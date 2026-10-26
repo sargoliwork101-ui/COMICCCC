@@ -320,11 +320,17 @@ async function loadOne(it) {
 async function loadAll(list) {
   loading = true;
   $('loadText').parentNode.classList.remove('finished');
+  const overlay = $('loadingOverlay');
+  overlay.classList.remove('hidden');
   let next = 0, done = 0;
   const total = list.length;
   const update = () => {
-    $('loadBar').style.width = Math.round((done / total) * 100) + '%';
+    const percent = total ? Math.round((done / total) * 100) : 100;
+    $('loadBar').style.width = percent + '%';
+    $('loadingOverlayBar').style.width = percent + '%';
     $('loadText').innerText = `در حال دریافت تصاویر... ${done} از ${total}`;
+    $('loadingOverlayText').innerText = done >= total ? 'آماده‌سازی تصاویر کامل شد' : 'در حال دریافت تصاویر...';
+    $('loadingOverlayCount').innerText = `${done} از ${total} تصویر`;
     refreshSummary();
   };
   update();
@@ -336,10 +342,14 @@ async function loadAll(list) {
       update();
     }
   };
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
-  loading = false;
-  $('loadText').parentNode.classList.add('finished');
-  refreshAll();
+  try {
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
+  } finally {
+    loading = false;
+    overlay.classList.add('hidden');
+    $('loadText').parentNode.classList.add('finished');
+    refreshAll();
+  }
 }
 
 // ---------- مرتب‌سازی کارت‌ها / ترتیب خروجی PDF ----------
@@ -922,6 +932,8 @@ function setMode(m) {
   mode = m;
   $('modePdf').classList.toggle('active', m === 'pdf');
   $('modeImg').classList.toggle('active', m === 'img');
+  $('modePdf').setAttribute('aria-pressed', String(m === 'pdf'));
+  $('modeImg').setAttribute('aria-pressed', String(m === 'img'));
   $('pdfOpts').classList.toggle('hidden', m !== 'pdf');
   $('imgOpts').classList.toggle('hidden', m !== 'img');
   $('buildBtn').classList.toggle('hidden', m !== 'pdf');
@@ -1324,6 +1336,20 @@ async function main() {
   $('saveImgBtn').onclick = onSaveImages;
   $('modePdf').onclick = () => setMode('pdf');
   $('modeImg').onclick = () => setMode('img');
+  const outputSettings = $('outputSettings');
+  $('closeOutputSettings').onclick = () => {
+    outputSettings.open = false;
+    outputSettings.querySelector('summary').focus();
+  };
+  document.addEventListener('click', (e) => {
+    if (outputSettings.open && !outputSettings.contains(e.target)) outputSettings.open = false;
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && outputSettings.open) {
+      outputSettings.open = false;
+      outputSettings.querySelector('summary').focus();
+    }
+  });
   $('seamless').addEventListener('change', () => {
     if ($('seamless').checked) {
       $('twoPerPage').checked = false;

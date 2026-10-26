@@ -79,18 +79,31 @@
     <section id="grid" class="grid"></section>
   </main>
 
+  <div id="loadingOverlay" class="loading-overlay hidden" role="status" aria-live="polite" aria-atomic="true">
+    <div class="loading-card">
+      <span class="loading-spinner" aria-hidden="true"></span>
+      <strong id="loadingOverlayText">در حال دریافت تصاویر...</strong>
+      <span id="loadingOverlayCount">۰ از ۰</span>
+      <div class="bar loading-progress"><div id="loadingOverlayBar"></div></div>
+    </div>
+  </div>
+
   <footer class="dock">
     <div class="dock-in">
       <div id="selCount">—</div>
 
-      <div class="seg" role="tablist" aria-label="نوع خروجی">
-        <button class="seg-btn active" id="modePdf" role="tab">خروجی PDF</button>
-        <button class="seg-btn" id="modeImg" role="tab">تصاویر جدا</button>
+      <div class="seg" role="group" aria-label="نوع خروجی">
+        <button type="button" class="seg-btn active" id="modePdf" aria-pressed="true">خروجی PDF</button>
+        <button type="button" class="seg-btn" id="modeImg" aria-pressed="false">تصاویر جدا</button>
       </div>
 
-      <details class="output-settings">
+      <details class="output-settings" id="outputSettings">
         <summary>تنظیمات خروجی</summary>
-        <div class="output-panel">
+        <div class="output-panel" role="group" aria-label="تنظیمات خروجی">
+          <div class="output-panel-heading">
+            <strong>تنظیمات خروجی</strong>
+            <button type="button" class="output-close" id="closeOutputSettings">بستن</button>
+          </div>
           <div class="opts" id="pdfOpts">
             <label class="check" title="همه تصاویر انتخاب‌شده پشت هم و بدون فاصله در یک صفحهٔ بلند قرار می‌گیرند">
               <input type="checkbox" id="seamless"><span>صفحهٔ بلند</span>
