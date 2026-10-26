@@ -1,0 +1,71 @@
+@font-face { font-family: 'Vazirmatn'; src: url('Vazirmatn.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
+
+:root {
+  color-scheme: dark;
+  --bg: #090b0f; --surface: #11151c; --surface2: #171c26; --surface3: #1f2632;
+  --line: rgba(255,255,255,.08); --line2: rgba(255,255,255,.16);
+  --text: #e9ecf3; --muted: #8c94a8; --faint: #5d6579;
+  --a1: #8b7bff; --a2: #4f8cff;
+  --grad: linear-gradient(135deg, #8b7bff 0%, #4f8cff 100%);
+  --grad-ok: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+  --glow: 0 10px 30px -8px rgba(99,115,255,.6);
+  --glow-ok: 0 10px 30px -8px rgba(16,185,129,.55);
+}
+* { box-sizing: border-box; }
+html { scrollbar-color: #2a3140 transparent; }
+body {
+  margin: 0; color: var(--text); font-family: 'Vazirmatn', Tahoma, system-ui, sans-serif;
+  background:
+    radial-gradient(900px 480px at 90% -8%, rgba(125,105,255,.17), transparent 62%),
+    radial-gradient(760px 480px at -8% 108%, rgba(60,140,255,.11), transparent 62%),
+    var(--bg);
+  background-attachment: fixed;
+}
+::selection { background: rgba(139,123,255,.45); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #2a3140; border-radius: 99px; border: 2px solid var(--bg); }
+
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand img { width: 44px; height: 44px; flex: none; border-radius: 12px; box-shadow: 0 6px 18px -6px rgba(99,115,255,.6); }
+.brand h1 { margin: 0; font: 800 20px/1.25 'Vazirmatn', sans-serif; letter-spacing: .2px; direction: ltr; text-align: right; }
+.brand small { display: block; direction: rtl; color: var(--muted); font: 500 11.5px 'Vazirmatn', Tahoma, sans-serif; margin-top: 3px; letter-spacing: 0; }
+.badge { margin-right: auto; font: 700 10.5px 'Vazirmatn', monospace; color: #c9c2ff; background: rgba(139,123,255,.14);
+  border: 1px solid rgba(139,123,255,.35); padding: 3px 10px; border-radius: 999px; }
+
+label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+input[type=text] {
+  width: 100%; background: rgba(255,255,255,.04); border: 1px solid var(--line2); border-radius: 12px;
+  padding: 10px 13px; color: var(--text); font: 500 14px 'Vazirmatn', Tahoma, sans-serif; outline: none;
+  direction: ltr; text-align: left; transition: border-color .15s, box-shadow .15s, background .15s;
+}
+input[type=text]::placeholder { color: var(--faint); direction: rtl; }
+input[type=text]:focus { border-color: var(--a1); background: rgba(255,255,255,.06); box-shadow: 0 0 0 3px rgba(139,123,255,.22); }
+
+.box { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+
+.btn {
+  display: flex; align-items: center; justify-content: center; gap: 9px; width: 100%;
+  background: var(--grad); color: #fff; border: 0; border-radius: 12px; padding: 11px 18px; cursor: pointer;
+  font: 700 14.5px 'Vazirmatn', Tahoma, sans-serif; text-decoration: none; position: relative;
+  box-shadow: var(--glow), inset 0 1px 0 rgba(255,255,255,.28);
+  transition: transform .12s, filter .15s, box-shadow .15s, opacity .15s;
+}
+.btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.btn:active { transform: translateY(0) scale(.985); filter: brightness(.96); }
+.btn:disabled { opacity: .38; cursor: not-allowed; box-shadow: none; transform: none; filter: grayscale(.4); }
+.btn svg { width: 19px; height: 19px; flex: none; }
+.btn.ok { background: var(--grad-ok); box-shadow: var(--glow-ok), inset 0 1px 0 rgba(255,255,255,.28); }
+.btn.ghost { background: rgba(255,255,255,.06); border: 1px solid var(--line2); box-shadow: none; color: var(--text); }
+.btn.ghost:hover { background: rgba(255,255,255,.1); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font-size: 11px; font-weight: 600; color: var(--muted); background: rgba(255,255,255,.04);
+  border: 1px solid var(--line); padding: 3px 11px; border-radius: 999px; }
+.hidden { display: none !important; }
+
+.bar { height: 10px; background: rgba(255,255,255,.07); border-radius: 999px; overflow: hidden; }
+#progressBar {
+  height: 100%; width: 0; transition: width .25s; border-radius: 999px; background: var(--grad);
+  box-shadow: 0 0 14px rgba(110,125,255,.6);
+}
+.done #progressBar { background: var(--grad-ok); box-shadow: 0 0 14px rgba(16,185,129,.5); }

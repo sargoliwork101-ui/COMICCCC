@@ -1,0 +1,144 @@
+document.getElementById('startBtn').addEventListener('click', async () => {
+  const startBtn = document.getElementById('startBtn');
+  const statusText = document.getElementById('statusText');
+  let pdfName = document.getElementById('pdfName').value.trim() || 'comic';
+  if (!pdfName.toLowerCase().endsWith('.pdf')) pdfName += '.pdf';
+
+  startBtn.disabled = true;
+  statusText.innerText = 'در حال اسکرول صفحه برای لود تصاویر...\n(می‌توانید popup را ببندید؛ پیشرفت روی خود صفحه نمایش داده می‌شود)';
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: scrapeAndSend,
+      args: [pdfName]
+    });
+    const res = results[0] && results[0].result;
+    if (res && res.busy) {
+      statusText.innerText = 'عملیات روی این صفحه از قبل در حال اجراست.';
+    } else if (!res || res.count === 0) {
+      statusText.innerText = 'هیچ تصویری در این صفحه پیدا نشد!';
+    } else {
+      statusText.innerText = `${res.count} تصویر پیدا شد. تب پیش‌نمایش باز شد؛ تصاویر دلخواه را انتخاب کنید.`;
+    }
+  } catch (err) {
+    console.error(err);
+    statusText.innerText = 'خطا: ' + (err && err.message ? err.message : err) +
+      '\n(روی صفحات chrome:// و فروشگاه کروم اکستنشن کار نمی‌کند)';
+  } finally {
+    startBtn.disabled = false;
+  }
+});
+
+// این تابع داخل صفحهٔ وب اجرا می‌شود
+async function scrapeAndSend(pdfName) {
+  if (window.__wtpdfRunning) return { busy: true };
+  window.__wtpdfRunning = true;
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const getH = () => Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
+
+  const box = document.createElement('div');
+  box.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;' +
+    'background:rgba(17,21,28,.96);color:#e9ecf3;padding:11px 20px;border-radius:14px;border:1px solid rgba(139,123,255,.55);' +
+    'font:600 13.5px Tahoma,sans-serif;box-shadow:0 14px 40px rgba(0,0,0,.55),0 0 0 3px rgba(139,123,255,.18);direction:rtl;pointer-events:none';
+  document.documentElement.appendChild(box);
+  const say = (t) => { box.textContent = t; };
+
+  const PLACEHOLDER = /blank|loading|placeholder|spacer|pixel|1x1|lazy\.(gif|png|jpg)/i;
+
+  // بهترین (بزرگ‌ترین) آدرس تصویر را انتخاب می‌کند
+  const bestSrc = (img) => {
+    const cands = [];
+    const parseSet = (s) => {
+      (s || '').split(',').forEach((part) => {
+        const p = part.trim().split(/\s+/);
+        if (!p[0]) return;
+        let w = 0;
+        if (p[1] && p[1].endsWith('w')) w = parseFloat(p[1]);
+        else if (p[1] && p[1].endsWith('x')) w = parseFloat(p[1]) * 1000;
+        cands.push({ url: p[0], w });
+      });
+    };
+    parseSet(img.srcset);
+    parseSet(img.dataset.srcset);
+    const pic = img.closest('picture');
+    if (pic) pic.querySelectorAll('source').forEach((s) => parseSet(s.srcset));
+    const withW = cands.filter((c) => c.w > 0).sort((a, b) => b.w - a.w);
+    if (withW.length) return withW[0].url;
+
+    const lazy = img.dataset.original || img.dataset.full || img.dataset.zoom || img.dataset.src ||
+      img.dataset.lazySrc || img.getAttribute('data-url');
+    if (lazy && !PLACEHOLDER.test(lazy)) return lazy;
+    return img.currentSrc || img.src || lazy || (cands[0] && cands[0].url);
+  };
+
+  try {
+    say('در حال اسکرول برای لود تصاویر...');
+    window.scrollTo(0, 0);
+    await sleep(300);
+
+    let stable = 0;
+    let last = getH();
+    for (let i = 0; i < 800; i++) {
+      window.scrollBy(0, Math.round(window.innerHeight * 0.7));
+      const pct = Math.min(100, Math.round(((window.scrollY + window.innerHeight) / getH()) * 100));
+      say(`در حال اسکرول برای لود تصاویر... ${pct}٪`);
+      await sleep(200);
+      const h = getH();
+      const atBottom = window.innerHeight + window.scrollY >= h - 5;
+      if (atBottom && h === last) {
+        if (++stable >= 4) break;
+        await sleep(500);
+      } else {
+        stable = 0;
+      }
+      last = h;
+    }
+    await sleep(800);
+
+    const urls = [];
+    const seen = new Set();
+    const add = (src) => {
+      if (!src || src.startsWith('data:') || src.startsWith('blob:')) return;
+      let abs;
+      try { abs = new URL(src, location.href).href; } catch (e) { return; }
+      if (!seen.has(abs)) { seen.add(abs); urls.push(abs); }
+    };
+
+    document.querySelectorAll('img').forEach((img) => {
+      const src = bestSrc(img);
+      const rect = img.getBoundingClientRect();
+      const w = Math.max(img.naturalWidth || 0, rect.width);
+      const h = Math.max(img.naturalHeight || 0, rect.height);
+      if (Math.max(w, h) < 250) return;
+      if (/logo|icon|avatar|sprite|emoji/i.test(src || '')) return;
+      add(src);
+    });
+
+    if (urls.length === 0) {
+      document.querySelectorAll('div, section, span, a').forEach((el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 250 || r.height < 250) return;
+        const bg = getComputedStyle(el).backgroundImage;
+        const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+        if (m) add(m[1]);
+      });
+    }
+
+    if (urls.length === 0) {
+      say('هیچ تصویری پیدا نشد!');
+      await sleep(3000);
+      return { count: 0 };
+    }
+
+    say(`${urls.length} تصویر پیدا شد. در حال باز کردن پیش‌نمایش...`);
+    await chrome.runtime.sendMessage({ type: 'WTPDF_URLS', urls, name: pdfName, pageUrl: location.href });
+    await sleep(1500);
+    return { count: urls.length };
+  } finally {
+    box.remove();
+    window.__wtpdfRunning = false;
+  }
+}

@@ -1,0 +1,2 @@
+body { width: 360px; padding: 18px; display: flex; flex-direction: column; gap: 16px; }
+#statusText { font-size: 12.5px; line-height: 1.9; white-space: pre-line; font-weight: 500; color: #cfd4e2; }

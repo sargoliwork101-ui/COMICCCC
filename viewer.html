@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>Comic to PDF</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <img src="icon128.png" alt="">
+      <h1>Comic to PDF<small>تصاویر را انتخاب کنید و خروجی دلخواه را بگیرید</small></h1>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="result" class="panel hidden">
+      <div id="statusText">—</div>
+      <div class="bar"><div id="progressBar"></div></div>
+      <div class="stats">
+        <div class="stat"><b id="sPages">0</b><span id="lblPages">صفحهٔ PDF</span></div>
+        <div class="stat"><b id="sSize">0</b><span>مگابایت</span></div>
+      </div>
+      <div id="failed"></div>
+      <button id="btnStopTr" class="mini warn hidden">توقف</button>
+      <a id="downloadBtn" class="btn ok hidden" download>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>
+        <span id="dlLabel">دانلود PDF</span>
+      </a>
+    </section>
+
+    <section class="toolbar panel">
+      <button class="mini" id="btnAll">انتخاب همه</button>
+      <button class="mini" id="btnNone">هیچ‌کدام</button>
+      <button class="mini" id="btnInv">معکوس انتخاب</button>
+      <button class="mini accent" id="btnTranslate" disabled>ترجمهٔ متن تصاویر به فارسی</button>
+      <button class="mini hidden" id="btnTxt">ذخیرهٔ متن‌ها (TXT)</button>
+      <button class="mini warn hidden" id="btnRetry">تلاش مجدد برای ناموفق‌ها</button>
+      <div class="loadwrap">
+        <span id="loadText">در حال دریافت تصاویر...</span>
+        <div class="bar small"><div id="loadBar"></div></div>
+      </div>
+    </section>
+
+    <section id="grid" class="grid"></section>
+  </main>
+
+  <footer class="dock">
+    <div class="dock-in">
+      <div id="selCount">—</div>
+
+      <div class="seg" role="tablist" aria-label="نوع خروجی">
+        <button class="seg-btn active" id="modePdf" role="tab">خروجی PDF</button>
+        <button class="seg-btn" id="modeImg" role="tab">تصاویر جدا</button>
+      </div>
+
+      <div class="opts" id="pdfOpts">
+        <label class="check" title="همه تصاویر انتخاب‌شده پشت هم و بدون فاصله در «یک» صفحهٔ PDF قرار می‌گیرند">
+          <input type="checkbox" id="seamless">
+          <span>چسباندن همه در یک صفحهٔ بلند</span>
+        </label>
+        <input type="text" id="pdfName" value="comic" spellcheck="false" aria-label="نام فایل PDF">
+        <button id="buildBtn" class="btn" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z M14 3v5h5"/></svg>
+          <span>ساخت PDF</span>
+        </button>
+      </div>
+
+      <div class="opts hidden" id="imgOpts">
+        <select id="outFmt" class="sel" aria-label="فرمت تصاویر" title="اصلی: فایل اصلی بدون هیچ تغییر. PNG: بدون افت کیفیت. JPEG: بالاترین کیفیت (۱۰۰٪).">
+          <option value="orig">فرمت: اصلی (بدون تغییر)</option>
+          <option value="png">فرمت: PNG (بدون افت)</option>
+          <option value="jpg">فرمت: JPEG (کیفیت ۱۰۰٪)</option>
+        </select>
+        <input type="text" id="folderName" placeholder="نام زیرپوشهٔ جدید (اختیاری)" spellcheck="false" aria-label="نام زیرپوشه">
+        <button id="saveImgBtn" class="btn" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <span>انتخاب پوشه و ذخیرهٔ تصاویر</span>
+        </button>
+      </div>
+    </div>
+  </footer>
+
+  <div id="trDialog" class="modal hidden">
+    <div class="modal-card">
+      <h3>ترجمهٔ متن داخل تصاویر به فارسی</h3>
+      <p class="muted">متن تصاویر خوانده می‌شود (OCR)، به فارسی ترجمه می‌شود و جای متن اصلی روی تصویر می‌نشیند. بعد از آن می‌توانید هر ترجمه را ویرایش کنید.</p>
+      <label for="trLang">زبان متن داخل تصاویر</label>
+      <select id="trLang" class="sel">
+        <option value="eng">English (انگلیسی)</option>
+        <option value="kor">한국어 (کره‌ای)</option>
+        <option value="jpn">日本語 (ژاپنی)</option>
+        <option value="chi_sim">中文 (چینی ساده)</option>
+      </select>
+      <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
+      <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>
+      <p class="note">زبان را درست انتخاب کنید؛ اگر زبان اشتباه باشد چیزی خوانده نمی‌شود. ترجمه به اینترنت نیاز دارد. دقت خواندن متن روی فونت‌های خیلی تزیینی یا متن روی نقاشی کمتر است؛ همه‌چیز را می‌توانید بعداً ویرایش کنید.</p>
+      <div class="modal-actions">
+        <button id="trStart" class="btn">شروع ترجمه</button>
+        <button id="trClose" class="btn ghost">انصراف</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="editor" class="hidden">
+    <div class="ed-head">
+      <div id="edTitle">ویرایش ترجمه</div>
+      <div class="ed-actions">
+        <button class="mini accent" id="edApply">به‌روزرسانی پیش‌نمایش</button>
+        <button class="mini warn" id="edRevert">بازگردانی به تصویر اصلی</button>
+        <button class="btn" id="edClose">ذخیره و بستن</button>
+      </div>
+    </div>
+    <div class="ed-body">
+      <div class="ed-preview"><div class="ed-stage"><img id="edImg" alt=""><div id="edBoxes"></div></div></div>
+      <div class="ed-list" id="edList"></div>
+    </div>
+  </div>
+
+  <div id="lightbox" class="hidden">
+    <button id="lbClose" aria-label="بستن">✕</button>
+    <div class="lbscroll"><img id="lbImg" alt=""></div>
+  </div>
+
+  <script src="jspdf.umd.min.js"></script>
+  <script src="pdfbuilder.js"></script>
+  <script src="tesseract.min.js"></script>
+  <script src="ocr.js"></script>
+  <script src="typeset.js"></script>
+  <script src="translate.js"></script>
+  <script src="viewer.js"></script>
+  <script src="trans.js"></script>
+</body>
+</html>
