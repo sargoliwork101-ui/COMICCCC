@@ -21,6 +21,7 @@ let cropItem = null;
 let cropObjectUrl = null;
 let cropRectDraft = null;
 let cropDragStart = null;
+let nextPageGroupId = 1;
 
 // ---------- دانلود تصاویر ----------
 async function setRefererRule(pageUrl) {
@@ -130,7 +131,8 @@ function makeCard(it) {
     <span class="idx">${it.i + 1}</span><span class="tick">${ICON_CHECK}</span>
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
     <button class="crop" title="کراپ دستی">${ICON_CROP}</button>
-    <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button><span class="fa-badge">ترجمه شد</span></div><div class="meta">…</div>
+    <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button><span class="fa-badge">ترجمه شد</span>
+    <span class="page-group-badge hidden"></span></div><div class="meta">…</div>
     <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>
     <div class="copies-control"><span>تعداد نسخه در PDF</span><input class="pdf-copies" type="number" min="1" max="20" step="1" value="${it.pdfCopies || 1}" aria-label="تعداد نسخه در PDF، حداکثر ۲۰"></div>`;
   const orderInput = el.querySelector('.page-order');
@@ -187,6 +189,12 @@ function refreshCard(it) {
   el.classList.toggle('translated', !!it.edited);
   el.classList.toggle('cropped', !!it.cropRect);
   el.classList.toggle('has-ocr', !!it.ocr);
+  const groupBadge = el.querySelector('.page-group-badge');
+  groupBadge.classList.toggle('hidden', !it.pageGroup);
+  if (it.pageGroup) {
+    groupBadge.innerText = `گروه ${it.pageGroup}`;
+    groupBadge.title = 'تصاویر این گروه در یک صفحهٔ PDF قرار می‌گیرند';
+  }
   const meta = el.querySelector('.meta');
   const spin = el.querySelector('.spin');
   if (it.state === 'ok') {
@@ -297,7 +305,8 @@ function updatePdfOrderFromGrid() {
 // ---------- انتخاب‌ها ----------
 function refreshSummary() {
   const ok = items.filter((it) => it.state === 'ok').length;
-  const sel = items.filter((it) => it.state === 'ok' && it.selected).length;
+  const selectedItems = items.filter((it) => it.state === 'ok' && it.selected);
+  const sel = selectedItems.length;
   const failedN = items.filter((it) => it.state === 'failed').length;
   $('selCount').innerText = `${sel} از ${ok} تصویر انتخاب شده`;
   $('btnRetry').classList.toggle('hidden', failedN === 0 || loading);
@@ -305,11 +314,26 @@ function refreshSummary() {
   $('saveImgBtn').disabled = loading || building || sel === 0;
   $('seamless').disabled = loading || building || $('twoPerPage').checked;
   $('twoPerPage').disabled = loading || building || $('seamless').checked;
+  $('uniformWidth').disabled = loading || building;
+  $('btnGroupPage').disabled = loading || building || sel < 2;
+  $('btnGroupPage').innerText = `گروه‌بندی ${sel} تصویر در یک صفحه`;
+  $('btnUngroupPage').disabled = loading || building || !selectedItems.some((it) => it.pageGroup);
   $('ocrEnabled').disabled = loading || building;
   $('btnTranslate').disabled = loading || building || ok === 0 || !$('ocrEnabled').checked;
   $('btnTxt').classList.toggle('hidden', !items.some((it) => it.ocr));
 }
 function refreshAll() { items.forEach(refreshCard); refreshSummary(); }
+function groupSelectedItems() {
+  const selected = items.filter((it) => it.state === 'ok' && it.selected);
+  if (selected.length < 2) return;
+  const groupId = nextPageGroupId++;
+  selected.forEach((it) => { it.pageGroup = groupId; });
+  refreshAll();
+}
+function ungroupSelectedItems() {
+  items.filter((it) => it.state === 'ok' && it.selected).forEach((it) => { it.pageGroup = null; });
+  refreshAll();
+}
 
 // ---------- نمایش بزرگ، کپی و کراپ دستی ----------
 let lbUrl = null;
@@ -466,41 +490,65 @@ async function fallback(seg) {
   return { data, fmt: 'JPEG' };
 }
 
-async function composePairVertically(pair, pairIndex) {
-  const sources = await Promise.all(pair.map(getDisplaySource));
-  const bmps = await Promise.all(sources.map((src) => createImageBitmap(src.blob, { imageOrientation: 'none' })));
-  try {
-    const maxW = Math.max(...bmps.map((b) => b.width));
-    const rawHeights = bmps.map((b) => b.height * maxW / b.width);
-    const rawH = rawHeights.reduce((sum, h) => sum + h, 0);
-    const scale = Math.min(1, 16000 / maxW, 16000 / rawH, Math.sqrt(180000000 / (maxW * rawH)));
-    const w = Math.max(1, Math.floor(maxW * scale));
-    const heights = rawHeights.map((h) => Math.max(1, Math.round(h * scale)));
-    const h = heights.reduce((sum, n) => sum + n, 0);
-    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-    const ctx = cv.getContext('2d');
-    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
-    let y = 0;
-    bmps.forEach((bmp, k) => {
-      ctx.drawImage(bmp, 0, y, w, heights[k]);
-      y += heights[k];
-    });
-    const blob = await canvasToBlob(cv, 'image/png');
-    cv.width = cv.height = 0;
-    return { i: pair[0].i, pdfKey: `pair_${pairIndex}`, blob, w, h, info: sniff(new Uint8Array(await blob.arrayBuffer())) };
-  } finally { bmps.forEach((bmp) => bmp.close()); }
+async function composeVertically(group, pageKey) {
+  const sources = await Promise.all(group.map(getDisplaySource));
+  const maxW = Math.max(...sources.map((src) => src.w));
+  const rawHeights = sources.map((src) => src.h * maxW / src.w);
+  const rawH = rawHeights.reduce((sum, h) => sum + h, 0);
+  const scale = Math.min(1, 16000 / maxW, 16000 / rawH, Math.sqrt(180000000 / (maxW * rawH)));
+  const w = Math.max(1, Math.floor(maxW * scale));
+  const heights = rawHeights.map((h) => Math.max(1, Math.round(h * scale)));
+  const h = heights.reduce((sum, n) => sum + n, 0);
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
+  let y = 0;
+  for (let k = 0; k < sources.length; k++) {
+    const bmp = await createImageBitmap(sources[k].blob, { imageOrientation: 'none' });
+    try { ctx.drawImage(bmp, 0, y, w, heights[k]); }
+    finally { bmp.close(); }
+    y += heights[k];
+  }
+  const blob = await canvasToBlob(cv, 'image/png');
+  cv.width = cv.height = 0;
+  return {
+    i: group[0].i, pdfKey: pageKey, pageOrder: Math.min(...group.map((it) => it.pdfOrder || it.i + 1)),
+    sequence: Math.min(...group.map((it) => it.sequence)), blob, w, h,
+    info: sniff(new Uint8Array(await blob.arrayBuffer()))
+  };
 }
 
 async function makePdfItems(selected, twoPerPage) {
-  const expanded = selected.flatMap((it) => {
+  let sequence = 0;
+  const expanded = [];
+  for (const it of selected) {
+    const source = await getDisplaySource(it);
     const count = Math.max(1, Math.min(20, Number.parseInt(it.pdfCopies, 10) || 1));
-    return Array.from({ length: count }, (_, n) => ({ ...it, sourceItem: it.sourceItem || it, pdfKey: `image_${it.i}_copy_${n + 1}` }));
-  });
-  if (!twoPerPage) return expanded;
-  const pages = [];
-  for (let i = 0; i < expanded.length; i += 2) {
-    pages.push(i + 1 < expanded.length ? await composePairVertically(expanded.slice(i, i + 2), pages.length) : expanded[i]);
+    for (let n = 0; n < count; n++) expanded.push({
+      ...it, w: source.w, h: source.h, sourceItem: it.sourceItem || it,
+      pdfKey: `image_${it.i}_copy_${n + 1}`, sequence: sequence++, pageOrder: it.pdfOrder || it.i + 1
+    });
   }
+
+  const groups = new Map(), ungrouped = [];
+  expanded.forEach((it) => {
+    if (it.pageGroup) {
+      if (!groups.has(it.pageGroup)) groups.set(it.pageGroup, []);
+      groups.get(it.pageGroup).push(it);
+    } else ungrouped.push(it);
+  });
+
+  const pages = [];
+  for (const [groupId, members] of groups) {
+    members.sort((a, b) => a.sequence - b.sequence);
+    pages.push(members.length > 1 ? await composeVertically(members, `group_${groupId}`) : members[0]);
+  }
+  const chunkSize = twoPerPage ? 2 : 1;
+  for (let i = 0; i < ungrouped.length; i += chunkSize) {
+    const chunk = ungrouped.slice(i, i + chunkSize);
+    pages.push(chunk.length > 1 ? await composeVertically(chunk, `pair_${chunk[0].sequence}`) : chunk[0]);
+  }
+  pages.sort((a, b) => (a.pageOrder || a.i + 1) - (b.pageOrder || b.i + 1) || a.sequence - b.sequence);
   return pages;
 }
 
@@ -519,6 +567,7 @@ async function onBuild() {
   if (!name.toLowerCase().endsWith('.pdf')) name += '.pdf';
   const seamless = $('seamless').checked;
   const twoPerPage = $('twoPerPage').checked && !seamless;
+  const uniformWidth = $('uniformWidth').checked;
 
   const result = $('result');
   result.classList.remove('hidden', 'done');
@@ -538,6 +587,7 @@ async function onBuild() {
       jsPDF: jsPDFLib,
       items: pdfItems,
       seamless,
+      uniformWidth,
       prepare,
       fallback,
       onProgress: (k, n) => {
@@ -564,7 +614,11 @@ async function onBuild() {
     $('sSize').innerText = mb;
     result.classList.add('done');
     $('progressBar').style.width = '100%';
-    const layoutNote = seamless ? ' (یک صفحهٔ بلند)' : twoPerPage ? ' (دو تصویر عمودی در هر صفحه)' : '';
+    const layoutNotes = [];
+    if (seamless) layoutNotes.push('یک صفحهٔ بلند');
+    else if (twoPerPage) layoutNotes.push('دو تصویر عمودی در هر صفحه');
+    if (uniformWidth) layoutNotes.push('عرض یکسان');
+    const layoutNote = layoutNotes.length ? ` (${layoutNotes.join('، ')})` : '';
     setStatus(`آماده شد! فایل PDF با ${res.pages} صفحه${layoutNote} ساخته شد. اگر دانلود شروع نشد، دکمهٔ «دانلود PDF» را بزنید.`);
     btn.click();
   } catch (e) {
@@ -768,12 +822,14 @@ async function main() {
     updatePdfOrderFromGrid();
     suppressCardClickUntil = Date.now() + 350;
   });
-  items = job.urls.map((url, i) => ({ i, url, pdfOrder: i + 1, pdfCopies: 1, state: 'loading', selected: true }));
+  items = job.urls.map((url, i) => ({ i, url, pdfOrder: i + 1, pdfCopies: 1, pageGroup: null, state: 'loading', selected: true }));
   items.forEach((it) => grid.appendChild(makeCard(it)));
 
   $('btnAll').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = true; }); refreshAll(); };
   $('btnNone').onclick = () => { items.forEach((it) => { it.selected = false; }); refreshAll(); };
   $('btnInv').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = !it.selected; }); refreshAll(); };
+  $('btnGroupPage').onclick = groupSelectedItems;
+  $('btnUngroupPage').onclick = ungroupSelectedItems;
   $('btnRetry').onclick = () => { loadAll(items.filter((it) => it.state === 'failed')); };
   $('buildBtn').onclick = onBuild;
   $('saveImgBtn').onclick = onSaveImages;

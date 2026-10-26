@@ -34,6 +34,9 @@
       <button class="mini" id="btnAll">انتخاب همه</button>
       <button class="mini" id="btnNone">هیچ‌کدام</button>
       <button class="mini" id="btnInv">معکوس انتخاب</button>
+      <button class="mini accent" id="btnGroupPage" disabled>گذاشتن انتخاب‌ها در یک صفحه</button>
+      <button class="mini" id="btnUngroupPage" disabled>جداکردن از گروه صفحه</button>
+      <span class="drag-hint">برای گروه‌کردن چند تصویر، انتخابشان کن و دکمهٔ «گذاشتن انتخاب‌ها در یک صفحه» را بزن.</span>
       <span class="drag-hint">برای تغییر ترتیب، تصاویر را بکشید و رها کنید.</span>
       <label class="check" title="با خاموش‌کردن این گزینه، OCR و ترجمه غیرفعال می‌شود و تصویرها به نسخهٔ اصلی برمی‌گردند"><input type="checkbox" id="ocrEnabled" checked><span>فعال‌بودن OCR</span></label>
       <button class="mini accent" id="btnTranslate" disabled>ترجمهٔ متن تصاویر به فارسی</button>
@@ -61,6 +64,10 @@
         <label class="check" title="همه تصاویر انتخاب‌شده پشت هم و بدون فاصله در «یک» صفحهٔ PDF قرار می‌گیرند">
           <input type="checkbox" id="seamless">
           <span>چسباندن همه در یک صفحهٔ بلند</span>
+        </label>
+        <label class="check" title="با عرض بیشترین تصویر انتخاب‌شده، عرض همهٔ تصویرها در PDF یکسان می‌شود و نسبت تصویر حفظ می‌شود">
+          <input type="checkbox" id="uniformWidth">
+          <span>یکسان‌کردن عرض با عریض‌ترین تصویر</span>
         </label>
         <label class="check" title="هر دو تصویر متوالی به‌صورت عمودی در یک صفحهٔ PDF قرار می‌گیرند">
           <input type="checkbox" id="twoPerPage">

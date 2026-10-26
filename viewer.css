@@ -132,6 +132,8 @@ body { min-height: 100vh; padding-bottom: 120px; }
 .fa-badge { position: absolute; bottom: 7px; left: 7px; z-index: 2; display: none; font: 700 10.5px 'Vazirmatn', sans-serif;
   background: var(--grad-ok); color: #04210f; padding: 2px 9px; border-radius: 999px; }
 .item.translated .fa-badge { display: block; }
+.page-group-badge { position: absolute; right: 7px; bottom: 38px; z-index: 3; font: 700 10px 'Vazirmatn', sans-serif;
+  background: rgba(139,123,255,.92); color: #fff; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(255,255,255,.35); pointer-events: none; }
 
 #result #btnStopTr { align-self: flex-start; }
 

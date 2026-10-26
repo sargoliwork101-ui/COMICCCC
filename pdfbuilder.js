@@ -13,11 +13,13 @@
     return best;
   }
 
-  // o: { jsPDF, items:[{w,h,...}], seamless, prepare(it, r), fallback(seg), onProgress(k,n), onPage(n) }
+  // o: { jsPDF, items:[{w,h,...}], seamless, uniformWidth, prepare(it, r), fallback(seg), onProgress(k,n), onPage(n) }
   // prepare باید آرایه‌ای از {data, fmt, w, h, alias} برگرداند (ابعاد به پیکسل)
   async function build(o) {
     const seamless = !!o.seamless;
-    const W = seamless ? pickWidth(o.items) : 0;
+    const uniformWidth = !!o.uniformWidth;
+    const maxW = o.items.length ? Math.max(...o.items.map((it) => it.w)) : 0;
+    const W = seamless ? (uniformWidth ? maxW : pickWidth(o.items)) : 0;
     let s = 0.75; // پوینت به‌ازای هر پیکسل
     if (seamless) {
       // کل تصاویر در «یک» صفحه: مقیاس طوری انتخاب می‌شود که مجموع ارتفاع زیر سقف ۱۴۴۰۰ بماند
@@ -62,7 +64,7 @@
     for (let k = 0; k < o.items.length; k++) {
       const it = o.items[k];
       if (o.onProgress) o.onProgress(k, o.items.length);
-      const r = seamless ? (W / it.w) * s : s;
+      const r = seamless ? (W / it.w) * s : uniformWidth ? (maxW / it.w) * s : s;
       const segs = await o.prepare(it, r);
       for (const seg of segs) {
         const wPt = seg.w * r, hPt = seg.h * r;
