@@ -93,7 +93,7 @@ body { min-height: 100vh; padding-bottom: calc(112px + env(safe-area-inset-botto
 .page-order { width: 62px; padding: 4px 6px; border-radius: 8px; border: 1px solid var(--line2); background: rgba(255,255,255,.04); color: var(--text);
   font: 600 12px 'Vazirmatn', sans-serif; text-align: center; direction: ltr; }
 .page-order:focus { outline: none; border-color: var(--a1); box-shadow: 0 0 0 2px rgba(139,123,255,.2); }
-.spin { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; font-weight: 600; }
+.spin { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 8px; color: var(--text); font-size: 24px; font-weight: 800; line-height: 1.6; text-align: center; text-shadow: 0 2px 12px rgba(0,0,0,.9); }
 .loading-overlay { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 20px; pointer-events: none; }
 .loading-card { width: min(440px, calc(100vw - 36px)); display: grid; justify-items: center; gap: 12px; padding: 24px 26px;
   border: 1px solid rgba(139,123,255,.48); border-radius: 20px; background: rgba(17,21,28,.96); backdrop-filter: blur(18px);
@@ -130,13 +130,16 @@ body { min-height: 100vh; padding-bottom: calc(112px + env(safe-area-inset-botto
 .output-settings[open] > summary { border-color: var(--a1); }
 .output-settings[open] > summary::after { transform: rotate(180deg); }
 .output-panel { position: absolute; left: 50%; right: auto; bottom: calc(100% + 10px); z-index: 65;
-  transform: translateX(-50%); width: min(760px, calc(100vw - 24px)); max-height: calc(100vh - 100px); max-height: calc(100dvh - 100px);
+  transform: translateX(-50%); width: min(520px, calc(100vw - 24px)); max-height: calc(100vh - 100px); max-height: calc(100dvh - 100px);
   overflow: auto; padding: 14px; border: 1px solid var(--line2); border-radius: 16px; background: rgba(17,21,28,.99);
   box-shadow: 0 18px 48px rgba(0,0,0,.62); }
 .output-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; color: var(--text); font-size: 13px; }
 .output-close { padding: 5px 12px; border: 1px solid var(--line2); border-radius: 9px; color: var(--muted); background: rgba(255,255,255,.04); font: 600 11px 'Vazirmatn', sans-serif; cursor: pointer; }
 .output-close:hover { color: var(--text); border-color: var(--a1); background: rgba(139,123,255,.12); }
-.output-panel .opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); align-items: stretch; gap: 9px; width: 100%; }
+.output-panel .opts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; gap: 9px; width: 100%; }
+.output-panel #pdfName { grid-column: 1 / -1; }
+.output-settings[data-mode="img"] .output-panel { width: min(410px, calc(100vw - 24px)); }
+.output-settings[data-mode="img"] #imgOpts { grid-template-columns: minmax(120px, .85fr) minmax(170px, 1.15fr); }
 .output-panel .opts > * { min-width: 0; width: 100%; }
 .output-panel .check { padding: 9px 11px; font-size: 12px; min-height: 42px; }
 .output-panel #pdfName, .output-panel #folderName { width: 100%; min-width: 0; }
@@ -191,8 +194,8 @@ body { min-height: 100vh; padding-bottom: calc(112px + env(safe-area-inset-botto
   .output-settings { grid-area: settings; margin: 0; }
   .dock-in > .btn { grid-area: action; justify-self: end; min-width: 135px; }
   .output-settings > summary { min-width: 125px; padding: 8px 10px; }
-  .output-panel { width: min(94vw, 560px); max-height: calc(100vh - 132px); max-height: calc(100dvh - 132px); }
-  .output-panel .opts { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  .output-panel { width: min(94vw, 520px); max-height: calc(100vh - 132px); max-height: calc(100dvh - 132px); }
+  .output-panel .opts, .output-settings[data-mode="img"] #imgOpts { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
   .output-panel .check { font-size: 11.5px; }
   #pdfName, #folderName { width: 100%; }
   .top { padding: 16px 12px 0; }

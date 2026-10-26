@@ -950,6 +950,7 @@ function setStatus(t) { $('statusText').innerText = t; }
 let mode = 'pdf';
 function setMode(m) {
   mode = m;
+  $('outputSettings').dataset.mode = m;
   $('modePdf').classList.toggle('active', m === 'pdf');
   $('modeImg').classList.toggle('active', m === 'img');
   $('modePdf').setAttribute('aria-pressed', String(m === 'pdf'));
