@@ -8,6 +8,10 @@ const ICON_DUPLICATE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
 const ICON_DELETE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m4 4v6m6-6v6"/></svg>';
 const CONCURRENCY = 4;
 const MAX_CANVAS_H = 16000;
+const APP_TITLE = 'Comic to PDF';
+function setTaskTitle(message = '') {
+  document.title = message ? `${message} · ${APP_TITLE}` : APP_TITLE;
+}
 
 let job = null;
 let jobKey = '';
@@ -331,6 +335,7 @@ async function loadAll(list) {
     $('loadText').innerText = `در حال دریافت تصاویر... ${done} از ${total}`;
     $('loadingOverlayText').innerText = done >= total ? 'آماده‌سازی تصاویر کامل شد' : 'در حال دریافت تصاویر...';
     $('loadingOverlayCount').innerText = `${done} از ${total} تصویر`;
+    setTaskTitle(done < total ? `در حال دریافت تصویر ${done} از ${total}` : 'بارگیری تصویرها کامل شد');
     refreshSummary();
   };
   update();
@@ -348,6 +353,7 @@ async function loadAll(list) {
     loading = false;
     overlay.classList.add('hidden');
     $('loadText').parentNode.classList.add('finished');
+    setTaskTitle();
     refreshAll();
   }
 }
@@ -941,10 +947,11 @@ async function onBuild() {
     setStatus('خطا در ساخت PDF: ' + (e && e.message ? e.message : e));
   } finally {
     building = false;
+    setTaskTitle();
     refreshSummary();
   }
 }
-function setStatus(t) { $('statusText').innerText = t; }
+function setStatus(t) { $('statusText').innerText = t; if (building) setTaskTitle(t); }
 
 // ---------- ذخیرهٔ تصاویر به‌صورت جدا ----------
 let mode = 'pdf';
@@ -1108,6 +1115,7 @@ async function onSaveImages() {
     setStatus('خطا در ذخیرهٔ تصاویر: ' + (e && e.message ? e.message : e));
   } finally {
     building = false;
+    setTaskTitle();
     refreshSummary();
   }
 }

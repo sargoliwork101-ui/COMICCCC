@@ -143,6 +143,7 @@ async function runTranslate() {
     setStatus('خطا در راه‌اندازی تشخیص متن: ' + (e && e.message ? e.message : e));
   } finally {
     building = false;
+    setTaskTitle();
     $('btnStopTr').classList.add('hidden');
     refreshSummary();
   }
