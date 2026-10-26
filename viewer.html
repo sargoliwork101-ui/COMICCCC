@@ -34,9 +34,9 @@
       <button class="mini" id="btnAll">انتخاب همه</button>
       <button class="mini" id="btnNone">هیچ‌کدام</button>
       <button class="mini" id="btnInv">معکوس انتخاب</button>
-      <button class="mini accent" id="btnGroupPage" disabled>گذاشتن انتخاب‌ها در یک صفحه</button>
-      <button class="mini" id="btnUngroupPage" disabled>جداکردن از گروه صفحه</button>
-      <span class="drag-hint">برای گروه‌کردن چند تصویر، انتخابشان کن و دکمهٔ «گذاشتن انتخاب‌ها در یک صفحه» را بزن.</span>
+      <button class="mini accent" id="btnGroupPage" disabled>ساخت گروه از انتخاب‌ها</button>
+      <button class="mini" id="btnUngroupPage" disabled>لغو گروهِ انتخاب‌ها</button>
+      <span class="drag-hint">برای چند گروه جدا: «هیچ‌کدام» را بزن، اعضای گروه اول (مثلاً ۲ تصویر) را انتخاب و «ساخت گروه» را بزن؛ سپس همین کار را برای گروه بعدی (مثلاً ۳ تصویر) تکرار کن. نشان هر کارت تعداد اعضای گروه را نشان می‌دهد.</span>
       <span class="drag-hint">برای تغییر ترتیب، تصاویر را بکشید و رها کنید.</span>
       <label class="check" title="با خاموش‌کردن این گزینه، OCR و ترجمه غیرفعال می‌شود و تصویرها به نسخهٔ اصلی برمی‌گردند"><input type="checkbox" id="ocrEnabled" checked><span>فعال‌بودن OCR</span></label>
       <button class="mini accent" id="btnTranslate" disabled>ترجمهٔ متن تصاویر به فارسی</button>
@@ -65,9 +65,9 @@
           <input type="checkbox" id="seamless">
           <span>چسباندن همه در یک صفحهٔ بلند</span>
         </label>
-        <label class="check" title="عرض صفحات PDF با عریض‌ترین تصویر هماهنگ می‌شود؛ نسبت تصویر حفظ می‌شود. اندازهٔ درصدی هر کارت می‌تواند جداگانه تغییر کند">
-          <input type="checkbox" id="uniformWidth">
-          <span>یکسان‌کردن عرض با عریض‌ترین تصویر</span>
+        <label class="check" title="عرض و ارتفاع قاب همهٔ صفحه‌های PDF یکسان می‌شود؛ تصویرها بدون تغییر نسبت داخل قاب جا می‌گیرند. اندازهٔ درصدی هر کارت همچنان مستقل است. با حالت صفحهٔ بلند قابل ترکیب نیست.">
+          <input type="checkbox" id="uniformSize">
+          <span>یکسان‌کردن اندازهٔ صفحه‌ها (عرض و ارتفاع)</span>
         </label>
         <label class="check" title="هر دو تصویر متوالی به‌صورت عمودی در یک صفحهٔ PDF قرار می‌گیرند">
           <input type="checkbox" id="twoPerPage">
@@ -142,9 +142,9 @@
       </div>
     </div>
     <div class="crop-body">
-      <div id="cropStage" class="crop-stage"><img id="cropImg" alt=""><div id="cropSelection"></div></div>
+      <div id="cropStage" class="crop-stage" tabindex="0" aria-label="ناحیهٔ انتخاب برش؛ Enter برای اعمال"><img id="cropImg" alt=""><div id="cropSelection"></div></div>
     </div>
-    <p class="crop-help">روی تصویر بکش تا محدودهٔ برش را مشخص کنی؛ برای تغییر دوباره، محدودهٔ تازه‌ای بکش.</p>
+    <p class="crop-help">روی تصویر بکش تا محدودهٔ برش را مشخص کنی؛ برای تغییر دوباره، محدودهٔ تازه‌ای بکش. با زدن Enter یا دکمهٔ «اعمال برش» تغییر را ثبت کن.</p>
   </div>
 
   <div id="lightbox" class="hidden">

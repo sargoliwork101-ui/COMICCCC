@@ -227,8 +227,9 @@ function refreshCard(it) {
   const groupBadge = el.querySelector('.page-group-badge');
   groupBadge.classList.toggle('hidden', !it.pageGroup);
   if (it.pageGroup) {
-    groupBadge.innerText = `گروه ${it.pageGroup}`;
-    groupBadge.title = 'تصاویر این گروه در یک صفحهٔ PDF قرار می‌گیرند';
+    const memberCount = items.filter((member) => member.pageGroup === it.pageGroup).length;
+    groupBadge.innerText = `گروه ${it.pageGroup} · ${memberCount} تصویر`;
+    groupBadge.title = `${memberCount} تصویر در یک صفحهٔ PDF قرار می‌گیرند`;
   }
   const meta = el.querySelector('.meta');
   const spin = el.querySelector('.spin');
@@ -348,24 +349,31 @@ function refreshSummary() {
   $('saveImgBtn').disabled = loading || building || sel === 0;
   $('seamless').disabled = loading || building || $('twoPerPage').checked;
   $('twoPerPage').disabled = loading || building || $('seamless').checked;
-  $('uniformWidth').disabled = loading || building;
+  $('uniformSize').disabled = loading || building || $('seamless').checked;
   $('btnGroupPage').disabled = loading || building || sel < 2;
-  $('btnGroupPage').innerText = `گروه‌بندی ${sel} تصویر در یک صفحه`;
+  $('btnGroupPage').innerText = `ساخت یک گروه از ${sel} انتخاب`;
   $('btnUngroupPage').disabled = loading || building || !selectedItems.some((it) => it.pageGroup);
   $('ocrEnabled').disabled = loading || building;
   $('btnTranslate').disabled = loading || building || ok === 0 || !$('ocrEnabled').checked;
   $('btnTxt').classList.toggle('hidden', !items.some((it) => it.ocr));
 }
 function refreshAll() { items.forEach(refreshCard); refreshSummary(); }
+function cleanupPageGroups() {
+  const sizes = new Map();
+  items.forEach((it) => { if (it.pageGroup) sizes.set(it.pageGroup, (sizes.get(it.pageGroup) || 0) + 1); });
+  items.forEach((it) => { if (it.pageGroup && sizes.get(it.pageGroup) < 2) it.pageGroup = null; });
+}
 function groupSelectedItems() {
   const selected = items.filter((it) => it.state === 'ok' && it.selected);
   if (selected.length < 2) return;
   const groupId = nextPageGroupId++;
   selected.forEach((it) => { it.pageGroup = groupId; });
+  cleanupPageGroups();
   refreshAll();
 }
 function ungroupSelectedItems() {
   items.filter((it) => it.state === 'ok' && it.selected).forEach((it) => { it.pageGroup = null; });
+  cleanupPageGroups();
   refreshAll();
 }
 
@@ -434,6 +442,7 @@ async function openCropper(it) {
   $('cropper').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
   paintCropSelection(cropRectDraft);
+  $('cropStage').focus();
 }
 function closeCropper() {
   $('cropper').classList.add('hidden');
@@ -472,6 +481,18 @@ function moveCropSelection(ev) {
   paintCropSelection(cropRectDraft);
 }
 function endCropSelection() { cropDragStart = null; }
+function handleOverlayKeydown(e) {
+  const cropOpen = !$('cropper').classList.contains('hidden');
+  if (e.key === 'Enter' && cropOpen) {
+    if (e.target && e.target.closest && e.target.closest('.crop-actions button')) return;
+    e.preventDefault();
+    applyCrop();
+    return;
+  }
+  if (e.key !== 'Escape') return;
+  if (cropOpen) closeCropper();
+  else if (!$('lightbox').classList.contains('hidden')) closeLightbox();
+}
 
 // ---------- آماده‌سازی تصاویر برای PDF ----------
 async function decodeSlices(it, maxSrcH) {
@@ -605,7 +626,7 @@ async function onBuild() {
   if (!name.toLowerCase().endsWith('.pdf')) name += '.pdf';
   const seamless = $('seamless').checked;
   const twoPerPage = $('twoPerPage').checked && !seamless;
-  const uniformWidth = $('uniformWidth').checked;
+  const uniformSize = $('uniformSize').checked;
 
   const result = $('result');
   result.classList.remove('hidden', 'done');
@@ -625,7 +646,7 @@ async function onBuild() {
       jsPDF: jsPDFLib,
       items: pdfItems,
       seamless,
-      uniformWidth,
+      uniformSize,
       prepare,
       fallback,
       onProgress: (k, n) => {
@@ -655,7 +676,7 @@ async function onBuild() {
     const layoutNotes = [];
     if (seamless) layoutNotes.push('یک صفحهٔ بلند');
     else if (twoPerPage) layoutNotes.push('دو تصویر عمودی در هر صفحه');
-    if (uniformWidth) layoutNotes.push('عرض یکسان');
+    if (uniformSize) layoutNotes.push('اندازهٔ قاب صفحه‌ها یکسان');
     const layoutNote = layoutNotes.length ? ` (${layoutNotes.join('، ')})` : '';
     setStatus(`آماده شد! فایل PDF با ${res.pages} صفحه${layoutNote} ساخته شد. اگر دانلود شروع نشد، دکمهٔ «دانلود PDF» را بزنید.`);
     btn.click();
@@ -876,7 +897,10 @@ async function main() {
   $('modePdf').onclick = () => setMode('pdf');
   $('modeImg').onclick = () => setMode('img');
   $('seamless').addEventListener('change', () => {
-    if ($('seamless').checked) $('twoPerPage').checked = false;
+    if ($('seamless').checked) {
+      $('twoPerPage').checked = false;
+      $('uniformSize').checked = false;
+    }
     refreshSummary();
   });
   $('twoPerPage').addEventListener('change', () => {
@@ -893,11 +917,7 @@ async function main() {
   $('cropStage').addEventListener('pointermove', moveCropSelection);
   $('cropStage').addEventListener('pointerup', endCropSelection);
   $('cropStage').addEventListener('pointercancel', endCropSelection);
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
-    if (!$('cropper').classList.contains('hidden')) closeCropper();
-    else if (!$('lightbox').classList.contains('hidden')) closeLightbox();
-  });
+  document.addEventListener('keydown', handleOverlayKeydown);
   window.addEventListener('pagehide', () => { chrome.storage.local.remove(jobKey); clearRefererRule(); });
 
   await loadAll(items);
