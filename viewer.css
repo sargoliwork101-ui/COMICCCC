@@ -31,6 +31,8 @@ body { min-height: 100vh; padding-bottom: 104px; }
 .tool-menu[open] > summary { border-bottom: 1px solid var(--line); }
 .tool-menu-body { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; max-height: min(28vh, 260px); overflow: auto; padding: 11px; }
 .tool-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.profile-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.profile-status { color: var(--muted); font-size: 11px; line-height: 1.7; }
 .menu-hint { flex: 1 0 100%; margin: 2px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.8; }
 .group-manager { flex: 1 0 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding: 8px 4px 2px; border-top: 1px solid var(--line); }
 .group-manager > strong { color: var(--muted); font-size: 11px; white-space: nowrap; }

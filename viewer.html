@@ -52,6 +52,18 @@
             <div class="group-manager"><strong>گروه‌های ساخته‌شده</strong><div id="groupList" class="group-list"><span class="group-empty">هنوز گروهی نساخته‌اید.</span></div></div>
           </div>
         </details>
+        <details class="tool-menu" id="profileMenu">
+          <summary>پروفایل این صفحه</summary>
+          <div class="tool-menu-body profile-body">
+            <p class="menu-hint">چیدمان، ترتیب، انتخاب‌ها، گروه‌ها، کراپ‌ها و تنظیمات خروجی این صفحه را ذخیره کنید تا بعداً بازیابی شوند.</p>
+            <div class="profile-actions">
+              <button class="mini accent" id="saveProfileBtn" disabled>ذخیرهٔ پروفایل</button>
+              <button class="mini" id="restoreProfileBtn" disabled>بازیابی پروفایل</button>
+              <button class="mini warn hidden" id="deleteProfileBtn">حذف پروفایل</button>
+            </div>
+            <span id="profileStatus" class="profile-status" role="status">هنوز پروفایلی ذخیره نشده است.</span>
+          </div>
+        </details>
         <details class="tool-menu">
           <summary>OCR، ترجمه و تصاویر ناموفق</summary>
           <div class="tool-menu-body">
@@ -171,12 +183,12 @@
       </label>
       <label>عرض برش (px)<input id="cropWidth" type="number" min="1" step="1" inputmode="numeric" aria-label="عرض برش بر حسب پیکسل"></label>
       <label>ارتفاع برش (px)<input id="cropHeight" type="number" min="1" step="1" inputmode="numeric" aria-label="ارتفاع برش بر حسب پیکسل"></label>
-      <span>ابعاد را مستقیم وارد کنید یا دستگیره‌های کادر را بکشید؛ کلیک بیرون کادر از گوشهٔ شروع تصویر (بالا-چپ) تا نقطهٔ ماوس برش می‌سازد.</span>
+      <span>ابعاد را مستقیم وارد کنید یا دستگیره‌های کادر را بکشید؛ برای کادر تازه، از نقطهٔ شروع موس تا نقطهٔ رهاکردن بکشید.</span>
     </div>
     <div class="crop-body">
       <div id="cropStage" class="crop-stage" tabindex="0" aria-label="ناحیهٔ انتخاب برش؛ Enter برای اعمال"><img id="cropImg" alt=""><div id="cropSelection"><i class="crop-handle nw" data-handle="nw"></i><i class="crop-handle n" data-handle="n"></i><i class="crop-handle ne" data-handle="ne"></i><i class="crop-handle e" data-handle="e"></i><i class="crop-handle se" data-handle="se"></i><i class="crop-handle s" data-handle="s"></i><i class="crop-handle sw" data-handle="sw"></i><i class="crop-handle w" data-handle="w"></i></div></div>
     </div>
-    <p class="crop-help">برای برش تازه بیرون کادر کلیک کنید؛ قاب از گوشهٔ بالا-چپ تا اشاره‌گر ساخته می‌شود. داخل کادر بکشید تا جابه‌جا شود و دستگیره‌ها را برای تغییر اندازه بکشید. Enter یا «اعمال برش» تغییر را ثبت می‌کند.</p>
+    <p class="crop-help">برای برش تازه، از نقطهٔ دلخواه کلیک کنید و تا محل پایان بکشید. داخل کادر را برای جابه‌جایی بکشید و دستگیره‌ها را برای تغییر اندازه بکشید. Enter یا «اعمال برش» تغییر را ثبت می‌کند.</p>
   </div>
 
   <div id="lightbox" class="hidden">

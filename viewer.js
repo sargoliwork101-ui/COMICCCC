@@ -11,6 +11,8 @@ const MAX_CANVAS_H = 16000;
 
 let job = null;
 let jobKey = '';
+let pageProfileKey = '';
+let pageProfileAvailable = false;
 let items = [];
 let loading = true;
 let building = false;
@@ -378,6 +380,7 @@ function refreshSummary() {
   $('ocrEnabled').disabled = loading || building;
   $('btnTranslate').disabled = loading || building || ok === 0 || !$('ocrEnabled').checked;
   $('btnTxt').classList.toggle('hidden', !items.some((it) => it.ocr));
+  updateProfileButtons();
   refreshGroupManager();
   refreshImageWarnings();
 }
@@ -635,22 +638,24 @@ function beginCropSelection(ev) {
       rect: cropPxRect(cropRectDraft, size)
     };
   } else {
-    // کلیک بیرون کادر، انتخاب تازه را از ابتدای متعارف تصویر (گوشهٔ بالا-چپ) آغاز می‌کند.
-    cropDragStart = { mode: 'draw', point: { x: 0, y: 0 } };
-    cropRectDraft = { x: 0, y: 0, w: 0, h: 0 };
+    // انتخاب تازه دقیقاً از نقطهٔ فشار موس شروع می‌شود و با محل رهاکردن تمام می‌شود.
+    cropDragStart = { mode: 'draw', point: p };
+    cropRectDraft = { x: p.x, y: p.y, w: 0, h: 0 };
     paintCropSelection(cropRectDraft);
-    updateCropDraw(p, size);
   }
   $('cropStage').setPointerCapture(ev.pointerId);
 }
-function updateCropDraw(p, size) {
-  let width = Math.max(0, p.x * size.w), height = Math.max(0, p.y * size.h);
+function updateCropDraw(p, size, start) {
+  const dx = (p.x - start.x) * size.w, dy = (p.y - start.y) * size.h;
+  let width = Math.abs(dx), height = Math.abs(dy);
   const ratio = cropAspectRatio();
   if (ratio && width > 0 && height > 0) {
-    height = Math.min(height, width / ratio);
-    width = height * ratio;
+    width = Math.min(width, height * ratio);
+    height = width / ratio;
   }
-  cropRectDraft = { x: 0, y: 0, w: width / size.w, h: height / size.h };
+  const x = dx < 0 ? start.x - width / size.w : start.x;
+  const y = dy < 0 ? start.y - height / size.h : start.y;
+  cropRectDraft = { x, y, w: width / size.w, h: height / size.h };
   paintCropSelection(cropRectDraft);
 }
 function resizeCrop(p, size, drag) {
@@ -687,7 +692,7 @@ function moveCropSelection(ev) {
   if (!p) return;
   const size = cropImageDimensions();
   const drag = cropDragStart;
-  if (drag.mode === 'draw') { updateCropDraw(p, size); return; }
+  if (drag.mode === 'draw') { updateCropDraw(p, size, drag.point); return; }
   if (drag.mode === 'resize') { resizeCrop(p, size, drag); return; }
   const dx = (p.x - drag.point.x) * size.w, dy = (p.y - drag.point.y) * size.h;
   const width = drag.rect.x2 - drag.rect.x1, height = drag.rect.y2 - drag.rect.y1;
@@ -695,7 +700,11 @@ function moveCropSelection(ev) {
   const y1 = Math.max(0, Math.min(size.h - height, drag.rect.y1 + dy));
   saveCropPxRect({ x1, y1, x2: x1 + width, y2: y1 + height }, size);
 }
-function endCropSelection() { cropDragStart = null; }
+function endCropSelection(ev) {
+  if (cropDragStart && ev && Number.isFinite(ev.clientX) && Number.isFinite(ev.clientY)) moveCropSelection(ev);
+  cropDragStart = null;
+}
+function cancelCropSelection() { cropDragStart = null; }
 function handleOverlayKeydown(e) {
   const cropOpen = !$('cropper').classList.contains('hidden');
   if (e.key === 'Enter' && cropOpen) {
@@ -1070,6 +1079,201 @@ async function onSaveImages() {
   }
 }
 
+// ---------- پروفایل تنظیمات برای هر صفحه ----------
+function makePageProfileKey(url) {
+  if (!url) return '';
+  let hash = 2166136261;
+  for (let i = 0; i < url.length; i++) { hash ^= url.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+  return `page_profile_${(hash >>> 0).toString(16)}`;
+}
+function profileImageIdentity(url) {
+  const text = String(url || '');
+  let stable = text;
+  if (/^blob:/i.test(text)) return 'blob';
+  if (/^https?:\/\//i.test(text)) {
+    try { const parsed = new URL(text); stable = `${parsed.origin}${parsed.pathname}`; } catch (e) {}
+  } else if (text.length > 2048) stable = `${text.slice(0, 1024)}${text.slice(-256)}_${text.length}`;
+  let hash = 2166136261;
+  for (let i = 0; i < stable.length; i++) { hash ^= stable.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+  return `${stable.length}_${(hash >>> 0).toString(16)}`;
+}
+function updateProfileButtons() {
+  const saving = $('saveProfileBtn');
+  if (!saving) return;
+  saving.disabled = loading || building || !pageProfileKey;
+  $('restoreProfileBtn').disabled = loading || building || !pageProfileAvailable;
+  $('deleteProfileBtn').disabled = loading || building || !pageProfileAvailable;
+  $('deleteProfileBtn').classList.toggle('hidden', !pageProfileAvailable);
+}
+async function checkSavedPageProfile() {
+  if (!pageProfileKey) {
+    pageProfileAvailable = false;
+    $('profileStatus').innerText = 'نشانی این صفحه برای ساخت پروفایل در دسترس نیست.';
+    updateProfileButtons();
+    return;
+  }
+  try {
+    const stored = await chrome.storage.local.get(pageProfileKey);
+    const profile = stored[pageProfileKey];
+    pageProfileAvailable = !!(profile && profile.pageUrl === job.pageUrl && Array.isArray(profile.items));
+    $('profileStatus').innerText = pageProfileAvailable
+      ? 'برای این صفحه پروفایل ذخیره‌شده دارید؛ هر زمان خواستید آن را بازیابی کنید.'
+      : 'برای این صفحه هنوز پروفایلی ذخیره نشده است.';
+  } catch (e) {
+    pageProfileAvailable = false;
+    $('profileStatus').innerText = 'خواندن پروفایل ذخیره‌شده ناموفق بود.';
+  }
+  updateProfileButtons();
+}
+function collectPageProfile() {
+  const gridOrder = Array.from($('grid').children)
+    .map((el) => items.find((it) => it.el === el)).filter(Boolean);
+  return {
+    version: 1,
+    pageUrl: job.pageUrl || '',
+    savedAt: Date.now(),
+    sourceImages: (job.urls || []).map((url, sourceIndex) => ({ sourceIndex, identity: profileImageIdentity(url) })),
+    settings: {
+      mode,
+      seamless: $('seamless').checked,
+      uniformSize: $('uniformSize').checked,
+      twoPerPage: $('twoPerPage').checked,
+      pdfName: $('pdfName').value,
+      folderName: $('folderName').value,
+      outFmt: $('outFmt').value,
+      ocrEnabled: $('ocrEnabled').checked,
+      trLang: $('trLang').value,
+      trOnlySel: $('trOnlySel').checked,
+      trErase: $('trErase').checked,
+      trPrecise: $('trPrecise').checked,
+      cropRatio: $('cropRatio').value
+    },
+    items: gridOrder.map((it) => ({
+      uid: it.uid,
+      sourceIndex: it.i,
+      sourceIdentity: profileImageIdentity(it.url),
+      isDuplicate: !!it.dupNo,
+      dupNo: it.dupNo || 0,
+      selected: !!it.selected,
+      pdfOrder: Number(it.pdfOrder) || it.i + 1,
+      pageGroup: it.pageGroup || null,
+      cropRect: it.cropRect ? { ...it.cropRect } : null
+    }))
+  };
+}
+async function savePageProfile() {
+  if (!pageProfileKey || loading || building) return;
+  try {
+    const profile = collectPageProfile();
+    await chrome.storage.local.set({ [pageProfileKey]: profile });
+    pageProfileAvailable = true;
+    $('profileStatus').innerText = `پروفایل این صفحه ذخیره شد (${profile.items.length} تصویر/کپی).`;
+    updateProfileButtons();
+  } catch (e) {
+    console.error('ذخیرهٔ پروفایل ناموفق بود', e);
+    $('profileStatus').innerText = 'ذخیرهٔ پروفایل ناموفق بود؛ فضای ذخیره‌سازی را بررسی کنید.';
+  }
+}
+async function deletePageProfile() {
+  if (!pageProfileKey || !pageProfileAvailable || loading || building) return;
+  if (!confirm('پروفایل ذخیره‌شدهٔ این صفحه حذف شود؟')) return;
+  try {
+    await chrome.storage.local.remove(pageProfileKey);
+    pageProfileAvailable = false;
+    $('profileStatus').innerText = 'پروفایل این صفحه حذف شد.';
+    updateProfileButtons();
+  } catch (e) { $('profileStatus').innerText = 'حذف پروفایل ناموفق بود.'; }
+}
+function applyProfileSettings(settings = {}) {
+  if (typeof settings.pdfName === 'string') $('pdfName').value = settings.pdfName;
+  if (typeof settings.folderName === 'string') $('folderName').value = settings.folderName;
+  if (['orig', 'png', 'jpg'].includes(settings.outFmt)) $('outFmt').value = settings.outFmt;
+  if (['free', '1/1', '4/3', '3/4', '16/9', '9/16'].includes(settings.cropRatio)) $('cropRatio').value = settings.cropRatio;
+  if (['eng', 'kor', 'jpn', 'chi_sim'].includes(settings.trLang)) $('trLang').value = settings.trLang;
+  for (const id of ['trOnlySel', 'trErase', 'trPrecise']) if (typeof settings[id] === 'boolean') $(id).checked = settings[id];
+  const seamless = !!settings.seamless;
+  $('seamless').checked = seamless;
+  $('twoPerPage').checked = !seamless && !!settings.twoPerPage;
+  $('uniformSize').checked = !seamless && !!settings.uniformSize;
+  if (settings.mode === 'pdf' || settings.mode === 'img') setMode(settings.mode);
+  if (typeof settings.ocrEnabled === 'boolean' && $('ocrEnabled').checked !== settings.ocrEnabled) {
+    $('ocrEnabled').checked = settings.ocrEnabled;
+    $('ocrEnabled').dispatchEvent(new Event('change', { bubbles: true }));
+  }
+}
+async function restorePageProfile() {
+  if (!pageProfileKey || !pageProfileAvailable || loading || building) return;
+  try {
+    const stored = await chrome.storage.local.get(pageProfileKey);
+    const profile = stored[pageProfileKey];
+    if (!profile || profile.pageUrl !== job.pageUrl || !Array.isArray(profile.items)) {
+      pageProfileAvailable = false;
+      $('profileStatus').innerText = 'پروفایل معتبر برای این صفحه پیدا نشد.';
+      updateProfileButtons();
+      return;
+    }
+    const grid = $('grid');
+    const baseItems = items.filter((it) => !it.dupNo);
+    items.filter((it) => it.dupNo && it.el && it.el.parentNode).forEach((it) => it.el.parentNode.removeChild(it.el));
+    items = baseItems.slice();
+    applyProfileSettings(profile.settings || {});
+    const usedUids = new Set();
+    let fallbackUid = Math.max(nextItemUid, ...baseItems.map((it) => it.uid + 1), 0);
+    const restored = [];
+    const sourceRecords = profile.sourceImages || profile.items;
+    const sourceIndices = new Set(sourceRecords.filter((record) => {
+      const source = baseItems.find((it) => it.i === Number(record.sourceIndex));
+      return !!source && (!record.identity || record.identity === profileImageIdentity(source.url));
+    }).map((record) => Number(record.sourceIndex)));
+    for (const entry of profile.items) {
+      const sourceIndex = Number(entry.sourceIndex);
+      const source = baseItems.find((it) => it.i === sourceIndex);
+      if (!source || (entry.sourceIdentity && entry.sourceIdentity !== profileImageIdentity(source.url))) continue;
+      let it;
+      if (entry.isDuplicate) {
+        if (source.state !== 'ok') continue;
+        it = makeDuplicateData(source);
+        it.dupNo = Number(entry.dupNo) || (items.filter((x) => x.i === sourceIndex && x.dupNo).length + 1);
+        it.el = makeCard(it);
+      } else it = source;
+      const proposedUid = Number(entry.uid);
+      if (Number.isInteger(proposedUid) && proposedUid >= 0 && !usedUids.has(proposedUid)) it.uid = proposedUid;
+      else { while (usedUids.has(fallbackUid)) fallbackUid++; it.uid = fallbackUid++; }
+      usedUids.add(it.uid);
+      it.selected = source.state === 'ok' && !!entry.selected;
+      it.pdfOrder = Number.isFinite(Number(entry.pdfOrder)) && Number(entry.pdfOrder) > 0 ? Number(entry.pdfOrder) : sourceIndex + 1;
+      it.pageGroup = Number(entry.pageGroup) > 0 ? Number(entry.pageGroup) : null;
+      it.cropRect = entry.cropRect && entry.cropRect.w > 0 && entry.cropRect.h > 0 ? { ...entry.cropRect } : null;
+      it.cropCache = null;
+      restored.push(it);
+      if (entry.isDuplicate) items.push(it);
+    }
+    const maxOrder = restored.reduce((max, it) => Math.max(max, Number(it.pdfOrder) || 0), 0);
+    const newSources = baseItems.filter((it) => !sourceIndices.has(it.i));
+    newSources.forEach((it, index) => {
+      it.selected = it.state === 'ok'; it.pageGroup = null; it.cropRect = null; it.cropCache = null;
+      it.pdfOrder = maxOrder + index + 1;
+    });
+    const finalItems = restored.concat(newSources);
+    const keep = new Set(finalItems);
+    baseItems.filter((it) => !keep.has(it)).forEach((it) => { if (it.el && it.el.parentNode) it.el.parentNode.removeChild(it.el); });
+    items = finalItems;
+    finalItems.forEach((it) => grid.appendChild(it.el));
+    nextItemUid = Math.max(0, ...items.map((it) => it.uid + 1));
+    nextPageGroupId = Math.max(0, ...items.map((it) => Number(it.pageGroup) || 0)) + 1;
+    lastClicked = null;
+    if ($('groupMenu')) $('groupMenu').open = false;
+    refreshAll();
+    items.filter((it) => it.dupNo).forEach((it) => drawThumb(it));
+    $('profileStatus').innerText = `پروفایل این صفحه بازیابی شد (${restored.length} تصویر/کپی).`;
+    pageProfileAvailable = true;
+    updateProfileButtons();
+  } catch (e) {
+    console.error('بازیابی پروفایل ناموفق بود', e);
+    $('profileStatus').innerText = `بازیابی پروفایل ناموفق بود: ${e && e.message ? e.message : e}`;
+  }
+}
+
 // ---------- شروع ----------
 async function main() {
   const jobId = new URLSearchParams(location.search).get('job');
@@ -1081,6 +1285,8 @@ async function main() {
     return;
   }
   $('pdfName').value = (job.name || 'comic').replace(/\.pdf$/i, '');
+  pageProfileKey = makePageProfileKey(job.pageUrl || '');
+  await checkSavedPageProfile();
   await setRefererRule(job.pageUrl);
 
   const grid = $('grid');
@@ -1110,6 +1316,9 @@ async function main() {
   $('btnInv').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = !it.selected; }); refreshAll(); };
   $('btnGroupPage').onclick = groupSelectedItems;
   $('btnUngroupPage').onclick = ungroupSelectedItems;
+  $('saveProfileBtn').onclick = savePageProfile;
+  $('restoreProfileBtn').onclick = restorePageProfile;
+  $('deleteProfileBtn').onclick = deletePageProfile;
   $('btnRetry').onclick = () => { loadAll(items.filter((it) => it.state === 'failed')); };
   $('buildBtn').onclick = onBuild;
   $('saveImgBtn').onclick = onSaveImages;
@@ -1140,7 +1349,7 @@ async function main() {
   $('cropStage').addEventListener('pointerdown', beginCropSelection);
   $('cropStage').addEventListener('pointermove', moveCropSelection);
   $('cropStage').addEventListener('pointerup', endCropSelection);
-  $('cropStage').addEventListener('pointercancel', endCropSelection);
+  $('cropStage').addEventListener('pointercancel', cancelCropSelection);
   document.addEventListener('keydown', handleOverlayKeydown);
   window.addEventListener('pagehide', () => { chrome.storage.local.remove(jobKey); clearRefererRule(); });
 
