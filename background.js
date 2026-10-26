@@ -6,11 +6,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       urls: msg.urls,
       name: msg.name,
       tabId: sender.tab ? sender.tab.id : null,
-      pageUrl: (sender.tab && sender.tab.url) || msg.pageUrl || ''
+      pageUrl: (sender.tab && sender.tab.url) || msg.pageUrl || '',
+      skippedInline: Number(msg.skippedInline) || 0
     };
     chrome.storage.local.set({ ['job_' + jobId]: job }).then(() => {
       chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') + '?job=' + jobId });
       sendResponse({ ok: true });
+    }).catch((error) => {
+      console.error('ذخیرهٔ فهرست تصاویر ناموفق بود', error);
+      sendResponse({ ok: false, error: error && error.message ? error.message : 'storage quota exceeded' });
     });
     return true;
   }

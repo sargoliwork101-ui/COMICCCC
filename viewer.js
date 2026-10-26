@@ -48,14 +48,18 @@ function looksLikeImage(b) {
 }
 
 async function fetchImageBlob(url, tabId) {
+  let directError = 'دریافت مستقیم ناموفق بود';
   try {
     const res = await fetch(url, { credentials: 'include' });
-    if (res.ok) {
-      const b = await res.blob();
-      if (looksLikeImage(b)) return b;
+    if (!res.ok) directError = `پاسخ سرور: HTTP ${res.status}`;
+    else {
+      const blob = await res.blob();
+      if (looksLikeImage(blob)) return { blob, error: null };
+      directError = `پاسخ سرور تصویر نبود${blob.type ? ` (${blob.type})` : ''}`;
     }
-  } catch (e) { /* روش دوم */ }
+  } catch (e) { directError = `دریافت مستقیم: ${e && e.message ? e.message : 'خطای شبکه یا دسترسی'}`; }
 
+  let pageError = 'دسترسی به صفحهٔ مبدأ در دسترس نیست';
   if (tabId != null) {
     try {
       const [r] = await chrome.scripting.executeScript({
@@ -64,23 +68,26 @@ async function fetchImageBlob(url, tabId) {
         func: async (u) => {
           try {
             const res = await fetch(u, { credentials: 'include' });
-            if (!res.ok) return null;
-            const b = await res.blob();
-            return await new Promise((resolve) => {
+            if (!res.ok) return { error: `HTTP ${res.status}` };
+            const blob = await res.blob();
+            const data = await new Promise((resolve, reject) => {
               const fr = new FileReader();
-              fr.onloadend = () => resolve(fr.result);
-              fr.readAsDataURL(b);
+              fr.onloadend = () => fr.error ? reject(fr.error) : resolve(fr.result);
+              fr.readAsDataURL(blob);
             });
-          } catch (e) { return null; }
+            return { data };
+          } catch (e) { return { error: e && e.message ? e.message : 'خطای fetch در صفحه' }; }
         }
       });
-      if (r && r.result) {
-        const b = await (await fetch(r.result)).blob();
-        if (looksLikeImage(b)) return b;
-      }
-    } catch (e) { /* نادیده */ }
+      const result = r && r.result;
+      if (result && result.data) {
+        const blob = await (await fetch(result.data)).blob();
+        if (looksLikeImage(blob)) return { blob, error: null };
+        pageError = 'صفحه پاسخ تصویری برنگرداند';
+      } else pageError = result && result.error ? `دریافت از صفحه: ${result.error}` : 'صفحه تصویر را برنگرداند';
+    } catch (e) { pageError = `دسترسی به صفحه: ${e && e.message ? e.message : 'مجاز نیست'}`; }
   }
-  return null;
+  return { blob: null, error: `${directError}؛ ${pageError}` };
 }
 
 // ---------- تشخیص فرمت از روی بایت‌ها ----------
@@ -233,12 +240,16 @@ function refreshCard(it) {
   }
   const meta = el.querySelector('.meta');
   const spin = el.querySelector('.spin');
+  if (it.state === 'failed') el.title = it.error || 'بارگیری این تصویر ناموفق بود';
+  else el.title = 'برای تغییر ترتیب در PDF، تصویر را بکشید و رها کنید';
   if (it.state === 'ok') {
     if (spin && spin.parentNode) spin.parentNode.removeChild(spin);
     meta.innerText = `${it.w}×${it.h} · ${fmtSize(it.blob.size)}`;
+    meta.title = '';
   } else if (it.state === 'failed') {
     if (spin && spin.parentNode) spin.parentNode.removeChild(spin);
     meta.innerText = 'دانلود نشد';
+    meta.title = it.error || 'علت دقیق بارگیری نامشخص است';
   } else {
     meta.innerText = '…';
   }
@@ -284,11 +295,12 @@ async function drawThumb(it) {
 
 async function loadOne(it) {
   it.state = 'loading';
-  const blob = await fetchImageBlob(it.url, job.tabId);
-  if (!blob) { it.state = 'failed'; it.selected = false; refreshCard(it); return; }
-  it.blob = blob;
-  try { await analyze(it); } catch (e) { it.info = null; }
-  if (!it.info) { it.state = 'failed'; it.selected = false; it.blob = null; refreshCard(it); return; }
+  const result = await fetchImageBlob(it.url, job.tabId);
+  if (!result.blob) { it.state = 'failed'; it.error = result.error; it.selected = false; refreshCard(it); return; }
+  it.blob = result.blob;
+  try { await analyze(it); } catch (e) { it.info = null; it.error = e && e.message ? e.message : 'تحلیل تصویر ناموفق بود'; }
+  if (!it.info) { it.state = 'failed'; it.error = it.error || 'قالب یا ابعاد تصویر قابل‌خواندن نبود'; it.selected = false; it.blob = null; refreshCard(it); return; }
+  it.error = '';
   it.state = 'ok';
   it.selected = true;
   refreshCard(it);
@@ -356,8 +368,50 @@ function refreshSummary() {
   $('ocrEnabled').disabled = loading || building;
   $('btnTranslate').disabled = loading || building || ok === 0 || !$('ocrEnabled').checked;
   $('btnTxt').classList.toggle('hidden', !items.some((it) => it.ocr));
+  refreshGroupManager();
+  refreshImageWarnings();
 }
 function refreshAll() { items.forEach(refreshCard); refreshSummary(); }
+function refreshGroupManager() {
+  const container = $('groupList');
+  if (!container) return;
+  const groups = new Map();
+  items.forEach((it) => {
+    if (!it.pageGroup || it.state !== 'ok') return;
+    if (!groups.has(it.pageGroup)) groups.set(it.pageGroup, []);
+    groups.get(it.pageGroup).push(it);
+  });
+  if (!groups.size) {
+    container.innerHTML = '<span class="group-empty">هنوز گروهی نساخته‌اید؛ کارت‌های یک صفحه را انتخاب و «ساخت گروه» را بزنید.</span>';
+    return;
+  }
+  container.innerHTML = [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([id, members]) => {
+    const allSelected = members.every((it) => it.selected);
+    return `<span class="group-chip"><button type="button" class="group-select" data-group="${id}" aria-pressed="${allSelected}" title="برای انتخاب اعضای این گروه کلیک کنید">گروه ${id} · ${members.length} کارت</button><button type="button" class="group-remove" data-group="${id}" aria-label="حذف گروه ${id}" title="لغو این گروه">×</button></span>`;
+  }).join('');
+  container.querySelectorAll('.group-select').forEach((button) => button.addEventListener('click', () => {
+    const groupId = Number(button.dataset.group);
+    items.forEach((it) => { it.selected = it.state === 'ok' && it.pageGroup === groupId; });
+    lastClicked = null;
+    refreshAll();
+  }));
+  container.querySelectorAll('.group-remove').forEach((button) => button.addEventListener('click', () => {
+    const groupId = Number(button.dataset.group);
+    items.filter((it) => it.pageGroup === groupId).forEach((it) => { it.pageGroup = null; });
+    refreshAll();
+  }));
+}
+function refreshImageWarnings() {
+  const notice = $('loadErrors');
+  if (!notice) return;
+  const failed = items.filter((it) => it.state === 'failed').length;
+  const skipped = Number(job && job.skippedInline) || 0;
+  const messages = [];
+  if (failed) messages.push(`${failed} تصویر بارگیری نشد؛ برای دیدن علت، نشانگر را روی کارت ناموفق نگه دارید.`);
+  if (skipped) messages.push(`${skipped} تصویر داخلیِ بزرگ برای جلوگیری از پرشدن فضای افزونه نادیده گرفته شد.`);
+  notice.innerText = messages.join(' ');
+  notice.classList.toggle('hidden', messages.length === 0);
+}
 function cleanupPageGroups() {
   const sizes = new Map();
   items.forEach((it) => { if (it.pageGroup) sizes.set(it.pageGroup, (sizes.get(it.pageGroup) || 0) + 1); });
