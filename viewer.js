@@ -30,6 +30,8 @@ let cropObjectUrl = null;
 let cropRectDraft = null;
 let cropDragStart = null;
 let nextPageGroupId = 1;
+let editingPageGroupId = null;
+let editingPageGroupSelection = null;
 let nextItemUid = 0;
 
 // ---------- دانلود تصاویر ----------
@@ -231,6 +233,7 @@ function duplicateItem(source) {
 function deleteItem(it) {
   if (!it || building || loading) return;
   if (!confirm(`تصویر ${it.i + 1} حذف شود؟`)) return;
+  if (editingPageGroupId !== null) cancelPageGroupEdit();
   if (cropItem === it) closeCropper();
   if (lbItem === it) closeLightbox();
   items = items.filter((item) => item !== it);
@@ -241,7 +244,23 @@ function deleteItem(it) {
   refreshAll();
 }
 
-function refreshCard(it) {
+function buildPageGroupView() {
+  const membersById = new Map();
+  items.forEach((it) => {
+    const id = Number(it.pageGroup);
+    if (it.state !== 'ok' || !Number.isInteger(id) || id < 1) return;
+    if (!membersById.has(id)) membersById.set(id, []);
+    membersById.get(id).push(it);
+  });
+  for (const [id, members] of membersById) if (members.length < 2) membersById.delete(id);
+  const orderedIds = [...membersById.keys()].sort((a, b) => a - b);
+  const numberById = new Map(orderedIds.map((id, index) => [id, index + 1]));
+  return { membersById, numberById };
+}
+function formatGroupLabel(displayNumber, memberCount) {
+  return `گروه ${displayNumber} · ${memberCount} عضو`;
+}
+function refreshCard(it, groupView = buildPageGroupView()) {
   const el = it.el;
   el.classList.toggle('selected', !!it.selected);
   el.classList.toggle('failed', it.state === 'failed');
@@ -251,11 +270,15 @@ function refreshCard(it) {
   const groupBadge = el.querySelector('.page-group-badge');
   const deleteButton = el.querySelector('.delete');
   if (deleteButton) deleteButton.disabled = loading || building;
-  groupBadge.classList.toggle('hidden', !it.pageGroup);
-  if (it.pageGroup) {
-    const memberCount = items.filter((member) => member.pageGroup === it.pageGroup).length;
-    groupBadge.innerText = `گروه ${it.pageGroup} · ${memberCount} تصویر`;
-    groupBadge.title = `${memberCount} تصویر در یک صفحهٔ PDF قرار می‌گیرند`;
+  const groupId = Number(it.pageGroup);
+  const groupMembers = groupView.membersById.get(groupId);
+  const displayNumber = groupView.numberById.get(groupId);
+  const hasVisibleGroup = !!groupMembers && !!displayNumber;
+  groupBadge.classList.toggle('hidden', !hasVisibleGroup);
+  if (hasVisibleGroup) {
+    const label = formatGroupLabel(displayNumber, groupMembers.length);
+    groupBadge.innerText = label;
+    groupBadge.title = `${label}; این اعضا در یک صفحهٔ PDF قرار می‌گیرند`;
   }
   const meta = el.querySelector('.meta');
   const spin = el.querySelector('.spin');
@@ -381,57 +404,76 @@ function updatePdfOrderFromGrid() {
 }
 
 // ---------- انتخاب‌ها ----------
-function refreshSummary() {
+function refreshSummary(groupView = buildPageGroupView()) {
   const ok = items.filter((it) => it.state === 'ok').length;
   const selectedItems = items.filter((it) => it.state === 'ok' && it.selected);
   const sel = selectedItems.length;
-  const selectedGroups = [...new Set(selectedItems.map((it) => Number(it.pageGroup)).filter((id) => Number.isInteger(id) && id > 0))].sort((a, b) => a - b);
+  const selectedGroups = [...new Set(selectedItems.map((it) => Number(it.pageGroup)).filter((id) => Number.isInteger(id) && id > 0 && groupView.numberById.has(id)))].sort((a, b) => a - b);
   const failedN = items.filter((it) => it.state === 'failed').length;
   $('selCount').innerText = `${sel} از ${ok} تصویر انتخاب شده`;
   const topCount = $('toolbarSelectionCount');
   if (topCount) topCount.innerText = `${sel} انتخاب`;
   $('btnRetry').classList.toggle('hidden', failedN === 0 || loading);
-  $('buildBtn').disabled = loading || building || sel === 0;
-  $('saveImgBtn').disabled = loading || building || sel === 0;
+  $('btnRetry').disabled = building || editingPageGroupId !== null;
+  ['btnAll', 'btnNone', 'btnInv'].forEach((id) => { $(id).disabled = building || editingPageGroupId !== null; });
+  $('buildBtn').disabled = loading || building || editingPageGroupId !== null || sel === 0;
+  $('saveImgBtn').disabled = loading || building || editingPageGroupId !== null || sel === 0;
   $('seamless').disabled = loading || building || $('twoPerPage').checked;
   $('twoPerPage').disabled = loading || building || $('seamless').checked;
   $('uniformSize').disabled = loading || building || $('seamless').checked;
   const groupingUnchanged = selectedGroups.length === 1 && selectedItems.every((it) => Number(it.pageGroup) === selectedGroups[0]);
-  $('btnGroupPage').disabled = loading || building || sel < 2 || groupingUnchanged;
-  $('btnGroupPage').innerText = selectedGroups.length > 1
-    ? `ادغام گروه‌ها در گروه ${selectedGroups[0]}`
-    : selectedGroups.length === 1
-      ? `افزودن انتخاب‌ها به گروه ${selectedGroups[0]}`
-      : `ساخت یک گروه از ${sel} انتخاب`;
-  $('btnUngroupPage').disabled = loading || building || !selectedItems.some((it) => it.pageGroup);
-  $('ocrEnabled').disabled = loading || building;
-  $('btnTranslate').disabled = loading || building || ok === 0 || !$('ocrEnabled').checked;
+  const targetGroupNumber = selectedGroups.length ? groupView.numberById.get(selectedGroups[0]) : null;
+  if (editingPageGroupId !== null) {
+    const currentMembers = new Set(selectedItems.map((it) => it.uid));
+    const originalMembers = new Set(items.filter((it) => Number(it.pageGroup) === editingPageGroupId).map((it) => it.uid));
+    const changed = currentMembers.size !== originalMembers.size || [...currentMembers].some((uid) => !originalMembers.has(uid));
+    const editingNumber = groupView.numberById.get(editingPageGroupId) || editingPageGroupId;
+    $('btnGroupPage').disabled = loading || building || sel < 2 || !changed;
+    $('btnGroupPage').innerText = `ذخیرهٔ ویرایش گروه ${editingNumber}`;
+    $('groupEditStatus').innerText = sel < 2
+      ? 'برای حفظ گروه دست‌کم دو کارت را نگه دارید؛ برای حذف کامل گروه از × استفاده کنید.'
+      : `ویرایش گروه ${editingNumber}: کارت‌ها را انتخاب یا از انتخاب خارج کنید، سپس تغییرات را ذخیره کنید.`;
+    $('btnCancelGroupEdit').classList.remove('hidden');
+  } else {
+    $('btnGroupPage').disabled = loading || building || sel < 2 || groupingUnchanged;
+    $('btnGroupPage').innerText = selectedGroups.length > 1
+      ? `ادغام گروه‌ها در گروه ${targetGroupNumber || selectedGroups[0]}`
+      : selectedGroups.length === 1
+        ? `افزودن انتخاب‌ها به گروه ${targetGroupNumber || selectedGroups[0]}`
+        : `ساخت یک گروه از ${sel} انتخاب`;
+    $('btnCancelGroupEdit').classList.add('hidden');
+  }
+  $('btnUngroupPage').disabled = loading || building || editingPageGroupId !== null || !selectedItems.some((it) => it.pageGroup);
+  $('ocrEnabled').disabled = loading || building || editingPageGroupId !== null;
+  $('btnTranslate').disabled = loading || building || editingPageGroupId !== null || ok === 0 || !$('ocrEnabled').checked;
   $('btnTxt').classList.toggle('hidden', !items.some((it) => it.ocr));
   updateProfileButtons();
-  refreshGroupManager();
+  refreshGroupManager(groupView);
   refreshImageWarnings();
 }
-function refreshAll() { items.forEach(refreshCard); refreshSummary(); }
-function refreshGroupManager() {
+function refreshAll() {
+  const groupView = buildPageGroupView();
+  items.forEach((it) => refreshCard(it, groupView));
+  refreshSummary(groupView);
+}
+function refreshGroupManager(groupView = buildPageGroupView()) {
   const container = $('groupList');
   if (!container) return;
-  const groups = new Map();
-  items.forEach((it) => {
-    if (!it.pageGroup || it.state !== 'ok') return;
-    if (!groups.has(it.pageGroup)) groups.set(it.pageGroup, []);
-    groups.get(it.pageGroup).push(it);
-  });
+  const groups = groupView.membersById;
   if (!groups.size) {
     container.innerHTML = '<span class="group-empty">هنوز گروهی نساخته‌اید؛ کارت‌های یک صفحه را انتخاب و «ساخت گروه» را بزنید.</span>';
     return;
   }
   container.innerHTML = [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([id, members]) => {
+    const number = groupView.numberById.get(id);
     const allSelected = members.every((it) => it.selected);
-    return `<span class="group-chip"><button type="button" class="group-select" data-group="${id}" aria-pressed="${allSelected}" title="اعضای گروه را انتخاب می‌کند و به اولین تصویر می‌برد">گروه ${id} · ${members.length} کارت</button><button type="button" class="group-remove" data-group="${id}" aria-label="حذف گروه ${id}" title="لغو این گروه">×</button></span>`;
+    const label = formatGroupLabel(number, members.length);
+    return `<span class="group-chip"><button type="button" class="group-select" data-group="${id}" aria-pressed="${allSelected}" title="اعضای گروه را انتخاب می‌کند و به اولین تصویر می‌برد">${label}</button><button type="button" class="group-edit" data-group="${id}" aria-label="ویرایش گروه ${number}" title="ویرایش اعضای این گروه">ویرایش</button><button type="button" class="group-remove" data-group="${id}" aria-label="حذف گروه ${number}" title="حذف این گروه">×</button></span>`;
   }).join('');
   container.querySelectorAll('.group-select').forEach((button) => button.addEventListener('click', () => {
+    if (editingPageGroupId !== null) cancelPageGroupEdit();
     const groupId = Number(button.dataset.group);
-    const members = items.filter((it) => it.state === 'ok' && it.pageGroup === groupId);
+    const members = items.filter((it) => it.state === 'ok' && Number(it.pageGroup) === groupId);
     items.forEach((it) => { it.selected = members.includes(it); });
     lastClicked = null;
     refreshAll();
@@ -448,8 +490,13 @@ function refreshGroupManager() {
     }
     setTimeout(() => members.forEach((it) => it.el.classList.remove('group-focus')), 2400);
   }));
+  container.querySelectorAll('.group-edit').forEach((button) => button.addEventListener('click', () => {
+    if (editingPageGroupId !== null) cancelPageGroupEdit();
+    beginPageGroupEdit(Number(button.dataset.group));
+  }));
   container.querySelectorAll('.group-remove').forEach((button) => button.addEventListener('click', () => {
     const groupId = Number(button.dataset.group);
+    if (editingPageGroupId !== null) cancelPageGroupEdit();
     items.filter((it) => Number(it.pageGroup) === groupId).forEach((it) => { it.pageGroup = null; });
     cleanupPageGroups();
     refreshAll();
@@ -470,23 +517,67 @@ function cleanupPageGroups() {
   const sizes = new Map();
   items.forEach((it) => {
     const id = Number(it.pageGroup);
-    if (Number.isInteger(id) && id > 0) sizes.set(id, (sizes.get(id) || 0) + 1);
+    if (it.state === 'ok' && Number.isInteger(id) && id > 0) sizes.set(id, (sizes.get(id) || 0) + 1);
     else it.pageGroup = null;
   });
   items.forEach((it) => {
     const id = Number(it.pageGroup);
     if (id && sizes.get(id) < 2) it.pageGroup = null;
   });
-  const groupIds = [...new Set(items.map((it) => Number(it.pageGroup)).filter((id) => Number.isInteger(id) && id > 0))].sort((a, b) => a - b);
-  const compactIds = new Map(groupIds.map((id, index) => [id, index + 1]));
-  items.forEach((it) => { if (it.pageGroup) it.pageGroup = compactIds.get(Number(it.pageGroup)) || null; });
-  nextPageGroupId = groupIds.length + 1;
+  // Internal IDs never change; display ordinals are computed once for both the header and cards.
+  const activeIds = [...sizes.keys()].filter((id) => sizes.get(id) >= 2);
+  nextPageGroupId = activeIds.length ? Math.max(...activeIds) + 1 : 1;
+}
+function beginPageGroupEdit(groupId) {
+  const members = items.filter((it) => it.state === 'ok' && Number(it.pageGroup) === groupId);
+  if (members.length < 2) return;
+  editingPageGroupId = groupId;
+  editingPageGroupSelection = new Map(items.map((it) => [it.uid, !!it.selected]));
+  items.forEach((it) => { if (it.state === 'ok') it.selected = members.includes(it); });
+  lastClicked = null;
+  const number = buildPageGroupView().numberById.get(groupId) || groupId;
+  const status = $('groupEditStatus');
+  status.innerText = `ویرایش گروه ${number}: کارت‌ها را انتخاب یا از انتخاب خارج کنید، سپس تغییرات را ذخیره کنید.`;
+  status.classList.remove('hidden');
+  if ($('groupMenu')) $('groupMenu').open = false;
+  refreshAll();
+  const first = members[0] && members[0].el;
+  if (first) requestAnimationFrame(() => first.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+}
+function cancelPageGroupEdit() {
+  if (editingPageGroupId === null) return;
+  if (editingPageGroupSelection) items.forEach((it) => {
+    if (editingPageGroupSelection.has(it.uid)) it.selected = editingPageGroupSelection.get(it.uid);
+  });
+  editingPageGroupId = null;
+  editingPageGroupSelection = null;
+  $('groupEditStatus').classList.add('hidden');
+  refreshAll();
+}
+function savePageGroupEdit() {
+  if (editingPageGroupId === null) return false;
+  const selected = items.filter((it) => it.state === 'ok' && it.selected);
+  if (selected.length < 2) {
+    $('groupEditStatus').innerText = 'برای ذخیرهٔ گروه، دست‌کم دو کارت را انتخاب کنید.';
+    $('groupEditStatus').classList.remove('hidden');
+    return false;
+  }
+  const groupId = editingPageGroupId;
+  items.filter((it) => Number(it.pageGroup) === groupId).forEach((it) => { it.pageGroup = null; });
+  selected.forEach((it) => { it.pageGroup = groupId; });
+  editingPageGroupId = null;
+  editingPageGroupSelection = null;
+  $('groupEditStatus').classList.add('hidden');
+  cleanupPageGroups();
+  refreshAll();
+  return true;
 }
 function groupSelectedItems() {
+  if (editingPageGroupId !== null) { savePageGroupEdit(); return; }
   const selected = items.filter((it) => it.state === 'ok' && it.selected);
   if (selected.length < 2) return;
   const existingIds = [...new Set(selected.map((it) => Number(it.pageGroup)).filter((id) => Number.isInteger(id) && id > 0))].sort((a, b) => a - b);
-  const groupId = existingIds[0] || nextPageGroupId;
+  const groupId = existingIds[0] || nextPageGroupId++;
   if (selected.every((it) => Number(it.pageGroup) === groupId)) return;
   selected.forEach((it) => { it.pageGroup = groupId; });
   cleanupPageGroups();
@@ -874,6 +965,7 @@ async function makePdfItems(selected, twoPerPage) {
     const chunk = ungrouped.slice(i, i + chunkSize);
     pages.push(chunk.length > 1 ? await composeVertically(chunk, `pair_${chunk[0].sequence}`) : chunk[0]);
   }
+  // Group IDs only define membership; PDF page order always follows the earliest card position.
   pages.sort((a, b) => (a.pageOrder || a.i + 1) - (b.pageOrder || b.i + 1) || a.sequence - b.sequence);
   return pages;
 }
@@ -1150,9 +1242,9 @@ function profileImageIdentity(url) {
 function updateProfileButtons() {
   const saving = $('saveProfileBtn');
   if (!saving) return;
-  saving.disabled = loading || building || !pageProfileKey;
-  $('restoreProfileBtn').disabled = loading || building || !pageProfileAvailable;
-  $('deleteProfileBtn').disabled = loading || building || !pageProfileAvailable;
+  saving.disabled = loading || building || editingPageGroupId !== null || !pageProfileKey;
+  $('restoreProfileBtn').disabled = loading || building || editingPageGroupId !== null || !pageProfileAvailable;
+  $('deleteProfileBtn').disabled = loading || building || editingPageGroupId !== null || !pageProfileAvailable;
   $('deleteProfileBtn').classList.toggle('hidden', !pageProfileAvailable);
 }
 async function checkSavedPageProfile() {
@@ -1253,6 +1345,7 @@ function applyProfileSettings(settings = {}) {
 }
 async function restorePageProfile() {
   if (!pageProfileKey || !pageProfileAvailable || loading || building) return;
+  if (editingPageGroupId !== null) cancelPageGroupEdit();
   try {
     const stored = await chrome.storage.local.get(pageProfileKey);
     const profile = stored[pageProfileKey];
@@ -1365,6 +1458,7 @@ async function main() {
   $('btnNone').onclick = () => { items.forEach((it) => { it.selected = false; }); refreshAll(); };
   $('btnInv').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = !it.selected; }); refreshAll(); };
   $('btnGroupPage').onclick = groupSelectedItems;
+  $('btnCancelGroupEdit').onclick = cancelPageGroupEdit;
   $('btnUngroupPage').onclick = ungroupSelectedItems;
   $('saveProfileBtn').onclick = savePageProfile;
   $('restoreProfileBtn').onclick = restorePageProfile;
