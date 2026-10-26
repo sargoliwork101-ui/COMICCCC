@@ -1,3 +1,16 @@
+// jobهای یتیم (مثلاً وقتی تب viewer کرش کرده یا بسته شده و pagehide اجرا نشده) را پاک کن تا فضای storage پر نشود
+async function pruneOrphanJobs() {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const orphanKeys = Object.keys(all).filter((key) => key.startsWith('job_'));
+    if (orphanKeys.length) await chrome.storage.local.remove(orphanKeys);
+  } catch (e) {
+    console.warn('پاک‌سازی jobهای قدیمی ناموفق بود', e);
+  }
+}
+chrome.runtime.onStartup.addListener(pruneOrphanJobs);
+chrome.runtime.onInstalled.addListener(pruneOrphanJobs);
+
 // دریافت لیست تصاویر از صفحه و باز کردن تب ساخت PDF
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === 'WTPDF_URLS') {

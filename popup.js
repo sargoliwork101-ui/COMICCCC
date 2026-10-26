@@ -119,7 +119,7 @@ async function scrapeAndSend(pdfName) {
       } else if (/^blob:/i.test(src)) abs = src;
       else {
         if (/^data:/i.test(src)) return;
-        try { abs = new URL(src, location.href).href; } catch (e) { return; }
+        try { abs = new URL(src, location.href).href; } catch { return; }
       }
       if (!seen.has(abs)) { seen.add(abs); urls.push(abs); }
     };

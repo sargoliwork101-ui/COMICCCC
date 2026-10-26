@@ -41,13 +41,18 @@ async function setRefererRule(pageUrl) {
       addRules: [{
         id: 1, priority: 1,
         action: { type: 'modifyHeaders', requestHeaders: [{ header: 'referer', operation: 'set', value: origin }] },
-        condition: { resourceTypes: ['xmlhttprequest'], initiatorDomains: [chrome.runtime.id] }
+        // فقط برای دریافت تصویرها؛ درخواست سرویس‌های ترجمه نباید Referer سایت کمیک را بگیرند
+        condition: {
+          resourceTypes: ['xmlhttprequest'],
+          initiatorDomains: [chrome.runtime.id],
+          excludedRequestDomains: ['translate.googleapis.com', 'api.mymemory.translated.net']
+        }
       }]
     });
   } catch (e) { console.warn('Referer rule failed', e); }
 }
 async function clearRefererRule() {
-  try { await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [1] }); } catch (e) {}
+  try { await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [1] }); } catch {}
 }
 
 function looksLikeImage(b) {
@@ -129,7 +134,7 @@ async function analyze(it) {
       const b = await createImageBitmap(it.blob, { imageOrientation: 'none' });
       info = { fmt: info ? info.fmt : null, ok: false, w: b.width, h: b.height };
       b.close();
-    } catch (e) { info = null; }
+    } catch { info = null; }
   }
   it.info = info;
   if (info) { it.w = info.w; it.h = info.h; }
@@ -1090,8 +1095,12 @@ async function onSaveImages() {
           const fname = await uniqueName(dir, base, ext);
           const fh = await dir.getFileHandle(fname, { create: true });
           const w = await fh.createWritable();
-          await w.write(ex.blob);
-          await w.close();
+          try {
+            await w.write(ex.blob);
+          } finally {
+            // بستن stream حتی هنگام خطا، فایل موقت ناقص را پاک می‌کند
+            await w.close();
+          }
         }
         saved++;
         bytes += ex.blob.size;
@@ -1132,7 +1141,7 @@ function profileImageIdentity(url) {
   let stable = text;
   if (/^blob:/i.test(text)) return 'blob';
   if (/^https?:\/\//i.test(text)) {
-    try { const parsed = new URL(text); stable = `${parsed.origin}${parsed.pathname}`; } catch (e) {}
+    try { const parsed = new URL(text); stable = `${parsed.origin}${parsed.pathname}`; } catch {}
   } else if (text.length > 2048) stable = `${text.slice(0, 1024)}${text.slice(-256)}_${text.length}`;
   let hash = 2166136261;
   for (let i = 0; i < stable.length; i++) { hash ^= stable.charCodeAt(i); hash = Math.imul(hash, 16777619); }
@@ -1160,7 +1169,7 @@ async function checkSavedPageProfile() {
     $('profileStatus').innerText = pageProfileAvailable
       ? 'برای این صفحه پروفایل ذخیره‌شده دارید؛ هر زمان خواستید آن را بازیابی کنید.'
       : 'برای این صفحه هنوز پروفایلی ذخیره نشده است.';
-  } catch (e) {
+  } catch {
     pageProfileAvailable = false;
     $('profileStatus').innerText = 'خواندن پروفایل ذخیره‌شده ناموفق بود.';
   }
@@ -1223,7 +1232,7 @@ async function deletePageProfile() {
     pageProfileAvailable = false;
     $('profileStatus').innerText = 'پروفایل این صفحه حذف شد.';
     updateProfileButtons();
-  } catch (e) { $('profileStatus').innerText = 'حذف پروفایل ناموفق بود.'; }
+  } catch { $('profileStatus').innerText = 'حذف پروفایل ناموفق بود.'; }
 }
 function applyProfileSettings(settings = {}) {
   if (typeof settings.pdfName === 'string') $('pdfName').value = settings.pdfName;

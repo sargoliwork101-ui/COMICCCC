@@ -1,0 +1,15 @@
+{
+  "name": "comic-to-pdf-extension",
+  "version": "2.15.0",
+  "private": true,
+  "description": "افزونهٔ Chrome برای جمع‌آوری تصاویر کمیک و وب‌تون و خروجی PDF/تصویر به‌همراه OCR و ترجمه",
+  "scripts": {
+    "test": "node test-smoke.js && node test-popup.js && node test-background.js && node test-dom.js && node test-errors.js && node test-interact.js",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "jsdom": "^30.0.0"
+  },
+  "license": "MIT"
+}

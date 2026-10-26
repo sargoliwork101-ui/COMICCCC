@@ -1,0 +1,215 @@
+// Smoke tests (node) for pure logic of the extension
+const PdfBuilder = require('./pdfbuilder.js');
+const OcrTools = require('./ocr.js');
+const Typeset = require('./typeset.js');
+const TranslateTools = require('./translate.js');
+
+let failures = 0;
+function check(name, cond, extra) {
+  if (cond) console.log('PASS:', name);
+  else { failures++; console.log('FAIL:', name, extra !== undefined ? JSON.stringify(extra) : ''); }
+}
+
+// ---------- mock jsPDF ----------
+function makeMockJsPDF() {
+  const calls = [];
+  const pages = [];
+  class Mock {
+    constructor(opts) { pages.push({ dims: opts.format, orient: opts.orientation, images: [] }); }
+    addPage(dims, orient) { pages.push({ dims, orient, images: [] }); }
+    addImage(data, fmt, x, y, w, h, alias, comp) {
+      pages[pages.length - 1].images.push({ data, fmt, x, y, w, h, alias, comp });
+      calls.push({ fmt, alias, w, h });
+    }
+    output() { return { blob: () => ({ size: 1 }) }; }
+  }
+  return { Mock, calls, pages };
+}
+
+const mkItem = (i, w = 100, h = 200, fmt = 'JPEG', ok = true) => ({
+  i, w, h, fmt, info: { fmt, w, h, ok }, data: new Uint8Array([1, 2, 3]), alias: 'a' + i
+});
+const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, alias: it.alias }];
+
+(async () => {
+  // 1. normal build: one page per item
+  {
+    const { Mock, calls, pages } = makeMockJsPDF();
+    const items = [mkItem(0), mkItem(1), mkItem(2)];
+    const res = await PdfBuilder.build({ jsPDF: Mock, items, prepare, fallback: async (s) => ({ data: 'x', fmt: 'JPEG' }) });
+    check('normal: pdf created', !!res.pdf);
+    check('normal: 3 pages', pages.length === 3, pages.length);
+    check('normal: 3 images', calls.length === 3, calls.length);
+  }
+
+  // 2. empty items -> pdf null, no throw
+  {
+    const { Mock, pages } = makeMockJsPDF();
+    const res = await PdfBuilder.build({ jsPDF: Mock, items: [], prepare });
+    check('empty: pdf null', res.pdf === null);
+    check('empty: zero pages', res.pages === 0);
+  }
+
+  // 3. seamless: single tall page, all images queued
+  {
+    const { Mock, calls, pages } = makeMockJsPDF();
+    const items = [mkItem(0, 100, 500), mkItem(1, 100, 500), mkItem(2, 100, 500)];
+    const res = await PdfBuilder.build({ jsPDF: Mock, items, seamless: true, prepare });
+    check('seamless: pdf created', !!res.pdf);
+    check('seamless: 1 page', pages.length === 1, pages.length);
+    check('seamless: 3 images on page', calls.length === 3, calls.length);
+  }
+
+  // 4. uniform size pages
+  {
+    const { Mock, pages } = makeMockJsPDF();
+    const items = [mkItem(0, 100, 100), mkItem(1, 300, 400)];
+    const res = await PdfBuilder.build({ jsPDF: Mock, items, uniformSize: true, prepare });
+    check('uniform: 2 pages same dims', pages.length === 2 &&
+      pages[0].dims && pages[1].dims &&
+      pages[0].dims[0] === pages[1].dims[0] && pages[0].dims[1] === pages[1].dims[1]);
+  }
+
+  // 5. fallback when addImage throws
+  {
+    const { Mock, calls } = makeMockJsPDF();
+    class Failing extends Mock {
+      addImage(data, fmt, x, y, w, h, alias) {
+        if (!String(alias).endsWith('f')) throw new Error('bad image');
+        super.addImage(data, fmt, x, y, w, h, alias);
+      }
+    }
+    const items = [mkItem(0)];
+    const res = await PdfBuilder.build({ jsPDF: Failing, items, prepare, fallback: async (s) => ({ data: 'fb', fmt: 'JPEG' }) });
+    check('fallback: recovered', calls.length === 1 && calls[0].alias === 'a0f', calls);
+  }
+
+  // 6. very tall image in seamless -> multiple pages, each under HARD_PT
+  // prepare mirrors viewer.js: slice at floor(SAFE_PT / r) like decodeSlices
+  {
+    const { Mock, pages } = makeMockJsPDF();
+    const tall = mkItem(0, 800, 40000);
+    const slicingPrepare = async (it, r) => {
+      const maxSrcH = Math.min(Math.floor(PdfBuilder.SAFE_PT / r), 16000); // viewer caps slices at MAX_CANVAS_H
+      const segs = [];
+      for (let y = 0; y < it.h; y += maxSrcH) {
+        const sh = Math.min(maxSrcH, it.h - y);
+        segs.push({ data: it.data, fmt: it.fmt, w: it.w, h: sh, alias: `${it.alias}_${y}` });
+      }
+      return segs;
+    };
+    const res = await PdfBuilder.build({ jsPDF: Mock, items: [tall], seamless: false, prepare: slicingPrepare });
+    const maxH = Math.max(...pages.map((p) => p.dims[1]));
+    check('tall image: slices become multiple pages', pages.length === 3, pages.length);
+    check('tall image: every page height <= 14400', maxH <= 14400, maxH);
+    // seamless mode intentionally fits the whole strip on one long page
+    const s2 = makeMockJsPDF();
+    await PdfBuilder.build({ jsPDF: s2.Mock, items: [tall], seamless: true, prepare: slicingPrepare });
+    check('seamless: single long page within limit', s2.pages.length === 1 && s2.pages[0].dims[1] <= 14400, s2.pages.map((p) => p.dims[1]));
+  }
+
+  // ---------- OCR ----------
+  check('looksReal eng accepts sentence', OcrTools.looksReal('Hello world this is real', 'eng') === true);
+  check('looksReal eng rejects noise', OcrTools.looksReal('--- ... !!!', 'eng') === false);
+  check('looksReal jpn accepts kana', OcrTools.looksReal('こんにちは', 'jpn') === true);
+  check('looksReal kor', OcrTools.looksReal('안녕하세요 세상', 'kor') === true);
+
+  // groupLines: two close lines merge into one block
+  {
+    const lines = [
+      { text: 'Hello', conf: 90, x0: 10, x1: 100, y0: 10, y1: 30 },
+      { text: 'world', conf: 90, x0: 12, x1: 95, y0: 32, y1: 52 }
+    ];
+    const blocks = OcrTools.groupLines(lines, false);
+    check('groupLines merges close lines', blocks.length === 1, blocks.length);
+    check('groupLines block has id/enabled/bg/tr', blocks[0] && blocks[0].id === 1 && blocks[0].enabled === true && blocks[0].bg === 'auto' && blocks[0].tr === '');
+  }
+  // groupLines: far apart lines stay separate
+  {
+    const lines = [
+      { text: 'Hello', conf: 90, x0: 10, x1: 100, y0: 10, y1: 30 },
+      { text: 'world', conf: 90, x0: 12, x1: 95, y0: 400, y1: 420 }
+    ];
+    const blocks = OcrTools.groupLines(lines, false);
+    check('groupLines keeps distant lines separate', blocks.length === 2, blocks.length);
+  }
+  // groupLines empty
+  {
+    const blocks = OcrTools.groupLines([], false);
+    check('groupLines empty', Array.isArray(blocks) && blocks.length === 0);
+  }
+
+  // extractLines with fake tesseract data
+  {
+    const data = { blocks: [{ paragraphs: [{ lines: [
+      { text: 'Recognizable text here', confidence: 80, bbox: { x0: 0, x1: 100, y0: 0, y1: 20 } },
+      { text: 'x', confidence: 10, bbox: { x0: 0, x1: 5, y0: 0, y1: 10 } }
+    ] }] }] };
+    const out = OcrTools.extractLines(data, 0, false, 40, 'eng', { raw: 0 });
+    check('extractLines keeps high-conf line', out.length === 1, out);
+    check('extractLines offset applied', out[0] && out[0].y0 === 0);
+    const out2 = OcrTools.extractLines(data, 50, false, 40, 'eng', null, 30);
+    check('extractLines x/y offsets', out2[0] && out2[0].y0 === 50 && out2[0].x0 === 30, out2[0]);
+  }
+
+  // ---------- Typeset ----------
+  // mock 2d context + canvas
+  function mockCtx() {
+    return new Proxy({}, {
+      get(t, prop) {
+        if (prop === 'measureText') return (s) => ({ width: String(s).length * 6 });
+        if (prop === 'getImageData') return (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) });
+        return typeof prop === 'string' ? (() => {}) : undefined;
+      },
+      set() { return true; }
+    });
+  }
+  global.document = { createElement: () => ({ width: 0, height: 0, getContext: () => mockCtx() }) };
+  {
+    const bmp = { width: 200, height: 200 };
+    const blocks = [
+      { enabled: true, tr: 'سلام دنیا', x0: 10, y0: 10, x1: 100, y1: 60, lineH: 16, bg: 'white' },
+      { enabled: false, tr: 'مخفی', x0: 10, y0: 80, x1: 100, y1: 130, lineH: 16, bg: 'white' },
+      { enabled: true, tr: '   ', x0: 10, y0: 140, x1: 100, y1: 180, lineH: 16, bg: 'black' }
+    ];
+    const cv = Typeset.render(bmp, blocks, {});
+    check('Typeset render returns canvas', cv && cv.width === 200 && cv.height === 200);
+  }
+  {
+    const ctx = mockCtx();
+    const lines = Typeset.wrapWords(ctx, 'one two three four five six seven', 20);
+    check('wrapWords returns array', Array.isArray(lines) && lines.length >= 1);
+    const f = Typeset.fit(ctx, 'hello', 100, 100, 40, 10);
+    check('fit returns size/lines/lh', f && f.size >= 10 && Array.isArray(f.lines) && f.lh > 0, f);
+  }
+
+  // ---------- Translate with mock fetch ----------
+  {
+    const fetchFn = async (url) => ({
+      ok: true,
+      json: async () => [[['سلام', 'hi']], null, null]
+    });
+    const r = await TranslateTools.translate('hi', 'en', fetchFn);
+    check('translate google mock', r.ok === true && r.text === 'سلام', r);
+  }
+  {
+    // google fails twice, mymemory succeeds
+    let calls = 0;
+    const fetchFn = async (url) => {
+      calls++;
+      if (url.includes('google')) return { ok: false, status: 500, json: async () => ({}) };
+      return { ok: true, json: async () => ({ responseData: { translatedText: 'سلام' } }) };
+    };
+    const r = await TranslateTools.translate('hi', 'en', fetchFn);
+    check('translate fallback mymemory', r.ok === true && r.text === 'سلام', r);
+    check('translate tried google first', calls >= 2, calls);
+  }
+  {
+    const fetchFn = async () => ({ ok: false, status: 500, json: async () => ({}) });
+    const r = await TranslateTools.translate('hi', 'en', fetchFn);
+    check('translate all fail -> ok false', r.ok === false && r.text === '', r);
+  }
+
+  console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL TESTS PASSED');
+  process.exit(failures ? 1 : 0);
+})().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

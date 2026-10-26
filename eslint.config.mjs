@@ -1,0 +1,61 @@
+export default [
+  {
+    files: ['*.js'],
+    ignores: ['node_modules/**', 'test-*.js', 'debug*.js', 'jspdf.umd.min.js', 'tesseract.min.js', 'ocr/**'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: {
+        window: 'readonly', document: 'readonly', console: 'readonly', fetch: 'readonly',
+        Blob: 'readonly', URL: 'readonly', FileReader: 'readonly', Promise: 'readonly',
+        setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly',
+        requestAnimationFrame: 'readonly', navigator: 'readonly', location: 'readonly',
+        chrome: 'readonly', Tesseract: 'readonly', confirm: 'readonly', alert: 'readonly',
+        ClipboardItem: 'readonly', Event: 'readonly', Uint8Array: 'readonly',
+        Uint8ClampedArray: 'readonly', Uint32Array: 'readonly', Int32Array: 'readonly',
+        DataView: 'readonly', Math: 'readonly', JSON: 'readonly', Date: 'readonly',
+        RegExp: 'readonly', Map: 'readonly', Set: 'readonly', Proxy: 'readonly',
+        createImageBitmap: 'readonly', HTMLCanvasElement: 'readonly', HTMLElement: 'readonly',
+        globalThis: 'readonly', module: 'readonly', exports: 'writable', self: 'readonly',
+        getComputedStyle: 'readonly', URLSearchParams: 'readonly',
+        // globals shared across the extension's classic scripts
+        PdfBuilder: 'readonly', OcrTools: 'readonly', Typeset: 'readonly', TranslateTools: 'readonly',
+        $: 'readonly', items: 'writable', building: 'writable', loading: 'writable',
+        canConvert: 'readonly', canvasToBlob: 'readonly', sniff: 'readonly',
+        setStatus: 'readonly', setTaskTitle: 'readonly', refreshAll: 'readonly',
+        refreshCard: 'readonly', refreshSummary: 'readonly', drawThumb: 'readonly',
+        openEditor: 'readonly'
+      }
+    },
+    rules: {
+      'no-undef': 'error',
+      'no-unused-vars': ['warn', { args: 'none' }],
+      'no-const-assign': 'error',
+      'no-cond-assign': 'error',
+      'no-dupe-keys': 'error',
+      'no-dupe-args': 'error',
+      'use-isnan': 'error',
+      'valid-typeof': 'error',
+      'no-self-assign': 'error',
+      'no-unreachable': 'warn',
+      'no-constant-binary-expression': 'error',
+      'no-async-promise-executor': 'error',
+      'no-fallthrough': 'warn',
+      'no-global-assign': 'error',
+      // globals are intentionally shared between the extension's classic scripts
+      'no-redeclare': 'off',
+      'no-shadow-restricted-names': 'error',
+      'no-useless-backreference': 'error',
+      'no-ex-assign': 'warn',
+      'no-func-assign': 'error',
+      'no-import-assign': 'error',
+      'no-setter-return': 'error',
+      'no-unsafe-negation': 'error',
+      'no-useless-catch': 'warn',
+      'no-control-regex': 'warn',
+      'no-empty': ['warn', { allowEmptyCatch: true }],
+      'eqeqeq': ['warn', 'smart'],
+      'curly': ['warn', 'multi-line']
+    }
+  }
+];

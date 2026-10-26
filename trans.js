@@ -9,7 +9,7 @@ function openTrDialog() {
 function closeTrDialog() { $('trDialog').classList.add('hidden'); }
 
 async function ensureFont() {
-  try { await document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'); } catch (e) { /* ادامه */ }
+  try { await document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'); } catch { /* ادامه */ }
 }
 
 // تصویر ترجمه‌شده را از روی بلوک‌ها (دوباره) می‌سازد
@@ -33,8 +33,11 @@ async function runTranslate() {
   const lang = $('trLang').value;
   const L = OcrTools.LANGS[lang];
   const list = items.filter((it) => it.state === 'ok' && (!$('trOnlySel').checked || it.selected));
-  if (!list.length) return;
   closeTrDialog();
+  if (!list.length) {
+    setStatus('تصویری برای ترجمه پیدا نشد؛ ابتدا چند تصویر بارگذاری‌شده را انتخاب کنید.');
+    return;
+  }
 
   building = true; TR.cancel = false;
   refreshSummary();
@@ -55,7 +58,7 @@ async function runTranslate() {
   try {
     setStatus('در حال بارگذاری موتور تشخیص متن... (بار اول کمی طول می‌کشد)');
     if (!TR.worker || TR.lang !== lang) {
-      if (TR.worker) { try { await TR.worker.terminate(); } catch (e) {} TR.worker = null; }
+      if (TR.worker) { try { await TR.worker.terminate(); } catch {} TR.worker = null; }
       TR.worker = await OcrTools.createOcrWorker(lang);
       TR.lang = lang;
     }
@@ -280,7 +283,7 @@ $('ocrEnabled').addEventListener('change', async () => {
     refreshAll();
     items.filter((it) => it.state === 'ok').forEach((it) => drawThumb(it));
     if (TR.worker) {
-      try { await TR.worker.terminate(); } catch (e) {}
+      try { await TR.worker.terminate(); } catch {}
       TR.worker = null;
       TR.lang = null;
     }
@@ -306,4 +309,4 @@ document.addEventListener('keydown', (e) => {
   if (!$('editor').classList.contains('hidden')) closeEditor();
   else if (!$('trDialog').classList.contains('hidden')) closeTrDialog();
 });
-window.addEventListener('pagehide', () => { if (TR.worker) { try { TR.worker.terminate(); } catch (e) {} } });
+window.addEventListener('pagehide', () => { if (TR.worker) { try { TR.worker.terminate(); } catch {} } });
