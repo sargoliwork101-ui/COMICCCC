@@ -34,6 +34,8 @@
       <button class="mini" id="btnAll">انتخاب همه</button>
       <button class="mini" id="btnNone">هیچ‌کدام</button>
       <button class="mini" id="btnInv">معکوس انتخاب</button>
+      <span class="drag-hint">برای تغییر ترتیب، تصاویر را بکشید و رها کنید.</span>
+      <label class="check" title="با خاموش‌کردن این گزینه، OCR و ترجمه غیرفعال می‌شود و تصویرها به نسخهٔ اصلی برمی‌گردند"><input type="checkbox" id="ocrEnabled" checked><span>فعال‌بودن OCR</span></label>
       <button class="mini accent" id="btnTranslate" disabled>ترجمهٔ متن تصاویر به فارسی</button>
       <button class="mini hidden" id="btnTxt">ذخیرهٔ متن‌ها (TXT)</button>
       <button class="mini warn hidden" id="btnRetry">تلاش مجدد برای ناموفق‌ها</button>
@@ -94,6 +96,7 @@
         <option value="chi_sim">中文 (چینی ساده)</option>
       </select>
       <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
+      <label class="check" title="اگر خاموش باشد، متن اصلی پاک نمی‌شود و ترجمه با حاشیه روی تصویر قرار می‌گیرد"><input type="checkbox" id="trErase" checked><span>پاک‌کردن متن اصلی زیر ترجمه</span></label>
       <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>
       <p class="note">زبان را درست انتخاب کنید؛ اگر زبان اشتباه باشد چیزی خوانده نمی‌شود. ترجمه به اینترنت نیاز دارد. دقت خواندن متن روی فونت‌های خیلی تزیینی یا متن روی نقاشی کمتر است؛ همه‌چیز را می‌توانید بعداً ویرایش کنید.</p>
       <div class="modal-actions">

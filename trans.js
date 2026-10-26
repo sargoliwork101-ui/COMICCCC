@@ -2,7 +2,10 @@
 // این فایل بعد از viewer.js بارگذاری می‌شود و از متغیرهای آن (items، building، ...) استفاده می‌کند.
 const TR = { worker: null, lang: null, cancel: false };
 
-function openTrDialog() { $('trDialog').classList.remove('hidden'); }
+function openTrDialog() {
+  if (!$('ocrEnabled').checked) return;
+  $('trDialog').classList.remove('hidden');
+}
 function closeTrDialog() { $('trDialog').classList.add('hidden'); }
 
 async function ensureFont() {
@@ -26,7 +29,7 @@ async function renderEdited(it) {
 }
 
 async function runTranslate() {
-  if (building || loading) return;
+  if (building || loading || !$('ocrEnabled').checked) return;
   const lang = $('trLang').value;
   const L = OcrTools.LANGS[lang];
   const list = items.filter((it) => it.state === 'ok' && (!$('trOnlySel').checked || it.selected));
@@ -74,6 +77,8 @@ async function runTranslate() {
         rawTotal += stats.raw; keptTotal += stats.kept;
 
         const blocks = OcrTools.groupLines(lines, L.cjk);
+        const eraseOriginal = $('trErase').checked;
+        blocks.forEach((block) => { block.bg = eraseOriginal ? 'auto' : 'none'; });
         it.ocr = { lang, blocks };
         if (!blocks.length) { noText++; it.edited = null; }
         else {
@@ -251,6 +256,21 @@ function exportText() {
 }
 
 // ---------- اتصال رویدادها ----------
+$('ocrEnabled').addEventListener('change', async () => {
+  if (!$('ocrEnabled').checked) {
+    TR.cancel = true;
+    // خاموش‌کردن سراسری OCR، ترجمه‌های موقت را کنار می‌گذارد و تصویر اصلی را برمی‌گرداند.
+    items.forEach((it) => { it.ocr = null; it.edited = null; });
+    refreshAll();
+    items.filter((it) => it.state === 'ok').forEach((it) => drawThumb(it));
+    if (TR.worker) {
+      try { await TR.worker.terminate(); } catch (e) {}
+      TR.worker = null;
+      TR.lang = null;
+    }
+  }
+  refreshSummary();
+});
 $('btnTranslate').onclick = openTrDialog;
 $('trClose').onclick = closeTrDialog;
 $('trStart').onclick = runTranslate;

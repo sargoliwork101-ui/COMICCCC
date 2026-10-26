@@ -13,6 +13,8 @@ let loading = true;
 let building = false;
 let lastClicked = -1;
 let lastObjUrl = null;
+let draggedItem = null;
+let suppressCardClickUntil = 0;
 
 // ---------- دانلود تصاویر ----------
 async function setRefererRule(pageUrl) {
@@ -116,11 +118,35 @@ function fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Ma
 function makeCard(it) {
   const el = document.createElement('div');
   el.className = 'item selected';
+  el.draggable = true;
+  el.title = 'برای تغییر ترتیب در PDF، تصویر را بکشید و رها کنید';
   el.innerHTML = `<div class="tw"><canvas width="240" height="320"></canvas><div class="spin">در حال دریافت...</div>
     <span class="idx">${it.i + 1}</span><span class="tick">${ICON_CHECK}</span>
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
-    <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button><span class="fa-badge">ترجمه شد</span></div><div class="meta">…</div>`;
+    <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button><span class="fa-badge">ترجمه شد</span></div><div class="meta">…</div>
+    <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>`;
+  const orderInput = el.querySelector('.page-order');
+  orderInput.addEventListener('click', (ev) => ev.stopPropagation());
+  orderInput.addEventListener('change', () => {
+    const value = Number.parseInt(orderInput.value, 10);
+    it.pdfOrder = Number.isFinite(value) && value > 0 ? value : (it.pdfOrder || it.i + 1);
+    orderInput.value = String(it.pdfOrder);
+    sortGridByPdfOrder();
+  });
+  el.addEventListener('dragstart', (ev) => {
+    if (ev.target.closest('input, button, select, textarea')) { ev.preventDefault(); return; }
+    draggedItem = it;
+    el.classList.add('dragging');
+    ev.dataTransfer.effectAllowed = 'move';
+    ev.dataTransfer.setData('text/plain', String(it.i));
+  });
+  el.addEventListener('dragend', () => {
+    el.classList.remove('dragging');
+    draggedItem = null;
+  });
   el.addEventListener('click', (ev) => {
+    if (Date.now() < suppressCardClickUntil) { ev.preventDefault(); return; }
+    if (ev.target.closest('.page-order')) return;
     if (ev.target.closest('.zoom')) { openLightbox(it); return; }
     if (ev.target.closest('.edit')) { if (typeof openEditor === 'function') openEditor(it); return; }
     if (it.state !== 'ok') return;
@@ -207,6 +233,23 @@ async function loadAll(list) {
   refreshAll();
 }
 
+// ---------- مرتب‌سازی کارت‌ها / ترتیب خروجی PDF ----------
+function sortGridByPdfOrder() {
+  const grid = $('grid');
+  items.slice().sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.i - b.i)
+    .forEach((it) => grid.appendChild(it.el));
+}
+
+function updatePdfOrderFromGrid() {
+  Array.from($('grid').children).forEach((el, index) => {
+    const it = items.find((item) => item.el === el);
+    if (!it) return;
+    it.pdfOrder = index + 1;
+    const input = el.querySelector('.page-order');
+    if (input) input.value = String(it.pdfOrder);
+  });
+}
+
 // ---------- انتخاب‌ها ----------
 function refreshSummary() {
   const ok = items.filter((it) => it.state === 'ok').length;
@@ -216,7 +259,8 @@ function refreshSummary() {
   $('btnRetry').classList.toggle('hidden', failedN === 0 || loading);
   $('buildBtn').disabled = loading || building || sel === 0;
   $('saveImgBtn').disabled = loading || building || sel === 0;
-  $('btnTranslate').disabled = loading || building || ok === 0;
+  $('ocrEnabled').disabled = loading || building;
+  $('btnTranslate').disabled = loading || building || ok === 0 || !$('ocrEnabled').checked;
   $('btnTxt').classList.toggle('hidden', !items.some((it) => it.ocr));
 }
 function refreshAll() { items.forEach(refreshCard); refreshSummary(); }
@@ -290,7 +334,8 @@ async function fallback(seg) {
 // ---------- ساخت PDF ----------
 async function onBuild() {
   if (building || loading) return;
-  const sel = items.filter((it) => it.state === 'ok' && it.selected);
+  const sel = items.filter((it) => it.state === 'ok' && it.selected)
+    .sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.i - b.i);
   if (!sel.length) return;
   const jsPDFLib = window.jspdf && window.jspdf.jsPDF;
   if (!jsPDFLib) { alert('فایل jspdf.umd.min.js پیدا نشد!'); return; }
@@ -529,7 +574,24 @@ async function main() {
   await setRefererRule(job.pageUrl);
 
   const grid = $('grid');
-  items = job.urls.map((url, i) => ({ i, url, state: 'loading', selected: true }));
+  grid.addEventListener('dragover', (ev) => {
+    if (!draggedItem) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'move';
+  });
+  grid.addEventListener('drop', (ev) => {
+    if (!draggedItem) return;
+    ev.preventDefault();
+    const target = ev.target.closest('.item');
+    if (!target || target === draggedItem.el) return;
+    const rect = target.getBoundingClientRect();
+    // شبکه از راست به چپ است: سمت راست کارت یعنی درج قبل از آن در ترتیب DOM.
+    const insertBefore = ev.clientX > rect.left + rect.width / 2 ? target : target.nextSibling;
+    grid.insertBefore(draggedItem.el, insertBefore);
+    updatePdfOrderFromGrid();
+    suppressCardClickUntil = Date.now() + 350;
+  });
+  items = job.urls.map((url, i) => ({ i, url, pdfOrder: i + 1, state: 'loading', selected: true }));
   items.forEach((it) => grid.appendChild(makeCard(it)));
 
   $('btnAll').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = true; }); refreshAll(); };
