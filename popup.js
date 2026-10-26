@@ -42,12 +42,27 @@ async function scrapeAndSend(pdfName) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const getH = () => Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
 
+  // پوشش تمام‌صفحهٔ تیره با کارت وسط‌چین و قلم درشت (حدود دو برابر قلم قبلی) تا کاربر هنگام اسکرول حتماً پیشرفت را ببیند
+  const styleTag = document.createElement('style');
+  styleTag.textContent =
+    '@keyframes wtpdfSpin{to{transform:rotate(360deg)}}' +
+    '.wtpdf-overlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
+    'padding:24px;background:rgba(3,5,10,.88);backdrop-filter:blur(4px);direction:rtl;pointer-events:none}' +
+    '.wtpdf-card{max-width:86vw;display:flex;flex-direction:column;align-items:center;gap:18px;' +
+    'background:rgba(15,19,28,.98);border:1px solid rgba(139,123,255,.55);border-radius:22px;padding:30px 38px;' +
+    'box-shadow:0 26px 80px rgba(0,0,0,.75),0 0 0 4px rgba(139,123,255,.16);text-align:center}' +
+    '.wtpdf-spinner{width:46px;height:46px;border-radius:50%;border:4px solid rgba(255,255,255,.16);' +
+    'border-top-color:#8b7bff;animation:wtpdfSpin .8s linear infinite}' +
+    '.wtpdf-msg{font:700 26px/1.7 Vazirmatn,Tahoma,sans-serif;color:#f2f4fb;white-space:pre-line}';
+  document.documentElement.appendChild(styleTag);
+  const overlay = document.createElement('div');
+  overlay.className = 'wtpdf-overlay';
   const box = document.createElement('div');
-  box.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;' +
-    'background:rgba(17,21,28,.96);color:#e9ecf3;padding:11px 20px;border-radius:14px;border:1px solid rgba(139,123,255,.55);' +
-    'font:600 13.5px Vazirmatn,sans-serif;box-shadow:0 14px 40px rgba(0,0,0,.55),0 0 0 3px rgba(139,123,255,.18);direction:rtl;pointer-events:none';
-  document.documentElement.appendChild(box);
-  const say = (t) => { box.textContent = t; };
+  box.className = 'wtpdf-card';
+  box.innerHTML = '<span class="wtpdf-spinner" aria-hidden="true"></span><span class="wtpdf-msg"></span>';
+  overlay.appendChild(box);
+  document.documentElement.appendChild(overlay);
+  const say = (t) => { box.querySelector('.wtpdf-msg').textContent = t; };
 
   const PLACEHOLDER = /blank|loading|placeholder|spacer|pixel|1x1|lazy\.(gif|png|jpg)/i;
 
@@ -155,7 +170,8 @@ async function scrapeAndSend(pdfName) {
     await sleep(1500);
     return { count: urls.length, skippedInline };
   } finally {
-    box.remove();
+    overlay.remove();
+    styleTag.remove();
     window.__wtpdfRunning = false;
   }
 }

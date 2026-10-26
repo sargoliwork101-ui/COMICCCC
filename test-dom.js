@@ -95,6 +95,15 @@ function check(name, cond, extra) {
 const $ = (id) => window.document.getElementById(id);
 
 (async () => {
+  // modernized header/footer shell keeps every functional id
+  check('modern topbar present', !!window.document.querySelector('.topbar .brand-logo') &&
+    !!window.document.querySelector('.brand-text h1') && !!window.document.querySelector('.version-pill'));
+  check('footer grouped shell present', !!window.document.querySelector('.dock .dock-side') &&
+    !!window.document.querySelector('.dock .dock-center') && !!window.document.querySelector('.dock .dock-actions'));
+  for (const id of ['selCount', 'modePdf', 'modeImg', 'outputSettings', 'buildBtn', 'saveImgBtn']) {
+    check(`footer id #${id} preserved`, !!window.document.getElementById(id));
+  }
+
   for (let i = 0; i < 50; i++) {
     await sleep(100);
     if (!ev('loading')) break;

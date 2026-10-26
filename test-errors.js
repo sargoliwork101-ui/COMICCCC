@@ -161,11 +161,40 @@ function check(name, cond, extra) {
     h.ev('items[0].selected=false; items[1].selected=false; items[2].selected=true; items[3].selected=true; refreshAll()');
     h.$('btnGroupPage').click();
     let g = h.ev('items.map(i=>i.pageGroup)');
-    check('two groups created', JSON.stringify(g) === JSON.stringify([1, 1, 2, 2]), g);
-    // delete one member of group 1 -> it dissolves (singleton), group 2 is renumbered to 1
+    check('two groups created (internal ids)', JSON.stringify(g) === JSON.stringify([1, 1, 2, 2]), g);
+    // delete one member of group 1 -> it dissolves (singleton); internal id 2 is kept,
+    // but the shared display mapping must still show a continuous number ("گروه ۱") on cards and in the list
     h.ev('deleteItem(items[0])');
     g = h.ev('items.map(i=>i.pageGroup)');
-    check('group renumbered after deletion', g.length === 3 && JSON.stringify(g) === JSON.stringify([null, 1, 1]), g);
+    check('internal group id stays stable after deletion', g.length === 3 && JSON.stringify(g) === JSON.stringify([null, 2, 2]), g);
+    const badges = [...h.$('grid').querySelectorAll('.page-group-badge:not(.hidden)')].map((n) => n.textContent.trim());
+    check('display label is continuous (گروه 1)', badges.length === 2 && badges.every((t) => /^گروه 1/.test(t)), badges);
+    const chipLabels = [...h.$('groupList').querySelectorAll('.group-select')].map((n) => n.textContent.trim());
+    check('group manager shows continuous label too', chipLabels.length === 1 && /^گروه 1/.test(chipLabels[0]), chipLabels);
+  }
+
+  // ---------- 5b. group editor: add/remove members and cancel ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ev('items[0].selected=true; items[1].selected=true; items[2].selected=false; items[3].selected=false; refreshAll()');
+    h.$('btnGroupPage').click();
+    check('group created', h.ev('items[0].pageGroup') === 1 && h.ev('items[1].pageGroup') === 1);
+    // enter edit mode via the manager's edit button
+    h.$('groupList').querySelector('.group-edit').click();
+    check('edit mode active', h.ev('editingPageGroupId') === 1 && !h.$('btnCancelGroupEdit').classList.contains('hidden'));
+    check('edit mode disables global select buttons', h.$('btnAll').disabled && h.$('btnTranslate').disabled);
+    // select a third card and save
+    h.ev('items[2].selected = true; refreshAll()');
+    h.$('btnGroupPage').click();
+    check('edit saved with new member', h.ev('items.filter(i=>i.pageGroup===1).length') === 3);
+    check('edit mode exits after save', h.ev('editingPageGroupId') === null && h.$('btnCancelGroupEdit').classList.contains('hidden'));
+    // cancel restores the previous selection snapshot
+    h.$('groupList').querySelector('.group-edit').click();
+    const beforeCancel = h.ev('items.map(i=>i.selected)');
+    h.ev('items[0].selected = false; refreshAll()');
+    h.$('btnCancelGroupEdit').click();
+    check('cancel restores selection snapshot', JSON.stringify(h.ev('items.map(i=>i.selected)')) === JSON.stringify(beforeCancel));
   }
 
   // ---------- 6. manual pdfOrder sorting ----------
@@ -253,6 +282,36 @@ function check(name, cond, extra) {
     check('revert clears edited blob', !target.edited);
     check('blocks disabled after revert', target.ocr.blocks.every((b) => !b.enabled));
     await h.ev('closeEditor()');
+  }
+
+  // ---------- 10b. profile restores crops and redraws every thumbnail ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    // spy on drawThumb through the shared realm
+    h.ctx.__drawLog = [];
+    h.ev(`const __origDrawThumb = drawThumb; drawThumb = (it) => { globalThis.__drawLog.push(it.uid); return __origDrawThumb(it); };`);
+    h.ev('items[0].cropRect = {x:0.1,y:0.1,w:0.5,h:0.5}; items[0].cropCache = null; refreshAll()');
+    h.$('pdfName').value = 'special-name';
+    h.$('folderName').value = 'special-folder';
+    h.$('outFmt').value = 'png';
+    h.$('saveProfileBtn').click();
+    await sleep(40);
+    // wipe local state, then restore
+    h.ev('items[0].cropRect = null; items[0].cropCache = null; refreshAll()');
+    h.ctx.__drawLog.length = 0;
+    h.$('restoreProfileBtn').click();
+    await sleep(80);
+    const items = h.ev('items');
+    check('crop restored on base item', JSON.stringify(items[0].cropRect) === JSON.stringify({ x: 0.1, y: 0.1, w: 0.5, h: 0.5 }), items[0].cropRect);
+    check('cropped badge visible after restore', items[0].el.classList.contains('cropped'));
+    check('base item thumbnail redrawn after restore', h.ctx.__drawLog.includes(items[0].uid), h.ctx.__drawLog);
+    check('file name restored', h.$('pdfName').value === 'special-name', h.$('pdfName').value);
+    check('folder and format restored', h.$('folderName').value === 'special-folder' && h.$('outFmt').value === 'png');
+    // stored profile really contains the crop and the output settings
+    const profile = h.storageMap.get(h.ev('pageProfileKey'));
+    check('profile payload keeps crop', !!profile.items.find((e) => e.sourceIndex === 0).cropRect);
+    check('profile payload keeps output settings', profile.settings.pdfName === 'special-name' && profile.settings.outFmt === 'png' && profile.settings.folderName === 'special-folder');
   }
 
   // ---------- 11. translate with no eligible images closes the dialog ----------

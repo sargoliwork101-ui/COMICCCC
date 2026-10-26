@@ -55,8 +55,40 @@ vm.runInContext(fnCode, ctx, { filename: 'popup.js' });
 let failures = 0;
 const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; console.log('FAIL:', n, e !== undefined ? JSON.stringify(e) : ''); } };
 
+// popup.html shell: chips removed, modern brand kept, single start button
+{
+  const popupDom = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'));
+  const pdoc = popupDom.window.document;
+  check('chips block removed from popup', !pdoc.querySelector('.chips, .chip'));
+  check('modern brand logo in popup', !!pdoc.querySelector('.brand .brand-logo img'));
+  check('version pill present', !!pdoc.querySelector('.version-pill'));
+  check('start button present', !!pdoc.getElementById('startBtn'));
+  check('file name input present', !!pdoc.getElementById('pdfName'));
+}
+
 (async () => {
-  const res = await window.eval('scrapeAndSend("comic.pdf")');
+  // start scraping without awaiting: the overlay is created synchronously before the first await,
+  // so it is already in the DOM while the job is in flight
+  const running = window.eval('scrapeAndSend("comic.pdf")');
+  await new Promise((r) => setTimeout(r, 0));
+  const probe = window.eval('(() => {' +
+    'const style = [...document.querySelectorAll("style")].map((s) => s.textContent).join("");' +
+    'return {' +
+    'overlay: !!document.querySelector(".wtpdf-overlay"),' +
+    'card: !!document.querySelector(".wtpdf-card"),' +
+    'msg: !!document.querySelector(".wtpdf-msg"),' +
+    'spinner: !!document.querySelector(".wtpdf-spinner"),' +
+    'hasDarkBackdrop: style.includes("rgba(3,5,10,.88)"),' +
+    'hasCenteredFlex: style.includes("align-items:center") && style.includes("justify-content:center"),' +
+    'hasBigFont: /font:700 26px/.test(style),' +
+    'hasMaxZ: style.includes("z-index:2147483647")}; })()');
+  const res = await running;
+  check('full-screen overlay shown while scraping', probe.overlay && probe.card && probe.msg && probe.spinner, probe);
+  check('overlay centered on screen', probe.hasCenteredFlex, probe);
+  check('overlay dark backdrop', probe.hasDarkBackdrop, probe);
+  check('message font about 2x (26px)', probe.hasBigFont, probe);
+  check('overlay on top of page (max z-index)', probe.hasMaxZ, probe);
+  check('overlay removed after finish', !window.document.querySelector('.wtpdf-overlay') && !window.document.querySelector('style'));
   check('count returned', res.count === sent[0].urls.length, res);
   const urls = sent[0].urls;
   console.log('scraped:', urls);

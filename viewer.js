@@ -206,7 +206,8 @@ function makeCard(it) {
 }
 
 function makeDuplicateData(source) {
-  const { el, ...state } = source;
+  const state = { ...source };
+  delete state.el; // مرجع DOM کارت مبدأ نباید به نسخهٔ کپی منتقل شود
   return {
     ...state,
     uid: nextItemUid++,
@@ -546,9 +547,13 @@ function beginPageGroupEdit(groupId) {
 }
 function cancelPageGroupEdit() {
   if (editingPageGroupId === null) return;
-  if (editingPageGroupSelection) items.forEach((it) => {
-    if (editingPageGroupSelection.has(it.uid)) it.selected = editingPageGroupSelection.get(it.uid);
-  });
+  if (editingPageGroupSelection) {
+    items.forEach((it) => {
+      if (editingPageGroupSelection.has(it.uid)) {
+        it.selected = editingPageGroupSelection.get(it.uid);
+      }
+    });
+  }
   editingPageGroupId = null;
   editingPageGroupSelection = null;
   $('groupEditStatus').classList.add('hidden');
@@ -1407,7 +1412,8 @@ async function restorePageProfile() {
     lastClicked = null;
     if ($('groupMenu')) $('groupMenu').open = false;
     refreshAll();
-    items.filter((it) => it.dupNo).forEach((it) => drawThumb(it));
+    // کراپ‌های بازیابی‌شده باید روی پیش‌نمایش کارت‌ها هم دیده شوند؛ فقط کپی‌ها تازه ساخته می‌شدند و کارت‌های اصلی تصویر بدون برش را نشان می‌دادند
+    items.filter((it) => it.state === 'ok').forEach((it) => drawThumb(it));
     $('profileStatus').innerText = `پروفایل این صفحه بازیابی شد (${restored.length} تصویر/کپی).`;
     pageProfileAvailable = true;
     updateProfileButtons();

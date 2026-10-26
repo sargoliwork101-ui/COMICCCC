@@ -7,10 +7,16 @@
   <link rel="stylesheet" href="viewer.css">
 </head>
 <body>
-  <header class="top">
-    <div class="brand">
-      <img src="icon128.png" alt="">
-      <h1>Comic to PDF<small>تصاویر را انتخاب کنید و خروجی دلخواه را بگیرید</small></h1>
+  <header class="topbar">
+    <div class="topbar-in">
+      <div class="brand">
+        <span class="brand-logo"><img src="icon128.png" alt=""></span>
+        <div class="brand-text">
+          <h1>Comic to PDF</h1>
+          <p>تصاویر را انتخاب، مرتب و ویرایش کنید و خروجی PDF یا تصویر بگیرید</p>
+        </div>
+      </div>
+      <span class="version-pill">نسخهٔ ۲.۱۷</span>
     </div>
   </header>
 
@@ -92,12 +98,15 @@
 
   <footer class="dock">
     <div class="dock-in">
-      <div id="selCount">—</div>
-
-      <div class="seg" role="group" aria-label="نوع خروجی">
-        <button type="button" class="seg-btn active" id="modePdf" aria-pressed="true">خروجی PDF</button>
-        <button type="button" class="seg-btn" id="modeImg" aria-pressed="false">تصاویر جدا</button>
+      <div class="dock-side">
+        <div id="selCount" class="sel-pill">—</div>
       </div>
+
+      <div class="dock-center">
+        <div class="seg" role="group" aria-label="نوع خروجی">
+          <button type="button" class="seg-btn active" id="modePdf" aria-pressed="true">خروجی PDF</button>
+          <button type="button" class="seg-btn" id="modeImg" aria-pressed="false">تصاویر جدا</button>
+        </div>
 
       <details class="output-settings" id="outputSettings" data-mode="pdf">
         <summary>تنظیمات خروجی</summary>
@@ -128,14 +137,18 @@
           </div>
         </div>
       </details>
-      <button id="buildBtn" class="btn" disabled>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z M14 3v5h5"/></svg>
-        <span>ساخت PDF</span>
-      </button>
-      <button id="saveImgBtn" class="btn hidden" disabled>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-        <span>ذخیرهٔ تصاویر</span>
-      </button>
+      </div>
+
+      <div class="dock-actions">
+        <button id="buildBtn" class="btn" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z M14 3v5h5"/></svg>
+          <span>ساخت PDF</span>
+        </button>
+        <button id="saveImgBtn" class="btn hidden" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <span>ذخیرهٔ تصاویر</span>
+        </button>
+      </div>
     </div>
   </footer>
 
