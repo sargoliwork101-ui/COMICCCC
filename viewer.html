@@ -36,7 +36,9 @@
         <button class="mini" id="btnNone">لغو انتخاب</button>
         <button class="mini" id="btnInv">معکوس‌کردن انتخاب</button>
         <button class="mini accent" id="btnGroupPage" disabled>ساخت گروه از انتخاب‌ها</button>
+        <button class="mini hidden" id="btnCancelGroupEdit">لغو ویرایش گروه</button>
         <button class="mini" id="btnUngroupPage" disabled>لغو گروهِ انتخاب‌ها</button>
+        <span id="groupEditStatus" class="group-edit-status hidden" role="status" aria-live="polite"></span>
         <span id="toolbarSelectionCount" class="toolbar-selection-count">—</span>
       </div>
       <div class="toolbar-status">
@@ -48,7 +50,7 @@
         <details class="tool-menu" id="groupMenu">
           <summary>مدیریت گروه‌ها</summary>
           <div class="tool-menu-body">
-            <p class="menu-hint">برای ساخت هر گروه، کارت‌های اعضای یک صفحه را انتخاب کنید و دکمهٔ «ساخت گروه» بالای صفحه را بزنید. با کلیک روی گروه، اعضایش انتخاب و اولین تصویرش در مرکز صفحه نمایش داده می‌شود.</p>
+            <p class="menu-hint">برای ویرایش اعضا «ویرایش» را بزنید؛ کارت‌ها را انتخاب یا از انتخاب خارج کنید و تغییرات را ذخیره کنید. با × گروه حذف می‌شود. افزودن کارت به گروه، شمارهٔ آن را ثابت نگه می‌دارد.</p>
             <div class="group-manager"><strong>گروه‌های ساخته‌شده</strong><div id="groupList" class="group-list"><span class="group-empty">هنوز گروهی نساخته‌اید.</span></div></div>
           </div>
         </details>
