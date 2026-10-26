@@ -18,18 +18,16 @@
   async function build(o) {
     const seamless = !!o.seamless;
     const uniformSize = !!o.uniformSize && !seamless;
-    const itemScale = (it) => Math.max(0.25, Math.min(2, (Number(it.pdfScale) || 100) / 100));
-    const maxItemScale = o.items.length ? Math.max(...o.items.map(itemScale)) : 1;
     const W = seamless ? pickWidth(o.items) : 0;
-    const maxEffectiveW = o.items.length ? Math.max(...o.items.map((it) => it.w * itemScale(it))) : 0;
-    const maxEffectiveH = o.items.length ? Math.max(...o.items.map((it) => it.h * itemScale(it))) : 0;
-    const targetPageW = uniformSize ? maxEffectiveW : seamless ? W * maxItemScale : maxEffectiveW;
-    const targetPageH = uniformSize ? maxEffectiveH : 0;
+    const maxW = o.items.length ? Math.max(...o.items.map((it) => it.w)) : 0;
+    const maxH = o.items.length ? Math.max(...o.items.map((it) => it.h)) : 0;
+    const targetPageW = uniformSize ? maxW : seamless ? W : maxW;
+    const targetPageH = uniformSize ? maxH : 0;
     let s = Math.min(0.75, HARD_PT / Math.max(targetPageW, 1), targetPageH ? SAFE_PT / targetPageH : 0.75); // پوینت به‌ازای هر پیکسل
     if (seamless) {
       // کل تصاویر در «یک» صفحه: مقیاس طوری انتخاب می‌شود که مجموع ارتفاع زیر سقف ۱۴۴۰۰ بماند
       let totalPx = 0;
-      o.items.forEach((it) => { totalPx += it.h * (W / it.w) * itemScale(it); });
+      o.items.forEach((it) => { totalPx += it.h * (W / it.w); });
       s = Math.min(s, SAFE_PT / Math.max(totalPx, 1));
     }
     let pdf = null, pages = 0;
@@ -69,21 +67,20 @@
     for (let k = 0; k < o.items.length; k++) {
       const it = o.items[k];
       if (o.onProgress) o.onProgress(k, o.items.length);
-      const factor = itemScale(it);
-      const fit = uniformSize ? Math.min(1, maxEffectiveW / (it.w * factor), maxEffectiveH / (it.h * factor)) : 1;
-      const r = seamless ? (W / it.w) * s * factor : s * factor * fit;
+      const fit = uniformSize ? Math.min(1, maxW / it.w, maxH / it.h) : 1;
+      const r = seamless ? (W / it.w) * s : s * fit;
       const segs = await o.prepare(it, r);
       for (const seg of segs) {
         const wPt = seg.w * r, hPt = seg.h * r;
         if (seamless) {
-          const pageW = W * maxItemScale * s;
+          const pageW = W * s;
           const xPt = (pageW - wPt) / 2;
           if (pendH + hPt > HARD_PT) await flush();
           pendW = pageW;
           pend.push({ seg, xPt, wPt, hPt });
           pendH += hPt;
         } else if (uniformSize) {
-          const pageW = maxEffectiveW * s, pageH = maxEffectiveH * s;
+          const pageW = maxW * s, pageH = maxH * s;
           const xPt = (pageW - wPt) / 2, yPt = (pageH - hPt) / 2;
           newPage(pageW, pageH);
           await put(seg, xPt, yPt, wPt, hPt);

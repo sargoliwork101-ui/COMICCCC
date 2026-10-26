@@ -5,6 +5,7 @@ const ICON_ZOOM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/></svg>';
 const ICON_CROP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v13a2 2 0 0 0 2 2h13M3 6h13a2 2 0 0 1 2 2v13"/></svg>';
 const ICON_DUPLICATE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';
+const ICON_DELETE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m4 4v6m6-6v6"/></svg>';
 const CONCURRENCY = 4;
 const MAX_CANVAS_H = 16000;
 
@@ -141,18 +142,11 @@ function makeCard(it) {
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
     <button class="crop" title="کراپ دستی">${ICON_CROP}</button>
     <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button>
-    <button class="duplicate" title="ساخت نسخهٔ مستقل">${ICON_DUPLICATE}</button><span class="fa-badge">ترجمه شد</span>
-    <span class="page-group-badge hidden"></span></div><div class="meta">…</div>
-    <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>
-    <div class="scale-control"><span>اندازه در PDF (%)</span><input class="pdf-scale" type="number" min="25" max="200" step="5" value="${it.pdfScale || 100}" aria-label="اندازهٔ مستقل این تصویر در PDF، درصد"></div>`;
+    <button class="duplicate" title="ساخت نسخهٔ مستقل">${ICON_DUPLICATE}</button>
+    <button class="delete" title="حذف این تصویر" aria-label="حذف تصویر">${ICON_DELETE}</button>
+    <span class="fa-badge">ترجمه شد</span><span class="page-group-badge hidden"></span></div><div class="meta">…</div>
+    <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>`;
   const orderInput = el.querySelector('.page-order');
-  const scaleInput = el.querySelector('.pdf-scale');
-  scaleInput.addEventListener('click', (ev) => ev.stopPropagation());
-  scaleInput.addEventListener('change', () => {
-    const value = Number.parseFloat(scaleInput.value);
-    it.pdfScale = Number.isFinite(value) ? Math.max(25, Math.min(200, value)) : 100;
-    scaleInput.value = String(it.pdfScale);
-  });
   orderInput.addEventListener('click', (ev) => ev.stopPropagation());
   orderInput.addEventListener('change', () => {
     const value = Number.parseInt(orderInput.value, 10);
@@ -173,11 +167,12 @@ function makeCard(it) {
   });
   el.addEventListener('click', (ev) => {
     if (Date.now() < suppressCardClickUntil) { ev.preventDefault(); return; }
-    if (ev.target.closest('.page-order, .pdf-scale')) return;
+    if (ev.target.closest('.page-order')) return;
     if (ev.target.closest('.zoom')) { openLightbox(it); return; }
     if (ev.target.closest('.crop')) { openCropper(it); return; }
     if (ev.target.closest('.edit')) { if (typeof openEditor === 'function') openEditor(it); return; }
     if (ev.target.closest('.duplicate')) { duplicateItem(it); return; }
+    if (ev.target.closest('.delete')) { deleteItem(it); return; }
     if (it.state !== 'ok') return;
     if (ev.shiftKey && lastClicked != null) {
       const ordered = Array.from($('grid').children).map((node) => items.find((item) => item.el === node)).filter((item) => item && item.state === 'ok');
@@ -207,7 +202,6 @@ function makeDuplicateData(source) {
     pageGroup: null,
     cropRect: source.cropRect ? { ...source.cropRect } : null,
     cropCache: null,
-    pdfScale: source.pdfScale || 100,
     ocr: source.ocr ? { lang: source.ocr.lang, blocks: source.ocr.blocks.map((block) => ({ ...block })) } : null,
     edited: source.edited ? { ...source.edited } : null,
     el: null
@@ -223,6 +217,18 @@ function duplicateItem(source) {
   refreshAll();
   drawThumb(duplicate);
 }
+function deleteItem(it) {
+  if (!it || building || loading) return;
+  if (!confirm(`تصویر ${it.i + 1} حذف شود؟`)) return;
+  if (cropItem === it) closeCropper();
+  if (lbItem === it) closeLightbox();
+  items = items.filter((item) => item !== it);
+  if (it.el && it.el.parentNode) it.el.parentNode.removeChild(it.el);
+  if (lastClicked === it.uid) lastClicked = null;
+  cleanupPageGroups();
+  updatePdfOrderFromGrid();
+  refreshAll();
+}
 
 function refreshCard(it) {
   const el = it.el;
@@ -232,6 +238,8 @@ function refreshCard(it) {
   el.classList.toggle('cropped', !!it.cropRect);
   el.classList.toggle('has-ocr', !!it.ocr);
   const groupBadge = el.querySelector('.page-group-badge');
+  const deleteButton = el.querySelector('.delete');
+  if (deleteButton) deleteButton.disabled = loading || building;
   groupBadge.classList.toggle('hidden', !it.pageGroup);
   if (it.pageGroup) {
     const memberCount = items.filter((member) => member.pageGroup === it.pageGroup).length;
@@ -496,19 +504,21 @@ function cropPoint(ev) {
   if (!r.width || !r.height) return null;
   return { x: Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)), y: Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height)) };
 }
-function paintCropSelection(rect) {
+function paintCropSelection(rect, preserveInput = null) {
+  const preservedValue = preserveInput ? $(preserveInput).value : null;
   const el = $('cropSelection');
   if (!rect || rect.w <= 0 || rect.h <= 0) {
     el.style.display = 'none';
     syncCropDimensionInputs(null);
-    return;
+  } else {
+    el.style.display = 'block';
+    el.style.left = (rect.x * 100) + '%'; el.style.top = (rect.y * 100) + '%';
+    el.style.width = (rect.w * 100) + '%'; el.style.height = (rect.h * 100) + '%';
+    syncCropDimensionInputs(rect);
   }
-  el.style.display = 'block';
-  el.style.left = (rect.x * 100) + '%'; el.style.top = (rect.y * 100) + '%';
-  el.style.width = (rect.w * 100) + '%'; el.style.height = (rect.h * 100) + '%';
-  syncCropDimensionInputs(rect);
+  if (preserveInput) $(preserveInput).value = preservedValue;
 }
-function updateCropFromInputs(changed) {
+function updateCropFromInputs(changed, live = false) {
   if (!cropItem) return;
   const size = cropImageDimensions();
   const old = cropRectDraft || { x: 0, y: 0, w: 1, h: 1 };
@@ -533,7 +543,7 @@ function updateCropFromInputs(changed) {
   const x = Math.max(0, Math.min(1 - w, centerX - w / 2));
   const y = Math.max(0, Math.min(1 - h, centerY - h / 2));
   cropRectDraft = { x, y, w, h };
-  paintCropSelection(cropRectDraft);
+  paintCropSelection(cropRectDraft, live ? (changed === 'height' ? 'cropHeight' : 'cropWidth') : null);
 }
 function adjustCropToRatio() {
   if (!cropItem || !cropRectDraft) return;
@@ -583,33 +593,92 @@ function applyCrop() {
   refreshCard(it);
   drawThumb(it);
 }
+function cropPxRect(rect, size) {
+  return { x1: rect.x * size.w, y1: rect.y * size.h, x2: (rect.x + rect.w) * size.w, y2: (rect.y + rect.h) * size.h };
+}
+function saveCropPxRect(r, size) {
+  const x1 = Math.max(0, Math.min(size.w - 1, Math.min(r.x1, r.x2)));
+  const y1 = Math.max(0, Math.min(size.h - 1, Math.min(r.y1, r.y2)));
+  const x2 = Math.max(x1 + 1, Math.min(size.w, Math.max(r.x1, r.x2)));
+  const y2 = Math.max(y1 + 1, Math.min(size.h, Math.max(r.y1, r.y2)));
+  cropRectDraft = { x: x1 / size.w, y: y1 / size.h, w: (x2 - x1) / size.w, h: (y2 - y1) / size.h };
+  paintCropSelection(cropRectDraft);
+}
 function beginCropSelection(ev) {
   if (!cropItem || ev.button !== 0) return;
   ev.preventDefault();
   const p = cropPoint(ev);
   if (!p) return;
-  cropDragStart = p;
-  cropRectDraft = { x: p.x, y: p.y, w: 0, h: 0 };
-  paintCropSelection(cropRectDraft);
+  const size = cropImageDimensions();
+  const handleEl = ev.target && ev.target.closest ? ev.target.closest('.crop-handle') : null;
+  const inside = ev.target && ev.target.closest && ev.target.closest('#cropSelection') && cropRectDraft && cropRectDraft.w > 0;
+  if (inside) {
+    cropDragStart = {
+      mode: handleEl ? 'resize' : 'move',
+      handle: handleEl ? handleEl.dataset.handle : null,
+      point: p,
+      rect: cropPxRect(cropRectDraft, size)
+    };
+  } else {
+    // کلیک بیرون کادر، انتخاب تازه را از ابتدای متعارف تصویر (گوشهٔ بالا-چپ) آغاز می‌کند.
+    cropDragStart = { mode: 'draw', point: { x: 0, y: 0 } };
+    cropRectDraft = { x: 0, y: 0, w: 0, h: 0 };
+    paintCropSelection(cropRectDraft);
+    updateCropDraw(p, size);
+  }
   $('cropStage').setPointerCapture(ev.pointerId);
+}
+function updateCropDraw(p, size) {
+  let width = Math.max(0, p.x * size.w), height = Math.max(0, p.y * size.h);
+  const ratio = cropAspectRatio();
+  if (ratio && width > 0 && height > 0) {
+    height = Math.min(height, width / ratio);
+    width = height * ratio;
+  }
+  cropRectDraft = { x: 0, y: 0, w: width / size.w, h: height / size.h };
+  paintCropSelection(cropRectDraft);
+}
+function resizeCrop(p, size, drag) {
+  const r = { ...drag.rect };
+  const dx = (p.x - drag.point.x) * size.w, dy = (p.y - drag.point.y) * size.h;
+  const h = drag.handle;
+  if (h.includes('w')) r.x1 += dx;
+  if (h.includes('e')) r.x2 += dx;
+  if (h.includes('n')) r.y1 += dy;
+  if (h.includes('s')) r.y2 += dy;
+  r.x1 = Math.max(0, Math.min(size.w - 1, r.x1)); r.x2 = Math.max(1, Math.min(size.w, r.x2));
+  r.y1 = Math.max(0, Math.min(size.h - 1, r.y1)); r.y2 = Math.max(1, Math.min(size.h, r.y2));
+  if (r.x2 <= r.x1) { if (h.includes('w')) r.x1 = r.x2 - 1; else r.x2 = r.x1 + 1; }
+  if (r.y2 <= r.y1) { if (h.includes('n')) r.y1 = r.y2 - 1; else r.y2 = r.y1 + 1; }
+  const ratio = cropAspectRatio();
+  if (ratio) {
+    let width = r.x2 - r.x1, height = r.y2 - r.y1;
+    if (h === 'e' || h === 'w') height = width / ratio;
+    else if (h === 'n' || h === 's') width = height * ratio;
+    else if (width / height > ratio) height = width / ratio;
+    else width = height * ratio;
+    if (h.includes('w')) r.x1 = r.x2 - width; else if (h.includes('e')) r.x2 = r.x1 + width; else { const cx = (r.x1 + r.x2) / 2; r.x1 = cx - width / 2; r.x2 = cx + width / 2; }
+    if (h.includes('n')) r.y1 = r.y2 - height; else if (h.includes('s')) r.y2 = r.y1 + height; else { const cy = (r.y1 + r.y2) / 2; r.y1 = cy - height / 2; r.y2 = cy + height / 2; }
+    const shiftX = Math.max(0, -r.x1) + Math.min(0, size.w - r.x2);
+    const shiftY = Math.max(0, -r.y1) + Math.min(0, size.h - r.y2);
+    r.x1 += shiftX; r.x2 += shiftX; r.y1 += shiftY; r.y2 += shiftY;
+    r.x1 = Math.max(0, r.x1); r.y1 = Math.max(0, r.y1); r.x2 = Math.min(size.w, r.x2); r.y2 = Math.min(size.h, r.y2);
+  }
+  saveCropPxRect(r, size);
 }
 function moveCropSelection(ev) {
   if (!cropDragStart) return;
   const p = cropPoint(ev);
   if (!p) return;
   const size = cropImageDimensions();
-  const dx = (p.x - cropDragStart.x) * size.w, dy = (p.y - cropDragStart.y) * size.h;
-  let width = Math.abs(dx), height = Math.abs(dy);
-  const ratio = cropAspectRatio();
-  if (ratio && width > 0 && height > 0) {
-    if (width / height > ratio) width = height * ratio;
-    else height = width / ratio;
-  }
-  const w = width / size.w, h = height / size.h;
-  const x = dx < 0 ? cropDragStart.x - w : cropDragStart.x;
-  const y = dy < 0 ? cropDragStart.y - h : cropDragStart.y;
-  cropRectDraft = { x, y, w, h };
-  paintCropSelection(cropRectDraft);
+  const drag = cropDragStart;
+  if (drag.mode === 'draw') { updateCropDraw(p, size); return; }
+  if (drag.mode === 'resize') { resizeCrop(p, size, drag); return; }
+  const dx = (p.x - drag.point.x) * size.w, dy = (p.y - drag.point.y) * size.h;
+  const width = drag.rect.x2 - drag.rect.x1, height = drag.rect.y2 - drag.rect.y1;
+  const x1 = Math.max(0, Math.min(size.w - width, drag.rect.x1 + dx));
+  const y1 = Math.max(0, Math.min(size.h - height, drag.rect.y1 + dy));
+  saveCropPxRect({ x1, y1, x2: x1 + width, y2: y1 + height }, size);
 }
 function endCropSelection() { cropDragStart = null; }
 function handleOverlayKeydown(e) {
@@ -681,8 +750,7 @@ async function fallback(seg) {
 
 async function composeVertically(group, pageKey) {
   const sources = await Promise.all(group.map(getDisplaySource));
-  const itemScales = group.map((it) => Math.max(0.25, Math.min(2, (Number(it.pdfScale) || 100) / 100)));
-  const targetWidths = sources.map((src, i) => src.w * itemScales[i]);
+  const targetWidths = sources.map((src) => src.w);
   const maxW = Math.max(...targetWidths);
   const rawHeights = sources.map((src, i) => src.h * targetWidths[i] / src.w);
   const rawH = rawHeights.reduce((sum, h) => sum + h, 0);
@@ -706,7 +774,7 @@ async function composeVertically(group, pageKey) {
   cv.width = cv.height = 0;
   return {
     i: group[0].i, pdfKey: pageKey, pageOrder: Math.min(...group.map((it) => it.pdfOrder || it.i + 1)),
-    sequence: Math.min(...group.map((it) => it.sequence)), blob, w, h, pdfScale: 100,
+    sequence: Math.min(...group.map((it) => it.sequence)), blob, w, h,
     info: sniff(new Uint8Array(await blob.arrayBuffer()))
   };
 }
@@ -832,6 +900,8 @@ function setMode(m) {
   $('modeImg').classList.toggle('active', m === 'img');
   $('pdfOpts').classList.toggle('hidden', m !== 'pdf');
   $('imgOpts').classList.toggle('hidden', m !== 'img');
+  $('buildBtn').classList.toggle('hidden', m !== 'pdf');
+  $('saveImgBtn').classList.toggle('hidden', m !== 'img');
 }
 
 // پسوند واقعی فایل از روی بایت‌های ابتدایی
@@ -1016,7 +1086,7 @@ async function main() {
     updatePdfOrderFromGrid();
     suppressCardClickUntil = Date.now() + 350;
   });
-  items = job.urls.map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pdfScale: 100, pageGroup: null, state: 'loading', selected: true }));
+  items = job.urls.map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pageGroup: null, state: 'loading', selected: true }));
   nextItemUid = items.length;
   items.forEach((it) => grid.appendChild(makeCard(it)));
 
@@ -1048,6 +1118,8 @@ async function main() {
   $('cropReset').onclick = () => { cropRectDraft = null; paintCropSelection(null); };
   $('cropApply').onclick = applyCrop;
   $('cropRatio').addEventListener('change', adjustCropToRatio);
+  $('cropWidth').addEventListener('input', () => updateCropFromInputs('width', true));
+  $('cropHeight').addEventListener('input', () => updateCropFromInputs('height', true));
   $('cropWidth').addEventListener('change', () => updateCropFromInputs('width'));
   $('cropHeight').addEventListener('change', () => updateCropFromInputs('height'));
   $('cropStage').addEventListener('pointerdown', beginCropSelection);
