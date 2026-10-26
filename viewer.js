@@ -4,6 +4,7 @@ const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 const ICON_ZOOM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg>';
 const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/></svg>';
 const ICON_CROP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v13a2 2 0 0 0 2 2h13M3 6h13a2 2 0 0 1 2 2v13"/></svg>';
+const ICON_DUPLICATE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';
 const CONCURRENCY = 4;
 const MAX_CANVAS_H = 16000;
 
@@ -12,7 +13,7 @@ let jobKey = '';
 let items = [];
 let loading = true;
 let building = false;
-let lastClicked = -1;
+let lastClicked = null;
 let lastObjUrl = null;
 let draggedItem = null;
 let suppressCardClickUntil = 0;
@@ -22,6 +23,7 @@ let cropObjectUrl = null;
 let cropRectDraft = null;
 let cropDragStart = null;
 let nextPageGroupId = 1;
+let nextItemUid = 0;
 
 // ---------- دانلود تصاویر ----------
 async function setRefererRule(pageUrl) {
@@ -128,20 +130,21 @@ function makeCard(it) {
   el.draggable = true;
   el.title = 'برای تغییر ترتیب در PDF، تصویر را بکشید و رها کنید';
   el.innerHTML = `<div class="tw"><canvas width="240" height="320"></canvas><div class="spin">در حال دریافت...</div>
-    <span class="idx">${it.i + 1}</span><span class="tick">${ICON_CHECK}</span>
+    <span class="idx">${it.i + 1}${it.dupNo ? ` · کپی ${it.dupNo}` : ''}</span><span class="tick">${ICON_CHECK}</span>
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
     <button class="crop" title="کراپ دستی">${ICON_CROP}</button>
-    <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button><span class="fa-badge">ترجمه شد</span>
+    <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button>
+    <button class="duplicate" title="ساخت نسخهٔ مستقل">${ICON_DUPLICATE}</button><span class="fa-badge">ترجمه شد</span>
     <span class="page-group-badge hidden"></span></div><div class="meta">…</div>
     <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>
-    <div class="copies-control"><span>تعداد نسخه در PDF</span><input class="pdf-copies" type="number" min="1" max="20" step="1" value="${it.pdfCopies || 1}" aria-label="تعداد نسخه در PDF، حداکثر ۲۰"></div>`;
+    <div class="scale-control"><span>اندازه در PDF (%)</span><input class="pdf-scale" type="number" min="25" max="200" step="5" value="${it.pdfScale || 100}" aria-label="اندازهٔ مستقل این تصویر در PDF، درصد"></div>`;
   const orderInput = el.querySelector('.page-order');
-  const copiesInput = el.querySelector('.pdf-copies');
-  copiesInput.addEventListener('click', (ev) => ev.stopPropagation());
-  copiesInput.addEventListener('change', () => {
-    const value = Number.parseInt(copiesInput.value, 10);
-    it.pdfCopies = Number.isFinite(value) ? Math.max(1, Math.min(20, value)) : 1;
-    copiesInput.value = String(it.pdfCopies);
+  const scaleInput = el.querySelector('.pdf-scale');
+  scaleInput.addEventListener('click', (ev) => ev.stopPropagation());
+  scaleInput.addEventListener('change', () => {
+    const value = Number.parseFloat(scaleInput.value);
+    it.pdfScale = Number.isFinite(value) ? Math.max(25, Math.min(200, value)) : 100;
+    scaleInput.value = String(it.pdfScale);
   });
   orderInput.addEventListener('click', (ev) => ev.stopPropagation());
   orderInput.addEventListener('change', () => {
@@ -155,7 +158,7 @@ function makeCard(it) {
     draggedItem = it;
     el.classList.add('dragging');
     ev.dataTransfer.effectAllowed = 'move';
-    ev.dataTransfer.setData('text/plain', String(it.i));
+    ev.dataTransfer.setData('text/plain', String(it.uid));
   });
   el.addEventListener('dragend', () => {
     el.classList.remove('dragging');
@@ -163,23 +166,55 @@ function makeCard(it) {
   });
   el.addEventListener('click', (ev) => {
     if (Date.now() < suppressCardClickUntil) { ev.preventDefault(); return; }
-    if (ev.target.closest('.page-order')) return;
+    if (ev.target.closest('.page-order, .pdf-scale')) return;
     if (ev.target.closest('.zoom')) { openLightbox(it); return; }
     if (ev.target.closest('.crop')) { openCropper(it); return; }
     if (ev.target.closest('.edit')) { if (typeof openEditor === 'function') openEditor(it); return; }
+    if (ev.target.closest('.duplicate')) { duplicateItem(it); return; }
     if (it.state !== 'ok') return;
-    if (ev.shiftKey && lastClicked >= 0) {
-      const [a, b] = [Math.min(lastClicked, it.i), Math.max(lastClicked, it.i)];
-      const val = !it.selected;
-      for (let k = a; k <= b; k++) if (items[k].state === 'ok') items[k].selected = val;
+    if (ev.shiftKey && lastClicked != null) {
+      const ordered = Array.from($('grid').children).map((node) => items.find((item) => item.el === node)).filter((item) => item && item.state === 'ok');
+      const from = ordered.findIndex((item) => item.uid === lastClicked), to = ordered.findIndex((item) => item.uid === it.uid);
+      if (from >= 0 && to >= 0) {
+        const [a, b] = [Math.min(from, to), Math.max(from, to)];
+        const val = !it.selected;
+        for (let k = a; k <= b; k++) ordered[k].selected = val;
+      }
     } else {
       it.selected = !it.selected;
     }
-    lastClicked = it.i;
+    lastClicked = it.uid;
     refreshAll();
   });
   it.el = el;
   return el;
+}
+
+function makeDuplicateData(source) {
+  const { el, ...state } = source;
+  return {
+    ...state,
+    uid: nextItemUid++,
+    dupNo: items.filter((it) => it.i === source.i).length,
+    selected: true,
+    pageGroup: null,
+    cropRect: source.cropRect ? { ...source.cropRect } : null,
+    cropCache: null,
+    pdfScale: source.pdfScale || 100,
+    ocr: source.ocr ? { lang: source.ocr.lang, blocks: source.ocr.blocks.map((block) => ({ ...block })) } : null,
+    edited: source.edited ? { ...source.edited } : null,
+    el: null
+  };
+}
+function duplicateItem(source) {
+  if (!source || source.state !== 'ok') return;
+  const duplicate = makeDuplicateData(source);
+  const card = makeCard(duplicate);
+  items.push(duplicate);
+  $('grid').insertBefore(card, source.el.nextSibling);
+  updatePdfOrderFromGrid();
+  refreshAll();
+  drawThumb(duplicate);
 }
 
 function refreshCard(it) {
@@ -209,12 +244,11 @@ function refreshCard(it) {
 }
 
 async function getDisplaySource(it) {
-  const owner = it.sourceItem || it;
-  const base = owner.edited || owner;
-  const rect = owner.cropRect;
+  const base = it.edited || it;
+  const rect = it.cropRect;
   if (!rect) return base;
   const key = [rect.x, rect.y, rect.w, rect.h].join(':');
-  if (owner.cropCache && owner.cropCache.base === base && owner.cropCache.key === key) return owner.cropCache;
+  if (it.cropCache && it.cropCache.base === base && it.cropCache.key === key) return it.cropCache;
 
   const bmp = await createImageBitmap(base.blob, { imageOrientation: 'none' });
   try {
@@ -229,8 +263,8 @@ async function getDisplaySource(it) {
     const blob = await canvasToBlob(cv, 'image/png');
     cv.width = cv.height = 0;
     const info = sniff(new Uint8Array(await blob.arrayBuffer()));
-    owner.cropCache = { i: owner.i, blob, info, w, h, base, key };
-    return owner.cropCache;
+    it.cropCache = { i: it.i, blob, info, w, h, base, key };
+    return it.cropCache;
   } finally { bmp.close(); }
 }
 
@@ -288,7 +322,7 @@ async function loadAll(list) {
 // ---------- مرتب‌سازی کارت‌ها / ترتیب خروجی PDF ----------
 function sortGridByPdfOrder() {
   const grid = $('grid');
-  items.slice().sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.i - b.i)
+  items.slice().sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.uid - b.uid)
     .forEach((it) => grid.appendChild(it.el));
 }
 
@@ -457,7 +491,7 @@ async function decodeSlices(it, maxSrcH) {
       ctx.drawImage(bmp, 0, y, bmp.width, sh, 0, 0, bmp.width, sh);
       const data = canvas.toDataURL(asPng ? 'image/png' : 'image/jpeg', 0.98);
       canvas.width = canvas.height = 0;
-      segs.push({ data, fmt: asPng ? 'PNG' : 'JPEG', w: bmp.width, h: sh, alias: `i${it.pdfKey || it.i}_${y}` });
+      segs.push({ data, fmt: asPng ? 'PNG' : 'JPEG', w: bmp.width, h: sh, alias: `i${it.pdfKey || it.uid || it.i}_${y}` });
     }
   } finally { bmp.close(); }
   return segs;
@@ -467,7 +501,7 @@ async function prepare(it, r) {
   const src = await getDisplaySource(it);
   const rawMax = Math.floor(PdfBuilder.SAFE_PT / r);
   const inf = src.info;
-  const key = it.pdfKey || it.i;
+  const key = it.pdfKey || it.uid || it.i;
   // فایل JPEG/PNG بدون هیچ فشرده‌سازی مجدد
   if (inf && inf.ok && inf.h <= rawMax) {
     const u8 = new Uint8Array(await src.blob.arrayBuffer());
@@ -492,11 +526,14 @@ async function fallback(seg) {
 
 async function composeVertically(group, pageKey) {
   const sources = await Promise.all(group.map(getDisplaySource));
-  const maxW = Math.max(...sources.map((src) => src.w));
-  const rawHeights = sources.map((src) => src.h * maxW / src.w);
+  const itemScales = group.map((it) => Math.max(0.25, Math.min(2, (Number(it.pdfScale) || 100) / 100)));
+  const targetWidths = sources.map((src, i) => src.w * itemScales[i]);
+  const maxW = Math.max(...targetWidths);
+  const rawHeights = sources.map((src, i) => src.h * targetWidths[i] / src.w);
   const rawH = rawHeights.reduce((sum, h) => sum + h, 0);
   const scale = Math.min(1, 16000 / maxW, 16000 / rawH, Math.sqrt(180000000 / (maxW * rawH)));
   const w = Math.max(1, Math.floor(maxW * scale));
+  const widths = targetWidths.map((width) => Math.min(w, Math.max(1, Math.round(width * scale))));
   const heights = rawHeights.map((h) => Math.max(1, Math.round(h * scale)));
   const h = heights.reduce((sum, n) => sum + n, 0);
   const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
@@ -505,7 +542,8 @@ async function composeVertically(group, pageKey) {
   let y = 0;
   for (let k = 0; k < sources.length; k++) {
     const bmp = await createImageBitmap(sources[k].blob, { imageOrientation: 'none' });
-    try { ctx.drawImage(bmp, 0, y, w, heights[k]); }
+    const x = Math.round((w - widths[k]) / 2);
+    try { ctx.drawImage(bmp, x, y, widths[k], heights[k]); }
     finally { bmp.close(); }
     y += heights[k];
   }
@@ -513,7 +551,7 @@ async function composeVertically(group, pageKey) {
   cv.width = cv.height = 0;
   return {
     i: group[0].i, pdfKey: pageKey, pageOrder: Math.min(...group.map((it) => it.pdfOrder || it.i + 1)),
-    sequence: Math.min(...group.map((it) => it.sequence)), blob, w, h,
+    sequence: Math.min(...group.map((it) => it.sequence)), blob, w, h, pdfScale: 100,
     info: sniff(new Uint8Array(await blob.arrayBuffer()))
   };
 }
@@ -523,10 +561,10 @@ async function makePdfItems(selected, twoPerPage) {
   const expanded = [];
   for (const it of selected) {
     const source = await getDisplaySource(it);
-    const count = Math.max(1, Math.min(20, Number.parseInt(it.pdfCopies, 10) || 1));
-    for (let n = 0; n < count; n++) expanded.push({
-      ...it, w: source.w, h: source.h, sourceItem: it.sourceItem || it,
-      pdfKey: `image_${it.i}_copy_${n + 1}`, sequence: sequence++, pageOrder: it.pdfOrder || it.i + 1
+    expanded.push({
+      ...it, blob: source.blob, info: source.info, w: source.w, h: source.h,
+      edited: null, cropRect: null, cropCache: null,
+      pdfKey: `image_${it.uid ?? it.i}`, sequence: sequence++, pageOrder: it.pdfOrder || it.i + 1
     });
   }
 
@@ -556,7 +594,7 @@ async function makePdfItems(selected, twoPerPage) {
 async function onBuild() {
   if (building || loading) return;
   const sel = items.filter((it) => it.state === 'ok' && it.selected)
-    .sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.i - b.i);
+    .sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.uid - b.uid);
   if (!sel.length) return;
   const jsPDFLib = window.jspdf && window.jspdf.jsPDF;
   if (!jsPDFLib) { alert('فایل jspdf.umd.min.js پیدا نشد!'); return; }
@@ -700,7 +738,8 @@ async function uniqueName(dir, base, ext) {
 
 async function onSaveImages() {
   if (building || loading) return;
-  const sel = items.filter((it) => it.state === 'ok' && it.selected);
+  const sel = items.filter((it) => it.state === 'ok' && it.selected)
+    .sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.uid - b.uid);
   if (!sel.length) return;
 
   // انتخاب پوشه باید مستقیماً با کلیک کاربر باز شود
@@ -822,7 +861,8 @@ async function main() {
     updatePdfOrderFromGrid();
     suppressCardClickUntil = Date.now() + 350;
   });
-  items = job.urls.map((url, i) => ({ i, url, pdfOrder: i + 1, pdfCopies: 1, pageGroup: null, state: 'loading', selected: true }));
+  items = job.urls.map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pdfScale: 100, pageGroup: null, state: 'loading', selected: true }));
+  nextItemUid = items.length;
   items.forEach((it) => grid.appendChild(makeCard(it)));
 
   $('btnAll').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = true; }); refreshAll(); };

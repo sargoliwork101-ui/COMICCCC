@@ -48,14 +48,15 @@ body { min-height: 100vh; padding-bottom: 120px; }
   transition: background .14s, border-color .14s; }
 .tick svg { width: 14px; height: 14px; }
 .item.selected .tick { background: var(--grad); border-color: transparent; color: #fff; }
-.zoom, .crop { position: absolute; left: 7px; width: 28px; height: 28px; border-radius: 9px; border: 1px solid var(--line2);
+.zoom, .crop, .duplicate { position: absolute; left: 7px; width: 28px; height: 28px; border-radius: 9px; border: 1px solid var(--line2);
   background: rgba(9,11,15,.55); backdrop-filter: blur(6px); color: var(--text); padding: 0;
   display: flex; align-items: center; justify-content: center; z-index: 2; opacity: 0; transition: opacity .14s, background .14s; }
 .zoom { top: 7px; cursor: zoom-in; }
 .crop { top: 40px; cursor: crosshair; }
-.item:hover .zoom, .item:hover .crop { opacity: 1; }
-.zoom svg, .crop svg { width: 15px; height: 15px; }
-.zoom:hover, .crop:hover { background: var(--grad); border-color: transparent; }
+.duplicate { top: 106px; cursor: copy; }
+.item:hover .zoom, .item:hover .crop, .item:hover .duplicate { opacity: 1; }
+.zoom svg, .crop svg, .duplicate svg { width: 15px; height: 15px; }
+.zoom:hover, .crop:hover, .duplicate:hover { background: var(--grad); border-color: transparent; }
 .item.cropped .crop { background: var(--grad-ok); opacity: 1; }
 .meta { margin-top: 8px; font-size: 11px; font-weight: 500; color: var(--muted); text-align: center; direction: ltr; }
 .item.failed .meta { direction: rtl; color: #fda4af; }
@@ -63,10 +64,10 @@ body { min-height: 100vh; padding-bottom: 120px; }
 .page-order { width: 62px; padding: 4px 6px; border-radius: 8px; border: 1px solid var(--line2); background: rgba(255,255,255,.04); color: var(--text);
   font: 600 12px 'Vazirmatn', Tahoma, sans-serif; text-align: center; direction: ltr; }
 .page-order:focus { outline: none; border-color: var(--a1); box-shadow: 0 0 0 2px rgba(139,123,255,.2); }
-.copies-control { margin-top: 6px; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
-.pdf-copies { width: 54px; padding: 4px 5px; border-radius: 8px; border: 1px solid var(--line2); background: rgba(255,255,255,.04); color: var(--text);
+.scale-control { margin-top: 6px; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.pdf-scale { width: 58px; padding: 4px 5px; border-radius: 8px; border: 1px solid var(--line2); background: rgba(255,255,255,.04); color: var(--text);
   font: 600 12px 'Vazirmatn', Tahoma, sans-serif; text-align: center; direction: ltr; }
-.pdf-copies:focus { outline: none; border-color: var(--a1); box-shadow: 0 0 0 2px rgba(139,123,255,.2); }
+.pdf-scale:focus { outline: none; border-color: var(--a1); box-shadow: 0 0 0 2px rgba(139,123,255,.2); }
 .spin { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; font-weight: 600; }
 
 .dock { position: fixed; right: 0; left: 0; bottom: 0; z-index: 20; background: rgba(9,11,15,.8);
