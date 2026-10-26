@@ -31,24 +31,25 @@
     </section>
 
     <section class="toolbar panel">
+      <div class="toolbar-actions">
+        <button class="mini" id="btnAll">انتخاب همه</button>
+        <button class="mini" id="btnNone">لغو انتخاب</button>
+        <button class="mini" id="btnInv">معکوس‌کردن انتخاب</button>
+        <button class="mini accent" id="btnGroupPage" disabled>ساخت گروه از انتخاب‌ها</button>
+        <button class="mini" id="btnUngroupPage" disabled>لغو گروهِ انتخاب‌ها</button>
+        <span id="toolbarSelectionCount" class="toolbar-selection-count">—</span>
+      </div>
       <div class="toolbar-status">
         <span id="loadText">در حال دریافت تصاویر...</span>
         <div class="bar small"><div id="loadBar"></div></div>
       </div>
       <div id="loadErrors" class="load-errors hidden" role="status"></div>
       <div class="toolbar-menus">
-        <details class="tool-menu">
-          <summary>انتخاب و چیدمان تصویرها</summary>
+        <details class="tool-menu" id="groupMenu">
+          <summary>مدیریت گروه‌ها</summary>
           <div class="tool-menu-body">
-            <div class="tool-actions">
-              <button class="mini" id="btnAll">انتخاب همه</button>
-              <button class="mini" id="btnNone">هیچ‌کدام</button>
-              <button class="mini" id="btnInv">معکوس انتخاب</button>
-              <button class="mini accent" id="btnGroupPage" disabled>ساخت گروه از انتخاب‌ها</button>
-              <button class="mini" id="btnUngroupPage" disabled>لغو گروهِ انتخاب‌ها</button>
-            </div>
-            <p class="menu-hint">برای ساخت چند گروه، اعضای هر صفحه را جداگانه انتخاب و «ساخت گروه» را بزنید. برای تغییر ترتیب، کارت‌ها را بکشید یا شمارهٔ ترتیب را عوض کنید.</p>
-            <div class="group-manager"><strong>گروه‌ها</strong><div id="groupList" class="group-list"><span class="group-empty">هنوز گروهی نساخته‌اید.</span></div></div>
+            <p class="menu-hint">برای ساخت هر گروه، کارت‌های اعضای یک صفحه را انتخاب کنید و دکمهٔ «ساخت گروه» بالای صفحه را بزنید. با کلیک روی گروه، اعضایش انتخاب و اولین تصویرش در مرکز صفحه نمایش داده می‌شود.</p>
+            <div class="group-manager"><strong>گروه‌های ساخته‌شده</strong><div id="groupList" class="group-list"><span class="group-empty">هنوز گروهی نساخته‌اید.</span></div></div>
           </div>
         </details>
         <details class="tool-menu">

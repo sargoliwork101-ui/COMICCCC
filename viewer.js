@@ -364,6 +364,8 @@ function refreshSummary() {
   const sel = selectedItems.length;
   const failedN = items.filter((it) => it.state === 'failed').length;
   $('selCount').innerText = `${sel} از ${ok} تصویر انتخاب شده`;
+  const topCount = $('toolbarSelectionCount');
+  if (topCount) topCount.innerText = `${sel} انتخاب`;
   $('btnRetry').classList.toggle('hidden', failedN === 0 || loading);
   $('buildBtn').disabled = loading || building || sel === 0;
   $('saveImgBtn').disabled = loading || building || sel === 0;
@@ -395,13 +397,26 @@ function refreshGroupManager() {
   }
   container.innerHTML = [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([id, members]) => {
     const allSelected = members.every((it) => it.selected);
-    return `<span class="group-chip"><button type="button" class="group-select" data-group="${id}" aria-pressed="${allSelected}" title="برای انتخاب اعضای این گروه کلیک کنید">گروه ${id} · ${members.length} کارت</button><button type="button" class="group-remove" data-group="${id}" aria-label="حذف گروه ${id}" title="لغو این گروه">×</button></span>`;
+    return `<span class="group-chip"><button type="button" class="group-select" data-group="${id}" aria-pressed="${allSelected}" title="اعضای گروه را انتخاب می‌کند و به اولین تصویر می‌برد">گروه ${id} · ${members.length} کارت</button><button type="button" class="group-remove" data-group="${id}" aria-label="حذف گروه ${id}" title="لغو این گروه">×</button></span>`;
   }).join('');
   container.querySelectorAll('.group-select').forEach((button) => button.addEventListener('click', () => {
     const groupId = Number(button.dataset.group);
-    items.forEach((it) => { it.selected = it.state === 'ok' && it.pageGroup === groupId; });
+    const members = items.filter((it) => it.state === 'ok' && it.pageGroup === groupId);
+    items.forEach((it) => { it.selected = members.includes(it); });
     lastClicked = null;
     refreshAll();
+    const groupMenu = $('groupMenu');
+    if (groupMenu) groupMenu.open = false;
+    members.forEach((it) => it.el.classList.add('group-focus'));
+    const first = members[0] && members[0].el;
+    if (first) {
+      first.tabIndex = -1;
+      requestAnimationFrame(() => {
+        first.focus({ preventScroll: true });
+        first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    }
+    setTimeout(() => members.forEach((it) => it.el.classList.remove('group-focus')), 2400);
   }));
   container.querySelectorAll('.group-remove').forEach((button) => button.addEventListener('click', () => {
     const groupId = Number(button.dataset.group);
