@@ -3,6 +3,7 @@ const $ = (id) => document.getElementById(id);
 const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 const ICON_ZOOM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg>';
 const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/></svg>';
+const ICON_CROP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v13a2 2 0 0 0 2 2h13M3 6h13a2 2 0 0 1 2 2v13"/></svg>';
 const CONCURRENCY = 4;
 const MAX_CANVAS_H = 16000;
 
@@ -15,6 +16,11 @@ let lastClicked = -1;
 let lastObjUrl = null;
 let draggedItem = null;
 let suppressCardClickUntil = 0;
+let lbItem = null;
+let cropItem = null;
+let cropObjectUrl = null;
+let cropRectDraft = null;
+let cropDragStart = null;
 
 // ---------- دانلود تصاویر ----------
 async function setRefererRule(pageUrl) {
@@ -123,9 +129,18 @@ function makeCard(it) {
   el.innerHTML = `<div class="tw"><canvas width="240" height="320"></canvas><div class="spin">در حال دریافت...</div>
     <span class="idx">${it.i + 1}</span><span class="tick">${ICON_CHECK}</span>
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
+    <button class="crop" title="کراپ دستی">${ICON_CROP}</button>
     <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button><span class="fa-badge">ترجمه شد</span></div><div class="meta">…</div>
-    <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>`;
+    <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>
+    <div class="copies-control"><span>تعداد نسخه در PDF</span><input class="pdf-copies" type="number" min="1" max="20" step="1" value="${it.pdfCopies || 1}" aria-label="تعداد نسخه در PDF، حداکثر ۲۰"></div>`;
   const orderInput = el.querySelector('.page-order');
+  const copiesInput = el.querySelector('.pdf-copies');
+  copiesInput.addEventListener('click', (ev) => ev.stopPropagation());
+  copiesInput.addEventListener('change', () => {
+    const value = Number.parseInt(copiesInput.value, 10);
+    it.pdfCopies = Number.isFinite(value) ? Math.max(1, Math.min(20, value)) : 1;
+    copiesInput.value = String(it.pdfCopies);
+  });
   orderInput.addEventListener('click', (ev) => ev.stopPropagation());
   orderInput.addEventListener('change', () => {
     const value = Number.parseInt(orderInput.value, 10);
@@ -148,6 +163,7 @@ function makeCard(it) {
     if (Date.now() < suppressCardClickUntil) { ev.preventDefault(); return; }
     if (ev.target.closest('.page-order')) return;
     if (ev.target.closest('.zoom')) { openLightbox(it); return; }
+    if (ev.target.closest('.crop')) { openCropper(it); return; }
     if (ev.target.closest('.edit')) { if (typeof openEditor === 'function') openEditor(it); return; }
     if (it.state !== 'ok') return;
     if (ev.shiftKey && lastClicked >= 0) {
@@ -169,6 +185,7 @@ function refreshCard(it) {
   el.classList.toggle('selected', !!it.selected);
   el.classList.toggle('failed', it.state === 'failed');
   el.classList.toggle('translated', !!it.edited);
+  el.classList.toggle('cropped', !!it.cropRect);
   el.classList.toggle('has-ocr', !!it.ocr);
   const meta = el.querySelector('.meta');
   const spin = el.querySelector('.spin');
@@ -183,16 +200,43 @@ function refreshCard(it) {
   }
 }
 
+async function getDisplaySource(it) {
+  const owner = it.sourceItem || it;
+  const base = owner.edited || owner;
+  const rect = owner.cropRect;
+  if (!rect) return base;
+  const key = [rect.x, rect.y, rect.w, rect.h].join(':');
+  if (owner.cropCache && owner.cropCache.base === base && owner.cropCache.key === key) return owner.cropCache;
+
+  const bmp = await createImageBitmap(base.blob, { imageOrientation: 'none' });
+  try {
+    const x = Math.max(0, Math.min(bmp.width - 1, Math.round(rect.x * bmp.width)));
+    const y = Math.max(0, Math.min(bmp.height - 1, Math.round(rect.y * bmp.height)));
+    const w = Math.max(1, Math.min(bmp.width - x, Math.round(rect.w * bmp.width)));
+    const h = Math.max(1, Math.min(bmp.height - y, Math.round(rect.h * bmp.height)));
+    if (!canConvert(w, h)) throw new Error('ابعاد ناحیهٔ برش برای پردازش بیش از حد بزرگ است');
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(bmp, x, y, w, h, 0, 0, w, h);
+    const blob = await canvasToBlob(cv, 'image/png');
+    cv.width = cv.height = 0;
+    const info = sniff(new Uint8Array(await blob.arrayBuffer()));
+    owner.cropCache = { i: owner.i, blob, info, w, h, base, key };
+    return owner.cropCache;
+  } finally { bmp.close(); }
+}
+
 async function drawThumb(it) {
   try {
-    const bmp = await createImageBitmap(it.edited ? it.edited.blob : it.blob, { resizeWidth: 240, resizeQuality: 'medium' });
+    const src = await getDisplaySource(it);
+    const bmp = await createImageBitmap(src.blob, { resizeWidth: 240, resizeQuality: 'medium' });
     const c = it.el.querySelector('canvas'), ctx = c.getContext('2d');
     ctx.fillStyle = '#171c26'; ctx.fillRect(0, 0, c.width, c.height);
     const dh = Math.min(bmp.height, c.height);
     const dy = bmp.height < c.height ? Math.round((c.height - bmp.height) / 2) : 0;
     ctx.drawImage(bmp, 0, 0, bmp.width, dh, 0, dy, bmp.width, dh);
     bmp.close();
-  } catch (e) { /* مهم نیست */ }
+  } catch (e) { console.warn('پیش‌نمایش تصویر ناموفق', e); }
 }
 
 async function loadOne(it) {
@@ -259,27 +303,117 @@ function refreshSummary() {
   $('btnRetry').classList.toggle('hidden', failedN === 0 || loading);
   $('buildBtn').disabled = loading || building || sel === 0;
   $('saveImgBtn').disabled = loading || building || sel === 0;
+  $('seamless').disabled = loading || building || $('twoPerPage').checked;
+  $('twoPerPage').disabled = loading || building || $('seamless').checked;
   $('ocrEnabled').disabled = loading || building;
   $('btnTranslate').disabled = loading || building || ok === 0 || !$('ocrEnabled').checked;
   $('btnTxt').classList.toggle('hidden', !items.some((it) => it.ocr));
 }
 function refreshAll() { items.forEach(refreshCard); refreshSummary(); }
 
-// ---------- نمایش بزرگ ----------
+// ---------- نمایش بزرگ، کپی و کراپ دستی ----------
 let lbUrl = null;
-function openLightbox(it) {
+async function openLightbox(it) {
   if (!it.blob) return;
-  lbUrl = URL.createObjectURL(it.edited ? it.edited.blob : it.blob);
-  $('lbImg').src = lbUrl;
-  $('lightbox').classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
+  try {
+    const src = await getDisplaySource(it);
+    lbItem = it;
+    if (lbUrl) URL.revokeObjectURL(lbUrl);
+    lbUrl = URL.createObjectURL(src.blob);
+    $('lbImg').src = lbUrl;
+    $('lightbox').classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  } catch (e) { alert('بازکردن تصویر ناموفق بود: ' + (e.message || e)); }
 }
 function closeLightbox() {
   $('lightbox').classList.add('hidden');
   $('lbImg').removeAttribute('src');
   if (lbUrl) { URL.revokeObjectURL(lbUrl); lbUrl = null; }
+  lbItem = null;
   document.body.style.overflow = '';
 }
+
+async function copyLightboxImage() {
+  if (!lbItem) return;
+  try {
+    if (!navigator.clipboard || !window.ClipboardItem) throw new Error('مرورگر اجازهٔ کپی تصویر به کلیپ‌بورد را نمی‌دهد');
+    const src = await getDisplaySource(lbItem);
+    let blob = src.blob;
+    if (blob.type !== 'image/png') {
+      const bmp = await createImageBitmap(blob);
+      const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
+      cv.getContext('2d').drawImage(bmp, 0, 0); bmp.close();
+      blob = await canvasToBlob(cv, 'image/png'); cv.width = cv.height = 0;
+    }
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    const btn = $('lbCopy');
+    btn.innerText = 'کپی شد ✓';
+    setTimeout(() => { if (btn.isConnected) btn.innerText = 'کپی تصویر'; }, 1400);
+  } catch (e) { alert('کپی تصویر ناموفق بود: ' + (e.message || e)); }
+}
+
+function cropPoint(ev) {
+  const r = $('cropImg').getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  return { x: Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)), y: Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height)) };
+}
+function paintCropSelection(rect) {
+  const el = $('cropSelection');
+  if (!rect || rect.w <= 0 || rect.h <= 0) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.style.left = (rect.x * 100) + '%'; el.style.top = (rect.y * 100) + '%';
+  el.style.width = (rect.w * 100) + '%'; el.style.height = (rect.h * 100) + '%';
+}
+async function openCropper(it) {
+  if (!it || !it.blob) return;
+  cropItem = it;
+  cropRectDraft = it.cropRect ? { ...it.cropRect } : null;
+  const base = it.edited || it;
+  if (cropObjectUrl) URL.revokeObjectURL(cropObjectUrl);
+  cropObjectUrl = URL.createObjectURL(base.blob);
+  $('cropImg').src = cropObjectUrl;
+  $('cropTitle').innerText = `کراپ تصویر ${it.i + 1}`;
+  $('cropper').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  paintCropSelection(cropRectDraft);
+}
+function closeCropper() {
+  $('cropper').classList.add('hidden');
+  $('cropImg').removeAttribute('src');
+  $('cropSelection').style.display = 'none';
+  if (cropObjectUrl) { URL.revokeObjectURL(cropObjectUrl); cropObjectUrl = null; }
+  cropItem = null; cropDragStart = null;
+  document.body.style.overflow = '';
+}
+function applyCrop() {
+  if (!cropItem) return;
+  if (cropRectDraft === null) cropItem.cropRect = null;
+  else if (cropRectDraft.w >= 0.01 && cropRectDraft.h >= 0.01) cropItem.cropRect = { ...cropRectDraft };
+  cropItem.cropCache = null;
+  const it = cropItem;
+  closeCropper();
+  refreshCard(it);
+  drawThumb(it);
+}
+function beginCropSelection(ev) {
+  if (!cropItem || ev.button !== 0) return;
+  ev.preventDefault();
+  const p = cropPoint(ev);
+  if (!p) return;
+  cropDragStart = p;
+  cropRectDraft = { x: p.x, y: p.y, w: 0, h: 0 };
+  paintCropSelection(cropRectDraft);
+  $('cropStage').setPointerCapture(ev.pointerId);
+}
+function moveCropSelection(ev) {
+  if (!cropDragStart) return;
+  const p = cropPoint(ev);
+  if (!p) return;
+  const x = Math.min(p.x, cropDragStart.x), y = Math.min(p.y, cropDragStart.y);
+  cropRectDraft = { x, y, w: Math.abs(p.x - cropDragStart.x), h: Math.abs(p.y - cropDragStart.y) };
+  paintCropSelection(cropRectDraft);
+}
+function endCropSelection() { cropDragStart = null; }
 
 // ---------- آماده‌سازی تصاویر برای PDF ----------
 async function decodeSlices(it, maxSrcH) {
@@ -299,22 +433,23 @@ async function decodeSlices(it, maxSrcH) {
       ctx.drawImage(bmp, 0, y, bmp.width, sh, 0, 0, bmp.width, sh);
       const data = canvas.toDataURL(asPng ? 'image/png' : 'image/jpeg', 0.98);
       canvas.width = canvas.height = 0;
-      segs.push({ data, fmt: asPng ? 'PNG' : 'JPEG', w: bmp.width, h: sh, alias: `i${it.i}_${y}` });
+      segs.push({ data, fmt: asPng ? 'PNG' : 'JPEG', w: bmp.width, h: sh, alias: `i${it.pdfKey || it.i}_${y}` });
     }
   } finally { bmp.close(); }
   return segs;
 }
 
 async function prepare(it, r) {
-  const src = it.edited || it; // تصویر ترجمه‌شده (در صورت وجود) یا تصویر اصلی
+  const src = await getDisplaySource(it);
   const rawMax = Math.floor(PdfBuilder.SAFE_PT / r);
   const inf = src.info;
+  const key = it.pdfKey || it.i;
   // فایل JPEG/PNG بدون هیچ فشرده‌سازی مجدد
   if (inf && inf.ok && inf.h <= rawMax) {
     const u8 = new Uint8Array(await src.blob.arrayBuffer());
-    return [{ data: u8, fmt: inf.fmt, w: inf.w, h: inf.h, alias: `i${it.i}` }];
+    return [{ data: u8, fmt: inf.fmt, w: inf.w, h: inf.h, alias: `i${key}` }];
   }
-  return decodeSlices({ i: it.i, blob: src.blob, info: src.info }, Math.min(rawMax, MAX_CANVAS_H));
+  return decodeSlices({ i: key, pdfKey: key, blob: src.blob, info: src.info }, Math.min(rawMax, MAX_CANVAS_H));
 }
 
 async function fallback(seg) {
@@ -331,6 +466,44 @@ async function fallback(seg) {
   return { data, fmt: 'JPEG' };
 }
 
+async function composePairVertically(pair, pairIndex) {
+  const sources = await Promise.all(pair.map(getDisplaySource));
+  const bmps = await Promise.all(sources.map((src) => createImageBitmap(src.blob, { imageOrientation: 'none' })));
+  try {
+    const maxW = Math.max(...bmps.map((b) => b.width));
+    const rawHeights = bmps.map((b) => b.height * maxW / b.width);
+    const rawH = rawHeights.reduce((sum, h) => sum + h, 0);
+    const scale = Math.min(1, 16000 / maxW, 16000 / rawH, Math.sqrt(180000000 / (maxW * rawH)));
+    const w = Math.max(1, Math.floor(maxW * scale));
+    const heights = rawHeights.map((h) => Math.max(1, Math.round(h * scale)));
+    const h = heights.reduce((sum, n) => sum + n, 0);
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
+    let y = 0;
+    bmps.forEach((bmp, k) => {
+      ctx.drawImage(bmp, 0, y, w, heights[k]);
+      y += heights[k];
+    });
+    const blob = await canvasToBlob(cv, 'image/png');
+    cv.width = cv.height = 0;
+    return { i: pair[0].i, pdfKey: `pair_${pairIndex}`, blob, w, h, info: sniff(new Uint8Array(await blob.arrayBuffer())) };
+  } finally { bmps.forEach((bmp) => bmp.close()); }
+}
+
+async function makePdfItems(selected, twoPerPage) {
+  const expanded = selected.flatMap((it) => {
+    const count = Math.max(1, Math.min(20, Number.parseInt(it.pdfCopies, 10) || 1));
+    return Array.from({ length: count }, (_, n) => ({ ...it, sourceItem: it.sourceItem || it, pdfKey: `image_${it.i}_copy_${n + 1}` }));
+  });
+  if (!twoPerPage) return expanded;
+  const pages = [];
+  for (let i = 0; i < expanded.length; i += 2) {
+    pages.push(i + 1 < expanded.length ? await composePairVertically(expanded.slice(i, i + 2), pages.length) : expanded[i]);
+  }
+  return pages;
+}
+
 // ---------- ساخت PDF ----------
 async function onBuild() {
   if (building || loading) return;
@@ -345,6 +518,7 @@ async function onBuild() {
   let name = $('pdfName').value.trim() || 'comic';
   if (!name.toLowerCase().endsWith('.pdf')) name += '.pdf';
   const seamless = $('seamless').checked;
+  const twoPerPage = $('twoPerPage').checked && !seamless;
 
   const result = $('result');
   result.classList.remove('hidden', 'done');
@@ -358,9 +532,11 @@ async function onBuild() {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
   try {
+    setStatus(twoPerPage ? 'در حال چیدن تصاویر دوتایی در صفحه‌های عمودی...' : 'در حال آماده‌سازی تصاویر PDF...');
+    const pdfItems = await makePdfItems(sel, twoPerPage);
     const res = await PdfBuilder.build({
       jsPDF: jsPDFLib,
-      items: sel,
+      items: pdfItems,
       seamless,
       prepare,
       fallback,
@@ -388,7 +564,8 @@ async function onBuild() {
     $('sSize').innerText = mb;
     result.classList.add('done');
     $('progressBar').style.width = '100%';
-    setStatus(`آماده شد! ${sel.length} تصویر در ${res.pages} صفحه ${seamless ? '(یک صفحهٔ بلند)' : ''} قرار گرفت. اگر دانلود شروع نشد، دکمهٔ «دانلود PDF» را بزنید.`);
+    const layoutNote = seamless ? ' (یک صفحهٔ بلند)' : twoPerPage ? ' (دو تصویر عمودی در هر صفحه)' : '';
+    setStatus(`آماده شد! فایل PDF با ${res.pages} صفحه${layoutNote} ساخته شد. اگر دانلود شروع نشد، دکمهٔ «دانلود PDF» را بزنید.`);
     btn.click();
   } catch (e) {
     console.error(e);
@@ -430,11 +607,11 @@ const canvasToBlob = (cv, type, q) => new Promise((res, rej) => cv.toBlob((b) =>
 
 // خروجی هر تصویر: فایل اصلی بدون دستکاری، یا تبدیل به PNG (بدون افت) / JPEG (بالاترین کیفیت)
 async function exportBlob(it, fmt) {
-  const src = it.edited || it;
+  const src = await getDisplaySource(it);
   const srcExt = await blobExt(src.blob);
   const want = fmt === 'png' ? 'png' : fmt === 'jpg' ? 'jpg' : null;
   if (!want || srcExt === want) return { blob: src.blob, ext: srcExt };
-  if (!canConvert(it.w, it.h)) return { blob: src.blob, ext: srcExt, note: 'ابعاد برای تبدیل بیش از حد بزرگ است؛ فایل اصلی ذخیره شد' };
+  if (!canConvert(src.w, src.h)) return { blob: src.blob, ext: srcExt, note: 'ابعاد برای تبدیل بیش از حد بزرگ است؛ فایل اصلی ذخیره شد' };
   const bmp = await createImageBitmap(src.blob, { imageOrientation: 'none' });
   try {
     const cv = document.createElement('canvas');
@@ -591,7 +768,7 @@ async function main() {
     updatePdfOrderFromGrid();
     suppressCardClickUntil = Date.now() + 350;
   });
-  items = job.urls.map((url, i) => ({ i, url, pdfOrder: i + 1, state: 'loading', selected: true }));
+  items = job.urls.map((url, i) => ({ i, url, pdfOrder: i + 1, pdfCopies: 1, state: 'loading', selected: true }));
   items.forEach((it) => grid.appendChild(makeCard(it)));
 
   $('btnAll').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = true; }); refreshAll(); };
@@ -602,9 +779,29 @@ async function main() {
   $('saveImgBtn').onclick = onSaveImages;
   $('modePdf').onclick = () => setMode('pdf');
   $('modeImg').onclick = () => setMode('img');
+  $('seamless').addEventListener('change', () => {
+    if ($('seamless').checked) $('twoPerPage').checked = false;
+    refreshSummary();
+  });
+  $('twoPerPage').addEventListener('change', () => {
+    if ($('twoPerPage').checked) $('seamless').checked = false;
+    refreshSummary();
+  });
   $('lbClose').onclick = closeLightbox;
+  $('lbCopy').onclick = copyLightboxImage;
   $('lightbox').addEventListener('click', (e) => { if (e.target.id === 'lightbox') closeLightbox(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLightbox(); });
+  $('cropCancel').onclick = closeCropper;
+  $('cropReset').onclick = () => { cropRectDraft = null; paintCropSelection(null); };
+  $('cropApply').onclick = applyCrop;
+  $('cropStage').addEventListener('pointerdown', beginCropSelection);
+  $('cropStage').addEventListener('pointermove', moveCropSelection);
+  $('cropStage').addEventListener('pointerup', endCropSelection);
+  $('cropStage').addEventListener('pointercancel', endCropSelection);
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!$('cropper').classList.contains('hidden')) closeCropper();
+    else if (!$('lightbox').classList.contains('hidden')) closeLightbox();
+  });
   window.addEventListener('pagehide', () => { chrome.storage.local.remove(jobKey); clearRefererRule(); });
 
   await loadAll(items);

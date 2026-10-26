@@ -62,6 +62,10 @@
           <input type="checkbox" id="seamless">
           <span>چسباندن همه در یک صفحهٔ بلند</span>
         </label>
+        <label class="check" title="هر دو تصویر متوالی به‌صورت عمودی در یک صفحهٔ PDF قرار می‌گیرند">
+          <input type="checkbox" id="twoPerPage">
+          <span>دو تصویر در هر صفحه (عمودی)</span>
+        </label>
         <input type="text" id="pdfName" value="comic" spellcheck="false" aria-label="نام فایل PDF">
         <button id="buildBtn" class="btn" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z M14 3v5h5"/></svg>
@@ -121,8 +125,26 @@
     </div>
   </div>
 
+  <div id="cropper" class="hidden">
+    <div class="crop-head">
+      <strong id="cropTitle">کراپ تصویر</strong>
+      <div class="crop-actions">
+        <button class="mini" id="cropReset">حذف برش</button>
+        <button class="mini" id="cropCancel">انصراف</button>
+        <button class="btn" id="cropApply">اعمال برش</button>
+      </div>
+    </div>
+    <div class="crop-body">
+      <div id="cropStage" class="crop-stage"><img id="cropImg" alt=""><div id="cropSelection"></div></div>
+    </div>
+    <p class="crop-help">روی تصویر بکش تا محدودهٔ برش را مشخص کنی؛ برای تغییر دوباره، محدودهٔ تازه‌ای بکش.</p>
+  </div>
+
   <div id="lightbox" class="hidden">
-    <button id="lbClose" aria-label="بستن">✕</button>
+    <div class="lb-head">
+      <button id="lbClose" aria-label="بستن">✕</button>
+      <button class="mini accent" id="lbCopy">کپی تصویر</button>
+    </div>
     <div class="lbscroll"><img id="lbImg" alt=""></div>
   </div>
 

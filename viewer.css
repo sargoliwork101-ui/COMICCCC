@@ -48,18 +48,25 @@ body { min-height: 100vh; padding-bottom: 120px; }
   transition: background .14s, border-color .14s; }
 .tick svg { width: 14px; height: 14px; }
 .item.selected .tick { background: var(--grad); border-color: transparent; color: #fff; }
-.zoom { position: absolute; top: 7px; left: 7px; width: 28px; height: 28px; border-radius: 9px; border: 1px solid var(--line2);
-  background: rgba(9,11,15,.55); backdrop-filter: blur(6px); color: var(--text); cursor: zoom-in; padding: 0;
+.zoom, .crop { position: absolute; left: 7px; width: 28px; height: 28px; border-radius: 9px; border: 1px solid var(--line2);
+  background: rgba(9,11,15,.55); backdrop-filter: blur(6px); color: var(--text); padding: 0;
   display: flex; align-items: center; justify-content: center; z-index: 2; opacity: 0; transition: opacity .14s, background .14s; }
-.item:hover .zoom { opacity: 1; }
-.zoom svg { width: 15px; height: 15px; }
-.zoom:hover { background: var(--grad); border-color: transparent; }
+.zoom { top: 7px; cursor: zoom-in; }
+.crop { top: 40px; cursor: crosshair; }
+.item:hover .zoom, .item:hover .crop { opacity: 1; }
+.zoom svg, .crop svg { width: 15px; height: 15px; }
+.zoom:hover, .crop:hover { background: var(--grad); border-color: transparent; }
+.item.cropped .crop { background: var(--grad-ok); opacity: 1; }
 .meta { margin-top: 8px; font-size: 11px; font-weight: 500; color: var(--muted); text-align: center; direction: ltr; }
 .item.failed .meta { direction: rtl; color: #fda4af; }
 .order-control { margin-top: 7px; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
 .page-order { width: 62px; padding: 4px 6px; border-radius: 8px; border: 1px solid var(--line2); background: rgba(255,255,255,.04); color: var(--text);
   font: 600 12px 'Vazirmatn', Tahoma, sans-serif; text-align: center; direction: ltr; }
 .page-order:focus { outline: none; border-color: var(--a1); box-shadow: 0 0 0 2px rgba(139,123,255,.2); }
+.copies-control { margin-top: 6px; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.pdf-copies { width: 54px; padding: 4px 5px; border-radius: 8px; border: 1px solid var(--line2); background: rgba(255,255,255,.04); color: var(--text);
+  font: 600 12px 'Vazirmatn', Tahoma, sans-serif; text-align: center; direction: ltr; }
+.pdf-copies:focus { outline: none; border-color: var(--a1); box-shadow: 0 0 0 2px rgba(139,123,255,.2); }
 .spin { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; font-weight: 600; }
 
 .dock { position: fixed; right: 0; left: 0; bottom: 0; z-index: 20; background: rgba(9,11,15,.8);
@@ -83,11 +90,23 @@ body { min-height: 100vh; padding-bottom: 120px; }
 .opts .btn { width: auto; min-width: 200px; }
 
 #lightbox { position: fixed; inset: 0; z-index: 100; background: rgba(5,6,9,.94); backdrop-filter: blur(6px); display: flex; flex-direction: column; }
-#lbClose { align-self: flex-start; margin: 14px; width: 40px; height: 40px; border-radius: 12px; border: 1px solid var(--line2);
+.lb-head { display: flex; align-items: center; justify-content: space-between; padding: 14px; flex: none; }
+#lbClose { align-self: flex-start; margin: 0; width: 40px; height: 40px; border-radius: 12px; border: 1px solid var(--line2);
   background: rgba(255,255,255,.08); color: var(--text); font-size: 16px; cursor: pointer; flex: none; transition: background .15s; }
 #lbClose:hover { background: var(--grad); border-color: transparent; }
 .lbscroll { flex: 1; overflow: auto; text-align: center; padding: 0 16px 30px; }
 .lbscroll img { max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 20px 60px rgba(0,0,0,.7); background: #fff; }
+
+#cropper { position: fixed; inset: 0; z-index: 110; display: flex; flex-direction: column; background: var(--bg); }
+.crop-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px; background: var(--surface); border-bottom: 1px solid var(--line); }
+#cropTitle { font: 800 15px 'Vazirmatn', sans-serif; }
+.crop-actions { display: flex; align-items: center; gap: 8px; }
+.crop-actions .btn { width: auto; padding: 8px 18px; }
+.crop-body { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 18px; }
+.crop-stage { position: relative; display: inline-block; max-width: 100%; max-height: 100%; touch-action: none; cursor: crosshair; user-select: none; }
+.crop-stage img { display: block; max-width: min(90vw, 1200px); max-height: 76vh; width: auto; height: auto; object-fit: contain; pointer-events: none; }
+#cropSelection { display: none; position: absolute; border: 2px solid #34d399; background: rgba(52,211,153,.18); box-shadow: 0 0 0 9999px rgba(0,0,0,.4); pointer-events: none; }
+.crop-help { flex: none; text-align: center; color: var(--muted); font-size: 12px; margin: 0 12px 14px; }
 
 @media (max-width: 760px) {
   .dock-in { padding: 10px 14px; }
@@ -104,7 +123,7 @@ body { min-height: 100vh; padding-bottom: 120px; }
 .sel:focus { border-color: var(--a1); box-shadow: 0 0 0 3px rgba(139,123,255,.22); }
 .sel option { background: #171c26; color: var(--text); }
 
-.edit { position: absolute; top: 40px; left: 7px; width: 28px; height: 28px; border-radius: 9px; border: 1px solid var(--line2);
+.edit { position: absolute; top: 73px; left: 7px; width: 28px; height: 28px; border-radius: 9px; border: 1px solid var(--line2);
   background: rgba(9,11,15,.55); backdrop-filter: blur(6px); color: var(--text); cursor: pointer; padding: 0; display: none;
   align-items: center; justify-content: center; z-index: 2; transition: background .14s; }
 .edit svg { width: 14px; height: 14px; }
