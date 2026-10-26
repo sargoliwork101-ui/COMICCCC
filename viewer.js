@@ -374,6 +374,7 @@ function refreshSummary() {
   const ok = items.filter((it) => it.state === 'ok').length;
   const selectedItems = items.filter((it) => it.state === 'ok' && it.selected);
   const sel = selectedItems.length;
+  const selectedGroups = [...new Set(selectedItems.map((it) => Number(it.pageGroup)).filter((id) => Number.isInteger(id) && id > 0))].sort((a, b) => a - b);
   const failedN = items.filter((it) => it.state === 'failed').length;
   $('selCount').innerText = `${sel} از ${ok} تصویر انتخاب شده`;
   const topCount = $('toolbarSelectionCount');
@@ -384,8 +385,13 @@ function refreshSummary() {
   $('seamless').disabled = loading || building || $('twoPerPage').checked;
   $('twoPerPage').disabled = loading || building || $('seamless').checked;
   $('uniformSize').disabled = loading || building || $('seamless').checked;
-  $('btnGroupPage').disabled = loading || building || sel < 2;
-  $('btnGroupPage').innerText = `ساخت یک گروه از ${sel} انتخاب`;
+  const groupingUnchanged = selectedGroups.length === 1 && selectedItems.every((it) => Number(it.pageGroup) === selectedGroups[0]);
+  $('btnGroupPage').disabled = loading || building || sel < 2 || groupingUnchanged;
+  $('btnGroupPage').innerText = selectedGroups.length > 1
+    ? `ادغام گروه‌ها در گروه ${selectedGroups[0]}`
+    : selectedGroups.length === 1
+      ? `افزودن انتخاب‌ها به گروه ${selectedGroups[0]}`
+      : `ساخت یک گروه از ${sel} انتخاب`;
   $('btnUngroupPage').disabled = loading || building || !selectedItems.some((it) => it.pageGroup);
   $('ocrEnabled').disabled = loading || building;
   $('btnTranslate').disabled = loading || building || ok === 0 || !$('ocrEnabled').checked;
@@ -433,7 +439,8 @@ function refreshGroupManager() {
   }));
   container.querySelectorAll('.group-remove').forEach((button) => button.addEventListener('click', () => {
     const groupId = Number(button.dataset.group);
-    items.filter((it) => it.pageGroup === groupId).forEach((it) => { it.pageGroup = null; });
+    items.filter((it) => Number(it.pageGroup) === groupId).forEach((it) => { it.pageGroup = null; });
+    cleanupPageGroups();
     refreshAll();
   }));
 }
@@ -450,13 +457,26 @@ function refreshImageWarnings() {
 }
 function cleanupPageGroups() {
   const sizes = new Map();
-  items.forEach((it) => { if (it.pageGroup) sizes.set(it.pageGroup, (sizes.get(it.pageGroup) || 0) + 1); });
-  items.forEach((it) => { if (it.pageGroup && sizes.get(it.pageGroup) < 2) it.pageGroup = null; });
+  items.forEach((it) => {
+    const id = Number(it.pageGroup);
+    if (Number.isInteger(id) && id > 0) sizes.set(id, (sizes.get(id) || 0) + 1);
+    else it.pageGroup = null;
+  });
+  items.forEach((it) => {
+    const id = Number(it.pageGroup);
+    if (id && sizes.get(id) < 2) it.pageGroup = null;
+  });
+  const groupIds = [...new Set(items.map((it) => Number(it.pageGroup)).filter((id) => Number.isInteger(id) && id > 0))].sort((a, b) => a - b);
+  const compactIds = new Map(groupIds.map((id, index) => [id, index + 1]));
+  items.forEach((it) => { if (it.pageGroup) it.pageGroup = compactIds.get(Number(it.pageGroup)) || null; });
+  nextPageGroupId = groupIds.length + 1;
 }
 function groupSelectedItems() {
   const selected = items.filter((it) => it.state === 'ok' && it.selected);
   if (selected.length < 2) return;
-  const groupId = nextPageGroupId++;
+  const existingIds = [...new Set(selected.map((it) => Number(it.pageGroup)).filter((id) => Number.isInteger(id) && id > 0))].sort((a, b) => a - b);
+  const groupId = existingIds[0] || nextPageGroupId;
+  if (selected.every((it) => Number(it.pageGroup) === groupId)) return;
   selected.forEach((it) => { it.pageGroup = groupId; });
   cleanupPageGroups();
   refreshAll();
@@ -1270,9 +1290,9 @@ async function restorePageProfile() {
     const keep = new Set(finalItems);
     baseItems.filter((it) => !keep.has(it)).forEach((it) => { if (it.el && it.el.parentNode) it.el.parentNode.removeChild(it.el); });
     items = finalItems;
+    cleanupPageGroups();
     finalItems.forEach((it) => grid.appendChild(it.el));
     nextItemUid = Math.max(0, ...items.map((it) => it.uid + 1));
-    nextPageGroupId = Math.max(0, ...items.map((it) => Number(it.pageGroup) || 0)) + 1;
     lastClicked = null;
     if ($('groupMenu')) $('groupMenu').open = false;
     refreshAll();
