@@ -472,6 +472,25 @@ async function copyLightboxImage() {
   } catch (e) { alert('کپی تصویر ناموفق بود: ' + (e.message || e)); }
 }
 
+function cropImageDimensions() {
+  const base = cropItem && (cropItem.edited || cropItem);
+  return { w: Math.max(1, Number(base && base.w) || Number(cropItem && cropItem.w) || 1), h: Math.max(1, Number(base && base.h) || Number(cropItem && cropItem.h) || 1) };
+}
+function cropAspectRatio() {
+  const value = $('cropRatio').value;
+  if (!value || value === 'free') return null;
+  const parts = value.split('/').map(Number);
+  return parts.length === 2 && parts[0] > 0 && parts[1] > 0 ? parts[0] / parts[1] : null;
+}
+function syncCropDimensionInputs(rect = cropRectDraft) {
+  const { w, h } = cropImageDimensions();
+  $('cropWidth').placeholder = String(w);
+  $('cropHeight').placeholder = String(h);
+  $('cropWidth').max = String(w);
+  $('cropHeight').max = String(h);
+  $('cropWidth').value = rect && rect.w > 0 ? String(Math.max(1, Math.round(rect.w * w))) : '';
+  $('cropHeight').value = rect && rect.h > 0 ? String(Math.max(1, Math.round(rect.h * h))) : '';
+}
 function cropPoint(ev) {
   const r = $('cropImg').getBoundingClientRect();
   if (!r.width || !r.height) return null;
@@ -479,10 +498,58 @@ function cropPoint(ev) {
 }
 function paintCropSelection(rect) {
   const el = $('cropSelection');
-  if (!rect || rect.w <= 0 || rect.h <= 0) { el.style.display = 'none'; return; }
+  if (!rect || rect.w <= 0 || rect.h <= 0) {
+    el.style.display = 'none';
+    syncCropDimensionInputs(null);
+    return;
+  }
   el.style.display = 'block';
   el.style.left = (rect.x * 100) + '%'; el.style.top = (rect.y * 100) + '%';
   el.style.width = (rect.w * 100) + '%'; el.style.height = (rect.h * 100) + '%';
+  syncCropDimensionInputs(rect);
+}
+function updateCropFromInputs(changed) {
+  if (!cropItem) return;
+  const size = cropImageDimensions();
+  const old = cropRectDraft || { x: 0, y: 0, w: 1, h: 1 };
+  const oldW = Math.max(1, Math.round(old.w * size.w)), oldH = Math.max(1, Math.round(old.h * size.h));
+  const read = (id, fallback) => {
+    const n = Number.parseInt($(id).value, 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  let width = Math.min(size.w, read('cropWidth', oldW));
+  let height = Math.min(size.h, read('cropHeight', oldH));
+  const ratio = cropAspectRatio();
+  if (ratio) {
+    if (changed === 'width') height = Math.max(1, Math.round(width / ratio));
+    else if (changed === 'height') width = Math.max(1, Math.round(height * ratio));
+    const fit = Math.min(1, size.w / width, size.h / height);
+    width = Math.max(1, Math.round(width * fit));
+    height = Math.max(1, Math.round(height * fit));
+  }
+  width = Math.min(size.w, width); height = Math.min(size.h, height);
+  const centerX = old.x + old.w / 2, centerY = old.y + old.h / 2;
+  const w = width / size.w, h = height / size.h;
+  const x = Math.max(0, Math.min(1 - w, centerX - w / 2));
+  const y = Math.max(0, Math.min(1 - h, centerY - h / 2));
+  cropRectDraft = { x, y, w, h };
+  paintCropSelection(cropRectDraft);
+}
+function adjustCropToRatio() {
+  if (!cropItem || !cropRectDraft) return;
+  const ratio = cropAspectRatio();
+  if (!ratio) return;
+  const size = cropImageDimensions();
+  let width = cropRectDraft.w * size.w, height = cropRectDraft.h * size.h;
+  if (width / height > ratio) width = height * ratio;
+  else height = width / ratio;
+  const w = width / size.w, h = height / size.h;
+  cropRectDraft = {
+    x: Math.max(0, Math.min(1 - w, cropRectDraft.x + (cropRectDraft.w - w) / 2)),
+    y: Math.max(0, Math.min(1 - h, cropRectDraft.y + (cropRectDraft.h - h) / 2)),
+    w, h
+  };
+  paintCropSelection(cropRectDraft);
 }
 async function openCropper(it) {
   if (!it || !it.blob) return;
@@ -509,7 +576,7 @@ function closeCropper() {
 function applyCrop() {
   if (!cropItem) return;
   if (cropRectDraft === null) cropItem.cropRect = null;
-  else if (cropRectDraft.w >= 0.01 && cropRectDraft.h >= 0.01) cropItem.cropRect = { ...cropRectDraft };
+  else if (cropRectDraft.w > 0 && cropRectDraft.h > 0) cropItem.cropRect = { ...cropRectDraft };
   cropItem.cropCache = null;
   const it = cropItem;
   closeCropper();
@@ -530,8 +597,18 @@ function moveCropSelection(ev) {
   if (!cropDragStart) return;
   const p = cropPoint(ev);
   if (!p) return;
-  const x = Math.min(p.x, cropDragStart.x), y = Math.min(p.y, cropDragStart.y);
-  cropRectDraft = { x, y, w: Math.abs(p.x - cropDragStart.x), h: Math.abs(p.y - cropDragStart.y) };
+  const size = cropImageDimensions();
+  const dx = (p.x - cropDragStart.x) * size.w, dy = (p.y - cropDragStart.y) * size.h;
+  let width = Math.abs(dx), height = Math.abs(dy);
+  const ratio = cropAspectRatio();
+  if (ratio && width > 0 && height > 0) {
+    if (width / height > ratio) width = height * ratio;
+    else height = width / ratio;
+  }
+  const w = width / size.w, h = height / size.h;
+  const x = dx < 0 ? cropDragStart.x - w : cropDragStart.x;
+  const y = dy < 0 ? cropDragStart.y - h : cropDragStart.y;
+  cropRectDraft = { x, y, w, h };
   paintCropSelection(cropRectDraft);
 }
 function endCropSelection() { cropDragStart = null; }
@@ -539,6 +616,9 @@ function handleOverlayKeydown(e) {
   const cropOpen = !$('cropper').classList.contains('hidden');
   if (e.key === 'Enter' && cropOpen) {
     if (e.target && e.target.closest && e.target.closest('.crop-actions button')) return;
+    if (e.target && e.target.id === 'cropWidth') updateCropFromInputs('width');
+    else if (e.target && e.target.id === 'cropHeight') updateCropFromInputs('height');
+    else if (e.target && e.target.id === 'cropRatio') adjustCropToRatio();
     e.preventDefault();
     applyCrop();
     return;
@@ -967,6 +1047,9 @@ async function main() {
   $('cropCancel').onclick = closeCropper;
   $('cropReset').onclick = () => { cropRectDraft = null; paintCropSelection(null); };
   $('cropApply').onclick = applyCrop;
+  $('cropRatio').addEventListener('change', adjustCropToRatio);
+  $('cropWidth').addEventListener('change', () => updateCropFromInputs('width'));
+  $('cropHeight').addEventListener('change', () => updateCropFromInputs('height'));
   $('cropStage').addEventListener('pointerdown', beginCropSelection);
   $('cropStage').addEventListener('pointermove', moveCropSelection);
   $('cropStage').addEventListener('pointerup', endCropSelection);

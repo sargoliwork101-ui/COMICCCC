@@ -74,6 +74,11 @@ async function runTranslate() {
         try {
           lines = await OcrTools.ocrBitmap(bmp, TR.worker, { cjk: L.cjk, lang, passes, stats, onSlice: (f) => prog(f * 0.6) });
         } finally { bmp.close(); }
+        if (!$('ocrEnabled').checked) {
+          it.ocr = null; it.edited = null;
+          refreshCard(it); drawThumb(it);
+          break;
+        }
         rawTotal += stats.raw; keptTotal += stats.kept;
 
         const blocks = OcrTools.groupLines(lines, L.cjk);
@@ -94,7 +99,17 @@ async function runTranslate() {
               prog(0.6 + 0.35 * (n / blocks.length));
             }
           }));
+          if (!$('ocrEnabled').checked) {
+            it.ocr = null; it.edited = null;
+            refreshCard(it); drawThumb(it);
+            break;
+          }
           await renderEdited(it);
+          if (!$('ocrEnabled').checked) {
+            it.ocr = null; it.edited = null;
+            refreshCard(it); drawThumb(it);
+            break;
+          }
           totalBlocks += blocks.length;
           doneImgs++;
           $('sPages').innerText = totalBlocks;

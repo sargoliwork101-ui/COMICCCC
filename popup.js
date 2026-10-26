@@ -45,7 +45,7 @@ async function scrapeAndSend(pdfName) {
   const box = document.createElement('div');
   box.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;' +
     'background:rgba(17,21,28,.96);color:#e9ecf3;padding:11px 20px;border-radius:14px;border:1px solid rgba(139,123,255,.55);' +
-    'font:600 13.5px Tahoma,sans-serif;box-shadow:0 14px 40px rgba(0,0,0,.55),0 0 0 3px rgba(139,123,255,.18);direction:rtl;pointer-events:none';
+    'font:600 13.5px Vazirmatn,sans-serif;box-shadow:0 14px 40px rgba(0,0,0,.55),0 0 0 3px rgba(139,123,255,.18);direction:rtl;pointer-events:none';
   document.documentElement.appendChild(box);
   const say = (t) => { box.textContent = t; };
 

@@ -143,6 +143,21 @@
         <button class="btn" id="cropApply">اعمال برش</button>
       </div>
     </div>
+    <div class="crop-controls">
+      <label>نسبت تصویر
+        <select id="cropRatio" aria-label="نسبت ابعاد برش">
+          <option value="free">آزاد</option>
+          <option value="1/1">۱:۱</option>
+          <option value="4/3">۴:۳</option>
+          <option value="3/4">۳:۴</option>
+          <option value="16/9">۱۶:۹</option>
+          <option value="9/16">۹:۱۶</option>
+        </select>
+      </label>
+      <label>عرض برش (px)<input id="cropWidth" type="number" min="1" step="1" inputmode="numeric" aria-label="عرض برش بر حسب پیکسل"></label>
+      <label>ارتفاع برش (px)<input id="cropHeight" type="number" min="1" step="1" inputmode="numeric" aria-label="ارتفاع برش بر حسب پیکسل"></label>
+      <span>برای تعیین دقیق ابعاد، عدد وارد کنید؛ قاب را هم می‌توانید با ماوس بکشید.</span>
+    </div>
     <div class="crop-body">
       <div id="cropStage" class="crop-stage" tabindex="0" aria-label="ناحیهٔ انتخاب برش؛ Enter برای اعمال"><img id="cropImg" alt=""><div id="cropSelection"></div></div>
     </div>
