@@ -110,16 +110,19 @@ async function runPopupOnce(executeResult, shouldReject) {
   await new Promise((r) => setTimeout(r, 0));
   const probe = window.eval('(() => {' +
     'const style = [...document.querySelectorAll("style")].map((s) => s.textContent).join("");' +
+    'const hint = document.querySelector(".wtpdf-hint");' +
     'return {' +
     'overlay: !!document.querySelector(".wtpdf-overlay"),' +
     'card: !!document.querySelector(".wtpdf-card"),' +
     'msg: !!document.querySelector(".wtpdf-msg"),' +
     'spinner: !!document.querySelector(".wtpdf-spinner"),' +
+    'hintText: hint ? hint.textContent : "",' +
     'hasDarkBackdrop: style.includes("rgba(3,5,10,.88)"),' +
     'hasCenteredFlex: style.includes("align-items:center") && style.includes("justify-content:center"),' +
     'hasBigFont: /font:700 26px/.test(style),' +
     'hasMaxZ: style.includes("z-index:2147483647")}; })()');
   const res = await running;
+  check('overlay advertises ESC cancellation hint', /ESC/.test(probe.hintText), probe.hintText);
   check('full-screen overlay shown while scraping', probe.overlay && probe.card && probe.msg && probe.spinner, probe);
   check('overlay centered on screen', probe.hasCenteredFlex, probe);
   check('overlay dark backdrop', probe.hasDarkBackdrop, probe);
@@ -145,6 +148,20 @@ async function runPopupOnce(executeResult, shouldReject) {
   const busy = await window.eval('scrapeAndSend("x.pdf")');
   check('busy guard', busy && busy.busy === true, busy);
 
+  // ESC during the scroll/scrape phase cancels before any message is sent
+  window.__wtpdfRunning = false; // the busy-guard path intentionally leaves this flag untouched
+  const messagesBefore = sent.length;
+  const cancelRun = window.eval('scrapeAndSend("cancel.pdf")');
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  const cancelRes = await cancelRun;
+  check('ESC returns a cancelled result', cancelRes && cancelRes.cancelled === true && cancelRes.count === 0, cancelRes);
+  check('cancelled scrape sends no WTPDF_URLS message', sent.length === messagesBefore, sent.length);
+  check('overlay removed after cancel', !window.document.querySelector('.wtpdf-overlay'));
+  check('running flag reset after cancel', window.__wtpdfRunning === false);
+  // leftover ESC keypress must not start or cancel anything new (listener was removed in finally)
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check('no overlay reappears from a stray ESC', !window.document.querySelector('.wtpdf-overlay') && sent.length === messagesBefore);
+
   // interactive popup status box: hidden on success, visible only on error/warning
   const successRun = await runPopupOnce({ count: 5, skippedInline: 0 });
   check('success run keeps the status box hidden', successRun.boxHidden && successRun.text === '', successRun);
@@ -152,6 +169,8 @@ async function runPopupOnce(executeResult, shouldReject) {
   check('no-images run shows the box with an error', !emptyRun.boxHidden && /هیچ تصویری/.test(emptyRun.text), emptyRun);
   const busyRun = await runPopupOnce({ busy: true });
   check('busy run shows the box with a warning', !busyRun.boxHidden && /از قبل/.test(busyRun.text), busyRun);
+  const cancelledRun = await runPopupOnce({ cancelled: true, count: 0 });
+  check('cancelled run shows the box with the ESC notice', !cancelledRun.boxHidden && /لغو/.test(cancelledRun.text), cancelledRun);
   const errorRun = await runPopupOnce(null, true);
   check('failed run shows the box with the error', !errorRun.boxHidden && /خطا/.test(errorRun.text), errorRun);
   const secondSuccess = await runPopupOnce({ count: 2 });

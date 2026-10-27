@@ -194,6 +194,59 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt2, bubbles: true }));
   check('edge drop preserves groups', JSON.stringify(h.ev('items.map(i => i.pageGroup)')) === JSON.stringify(beforeD));
 
+  // ---- 2.23: insertion marker animation for single-card reorder ----
+  h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+  const dt3 = { effectAllowed: '', setData() {}, dropEffect: '' };
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt3, bubbles: true }));
+  cards[2].getBoundingClientRect = rect156;
+  cards[2].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt3, clientX: 10, bubbles: true })); // left half -> after
+  check('edge dragover shows single insertion marker', cards[2].classList.contains('drag-insert-after') &&
+    !cards[2].classList.contains('drag-insert-group'));
+  check('single drag does not mark group moving', h.ev('draggedGroupItems') === null);
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt3, bubbles: true }));
+  check('insertion marker cleared on dragend', !cards[2].classList.contains('drag-insert-after') &&
+    h.ev('insertMarkerEl') === null);
+
+  // ---- 2.23: dragging one group member moves the whole block, with a distinct marker ----
+  h.ev('items[0].pageGroup = 1; items[1].pageGroup = 1; items[2].pageGroup = null; cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+  const dt4 = { effectAllowed: '', setData() {}, dropEffect: '' };
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt4, bubbles: true }));
+  check('group drag arms block move', h.ev('draggedGroupItems && draggedGroupItems.length') === 2);
+  check('all group members get group-moving class', cards[0].classList.contains('group-moving') &&
+    cards[1].classList.contains('group-moving') && !cards[2].classList.contains('group-moving'));
+  check('grid gets the group color variable', /^#/.test(grid.style.getPropertyValue('--group-color')));
+  cards[2].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt4, clientX: 10, bubbles: true }));
+  check('group reorder uses the distinct group marker', cards[2].classList.contains('drag-insert-after') &&
+    cards[2].classList.contains('drag-insert-group'));
+  cards[2].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt4, clientX: 10, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt4, bubbles: true }));
+  const groupMoveOrder = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);
+  // internal order of the block is preserved ([1,0] was the current grid order); the block stays contiguous
+  check('whole group block moves together', JSON.stringify(groupMoveOrder) === JSON.stringify([2, 1, 0]), groupMoveOrder);
+  check('group stays intact after block move', h.ev('items[0].pageGroup') === h.ev('items[1].pageGroup') &&
+    h.ev('items[2].pageGroup') === null);
+  check('group-moving class and color var cleared after dragend',
+    !cards[0].classList.contains('group-moving') && !cards[1].classList.contains('group-moving') &&
+    grid.style.getPropertyValue('--group-color') === '');
+
+  // ---- 2.23: each group gets its own distinguishable color ----
+  h.ev('duplicateItem(items[2])');
+  await sleep(40);
+  h.ev('const g2 = nextPageGroupId++; items[2].pageGroup = g2; items[3].pageGroup = g2; cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+  const boxes = [...outlineLayer.querySelectorAll('.group-outline')];
+  check('two groups render two outline boxes', boxes.length === 2, boxes.length);
+  check('group outline colors differ', boxes[0].style.borderColor !== boxes[1].style.borderColor &&
+    !!boxes[0].style.borderColor && !!boxes[1].style.borderColor);
+  const badge0 = cards[0].querySelector('.page-group-badge');
+  const badge2 = cards[2].querySelector('.page-group-badge');
+  check('group badges carry distinct inline colors', !!badge0.style.background &&
+    badge0.style.background !== badge2.style.background);
+  const chips = [...h.$('groupList').querySelectorAll('.group-chip')];
+  check('manager chips carry per-group color vars', chips.length === 2 &&
+    /--gc:/.test(chips[0].getAttribute('style')) &&
+    chips[0].style.getPropertyValue('--gc') !== chips[1].style.getPropertyValue('--gc'));
+  h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+
   // ---- output settings open/close ----
   const settings = h.$('outputSettings');
   settings.open = true;

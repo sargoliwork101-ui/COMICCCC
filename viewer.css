@@ -71,11 +71,11 @@ body { min-height: 100vh; padding-bottom: calc(132px + env(safe-area-inset-botto
 .group-manager > strong { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .group-list { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
 .group-empty { color: var(--muted); font-size: 11px; }
-.group-chip { display: inline-flex; overflow: hidden; border: 1px solid rgba(139,123,255,.38); border-radius: 999px; background: rgba(139,123,255,.1); }
+.group-chip { display: inline-flex; overflow: hidden; border: 1px solid rgba(var(--gc-rgb, 139,123,255),.45); border-radius: 999px; background: rgba(var(--gc-rgb, 139,123,255),.1); }
 .group-chip button { border: 0; color: var(--text); background: transparent; font: 600 11px 'Vazirmatn', sans-serif; padding: 4px 10px; cursor: pointer; }
-.group-chip button:hover { background: rgba(139,123,255,.2); }
-.group-chip .group-select[aria-pressed="true"] { background: rgba(139,123,255,.3); color: #fff; }
-.group-chip .group-edit { color: #c9c2ff; border-inline: 1px solid rgba(139,123,255,.24); }
+.group-chip button:hover { background: rgba(var(--gc-rgb, 139,123,255),.22); }
+.group-chip .group-select[aria-pressed="true"] { background: rgba(var(--gc-rgb, 139,123,255),.34); color: #fff; }
+.group-chip .group-edit { color: var(--text); border-inline: 1px solid rgba(var(--gc-rgb, 139,123,255),.28); }
 .group-chip .group-edit:hover { background: rgba(139,123,255,.24); color: #fff; }
 .group-chip .group-remove { padding-inline: 8px; color: #fda4af; border-right: 1px solid rgba(139,123,255,.3); }
 .load-errors { flex: 1 0 100%; color: #ffd180; border: 1px solid rgba(255,190,70,.25); background: rgba(255,190,70,.06); border-radius: 10px; padding: 8px 11px; font-size: 11px; line-height: 1.8; }
@@ -89,14 +89,38 @@ body { min-height: 100vh; padding-bottom: calc(132px + env(safe-area-inset-botto
 #loadBar { height: 100%; width: 0; background: var(--grad); transition: width .2s; border-radius: 999px; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(clamp(128px, 15vw, 172px), 1fr)); gap: clamp(12px, 2.2vw, 20px) clamp(10px, 1.8vw, 16px); }
-/* لایهٔ کادر گروه‌ها: پشت کارت‌ها، بدون دریافت رویداد؛ هر گروه یک کادر سبز دور همهٔ اعضایش */
+/* لایهٔ کادر گروه‌ها: پشت کارت‌ها، بدون دریافت رویداد؛ هر گروه کادر رنگی مخصوص خودش را دور همهٔ اعضایش می‌گیرد */
 .group-outline-layer { position: absolute; z-index: 0; pointer-events: none; }
-.group-outline { position: absolute; border: 2px dashed rgba(52,211,153,.95); border-radius: 16px;
-  background: rgba(52,211,153,.08); box-shadow: 0 0 0 1px rgba(52,211,153,.22), 0 14px 34px -20px rgba(16,185,129,.8);
-  transition: left .18s ease, top .18s ease, width .18s ease, height .18s ease; }
-.item { position: relative; z-index: 1; cursor: grab; user-select: none; }
+.group-outline { position: absolute; border: 2px dashed var(--gc, #34d399); border-radius: 16px;
+  transition: left .18s ease, top .18s ease, width .18s ease, height .18s ease, border-color .2s ease; }
+.item { position: relative; z-index: 1; cursor: grab; user-select: none; transition: transform .22s ease; }
 .item.dragging { opacity: .4; cursor: grabbing; }
 .item:active { cursor: grabbing; }
+
+/* ---------- انیمیشن‌های درگ ---------- */
+/* نشانگر محل درج برای جابه‌جایی تکی: خط بنفش باریک با افکت رشد */
+.item.drag-insert-before::before, .item.drag-insert-after::before {
+  content: ''; position: absolute; top: -8px; bottom: -8px; width: 5px; z-index: 5; pointer-events: none;
+  border-radius: 999px; background: linear-gradient(180deg, var(--a1), #6d8bff);
+  box-shadow: 0 0 14px rgba(139,123,255,.9); animation: insert-pop .16s ease;
+}
+.item.drag-insert-before::before { inset-inline-start: -13px; }
+.item.drag-insert-after::before { inset-inline-end: -13px; }
+/* نشانگر جابه‌جایی گروهی: خط رنگیِ پهن‌تر و درخشان‌تر به رنگ همان گروه */
+.item.drag-insert-group::before {
+  width: 8px; background: var(--group-color, #34d399);
+  box-shadow: 0 0 18px var(--group-color, #34d399), 0 0 0 3px rgba(255,255,255,.08);
+}
+@keyframes insert-pop { from { transform: scaleY(.2); opacity: 0; } to { transform: scaleY(1); opacity: 1; } }
+/* اعضای گروه هنگام درگ یکی از اعضایشان: حلقهٔ رنگی و لغزش ملایم، متمایز از درگ تکی */
+.item.group-moving { z-index: 2; }
+.item.group-moving .tw {
+  outline: 2px solid var(--group-color, #34d399); outline-offset: 3px;
+  animation: group-carry .85s ease-in-out infinite;
+}
+.item.group-moving .meta { color: var(--group-color, #34d399); }
+.item.group-moving.dragging .tw { animation: none; }
+@keyframes group-carry { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
 .tw { position: relative; aspect-ratio: 3 / 4; border-radius: 14px; overflow: hidden; background: var(--surface2);
   border: 1px solid var(--line2); transition: transform .14s, box-shadow .14s, filter .14s, opacity .14s, border-color .14s; }
 .tw canvas { width: 100%; height: 100%; display: block; }

@@ -34,6 +34,8 @@ startBtn.addEventListener('click', async () => {
     const res = results[0] && results[0].result;
     if (res && res.busy) {
       showError('عملیات روی این صفحه از قبل در حال اجراست.');
+    } else if (res && res.cancelled) {
+      showError('جمع‌آوری تصاویر با کلید ESC لغو شد.');
     } else if (!res || res.count === 0) {
       showError(res && res.skippedInline
         ? `تصاویر داخلی پیدا شدند، اما ${res.skippedInline} مورد از حد مجاز بزرگ‌تر بودند.`
@@ -70,16 +72,30 @@ async function scrapeAndSend(pdfName) {
     'box-shadow:0 26px 80px rgba(0,0,0,.75),0 0 0 4px rgba(139,123,255,.16);text-align:center}' +
     '.wtpdf-spinner{width:46px;height:46px;border-radius:50%;border:4px solid rgba(255,255,255,.16);' +
     'border-top-color:#8b7bff;animation:wtpdfSpin .8s linear infinite}' +
-    '.wtpdf-msg{font:700 26px/1.7 Vazirmatn,Tahoma,sans-serif;color:#f2f4fb;white-space:pre-line}';
+    '.wtpdf-card.wtpdf-cancel .wtpdf-spinner{animation:none;border-top-color:#fb7185}' +
+    '.wtpdf-msg{font:700 26px/1.7 Vazirmatn,Tahoma,sans-serif;color:#f2f4fb;white-space:pre-line}' +
+    '.wtpdf-hint{font:600 16px/1.6 Vazirmatn,Tahoma,sans-serif;color:#c9c2ff;opacity:.85}';
   document.documentElement.appendChild(styleTag);
   const overlay = document.createElement('div');
   overlay.className = 'wtpdf-overlay';
   const box = document.createElement('div');
   box.className = 'wtpdf-card';
-  box.innerHTML = '<span class="wtpdf-spinner" aria-hidden="true"></span><span class="wtpdf-msg"></span>';
+  box.innerHTML = '<span class="wtpdf-spinner" aria-hidden="true"></span><span class="wtpdf-msg"></span>' +
+    '<span class="wtpdf-hint">برای لغو عملیات، کلید ESC را بزنید</span>';
   overlay.appendChild(box);
   document.documentElement.appendChild(overlay);
   const say = (t) => { box.querySelector('.wtpdf-msg').textContent = t; };
+
+  // لغو مرحلهٔ اسکرول/جمع‌آوری با ESC (این کد داخل خود صفحهٔ وب اجرا می‌شود)
+  let cancelled = false;
+  const onCancelKey = (e) => {
+    if (e.key === 'Escape' || e.key === 'Esc') {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelled = true;
+    }
+  };
+  document.addEventListener('keydown', onCancelKey, true);
 
   const PLACEHOLDER = /blank|loading|placeholder|spacer|pixel|1x1|lazy\.(gif|png|jpg)/i;
 
@@ -119,6 +135,7 @@ async function scrapeAndSend(pdfName) {
     let stable = 0;
     let last = getH();
     for (let i = 0; i < 800; i++) {
+      if (cancelled) break;
       window.scrollBy(0, Math.round(window.innerHeight * 0.7));
       const pct = Math.min(100, Math.round(((window.scrollY + window.innerHeight) / getH()) * 100));
       say(`در حال اسکرول برای لود تصاویر... ${pct}٪`);
@@ -132,6 +149,12 @@ async function scrapeAndSend(pdfName) {
         stable = 0;
       }
       last = h;
+    }
+    if (cancelled) {
+      box.classList.add('wtpdf-cancel');
+      say('عملیات با کلید ESC لغو شد.');
+      await sleep(1200);
+      return { cancelled: true, count: 0, skippedInline: 0 };
     }
     await sleep(800);
 
@@ -181,12 +204,15 @@ async function scrapeAndSend(pdfName) {
       return { count: 0, skippedInline };
     }
 
+    if (cancelled) return { cancelled: true, count: 0, skippedInline };
+
     say(`${urls.length} تصویر پیدا شد. در حال باز کردن پیش‌نمایش...`);
     const response = await chrome.runtime.sendMessage({ type: 'WTPDF_URLS', urls, name: pdfName, pageUrl: location.href, skippedInline });
     if (!response || !response.ok) throw new Error(`ذخیرهٔ فهرست تصویرها ناموفق بود${response && response.error ? `: ${response.error}` : ''}`);
     await sleep(1500);
     return { count: urls.length, skippedInline };
   } finally {
+    document.removeEventListener('keydown', onCancelKey, true);
     overlay.remove();
     styleTag.remove();
     window.__wtpdfRunning = false;

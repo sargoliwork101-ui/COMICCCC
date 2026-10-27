@@ -43,6 +43,57 @@ let draggedItem = null;
 let dragGroupDrop = false;
 let dragDropTargetEl = null;
 let suppressCardClickUntil = 0;
+// وقتی کارتی از یک گروه کشیده می‌شود، کل اعضای گروه به‌صورت یک بلوک جابه‌جا می‌شوند
+let draggedGroupItems = null;
+let insertMarkerEl = null;
+
+// انیمیشن FLIP: موقعیت کارت‌ها قبل از تغییر DOM را ذخیره و بعد از جابه‌جایی، لغزش نرم می‌سازد
+function captureGridRects() {
+  const map = new Map();
+  Array.from($('grid').children).forEach((el) => map.set(el, el.getBoundingClientRect()));
+  return map;
+}
+function playGridMove(firstRects) {
+  if (typeof requestAnimationFrame === 'undefined') return;
+  Array.from($('grid').children).forEach((el) => {
+    const old = firstRects.get(el);
+    if (!old) return;
+    const now = el.getBoundingClientRect();
+    const dx = old.left - now.left;
+    const dy = old.top - now.top;
+    if (!dx && !dy) return;
+    el.style.transition = 'none';
+    el.style.transform = `translate(${dx}px, ${dy}px)`;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      el.style.transition = 'transform .22s ease';
+      el.style.transform = '';
+      const done = () => { el.style.transition = ''; el.removeEventListener('transitionend', done); };
+      el.addEventListener('transitionend', done);
+    }));
+  });
+}
+// اعضای یک گروه به ترتیب فعلی شبکه (پیوسته‌اند)
+function gridGroupBlock(groupId) {
+  return Array.from($('grid').children).filter((el) => {
+    const it = items.find((x) => x.el === el);
+    return it && Number(it.pageGroup) === groupId;
+  });
+}
+function clearInsertMarker() {
+  if (insertMarkerEl) {
+    insertMarkerEl.classList.remove('drag-insert-before', 'drag-insert-after', 'drag-insert-group');
+    insertMarkerEl = null;
+  }
+}
+function setInsertMarker(targetEl, before, isGroup) {
+  const sameEdge = targetEl.classList.contains(before ? 'drag-insert-before' : 'drag-insert-after');
+  const sameMode = targetEl.classList.contains('drag-insert-group') === isGroup;
+  if (insertMarkerEl === targetEl && sameEdge && sameMode) return;
+  clearInsertMarker();
+  insertMarkerEl = targetEl;
+  targetEl.classList.add(before ? 'drag-insert-before' : 'drag-insert-after');
+  if (isGroup) targetEl.classList.add('drag-insert-group');
+}
 let lbItem = null;
 let cropItem = null;
 let cropObjectUrl = null;
@@ -195,11 +246,27 @@ function makeCard(it) {
     if (ev.target.closest('input, button, select, textarea')) { ev.preventDefault(); return; }
     draggedItem = it;
     el.classList.add('dragging');
+    // اگر کارت عضو یک گروه معتبر است، کل اعضای گروه برای جابه‌جایی بلوکی علامت‌گذاری می‌شوند
+    const gid = Number(it.pageGroup);
+    const groupMembers = gid > 0 ? items.filter((x) => x.state === 'ok' && Number(x.pageGroup) === gid) : [];
+    if (groupMembers.length >= 2) {
+      draggedGroupItems = groupMembers;
+      const color = groupColorFor(buildPageGroupView().numberById.get(gid));
+      $('grid').style.setProperty('--group-color', color.hex);
+      groupMembers.forEach((member) => member.el.classList.add('group-moving'));
+    } else {
+      draggedGroupItems = null;
+    }
     ev.dataTransfer.effectAllowed = 'move';
     ev.dataTransfer.setData('text/plain', String(it.uid));
   });
   el.addEventListener('dragend', () => {
     el.classList.remove('dragging');
+    if (draggedGroupItems) {
+      draggedGroupItems.forEach((member) => member.el.classList.remove('group-moving'));
+      draggedGroupItems = null;
+    }
+    $('grid').style.removeProperty('--group-color');
     clearDragDropHint();
     draggedItem = null;
   });
@@ -270,6 +337,22 @@ function deleteItem(it) {
   refreshAll();
 }
 
+// پالت رنگی گروه‌ها: هر گروه شمارهٔ نمایشی خودش رنگ ثابتی دارد تا گروه‌ها به‌راحتی از هم تفکیک شوند
+const GROUP_PALETTE = [
+  { hex: '#34d399', rgb: '52,211,153' },  // سبز
+  { hex: '#8b7bff', rgb: '139,123,255' }, // بنفش
+  { hex: '#fbbf24', rgb: '251,191,36' },  // کهربایی
+  { hex: '#38bdf8', rgb: '56,189,248' },  // آسمانی
+  { hex: '#fb7185', rgb: '251,113,133' }, // سرخ‌صورتی
+  { hex: '#fb923c', rgb: '251,146,60' },  // نارنجی
+  { hex: '#22d3ee', rgb: '34,211,238' },  // فیروزه‌ای
+  { hex: '#e879f9', rgb: '232,121,249' }, // سرخابی
+  { hex: '#a3e635', rgb: '163,230,53' },  // لیمویی
+  { hex: '#818cf8', rgb: '129,140,248' }  // نیلی
+];
+function groupColorFor(displayNumber) {
+  return GROUP_PALETTE[(Math.max(1, Number(displayNumber) || 1) - 1) % GROUP_PALETTE.length];
+}
 function buildPageGroupView() {
   const membersById = new Map();
   items.forEach((it) => {
@@ -307,6 +390,8 @@ function drawGroupOutlines(groupView = buildPageGroupView()) {
   layer.style.height = `${gridRect.height}px`;
   const PAD = 7;
   for (const [groupId, members] of groups) {
+    const displayNumber = groupView.numberById.get(groupId);
+    const color = groupColorFor(displayNumber);
     const rects = members.map((it) => it.el.getBoundingClientRect());
     // خوشه‌بندی اعضا بر اساس ردیف (تحمل ۴ پیکسل برای تفاوت گردشدن مرورگر)
     const rows = [];
@@ -330,6 +415,9 @@ function drawGroupOutlines(groupView = buildPageGroupView()) {
       box.style.top = `${row.top - gridRect.top - PAD}px`;
       box.style.width = `${row.right - row.left + PAD * 2}px`;
       box.style.height = `${row.bottom - row.top + PAD * 2}px`;
+      box.style.borderColor = color.hex;
+      box.style.background = `rgba(${color.rgb},.08)`;
+      box.style.boxShadow = `0 0 0 1px rgba(${color.rgb},.22), 0 14px 34px -20px rgba(${color.rgb},.8)`;
       layer.appendChild(box);
     });
   }
@@ -355,6 +443,15 @@ function refreshCard(it, groupView = buildPageGroupView()) {
     const label = formatGroupLabel(displayNumber, groupMembers.length);
     groupBadge.innerText = label;
     groupBadge.title = `${label}; این اعضا در یک صفحهٔ PDF قرار می‌گیرند`;
+    // رنگ مخصوص همان گروه روی badge، هماهنگ با کادر دور اعضا
+    const color = groupColorFor(displayNumber);
+    groupBadge.style.background = color.hex;
+    groupBadge.style.color = '#0b1220';
+    groupBadge.style.borderColor = 'rgba(255,255,255,.4)';
+  } else {
+    groupBadge.style.background = '';
+    groupBadge.style.color = '';
+    groupBadge.style.borderColor = '';
   }
   const meta = el.querySelector('.meta');
   const spin = el.querySelector('.spin');
@@ -561,7 +658,9 @@ function refreshGroupManager(groupView = buildPageGroupView()) {
     const number = groupView.numberById.get(id);
     const allSelected = members.every((it) => it.selected);
     const label = formatGroupLabel(number, members.length);
-    return `<span class="group-chip"><button type="button" class="group-select" data-group="${id}" aria-pressed="${allSelected}" title="اعضای گروه را انتخاب می‌کند و به اولین تصویر می‌برد">${label}</button><button type="button" class="group-edit" data-group="${id}" aria-label="ویرایش گروه ${number}" title="ویرایش اعضای این گروه">ویرایش</button><button type="button" class="group-remove" data-group="${id}" aria-label="حذف گروه ${number}" title="حذف این گروه">×</button></span>`;
+    const color = groupColorFor(number);
+    const chipStyle = `style="--gc:${color.hex};--gc-rgb:${color.rgb}"`;
+    return `<span class="group-chip" ${chipStyle}><button type="button" class="group-select" data-group="${id}" aria-pressed="${allSelected}" title="اعضای گروه را انتخاب می‌کند و به اولین تصویر می‌برد">${label}</button><button type="button" class="group-edit" data-group="${id}" aria-label="ویرایش گروه ${number}" title="ویرایش اعضای این گروه">ویرایش</button><button type="button" class="group-remove" data-group="${id}" aria-label="حذف گروه ${number}" title="حذف این گروه">×</button></span>`;
   }).join('');
   container.querySelectorAll('.group-select').forEach((button) => button.addEventListener('click', () => {
     if (editingPageGroupId !== null) cancelPageGroupEdit();
@@ -674,6 +773,7 @@ function savePageGroupEdit() {
 // ترتیب نسبی بقیهٔ کارت‌ها دست‌نخورده می‌ماند.
 function normalizeGroupLayout() {
   const grid = $('grid');
+  const firstRects = captureGridRects();
   const ordered = Array.from(grid.children)
     .map((el) => items.find((it) => it.el === el))
     .filter(Boolean);
@@ -694,6 +794,7 @@ function normalizeGroupLayout() {
   }
   nextOrder.forEach((it) => grid.appendChild(it.el));
   updatePdfOrderFromGrid();
+  playGridMove(firstRects);
 }
 function groupSelectedItems() {
   if (editingPageGroupId !== null) { savePageGroupEdit(); return; }
@@ -720,6 +821,33 @@ function clearDragDropHint() {
     dragDropTargetEl = null;
   }
   dragGroupDrop = false;
+  clearInsertMarker();
+}
+
+// جابه‌جایی ترتیبی با درگ: اگر کارت کشیده‌شده عضو گروه باشد، کل بلوک گروه با هم جابه‌جا می‌شود.
+// لنگر درج هرگز نباید داخل بلوک یک گروه بیگانه بیفتد تا گروهی از هم نپاشد.
+function reorderByDrop(dragged, targetEl, before) {
+  const grid = $('grid');
+  const gid = Number(dragged.pageGroup);
+  const hasGroup = gid > 0 && items.some((it) => it.state === 'ok' && Number(it.pageGroup) === gid);
+  const movingEls = hasGroup ? gridGroupBlock(gid) : [dragged.el];
+  if (movingEls.includes(targetEl)) return false; // روی اعضای بلوک خودی، جابه‌جایی بی‌اثر است
+  let anchor = before ? targetEl : targetEl.nextSibling;
+  // اگر هدف عضو یک گروه بیگانه است، لنگر را به لبهٔ بیرونی بلوک آن گروه محدود کن
+  const targetItem = items.find((it) => it.el === targetEl);
+  const tg = Number(targetItem && targetItem.pageGroup);
+  if (tg > 0 && tg !== gid) {
+    const foreignBlock = gridGroupBlock(tg);
+    if (foreignBlock.includes(targetEl)) {
+      anchor = before ? foreignBlock[0] : foreignBlock[foreignBlock.length - 1].nextSibling;
+    }
+  }
+  if (anchor && movingEls.includes(anchor)) return false;
+  const firstRects = captureGridRects();
+  movingEls.forEach((el) => grid.insertBefore(el, anchor));
+  updatePdfOrderFromGrid();
+  playGridMove(firstRects);
+  return true;
 }
 
 // رهاکردن کارت کشیده‌شده روی کارت هدف: گروه تازه، یا عضویت در گروه موجود
@@ -1625,6 +1753,7 @@ async function main() {
     const band = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
     const isGroupDrop = groupable && band > 0.28 && band < 0.72;
     if (isGroupDrop) {
+      clearInsertMarker();
       if (dragDropTargetEl !== target) {
         clearDragDropHint();
         target.classList.add('group-drop-target');
@@ -1633,6 +1762,12 @@ async function main() {
       dragGroupDrop = true;
     } else {
       clearDragDropHint();
+      // نشانگر محل درج؛ برای جابه‌جایی گروهی با رنگ و ضخامت متفاوت از کارت تکی
+      const sameGroupBlock = !!draggedGroupItems && draggedGroupItems.some((member) => member.el === target);
+      if (sameGroupBlock) { clearInsertMarker(); return; }
+      // RTL: نیمهٔ راست کارت یعنی درج قبل از آن، نیمهٔ چپ یعنی بعد از آن
+      const before = ev.clientX > rect.left + rect.width / 2;
+      setInsertMarker(target, before, !!draggedGroupItems);
     }
   });
   grid.addEventListener('drop', (ev) => {
@@ -1641,6 +1776,7 @@ async function main() {
     const target = ev.target.closest('.item');
     const wantGroup = dragGroupDrop;
     clearDragDropHint();
+    clearInsertMarker();
     if (!target || target === draggedItem.el) return;
     if (wantGroup) {
       const targetItem = items.find((it) => it.el === target);
@@ -1650,9 +1786,8 @@ async function main() {
     }
     const rect = target.getBoundingClientRect();
     // شبکه از راست به چپ است: سمت راست کارت یعنی درج قبل از آن در ترتیب DOM.
-    const insertBefore = ev.clientX > rect.left + rect.width / 2 ? target : target.nextSibling;
-    grid.insertBefore(draggedItem.el, insertBefore);
-    updatePdfOrderFromGrid();
+    const before = ev.clientX > rect.left + rect.width / 2;
+    reorderByDrop(draggedItem, target, before);
     suppressCardClickUntil = Date.now() + 350;
   });
   items = job.urls.map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pageGroup: null, state: 'loading', selected: true }));
