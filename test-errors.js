@@ -134,6 +134,73 @@ function check(name, cond, extra) {
     check('retry-all hidden after full recovery', h.$('btnRetryAll').classList.contains('hidden'));
   }
 
+  // ---------- 2b. single-card retry: progress indicator + control lock while in flight ----------
+  {
+    const h = makeHarness({
+      fetchImpl: async () => { throw new Error('network down'); }
+    });
+    h.window.chrome.scripting.executeScript = async () => { throw new Error('blocked'); };
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    let items = h.ev('items');
+    check('2b: all cards failed first', items.every((it) => it.state === 'failed'), items.map((i) => i.state));
+    const firstCard = items[0].el;
+    check('2b: failed card has no spin before retry', !firstCard.querySelector('.spin'));
+
+    // یک fetch معوق تا تلاش مجدد تکی را در حالت «در حال دریافت» نگه داریم
+    let resolveFetch = null;
+    h.window.fetch = () => new Promise((resolve) => {
+      resolveFetch = () => resolve({
+        ok: true, status: 200,
+        blob: async () => new h.window.Blob([PNG], { type: 'image/png' }),
+        json: async () => [[]]
+      });
+    });
+    firstCard.querySelector('.retry').click();
+    for (let i = 0; i < 60; i++) { await sleep(40); if (items[0].state === 'loading') break; }
+    check('2b: retry flips the card back to loading', items[0].state === 'loading', items[0].state);
+    check('2b: global loading flag armed during single retry', h.ev('loading') === true);
+    check('2b: spin recreated inside .tw during retry', !!firstCard.querySelector('.tw .spin'));
+    check('2b: card retry button disabled during retry', firstCard.querySelector('.retry').disabled === true);
+    check('2b: card delete button disabled during retry', firstCard.querySelector('.delete').disabled === true);
+    check('2b: toolbar retry-all hidden while a retry runs', h.$('btnRetryAll').classList.contains('hidden'));
+    check('2b: build blocked while a retry runs', h.$('buildBtn').disabled === true);
+
+    resolveFetch();
+    for (let i = 0; i < 60; i++) { await sleep(60); if (items[0].state === 'ok') break; }
+    items = h.ev('items');
+    check('2b: retried card recovers', items[0].state === 'ok', items[0].state);
+    check('2b: loading flag cleared after retry', h.ev('loading') === false);
+    check('2b: spin removed after successful retry', !items[0].el.querySelector('.spin'));
+    check('2b: other cards stay failed and still offer retry',
+      items.slice(1).every((it) => it.state === 'failed' && !it.el.querySelector('.retry').disabled),
+      items.map((i) => i.state));
+  }
+
+  // ---------- 2c. ESC cancels an in-flight single-card retry ----------
+  {
+    const h = makeHarness({
+      fetchImpl: async () => { throw new Error('network down'); }
+    });
+    h.window.chrome.scripting.executeScript = async () => { throw new Error('blocked'); };
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    const items = h.ev('items');
+    check('2c: all failed before retry', items.every((it) => it.state === 'failed'));
+    // مثل بارگیری سراسری: abort سیگنال، fetch را با خطا رد می‌کند
+    h.window.fetch = (url, opts) => new Promise((resolve, reject) => {
+      if (opts && opts.signal) opts.signal.addEventListener('abort', () => reject(new Error('Aborted')));
+    });
+    items[0].el.querySelector('.retry').click();
+    for (let i = 0; i < 60; i++) { await sleep(40); if (items[0].state === 'loading') break; }
+    check('2c: retry started', items[0].state === 'loading' && h.ev('loading') === true);
+    h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    for (let i = 0; i < 60; i++) { await sleep(40); if (!h.ev('loading')) break; }
+    check('2c: loading flag cleared after ESC', h.ev('loading') === false);
+    check('2c: abort controller released', h.ev('loadAbortController') === null);
+    check('2c: card back to failed with cancel reason', items[0].state === 'failed' && /لغو/.test(items[0].error || ''), items[0].error);
+    check('2c: spin removed again after cancel', !items[0].el.querySelector('.spin'));
+    check('2c: retry offered again after cancel', items[0].el.querySelector('.retry').disabled === false);
+  }
+
   // ---------- 3. non-image bytes -> failed ----------
   {
     const h = makeHarness({

@@ -476,6 +476,14 @@ function refreshCard(it, groupView = buildPageGroupView()) {
     meta.innerText = 'دانلود نشد';
     meta.title = it.error || 'علت دقیق بارگیری نامشخص است';
   } else {
+    // حالت بارگیری: کارتی که قبلاً شکست خورده و دوباره تلاش می‌شود، spin خود را از دست داده؛ بازسازی‌اش کن
+    const tw = el.querySelector('.tw');
+    if (tw && !spin) {
+      const freshSpin = document.createElement('div');
+      freshSpin.className = 'spin';
+      freshSpin.innerText = 'در حال دریافت...';
+      tw.appendChild(freshSpin);
+    }
     meta.innerText = '…';
   }
 }
@@ -586,11 +594,24 @@ async function loadAll(list) {
 // تلاش مجدد برای بارگیری یک کارت ناموفق، بدون نمایش overlay تمام‌صفحه
 async function retryItem(it) {
   if (!it || loading || building || it.state !== 'failed') return;
+  // تلاش مجدد تکی هم یک «بارگیری» واقعی است؛ فلگ سراسری فعال شود تا دکمه‌های کارت/نوار ابزار
+  // و شمارش هشدارها همان رفتار بارگیری سراسری را داشته باشند و کلیک هم‌زمان ممکن نباشد
+  loading = true;
+  jobCancelRequested = false;
+  loadAbortController = new AbortController();
+  const signal = loadAbortController.signal;
   it.state = 'loading';
   it.error = '';
   it.selected = false;
   refreshCard(it);
-  await loadOne(it);
+  refreshSummary();
+  try {
+    // با سیگنال اختصاصی، ESC همانند بارگیری سراسری این تلاش تکی را هم لغو می‌کند
+    await loadOne(it, signal);
+  } finally {
+    loading = false;
+    loadAbortController = null;
+  }
   refreshAll();
 }
 
