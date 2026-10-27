@@ -278,6 +278,8 @@ function refreshCard(it, groupView = buildPageGroupView()) {
   const groupMembers = groupView.membersById.get(groupId);
   const displayNumber = groupView.numberById.get(groupId);
   const hasVisibleGroup = !!groupMembers && !!displayNumber;
+  // خط چین سبز ماندگار دور اعضای هر گروه تا گروه بودنشان همیشه مشخص باشد
+  el.classList.toggle('in-group', hasVisibleGroup);
   groupBadge.classList.toggle('hidden', !hasVisibleGroup);
   if (hasVisibleGroup) {
     const label = formatGroupLabel(displayNumber, groupMembers.length);
@@ -577,8 +579,34 @@ function savePageGroupEdit() {
   editingPageGroupSelection = null;
   $('groupEditStatus').classList.add('hidden');
   cleanupPageGroups();
+  normalizeGroupLayout();
   refreshAll();
   return true;
+}
+// اعضای هر گروه را در شبکه پشت سر هم (کنار هم) می‌چیند چون قرار است در یک صفحهٔ PDF بیایند؛
+// ترتیب نسبی بقیهٔ کارت‌ها دست‌نخورده می‌ماند.
+function normalizeGroupLayout() {
+  const grid = $('grid');
+  const ordered = Array.from(grid.children)
+    .map((el) => items.find((it) => it.el === el))
+    .filter(Boolean);
+  const placed = new Set();
+  const nextOrder = [];
+  for (const it of ordered) {
+    if (placed.has(it)) continue;
+    const gid = Number(it.pageGroup);
+    if (gid && gid > 0) {
+      ordered.filter((x) => Number(x.pageGroup) === gid).forEach((member) => {
+        placed.add(member);
+        nextOrder.push(member);
+      });
+    } else {
+      placed.add(it);
+      nextOrder.push(it);
+    }
+  }
+  nextOrder.forEach((it) => grid.appendChild(it.el));
+  updatePdfOrderFromGrid();
 }
 function groupSelectedItems() {
   if (editingPageGroupId !== null) { savePageGroupEdit(); return; }
@@ -589,6 +617,7 @@ function groupSelectedItems() {
   if (selected.every((it) => Number(it.pageGroup) === groupId)) return;
   selected.forEach((it) => { it.pageGroup = groupId; });
   cleanupPageGroups();
+  normalizeGroupLayout();
   refreshAll();
 }
 function ungroupSelectedItems() {
@@ -626,6 +655,7 @@ function groupCardsByDrop(dragged, targetItem) {
     targetItem.pageGroup = groupId;
   }
   cleanupPageGroups();
+  normalizeGroupLayout();
   refreshAll();
 }
 
@@ -1443,6 +1473,7 @@ async function restorePageProfile() {
     items = finalItems;
     cleanupPageGroups();
     finalItems.forEach((it) => grid.appendChild(it.el));
+    normalizeGroupLayout();
     nextItemUid = Math.max(0, ...items.map((it) => it.uid + 1));
     lastClicked = null;
     if ($('groupMenu')) $('groupMenu').open = false;
@@ -1540,13 +1571,19 @@ async function main() {
     outputSettings.open = false;
     outputSettings.querySelector('summary').focus();
   };
+  const topMenu = $('topMenu');
   document.addEventListener('click', (e) => {
     if (outputSettings.open && !outputSettings.contains(e.target)) outputSettings.open = false;
+    if (topMenu && topMenu.open && !topMenu.contains(e.target)) topMenu.open = false;
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && outputSettings.open) {
       outputSettings.open = false;
       outputSettings.querySelector('summary').focus();
+    }
+    if (e.key === 'Escape' && topMenu && topMenu.open) {
+      topMenu.open = false;
+      topMenu.querySelector('summary').focus();
     }
   });
   $('seamless').addEventListener('change', () => {

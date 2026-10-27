@@ -157,7 +157,11 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   const gA = h.ev('items.map(i => i.pageGroup)');
   check('center drop groups two cards', gA[0] !== null && gA[0] === gA[1] && gA[2] === null, gA);
   check('group hint cleared after drop', !cards[1].classList.contains('group-drop-target') && h.ev('dragGroupDrop') === false);
-  check('grouping keeps DOM order', JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([1, 2, 0]));
+  // 2.20: group members must be laid out adjacent (they share one PDF page); relative order of the rest is kept
+  const orderA = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);
+  check('grouping lays group members adjacent', JSON.stringify(orderA) === JSON.stringify([1, 0, 2]), orderA);
+  check('adjacent layout renumbers pdf order', JSON.stringify([...grid.children].map((n) => n.querySelector('.page-order').value)) === JSON.stringify(['1', '2', '3']));
+  check('grouped cards keep persistent in-group class', cards[0].classList.contains('in-group') && cards[1].classList.contains('in-group') && !cards[2].classList.contains('in-group'));
 
   // B) ungrouped card dropped onto a grouped card joins its group
   cards[0].getBoundingClientRect = rect156;
@@ -195,6 +199,16 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   settings.open = true;
   h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   check('output settings escape closes', settings.open === false);
+
+  // ---- hamburger top menu (profile + OCR) open/close ----
+  const topMenu = h.$('topMenu');
+  check('top hamburger menu exists', !!topMenu && topMenu.tagName === 'DETAILS');
+  topMenu.open = true;
+  h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('top menu escape closes', topMenu.open === false);
+  topMenu.open = true;
+  h.window.document.body.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true }));
+  check('top menu outside click closes', topMenu.open === false);
 
   // ---- Enter key applies crop ----
   h.ev('openCropper(items[0])');

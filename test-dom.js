@@ -108,6 +108,18 @@ const $ = (id) => window.document.getElementById(id);
     check(`footer id #${id} preserved`, !!window.document.getElementById(id));
   }
 
+  // 2.20: profile + OCR controls live inside the header hamburger; group menu stays independent in the toolbar
+  const topMenu = $('topMenu');
+  check('hamburger top menu present in header', !!window.document.querySelector('.topbar #topMenu') && topMenu.tagName === 'DETAILS');
+  for (const id of ['saveProfileBtn', 'restoreProfileBtn', 'deleteProfileBtn', 'profileStatus',
+    'ocrEnabled', 'btnTranslate', 'btnTxt', 'btnRetry']) {
+    check(`top menu hosts #${id}`, !!topMenu.contains($(id)));
+  }
+  check('group menu stays in toolbar, outside hamburger', !!window.document.querySelector('.toolbar #groupMenu') &&
+    !topMenu.contains($('groupMenu')));
+  check('toolbar hosts only the group menu now', window.document.querySelectorAll('.toolbar-menus details').length === 1 &&
+    !!window.document.querySelector('.toolbar-menus #groupMenu'));
+
   for (let i = 0; i < 50; i++) {
     await sleep(100);
     if (!ev('loading')) break;
@@ -131,8 +143,16 @@ const $ = (id) => window.document.getElementById(id);
   ev('refreshAll()');
   $('btnGroupPage').click();
   check('group created', items[0].pageGroup === 1 && items[1].pageGroup === 1 && !items[2].pageGroup, items.map((i) => i.pageGroup));
+  check('grouped cards carry persistent in-group class',
+    items[0].el.classList.contains('in-group') && items[1].el.classList.contains('in-group') &&
+    !items[2].el.classList.contains('in-group'));
+  check('grouped cards are adjacent in the grid', (() => {
+    const kids = [...$('grid').children];
+    return kids.indexOf(items[0].el) + 1 === kids.indexOf(items[1].el);
+  })());
   $('btnUngroupPage').click();
   check('ungroup', items.every((it) => !it.pageGroup));
+  check('in-group class removed after ungroup', items.every((it) => !it.el.classList.contains('in-group')));
 
   const before = items.length;
   ev('duplicateItem(items[0])');
