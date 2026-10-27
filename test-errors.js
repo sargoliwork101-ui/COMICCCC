@@ -525,6 +525,36 @@ prepare = async (it, r) => {
     check('job hint hidden when work ends', h.$('jobHint').classList.contains('hidden'));
   }
 
+  // ---------- 17. closing the editor mid-render must not alert or lose the render ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ev(`OcrTools.createOcrWorker=async()=>({recognize:async()=>({data:{blocks:[]}}),setParameters:async()=>{},terminate:async()=>{}});
+    OcrTools.ocrBitmap=async()=>[{text:'Hello',conf:90,x0:10,x1:90,y0:10,y1:30}];
+    OcrTools.groupLines=()=>[{id:1,enabled:true,bg:'auto',tr:'سلام',text:'Hello',x0:10,x1:90,y0:10,y1:30,lineH:16}];`);
+    h.$('btnTranslate').click(); h.$('trStart').click();
+    for (let i = 0; i < 80; i++) { await sleep(80); if (!h.ev('building')) break; }
+    let alertCount = 0;
+    h.window.alert = (m) => { alertCount++; console.log('  [unexpected alert]', m); };
+    const target = h.ev('items.find(i=>i.ocr)');
+    h.ev('openEditor(items.find(i=>i.ocr))');
+    // رندر را پشت یک دروازه نگه می‌داریم تا ویرایشگر دقیقاً وسط await بسته شود
+    h.ev(`globalThis.__origRE = renderEdited;
+    globalThis.__gate = new Promise((resolve) => { globalThis.__releaseGate = resolve; });
+    renderEdited = async (it) => { await globalThis.__gate; return globalThis.__origRE(it); };
+    applyEditor();`);
+    await sleep(60);
+    check('apply was in flight when editor closed', h.ev('edBusy') === true && h.ev('EDI') !== null);
+    await h.ev('closeEditor()');
+    check('editor closed while render pending', h.ev('EDI') === null && h.$('editor').classList.contains('hidden'));
+    h.ev('globalThis.__releaseGate()');
+    for (let i = 0; i < 30; i++) { await sleep(60); if (h.ev('edBusy') === false) break; }
+    check('no spurious error alert after mid-render close', alertCount === 0, alertCount);
+    check('in-flight render still updated the item blob', !!target.edited);
+    check('busy flag released after render settles', h.ev('edBusy') === false);
+    h.ev('renderEdited = globalThis.__origRE;');
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL EDGE-CASE TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

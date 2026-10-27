@@ -157,8 +157,9 @@ async function runTranslate() {
 // ---------- ویرایشگر ----------
 let EDI = null, edUrl = null, edTimer = null, edDirty = false, edBusy = false, edPending = false;
 
-function setEdImage() {
-  const blob = EDI.edited ? EDI.edited.blob : EDI.blob;
+function setEdImage(item = EDI) {
+  if (!item) return;
+  const blob = item.edited ? item.edited.blob : item.blob;
   if (edUrl) URL.revokeObjectURL(edUrl);
   edUrl = URL.createObjectURL(blob);
   $('edImg').src = edUrl;
@@ -182,13 +183,17 @@ function scheduleApply() {
 async function applyEditor() {
   if (!EDI) return;
   if (edBusy) { edPending = true; return; }
+  // آیتم را در همان ابتدا تثبیت کن؛ اگر حین رندر ناهمگام، ویرایشگر بسته یا به تصویر دیگری منتقل شد،
+  // فراخوانی‌های بعدی به EDI تهی‌شده دست نزنند و رندر آیتم قبلی سالم کامل شود
+  const item = EDI;
   edBusy = true; edDirty = false;
   clearTimeout(edTimer);
   try {
-    await renderEdited(EDI);
-    setEdImage();
-    refreshCard(EDI);
-    drawThumb(EDI);
+    await renderEdited(item);
+    // پیش‌نمایش ویرایشگر فقط وقتی هنوز روی همین آیتم باز است به‌روز شود
+    if (EDI === item) setEdImage(item);
+    refreshCard(item);
+    drawThumb(item);
   } catch (e) {
     console.warn(e);
     alert('خطا در ساخت تصویر: ' + (e && e.message ? e.message : e));
