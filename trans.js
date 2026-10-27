@@ -2,11 +2,14 @@
 // این فایل بعد از viewer.js بارگذاری می‌شود و از متغیرهای آن (items، building، ...) استفاده می‌کند.
 const TR = { worker: null, lang: null, cancel: false };
 
-function openTrDialog() { $('trDialog').classList.remove('hidden'); }
+function openTrDialog() {
+  if (!$('ocrEnabled').checked) return;
+  $('trDialog').classList.remove('hidden');
+}
 function closeTrDialog() { $('trDialog').classList.add('hidden'); }
 
 async function ensureFont() {
-  try { await document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'); } catch (e) { /* ادامه */ }
+  try { await document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'); } catch { /* ادامه */ }
 }
 
 // تصویر ترجمه‌شده را از روی بلوک‌ها (دوباره) می‌سازد
@@ -26,14 +29,18 @@ async function renderEdited(it) {
 }
 
 async function runTranslate() {
-  if (building || loading) return;
+  if (building || loading || !$('ocrEnabled').checked) return;
   const lang = $('trLang').value;
   const L = OcrTools.LANGS[lang];
   const list = items.filter((it) => it.state === 'ok' && (!$('trOnlySel').checked || it.selected));
-  if (!list.length) return;
   closeTrDialog();
+  if (!list.length) {
+    setStatus('تصویری برای ترجمه پیدا نشد؛ ابتدا چند تصویر بارگذاری‌شده را انتخاب کنید.');
+    return;
+  }
 
-  building = true; TR.cancel = false;
+  building = true; TR.cancel = false; jobCancelRequested = false;
+  setJobHint(true);
   refreshSummary();
   const result = $('result');
   result.classList.remove('hidden', 'done');
@@ -52,7 +59,7 @@ async function runTranslate() {
   try {
     setStatus('در حال بارگذاری موتور تشخیص متن... (بار اول کمی طول می‌کشد)');
     if (!TR.worker || TR.lang !== lang) {
-      if (TR.worker) { try { await TR.worker.terminate(); } catch (e) {} TR.worker = null; }
+      if (TR.worker) { try { await TR.worker.terminate(); } catch {} TR.worker = null; }
       TR.worker = await OcrTools.createOcrWorker(lang);
       TR.lang = lang;
     }
@@ -71,9 +78,16 @@ async function runTranslate() {
         try {
           lines = await OcrTools.ocrBitmap(bmp, TR.worker, { cjk: L.cjk, lang, passes, stats, onSlice: (f) => prog(f * 0.6) });
         } finally { bmp.close(); }
+        if (!$('ocrEnabled').checked) {
+          it.ocr = null; it.edited = null;
+          refreshCard(it); drawThumb(it);
+          break;
+        }
         rawTotal += stats.raw; keptTotal += stats.kept;
 
         const blocks = OcrTools.groupLines(lines, L.cjk);
+        const eraseOriginal = $('trErase').checked;
+        blocks.forEach((block) => { block.bg = eraseOriginal ? 'auto' : 'none'; });
         it.ocr = { lang, blocks };
         if (!blocks.length) { noText++; it.edited = null; }
         else {
@@ -89,7 +103,17 @@ async function runTranslate() {
               prog(0.6 + 0.35 * (n / blocks.length));
             }
           }));
+          if (!$('ocrEnabled').checked) {
+            it.ocr = null; it.edited = null;
+            refreshCard(it); drawThumb(it);
+            break;
+          }
           await renderEdited(it);
+          if (!$('ocrEnabled').checked) {
+            it.ocr = null; it.edited = null;
+            refreshCard(it); drawThumb(it);
+            break;
+          }
           totalBlocks += blocks.length;
           doneImgs++;
           $('sPages').innerText = totalBlocks;
@@ -123,6 +147,8 @@ async function runTranslate() {
     setStatus('خطا در راه‌اندازی تشخیص متن: ' + (e && e.message ? e.message : e));
   } finally {
     building = false;
+    setJobHint(false);
+    setTaskTitle();
     $('btnStopTr').classList.add('hidden');
     refreshSummary();
   }
@@ -251,6 +277,21 @@ function exportText() {
 }
 
 // ---------- اتصال رویدادها ----------
+$('ocrEnabled').addEventListener('change', async () => {
+  if (!$('ocrEnabled').checked) {
+    TR.cancel = true;
+    // خاموش‌کردن سراسری OCR، ترجمه‌های موقت را کنار می‌گذارد و تصویر اصلی را برمی‌گرداند.
+    items.forEach((it) => { it.ocr = null; it.edited = null; });
+    refreshAll();
+    items.filter((it) => it.state === 'ok').forEach((it) => drawThumb(it));
+    if (TR.worker) {
+      try { await TR.worker.terminate(); } catch {}
+      TR.worker = null;
+      TR.lang = null;
+    }
+  }
+  refreshSummary();
+});
 $('btnTranslate').onclick = openTrDialog;
 $('trClose').onclick = closeTrDialog;
 $('trStart').onclick = runTranslate;
@@ -270,4 +311,4 @@ document.addEventListener('keydown', (e) => {
   if (!$('editor').classList.contains('hidden')) closeEditor();
   else if (!$('trDialog').classList.contains('hidden')) closeTrDialog();
 });
-window.addEventListener('pagehide', () => { if (TR.worker) { try { TR.worker.terminate(); } catch (e) {} } });
+window.addEventListener('pagehide', () => { if (TR.worker) { try { TR.worker.terminate(); } catch {} } });

@@ -2,15 +2,18 @@
 <html lang="fa" dir="rtl">
 <head>
   <meta charset="UTF-8">
-  <title>Comic to PDF</title>
+  <title>PIC TO PDF</title>
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <div class="brand">
-    <img src="icon128.png" alt="">
-    <h1>Comic to PDF<small>کمیک را به PDF یا تصویر تبدیل کن</small></h1>
-    <span class="badge">v2.2</span>
+    <span class="brand-logo"><img src="icon128.png" alt=""></span>
+    <div class="brand-text">
+      <h1>PIC TO PDF</h1>
+      <p>کمیک را به PDF یا تصویر تبدیل کن</p>
+    </div>
+    <span class="version-pill">v2.24</span>
   </div>
 
   <div class="field">
@@ -18,21 +21,14 @@
     <input type="text" id="pdfName" value="comic" spellcheck="false">
   </div>
 
-  <div class="box" id="statusBox">
-    <div id="statusText">آماده برای شروع</div>
+  <div class="box hidden" id="statusBox">
+    <div id="statusText"></div>
   </div>
 
   <button id="startBtn" class="btn">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>
     <span>شروع و پیش‌نمایش تصاویر</span>
   </button>
-
-  <div class="chips">
-    <span class="chip">خروجی PDF</span>
-    <span class="chip">ذخیرهٔ تصاویر جدا</span>
-    <span class="chip">کیفیت اصلی</span>
-    <span class="chip">انتخاب صفحه‌ها</span>
-  </div>
 
   <script src="popup.js"></script>
 </body>

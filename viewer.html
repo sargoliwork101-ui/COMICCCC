@@ -2,15 +2,49 @@
 <html lang="fa" dir="rtl">
 <head>
   <meta charset="UTF-8">
-  <title>Comic to PDF</title>
+  <title>PIC TO PDF</title>
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="viewer.css">
 </head>
 <body>
-  <header class="top">
-    <div class="brand">
-      <img src="icon128.png" alt="">
-      <h1>Comic to PDF<small>تصاویر را انتخاب کنید و خروجی دلخواه را بگیرید</small></h1>
+  <header class="topbar">
+    <div class="topbar-in">
+      <div class="brand">
+        <span class="brand-logo"><img src="icon128.png" alt=""></span>
+        <div class="brand-text">
+          <h1>PIC TO PDF</h1>
+          <p>تصاویر را انتخاب، مرتب و ویرایش کنید و خروجی PDF یا تصویر بگیرید</p>
+        </div>
+      </div>
+      <div class="topbar-side">
+        <span class="version-pill">نسخهٔ ۲.۲۴</span>
+        <details class="top-menu" id="topMenu">
+          <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </summary>
+          <div class="top-menu-panel" role="menu">
+            <section class="top-menu-section">
+              <h2 class="top-menu-title">پروفایل این صفحه</h2>
+              <p class="menu-hint">چیدمان، ترتیب، انتخاب‌ها، گروه‌ها، کراپ‌ها و تنظیمات خروجی این صفحه ذخیره و بعداً بازیابی می‌شود.</p>
+              <div class="profile-actions">
+                <button class="mini accent" id="saveProfileBtn" disabled>ذخیرهٔ پروفایل</button>
+                <button class="mini" id="restoreProfileBtn" disabled>بازیابی پروفایل</button>
+                <button class="mini warn hidden" id="deleteProfileBtn">حذف پروفایل</button>
+              </div>
+              <span id="profileStatus" class="profile-status" role="status">هنوز پروفایلی ذخیره نشده است.</span>
+            </section>
+            <section class="top-menu-section">
+              <h2 class="top-menu-title">OCR، ترجمه و تصاویر ناموفق</h2>
+              <div class="top-menu-ocr">
+                <label class="check" title="با خاموش‌کردن این گزینه، OCR و ترجمه غیرفعال می‌شود و تصویرها به نسخهٔ اصلی برمی‌گردند"><input type="checkbox" id="ocrEnabled" checked><span>فعال‌بودن OCR</span></label>
+                <button class="mini accent" id="btnTranslate" disabled>ترجمهٔ متن تصاویر به فارسی</button>
+                <button class="mini hidden" id="btnTxt">ذخیرهٔ متن‌ها (TXT)</button>
+                <button class="mini warn hidden" id="btnRetry">تلاش مجدد برای ناموفق‌ها</button>
+              </div>
+            </section>
+          </div>
+        </details>
+      </div>
     </div>
   </header>
 
@@ -23,7 +57,8 @@
         <div class="stat"><b id="sSize">0</b><span>مگابایت</span></div>
       </div>
       <div id="failed"></div>
-      <button id="btnStopTr" class="mini warn hidden">توقف</button>
+      <span id="jobHint" class="job-hint hidden" role="note">برای لغو این عملیات، کلید <kbd>ESC</kbd> را بزنید</span>
+      <button id="btnStopTr" class="mini warn hidden">توقف <kbd>ESC</kbd></button>
       <a id="downloadBtn" class="btn ok hidden" download>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>
         <span id="dlLabel">دانلود PDF</span>
@@ -31,52 +66,97 @@
     </section>
 
     <section class="toolbar panel">
-      <button class="mini" id="btnAll">انتخاب همه</button>
-      <button class="mini" id="btnNone">هیچ‌کدام</button>
-      <button class="mini" id="btnInv">معکوس انتخاب</button>
-      <button class="mini accent" id="btnTranslate" disabled>ترجمهٔ متن تصاویر به فارسی</button>
-      <button class="mini hidden" id="btnTxt">ذخیرهٔ متن‌ها (TXT)</button>
-      <button class="mini warn hidden" id="btnRetry">تلاش مجدد برای ناموفق‌ها</button>
-      <div class="loadwrap">
+      <div class="toolbar-actions">
+        <button class="mini" id="btnAll">انتخاب همه</button>
+        <button class="mini" id="btnNone">لغو انتخاب</button>
+        <button class="mini" id="btnInv">معکوس‌کردن انتخاب</button>
+        <button class="mini accent" id="btnGroupPage" disabled>ساخت گروه از انتخاب‌ها</button>
+        <button class="mini hidden" id="btnCancelGroupEdit">لغو ویرایش گروه</button>
+        <button class="mini" id="btnUngroupPage" disabled>لغو گروهِ انتخاب‌ها</button>
+        <span id="groupEditStatus" class="group-edit-status hidden" role="status" aria-live="polite"></span>
+        <span id="toolbarSelectionCount" class="toolbar-selection-count">—</span>
+      </div>
+      <div class="toolbar-status">
         <span id="loadText">در حال دریافت تصاویر...</span>
         <div class="bar small"><div id="loadBar"></div></div>
+      </div>
+      <div id="loadErrors" class="load-errors hidden" role="status"></div>
+      <div class="toolbar-menus">
+        <details class="tool-menu" id="groupMenu">
+          <summary>مدیریت گروه‌ها</summary>
+          <div class="tool-menu-body">
+            <p class="menu-hint">کارت را روی <b>وسط کارت دیگر</b> رها کنید تا گروه شوند؛ رهاکردن روی لبه فقط ترتیب را عوض می‌کند. با «ویرایش» اعضا را تغییر دهید و با × گروه را حذف کنید.</p>
+            <div class="group-manager"><strong>گروه‌های ساخته‌شده</strong><div id="groupList" class="group-list"><span class="group-empty">هنوز گروهی نساخته‌اید.</span></div></div>
+          </div>
+        </details>
       </div>
     </section>
 
     <section id="grid" class="grid"></section>
+    <div id="groupOutlineLayer" class="group-outline-layer hidden" aria-hidden="true"></div>
   </main>
+
+  <div id="loadingOverlay" class="loading-overlay hidden" role="status" aria-live="polite" aria-atomic="true">
+    <div class="loading-card">
+      <span class="loading-spinner" aria-hidden="true"></span>
+      <strong id="loadingOverlayText">در حال دریافت تصاویر...</strong>
+      <span id="loadingOverlayCount">۰ از ۰</span>
+      <div class="bar loading-progress"><div id="loadingOverlayBar"></div></div>
+      <span class="loading-hint">برای لغو بارگیری، کلید <kbd>ESC</kbd> را بزنید</span>
+    </div>
+  </div>
 
   <footer class="dock">
     <div class="dock-in">
-      <div id="selCount">—</div>
-
-      <div class="seg" role="tablist" aria-label="نوع خروجی">
-        <button class="seg-btn active" id="modePdf" role="tab">خروجی PDF</button>
-        <button class="seg-btn" id="modeImg" role="tab">تصاویر جدا</button>
+      <div class="dock-side">
+        <div id="selCount" class="sel-pill">—</div>
       </div>
 
-      <div class="opts" id="pdfOpts">
-        <label class="check" title="همه تصاویر انتخاب‌شده پشت هم و بدون فاصله در «یک» صفحهٔ PDF قرار می‌گیرند">
-          <input type="checkbox" id="seamless">
-          <span>چسباندن همه در یک صفحهٔ بلند</span>
-        </label>
-        <input type="text" id="pdfName" value="comic" spellcheck="false" aria-label="نام فایل PDF">
+      <div class="dock-center">
+        <div class="seg" role="group" aria-label="نوع خروجی">
+          <button type="button" class="seg-btn active" id="modePdf" aria-pressed="true">خروجی PDF</button>
+          <button type="button" class="seg-btn" id="modeImg" aria-pressed="false">تصاویر جدا</button>
+        </div>
+
+      <details class="output-settings" id="outputSettings" data-mode="pdf">
+        <summary>تنظیمات خروجی</summary>
+        <div class="output-panel" role="group" aria-label="تنظیمات خروجی">
+          <div class="output-panel-heading">
+            <strong>تنظیمات خروجی</strong>
+            <button type="button" class="output-close" id="closeOutputSettings">بستن</button>
+          </div>
+          <div class="opts" id="pdfOpts">
+            <label class="check" title="همهٔ تصاویر انتخاب‌شده پشت سر هم و بدون فاصله، در یک صفحهٔ واحد PDF قرار می‌گیرند">
+              <input type="checkbox" id="seamless"><span>همه تصاویر در یک صفحه</span>
+            </label>
+            <label class="check" title="قاب همهٔ صفحه‌های PDF عرض و ارتفاع یکسان دارد">
+              <input type="checkbox" id="uniformSize"><span>قاب‌های هم‌اندازه</span>
+            </label>
+            <label class="check" title="هر دو تصویر متوالی به‌صورت عمودی در یک صفحهٔ PDF قرار می‌گیرند">
+              <input type="checkbox" id="twoPerPage"><span>دو تصویر در هر صفحه</span>
+            </label>
+            <input type="text" id="pdfName" value="comic" spellcheck="false" aria-label="نام فایل PDF" placeholder="نام PDF">
+          </div>
+          <div class="opts hidden" id="imgOpts">
+            <select id="outFmt" class="sel" aria-label="فرمت تصاویر" title="اصلی: بدون تغییر؛ PNG: بدون افت؛ JPEG: کیفیت ۱۰۰٪.">
+              <option value="orig">فرمت اصلی</option>
+              <option value="png">PNG، بدون افت</option>
+              <option value="jpg">JPEG، کیفیت ۱۰۰٪</option>
+            </select>
+            <input type="text" id="folderName" placeholder="نام زیرپوشه (اختیاری)" spellcheck="false" aria-label="نام زیرپوشه">
+          </div>
+        </div>
+      </details>
+      </div>
+
+      <div class="dock-actions">
         <button id="buildBtn" class="btn" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z M14 3v5h5"/></svg>
           <span>ساخت PDF</span>
         </button>
-      </div>
-
-      <div class="opts hidden" id="imgOpts">
-        <select id="outFmt" class="sel" aria-label="فرمت تصاویر" title="اصلی: فایل اصلی بدون هیچ تغییر. PNG: بدون افت کیفیت. JPEG: بالاترین کیفیت (۱۰۰٪).">
-          <option value="orig">فرمت: اصلی (بدون تغییر)</option>
-          <option value="png">فرمت: PNG (بدون افت)</option>
-          <option value="jpg">فرمت: JPEG (کیفیت ۱۰۰٪)</option>
-        </select>
-        <input type="text" id="folderName" placeholder="نام زیرپوشهٔ جدید (اختیاری)" spellcheck="false" aria-label="نام زیرپوشه">
-        <button id="saveImgBtn" class="btn" disabled>
+        <button id="saveImgBtn" class="btn hidden" disabled>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-          <span>انتخاب پوشه و ذخیرهٔ تصاویر</span>
+          <span>ذخیرهٔ تصاویر</span>
         </button>
       </div>
     </div>
@@ -94,6 +174,7 @@
         <option value="chi_sim">中文 (چینی ساده)</option>
       </select>
       <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
+      <label class="check" title="اگر خاموش باشد، متن اصلی پاک نمی‌شود و ترجمه با حاشیه روی تصویر قرار می‌گیرد"><input type="checkbox" id="trErase" checked><span>پاک‌کردن متن اصلی زیر ترجمه</span></label>
       <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>
       <p class="note">زبان را درست انتخاب کنید؛ اگر زبان اشتباه باشد چیزی خوانده نمی‌شود. ترجمه به اینترنت نیاز دارد. دقت خواندن متن روی فونت‌های خیلی تزیینی یا متن روی نقاشی کمتر است؛ همه‌چیز را می‌توانید بعداً ویرایش کنید.</p>
       <div class="modal-actions">
@@ -118,8 +199,41 @@
     </div>
   </div>
 
+  <div id="cropper" class="hidden">
+    <div class="crop-head">
+      <strong id="cropTitle">کراپ تصویر</strong>
+      <div class="crop-actions">
+        <button class="mini" id="cropReset">حذف برش</button>
+        <button class="mini" id="cropCancel">انصراف</button>
+        <button class="btn" id="cropApply">اعمال برش</button>
+      </div>
+    </div>
+    <div class="crop-controls">
+      <label>نسبت تصویر
+        <select id="cropRatio" aria-label="نسبت ابعاد برش">
+          <option value="free">آزاد</option>
+          <option value="1/1">۱:۱</option>
+          <option value="4/3">۴:۳</option>
+          <option value="3/4">۳:۴</option>
+          <option value="16/9">۱۶:۹</option>
+          <option value="9/16">۹:۱۶</option>
+        </select>
+      </label>
+      <label>عرض برش (px)<input id="cropWidth" type="number" min="1" step="1" inputmode="numeric" aria-label="عرض برش بر حسب پیکسل"></label>
+      <label>ارتفاع برش (px)<input id="cropHeight" type="number" min="1" step="1" inputmode="numeric" aria-label="ارتفاع برش بر حسب پیکسل"></label>
+      <span>ابعاد را مستقیم وارد کنید یا دستگیره‌های کادر را بکشید؛ برای کادر تازه، از نقطهٔ شروع موس تا نقطهٔ رهاکردن بکشید.</span>
+    </div>
+    <div class="crop-body">
+      <div id="cropStage" class="crop-stage" tabindex="0" aria-label="ناحیهٔ انتخاب برش؛ Enter برای اعمال"><img id="cropImg" alt=""><div id="cropSelection"><i class="crop-handle nw" data-handle="nw"></i><i class="crop-handle n" data-handle="n"></i><i class="crop-handle ne" data-handle="ne"></i><i class="crop-handle e" data-handle="e"></i><i class="crop-handle se" data-handle="se"></i><i class="crop-handle s" data-handle="s"></i><i class="crop-handle sw" data-handle="sw"></i><i class="crop-handle w" data-handle="w"></i></div></div>
+    </div>
+    <p class="crop-help">برای برش تازه، از نقطهٔ دلخواه کلیک کنید و تا محل پایان بکشید. داخل کادر را برای جابه‌جایی بکشید و دستگیره‌ها را برای تغییر اندازه بکشید. Enter یا «اعمال برش» تغییر را ثبت می‌کند.</p>
+  </div>
+
   <div id="lightbox" class="hidden">
-    <button id="lbClose" aria-label="بستن">✕</button>
+    <div class="lb-head">
+      <button id="lbClose" aria-label="بستن">✕</button>
+      <button class="mini accent" id="lbCopy">کپی تصویر</button>
+    </div>
     <div class="lbscroll"><img id="lbImg" alt=""></div>
   </div>
 

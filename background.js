@@ -1,3 +1,16 @@
+// jobهای یتیم (مثلاً وقتی تب viewer کرش کرده یا بسته شده و pagehide اجرا نشده) را پاک کن تا فضای storage پر نشود
+async function pruneOrphanJobs() {
+  try {
+    const all = await chrome.storage.local.get(null);
+    const orphanKeys = Object.keys(all).filter((key) => key.startsWith('job_'));
+    if (orphanKeys.length) await chrome.storage.local.remove(orphanKeys);
+  } catch (e) {
+    console.warn('پاک‌سازی jobهای قدیمی ناموفق بود', e);
+  }
+}
+chrome.runtime.onStartup.addListener(pruneOrphanJobs);
+chrome.runtime.onInstalled.addListener(pruneOrphanJobs);
+
 // دریافت لیست تصاویر از صفحه و باز کردن تب ساخت PDF
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === 'WTPDF_URLS') {
@@ -6,11 +19,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       urls: msg.urls,
       name: msg.name,
       tabId: sender.tab ? sender.tab.id : null,
-      pageUrl: (sender.tab && sender.tab.url) || msg.pageUrl || ''
+      pageUrl: (sender.tab && sender.tab.url) || msg.pageUrl || '',
+      skippedInline: Number(msg.skippedInline) || 0
     };
     chrome.storage.local.set({ ['job_' + jobId]: job }).then(() => {
-      chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') + '?job=' + jobId });
-      sendResponse({ ok: true });
+      chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') + '?job=' + jobId }, (tab) => {
+        if (chrome.runtime.lastError || !tab || tab.id == null) {
+          const error = chrome.runtime.lastError;
+          sendResponse({ ok: false, error: error ? error.message : 'preview tab could not be opened' });
+          return;
+        }
+        // Keep the work tab from being auto-discarded while the user switches to other tabs.
+        try {
+          chrome.tabs.update(tab.id, { autoDiscardable: false }, () => {
+            if (chrome.runtime.lastError) console.warn('Could not disable automatic tab discard:', chrome.runtime.lastError.message);
+            sendResponse({ ok: true, tabId: tab.id });
+          });
+        } catch (error) {
+          console.warn('Could not protect the work tab from automatic discard:', error);
+          sendResponse({ ok: true, tabId: tab.id });
+        }
+      });
+    }).catch((error) => {
+      console.error('ذخیرهٔ فهرست تصاویر ناموفق بود', error);
+      sendResponse({ ok: false, error: error && error.message ? error.message : 'storage quota exceeded' });
     });
     return true;
   }

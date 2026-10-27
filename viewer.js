@@ -3,16 +3,106 @@ const $ = (id) => document.getElementById(id);
 const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 const ICON_ZOOM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg>';
 const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/></svg>';
+const ICON_CROP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v13a2 2 0 0 0 2 2h13M3 6h13a2 2 0 0 1 2 2v13"/></svg>';
+const ICON_DUPLICATE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';
+const ICON_DELETE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m4 4v6m6-6v6"/></svg>';
 const CONCURRENCY = 4;
 const MAX_CANVAS_H = 16000;
+const APP_TITLE = 'PIC TO PDF';
+function setTaskTitle(message = '') {
+  document.title = message ? `${message} · ${APP_TITLE}` : APP_TITLE;
+}
+
+// درخواست لغو همهٔ کارهای در حال اجرا (بارگیری، ساخت PDF، ذخیرهٔ تصاویر و ترجمه)
+function requestJobCancel() {
+  jobCancelRequested = true;
+  if (loadAbortController) { try { loadAbortController.abort(); } catch { /* کنترلر قبلاً بسته شده */ } }
+  // TR در trans.js تعریف شده و حلقهٔ ترجمه همان پرچم را می‌خواند
+  try { if (typeof TR !== 'undefined' && TR) TR.cancel = true; } catch { /* trans.js هنوز بارگذاری نشده */ }
+}
+
+// راهنمای لغو با ESC در پنل نتیجه، فقط هنگام اجرای کار دیده می‌شود
+function setJobHint(visible) {
+  const el = $('jobHint');
+  if (el) el.classList.toggle('hidden', !visible);
+}
 
 let job = null;
 let jobKey = '';
+let pageProfileKey = '';
+let pageProfileAvailable = false;
 let items = [];
 let loading = true;
 let building = false;
-let lastClicked = -1;
+// لغو کار در حال اجرا با ESC؛ بارگیری از AbortController و بقیه کارها از همین پرچم در مرز حلقه‌ها استفاده می‌کنند
+let jobCancelRequested = false;
+let loadAbortController = null;
+let lastClicked = null;
 let lastObjUrl = null;
+let draggedItem = null;
+let dragGroupDrop = false;
+let dragDropTargetEl = null;
+let suppressCardClickUntil = 0;
+// وقتی کارتی از یک گروه کشیده می‌شود، کل اعضای گروه به‌صورت یک بلوک جابه‌جا می‌شوند
+let draggedGroupItems = null;
+let insertMarkerEl = null;
+
+// انیمیشن FLIP: موقعیت کارت‌ها قبل از تغییر DOM را ذخیره و بعد از جابه‌جایی، لغزش نرم می‌سازد
+function captureGridRects() {
+  const map = new Map();
+  Array.from($('grid').children).forEach((el) => map.set(el, el.getBoundingClientRect()));
+  return map;
+}
+function playGridMove(firstRects) {
+  if (typeof requestAnimationFrame === 'undefined') return;
+  Array.from($('grid').children).forEach((el) => {
+    const old = firstRects.get(el);
+    if (!old) return;
+    const now = el.getBoundingClientRect();
+    const dx = old.left - now.left;
+    const dy = old.top - now.top;
+    if (!dx && !dy) return;
+    el.style.transition = 'none';
+    el.style.transform = `translate(${dx}px, ${dy}px)`;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      el.style.transition = 'transform .22s ease';
+      el.style.transform = '';
+      const done = () => { el.style.transition = ''; el.removeEventListener('transitionend', done); };
+      el.addEventListener('transitionend', done);
+    }));
+  });
+}
+// اعضای یک گروه به ترتیب فعلی شبکه (پیوسته‌اند)
+function gridGroupBlock(groupId) {
+  return Array.from($('grid').children).filter((el) => {
+    const it = items.find((x) => x.el === el);
+    return it && Number(it.pageGroup) === groupId;
+  });
+}
+function clearInsertMarker() {
+  if (insertMarkerEl) {
+    insertMarkerEl.classList.remove('drag-insert-before', 'drag-insert-after', 'drag-insert-group');
+    insertMarkerEl = null;
+  }
+}
+function setInsertMarker(targetEl, before, isGroup) {
+  const sameEdge = targetEl.classList.contains(before ? 'drag-insert-before' : 'drag-insert-after');
+  const sameMode = targetEl.classList.contains('drag-insert-group') === isGroup;
+  if (insertMarkerEl === targetEl && sameEdge && sameMode) return;
+  clearInsertMarker();
+  insertMarkerEl = targetEl;
+  targetEl.classList.add(before ? 'drag-insert-before' : 'drag-insert-after');
+  if (isGroup) targetEl.classList.add('drag-insert-group');
+}
+let lbItem = null;
+let cropItem = null;
+let cropObjectUrl = null;
+let cropRectDraft = null;
+let cropDragStart = null;
+let nextPageGroupId = 1;
+let editingPageGroupId = null;
+let editingPageGroupSelection = null;
+let nextItemUid = 0;
 
 // ---------- دانلود تصاویر ----------
 async function setRefererRule(pageUrl) {
@@ -23,28 +113,42 @@ async function setRefererRule(pageUrl) {
       addRules: [{
         id: 1, priority: 1,
         action: { type: 'modifyHeaders', requestHeaders: [{ header: 'referer', operation: 'set', value: origin }] },
-        condition: { resourceTypes: ['xmlhttprequest'], initiatorDomains: [chrome.runtime.id] }
+        // فقط برای دریافت تصویرها؛ درخواست سرویس‌های ترجمه نباید Referer سایت کمیک را بگیرند
+        condition: {
+          resourceTypes: ['xmlhttprequest'],
+          initiatorDomains: [chrome.runtime.id],
+          excludedRequestDomains: ['translate.googleapis.com', 'api.mymemory.translated.net']
+        }
       }]
     });
   } catch (e) { console.warn('Referer rule failed', e); }
 }
 async function clearRefererRule() {
-  try { await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [1] }); } catch (e) {}
+  try { await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [1] }); } catch {}
 }
 
 function looksLikeImage(b) {
   return b && b.size > 0 && !/^(text|application\/json)/i.test(b.type || '');
 }
 
-async function fetchImageBlob(url, tabId) {
+async function fetchImageBlob(url, tabId, signal) {
+  let directError = 'دریافت مستقیم ناموفق بود';
   try {
-    const res = await fetch(url, { credentials: 'include' });
-    if (res.ok) {
-      const b = await res.blob();
-      if (looksLikeImage(b)) return b;
+    const res = await fetch(url, { credentials: 'include', signal });
+    if (!res.ok) directError = `پاسخ سرور: HTTP ${res.status}`;
+    else {
+      const blob = await res.blob();
+      if (looksLikeImage(blob)) return { blob, error: null };
+      directError = `پاسخ سرور تصویر نبود${blob.type ? ` (${blob.type})` : ''}`;
     }
-  } catch (e) { /* روش دوم */ }
+  } catch (e) {
+    if (signal && signal.aborted) return { blob: null, error: 'بارگیری با کلید ESC لغو شد' };
+    directError = `دریافت مستقیم: ${e && e.message ? e.message : 'خطای شبکه یا دسترسی'}`;
+  }
+  // اگر کاربر لغو کرده، fetch جایگزین از داخل صفحه هم بی‌فایده است
+  if (signal && signal.aborted) return { blob: null, error: 'بارگیری با کلید ESC لغو شد' };
 
+  let pageError = 'دسترسی به صفحهٔ مبدأ در دسترس نیست';
   if (tabId != null) {
     try {
       const [r] = await chrome.scripting.executeScript({
@@ -53,23 +157,26 @@ async function fetchImageBlob(url, tabId) {
         func: async (u) => {
           try {
             const res = await fetch(u, { credentials: 'include' });
-            if (!res.ok) return null;
-            const b = await res.blob();
-            return await new Promise((resolve) => {
+            if (!res.ok) return { error: `HTTP ${res.status}` };
+            const blob = await res.blob();
+            const data = await new Promise((resolve, reject) => {
               const fr = new FileReader();
-              fr.onloadend = () => resolve(fr.result);
-              fr.readAsDataURL(b);
+              fr.onloadend = () => fr.error ? reject(fr.error) : resolve(fr.result);
+              fr.readAsDataURL(blob);
             });
-          } catch (e) { return null; }
+            return { data };
+          } catch (e) { return { error: e && e.message ? e.message : 'خطای fetch در صفحه' }; }
         }
       });
-      if (r && r.result) {
-        const b = await (await fetch(r.result)).blob();
-        if (looksLikeImage(b)) return b;
-      }
-    } catch (e) { /* نادیده */ }
+      const result = r && r.result;
+      if (result && result.data) {
+        const blob = await (await fetch(result.data)).blob();
+        if (looksLikeImage(blob)) return { blob, error: null };
+        pageError = 'صفحه پاسخ تصویری برنگرداند';
+      } else pageError = result && result.error ? `دریافت از صفحه: ${result.error}` : 'صفحه تصویر را برنگرداند';
+    } catch (e) { pageError = `دسترسی به صفحه: ${e && e.message ? e.message : 'مجاز نیست'}`; }
   }
-  return null;
+  return { blob: null, error: `${directError}؛ ${pageError}` };
 }
 
 // ---------- تشخیص فرمت از روی بایت‌ها ----------
@@ -104,7 +211,7 @@ async function analyze(it) {
       const b = await createImageBitmap(it.blob, { imageOrientation: 'none' });
       info = { fmt: info ? info.fmt : null, ok: false, w: b.width, h: b.height };
       b.close();
-    } catch (e) { info = null; }
+    } catch { info = null; }
   }
   it.info = info;
   if (info) { it.w = info.w; it.h = info.h; }
@@ -116,66 +223,303 @@ function fmtSize(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Ma
 function makeCard(it) {
   const el = document.createElement('div');
   el.className = 'item selected';
+  el.draggable = true;
+  el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید';
   el.innerHTML = `<div class="tw"><canvas width="240" height="320"></canvas><div class="spin">در حال دریافت...</div>
-    <span class="idx">${it.i + 1}</span><span class="tick">${ICON_CHECK}</span>
+    <span class="idx">${it.i + 1}${it.dupNo ? ` · کپی ${it.dupNo}` : ''}</span><span class="tick">${ICON_CHECK}</span>
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
-    <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button><span class="fa-badge">ترجمه شد</span></div><div class="meta">…</div>`;
+    <button class="crop" title="کراپ دستی">${ICON_CROP}</button>
+    <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button>
+    <button class="duplicate" title="ساخت نسخهٔ مستقل">${ICON_DUPLICATE}</button>
+    <button class="delete" title="حذف این تصویر" aria-label="حذف تصویر">${ICON_DELETE}</button>
+    <span class="fa-badge">ترجمه شد</span><span class="page-group-badge hidden"></span></div><div class="meta">…</div>
+    <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>`;
+  const orderInput = el.querySelector('.page-order');
+  orderInput.addEventListener('click', (ev) => ev.stopPropagation());
+  orderInput.addEventListener('change', () => {
+    const value = Number.parseInt(orderInput.value, 10);
+    it.pdfOrder = Number.isFinite(value) && value > 0 ? value : (it.pdfOrder || it.i + 1);
+    orderInput.value = String(it.pdfOrder);
+    sortGridByPdfOrder();
+  });
+  el.addEventListener('dragstart', (ev) => {
+    if (ev.target.closest('input, button, select, textarea')) { ev.preventDefault(); return; }
+    draggedItem = it;
+    el.classList.add('dragging');
+    $('grid').classList.add('order-live');
+    // اگر کارت عضو یک گروه معتبر است، کل اعضای گروه برای جابه‌جایی بلوکی علامت‌گذاری می‌شوند
+    const gid = Number(it.pageGroup);
+    const groupMembers = gid > 0 ? items.filter((x) => x.state === 'ok' && Number(x.pageGroup) === gid) : [];
+    if (groupMembers.length >= 2) {
+      draggedGroupItems = groupMembers;
+      const color = groupColorFor(buildPageGroupView().numberById.get(gid));
+      $('grid').style.setProperty('--group-color', color.hex);
+      groupMembers.forEach((member) => member.el.classList.add('group-moving'));
+    } else {
+      draggedGroupItems = null;
+    }
+    ev.dataTransfer.effectAllowed = 'move';
+    ev.dataTransfer.setData('text/plain', String(it.uid));
+  });
+  el.addEventListener('dragend', () => {
+    el.classList.remove('dragging');
+    if (draggedGroupItems) {
+      draggedGroupItems.forEach((member) => member.el.classList.remove('group-moving'));
+      draggedGroupItems = null;
+    }
+    $('grid').style.removeProperty('--group-color');
+    $('grid').classList.remove('order-live');
+    clearDragDropHint();
+    // اگر دراپ معتبری رخ نداده باشد، شماره‌های پیش‌نمایشی به ترتیب واقعی برگردند
+    restoreDragOrderPreview();
+    draggedItem = null;
+  });
   el.addEventListener('click', (ev) => {
+    if (Date.now() < suppressCardClickUntil) { ev.preventDefault(); return; }
+    if (ev.target.closest('.page-order')) return;
     if (ev.target.closest('.zoom')) { openLightbox(it); return; }
+    if (ev.target.closest('.crop')) { openCropper(it); return; }
     if (ev.target.closest('.edit')) { if (typeof openEditor === 'function') openEditor(it); return; }
+    if (ev.target.closest('.duplicate')) { duplicateItem(it); return; }
+    if (ev.target.closest('.delete')) { deleteItem(it); return; }
     if (it.state !== 'ok') return;
-    if (ev.shiftKey && lastClicked >= 0) {
-      const [a, b] = [Math.min(lastClicked, it.i), Math.max(lastClicked, it.i)];
-      const val = !it.selected;
-      for (let k = a; k <= b; k++) if (items[k].state === 'ok') items[k].selected = val;
+    if (ev.shiftKey && lastClicked != null) {
+      const ordered = Array.from($('grid').children).map((node) => items.find((item) => item.el === node)).filter((item) => item && item.state === 'ok');
+      const from = ordered.findIndex((item) => item.uid === lastClicked), to = ordered.findIndex((item) => item.uid === it.uid);
+      if (from >= 0 && to >= 0) {
+        const [a, b] = [Math.min(from, to), Math.max(from, to)];
+        const val = !it.selected;
+        for (let k = a; k <= b; k++) ordered[k].selected = val;
+      }
     } else {
       it.selected = !it.selected;
     }
-    lastClicked = it.i;
+    lastClicked = it.uid;
     refreshAll();
   });
   it.el = el;
   return el;
 }
 
-function refreshCard(it) {
+function makeDuplicateData(source) {
+  const state = { ...source };
+  delete state.el; // مرجع DOM کارت مبدأ نباید به نسخهٔ کپی منتقل شود
+  return {
+    ...state,
+    uid: nextItemUid++,
+    dupNo: items.filter((it) => it.i === source.i).length,
+    selected: true,
+    pageGroup: null,
+    cropRect: source.cropRect ? { ...source.cropRect } : null,
+    cropCache: null,
+    ocr: source.ocr ? { lang: source.ocr.lang, blocks: source.ocr.blocks.map((block) => ({ ...block })) } : null,
+    edited: source.edited ? { ...source.edited } : null,
+    el: null
+  };
+}
+function duplicateItem(source) {
+  if (!source || source.state !== 'ok') return;
+  const duplicate = makeDuplicateData(source);
+  const card = makeCard(duplicate);
+  items.push(duplicate);
+  $('grid').insertBefore(card, source.el.nextSibling);
+  updatePdfOrderFromGrid();
+  refreshAll();
+  drawThumb(duplicate);
+}
+function deleteItem(it) {
+  if (!it || building || loading) return;
+  if (!confirm(`تصویر ${it.i + 1} حذف شود؟`)) return;
+  if (editingPageGroupId !== null) cancelPageGroupEdit();
+  if (cropItem === it) closeCropper();
+  if (lbItem === it) closeLightbox();
+  items = items.filter((item) => item !== it);
+  if (it.el && it.el.parentNode) it.el.parentNode.removeChild(it.el);
+  if (lastClicked === it.uid) lastClicked = null;
+  cleanupPageGroups();
+  updatePdfOrderFromGrid();
+  refreshAll();
+}
+
+// پالت رنگی گروه‌ها: هر گروه شمارهٔ نمایشی خودش رنگ ثابتی دارد تا گروه‌ها به‌راحتی از هم تفکیک شوند
+const GROUP_PALETTE = [
+  { hex: '#34d399', rgb: '52,211,153' },  // سبز
+  { hex: '#8b7bff', rgb: '139,123,255' }, // بنفش
+  { hex: '#fbbf24', rgb: '251,191,36' },  // کهربایی
+  { hex: '#38bdf8', rgb: '56,189,248' },  // آسمانی
+  { hex: '#fb7185', rgb: '251,113,133' }, // سرخ‌صورتی
+  { hex: '#fb923c', rgb: '251,146,60' },  // نارنجی
+  { hex: '#22d3ee', rgb: '34,211,238' },  // فیروزه‌ای
+  { hex: '#e879f9', rgb: '232,121,249' }, // سرخابی
+  { hex: '#a3e635', rgb: '163,230,53' },  // لیمویی
+  { hex: '#818cf8', rgb: '129,140,248' }  // نیلی
+];
+function groupColorFor(displayNumber) {
+  return GROUP_PALETTE[(Math.max(1, Number(displayNumber) || 1) - 1) % GROUP_PALETTE.length];
+}
+function buildPageGroupView() {
+  const membersById = new Map();
+  items.forEach((it) => {
+    const id = Number(it.pageGroup);
+    if (it.state !== 'ok' || !Number.isInteger(id) || id < 1) return;
+    if (!membersById.has(id)) membersById.set(id, []);
+    membersById.get(id).push(it);
+  });
+  for (const [id, members] of membersById) if (members.length < 2) membersById.delete(id);
+  const orderedIds = [...membersById.keys()].sort((a, b) => a - b);
+  const numberById = new Map(orderedIds.map((id, index) => [id, index + 1]));
+  return { membersById, numberById };
+}
+function formatGroupLabel(displayNumber, memberCount) {
+  return `گروه ${displayNumber} · ${memberCount} عضو`;
+}
+
+// یک کادر سبز واحد دور «همهٔ» اعضای هر گروه رسم می‌کند؛ اگر اعضای گروه در چند ردیف شبکه شکسته شوند،
+// هر ردیف کادر پیوستهٔ خودش را می‌گیرد تا کادر هیچ کارت بیگانه‌ای را در بر نگیرد.
+function drawGroupOutlines(groupView = buildPageGroupView()) {
+  const layer = $('groupOutlineLayer');
+  const grid = $('grid');
+  const wrap = document.querySelector('.wrap');
+  if (!layer || !grid || !wrap) return;
+  layer.innerHTML = '';
+  const groups = [...groupView.membersById.entries()];
+  if (!groups.length) { layer.classList.add('hidden'); return; }
+  const gridRect = grid.getBoundingClientRect();
+  const wrapRect = wrap.getBoundingClientRect();
+  layer.classList.remove('hidden');
+  // لایه دقیقاً روی محدودهٔ شبکه تراز می‌شود تا مختصات کادرها نسبت به خود شبکه حساب شود
+  layer.style.left = `${gridRect.left - wrapRect.left}px`;
+  layer.style.top = `${gridRect.top - wrapRect.top}px`;
+  layer.style.width = `${gridRect.width}px`;
+  layer.style.height = `${gridRect.height}px`;
+  const PAD = 7;
+  for (const [groupId, members] of groups) {
+    const displayNumber = groupView.numberById.get(groupId);
+    const color = groupColorFor(displayNumber);
+    const rects = members.map((it) => it.el.getBoundingClientRect());
+    // خوشه‌بندی اعضا بر اساس ردیف (تحمل ۴ پیکسل برای تفاوت گردشدن مرورگر)
+    const rows = [];
+    for (const r of rects) {
+      const row = rows.find((c) => Math.abs(c.top - r.top) <= 4);
+      if (row) {
+        row.top = Math.min(row.top, r.top);
+        row.left = Math.min(row.left, r.left);
+        row.right = Math.max(row.right, r.right);
+        row.bottom = Math.max(row.bottom, r.bottom);
+      } else {
+        rows.push({ top: r.top, left: r.left, right: r.right, bottom: r.bottom });
+      }
+    }
+    rows.forEach((row, idx) => {
+      const box = document.createElement('div');
+      box.className = 'group-outline';
+      box.dataset.group = String(groupId);
+      box.dataset.row = String(idx + 1);
+      box.style.left = `${row.left - gridRect.left - PAD}px`;
+      box.style.top = `${row.top - gridRect.top - PAD}px`;
+      box.style.width = `${row.right - row.left + PAD * 2}px`;
+      box.style.height = `${row.bottom - row.top + PAD * 2}px`;
+      box.style.borderColor = color.hex;
+      box.style.background = `rgba(${color.rgb},.08)`;
+      box.style.boxShadow = `0 0 0 1px rgba(${color.rgb},.22), 0 14px 34px -20px rgba(${color.rgb},.8)`;
+      layer.appendChild(box);
+    });
+  }
+}
+function refreshCard(it, groupView = buildPageGroupView()) {
   const el = it.el;
   el.classList.toggle('selected', !!it.selected);
   el.classList.toggle('failed', it.state === 'failed');
   el.classList.toggle('translated', !!it.edited);
+  el.classList.toggle('cropped', !!it.cropRect);
   el.classList.toggle('has-ocr', !!it.ocr);
+  const groupBadge = el.querySelector('.page-group-badge');
+  const deleteButton = el.querySelector('.delete');
+  if (deleteButton) deleteButton.disabled = loading || building;
+  const groupId = Number(it.pageGroup);
+  const groupMembers = groupView.membersById.get(groupId);
+  const displayNumber = groupView.numberById.get(groupId);
+  const hasVisibleGroup = !!groupMembers && !!displayNumber;
+  // خط چین سبز ماندگار دور اعضای هر گروه تا گروه بودنشان همیشه مشخص باشد
+  el.classList.toggle('in-group', hasVisibleGroup);
+  groupBadge.classList.toggle('hidden', !hasVisibleGroup);
+  if (hasVisibleGroup) {
+    const label = formatGroupLabel(displayNumber, groupMembers.length);
+    groupBadge.innerText = label;
+    groupBadge.title = `${label}; این اعضا در یک صفحهٔ PDF قرار می‌گیرند`;
+    // رنگ مخصوص همان گروه روی badge، هماهنگ با کادر دور اعضا
+    const color = groupColorFor(displayNumber);
+    groupBadge.style.background = color.hex;
+    groupBadge.style.color = '#0b1220';
+    groupBadge.style.borderColor = 'rgba(255,255,255,.4)';
+  } else {
+    groupBadge.style.background = '';
+    groupBadge.style.color = '';
+    groupBadge.style.borderColor = '';
+  }
   const meta = el.querySelector('.meta');
   const spin = el.querySelector('.spin');
+  if (it.state === 'failed') el.title = it.error || 'بارگیری این تصویر ناموفق بود';
+  else el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید';
   if (it.state === 'ok') {
     if (spin && spin.parentNode) spin.parentNode.removeChild(spin);
     meta.innerText = `${it.w}×${it.h} · ${fmtSize(it.blob.size)}`;
+    meta.title = '';
   } else if (it.state === 'failed') {
     if (spin && spin.parentNode) spin.parentNode.removeChild(spin);
     meta.innerText = 'دانلود نشد';
+    meta.title = it.error || 'علت دقیق بارگیری نامشخص است';
   } else {
     meta.innerText = '…';
   }
 }
 
+async function getDisplaySource(it) {
+  const base = it.edited || it;
+  const rect = it.cropRect;
+  if (!rect) return base;
+  const key = [rect.x, rect.y, rect.w, rect.h].join(':');
+  if (it.cropCache && it.cropCache.base === base && it.cropCache.key === key) return it.cropCache;
+
+  const bmp = await createImageBitmap(base.blob, { imageOrientation: 'none' });
+  try {
+    const x = Math.max(0, Math.min(bmp.width - 1, Math.round(rect.x * bmp.width)));
+    const y = Math.max(0, Math.min(bmp.height - 1, Math.round(rect.y * bmp.height)));
+    const w = Math.max(1, Math.min(bmp.width - x, Math.round(rect.w * bmp.width)));
+    const h = Math.max(1, Math.min(bmp.height - y, Math.round(rect.h * bmp.height)));
+    if (!canConvert(w, h)) throw new Error('ابعاد ناحیهٔ برش برای پردازش بیش از حد بزرگ است');
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(bmp, x, y, w, h, 0, 0, w, h);
+    const blob = await canvasToBlob(cv, 'image/png');
+    cv.width = cv.height = 0;
+    const info = sniff(new Uint8Array(await blob.arrayBuffer()));
+    it.cropCache = { i: it.i, blob, info, w, h, base, key };
+    return it.cropCache;
+  } finally { bmp.close(); }
+}
+
 async function drawThumb(it) {
   try {
-    const bmp = await createImageBitmap(it.edited ? it.edited.blob : it.blob, { resizeWidth: 240, resizeQuality: 'medium' });
+    const src = await getDisplaySource(it);
+    const bmp = await createImageBitmap(src.blob, { resizeWidth: 240, resizeQuality: 'medium' });
     const c = it.el.querySelector('canvas'), ctx = c.getContext('2d');
     ctx.fillStyle = '#171c26'; ctx.fillRect(0, 0, c.width, c.height);
     const dh = Math.min(bmp.height, c.height);
     const dy = bmp.height < c.height ? Math.round((c.height - bmp.height) / 2) : 0;
     ctx.drawImage(bmp, 0, 0, bmp.width, dh, 0, dy, bmp.width, dh);
     bmp.close();
-  } catch (e) { /* مهم نیست */ }
+  } catch (e) { console.warn('پیش‌نمایش تصویر ناموفق', e); }
 }
 
-async function loadOne(it) {
+async function loadOne(it, signal) {
   it.state = 'loading';
-  const blob = await fetchImageBlob(it.url, job.tabId);
-  if (!blob) { it.state = 'failed'; it.selected = false; refreshCard(it); return; }
-  it.blob = blob;
-  try { await analyze(it); } catch (e) { it.info = null; }
-  if (!it.info) { it.state = 'failed'; it.selected = false; it.blob = null; refreshCard(it); return; }
+  const result = await fetchImageBlob(it.url, job.tabId, signal);
+  if (!result.blob) { it.state = 'failed'; it.error = result.error; it.selected = false; refreshCard(it); return; }
+  it.blob = result.blob;
+  try { await analyze(it); } catch (e) { it.info = null; it.error = e && e.message ? e.message : 'تحلیل تصویر ناموفق بود'; }
+  if (!it.info) { it.state = 'failed'; it.error = it.error || 'قالب یا ابعاد تصویر قابل‌خواندن نبود'; it.selected = false; it.blob = null; refreshCard(it); return; }
+  it.error = '';
   it.state = 'ok';
   it.selected = true;
   refreshCard(it);
@@ -184,57 +528,656 @@ async function loadOne(it) {
 
 async function loadAll(list) {
   loading = true;
+  jobCancelRequested = false;
+  loadAbortController = new AbortController();
+  const signal = loadAbortController.signal;
   $('loadText').parentNode.classList.remove('finished');
+  const overlay = $('loadingOverlay');
+  overlay.classList.remove('hidden');
   let next = 0, done = 0;
   const total = list.length;
   const update = () => {
-    $('loadBar').style.width = Math.round((done / total) * 100) + '%';
+    const percent = total ? Math.round((done / total) * 100) : 100;
+    $('loadBar').style.width = percent + '%';
+    $('loadingOverlayBar').style.width = percent + '%';
     $('loadText').innerText = `در حال دریافت تصاویر... ${done} از ${total}`;
+    $('loadingOverlayText').innerText = done >= total ? 'آماده‌سازی تصاویر کامل شد' : 'در حال دریافت تصاویر...';
+    $('loadingOverlayCount').innerText = `${done} از ${total} تصویر`;
+    setTaskTitle(done < total ? `در حال دریافت تصویر ${done} از ${total}` : 'بارگیری تصویرها کامل شد');
     refreshSummary();
   };
   update();
   const worker = async () => {
-    while (next < total) {
+    while (next < total && !jobCancelRequested) {
       const it = list[next++];
-      await loadOne(it);
+      await loadOne(it, signal);
       done++;
       update();
     }
   };
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
-  loading = false;
-  $('loadText').parentNode.classList.add('finished');
-  refreshAll();
+  try {
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
+  } finally {
+    loading = false;
+    loadAbortController = null;
+    // کارت‌هایی که فرصت بارگیری پیدا نکردند یا درخواستشان لغو شد، ناموفقِ قابل‌تلاش‌مجدد می‌شوند
+    if (jobCancelRequested) {
+      list.filter((it) => it.state === 'loading').forEach((it) => {
+        it.state = 'failed';
+        it.error = 'بارگیری با کلید ESC لغو شد';
+        it.selected = false;
+        refreshCard(it);
+      });
+      $('loadingOverlayText').innerText = 'بارگیری لغو شد';
+    }
+    overlay.classList.add('hidden');
+    $('loadText').parentNode.classList.add('finished');
+    setTaskTitle();
+    refreshAll();
+  }
+}
+
+// ---------- مرتب‌سازی کارت‌ها / ترتیب خروجی PDF ----------
+function sortGridByPdfOrder() {
+  const grid = $('grid');
+  items.slice().sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.uid - b.uid)
+    .forEach((it) => grid.appendChild(it.el));
+}
+
+function updatePdfOrderFromGrid() {
+  Array.from($('grid').children).forEach((el, index) => {
+    const it = items.find((item) => item.el === el);
+    if (!it) return;
+    it.pdfOrder = index + 1;
+    const input = el.querySelector('.page-order');
+    if (input) input.value = String(it.pdfOrder);
+  });
+  // جابه‌جایی درگ/دراپ یا مرتب‌سازی دستی، محل کادر گروه‌ها را عوض می‌کند
+  drawGroupOutlines();
 }
 
 // ---------- انتخاب‌ها ----------
-function refreshSummary() {
+function refreshSummary(groupView = buildPageGroupView()) {
   const ok = items.filter((it) => it.state === 'ok').length;
-  const sel = items.filter((it) => it.state === 'ok' && it.selected).length;
+  const selectedItems = items.filter((it) => it.state === 'ok' && it.selected);
+  const sel = selectedItems.length;
+  const selectedGroups = [...new Set(selectedItems.map((it) => Number(it.pageGroup)).filter((id) => Number.isInteger(id) && id > 0 && groupView.numberById.has(id)))].sort((a, b) => a - b);
   const failedN = items.filter((it) => it.state === 'failed').length;
   $('selCount').innerText = `${sel} از ${ok} تصویر انتخاب شده`;
+  const topCount = $('toolbarSelectionCount');
+  if (topCount) topCount.innerText = `${sel} انتخاب`;
   $('btnRetry').classList.toggle('hidden', failedN === 0 || loading);
-  $('buildBtn').disabled = loading || building || sel === 0;
-  $('saveImgBtn').disabled = loading || building || sel === 0;
-  $('btnTranslate').disabled = loading || building || ok === 0;
+  $('btnRetry').disabled = building || editingPageGroupId !== null;
+  ['btnAll', 'btnNone', 'btnInv'].forEach((id) => { $(id).disabled = building || editingPageGroupId !== null; });
+  $('buildBtn').disabled = loading || building || editingPageGroupId !== null || sel === 0;
+  $('saveImgBtn').disabled = loading || building || editingPageGroupId !== null || sel === 0;
+  $('seamless').disabled = loading || building || $('twoPerPage').checked;
+  $('twoPerPage').disabled = loading || building || $('seamless').checked;
+  $('uniformSize').disabled = loading || building || $('seamless').checked;
+  const groupingUnchanged = selectedGroups.length === 1 && selectedItems.every((it) => Number(it.pageGroup) === selectedGroups[0]);
+  const targetGroupNumber = selectedGroups.length ? groupView.numberById.get(selectedGroups[0]) : null;
+  if (editingPageGroupId !== null) {
+    const currentMembers = new Set(selectedItems.map((it) => it.uid));
+    const originalMembers = new Set(items.filter((it) => Number(it.pageGroup) === editingPageGroupId).map((it) => it.uid));
+    const changed = currentMembers.size !== originalMembers.size || [...currentMembers].some((uid) => !originalMembers.has(uid));
+    const editingNumber = groupView.numberById.get(editingPageGroupId) || editingPageGroupId;
+    $('btnGroupPage').disabled = loading || building || sel < 2 || !changed;
+    $('btnGroupPage').innerText = `ذخیرهٔ ویرایش گروه ${editingNumber}`;
+    $('groupEditStatus').innerText = sel < 2
+      ? 'برای حفظ گروه دست‌کم دو کارت را نگه دارید؛ برای حذف کامل گروه از × استفاده کنید.'
+      : `ویرایش گروه ${editingNumber}: کارت‌ها را انتخاب یا از انتخاب خارج کنید، سپس تغییرات را ذخیره کنید.`;
+    $('btnCancelGroupEdit').classList.remove('hidden');
+  } else {
+    $('btnGroupPage').disabled = loading || building || sel < 2 || groupingUnchanged;
+    $('btnGroupPage').innerText = selectedGroups.length > 1
+      ? `ادغام گروه‌ها در گروه ${targetGroupNumber || selectedGroups[0]}`
+      : selectedGroups.length === 1
+        ? `افزودن انتخاب‌ها به گروه ${targetGroupNumber || selectedGroups[0]}`
+        : `ساخت یک گروه از ${sel} انتخاب`;
+    $('btnCancelGroupEdit').classList.add('hidden');
+  }
+  $('btnUngroupPage').disabled = loading || building || editingPageGroupId !== null || !selectedItems.some((it) => it.pageGroup);
+  $('ocrEnabled').disabled = loading || building || editingPageGroupId !== null;
+  $('btnTranslate').disabled = loading || building || editingPageGroupId !== null || ok === 0 || !$('ocrEnabled').checked;
   $('btnTxt').classList.toggle('hidden', !items.some((it) => it.ocr));
+  updateProfileButtons();
+  refreshGroupManager(groupView);
+  refreshImageWarnings();
 }
-function refreshAll() { items.forEach(refreshCard); refreshSummary(); }
+function refreshAll() {
+  const groupView = buildPageGroupView();
+  items.forEach((it) => refreshCard(it, groupView));
+  refreshSummary(groupView);
+  drawGroupOutlines(groupView);
+}
+function refreshGroupManager(groupView = buildPageGroupView()) {
+  const container = $('groupList');
+  if (!container) return;
+  const groups = groupView.membersById;
+  if (!groups.size) {
+    container.innerHTML = '<span class="group-empty">هنوز گروهی نساخته‌اید؛ کارت‌های یک صفحه را انتخاب و «ساخت گروه» را بزنید.</span>';
+    return;
+  }
+  container.innerHTML = [...groups.entries()].sort((a, b) => a[0] - b[0]).map(([id, members]) => {
+    const number = groupView.numberById.get(id);
+    const allSelected = members.every((it) => it.selected);
+    const label = formatGroupLabel(number, members.length);
+    const color = groupColorFor(number);
+    const chipStyle = `style="--gc:${color.hex};--gc-rgb:${color.rgb}"`;
+    return `<span class="group-chip" ${chipStyle}><button type="button" class="group-select" data-group="${id}" aria-pressed="${allSelected}" title="اعضای گروه را انتخاب می‌کند و به اولین تصویر می‌برد">${label}</button><button type="button" class="group-edit" data-group="${id}" aria-label="ویرایش گروه ${number}" title="ویرایش اعضای این گروه">ویرایش</button><button type="button" class="group-remove" data-group="${id}" aria-label="حذف گروه ${number}" title="حذف این گروه">×</button></span>`;
+  }).join('');
+  container.querySelectorAll('.group-select').forEach((button) => button.addEventListener('click', () => {
+    if (editingPageGroupId !== null) cancelPageGroupEdit();
+    const groupId = Number(button.dataset.group);
+    const members = items.filter((it) => it.state === 'ok' && Number(it.pageGroup) === groupId);
+    items.forEach((it) => { it.selected = members.includes(it); });
+    lastClicked = null;
+    refreshAll();
+    const groupMenu = $('groupMenu');
+    if (groupMenu) groupMenu.open = false;
+    members.forEach((it) => it.el.classList.add('group-focus'));
+    const first = members[0] && members[0].el;
+    if (first) {
+      first.tabIndex = -1;
+      requestAnimationFrame(() => {
+        first.focus({ preventScroll: true });
+        first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    }
+    setTimeout(() => members.forEach((it) => it.el.classList.remove('group-focus')), 2400);
+  }));
+  container.querySelectorAll('.group-edit').forEach((button) => button.addEventListener('click', () => {
+    if (editingPageGroupId !== null) cancelPageGroupEdit();
+    beginPageGroupEdit(Number(button.dataset.group));
+  }));
+  container.querySelectorAll('.group-remove').forEach((button) => button.addEventListener('click', () => {
+    const groupId = Number(button.dataset.group);
+    if (editingPageGroupId !== null) cancelPageGroupEdit();
+    items.filter((it) => Number(it.pageGroup) === groupId).forEach((it) => { it.pageGroup = null; });
+    cleanupPageGroups();
+    refreshAll();
+  }));
+}
+function refreshImageWarnings() {
+  const notice = $('loadErrors');
+  if (!notice) return;
+  const failed = items.filter((it) => it.state === 'failed').length;
+  const skipped = Number(job && job.skippedInline) || 0;
+  const messages = [];
+  if (failed) messages.push(`${failed} تصویر بارگیری نشد؛ برای دیدن علت، نشانگر را روی کارت ناموفق نگه دارید.`);
+  if (skipped) messages.push(`${skipped} تصویر داخلیِ بزرگ برای جلوگیری از پرشدن فضای افزونه نادیده گرفته شد.`);
+  notice.innerText = messages.join(' ');
+  notice.classList.toggle('hidden', messages.length === 0);
+}
+function cleanupPageGroups() {
+  const sizes = new Map();
+  items.forEach((it) => {
+    const id = Number(it.pageGroup);
+    if (it.state === 'ok' && Number.isInteger(id) && id > 0) sizes.set(id, (sizes.get(id) || 0) + 1);
+    else it.pageGroup = null;
+  });
+  items.forEach((it) => {
+    const id = Number(it.pageGroup);
+    if (id && sizes.get(id) < 2) it.pageGroup = null;
+  });
+  // Internal IDs never change; display ordinals are computed once for both the header and cards.
+  const activeIds = [...sizes.keys()].filter((id) => sizes.get(id) >= 2);
+  nextPageGroupId = activeIds.length ? Math.max(...activeIds) + 1 : 1;
+}
+function beginPageGroupEdit(groupId) {
+  const members = items.filter((it) => it.state === 'ok' && Number(it.pageGroup) === groupId);
+  if (members.length < 2) return;
+  editingPageGroupId = groupId;
+  editingPageGroupSelection = new Map(items.map((it) => [it.uid, !!it.selected]));
+  items.forEach((it) => { if (it.state === 'ok') it.selected = members.includes(it); });
+  lastClicked = null;
+  const number = buildPageGroupView().numberById.get(groupId) || groupId;
+  const status = $('groupEditStatus');
+  status.innerText = `ویرایش گروه ${number}: کارت‌ها را انتخاب یا از انتخاب خارج کنید، سپس تغییرات را ذخیره کنید.`;
+  status.classList.remove('hidden');
+  if ($('groupMenu')) $('groupMenu').open = false;
+  refreshAll();
+  const first = members[0] && members[0].el;
+  if (first) requestAnimationFrame(() => first.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+}
+function cancelPageGroupEdit() {
+  if (editingPageGroupId === null) return;
+  if (editingPageGroupSelection) {
+    items.forEach((it) => {
+      if (editingPageGroupSelection.has(it.uid)) {
+        it.selected = editingPageGroupSelection.get(it.uid);
+      }
+    });
+  }
+  editingPageGroupId = null;
+  editingPageGroupSelection = null;
+  $('groupEditStatus').classList.add('hidden');
+  refreshAll();
+}
+function savePageGroupEdit() {
+  if (editingPageGroupId === null) return false;
+  const selected = items.filter((it) => it.state === 'ok' && it.selected);
+  if (selected.length < 2) {
+    $('groupEditStatus').innerText = 'برای ذخیرهٔ گروه، دست‌کم دو کارت را انتخاب کنید.';
+    $('groupEditStatus').classList.remove('hidden');
+    return false;
+  }
+  const groupId = editingPageGroupId;
+  items.filter((it) => Number(it.pageGroup) === groupId).forEach((it) => { it.pageGroup = null; });
+  selected.forEach((it) => { it.pageGroup = groupId; });
+  editingPageGroupId = null;
+  editingPageGroupSelection = null;
+  $('groupEditStatus').classList.add('hidden');
+  cleanupPageGroups();
+  normalizeGroupLayout();
+  refreshAll();
+  return true;
+}
+// اعضای هر گروه را در شبکه پشت سر هم (کنار هم) می‌چیند چون قرار است در یک صفحهٔ PDF بیایند؛
+// ترتیب نسبی بقیهٔ کارت‌ها دست‌نخورده می‌ماند.
+function normalizeGroupLayout() {
+  const grid = $('grid');
+  const firstRects = captureGridRects();
+  const ordered = Array.from(grid.children)
+    .map((el) => items.find((it) => it.el === el))
+    .filter(Boolean);
+  const placed = new Set();
+  const nextOrder = [];
+  for (const it of ordered) {
+    if (placed.has(it)) continue;
+    const gid = Number(it.pageGroup);
+    if (gid && gid > 0) {
+      ordered.filter((x) => Number(x.pageGroup) === gid).forEach((member) => {
+        placed.add(member);
+        nextOrder.push(member);
+      });
+    } else {
+      placed.add(it);
+      nextOrder.push(it);
+    }
+  }
+  nextOrder.forEach((it) => grid.appendChild(it.el));
+  updatePdfOrderFromGrid();
+  playGridMove(firstRects);
+}
+function groupSelectedItems() {
+  if (editingPageGroupId !== null) { savePageGroupEdit(); return; }
+  const selected = items.filter((it) => it.state === 'ok' && it.selected);
+  if (selected.length < 2) return;
+  const existingIds = [...new Set(selected.map((it) => Number(it.pageGroup)).filter((id) => Number.isInteger(id) && id > 0))].sort((a, b) => a - b);
+  const groupId = existingIds[0] || nextPageGroupId++;
+  if (selected.every((it) => Number(it.pageGroup) === groupId)) return;
+  selected.forEach((it) => { it.pageGroup = groupId; });
+  cleanupPageGroups();
+  normalizeGroupLayout();
+  refreshAll();
+}
+function ungroupSelectedItems() {
+  items.filter((it) => it.state === 'ok' && it.selected).forEach((it) => { it.pageGroup = null; });
+  cleanupPageGroups();
+  refreshAll();
+}
 
-// ---------- نمایش بزرگ ----------
+// ---------- گروه‌بندی با کشیدن کارت روی کارت ----------
+function clearDragDropHint() {
+  if (dragDropTargetEl) {
+    dragDropTargetEl.classList.remove('group-drop-target');
+    dragDropTargetEl = null;
+  }
+  dragGroupDrop = false;
+  clearInsertMarker();
+}
+
+// جابه‌جایی ترتیبی با درگ: اگر کارت کشیده‌شده عضو گروه باشد، کل بلوک گروه با هم جابه‌جا می‌شود.
+// طرح درج: کدام المان‌ها جابه‌جا می‌شوند (تکی یا بلوک گروه) و لنگر کجاست.
+// لنگر هرگز داخل بلوک یک گروه بیگانه نمی‌افتد تا گروهی از هم نپاشد.
+function planDrop(dragged, targetEl, before) {
+  const gid = Number(dragged.pageGroup);
+  const hasGroup = gid > 0 && items.some((it) => it.state === 'ok' && Number(it.pageGroup) === gid);
+  const movingEls = hasGroup ? gridGroupBlock(gid) : [dragged.el];
+  if (movingEls.includes(targetEl)) return null; // روی اعضای بلوک خودی، جابه‌جایی بی‌اثر است
+  let anchor = before ? targetEl : targetEl.nextSibling;
+  // اگر هدف عضو یک گروه بیگانه است، لنگر را به لبهٔ بیرونی بلوک آن گروه محدود کن
+  const targetItem = items.find((it) => it.el === targetEl);
+  const tg = Number(targetItem && targetItem.pageGroup);
+  if (tg > 0 && tg !== gid) {
+    const foreignBlock = gridGroupBlock(tg);
+    if (foreignBlock.includes(targetEl)) {
+      anchor = before ? foreignBlock[0] : foreignBlock[foreignBlock.length - 1].nextSibling;
+    }
+  }
+  if (anchor && movingEls.includes(anchor)) return null;
+  return { movingEls, anchor };
+}
+
+// پیش‌نمایش زندهٔ شماره صفحه‌ها حین درگ (بدون جابه‌جایی DOM تا لحظهٔ رهاکردن)
+function previewDragOrder(dragged, targetEl, before) {
+  const grid = $('grid');
+  const plan = planDrop(dragged, targetEl, before);
+  if (!plan) { restoreDragOrderPreview(); return; }
+  const tentative = Array.from(grid.children).filter((el) => !plan.movingEls.includes(el));
+  const anchorIndex = plan.anchor ? tentative.indexOf(plan.anchor) : tentative.length;
+  tentative.splice(anchorIndex, 0, ...plan.movingEls);
+  tentative.forEach((el, index) => {
+    const input = el.querySelector('.page-order');
+    if (!input) return;
+    const next = String(index + 1);
+    // فقط ورودی‌هایی که شماره‌شان واقعاً عوض شده به‌روز و فلش می‌شوند (جلوگیری از reflow و انیمیشن بی‌مورد در هر dragover)
+    if (input.value === next) return;
+    input.value = next;
+    input.classList.remove('order-flash');
+    void input.offsetWidth;
+    input.classList.add('order-flash');
+  });
+}
+// بازگرداندن شماره‌ها به ترتیب واقعی فعلی شبکه (وقتی درگ لغو می‌شود یا روی نوار گروهی می‌رویم)
+function restoreDragOrderPreview() {
+  Array.from($('grid').children).forEach((el, index) => {
+    const input = el.querySelector('.page-order');
+    if (!input) return;
+    if (input.classList.contains('order-flash')) input.classList.remove('order-flash');
+    const next = String(index + 1);
+    if (input.value !== next) input.value = next;
+  });
+}
+
+function reorderByDrop(dragged, targetEl, before) {
+  const grid = $('grid');
+  const plan = planDrop(dragged, targetEl, before);
+  if (!plan) return false;
+  const firstRects = captureGridRects();
+  plan.movingEls.forEach((el) => grid.insertBefore(el, plan.anchor));
+  updatePdfOrderFromGrid();
+  playGridMove(firstRects);
+  return true;
+}
+
+// رهاکردن کارت کشیده‌شده روی کارت هدف: گروه تازه، یا عضویت در گروه موجود
+function groupCardsByDrop(dragged, targetItem) {
+  if (!dragged || !targetItem || dragged === targetItem) return;
+  if (dragged.state !== 'ok' || targetItem.state !== 'ok') return;
+  const targetGroup = Number(targetItem.pageGroup) || null;
+  const draggedGroup = Number(dragged.pageGroup) || null;
+  if (targetGroup && draggedGroup === targetGroup) return; // از قبل هم‌گروه‌اند
+  if (targetGroup) {
+    // کارت کشیده‌شده به گروه کارت هدف ملحق می‌شود (اگر گروه قبلی تک‌عضو شود، cleanup حذفش می‌کند)
+    dragged.pageGroup = targetGroup;
+  } else if (draggedGroup) {
+    // کارت هدف به گروه کارت کشیده‌شده ملحق می‌شود
+    targetItem.pageGroup = draggedGroup;
+  } else {
+    // هیچ‌کدام گروه ندارند: گروه تازه با هر دو
+    const groupId = nextPageGroupId++;
+    dragged.pageGroup = groupId;
+    targetItem.pageGroup = groupId;
+  }
+  cleanupPageGroups();
+  normalizeGroupLayout();
+  refreshAll();
+}
+
+// ---------- نمایش بزرگ، کپی و کراپ دستی ----------
 let lbUrl = null;
-function openLightbox(it) {
+async function openLightbox(it) {
   if (!it.blob) return;
-  lbUrl = URL.createObjectURL(it.edited ? it.edited.blob : it.blob);
-  $('lbImg').src = lbUrl;
-  $('lightbox').classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
+  try {
+    const src = await getDisplaySource(it);
+    lbItem = it;
+    if (lbUrl) URL.revokeObjectURL(lbUrl);
+    lbUrl = URL.createObjectURL(src.blob);
+    $('lbImg').src = lbUrl;
+    $('lightbox').classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  } catch (e) { alert('بازکردن تصویر ناموفق بود: ' + (e.message || e)); }
 }
 function closeLightbox() {
   $('lightbox').classList.add('hidden');
   $('lbImg').removeAttribute('src');
   if (lbUrl) { URL.revokeObjectURL(lbUrl); lbUrl = null; }
+  lbItem = null;
   document.body.style.overflow = '';
+}
+
+async function copyLightboxImage() {
+  if (!lbItem) return;
+  try {
+    if (!navigator.clipboard || !window.ClipboardItem) throw new Error('مرورگر اجازهٔ کپی تصویر به کلیپ‌بورد را نمی‌دهد');
+    const src = await getDisplaySource(lbItem);
+    let blob = src.blob;
+    if (blob.type !== 'image/png') {
+      const bmp = await createImageBitmap(blob);
+      const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
+      cv.getContext('2d').drawImage(bmp, 0, 0); bmp.close();
+      blob = await canvasToBlob(cv, 'image/png'); cv.width = cv.height = 0;
+    }
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    const btn = $('lbCopy');
+    btn.innerText = 'کپی شد ✓';
+    setTimeout(() => { if (btn.isConnected) btn.innerText = 'کپی تصویر'; }, 1400);
+  } catch (e) { alert('کپی تصویر ناموفق بود: ' + (e.message || e)); }
+}
+
+function cropImageDimensions() {
+  const base = cropItem && (cropItem.edited || cropItem);
+  return { w: Math.max(1, Number(base && base.w) || Number(cropItem && cropItem.w) || 1), h: Math.max(1, Number(base && base.h) || Number(cropItem && cropItem.h) || 1) };
+}
+function cropAspectRatio() {
+  const value = $('cropRatio').value;
+  if (!value || value === 'free') return null;
+  const parts = value.split('/').map(Number);
+  return parts.length === 2 && parts[0] > 0 && parts[1] > 0 ? parts[0] / parts[1] : null;
+}
+function syncCropDimensionInputs(rect = cropRectDraft) {
+  const { w, h } = cropImageDimensions();
+  $('cropWidth').placeholder = String(w);
+  $('cropHeight').placeholder = String(h);
+  $('cropWidth').max = String(w);
+  $('cropHeight').max = String(h);
+  $('cropWidth').value = rect && rect.w > 0 ? String(Math.max(1, Math.round(rect.w * w))) : '';
+  $('cropHeight').value = rect && rect.h > 0 ? String(Math.max(1, Math.round(rect.h * h))) : '';
+}
+function cropPoint(ev) {
+  const r = $('cropImg').getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  return { x: Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)), y: Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height)) };
+}
+function paintCropSelection(rect, preserveInput = null) {
+  const preservedValue = preserveInput ? $(preserveInput).value : null;
+  const el = $('cropSelection');
+  if (!rect || rect.w <= 0 || rect.h <= 0) {
+    el.style.display = 'none';
+    syncCropDimensionInputs(null);
+  } else {
+    el.style.display = 'block';
+    el.style.left = (rect.x * 100) + '%'; el.style.top = (rect.y * 100) + '%';
+    el.style.width = (rect.w * 100) + '%'; el.style.height = (rect.h * 100) + '%';
+    syncCropDimensionInputs(rect);
+  }
+  if (preserveInput) $(preserveInput).value = preservedValue;
+}
+function updateCropFromInputs(changed, live = false) {
+  if (!cropItem) return;
+  const size = cropImageDimensions();
+  const old = cropRectDraft || { x: 0, y: 0, w: 1, h: 1 };
+  const oldW = Math.max(1, Math.round(old.w * size.w)), oldH = Math.max(1, Math.round(old.h * size.h));
+  const read = (id, fallback) => {
+    const n = Number.parseInt($(id).value, 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  let width = Math.min(size.w, read('cropWidth', oldW));
+  let height = Math.min(size.h, read('cropHeight', oldH));
+  const ratio = cropAspectRatio();
+  if (ratio) {
+    if (changed === 'width') height = Math.max(1, Math.round(width / ratio));
+    else if (changed === 'height') width = Math.max(1, Math.round(height * ratio));
+    const fit = Math.min(1, size.w / width, size.h / height);
+    width = Math.max(1, Math.round(width * fit));
+    height = Math.max(1, Math.round(height * fit));
+  }
+  width = Math.min(size.w, width); height = Math.min(size.h, height);
+  const centerX = old.x + old.w / 2, centerY = old.y + old.h / 2;
+  const w = width / size.w, h = height / size.h;
+  const x = Math.max(0, Math.min(1 - w, centerX - w / 2));
+  const y = Math.max(0, Math.min(1 - h, centerY - h / 2));
+  cropRectDraft = { x, y, w, h };
+  paintCropSelection(cropRectDraft, live ? (changed === 'height' ? 'cropHeight' : 'cropWidth') : null);
+}
+function adjustCropToRatio() {
+  if (!cropItem || !cropRectDraft) return;
+  const ratio = cropAspectRatio();
+  if (!ratio) return;
+  const size = cropImageDimensions();
+  let width = cropRectDraft.w * size.w, height = cropRectDraft.h * size.h;
+  if (width / height > ratio) width = height * ratio;
+  else height = width / ratio;
+  const w = width / size.w, h = height / size.h;
+  cropRectDraft = {
+    x: Math.max(0, Math.min(1 - w, cropRectDraft.x + (cropRectDraft.w - w) / 2)),
+    y: Math.max(0, Math.min(1 - h, cropRectDraft.y + (cropRectDraft.h - h) / 2)),
+    w, h
+  };
+  paintCropSelection(cropRectDraft);
+}
+async function openCropper(it) {
+  if (!it || !it.blob) return;
+  cropItem = it;
+  cropRectDraft = it.cropRect ? { ...it.cropRect } : null;
+  const base = it.edited || it;
+  if (cropObjectUrl) URL.revokeObjectURL(cropObjectUrl);
+  cropObjectUrl = URL.createObjectURL(base.blob);
+  $('cropImg').src = cropObjectUrl;
+  $('cropTitle').innerText = `کراپ تصویر ${it.i + 1}`;
+  $('cropper').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  paintCropSelection(cropRectDraft);
+  $('cropStage').focus();
+}
+function closeCropper() {
+  $('cropper').classList.add('hidden');
+  $('cropImg').removeAttribute('src');
+  $('cropSelection').style.display = 'none';
+  if (cropObjectUrl) { URL.revokeObjectURL(cropObjectUrl); cropObjectUrl = null; }
+  cropItem = null; cropDragStart = null;
+  document.body.style.overflow = '';
+}
+function applyCrop() {
+  if (!cropItem) return;
+  if (cropRectDraft === null) cropItem.cropRect = null;
+  else if (cropRectDraft.w > 0 && cropRectDraft.h > 0) cropItem.cropRect = { ...cropRectDraft };
+  cropItem.cropCache = null;
+  const it = cropItem;
+  closeCropper();
+  refreshCard(it);
+  drawThumb(it);
+}
+function cropPxRect(rect, size) {
+  return { x1: rect.x * size.w, y1: rect.y * size.h, x2: (rect.x + rect.w) * size.w, y2: (rect.y + rect.h) * size.h };
+}
+function saveCropPxRect(r, size) {
+  const x1 = Math.max(0, Math.min(size.w - 1, Math.min(r.x1, r.x2)));
+  const y1 = Math.max(0, Math.min(size.h - 1, Math.min(r.y1, r.y2)));
+  const x2 = Math.max(x1 + 1, Math.min(size.w, Math.max(r.x1, r.x2)));
+  const y2 = Math.max(y1 + 1, Math.min(size.h, Math.max(r.y1, r.y2)));
+  cropRectDraft = { x: x1 / size.w, y: y1 / size.h, w: (x2 - x1) / size.w, h: (y2 - y1) / size.h };
+  paintCropSelection(cropRectDraft);
+}
+function beginCropSelection(ev) {
+  if (!cropItem || ev.button !== 0) return;
+  ev.preventDefault();
+  const p = cropPoint(ev);
+  if (!p) return;
+  const size = cropImageDimensions();
+  const handleEl = ev.target && ev.target.closest ? ev.target.closest('.crop-handle') : null;
+  const inside = ev.target && ev.target.closest && ev.target.closest('#cropSelection') && cropRectDraft && cropRectDraft.w > 0;
+  if (inside) {
+    cropDragStart = {
+      mode: handleEl ? 'resize' : 'move',
+      handle: handleEl ? handleEl.dataset.handle : null,
+      point: p,
+      rect: cropPxRect(cropRectDraft, size)
+    };
+  } else {
+    // انتخاب تازه دقیقاً از نقطهٔ فشار موس شروع می‌شود و با محل رهاکردن تمام می‌شود.
+    cropDragStart = { mode: 'draw', point: p };
+    cropRectDraft = { x: p.x, y: p.y, w: 0, h: 0 };
+    paintCropSelection(cropRectDraft);
+  }
+  $('cropStage').setPointerCapture(ev.pointerId);
+}
+function updateCropDraw(p, size, start) {
+  const dx = (p.x - start.x) * size.w, dy = (p.y - start.y) * size.h;
+  let width = Math.abs(dx), height = Math.abs(dy);
+  const ratio = cropAspectRatio();
+  if (ratio && width > 0 && height > 0) {
+    width = Math.min(width, height * ratio);
+    height = width / ratio;
+  }
+  const x = dx < 0 ? start.x - width / size.w : start.x;
+  const y = dy < 0 ? start.y - height / size.h : start.y;
+  cropRectDraft = { x, y, w: width / size.w, h: height / size.h };
+  paintCropSelection(cropRectDraft);
+}
+function resizeCrop(p, size, drag) {
+  const r = { ...drag.rect };
+  const dx = (p.x - drag.point.x) * size.w, dy = (p.y - drag.point.y) * size.h;
+  const h = drag.handle;
+  if (h.includes('w')) r.x1 += dx;
+  if (h.includes('e')) r.x2 += dx;
+  if (h.includes('n')) r.y1 += dy;
+  if (h.includes('s')) r.y2 += dy;
+  r.x1 = Math.max(0, Math.min(size.w - 1, r.x1)); r.x2 = Math.max(1, Math.min(size.w, r.x2));
+  r.y1 = Math.max(0, Math.min(size.h - 1, r.y1)); r.y2 = Math.max(1, Math.min(size.h, r.y2));
+  if (r.x2 <= r.x1) { if (h.includes('w')) r.x1 = r.x2 - 1; else r.x2 = r.x1 + 1; }
+  if (r.y2 <= r.y1) { if (h.includes('n')) r.y1 = r.y2 - 1; else r.y2 = r.y1 + 1; }
+  const ratio = cropAspectRatio();
+  if (ratio) {
+    let width = r.x2 - r.x1, height = r.y2 - r.y1;
+    if (h === 'e' || h === 'w') height = width / ratio;
+    else if (h === 'n' || h === 's') width = height * ratio;
+    else if (width / height > ratio) height = width / ratio;
+    else width = height * ratio;
+    if (h.includes('w')) r.x1 = r.x2 - width; else if (h.includes('e')) r.x2 = r.x1 + width; else { const cx = (r.x1 + r.x2) / 2; r.x1 = cx - width / 2; r.x2 = cx + width / 2; }
+    if (h.includes('n')) r.y1 = r.y2 - height; else if (h.includes('s')) r.y2 = r.y1 + height; else { const cy = (r.y1 + r.y2) / 2; r.y1 = cy - height / 2; r.y2 = cy + height / 2; }
+    const shiftX = Math.max(0, -r.x1) + Math.min(0, size.w - r.x2);
+    const shiftY = Math.max(0, -r.y1) + Math.min(0, size.h - r.y2);
+    r.x1 += shiftX; r.x2 += shiftX; r.y1 += shiftY; r.y2 += shiftY;
+    r.x1 = Math.max(0, r.x1); r.y1 = Math.max(0, r.y1); r.x2 = Math.min(size.w, r.x2); r.y2 = Math.min(size.h, r.y2);
+  }
+  saveCropPxRect(r, size);
+}
+function moveCropSelection(ev) {
+  if (!cropDragStart) return;
+  const p = cropPoint(ev);
+  if (!p) return;
+  const size = cropImageDimensions();
+  const drag = cropDragStart;
+  if (drag.mode === 'draw') { updateCropDraw(p, size, drag.point); return; }
+  if (drag.mode === 'resize') { resizeCrop(p, size, drag); return; }
+  const dx = (p.x - drag.point.x) * size.w, dy = (p.y - drag.point.y) * size.h;
+  const width = drag.rect.x2 - drag.rect.x1, height = drag.rect.y2 - drag.rect.y1;
+  const x1 = Math.max(0, Math.min(size.w - width, drag.rect.x1 + dx));
+  const y1 = Math.max(0, Math.min(size.h - height, drag.rect.y1 + dy));
+  saveCropPxRect({ x1, y1, x2: x1 + width, y2: y1 + height }, size);
+}
+function endCropSelection(ev) {
+  if (cropDragStart && ev && Number.isFinite(ev.clientX) && Number.isFinite(ev.clientY)) moveCropSelection(ev);
+  cropDragStart = null;
+}
+function cancelCropSelection() { cropDragStart = null; }
+function handleOverlayKeydown(e) {
+  const cropOpen = !$('cropper').classList.contains('hidden');
+  if (e.key === 'Enter' && cropOpen) {
+    if (e.target && e.target.closest && e.target.closest('.crop-actions button')) return;
+    if (e.target && e.target.id === 'cropWidth') updateCropFromInputs('width');
+    else if (e.target && e.target.id === 'cropHeight') updateCropFromInputs('height');
+    else if (e.target && e.target.id === 'cropRatio') adjustCropToRatio();
+    e.preventDefault();
+    applyCrop();
+    return;
+  }
+  if (e.key !== 'Escape') return;
+  if (cropOpen) closeCropper();
+  else if (!$('lightbox').classList.contains('hidden')) closeLightbox();
 }
 
 // ---------- آماده‌سازی تصاویر برای PDF ----------
@@ -255,22 +1198,23 @@ async function decodeSlices(it, maxSrcH) {
       ctx.drawImage(bmp, 0, y, bmp.width, sh, 0, 0, bmp.width, sh);
       const data = canvas.toDataURL(asPng ? 'image/png' : 'image/jpeg', 0.98);
       canvas.width = canvas.height = 0;
-      segs.push({ data, fmt: asPng ? 'PNG' : 'JPEG', w: bmp.width, h: sh, alias: `i${it.i}_${y}` });
+      segs.push({ data, fmt: asPng ? 'PNG' : 'JPEG', w: bmp.width, h: sh, alias: `i${it.pdfKey || it.uid || it.i}_${y}` });
     }
   } finally { bmp.close(); }
   return segs;
 }
 
 async function prepare(it, r) {
-  const src = it.edited || it; // تصویر ترجمه‌شده (در صورت وجود) یا تصویر اصلی
+  const src = await getDisplaySource(it);
   const rawMax = Math.floor(PdfBuilder.SAFE_PT / r);
   const inf = src.info;
+  const key = it.pdfKey || it.uid || it.i;
   // فایل JPEG/PNG بدون هیچ فشرده‌سازی مجدد
   if (inf && inf.ok && inf.h <= rawMax) {
     const u8 = new Uint8Array(await src.blob.arrayBuffer());
-    return [{ data: u8, fmt: inf.fmt, w: inf.w, h: inf.h, alias: `i${it.i}` }];
+    return [{ data: u8, fmt: inf.fmt, w: inf.w, h: inf.h, alias: `i${key}` }];
   }
-  return decodeSlices({ i: it.i, blob: src.blob, info: src.info }, Math.min(rawMax, MAX_CANVAS_H));
+  return decodeSlices({ i: key, pdfKey: key, blob: src.blob, info: src.info }, Math.min(rawMax, MAX_CANVAS_H));
 }
 
 async function fallback(seg) {
@@ -287,19 +1231,94 @@ async function fallback(seg) {
   return { data, fmt: 'JPEG' };
 }
 
+async function composeVertically(group, pageKey) {
+  const sources = await Promise.all(group.map(getDisplaySource));
+  const targetWidths = sources.map((src) => src.w);
+  const maxW = Math.max(...targetWidths);
+  const rawHeights = sources.map((src, i) => src.h * targetWidths[i] / src.w);
+  const rawH = rawHeights.reduce((sum, h) => sum + h, 0);
+  const scale = Math.min(1, 16000 / maxW, 16000 / rawH, Math.sqrt(180000000 / (maxW * rawH)));
+  const w = Math.max(1, Math.floor(maxW * scale));
+  const widths = targetWidths.map((width) => Math.min(w, Math.max(1, Math.round(width * scale))));
+  const heights = rawHeights.map((h) => Math.max(1, Math.round(h * scale)));
+  const h = heights.reduce((sum, n) => sum + n, 0);
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
+  let y = 0;
+  for (let k = 0; k < sources.length; k++) {
+    if (jobCancelRequested) break;
+    const bmp = await createImageBitmap(sources[k].blob, { imageOrientation: 'none' });
+    const x = Math.round((w - widths[k]) / 2);
+    try { ctx.drawImage(bmp, x, y, widths[k], heights[k]); }
+    finally { bmp.close(); }
+    y += heights[k];
+  }
+  const blob = await canvasToBlob(cv, 'image/png');
+  cv.width = cv.height = 0;
+  return {
+    i: group[0].i, pdfKey: pageKey, pageOrder: Math.min(...group.map((it) => it.pdfOrder || it.i + 1)),
+    sequence: Math.min(...group.map((it) => it.sequence)), blob, w, h,
+    info: sniff(new Uint8Array(await blob.arrayBuffer()))
+  };
+}
+
+async function makePdfItems(selected, twoPerPage) {
+  let sequence = 0;
+  const expanded = [];
+  for (const it of selected) {
+    if (jobCancelRequested) break;
+    const source = await getDisplaySource(it);
+    expanded.push({
+      ...it, blob: source.blob, info: source.info, w: source.w, h: source.h,
+      edited: null, cropRect: null, cropCache: null,
+      pdfKey: `image_${it.uid ?? it.i}`, sequence: sequence++, pageOrder: it.pdfOrder || it.i + 1
+    });
+  }
+
+  const groups = new Map(), ungrouped = [];
+  expanded.forEach((it) => {
+    if (it.pageGroup) {
+      if (!groups.has(it.pageGroup)) groups.set(it.pageGroup, []);
+      groups.get(it.pageGroup).push(it);
+    } else ungrouped.push(it);
+  });
+
+  const pages = [];
+  for (const [groupId, members] of groups) {
+    if (jobCancelRequested) break;
+    members.sort((a, b) => a.sequence - b.sequence);
+    pages.push(members.length > 1 ? await composeVertically(members, `group_${groupId}`) : members[0]);
+  }
+  const chunkSize = twoPerPage ? 2 : 1;
+  for (let i = 0; i < ungrouped.length && !jobCancelRequested; i += chunkSize) {
+    const chunk = ungrouped.slice(i, i + chunkSize);
+    pages.push(chunk.length > 1 ? await composeVertically(chunk, `pair_${chunk[0].sequence}`) : chunk[0]);
+  }
+  if (jobCancelRequested) return [];
+  // Group IDs only define membership; PDF page order always follows the earliest card position.
+  pages.sort((a, b) => (a.pageOrder || a.i + 1) - (b.pageOrder || b.i + 1) || a.sequence - b.sequence);
+  return pages;
+}
+
 // ---------- ساخت PDF ----------
 async function onBuild() {
   if (building || loading) return;
-  const sel = items.filter((it) => it.state === 'ok' && it.selected);
+  const sel = items.filter((it) => it.state === 'ok' && it.selected)
+    .sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.uid - b.uid);
   if (!sel.length) return;
   const jsPDFLib = window.jspdf && window.jspdf.jsPDF;
   if (!jsPDFLib) { alert('فایل jspdf.umd.min.js پیدا نشد!'); return; }
 
   building = true;
+  jobCancelRequested = false;
+  setJobHint(true);
   refreshSummary();
   let name = $('pdfName').value.trim() || 'comic';
   if (!name.toLowerCase().endsWith('.pdf')) name += '.pdf';
   const seamless = $('seamless').checked;
+  const twoPerPage = $('twoPerPage').checked && !seamless;
+  const uniformSize = $('uniformSize').checked;
 
   const result = $('result');
   result.classList.remove('hidden', 'done');
@@ -313,12 +1332,17 @@ async function onBuild() {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
   try {
+    setStatus(twoPerPage ? 'در حال چیدن تصاویر دوتایی در صفحه‌های عمودی...' : 'در حال آماده‌سازی تصاویر PDF...');
+    const pdfItems = await makePdfItems(sel, twoPerPage);
+    if (jobCancelRequested) { setStatus('ساخت PDF با کلید ESC لغو شد.'); return; }
     const res = await PdfBuilder.build({
       jsPDF: jsPDFLib,
-      items: sel,
+      items: pdfItems,
       seamless,
+      uniformSize,
       prepare,
       fallback,
+      isCancelled: () => jobCancelRequested,
       onProgress: (k, n) => {
         $('progressBar').style.width = Math.round((k / n) * 95) + '%';
         if (k < n) setStatus(`در حال پردازش تصویر ${k + 1} از ${n}...`);
@@ -326,6 +1350,7 @@ async function onBuild() {
       onPage: (p) => { $('sPages').innerText = p; }
     });
 
+    if (res.cancelled || jobCancelRequested) { setStatus('ساخت PDF با کلید ESC لغو شد.'); return; }
     if (!res.pdf) { setStatus('هیچ تصویری قابل تبدیل به PDF نبود!'); return; }
 
     setStatus('در حال نهایی کردن فایل PDF...');
@@ -343,26 +1368,38 @@ async function onBuild() {
     $('sSize').innerText = mb;
     result.classList.add('done');
     $('progressBar').style.width = '100%';
-    setStatus(`آماده شد! ${sel.length} تصویر در ${res.pages} صفحه ${seamless ? '(یک صفحهٔ بلند)' : ''} قرار گرفت. اگر دانلود شروع نشد، دکمهٔ «دانلود PDF» را بزنید.`);
+    const layoutNotes = [];
+    if (seamless) layoutNotes.push('همه تصاویر در یک صفحه');
+    else if (twoPerPage) layoutNotes.push('دو تصویر عمودی در هر صفحه');
+    if (uniformSize) layoutNotes.push('اندازهٔ قاب صفحه‌ها یکسان');
+    const layoutNote = layoutNotes.length ? ` (${layoutNotes.join('، ')})` : '';
+    setStatus(`آماده شد! فایل PDF با ${res.pages} صفحه${layoutNote} ساخته شد. اگر دانلود شروع نشد، دکمهٔ «دانلود PDF» را بزنید.`);
     btn.click();
   } catch (e) {
     console.error(e);
     setStatus('خطا در ساخت PDF: ' + (e && e.message ? e.message : e));
   } finally {
     building = false;
+    setJobHint(false);
+    setTaskTitle();
     refreshSummary();
   }
 }
-function setStatus(t) { $('statusText').innerText = t; }
+function setStatus(t) { $('statusText').innerText = t; if (building) setTaskTitle(t); }
 
 // ---------- ذخیرهٔ تصاویر به‌صورت جدا ----------
 let mode = 'pdf';
 function setMode(m) {
   mode = m;
+  $('outputSettings').dataset.mode = m;
   $('modePdf').classList.toggle('active', m === 'pdf');
   $('modeImg').classList.toggle('active', m === 'img');
+  $('modePdf').setAttribute('aria-pressed', String(m === 'pdf'));
+  $('modeImg').setAttribute('aria-pressed', String(m === 'img'));
   $('pdfOpts').classList.toggle('hidden', m !== 'pdf');
   $('imgOpts').classList.toggle('hidden', m !== 'img');
+  $('buildBtn').classList.toggle('hidden', m !== 'pdf');
+  $('saveImgBtn').classList.toggle('hidden', m !== 'img');
 }
 
 // پسوند واقعی فایل از روی بایت‌های ابتدایی
@@ -385,11 +1422,11 @@ const canvasToBlob = (cv, type, q) => new Promise((res, rej) => cv.toBlob((b) =>
 
 // خروجی هر تصویر: فایل اصلی بدون دستکاری، یا تبدیل به PNG (بدون افت) / JPEG (بالاترین کیفیت)
 async function exportBlob(it, fmt) {
-  const src = it.edited || it;
+  const src = await getDisplaySource(it);
   const srcExt = await blobExt(src.blob);
   const want = fmt === 'png' ? 'png' : fmt === 'jpg' ? 'jpg' : null;
   if (!want || srcExt === want) return { blob: src.blob, ext: srcExt };
-  if (!canConvert(it.w, it.h)) return { blob: src.blob, ext: srcExt, note: 'ابعاد برای تبدیل بیش از حد بزرگ است؛ فایل اصلی ذخیره شد' };
+  if (!canConvert(src.w, src.h)) return { blob: src.blob, ext: srcExt, note: 'ابعاد برای تبدیل بیش از حد بزرگ است؛ فایل اصلی ذخیره شد' };
   const bmp = await createImageBitmap(src.blob, { imageOrientation: 'none' });
   try {
     const cv = document.createElement('canvas');
@@ -424,7 +1461,8 @@ async function uniqueName(dir, base, ext) {
 
 async function onSaveImages() {
   if (building || loading) return;
-  const sel = items.filter((it) => it.state === 'ok' && it.selected);
+  const sel = items.filter((it) => it.state === 'ok' && it.selected)
+    .sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.uid - b.uid);
   if (!sel.length) return;
 
   // انتخاب پوشه باید مستقیماً با کلیک کاربر باز شود
@@ -448,6 +1486,8 @@ async function onSaveImages() {
   const folderLabel = useDownloads ? ('Downloads/' + (sub || 'comic')) : (rootDir.name + (sub ? '/' + sub : ''));
 
   building = true;
+  jobCancelRequested = false;
+  setJobHint(true);
   refreshSummary();
   const result = $('result');
   result.classList.remove('hidden', 'done');
@@ -469,6 +1509,7 @@ async function onSaveImages() {
 
     const pad = Math.max(3, String(sel.length).length);
     for (let k = 0; k < sel.length; k++) {
+      if (jobCancelRequested) break;
       const it = sel[k];
       let ext = 'img';
       const base = String(k + 1).padStart(pad, '0');
@@ -486,8 +1527,12 @@ async function onSaveImages() {
           const fname = await uniqueName(dir, base, ext);
           const fh = await dir.getFileHandle(fname, { create: true });
           const w = await fh.createWritable();
-          await w.write(ex.blob);
-          await w.close();
+          try {
+            await w.write(ex.blob);
+          } finally {
+            // بستن stream حتی هنگام خطا، فایل موقت ناقص را پاک می‌کند
+            await w.close();
+          }
         }
         saved++;
         bytes += ex.blob.size;
@@ -502,16 +1547,222 @@ async function onSaveImages() {
     }
 
     result.classList.add('done');
-    setStatus(saved
-      ? `${note}${saved} تصویر ${fmt === 'png' ? 'با فرمت PNG (بدون افت کیفیت)' : fmt === 'jpg' ? 'با فرمت JPEG (کیفیت ۱۰۰٪؛ فایل‌های JPEG اصلی دست‌نخورده)' : 'با فرمت و کیفیت اصلی'} در «${folderLabel}» ذخیره شد.`
-      : 'هیچ تصویری ذخیره نشد.');
+    if (jobCancelRequested) {
+      setStatus(saved
+        ? `ذخیره‌سازی با کلید ESC لغو شد؛ ${saved} تصویر از ${sel.length} تصویر قبلاً در «${folderLabel}» ذخیره شده بود.`
+        : 'ذخیره‌سازی تصاویر با کلید ESC لغو شد.');
+    } else {
+      setStatus(saved
+        ? `${note}${saved} تصویر ${fmt === 'png' ? 'با فرمت PNG (بدون افت کیفیت)' : fmt === 'jpg' ? 'با فرمت JPEG (کیفیت ۱۰۰٪؛ فایل‌های JPEG اصلی دست‌نخورده)' : 'با فرمت و کیفیت اصلی'} در «${folderLabel}» ذخیره شد.`
+        : 'هیچ تصویری ذخیره نشد.');
+    }
     if (errors.length) $('failed').innerText = `${errors.length} تصویر ذخیره نشد:\n` + errors.slice(0, 5).join('\n');
   } catch (e) {
     console.error(e);
     setStatus('خطا در ذخیرهٔ تصاویر: ' + (e && e.message ? e.message : e));
   } finally {
     building = false;
+    setJobHint(false);
+    setTaskTitle();
     refreshSummary();
+  }
+}
+
+// ---------- پروفایل تنظیمات برای هر صفحه ----------
+function makePageProfileKey(url) {
+  if (!url) return '';
+  let hash = 2166136261;
+  for (let i = 0; i < url.length; i++) { hash ^= url.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+  return `page_profile_${(hash >>> 0).toString(16)}`;
+}
+function profileImageIdentity(url) {
+  const text = String(url || '');
+  let stable = text;
+  if (/^blob:/i.test(text)) return 'blob';
+  if (/^https?:\/\//i.test(text)) {
+    try { const parsed = new URL(text); stable = `${parsed.origin}${parsed.pathname}`; } catch {}
+  } else if (text.length > 2048) stable = `${text.slice(0, 1024)}${text.slice(-256)}_${text.length}`;
+  let hash = 2166136261;
+  for (let i = 0; i < stable.length; i++) { hash ^= stable.charCodeAt(i); hash = Math.imul(hash, 16777619); }
+  return `${stable.length}_${(hash >>> 0).toString(16)}`;
+}
+function updateProfileButtons() {
+  const saving = $('saveProfileBtn');
+  if (!saving) return;
+  saving.disabled = loading || building || editingPageGroupId !== null || !pageProfileKey;
+  $('restoreProfileBtn').disabled = loading || building || editingPageGroupId !== null || !pageProfileAvailable;
+  $('deleteProfileBtn').disabled = loading || building || editingPageGroupId !== null || !pageProfileAvailable;
+  $('deleteProfileBtn').classList.toggle('hidden', !pageProfileAvailable);
+}
+async function checkSavedPageProfile() {
+  if (!pageProfileKey) {
+    pageProfileAvailable = false;
+    $('profileStatus').innerText = 'نشانی این صفحه برای ساخت پروفایل در دسترس نیست.';
+    updateProfileButtons();
+    return;
+  }
+  try {
+    const stored = await chrome.storage.local.get(pageProfileKey);
+    const profile = stored[pageProfileKey];
+    pageProfileAvailable = !!(profile && profile.pageUrl === job.pageUrl && Array.isArray(profile.items));
+    $('profileStatus').innerText = pageProfileAvailable
+      ? 'برای این صفحه پروفایل ذخیره‌شده دارید؛ هر زمان خواستید آن را بازیابی کنید.'
+      : 'برای این صفحه هنوز پروفایلی ذخیره نشده است.';
+  } catch {
+    pageProfileAvailable = false;
+    $('profileStatus').innerText = 'خواندن پروفایل ذخیره‌شده ناموفق بود.';
+  }
+  updateProfileButtons();
+}
+function collectPageProfile() {
+  const gridOrder = Array.from($('grid').children)
+    .map((el) => items.find((it) => it.el === el)).filter(Boolean);
+  return {
+    version: 1,
+    pageUrl: job.pageUrl || '',
+    savedAt: Date.now(),
+    sourceImages: (job.urls || []).map((url, sourceIndex) => ({ sourceIndex, identity: profileImageIdentity(url) })),
+    settings: {
+      mode,
+      seamless: $('seamless').checked,
+      uniformSize: $('uniformSize').checked,
+      twoPerPage: $('twoPerPage').checked,
+      pdfName: $('pdfName').value,
+      folderName: $('folderName').value,
+      outFmt: $('outFmt').value,
+      ocrEnabled: $('ocrEnabled').checked,
+      trLang: $('trLang').value,
+      trOnlySel: $('trOnlySel').checked,
+      trErase: $('trErase').checked,
+      trPrecise: $('trPrecise').checked,
+      cropRatio: $('cropRatio').value
+    },
+    items: gridOrder.map((it) => ({
+      uid: it.uid,
+      sourceIndex: it.i,
+      sourceIdentity: profileImageIdentity(it.url),
+      isDuplicate: !!it.dupNo,
+      dupNo: it.dupNo || 0,
+      selected: !!it.selected,
+      pdfOrder: Number(it.pdfOrder) || it.i + 1,
+      pageGroup: it.pageGroup || null,
+      cropRect: it.cropRect ? { ...it.cropRect } : null
+    }))
+  };
+}
+async function savePageProfile() {
+  if (!pageProfileKey || loading || building) return;
+  try {
+    const profile = collectPageProfile();
+    await chrome.storage.local.set({ [pageProfileKey]: profile });
+    pageProfileAvailable = true;
+    $('profileStatus').innerText = `پروفایل این صفحه ذخیره شد (${profile.items.length} تصویر/کپی).`;
+    updateProfileButtons();
+  } catch (e) {
+    console.error('ذخیرهٔ پروفایل ناموفق بود', e);
+    $('profileStatus').innerText = 'ذخیرهٔ پروفایل ناموفق بود؛ فضای ذخیره‌سازی را بررسی کنید.';
+  }
+}
+async function deletePageProfile() {
+  if (!pageProfileKey || !pageProfileAvailable || loading || building) return;
+  if (!confirm('پروفایل ذخیره‌شدهٔ این صفحه حذف شود؟')) return;
+  try {
+    await chrome.storage.local.remove(pageProfileKey);
+    pageProfileAvailable = false;
+    $('profileStatus').innerText = 'پروفایل این صفحه حذف شد.';
+    updateProfileButtons();
+  } catch { $('profileStatus').innerText = 'حذف پروفایل ناموفق بود.'; }
+}
+function applyProfileSettings(settings = {}) {
+  if (typeof settings.pdfName === 'string') $('pdfName').value = settings.pdfName;
+  if (typeof settings.folderName === 'string') $('folderName').value = settings.folderName;
+  if (['orig', 'png', 'jpg'].includes(settings.outFmt)) $('outFmt').value = settings.outFmt;
+  if (['free', '1/1', '4/3', '3/4', '16/9', '9/16'].includes(settings.cropRatio)) $('cropRatio').value = settings.cropRatio;
+  if (['eng', 'kor', 'jpn', 'chi_sim'].includes(settings.trLang)) $('trLang').value = settings.trLang;
+  for (const id of ['trOnlySel', 'trErase', 'trPrecise']) if (typeof settings[id] === 'boolean') $(id).checked = settings[id];
+  const seamless = !!settings.seamless;
+  $('seamless').checked = seamless;
+  $('twoPerPage').checked = !seamless && !!settings.twoPerPage;
+  $('uniformSize').checked = !seamless && !!settings.uniformSize;
+  if (settings.mode === 'pdf' || settings.mode === 'img') setMode(settings.mode);
+  if (typeof settings.ocrEnabled === 'boolean' && $('ocrEnabled').checked !== settings.ocrEnabled) {
+    $('ocrEnabled').checked = settings.ocrEnabled;
+    $('ocrEnabled').dispatchEvent(new Event('change', { bubbles: true }));
+  }
+}
+async function restorePageProfile() {
+  if (!pageProfileKey || !pageProfileAvailable || loading || building) return;
+  if (editingPageGroupId !== null) cancelPageGroupEdit();
+  try {
+    const stored = await chrome.storage.local.get(pageProfileKey);
+    const profile = stored[pageProfileKey];
+    if (!profile || profile.pageUrl !== job.pageUrl || !Array.isArray(profile.items)) {
+      pageProfileAvailable = false;
+      $('profileStatus').innerText = 'پروفایل معتبر برای این صفحه پیدا نشد.';
+      updateProfileButtons();
+      return;
+    }
+    const grid = $('grid');
+    const baseItems = items.filter((it) => !it.dupNo);
+    items.filter((it) => it.dupNo && it.el && it.el.parentNode).forEach((it) => it.el.parentNode.removeChild(it.el));
+    items = baseItems.slice();
+    applyProfileSettings(profile.settings || {});
+    const usedUids = new Set();
+    let fallbackUid = Math.max(nextItemUid, ...baseItems.map((it) => it.uid + 1), 0);
+    const restored = [];
+    const sourceRecords = profile.sourceImages || profile.items;
+    const sourceIndices = new Set(sourceRecords.filter((record) => {
+      const source = baseItems.find((it) => it.i === Number(record.sourceIndex));
+      return !!source && (!record.identity || record.identity === profileImageIdentity(source.url));
+    }).map((record) => Number(record.sourceIndex)));
+    for (const entry of profile.items) {
+      const sourceIndex = Number(entry.sourceIndex);
+      const source = baseItems.find((it) => it.i === sourceIndex);
+      if (!source || (entry.sourceIdentity && entry.sourceIdentity !== profileImageIdentity(source.url))) continue;
+      let it;
+      if (entry.isDuplicate) {
+        if (source.state !== 'ok') continue;
+        it = makeDuplicateData(source);
+        it.dupNo = Number(entry.dupNo) || (items.filter((x) => x.i === sourceIndex && x.dupNo).length + 1);
+        it.el = makeCard(it);
+      } else it = source;
+      const proposedUid = Number(entry.uid);
+      if (Number.isInteger(proposedUid) && proposedUid >= 0 && !usedUids.has(proposedUid)) it.uid = proposedUid;
+      else { while (usedUids.has(fallbackUid)) fallbackUid++; it.uid = fallbackUid++; }
+      usedUids.add(it.uid);
+      it.selected = source.state === 'ok' && !!entry.selected;
+      it.pdfOrder = Number.isFinite(Number(entry.pdfOrder)) && Number(entry.pdfOrder) > 0 ? Number(entry.pdfOrder) : sourceIndex + 1;
+      it.pageGroup = Number(entry.pageGroup) > 0 ? Number(entry.pageGroup) : null;
+      it.cropRect = entry.cropRect && entry.cropRect.w > 0 && entry.cropRect.h > 0 ? { ...entry.cropRect } : null;
+      it.cropCache = null;
+      restored.push(it);
+      if (entry.isDuplicate) items.push(it);
+    }
+    const maxOrder = restored.reduce((max, it) => Math.max(max, Number(it.pdfOrder) || 0), 0);
+    const newSources = baseItems.filter((it) => !sourceIndices.has(it.i));
+    newSources.forEach((it, index) => {
+      it.selected = it.state === 'ok'; it.pageGroup = null; it.cropRect = null; it.cropCache = null;
+      it.pdfOrder = maxOrder + index + 1;
+    });
+    const finalItems = restored.concat(newSources);
+    const keep = new Set(finalItems);
+    baseItems.filter((it) => !keep.has(it)).forEach((it) => { if (it.el && it.el.parentNode) it.el.parentNode.removeChild(it.el); });
+    items = finalItems;
+    cleanupPageGroups();
+    finalItems.forEach((it) => grid.appendChild(it.el));
+    normalizeGroupLayout();
+    nextItemUid = Math.max(0, ...items.map((it) => it.uid + 1));
+    lastClicked = null;
+    if ($('groupMenu')) $('groupMenu').open = false;
+    refreshAll();
+    // کراپ‌های بازیابی‌شده باید روی پیش‌نمایش کارت‌ها هم دیده شوند؛ فقط کپی‌ها تازه ساخته می‌شدند و کارت‌های اصلی تصویر بدون برش را نشان می‌دادند
+    items.filter((it) => it.state === 'ok').forEach((it) => drawThumb(it));
+    $('profileStatus').innerText = `پروفایل این صفحه بازیابی شد (${restored.length} تصویر/کپی).`;
+    pageProfileAvailable = true;
+    updateProfileButtons();
+  } catch (e) {
+    console.error('بازیابی پروفایل ناموفق بود', e);
+    $('profileStatus').innerText = `بازیابی پروفایل ناموفق بود: ${e && e.message ? e.message : e}`;
   }
 }
 
@@ -526,23 +1777,165 @@ async function main() {
     return;
   }
   $('pdfName').value = (job.name || 'comic').replace(/\.pdf$/i, '');
+  pageProfileKey = makePageProfileKey(job.pageUrl || '');
+  await checkSavedPageProfile();
   await setRefererRule(job.pageUrl);
 
   const grid = $('grid');
-  items = job.urls.map((url, i) => ({ i, url, state: 'loading', selected: true }));
+  grid.addEventListener('dragover', (ev) => {
+    if (!draggedItem) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'move';
+    const target = ev.target.closest ? ev.target.closest('.item') : null;
+    if (!target || target === draggedItem.el) { clearDragDropHint(); clearInsertMarker(); restoreDragOrderPreview(); return; }
+    const rect = target.getBoundingClientRect();
+    const targetItem = items.find((it) => it.el === target);
+    const groupable = targetItem && targetItem.state === 'ok' && draggedItem.state === 'ok';
+    // نوار میانی کارت (۴۴٪ وسط) یعنی گروه‌بندی؛ لبه‌ها مثل قبل جابه‌جایی ترتیب است
+    const band = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
+    const isGroupDrop = groupable && band > 0.28 && band < 0.72;
+    if (isGroupDrop) {
+      clearInsertMarker();
+      restoreDragOrderPreview();
+      if (dragDropTargetEl !== target) {
+        clearDragDropHint();
+        target.classList.add('group-drop-target');
+        dragDropTargetEl = target;
+      }
+      dragGroupDrop = true;
+    } else {
+      clearDragDropHint();
+      // نشانگر محل درج؛ برای جابه‌جایی گروهی با رنگ و ضخامت متفاوت از کارت تکی
+      const sameGroupBlock = !!draggedGroupItems && draggedGroupItems.some((member) => member.el === target);
+      if (sameGroupBlock) { clearInsertMarker(); restoreDragOrderPreview(); return; }
+      // RTL: نیمهٔ راست کارت یعنی درج قبل از آن، نیمهٔ چپ یعنی بعد از آن
+      const before = ev.clientX > rect.left + rect.width / 2;
+      setInsertMarker(target, before, !!draggedGroupItems);
+      // شماره صفحه‌های زیر کارت‌ها به‌صورت زنده با محل درج جدید به‌روز می‌شوند
+      previewDragOrder(draggedItem, target, before);
+    }
+  });
+  // با ترک محدودهٔ شبکه، پیش‌نمایش شماره‌ها به ترتیب واقعی برمی‌گردد
+  grid.addEventListener('dragleave', (ev) => {
+    if (!draggedItem) return;
+    if (ev.target === grid || !grid.contains(ev.relatedTarget)) {
+      clearInsertMarker();
+      restoreDragOrderPreview();
+    }
+  });
+  grid.addEventListener('drop', (ev) => {
+    if (!draggedItem) return;
+    ev.preventDefault();
+    const target = ev.target.closest('.item');
+    const wantGroup = dragGroupDrop;
+    clearDragDropHint();
+    clearInsertMarker();
+    if (!target || target === draggedItem.el) return;
+    if (wantGroup) {
+      const targetItem = items.find((it) => it.el === target);
+      groupCardsByDrop(draggedItem, targetItem);
+      suppressCardClickUntil = Date.now() + 350;
+      return;
+    }
+    const rect = target.getBoundingClientRect();
+    // شبکه از راست به چپ است: سمت راست کارت یعنی درج قبل از آن در ترتیب DOM.
+    const before = ev.clientX > rect.left + rect.width / 2;
+    reorderByDrop(draggedItem, target, before);
+    suppressCardClickUntil = Date.now() + 350;
+  });
+  items = job.urls.map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pageGroup: null, state: 'loading', selected: true }));
+  nextItemUid = items.length;
   items.forEach((it) => grid.appendChild(makeCard(it)));
 
   $('btnAll').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = true; }); refreshAll(); };
   $('btnNone').onclick = () => { items.forEach((it) => { it.selected = false; }); refreshAll(); };
   $('btnInv').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = !it.selected; }); refreshAll(); };
+  $('btnGroupPage').onclick = groupSelectedItems;
+  $('btnCancelGroupEdit').onclick = cancelPageGroupEdit;
+  $('btnUngroupPage').onclick = ungroupSelectedItems;
+  $('saveProfileBtn').onclick = savePageProfile;
+  $('restoreProfileBtn').onclick = restorePageProfile;
+  $('deleteProfileBtn').onclick = deletePageProfile;
   $('btnRetry').onclick = () => { loadAll(items.filter((it) => it.state === 'failed')); };
   $('buildBtn').onclick = onBuild;
   $('saveImgBtn').onclick = onSaveImages;
   $('modePdf').onclick = () => setMode('pdf');
   $('modeImg').onclick = () => setMode('img');
+  const outputSettings = $('outputSettings');
+  $('closeOutputSettings').onclick = () => {
+    outputSettings.open = false;
+    outputSettings.querySelector('summary').focus();
+  };
+  const topMenu = $('topMenu');
+  document.addEventListener('click', (e) => {
+    if (outputSettings.open && !outputSettings.contains(e.target)) outputSettings.open = false;
+    if (topMenu && topMenu.open && !topMenu.contains(e.target)) topMenu.open = false;
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    // اولویت اول: منوها و پنل‌های باز با ESC بسته شوند، نه اینکه کار لغو شود
+    let menuConsumed = false;
+    if (outputSettings.open) {
+      outputSettings.open = false;
+      outputSettings.querySelector('summary').focus();
+      menuConsumed = true;
+    }
+    if (topMenu && topMenu.open) {
+      topMenu.open = false;
+      topMenu.querySelector('summary').focus();
+      menuConsumed = true;
+    }
+    const groupMenu = $('groupMenu');
+    if (groupMenu && groupMenu.open) {
+      groupMenu.open = false;
+      menuConsumed = true;
+    }
+    if (menuConsumed) return;
+    // اگر پنجرهٔ تمام‌صفحه‌ای باز است، ESC همان را می‌بندد (هندلرهای خودشان)
+    const overlayOpen = ['lightbox', 'cropper', 'editor', 'trDialog']
+      .some((id) => !$(id).classList.contains('hidden'));
+    if (overlayOpen) return;
+    // اولویت دوم: لغو کار در حال اجرا (بارگیری / ساخت / ذخیره / ترجمه)
+    if (building || loading) {
+      e.preventDefault();
+      requestJobCancel();
+    }
+  });
+  $('seamless').addEventListener('change', () => {
+    if ($('seamless').checked) {
+      $('twoPerPage').checked = false;
+      $('uniformSize').checked = false;
+    }
+    refreshSummary();
+  });
+  $('twoPerPage').addEventListener('change', () => {
+    if ($('twoPerPage').checked) $('seamless').checked = false;
+    refreshSummary();
+  });
   $('lbClose').onclick = closeLightbox;
+  $('lbCopy').onclick = copyLightboxImage;
   $('lightbox').addEventListener('click', (e) => { if (e.target.id === 'lightbox') closeLightbox(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLightbox(); });
+  $('cropCancel').onclick = closeCropper;
+  $('cropReset').onclick = () => { cropRectDraft = null; paintCropSelection(null); };
+  $('cropApply').onclick = applyCrop;
+  $('cropRatio').addEventListener('change', adjustCropToRatio);
+  $('cropWidth').addEventListener('input', () => updateCropFromInputs('width', true));
+  $('cropHeight').addEventListener('input', () => updateCropFromInputs('height', true));
+  $('cropWidth').addEventListener('change', () => updateCropFromInputs('width'));
+  $('cropHeight').addEventListener('change', () => updateCropFromInputs('height'));
+  $('cropStage').addEventListener('pointerdown', beginCropSelection);
+  $('cropStage').addEventListener('pointermove', moveCropSelection);
+  $('cropStage').addEventListener('pointerup', endCropSelection);
+  $('cropStage').addEventListener('pointercancel', cancelCropSelection);
+  document.addEventListener('keydown', handleOverlayKeydown);
+  // ارتفاع شبکه با بارگیری بند‌انگشتی‌ها و تغییر اندازهٔ پنجره عوض می‌شود؛ کادر گروه‌ها باید هم‌تراز بمانند
+  if (typeof ResizeObserver !== 'undefined') {
+    // هر تغییر اندازهٔ شبکه (بند‌انگشتی‌ها) یا جابه‌جایی آن (پنل نتیجه، منوی گروه‌ها) اندازهٔ .wrap را عوض می‌کند
+    const outlineObserver = new ResizeObserver(() => drawGroupOutlines());
+    outlineObserver.observe($('grid'));
+    outlineObserver.observe(document.querySelector('.wrap'));
+  }
+  window.addEventListener('resize', () => drawGroupOutlines());
   window.addEventListener('pagehide', () => { chrome.storage.local.remove(jobKey); clearRefererRule(); });
 
   await loadAll(items);

@@ -27,7 +27,7 @@
     for (const fn of [viaGoogle, viaMyMemory]) {
       for (let attempt = 0; attempt < 2; attempt++) {
         try { return { text: await fn(text, sl, f), ok: true }; }
-        catch (e) { await new Promise((r) => setTimeout(r, 250 * (attempt + 1))); }
+        catch { await new Promise((r) => setTimeout(r, 250 * (attempt + 1))); }
       }
     }
     return { text: '', ok: false };

@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Comic to PDF",
-  "version": "2.2",
+  "name": "PIC TO PDF",
+  "version": "2.24",
   "description": "دانلود کمیک و وب‌تون به‌صورت PDF یا تصاویر جدا، با کیفیت اصلی",
   "permissions": [
     "activeTab",
     "scripting",
     "storage",
     "declarativeNetRequest",
-    "downloads"
+    "downloads",
+    "clipboardWrite"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -18,7 +19,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Comic to PDF",
+    "default_title": "PIC TO PDF",
     "default_icon": {
       "16": "icon16.png",
       "32": "icon32.png",
