@@ -204,13 +204,17 @@ function buildEditor() {
   list.innerHTML = ''; boxes.innerHTML = '';
   if (!bl.length) { list.innerHTML = '<div class="ed-empty">در این تصویر متنی پیدا نشد.</div>'; return; }
 
+  // پیش‌فرض قالب‌بندی هر بلوک؛ دکمهٔ بازنشانی هم همین مقادیر را برمی‌گرداند
+  const FMT_DEFAULTS = { dir: 'rtl', align: 'right', bold: true, italic: false, underline: false, size: null, color: null };
   bl.forEach((b) => {
     // پیش‌فرض‌های قالب‌بندی برای بلوک‌های ساخته‌شده در نسخه‌های قبل (فیلدها هنوز وجود ندارند)
+    b.dir = b.dir === 'ltr' ? 'ltr' : 'rtl';
     b.align = b.align === 'center' || b.align === 'left' ? b.align : 'right';
     b.bold = b.bold !== false;
     b.italic = !!b.italic;
     b.underline = !!b.underline;
     b.size = Number.isFinite(+b.size) && +b.size > 0 ? +b.size : null;
+    b.color = /^#[0-9a-fA-F]{6}$/.test(b.color) ? b.color : null;
     const box = document.createElement('div');
     box.className = 'ed-box' + (b.enabled ? '' : ' off');
     box.dataset.id = b.id;
@@ -227,7 +231,11 @@ function buildEditor() {
       <select class="sel blk-bg"><option value="auto">پس‌زمینه: خودکار</option><option value="white">پس‌زمینه: سفید</option>
       <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن (متن با حاشیه)</option></select></div>
       <div class="blk-format">
-        <select class="sel blk-align" title="چیدمان متن">
+        <div class="dir-group" title="جهت متن (راست‌به‌چپ / چپ‌به‌راست)">
+          <button type="button" class="fmt-btn blk-dir-rtl">RTL</button>
+          <button type="button" class="fmt-btn blk-dir-ltr">LTR</button>
+        </div>
+        <select class="sel blk-align" title="چیدمان فیزیکی خط‌ها">
           <option value="right">راست‌چین</option>
           <option value="center">وسط‌چین</option>
           <option value="left">چپ‌چین</option>
@@ -238,6 +246,11 @@ function buildEditor() {
         <label class="size-field">اندازهٔ فونت
           <input type="number" class="blk-size" min="8" max="160" step="1" placeholder="خودکار" title="اگر خالی باشد، بهترین اندازه به‌صورت خودکار انتخاب می‌شود">
         </label>
+        <label class="color-field" title="رنگ متن؛ «خودکار» بر اساس روشنی پس‌زمینه انتخاب می‌شود">رنگ
+          <input type="color" class="blk-color" value="#0b0b0b">
+          <button type="button" class="fmt-btn blk-color-auto">خودکار</button>
+        </label>
+        <button type="button" class="fmt-btn blk-reset" title="بازنشانی همهٔ قالب‌بندی‌های این متن به پیش‌فرض">↺</button>
       </div>
       <div class="blk-orig"></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>`;
     row.querySelector('.blk-orig').textContent = b.text;
@@ -249,29 +262,46 @@ function buildEditor() {
     sel.onchange = () => { b.bg = sel.value; scheduleApply(); };
     chk.onchange = () => { b.enabled = chk.checked; row.classList.toggle('off', !b.enabled); box.classList.toggle('off', !b.enabled); scheduleApply(); };
 
+    const rtlBtn = row.querySelector('.blk-dir-rtl');
+    const ltrBtn = row.querySelector('.blk-dir-ltr');
     const alignSel = row.querySelector('.blk-align');
-    alignSel.value = b.align;
-    alignSel.onchange = () => { b.align = alignSel.value; scheduleApply(); };
     const boldBtn = row.querySelector('.blk-bold');
     const italicBtn = row.querySelector('.blk-italic');
     const underBtn = row.querySelector('.blk-under');
-    const syncFmtButtons = () => {
+    const sizeInput = row.querySelector('.blk-size');
+    const colorInput = row.querySelector('.blk-color');
+    const colorAutoBtn = row.querySelector('.blk-color-auto');
+    const resetBtn = row.querySelector('.blk-reset');
+    // یک همگام‌ساز واحد: وضعیت همهٔ کنترل‌ها را از روی دادهٔ بلوک بازسازی می‌کند
+    const syncFmt = () => {
+      rtlBtn.classList.toggle('active', b.dir === 'rtl');
+      ltrBtn.classList.toggle('active', b.dir === 'ltr');
       boldBtn.classList.toggle('active', b.bold);
       italicBtn.classList.toggle('active', b.italic);
       underBtn.classList.toggle('active', b.underline);
+      alignSel.value = b.align;
+      sizeInput.value = b.size ? String(b.size) : '';
+      colorAutoBtn.classList.toggle('active', !b.color);
+      colorInput.value = b.color || '#0b0b0b';
+      colorInput.classList.toggle('is-auto', !b.color);
+      ta.style.direction = b.dir; // پیش‌نمایش ویرایش هم جهت واقعی متن را نشان دهد
     };
-    syncFmtButtons();
-    boldBtn.onclick = () => { b.bold = !b.bold; syncFmtButtons(); scheduleApply(); };
-    italicBtn.onclick = () => { b.italic = !b.italic; syncFmtButtons(); scheduleApply(); };
-    underBtn.onclick = () => { b.underline = !b.underline; syncFmtButtons(); scheduleApply(); };
-    const sizeInput = row.querySelector('.blk-size');
-    sizeInput.value = b.size ? String(b.size) : '';
+    syncFmt();
+    rtlBtn.onclick = () => { b.dir = 'rtl'; syncFmt(); scheduleApply(); };
+    ltrBtn.onclick = () => { b.dir = 'ltr'; syncFmt(); scheduleApply(); };
+    alignSel.onchange = () => { b.align = alignSel.value; scheduleApply(); };
+    boldBtn.onclick = () => { b.bold = !b.bold; syncFmt(); scheduleApply(); };
+    italicBtn.onclick = () => { b.italic = !b.italic; syncFmt(); scheduleApply(); };
+    underBtn.onclick = () => { b.underline = !b.underline; syncFmt(); scheduleApply(); };
     sizeInput.onchange = () => {
       const n = Number.parseInt(sizeInput.value, 10);
       b.size = Number.isFinite(n) && n >= 8 ? Math.min(160, n) : null;
       sizeInput.value = b.size ? String(b.size) : '';
       scheduleApply();
     };
+    colorInput.oninput = () => { b.color = colorInput.value; syncFmt(); scheduleApply(); };
+    colorAutoBtn.onclick = () => { b.color = null; syncFmt(); scheduleApply(); };
+    resetBtn.onclick = () => { Object.assign(b, FMT_DEFAULTS); syncFmt(); scheduleApply(); };
     list.appendChild(row);
   });
 }

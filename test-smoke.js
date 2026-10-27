@@ -206,9 +206,9 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
 
   // ---------- Typeset per-block formatting (2.27) ----------
   function recordingCtx() {
-    const calls = { font: [], textAlign: [], fillText: [], strokeText: 0, beginPath: 0, stroke: 0, lineTo: 0 };
+    const calls = { font: [], textAlign: [], direction: [], fillStyles: [], fillText: [], strokeText: 0, beginPath: 0, stroke: 0, lineTo: 0 };
     const ctx = {
-      direction: '', textBaseline: '', lineWidth: 0, strokeStyle: '', fillStyle: '', lineJoin: '',
+      textBaseline: '', lineWidth: 0, strokeStyle: '', lineJoin: '',
       drawImage() {}, fillRect() {},
       measureText: (s) => ({ width: String(s).length * 6 }),
       getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }),
@@ -218,9 +218,11 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
       stroke() { calls.stroke++; },
       moveTo() {}, lineTo() { calls.lineTo++; }
     };
-    let font = '', textAlign = '';
+    let font = '', textAlign = '', direction = '', fillStyle = '';
     Object.defineProperty(ctx, 'font', { get: () => font, set: (v) => { font = v; calls.font.push(v); }, configurable: true });
     Object.defineProperty(ctx, 'textAlign', { get: () => textAlign, set: (v) => { textAlign = v; calls.textAlign.push(v); }, configurable: true });
+    Object.defineProperty(ctx, 'direction', { get: () => direction, set: (v) => { direction = v; calls.direction.push(v); }, configurable: true });
+    Object.defineProperty(ctx, 'fillStyle', { get: () => fillStyle, set: (v) => { fillStyle = v; calls.fillStyles.push(v); }, configurable: true });
     return { ctx, calls };
   }
   const fmtBase = { enabled: true, tr: 'سلام دنیا', x0: 10, y0: 10, x1: 190, y1: 80, lineH: 16, bg: 'white' };
@@ -257,8 +259,24 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
   }
   {
     const st = Typeset.blockStyle({});
-    check('blockStyle safe defaults', st.align === 'right' && st.bold === true &&
-      st.italic === false && st.underline === false && st.size === null, st);
+    check('blockStyle safe defaults', st.dir === 'rtl' && st.align === 'right' && st.bold === true &&
+      st.italic === false && st.underline === false && st.size === null && st.color === null, st);
+  }
+  {
+    const calls = renderWith({});
+    check('default canvas direction is rtl', calls.direction.every((d) => d === 'rtl'), calls.direction);
+  }
+  {
+    const calls = renderWith({ dir: 'ltr' });
+    check('ltr block sets canvas direction ltr', calls.direction.every((d) => d === 'ltr'), calls.direction);
+  }
+  {
+    const calls = renderWith({ color: '#e11d48' });
+    check('manual text color reaches fillStyle before drawing', calls.fillStyles.includes('#e11d48'), calls.fillStyles);
+  }
+  {
+    const st = Typeset.blockStyle({ color: 'not-a-color', dir: 'sideways' });
+    check('invalid color/dir fall back safely', st.color === null && st.dir === 'rtl', st);
   }
 
   // ---------- Translate with mock fetch ----------

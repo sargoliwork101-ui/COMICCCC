@@ -52,14 +52,16 @@
     return { size: minSize, lines: wrapWords(ctx, text, boxW), lh: minSize * 1.55 };
   }
 
-  // قالب‌بندی هر بلوک با پیش‌فرض‌های ایمن برای بلوک‌های قدیمی (ذخیره‌شده قبل از نسخهٔ ۲.۲۷)
+  // قالب‌بندی هر بلوک با پیش‌فرض‌های ایمن برای بلوک‌های قدیمی (ذخیره‌شده قبل از نسخهٔ ۲.۲۸)
   function blockStyle(b) {
     return {
-      align: b.align === 'center' || b.align === 'left' ? b.align : 'right', // پیش‌فرض: راست‌چین
+      dir: b.dir === 'ltr' ? 'ltr' : 'rtl',       // جهت متن: پیش‌فرض راست‌به‌چپ
+      align: b.align === 'center' || b.align === 'left' ? b.align : 'right', // چیدمان فیزیکی: پیش‌فرض راست‌چین
       bold: b.bold !== false,           // پیش‌فرض مثل گذشته: پررنگ
       italic: !!b.italic,
       underline: !!b.underline,
-      size: Number.isFinite(+b.size) && +b.size > 0 ? +b.size : null
+      size: Number.isFinite(+b.size) && +b.size > 0 ? +b.size : null,
+      color: /^#[0-9a-fA-F]{6}$/.test(b.color) ? b.color : null // null = رنگ خودکار بر اساس پس‌زمینه
     };
   }
 
@@ -93,6 +95,8 @@
         fill = `rgb(${s.r},${s.g},${s.b})`;
         txt = lum(s.r, s.g, s.b) > 150 ? '#0b0b0b' : '#fafafa';
       }
+      // رنگ دستی کاربر بر انتخاب خودکار اولویت دارد (زیرخط هم با همین رنگ رسم می‌شود)
+      if (st.color) txt = st.color;
       if (fill) { ctx.fillStyle = fill; ctx.fillRect(box.x0, box.y0, bw, bh); }
 
       const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
@@ -104,7 +108,7 @@
       } else {
         f = fit(ctx, b.tr.trim(), bw * 0.96, bh * 0.96, maxSize, 10, fontPrefix);
       }
-      if ('direction' in ctx) ctx.direction = 'rtl';
+      if ('direction' in ctx) ctx.direction = st.dir;
       ctx.textAlign = st.align;
       ctx.textBaseline = 'middle';
       const totalH = f.lines.length * f.lh;

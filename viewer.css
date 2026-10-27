@@ -392,6 +392,16 @@ kbd { display: inline-block; padding: 1px 7px; border-radius: 7px; border: 1px s
 .blk-size { width: 76px; height: 30px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--line2);
   background: rgba(255,255,255,.04); color: var(--text); font: 600 12px 'Vazirmatn', sans-serif; outline: none; }
 .blk-size:focus { border-color: var(--a1); box-shadow: 0 0 0 3px rgba(139,123,255,.18); }
+.dir-group { display: inline-flex; border: 1px solid var(--line2); border-radius: 8px; overflow: hidden; }
+.dir-group .fmt-btn { min-width: 40px; border: 0; border-radius: 0; font-size: 11.5px; }
+.dir-group .fmt-btn + .fmt-btn { border-inline-start: 1px solid var(--line2); }
+.color-field { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600;
+  color: var(--muted); white-space: nowrap; }
+.blk-color { width: 40px; height: 30px; padding: 2px; border-radius: 8px; border: 1px solid var(--line2);
+  background: rgba(255,255,255,.04); cursor: pointer; }
+.blk-color.is-auto { opacity: .45; cursor: default; }
+.blk-color-auto { min-width: 0; padding: 0 9px; font-size: 11px; }
+.blk-reset { min-width: 34px; font-size: 15px; line-height: 1; }
 .ed-empty { color: var(--muted); text-align: center; padding: 40px 10px; font-size: 13px; }
 @media (max-width: 860px) { .ed-body { grid-template-columns: 1fr; grid-template-rows: 40% 1fr; } .ed-preview { border-left: 0; border-bottom: 1px solid var(--line); } }
 

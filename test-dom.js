@@ -288,6 +288,46 @@ const $ = (id) => window.document.getElementById(id);
   await sleep(1000); // اجازه بده رندر debounceشدهٔ ویرایشگر کامل شود
   check('edited image survives formatting edits', !!translated.edited);
 
+  // 2.28: جهت متن RTL/LTR، رنگ دستی و بازنشانی
+  const rtlBtn = fmtRow.querySelector('.blk-dir-rtl');
+  const ltrBtn = fmtRow.querySelector('.blk-dir-ltr');
+  const colorInput = fmtRow.querySelector('.blk-color');
+  const colorAutoBtn = fmtRow.querySelector('.blk-color-auto');
+  const resetBtn = fmtRow.querySelector('.blk-reset');
+  check('direction controls rendered', !!rtlBtn && !!ltrBtn);
+  check('block defaults to rtl direction', blk0.dir === 'rtl' && rtlBtn.classList.contains('active'));
+  check('textarea reflects rtl direction', ta.style.direction === 'rtl', ta.style.direction);
+  ltrBtn.click();
+  check('ltr toggle flips block, button and textarea', blk0.dir === 'ltr' &&
+    ltrBtn.classList.contains('active') && !rtlBtn.classList.contains('active') && ta.style.direction === 'ltr');
+  rtlBtn.click();
+  check('rtl toggle restores direction', blk0.dir === 'rtl' && rtlBtn.classList.contains('active'));
+  check('color starts in auto mode', blk0.color === null && colorAutoBtn.classList.contains('active') &&
+    colorInput.classList.contains('is-auto'));
+  colorInput.value = '#e11d48';
+  colorInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  check('picking a color stores it and exits auto', blk0.color === '#e11d48' &&
+    !colorAutoBtn.classList.contains('active') && !colorInput.classList.contains('is-auto'));
+  colorAutoBtn.click();
+  check('auto color button clears manual color', blk0.color === null && colorAutoBtn.classList.contains('active'));
+  // چند تغییر بده و بعد بازنشانی کن؛ همه‌چیز باید به پیش‌فرض برگردد
+  ltrBtn.click();
+  alignSel.value = 'left';
+  alignSel.dispatchEvent(new window.Event('change', { bubbles: true }));
+  italicBtn.click();
+  sizeInput.value = '55';
+  sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  resetBtn.click();
+  check('reset restores all formatting defaults', blk0.dir === 'rtl' && blk0.align === 'right' &&
+    blk0.bold === true && blk0.italic === false && blk0.underline === false &&
+    blk0.size === null && blk0.color === null,
+    { dir: blk0.dir, align: blk0.align, bold: blk0.bold, italic: blk0.italic, under: blk0.underline, size: blk0.size, color: blk0.color });
+  check('reset re-syncs the controls', rtlBtn.classList.contains('active') && boldBtn.classList.contains('active') &&
+    !italicBtn.classList.contains('active') && alignSel.value === 'right' && sizeInput.value === '' &&
+    colorAutoBtn.classList.contains('active') && ta.style.direction === 'rtl');
+  await sleep(1000);
+  check('edited image survives reset', !!translated.edited);
+
   await ev('closeEditor()');
   check('editor closes', $('editor').classList.contains('hidden'));
 
