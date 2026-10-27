@@ -17,7 +17,7 @@
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۲.۲۰</span>
+        <span class="version-pill">نسخهٔ ۲.۲۱</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -57,7 +57,8 @@
         <div class="stat"><b id="sSize">0</b><span>مگابایت</span></div>
       </div>
       <div id="failed"></div>
-      <button id="btnStopTr" class="mini warn hidden">توقف</button>
+      <span id="jobHint" class="job-hint hidden" role="note">برای لغو این عملیات، کلید <kbd>ESC</kbd> را بزنید</span>
+      <button id="btnStopTr" class="mini warn hidden">توقف <kbd>ESC</kbd></button>
       <a id="downloadBtn" class="btn ok hidden" download>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-5-5m5 5l5-5M4 20h16"/></svg>
         <span id="dlLabel">دانلود PDF</span>
@@ -100,6 +101,7 @@
       <strong id="loadingOverlayText">در حال دریافت تصاویر...</strong>
       <span id="loadingOverlayCount">۰ از ۰</span>
       <div class="bar loading-progress"><div id="loadingOverlayBar"></div></div>
+      <span class="loading-hint">برای لغو بارگیری، کلید <kbd>ESC</kbd> را بزنید</span>
     </div>
   </div>
 

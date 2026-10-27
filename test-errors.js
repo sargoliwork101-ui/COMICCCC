@@ -329,6 +329,104 @@ function check(name, cond, extra) {
     check('empty-run explains why', /تصویری برای ترجمه/.test(h.$('statusText').textContent), h.$('statusText').textContent);
   }
 
+  // ---------- 12. ESC cancels the initial image load ----------
+  {
+    const h = makeHarness({
+      // honors AbortSignal like the real fetch does
+      fetchImpl: (url, opts) => new Promise((res, rej) => {
+        if (opts && opts.signal) opts.signal.addEventListener('abort', () => rej(new Error('Aborted')));
+      })
+    });
+    await sleep(80);
+    check('load in progress before ESC', h.ev('loading') === true);
+    h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    check('ESC arms the cancel flag', h.ev('jobCancelRequested') === true &&
+      h.ev('loadAbortController && loadAbortController.signal.aborted') === true);
+    for (let i = 0; i < 60; i++) { await sleep(60); if (!h.ev('loading')) break; }
+    check('loading stops after ESC', h.ev('loading') === false);
+    check('loading overlay hidden after cancel', h.$('loadingOverlay').classList.contains('hidden'));
+    const items = h.ev('items');
+    check('cancelled cards marked failed', items.every((it) => it.state === 'failed'), items.map((i) => i.state));
+    check('cancel reason recorded on cards', items.every((it) => /لغو/.test(it.error || '')), items.map((i) => i.error));
+    check('retry offered after cancelled load', !h.$('btnRetry').classList.contains('hidden'));
+    check('no scripting fallback after abort', h.scriptingCalls === 0, h.scriptingCalls);
+  }
+
+  // ---------- 13. ESC mid PDF build cancels; a later rerun resets and succeeds ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    const calls = [];
+    h.ctx.calls = calls; h.ctx.PNG_BYTES = PNG;
+    h.ev(`window.jspdf={jsPDF:class{constructor(){}addPage(){}addImage(...a){calls.push(a)}output(){return{blob:()=>new Blob([PNG_BYTES])}}}}`);
+    h.ev(`globalThis.__origPrepare = prepare;
+globalThis.__prepCount = 0;
+prepare = async (it, r) => {
+  globalThis.__prepCount++;
+  if (globalThis.__prepCount === 2) document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  return globalThis.__origPrepare(it, r);
+};`);
+    h.$('buildBtn').click();
+    for (let i = 0; i < 80; i++) { await sleep(60); if (!h.ev('building')) break; }
+    check('pdf build cancelled by ESC', /لغو/.test(h.$('statusText').textContent), h.$('statusText').textContent);
+    check('build stopped before all images', h.ev('globalThis.__prepCount') === 2, h.ev('globalThis.__prepCount'));
+    check('no download offered for cancelled build', h.$('downloadBtn').classList.contains('hidden'));
+    // rerun: flag resets and the full build completes
+    h.ev('prepare = globalThis.__origPrepare;');
+    h.$('buildBtn').click();
+    for (let i = 0; i < 80; i++) { await sleep(60); if (!h.ev('building')) break; }
+    check('rerun resets cancel flag', h.ev('jobCancelRequested') === false);
+    check('rerun completes with download', !h.$('downloadBtn').classList.contains('hidden'));
+    check('success status after rerun', /آماده شد/.test(h.$('statusText').textContent), h.$('statusText').textContent);
+  }
+
+  // ---------- 14. ESC during image save stops the loop ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.window.chrome.downloads.download = async () => {
+      h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return 1;
+    };
+    h.$('modeImg').click();
+    h.$('saveImgBtn').click();
+    for (let i = 0; i < 80; i++) { await sleep(60); if (!h.ev('building')) break; }
+    check('image save cancelled by ESC', /لغو/.test(h.$('statusText').textContent), h.$('statusText').textContent);
+    check('only the first image was saved', h.$('sPages').textContent.trim() === '1', h.$('sPages').textContent);
+  }
+
+  // ---------- 15. ESC closes an open menu first instead of cancelling work ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.$('topMenu').open = true;
+    h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    check('ESC closes the hamburger menu', h.$('topMenu').open === false);
+    check('menu ESC does not arm cancellation', h.ev('jobCancelRequested') === false);
+    h.$('groupMenu').open = true;
+    h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    check('ESC also closes the group menu', h.$('groupMenu').open === false);
+  }
+
+  // ---------- 16. ESC cancels a running translation like the stop button ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ev(`OcrTools.createOcrWorker=async()=>({recognize:async()=>new Promise(r=>setTimeout(()=>r({data:{blocks:[]}}),300)),setParameters:async()=>{},terminate:async()=>{}});
+    OcrTools.ocrBitmap=async()=>[{text:'Hello',conf:90,x0:10,x1:90,y0:10,y1:30}];
+    OcrTools.groupLines=()=>[{id:1,enabled:true,bg:'auto',tr:'',text:'Hello',x0:10,x1:90,y0:10,y1:30,lineH:16}];`);
+    h.$('trOnlySel').checked = false;
+    h.$('btnTranslate').click();
+    h.$('trStart').click();
+    h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    check('ESC arms translation cancel', h.ev('TR.cancel') === true && h.ev('jobCancelRequested') === true);
+    for (let i = 0; i < 80; i++) { await sleep(60); if (!h.ev('building')) break; }
+    check('translation ends after ESC', !h.ev('building'));
+    check('stop button hidden again', h.$('btnStopTr').classList.contains('hidden'));
+    check('cancel mentioned in status', /متوقف/.test(h.$('statusText').textContent), h.$('statusText').textContent);
+    check('job hint hidden when work ends', h.$('jobHint').classList.contains('hidden'));
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL EDGE-CASE TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

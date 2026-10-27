@@ -117,6 +117,14 @@ const $ = (id) => window.document.getElementById(id);
   }
   check('group menu stays in toolbar, outside hamburger', !!window.document.querySelector('.toolbar #groupMenu') &&
     !topMenu.contains($('groupMenu')));
+
+  // 2.21: ESC cancellation affordances exist in the shell
+  const jobHint = $('jobHint');
+  check('ESC hint exists inside result panel', !!jobHint && jobHint.closest('#result') &&
+    jobHint.classList.contains('hidden') && /ESC/.test(jobHint.textContent));
+  const loadingHint = window.document.querySelector('#loadingOverlay .loading-hint');
+  check('loading overlay shows ESC cancel hint', !!loadingHint && /ESC/.test(loadingHint.textContent));
+  check('translation stop button advertises ESC', /ESC/.test($('btnStopTr').textContent));
   check('toolbar hosts only the group menu now', window.document.querySelectorAll('.toolbar-menus details').length === 1 &&
     !!window.document.querySelector('.toolbar-menus #groupMenu'));
 

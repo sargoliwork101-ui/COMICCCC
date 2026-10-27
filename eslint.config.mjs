@@ -18,11 +18,14 @@ export default [
         createImageBitmap: 'readonly', HTMLCanvasElement: 'readonly', HTMLElement: 'readonly',
         globalThis: 'readonly', module: 'readonly', exports: 'writable', self: 'readonly',
         getComputedStyle: 'readonly', URLSearchParams: 'readonly',
+        AbortController: 'readonly',
         // globals shared across the extension's classic scripts
         PdfBuilder: 'readonly', OcrTools: 'readonly', Typeset: 'readonly', TranslateTools: 'readonly',
         $: 'readonly', items: 'writable', building: 'writable', loading: 'writable',
+        jobCancelRequested: 'writable', TR: 'readonly',
         canConvert: 'readonly', canvasToBlob: 'readonly', sniff: 'readonly',
-        setStatus: 'readonly', setTaskTitle: 'readonly', refreshAll: 'readonly',
+        setStatus: 'readonly', setTaskTitle: 'readonly', setJobHint: 'readonly',
+        refreshAll: 'readonly',
         refreshCard: 'readonly', refreshSummary: 'readonly', drawThumb: 'readonly',
         openEditor: 'readonly'
       }

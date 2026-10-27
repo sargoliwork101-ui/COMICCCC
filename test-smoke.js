@@ -108,6 +108,27 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('seamless: single long page within limit', s2.pages.length === 1 && s2.pages[0].dims[1] <= 14400, s2.pages.map((p) => p.dims[1]));
   }
 
+  // 7. isCancelled stops the build loop and reports the cancellation
+  {
+    const { Mock, calls } = makeMockJsPDF();
+    const items = [mkItem(0), mkItem(1), mkItem(2), mkItem(3)];
+    let cancel = false;
+    const cancelPrepare = async (it) => {
+      if (it.i === 1) cancel = true; // flipped while item 1 is being prepared
+      return prepare(it);
+    };
+    const res = await PdfBuilder.build({ jsPDF: Mock, items, prepare: cancelPrepare, isCancelled: () => cancel });
+    check('cancel: result flagged cancelled', res.cancelled === true, res.cancelled);
+    check('cancel: remaining items never processed', calls.length === 2, calls.length);
+  }
+
+  // 7b. without isCancelled the new field stays false (backward compatible)
+  {
+    const { Mock } = makeMockJsPDF();
+    const res = await PdfBuilder.build({ jsPDF: Mock, items: [mkItem(0)], prepare });
+    check('normal run: cancelled flag is false', res.cancelled === false, res.cancelled);
+  }
+
   // ---------- OCR ----------
   check('looksReal eng accepts sentence', OcrTools.looksReal('Hello world this is real', 'eng') === true);
   check('looksReal eng rejects noise', OcrTools.looksReal('--- ... !!!', 'eng') === false);

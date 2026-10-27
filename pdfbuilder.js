@@ -30,7 +30,7 @@
       o.items.forEach((it) => { totalPx += it.h * (W / it.w); });
       s = Math.min(s, SAFE_PT / Math.max(totalPx, 1));
     }
-    let pdf = null, pages = 0;
+    let pdf = null, pages = 0, cancelled = false;
 
     const newPage = (pw, ph) => {
       const orient = pw > ph ? 'landscape' : 'portrait';
@@ -65,6 +65,7 @@
     };
 
     for (let k = 0; k < o.items.length; k++) {
+      if (o.isCancelled && o.isCancelled()) { cancelled = true; break; }
       const it = o.items[k];
       if (o.onProgress) o.onProgress(k, o.items.length);
       const fit = uniformSize ? Math.min(1, maxW / it.w, maxH / it.h) : 1;
@@ -90,9 +91,9 @@
         }
       }
     }
-    await flush();
-    if (o.onProgress) o.onProgress(o.items.length, o.items.length);
-    return { pdf, pages };
+    if (!cancelled) await flush();
+    if (!cancelled && o.onProgress) o.onProgress(o.items.length, o.items.length);
+    return { pdf, pages, cancelled };
   }
 
   const api = { build, SAFE_PT };

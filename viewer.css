@@ -153,6 +153,13 @@ body { min-height: 100vh; padding-bottom: calc(132px + env(safe-area-inset-botto
 @keyframes loading-spin { to { transform: rotate(360deg); } }
 .loading-progress { width: 100%; height: 8px; }
 #loadingOverlayBar { height: 100%; width: 0; border-radius: inherit; background: var(--grad); transition: width .2s; }
+.loading-hint { margin-top: 2px; font-size: 12px !important; font-weight: 500 !important; opacity: .85; }
+kbd { display: inline-block; padding: 1px 7px; border-radius: 7px; border: 1px solid var(--line2);
+  border-bottom-width: 2px; background: rgba(255,255,255,.08); color: var(--text);
+  font: 700 11px 'Vazirmatn', sans-serif; line-height: 1.6; white-space: nowrap; }
+.job-hint { display: block; margin-top: 2px; color: var(--muted); font-size: 11.5px; font-weight: 600; }
+.job-hint kbd, .loading-hint kbd, #btnStopTr kbd { margin-inline: 2px; }
+#btnStopTr kbd { background: rgba(251,113,133,.18); border-color: rgba(251,113,133,.5); color: #fda4af; font-size: 10px; padding: 0 6px; }
 
 .dock { position: fixed; right: 0; left: 0; bottom: 0; z-index: 50; pointer-events: none;
   padding: 0 18px calc(14px + env(safe-area-inset-bottom)); }

@@ -13,6 +13,20 @@ function setTaskTitle(message = '') {
   document.title = message ? `${message} · ${APP_TITLE}` : APP_TITLE;
 }
 
+// درخواست لغو همهٔ کارهای در حال اجرا (بارگیری، ساخت PDF، ذخیرهٔ تصاویر و ترجمه)
+function requestJobCancel() {
+  jobCancelRequested = true;
+  if (loadAbortController) { try { loadAbortController.abort(); } catch { /* کنترلر قبلاً بسته شده */ } }
+  // TR در trans.js تعریف شده و حلقهٔ ترجمه همان پرچم را می‌خواند
+  try { if (typeof TR !== 'undefined' && TR) TR.cancel = true; } catch { /* trans.js هنوز بارگذاری نشده */ }
+}
+
+// راهنمای لغو با ESC در پنل نتیجه، فقط هنگام اجرای کار دیده می‌شود
+function setJobHint(visible) {
+  const el = $('jobHint');
+  if (el) el.classList.toggle('hidden', !visible);
+}
+
 let job = null;
 let jobKey = '';
 let pageProfileKey = '';
@@ -20,6 +34,9 @@ let pageProfileAvailable = false;
 let items = [];
 let loading = true;
 let building = false;
+// لغو کار در حال اجرا با ESC؛ بارگیری از AbortController و بقیه کارها از همین پرچم در مرز حلقه‌ها استفاده می‌کنند
+let jobCancelRequested = false;
+let loadAbortController = null;
 let lastClicked = null;
 let lastObjUrl = null;
 let draggedItem = null;
@@ -63,17 +80,22 @@ function looksLikeImage(b) {
   return b && b.size > 0 && !/^(text|application\/json)/i.test(b.type || '');
 }
 
-async function fetchImageBlob(url, tabId) {
+async function fetchImageBlob(url, tabId, signal) {
   let directError = 'دریافت مستقیم ناموفق بود';
   try {
-    const res = await fetch(url, { credentials: 'include' });
+    const res = await fetch(url, { credentials: 'include', signal });
     if (!res.ok) directError = `پاسخ سرور: HTTP ${res.status}`;
     else {
       const blob = await res.blob();
       if (looksLikeImage(blob)) return { blob, error: null };
       directError = `پاسخ سرور تصویر نبود${blob.type ? ` (${blob.type})` : ''}`;
     }
-  } catch (e) { directError = `دریافت مستقیم: ${e && e.message ? e.message : 'خطای شبکه یا دسترسی'}`; }
+  } catch (e) {
+    if (signal && signal.aborted) return { blob: null, error: 'بارگیری با کلید ESC لغو شد' };
+    directError = `دریافت مستقیم: ${e && e.message ? e.message : 'خطای شبکه یا دسترسی'}`;
+  }
+  // اگر کاربر لغو کرده، fetch جایگزین از داخل صفحه هم بی‌فایده است
+  if (signal && signal.aborted) return { blob: null, error: 'بارگیری با کلید ESC لغو شد' };
 
   let pageError = 'دسترسی به صفحهٔ مبدأ در دسترس نیست';
   if (tabId != null) {
@@ -341,9 +363,9 @@ async function drawThumb(it) {
   } catch (e) { console.warn('پیش‌نمایش تصویر ناموفق', e); }
 }
 
-async function loadOne(it) {
+async function loadOne(it, signal) {
   it.state = 'loading';
-  const result = await fetchImageBlob(it.url, job.tabId);
+  const result = await fetchImageBlob(it.url, job.tabId, signal);
   if (!result.blob) { it.state = 'failed'; it.error = result.error; it.selected = false; refreshCard(it); return; }
   it.blob = result.blob;
   try { await analyze(it); } catch (e) { it.info = null; it.error = e && e.message ? e.message : 'تحلیل تصویر ناموفق بود'; }
@@ -357,6 +379,9 @@ async function loadOne(it) {
 
 async function loadAll(list) {
   loading = true;
+  jobCancelRequested = false;
+  loadAbortController = new AbortController();
+  const signal = loadAbortController.signal;
   $('loadText').parentNode.classList.remove('finished');
   const overlay = $('loadingOverlay');
   overlay.classList.remove('hidden');
@@ -374,9 +399,9 @@ async function loadAll(list) {
   };
   update();
   const worker = async () => {
-    while (next < total) {
+    while (next < total && !jobCancelRequested) {
       const it = list[next++];
-      await loadOne(it);
+      await loadOne(it, signal);
       done++;
       update();
     }
@@ -385,6 +410,17 @@ async function loadAll(list) {
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
   } finally {
     loading = false;
+    loadAbortController = null;
+    // کارت‌هایی که فرصت بارگیری پیدا نکردند یا درخواستشان لغو شد، ناموفقِ قابل‌تلاش‌مجدد می‌شوند
+    if (jobCancelRequested) {
+      list.filter((it) => it.state === 'loading').forEach((it) => {
+        it.state = 'failed';
+        it.error = 'بارگیری با کلید ESC لغو شد';
+        it.selected = false;
+        refreshCard(it);
+      });
+      $('loadingOverlayText').innerText = 'بارگیری لغو شد';
+    }
     overlay.classList.add('hidden');
     $('loadText').parentNode.classList.add('finished');
     setTaskTitle();
@@ -990,6 +1026,7 @@ async function composeVertically(group, pageKey) {
   ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
   let y = 0;
   for (let k = 0; k < sources.length; k++) {
+    if (jobCancelRequested) break;
     const bmp = await createImageBitmap(sources[k].blob, { imageOrientation: 'none' });
     const x = Math.round((w - widths[k]) / 2);
     try { ctx.drawImage(bmp, x, y, widths[k], heights[k]); }
@@ -1009,6 +1046,7 @@ async function makePdfItems(selected, twoPerPage) {
   let sequence = 0;
   const expanded = [];
   for (const it of selected) {
+    if (jobCancelRequested) break;
     const source = await getDisplaySource(it);
     expanded.push({
       ...it, blob: source.blob, info: source.info, w: source.w, h: source.h,
@@ -1027,14 +1065,16 @@ async function makePdfItems(selected, twoPerPage) {
 
   const pages = [];
   for (const [groupId, members] of groups) {
+    if (jobCancelRequested) break;
     members.sort((a, b) => a.sequence - b.sequence);
     pages.push(members.length > 1 ? await composeVertically(members, `group_${groupId}`) : members[0]);
   }
   const chunkSize = twoPerPage ? 2 : 1;
-  for (let i = 0; i < ungrouped.length; i += chunkSize) {
+  for (let i = 0; i < ungrouped.length && !jobCancelRequested; i += chunkSize) {
     const chunk = ungrouped.slice(i, i + chunkSize);
     pages.push(chunk.length > 1 ? await composeVertically(chunk, `pair_${chunk[0].sequence}`) : chunk[0]);
   }
+  if (jobCancelRequested) return [];
   // Group IDs only define membership; PDF page order always follows the earliest card position.
   pages.sort((a, b) => (a.pageOrder || a.i + 1) - (b.pageOrder || b.i + 1) || a.sequence - b.sequence);
   return pages;
@@ -1050,6 +1090,8 @@ async function onBuild() {
   if (!jsPDFLib) { alert('فایل jspdf.umd.min.js پیدا نشد!'); return; }
 
   building = true;
+  jobCancelRequested = false;
+  setJobHint(true);
   refreshSummary();
   let name = $('pdfName').value.trim() || 'comic';
   if (!name.toLowerCase().endsWith('.pdf')) name += '.pdf';
@@ -1071,6 +1113,7 @@ async function onBuild() {
   try {
     setStatus(twoPerPage ? 'در حال چیدن تصاویر دوتایی در صفحه‌های عمودی...' : 'در حال آماده‌سازی تصاویر PDF...');
     const pdfItems = await makePdfItems(sel, twoPerPage);
+    if (jobCancelRequested) { setStatus('ساخت PDF با کلید ESC لغو شد.'); return; }
     const res = await PdfBuilder.build({
       jsPDF: jsPDFLib,
       items: pdfItems,
@@ -1078,6 +1121,7 @@ async function onBuild() {
       uniformSize,
       prepare,
       fallback,
+      isCancelled: () => jobCancelRequested,
       onProgress: (k, n) => {
         $('progressBar').style.width = Math.round((k / n) * 95) + '%';
         if (k < n) setStatus(`در حال پردازش تصویر ${k + 1} از ${n}...`);
@@ -1085,6 +1129,7 @@ async function onBuild() {
       onPage: (p) => { $('sPages').innerText = p; }
     });
 
+    if (res.cancelled || jobCancelRequested) { setStatus('ساخت PDF با کلید ESC لغو شد.'); return; }
     if (!res.pdf) { setStatus('هیچ تصویری قابل تبدیل به PDF نبود!'); return; }
 
     setStatus('در حال نهایی کردن فایل PDF...');
@@ -1114,6 +1159,7 @@ async function onBuild() {
     setStatus('خطا در ساخت PDF: ' + (e && e.message ? e.message : e));
   } finally {
     building = false;
+    setJobHint(false);
     setTaskTitle();
     refreshSummary();
   }
@@ -1219,6 +1265,8 @@ async function onSaveImages() {
   const folderLabel = useDownloads ? ('Downloads/' + (sub || 'comic')) : (rootDir.name + (sub ? '/' + sub : ''));
 
   building = true;
+  jobCancelRequested = false;
+  setJobHint(true);
   refreshSummary();
   const result = $('result');
   result.classList.remove('hidden', 'done');
@@ -1240,6 +1288,7 @@ async function onSaveImages() {
 
     const pad = Math.max(3, String(sel.length).length);
     for (let k = 0; k < sel.length; k++) {
+      if (jobCancelRequested) break;
       const it = sel[k];
       let ext = 'img';
       const base = String(k + 1).padStart(pad, '0');
@@ -1277,15 +1326,22 @@ async function onSaveImages() {
     }
 
     result.classList.add('done');
-    setStatus(saved
-      ? `${note}${saved} تصویر ${fmt === 'png' ? 'با فرمت PNG (بدون افت کیفیت)' : fmt === 'jpg' ? 'با فرمت JPEG (کیفیت ۱۰۰٪؛ فایل‌های JPEG اصلی دست‌نخورده)' : 'با فرمت و کیفیت اصلی'} در «${folderLabel}» ذخیره شد.`
-      : 'هیچ تصویری ذخیره نشد.');
+    if (jobCancelRequested) {
+      setStatus(saved
+        ? `ذخیره‌سازی با کلید ESC لغو شد؛ ${saved} تصویر از ${sel.length} تصویر قبلاً در «${folderLabel}» ذخیره شده بود.`
+        : 'ذخیره‌سازی تصاویر با کلید ESC لغو شد.');
+    } else {
+      setStatus(saved
+        ? `${note}${saved} تصویر ${fmt === 'png' ? 'با فرمت PNG (بدون افت کیفیت)' : fmt === 'jpg' ? 'با فرمت JPEG (کیفیت ۱۰۰٪؛ فایل‌های JPEG اصلی دست‌نخورده)' : 'با فرمت و کیفیت اصلی'} در «${folderLabel}» ذخیره شد.`
+        : 'هیچ تصویری ذخیره نشد.');
+    }
     if (errors.length) $('failed').innerText = `${errors.length} تصویر ذخیره نشد:\n` + errors.slice(0, 5).join('\n');
   } catch (e) {
     console.error(e);
     setStatus('خطا در ذخیرهٔ تصاویر: ' + (e && e.message ? e.message : e));
   } finally {
     building = false;
+    setJobHint(false);
     setTaskTitle();
     refreshSummary();
   }
@@ -1577,13 +1633,33 @@ async function main() {
     if (topMenu && topMenu.open && !topMenu.contains(e.target)) topMenu.open = false;
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && outputSettings.open) {
+    if (e.key !== 'Escape') return;
+    // اولویت اول: منوها و پنل‌های باز با ESC بسته شوند، نه اینکه کار لغو شود
+    let menuConsumed = false;
+    if (outputSettings.open) {
       outputSettings.open = false;
       outputSettings.querySelector('summary').focus();
+      menuConsumed = true;
     }
-    if (e.key === 'Escape' && topMenu && topMenu.open) {
+    if (topMenu && topMenu.open) {
       topMenu.open = false;
       topMenu.querySelector('summary').focus();
+      menuConsumed = true;
+    }
+    const groupMenu = $('groupMenu');
+    if (groupMenu && groupMenu.open) {
+      groupMenu.open = false;
+      menuConsumed = true;
+    }
+    if (menuConsumed) return;
+    // اگر پنجرهٔ تمام‌صفحه‌ای باز است، ESC همان را می‌بندد (هندلرهای خودشان)
+    const overlayOpen = ['lightbox', 'cropper', 'editor', 'trDialog']
+      .some((id) => !$(id).classList.contains('hidden'));
+    if (overlayOpen) return;
+    // اولویت دوم: لغو کار در حال اجرا (بارگیری / ساخت / ذخیره / ترجمه)
+    if (building || loading) {
+      e.preventDefault();
+      requestJobCancel();
     }
   });
   $('seamless').addEventListener('change', () => {

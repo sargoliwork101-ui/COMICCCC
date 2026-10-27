@@ -39,7 +39,8 @@ async function runTranslate() {
     return;
   }
 
-  building = true; TR.cancel = false;
+  building = true; TR.cancel = false; jobCancelRequested = false;
+  setJobHint(true);
   refreshSummary();
   const result = $('result');
   result.classList.remove('hidden', 'done');
@@ -146,6 +147,7 @@ async function runTranslate() {
     setStatus('خطا در راه‌اندازی تشخیص متن: ' + (e && e.message ? e.message : e));
   } finally {
     building = false;
+    setJobHint(false);
     setTaskTitle();
     $('btnStopTr').classList.add('hidden');
     refreshSummary();
