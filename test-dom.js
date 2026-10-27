@@ -95,6 +95,10 @@ function check(name, cond, extra) {
 const $ = (id) => window.document.getElementById(id);
 
 (async () => {
+  // meaningful seamless label replaces the old vague "صفحهٔ بلند"
+  const seamlessLabel = window.document.querySelector('label[for="seamless"], #seamless').closest('label').textContent;
+  check('seamless option labeled meaningfully', /همه تصاویر در یک صفحه/.test(seamlessLabel), seamlessLabel);
+
   // modernized header/footer shell keeps every functional id
   check('modern topbar present', !!window.document.querySelector('.topbar .brand-logo') &&
     !!window.document.querySelector('.brand-text h1') && !!window.document.querySelector('.version-pill'));

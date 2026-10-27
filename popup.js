@@ -1,10 +1,18 @@
 const startBtn = document.getElementById('startBtn');
 const statusBox = document.getElementById('statusBox');
 const statusText = document.getElementById('statusText');
-// باکس وضعیت فقط وقتی پیام واقعی (پیشرفت/نتیجه/خطا) دارد نمایش داده می‌شود
+// متن وضعیت (پیشرفت) را بدون نمایش باکس به‌روز می‌کند؛ پیشرفت واقعی روی خود صفحه با پوشش تمام‌صفحه دیده می‌شود
 const setStatus = (text) => {
   statusText.innerText = text;
+};
+// باکس فقط برای خطاها و هشدارهایی که کاربر باید ببیند نمایش داده می‌شود
+const showError = (text) => {
+  statusText.innerText = text;
   statusBox.classList.remove('hidden');
+};
+const hideStatus = () => {
+  statusText.innerText = '';
+  statusBox.classList.add('hidden');
 };
 
 startBtn.addEventListener('click', async () => {
@@ -12,6 +20,8 @@ startBtn.addEventListener('click', async () => {
   if (!pdfName.toLowerCase().endsWith('.pdf')) pdfName += '.pdf';
 
   startBtn.disabled = true;
+  // خطای اجرای قبلی را پاک کن؛ این بار فقط در صورت بروز خطا باکس ظاهر می‌شود
+  hideStatus();
   setStatus('در حال اسکرول صفحه برای لود تصاویر...\n(می‌توانید popup را ببندید؛ پیشرفت روی خود صفحه نمایش داده می‌شود)');
 
   try {
@@ -23,18 +33,18 @@ startBtn.addEventListener('click', async () => {
     });
     const res = results[0] && results[0].result;
     if (res && res.busy) {
-      setStatus('عملیات روی این صفحه از قبل در حال اجراست.');
+      showError('عملیات روی این صفحه از قبل در حال اجراست.');
     } else if (!res || res.count === 0) {
-      setStatus(res && res.skippedInline
+      showError(res && res.skippedInline
         ? `تصاویر داخلی پیدا شدند، اما ${res.skippedInline} مورد از حد مجاز بزرگ‌تر بودند.`
         : 'هیچ تصویری در این صفحه پیدا نشد!');
     } else {
-      const skipped = res.skippedInline ? ` (${res.skippedInline} تصویر داخلی بزرگ نادیده گرفته شد)` : '';
-      setStatus(`${res.count} تصویر پیدا شد${skipped}. تب پیش‌نمایش باز شد؛ تصاویر دلخواه را انتخاب کنید.`);
+      // موفقیت: تب پیش‌نمایش خودکار باز می‌شود، پس نیازی به نمایش باکس در popup نیست
+      hideStatus();
     }
   } catch (err) {
     console.error(err);
-    setStatus('خطا: ' + (err && err.message ? err.message : err) +
+    showError('خطا: ' + (err && err.message ? err.message : err) +
       '\n(روی صفحات chrome:// و فروشگاه کروم اکستنشن کار نمی‌کند)');
   } finally {
     startBtn.disabled = false;

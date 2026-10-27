@@ -1073,7 +1073,7 @@ async function onBuild() {
     result.classList.add('done');
     $('progressBar').style.width = '100%';
     const layoutNotes = [];
-    if (seamless) layoutNotes.push('یک صفحهٔ بلند');
+    if (seamless) layoutNotes.push('همه تصاویر در یک صفحه');
     else if (twoPerPage) layoutNotes.push('دو تصویر عمودی در هر صفحه');
     if (uniformSize) layoutNotes.push('اندازهٔ قاب صفحه‌ها یکسان');
     const layoutNote = layoutNotes.length ? ` (${layoutNotes.join('، ')})` : '';

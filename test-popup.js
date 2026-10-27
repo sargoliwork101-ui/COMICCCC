@@ -67,10 +67,41 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('idle status box hidden with no filler text', pdoc.getElementById('statusBox').classList.contains('hidden') &&
     pdoc.getElementById('statusText').textContent.trim() === '');
 }
-// popup.js exposes a helper that reveals the status box only for real messages
+// popup.js keeps the status box hidden unless an error/warning actually happens
 const popupCode = fs.readFileSync(__dirname + '/popup.js', 'utf8');
-check('popup has setStatus helper', /const setStatus = \(text\)/.test(popupCode));
-check('popup status box is unhidden via helper', /statusBox\.classList\.remove\('hidden'\)/.test(popupCode));
+check('popup has setStatus helper (text only)', /const setStatus = \(text\)/.test(popupCode));
+check('popup reveals the box only via showError', /const showError = \(text\)/.test(popupCode) &&
+  /statusBox\.classList\.remove\('hidden'\)/.test(popupCode));
+
+// interactive behavior: run the real popup.html + popup.js with a mocked chrome API
+async function runPopupOnce(executeResult, shouldReject) {
+  const dom2 = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
+    url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+  });
+  const w = dom2.window;
+  const c = dom2.getInternalVMContext();
+  // jsdom does not implement innerText; map it to textContent like the viewer harnesses do
+  Object.defineProperty(w.Element.prototype, 'innerText', {
+    get() { return this.textContent; },
+    set(v) { this.textContent = v; },
+    configurable: true
+  });
+  w.chrome = {
+    tabs: { query: async () => [{ id: 1 }] },
+    scripting: {
+      executeScript: shouldReject
+        ? async () => { throw new Error('Cannot access chrome:// URLs'); }
+        : async () => [{ result: executeResult }]
+    }
+  };
+  vm.runInContext(popupCode, c, { filename: 'popup.js' });
+  w.document.getElementById('startBtn').click();
+  await new Promise((r) => setTimeout(r, 10));
+  return {
+    boxHidden: w.document.getElementById('statusBox').classList.contains('hidden'),
+    text: w.document.getElementById('statusText').textContent
+  };
+}
 
 (async () => {
   // start scraping without awaiting: the overlay is created synchronously before the first await,
@@ -113,6 +144,18 @@ check('popup status box is unhidden via helper', /statusBox\.classList\.remove\(
   window.__wtpdfRunning = true;
   const busy = await window.eval('scrapeAndSend("x.pdf")');
   check('busy guard', busy && busy.busy === true, busy);
+
+  // interactive popup status box: hidden on success, visible only on error/warning
+  const successRun = await runPopupOnce({ count: 5, skippedInline: 0 });
+  check('success run keeps the status box hidden', successRun.boxHidden && successRun.text === '', successRun);
+  const emptyRun = await runPopupOnce({ count: 0 });
+  check('no-images run shows the box with an error', !emptyRun.boxHidden && /هیچ تصویری/.test(emptyRun.text), emptyRun);
+  const busyRun = await runPopupOnce({ busy: true });
+  check('busy run shows the box with a warning', !busyRun.boxHidden && /از قبل/.test(busyRun.text), busyRun);
+  const errorRun = await runPopupOnce(null, true);
+  check('failed run shows the box with the error', !errorRun.boxHidden && /خطا/.test(errorRun.text), errorRun);
+  const secondSuccess = await runPopupOnce({ count: 2 });
+  check('later success clears a previously shown error', secondSuccess.boxHidden && secondSuccess.text === '', secondSuccess);
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL POPUP TESTS PASSED');
   process.exit(failures ? 1 : 0);
