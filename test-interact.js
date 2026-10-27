@@ -144,6 +144,49 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('drag-drop reorders cards', JSON.stringify(uidOrder) === JSON.stringify([1, 2, 0]), uidOrder);
   check('drag-drop renumbers pdf order sequentially', JSON.stringify(order) === JSON.stringify(['1', '2', '3']), order);
 
+  // ---- drag-to-group: drop on the center band of another card ----
+  const dt2 = { effectAllowed: '', setData() {}, dropEffect: '' };
+  const rect156 = () => ({ left: 0, width: 156, top: 0, height: 200, right: 156, bottom: 200 });
+  // A) two ungrouped cards -> a new group of two, DOM order untouched
+  cards[1].getBoundingClientRect = rect156;
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt2, bubbles: true }));
+  cards[1].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt2, clientX: 78, bubbles: true })); // band 0.5 -> group
+  check('center-band dragover shows group hint', cards[1].classList.contains('group-drop-target') && h.ev('dragGroupDrop') === true);
+  cards[1].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt2, clientX: 78, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt2, bubbles: true }));
+  const gA = h.ev('items.map(i => i.pageGroup)');
+  check('center drop groups two cards', gA[0] !== null && gA[0] === gA[1] && gA[2] === null, gA);
+  check('group hint cleared after drop', !cards[1].classList.contains('group-drop-target') && h.ev('dragGroupDrop') === false);
+  check('grouping keeps DOM order', JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([1, 2, 0]));
+
+  // B) ungrouped card dropped onto a grouped card joins its group
+  cards[0].getBoundingClientRect = rect156;
+  cards[2].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt2, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt2, clientX: 78, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt2, clientX: 78, bubbles: true }));
+  cards[2].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt2, bubbles: true }));
+  const gB = h.ev('items.map(i => i.pageGroup)');
+  check('drop onto grouped card joins the group', gB[0] === gB[1] && gB[1] === gB[2], gB);
+
+  // C) dropping a card from the same group is a no-op
+  const beforeC = h.ev('items.map(i => i.pageGroup)');
+  cards[1].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt2, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt2, clientX: 78, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt2, clientX: 78, bubbles: true }));
+  cards[1].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt2, bubbles: true }));
+  check('same-group drop is a no-op', JSON.stringify(h.ev('items.map(i => i.pageGroup)')) === JSON.stringify(beforeC));
+
+  // D) edge-band drop still reorders and never changes groups
+  const beforeD = h.ev('items.map(i => i.pageGroup)');
+  const target2 = cards[1];
+  target2.getBoundingClientRect = rect156;
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt2, bubbles: true }));
+  target2.dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt2, clientX: 8, bubbles: true })); // band ~0.05 -> reorder
+  check('edge-band dragover does not arm group drop', h.ev('dragGroupDrop') === false && !target2.classList.contains('group-drop-target'));
+  target2.dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt2, clientX: 8, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt2, bubbles: true }));
+  check('edge drop preserves groups', JSON.stringify(h.ev('items.map(i => i.pageGroup)')) === JSON.stringify(beforeD));
+
   // ---- output settings open/close ----
   const settings = h.$('outputSettings');
   settings.open = true;

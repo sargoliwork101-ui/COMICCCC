@@ -64,7 +64,13 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('version pill present', !!pdoc.querySelector('.version-pill'));
   check('start button present', !!pdoc.getElementById('startBtn'));
   check('file name input present', !!pdoc.getElementById('pdfName'));
+  check('idle status box hidden with no filler text', pdoc.getElementById('statusBox').classList.contains('hidden') &&
+    pdoc.getElementById('statusText').textContent.trim() === '');
 }
+// popup.js exposes a helper that reveals the status box only for real messages
+const popupCode = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+check('popup has setStatus helper', /const setStatus = \(text\)/.test(popupCode));
+check('popup status box is unhidden via helper', /statusBox\.classList\.remove\('hidden'\)/.test(popupCode));
 
 (async () => {
   // start scraping without awaiting: the overlay is created synchronously before the first await,

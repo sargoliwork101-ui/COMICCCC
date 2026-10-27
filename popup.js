@@ -1,11 +1,18 @@
-document.getElementById('startBtn').addEventListener('click', async () => {
-  const startBtn = document.getElementById('startBtn');
-  const statusText = document.getElementById('statusText');
+const startBtn = document.getElementById('startBtn');
+const statusBox = document.getElementById('statusBox');
+const statusText = document.getElementById('statusText');
+// باکس وضعیت فقط وقتی پیام واقعی (پیشرفت/نتیجه/خطا) دارد نمایش داده می‌شود
+const setStatus = (text) => {
+  statusText.innerText = text;
+  statusBox.classList.remove('hidden');
+};
+
+startBtn.addEventListener('click', async () => {
   let pdfName = document.getElementById('pdfName').value.trim() || 'comic';
   if (!pdfName.toLowerCase().endsWith('.pdf')) pdfName += '.pdf';
 
   startBtn.disabled = true;
-  statusText.innerText = 'در حال اسکرول صفحه برای لود تصاویر...\n(می‌توانید popup را ببندید؛ پیشرفت روی خود صفحه نمایش داده می‌شود)';
+  setStatus('در حال اسکرول صفحه برای لود تصاویر...\n(می‌توانید popup را ببندید؛ پیشرفت روی خود صفحه نمایش داده می‌شود)');
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -16,19 +23,19 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     });
     const res = results[0] && results[0].result;
     if (res && res.busy) {
-      statusText.innerText = 'عملیات روی این صفحه از قبل در حال اجراست.';
+      setStatus('عملیات روی این صفحه از قبل در حال اجراست.');
     } else if (!res || res.count === 0) {
-      statusText.innerText = res && res.skippedInline
+      setStatus(res && res.skippedInline
         ? `تصاویر داخلی پیدا شدند، اما ${res.skippedInline} مورد از حد مجاز بزرگ‌تر بودند.`
-        : 'هیچ تصویری در این صفحه پیدا نشد!';
+        : 'هیچ تصویری در این صفحه پیدا نشد!');
     } else {
       const skipped = res.skippedInline ? ` (${res.skippedInline} تصویر داخلی بزرگ نادیده گرفته شد)` : '';
-      statusText.innerText = `${res.count} تصویر پیدا شد${skipped}. تب پیش‌نمایش باز شد؛ تصاویر دلخواه را انتخاب کنید.`;
+      setStatus(`${res.count} تصویر پیدا شد${skipped}. تب پیش‌نمایش باز شد؛ تصاویر دلخواه را انتخاب کنید.`);
     }
   } catch (err) {
     console.error(err);
-    statusText.innerText = 'خطا: ' + (err && err.message ? err.message : err) +
-      '\n(روی صفحات chrome:// و فروشگاه کروم اکستنشن کار نمی‌کند)';
+    setStatus('خطا: ' + (err && err.message ? err.message : err) +
+      '\n(روی صفحات chrome:// و فروشگاه کروم اکستنشن کار نمی‌کند)');
   } finally {
     startBtn.disabled = false;
   }

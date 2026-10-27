@@ -74,6 +74,17 @@ body { min-height: 100vh; padding-bottom: calc(132px + env(safe-area-inset-botto
 .item:hover .tw { transform: translateY(-3px); border-color: rgba(255,255,255,.3); }
 .item.selected .tw { border-color: var(--a1); box-shadow: 0 0 0 2px rgba(139,123,255,.6), 0 14px 26px -12px rgba(80,90,255,.55); }
 .item.group-focus .tw { outline: 3px solid #34d399; outline-offset: 3px; animation: group-focus-pulse .8s ease-in-out 3; }
+.item.group-drop-target .tw {
+  outline: 3px dashed #34d399; outline-offset: 3px;
+  box-shadow: 0 0 0 6px rgba(52,211,153,.25), 0 16px 34px -12px rgba(16,185,129,.8);
+}
+.item.group-drop-target .tw::after {
+  content: 'برای گروه‌بندی اینجا رها کنید';
+  position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+  background: rgba(6,78,59,.94); color: #ecfdf5; border: 1px solid rgba(52,211,153,.6);
+  font: 700 10.5px 'Vazirmatn', sans-serif; padding: 5px 12px; border-radius: 999px;
+  white-space: nowrap; z-index: 4; pointer-events: none;
+}
 @keyframes group-focus-pulse { 50% { outline-color: #fff; outline-offset: 5px; } }
 .item:not(.selected) .tw { filter: grayscale(.75) brightness(.75); opacity: .5; }
 .item.failed .tw { border-style: dashed; opacity: .4; cursor: not-allowed; filter: grayscale(1); }

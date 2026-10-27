@@ -23,6 +23,8 @@ let building = false;
 let lastClicked = null;
 let lastObjUrl = null;
 let draggedItem = null;
+let dragGroupDrop = false;
+let dragDropTargetEl = null;
 let suppressCardClickUntil = 0;
 let lbItem = null;
 let cropItem = null;
@@ -149,7 +151,7 @@ function makeCard(it) {
   const el = document.createElement('div');
   el.className = 'item selected';
   el.draggable = true;
-  el.title = 'برای تغییر ترتیب در PDF، تصویر را بکشید و رها کنید';
+  el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید';
   el.innerHTML = `<div class="tw"><canvas width="240" height="320"></canvas><div class="spin">در حال دریافت...</div>
     <span class="idx">${it.i + 1}${it.dupNo ? ` · کپی ${it.dupNo}` : ''}</span><span class="tick">${ICON_CHECK}</span>
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
@@ -176,6 +178,7 @@ function makeCard(it) {
   });
   el.addEventListener('dragend', () => {
     el.classList.remove('dragging');
+    clearDragDropHint();
     draggedItem = null;
   });
   el.addEventListener('click', (ev) => {
@@ -284,7 +287,7 @@ function refreshCard(it, groupView = buildPageGroupView()) {
   const meta = el.querySelector('.meta');
   const spin = el.querySelector('.spin');
   if (it.state === 'failed') el.title = it.error || 'بارگیری این تصویر ناموفق بود';
-  else el.title = 'برای تغییر ترتیب در PDF، تصویر را بکشید و رها کنید';
+  else el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید';
   if (it.state === 'ok') {
     if (spin && spin.parentNode) spin.parentNode.removeChild(spin);
     meta.innerText = `${it.w}×${it.h} · ${fmtSize(it.blob.size)}`;
@@ -590,6 +593,38 @@ function groupSelectedItems() {
 }
 function ungroupSelectedItems() {
   items.filter((it) => it.state === 'ok' && it.selected).forEach((it) => { it.pageGroup = null; });
+  cleanupPageGroups();
+  refreshAll();
+}
+
+// ---------- گروه‌بندی با کشیدن کارت روی کارت ----------
+function clearDragDropHint() {
+  if (dragDropTargetEl) {
+    dragDropTargetEl.classList.remove('group-drop-target');
+    dragDropTargetEl = null;
+  }
+  dragGroupDrop = false;
+}
+
+// رهاکردن کارت کشیده‌شده روی کارت هدف: گروه تازه، یا عضویت در گروه موجود
+function groupCardsByDrop(dragged, targetItem) {
+  if (!dragged || !targetItem || dragged === targetItem) return;
+  if (dragged.state !== 'ok' || targetItem.state !== 'ok') return;
+  const targetGroup = Number(targetItem.pageGroup) || null;
+  const draggedGroup = Number(dragged.pageGroup) || null;
+  if (targetGroup && draggedGroup === targetGroup) return; // از قبل هم‌گروه‌اند
+  if (targetGroup) {
+    // کارت کشیده‌شده به گروه کارت هدف ملحق می‌شود (اگر گروه قبلی تک‌عضو شود، cleanup حذفش می‌کند)
+    dragged.pageGroup = targetGroup;
+  } else if (draggedGroup) {
+    // کارت هدف به گروه کارت کشیده‌شده ملحق می‌شود
+    targetItem.pageGroup = draggedGroup;
+  } else {
+    // هیچ‌کدام گروه ندارند: گروه تازه با هر دو
+    const groupId = nextPageGroupId++;
+    dragged.pageGroup = groupId;
+    targetItem.pageGroup = groupId;
+  }
   cleanupPageGroups();
   refreshAll();
 }
@@ -1443,12 +1478,38 @@ async function main() {
     if (!draggedItem) return;
     ev.preventDefault();
     ev.dataTransfer.dropEffect = 'move';
+    const target = ev.target.closest ? ev.target.closest('.item') : null;
+    if (!target || target === draggedItem.el) { clearDragDropHint(); return; }
+    const rect = target.getBoundingClientRect();
+    const targetItem = items.find((it) => it.el === target);
+    const groupable = targetItem && targetItem.state === 'ok' && draggedItem.state === 'ok';
+    // نوار میانی کارت (۴۴٪ وسط) یعنی گروه‌بندی؛ لبه‌ها مثل قبل جابه‌جایی ترتیب است
+    const band = rect.width ? (ev.clientX - rect.left) / rect.width : 0;
+    const isGroupDrop = groupable && band > 0.28 && band < 0.72;
+    if (isGroupDrop) {
+      if (dragDropTargetEl !== target) {
+        clearDragDropHint();
+        target.classList.add('group-drop-target');
+        dragDropTargetEl = target;
+      }
+      dragGroupDrop = true;
+    } else {
+      clearDragDropHint();
+    }
   });
   grid.addEventListener('drop', (ev) => {
     if (!draggedItem) return;
     ev.preventDefault();
     const target = ev.target.closest('.item');
+    const wantGroup = dragGroupDrop;
+    clearDragDropHint();
     if (!target || target === draggedItem.el) return;
+    if (wantGroup) {
+      const targetItem = items.find((it) => it.el === target);
+      groupCardsByDrop(draggedItem, targetItem);
+      suppressCardClickUntil = Date.now() + 350;
+      return;
+    }
     const rect = target.getBoundingClientRect();
     // شبکه از راست به چپ است: سمت راست کارت یعنی درج قبل از آن در ترتیب DOM.
     const insertBefore = ev.clientX > rect.left + rect.width / 2 ? target : target.nextSibling;
