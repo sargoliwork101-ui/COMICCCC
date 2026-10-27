@@ -861,8 +861,10 @@ function previewDragOrder(dragged, targetEl, before) {
   tentative.forEach((el, index) => {
     const input = el.querySelector('.page-order');
     if (!input) return;
-    input.value = String(index + 1);
-    // ری‌تریگر انیمیشن برای هر به‌روزرسانی پیش‌نمایش
+    const next = String(index + 1);
+    // فقط ورودی‌هایی که شماره‌شان واقعاً عوض شده به‌روز و فلش می‌شوند (جلوگیری از reflow و انیمیشن بی‌مورد در هر dragover)
+    if (input.value === next) return;
+    input.value = next;
     input.classList.remove('order-flash');
     void input.offsetWidth;
     input.classList.add('order-flash');
@@ -872,10 +874,10 @@ function previewDragOrder(dragged, targetEl, before) {
 function restoreDragOrderPreview() {
   Array.from($('grid').children).forEach((el, index) => {
     const input = el.querySelector('.page-order');
-    if (input) {
-      input.classList.remove('order-flash');
-      input.value = String(index + 1);
-    }
+    if (!input) return;
+    if (input.classList.contains('order-flash')) input.classList.remove('order-flash');
+    const next = String(index + 1);
+    if (input.value !== next) input.value = next;
   });
 }
 
