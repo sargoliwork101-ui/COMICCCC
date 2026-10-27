@@ -1,4 +1,6 @@
-// Integration tests for the Google Books dedicated path inside scrapeAndSend().
+// Integration tests for the Google Books paths inside scrapeAndSend():
+// - in-frame reader (books.google.*): same-origin click3 fetch (walk + manual)
+// - top-frame edition/embedded pages: service-worker message transport
 const fs = require('fs');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
@@ -6,8 +8,41 @@ const { JSDOM } = require('jsdom');
 let failures = 0;
 const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; console.log('FAIL:', n, e !== undefined ? JSON.stringify(e) : ''); } };
 const tick = () => new Promise((r) => setTimeout(r, 0));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function makeHarness(pageUrl) {
+const rawSrc = (pid) => `https://books.google.com/books/content?id=B1&pg=${pid}&img=1&zoom=3&sig=${pid.toLowerCase()}&w=600`;
+const API_URLS = ['PA1', 'PA2', 'PA3'].map((pid) =>
+  `https://books.google.com/books/content?id=B1&pg=${pid}&img=1&zoom=3&sig=${pid.toLowerCase()}&w=10000`);
+
+// fetch implementation factory for the in-frame same-origin walk
+function click3Fetch(opts) {
+  const pids = opts.pids;                 // e.g. ['PA1','PA2','PA3','PA4']
+  const srcPids = new Set(opts.srcPids || []); // pids that carry a preview src
+  const failFirst = new Map(opts.failFirst || []); // pid -> number of failing attempts before success
+  const alwaysFail = new Set(opts.alwaysFail || []);
+  const counts = {};
+  const fetchFn = async (url) => {
+    const u = new URL(url);
+    const pg = u.searchParams.get('pg');
+    counts[pg] = (counts[pg] || 0) + 1;
+    const json = (page) => ({
+      ok: true, status: 200,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({ page })
+    });
+    if (pg === '1') {
+      return json(pids.map((pid) => ({ pid, src: pid === pids[0] && srcPids.has(pid) ? rawSrc(pid) : null })));
+    }
+    if (alwaysFail.has(pg) || (failFirst.has(pg) && counts[pg] <= failFirst.get(pg))) {
+      return { ok: false, status: 429, headers: { get: () => null }, text: async () => '' };
+    }
+    return json([{ pid: pg, src: srcPids.has(pg) ? rawSrc(pg) : null }]);
+  };
+  fetchFn.counts = counts;
+  return fetchFn;
+}
+
+function makeHarness(pageUrl, fetchImpl) {
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
     url: pageUrl, pretendToBeVisual: true, runScripts: 'dangerously'
   });
@@ -30,11 +65,11 @@ function makeHarness(pageUrl) {
   const messages = [];
   const progressListeners = [];
   let gbCancelled = false;
-  let scanBehavior = { type: 'ok' }; // 'ok' | 'fail' | 'defer'
+  let scanBehavior = { type: 'ok' };
   let deferredScan = null;
-  // per-pid responses for manual-mode single-page resolution; null pid means "not previewable"
   let pageSrcByPid = {};
   let pageFailPids = new Set();
+  let lastJobNote = '';
   window.chrome = {
     runtime: {
       sendMessage: async (msg) => {
@@ -46,7 +81,9 @@ function makeHarness(pageUrl) {
           if (gbCancelled) return { ok: false, cancelled: true, error: 'cancelled' };
           return {
             ok: true, urls: scanBehavior.urls || [],
-            totalPages: scanBehavior.totalPages || 0, availablePages: (scanBehavior.urls || []).length
+            totalPages: scanBehavior.totalPages || 0,
+            availablePages: (scanBehavior.urls || []).length,
+            failedPages: scanBehavior.failedPages || 0
           };
         }
         if (msg.type === 'WTPDF_GBOOKS_PAGE') {
@@ -54,7 +91,12 @@ function makeHarness(pageUrl) {
           const src = pageSrcByPid[msg.pid];
           return src ? { ok: true, pid: msg.pid, src } : { ok: false, error: 'not previewable' };
         }
-        if (msg.type === 'WTPDF_URLS') return { ok: true };
+        if (msg.type === 'WTPDF_URLS') {
+          // capture the final on-screen note before the run tears its UI down
+          lastJobNote = window.document.querySelector('.wtpdf-msg')
+            ? window.document.querySelector('.wtpdf-msg').textContent : '';
+          return { ok: true };
+        }
         return { ok: true };
       },
       onMessage: {
@@ -66,21 +108,21 @@ function makeHarness(pageUrl) {
       }
     }
   };
-  window.setTimeout = (cb) => global.setTimeout(cb, 0);
-  // real repeating intervals so the manual GB polling can observe simulated page turns
-  window.setInterval = (cb, ms) => global.setInterval(cb, ms);
-  window.clearInterval = (id) => global.clearInterval(id);
+  // same-origin fetch used by the in-frame reader path
+  window.fetch = fetchImpl || (async () => { throw new Error('fetch not mocked'); });
+  window.AbortController = AbortController;
   window.__wtpdfTimings = {
     poll: 1, clickTimeout: 30, settle: 1, stuckLimit: 2, maxPages: 5,
-    manualRescan: 1, gbookManualPoll: 5
+    manualRescan: 1, gbookManualPoll: 5,
+    gbookPause: 1, gbookBackoff: [1, 1, 1], gbookRounds: 3, gbookTimeout: 1000
   };
 
   const code = fs.readFileSync(__dirname + '/popup.js', 'utf8');
-  const fnCode = code.slice(code.indexOf('async function scrapeAndSend'));
-  vm.runInContext(fnCode, ctx, { filename: 'popup.js' });
+  const start = code.indexOf('async function probeBookFrame');
+  vm.runInContext(code.slice(start), ctx, { filename: 'popup.js' });
 
   return {
-    window, img, messages, progressListeners,
+    window, img, messages,
     setPageSrc(map, fails = []) { pageSrcByPid = map; pageFailPids = new Set(fails); },
     setScanBehavior(b) { scanBehavior = b; },
     deferScan() {
@@ -92,168 +134,180 @@ function makeHarness(pageUrl) {
     },
     urlJobs: () => messages.filter((m) => m.type === 'WTPDF_URLS'),
     scanJobs: () => messages.filter((m) => m.type === 'WTPDF_GBOOKS_SCAN'),
-    cancelJobs: () => messages.filter((m) => m.type === 'WTPDF_GBOOKS_CANCEL')
+    pageJobs: () => messages.filter((m) => m.type === 'WTPDF_GBOOKS_PAGE'),
+    cancelJobs: () => messages.filter((m) => m.type === 'WTPDF_GBOOKS_CANCEL'),
+    getLastJobNote: () => lastJobNote
   };
 }
 
-const API_URLS = [
-  'https://books.google.com/books/content?id=B1&pg=PA1&img=1&zoom=3&sig=a&w=10000',
-  'https://books.google.com/books/content?id=B1&pg=PA2&img=1&zoom=3&sig=b&w=10000',
-  'https://books.google.com/books/content?id=B1&pg=PA3&img=1&zoom=3&sig=c&w=10000'
-];
-
 (async () => {
-  // 1a. scroll/auto modes on Google Books route through the full API walk
-  for (const mode of ['scroll', 'auto']) {
-    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1&jscmd=click3');
-    // the DOM only carries 256x256 tiles which must not pollute the result
-    h.window.document.body.appendChild(h.img('https://books.google.com/books/content?id=B1&pg=PA1&img=1&zoom=2&tid=0'));
-    h.window.document.body.appendChild(h.img('https://books.google.com/books/content?id=B1&pg=PA1&img=1&zoom=2&tid=1'));
-    // hold the API response so the in-flight UI can be inspected before the run finishes and removes it
-    const deferred = h.deferScan();
-
-    const running = h.window.eval(`scrapeAndSend("book.pdf", "${mode}")`);
-    await tick();
-    await tick();
-    check(`mode ${mode}: full-screen overlay used (no manual panel)`,
-      !!h.window.document.querySelector('.wtpdf-overlay') && !h.window.document.querySelector('.wtpdf-manual'));
-    check(`mode ${mode}: scan message sent with page url`, h.scanJobs().length === 1 &&
-      h.scanJobs()[0].pageUrl.includes('id=B1'), h.scanJobs());
-    deferred.resolve({ ok: true, urls: API_URLS, totalPages: 4, availablePages: 3, failedPages: 1 });
-    const res = await running;
-
-    check(`mode ${mode}: result count comes from the API`, res && res.count === 3, res);
+  // ========== A. in-frame reader on books.google.*: same-origin walk ==========
+  {
+    const fetchImpl = click3Fetch({ pids: ['PA1', 'PA2', 'PA3', 'PA4'], srcPids: ['PA1', 'PA2', 'PA3'] });
+    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1&jscmd=click3', fetchImpl);
+    h.window.document.body.appendChild(h.img('https://books.google.com/books/content?id=B1&pg=PA1&zoom=2&tid=0'));
+    const res = await h.window.eval('scrapeAndSend("book.pdf", "auto")');
+    check('in-frame auto: walk resolves all previewable pages', res && res.count === 3, res);
+    check('in-frame auto: no service-worker scan message', h.scanJobs().length === 0, h.scanJobs().length);
     const job = h.urlJobs()[0];
-    check(`mode ${mode}: one WTPDF_URLS job carrying API urls`, h.urlJobs().length === 1 &&
+    check('in-frame auto: urls ordered and full resolution', h.urlJobs().length === 1 &&
       JSON.stringify(job.urls) === JSON.stringify(API_URLS), job && job.urls);
-    check(`mode ${mode}: DOM tiles excluded`, !job.urls.some((u) => u.includes('tid=')));
-    check(`mode ${mode}: UI cleaned up and flag reset`,
-      !h.window.document.querySelector('.wtpdf-root') && h.window.__wtpdfRunning === false);
+    check('in-frame auto: DOM tiles excluded', !job.urls.some((u) => u.includes('tid=')));
+    check('in-frame auto: ending note reports the non-previewable page',
+      /غیرقابل‌پیش‌نمایش/.test(h.getLastJobNote()), h.getLastJobNote());
+    check('in-frame auto: UI cleaned up', !h.window.document.querySelector('.wtpdf-root'));
   }
 
-  // 1b. manual mode on Google Books: floating panel, one light API call per manually turned page
+  // ========== B. in-frame walk retries transient failures ==========
   {
-    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1');
-    h.setPageSrc({
-      PA1: API_URLS[0],
-      PA2: API_URLS[1],
-      PA3: API_URLS[2]
+    const fetchImpl = click3Fetch({
+      pids: ['PA1', 'PA2'], srcPids: ['PA1', 'PA2'], failFirst: [['PA2', 2]]
     });
+    const h = makeHarness('https://books.google.com/books?id=B1', fetchImpl);
+    const res = await h.window.eval('scrapeAndSend("book.pdf", "auto")');
+    check('retry: flaky page recovered inside the frame', res && res.count === 2, res);
+  }
+
+  // ========== C. in-frame walk gives up after the round limit ==========
+  {
+    const fetchImpl = click3Fetch({
+      pids: ['PA1', 'PA2'], srcPids: ['PA1'], alwaysFail: ['PA2']
+    });
+    const h = makeHarness('https://books.google.com/books?id=B1', fetchImpl);
+    const res = await h.window.eval('scrapeAndSend("book.pdf", "auto")');
+    check('dead page: previewable page kept', res && res.count === 1, res);
+    check('dead page: failed exactly after three rounds', fetchImpl.counts.PA2 === 3, fetchImpl.counts.PA2);
+  }
+
+  // ========== D. in-frame manual mode: real floating panel, one fetch per turned page ==========
+  {
+    const fetchImpl = click3Fetch({ pids: ['PA1', 'PA2', 'PA3'], srcPids: ['PA1', 'PA2', 'PA3'] });
+    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1', fetchImpl);
     const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
     await tick();
     await tick();
-    check('GB manual: compact panel shown instead of full-screen overlay',
+    check('in-frame manual: floating panel, not the dark overlay',
       !!h.window.document.querySelector('.wtpdf-manual') && !h.window.document.querySelector('.wtpdf-overlay'));
-    check('GB manual: no bulk walk started', h.scanJobs().length === 0);
-    const pageJobs = () => h.messages.filter((m) => m.type === 'WTPDF_GBOOKS_PAGE');
-    check('GB manual: current page resolved immediately', pageJobs().length === 1 && pageJobs()[0].pid === 'PA1', pageJobs());
-    check('GB manual: counter shows one image',
+    check('in-frame manual: no bulk SW scan', h.scanJobs().length === 0 && h.pageJobs().length === 0);
+    check('in-frame manual: first page grabbed immediately',
       h.window.document.querySelector('.wtpdf-count').textContent === '1 تصویر جمع شد');
 
-    // simulate the reader's URL change when the user clicks its own next-page arrow
     h.window.history.replaceState(null, '', 'https://books.google.com/books?id=B1&pg=PA2');
-    await new Promise((r) => setTimeout(r, 30));
-    check('GB manual: turning the page triggers a single-page request for PA2',
-      pageJobs().some((m) => m.pid === 'PA2'), pageJobs().map((m) => m.pid));
-    check('GB manual: counter updates to two',
+    await sleep(30);
+    check('in-frame manual: turning page adds the second image',
       h.window.document.querySelector('.wtpdf-count').textContent === '2 تصویر جمع شد');
     h.window.history.replaceState(null, '', 'https://books.google.com/books?id=B1&pg=PA3');
-    await new Promise((r) => setTimeout(r, 30));
-    check('GB manual: third page picked up',
+    await sleep(30);
+    check('in-frame manual: third page added',
       h.window.document.querySelector('.wtpdf-count').textContent === '3 تصویر جمع شد');
 
     h.window.document.querySelector('.wtpdf-done').click();
     const res = await running;
-    check('GB manual: Done returns all manually collected pages', res && res.count === 3, res);
-    const job = h.urlJobs()[0];
-    check('GB manual: urls follow the viewing order and are full-resolution',
-      h.urlJobs().length === 1 && JSON.stringify(job.urls) === JSON.stringify(API_URLS), job && job.urls);
-    check('GB manual: panel removed and flag reset',
-      !h.window.document.querySelector('.wtpdf-root') && h.window.__wtpdfRunning === false);
+    check('in-frame manual: Done returns viewed pages in order',
+      res && res.count === 3 && JSON.stringify(h.urlJobs()[0].urls) === JSON.stringify(API_URLS), res);
+    check('in-frame manual: panel removed', !h.window.document.querySelector('.wtpdf-root'));
   }
 
-  // 1c. a transient single-page failure is retried automatically while staying on the page
+  // ========== E. in-frame manual recovers a transient fetch error by polling ==========
   {
-    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1');
-    h.setPageSrc({ PA1: API_URLS[0] }, ['PA1']); // first attempts fail...
+    const flaky = click3Fetch({ pids: ['PA1'], srcPids: ['PA1'], failFirst: [['PA1', 2]] });
+    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1', flaky);
     const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
-    await tick();
-    h.setPageSrc({ PA1: API_URLS[0] }); // ...then the page becomes available; polling retries
-    await new Promise((r) => setTimeout(r, 30));
+    await sleep(40);
     h.window.document.querySelector('.wtpdf-done').click();
     const res = await running;
-    check('GB manual: failed page recovered by polling retry', res && res.count === 1, res);
+    check('in-frame manual: failed current page retried and recovered', res && res.count === 1, res);
   }
 
-  // 1d. embedded Google Books iframe cannot expose top-frame page turns, so manual falls back to the walk
+  // ========== F. in-frame ESC cancels the local walk without creating a job ==========
   {
-    const h = makeHarness('https://example.com/article');
-    const frame = h.window.document.createElement('iframe');
-    frame.src = 'https://books.google.com/books?id=EMBED99&output=embed';
-    h.window.document.body.appendChild(frame);
-    h.setScanBehavior({ type: 'ok', urls: API_URLS.slice(0, 2), totalPages: 2, availablePages: 2 });
-    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
-    await tick();
-    check('embedded: manual mode uses the overlay walk (no floating panel)',
-      !!h.window.document.querySelector('.wtpdf-overlay') && !h.window.document.querySelector('.wtpdf-manual'));
-    const res = await running;
-    check('embedded: walk still resolves the book', res && res.count === 2, res);
-  }
-
-  // 2. new-style edition URL on www.google.com is detected
-  {
-    const h = makeHarness('https://www.google.com/books/edition/A_Textbook_of_Electronic_Circuits/4ciReKlOVHIC?hl=en&gbpv=1');
-    h.setScanBehavior({ type: 'ok', urls: API_URLS, totalPages: 3 });
-    const res = await h.window.eval('scrapeAndSend("book.pdf", "auto")');
-    check('edition URL: API path used', h.scanJobs().length === 1 && res.count === 3, res);
-  }
-
-  // 3. ESC during the API walk cancels and sends the cancel control message
-  {
-    const h = makeHarness('https://books.google.com/books?id=B1');
-    const deferred = h.deferScan();
+    let release;
+    const blocked = new Promise((r) => { release = r; });
+    const hanging = async () => { await blocked; throw new Error('should not resolve'); };
+    const h = makeHarness('https://books.google.com/books?id=B1', hanging);
     const running = h.window.eval('scrapeAndSend("book.pdf", "auto")');
     await tick();
     h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    deferred.resolve({ ok: false, cancelled: true, error: 'cancelled' });
+    release();
     const res = await running;
-    check('ESC: cancelled result', res && res.cancelled === true, res);
-    check('ESC: cancel control message sent', h.cancelJobs().length === 1);
-    check('ESC: no URL job created', h.urlJobs().length === 0);
-    check('ESC: overlay removed', !h.window.document.querySelector('.wtpdf-root'));
+    check('in-frame ESC: cancelled result', res && res.cancelled === true, res);
+    check('in-frame ESC: no URL job', h.urlJobs().length === 0);
   }
 
-  // 4. API failure falls back to ordinary DOM scanning instead of hard failure
+  // ========== G. local walk failure falls back to SW, then DOM ==========
   {
-    const h = makeHarness('https://books.google.com/books?id=B1');
-    h.window.document.body.appendChild(h.img('https://books.google.com/books/content?id=B1&pg=PA1&img=1&zoom=2&tid=0'));
-    h.setScanBehavior({ type: 'fail', error: 'HTTP 429' });
+    const h = makeHarness('https://books.google.com/books?id=B1', async () => { throw new Error('offline'); });
+    h.window.document.body.appendChild(h.img('https://books.google.com/books/content?id=B1&pg=PA1&zoom=2&tid=0'));
+    h.setScanBehavior({ type: 'fail', error: 'HTTP 500' });
     const res = await h.window.eval('scrapeAndSend("book.pdf", "auto")');
-    check('fallback: DOM tile collected after API failure', res && res.count === 1, res);
-    check('fallback: scan attempted then URL job sent', h.scanJobs().length === 1 && h.urlJobs().length === 1);
+    check('fallback: SW scan attempted after local failure', h.scanJobs().length === 1);
+    check('fallback: DOM tile collected when both dedicated paths fail', res && res.count === 1, res);
   }
 
-  // 5. embedded Google Books iframe on a non-Google page is detected
+  // ========== H. top-frame edition page uses the service-worker transport ==========
+  {
+    const h = makeHarness('https://www.google.com/books/edition/A_Textbook_of_Electronic_Circuits/4ciReKlOVHIC?hl=en&gbpv=1');
+    const deferred = h.deferScan();
+    const running = h.window.eval('scrapeAndSend("book.pdf", "auto")');
+    await tick();
+    check('edition: full-screen overlay shown during the SW walk',
+      !!h.window.document.querySelector('.wtpdf-overlay') && !h.window.document.querySelector('.wtpdf-manual'));
+    deferred.resolve({ ok: true, urls: API_URLS, totalPages: 4, availablePages: 3, failedPages: 1 });
+    const res = await running;
+    check('edition: SW walk used', h.scanJobs().length === 1 && res && res.count === 3, res);
+  }
+
+  // ========== I. manual mode on a top-frame edition page degrades to the SW auto walk ==========
+  {
+    const h = makeHarness('https://www.google.com/books/edition/Some_Book/B1abcdef');
+    const deferred = h.deferScan();
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
+    await tick();
+    check('edition manual: degraded to overlay walk (no floating panel)',
+      !!h.window.document.querySelector('.wtpdf-overlay') && !h.window.document.querySelector('.wtpdf-manual'));
+    deferred.resolve({ ok: true, urls: API_URLS.slice(0, 2), totalPages: 2, availablePages: 2 });
+    const res = await running;
+    check('edition manual: SW walk still runs', h.scanJobs().length === 1 && res.count === 2, res);
+  }
+
+  // ========== J. embedded iframe reader on a foreign page uses the SW walk ==========
   {
     const h = makeHarness('https://example.com/article');
     const frame = h.window.document.createElement('iframe');
     frame.src = 'https://books.google.com/books?id=EMBED99&output=embed';
     h.window.document.body.appendChild(frame);
-    h.setScanBehavior({ type: 'ok', urls: API_URLS.slice(0, 1), totalPages: 1 });
-    const res = await h.window.eval('scrapeAndSend("book.pdf", "scroll")');
-    check('iframe: embedded reader detected via frame src', h.scanJobs().length === 1 && res && res.count === 1, res);
+    const deferred = h.deferScan();
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
+    await tick();
+    check('embedded: manual degrades to overlay walk (no floating panel)',
+      !!h.window.document.querySelector('.wtpdf-overlay') && !h.window.document.querySelector('.wtpdf-manual'));
+    deferred.resolve({ ok: true, urls: API_URLS.slice(0, 1), totalPages: 1, availablePages: 1 });
+    const res = await running;
+    check('embedded: SW walk resolves the book', res && res.count === 1, res);
   }
 
-  // 6. unrelated pages never trigger the Google Books path
+  // ========== K. unrelated pages never take a Google Books path ==========
   {
     const h = makeHarness('https://comic.test/episode/9');
     h.window.document.body.appendChild(h.img('https://cdn.test/page.jpg', 300, 420));
     const res = await h.window.eval('scrapeAndSend("comic.pdf", "auto")');
     check('non-GB: no scan message', h.scanJobs().length === 0);
-    check('non-GB: ordinary DOM collection still works', res && res.count === 1 && h.urlJobs().length === 1, res);
-    // ESC outside an active Google Books scan must not leave a cancel control message behind
+    check('non-GB: ordinary DOM collection works', res && res.count === 1 && h.urlJobs().length === 1, res);
     h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     check('non-GB: no stray cancel control message', h.cancelJobs().length === 0, h.cancelJobs().length);
+  }
+
+  // ========== L. frame probe identifies only the books.google.* reader frame ==========
+  {
+    const reader = makeHarness('https://books.google.com/books?id=B1&output=embed');
+    const probeReader = await reader.window.eval('probeBookFrame()');
+    check('probe: reader frame detected', probeReader.isReader === true && probeReader.id === 'B1', probeReader);
+    const plain = makeHarness('https://www.google.com/books/edition/Title/B1abcdef');
+    const probePlain = await plain.window.eval('probeBookFrame()');
+    check('probe: edition top frame is not itself a reader frame', probePlain.isReader === false, probePlain);
+    const other = makeHarness('https://comic.test/ep');
+    const probeOther = await other.window.eval('probeBookFrame()');
+    check('probe: unrelated frame not detected', probeOther.isReader === false, probeOther);
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL GBOOKS POPUP TESTS PASSED');

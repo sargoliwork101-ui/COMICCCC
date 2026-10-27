@@ -45,8 +45,24 @@ startBtn.addEventListener('click', async () => {
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // مرحلهٔ ۱: کاوش همهٔ فریم‌ها برای پیدا کردن فریم اصلی reader گوگل‌بوک (در صفحات edition داخل iframe است)
+    let injectionTarget = { tabId: tab.id };
+    try {
+      const probes = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        func: probeBookFrame
+      });
+      const reader = (probes || []).find((r) => r && r.result && r.result.isReader);
+      if (reader && typeof reader.frameId === 'number') {
+        injectionTarget = { tabId: tab.id, frameIds: [reader.frameId] };
+      }
+    } catch (probeErr) {
+      // بعضی فریم‌ها دسترسی‌ناپذیرند؛ تزریق در فریم بالایی به‌عنوان fallback کافی است
+      console.warn('کاوش فریم‌ها ناموفق بود، تزریق در فریم اصلی', probeErr);
+    }
+    // مرحلهٔ ۲: تزریق اسکریپت کامل فقط در فریم انتخاب‌شده (reader یا فریم بالایی)
     const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: injectionTarget,
       func: scrapeAndSend,
       args: [pdfName, collectMode]
     });
@@ -72,6 +88,17 @@ startBtn.addEventListener('click', async () => {
   }
 });
 
+// در هر فریم تب اجرا می‌شود و می‌گوید آیا این فریم همان reader گوگل‌بوک است یا نه
+async function probeBookFrame() {
+  try {
+    const u = new URL(location.href);
+    const id = u.searchParams.get('id') || u.searchParams.get('nid') || '';
+    return { isReader: u.hostname.startsWith('books.google.') && !!id, href: location.href, id };
+  } catch {
+    return { isReader: false, href: '', id: '' };
+  }
+}
+
 // این تابع داخل صفحهٔ وب اجرا می‌شود
 // mode: 'scroll' (پیش‌فرض) | 'auto' (ورق‌زدن خودکار) | 'manual' (ورق‌زدن دستی کاربر)
 async function scrapeAndSend(pdfName, mode) {
@@ -93,21 +120,27 @@ async function scrapeAndSend(pdfName, mode) {
     scrollStep: 0.7,    // سهم ارتفاع پنجره در هر گام اسکرول
     scrollSleep: 200,   // مکث هر گام اسکرول
     scrollMax: 800,     // سقف تعداد گام‌های اسکرول
-    gbookManualPoll: 700 // فاصلهٔ بررسی تغییر صفحه در حالت دستی Google Books
+    gbookManualPoll: 700, // فاصلهٔ بررسی تغییر صفحه در حالت دستی Google Books
+    gbookPause: 450,    // مکث پایه بین درخواست‌های click3 (با jitter) برای جلوگیری از throttle
+    gbookBackoff: [700, 2000, 5000], // backoff تلاش‌های مجدد هر صفحه در دورهای بعدی
+    gbookRounds: 3,     // هر صفحهٔ خطادار حداکثر در سه دور تلاش می‌شود
+    gbookTimeout: 20000 // timeout هر درخواست click3
   }, window.__wtpdfTimings || {});
 
   // ---------- تشخیص کتاب‌خوان Google Books ----------
   // کتاب‌های گوگل به‌جای تصویر کامل، کاشی‌های ۲۵۶px داخل iframe دارند؛ برای همین مسیر اختصاصی API لازم است.
+  // inFrame یعنی اسکریپت داخل خود فریم reader (دامنهٔ books.google.*) اجرا شده: fetch هم‌مبدا و ردیابی ورق‌زدن ممکن است.
   const detectGoogleBooks = (href) => {
     let u;
     try { u = new URL(href); } catch { return null; }
+    const inFrame = u.hostname.startsWith('books.google.');
     const byId = u.searchParams.get('id');
     if (byId && /^[\w-]+$/.test(byId) && /(^|\.)google\./i.test(u.hostname)) {
-      return { id: byId, origin: u.hostname.startsWith('books.google.') ? u.origin : 'https://books.google.com' };
+      return { id: byId, origin: inFrame ? u.origin : 'https://books.google.com', inFrame, embedded: false };
     }
     if (/(^|\.)google\.[a-z.]+$/i.test(u.hostname) && u.pathname.includes('/books/edition/')) {
       const seg = u.pathname.split('/').filter(Boolean).pop();
-      if (seg && /^[\w-]{6,}$/.test(seg)) return { id: seg, origin: 'https://books.google.com' };
+      if (seg && /^[\w-]{6,}$/.test(seg)) return { id: seg, origin: 'https://books.google.com', inFrame: false, embedded: false };
     }
     // reader جاسازی‌شده در iframe (نشانی books.google.* داخل قاب صفحه)
     const frame = document.querySelector('iframe[src*="books.google."]');
@@ -115,16 +148,16 @@ async function scrapeAndSend(pdfName, mode) {
       try {
         const fu = new URL(frame.src);
         const fid = fu.searchParams.get('id');
-        if (fid && /^[\w-]+$/.test(fid)) return { id: fid, origin: fu.origin, embedded: true };
+        if (fid && /^[\w-]+$/.test(fid)) return { id: fid, origin: fu.origin, inFrame: false, embedded: true };
       } catch { /* قاب نامعتبر */ }
     }
     return null;
   };
   const gbook = detectGoogleBooks(location.href);
-  // روی گوگل‌بوک هم حالت دستی واقعی داریم (ورق‌زدن کاربر + برداشتن صفحه از API)؛
-  // فقط reader جاسازی‌شده در iframe چون تغییر آدرس قاب بالا دیده نمی‌شود، همان مسیر خودکار را می‌رود
+  // حالت دستی واقعی فقط داخل فریم reader ممکن است (ورق‌زدن، آدرس همان فریم را عوض می‌کند)؛
+  // در فریم بالاییِ صفحات edition یا reader جاسازی‌شده، دستی به پیمایش خودکار تبدیل می‌شود
   const effectiveMode = gbook
-    ? (mode === 'manual' && !gbook.embedded ? 'manual' : 'auto')
+    ? (mode === 'manual' && gbook.inFrame ? 'manual' : 'auto')
     : mode;
 
   const PLACEHOLDER = /blank|loading|placeholder|spacer|pixel|1x1|lazy\.(gif|png|jpg)/i;
@@ -318,8 +351,116 @@ async function scrapeAndSend(pdfName, mode) {
     }
   };
 
+  // ---------- مسیر درون‌قاب Google Books: fetch هم‌مبدا از خود فریم reader (طبیعی‌ترین حالت برای گوگل) ----------
+  const gbNormalizeSrc = (src) => {
+    let abs = src;
+    if (abs.startsWith('//')) abs = 'https:' + abs;
+    if (/[?&]w=\d+/.test(abs)) return abs.replace(/([?&]w=)\d+/, '$1' + '10000');
+    return abs + (abs.includes('?') ? '&' : '?') + 'w=10000';
+  };
+  const gbParseJson = (text) => {
+    const clean = text.replace(/^\)\]\}'?\s*/, '').replace(/^while\s*\(\s*1\s*\)\s*;?\s*/, '').trim();
+    return JSON.parse(clean);
+  };
+  // یک درخواست تک‌تلاش click3 هم‌مبدا با timeout؛ retry در خود walker مدیریت می‌شود
+  const gbFetchClick3 = async (pid) => {
+    if (cancelled) { const e = new Error('cancelled'); e.cancelled = true; throw e; }
+    const url = `${gbook.origin}/books?id=${encodeURIComponent(gbook.id)}&hl=en&lpg=${encodeURIComponent('1')}` +
+      `&pg=${encodeURIComponent(pid)}&jscmd=click3`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), T.gbookTimeout);
+    try {
+      const res = await fetch(url, { credentials: 'include', signal: ctrl.signal });
+      if (!res.ok) {
+        const e = new Error('HTTP ' + res.status);
+        if (res.status === 429 || res.status === 503) {
+          const retryAfter = parseInt(res.headers.get('Retry-After') || '', 10);
+          if (Number.isFinite(retryAfter) && retryAfter > 0) e.retryAfterMs = retryAfter * 1000;
+        }
+        throw e;
+      }
+      return gbParseJson(await res.text());
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw new Error('request timeout');
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // پیمایش کامل کتاب داخل فریم reader؛ همان منطق مقاوم service worker ولی با fetch هم‌مبدا
+  const runGoogleBooksWalkInPage = async () => {
+    const first = await gbFetchClick3('1');
+    if (!first || !Array.isArray(first.page) || !first.page.length) {
+      throw new Error('فهرست صفحه‌های کتاب خالی بود یا این کتاب پیش‌نمایش ندارد');
+    }
+    const order = [];
+    const srcByPid = new Map();
+    // صفحه‌ای که پاسخ اختصاصی‌اش بدون src برگردد قطعاً قابل‌پیش‌نمایش نیست و دوباره درخواست نمی‌شود
+    const definitiveEmpty = new Set();
+    const merge = (data) => {
+      if (!data || !Array.isArray(data.page)) return;
+      data.page.forEach((p) => {
+        if (!p || !p.pid) return;
+        if (!order.includes(p.pid)) order.push(p.pid);
+        if (typeof p.src === 'string' && p.src && !srcByPid.has(p.pid)) srcByPid.set(p.pid, p.src);
+      });
+    };
+    merge(first);
+
+    const attempts = new Map();
+    let consecutiveErrors = 0;
+    let lastError = null;
+    while (true) {
+      if (cancelled) { const e = new Error('cancelled'); e.cancelled = true; throw e; }
+      const pid = order.find((candidate) =>
+        !srcByPid.has(candidate) && !definitiveEmpty.has(candidate) && (attempts.get(candidate) || 0) < T.gbookRounds);
+      if (!pid) break;
+      const round = (attempts.get(pid) || 0) + 1;
+      attempts.set(pid, round);
+      say(`در حال خواندن صفحات کتاب از Google Books...\n${srcByPid.size} صفحهٔ قابل‌پیش‌نمایش از ${order.length} صفحه`);
+      try {
+        const data = await gbFetchClick3(pid);
+        merge(data);
+        if (!srcByPid.has(pid)) definitiveEmpty.add(pid);
+        consecutiveErrors = 0;
+        lastError = null;
+      } catch (e) {
+        if (e && e.cancelled) throw e;
+        consecutiveErrors += 1;
+        lastError = e;
+      }
+      const stillRetrying = !srcByPid.has(pid) && !definitiveEmpty.has(pid) && round < T.gbookRounds;
+      let pause;
+      if (stillRetrying) {
+        const base = lastError && lastError.retryAfterMs ? lastError.retryAfterMs : (T.gbookBackoff[round - 1] || 5000);
+        pause = base * Math.min(4, 1 + consecutiveErrors * 0.5);
+      } else {
+        // jitter تصادفی الگوی رباتیک درخواست‌ها را می‌شکند
+        pause = T.gbookPause + Math.random() * 150;
+      }
+      await sleep(Math.round(pause));
+    }
+    const urls = order.filter((pid) => srcByPid.has(pid)).map((pid) => gbNormalizeSrc(srcByPid.get(pid)));
+    if (!urls.length) throw new Error('هیچ صفحهٔ قابل‌پیش‌نمایشی برای این کتاب پیدا نشد');
+    return {
+      ok: true, urls, totalPages: order.length, availablePages: urls.length,
+      failedPages: order.length - urls.length
+    };
+  };
+
+  // حل یک صفحهٔ منفرد برای حالت دستی داخل فریم (یک درخواست سبک هم‌مبدا)
+  const resolveGoogleBooksPageInPage = async (pid) => {
+    const data = await gbFetchClick3(pid);
+    const entry = (data.page || []).find((p) => p && p.pid === pid && typeof p.src === 'string' && p.src);
+    if (!entry) return { ok: false, error: 'این صفحه قابل‌پیش‌نمایش نیست' };
+    return { ok: true, pid: entry.pid, src: gbNormalizeSrc(entry.src) };
+  };
+
   // ---------- حالت دستی Google Books: کاربر ورق می‌زند، افزونه فقط همان صفحه را از API برمی‌دارد ----------
   const runGoogleBooksManual = async () => {
+    // داخل فریم reader درخواست هم‌مبدا مستقیم است؛ در فریم بالایی از service worker کمک می‌گیریم
+    const transport = gbook.inFrame ? 'inpage' : 'sw';
     const pidFromHref = (href) => {
       try { return new URL(href).searchParams.get('pg') || '1'; } catch { return '1'; }
     };
@@ -330,9 +471,11 @@ async function scrapeAndSend(pdfName, mode) {
       if (!pid || inFlight.has(pid) || cancelled) return;
       inFlight.add(pid);
       try {
-        const res = await chrome.runtime.sendMessage({
-          type: 'WTPDF_GBOOKS_PAGE', pageUrl: location.href, pid
-        });
+        const res = transport === 'inpage'
+          ? await resolveGoogleBooksPageInPage(pid)
+          : await chrome.runtime.sendMessage({
+            type: 'WTPDF_GBOOKS_PAGE', pageUrl: location.href, pid
+          });
         if (!cancelled && res && res.ok && res.src) {
           add(res.src);
           collectedPids.add(pid);
@@ -540,11 +683,21 @@ async function scrapeAndSend(pdfName, mode) {
         // مسیر اختصاصی Google Books: فهرست کامل صفحه‌ها از API رسمی، بدون کلیک و بدون اسکن کاشی‌های DOM
         let gbRes = null;
         try {
-          gbRes = await runGoogleBooks();
+          // اولویت با fetch هم‌مبدا داخل فریم reader است (طبیعی‌ترین درخواست، کمترین خطر throttle)
+          gbRes = gbook.inFrame ? await runGoogleBooksWalkInPage() : await runGoogleBooks();
         } catch {
           if (cancelled) return { cancelled: true, count: 0, skippedInline: 0 };
-          say('مسیر اختصاصی Google Books جواب نداد؛ اسکن عادی صفحه امتحان می‌شود...');
-          await sleep(1200);
+          if (gbook.inFrame) {
+            say('مسیر درون‌قاب Google Books جواب نداد؛ از service worker تلاش می‌شود...');
+            await sleep(1000);
+            try { gbRes = await runGoogleBooks(); }
+            catch {
+              if (cancelled) return { cancelled: true, count: 0, skippedInline: 0 };
+            }
+          } else {
+            say('مسیر اختصاصی Google Books جواب نداد؛ اسکن عادی صفحه امتحان می‌شود...');
+            await sleep(1200);
+          }
         }
         if (gbRes && gbRes.ok && Array.isArray(gbRes.urls) && gbRes.urls.length) {
           gbRes.urls.forEach(add);

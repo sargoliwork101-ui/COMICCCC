@@ -91,7 +91,13 @@ async function runPopupOnce(executeResult, shouldReject) {
     scripting: {
       executeScript: shouldReject
         ? async () => { throw new Error('Cannot access chrome:// URLs'); }
-        : async () => [{ result: executeResult }]
+        : async (opts) => {
+          // stage 1: frame probe; stage 2: the real scrape injection
+          if (opts.func && opts.func.name === 'probeBookFrame') {
+            return [{ frameId: 0, result: { isReader: false, href: 'https://comic.test/ep', id: '' } }];
+          }
+          return [{ result: executeResult }];
+        }
     }
   };
   vm.runInContext(popupCode, c, { filename: 'popup.js' });
@@ -177,6 +183,39 @@ async function runPopupOnce(executeResult, shouldReject) {
   check('failed run shows the box with the error', !errorRun.boxHidden && /خطا/.test(errorRun.text), errorRun);
   const secondSuccess = await runPopupOnce({ count: 2 });
   check('later success clears a previously shown error', secondSuccess.boxHidden && secondSuccess.text === '', secondSuccess);
+
+  // two-stage injection: a reader frame reported by the probe must become the scrape target
+  {
+    const calls = [];
+    const dom3 = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const w3 = dom3.window;
+    Object.defineProperty(w3.Element.prototype, 'innerText', {
+      get() { return this.textContent; }, set(v) { this.textContent = v; }, configurable: true
+    });
+    w3.chrome = {
+      tabs: { query: async () => [{ id: 1 }] },
+      scripting: {
+        executeScript: async (opts) => {
+          calls.push(opts);
+          if (opts.func && opts.func.name === 'probeBookFrame') {
+            return [
+              { frameId: 0, result: { isReader: false, href: 'https://www.google.com/books/edition/T/B1abcdef', id: '' } },
+              { frameId: 77, result: { isReader: true, href: 'https://books.google.com/books?id=B1abcdef&output=embed', id: 'B1abcdef' } }
+            ];
+          }
+          return [{ result: { count: 4, skippedInline: 0 } }];
+        }
+      }
+    };
+    vm.runInContext(popupCode, dom3.getInternalVMContext(), { filename: 'popup.js' });
+    w3.document.getElementById('startBtn').click();
+    await new Promise((r) => setTimeout(r, 10));
+    check('frame probe runs across all frames', calls[0] && calls[0].target && calls[0].target.allFrames === true, calls[0]);
+    check('scrape injected into the reader frame only',
+      calls[1] && calls[1].target && calls[1].target.frameIds && calls[1].target.frameIds[0] === 77, calls[1] && calls[1].target);
+  }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL POPUP TESTS PASSED');
   process.exit(failures ? 1 : 0);
