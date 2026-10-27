@@ -15,6 +15,24 @@ const hideStatus = () => {
   statusBox.classList.add('hidden');
 };
 
+// سه روش جمع‌آوری: اسکرول (کمیک تودرتو)، ورق‌زدن خودکار (کلیک روی دکمهٔ بعدی)، ورق‌زدن دستی
+let collectMode = 'scroll';
+const modeSeg = document.getElementById('modeSeg');
+if (modeSeg) {
+  modeSeg.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('.mode-btn');
+    if (!btn) return;
+    collectMode = btn.dataset.mode || 'scroll';
+    modeSeg.querySelectorAll('.mode-btn').forEach((b) => b.classList.toggle('active', b === btn));
+  });
+}
+
+const MODE_STATUS = {
+  scroll: 'در حال اسکرول صفحه برای لود تصاویر...',
+  auto: 'در حال ورق‌زدن خودکار صفحات (کلیک روی مثلث/دکمهٔ بعدی)...',
+  manual: 'پنل حالت دستی روی صفحه باز می‌شود؛ خودت صفحه‌ها را ورق بزن و در پایان «تمام شد» را بزن...'
+};
+
 startBtn.addEventListener('click', async () => {
   let pdfName = document.getElementById('pdfName').value.trim() || 'comic';
   if (!pdfName.toLowerCase().endsWith('.pdf')) pdfName += '.pdf';
@@ -22,14 +40,15 @@ startBtn.addEventListener('click', async () => {
   startBtn.disabled = true;
   // خطای اجرای قبلی را پاک کن؛ این بار فقط در صورت بروز خطا باکس ظاهر می‌شود
   hideStatus();
-  setStatus('در حال اسکرول صفحه برای لود تصاویر...\n(می‌توانید popup را ببندید؛ پیشرفت روی خود صفحه نمایش داده می‌شود)');
+  setStatus((MODE_STATUS[collectMode] || MODE_STATUS.scroll) +
+    '\n(می‌توانید popup را ببندید؛ پیشرفت روی خود صفحه نمایش داده می‌شود)');
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: scrapeAndSend,
-      args: [pdfName]
+      args: [pdfName, collectMode]
     });
     const res = results[0] && results[0].result;
     if (res && res.busy) {
@@ -54,48 +73,27 @@ startBtn.addEventListener('click', async () => {
 });
 
 // این تابع داخل صفحهٔ وب اجرا می‌شود
-async function scrapeAndSend(pdfName) {
+// mode: 'scroll' (پیش‌فرض) | 'auto' (ورق‌زدن خودکار) | 'manual' (ورق‌زدن دستی کاربر)
+async function scrapeAndSend(pdfName, mode) {
+  mode = mode === 'auto' || mode === 'manual' ? mode : 'scroll';
   if (window.__wtpdfRunning) return { busy: true };
   window.__wtpdfRunning = true;
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const getH = () => Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
 
-  // پوشش تمام‌صفحهٔ تیره با کارت وسط‌چین و قلم درشت (حدود دو برابر قلم قبلی) تا کاربر هنگام اسکرول حتماً پیشرفت را ببیند
-  const styleTag = document.createElement('style');
-  styleTag.textContent =
-    '@keyframes wtpdfSpin{to{transform:rotate(360deg)}}' +
-    '.wtpdf-overlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
-    'padding:24px;background:rgba(3,5,10,.88);backdrop-filter:blur(4px);direction:rtl;pointer-events:none}' +
-    '.wtpdf-card{max-width:86vw;display:flex;flex-direction:column;align-items:center;gap:18px;' +
-    'background:rgba(15,19,28,.98);border:1px solid rgba(139,123,255,.55);border-radius:22px;padding:30px 38px;' +
-    'box-shadow:0 26px 80px rgba(0,0,0,.75),0 0 0 4px rgba(139,123,255,.16);text-align:center}' +
-    '.wtpdf-spinner{width:46px;height:46px;border-radius:50%;border:4px solid rgba(255,255,255,.16);' +
-    'border-top-color:#8b7bff;animation:wtpdfSpin .8s linear infinite}' +
-    '.wtpdf-card.wtpdf-cancel .wtpdf-spinner{animation:none;border-top-color:#fb7185}' +
-    '.wtpdf-msg{font:700 26px/1.7 Vazirmatn,Tahoma,sans-serif;color:#f2f4fb;white-space:pre-line}' +
-    '.wtpdf-hint{font:600 16px/1.6 Vazirmatn,Tahoma,sans-serif;color:#c9c2ff;opacity:.85}';
-  document.documentElement.appendChild(styleTag);
-  const overlay = document.createElement('div');
-  overlay.className = 'wtpdf-overlay';
-  const box = document.createElement('div');
-  box.className = 'wtpdf-card';
-  box.innerHTML = '<span class="wtpdf-spinner" aria-hidden="true"></span><span class="wtpdf-msg"></span>' +
-    '<span class="wtpdf-hint">برای لغو عملیات، کلید ESC را بزنید</span>';
-  overlay.appendChild(box);
-  document.documentElement.appendChild(overlay);
-  const say = (t) => { box.querySelector('.wtpdf-msg').textContent = t; };
-
-  // لغو مرحلهٔ اسکرول/جمع‌آوری با ESC (این کد داخل خود صفحهٔ وب اجرا می‌شود)
-  let cancelled = false;
-  const onCancelKey = (e) => {
-    if (e.key === 'Escape' || e.key === 'Esc') {
-      e.preventDefault();
-      e.stopPropagation();
-      cancelled = true;
-    }
-  };
-  document.addEventListener('keydown', onCancelKey, true);
+  // زمان‌بندی‌ها ثابت‌اند؛ تست‌ها می‌توانند با window.__wtpdfTimings آن‌ها را کوتاه کنند
+  const T = Object.assign({
+    poll: 250,          // فاصلهٔ بررسی آمدن تصویر تازه پس از هر کلیک
+    clickTimeout: 7000, // حداکثر انتظار برای تصویر تازه پس از کلیک روی بعدی
+    settle: 500,        // مکث پس از دیدن تصویر تازه برای اطمینان از لود کامل
+    stuckLimit: 2,      // چند کلیک پشت‌سرهم بدون تصویر تازه = پایان کار
+    maxPages: 1000,     // سقف تعداد صفحه/کلیک در حالت خودکار
+    manualRescan: 1500, // اسکن دوره‌ای حالت دستی (پشتیبان MutationObserver)
+    scrollStep: 0.7,    // سهم ارتفاع پنجره در هر گام اسکرول
+    scrollSleep: 200,   // مکث هر گام اسکرول
+    scrollMax: 800      // سقف تعداد گام‌های اسکرول
+  }, window.__wtpdfTimings || {});
 
   const PLACEHOLDER = /blank|loading|placeholder|spacer|pixel|1x1|lazy\.(gif|png|jpg)/i;
 
@@ -127,19 +125,149 @@ async function scrapeAndSend(pdfName) {
     return active || lazy || (cands[0] && cands[0].url);
   };
 
-  try {
+  // ---------- مخزن مشترک تصاویر (هر سه حالت از همین استفاده می‌کنند) ----------
+  const urls = [];
+  const seen = new Set();
+  const INLINE_DATA_BUDGET = 4 * 1024 * 1024;
+  let inlineDataBytes = 0, skippedInline = 0;
+  const add = (src) => {
+    if (!src) return;
+    let abs;
+    if (/^data:image\//i.test(src)) {
+      abs = src;
+      if (seen.has(abs)) return;
+      const bytes = Math.ceil(src.length * 0.75);
+      if (inlineDataBytes + bytes > INLINE_DATA_BUDGET) { skippedInline++; return; }
+      inlineDataBytes += bytes;
+    } else if (/^blob:/i.test(src)) abs = src;
+    else {
+      if (/^data:/i.test(src)) return;
+      try { abs = new URL(src, location.href).href; } catch { return; }
+    }
+    if (!seen.has(abs)) { seen.add(abs); urls.push(abs); }
+  };
+
+  // یک بار کل DOM را اسکن می‌کند و فقط تعداد تصاویر «تازه» را برمی‌گرداند
+  const scanImages = () => {
+    const before = urls.length;
+    document.querySelectorAll('img').forEach((img) => {
+      const src = bestSrc(img);
+      const rect = img.getBoundingClientRect();
+      const w = Math.max(img.naturalWidth || 0, rect.width);
+      const h = Math.max(img.naturalHeight || 0, rect.height);
+      if (Math.max(w, h) < 250) return;
+      if (/logo|icon|avatar|sprite|emoji/i.test(src || '')) return;
+      add(src);
+    });
+    // بعضی سایت‌ها کمیک را با CSS background می‌سازند
+    document.querySelectorAll('div, section, span, a').forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 250 || r.height < 250) return;
+      const bg = getComputedStyle(el).backgroundImage;
+      const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+      if (m && !/logo|icon|avatar|sprite|emoji/i.test(m[1])) add(m[1]);
+    });
+    return urls.length - before;
+  };
+
+  // ---------- رابط کاربری روی صفحه ----------
+  const styleTag = document.createElement('style');
+  styleTag.textContent =
+    '@keyframes wtpdfSpin{to{transform:rotate(360deg)}}' +
+    '.wtpdf-overlay{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;' +
+    'padding:24px;background:rgba(3,5,10,.88);backdrop-filter:blur(4px);direction:rtl;pointer-events:none}' +
+    '.wtpdf-card{max-width:86vw;display:flex;flex-direction:column;align-items:center;gap:18px;' +
+    'background:rgba(15,19,28,.98);border:1px solid rgba(139,123,255,.55);border-radius:22px;padding:30px 38px;' +
+    'box-shadow:0 26px 80px rgba(0,0,0,.75),0 0 0 4px rgba(139,123,255,.16);text-align:center}' +
+    '.wtpdf-spinner{width:46px;height:46px;border-radius:50%;border:4px solid rgba(255,255,255,.16);' +
+    'border-top-color:#8b7bff;animation:wtpdfSpin .8s linear infinite}' +
+    '.wtpdf-card.wtpdf-cancel .wtpdf-spinner{animation:none;border-top-color:#fb7185}' +
+    '.wtpdf-msg{font:700 26px/1.7 Vazirmatn,Tahoma,sans-serif;color:#f2f4fb;white-space:pre-line}' +
+    '.wtpdf-hint{font:600 16px/1.6 Vazirmatn,Tahoma,sans-serif;color:#c9c2ff;opacity:.85}' +
+    // پنل کوچک تعاملی حالت دستی: فقط خود کارت کلیک می‌خورد، بقیه صفحه برای کاربر آزاد است
+    '.wtpdf-manual{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:2147483647;direction:rtl;max-width:92vw}' +
+    '.wtpdf-manual-card{display:flex;flex-direction:column;align-items:center;gap:10px;pointer-events:auto;' +
+    'background:rgba(15,19,28,.98);border:1px solid rgba(52,211,153,.55);border-radius:18px;padding:18px 24px;' +
+    'box-shadow:0 22px 70px rgba(0,0,0,.7),0 0 0 4px rgba(52,211,153,.14);text-align:center}' +
+    '.wtpdf-manual .wtpdf-msg{font:700 17px/1.6 Vazirmatn,Tahoma,sans-serif;color:#f2f4fb;white-space:pre-line;max-width:440px}' +
+    '.wtpdf-count{font:800 24px/1.4 Vazirmatn,Tahoma,sans-serif;color:#34d399}' +
+    '.wtpdf-manual .wtpdf-hint{font:600 12.5px/1.6 Vazirmatn,Tahoma,sans-serif;color:#c9c2ff;opacity:.9}' +
+    '.wtpdf-done{border:0;border-radius:12px;padding:11px 30px;cursor:pointer;' +
+    'background:linear-gradient(135deg,#34d399,#10b981);color:#06281d;' +
+    'font:800 15px/1 Vazirmatn,Tahoma,sans-serif;box-shadow:0 10px 28px -10px rgba(16,185,129,.85);transition:filter .15s,transform .15s}' +
+    '.wtpdf-done:hover{filter:brightness(1.08);transform:translateY(-1px)}' +
+    '.wtpdf-done:active{transform:scale(.97)}';
+  document.documentElement.appendChild(styleTag);
+
+  let uiRoot = null, card = null, say = () => {}, countEl = null;
+  let resolveManual = null;
+  const manualDone = new Promise((resolve) => { resolveManual = resolve; });
+
+  if (mode === 'manual') {
+    // پنل شناور بالای صفحه؛ بدون پوشش تیره تا کاربر سایت را ببیند و روی مثلث‌های خودش کلیک کند
+    uiRoot = document.createElement('div');
+    uiRoot.className = 'wtpdf-manual wtpdf-root';
+    uiRoot.innerHTML =
+      '<div class="wtpdf-manual-card">' +
+      '<strong class="wtpdf-msg"></strong>' +
+      '<span class="wtpdf-count">0 تصویر</span>' +
+      '<span class="wtpdf-hint">روی مثلث یا دکمهٔ صفحهٔ بعدیِ خود سایت بزن؛ تصویر هر صفحه خودکار اضافه می‌شود.</span>' +
+      '<button type="button" class="wtpdf-done">تمام شد ✓</button>' +
+      '<span class="wtpdf-hint">برای لغو کامل عملیات، کلید ESC را بزنید</span>' +
+      '</div>';
+    document.documentElement.appendChild(uiRoot);
+    const msgEl = uiRoot.querySelector('.wtpdf-msg');
+    countEl = uiRoot.querySelector('.wtpdf-count');
+    say = (t) => { msgEl.textContent = t; };
+    // دکمهٔ «تمام شد» در فاز capture مصرف می‌شود تا کلیک به خود سایت نرسد
+    uiRoot.querySelector('.wtpdf-done').addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      resolveManual('done');
+    }, true);
+  } else {
+    // پوشش تمام‌صفحهٔ تیره با کارت وسط‌چین و قلم درشت (اسکرول و ورق‌زدن خودکار)
+    uiRoot = document.createElement('div');
+    uiRoot.className = 'wtpdf-overlay wtpdf-root';
+    card = document.createElement('div');
+    card.className = 'wtpdf-card';
+    card.innerHTML = '<span class="wtpdf-spinner" aria-hidden="true"></span><span class="wtpdf-msg"></span>' +
+      '<span class="wtpdf-hint">برای لغو عملیات، کلید ESC را بزنید</span>';
+    uiRoot.appendChild(card);
+    document.documentElement.appendChild(uiRoot);
+    say = (t) => { card.querySelector('.wtpdf-msg').textContent = t; };
+  }
+  const removeUi = () => {
+    if (uiRoot && uiRoot.parentNode) uiRoot.parentNode.removeChild(uiRoot);
+    styleTag.remove();
+  };
+
+  // لغو با ESC (این کد داخل خود صفحهٔ وب اجرا می‌شود)؛ در حالت دستی قول انتظار را هم حل می‌کند
+  let cancelled = false;
+  const onCancelKey = (e) => {
+    if (e.key === 'Escape' || e.key === 'Esc') {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelled = true;
+      if (mode === 'manual') resolveManual('cancel');
+    }
+  };
+  document.addEventListener('keydown', onCancelKey, true);
+
+  // ---------- حالت ۱: اسکرول تا انتهای صفحه (رفتار پیش‌فرض قبلی) ----------
+  const runScroll = async () => {
     say('در حال اسکرول برای لود تصاویر...');
     window.scrollTo(0, 0);
     await sleep(300);
 
     let stable = 0;
     let last = getH();
-    for (let i = 0; i < 800; i++) {
+    for (let i = 0; i < T.scrollMax; i++) {
       if (cancelled) break;
-      window.scrollBy(0, Math.round(window.innerHeight * 0.7));
+      window.scrollBy(0, Math.round(window.innerHeight * T.scrollStep));
       const pct = Math.min(100, Math.round(((window.scrollY + window.innerHeight) / getH()) * 100));
       say(`در حال اسکرول برای لود تصاویر... ${pct}٪`);
-      await sleep(200);
+      await sleep(T.scrollSleep);
       const h = getH();
       const atBottom = window.innerHeight + window.scrollY >= h - 5;
       if (atBottom && h === last) {
@@ -150,71 +278,181 @@ async function scrapeAndSend(pdfName) {
       }
       last = h;
     }
+    await sleep(800);
+    scanImages();
+  };
+
+  // ---------- تشخیص دکمهٔ «بعدی» در صفحه ----------
+  const classText = (el) => {
+    // className المان‌های SVG رشته نیست؛ baseVal آن را می‌خوانیم
+    const c = el.className;
+    return String(c && c.baseVal !== undefined ? c.baseVal : c || '') + ' ' + (el.id || '');
+  };
+  const NEXT_WORDS = /next|forward|بعدی|صفحه[ٔ‌\s]?بعد/i;
+  const PREV_WORDS = /prev|previous|back|قبل|قبلی|بازگشت/i;
+  const CHEVRON_ONLY = /^[›»❯➤▶→⟩\s‌]+$/;
+
+  const isUsableControl = (el) => {
+    if (!el || !el.isConnected) return false;
+    if (el.closest && el.closest('.wtpdf-root')) return false;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+    if (/disabled|inactive|is-off/i.test(classText(el))) return false;
+    const r = el.getBoundingClientRect();
+    if (!r || r.width < 8 || r.height < 8) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+    return true;
+  };
+
+  // امتیازدارترین دکمهٔ قابل‌مشاهدهٔ «بعدی» را برمی‌گرداند یا null
+  const findNextButton = () => {
+    const scored = new Map();
+    const consider = (el, score) => { if (el && el.isConnected && !scored.has(el)) scored.set(el, score); };
+
+    document.querySelectorAll('[rel~="next"]').forEach((el) => consider(el, 100));
+
+    document.querySelectorAll('button, a, [role="button"], [onclick], [aria-label], [title]').forEach((el) => {
+      if (el.tagName === 'IMG' || (el.closest && el.closest('.wtpdf-root'))) return;
+      const label = [el.getAttribute('aria-label'), el.title, el.getAttribute('data-title')].filter(Boolean).join(' ');
+      const cls = classText(el);
+      const text = (el.textContent || '').trim();
+      // هر چیزی که بوی «قبلی/بازگشت» بدهد قطعاً هدف نیست
+      if (PREV_WORDS.test(label) || /prev|back/i.test(cls)) return;
+      if (NEXT_WORDS.test(label)) { consider(el, 85); return; }
+      if (/(^|[^a-z])(next|forward|nav-next|page-next)([^a-z]|$)/i.test(cls)) { consider(el, 65); return; }
+      if (NEXT_WORDS.test(text) && text.length < 40) { consider(el, 35); return; }
+      if (CHEVRON_ONLY.test(text) && text.length <= 3) consider(el, 25);
+    });
+
+    let best = null, bestScore = 0;
+    scored.forEach((score, el) => {
+      // تساوی امتیاز به نفع اولین المان در ترتیب سند است (Map ترتیب درج را حفظ می‌کند)
+      if (score > bestScore && isUsableControl(el)) { best = el; bestScore = score; }
+    });
+    return best;
+  };
+
+  // تا آمدن تصویر تازه (یا رسیدن به زمان‌سنج) صبر می‌کند؛ تعداد تصاویر تازه را برمی‌گرداند
+  const waitForNewImages = async (baseline) => {
+    const deadline = Date.now() + T.clickTimeout;
+    while (Date.now() < deadline) {
+      if (cancelled) return 0;
+      if (scanImages() > 0 || urls.length > baseline) {
+        await sleep(T.settle);
+        scanImages();
+        return urls.length - baseline;
+      }
+      await sleep(T.poll);
+    }
+    scanImages();
+    return urls.length - baseline;
+  };
+
+  // ---------- حالت ۲: ورق‌زدن خودکار ----------
+  const runAuto = async () => {
+    await sleep(300);
+    scanImages();
+    let page = 1, stuck = 0;
+    say(`ورق‌زدن خودکار — صفحهٔ ${page} — ${urls.length} تصویر`);
+
+    while (page < T.maxPages && !cancelled) {
+      const btn = findNextButton();
+      if (!btn) {
+        say(`دکمهٔ «بعدی» پیدا نشد؛ به پایان رسیدیم.\nدر مجموع ${urls.length} تصویر جمع شد.`);
+        return;
+      }
+      try { btn.scrollIntoView({ block: 'center', inline: 'center' }); } catch { /* بعضی المان‌ها scrollIntoView ندارند */ }
+      await sleep(60);
+      if (cancelled) return;
+      btn.click();
+      page += 1;
+
+      const gained = await waitForNewImages(urls.length);
+      if (cancelled) return;
+      if (gained > 0) {
+        stuck = 0;
+        say(`ورق‌زدن خودکار — صفحهٔ ${page} — ${urls.length} تصویر جمع شد`);
+      } else {
+        stuck += 1;
+        say(`صفحهٔ ${page}: تصویر تازه‌ای نیامد (تلاش ${stuck} از ${T.stuckLimit})`);
+        if (stuck >= T.stuckLimit) {
+          say(`تصویر تازه‌ای پیدا نشد؛ جمع‌آوری تمام شد.\nدر مجموع ${urls.length} تصویر.`);
+          return;
+        }
+      }
+    }
+    if (!cancelled) say(`به سقف ${T.maxPages} صفحه رسیدیم؛ جمع‌آوری متوقف شد.\nدر مجموع ${urls.length} تصویر.`);
+  };
+
+  // ---------- حالت ۳: ورق‌زدن دستی (کاربر کلیک می‌کند، افزونه برمی‌دارد) ----------
+  const runManual = async () => {
+    let lastCount = -1;
+    const refreshCount = () => {
+      if (urls.length !== lastCount) {
+        lastCount = urls.length;
+        countEl.textContent = `${urls.length} تصویر جمع شد`;
+      }
+    };
+    scanImages();
+    refreshCount();
+    say('حالت دستی فعال است؛ تو صفحه‌ها را ورق بزن');
+
+    // هر تغییر DOM (تعویض src، اضافه‌شدن img جدید و...) بلافاصله یک اسکن می‌خورد
+    const observer = new MutationObserver((mutations) => {
+      // تغییرات خود پنل افزونه نباید اسکن بی‌مورد بسازد
+      if (mutations.every((m) => m.target && m.target.closest && m.target.closest('.wtpdf-root'))) return;
+      scanImages();
+      refreshCount();
+    });
+    observer.observe(document.documentElement, {
+      subtree: true, childList: true, attributes: true,
+      attributeFilter: ['src', 'srcset', 'style', 'class', 'data-src', 'data-url']
+    });
+    // پشتیبان دوره‌ای برای سایت‌هایی که تغییرشان را observer نمی‌گیرد
+    const timer = setInterval(() => { scanImages(); refreshCount(); }, T.manualRescan);
+
+    const outcome = await manualDone;
+    observer.disconnect();
+    clearInterval(timer);
+    if (outcome === 'cancel') cancelled = true;
+  };
+
+  try {
+    if (mode === 'scroll') await runScroll();
+    else if (mode === 'auto') await runAuto();
+    else await runManual();
+
     if (cancelled) {
-      box.classList.add('wtpdf-cancel');
-      say('عملیات با کلید ESC لغو شد.');
-      await sleep(1200);
+      if (card) {
+        card.classList.add('wtpdf-cancel');
+        say('عملیات با کلید ESC لغو شد.');
+      }
+      await sleep(mode === 'manual' ? 0 : 1200);
       return { cancelled: true, count: 0, skippedInline: 0 };
     }
-    await sleep(800);
 
-    const urls = [];
-    const seen = new Set();
-    const INLINE_DATA_BUDGET = 4 * 1024 * 1024;
-    let inlineDataBytes = 0, skippedInline = 0;
-    const add = (src) => {
-      if (!src) return;
-      let abs;
-      if (/^data:image\//i.test(src)) {
-        abs = src;
-        if (seen.has(abs)) return;
-        const bytes = Math.ceil(src.length * 0.75);
-        if (inlineDataBytes + bytes > INLINE_DATA_BUDGET) { skippedInline++; return; }
-        inlineDataBytes += bytes;
-      } else if (/^blob:/i.test(src)) abs = src;
-      else {
-        if (/^data:/i.test(src)) return;
-        try { abs = new URL(src, location.href).href; } catch { return; }
-      }
-      if (!seen.has(abs)) { seen.add(abs); urls.push(abs); }
-    };
-
-    document.querySelectorAll('img').forEach((img) => {
-      const src = bestSrc(img);
-      const rect = img.getBoundingClientRect();
-      const w = Math.max(img.naturalWidth || 0, rect.width);
-      const h = Math.max(img.naturalHeight || 0, rect.height);
-      if (Math.max(w, h) < 250) return;
-      if (/logo|icon|avatar|sprite|emoji/i.test(src || '')) return;
-      add(src);
-    });
-
-    // بعضی سایت‌ها کمیک را با CSS background می‌سازند و در کنار imgها هم ممکن است تصویر داشته باشند.
-    document.querySelectorAll('div, section, span, a').forEach((el) => {
-      const r = el.getBoundingClientRect();
-      if (r.width < 250 || r.height < 250) return;
-      const bg = getComputedStyle(el).backgroundImage;
-      const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
-      if (m && !/logo|icon|avatar|sprite|emoji/i.test(m[1])) add(m[1]);
-    });
-
+    // اسکن نهایی تضمینی؛ در حالت اسکرول هم داخل runScroll یک بار اسکن شده و این فقط موارد تازه را اضافه می‌کند
+    scanImages();
     if (urls.length === 0) {
       say(skippedInline ? `تصاویر داخلی پیدا شدند اما ${skippedInline} مورد از حد مجاز بزرگ‌تر بودند.` : 'هیچ تصویری پیدا نشد!');
       await sleep(3000);
       return { count: 0, skippedInline };
     }
 
-    if (cancelled) return { cancelled: true, count: 0, skippedInline };
-
-    say(`${urls.length} تصویر پیدا شد. در حال باز کردن پیش‌نمایش...`);
-    const response = await chrome.runtime.sendMessage({ type: 'WTPDF_URLS', urls, name: pdfName, pageUrl: location.href, skippedInline });
-    if (!response || !response.ok) throw new Error(`ذخیرهٔ فهرست تصویرها ناموفق بود${response && response.error ? `: ${response.error}` : ''}`);
+    say(mode === 'manual'
+      ? `${urls.length} تصویر آماده است. در حال باز کردن پیش‌نمایش...`
+      : `${urls.length} تصویر پیدا شد. در حال باز کردن پیش‌نمایش...`);
+    const response = await chrome.runtime.sendMessage({
+      type: 'WTPDF_URLS', urls, name: pdfName, pageUrl: location.href, skippedInline
+    });
+    if (!response || !response.ok) {
+      throw new Error(`ذخیرهٔ فهرست تصویرها ناموفق بود${response && response.error ? `: ${response.error}` : ''}`);
+    }
     await sleep(1500);
     return { count: urls.length, skippedInline };
   } finally {
     document.removeEventListener('keydown', onCancelKey, true);
-    overlay.remove();
-    styleTag.remove();
+    removeUi();
     window.__wtpdfRunning = false;
   }
 }

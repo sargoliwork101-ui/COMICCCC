@@ -8,7 +8,8 @@ export default [
       globals: {
         window: 'readonly', document: 'readonly', console: 'readonly', fetch: 'readonly',
         Blob: 'readonly', URL: 'readonly', FileReader: 'readonly', Promise: 'readonly',
-        setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly',
+        setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly',
+        MutationObserver: 'readonly',
         requestAnimationFrame: 'readonly', navigator: 'readonly', location: 'readonly',
         chrome: 'readonly', Tesseract: 'readonly', confirm: 'readonly', alert: 'readonly',
         ClipboardItem: 'readonly', Event: 'readonly', Uint8Array: 'readonly',
