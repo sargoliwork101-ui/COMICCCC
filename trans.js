@@ -205,6 +205,12 @@ function buildEditor() {
   if (!bl.length) { list.innerHTML = '<div class="ed-empty">در این تصویر متنی پیدا نشد.</div>'; return; }
 
   bl.forEach((b) => {
+    // پیش‌فرض‌های قالب‌بندی برای بلوک‌های ساخته‌شده در نسخه‌های قبل (فیلدها هنوز وجود ندارند)
+    b.align = b.align === 'center' || b.align === 'left' ? b.align : 'right';
+    b.bold = b.bold !== false;
+    b.italic = !!b.italic;
+    b.underline = !!b.underline;
+    b.size = Number.isFinite(+b.size) && +b.size > 0 ? +b.size : null;
     const box = document.createElement('div');
     box.className = 'ed-box' + (b.enabled ? '' : ' off');
     box.dataset.id = b.id;
@@ -220,15 +226,52 @@ function buildEditor() {
       <label><input type="checkbox" ${b.enabled ? 'checked' : ''}> جایگزین شود</label>
       <select class="sel blk-bg"><option value="auto">پس‌زمینه: خودکار</option><option value="white">پس‌زمینه: سفید</option>
       <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن (متن با حاشیه)</option></select></div>
+      <div class="blk-format">
+        <select class="sel blk-align" title="چیدمان متن">
+          <option value="right">راست‌چین</option>
+          <option value="center">وسط‌چین</option>
+          <option value="left">چپ‌چین</option>
+        </select>
+        <button type="button" class="fmt-btn blk-bold" title="متن پررنگ (بولد)">B</button>
+        <button type="button" class="fmt-btn blk-italic" title="متن ایتالیک (کج)">I</button>
+        <button type="button" class="fmt-btn blk-under" title="زیرخط متن">U</button>
+        <label class="size-field">اندازهٔ فونت
+          <input type="number" class="blk-size" min="8" max="160" step="1" placeholder="خودکار" title="اگر خالی باشد، بهترین اندازه به‌صورت خودکار انتخاب می‌شود">
+        </label>
+      </div>
       <div class="blk-orig"></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>`;
     row.querySelector('.blk-orig').textContent = b.text;
     const ta = row.querySelector('textarea'); ta.value = b.tr || '';
-    const sel = row.querySelector('select'); sel.value = b.bg;
-    const chk = row.querySelector('input');
+    const sel = row.querySelector('.blk-bg'); sel.value = b.bg;
+    const chk = row.querySelector('.blk-top input');
     ta.oninput = () => { b.tr = ta.value; scheduleApply(); };
     ta.onfocus = () => setActiveBlock(b.id, false);
     sel.onchange = () => { b.bg = sel.value; scheduleApply(); };
     chk.onchange = () => { b.enabled = chk.checked; row.classList.toggle('off', !b.enabled); box.classList.toggle('off', !b.enabled); scheduleApply(); };
+
+    const alignSel = row.querySelector('.blk-align');
+    alignSel.value = b.align;
+    alignSel.onchange = () => { b.align = alignSel.value; scheduleApply(); };
+    const boldBtn = row.querySelector('.blk-bold');
+    const italicBtn = row.querySelector('.blk-italic');
+    const underBtn = row.querySelector('.blk-under');
+    const syncFmtButtons = () => {
+      boldBtn.classList.toggle('active', b.bold);
+      italicBtn.classList.toggle('active', b.italic);
+      underBtn.classList.toggle('active', b.underline);
+    };
+    syncFmtButtons();
+    boldBtn.onclick = () => { b.bold = !b.bold; syncFmtButtons(); scheduleApply(); };
+    italicBtn.onclick = () => { b.italic = !b.italic; syncFmtButtons(); scheduleApply(); };
+    underBtn.onclick = () => { b.underline = !b.underline; syncFmtButtons(); scheduleApply(); };
+    const sizeInput = row.querySelector('.blk-size');
+    sizeInput.value = b.size ? String(b.size) : '';
+    sizeInput.onchange = () => {
+      const n = Number.parseInt(sizeInput.value, 10);
+      b.size = Number.isFinite(n) && n >= 8 ? Math.min(160, n) : null;
+      sizeInput.value = b.size ? String(b.size) : '';
+      scheduleApply();
+    };
     list.appendChild(row);
   });
 }

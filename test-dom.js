@@ -252,6 +252,42 @@ const $ = (id) => window.document.getElementById(id);
   check('editor opens', !$('editor').classList.contains('hidden'));
   const ta = window.document.querySelector('.blk textarea');
   check('editor textarea has translation', ta && ta.value === 'سلام', ta && ta.value);
+
+  // 2.27: per-block formatting toolbar
+  const fmtRow = window.document.querySelector('.blk-format');
+  check('format toolbar rendered per block', !!fmtRow);
+  const blk0 = translated.ocr.blocks[0];
+  check('block normalized to right/bold defaults', blk0.align === 'right' && blk0.bold === true &&
+    blk0.italic === false && blk0.underline === false && blk0.size === null, blk0);
+  const alignSel = fmtRow.querySelector('.blk-align');
+  const boldBtn = fmtRow.querySelector('.blk-bold');
+  const italicBtn = fmtRow.querySelector('.blk-italic');
+  const underBtn = fmtRow.querySelector('.blk-under');
+  const sizeInput = fmtRow.querySelector('.blk-size');
+  check('align select starts on right', alignSel.value === 'right');
+  check('bold button shows active state', boldBtn.classList.contains('active'));
+  boldBtn.click();
+  check('bold toggle flips block and button', blk0.bold === false && !boldBtn.classList.contains('active'));
+  italicBtn.click();
+  check('italic toggle flips block and button', blk0.italic === true && italicBtn.classList.contains('active'));
+  underBtn.click();
+  check('underline toggle flips block and button', blk0.underline === true && underBtn.classList.contains('active'));
+  alignSel.value = 'center';
+  alignSel.dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('align select updates block', blk0.align === 'center');
+  check('size input blank means auto size', sizeInput.value === '');
+  sizeInput.value = '40';
+  sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('manual size stored on block', blk0.size === 40 && sizeInput.value === '40');
+  sizeInput.value = '9999';
+  sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('oversized font clamped to 160', blk0.size === 160 && sizeInput.value === '160');
+  sizeInput.value = '';
+  sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('clearing size returns to auto (null)', blk0.size === null && sizeInput.value === '');
+  await sleep(1000); // اجازه بده رندر debounceشدهٔ ویرایشگر کامل شود
+  check('edited image survives formatting edits', !!translated.edited);
+
   await ev('closeEditor()');
   check('editor closes', $('editor').classList.contains('hidden'));
 

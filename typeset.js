@@ -40,16 +40,27 @@
     return lines;
   }
 
-  function fit(ctx, text, boxW, boxH, maxSize, minSize) {
+  function fit(ctx, text, boxW, boxH, maxSize, minSize, fontPrefix = '700 ') {
     for (let s = maxSize; s >= minSize; s--) {
-      ctx.font = `700 ${s}px ${FONT}`;
+      ctx.font = `${fontPrefix}${s}px ${FONT}`;
       const lines = wrapWords(ctx, text, boxW);
       const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
       const lh = s * 1.55;
       if (lines.length * lh <= boxH * 1.2 && widest <= boxW * 1.04) return { size: s, lines, lh };
     }
-    ctx.font = `700 ${minSize}px ${FONT}`;
+    ctx.font = `${fontPrefix}${minSize}px ${FONT}`;
     return { size: minSize, lines: wrapWords(ctx, text, boxW), lh: minSize * 1.55 };
+  }
+
+  // قالب‌بندی هر بلوک با پیش‌فرض‌های ایمن برای بلوک‌های قدیمی (ذخیره‌شده قبل از نسخهٔ ۲.۲۷)
+  function blockStyle(b) {
+    return {
+      align: b.align === 'center' || b.align === 'left' ? b.align : 'right', // پیش‌فرض: راست‌چین
+      bold: b.bold !== false,           // پیش‌فرض مثل گذشته: پررنگ
+      italic: !!b.italic,
+      underline: !!b.underline,
+      size: Number.isFinite(+b.size) && +b.size > 0 ? +b.size : null
+    };
   }
 
   // bmp: تصویر اصلی؛ blocks: بلوک‌ها؛ برمی‌گرداند canvas نهایی
@@ -63,6 +74,8 @@
 
     blocks.forEach((b) => {
       if (!b.enabled || !b.tr || !b.tr.trim()) return;
+      const st = blockStyle(b);
+      const fontPrefix = `${st.italic ? 'italic ' : ''}${st.bold ? '700' : '400'} `;
       const pad = Math.max(4, Math.round(b.lineH * 0.3));
       const box = {
         x0: Math.max(0, b.x0 - pad), y0: Math.max(0, b.y0 - pad),
@@ -83,23 +96,44 @@
       if (fill) { ctx.fillStyle = fill; ctx.fillRect(box.x0, box.y0, bw, bh); }
 
       const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
-      const f = fit(ctx, b.tr.trim(), bw * 0.96, bh * 0.96, maxSize, 10);
+      // سایز دستی کاربر جای حالت خودکار می‌نشیند؛ در غیر این صورت بهترین سایز برای جاشدن در کادر
+      let f;
+      if (st.size) {
+        ctx.font = `${fontPrefix}${st.size}px ${FONT}`;
+        f = { size: st.size, lines: wrapWords(ctx, b.tr.trim(), bw * 0.96), lh: st.size * 1.55 };
+      } else {
+        f = fit(ctx, b.tr.trim(), bw * 0.96, bh * 0.96, maxSize, 10, fontPrefix);
+      }
       if ('direction' in ctx) ctx.direction = 'rtl';
-      ctx.textAlign = 'center';
+      ctx.textAlign = st.align;
       ctx.textBaseline = 'middle';
       const totalH = f.lines.length * f.lh;
       let y = (box.y0 + box.y1) / 2 - totalH / 2 + f.lh / 2;
-      const cx = (box.x0 + box.x1) / 2;
+      // لنگر هر خط بر اساس چیدمان انتخابی، با حاشیهٔ کوچک از لبهٔ کادر
+      const anchorX = st.align === 'left' ? box.x0 + bw * 0.02
+        : st.align === 'center' ? (box.x0 + box.x1) / 2
+        : box.x1 - bw * 0.02;
       f.lines.forEach((ln) => {
-        if (stroke) { ctx.lineWidth = Math.max(3, f.size / 5); ctx.strokeStyle = stroke; ctx.lineJoin = 'round'; ctx.strokeText(ln, cx, y); }
+        if (stroke) { ctx.lineWidth = Math.max(3, f.size / 5); ctx.strokeStyle = stroke; ctx.lineJoin = 'round'; ctx.strokeText(ln, anchorX, y); }
         ctx.fillStyle = txt;
-        ctx.fillText(ln, cx, y);
+        ctx.fillText(ln, anchorX, y);
+        if (st.underline) {
+          const lineW = ctx.measureText(ln).width;
+          const ux = st.align === 'left' ? anchorX : st.align === 'center' ? anchorX - lineW / 2 : anchorX - lineW;
+          const uy = y + f.size * 0.55;
+          ctx.strokeStyle = txt;
+          ctx.lineWidth = Math.max(1, f.size / 14);
+          ctx.beginPath();
+          ctx.moveTo(ux, uy);
+          ctx.lineTo(ux + lineW, uy);
+          ctx.stroke();
+        }
         y += f.lh;
       });
     });
     return cv;
   }
 
-  const api = { render, sampleBg, fit, wrapWords };
+  const api = { render, sampleBg, fit, wrapWords, blockStyle };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Typeset = api;
 })(typeof window !== 'undefined' ? window : globalThis);

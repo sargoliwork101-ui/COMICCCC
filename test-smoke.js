@@ -204,6 +204,63 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('fit returns size/lines/lh', f && f.size >= 10 && Array.isArray(f.lines) && f.lh > 0, f);
   }
 
+  // ---------- Typeset per-block formatting (2.27) ----------
+  function recordingCtx() {
+    const calls = { font: [], textAlign: [], fillText: [], strokeText: 0, beginPath: 0, stroke: 0, lineTo: 0 };
+    const ctx = {
+      direction: '', textBaseline: '', lineWidth: 0, strokeStyle: '', fillStyle: '', lineJoin: '',
+      drawImage() {}, fillRect() {},
+      measureText: (s) => ({ width: String(s).length * 6 }),
+      getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }),
+      fillText(t, x, y) { calls.fillText.push({ t, x, y }); },
+      strokeText() { calls.strokeText++; },
+      beginPath() { calls.beginPath++; },
+      stroke() { calls.stroke++; },
+      moveTo() {}, lineTo() { calls.lineTo++; }
+    };
+    let font = '', textAlign = '';
+    Object.defineProperty(ctx, 'font', { get: () => font, set: (v) => { font = v; calls.font.push(v); }, configurable: true });
+    Object.defineProperty(ctx, 'textAlign', { get: () => textAlign, set: (v) => { textAlign = v; calls.textAlign.push(v); }, configurable: true });
+    return { ctx, calls };
+  }
+  const fmtBase = { enabled: true, tr: 'سلام دنیا', x0: 10, y0: 10, x1: 190, y1: 80, lineH: 16, bg: 'white' };
+  const renderWith = (extra) => {
+    const { ctx, calls } = recordingCtx();
+    Typeset.render({ width: 200, height: 200 }, [{ ...fmtBase, ...extra }],
+      { createCanvas: () => ({ width: 200, height: 200, getContext: () => ctx }) });
+    return calls;
+  };
+  {
+    const calls = renderWith({});
+    check('legacy block defaults to right align', calls.textAlign.every((a) => a === 'right'), calls.textAlign);
+    check('default font is bold 700 without italic', calls.font.some((f) => /700/.test(f) && !/italic/.test(f)), calls.font);
+    check('no underline path by default', calls.stroke === 0 && calls.beginPath === 0);
+    check('fillText invoked for translation', calls.fillText.length >= 1);
+  }
+  {
+    const calls = renderWith({ align: 'left', bold: false, italic: true });
+    check('left align applied to canvas', calls.textAlign.every((a) => a === 'left'));
+    check('italic regular-weight font built', calls.font.some((f) => /^italic 400 /.test(f)), calls.font);
+  }
+  {
+    const calls = renderWith({ align: 'center', size: 33 });
+    check('center align applied to canvas', calls.textAlign.every((a) => a === 'center'));
+    check('manual font size honored over auto-fit', calls.font.some((f) => f.includes('33px')), calls.font);
+  }
+  {
+    const calls = renderWith({ underline: true });
+    check('underline draws a stroked path', calls.beginPath >= 1 && calls.stroke >= 1 && calls.lineTo >= 1);
+  }
+  {
+    const calls = renderWith({ bg: 'none' });
+    check('bg none keeps outline strokeText', calls.strokeText >= 1);
+  }
+  {
+    const st = Typeset.blockStyle({});
+    check('blockStyle safe defaults', st.align === 'right' && st.bold === true &&
+      st.italic === false && st.underline === false && st.size === null, st);
+  }
+
   // ---------- Translate with mock fetch ----------
   {
     const fetchFn = async (url) => ({
