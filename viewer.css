@@ -143,6 +143,16 @@ body { min-height: 100vh; padding-bottom: calc(132px + env(safe-area-inset-botto
 .item:not(.selected) .tw { filter: grayscale(.75) brightness(.75); opacity: .5; }
 .item.failed .tw { border-style: dashed; opacity: .4; cursor: not-allowed; filter: grayscale(1); }
 .item.failed { cursor: not-allowed; }
+/* دکمهٔ تلاش مجدد روی کارت ناموفق (خارج از .tw تا کم‌رنگی کارت رویش اثر نگذارد) */
+.item .retry { display: none; position: absolute; z-index: 5; left: 50%; top: 38%; transform: translate(-50%, -50%);
+  align-items: center; gap: 6px; padding: 8px 14px; border-radius: 999px; border: 1px solid rgba(251,113,133,.6);
+  background: rgba(15,19,28,.94); color: #fda4af; font: 700 11.5px 'Vazirmatn', sans-serif; cursor: pointer;
+  box-shadow: 0 10px 26px rgba(0,0,0,.55); white-space: nowrap; }
+.item .retry svg { width: 15px; height: 15px; }
+.item .retry:hover { background: var(--grad); color: #fff; border-color: transparent; }
+.item.failed .retry { display: inline-flex; }
+.item .retry:disabled { opacity: .5; cursor: not-allowed; }
+#btnRetryAll { margin-top: 8px; }
 .idx { position: absolute; bottom: 7px; right: 7px; background: rgba(9,11,15,.72); backdrop-filter: blur(6px); color: var(--text);
   font: 700 11px 'Vazirmatn', sans-serif; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line2); z-index: 2; }
 .tick { position: absolute; top: 7px; right: 7px; width: 26px; height: 26px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,.55);

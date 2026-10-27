@@ -6,6 +6,7 @@ const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const ICON_CROP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v13a2 2 0 0 0 2 2h13M3 6h13a2 2 0 0 1 2 2v13"/></svg>';
 const ICON_DUPLICATE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';
 const ICON_DELETE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m4 4v6m6-6v6"/></svg>';
+const ICON_RETRY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
 const CONCURRENCY = 4;
 const MAX_CANVAS_H = 16000;
 const APP_TITLE = 'PIC TO PDF';
@@ -232,7 +233,9 @@ function makeCard(it) {
     <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button>
     <button class="duplicate" title="ساخت نسخهٔ مستقل">${ICON_DUPLICATE}</button>
     <button class="delete" title="حذف این تصویر" aria-label="حذف تصویر">${ICON_DELETE}</button>
-    <span class="fa-badge">ترجمه شد</span><span class="page-group-badge hidden"></span></div><div class="meta">…</div>
+    <span class="fa-badge">ترجمه شد</span><span class="page-group-badge hidden"></span></div>
+    <button class="retry" type="button" title="تلاش مجدد برای بارگیری این تصویر" aria-label="تلاش مجدد برای بارگیری">${ICON_RETRY}<span>تلاش مجدد</span></button>
+    <div class="meta">…</div>
     <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>`;
   const orderInput = el.querySelector('.page-order');
   orderInput.addEventListener('click', (ev) => ev.stopPropagation());
@@ -282,6 +285,7 @@ function makeCard(it) {
     if (ev.target.closest('.edit')) { if (typeof openEditor === 'function') openEditor(it); return; }
     if (ev.target.closest('.duplicate')) { duplicateItem(it); return; }
     if (ev.target.closest('.delete')) { deleteItem(it); return; }
+    if (ev.target.closest('.retry')) { retryItem(it); return; }
     if (it.state !== 'ok') return;
     if (ev.shiftKey && lastClicked != null) {
       const ordered = Array.from($('grid').children).map((node) => items.find((item) => item.el === node)).filter((item) => item && item.state === 'ok');
@@ -436,6 +440,8 @@ function refreshCard(it, groupView = buildPageGroupView()) {
   const groupBadge = el.querySelector('.page-group-badge');
   const deleteButton = el.querySelector('.delete');
   if (deleteButton) deleteButton.disabled = loading || building;
+  const retryButton = el.querySelector('.retry');
+  if (retryButton) retryButton.disabled = loading || building;
   const groupId = Number(it.pageGroup);
   const groupMembers = groupView.membersById.get(groupId);
   const displayNumber = groupView.numberById.get(groupId);
@@ -577,6 +583,17 @@ async function loadAll(list) {
   }
 }
 
+// تلاش مجدد برای بارگیری یک کارت ناموفق، بدون نمایش overlay تمام‌صفحه
+async function retryItem(it) {
+  if (!it || loading || building || it.state !== 'failed') return;
+  it.state = 'loading';
+  it.error = '';
+  it.selected = false;
+  refreshCard(it);
+  await loadOne(it);
+  refreshAll();
+}
+
 // ---------- مرتب‌سازی کارت‌ها / ترتیب خروجی PDF ----------
 function sortGridByPdfOrder() {
   const grid = $('grid');
@@ -608,6 +625,11 @@ function refreshSummary(groupView = buildPageGroupView()) {
   if (topCount) topCount.innerText = `${sel} انتخاب`;
   $('btnRetry').classList.toggle('hidden', failedN === 0 || loading);
   $('btnRetry').disabled = building || editingPageGroupId !== null;
+  const retryAllButton = $('btnRetryAll');
+  if (retryAllButton) {
+    retryAllButton.classList.toggle('hidden', failedN === 0 || loading);
+    retryAllButton.disabled = building || editingPageGroupId !== null;
+  }
   ['btnAll', 'btnNone', 'btnInv'].forEach((id) => { $(id).disabled = building || editingPageGroupId !== null; });
   $('buildBtn').disabled = loading || building || editingPageGroupId !== null || sel === 0;
   $('saveImgBtn').disabled = loading || building || editingPageGroupId !== null || sel === 0;
@@ -1857,6 +1879,7 @@ async function main() {
   $('restoreProfileBtn').onclick = restorePageProfile;
   $('deleteProfileBtn').onclick = deletePageProfile;
   $('btnRetry').onclick = () => { loadAll(items.filter((it) => it.state === 'failed')); };
+  $('btnRetryAll').onclick = () => { loadAll(items.filter((it) => it.state === 'failed')); };
   $('buildBtn').onclick = onBuild;
   $('saveImgBtn').onclick = onSaveImages;
   $('modePdf').onclick = () => setMode('pdf');

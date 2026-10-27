@@ -148,6 +148,12 @@ const $ = (id) => window.document.getElementById(id);
   check('summary shows 3 selected', /3/.test($('selCount').textContent), $('selCount').textContent);
   check('build button enabled', !$('buildBtn').disabled);
   check('retry hidden (no failures)', $('btnRetry').classList.contains('hidden'));
+  // 2.25: visible retry-all button in the toolbar and a per-card retry button template
+  check('toolbar retry-all button exists', !!$('btnRetryAll') && $('btnRetryAll').classList.contains('hidden'));
+  const firstCard = $('grid').children[0];
+  const cardRetry = firstCard.querySelector('.retry');
+  check('each card carries a retry button', !!cardRetry && cardRetry.tagName === 'BUTTON');
+  check('ok cards do not get the failed class (retry stays visually hidden)', !firstCard.classList.contains('failed'));
 
   $('btnNone').click();
   check('select none', items.every((it) => !it.selected) && $('buildBtn').disabled);

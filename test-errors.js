@@ -102,12 +102,36 @@ function check(name, cond, extra) {
     let items = h.ev('items');
     check('all failed when network down', items.every((it) => it.state === 'failed'), items.map((i) => i.state));
     check('retry button visible', !h.$('btnRetry').classList.contains('hidden'));
+    check('toolbar retry-all button visible', !h.$('btnRetryAll').classList.contains('hidden'));
     check('failed cards not selected', items.every((it) => !it.selected));
+    // 2.25: every failed card shows its own retry button
+    const cardRetryButtons = [...h.$('grid').querySelectorAll('.item .retry')];
+    check('one per-card retry button per card', cardRetryButtons.length === items.length);
+    check('per-card retry shown on failed items', items.every((it) => it.el.classList.contains('failed')));
+
+    // per-card retry: only the clicked card is retried; others stay failed
+    h.window.fetch = async (url) => {
+      if (String(url).includes('a.png')) {
+        return { ok: true, status: 200, blob: async () => new h.window.Blob([PNG], { type: 'image/png' }), json: async () => [[]] };
+      }
+      throw new Error('still down');
+    };
+    cardRetryButtons[0].click();
+    for (let i = 0; i < 60; i++) { await sleep(60); if (h.ev('items')[0].state !== 'loading') break; }
+    items = h.ev('items');
+    check('per-card retry recovers only that card', items[0].state === 'ok' &&
+      items.slice(1).every((it) => it.state === 'failed'), items.map((i) => i.state));
+    check('recovered card loses the failed class (retry hidden again)', !items[0].el.classList.contains('failed'));
+    check('toolbar retry-all stays visible while failures remain', !h.$('btnRetryAll').classList.contains('hidden'));
+
+    // toolbar retry-all recovers the rest
     failAll = false;
-    h.$('btnRetry').click();
+    h.window.fetch = async () => ({ ok: true, status: 200, blob: async () => new h.window.Blob([PNG], { type: 'image/png' }), json: async () => [[]] });
+    h.$('btnRetryAll').click();
     for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
     items = h.ev('items');
     check('retry recovers all', items.every((it) => it.state === 'ok'), items.map((i) => i.state));
+    check('retry-all hidden after full recovery', h.$('btnRetryAll').classList.contains('hidden'));
   }
 
   // ---------- 3. non-image bytes -> failed ----------
