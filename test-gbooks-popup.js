@@ -32,6 +32,9 @@ function makeHarness(pageUrl) {
   let gbCancelled = false;
   let scanBehavior = { type: 'ok' }; // 'ok' | 'fail' | 'defer'
   let deferredScan = null;
+  // per-pid responses for manual-mode single-page resolution; null pid means "not previewable"
+  let pageSrcByPid = {};
+  let pageFailPids = new Set();
   window.chrome = {
     runtime: {
       sendMessage: async (msg) => {
@@ -46,6 +49,11 @@ function makeHarness(pageUrl) {
             totalPages: scanBehavior.totalPages || 0, availablePages: (scanBehavior.urls || []).length
           };
         }
+        if (msg.type === 'WTPDF_GBOOKS_PAGE') {
+          if (pageFailPids.has(msg.pid)) return { ok: false, error: 'HTTP 429' };
+          const src = pageSrcByPid[msg.pid];
+          return src ? { ok: true, pid: msg.pid, src } : { ok: false, error: 'not previewable' };
+        }
         if (msg.type === 'WTPDF_URLS') return { ok: true };
         return { ok: true };
       },
@@ -59,9 +67,13 @@ function makeHarness(pageUrl) {
     }
   };
   window.setTimeout = (cb) => global.setTimeout(cb, 0);
-  window.setInterval = (cb) => { global.setTimeout(cb, 0); return 1; };
-  window.clearInterval = () => {};
-  window.__wtpdfTimings = { poll: 1, clickTimeout: 30, settle: 1, stuckLimit: 2, maxPages: 5, manualRescan: 1 };
+  // real repeating intervals so the manual GB polling can observe simulated page turns
+  window.setInterval = (cb, ms) => global.setInterval(cb, ms);
+  window.clearInterval = (id) => global.clearInterval(id);
+  window.__wtpdfTimings = {
+    poll: 1, clickTimeout: 30, settle: 1, stuckLimit: 2, maxPages: 5,
+    manualRescan: 1, gbookManualPoll: 5
+  };
 
   const code = fs.readFileSync(__dirname + '/popup.js', 'utf8');
   const fnCode = code.slice(code.indexOf('async function scrapeAndSend'));
@@ -69,6 +81,7 @@ function makeHarness(pageUrl) {
 
   return {
     window, img, messages, progressListeners,
+    setPageSrc(map, fails = []) { pageSrcByPid = map; pageFailPids = new Set(fails); },
     setScanBehavior(b) { scanBehavior = b; },
     deferScan() {
       let resolve;
@@ -90,8 +103,8 @@ const API_URLS = [
 ];
 
 (async () => {
-  // 1. old-style books.google.com URL: every user mode routes through the dedicated API path
-  for (const mode of ['scroll', 'auto', 'manual']) {
+  // 1a. scroll/auto modes on Google Books route through the full API walk
+  for (const mode of ['scroll', 'auto']) {
     const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1&jscmd=click3');
     // the DOM only carries 256x256 tiles which must not pollute the result
     h.window.document.body.appendChild(h.img('https://books.google.com/books/content?id=B1&pg=PA1&img=1&zoom=2&tid=0'));
@@ -102,11 +115,11 @@ const API_URLS = [
     const running = h.window.eval(`scrapeAndSend("book.pdf", "${mode}")`);
     await tick();
     await tick();
-    check(`mode ${mode}: full-screen overlay used (no manual panel on GB)`,
+    check(`mode ${mode}: full-screen overlay used (no manual panel)`,
       !!h.window.document.querySelector('.wtpdf-overlay') && !h.window.document.querySelector('.wtpdf-manual'));
     check(`mode ${mode}: scan message sent with page url`, h.scanJobs().length === 1 &&
       h.scanJobs()[0].pageUrl.includes('id=B1'), h.scanJobs());
-    deferred.resolve({ ok: true, urls: API_URLS, totalPages: 4, availablePages: 3 });
+    deferred.resolve({ ok: true, urls: API_URLS, totalPages: 4, availablePages: 3, failedPages: 1 });
     const res = await running;
 
     check(`mode ${mode}: result count comes from the API`, res && res.count === 3, res);
@@ -116,6 +129,75 @@ const API_URLS = [
     check(`mode ${mode}: DOM tiles excluded`, !job.urls.some((u) => u.includes('tid=')));
     check(`mode ${mode}: UI cleaned up and flag reset`,
       !h.window.document.querySelector('.wtpdf-root') && h.window.__wtpdfRunning === false);
+  }
+
+  // 1b. manual mode on Google Books: floating panel, one light API call per manually turned page
+  {
+    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1');
+    h.setPageSrc({
+      PA1: API_URLS[0],
+      PA2: API_URLS[1],
+      PA3: API_URLS[2]
+    });
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
+    await tick();
+    await tick();
+    check('GB manual: compact panel shown instead of full-screen overlay',
+      !!h.window.document.querySelector('.wtpdf-manual') && !h.window.document.querySelector('.wtpdf-overlay'));
+    check('GB manual: no bulk walk started', h.scanJobs().length === 0);
+    const pageJobs = () => h.messages.filter((m) => m.type === 'WTPDF_GBOOKS_PAGE');
+    check('GB manual: current page resolved immediately', pageJobs().length === 1 && pageJobs()[0].pid === 'PA1', pageJobs());
+    check('GB manual: counter shows one image',
+      h.window.document.querySelector('.wtpdf-count').textContent === '1 تصویر جمع شد');
+
+    // simulate the reader's URL change when the user clicks its own next-page arrow
+    h.window.history.replaceState(null, '', 'https://books.google.com/books?id=B1&pg=PA2');
+    await new Promise((r) => setTimeout(r, 30));
+    check('GB manual: turning the page triggers a single-page request for PA2',
+      pageJobs().some((m) => m.pid === 'PA2'), pageJobs().map((m) => m.pid));
+    check('GB manual: counter updates to two',
+      h.window.document.querySelector('.wtpdf-count').textContent === '2 تصویر جمع شد');
+    h.window.history.replaceState(null, '', 'https://books.google.com/books?id=B1&pg=PA3');
+    await new Promise((r) => setTimeout(r, 30));
+    check('GB manual: third page picked up',
+      h.window.document.querySelector('.wtpdf-count').textContent === '3 تصویر جمع شد');
+
+    h.window.document.querySelector('.wtpdf-done').click();
+    const res = await running;
+    check('GB manual: Done returns all manually collected pages', res && res.count === 3, res);
+    const job = h.urlJobs()[0];
+    check('GB manual: urls follow the viewing order and are full-resolution',
+      h.urlJobs().length === 1 && JSON.stringify(job.urls) === JSON.stringify(API_URLS), job && job.urls);
+    check('GB manual: panel removed and flag reset',
+      !h.window.document.querySelector('.wtpdf-root') && h.window.__wtpdfRunning === false);
+  }
+
+  // 1c. a transient single-page failure is retried automatically while staying on the page
+  {
+    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1');
+    h.setPageSrc({ PA1: API_URLS[0] }, ['PA1']); // first attempts fail...
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
+    await tick();
+    h.setPageSrc({ PA1: API_URLS[0] }); // ...then the page becomes available; polling retries
+    await new Promise((r) => setTimeout(r, 30));
+    h.window.document.querySelector('.wtpdf-done').click();
+    const res = await running;
+    check('GB manual: failed page recovered by polling retry', res && res.count === 1, res);
+  }
+
+  // 1d. embedded Google Books iframe cannot expose top-frame page turns, so manual falls back to the walk
+  {
+    const h = makeHarness('https://example.com/article');
+    const frame = h.window.document.createElement('iframe');
+    frame.src = 'https://books.google.com/books?id=EMBED99&output=embed';
+    h.window.document.body.appendChild(frame);
+    h.setScanBehavior({ type: 'ok', urls: API_URLS.slice(0, 2), totalPages: 2, availablePages: 2 });
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
+    await tick();
+    check('embedded: manual mode uses the overlay walk (no floating panel)',
+      !!h.window.document.querySelector('.wtpdf-overlay') && !h.window.document.querySelector('.wtpdf-manual'));
+    const res = await running;
+    check('embedded: walk still resolves the book', res && res.count === 2, res);
   }
 
   // 2. new-style edition URL on www.google.com is detected

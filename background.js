@@ -50,17 +50,42 @@ function parseGoogleBooksJson(text) {
   return JSON.parse(clean);
 }
 
-async function fetchClick3(origin, id, firstPid, pid) {
+// تست‌ها می‌توانند این دو را در همان context کوتاه کنند؛ در production مقادیر پیش‌فرض محافظه‌کارانه‌اند
+let GB_BACKOFF_MS = [600, 1800, 5000];
+let GB_REQUEST_PAUSE_MS = 350;   // مکث پایه بین درخواست‌ها برای جلوگیری از throttle
+const GB_MAX_ROUNDS = 3;        // هر صفحهٔ خطادار حداکثر در سه دور جداگانه تلاش می‌شود
+
+// یک درخواست تک‌تلاش؛ مکانیزم retry و backoff در walkGoogleBooks پیاده شده تا هر صفحه دقیقاً یک بار در هر دور درخواست شود
+async function fetchClick3(origin, id, firstPid, pid, shouldCancel) {
+  if (shouldCancel && shouldCancel()) {
+    const e = new Error('cancelled'); e.cancelled = true; throw e;
+  }
   const url = `${origin}/books?id=${encodeURIComponent(id)}&hl=en&lpg=${encodeURIComponent(firstPid)}` +
     `&pg=${encodeURIComponent(pid)}&jscmd=click3`;
-  const res = await fetch(url, { credentials: 'include' });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  return parseGoogleBooksJson(await res.text());
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const res = await fetch(url, { credentials: 'include', signal: ctrl.signal });
+    if (!res.ok) {
+      const e = new Error('HTTP ' + res.status);
+      if (res.status === 429 || res.status === 503) {
+        const retryAfter = parseInt(res.headers.get('Retry-After') || '', 10);
+        if (Number.isFinite(retryAfter) && retryAfter > 0) e.retryAfterMs = retryAfter * 1000;
+      }
+      throw e;
+    }
+    return parseGoogleBooksJson(await res.text());
+  } catch (e) {
+    if (e && e.cancelled) throw e;
+    if (e && e.name === 'AbortError') throw new Error('request timeout');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // کلید لغو per-tab؛ فقط یک عملیات در هر تب فعال است
 const gbookCancels = new Map();
-const GB_REQUEST_PAUSE_MS = 120;
 
 async function walkGoogleBooks(pageUrl, tabId, onProgress) {
   const id = parseGoogleBooksId(pageUrl);
@@ -69,7 +94,7 @@ async function walkGoogleBooks(pageUrl, tabId, onProgress) {
   const isCancelled = () => tabId != null && gbookCancels.get(tabId) === true;
   if (isCancelled()) { const e = new Error('cancelled'); e.cancelled = true; throw e; }
 
-  const first = await fetchClick3(origin, id, '1', '1');
+  const first = await fetchClick3(origin, id, '1', '1', isCancelled);
   if (!first || !Array.isArray(first.page) || !first.page.length) {
     throw new Error('فهرست صفحه‌های کتاب خالی بود یا این کتاب پیش‌نمایش ندارد');
   }
@@ -77,43 +102,82 @@ async function walkGoogleBooks(pageUrl, tabId, onProgress) {
   // ترتیب صفحه‌ها از اولین پاسخ گرفته می‌شود و پاسخ‌های بعدی فقط انتهای فهرست را گسترش می‌دهند
   const order = [];
   const srcByPid = new Map();
-  first.page.forEach((p) => {
-    if (!p || !p.pid) return;
-    order.push(p.pid);
-    if (typeof p.src === 'string' && p.src) srcByPid.set(p.pid, p.src);
-  });
+  // صفحه‌ای که کلیک‌۳ موفق به آن پاسخ داده ولی src نداشته، یعنی قطعاً قابل‌پیش‌نمایش نیست؛ دوباره درخواست نمی‌شود
+  const definitiveEmpty = new Set();
+  const mergePage = (data) => {
+    if (!data || !Array.isArray(data.page)) return;
+    data.page.forEach((p) => {
+      if (!p || !p.pid) return;
+      if (!order.includes(p.pid)) order.push(p.pid);
+      if (typeof p.src === 'string' && p.src && !srcByPid.has(p.pid)) srcByPid.set(p.pid, p.src);
+    });
+  };
+  mergePage(first);
+  // توجه: null بودن src در فهرست اولیه به‌معنای قفل‌بودن نیست؛ آن صفحات بعداً تک‌تک پرسیده می‌شوند.
+  // definitiveEmpty فقط وقتی مقدار می‌گیرد که پاسخ اختصاصی خودِ همان pid بدون src برگردد.
 
-  const attempted = new Set();
-  // هر صفحهٔ بدون src دقیقاً یک بار با click3 پرسیده می‌شود؛ صفحات غیرقابل‌پیش‌نمایش تا آخر بدون src می‌مانند و رد می‌شوند
+  // هر صفحهٔ خطادار در دورهای بعدی با backoff فزاینده دوباره تلاش می‌شود تا throttle موقت دائمی تلقی نشود
+  const attempts = new Map();
+  let consecutiveErrors = 0;
+  let lastError = null;
   while (true) {
     if (isCancelled()) { const e = new Error('cancelled'); e.cancelled = true; throw e; }
-    const pid = order.find((candidate) => !srcByPid.has(candidate) && !attempted.has(candidate));
+    const pid = order.find((candidate) =>
+      !srcByPid.has(candidate) && !definitiveEmpty.has(candidate) && (attempts.get(candidate) || 0) < GB_MAX_ROUNDS);
     if (!pid) break;
-    attempted.add(pid);
+    const round = (attempts.get(pid) || 0) + 1;
+    attempts.set(pid, round);
     if (onProgress) {
-      await onProgress({ phase: 'walk', round: attempted.size, total: order.length, resolved: srcByPid.size });
+      await onProgress({
+        phase: 'walk', round, total: order.length,
+        resolved: srcByPid.size, failed: order.filter((p) => !srcByPid.has(p)).length
+      });
     }
     try {
-      const data = await fetchClick3(origin, id, order[0], pid);
-      if (data && Array.isArray(data.page)) {
-        data.page.forEach((p) => {
-          if (!p || !p.pid) return;
-          if (!order.includes(p.pid)) order.push(p.pid);
-          if (typeof p.src === 'string' && p.src && !srcByPid.has(p.pid)) srcByPid.set(p.pid, p.src);
-        });
-      }
+      const data = await fetchClick3(origin, id, order[0], pid, isCancelled);
+      mergePage(data);
+      if (!srcByPid.has(pid)) definitiveEmpty.add(pid);
+      consecutiveErrors = 0;
+      lastError = null;
     } catch (e) {
-      // خطای یک صفحه کل کتاب را نشکند؛ آن صفحه رد می‌شود و بقیه ادامه می‌یابند
+      if (e && e.cancelled) throw e;
+      consecutiveErrors += 1;
+      lastError = e;
+      // خطای یک صفحه در این دور کل کتاب را نمی‌شکند؛ دور بعدی با فاصلهٔ بیشتر دوباره تلاش می‌شود
       console.warn('Google Books page failed', pid, e);
     }
-    await new Promise((r) => setTimeout(r, GB_REQUEST_PAUSE_MS));
+    // مکث عادی بین صفحه‌ها؛ اما اگر همین صفحه دور دیگری دارد، backoff مخصوص retry اعمال می‌شود
+    const stillRetrying = !srcByPid.has(pid) && !definitiveEmpty.has(pid) && round < GB_MAX_ROUNDS;
+    let pause;
+    if (stillRetrying) {
+      const base = lastError && lastError.retryAfterMs ? lastError.retryAfterMs : (GB_BACKOFF_MS[round - 1] || 5000);
+      pause = base * Math.min(4, 1 + consecutiveErrors * 0.5);
+    } else {
+      pause = GB_REQUEST_PAUSE_MS;
+    }
+    await new Promise((r) => setTimeout(r, Math.round(pause)));
   }
 
+  const failedPids = order.filter((pid) => !srcByPid.has(pid));
   const urls = order
     .filter((pid) => srcByPid.has(pid))
     .map((pid) => normalizeGoogleBooksSrc(srcByPid.get(pid)));
   if (!urls.length) throw new Error('هیچ صفحهٔ قابل‌پیش‌نمایشی برای این کتاب پیدا نشد');
-  return { urls, totalPages: order.length, availablePages: urls.length, origin, id };
+  return {
+    urls, totalPages: order.length, availablePages: urls.length,
+    failedPages: failedPids.length, origin, id
+  };
+}
+
+// حل یک صفحهٔ منفرد برای حالت دستی؛ وقتی کاربر خودش صفحه را ورق می‌زند فقط همان صفحه درخواست می‌شود
+async function resolveGoogleBooksPage(pageUrl, pid) {
+  const id = parseGoogleBooksId(pageUrl);
+  if (!id) throw new Error('شناسهٔ کتاب در آدرس صفحه پیدا نشد');
+  const origin = googleBooksOrigin(pageUrl);
+  const data = await fetchClick3(origin, id, pid, pid, null);
+  const entry = (data.page || []).find((p) => p && p.pid === pid && typeof p.src === 'string' && p.src);
+  if (!entry) return { ok: false, error: 'این صفحه قابل‌پیش‌نمایش نیست' };
+  return { ok: true, pid: entry.pid, src: normalizeGoogleBooksSrc(entry.src) };
 }
 
 // دریافت لیست تصاویر از صفحه و باز کردن تب ساخت PDF
@@ -142,6 +206,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (tabId != null) gbookCancels.set(tabId, true);
     sendResponse({ ok: true });
     return false;
+  }
+  if (msg && msg.type === 'WTPDF_GBOOKS_PAGE') {
+    resolveGoogleBooksPage(msg.pageUrl || (sender.tab && sender.tab.url) || '', String(msg.pid || '1'))
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error && error.message ? error.message : String(error) }));
+    return true;
   }
   if (msg && msg.type === 'WTPDF_URLS') {
     const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);

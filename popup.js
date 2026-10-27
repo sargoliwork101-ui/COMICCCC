@@ -92,7 +92,8 @@ async function scrapeAndSend(pdfName, mode) {
     manualRescan: 1500, // اسکن دوره‌ای حالت دستی (پشتیبان MutationObserver)
     scrollStep: 0.7,    // سهم ارتفاع پنجره در هر گام اسکرول
     scrollSleep: 200,   // مکث هر گام اسکرول
-    scrollMax: 800      // سقف تعداد گام‌های اسکرول
+    scrollMax: 800,     // سقف تعداد گام‌های اسکرول
+    gbookManualPoll: 700 // فاصلهٔ بررسی تغییر صفحه در حالت دستی Google Books
   }, window.__wtpdfTimings || {});
 
   // ---------- تشخیص کتاب‌خوان Google Books ----------
@@ -120,8 +121,11 @@ async function scrapeAndSend(pdfName, mode) {
     return null;
   };
   const gbook = detectGoogleBooks(location.href);
-  // مسیر اختصاصی گوگل‌بوک خودکار تمام می‌شود؛ پنل دستی فقط برای سایت‌های غیرگوگل لازم است
-  const effectiveMode = gbook ? 'auto' : mode;
+  // روی گوگل‌بوک هم حالت دستی واقعی داریم (ورق‌زدن کاربر + برداشتن صفحه از API)؛
+  // فقط reader جاسازی‌شده در iframe چون تغییر آدرس قاب بالا دیده نمی‌شود، همان مسیر خودکار را می‌رود
+  const effectiveMode = gbook
+    ? (mode === 'manual' && !gbook.embedded ? 'manual' : 'auto')
+    : mode;
 
   const PLACEHOLDER = /blank|loading|placeholder|spacer|pixel|1x1|lazy\.(gif|png|jpg)/i;
 
@@ -314,6 +318,47 @@ async function scrapeAndSend(pdfName, mode) {
     }
   };
 
+  // ---------- حالت دستی Google Books: کاربر ورق می‌زند، افزونه فقط همان صفحه را از API برمی‌دارد ----------
+  const runGoogleBooksManual = async () => {
+    const pidFromHref = (href) => {
+      try { return new URL(href).searchParams.get('pg') || '1'; } catch { return '1'; }
+    };
+    const collectedPids = new Set();
+    const inFlight = new Set();
+    const refreshCount = () => { countEl.textContent = `${urls.length} تصویر جمع شد`; };
+    const grab = async (pid) => {
+      if (!pid || inFlight.has(pid) || cancelled) return;
+      inFlight.add(pid);
+      try {
+        const res = await chrome.runtime.sendMessage({
+          type: 'WTPDF_GBOOKS_PAGE', pageUrl: location.href, pid
+        });
+        if (!cancelled && res && res.ok && res.src) {
+          add(res.src);
+          collectedPids.add(pid);
+          refreshCount();
+        }
+      } catch {
+        // خطای موقت؛ دور بعدی interval همان صفحه را دوباره امتحان می‌کند
+      } finally {
+        inFlight.delete(pid);
+      }
+    };
+    say('حالت دستی Google Books: با مثلث‌های خود گوگل صفحه‌ها را ورق بزن');
+    refreshCount();
+    await grab(pidFromHref(location.href));
+    // گوگل‌بوک با هر ورق، پارامتر pg آدرس را عوض می‌کند؛ همان شاخص برای دنبال‌کردن صفحه‌ها کافی است
+    const timer = setInterval(() => {
+      if (cancelled) return;
+      const pid = pidFromHref(location.href);
+      if (!collectedPids.has(pid)) grab(pid);
+    }, T.gbookManualPoll);
+
+    const outcome = await manualDone;
+    clearInterval(timer);
+    if (outcome === 'cancel') cancelled = true;
+  };
+
   // ---------- حالت ۱: اسکرول تا انتهای صفحه (رفتار پیش‌فرض قبلی) ----------
   const runScroll = async () => {
     say('در حال اسکرول برای لود تصاویر...');
@@ -484,22 +529,30 @@ async function scrapeAndSend(pdfName, mode) {
   };
 
   let usedGoogleBooks = false;
+  let gbookResult = null;
   try {
     if (gbook) {
-      // مسیر اختصاصی Google Books: فهرست کامل صفحه‌ها از API رسمی، بدون کلیک و بدون اسکن کاشی‌های DOM
-      let gbRes = null;
-      try {
-        gbRes = await runGoogleBooks();
-      } catch {
-        if (cancelled) return { cancelled: true, count: 0, skippedInline: 0 };
-        say('مسیر اختصاصی Google Books جواب نداد؛ اسکن عادی صفحه امتحان می‌شود...');
-        await sleep(1200);
-      }
-      if (gbRes && gbRes.ok && Array.isArray(gbRes.urls) && gbRes.urls.length) {
-        gbRes.urls.forEach(add);
+      if (effectiveMode === 'manual') {
+        // حالت دستی گوگل‌بوک: پنل شناور، کاربر ورق می‌زند و هر صفحه فقط به اندازهٔ یک درخواست سبک برداشته می‌شود
+        await runGoogleBooksManual();
         usedGoogleBooks = true;
       } else {
-        await runSelectedMode(effectiveMode);
+        // مسیر اختصاصی Google Books: فهرست کامل صفحه‌ها از API رسمی، بدون کلیک و بدون اسکن کاشی‌های DOM
+        let gbRes = null;
+        try {
+          gbRes = await runGoogleBooks();
+        } catch {
+          if (cancelled) return { cancelled: true, count: 0, skippedInline: 0 };
+          say('مسیر اختصاصی Google Books جواب نداد؛ اسکن عادی صفحه امتحان می‌شود...');
+          await sleep(1200);
+        }
+        if (gbRes && gbRes.ok && Array.isArray(gbRes.urls) && gbRes.urls.length) {
+          gbRes.urls.forEach(add);
+          usedGoogleBooks = true;
+          gbookResult = gbRes;
+        } else {
+          await runSelectedMode(effectiveMode);
+        }
       }
     } else {
       await runSelectedMode(effectiveMode);
@@ -522,9 +575,12 @@ async function scrapeAndSend(pdfName, mode) {
       return { count: 0, skippedInline };
     }
 
+    const gbNote = gbookResult && gbookResult.failedPages
+      ? ` (${gbookResult.failedPages} صفحهٔ غیرقابل‌پیش‌نمایش کنار گذاشته شد)`
+      : '';
     say(effectiveMode === 'manual'
       ? `${urls.length} تصویر آماده است. در حال باز کردن پیش‌نمایش...`
-      : `${urls.length} تصویر پیدا شد. در حال باز کردن پیش‌نمایش...`);
+      : `${urls.length} تصویر پیدا شد${gbNote}. در حال باز کردن پیش‌نمایش...`);
     const response = await chrome.runtime.sendMessage({
       type: 'WTPDF_URLS', urls, name: pdfName, pageUrl: location.href, skippedInline
     });
