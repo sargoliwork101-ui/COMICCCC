@@ -204,7 +204,8 @@ function makeHarness() {
     window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     const res = await running;
     check('manual-esc: cancelled result', res && res.cancelled === true && res.count === 0, res);
-    check('manual-esc: no message sent', sent.length === 0, sent.length);
+    // ESC also fires a WTPDF_GBOOKS_CANCEL control message; only real image jobs matter
+    check('manual-esc: no message sent', !sent.some((m) => m.type === 'WTPDF_URLS'), sent.length);
     check('manual-esc: panel removed', !window.document.querySelector('.wtpdf-manual'));
     check('manual-esc: running flag reset', window.__wtpdfRunning === false);
   }
@@ -224,7 +225,7 @@ function makeHarness() {
     window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     const res = await running;
     check('auto-esc: cancelled result', res && res.cancelled === true, res);
-    check('auto-esc: no message sent', sent.length === 0, sent.length);
+    check('auto-esc: no message sent', !sent.some((m) => m.type === 'WTPDF_URLS'), sent.length);
   }
 
   // ---------- 10. default argument keeps the classic scroll mode (no next-button clicking) ----------

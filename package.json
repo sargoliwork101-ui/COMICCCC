@@ -4,7 +4,7 @@
   "private": true,
   "description": "افزونهٔ Chrome برای جمع‌آوری تصاویر کمیک و وب‌تون و خروجی PDF/تصویر به‌همراه OCR و ترجمه",
   "scripts": {
-    "test": "node test-smoke.js && node test-popup.js && node test-background.js && node test-dom.js && node test-errors.js && node test-interact.js && node test-navigation.js",
+    "test": "node test-smoke.js && node test-popup.js && node test-background.js && node test-dom.js && node test-errors.js && node test-interact.js && node test-navigation.js && node test-gbooks-background.js && node test-gbooks-popup.js",
     "lint": "eslint ."
   },
   "devDependencies": {

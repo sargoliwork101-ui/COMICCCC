@@ -95,6 +95,34 @@ async function scrapeAndSend(pdfName, mode) {
     scrollMax: 800      // سقف تعداد گام‌های اسکرول
   }, window.__wtpdfTimings || {});
 
+  // ---------- تشخیص کتاب‌خوان Google Books ----------
+  // کتاب‌های گوگل به‌جای تصویر کامل، کاشی‌های ۲۵۶px داخل iframe دارند؛ برای همین مسیر اختصاصی API لازم است.
+  const detectGoogleBooks = (href) => {
+    let u;
+    try { u = new URL(href); } catch { return null; }
+    const byId = u.searchParams.get('id');
+    if (byId && /^[\w-]+$/.test(byId) && /(^|\.)google\./i.test(u.hostname)) {
+      return { id: byId, origin: u.hostname.startsWith('books.google.') ? u.origin : 'https://books.google.com' };
+    }
+    if (/(^|\.)google\.[a-z.]+$/i.test(u.hostname) && u.pathname.includes('/books/edition/')) {
+      const seg = u.pathname.split('/').filter(Boolean).pop();
+      if (seg && /^[\w-]{6,}$/.test(seg)) return { id: seg, origin: 'https://books.google.com' };
+    }
+    // reader جاسازی‌شده در iframe (نشانی books.google.* داخل قاب صفحه)
+    const frame = document.querySelector('iframe[src*="books.google."]');
+    if (frame && frame.src) {
+      try {
+        const fu = new URL(frame.src);
+        const fid = fu.searchParams.get('id');
+        if (fid && /^[\w-]+$/.test(fid)) return { id: fid, origin: fu.origin, embedded: true };
+      } catch { /* قاب نامعتبر */ }
+    }
+    return null;
+  };
+  const gbook = detectGoogleBooks(location.href);
+  // مسیر اختصاصی گوگل‌بوک خودکار تمام می‌شود؛ پنل دستی فقط برای سایت‌های غیرگوگل لازم است
+  const effectiveMode = gbook ? 'auto' : mode;
+
   const PLACEHOLDER = /blank|loading|placeholder|spacer|pixel|1x1|lazy\.(gif|png|jpg)/i;
 
   // منبعی را بردار که خود مرورگر با موفقیت نمایش داده؛ در غیر این صورت سراغ آدرس‌های lazy و srcset برو.
@@ -203,7 +231,7 @@ async function scrapeAndSend(pdfName, mode) {
   let resolveManual = null;
   const manualDone = new Promise((resolve) => { resolveManual = resolve; });
 
-  if (mode === 'manual') {
+  if (effectiveMode === 'manual') {
     // پنل شناور بالای صفحه؛ بدون پوشش تیره تا کاربر سایت را ببیند و روی مثلث‌های خودش کلیک کند
     uiRoot = document.createElement('div');
     uiRoot.className = 'wtpdf-manual wtpdf-root';
@@ -244,15 +272,47 @@ async function scrapeAndSend(pdfName, mode) {
 
   // لغو با ESC (این کد داخل خود صفحهٔ وب اجرا می‌شود)؛ در حالت دستی قول انتظار را هم حل می‌کند
   let cancelled = false;
+  // فقط وقتی اسکن Google Books واقعاً در جریان است پیام لغو به service worker برود تا پرچم کهنه نماند
+  let gbookScanActive = false;
   const onCancelKey = (e) => {
     if (e.key === 'Escape' || e.key === 'Esc') {
       e.preventDefault();
       e.stopPropagation();
       cancelled = true;
-      if (mode === 'manual') resolveManual('cancel');
+      if (effectiveMode === 'manual') resolveManual('cancel');
+      if (gbookScanActive) {
+        try {
+          const cancelMsg = chrome.runtime.sendMessage({ type: 'WTPDF_GBOOKS_CANCEL' });
+          if (cancelMsg && typeof cancelMsg.catch === 'function') cancelMsg.catch(() => {});
+        } catch { /* افزونه در دسترس نیست */ }
+      }
     }
   };
   document.addEventListener('keydown', onCancelKey, true);
+
+  // ---------- مسیر اختصاصی Google Books (API رسمی reader، بدون نیاز به کلیک/DOM) ----------
+  const runGoogleBooks = async () => {
+    const onProgress = (m) => {
+      if (m && m.type === 'WTPDF_GBOOKS_PROGRESS' && m.phase === 'walk') {
+        say(`در حال خواندن صفحات کتاب از Google Books...\n${m.resolved || 0} صفحهٔ قابل‌پیش‌نمایش از ${m.total || 0} صفحه پیدا شد`);
+      }
+    };
+    chrome.runtime.onMessage.addListener(onProgress);
+    gbookScanActive = true;
+    try {
+      say('در حال اتصال به کتاب‌خوان Google Books و خواندن فهرست صفحه‌ها...');
+      const res = await chrome.runtime.sendMessage({ type: 'WTPDF_GBOOKS_SCAN', pageUrl: location.href });
+      if (!res || !res.ok) {
+        if (res && res.cancelled) cancelled = true;
+        throw new Error(res && res.error ? res.error : 'پاسخی از Google Books دریافت نشد');
+      }
+      say(`${res.availablePages} صفحهٔ قابل‌پیش‌نمایش از ${res.totalPages} صفحهٔ کتاب پیدا شد.`);
+      return res;
+    } finally {
+      gbookScanActive = false;
+      chrome.runtime.onMessage.removeListener(onProgress);
+    }
+  };
 
   // ---------- حالت ۱: اسکرول تا انتهای صفحه (رفتار پیش‌فرض قبلی) ----------
   const runScroll = async () => {
@@ -417,29 +477,52 @@ async function scrapeAndSend(pdfName, mode) {
     if (outcome === 'cancel') cancelled = true;
   };
 
+  const runSelectedMode = async (selectedMode) => {
+    if (selectedMode === 'scroll') return runScroll();
+    if (selectedMode === 'auto') return runAuto();
+    return runManual();
+  };
+
+  let usedGoogleBooks = false;
   try {
-    if (mode === 'scroll') await runScroll();
-    else if (mode === 'auto') await runAuto();
-    else await runManual();
+    if (gbook) {
+      // مسیر اختصاصی Google Books: فهرست کامل صفحه‌ها از API رسمی، بدون کلیک و بدون اسکن کاشی‌های DOM
+      let gbRes = null;
+      try {
+        gbRes = await runGoogleBooks();
+      } catch {
+        if (cancelled) return { cancelled: true, count: 0, skippedInline: 0 };
+        say('مسیر اختصاصی Google Books جواب نداد؛ اسکن عادی صفحه امتحان می‌شود...');
+        await sleep(1200);
+      }
+      if (gbRes && gbRes.ok && Array.isArray(gbRes.urls) && gbRes.urls.length) {
+        gbRes.urls.forEach(add);
+        usedGoogleBooks = true;
+      } else {
+        await runSelectedMode(effectiveMode);
+      }
+    } else {
+      await runSelectedMode(effectiveMode);
+    }
 
     if (cancelled) {
       if (card) {
         card.classList.add('wtpdf-cancel');
         say('عملیات با کلید ESC لغو شد.');
       }
-      await sleep(mode === 'manual' ? 0 : 1200);
+      await sleep(effectiveMode === 'manual' ? 0 : 1200);
       return { cancelled: true, count: 0, skippedInline: 0 };
     }
 
-    // اسکن نهایی تضمینی؛ در حالت اسکرول هم داخل runScroll یک بار اسکن شده و این فقط موارد تازه را اضافه می‌کند
-    scanImages();
+    // اسکن نهایی تضمینی فقط برای مسیرهای DOM؛ در Google Books اسکن صفحه کاشی‌های ۲۵۶px بی‌ربط می‌آورد
+    if (!usedGoogleBooks) scanImages();
     if (urls.length === 0) {
       say(skippedInline ? `تصاویر داخلی پیدا شدند اما ${skippedInline} مورد از حد مجاز بزرگ‌تر بودند.` : 'هیچ تصویری پیدا نشد!');
       await sleep(3000);
       return { count: 0, skippedInline };
     }
 
-    say(mode === 'manual'
+    say(effectiveMode === 'manual'
       ? `${urls.length} تصویر آماده است. در حال باز کردن پیش‌نمایش...`
       : `${urls.length} تصویر پیدا شد. در حال باز کردن پیش‌نمایش...`);
     const response = await chrome.runtime.sendMessage({

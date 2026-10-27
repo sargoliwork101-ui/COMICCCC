@@ -155,12 +155,14 @@ async function runPopupOnce(executeResult, shouldReject) {
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   const cancelRes = await cancelRun;
   check('ESC returns a cancelled result', cancelRes && cancelRes.cancelled === true && cancelRes.count === 0, cancelRes);
-  check('cancelled scrape sends no WTPDF_URLS message', sent.length === messagesBefore, sent.length);
+  // ESC may also send a WTPDF_GBOOKS_CANCEL control message; only WTPDF_URLS jobs must be counted
+  const urlJobs = () => sent.filter((m) => m.type === 'WTPDF_URLS').length;
+  check('cancelled scrape sends no WTPDF_URLS message', urlJobs() === messagesBefore, urlJobs());
   check('overlay removed after cancel', !window.document.querySelector('.wtpdf-overlay'));
   check('running flag reset after cancel', window.__wtpdfRunning === false);
   // leftover ESC keypress must not start or cancel anything new (listener was removed in finally)
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-  check('no overlay reappears from a stray ESC', !window.document.querySelector('.wtpdf-overlay') && sent.length === messagesBefore);
+  check('no overlay reappears from a stray ESC', !window.document.querySelector('.wtpdf-overlay') && urlJobs() === messagesBefore);
 
   // interactive popup status box: hidden on success, visible only on error/warning
   const successRun = await runPopupOnce({ count: 5, skippedInline: 0 });
