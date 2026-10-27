@@ -286,6 +286,54 @@ function buildPageGroupView() {
 function formatGroupLabel(displayNumber, memberCount) {
   return `گروه ${displayNumber} · ${memberCount} عضو`;
 }
+
+// یک کادر سبز واحد دور «همهٔ» اعضای هر گروه رسم می‌کند؛ اگر اعضای گروه در چند ردیف شبکه شکسته شوند،
+// هر ردیف کادر پیوستهٔ خودش را می‌گیرد تا کادر هیچ کارت بیگانه‌ای را در بر نگیرد.
+function drawGroupOutlines(groupView = buildPageGroupView()) {
+  const layer = $('groupOutlineLayer');
+  const grid = $('grid');
+  const wrap = document.querySelector('.wrap');
+  if (!layer || !grid || !wrap) return;
+  layer.innerHTML = '';
+  const groups = [...groupView.membersById.entries()];
+  if (!groups.length) { layer.classList.add('hidden'); return; }
+  const gridRect = grid.getBoundingClientRect();
+  const wrapRect = wrap.getBoundingClientRect();
+  layer.classList.remove('hidden');
+  // لایه دقیقاً روی محدودهٔ شبکه تراز می‌شود تا مختصات کادرها نسبت به خود شبکه حساب شود
+  layer.style.left = `${gridRect.left - wrapRect.left}px`;
+  layer.style.top = `${gridRect.top - wrapRect.top}px`;
+  layer.style.width = `${gridRect.width}px`;
+  layer.style.height = `${gridRect.height}px`;
+  const PAD = 7;
+  for (const [groupId, members] of groups) {
+    const rects = members.map((it) => it.el.getBoundingClientRect());
+    // خوشه‌بندی اعضا بر اساس ردیف (تحمل ۴ پیکسل برای تفاوت گردشدن مرورگر)
+    const rows = [];
+    for (const r of rects) {
+      const row = rows.find((c) => Math.abs(c.top - r.top) <= 4);
+      if (row) {
+        row.top = Math.min(row.top, r.top);
+        row.left = Math.min(row.left, r.left);
+        row.right = Math.max(row.right, r.right);
+        row.bottom = Math.max(row.bottom, r.bottom);
+      } else {
+        rows.push({ top: r.top, left: r.left, right: r.right, bottom: r.bottom });
+      }
+    }
+    rows.forEach((row, idx) => {
+      const box = document.createElement('div');
+      box.className = 'group-outline';
+      box.dataset.group = String(groupId);
+      box.dataset.row = String(idx + 1);
+      box.style.left = `${row.left - gridRect.left - PAD}px`;
+      box.style.top = `${row.top - gridRect.top - PAD}px`;
+      box.style.width = `${row.right - row.left + PAD * 2}px`;
+      box.style.height = `${row.bottom - row.top + PAD * 2}px`;
+      layer.appendChild(box);
+    });
+  }
+}
 function refreshCard(it, groupView = buildPageGroupView()) {
   const el = it.el;
   el.classList.toggle('selected', !!it.selected);
@@ -443,6 +491,8 @@ function updatePdfOrderFromGrid() {
     const input = el.querySelector('.page-order');
     if (input) input.value = String(it.pdfOrder);
   });
+  // جابه‌جایی درگ/دراپ یا مرتب‌سازی دستی، محل کادر گروه‌ها را عوض می‌کند
+  drawGroupOutlines();
 }
 
 // ---------- انتخاب‌ها ----------
@@ -497,6 +547,7 @@ function refreshAll() {
   const groupView = buildPageGroupView();
   items.forEach((it) => refreshCard(it, groupView));
   refreshSummary(groupView);
+  drawGroupOutlines(groupView);
 }
 function refreshGroupManager(groupView = buildPageGroupView()) {
   const container = $('groupList');
@@ -1689,6 +1740,14 @@ async function main() {
   $('cropStage').addEventListener('pointerup', endCropSelection);
   $('cropStage').addEventListener('pointercancel', cancelCropSelection);
   document.addEventListener('keydown', handleOverlayKeydown);
+  // ارتفاع شبکه با بارگیری بند‌انگشتی‌ها و تغییر اندازهٔ پنجره عوض می‌شود؛ کادر گروه‌ها باید هم‌تراز بمانند
+  if (typeof ResizeObserver !== 'undefined') {
+    // هر تغییر اندازهٔ شبکه (بند‌انگشتی‌ها) یا جابه‌جایی آن (پنل نتیجه، منوی گروه‌ها) اندازهٔ .wrap را عوض می‌کند
+    const outlineObserver = new ResizeObserver(() => drawGroupOutlines());
+    outlineObserver.observe($('grid'));
+    outlineObserver.observe(document.querySelector('.wrap'));
+  }
+  window.addEventListener('resize', () => drawGroupOutlines());
   window.addEventListener('pagehide', () => { chrome.storage.local.remove(jobKey); clearRefererRule(); });
 
   await loadAll(items);

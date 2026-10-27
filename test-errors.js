@@ -171,6 +171,13 @@ function check(name, cond, extra) {
     check('display label is continuous (گروه 1)', badges.length === 2 && badges.every((t) => /^گروه 1/.test(t)), badges);
     const chipLabels = [...h.$('groupList').querySelectorAll('.group-select')].map((n) => n.textContent.trim());
     check('group manager shows continuous label too', chipLabels.length === 1 && /^گروه 1/.test(chipLabels[0]), chipLabels);
+    // one shared outline box per surviving group
+    const boxes = [...h.$('groupOutlineLayer').querySelectorAll('.group-outline')];
+    check('one outline box per group', boxes.length === 1 && boxes[0].dataset.group === '2', boxes.map((b) => b.dataset.group));
+    // deleting the other group removes all boxes
+    h.ev('deleteItem(items.find(i=>i.pageGroup===2))');
+    check('outline layer empties when no groups remain',
+      h.$('groupOutlineLayer').classList.contains('hidden') && h.$('groupOutlineLayer').children.length === 0);
   }
 
   // ---------- 5b. group editor: add/remove members and cancel ----------

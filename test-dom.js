@@ -158,9 +158,19 @@ const $ = (id) => window.document.getElementById(id);
     const kids = [...$('grid').children];
     return kids.indexOf(items[0].el) + 1 === kids.indexOf(items[1].el);
   })());
+  // 2.22: one shared outline box wraps the whole group instead of per-card dashed outlines
+  const outlineLayer = $('groupOutlineLayer');
+  check('outline layer lives inside the page wrap', !!outlineLayer && outlineLayer.closest('.wrap') &&
+    outlineLayer.closest('.wrap') === window.document.querySelector('.wrap'));
+  check('one group -> one shared outline box', !outlineLayer.classList.contains('hidden') &&
+    outlineLayer.querySelectorAll('.group-outline').length === 1);
+  check('outline box is tagged with the group id',
+    outlineLayer.querySelector('.group-outline').dataset.group === String(items[0].pageGroup));
   $('btnUngroupPage').click();
   check('ungroup', items.every((it) => !it.pageGroup));
   check('in-group class removed after ungroup', items.every((it) => !it.el.classList.contains('in-group')));
+  check('outline layer hidden and emptied after ungroup',
+    outlineLayer.classList.contains('hidden') && outlineLayer.children.length === 0);
 
   const before = items.length;
   ev('duplicateItem(items[0])');

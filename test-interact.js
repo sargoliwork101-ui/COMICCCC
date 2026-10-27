@@ -162,6 +162,9 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('grouping lays group members adjacent', JSON.stringify(orderA) === JSON.stringify([1, 0, 2]), orderA);
   check('adjacent layout renumbers pdf order', JSON.stringify([...grid.children].map((n) => n.querySelector('.page-order').value)) === JSON.stringify(['1', '2', '3']));
   check('grouped cards keep persistent in-group class', cards[0].classList.contains('in-group') && cards[1].classList.contains('in-group') && !cards[2].classList.contains('in-group'));
+  const outlineLayer = h.$('groupOutlineLayer');
+  check('drag-group draws one shared outline box', !outlineLayer.classList.contains('hidden') &&
+    outlineLayer.querySelectorAll('.group-outline').length === 1);
 
   // B) ungrouped card dropped onto a grouped card joins its group
   cards[0].getBoundingClientRect = rect156;
