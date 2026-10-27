@@ -102,6 +102,16 @@ const $ = (id) => window.document.getElementById(id);
   // modernized header/footer shell keeps every functional id
   check('modern topbar present', !!window.document.querySelector('.topbar .brand-logo') &&
     !!window.document.querySelector('.brand-text h1') && !!window.document.querySelector('.version-pill'));
+  // 2.24: rebranded to PIC TO PDF
+  check('viewer title uses PIC TO PDF', /PIC TO PDF/.test(window.document.title), window.document.title);
+  check('viewer brand h1 uses PIC TO PDF', window.document.querySelector('.brand-text h1').textContent.trim() === 'PIC TO PDF');
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'manifest.json'), 'utf8'));
+  check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
+    manifest.action.default_title === 'PIC TO PDF');
+  check('manifest icon files declared', [16, 32, 48, 128].every((s) => manifest.icons[String(s)] === `icon${s}.png`) &&
+    manifest.action.default_icon['128'] === 'icon128.png');
+  check('brand logo points at the new icon file',
+    window.document.querySelector('.brand-logo img').getAttribute('src') === 'icon128.png');
   check('footer grouped shell present', !!window.document.querySelector('.dock .dock-side') &&
     !!window.document.querySelector('.dock .dock-center') && !!window.document.querySelector('.dock .dock-actions'));
   for (const id of ['selCount', 'modePdf', 'modeImg', 'outputSettings', 'buildBtn', 'saveImgBtn']) {

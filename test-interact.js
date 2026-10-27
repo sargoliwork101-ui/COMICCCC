@@ -132,6 +132,24 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   // ---- drag/drop reorder ----
   const grid = h.$('grid');
   const cards = [...grid.children];
+
+  // 2.24: page numbers under the cards update live while dragging (before any drop)
+  const dtLive = { effectAllowed: '', setData() {}, dropEffect: '' };
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dtLive, bubbles: true }));
+  check('grid enters live-order mode on dragstart', grid.classList.contains('order-live'));
+  const liveTarget = cards[2];
+  liveTarget.getBoundingClientRect = () => ({ left: 0, width: 156, top: 0, height: 200, right: 156, bottom: 200 });
+  liveTarget.dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dtLive, clientX: 10, bubbles: true }));
+  const liveDomOrder = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);
+  check('dragover does not move DOM yet', JSON.stringify(liveDomOrder) === JSON.stringify([0, 1, 2]), liveDomOrder);
+  const liveInputs = cards.map((c) => c.querySelector('.page-order').value);
+  check('page numbers preview the tentative order live', JSON.stringify(liveInputs) === JSON.stringify(['3', '1', '2']), liveInputs);
+  // abort without dropping: numbers return to the real grid order
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dtLive, bubbles: true }));
+  check('live-order mode cleared on dragend', !grid.classList.contains('order-live'));
+  check('numbers restored after a cancelled drag',
+    JSON.stringify(cards.map((c) => c.querySelector('.page-order').value)) === JSON.stringify(['1', '2', '3']));
+
   const dataTransfer = { effectAllowed: '', setData() {}, dropEffect: '' };
   cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer, bubbles: true }));
   const target = cards[2];
@@ -139,6 +157,7 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   target.dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer, clientX: 10, bubbles: true })); // left half -> after target
   target.dispatchEvent(new h.window.DragEvent('drop', { dataTransfer, clientX: 10, bubbles: true }));
   cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer, bubbles: true }));
+
   const order = [...grid.children].map((n) => n.querySelector('.page-order').value);
   const uidOrder = h.ev(`[...document.getElementById('grid').children].map((n) => items.find((i) => i.el === n).uid)`);
   check('drag-drop reorders cards', JSON.stringify(uidOrder) === JSON.stringify([1, 2, 0]), uidOrder);
@@ -218,6 +237,12 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   cards[2].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt4, clientX: 10, bubbles: true }));
   check('group reorder uses the distinct group marker', cards[2].classList.contains('drag-insert-after') &&
     cards[2].classList.contains('drag-insert-group'));
+  // live preview shows the whole block's tentative numbering while DOM is untouched
+  const groupDomBefore = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);
+  check('group dragover keeps DOM untouched', JSON.stringify(groupDomBefore) === JSON.stringify([1, 0, 2]), groupDomBefore);
+  check('group block numbers preview live',
+    JSON.stringify(cards.map((c) => c.querySelector('.page-order').value)) === JSON.stringify(['3', '2', '1']),
+    cards.map((c) => c.querySelector('.page-order').value));
   cards[2].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt4, clientX: 10, bubbles: true }));
   cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt4, bubbles: true }));
   const groupMoveOrder = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);

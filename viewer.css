@@ -169,6 +169,11 @@ body { min-height: 100vh; padding-bottom: calc(132px + env(safe-area-inset-botto
 .page-order { width: 62px; padding: 4px 6px; border-radius: 8px; border: 1px solid var(--line2); background: rgba(255,255,255,.04); color: var(--text);
   font: 600 12px 'Vazirmatn', sans-serif; text-align: center; direction: ltr; }
 .page-order:focus { outline: none; border-color: var(--a1); box-shadow: 0 0 0 2px rgba(139,123,255,.2); }
+/* شماره صفحه‌ها حین درگ به‌صورت زنده تغییر می‌کنند */
+.grid.order-live .page-order { border-color: rgba(139,123,255,.75); color: #c9c2ff;
+  background: rgba(139,123,255,.14); }
+.page-order.order-flash { animation: order-tick .18s ease; }
+@keyframes order-tick { from { transform: scale(.82); opacity: .4; } to { transform: scale(1); opacity: 1; } }
 .spin { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 8px; color: var(--text); font-size: 24px; font-weight: 800; line-height: 1.6; text-align: center; text-shadow: 0 2px 12px rgba(0,0,0,.9); }
 .loading-overlay { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 20px; pointer-events: none; }
 .loading-card { width: min(440px, calc(100vw - 36px)); display: grid; justify-items: center; gap: 12px; padding: 24px 26px;

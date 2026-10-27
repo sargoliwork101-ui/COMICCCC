@@ -8,7 +8,7 @@ const ICON_DUPLICATE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColo
 const ICON_DELETE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m4 4v6m6-6v6"/></svg>';
 const CONCURRENCY = 4;
 const MAX_CANVAS_H = 16000;
-const APP_TITLE = 'Comic to PDF';
+const APP_TITLE = 'PIC TO PDF';
 function setTaskTitle(message = '') {
   document.title = message ? `${message} · ${APP_TITLE}` : APP_TITLE;
 }
@@ -246,6 +246,7 @@ function makeCard(it) {
     if (ev.target.closest('input, button, select, textarea')) { ev.preventDefault(); return; }
     draggedItem = it;
     el.classList.add('dragging');
+    $('grid').classList.add('order-live');
     // اگر کارت عضو یک گروه معتبر است، کل اعضای گروه برای جابه‌جایی بلوکی علامت‌گذاری می‌شوند
     const gid = Number(it.pageGroup);
     const groupMembers = gid > 0 ? items.filter((x) => x.state === 'ok' && Number(x.pageGroup) === gid) : [];
@@ -267,7 +268,10 @@ function makeCard(it) {
       draggedGroupItems = null;
     }
     $('grid').style.removeProperty('--group-color');
+    $('grid').classList.remove('order-live');
     clearDragDropHint();
+    // اگر دراپ معتبری رخ نداده باشد، شماره‌های پیش‌نمایشی به ترتیب واقعی برگردند
+    restoreDragOrderPreview();
     draggedItem = null;
   });
   el.addEventListener('click', (ev) => {
@@ -825,13 +829,13 @@ function clearDragDropHint() {
 }
 
 // جابه‌جایی ترتیبی با درگ: اگر کارت کشیده‌شده عضو گروه باشد، کل بلوک گروه با هم جابه‌جا می‌شود.
-// لنگر درج هرگز نباید داخل بلوک یک گروه بیگانه بیفتد تا گروهی از هم نپاشد.
-function reorderByDrop(dragged, targetEl, before) {
-  const grid = $('grid');
+// طرح درج: کدام المان‌ها جابه‌جا می‌شوند (تکی یا بلوک گروه) و لنگر کجاست.
+// لنگر هرگز داخل بلوک یک گروه بیگانه نمی‌افتد تا گروهی از هم نپاشد.
+function planDrop(dragged, targetEl, before) {
   const gid = Number(dragged.pageGroup);
   const hasGroup = gid > 0 && items.some((it) => it.state === 'ok' && Number(it.pageGroup) === gid);
   const movingEls = hasGroup ? gridGroupBlock(gid) : [dragged.el];
-  if (movingEls.includes(targetEl)) return false; // روی اعضای بلوک خودی، جابه‌جایی بی‌اثر است
+  if (movingEls.includes(targetEl)) return null; // روی اعضای بلوک خودی، جابه‌جایی بی‌اثر است
   let anchor = before ? targetEl : targetEl.nextSibling;
   // اگر هدف عضو یک گروه بیگانه است، لنگر را به لبهٔ بیرونی بلوک آن گروه محدود کن
   const targetItem = items.find((it) => it.el === targetEl);
@@ -842,9 +846,45 @@ function reorderByDrop(dragged, targetEl, before) {
       anchor = before ? foreignBlock[0] : foreignBlock[foreignBlock.length - 1].nextSibling;
     }
   }
-  if (anchor && movingEls.includes(anchor)) return false;
+  if (anchor && movingEls.includes(anchor)) return null;
+  return { movingEls, anchor };
+}
+
+// پیش‌نمایش زندهٔ شماره صفحه‌ها حین درگ (بدون جابه‌جایی DOM تا لحظهٔ رهاکردن)
+function previewDragOrder(dragged, targetEl, before) {
+  const grid = $('grid');
+  const plan = planDrop(dragged, targetEl, before);
+  if (!plan) { restoreDragOrderPreview(); return; }
+  const tentative = Array.from(grid.children).filter((el) => !plan.movingEls.includes(el));
+  const anchorIndex = plan.anchor ? tentative.indexOf(plan.anchor) : tentative.length;
+  tentative.splice(anchorIndex, 0, ...plan.movingEls);
+  tentative.forEach((el, index) => {
+    const input = el.querySelector('.page-order');
+    if (!input) return;
+    input.value = String(index + 1);
+    // ری‌تریگر انیمیشن برای هر به‌روزرسانی پیش‌نمایش
+    input.classList.remove('order-flash');
+    void input.offsetWidth;
+    input.classList.add('order-flash');
+  });
+}
+// بازگرداندن شماره‌ها به ترتیب واقعی فعلی شبکه (وقتی درگ لغو می‌شود یا روی نوار گروهی می‌رویم)
+function restoreDragOrderPreview() {
+  Array.from($('grid').children).forEach((el, index) => {
+    const input = el.querySelector('.page-order');
+    if (input) {
+      input.classList.remove('order-flash');
+      input.value = String(index + 1);
+    }
+  });
+}
+
+function reorderByDrop(dragged, targetEl, before) {
+  const grid = $('grid');
+  const plan = planDrop(dragged, targetEl, before);
+  if (!plan) return false;
   const firstRects = captureGridRects();
-  movingEls.forEach((el) => grid.insertBefore(el, anchor));
+  plan.movingEls.forEach((el) => grid.insertBefore(el, plan.anchor));
   updatePdfOrderFromGrid();
   playGridMove(firstRects);
   return true;
@@ -1745,7 +1785,7 @@ async function main() {
     ev.preventDefault();
     ev.dataTransfer.dropEffect = 'move';
     const target = ev.target.closest ? ev.target.closest('.item') : null;
-    if (!target || target === draggedItem.el) { clearDragDropHint(); return; }
+    if (!target || target === draggedItem.el) { clearDragDropHint(); clearInsertMarker(); restoreDragOrderPreview(); return; }
     const rect = target.getBoundingClientRect();
     const targetItem = items.find((it) => it.el === target);
     const groupable = targetItem && targetItem.state === 'ok' && draggedItem.state === 'ok';
@@ -1754,6 +1794,7 @@ async function main() {
     const isGroupDrop = groupable && band > 0.28 && band < 0.72;
     if (isGroupDrop) {
       clearInsertMarker();
+      restoreDragOrderPreview();
       if (dragDropTargetEl !== target) {
         clearDragDropHint();
         target.classList.add('group-drop-target');
@@ -1764,10 +1805,20 @@ async function main() {
       clearDragDropHint();
       // نشانگر محل درج؛ برای جابه‌جایی گروهی با رنگ و ضخامت متفاوت از کارت تکی
       const sameGroupBlock = !!draggedGroupItems && draggedGroupItems.some((member) => member.el === target);
-      if (sameGroupBlock) { clearInsertMarker(); return; }
+      if (sameGroupBlock) { clearInsertMarker(); restoreDragOrderPreview(); return; }
       // RTL: نیمهٔ راست کارت یعنی درج قبل از آن، نیمهٔ چپ یعنی بعد از آن
       const before = ev.clientX > rect.left + rect.width / 2;
       setInsertMarker(target, before, !!draggedGroupItems);
+      // شماره صفحه‌های زیر کارت‌ها به‌صورت زنده با محل درج جدید به‌روز می‌شوند
+      previewDragOrder(draggedItem, target, before);
+    }
+  });
+  // با ترک محدودهٔ شبکه، پیش‌نمایش شماره‌ها به ترتیب واقعی برمی‌گردد
+  grid.addEventListener('dragleave', (ev) => {
+    if (!draggedItem) return;
+    if (ev.target === grid || !grid.contains(ev.relatedTarget)) {
+      clearInsertMarker();
+      restoreDragOrderPreview();
     }
   });
   grid.addEventListener('drop', (ev) => {
