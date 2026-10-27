@@ -85,6 +85,9 @@ body { min-height: 100vh; padding-bottom: calc(132px + env(safe-area-inset-botto
 .mini:hover { background: rgba(139,123,255,.18); border-color: rgba(139,123,255,.55); }
 .mini:active { transform: scale(.97); }
 .mini.warn { border-color: rgba(251,113,133,.5); color: #fda4af; }
+#btnDeleteSel { display: inline-flex; align-items: center; gap: 6px; }
+#btnDeleteSel svg { width: 15px; height: 15px; flex: none; }
+#btnDeleteSel:not(:disabled):hover { background: rgba(251,113,133,.16); border-color: rgba(251,113,133,.8); }
 .bar.small { height: 8px; flex: 1; }
 #loadBar { height: 100%; width: 0; background: var(--grad); transition: width .2s; border-radius: 999px; }
 

@@ -351,6 +351,34 @@ const $ = (id) => window.document.getElementById(id);
   for (let i = 0; i < 80; i++) { await sleep(100); if (!ev('building')) break; }
   check('image save finished', !ev('building'));
 
+  // 2.30: حذف دسته‌جمعی کارت‌های انتخاب‌شده
+  {
+    const beforeCount = ev('items').length;
+    check('bulk delete button exists in toolbar', !!$('btnDeleteSel'));
+    check('bulk delete enabled while cards are selected', !$('btnDeleteSel').disabled);
+    $('btnNone').click();
+    check('bulk delete disabled when nothing is selected', $('btnDeleteSel').disabled);
+    // مسیر لغو تأیید: هیچ کارتی نباید حذف شود
+    ev('items.forEach((it) => { if (it.state === "ok") it.selected = true; }); refreshAll()');
+    let confirmMsg = '';
+    window.confirm = (m) => { confirmMsg = m; return false; };
+    $('btnDeleteSel').click();
+    check('cancelled bulk delete keeps every card', ev('items').length === beforeCount);
+    check('bulk confirm states how many images are removed', new RegExp(String(beforeCount)).test(confirmMsg), confirmMsg);
+    // حذف واقعی فقط دو کارت انتخاب‌شده
+    window.confirm = () => true;
+    const keptUrl = ev('items[2].url');
+    ev('items[0].selected = true; items[1].selected = true; items[2].selected = false; refreshAll()');
+    $('btnDeleteSel').click();
+    const after = ev('items');
+    check('bulk delete removed exactly the selected cards', after.length === beforeCount - 2 &&
+      after.every((it) => it.selected === false), after.map((it) => it.url));
+    check('grid DOM matches the remaining items', window.document.querySelectorAll('#grid .item').length === after.length);
+    check('unselected card survives the bulk delete', after.length === 1 && after[0].url === keptUrl);
+    check('bulk delete disabled once nothing remains selected', $('btnDeleteSel').disabled);
+    window.confirm = () => true;
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL DOM TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

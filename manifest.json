@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PIC TO PDF",
-  "version": "2.29",
+  "version": "2.30",
   "description": "دانلود کمیک و وب‌تون به‌صورت PDF یا تصاویر جدا، با کیفیت اصلی",
   "permissions": [
     "activeTab",

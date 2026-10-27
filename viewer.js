@@ -331,18 +331,34 @@ function duplicateItem(source) {
   refreshAll();
   drawThumb(duplicate);
 }
+// حذف واقعی مجموعه‌ای از کارت‌ها پس از تأیید؛ مشترک بین حذف تکی و حذف دسته‌جمعی
+function removeItemsFromGrid(targets) {
+  const remove = new Set(targets);
+  if (cropItem && remove.has(cropItem)) closeCropper();
+  if (lbItem && remove.has(lbItem)) closeLightbox();
+  targets.forEach((it) => {
+    if (it.el && it.el.parentNode) it.el.parentNode.removeChild(it.el);
+    if (lastClicked === it.uid) lastClicked = null;
+  });
+  items = items.filter((item) => !remove.has(item));
+  cleanupPageGroups();
+  updatePdfOrderFromGrid();
+  refreshAll();
+}
 function deleteItem(it) {
   if (!it || building || loading) return;
   if (!confirm(`تصویر ${it.i + 1} حذف شود؟`)) return;
   if (editingPageGroupId !== null) cancelPageGroupEdit();
-  if (cropItem === it) closeCropper();
-  if (lbItem === it) closeLightbox();
-  items = items.filter((item) => item !== it);
-  if (it.el && it.el.parentNode) it.el.parentNode.removeChild(it.el);
-  if (lastClicked === it.uid) lastClicked = null;
-  cleanupPageGroups();
-  updatePdfOrderFromGrid();
-  refreshAll();
+  removeItemsFromGrid([it]);
+}
+// حذف دسته‌جمعی: فقط کارت‌های بارگیری‌شده و انتخاب‌شده؛ یک تأیید برای کل مجموعه
+function deleteSelectedItems() {
+  if (building || loading) return;
+  const targets = items.filter((it) => it.state === 'ok' && it.selected);
+  if (!targets.length) return;
+  if (!confirm(`${targets.length} تصویر انتخاب‌شده حذف شوند؟`)) return;
+  if (editingPageGroupId !== null) cancelPageGroupEdit();
+  removeItemsFromGrid(targets);
 }
 
 // پالت رنگی گروه‌ها: هر گروه شمارهٔ نمایشی خودش رنگ ثابتی دارد تا گروه‌ها به‌راحتی از هم تفکیک شوند
@@ -652,6 +668,9 @@ function refreshSummary(groupView = buildPageGroupView()) {
     retryAllButton.disabled = building || editingPageGroupId !== null;
   }
   ['btnAll', 'btnNone', 'btnInv'].forEach((id) => { $(id).disabled = building || editingPageGroupId !== null; });
+  // حذف دسته‌جمعی فقط وقتی ممکن است که حداقل یک کارت سالم انتخاب‌شده وجود داشته باشد
+  const deleteSelButton = $('btnDeleteSel');
+  if (deleteSelButton) deleteSelButton.disabled = loading || building || editingPageGroupId !== null || sel === 0;
   $('buildBtn').disabled = loading || building || editingPageGroupId !== null || sel === 0;
   $('saveImgBtn').disabled = loading || building || editingPageGroupId !== null || sel === 0;
   $('seamless').disabled = loading || building || $('twoPerPage').checked;
@@ -1893,6 +1912,7 @@ async function main() {
   $('btnAll').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = true; }); refreshAll(); };
   $('btnNone').onclick = () => { items.forEach((it) => { it.selected = false; }); refreshAll(); };
   $('btnInv').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = !it.selected; }); refreshAll(); };
+  $('btnDeleteSel').onclick = deleteSelectedItems;
   $('btnGroupPage').onclick = groupSelectedItems;
   $('btnCancelGroupEdit').onclick = cancelPageGroupEdit;
   $('btnUngroupPage').onclick = ungroupSelectedItems;
