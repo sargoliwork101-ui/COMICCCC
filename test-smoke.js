@@ -163,12 +163,12 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     }, async (_bmp, _worker, options) => {
       attempted.push({ profile: options.profile, passes: options.passes });
       passCount++;
-      return passCount === 1 ? [] : [{ text: 'hello world', conf: 70 }];
+      return passCount === 1 ? [] : [{ text: 'hello world again', conf: 80 }];
     });
     check('automatic OCR fallback tries the dense profile after a failed sparse pass',
       JSON.stringify(pageModes) === JSON.stringify(['11', '6']) && attempted.map((entry) => entry.profile).join(',') === 'sparse,dense');
     check('alternate OCR profile keeps adaptive contrast enabled', attempted[1].passes.includes('adaptive'));
-    check('automatic OCR fallback returns the successful method result', lines.length === 1 && lines[0].text === 'hello world');
+    check('automatic OCR fallback returns the successful method result', lines.length === 1 && lines[0].text === 'hello world again');
   }
 
   // groupLines: two close lines merge into one block
@@ -207,6 +207,11 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('extractLines offset applied', out[0] && out[0].y0 === 0);
     const out2 = OcrTools.extractLines(data, 50, false, 40, 'eng', null, 30);
     check('extractLines x/y offsets', out2[0] && out2[0].y0 === 50 && out2[0].x0 === 30, out2[0]);
+    const tiny = { blocks: [{ paragraphs: [{ lines: [
+      { text: 'small', confidence: 35, bbox: { x0: 5, x1: 35, y0: 0, y1: 5 } }
+    ] }] }] };
+    check('fallback OCR accepts small low-resolution comic lettering',
+      OcrTools.extractLines(tiny, 0, false, 25, 'eng').length === 1);
   }
 
   // ---------- Typeset ----------

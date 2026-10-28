@@ -54,7 +54,7 @@ async function runTranslate() {
   $('progressBar').style.width = '0';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
-  let totalBlocks = 0, doneImgs = 0, trFail = 0, noText = 0, rawTotal = 0, keptTotal = 0;
+  let totalBlocks = 0, translatedBlocks = 0, reviewBlocks = 0, doneImgs = 0, trFail = 0, noText = 0, rawTotal = 0, keptTotal = 0;
   const ocrProfile = $('trOcrProfile').value;
   const enhanceContrast = $('trContrast').checked;
   const precise = $('trPrecise').checked;
@@ -98,18 +98,29 @@ async function runTranslate() {
         it.ocr = { lang, blocks };
         if (!blocks.length) { noText++; it.edited = null; }
         else {
-          setStatus(`در حال ترجمهٔ ${blocks.length} متن در تصویر ${k + 1} از ${list.length}...`);
-          let next = 0, n = 0;
-          await Promise.all(Array.from({ length: Math.min(3, blocks.length) }, async () => {
-            while (next < blocks.length && !TR.cancel) {
-              const b = blocks[next++];
-              const r = await TranslateTools.translate(b.text, L.sl);
-              b.tr = r.text;
-              if (!r.ok) trFail++;
-              n++;
-              prog(0.6 + 0.35 * (n / blocks.length));
-            }
-          }));
+          const minTranslateConfidence = 55;
+          const translatable = blocks.filter((block) => Number.isFinite(block.conf) && block.conf >= minTranslateConfidence);
+          const reviewCount = blocks.length - translatable.length;
+          totalBlocks += blocks.length;
+          translatedBlocks += translatable.length;
+          reviewBlocks += reviewCount;
+          if (reviewCount) {
+            setStatus(`${reviewCount} متن با اطمینان OCR پایین برای جلوگیری از ترجمهٔ بی‌معنی فعلاً رد شد؛ تصویر ${k + 1} از ${list.length}. در ویرایشگر متن OCR را اصلاح و «ترجمهٔ دوباره» را بزنید.`);
+          }
+          if (translatable.length) {
+            setStatus(`در حال ترجمهٔ ${translatable.length} متن مطمئن در تصویر ${k + 1} از ${list.length}...`);
+            let next = 0, n = 0;
+            await Promise.all(Array.from({ length: Math.min(3, translatable.length) }, async () => {
+              while (next < translatable.length && !TR.cancel) {
+                const b = translatable[next++];
+                const r = await TranslateTools.translate(b.text, L.sl);
+                b.tr = r.text;
+                if (!r.ok) trFail++;
+                n++;
+                prog(0.6 + 0.35 * (n / translatable.length));
+              }
+            }));
+          }
           if (!$('ocrEnabled').checked) {
             it.ocr = null; it.edited = null;
             refreshCard(it); drawThumb(it);
@@ -121,9 +132,8 @@ async function runTranslate() {
             refreshCard(it); drawThumb(it);
             break;
           }
-          totalBlocks += blocks.length;
           doneImgs++;
-          $('sPages').innerText = totalBlocks;
+          $('sPages').innerText = translatedBlocks;
         }
       } catch (e) {
         console.warn(e);
@@ -140,10 +150,13 @@ async function runTranslate() {
     } else if (!totalBlocks && !TR.cancel) {
       setStatus(`متنی پیدا نشد. موتور OCR کار کرد (${rawTotal} خط خام، ${keptTotal} خط معتبر) ولی متن قابل‌قبولی نبود. ` +
         `مطمئن شوید زبان درست انتخاب شده (الان: ${L.name}) و گزینهٔ «دقت بالاتر» روشن است.`);
-    } else if (totalBlocks && trFail >= totalBlocks) {
-      setStatus('متن‌ها خوانده شد ولی ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید. (متن اصلی در ویرایشگر موجود است)');
+    } else if (translatedBlocks && trFail >= translatedBlocks) {
+      setStatus('متن‌های مطمئن خوانده شد ولی ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید. متن‌های OCR با اطمینان پایین در ویرایشگر برای اصلاح باقی مانده‌اند.');
+    } else if (!translatedBlocks && reviewBlocks) {
+      setStatus(`${reviewBlocks} متن شناسایی شد ولی اطمینان OCR کافی نبود؛ برای جلوگیری از ترجمهٔ چرت، ترجمهٔ خودکار انجام نشد. روی ✎ تصویر بزنید، متن OCR را اصلاح کنید و «ترجمهٔ دوباره» را بزنید.`);
     } else {
-      setStatus(`${TR.cancel ? 'متوقف شد. ' : ''}${totalBlocks} متن در ${doneImgs} تصویر ترجمه شد` +
+      setStatus(`${TR.cancel ? 'متوقف شد. ' : ''}${translatedBlocks} متن مطمئن در ${doneImgs} تصویر ترجمه شد` +
+        (reviewBlocks ? ` — ${reviewBlocks} متن با اطمینان OCR پایین برای اصلاح دستی کنار گذاشته شد` : '') +
         (noText ? ` (${noText} تصویر بدون متن)` : '') +
         (trFail ? ` — ترجمهٔ ${trFail} متن ناموفق بود` : '') +
         '. روی دکمهٔ ✎ هر تصویر بزنید تا ترجمه‌ها را ویرایش کنید.');

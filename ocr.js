@@ -38,7 +38,8 @@
       if (stats) stats.raw++;
       const h = l.bbox.y1 - l.bbox.y0;
       if (!text || l.confidence < minConf || letterCount(text) < (cjk ? 1 : 2)) return;
-      if (h < 8 || h > 220) return;
+      // Compressed comic lettering can be only 4–7 source pixels high; don't discard it before fallback profiles run.
+      if (h < 4 || h > 220) return;
       if (!looksReal(text, lang)) return;
       // خط‌های خیلی کوتاه فقط با اطمینان بالا پذیرفته می‌شوند (حذف نویز)
       if (letterCount(text) < (cjk ? 2 : 5) && l.confidence < 70) return;
@@ -286,9 +287,9 @@
   }
 
   const OCR_PROFILES = {
-    sparse: { psm: '11', name: 'متن پراکنده' },
-    dense: { psm: '6', name: 'بلوک متنی فشرده' },
-    comic: { psm: '12', name: 'کمیک و حباب گفتگو' }
+    sparse: { psm: '11', minConf: 40, name: 'متن پراکنده' },
+    dense: { psm: '6', minConf: 30, name: 'بلوک متنی فشرده' },
+    comic: { psm: '12', minConf: 25, name: 'کمیک و حباب گفتگو' }
   };
 
   function profilePasses(profile, opts) {
@@ -304,7 +305,8 @@
     const chars = lines.reduce((sum, line) => sum + Array.from(line.text || '').length, 0);
     const confidence = lines.reduce((sum, line) => sum + (Number(line.conf) || 0), 0) / lines.length;
     const score = confidence + Math.min(15, lines.length * 2) + Math.min(10, chars * 0.1);
-    return { score, reliable: confidence >= 58 && chars >= (cjk ? 1 : 3) };
+    // Short or merely plausible output is not enough to stop fallback: weak scripts often score highly on a few glyphs.
+    return { score, reliable: confidence >= 72 && chars >= (cjk ? 4 : 12) };
   }
 
   // Auto mode tries two alternate Tesseract page-segmentation profiles only when the previous pass is weak.
@@ -320,7 +322,7 @@
         await worker.setParameters({ tessedit_pageseg_mode: profile.psm, preserve_interword_spaces: '1' });
         const localStats = { raw: 0, kept: 0 };
         const lines = await recognize(bmp, worker, {
-          ...o, profile: id, passes: profilePasses(id, o), stats: localStats,
+          ...o, profile: id, minConf: profile.minConf, passes: profilePasses(id, o), stats: localStats,
           onSlice: o.onSlice ? (fraction) => o.onSlice((index + fraction) / profileIds.length) : undefined
         });
         const rating = rateRecognition(lines, o.cjk);

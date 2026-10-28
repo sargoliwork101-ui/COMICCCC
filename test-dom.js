@@ -267,8 +267,11 @@ const $ = (id) => window.document.getElementById(id);
   check('ocr on re-enables translate', !$('btnTranslate').disabled);
 
   ev(`OcrTools.createOcrWorker = async () => ({ recognize: async () => ({ data: { blocks: [] } }), setParameters: async () => {}, terminate: async () => {} });
-    OcrTools.ocrBitmap = async (bmp, worker, opts) => { window.__ocrPasses = opts.passes.slice(); window.__ocrProfile = opts.profile; return [{ text: 'Hello', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30 }]; };
-    OcrTools.groupLines = (lines) => [{ id: 1, enabled: true, bg: 'auto', tr: '', text: 'Hello', x0: 10, x1: 90, y0: 10, y1: 30, lineH: 16 }];`);
+    OcrTools.ocrBitmap = async (bmp, worker, opts) => { window.__ocrPasses = opts.passes.slice(); window.__ocrProfile = opts.profile; return [{ text: 'Hello world from OCR', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30 }]; };
+    OcrTools.groupLines = (lines) => [
+      { id: 1, enabled: true, bg: 'auto', tr: '', text: 'Hello', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30, lineH: 16 },
+      { id: 2, enabled: true, bg: 'auto', tr: '', text: 'uncertain', conf: 30, x0: 10, x1: 90, y0: 50, y1: 70, lineH: 16 }
+    ];`);
   $('trOnlySel').checked = false;
   $('btnTranslate').click();
   check('translate dialog opens', !$('trDialog').classList.contains('hidden'));
@@ -280,6 +283,8 @@ const $ = (id) => window.document.getElementById(id);
   check('ocr data attached', items.some((it) => it.ocr && it.ocr.blocks.length), items.map((it) => !!(it.ocr && it.ocr.blocks.length)));
   const translated = items.find((it) => it.ocr && it.ocr.blocks.length);
   check('translation filled from mock fetch', translated && translated.ocr.blocks[0].tr === 'سلام', translated && translated.ocr.blocks[0].tr);
+  check('low-confidence OCR is retained for correction, not auto-translated as gibberish',
+    translated && translated.ocr.blocks[1].tr === '' && translated.ocr.blocks[1].text === 'uncertain' && /اطمینان OCR پایین/.test($('statusText').textContent));
   check('edited image produced', !!translated.edited);
 
   ev('openEditor(items.find((it) => it.ocr && it.ocr.blocks.length))');
@@ -340,7 +345,7 @@ const $ = (id) => window.document.getElementById(id);
   directEditor.innerHTML = '<span>ترجمهٔ روی تصویر</span>';
   directEditor.dispatchEvent(new window.Event('input', { bubbles: true }));
   check('typing in image box updates translation and sidebar', blk0.tr === 'ترجمهٔ روی تصویر' && richEditor.textContent === 'ترجمهٔ روی تصویر', { text: blk0.tr, sidebar: richEditor.textContent });
-  check('resizable overlay handles exist', window.document.querySelectorAll('.ed-box .ed-resize').length === 8);
+  check('resizable overlay handles exist for each text box', window.document.querySelector('.ed-box-text').closest('.ed-box').querySelectorAll('.ed-resize').length === 8);
   await sleep(1000);
   check('edited image survives rich-text edits', !!translated.edited);
 
