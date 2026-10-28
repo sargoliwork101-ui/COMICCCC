@@ -28,6 +28,27 @@ window.document.body.appendChild(img({ src: 'https://cdn.test/small.gif' }, 100,
 const srcset = img({ src: 'https://cdn.test/loading.gif' }, 300, 300);
 srcset.setAttribute('srcset', 'https://cdn.test/set-1x.jpg 1x, https://cdn.test/set-2x.jpg 2x');
 window.document.body.appendChild(srcset);
+// Regression: the browser has already loaded a small src candidate, but a larger responsive file exists.
+const responsiveLoaded = img({ src: 'https://cdn.test/comic-page-300.jpg' }, 300, 420);
+responsiveLoaded.setAttribute('srcset', 'https://cdn.test/comic-page-300.jpg 300w, https://cdn.test/comic-page-1800.jpg 1800w');
+Object.defineProperty(responsiveLoaded, 'currentSrc', { value: 'https://cdn.test/comic-page-300.jpg', configurable: true });
+window.document.body.appendChild(responsiveLoaded);
+// Regression: a loaded thumbnail must not take precedence over an explicit original/full-resolution URL.
+const dataOriginal = img({ src: 'https://cdn.test/thumbnail-240.jpg', 'data-original': 'https://cdn.test/comic-original-2400.jpg' }, 300, 420);
+Object.defineProperty(dataOriginal, 'currentSrc', { value: 'https://cdn.test/thumbnail-240.jpg', configurable: true });
+window.document.body.appendChild(dataOriginal);
+const linkedOriginal = window.document.createElement('a');
+linkedOriginal.href = 'https://cdn.test/comic-linked-original.jpg';
+linkedOriginal.appendChild(img({ src: 'https://cdn.test/comic-linked-thumb.jpg' }, 300, 420));
+window.document.body.appendChild(linkedOriginal);
+const picture = window.document.createElement('picture');
+const pictureSource = window.document.createElement('source');
+pictureSource.setAttribute('srcset', 'https://cdn.test/picture-page-320.jpg 320w, https://cdn.test/picture-page-1600.jpg 1600w');
+picture.appendChild(pictureSource);
+const pictureImage = img({ src: 'https://cdn.test/picture-fallback.jpg' }, 300, 420);
+Object.defineProperty(pictureImage, 'currentSrc', { value: 'https://cdn.test/picture-page-320.jpg', configurable: true });
+picture.appendChild(pictureImage);
+window.document.body.appendChild(picture);
 // CSS background element
 const div = window.document.createElement('div');
 div.style.backgroundImage = 'url("https://cdn.test/bg.webp")';
@@ -209,6 +230,14 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   check('relative URL resolved', urls.includes('https://comic.test/relative/x.jpg'));
   check('small image filtered', !urls.some((u) => u.includes('small.gif')));
   check('srcset 2x chosen', urls.includes('https://cdn.test/set-2x.jpg') && !urls.includes('https://cdn.test/place.gif'));
+  check('loaded responsive image uses its largest srcset candidate',
+    urls.includes('https://cdn.test/comic-page-1800.jpg') && !urls.includes('https://cdn.test/comic-page-300.jpg'), urls);
+  check('explicit data-original beats an already loaded thumbnail',
+    urls.includes('https://cdn.test/comic-original-2400.jpg') && !urls.includes('https://cdn.test/thumbnail-240.jpg'), urls);
+  check('direct image link is preferred over its thumbnail',
+    urls.includes('https://cdn.test/comic-linked-original.jpg') && !urls.includes('https://cdn.test/comic-linked-thumb.jpg'), urls);
+  check('picture source uses its highest candidate',
+    urls.includes('https://cdn.test/picture-page-1600.jpg') && !urls.includes('https://cdn.test/picture-page-320.jpg'), urls);
   check('css background collected', urls.includes('https://cdn.test/bg.webp'));
   check('no duplicates', new Set(urls).size === urls.length);
   check('message payload fields', sent[0].type === 'WTPDF_URLS' && sent[0].name === 'comic.pdf' && sent[0].pageUrl === 'https://comic.test/episode/1?x=1');
