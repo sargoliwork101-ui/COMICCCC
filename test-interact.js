@@ -418,6 +418,20 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
       ta.value === 'hello [size=30]world[/size]', ta.value);
     ta.remove();
   }
+  // ---- OCR source text copy button inside the editor ----
+  {
+    let copied = '';
+    h.window.navigator.clipboard = { writeText: async (t) => { copied = t; } };
+    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "Recognizable english sentence", tr: "ترجمه", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
+    const copyBtn = h.$('edList').querySelector('.blk-copy-orig');
+    check('editor exposes an OCR copy button', !!copyBtn);
+    copyBtn.click();
+    await sleep(10);
+    check('copy button puts the English OCR text on the clipboard', copied === 'Recognizable english sentence', copied);
+    check('copy button shows the copied state', copyBtn.classList.contains('copied'));
+    h.$('edClose').click();
+  }
+
   {
     // the shared block toolbar drives both block-level (no selection) and inline (selection) styling
     h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "hi", tr: "hello world", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');

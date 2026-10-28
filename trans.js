@@ -154,6 +154,25 @@ async function runTranslate() {
   }
 }
 
+// کپی متن ساده در کلیپ‌بورد؛ در نبود Clipboard API (مجوز/پروتکل) از روش قدیمی textarea استفاده می‌کند
+async function copyPlainText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    ta.remove();
+    return ok;
+  }
+}
+
 // ---------- ویرایشگر ----------
 let EDI = null, edUrl = null, edTimer = null, edDirty = false, edBusy = false, edPending = false;
 // تریگر زمانی اطمینان: همان ۹۰۰ms قبلی، اما وقتی کاربر هنوز داخل فیلدهای ویرایشگر است رندر عقب می‌افتد
@@ -340,6 +359,12 @@ function buildEditor() {
     row.dataset.id = b.id;
     row.innerHTML = `<div class="blk-top"><span class="blk-n">${b.id}</span>
       <label><input type="checkbox" ${b.enabled ? 'checked' : ''}> جایگزین شود</label>
+      <button type="button" class="fmt-btn blk-copy-orig" title="کپی متن شناسایی‌شدهٔ انگلیسی (OCR)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+      </button>
       <select class="sel blk-bg"><option value="auto">پس‌زمینه: خودکار</option><option value="white">پس‌زمینه: سفید</option>
       <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن (متن با حاشیه)</option></select></div>
       <div class="blk-format">
@@ -471,6 +496,17 @@ function buildEditor() {
       scheduleApply();
     };
     resetBtn.onclick = () => { Object.assign(b, FMT_DEFAULTS); syncFmt(); scheduleApply(); };
+    // کپی متن انگلیسی OCRشدهٔ همین بلوک در کلیپ‌بورد، بدون خروج از ویرایشگر
+    const copyOrigBtn = row.querySelector('.blk-copy-orig');
+    copyOrigBtn.onclick = async () => {
+      const ok = await copyPlainText(b.text || '');
+      copyOrigBtn.classList.toggle('copied', ok);
+      copyOrigBtn.title = ok ? 'کپی شد ✓' : 'کپی ناموفق بود';
+      setTimeout(() => {
+        copyOrigBtn.classList.remove('copied');
+        copyOrigBtn.title = 'کپی متن شناسایی‌شدهٔ انگلیسی (OCR)';
+      }, 1400);
+    };
     list.appendChild(row);
   });
 }
