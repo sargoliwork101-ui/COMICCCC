@@ -69,11 +69,11 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('manual next selector input present', !!pdoc.getElementById('nextSelector'));
   check('manual image selector input present', !!pdoc.getElementById('imageSelector'));
   check('advanced F12 section present', !!pdoc.querySelector('.advanced summary'));
-  const readerOnly = pdoc.getElementById('readerOnlyFields');
-  check('reader-only container exists and hides both controls by default',
-    readerOnly && readerOnly.classList.contains('hidden') &&
-    readerOnly.contains(pdoc.getElementById('pageLimit')) &&
-    !!readerOnly.querySelector('.advanced'));
+  const pagedFields = pdoc.getElementById('pagedModeFields');
+  check('paged-mode container exists and hides both controls by default',
+    pagedFields && pagedFields.classList.contains('hidden') &&
+    pagedFields.contains(pdoc.getElementById('pageLimit')) &&
+    !!pagedFields.querySelector('.advanced'));
   check('page limit label is generic (no site name)',
     !/Google Books/i.test(pdoc.querySelector('label[for="pageLimit"]').textContent));
   check('idle status box hidden with no filler text', pdoc.getElementById('statusBox').classList.contains('hidden') &&
@@ -85,30 +85,26 @@ check('popup has setStatus helper (text only)', /const setStatus = \(text\)/.tes
 check('popup reveals the box only via showError', /const showError = \(text\)/.test(popupCode) &&
   /statusBox\.classList\.remove\('hidden'\)/.test(popupCode));
 
-// reader-only visibility helpers, extracted through their marker block and unit-tested directly
+// mode-gated visibility helper, extracted from popup.js and unit-tested directly
 {
-  const startMarker = '// ---- reader-only field helpers';
-  const endMarker = '// ---- end reader-only field helpers';
-  const helperCode = popupCode.slice(popupCode.indexOf(startMarker), popupCode.indexOf(endMarker) + endMarker.length);
+  const match = popupCode.match(/const applyPagedModeFields = \(mode\) => \{[\s\S]*?\};/);
   const stub = window.document.createElement('div');
   stub.className = 'hidden';
-  window.readerOnlyFields = stub;
-  window.eval(helperCode);
-  check('helper: books.google hostname is a paged reader',
-    window.eval('isPagedReaderUrl("https://books.google.com/books?id=abc&pg=PA1")') === true &&
-    window.eval('isPagedReaderUrl("https://books.google.co.uk/books/edition/x/abcd")') === true);
-  check('helper: ordinary sites are not paged readers',
-    window.eval('isPagedReaderUrl("https://m.webtoons.com/en/comic/ep/1")') === false);
-  window.eval('applyReaderOnlyFields("https://books.google.com/books?id=abc")');
-  check('helper: reader tab reveals the fields', !stub.classList.contains('hidden'));
-  window.eval('applyReaderOnlyFields("https://example.com/comic/12")');
-  check('helper: ordinary site hides the fields', stub.classList.contains('hidden'));
-  window.eval('applyReaderOnlyFields("not-a-url")');
-  check('helper: invalid URL stays hidden', stub.classList.contains('hidden'));
+  window.pagedModeFields = stub;
+  // const bindings do not survive separate eval calls; assign the helper onto the global instead
+  window.eval(match[0].replace('const applyPagedModeFields', 'window.applyPagedModeFields'));
+  window.eval('applyPagedModeFields("scroll")');
+  check('helper: scroll mode hides the paged fields', stub.classList.contains('hidden'));
+  window.eval('applyPagedModeFields("auto")');
+  check('helper: auto mode reveals the paged fields', !stub.classList.contains('hidden'));
+  window.eval('applyPagedModeFields("manual")');
+  check('helper: manual mode keeps the paged fields visible', !stub.classList.contains('hidden'));
+  window.eval('applyPagedModeFields("scroll")');
+  check('helper: returning to scroll hides the fields again', stub.classList.contains('hidden'));
 }
 
 // interactive behavior: run the real popup.html + popup.js with a mocked chrome API
-async function runPopupOnce(executeResult, shouldReject, tabUrl = '') {
+async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   const dom2 = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
     url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
   });
@@ -121,8 +117,8 @@ async function runPopupOnce(executeResult, shouldReject, tabUrl = '') {
     configurable: true
   });
   w.chrome = {
-    // popup.js uses the callback form; promise support is kept for any other caller
-    tabs: { query: (_q, cb) => { const res = [{ id: 1, url: tabUrl }]; if (cb) cb(res); return Promise.resolve(res); } },
+    // start handler resolves the active tab before injecting; the popup itself no longer uses tabs for field visibility
+    tabs: { query: async () => [{ id: 1 }] },
     scripting: {
       executeScript: shouldReject
         ? async () => { throw new Error('Cannot access chrome:// URLs'); }
@@ -136,12 +132,15 @@ async function runPopupOnce(executeResult, shouldReject, tabUrl = '') {
     }
   };
   vm.runInContext(popupCode, c, { filename: 'popup.js' });
-  w.document.getElementById('startBtn').click();
-  await new Promise((r) => setTimeout(r, 10));
+  if (clickStart) {
+    w.document.getElementById('startBtn').click();
+    await new Promise((r) => setTimeout(r, 10));
+  }
   return {
+    win: w,
     boxHidden: w.document.getElementById('statusBox').classList.contains('hidden'),
     text: w.document.getElementById('statusText').textContent,
-    readerHidden: w.document.getElementById('readerOnlyFields').classList.contains('hidden')
+    pagedHidden: w.document.getElementById('pagedModeFields').classList.contains('hidden')
   };
 }
 
@@ -219,11 +218,18 @@ async function runPopupOnce(executeResult, shouldReject, tabUrl = '') {
   check('failed run shows the box with the error', !errorRun.boxHidden && /خطا/.test(errorRun.text), errorRun);
   const secondSuccess = await runPopupOnce({ count: 2 });
   check('later success clears a previously shown error', secondSuccess.boxHidden && secondSuccess.text === '', secondSuccess);
-  // reader-only controls follow the active tab URL
-  const comicTab = await runPopupOnce({ count: 1 }, false, 'https://m.webtoons.com/en/title/list');
-  check('ordinary tab hides the reader-only controls', comicTab.readerHidden === true, comicTab);
-  const bookTab = await runPopupOnce({ count: 1 }, false, 'https://books.google.com/books?id=abc&pg=PA1');
-  check('Google Books tab reveals the reader-only controls', bookTab.readerHidden === false, bookTab);
+  // paged-mode controls follow the selected collection mode, never the site hostname
+  const modePopup = await runPopupOnce({ count: 1 }, false, false);
+  const mpw = modePopup.win;
+  const fieldsEl = mpw.document.getElementById('pagedModeFields');
+  check('default scroll mode hides the paged controls', fieldsEl.classList.contains('hidden'));
+  mpw.document.querySelector('.mode-btn[data-mode="auto"]').click();
+  check('switching to auto mode reveals the paged controls on any site',
+    !fieldsEl.classList.contains('hidden') && mpw.document.getElementById('pageLimit'));
+  mpw.document.querySelector('.mode-btn[data-mode="manual"]').click();
+  check('manual mode keeps the paged controls visible', !fieldsEl.classList.contains('hidden'));
+  mpw.document.querySelector('.mode-btn[data-mode="scroll"]').click();
+  check('switching back to scroll hides the paged controls', fieldsEl.classList.contains('hidden'));
 
   // two-stage injection: a reader frame reported by the probe must become the scrape target
   {

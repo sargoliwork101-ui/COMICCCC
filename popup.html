@@ -13,7 +13,7 @@
       <h1>PIC TO PDF</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v2.38</span>
+    <span class="version-pill">v2.39</span>
   </div>
 
   <div class="field">
@@ -31,8 +31,8 @@
     <input type="text" id="pdfName" value="comic" spellcheck="false">
   </div>
 
-  <!-- این کنترل‌ها فقط روی تب‌های کتاب‌خوان صفحه‌ای (مثل Google Books) نمایش داده می‌شوند؛ popup.js بر اساس آدرس تب بازشان می‌کند -->
-  <div id="readerOnlyFields" class="hidden">
+  <!-- این کنترل‌ها فقط در حالت‌های ورق‌زدن خودکار/دستی نمایش داده می‌شوند (روی هر سایتی)؛ popup.js بر اساس حالت انتخابی بازشان می‌کند -->
+  <div id="pagedModeFields" class="hidden">
     <div class="field">
       <label for="pageLimit" title="خالی بودن یعنی همهٔ صفحات بدون محدودیت خوانده شوند">حداکثر تعداد صفحات</label>
       <input type="number" id="pageLimit" min="1" step="1" inputmode="numeric" spellcheck="false"
