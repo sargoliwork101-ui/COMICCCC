@@ -349,6 +349,21 @@ kbd { display: inline-block; padding: 1px 7px; border-radius: 7px; border: 1px s
 .modal-card h3 { margin: 0; font: 800 17px 'Vazirmatn', sans-serif; }
 .modal-card .muted { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.9; }
 .modal-card .note { margin: 0; color: #c9a86a; font-size: 11.5px; line-height: 1.9; }
+.ai-settings { border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.025); padding: 9px 12px; }
+.ai-settings > summary { cursor: pointer; color: var(--text); font-size: 12.5px; font-weight: 700; }
+.ai-settings-body { display: flex; flex-direction: column; gap: 10px; padding-top: 12px; }
+.ai-settings-body label:not(.check) { margin: 2px 0 -4px; }
+.ai-settings input[type=password], .ai-settings textarea { width: 100%; background: rgba(255,255,255,.04); border: 1px solid var(--line2);
+  border-radius: 10px; padding: 10px 12px; color: var(--text); font: 500 13px 'Vazirmatn', sans-serif; outline: none; }
+.ai-settings input[type=password] { direction: ltr; text-align: left; }
+.ai-settings textarea { min-height: 150px; resize: vertical; direction: rtl; text-align: right; line-height: 1.9; }
+.ai-settings input[type=password]:focus, .ai-settings textarea:focus { border-color: var(--a1); box-shadow: 0 0 0 3px rgba(139,123,255,.18); }
+.ai-settings #trAiSkillReset { align-self: flex-start; }
+.ai-help { margin: -4px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.8; }
+.ai-help a { color: #b9afff; text-decoration: none; }
+.ai-help a:hover { text-decoration: underline; }
+.ai-error { margin: 0; color: #fda4af; font-size: 11.5px; line-height: 1.8; }
+.ai-error:empty { display: none; }
 .modal-card .sel { width: 100%; }
 .modal-card label:not(.check) { margin: 4px 0 -4px; }
 .modal-actions { display: flex; gap: 10px; margin-top: 4px; }

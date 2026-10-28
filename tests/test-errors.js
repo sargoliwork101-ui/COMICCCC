@@ -56,7 +56,7 @@ function makeHarness({ fetchImpl, jobUrls } = {}) {
   window.scrollTo = () => {};
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
-  for (const f of ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/viewer/viewer.js', '../src/viewer/trans.js']) {
+  for (const f of ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/ai-translate.js', '../src/viewer/viewer.js', '../src/viewer/trans.js']) {
     vm.runInContext(fs.readFileSync(__dirname + '/' + f, 'utf8'), ctx, { filename: f });
   }
   return { dom, window, ctx, ev, storageMap, get scriptingCalls() { return scriptingCalls; }, $: (id) => window.document.getElementById(id) };
@@ -710,6 +710,82 @@ prepare = async (it, r) => {
     } finally {
       h.window.createImageBitmap = originalBitmap;
     }
+  }
+
+  // ---------- 24. optional whole-context AI translation and fallback ----------
+  const prepareAiTranslationHarness = async () => {
+    const h = makeHarness({ jobUrls: ['https://comic.test/a.png', 'https://comic.test/b.png'] });
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    await h.ev('aiSettingsReady');
+    h.ev(`OcrTools.createOcrWorker=async()=>({recognize:async()=>({data:{blocks:[]}}),setParameters:async()=>{},terminate:async()=>{}});
+      OcrTools.ocrBitmap=async()=>[{text:'Hello',conf:90,x0:10,x1:90,y0:10,y1:30}];
+      OcrTools.groupLines=()=>[{id:1,enabled:true,bg:'auto',tr:'',text:'Hello',x0:10,x1:90,y0:10,y1:30,lineH:16}];`);
+    h.$('trOnlySel').checked = false;
+    return h;
+  };
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0; window.__freeCalls=0;
+      AiTranslateTools.translateBatch=async()=>{window.__aiCalls++;return new Map();};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiEnabled').checked = false;
+    await h.ev('runTranslate()');
+    check('AI opt-in off spends zero Gemini requests', h.ev('window.__aiCalls') === 0);
+    check('AI opt-in off preserves the established translation path', h.ev('window.__freeCalls') === 2,
+      h.ev('window.__freeCalls'));
+  }
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0; window.__freeCalls=0; window.__aiEntryCount=0;
+      AiTranslateTools.translateBatch=async(options)=>{window.__aiCalls++;window.__aiEntryCount=options.entries.length;
+        return new Map(options.entries.map(entry=>[entry.id,'ترجمه طبیعی '+entry.id]));};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiEnabled').checked = true;
+    h.$('trAiKey').value = 'test-local-key';
+    h.$('trAiSkill').value = 'لحن صمیمی و طبیعی';
+    await h.ev('runTranslate()');
+    check('AI opt-in sends all selected pages in one request', h.ev('window.__aiCalls') === 1 && h.ev('window.__aiEntryCount') === 2,
+      { calls: h.ev('window.__aiCalls'), entries: h.ev('window.__aiEntryCount') });
+    check('successful AI batch never spends the old per-bubble fallback', h.ev('window.__freeCalls') === 0);
+    check('AI translations render back onto every image', h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr.startsWith("ترجمه طبیعی"))'));
+    check('AI settings stay local for the next use', h.storageMap.get('gemini_translation_settings_v1') &&
+      h.storageMap.get('gemini_translation_settings_v1').apiKey === 'test-local-key' &&
+      h.storageMap.get('gemini_translation_settings_v1').skill === 'لحن صمیمی و طبیعی');
+    check('API key never enters the page profile', !JSON.stringify(h.ev('collectPageProfile()')).includes('test-local-key'));
+    check('completed status mentions the single AI request', /یک درخواست/.test(h.$('statusText').textContent), h.$('statusText').textContent);
+  }
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0; window.__freeCalls=0;
+      AiTranslateTools.translateBatch=async()=>{window.__aiCalls++;const e=new Error('quota');e.status=429;throw e;};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه جایگزین',ok:true};};`);
+    h.$('trAiEnabled').checked = true;
+    h.$('trAiKey').value = 'test-local-key';
+    await h.ev('runTranslate()');
+    check('AI failure is not retried to conserve quota', h.ev('window.__aiCalls') === 1);
+    check('AI failure falls back only once per missing bubble', h.ev('window.__freeCalls') === 2,
+      h.ev('window.__freeCalls'));
+    check('fallback still produces translated images', h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr==="ترجمه جایگزین")'));
+    check('fallback is explained without exposing the key', /جایگزین/.test(h.$('statusText').textContent) &&
+      !h.$('failed').textContent.includes('test-local-key') && /سقف/.test(h.$('failed').textContent), h.$('failed').textContent);
+  }
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0; window.__freeCalls=0;
+      AiTranslateTools.translateBatch=async(options)=>{window.__aiCalls++;return new Promise((resolve,reject)=>{
+        options.signal.addEventListener('abort',()=>reject(new Error('aborted')));
+      });};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiEnabled').checked = true;
+    h.$('trAiKey').value = 'test-local-key';
+    const running = h.ev('runTranslate()');
+    for (let i = 0; i < 60 && h.ev('window.__aiCalls') === 0; i++) await sleep(20);
+    check('AI request is in flight before cancellation', h.ev('window.__aiCalls') === 1);
+    h.$('btnStopTr').click();
+    await running;
+    check('stopping aborts AI without starting fallback requests', h.ev('window.__freeCalls') === 0 && h.ev('TR.aiController') === null);
+    check('stopped AI run releases the UI and reports cancellation', !h.ev('building') && /متوقف/.test(h.$('statusText').textContent),
+      h.$('statusText').textContent);
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL EDGE-CASE TESTS PASSED');

@@ -17,7 +17,7 @@
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۲.۵۷</span>
+        <span class="version-pill">نسخهٔ ۲.۵۸</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -184,6 +184,23 @@
       <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
       <label class="check" title="اگر خاموش باشد، متن اصلی پاک نمی‌شود و ترجمه با حاشیه روی تصویر قرار می‌گیرد"><input type="checkbox" id="trErase" checked><span>پاک‌کردن متن اصلی زیر ترجمه</span></label>
       <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>
+      <details class="ai-settings" id="aiSettings">
+        <summary>ترجمهٔ هوش مصنوعی با Gemini (اختیاری)</summary>
+        <div class="ai-settings-body">
+          <label class="check" title="اگر خاموش باشد، هیچ درخواست یا مصرفی از سهمیهٔ هوش مصنوعی انجام نمی‌شود"><input type="checkbox" id="trAiEnabled"><span>استفاده از ترجمهٔ یک‌جای هوش مصنوعی</span></label>
+          <p class="note">پیش‌فرض خاموش است. فقط وقتی این گزینه روشن باشد و «شروع ترجمه» را بزنید، تمام متن‌های انتخاب‌شده در یک بستهٔ متنی برای Gemini ارسال می‌شوند.</p>
+          <label for="trAiKey">کلید Gemini API</label>
+          <input id="trAiKey" type="password" dir="ltr" autocomplete="off" spellcheck="false" placeholder="کلید خودتان را وارد کنید">
+          <p class="ai-help"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلید فقط در حافظهٔ محلی همین مرورگر ذخیره می‌شود.</p>
+          <label for="trAiModel">مدل Gemini</label>
+          <input id="trAiModel" type="text" dir="ltr" value="gemini-3.8-flash" spellcheck="false">
+          <label for="trAiSkill">Skill / راهنمای سبک ترجمه</label>
+          <textarea id="trAiSkill" rows="8" spellcheck="false" placeholder="لحن، شیوهٔ ترجمهٔ نام‌ها و سلیقهٔ خودتان را بنویسید"></textarea>
+          <button id="trAiSkillReset" class="mini" type="button">بازگردانی Skill پیشنهادی</button>
+          <p class="note">متن‌ها برای ترجمه به Google ارسال می‌شوند. طبق شرایط Gemini، محتوای پلن رایگان برای بهبود محصولات Google استفاده می‌شود؛ متن حساس وارد نکنید.</p>
+          <p id="trAiError" class="ai-error" role="alert"></p>
+        </div>
+      </details>
       <p class="note">زبان را درست انتخاب کنید؛ اگر زبان اشتباه باشد چیزی خوانده نمی‌شود. ترجمه به اینترنت نیاز دارد. دقت خواندن متن روی فونت‌های خیلی تزیینی یا متن روی نقاشی کمتر است؛ همه‌چیز را می‌توانید بعداً ویرایش کنید.</p>
       <div class="modal-actions">
         <button id="trStart" class="btn">شروع ترجمه</button>
@@ -251,6 +268,7 @@
   <script src="../core/ocr.js"></script>
   <script src="../core/typeset.js"></script>
   <script src="../core/translate.js"></script>
+  <script src="../core/ai-translate.js"></script>
   <script src="../core/pdf-import-store.js"></script>
   <script src="viewer.js"></script>
   <script src="trans.js"></script>

@@ -1,13 +1,50 @@
 /* exported openEditor */ // viewer.js این تابع سراسری را برای بازکردن ادیتور صدا می‌زند.
 // ---------- ترجمهٔ متن تصاویر + ویرایشگر ترجمه + خروجی متنی ----------
 // این فایل بعد از viewer.js بارگذاری می‌شود و از متغیرهای آن (items، building، ...) استفاده می‌کند.
-const TR = { worker: null, lang: null, cancel: false };
+const TR = { worker: null, lang: null, cancel: false, aiController: null };
+const AI_SETTINGS_KEY = 'gemini_translation_settings_v1';
+
+async function loadAiSettings() {
+  try {
+    const stored = await chrome.storage.local.get(AI_SETTINGS_KEY);
+    const settings = stored[AI_SETTINGS_KEY] || {};
+    $('trAiEnabled').checked = settings.enabled === true;
+    $('trAiKey').value = typeof settings.apiKey === 'string' ? settings.apiKey : '';
+    $('trAiModel').value = typeof settings.model === 'string' && settings.model.trim()
+      ? settings.model.trim() : AiTranslateTools.DEFAULT_MODEL;
+    $('trAiSkill').value = typeof settings.skill === 'string' && settings.skill.trim()
+      ? settings.skill : AiTranslateTools.DEFAULT_SKILL;
+  } catch (error) {
+    console.warn('خواندن تنظیمات ترجمهٔ هوش مصنوعی ناموفق بود', error);
+    $('trAiSkill').value = AiTranslateTools.DEFAULT_SKILL;
+  }
+}
+async function saveAiSettings() {
+  try {
+    await chrome.storage.local.set({ [AI_SETTINGS_KEY]: {
+      enabled: $('trAiEnabled').checked,
+      apiKey: $('trAiKey').value.trim(),
+      model: $('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODEL,
+      skill: $('trAiSkill').value.trim() || AiTranslateTools.DEFAULT_SKILL
+    } });
+    return true;
+  } catch (error) {
+    console.warn('ذخیرهٔ تنظیمات ترجمهٔ هوش مصنوعی ناموفق بود', error);
+    return false;
+  }
+}
+const aiSettingsReady = loadAiSettings();
 
 function openTrDialog() {
   if (!$('ocrEnabled').checked) return;
+  $('trAiError').textContent = '';
   $('trDialog').classList.remove('hidden');
 }
 function closeTrDialog() { $('trDialog').classList.add('hidden'); }
+function cancelTranslation() {
+  TR.cancel = true;
+  if (TR.aiController) { try { TR.aiController.abort(); } catch { /* درخواست قبلاً تمام شده */ } }
+}
 
 async function ensureFont() {
   try { await document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'); } catch { /* ادامه */ }
@@ -39,8 +76,26 @@ async function runTranslate() {
     setStatus('تصویری برای ترجمه پیدا نشد؛ ابتدا چند تصویر بارگذاری‌شده را انتخاب کنید.');
     return;
   }
+  const aiMode = $('trAiEnabled').checked;
+  const aiConfig = aiMode ? {
+    apiKey: $('trAiKey').value,
+    model: $('trAiModel').value,
+    skill: $('trAiSkill').value
+  } : null;
+  if (aiMode) {
+    try {
+      if (!aiConfig.apiKey.trim()) throw new Error('برای استفاده از ترجمهٔ هوش مصنوعی، ابتدا کلید API را وارد کنید.');
+      AiTranslateTools.normalizeModel(aiConfig.model);
+    } catch (error) {
+      $('aiSettings').open = true;
+      $('trAiError').textContent = error.message;
+      $('trDialog').classList.remove('hidden');
+      return;
+    }
+  }
+  saveAiSettings();
 
-  building = true; TR.cancel = false; jobCancelRequested = false;
+  building = true; TR.cancel = false; TR.aiController = null; jobCancelRequested = false;
   setJobHint(true);
   refreshSummary();
   const result = $('result');
@@ -56,7 +111,8 @@ async function runTranslate() {
 
   let totalBlocks = 0, doneImgs = 0, trFail = 0, noText = 0, rawTotal = 0, keptTotal = 0;
   const passes = ['gray', ...($('trContrast').checked ? ['adaptive'] : []), 'bubbles', ...($('trPrecise').checked ? ['wmask'] : [])];
-  const errs = [];
+  const errs = [], aiItems = [];
+  let aiNotice = '';
   try {
     setStatus('در حال بارگذاری موتور تشخیص متن... (بار اول کمی طول می‌کشد)');
     if (!TR.worker || TR.lang !== lang) {
@@ -69,7 +125,10 @@ async function runTranslate() {
       if (TR.cancel) break;
       const it = list[k];
       const base = k / list.length, span = 1 / list.length;
-      const prog = (f) => { $('progressBar').style.width = Math.round((base + span * f) * 100) + '%'; };
+      const prog = (f) => {
+        const ratio = aiMode ? (k + f) / list.length * 0.55 : base + span * f;
+        $('progressBar').style.width = Math.round(ratio * 100) + '%';
+      };
       prog(0);
       setStatus(`در حال خواندن متن تصویر ${k + 1} از ${list.length}...`);
       try {
@@ -91,6 +150,10 @@ async function runTranslate() {
         blocks.forEach((block) => { block.bg = eraseOriginal ? 'auto' : 'none'; });
         it.ocr = { lang, blocks };
         if (!blocks.length) { noText++; it.edited = null; }
+        else if (aiMode) {
+          aiItems.push(it);
+          prog(1);
+        }
         else {
           setStatus(`در حال ترجمهٔ ${blocks.length} متن در تصویر ${k + 1} از ${list.length}...`);
           let next = 0, n = 0;
@@ -127,10 +190,87 @@ async function runTranslate() {
       drawThumb(it);
     }
 
+    // در حالت اختیاری AI، همهٔ صفحه‌ها اول OCR می‌شوند و سپس فقط یک درخواست برای کل متن ارسال می‌شود.
+    if (aiMode && aiItems.length && !TR.cancel && $('ocrEnabled').checked) {
+      const entries = [];
+      aiItems.forEach((it) => {
+        const page = `${it.i + 1}${it.dupNo ? `-copy-${it.dupNo}` : ''}`;
+        it.ocr.blocks.forEach((block, index) => {
+          const id = `p${String(it.uid + 1).padStart(4, '0')}-b${String(index + 1).padStart(3, '0')}`;
+          entries.push({ id, page, text: block.text, block });
+        });
+      });
+      setStatus(`متن ${aiItems.length} تصویر خوانده شد؛ ${entries.length} حباب در یک بستهٔ متنی برای ترجمهٔ طبیعی ارسال می‌شود...`);
+      $('progressBar').style.width = '60%';
+      let translations = new Map(), aiError = null;
+      TR.aiController = new AbortController();
+      try {
+        translations = await AiTranslateTools.translateBatch({
+          ...aiConfig,
+          sourceLang: L.sl,
+          entries,
+          signal: TR.aiController.signal
+        });
+      } catch (error) {
+        if (!TR.cancel) aiError = error;
+      } finally {
+        TR.aiController = null;
+      }
+
+      if (!TR.cancel && $('ocrEnabled').checked) {
+        const missing = [];
+        entries.forEach((entry) => {
+          const translated = translations.get(entry.id);
+          entry.block.tr = translated || '';
+          if (!translated) missing.push(entry);
+        });
+        if (aiError) {
+          errs.push('ترجمهٔ هوش مصنوعی: ' + AiTranslateTools.safeError(aiError));
+          aiNotice = 'هوش مصنوعی پاسخ نداد؛ ترجمهٔ معمولی جایگزین شد';
+        } else if (missing.length) {
+          aiNotice = `${missing.length} متن برای تکمیل به ترجمهٔ معمولی فرستاده شد`;
+        } else {
+          aiNotice = 'همهٔ متن‌ها در یک درخواست با هوش مصنوعی ترجمه شدند';
+        }
+
+        // فقط موارد ناموفق/جاافتاده به روش قبلی می‌روند؛ درخواست AI برای صرفه‌جویی در سهمیه تکرار نمی‌شود.
+        let next = 0, finished = 0;
+        if (missing.length) setStatus(`${missing.length} متن با ترجمهٔ معمولی تکمیل می‌شود...`);
+        await Promise.all(Array.from({ length: Math.min(3, missing.length) }, async () => {
+          while (next < missing.length && !TR.cancel) {
+            const entry = missing[next++];
+            const r = await TranslateTools.translate(entry.block.text, L.sl);
+            entry.block.tr = r.text;
+            if (!r.ok) trFail++;
+            finished++;
+            $('progressBar').style.width = Math.round(60 + 15 * finished / missing.length) + '%';
+          }
+        }));
+
+        for (let index = 0; index < aiItems.length && !TR.cancel && $('ocrEnabled').checked; index++) {
+          const it = aiItems[index];
+          try {
+            await renderEdited(it);
+            if (!$('ocrEnabled').checked) break;
+            totalBlocks += it.ocr.blocks.length;
+            doneImgs++;
+            $('sPages').innerText = totalBlocks;
+          } catch (error) {
+            console.warn(error);
+            errs.push(`تصویر ${it.i + 1}: ${error && error.message ? error.message : error}`);
+          }
+          refreshCard(it);
+          drawThumb(it);
+          $('progressBar').style.width = Math.round(75 + 25 * (index + 1) / aiItems.length) + '%';
+        }
+      }
+    }
+
     result.classList.add('done');
     $('progressBar').style.width = '100%';
     if (errs.length && !doneImgs) {
-      setStatus('ترجمه انجام نشد. اگر خطا مربوط به موتور OCR است، اکستنشن را Reload کنید.');
+      setStatus(aiMode ? 'ترجمه کامل نشد؛ جزئیات خطا در پایین آمده است.'
+        : 'ترجمه انجام نشد. اگر خطا مربوط به موتور OCR است، اکستنشن را Reload کنید.');
     } else if (!totalBlocks && !TR.cancel) {
       setStatus(`متنی پیدا نشد. موتور OCR کار کرد (${rawTotal} خط خام، ${keptTotal} خط معتبر) ولی متن قابل‌قبولی نبود. ` +
         `مطمئن شوید زبان درست انتخاب شده (الان: ${L.name}) و گزینهٔ «دقت بالاتر» روشن است.`);
@@ -140,6 +280,7 @@ async function runTranslate() {
       setStatus(`${TR.cancel ? 'متوقف شد. ' : ''}${totalBlocks} متن در ${doneImgs} تصویر ترجمه شد` +
         (noText ? ` (${noText} تصویر بدون متن)` : '') +
         (trFail ? ` — ترجمهٔ ${trFail} متن ناموفق بود` : '') +
+        (aiNotice && !TR.cancel ? ` — ${aiNotice}` : '') +
         '. روی دکمهٔ ✎ هر تصویر بزنید تا ترجمه‌ها را ویرایش کنید.');
     }
     if (errs.length) $('failed').innerText = errs.slice(0, 5).join('\n');
@@ -148,6 +289,7 @@ async function runTranslate() {
     setStatus('خطا در راه‌اندازی تشخیص متن: ' + (e && e.message ? e.message : e));
   } finally {
     building = false;
+    TR.aiController = null;
     setJobHint(false);
     setTaskTitle();
     $('btnStopTr').classList.add('hidden');
@@ -738,7 +880,7 @@ function exportText() {
 // ---------- اتصال رویدادها ----------
 $('ocrEnabled').addEventListener('change', async () => {
   if (!$('ocrEnabled').checked) {
-    TR.cancel = true;
+    cancelTranslation();
     // خاموش‌کردن سراسری OCR، ترجمه‌های موقت را کنار می‌گذارد و تصویر اصلی را برمی‌گرداند.
     items.forEach((it) => { it.ocr = null; it.edited = null; });
     refreshAll();
@@ -751,11 +893,19 @@ $('ocrEnabled').addEventListener('change', async () => {
   }
   refreshSummary();
 });
+['trAiEnabled', 'trAiKey', 'trAiModel', 'trAiSkill'].forEach((id) => {
+  $(id).addEventListener('change', () => { $('trAiError').textContent = ''; saveAiSettings(); });
+});
+$('trAiSkillReset').onclick = async () => {
+  await aiSettingsReady;
+  $('trAiSkill').value = AiTranslateTools.DEFAULT_SKILL;
+  await saveAiSettings();
+};
 $('btnTranslate').onclick = openTrDialog;
 $('trClose').onclick = closeTrDialog;
 $('trStart').onclick = runTranslate;
 $('trDialog').addEventListener('click', (e) => { if (e.target.id === 'trDialog') closeTrDialog(); });
-$('btnStopTr').onclick = () => { TR.cancel = true; };
+$('btnStopTr').onclick = cancelTranslation;
 $('edApply').onclick = applyEditor;
 $('edClose').onclick = closeEditor;
 $('edRevert').onclick = async () => {

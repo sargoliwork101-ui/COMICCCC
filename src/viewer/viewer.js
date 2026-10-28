@@ -19,7 +19,12 @@ function requestJobCancel() {
   jobCancelRequested = true;
   if (loadAbortController) { try { loadAbortController.abort(); } catch { /* کنترلر قبلاً بسته شده */ } }
   // TR در trans.js تعریف شده و حلقهٔ ترجمه همان پرچم را می‌خواند
-  try { if (typeof TR !== 'undefined' && TR) TR.cancel = true; } catch { /* trans.js هنوز بارگذاری نشده */ }
+  try {
+    if (typeof TR !== 'undefined' && TR) {
+      TR.cancel = true;
+      if (TR.aiController) TR.aiController.abort();
+    }
+  } catch { /* trans.js هنوز بارگذاری نشده یا درخواست قبلاً تمام شده */ }
 }
 
 // راهنمای لغو با ESC در پنل نتیجه، فقط هنگام اجرای کار دیده می‌شود

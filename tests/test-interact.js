@@ -70,7 +70,7 @@ function boot() {
   window.DragEvent = class DragEvent extends window.MouseEvent {
     constructor(type, init = {}) { super(type, init); this.dataTransfer = init.dataTransfer; }
   };
-  for (const f of ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/pdf-import-store.js', '../src/viewer/viewer.js', '../src/viewer/trans.js']) {
+  for (const f of ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/ai-translate.js', '../src/core/pdf-import-store.js', '../src/viewer/viewer.js', '../src/viewer/trans.js']) {
     vm.runInContext(fs.readFileSync(__dirname + '/' + f, 'utf8'), ctx, { filename: f });
   }
   return { dom, window, ctx, ev, $: (id) => window.document.getElementById(id) };

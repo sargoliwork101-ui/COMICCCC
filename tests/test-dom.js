@@ -89,7 +89,7 @@ window.scrollTo = () => {};
 window.HTMLElement.prototype.scrollIntoView = () => {};
 window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
 
-const scripts = ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/pdf-import-store.js', '../src/viewer/viewer.js', '../src/viewer/trans.js'];
+const scripts = ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/ai-translate.js', '../src/core/pdf-import-store.js', '../src/viewer/viewer.js', '../src/viewer/trans.js'];
 for (const f of scripts) {
   const code = fs.readFileSync(path.join(__dirname, f), 'utf8');
   try {
@@ -123,8 +123,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.57', manifest.version === '2.57' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۵۷'));
+  check('manifest and viewer version badge are synchronized at 2.58', manifest.version === '2.58' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۵۸'));
   const viewerCss = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
@@ -162,6 +162,14 @@ const $ = (id) => window.document.getElementById(id);
     /فقط برای OCR/.test($('trContrast').parentElement.textContent));
   check('OCR uses one local Tesseract page-segmentation method',
     !$('trOcrProfile') && /یک روش صفحه‌بندی/.test($('ocrMethodNote').textContent));
+  check('optional AI settings stay collapsed to avoid clutter', $('aiSettings') && $('aiSettings').tagName === 'DETAILS' && !$('aiSettings').open);
+  check('AI translation is opt-in and defaults off', $('trAiEnabled') && !$('trAiEnabled').checked);
+  check('AI key is a private password field inside the collapsed settings',
+    $('trAiKey').type === 'password' && $('aiSettings').contains($('trAiKey')));
+  check('editable Skill and reset action are available',
+    $('aiSettings').contains($('trAiSkill')) && $('aiSettings').contains($('trAiSkillReset')));
+  check('AI key help links only to Google AI Studio',
+    window.document.querySelector('#aiSettings a[href="https://aistudio.google.com/apikey"][rel="noopener noreferrer"]') !== null);
 
   // 2.21: ESC cancellation affordances exist in the shell
   const jobHint = $('jobHint');
