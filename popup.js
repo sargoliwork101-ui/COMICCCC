@@ -546,12 +546,59 @@ async function scrapeAndSend(pdfName, mode, opts) {
     return { ok: true, pid: entry.pid, src: gbNormalizeSrc(entry.src) };
   };
 
+  // ---------- تشخیص شناسهٔ صفحه از DOM ----------
+  // بعضی نسخه‌های reader موقع ورق‌زدن نه آدرس را عوض می‌کنند نه pg را در هش می‌گذارند؛
+  // در این حالت شناسهٔ صفحه از روی تصویر محتوای کتاب (src شامل pg=) یا attributeهای صفحه خوانده می‌شود.
+  const gbPidFromUrlLike = (raw) => {
+    if (!raw) return '';
+    const m = String(raw).match(/[?&]pg=([^&"' )]+)/);
+    return m ? decodeURIComponent(m[1]) : '';
+  };
+  const gbIsVisible = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width >= 120 && r.height >= 120 &&
+      r.bottom > 0 && r.right > 0 &&
+      r.top < window.innerHeight && r.left < window.innerWidth;
+  };
+  const detectPidFromDom = () => {
+    // ۱) تصاویر/منابع محتوای کتاب: src یا srcset شامل pg= است؛ المان دیده‌شده در viewport اولویت دارد
+    const hits = [];
+    document.querySelectorAll('img, source').forEach((el) => {
+      const raw = el.currentSrc || el.src || el.getAttribute('src') || el.getAttribute('srcset') || '';
+      const pid = gbPidFromUrlLike(raw);
+      if (pid) hits.push({ pid, score: gbIsVisible(el) ? 1 : 0 });
+    });
+    // ۲) تصویر پس‌زمینهٔ CSS (فقط اگر تصویر محتوایی پیدا نشد)
+    if (!hits.length) {
+      const bgEls = document.querySelectorAll('div, section, span, a');
+      for (const el of bgEls) {
+        const pid = gbPidFromUrlLike(getComputedStyle(el).backgroundImage);
+        if (pid) { hits.push({ pid, score: gbIsVisible(el) ? 1 : 0 }); break; }
+      }
+    }
+    if (hits.length) return hits.sort((a, b) => b.score - a.score)[0].pid;
+    // ۳) شناسهٔ صفحه به‌صورت attribute روی کانتینر صفحه
+    const tagged = document.querySelector('[data-pid], [data-page-id], [data-page-pid]');
+    if (tagged) {
+      const v = tagged.getAttribute('data-pid') || tagged.getAttribute('data-page-id') || tagged.getAttribute('data-page-pid');
+      if (v) return v;
+    }
+    // ۴) شناسهٔ المان به شکل شناسهٔ صفحهٔ گوگل (مثل PA12، PT3، PP1)
+    const byId = document.querySelector('[id^="PA"], [id^="PT"], [id^="PP"]');
+    if (byId && /^(PA|PT|PP)[A-Za-z0-9_-]+$/.test(byId.id)) return byId.id;
+    return '';
+  };
+
   // ---------- حالت دستی Google Books: کاربر ورق می‌زند، افزونه فقط همان صفحه را از API برمی‌دارد ----------
   const runGoogleBooksManual = async () => {
     // داخل فریم reader درخواست هم‌مبدا مستقیم است؛ در فریم بالایی از service worker کمک می‌گیریم
     const transport = gbook.inFrame ? 'inpage' : 'sw';
-    // شناسهٔ صفحه از آدرس؛ هم query و هم hash بررسی می‌شود (نسخه‌های مختلف reader متفاوت رفتار می‌کنند)
-    let startupPid = '1';
+    const collectedPids = new Set();
+    const inFlight = new Set();
+    let limitReached = false;
+    let currentPid = '1';
+    let lastError = '';
+    // زنجیرهٔ تشخیص: پارامتر pg در آدرس (query یا hash) ← شناسه از DOM reader ← آخرین شناسهٔ شناخته‌شده
     const detectPid = () => {
       try {
         const u = new URL(location.href);
@@ -559,15 +606,10 @@ async function scrapeAndSend(pdfName, mode, opts) {
         if (fromQuery) return fromQuery;
         const fromHash = u.hash.match(/[#?&]pg=([^&]+)/);
         if (fromHash) return decodeURIComponent(fromHash[1]);
-      } catch { /* آدرس نامعتبر؛ مقدار پیش‌فرض */ }
-      return startupPid || '1';
+      } catch { /* آدرس نامعتبر؛ سراغ DOM */ }
+      return detectPidFromDom() || currentPid || '1';
     };
-    startupPid = detectPid();
-    const collectedPids = new Set();
-    const inFlight = new Set();
-    let limitReached = false;
-    let currentPid = startupPid;
-    let lastError = '';
+    const startupPid = detectPid();
 
     // خط وضعیت و خطا و دکمه‌های کمکی به پنل شناور اضافه می‌شوند
     const cardEl = uiRoot.querySelector('.wtpdf-manual-card');
@@ -596,7 +638,9 @@ async function scrapeAndSend(pdfName, mode, opts) {
         : `${urls.length} تصویر جمع شد`;
     };
     const updateStatus = () => {
-      statusEl.textContent = `صفحهٔ فعلی: ${currentPid} · مبدا: ${transport === 'inpage' ? 'داخل فریم' : 'service worker'}`;
+      const fromUrl = /[?#&]pg=/.test(location.href);
+      const sourceLabel = fromUrl ? 'آدرس' : 'DOM صفحه';
+      statusEl.textContent = `صفحهٔ فعلی: ${currentPid} (از ${sourceLabel}) · مبدا: ${transport === 'inpage' ? 'داخل فریم' : 'service worker'}`;
       if (lastError) { errorEl.textContent = 'آخرین خطا: ' + lastError; errorEl.classList.remove('hidden'); }
       else errorEl.classList.add('hidden');
     };
@@ -681,11 +725,16 @@ async function scrapeAndSend(pdfName, mode, opts) {
       const payload = JSON.stringify({
         href: location.href,
         detectedPid: currentPid,
+        domPid: detectPidFromDom(),
         startupPid,
         transport,
         inFrame: !!gbook.inFrame,
         collectedPids: [...collectedPids],
         imageCount: urls.length,
+        readerMedia: [...document.querySelectorAll('img, source')]
+          .map((el) => el.currentSrc || el.src || el.getAttribute('src') || el.getAttribute('srcset') || '')
+          .filter((s) => s && s.includes('/books/content'))
+          .slice(0, 3),
         lastError,
         at: new Date().toISOString()
       }, null, 2);

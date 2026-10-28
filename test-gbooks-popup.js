@@ -467,6 +467,65 @@ function makeHarness(pageUrl, fetchImpl) {
     await running;
   }
 
+  // ========== T. reader without pg in URL: page turns are detected from the DOM content image ==========
+  {
+    const fetchImpl = click3Fetch({ pids: ['PA1', 'PA7'], srcPids: ['PA1', 'PA7'] });
+    // real-world shape from user diagnostics: no pg query, only a v=onepage hash
+    const h = makeHarness('https://books.google.com/books?id=4ciReKlOVHIC&hl=en#v=onepage&q&f=false', fetchImpl);
+    let copied = '';
+    h.window.navigator.clipboard = { writeText: async (t) => { copied = t; } };
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
+    await sleep(30);
+    check('dom-less start: first page still collected via pg=1 listing',
+      h.window.document.querySelector('.wtpdf-count').textContent.startsWith('1'));
+    check('status: source label says DOM when URL carries no pg',
+      /DOM/.test(h.window.document.querySelector('.wtpdf-gb-status').textContent),
+      h.window.document.querySelector('.wtpdf-gb-status').textContent);
+    // reader swaps the visible content image without touching the URL
+    const pageImg = h.window.document.createElement('img');
+    pageImg.setAttribute('src', rawSrc('PA7'));
+    h.window.document.body.appendChild(pageImg);
+    await sleep(350); // MutationObserver + 250ms debounce
+    check('dom turn: new page grabbed after the content image changed',
+      h.window.document.querySelector('.wtpdf-count').textContent.startsWith('2'),
+      h.window.document.querySelector('.wtpdf-count').textContent);
+    check('status: current pid follows the DOM image',
+      /PA7/.test(h.window.document.querySelector('.wtpdf-gb-status').textContent));
+    // diagnostics expose the DOM-derived pid and the reader media sample
+    [...h.window.document.querySelectorAll('.wtpdf-mini-btn')]
+      .find((b) => b.textContent.includes('عیب‌یابی')).click();
+    await tick();
+    const payload = JSON.parse(copied);
+    check('diagnostics: domPid and readerMedia captured',
+      payload.domPid === 'PA7' && payload.readerMedia.some((s) => s.includes('pg=PA7')), payload);
+    h.window.document.querySelector('.wtpdf-done').click();
+    await running;
+  }
+
+  // ========== U. visible content image wins over a hidden preloaded one; data-pid fallback works ==========
+  {
+    const fetchImpl = click3Fetch({ pids: ['PA1', 'PA8', 'PA9'], srcPids: ['PA1', 'PA8', 'PA9'] });
+    const h = makeHarness('https://books.google.com/books?id=B1#v=onepage', fetchImpl);
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
+    await sleep(30);
+    const hidden = h.window.document.createElement('img');
+    hidden.setAttribute('src', rawSrc('PA9')); // preloaded next page, off-screen
+    hidden.getBoundingClientRect = () => ({ width: 10, height: 10, top: 9000, left: 0, right: 10, bottom: 9010 });
+    const visible = h.window.document.createElement('img');
+    visible.setAttribute('src', rawSrc('PA8')); // currently displayed page
+    visible.getBoundingClientRect = () => ({ width: 300, height: 420, top: 0, left: 0, right: 300, bottom: 420 });
+    h.window.document.body.append(hidden, visible);
+    await sleep(350);
+    check('visibility: displayed page pid preferred over the preloaded one',
+      /PA8/.test(h.window.document.querySelector('.wtpdf-gb-status').textContent),
+      h.window.document.querySelector('.wtpdf-gb-status').textContent);
+    check('visibility: only the displayed page was grabbed',
+      h.window.document.querySelector('.wtpdf-count').textContent.startsWith('2'),
+      h.window.document.querySelector('.wtpdf-count').textContent);
+    h.window.document.querySelector('.wtpdf-done').click();
+    await running;
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL GBOOKS POPUP TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });
