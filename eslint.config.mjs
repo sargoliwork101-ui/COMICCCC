@@ -11,6 +11,7 @@ export default [
         setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly',
         MutationObserver: 'readonly',
         requestAnimationFrame: 'readonly', navigator: 'readonly', location: 'readonly',
+        history: 'readonly',
         chrome: 'readonly', Tesseract: 'readonly', confirm: 'readonly', alert: 'readonly',
         ClipboardItem: 'readonly', Event: 'readonly', Uint8Array: 'readonly',
         Uint8ClampedArray: 'readonly', Uint32Array: 'readonly', Int32Array: 'readonly',

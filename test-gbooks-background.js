@@ -193,6 +193,17 @@ function bootBackground(fetchImpl) {
     );
     await waitFor(() => blocked !== null);
     check('single page: non-previewable pid reported cleanly', blocked && blocked.ok === false, blocked);
+
+    // pg=1 listing names the page internally as PA1; resolver must fall back to the src-bearing entry
+    let renamed = null;
+    bp.listeners.message(
+      { type: 'WTPDF_GBOOKS_PAGE', pageUrl: 'https://books.google.com/books?id=B1', pid: '1' },
+      { tab: { id: 21 } },
+      (r) => { renamed = r; }
+    );
+    await waitFor(() => renamed !== null);
+    check('single page: pid rename tolerated via first src entry',
+      renamed && renamed.ok === true && renamed.src.includes('pg=PA1') && /w=10000/.test(renamed.src), renamed);
   }
 
   // 6. message handler: SCAN responds via sendResponse with the url list

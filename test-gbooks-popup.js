@@ -392,6 +392,81 @@ function makeHarness(pageUrl, fetchImpl) {
     check('image selector: invalid selector falls back without throwing', invalid && invalid.count === 1, invalid);
   }
 
+  // ========== Q. pushState SPA navigation is captured by the history hook ==========
+  {
+    const fetchImpl = click3Fetch({ pids: ['PA1', 'PA2'], srcPids: ['PA1', 'PA2'] });
+    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1', fetchImpl);
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
+    await tick();
+    await tick();
+    h.window.history.pushState({}, '', 'https://books.google.com/books?id=B1&pg=PA2');
+    await sleep(30);
+    check('pushState: SPA page turn is grabbed without a reload',
+      h.window.document.querySelector('.wtpdf-count').textContent.startsWith('2'),
+      h.window.document.querySelector('.wtpdf-count').textContent);
+    check('panel: status line reports the current pid',
+      /PA2/.test(h.window.document.querySelector('.wtpdf-gb-status').textContent));
+    h.window.document.querySelector('.wtpdf-done').click();
+    await running;
+  }
+
+  // ========== R. hash-based navigation + pid fallback when click3 renames the pid ==========
+  {
+    const fetchImpl = click3Fetch({ pids: ['PA1', 'PA2'], srcPids: ['PA1', 'PA2'] });
+    // URL has no pg query: detectPid falls back to '1', and the click3 response names the page 'PA1'
+    const h = makeHarness('https://books.google.com/books?id=B1', fetchImpl);
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
+    await tick();
+    await tick();
+    check('pid fallback: first page resolved despite pid rename',
+      h.window.document.querySelector('.wtpdf-count').textContent.startsWith('1'));
+    h.window.location.hash = 'pg=PA2';
+    await sleep(30);
+    check('hashchange: page turn via hash is captured',
+      h.window.document.querySelector('.wtpdf-count').textContent.startsWith('2'),
+      h.window.document.querySelector('.wtpdf-count').textContent);
+    h.window.document.querySelector('.wtpdf-done').click();
+    await running;
+  }
+
+  // ========== S. force-grab button recovers a failed initial pickup; diagnostics copy works ==========
+  {
+    // controllable fetch: fails until the test flips the flag, so the error state stays observable
+    let shouldFail = true;
+    const controlled = async (url) => {
+      const u = new URL(url);
+      const pg = u.searchParams.get('pg');
+      const json = (page) => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify({ page }) });
+      if (pg === '1') return json([{ pid: 'PA1', src: shouldFail ? null : rawSrc('PA1') }]);
+      if (shouldFail) return { ok: false, status: 500, headers: { get: () => null }, text: async () => '' };
+      return json([{ pid: pg, src: rawSrc(pg) }]);
+    };
+    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1', controlled);
+    let copied = '';
+    h.window.navigator.clipboard = { writeText: async (t) => { copied = t; } };
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
+    await sleep(30);
+    check('error line: failed pickup is surfaced in the panel',
+      !h.window.document.querySelector('.wtpdf-gb-error').classList.contains('hidden'),
+      h.window.document.querySelector('.wtpdf-gb-error').textContent);
+    const grabNow = [...h.window.document.querySelectorAll('.wtpdf-mini-btn')]
+      .find((b) => b.textContent.includes('برداشتن'));
+    shouldFail = false;
+    grabNow.click();
+    await sleep(30);
+    check('force grab: manual button recovers the failed page',
+      h.window.document.querySelector('.wtpdf-count').textContent.startsWith('1'));
+    const diag = [...h.window.document.querySelectorAll('.wtpdf-mini-btn')]
+      .find((b) => b.textContent.includes('عیب‌یابی'));
+    diag.click();
+    await tick();
+    const payload = JSON.parse(copied);
+    check('diagnostics: clipboard payload carries href, pid and error state',
+      payload.href.includes('id=B1') && payload.detectedPid === 'PA1' && 'lastError' in payload, payload);
+    h.window.document.querySelector('.wtpdf-done').click();
+    await running;
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL GBOOKS POPUP TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

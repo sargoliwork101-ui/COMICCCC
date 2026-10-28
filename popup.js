@@ -302,7 +302,13 @@ async function scrapeAndSend(pdfName, mode, opts) {
     'background:linear-gradient(135deg,#34d399,#10b981);color:#06281d;' +
     'font:800 15px/1 Vazirmatn,Tahoma,sans-serif;box-shadow:0 10px 28px -10px rgba(16,185,129,.85);transition:filter .15s,transform .15s}' +
     '.wtpdf-done:hover{filter:brightness(1.08);transform:translateY(-1px)}' +
-    '.wtpdf-done:active{transform:scale(.97)}';
+    '.wtpdf-done:active{transform:scale(.97)}' +
+    '.wtpdf-gb-status{font:600 12px/1.6 Vazirmatn,Tahoma,sans-serif;color:#7dd3fc;direction:ltr;max-width:440px;word-break:break-all}' +
+    '.wtpdf-gb-error{font:600 11.5px/1.6 Vazirmatn,Tahoma,sans-serif;color:#fda4af;max-width:440px}' +
+    '.wtpdf-btn-row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}' +
+    '.wtpdf-mini-btn{border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);color:#f2f4fb;' +
+    'border-radius:10px;padding:8px 14px;cursor:pointer;pointer-events:auto;font:700 12.5px/1 Vazirmatn,Tahoma,sans-serif;transition:background .15s}' +
+    '.wtpdf-mini-btn:hover{background:rgba(255,255,255,.16)}';
   document.documentElement.appendChild(styleTag);
 
   let uiRoot = null, card = null, say = () => {}, countEl = null;
@@ -406,9 +412,10 @@ async function scrapeAndSend(pdfName, mode, opts) {
     return JSON.parse(clean);
   };
   // یک درخواست تک‌تلاش click3 هم‌مبدا با timeout؛ retry در خود walker مدیریت می‌شود
-  const gbFetchClick3 = async (pid) => {
+  // lpgPid: صفحهٔ شروع reader (گوگل در بعضی نسخه‌ها lpg نامعتبر را رد می‌کند)
+  const gbFetchClick3 = async (pid, lpgPid = '1') => {
     if (cancelled) { const e = new Error('cancelled'); e.cancelled = true; throw e; }
-    const url = `${gbook.origin}/books?id=${encodeURIComponent(gbook.id)}&hl=en&lpg=${encodeURIComponent('1')}` +
+    const url = `${gbook.origin}/books?id=${encodeURIComponent(gbook.id)}&hl=en&lpg=${encodeURIComponent(lpgPid)}` +
       `&pg=${encodeURIComponent(pid)}&jscmd=click3`;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), T.gbookTimeout);
@@ -506,9 +513,12 @@ async function scrapeAndSend(pdfName, mode, opts) {
   };
 
   // حل یک صفحهٔ منفرد برای حالت دستی داخل فریم (یک درخواست سبک هم‌مبدا)
-  const resolveGoogleBooksPageInPage = async (pid) => {
-    const data = await gbFetchClick3(pid);
-    const entry = (data.page || []).find((p) => p && p.pid === pid && typeof p.src === 'string' && p.src);
+  const resolveGoogleBooksPageInPage = async (pid, lpgPid) => {
+    const data = await gbFetchClick3(pid, lpgPid);
+    const pages = data.page || [];
+    // تطابق دقیق ارجح است؛ اما بعضی پاسخ‌ها pid درخواستی را با شناسهٔ داخلی دیگر برمی‌گردانند
+    const entry = pages.find((p) => p && p.pid === pid && typeof p.src === 'string' && p.src) ||
+      pages.find((p) => p && typeof p.src === 'string' && p.src);
     if (!entry) return { ok: false, error: 'این صفحه قابل‌پیش‌نمایش نیست' };
     return { ok: true, pid: entry.pid, src: gbNormalizeSrc(entry.src) };
   };
@@ -517,53 +527,176 @@ async function scrapeAndSend(pdfName, mode, opts) {
   const runGoogleBooksManual = async () => {
     // داخل فریم reader درخواست هم‌مبدا مستقیم است؛ در فریم بالایی از service worker کمک می‌گیریم
     const transport = gbook.inFrame ? 'inpage' : 'sw';
-    const pidFromHref = (href) => {
-      try { return new URL(href).searchParams.get('pg') || '1'; } catch { return '1'; }
+    // شناسهٔ صفحه از آدرس؛ هم query و هم hash بررسی می‌شود (نسخه‌های مختلف reader متفاوت رفتار می‌کنند)
+    let startupPid = '1';
+    const detectPid = () => {
+      try {
+        const u = new URL(location.href);
+        const fromQuery = u.searchParams.get('pg');
+        if (fromQuery) return fromQuery;
+        const fromHash = u.hash.match(/[#?&]pg=([^&]+)/);
+        if (fromHash) return decodeURIComponent(fromHash[1]);
+      } catch { /* آدرس نامعتبر؛ مقدار پیش‌فرض */ }
+      return startupPid || '1';
     };
+    startupPid = detectPid();
     const collectedPids = new Set();
     const inFlight = new Set();
     let limitReached = false;
+    let currentPid = startupPid;
+    let lastError = '';
+
+    // خط وضعیت و خطا و دکمه‌های کمکی به پنل شناور اضافه می‌شوند
+    const cardEl = uiRoot.querySelector('.wtpdf-manual-card');
+    const statusEl = document.createElement('div');
+    statusEl.className = 'wtpdf-gb-status';
+    const errorEl = document.createElement('div');
+    errorEl.className = 'wtpdf-gb-error hidden';
+    const btnRow = document.createElement('div');
+    btnRow.className = 'wtpdf-btn-row';
+    const grabNowBtn = document.createElement('button');
+    grabNowBtn.type = 'button';
+    grabNowBtn.className = 'wtpdf-mini-btn';
+    grabNowBtn.textContent = 'برداشتن همین صفحه';
+    const diagBtn = document.createElement('button');
+    diagBtn.type = 'button';
+    diagBtn.className = 'wtpdf-mini-btn';
+    diagBtn.textContent = 'کپی اطلاعات عیب‌یابی';
+    btnRow.append(grabNowBtn, diagBtn);
+    cardEl.insertBefore(btnRow, cardEl.querySelector('.wtpdf-done'));
+    cardEl.insertBefore(errorEl, btnRow);
+    cardEl.insertBefore(statusEl, errorEl);
+
     const refreshCount = () => {
       countEl.textContent = limitReached && pageLimit
         ? `${urls.length} تصویر (به سقف ${pageLimit} رسیدی)`
         : `${urls.length} تصویر جمع شد`;
     };
-    const grab = async (pid) => {
+    const updateStatus = () => {
+      statusEl.textContent = `صفحهٔ فعلی: ${currentPid} · مبدا: ${transport === 'inpage' ? 'داخل فریم' : 'service worker'}`;
+      if (lastError) { errorEl.textContent = 'آخرین خطا: ' + lastError; errorEl.classList.remove('hidden'); }
+      else errorEl.classList.add('hidden');
+    };
+    const grab = async (pid, force = false) => {
       if (!pid || inFlight.has(pid) || cancelled || limitReached) return;
+      if (!force && collectedPids.has(pid)) return;
       inFlight.add(pid);
+      lastError = '';
+      updateStatus();
       try {
         const res = transport === 'inpage'
-          ? await resolveGoogleBooksPageInPage(pid)
+          ? await resolveGoogleBooksPageInPage(pid, startupPid)
           : await chrome.runtime.sendMessage({
             type: 'WTPDF_GBOOKS_PAGE', pageUrl: location.href, pid
           });
-        if (!cancelled && res && res.ok && res.src) {
+        if (cancelled) return;
+        if (res && res.ok && res.src) {
           add(res.src);
           collectedPids.add(pid);
+          lastError = '';
           if (pageLimit > 0 && urls.length >= pageLimit) {
             limitReached = true;
             say(`به سقف ${pageLimit} صفحه رسیدی؛ صفحه‌های جدید دیگر برداشته نمی‌شوند. برای پایان «تمام شد ✓» را بزن.`);
           }
-          refreshCount();
+        } else {
+          lastError = (res && res.error) || 'پاسخی برای این صفحه نیامد';
         }
-      } catch {
-        // خطای موقت؛ دور بعدی interval همان صفحه را دوباره امتحان می‌کند
+      } catch (e) {
+        // خطای موقت؛ سیگنال بعدی یا دکمهٔ برداشت اجباری دوباره تلاش می‌کند
+        lastError = e && e.message ? e.message : String(e);
       } finally {
         inFlight.delete(pid);
+        refreshCount();
+        updateStatus();
       }
     };
+
+    // هر سیگنال ورق‌زدن (هوک تاریخچه، hash، تغییر DOM، polling) به این تابع واحد می‌رسد
+    let signalTimer = 0;
+    const onSignal = () => {
+      if (cancelled || limitReached) return;
+      const pid = detectPid();
+      const changed = pid !== currentPid;
+      currentPid = pid;
+      updateStatus();
+      if (changed || !collectedPids.has(pid)) grab(pid);
+    };
+    const scheduleSignal = () => {
+      clearTimeout(signalTimer);
+      signalTimer = setTimeout(onSignal, 250);
+    };
+
+    // سیگنال ۱: هوک pushState/replaceState (readerهای SPA بدون رفرش)
+    const origPush = history.pushState.bind(history);
+    const origReplace = history.replaceState.bind(history);
+    history.pushState = function (...args) { const r = origPush(...args); scheduleSignal(); return r; };
+    history.replaceState = function (...args) { const r = origReplace(...args); scheduleSignal(); return r; };
+    // سیگنال ۲: رویدادهای مرورگر
+    window.addEventListener('popstate', scheduleSignal);
+    window.addEventListener('hashchange', scheduleSignal);
+    // سیگنال ۳: تغییرات DOM reader (تعویض تصویر/کانتینر صفحه) با debounce
+    const observer = new MutationObserver((mutations) => {
+      if (mutations.every((m) => m.target && m.target.closest && m.target.closest('.wtpdf-root'))) return;
+      scheduleSignal();
+    });
+    observer.observe(document.documentElement, {
+      subtree: true, childList: true, attributes: true,
+      attributeFilter: ['src', 'srcset', 'style', 'class', 'data-src', 'data-url', 'data-pid']
+    });
+    // سیگنال ۴: polling پشتیبان برای هر نوع تغییر پوشیده‌مانده
+    const timer = setInterval(onSignal, T.gbookManualPoll);
+
+    // برداشت اجباری: اگر هیچ سیگنالی تغییر صفحه را نگرفت، کاربر خودش این دکمه را می‌زند
+    grabNowBtn.addEventListener('click', (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      currentPid = detectPid();
+      grab(currentPid, true);
+    }, true);
+    // کپی اطلاعات عیب‌یابی برای گزارش دقیق مشکل
+    diagBtn.addEventListener('click', async (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      const payload = JSON.stringify({
+        href: location.href,
+        detectedPid: currentPid,
+        startupPid,
+        transport,
+        inFrame: !!gbook.inFrame,
+        collectedPids: [...collectedPids],
+        imageCount: urls.length,
+        lastError,
+        at: new Date().toISOString()
+      }, null, 2);
+      try {
+        await navigator.clipboard.writeText(payload);
+        diagBtn.textContent = 'کپی شد ✓';
+      } catch {
+        const ta = document.createElement('textarea');
+        ta.value = payload; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); diagBtn.textContent = 'کپی شد ✓'; }
+        catch { diagBtn.textContent = 'کپی نشد'; }
+        ta.remove();
+      }
+      setTimeout(() => { diagBtn.textContent = 'کپی اطلاعات عیب‌یابی'; }, 1600);
+    }, true);
+
     say('حالت دستی Google Books: با مثلث‌های خود گوگل صفحه‌ها را ورق بزن');
     refreshCount();
-    await grab(pidFromHref(location.href));
-    // گوگل‌بوک با هر ورق، پارامتر pg آدرس را عوض می‌کند؛ همان شاخص برای دنبال‌کردن صفحه‌ها کافی است
-    const timer = setInterval(() => {
-      if (cancelled || limitReached) return;
-      const pid = pidFromHref(location.href);
-      if (!collectedPids.has(pid)) grab(pid);
-    }, T.gbookManualPoll);
+    updateStatus();
+    await grab(startupPid);
 
-    const outcome = await manualDone;
-    clearInterval(timer);
+    let outcome;
+    try {
+      outcome = await manualDone;
+    } finally {
+      // پاک‌سازی کامل همهٔ هوک‌ها و ناظرها
+      clearInterval(timer);
+      clearTimeout(signalTimer);
+      observer.disconnect();
+      window.removeEventListener('popstate', scheduleSignal);
+      window.removeEventListener('hashchange', scheduleSignal);
+      history.pushState = origPush;
+      history.replaceState = origReplace;
+    }
     if (outcome === 'cancel') cancelled = true;
   };
 

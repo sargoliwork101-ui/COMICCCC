@@ -180,12 +180,15 @@ async function walkGoogleBooks(pageUrl, tabId, onProgress, limit) {
 }
 
 // حل یک صفحهٔ منفرد برای حالت دستی؛ وقتی کاربر خودش صفحه را ورق می‌زند فقط همان صفحه درخواست می‌شود
-async function resolveGoogleBooksPage(pageUrl, pid) {
+async function resolveGoogleBooksPage(pageUrl, pid, lpgPid) {
   const id = parseGoogleBooksId(pageUrl);
   if (!id) throw new Error('شناسهٔ کتاب در آدرس صفحه پیدا نشد');
   const origin = googleBooksOrigin(pageUrl);
-  const data = await fetchClick3(origin, id, pid, pid, null);
-  const entry = (data.page || []).find((p) => p && p.pid === pid && typeof p.src === 'string' && p.src);
+  const data = await fetchClick3(origin, id, lpgPid || pid, pid, null);
+  const pages = data.page || [];
+  // تطابق دقیق ارجح است؛ بعضی پاسخ‌ها شناسهٔ داخلی متفاوتی برای صفحه برمی‌گردانند
+  const entry = pages.find((p) => p && p.pid === pid && typeof p.src === 'string' && p.src) ||
+    pages.find((p) => p && typeof p.src === 'string' && p.src);
   if (!entry) return { ok: false, error: 'این صفحه قابل‌پیش‌نمایش نیست' };
   return { ok: true, pid: entry.pid, src: normalizeGoogleBooksSrc(entry.src) };
 }
