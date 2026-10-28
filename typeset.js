@@ -216,7 +216,7 @@
       const widest = Math.max(...lines.map((ln) => measureLine(ctx, ln, st, s).width));
       const lhList = lineHeightsFor(lines, st, s);
       const totalH = lhList.reduce((sum, v) => sum + v, 0);
-      if (totalH <= boxH * 1.2 && widest <= boxW * 1.04) {
+      if (totalH <= boxH && widest <= boxW * 1.04) {
         return { size: s, lines, lh: s * 1.55, lineLh: lhList };
       }
     }
@@ -230,7 +230,7 @@
       const lines = wrapWords(ctx, text, boxW);
       const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
       const lh = s * 1.55;
-      if (lines.length * lh <= boxH * 1.2 && widest <= boxW * 1.04) return { size: s, lines, lh };
+      if (lines.length * lh <= boxH && widest <= boxW * 1.04) return { size: s, lines, lh };
     }
     ctx.font = `${fontPrefix}${minSize}px ${FONT}`;
     return { size: minSize, lines: wrapWords(ctx, text, boxW), lh: minSize * 1.55 };
@@ -288,7 +288,7 @@
       }
       // رنگ دستی کاربر بر انتخاب خودکار اولویت دارد (زیرخط هم با همین رنگ رسم می‌شود)
       if (st.color) txt = st.color;
-      if (fill) { ctx.fillStyle = fill; ctx.fillRect(box.x0, box.y0, bw, bh); }
+      if (fill) { ctx.fillStyle = fill; ctx.fillRect(box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0); }
 
       const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
       const sourceText = b.tr.trim();
@@ -301,14 +301,19 @@
           const lines = wrapInlineAt(ctx, inWords, bw * 0.96, st, st.size);
           f = { size: st.size, lines, lh: st.size * 1.55, lineLh: lineHeightsFor(lines, st, st.size) };
         } else {
-          f = fitInline(ctx, inWords, bw * 0.96, bh * 0.96, maxSize, 10, st);
+          f = fitInline(ctx, inWords, bw * 0.96, bh * 0.96, maxSize, 8, st);
         }
       } else if (st.size) {
         ctx.font = `${fontPrefix}${st.size}px ${FONT}`;
         f = { size: st.size, lines: wrapWords(ctx, sourceText, bw * 0.96), lh: st.size * 1.55 };
       } else {
-        f = fit(ctx, sourceText, bw * 0.96, bh * 0.96, maxSize, 10, fontPrefix);
+        f = fit(ctx, sourceText, bw * 0.96, bh * 0.96, maxSize, 8, fontPrefix);
       }
+      // Keep the actual output inside the editable translation box, even for manually enlarged text.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(layoutBox.x0, layoutBox.y0, bw, bh);
+      ctx.clip();
       if ('direction' in ctx) ctx.direction = st.dir;
       ctx.textBaseline = 'middle';
       const totalH = inline ? f.lineLh.reduce((sum, v) => sum + v, 0) : f.lines.length * f.lh;
@@ -358,6 +363,7 @@
           });
           y += f.lineLh[li];
         });
+        ctx.restore();
         return;
       }
       ctx.textAlign = st.align;
@@ -378,6 +384,7 @@
         }
         y += f.lh;
       });
+      ctx.restore();
     });
     return cv;
   }

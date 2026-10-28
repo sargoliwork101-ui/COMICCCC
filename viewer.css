@@ -365,11 +365,12 @@ kbd { display: inline-block; padding: 1px 7px; border-radius: 7px; border: 1px s
 .ed-stage { position: relative; width: 100%; max-width: 560px; margin: 0 auto; }
 .ed-stage img { width: 100%; height: auto; display: block; border-radius: 6px; background: #fff; }
 #edBoxes { position: absolute; inset: 0; pointer-events: none; }
-.ed-box { position: absolute; border: 2px solid rgba(139,123,255,.95); background: rgba(139,123,255,.08); border-radius: 4px; pointer-events: auto; }
-.ed-box.off { border-color: rgba(255,255,255,.35); background: transparent; border-style: dashed; }
-.ed-box.active { border-color: #34d399; background: rgba(52,211,153,.08); box-shadow: 0 0 0 2px rgba(52,211,153,.3); }
-.ed-box-text { position: absolute; inset: 0; overflow: hidden; padding: 2px 4px; border: 0; outline: none; color: #fff; background: rgba(8,10,15,.38);
-  font: 700 16px/1.35 'Vazirmatn', sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; text-shadow: 0 1px 3px #000; transform-origin: top left; cursor: text; }
+.ed-box { position: absolute; box-sizing: border-box; outline: 2px solid rgba(139,123,255,.95); background: rgba(139,123,255,.08); border-radius: 4px; pointer-events: auto; }
+.ed-box.off { outline-color: rgba(255,255,255,.35); background: transparent; outline-style: dashed; }
+.ed-box.active { outline-color: #34d399; background: rgba(52,211,153,.08); box-shadow: 0 0 0 2px rgba(52,211,153,.3); }
+.ed-box-text { position: absolute; inset: 2%; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; overflow: hidden; padding: 0; border: 0; outline: none; color: #fff; background: rgba(8,10,15,.38);
+  font: 700 16px/1.55 'Vazirmatn', sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; text-shadow: 0 1px 3px #000; transform-origin: top left; cursor: text; }
+.ed-box-text p, .ed-box-text div { margin: 0; }
 .ed-box-text:focus { background: rgba(8,10,15,.58); box-shadow: inset 0 0 0 2px #34d399; }
 .ed-resize { position: absolute; z-index: 3; width: 12px; height: 12px; padding: 0; border: 2px solid #fff; border-radius: 50%; background: #34d399; box-shadow: 0 1px 5px #0008; touch-action: none; }
 .ed-resize-n { left: 50%; top: -7px; transform: translateX(-50%); cursor: ns-resize; }

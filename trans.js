@@ -284,6 +284,7 @@ function updateRichBlock(blockId, source) {
   document.querySelectorAll(`.blk-editor[data-id="${blockId}"], .ed-box-text[data-id="${blockId}"]`).forEach((field) => {
     if (field !== source) field.innerHTML = block.richHtml || '';
   });
+  updatePreviewScale();
   scheduleApply();
 }
 function runRichCommand(command, value) {
@@ -341,6 +342,20 @@ function syncRichToolbarState() {
     if (button) { button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active)); }
   });
 }
+function previewTextSize(block, boxWidth, boxHeight) {
+  const style = Typeset.blockStyle(block);
+  if (style.size) return style.size;
+  const ctx = document.createElement('canvas').getContext('2d');
+  if (!ctx) return Math.max(10, Math.round((block.lineH || 16) * 1.1));
+  const maxSize = Math.max(12, Math.min(64, Math.round((block.lineH || 16) * 1.1)));
+  const fontPrefix = `${style.italic ? 'italic ' : ''}${style.bold ? '700' : '400'} `;
+  const rich = !!block.richHtml || Typeset.hasInlineMarks(block.tr || '');
+  if (rich) {
+    const words = block.richHtml ? Typeset.richHtmlWords(block.richHtml) : Typeset.inlineWords(block.tr || '');
+    return Typeset.fitInline(ctx, words, boxWidth * 0.96, boxHeight * 0.96, maxSize, 8, style).size;
+  }
+  return Typeset.fit(ctx, (block.tr || '').trim(), boxWidth * 0.96, boxHeight * 0.96, maxSize, 8, fontPrefix).size;
+}
 function syncBlockTextStyles(block, editor, overlay) {
   const baseSize = block.size || Math.max(10, Math.round((block.lineH || 16) * 1.1));
   [editor, overlay].forEach((field) => {
@@ -353,6 +368,7 @@ function syncBlockTextStyles(block, editor, overlay) {
     field.style.fontSize = `${baseSize}px`;
   });
   overlay.dataset.baseSize = String(baseSize);
+  updatePreviewScale();
 }
 function updatePreviewScale() {
   if (!EDI) return;
@@ -362,10 +378,19 @@ function updatePreviewScale() {
   if (!stageWidth) return;
   const scale = stageWidth / EDI.w;
   stage.querySelectorAll('.ed-box-text').forEach((field) => {
+    const block = EDI.ocr.blocks.find((item) => String(item.id) === String(field.dataset.id));
+    if (!block) return;
+    const x0 = Number.isFinite(block.tx0) ? block.tx0 : block.x0;
+    const y0 = Number.isFinite(block.ty0) ? block.ty0 : block.y0;
+    const x1 = Number.isFinite(block.tx1) ? block.tx1 : block.x1;
+    const y1 = Number.isFinite(block.ty1) ? block.ty1 : block.y1;
     field.style.transform = `scale(${scale})`;
-    field.style.width = `${100 / scale}%`;
-    field.style.height = `${100 / scale}%`;
-    field.style.fontSize = `${Math.max(8, field.dataset.baseSize || 14)}px`;
+    field.style.left = '2%'; field.style.top = '2%';
+    field.style.right = 'auto'; field.style.bottom = 'auto';
+    field.style.width = `${96 / scale}%`;
+    field.style.height = `${96 / scale}%`;
+    // Match Typeset.render's auto-fit and 2% inner margin before scaling logical image pixels down.
+    field.style.fontSize = `${previewTextSize(block, x1 - x0, y1 - y0)}px`;
   });
 }
 

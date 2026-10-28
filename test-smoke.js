@@ -197,11 +197,33 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('Typeset render returns canvas', cv && cv.width === 200 && cv.height === 200);
   }
   {
+    const fillCalls = [], clipRects = [];
+    const ctx = new Proxy({}, {
+      get(t, prop) {
+        if (prop === 'measureText') return (s) => ({ width: String(s).length * 6 });
+        if (prop === 'fillRect') return (...args) => fillCalls.push(args);
+        if (prop === 'rect') return (...args) => clipRects.push(args);
+        return typeof prop === 'string' ? (() => {}) : undefined;
+      },
+      set() { return true; }
+    });
+    const bmp = { width: 200, height: 200 };
+    const block = { enabled: true, tr: 'text', x0: 20, y0: 30, x1: 40, y1: 50,
+      tx0: 100, ty0: 110, tx1: 150, ty1: 160, lineH: 10, size: 10, bg: 'white' };
+    Typeset.render(bmp, [block], { createCanvas: () => ({ width: 200, height: 200, getContext: () => ctx }) });
+    check('moving the translation box does not shift or resize the original-text erasure area',
+      JSON.stringify(fillCalls[0]) === JSON.stringify([16, 26, 28, 28]), fillCalls[0]);
+    check('saved text is clipped to the translation box',
+      JSON.stringify(clipRects[0]) === JSON.stringify([100, 110, 50, 50]), clipRects[0]);
+  }
+  {
     const ctx = mockCtx();
     const lines = Typeset.wrapWords(ctx, 'one two three four five six seven', 20);
     check('wrapWords returns array', Array.isArray(lines) && lines.length >= 1);
     const f = Typeset.fit(ctx, 'hello', 100, 100, 40, 10);
     check('fit returns size/lines/lh', f && f.size >= 10 && Array.isArray(f.lines) && f.lh > 0, f);
+    const tight = Typeset.fit(ctx, 'hello world', 100, 15, 40, 8);
+    check('auto-fit never deliberately lets text exceed the translation box height', tight.lines.length * tight.lh <= 15, tight);
   }
 
   // ---------- Typeset per-block formatting (2.27) ----------
@@ -209,7 +231,7 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     const calls = { font: [], textAlign: [], direction: [], fillStyles: [], fillText: [], strokeText: 0, beginPath: 0, stroke: 0, lineTo: 0 };
     const ctx = {
       textBaseline: '', lineWidth: 0, strokeStyle: '', lineJoin: '',
-      drawImage() {}, fillRect() {},
+      drawImage() {}, fillRect() {}, save() {}, restore() {}, rect() {}, clip() {},
       measureText: (s) => ({ width: String(s).length * 6 }),
       getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }),
       fillText(t, x, y) { calls.fillText.push({ t, x, y }); },
@@ -236,7 +258,7 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     const calls = renderWith({});
     check('legacy block defaults to right align', calls.textAlign.every((a) => a === 'right'), calls.textAlign);
     check('default font is bold 700 without italic', calls.font.some((f) => /700/.test(f) && !/italic/.test(f)), calls.font);
-    check('no underline path by default', calls.stroke === 0 && calls.beginPath === 0);
+    check('no underline path by default', calls.stroke === 0 && calls.lineTo === 0);
     check('fillText invoked for translation', calls.fillText.length >= 1);
   }
   {

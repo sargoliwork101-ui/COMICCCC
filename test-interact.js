@@ -409,6 +409,18 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     check('translation is edited in a Word-like contenteditable', field && field.getAttribute('contenteditable') === 'true' && field.textContent === 'hello world');
     check('formatting toolbar includes common controls', !!bold && !!row.querySelector('.blk-italic') && !!row.querySelector('.blk-under') && !!row.querySelector('.blk-undo') && !!row.querySelector('.blk-redo'));
     check('format syntax is not exposed as text', !field.textContent.includes('**') && !field.textContent.includes('[size='));
+    const previewStage = h.window.document.querySelector('.ed-stage');
+    previewStage.getBoundingClientRect = () => ({ left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100 });
+    h.ev('updatePreviewScale()');
+    const imageOverlay = h.$('edBoxes').querySelector('.ed-box-text');
+    const previewExpectedSize = h.ev('previewTextSize(items[0].ocr.blocks[0], 60, 40)');
+    check('live overlay uses the same auto-fit font size as saved rendering', imageOverlay.style.fontSize === `${previewExpectedSize}px`,
+      { actual: imageOverlay.style.fontSize, expected: previewExpectedSize });
+    check('live overlay uses source-image coordinates scaled to the preview', imageOverlay.style.transform === 'scale(0.5)', imageOverlay.style.transform);
+    check('live text layout keeps the renderer’s 2% inner margin', imageOverlay.style.left === '2%' && imageOverlay.style.width === '192%',
+      { left: imageOverlay.style.left, width: imageOverlay.style.width });
+    check('live overlay is vertically centered like the saved canvas text',
+      /\.ed-box-text\s*\{[^}]*display:\s*flex;[^}]*justify-content:\s*center;/s.test(fs.readFileSync(__dirname + '/viewer.css', 'utf8')));
 
     field.focus();
     const text = field.firstChild;
