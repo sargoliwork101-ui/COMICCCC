@@ -74,6 +74,11 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     pagedFields && pagedFields.classList.contains('hidden') &&
     pagedFields.contains(pdoc.getElementById('pageLimit')) &&
     !!pagedFields.querySelector('.advanced'));
+  const scrollFields = pdoc.getElementById('scrollModeFields');
+  check('scroll-mode container with deep-search checkbox is visible by default',
+    scrollFields && !scrollFields.classList.contains('hidden') &&
+    pdoc.getElementById('deepSearch') && pdoc.getElementById('deepSearch').type === 'checkbox' &&
+    scrollFields.contains(pdoc.getElementById('deepSearch')));
   check('page limit label is generic (no site name)',
     !/Google Books/i.test(pdoc.querySelector('label[for="pageLimit"]').textContent));
   check('idle status box hidden with no filler text', pdoc.getElementById('statusBox').classList.contains('hidden') &&
@@ -87,20 +92,25 @@ check('popup reveals the box only via showError', /const showError = \(text\)/.t
 
 // mode-gated visibility helper, extracted from popup.js and unit-tested directly
 {
-  const match = popupCode.match(/const applyPagedModeFields = \(mode\) => \{[\s\S]*?\};/);
-  const stub = window.document.createElement('div');
-  stub.className = 'hidden';
-  window.pagedModeFields = stub;
+  const match = popupCode.match(/const applyModeFields = \(mode\) => \{[\s\S]*?\};/);
+  const pagedStub = window.document.createElement('div');
+  pagedStub.className = 'hidden';
+  const scrollStub = window.document.createElement('div'); // starts visible like the real container
+  window.pagedModeFields = pagedStub;
+  window.scrollModeFields = scrollStub;
   // const bindings do not survive separate eval calls; assign the helper onto the global instead
-  window.eval(match[0].replace('const applyPagedModeFields', 'window.applyPagedModeFields'));
-  window.eval('applyPagedModeFields("scroll")');
-  check('helper: scroll mode hides the paged fields', stub.classList.contains('hidden'));
-  window.eval('applyPagedModeFields("auto")');
-  check('helper: auto mode reveals the paged fields', !stub.classList.contains('hidden'));
-  window.eval('applyPagedModeFields("manual")');
-  check('helper: manual mode keeps the paged fields visible', !stub.classList.contains('hidden'));
-  window.eval('applyPagedModeFields("scroll")');
-  check('helper: returning to scroll hides the fields again', stub.classList.contains('hidden'));
+  window.eval(match[0].replace('const applyModeFields', 'window.applyModeFields'));
+  window.eval('applyModeFields("scroll")');
+  check('helper: scroll mode hides the paged fields', pagedStub.classList.contains('hidden'));
+  check('helper: scroll mode shows the scroll fields', !scrollStub.classList.contains('hidden'));
+  window.eval('applyModeFields("auto")');
+  check('helper: auto mode reveals the paged fields', !pagedStub.classList.contains('hidden'));
+  check('helper: auto mode hides the scroll fields', scrollStub.classList.contains('hidden'));
+  window.eval('applyModeFields("manual")');
+  check('helper: manual mode keeps the paged fields visible', !pagedStub.classList.contains('hidden'));
+  window.eval('applyModeFields("scroll")');
+  check('helper: returning to scroll restores both containers',
+    pagedStub.classList.contains('hidden') && !scrollStub.classList.contains('hidden'));
 }
 
 // interactive behavior: run the real popup.html + popup.js with a mocked chrome API
@@ -218,18 +228,22 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   check('failed run shows the box with the error', !errorRun.boxHidden && /خطا/.test(errorRun.text), errorRun);
   const secondSuccess = await runPopupOnce({ count: 2 });
   check('later success clears a previously shown error', secondSuccess.boxHidden && secondSuccess.text === '', secondSuccess);
-  // paged-mode controls follow the selected collection mode, never the site hostname
+  // mode-specific controls follow the selected collection mode, never the site hostname
   const modePopup = await runPopupOnce({ count: 1 }, false, false);
   const mpw = modePopup.win;
   const fieldsEl = mpw.document.getElementById('pagedModeFields');
+  const scrollEl = mpw.document.getElementById('scrollModeFields');
   check('default scroll mode hides the paged controls', fieldsEl.classList.contains('hidden'));
+  check('default scroll mode shows the deep-search checkbox', !scrollEl.classList.contains('hidden'));
   mpw.document.querySelector('.mode-btn[data-mode="auto"]').click();
   check('switching to auto mode reveals the paged controls on any site',
     !fieldsEl.classList.contains('hidden') && mpw.document.getElementById('pageLimit'));
+  check('switching to auto mode hides the deep-search checkbox', scrollEl.classList.contains('hidden'));
   mpw.document.querySelector('.mode-btn[data-mode="manual"]').click();
   check('manual mode keeps the paged controls visible', !fieldsEl.classList.contains('hidden'));
   mpw.document.querySelector('.mode-btn[data-mode="scroll"]').click();
-  check('switching back to scroll hides the paged controls', fieldsEl.classList.contains('hidden'));
+  check('switching back to scroll restores the field visibility',
+    fieldsEl.classList.contains('hidden') && !scrollEl.classList.contains('hidden'));
 
   // two-stage injection: a reader frame reported by the probe must become the scrape target
   {

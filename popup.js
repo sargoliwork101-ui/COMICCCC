@@ -3,6 +3,8 @@ const statusBox = document.getElementById('statusBox');
 const statusText = document.getElementById('statusText');
 // کنترل‌های مخصوص حالت‌های ورق‌زدن (سقف صفحه و انتخابگرهای دستی)؛ مستقل از سایت، فقط بر اساس حالت انتخابی باز می‌شوند
 const pagedModeFields = document.getElementById('pagedModeFields');
+// کنترل مخصوص حالت اسکرول (تیک جستجوی عمیق)
+const scrollModeFields = document.getElementById('scrollModeFields');
 // متن وضعیت (پیشرفت) را بدون نمایش باکس به‌روز می‌کند؛ پیشرفت واقعی روی خود صفحه با پوشش تمام‌صفحه دیده می‌شود
 const setStatus = (text) => {
   statusText.innerText = text;
@@ -19,11 +21,12 @@ const hideStatus = () => {
 
 // سه روش جمع‌آوری: اسکرول (کمیک تودرتو)، ورق‌زدن خودکار (کلیک روی دکمهٔ بعدی)، ورق‌زدن دستی
 let collectMode = 'scroll';
-// کادرهای ورق‌زدن فقط در حالت‌های auto/manual و روی هر سایتی نمایش داده می‌شوند
-const applyPagedModeFields = (mode) => {
+// کادرهای هر حالت فقط در همان حالت نمایش داده می‌شوند و ربطی به سایت ندارند
+const applyModeFields = (mode) => {
   if (pagedModeFields) pagedModeFields.classList.toggle('hidden', mode === 'scroll');
+  if (scrollModeFields) scrollModeFields.classList.toggle('hidden', mode !== 'scroll');
 };
-applyPagedModeFields(collectMode);
+applyModeFields(collectMode);
 const modeSeg = document.getElementById('modeSeg');
 if (modeSeg) {
   modeSeg.addEventListener('click', (ev) => {
@@ -31,7 +34,7 @@ if (modeSeg) {
     if (!btn) return;
     collectMode = btn.dataset.mode || 'scroll';
     modeSeg.querySelectorAll('.mode-btn').forEach((b) => b.classList.toggle('active', b === btn));
-    applyPagedModeFields(collectMode);
+    applyModeFields(collectMode);
   });
 }
 
@@ -51,7 +54,8 @@ startBtn.addEventListener('click', async () => {
   const options = {
     pageLimit,
     nextSelector: document.getElementById('nextSelector').value.trim(),
-    imageSelector: document.getElementById('imageSelector').value.trim()
+    imageSelector: document.getElementById('imageSelector').value.trim(),
+    deepSearch: document.getElementById('deepSearch').checked === true
   };
 
   startBtn.disabled = true;
@@ -118,13 +122,15 @@ async function probeBookFrame() {
 
 // این تابع داخل صفحهٔ وب اجرا می‌شود
 // mode: 'scroll' (پیش‌فرض) | 'auto' (ورق‌زدن خودکار) | 'manual' (ورق‌زدن دستی کاربر)
-// opts: { pageLimit, nextSelector, imageSelector }
+// opts: { pageLimit, nextSelector, imageSelector, deepSearch }
 async function scrapeAndSend(pdfName, mode, opts) {
   mode = mode === 'auto' || mode === 'manual' ? mode : 'scroll';
   opts = opts || {};
   const pageLimit = Number.isFinite(opts.pageLimit) && opts.pageLimit > 0 ? Math.floor(opts.pageLimit) : 0;
   const nextSelector = typeof opts.nextSelector === 'string' ? opts.nextSelector : '';
   const imageSelector = typeof opts.imageSelector === 'string' ? opts.imageSelector : '';
+  // جستجوی عمیق فقط در حالت اسکرول معنا دارد: تیک فعال = اسکنر کامل قدیمی (همهٔ تصاویر ریز و درشت)
+  const deepSearch = opts.deepSearch === true;
   if (window.__wtpdfRunning) return { busy: true };
   window.__wtpdfRunning = true;
 
@@ -320,6 +326,22 @@ async function scrapeAndSend(pdfName, mode, opts) {
     });
     return urls.length - before;
   };
+
+  // جستجوی عمیق (اختیاری، فقط حالت اسکرول): هیچ فیلتر اندازه/آدرس/نمودی ندارد؛
+  // هر img و هر background-image صفحه جمع می‌شود و فقط مخزن مشترک (تکراری/بودجه data-URI) تصمیم می‌گیرد.
+  const scanAllImages = () => {
+    const before = urls.length;
+    document.querySelectorAll('img').forEach((img) => add(bestSrc(img)));
+    document.querySelectorAll('div, section, span, a, li, td, th, figure, p').forEach((el) => {
+      const bg = getComputedStyle(el).backgroundImage;
+      const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+      if (m) add(m[1]);
+    });
+    return urls.length - before;
+  };
+
+  // حالت اسکرول: پیش‌فرض سخت‌گیر (فقط تصاویر کمیک)؛ تیک «جستجوی عمیق» همهٔ تصاویر ریز و درشت را می‌آورد
+  const scanScrollMode = () => (deepSearch ? scanAllImages() : scanScrollImages());
 
   // ---------- رابط کاربری روی صفحه ----------
   const styleTag = document.createElement('style');
@@ -819,7 +841,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
       last = h;
     }
     await sleep(800);
-    scanScrollImages();
+    scanScrollMode();
   };
 
   // ---------- تشخیص دکمهٔ «بعدی» در صفحه ----------
@@ -1019,9 +1041,9 @@ async function scrapeAndSend(pdfName, mode, opts) {
     }
 
     // اسکن نهایی تضمینی فقط برای مسیرهای DOM؛ در Google Books اسکن صفحه کاشی‌های ۲۵۶px بی‌ربط می‌آورد
-    // حالت اسکرول اسکنر سخت‌گیرانهٔ خودش را دارد تا بنر/آیکون/تصاویر تزئینی وارد فهرست نشوند
+    // حالت اسکرول پیش‌فرض اسکنر سخت‌گیر دارد و با تیک جستجوی عمیق اسکنر کامل قدیمی اجرا می‌شود
     if (!usedGoogleBooks) {
-      if (effectiveMode === 'scroll') scanScrollImages();
+      if (effectiveMode === 'scroll') scanScrollMode();
       else scanImages();
     }
     if (urls.length === 0) {

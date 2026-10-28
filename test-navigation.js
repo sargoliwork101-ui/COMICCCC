@@ -300,6 +300,46 @@ function makeHarness() {
       res.count === 1 && urls.includes('https://cdn.test/medium260.jpg'), res);
   }
 
+  // ---------- 13. deep search in scroll mode collects every image, small or large, no filters ----------
+  {
+    const h = makeHarness();
+    const { window, img, sent } = h;
+    window.document.body.appendChild(img('https://cdn.test/comic-page.jpg', 800, 1200));
+    window.document.body.appendChild(img('https://cdn.test/top-banner-728x90.jpg', 728, 90));
+    window.document.body.appendChild(img('https://cdn.test/small200.png', 200, 200));
+    const hidden = img('https://cdn.test/preloaded-offscreen.jpg', 900, 1200);
+    hidden.style.display = 'none';
+    window.document.body.appendChild(hidden);
+    window.document.body.appendChild(img('https://cdn.test/assets/rating-star.png', 400, 400));
+    window.document.body.appendChild(img('https://cdn.test/btn/next-button.png', 350, 350));
+    const contentBg = window.document.createElement('div');
+    contentBg.style.backgroundImage = 'url("https://cdn.test/bg-content.webp")';
+    window.document.body.appendChild(contentBg);
+    const footer = window.document.createElement('footer');
+    const footerBg = window.document.createElement('div');
+    footerBg.style.backgroundImage = 'url("https://cdn.test/footer-art.jpg")';
+    footer.appendChild(footerBg);
+    window.document.body.appendChild(footer);
+    const inlineBg = window.document.createElement('div');
+    inlineBg.style.backgroundImage = 'url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")';
+    window.document.body.appendChild(inlineBg);
+
+    const res = await window.eval('scrapeAndSend("deep.pdf", "scroll", { deepSearch: true })');
+    const urls = sent[0] && sent[0].urls ? sent[0].urls : [];
+    check('deep search: small images are collected', urls.some((u) => u.includes('small200')), urls);
+    check('deep search: thin banners are collected', urls.some((u) => u.includes('banner-728x90')), urls);
+    check('deep search: hidden images are collected', urls.some((u) => u.includes('preloaded-offscreen')), urls);
+    check('deep search: junk-url images are collected',
+      urls.some((u) => u.includes('rating-star')) && urls.some((u) => u.includes('next-button')), urls);
+    check('deep search: footer backgrounds are collected', urls.some((u) => u.includes('footer-art')), urls);
+    check('deep search: inline data-URI backgrounds are collected', urls.some((u) => u.startsWith('data:image/')), urls);
+    check('deep search: all nine unique assets gathered', res.count === 9, res);
+
+    // without the tick, the same page is back to the strict comic-only scanner
+    const strict = await window.eval('scrapeAndSend("strict-again.pdf", "scroll")');
+    check('deep search off: strict scanner returns only the comic page', strict.count === 1, strict);
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL NAVIGATION TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

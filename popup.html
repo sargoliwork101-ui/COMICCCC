@@ -13,7 +13,7 @@
       <h1>PIC TO PDF</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v2.40</span>
+    <span class="version-pill">v2.41</span>
   </div>
 
   <div class="field">
@@ -29,6 +29,15 @@
   <div class="field">
     <label for="pdfName">نام فایل خروجی</label>
     <input type="text" id="pdfName" value="comic" spellcheck="false">
+  </div>
+
+  <!-- فقط در حالت اسکرول صفحه نمایش داده می‌شود؛ popup.js با تغییر حالت باز/بسته‌اش می‌کند -->
+  <div id="scrollModeFields">
+    <label class="check-field" for="deepSearch">
+      <input type="checkbox" id="deepSearch">
+      <span>جستجوی عمیق</span>
+    </label>
+    <p class="mode-hint">به‌صورت پیش‌فرض فقط تصاویر اصلی کمیک جمع می‌شوند؛ با تیک‌زدن این گزینه همهٔ تصاویر صفحه (ریز و درشت، شامل بنر و آیکون) با روش کامل بررسی می‌شوند.</p>
   </div>
 
   <!-- این کنترل‌ها فقط در حالت‌های ورق‌زدن خودکار/دستی نمایش داده می‌شوند (روی هر سایتی)؛ popup.js بر اساس حالت انتخابی بازشان می‌کند -->

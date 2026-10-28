@@ -19,3 +19,10 @@ body { width: 360px; padding: 18px; display: flex; flex-direction: column; gap: 
 .advanced[open] > summary { margin-bottom: 10px; }
 .advanced .field { margin-top: 10px; }
 .advanced b { color: var(--text); font-weight: 700; }
+
+.check-field { display: flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
+.check-field input[type="checkbox"] {
+  width: 17px; height: 17px; flex: none; accent-color: var(--a1); cursor: pointer; margin: 0;
+}
+.check-field span { font: 700 13px/1.5 'Vazirmatn', sans-serif; color: var(--text); }
+#scrollModeFields .mode-hint { margin-top: 6px; }
