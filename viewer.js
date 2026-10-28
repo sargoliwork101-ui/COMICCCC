@@ -225,7 +225,7 @@ function makeCard(it) {
   const el = document.createElement('div');
   el.className = 'item selected';
   el.draggable = true;
-  el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید. داخل یک گروه، رهاکردن روی لبهٔ کارت هم‌گروه فقط ترتیب داخلی گروه را عوض می‌کند';
+  el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید. داخل یک گروه، رهاکردن روی لبهٔ کارت هم‌گروه فقط ترتیب داخلی گروه را عوض می‌کند؛ برای خروج از گروه، کارت را در فضای خالی شبکه رها کنید';
   el.innerHTML = `<div class="tw"><canvas width="240" height="320"></canvas><div class="spin">در حال دریافت...</div>
     <span class="idx">${it.i + 1}${it.dupNo ? ` · کپی ${it.dupNo}` : ''}</span><span class="tick">${ICON_CHECK}</span>
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
@@ -887,6 +887,7 @@ function clearDragDropHint() {
     dragDropTargetEl = null;
   }
   dragGroupDrop = false;
+  $('grid').classList.remove('extract-zone');
   clearInsertMarker();
 }
 
@@ -913,13 +914,11 @@ function planDrop(dragged, targetEl, before) {
 }
 
 // پیش‌نمایش زندهٔ شماره صفحه‌ها حین درگ (بدون جابه‌جایی DOM تا لحظهٔ رهاکردن)
-function previewDragOrder(dragged, targetEl, before) {
+function previewOrderFor(movingEls, anchorNode) {
   const grid = $('grid');
-  const plan = planDrop(dragged, targetEl, before);
-  if (!plan) { restoreDragOrderPreview(); return; }
-  const tentative = Array.from(grid.children).filter((el) => !plan.movingEls.includes(el));
-  const anchorIndex = plan.anchor ? tentative.indexOf(plan.anchor) : tentative.length;
-  tentative.splice(anchorIndex, 0, ...plan.movingEls);
+  const tentative = Array.from(grid.children).filter((el) => !movingEls.includes(el));
+  const anchorIndex = anchorNode ? tentative.indexOf(anchorNode) : tentative.length;
+  tentative.splice(anchorIndex, 0, ...movingEls);
   tentative.forEach((el, index) => {
     const input = el.querySelector('.page-order');
     if (!input) return;
@@ -931,6 +930,11 @@ function previewDragOrder(dragged, targetEl, before) {
     void input.offsetWidth;
     input.classList.add('order-flash');
   });
+}
+function previewDragOrder(dragged, targetEl, before) {
+  const plan = planDrop(dragged, targetEl, before);
+  if (!plan) { restoreDragOrderPreview(); return; }
+  previewOrderFor(plan.movingEls, plan.anchor);
 }
 // بازگرداندن شماره‌ها به ترتیب واقعی فعلی شبکه (وقتی درگ لغو می‌شود یا روی نوار گروهی می‌رویم)
 function restoreDragOrderPreview() {
@@ -1003,6 +1007,54 @@ function reorderWithinGroup(dragged, targetEl, before) {
   const anchorAfterBlock = plan.blockEls[plan.blockEls.length - 1].nextSibling;
   const firstRects = captureGridRects();
   plan.nextBlockEls.forEach((el) => grid.insertBefore(el, anchorAfterBlock));
+  updatePdfOrderFromGrid();
+  playGridMove(firstRects);
+  return true;
+}
+
+// ---------- رهاکردن در فضای خالی شبکه: استخراج تک‌کارت از گروه ----------
+// نزدیک‌ترین کارت به نشانگر را لنگر درج می‌کند؛ RTL: نیمهٔ راست کارت یعنی درج قبل از آن
+function nearestCardAnchor(clientX, clientY) {
+  const cards = Array.from($('grid').querySelectorAll('.item'));
+  if (!cards.length) return { anchorEl: null, before: false };
+  let anchorEl = null, bestDist = Infinity;
+  for (const el of cards) {
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const dist = Math.hypot(cx - clientX, cy - clientY);
+    if (dist < bestDist) { bestDist = dist; anchorEl = el; }
+  }
+  const r = anchorEl.getBoundingClientRect();
+  return { anchorEl, before: clientX > r.left + r.width / 2 };
+}
+
+// پیش‌نمایش رهاکردن در فضای خالی: همیشه حرکت یک کارت تکی است (نه بلوک گروه)
+function previewEmptyAreaDrop(clientX, clientY) {
+  const { anchorEl, before } = nearestCardAnchor(clientX, clientY);
+  if (!anchorEl || anchorEl === draggedItem.el) {
+    $('grid').classList.remove('extract-zone');
+    clearInsertMarker();
+    restoreDragOrderPreview();
+    return;
+  }
+  $('grid').classList.add('extract-zone');
+  setInsertMarker(anchorEl, before, false);
+  previewOrderFor([draggedItem.el], before ? anchorEl : anchorEl.nextSibling);
+}
+
+// کارت کشیده‌شده در فضای خالی رها شده؛ اگر عضو گروه باشد فقط همان کارت از گروه خارج می‌شود
+function dropOnEmptyArea(clientX, clientY) {
+  const { anchorEl, before } = nearestCardAnchor(clientX, clientY);
+  if (!anchorEl || anchorEl === draggedItem.el) return false;
+  const anchorNode = before ? anchorEl : anchorEl.nextSibling;
+  if (anchorNode === draggedItem.el) return false;
+  const wasGrouped = Number(draggedItem.pageGroup) > 0;
+  const grid = $('grid');
+  const firstRects = captureGridRects();
+  if (wasGrouped) draggedItem.pageGroup = null;
+  grid.insertBefore(draggedItem.el, anchorNode);
+  // اگر گروه با خروج این کارت تک‌عضو شود، cleanup خودش آن گروه را منحل می‌کند
+  if (wasGrouped) cleanupPageGroups();
   updatePdfOrderFromGrid();
   playGridMove(firstRects);
   return true;
@@ -1903,7 +1955,9 @@ async function main() {
     ev.preventDefault();
     ev.dataTransfer.dropEffect = 'move';
     const target = ev.target.closest ? ev.target.closest('.item') : null;
-    if (!target || target === draggedItem.el) { clearDragDropHint(); clearInsertMarker(); restoreDragOrderPreview(); return; }
+    // فضای خالی شبکه: رهاکردن اینجا کارت را از گروه خارج و در همان محل درج می‌کند
+    if (!target) { previewEmptyAreaDrop(ev.clientX, ev.clientY); return; }
+    if (target === draggedItem.el) { clearDragDropHint(); clearInsertMarker(); restoreDragOrderPreview(); return; }
     const rect = target.getBoundingClientRect();
     const targetItem = items.find((it) => it.el === target);
     const groupable = targetItem && targetItem.state === 'ok' && draggedItem.state === 'ok';
@@ -1951,7 +2005,8 @@ async function main() {
     const wantGroup = dragGroupDrop;
     clearDragDropHint();
     clearInsertMarker();
-    if (!target || target === draggedItem.el) return;
+    if (!target) { dropOnEmptyArea(ev.clientX, ev.clientY); suppressCardClickUntil = Date.now() + 350; return; }
+    if (target === draggedItem.el) return;
     if (wantGroup) {
       const targetItem = items.find((it) => it.el === target);
       groupCardsByDrop(draggedItem, targetItem);

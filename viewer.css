@@ -92,6 +92,8 @@ body { min-height: 100vh; padding-bottom: calc(132px + env(safe-area-inset-botto
 #loadBar { height: 100%; width: 0; background: var(--grad); transition: width .2s; border-radius: 999px; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(clamp(128px, 15vw, 172px), 1fr)); gap: clamp(12px, 2.2vw, 20px) clamp(10px, 1.8vw, 16px); }
+/* رهاکردن در فضای خالی شبکه برای خارج‌کردن کارت از گروه: کادر کهربایی ملایم دور کل شبکه */
+.grid.extract-zone { outline: 2px dashed rgba(251, 191, 36, .7); outline-offset: 6px; border-radius: 18px; }
 /* لایهٔ کادر گروه‌ها: پشت کارت‌ها، بدون دریافت رویداد؛ هر گروه کادر رنگی مخصوص خودش را دور همهٔ اعضایش می‌گیرد */
 .group-outline-layer { position: absolute; z-index: 0; pointer-events: none; }
 .group-outline { position: absolute; border: 2px dashed var(--gc, #34d399); border-radius: 16px;

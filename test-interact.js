@@ -321,6 +321,58 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([0, 1, 2, 3]));
   h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
 
+  // ---- empty-area drop: drag a group member into grid whitespace to extract just that card ----
+  const gcards = () => [...grid.children];
+  const rectAt = (left) => ({ left, width: 156, top: 0, height: 200, right: left + 156, bottom: 200 });
+  const resetGrid = () => h.ev('[...items].sort((a,b)=>a.uid-b.uid).forEach(i => document.getElementById("grid").appendChild(i.el)); updatePdfOrderFromGrid()');
+  const pinRects = () => gcards().forEach((c, i) => { c.getBoundingClientRect = () => rectAt(i * 166); });
+  resetGrid();
+  h.ev('items[0].pageGroup = 1; items[1].pageGroup = 1; items[2].pageGroup = 1; cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+  pinRects();
+  const dt6 = { effectAllowed: '', setData() {}, dropEffect: '' };
+  gcards()[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt6, bubbles: true }));
+  // dragover over the grid itself (whitespace past the last card); nearest anchor is card 3
+  grid.dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt6, clientX: 600, clientY: 100, bubbles: true }));
+  check('empty-area dragover marks the grid as an extract zone', grid.classList.contains('extract-zone'));
+  check('empty-area dragover shows a single insertion marker on the anchor',
+    gcards()[3].classList.contains('drag-insert-before') && !gcards()[3].classList.contains('drag-insert-group'));
+  check('empty-area drag previews the extracted single-card order',
+    JSON.stringify(gcards().map((c) => c.querySelector('.page-order').value)) === JSON.stringify(['3', '1', '2', '4']));
+  check('empty-area dragover keeps DOM untouched',
+    JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([0, 1, 2, 3]));
+  grid.dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt6, clientX: 600, clientY: 100, bubbles: true }));
+  gcards()[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt6, bubbles: true }));
+  check('empty-area drop moves only the dragged card',
+    JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([1, 2, 0, 3]));
+  check('empty-area drop removes the card from its group',
+    JSON.stringify(h.ev('items.map(i => i.pageGroup)')) === JSON.stringify([null, 1, 1, null]),
+    h.ev('items.map(i => i.pageGroup)'));
+  check('remaining group stays one contiguous outline box',
+    outlineLayer.querySelectorAll('.group-outline').length === 1);
+  check('extract-zone visual cleared after drop', !grid.classList.contains('extract-zone'));
+
+  // a two-member group dissolves when one card is extracted
+  resetGrid();
+  h.ev('items.forEach(i => i.pageGroup = null); items[1].pageGroup = 2; items[2].pageGroup = 2; cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+  pinRects();
+  gcards()[1].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt6, bubbles: true }));
+  grid.dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt6, clientX: 600, clientY: 100, bubbles: true }));
+  gcards()[1].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt6, bubbles: true }));
+  check('extracting from a two-member group dissolves the group',
+    h.ev('items.every(i => !i.pageGroup)') === true, h.ev('items.map(i => i.pageGroup)'));
+  check('dissolved group leaves no outline box', outlineLayer.classList.contains('hidden') ||
+    outlineLayer.querySelectorAll('.group-outline').length === 0);
+
+  // ungrouped cards can also be reordered via an empty-area drop without touching membership
+  resetGrid();
+  pinRects();
+  gcards()[3].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt6, bubbles: true }));
+  grid.dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt6, clientX: 50, clientY: 100, bubbles: true }));
+  gcards()[3].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt6, bubbles: true }));
+  check('empty-area drop reorders an ungrouped card too',
+    JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([0, 3, 1, 2]));
+  h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+
   // ---- output settings open/close ----
   const settings = h.$('outputSettings');
   settings.open = true;
