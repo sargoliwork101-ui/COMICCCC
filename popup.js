@@ -284,6 +284,43 @@ async function scrapeAndSend(pdfName, mode, opts) {
     return urls.length - before;
   };
 
+  // ---------- اسکن اختصاصی حالت اسکرول (تب اول): دروازه‌های سخت‌گیرانه برای نیاوردن بنر/آیکون/تصاویر تزئینی ----------
+  // عمداً مستقل از scanImages است تا حالت‌های ورق‌زدن و مسیر کتابخوان رفتار قبلی خود را حفظ کنند.
+  const SCROLL_JUNK_URL = /logo|icon|avatar|sprite|emoji|sticker|banner|badge|button|btn[-_.]|pixel|tracker|beacon|spacer|placeholder|blank|loading|advert|\/ads?\/|rating/i;
+  const SCROLL_UI_ZONE = 'header, nav, footer, aside, [class*="sidebar"], [class*="comment"], ' +
+    '[class*="recommend"], [class*="related"], [class*="banner"], [class*="advert"], [class*="promo"]';
+  const isRendered = (el) => {
+    const cs = getComputedStyle(el);
+    return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
+  };
+  const scanScrollImages = () => {
+    const before = urls.length;
+    document.querySelectorAll('img').forEach((img) => {
+      if (!isRendered(img)) return;
+      const src = bestSrc(img);
+      if (!src || SCROLL_JUNK_URL.test(src)) return;
+      const rect = img.getBoundingClientRect();
+      const w = Math.max(img.naturalWidth || 0, rect.width);
+      const h = Math.max(img.naturalHeight || 0, rect.height);
+      // هر دو بُعد باید قابل‌قبول باشند؛ نوارهای باریک تبلیغاتی (مثل ۷۲۸×۹۰) و تصاویر ریز رد می‌شوند
+      if (w < 300 || h < 120) return;
+      add(src);
+    });
+    // background فقط وقتی محتوای اصلی است: المانِ بزرگِ رندرشده خارج از نواحی UI و بدون data-URI تزئینی
+    document.querySelectorAll('div, section, span, a').forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 300 || r.height < 300 || r.width * r.height < 120000) return;
+      if (!isRendered(el) || el.closest(SCROLL_UI_ZONE)) return;
+      const bg = getComputedStyle(el).backgroundImage;
+      const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+      if (!m) return;
+      const raw = m[1];
+      if (/^data:/i.test(raw) || SCROLL_JUNK_URL.test(raw)) return;
+      add(raw);
+    });
+    return urls.length - before;
+  };
+
   // ---------- رابط کاربری روی صفحه ----------
   const styleTag = document.createElement('style');
   styleTag.textContent =
@@ -782,7 +819,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
       last = h;
     }
     await sleep(800);
-    scanImages();
+    scanScrollImages();
   };
 
   // ---------- تشخیص دکمهٔ «بعدی» در صفحه ----------
@@ -982,7 +1019,11 @@ async function scrapeAndSend(pdfName, mode, opts) {
     }
 
     // اسکن نهایی تضمینی فقط برای مسیرهای DOM؛ در Google Books اسکن صفحه کاشی‌های ۲۵۶px بی‌ربط می‌آورد
-    if (!usedGoogleBooks) scanImages();
+    // حالت اسکرول اسکنر سخت‌گیرانهٔ خودش را دارد تا بنر/آیکون/تصاویر تزئینی وارد فهرست نشوند
+    if (!usedGoogleBooks) {
+      if (effectiveMode === 'scroll') scanScrollImages();
+      else scanImages();
+    }
     if (urls.length === 0) {
       say(skippedInline ? `تصاویر داخلی پیدا شدند اما ${skippedInline} مورد از حد مجاز بزرگ‌تر بودند.` : 'هیچ تصویری پیدا نشد!');
       await sleep(3000);

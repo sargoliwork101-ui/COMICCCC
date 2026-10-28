@@ -245,6 +245,61 @@ function makeHarness() {
     check('default: scroll mode still collects images', res && res.count === 1 && sent.length === 1, res);
   }
 
+  // ---------- 11. scroll mode uses the strict scanner: banners, hidden and junk images stay out ----------
+  {
+    const h = makeHarness();
+    const { window, img, sent } = h;
+    window.document.body.appendChild(img('https://cdn.test/comic-page.jpg', 800, 1200)); // legit
+    const banner = img('https://cdn.test/top-banner-728x90.jpg', 728, 90);               // thin ad strip
+    window.document.body.appendChild(banner);
+    window.document.body.appendChild(img('https://cdn.test/small200.png', 200, 200));    // too small
+    const hidden = img('https://cdn.test/preloaded-offscreen.jpg', 900, 1200);
+    hidden.style.display = 'none';                                                        // not rendered
+    window.document.body.appendChild(hidden);
+    window.document.body.appendChild(img('https://cdn.test/assets/rating-star.png', 400, 400)); // junk url
+    window.document.body.appendChild(img('https://cdn.test/btn/next-button.png', 350, 350));    // junk url
+
+    // background fixtures: one real content block, one footer decoration, one inline data-URI
+    const contentBg = window.document.createElement('div');
+    contentBg.style.backgroundImage = 'url("https://cdn.test/bg-content.webp")';
+    contentBg.getBoundingClientRect = () => ({ width: 600, height: 800, top: 0, left: 0, right: 600, bottom: 800 });
+    window.document.body.appendChild(contentBg);
+    const footer = window.document.createElement('footer');
+    const footerBg = window.document.createElement('div');
+    footerBg.style.backgroundImage = 'url("https://cdn.test/footer-art.jpg")';
+    footerBg.getBoundingClientRect = () => ({ width: 500, height: 500, top: 0, left: 0, right: 500, bottom: 500 });
+    footer.appendChild(footerBg);
+    window.document.body.appendChild(footer);
+    const inlineBg = window.document.createElement('div');
+    inlineBg.style.backgroundImage = 'url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")';
+    inlineBg.getBoundingClientRect = () => ({ width: 700, height: 700, top: 0, left: 0, right: 700, bottom: 700 });
+    window.document.body.appendChild(inlineBg);
+
+    const res = await window.eval('scrapeAndSend("strict.pdf")');
+    const urls = sent[0] && sent[0].urls ? sent[0].urls : [];
+    check('strict scroll: collects the real comic page', urls.includes('https://cdn.test/comic-page.jpg'), urls);
+    check('strict scroll: collects the large content background', urls.includes('https://cdn.test/bg-content.webp'), urls);
+    check('strict scroll: rejects thin banner strips', !urls.some((u) => u.includes('banner-728x90')), urls);
+    check('strict scroll: rejects undersized images', !urls.some((u) => u.includes('small200')), urls);
+    check('strict scroll: rejects display:none images', !urls.some((u) => u.includes('preloaded-offscreen')), urls);
+    check('strict scroll: rejects junk-url images',
+      !urls.some((u) => u.includes('rating-star') || u.includes('next-button')), urls);
+    check('strict scroll: rejects UI-zone backgrounds', !urls.some((u) => u.includes('footer-art')), urls);
+    check('strict scroll: rejects inline data-URI backgrounds', !urls.some((u) => u.startsWith('data:')), urls);
+    check('strict scroll: only the two legit assets remain', res.count === 2, res);
+  }
+
+  // ---------- 12. auto mode keeps the lenient shared scanner (a 260px image still passes) ----------
+  {
+    const h = makeHarness();
+    const { window, img, sent } = h;
+    window.document.body.appendChild(img('https://cdn.test/medium260.jpg', 260, 260));
+    const res = await window.eval('scrapeAndSend("lenient.pdf", "auto")');
+    const urls = sent[0] && sent[0].urls ? sent[0].urls : [];
+    check('auto mode: shared lenient scanner still accepts 260px images',
+      res.count === 1 && urls.includes('https://cdn.test/medium260.jpg'), res);
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL NAVIGATION TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });
