@@ -17,7 +17,7 @@
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۲.۵۴</span>
+        <span class="version-pill">نسخهٔ ۲.۵۵</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -180,15 +180,7 @@
         <option value="jpn">日本語 (ژاپنی)</option>
         <option value="chi_sim">中文 (چینی ساده)</option>
       </select>
-      <label for="trOcrProfile">روش تشخیص متن</label>
-      <select id="trOcrProfile" class="sel">
-        <option value="auto" selected>خودکار؛ مقایسهٔ ۴ روش و بازبینی موارد مشکوک</option>
-        <option value="sparse">روش ۱: متن‌های پراکنده</option>
-        <option value="dense">روش ۲: متن فشرده و بلوک‌بندی‌شده</option>
-        <option value="comic">روش ۳: کمیک و حباب گفتگو</option>
-        <option value="line">روش ۴: خط منفرد با LSTM</option>
-      </select>
-      <p class="note">همهٔ روش‌ها محلی و بر پایهٔ Tesseract LSTM هستند. در حالت خودکار، چهار شیوهٔ صفحه‌بندی و کنتراست OCR مقایسه می‌شوند؛ اگر نتیجه‌ها با هم نخوانند یا خروجی مشکوک باشد، متن حفظ می‌شود و خودکار ترجمه نمی‌شود تا دستی بازبینی شود.</p>
+      <p id="ocrMethodNote" class="note">تشخیص متن با موتور محلی Tesseract و یک روش صفحه‌بندی انجام می‌شود؛ تنظیم‌های افزایش کنتراست و دقت بالاتر فقط روی تصویر موقت OCR اثر دارند.</p>
       <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
       <label class="check" title="اگر خاموش باشد، متن اصلی پاک نمی‌شود و ترجمه با حاشیه روی تصویر قرار می‌گیرد"><input type="checkbox" id="trErase" checked><span>پاک‌کردن متن اصلی زیر ترجمه</span></label>
       <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>

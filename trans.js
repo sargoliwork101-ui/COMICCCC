@@ -54,10 +54,8 @@ async function runTranslate() {
   $('progressBar').style.width = '0';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
-  let totalBlocks = 0, translatedBlocks = 0, reviewBlocks = 0, doneImgs = 0, trFail = 0, noText = 0, rawTotal = 0, keptTotal = 0;
-  const ocrProfile = $('trOcrProfile').value;
-  const enhanceContrast = $('trContrast').checked;
-  const precise = $('trPrecise').checked;
+  let totalBlocks = 0, doneImgs = 0, trFail = 0, noText = 0, rawTotal = 0, keptTotal = 0;
+  const passes = ['gray', ...($('trContrast').checked ? ['adaptive'] : []), 'bubbles', ...($('trPrecise').checked ? ['wmask'] : [])];
   const errs = [];
   try {
     setStatus('در حال بارگذاری موتور تشخیص متن... (بار اول کمی طول می‌کشد)');
@@ -79,11 +77,7 @@ async function runTranslate() {
         let lines;
         const stats = { raw: 0, kept: 0 };
         try {
-          lines = await OcrTools.ocrWithProfiles(bmp, TR.worker, {
-            cjk: L.cjk, lang, profile: ocrProfile, enhanceContrast, precise, stats,
-            onSlice: (f) => prog(f * 0.6),
-            onProfile: (profile, index, count) => setStatus(`روش OCR ${index + 1} از ${count}: ${profile.name} — تصویر ${k + 1} از ${list.length}...`)
-          });
+          lines = await OcrTools.ocrBitmap(bmp, TR.worker, { cjk: L.cjk, lang, passes, stats, onSlice: (f) => prog(f * 0.6) });
         } finally { bmp.close(); }
         if (!$('ocrEnabled').checked) {
           it.ocr = null; it.edited = null;
@@ -98,29 +92,18 @@ async function runTranslate() {
         it.ocr = { lang, blocks };
         if (!blocks.length) { noText++; it.edited = null; }
         else {
-          const minTranslateConfidence = 55;
-          const translatable = blocks.filter((block) => Number.isFinite(block.conf) && block.conf >= minTranslateConfidence && !block.needsReview);
-          const reviewCount = blocks.length - translatable.length;
-          totalBlocks += blocks.length;
-          translatedBlocks += translatable.length;
-          reviewBlocks += reviewCount;
-          if (reviewCount) {
-            setStatus(`${reviewCount} متن به‌دلیل اطمینان پایین یا اختلاف بین روش‌های OCR برای جلوگیری از ترجمهٔ بی‌معنی نیاز به بازبینی دارد؛ تصویر ${k + 1} از ${list.length}. متن OCR را در ویرایشگر اصلاح کنید و «ترجمهٔ دوباره» را بزنید.`);
-          }
-          if (translatable.length) {
-            setStatus(`در حال ترجمهٔ ${translatable.length} متن مطمئن در تصویر ${k + 1} از ${list.length}...`);
-            let next = 0, n = 0;
-            await Promise.all(Array.from({ length: Math.min(3, translatable.length) }, async () => {
-              while (next < translatable.length && !TR.cancel) {
-                const b = translatable[next++];
-                const r = await TranslateTools.translate(b.text, L.sl);
-                b.tr = r.text;
-                if (!r.ok) trFail++;
-                n++;
-                prog(0.6 + 0.35 * (n / translatable.length));
-              }
-            }));
-          }
+          setStatus(`در حال ترجمهٔ ${blocks.length} متن در تصویر ${k + 1} از ${list.length}...`);
+          let next = 0, n = 0;
+          await Promise.all(Array.from({ length: Math.min(3, blocks.length) }, async () => {
+            while (next < blocks.length && !TR.cancel) {
+              const b = blocks[next++];
+              const r = await TranslateTools.translate(b.text, L.sl);
+              b.tr = r.text;
+              if (!r.ok) trFail++;
+              n++;
+              prog(0.6 + 0.35 * (n / blocks.length));
+            }
+          }));
           if (!$('ocrEnabled').checked) {
             it.ocr = null; it.edited = null;
             refreshCard(it); drawThumb(it);
@@ -132,8 +115,9 @@ async function runTranslate() {
             refreshCard(it); drawThumb(it);
             break;
           }
+          totalBlocks += blocks.length;
           doneImgs++;
-          $('sPages').innerText = translatedBlocks;
+          $('sPages').innerText = totalBlocks;
         }
       } catch (e) {
         console.warn(e);
@@ -150,13 +134,10 @@ async function runTranslate() {
     } else if (!totalBlocks && !TR.cancel) {
       setStatus(`متنی پیدا نشد. موتور OCR کار کرد (${rawTotal} خط خام، ${keptTotal} خط معتبر) ولی متن قابل‌قبولی نبود. ` +
         `مطمئن شوید زبان درست انتخاب شده (الان: ${L.name}) و گزینهٔ «دقت بالاتر» روشن است.`);
-    } else if (translatedBlocks && trFail >= translatedBlocks) {
-      setStatus('متن‌های مطمئن خوانده شد ولی ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید. متن‌های کم‌اطمینان یا دارای اختلاف بین روش‌های OCR در ویرایشگر برای بازبینی باقی مانده‌اند.');
-    } else if (!translatedBlocks && reviewBlocks) {
-      setStatus(`${reviewBlocks} متن به‌دلیل اطمینان پایین یا اختلاف بین روش‌های OCR نیاز به بازبینی دارد؛ برای جلوگیری از ترجمهٔ بی‌معنی، خودکار ترجمه نشد. روی ✎ تصویر بزنید، متن OCR را اصلاح کنید و «ترجمهٔ دوباره» را بزنید.`);
+    } else if (totalBlocks && trFail >= totalBlocks) {
+      setStatus('متن‌ها خوانده شد ولی ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید. (متن اصلی در ویرایشگر موجود است)');
     } else {
-      setStatus(`${TR.cancel ? 'متوقف شد. ' : ''}${translatedBlocks} متن مطمئن در ${doneImgs} تصویر ترجمه شد` +
-        (reviewBlocks ? ` — ${reviewBlocks} متن به‌دلیل اطمینان پایین یا اختلاف OCR برای بازبینی کنار گذاشته شد` : '') +
+      setStatus(`${TR.cancel ? 'متوقف شد. ' : ''}${totalBlocks} متن در ${doneImgs} تصویر ترجمه شد` +
         (noText ? ` (${noText} تصویر بدون متن)` : '') +
         (trFail ? ` — ترجمهٔ ${trFail} متن ناموفق بود` : '') +
         '. روی دکمهٔ ✎ هر تصویر بزنید تا ترجمه‌ها را ویرایش کنید.');
@@ -593,7 +574,6 @@ function buildEditor() {
 
     const row = document.createElement('div'); row.className = `blk${b.enabled ? '' : ' off'}`; row.dataset.id = b.id;
     row.innerHTML = `<div class="blk-top"><span class="blk-n">${b.id}</span>
-      ${b.needsReview ? '<span class="blk-review-badge" title="چند روش OCR نتیجهٔ یکسانی ندادند یا متن نویسهٔ مشکوک دارد">نیاز به بازبینی</span>' : ''}
       <label><input type="checkbox" ${b.enabled ? 'checked' : ''}> جایگزین شود</label>
       <select class="sel blk-bg"><option value="auto">پس‌زمینه: خودکار</option><option value="white">پس‌زمینه: سفید</option>
       <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن</option></select>

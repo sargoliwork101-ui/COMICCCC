@@ -154,30 +154,8 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
   }
   check('looksReal jpn accepts kana', OcrTools.looksReal('こんにちは', 'jpn') === true);
   check('looksReal kor', OcrTools.looksReal('안녕하세요 세상', 'kor') === true);
-  {
-    const pageModes = [], engineModes = [], attempted = [];
-    let passCount = 0;
-    const worker = { setParameters: async (parameters) => { pageModes.push(parameters.tessedit_pageseg_mode); engineModes.push(parameters.tessedit_ocr_engine_mode); } };
-    const lines = await OcrTools.ocrWithProfiles({}, worker, {
-      profile: 'auto', lang: 'eng', cjk: false, enhanceContrast: true, precise: false
-    }, async (_bmp, _worker, options) => {
-      attempted.push({ profile: options.profile, passes: options.passes });
-      passCount++;
-      return passCount === 1 ? [] : [{ text: 'hello world again', conf: 80 }];
-    });
-    check('automatic OCR evaluates sparse, dense, comic, and LSTM single-line profiles',
-      JSON.stringify(pageModes) === JSON.stringify(['11', '6', '12', '13']) && attempted.map((entry) => entry.profile).join(',') === 'sparse,dense,comic,line');
-    check('profiles explicitly use the Tesseract LSTM engine', engineModes.length === 4 && engineModes.every((mode) => mode === '1'));
-    check('alternate OCR profiles keep adaptive contrast enabled', attempted.slice(1).every((entry) => entry.passes.includes('adaptive')));
-    check('automatic OCR returns the best successful profile result', lines.length === 1 && lines[0].text === 'hello world again');
-    check('agreement across multiple OCR profiles avoids unnecessary review', lines[0] && lines[0].needsReview !== true);
-  }
-  {
-    const worker = { setParameters: async () => {} };
-    const lines = await OcrTools.ocrWithProfiles({}, worker, { profile: 'auto', lang: 'eng' }, async (_bmp, _worker, options) =>
-      [{ text: ['sparse', 'dense'].includes(options.profile) ? 'hello nice world' : 'nonsense glyph output', conf: 90 }]);
-    check('conflicting profile readings are flagged for manual review despite high confidence', lines[0] && lines[0].needsReview === true);
-  }
+  check('OCR uses the established single local Tesseract path',
+    typeof OcrTools.ocrWithProfiles === 'undefined' && !OcrTools.OCR_PROFILES);
 
   // groupLines: two close lines merge into one block
   {
@@ -218,20 +196,15 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     const garbled = { blocks: [{ paragraphs: [{ lines: [
       { text: 'NG BEYAYN®BIE', confidence: 94, bbox: { x0: 5, x1: 145, y0: 0, y1: 18 } }
     ] }] }] };
-    const reviewLine = OcrTools.extractLines(garbled, 0, false, 25, 'eng')[0];
-    check('garbled high-confidence OCR is retained and flagged for manual review',
-      reviewLine && reviewLine.text === 'NG BEYAYN®BIE' && reviewLine.needsReview === true, reviewLine);
-    const noisyMarks = { blocks: [{ paragraphs: [{ lines: [
-      { text: 'NG@@BEYAYN®BIE', confidence: 94, bbox: { x0: 5, x1: 145, y0: 0, y1: 18 } }
-    ] }] }] };
-    check('OCR text with extra misread symbols is retained rather than dropped',
-      OcrTools.extractLines(noisyMarks, 0, false, 25, 'eng').length === 1);
-    const groupedReview = OcrTools.groupLines([reviewLine], false)[0];
-    check('manual-review flag survives OCR grouping', groupedReview && groupedReview.needsReview === true);
+    const sampleLine = OcrTools.extractLines(garbled, 0, false, 25, 'eng')[0];
+    check('established OCR filter preserves the reported text for manual correction',
+      sampleLine && sampleLine.text === 'NG BEYAYN®BIE', sampleLine);
+    const groupedSample = OcrTools.groupLines([sampleLine], false)[0];
+    check('reported OCR result survives grouping', groupedSample && groupedSample.text === 'NG BEYAYN®BIE');
     const tiny = { blocks: [{ paragraphs: [{ lines: [
-      { text: 'small', confidence: 35, bbox: { x0: 5, x1: 35, y0: 0, y1: 5 } }
+      { text: 'small', confidence: 35, bbox: { x0: 5, x1: 35, y0: 0, y1: 9 } }
     ] }] }] };
-    check('fallback OCR accepts small low-resolution comic lettering',
+    check('single-pass OCR accepts lettering at its established minimum height',
       OcrTools.extractLines(tiny, 0, false, 25, 'eng').length === 1);
   }
 

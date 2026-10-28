@@ -123,8 +123,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.54', manifest.version === '2.54' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۵۴'));
+  check('manifest and viewer version badge are synchronized at 2.55', manifest.version === '2.55' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۵۵'));
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(fs.readFileSync(path.join(__dirname, 'viewer.css'), 'utf8')));
   check('PDF-to-image import opens the dedicated converter tab',
@@ -151,8 +151,8 @@ const $ = (id) => window.document.getElementById(id);
     !topMenu.contains($('groupMenu')));
   check('OCR-only contrast control exists and defaults on', !!$('trContrast') && $('trContrast').checked &&
     /فقط برای OCR/.test($('trContrast').parentElement.textContent));
-  check('Tesseract settings offer four local OCR profiles with automatic comparison',
-    $('trOcrProfile').value === 'auto' && ['sparse', 'dense', 'comic', 'line'].every((id) => $('trOcrProfile').querySelector(`option[value="${id}"]`)));
+  check('OCR uses one local Tesseract page-segmentation method',
+    !$('trOcrProfile') && /یک روش صفحه‌بندی/.test($('ocrMethodNote').textContent));
 
   // 2.21: ESC cancellation affordances exist in the shell
   const jobHint = $('jobHint');
@@ -267,11 +267,11 @@ const $ = (id) => window.document.getElementById(id);
   check('ocr on re-enables translate', !$('btnTranslate').disabled);
 
   ev(`OcrTools.createOcrWorker = async () => ({ recognize: async () => ({ data: { blocks: [] } }), setParameters: async () => {}, terminate: async () => {} });
-    OcrTools.ocrBitmap = async (bmp, worker, opts) => { window.__ocrPasses = opts.passes.slice(); window.__ocrProfiles = window.__ocrProfiles || []; window.__ocrProfiles.push(opts.profile); return [{ text: 'Hello world from OCR', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30 }]; };
+    OcrTools.ocrBitmap = async (bmp, worker, opts) => { window.__ocrCalls = (window.__ocrCalls || 0) + 1; window.__ocrPasses = opts.passes.slice(); return [{ text: 'Hello world from OCR', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30 }]; };
     OcrTools.groupLines = (lines) => [
       { id: 1, enabled: true, bg: 'auto', tr: '', text: 'Hello', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30, lineH: 16 },
       { id: 2, enabled: true, bg: 'auto', tr: '', text: 'uncertain', conf: 30, x0: 10, x1: 90, y0: 50, y1: 70, lineH: 16 },
-      { id: 3, enabled: true, bg: 'auto', tr: '', text: 'NG BEYAYN®BIE', conf: 94, needsReview: true, x0: 10, x1: 90, y0: 90, y1: 110, lineH: 16 }
+      { id: 3, enabled: true, bg: 'auto', tr: '', text: 'NG BEYAYN®BIE', conf: 94, x0: 10, x1: 90, y0: 90, y1: 110, lineH: 16 }
     ];`);
   $('trOnlySel').checked = false;
   $('btnTranslate').click();
@@ -280,15 +280,15 @@ const $ = (id) => window.document.getElementById(id);
   for (let i = 0; i < 80; i++) { await sleep(100); if (!ev('building')) break; }
   check('translate finished', !ev('building'));
   check('adaptive contrast pass is sent only through OCR processing', ev('window.__ocrPasses.includes("adaptive")'));
-  check('automatic OCR profile starts with Tesseract sparse-text mode', ev('window.__ocrProfiles[0] === "sparse"'));
+  check('one Tesseract OCR call per image uses the standard preprocessing path',
+    ev('window.__ocrCalls === 3 && window.__ocrPasses.includes("gray") && window.__ocrPasses.includes("bubbles") && window.__ocrPasses.includes("adaptive")'));
   check('ocr data attached', items.some((it) => it.ocr && it.ocr.blocks.length), items.map((it) => !!(it.ocr && it.ocr.blocks.length)));
   const translated = items.find((it) => it.ocr && it.ocr.blocks.length);
   check('translation filled from mock fetch', translated && translated.ocr.blocks[0].tr === 'سلام', translated && translated.ocr.blocks[0].tr);
-  check('low-confidence OCR is retained for correction, not auto-translated as gibberish',
-    translated && translated.ocr.blocks[1].tr === '' && translated.ocr.blocks[1].text === 'uncertain');
-  check('high-confidence but suspicious OCR is also retained for review, not auto-translated',
-    translated && translated.ocr.blocks[2].tr === '' && translated.ocr.blocks[2].text === 'NG BEYAYN®BIE' && translated.ocr.blocks[2].needsReview === true && /بازبینی/.test($('statusText').textContent),
-    { block: translated && translated.ocr.blocks[2], status: $('statusText').textContent });
+  check('single-pass path translates all extracted text, including low-confidence blocks',
+    translated && translated.ocr.blocks[1].tr === 'سلام' && translated.ocr.blocks[1].text === 'uncertain');
+  check('single-pass path translates the remaining extracted blocks too',
+    translated && translated.ocr.blocks[2].tr === 'سلام' && translated.ocr.blocks[2].text === 'NG BEYAYN®BIE');
   check('edited image produced', !!translated.edited);
 
   ev('openEditor(items.find((it) => it.ocr && it.ocr.blocks.length))');
