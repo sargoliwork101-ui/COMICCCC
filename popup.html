@@ -13,7 +13,7 @@
       <h1>PIC TO PDF</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v2.48</span>
+<span class="version-pill">v3.1</span>
     <button type="button" id="updateBtn" class="update-btn" title="بررسی و دانلود به‌روزرسانی از گیت‌هاب"
       aria-label="بررسی به‌روزرسانی">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
@@ -72,6 +72,13 @@
     </details>
   </div>
 
+  <div class="field pdf-import">
+    <label for="pdfFile">تبدیل فایل PDF به تصویر</label>
+    <input type="file" id="pdfFile" accept="application/pdf,.pdf">
+    <p class="mode-hint">هر صفحهٔ PDF به یک تصویر تبدیل و در همان پیش‌نمایش باز می‌شود؛ کراپ، ترجمه، گروه‌بندی و خروجی مثل بقیهٔ تصاویر در دسترس است.</p>
+    <div id="pdfImportStatus" class="update-status hidden" role="status" aria-live="polite"></div>
+  </div>
+
   <div class="box hidden" id="statusBox">
     <div id="statusText"></div>
   </div>
@@ -81,6 +88,9 @@
     <span>شروع و پیش‌نمایش تصاویر</span>
   </button>
 
+  <script src="pdf.min.js"></script>
+  <script src="pdfstore.js"></script>
+  <script src="pdfimport.js"></script>
   <script src="popup.js"></script>
   <script src="update.js"></script>
 </body>

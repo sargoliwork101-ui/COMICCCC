@@ -227,14 +227,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((error) => sendResponse({ ok: false, error: error && error.message ? error.message : String(error) }));
     return true;
   }
-  if (msg && msg.type === 'WTPDF_URLS') {
+  if (msg && (msg.type === 'WTPDF_URLS' || msg.type === 'WTPDF_LOCAL_JOB')) {
     const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     const job = {
       urls: msg.urls,
       name: msg.name,
       tabId: sender.tab ? sender.tab.id : null,
       pageUrl: (sender.tab && sender.tab.url) || msg.pageUrl || '',
-      skippedInline: Number(msg.skippedInline) || 0
+      skippedInline: Number(msg.skippedInline) || 0,
+      source: msg.source || 'web'
     };
     chrome.storage.local.set({ ['job_' + jobId]: job }).then(() => {
       chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') + '?job=' + jobId }, (tab) => {
