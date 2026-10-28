@@ -425,6 +425,9 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "Recognizable english sentence", tr: "ترجمه", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
     const copyBtn = h.$('edList').querySelector('.blk-copy-orig');
     check('editor exposes an OCR copy button', !!copyBtn);
+    check('copy button sits next to the English OCR text, not the block toolbar',
+      !!copyBtn.closest('.blk-orig') && !copyBtn.closest('.blk-top') &&
+      copyBtn.parentElement.querySelector('.blk-orig-text').textContent === 'Recognizable english sentence');
     copyBtn.click();
     await sleep(10);
     check('copy button puts the English OCR text on the clipboard', copied === 'Recognizable english sentence', copied);
@@ -455,6 +458,47 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     edTa.setSelectionRange(0, edTa.value.length);
     underBtn.click();
     check('select-all underline marks the whole line', edTa.value === '__hello **world**__', edTa.value);
+    h.$('edClose').click();
+  }
+
+  // ---- custom undo/redo for editor textareas (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) ----
+  {
+    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "hi", tr: "", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
+    const edList = h.$('edList');
+    const ta = edList.querySelector('textarea');
+    const type = (val) => { ta.value = val; ta.dispatchEvent(new h.window.Event('input', { bubbles: true })); };
+    const press = (init) => {
+      const evt = new h.window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
+      ta.dispatchEvent(evt);
+      return evt;
+    };
+    // two rapid edits coalesce into a single undo step
+    type('hello'); type('hello world');
+    check('typing updates the block model live', h.ev('items[0].ocr.blocks[0].tr') === 'hello world');
+    await sleep(750); // past the coalesce window -> next edit starts a fresh undo step
+    type('hello world!');
+    const undoEvt = press({ key: 'z', ctrlKey: true });
+    check('Ctrl+Z is intercepted (preventDefault) by the editor', undoEvt.defaultPrevented === true);
+    check('Ctrl+Z restores the previous typing step', ta.value === 'hello world', ta.value);
+    check('undo keeps the block model in sync', h.ev('items[0].ocr.blocks[0].tr') === 'hello world');
+    press({ key: 'y', ctrlKey: true });
+    check('Ctrl+Y redoes the undone step', ta.value === 'hello world!', ta.value);
+    press({ key: 'z', ctrlKey: true });
+    press({ key: 'z', ctrlKey: true, shiftKey: true });
+    check('Ctrl+Shift+Z redoes too', ta.value === 'hello world!', ta.value);
+    // formatting changes are discrete, individually undoable steps
+    ta.setSelectionRange(0, 5);
+    edList.querySelector('.blk-bold').click();
+    check('bold inserts inline markers', ta.value === '**hello** world!', ta.value);
+    press({ key: 'z', ctrlKey: true });
+    check('Ctrl+Z removes the formatting markers as one step', ta.value === 'hello world!', ta.value);
+    press({ key: 'z', ctrlKey: true, shiftKey: true });
+    check('redo restores the formatting markers', ta.value === '**hello** world!', ta.value);
+    // undo all the way to the original value is a safe no-op beyond the baseline
+    press({ key: 'z', ctrlKey: true });
+    press({ key: 'z', ctrlKey: true });
+    press({ key: 'z', ctrlKey: true });
+    check('undo at baseline never throws and stops at the initial value', ta.value === '', ta.value);
     h.$('edClose').click();
   }
 

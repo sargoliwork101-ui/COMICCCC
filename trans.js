@@ -220,6 +220,97 @@ function flushEditorOnBlur() {
   if (edDirty) applyEditor();
 }
 
+// ---------- Undo/Redo اختصاصی textareaهای ویرایشگر ----------
+// مرورگر با هر مقداردهی برنامه‌ای ta.value (مثل افزودن مارکرهای استایل) پشتهٔ undo بومی را پاک می‌کند،
+// برای همین تاریخچهٔ ویرایش هر textarea را خودمان نگه می‌داریم تا Ctrl+Z همیشه و روی همهٔ تغییرها کار کند.
+const UNDO_COALESCE_MS = 700; // تایپ پیوسته در این بازه یک مرحله حساب می‌شود
+const UNDO_LIMIT = 100;
+
+function snapshotTa(ta) {
+  return { value: ta.value, s: ta.selectionStart, e: ta.selectionEnd };
+}
+
+function createTextHistory(ta, initial) {
+  ta.__hist = {
+    stack: [{ value: initial, s: initial.length, e: initial.length }],
+    idx: 0,
+    lastAt: 0,
+    programmatic: false
+  };
+  return ta.__hist;
+}
+
+function pushTextHistory(ta, coalesce) {
+  const h = ta.__hist;
+  if (!h) return;
+  const entry = snapshotTa(ta);
+  const top = h.stack[h.idx];
+  const now = Date.now();
+  if (coalesce && h.idx === h.stack.length - 1 && top && top.value !== entry.value &&
+    now - h.lastAt < UNDO_COALESCE_MS) {
+    h.stack[h.idx] = entry; // تایپ پیوسته: همان مرحله به‌روز می‌شود
+  } else if (!top || top.value !== entry.value) {
+    h.stack.splice(h.idx + 1); // با ویرایش تازه، مسیر redo قبلی باطل می‌شود
+    h.stack.push(entry);
+    if (h.stack.length > UNDO_LIMIT) h.stack.shift();
+    h.idx = h.stack.length - 1;
+  }
+  h.lastAt = now;
+}
+
+// تغییر برنامه‌ای (افزودن/حذف مارکر استایل): یک مرحلهٔ مجزا و قابل Undo ثبت و مدل را همگام کن
+function commitEditorText(ta) {
+  const h = ta.__hist;
+  if (h) {
+    pushTextHistory(ta, false);
+    h.programmatic = true;
+    try { ta.dispatchEvent(new Event('input', { bubbles: true })); }
+    finally { h.programmatic = false; }
+  } else {
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+}
+
+function restoreTextHistory(ta, entry) {
+  const h = ta.__hist;
+  ta.value = entry.value;
+  ta.setSelectionRange(entry.s, entry.e);
+  h.programmatic = true;
+  try { ta.dispatchEvent(new Event('input', { bubbles: true })); }
+  finally { h.programmatic = false; }
+  h.lastAt = 0; // اولین تایپ بعد از undo/redo در مرحلهٔ قبلی ادغام نشود
+}
+
+function undoEditorText(ta) {
+  const h = ta.__hist;
+  if (!h || h.idx <= 0) return;
+  h.idx--;
+  restoreTextHistory(ta, h.stack[h.idx]);
+}
+
+function redoEditorText(ta) {
+  const h = ta.__hist;
+  if (!h || h.idx >= h.stack.length - 1) return;
+  h.idx++;
+  restoreTextHistory(ta, h.stack[h.idx]);
+}
+
+// اتصال Ctrl/Cmd+Z و Ctrl/Cmd+Shift+Z / Ctrl+Y به یک textarea
+function wireTextUndo(ta) {
+  ta.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const key = (e.key || '').toLowerCase();
+    if (key === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) redoEditorText(ta);
+      else undoEditorText(ta);
+    } else if (key === 'y') {
+      e.preventDefault();
+      redoEditorText(ta);
+    }
+  });
+}
+
 // ---------- استایل درون‌متنی وردی: دکمه‌های نوار بلوک روی متن انتخاب‌شده، در نبود انتخاب روی کل بلوک ----------
 // مارکرهای ساده: **بولد** *ایتالیک* __زیرخط__؛ تگ‌ها: [size=24]..[/size] و [color=#hex]..[/color].
 // دور متن انتخاب‌شدهٔ textarea مارکر می‌گذارد؛ اگر انتخاب دقیقاً داخل همان جفت مارکر باشد، آن را برمی‌دارد.
@@ -246,7 +337,7 @@ function wrapSelection(ta, open, close) {
   ta.value = next;
   ta.focus();
   ta.setSelectionRange(caretS, caretE);
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  commitEditorText(ta);
 }
 
 // تگ پارامتری (size/color): اگر انتخاب داخل تگ همان نوع باشد فقط پارامتر عوض می‌شود، وگرنه تگ تازه دورش می‌نشیند
@@ -277,7 +368,7 @@ function wrapTagSelection(ta, tag, param) {
   ta.value = next;
   ta.focus();
   ta.setSelectionRange(caretS, caretE);
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  commitEditorText(ta);
 }
 
 // حذف تگ پارامتری دور انتخاب (برای رنگ خودکار روی انتخاب)
@@ -293,7 +384,7 @@ function unwrapTagSelection(ta, tag) {
   ta.value = newBefore + sel + after.slice(am[0].length);
   ta.focus();
   ta.setSelectionRange(newBefore.length, newBefore.length + sel.length);
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  commitEditorText(ta);
   return true;
 }
 
@@ -359,12 +450,6 @@ function buildEditor() {
     row.dataset.id = b.id;
     row.innerHTML = `<div class="blk-top"><span class="blk-n">${b.id}</span>
       <label><input type="checkbox" ${b.enabled ? 'checked' : ''}> جایگزین شود</label>
-      <button type="button" class="fmt-btn blk-copy-orig" title="کپی متن شناسایی‌شدهٔ انگلیسی (OCR)">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"
-          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-      </button>
       <select class="sel blk-bg"><option value="auto">پس‌زمینه: خودکار</option><option value="white">پس‌زمینه: سفید</option>
       <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن (متن با حاشیه)</option></select></div>
       <div class="blk-format">
@@ -389,12 +474,25 @@ function buildEditor() {
         </label>
         <button type="button" class="fmt-btn blk-reset" title="بازنشانی همهٔ قالب‌بندی‌های این متن به پیش‌فرض">↺</button>
       </div>
-      <div class="blk-orig"></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>`;
-    row.querySelector('.blk-orig').textContent = b.text;
+      <div class="blk-orig"><button type="button" class="blk-copy-orig" title="کپی متن شناسایی‌شدهٔ انگلیسی (OCR)"
+          aria-label="کپی متن انگلیسی این متن">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+        </button><span class="blk-orig-text"></span></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>`;
+    row.querySelector('.blk-orig-text').textContent = b.text;
     const ta = row.querySelector('textarea'); ta.value = b.tr || '';
+    createTextHistory(ta, b.tr || '');
+    wireTextUndo(ta);
     const sel = row.querySelector('.blk-bg'); sel.value = b.bg;
     const chk = row.querySelector('.blk-top input');
-    ta.oninput = () => { b.tr = ta.value; scheduleApply(); };
+    ta.oninput = () => {
+      b.tr = ta.value;
+      // ورودی برنامه‌ای (undo/redo یا مارکر استایل) خودش قبلاً در تاریخچه ثبت شده است
+      if (!ta.__hist.programmatic) pushTextHistory(ta, true);
+      scheduleApply();
+    };
     ta.onfocus = () => setActiveBlock(b.id, false);
     sel.onchange = () => { b.bg = sel.value; scheduleApply(); };
     chk.onchange = () => { b.enabled = chk.checked; row.classList.toggle('off', !b.enabled); box.classList.toggle('off', !b.enabled); scheduleApply(); };
