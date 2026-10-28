@@ -409,6 +409,40 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     h.$('edClose').click();
   }
 
+  // ---- editor refresh gating: no re-render while a field is focused, flush on blur (2.45) ----
+  {
+    h.ev('items[0].ocr = { lang: "eng", blocks: [' +
+      '{ id: 1, text: "a", tr: "one", enabled: true, bg: "white", x0: 0, y0: 0, x1: 80, y1: 40, lineH: 16 },' +
+      '{ id: 2, text: "b", tr: "two", enabled: true, bg: "white", x0: 0, y0: 50, x1: 80, y1: 90, lineH: 16 }] };' +
+      'openEditor(items[0])');
+    h.ev('window.__applyCalls = 0; window.__origApplyEditor = applyEditor;' +
+      'applyEditor = async function(){ window.__applyCalls++; return window.__origApplyEditor.apply(this, arguments); }');
+    const edList2 = h.$('edList');
+    const tas = [...edList2.querySelectorAll('textarea')];
+    tas[0].focus();
+    tas[0].value = 'edited while focused';
+    tas[0].dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    await sleep(1000); // longer than the 900ms time trigger
+    check('no re-render while the textarea stays focused', h.ev('window.__applyCalls') === 0, h.ev('window.__applyCalls'));
+    // moving focus straight to another block's field also must not flush (user is still editing)
+    tas[1].focus();
+    await sleep(60);
+    check('switching to another editor field keeps the render pending', h.ev('window.__applyCalls') === 0);
+    // leaving the editor fields flushes immediately
+    h.window.document.body.focus();
+    tas[1].blur();
+    await sleep(120);
+    check('blur out of the editor flushes the pending render', h.ev('window.__applyCalls') === 1, h.ev('window.__applyCalls'));
+    // without any focused field, the 900ms time trigger works as the fallback
+    h.ev('window.__applyCalls = 0');
+    tas[0].value = 'unfocused edit';
+    tas[0].dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    await sleep(1000);
+    check('time trigger renders when no editor field is focused', h.ev('window.__applyCalls') >= 1, h.ev('window.__applyCalls'));
+    h.ev('applyEditor = window.__origApplyEditor');
+    h.$('edClose').click();
+  }
+
   // ---- output settings open/close ----
   const settings = h.$('outputSettings');
   settings.open = true;

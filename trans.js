@@ -156,6 +156,16 @@ async function runTranslate() {
 
 // ---------- ویرایشگر ----------
 let EDI = null, edUrl = null, edTimer = null, edDirty = false, edBusy = false, edPending = false;
+// تریگر زمانی اطمینان: همان ۹۰۰ms قبلی، اما وقتی کاربر هنوز داخل فیلدهای ویرایشگر است رندر عقب می‌افتد
+const EDITOR_APPLY_DELAY = 900;
+// وضعیت صریح فوکوس فیلدها (روی مرورگرها هم در لحظهٔ focusout قابل اعتمادتر از activeElement است)
+let edFieldFocused = false;
+const editorFieldEl = (el) => {
+  if (!el || !el.closest || !el.closest('#edList')) return null;
+  return ['TEXTAREA', 'INPUT', 'SELECT'].includes(el.tagName) ? el : null;
+};
+// دکمه‌ها عمداً فیلد حساب نمی‌شوند تا بعد از کلیک روی آن‌ها تریگر زمانی ۹۰۰ms بتواند رندر را انجام دهد.
+function isEditorInputFocused() { return edFieldFocused; }
 
 function setEdImage(item = EDI) {
   if (!item) return;
@@ -177,7 +187,18 @@ function setActiveBlock(id, scroll) {
 function scheduleApply() {
   edDirty = true;
   clearTimeout(edTimer);
-  edTimer = setTimeout(applyEditor, 900);
+  // تا وقتی کاربر در حال کار روی فیلدهاست رندر نمی‌کنیم (نه تصویر پیش‌نمایش می‌پرد نه بندانگشتی)؛
+  // تایمر ۹۰۰ms به‌عنوان شبکهٔ اطمینان باقی است و در حالت فوکوس دوباره مسلح می‌شود.
+  // رندر واقعی با blur فیلد (پایان کار کاربر) یا بستن ویرایشگر اتفاق می‌افتد.
+  edTimer = setTimeout(() => {
+    if (isEditorInputFocused()) { scheduleApply(); return; }
+    applyEditor();
+  }, EDITOR_APPLY_DELAY);
+}
+
+// پایان کار کاربر روی یک فیلد: اگر تغییر معلق مانده، بلافاصله رندر کن
+function flushEditorOnBlur() {
+  if (edDirty) applyEditor();
 }
 
 // استایل درون‌متنی روی متن انتخاب‌شدهٔ textarea: دور انتخاب مارکر می‌گذارد (یا مارکر موجود را برمی‌دارد)
@@ -236,6 +257,7 @@ function buildEditor() {
   const it = EDI, bl = it.ocr.blocks;
   const list = $('edList'), boxes = $('edBoxes');
   list.innerHTML = ''; boxes.innerHTML = '';
+  edFieldFocused = false; // فیلدهای قبلی با بازسازی لیست از بین رفته‌اند
   if (!bl.length) { list.innerHTML = '<div class="ed-empty">در این تصویر متنی پیدا نشد.</div>'; return; }
 
   // پیش‌فرض قالب‌بندی هر بلوک؛ دکمهٔ بازنشانی هم همین مقادیر را برمی‌گرداند
@@ -363,6 +385,7 @@ function openEditor(it) {
 async function closeEditor() {
   if (!EDI) return;
   clearTimeout(edTimer);
+  edFieldFocused = false;
   if (edDirty) await applyEditor();
   $('editor').classList.add('hidden');
   document.body.style.overflow = '';
@@ -427,6 +450,18 @@ $('edRevert').onclick = async () => {
   await applyEditor();
 };
 $('btnTxt').onclick = exportText;
+// پایان کار کاربر روی فیلدها (کلیک بیرون از فیلد، رفتن به پیش‌نمایش): تغییرات معلق بلافاصله رندر می‌شوند.
+// focusout حباب‌دار است و با بازسازی innerHTML فهرست در buildEditor هم از بین نمی‌رود.
+$('edList').addEventListener('focusin', (e) => {
+  if (editorFieldEl(e.target)) edFieldFocused = true;
+});
+$('edList').addEventListener('focusout', (e) => {
+  if (!editorFieldEl(e.target)) return;
+  // جابه‌جایی بین دو فیلد ویرایشگر یعنی کاربر هنوز مشغول است؛ رندر معلق می‌ماند
+  if (editorFieldEl(e.relatedTarget)) return;
+  edFieldFocused = false;
+  flushEditorOnBlur();
+});
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!$('editor').classList.contains('hidden')) closeEditor();
