@@ -1,0 +1,18 @@
+body { min-height: 100vh; padding: 0; }
+.import-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px clamp(16px, 5vw, 48px); border-bottom: 1px solid var(--line); background: linear-gradient(180deg, rgba(17,21,28,.92), rgba(17,21,28,.72)); }
+.import-main { width: min(760px, calc(100% - 32px)); margin: clamp(40px, 12vh, 110px) auto 60px; }
+.import-card { display: flex; flex-direction: column; gap: 16px; padding: clamp(20px, 5vw, 38px); border: 1px solid var(--line2); border-radius: 22px; background: linear-gradient(145deg, rgba(139,123,255,.08), var(--surface) 42%); box-shadow: 0 22px 60px -30px rgba(0,0,0,.8); }
+.import-card h2 { margin: 0; font-size: clamp(20px, 4vw, 26px); font-weight: 800; }
+.import-description { max-width: 620px; margin: 0; color: var(--muted); font-size: 14px; line-height: 2; }
+.import-card > .btn { max-width: 320px; margin-top: 6px; }
+.selected-file { overflow-wrap: anywhere; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.035); color: var(--muted); font-size: 12px; direction: ltr; text-align: left; }
+.progress-area { display: flex; flex-direction: column; gap: 9px; margin-top: 6px; }
+.progress-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
+.progress-heading span { color: var(--muted); direction: ltr; }
+.progress-area .bar { height: 12px; }
+#progressBar { width: 0; height: 100%; border-radius: inherit; background: var(--grad); box-shadow: 0 0 14px rgba(110,125,255,.6); transition: width .2s; }
+.import-status { margin: 0; min-height: 1.7em; color: var(--muted); font-size: 12px; line-height: 1.8; }
+.import-status.error { color: #fda4af; }
+.import-status.success { color: #6ee7b7; }
+#retryButton { width: auto; align-self: flex-start; }
+@media (max-width: 480px) { .import-header { padding-inline: 12px; } .import-main { margin-top: 32px; } }

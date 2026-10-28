@@ -60,7 +60,7 @@ function boot() {
   window.DragEvent = class DragEvent extends window.MouseEvent {
     constructor(type, init = {}) { super(type, init); this.dataTransfer = init.dataTransfer; }
   };
-  for (const f of ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'viewer.js', 'trans.js']) {
+  for (const f of ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'pdf-import-store.js', 'viewer.js', 'trans.js']) {
     vm.runInContext(fs.readFileSync(__dirname + '/' + f, 'utf8'), ctx, { filename: f });
   }
   return { dom, window, ctx, ev, $: (id) => window.document.getElementById(id) };
@@ -429,7 +429,11 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     await sleep(10);
     check('copy button puts the English OCR text on the clipboard', copied === 'Recognizable english sentence', copied);
     check('copy button shows the copied state', copyBtn.classList.contains('copied'));
+    check('copy button sits inline beside the OCR source text',
+      copyBtn.parentElement.classList.contains('blk-orig') &&
+      copyBtn.parentElement.querySelector('.blk-orig-text').textContent === 'Recognizable english sentence');
     h.$('edClose').click();
+    await sleep(120); // let the final asynchronous preview render settle before the next editor test
   }
 
   {
@@ -456,6 +460,24 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     underBtn.click();
     check('select-all underline marks the whole line', edTa.value === '__hello **world**__', edTa.value);
     h.$('edClose').click();
+    await sleep(120); // let the final asynchronous preview render settle before the next editor test
+  }
+
+  // ---- editor textarea undo/redo history ----
+  {
+    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "hi", tr: "first", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
+    const undoTa = h.$('edList').querySelector('textarea');
+    undoTa.value = 'second';
+    undoTa.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    undoTa.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
+    check('Ctrl+Z restores the previous text edit', undoTa.value === 'first' && h.ev('items[0].ocr.blocks[0].tr') === 'first', undoTa.value);
+    undoTa.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true, cancelable: true }));
+    check('Ctrl+Y reapplies the undone text edit', undoTa.value === 'second' && h.ev('items[0].ocr.blocks[0].tr') === 'second', undoTa.value);
+    undoTa.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
+    undoTa.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    check('Ctrl+Shift+Z also reapplies the text edit', undoTa.value === 'second');
+    h.$('edClose').click();
+    await sleep(120); // close out the queued preview render before checking focus gating
   }
 
   // ---- editor refresh gating: no re-render while a field is focused, flush on blur (2.45) ----
