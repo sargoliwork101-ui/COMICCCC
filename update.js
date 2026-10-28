@@ -2,18 +2,13 @@
 // افزونهٔ unpacked نمی‌تواند فایل‌های خودش را بازنویسی کند؛ پس از دانلود، جایگزینی ZIP و Reload دستی است.
 (function () {
   const REPO = 'sargoliwork101-ui/COMICCCC';
-  const DEFAULT_BRANCH = window.PIC_TO_PDF_UPDATE_BRANCH || 'main';
-  const BRANCH_STORAGE_KEY = 'pic_to_pdf_update_branch';
+  // شاخه به‌صورت خودکار از build تنظیم می‌شود؛ کاربر نیازی به انتخاب شاخه ندارد.
+  const BRANCH = window.PIC_TO_PDF_UPDATE_BRANCH || 'main';
   const btn = document.getElementById('updateBtn');
   const statusEl = document.getElementById('updateStatus');
-  const branchInput = document.getElementById('updateBranch');
-  const saveBranchBtn = document.getElementById('saveUpdateBranch');
   if (!btn || !statusEl || typeof chrome === 'undefined' || !chrome.runtime) return;
 
   const currentVersion = chrome.runtime.getManifest().version;
-  let updateBranch = DEFAULT_BRANCH;
-  if (branchInput) branchInput.value = updateBranch;
-
   const setStatus = (text, kind) => {
     statusEl.textContent = text;
     statusEl.classList.remove('hidden', 'ok', 'warn', 'err');
@@ -23,42 +18,8 @@
     btn.disabled = busy;
     btn.classList.toggle('spinning', busy);
   };
-  function cleanBranch(value) {
-    return String(value || '').trim().replace(/^\/+|\/+$/g, '');
-  }
-  async function storeBranch(branch) {
-    updateBranch = branch;
-    if (branchInput) branchInput.value = branch;
-    if (chrome.storage && chrome.storage.local) {
-      await chrome.storage.local.set({ [BRANCH_STORAGE_KEY]: branch });
-    }
-  }
 
-  // Restore the user's selected channel; the source branch is the default on a fresh install.
-  if (chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get(BRANCH_STORAGE_KEY).then((stored) => {
-      const saved = cleanBranch(stored && stored[BRANCH_STORAGE_KEY]);
-      if (saved) {
-        updateBranch = saved;
-        if (branchInput) branchInput.value = saved;
-      }
-    }).catch(() => {});
-  }
-
-  if (saveBranchBtn) {
-    saveBranchBtn.addEventListener('click', async () => {
-      const branch = cleanBranch(branchInput && branchInput.value);
-      if (!branch) { setStatus('نام شاخه را وارد کن؛ مثلاً main یا arena/نام-شاخه.', 'err'); return; }
-      try {
-        await storeBranch(branch);
-        setStatus(`شاخهٔ به‌روزرسانی روی «${branch}» ذخیره شد.`, 'ok');
-      } catch (error) {
-        setStatus('ذخیرهٔ شاخه ناموفق بود: ' + (error && error.message ? error.message : error), 'err');
-      }
-    });
-  }
-
-  // مقایسهٔ نسخه‌های چندبخشی مثل 2.48 با 2.49.1
+  // مقایسهٔ نسخه‌های چندبخشی مثل 2.50 با 2.51.1
   function compareVersions(a, b) {
     const pa = String(a).split('.').map((n) => Number.parseInt(n, 10) || 0);
     const pb = String(b).split('.').map((n) => Number.parseInt(n, 10) || 0);
@@ -70,8 +31,8 @@
     return 0;
   }
 
-  async function fetchLatestVersion(branch) {
-    const url = `https://api.github.com/repos/${REPO}/contents/manifest.json?ref=${encodeURIComponent(branch)}&_=${Date.now()}`;
+  async function fetchLatestVersion() {
+    const url = `https://api.github.com/repos/${REPO}/contents/manifest.json?ref=${encodeURIComponent(BRANCH)}&_=${Date.now()}`;
     const res = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
     if (res.status === 403 || res.status === 429) {
       throw new Error('محدودیت درخواست گیت‌هاب؛ چند دقیقهٔ دیگر دوباره تلاش کن');
@@ -84,8 +45,8 @@
     return json.version;
   }
 
-  async function downloadLatest(branch) {
-    const branchPath = branch.split('/').map(encodeURIComponent).join('/');
+  async function downloadLatest() {
+    const branchPath = BRANCH.split('/').map(encodeURIComponent).join('/');
     const zipUrl = `https://codeload.github.com/${REPO}/zip/refs/heads/${branchPath}`;
     if (chrome.downloads && typeof chrome.downloads.download === 'function') {
       await chrome.downloads.download({ url: zipUrl, filename: 'PIC-TO-PDF-latest.zip', saveAs: false });
@@ -96,23 +57,21 @@
 
   btn.addEventListener('click', async () => {
     setBusy(true);
-    setStatus('در حال بررسی نسخهٔ روی گیت‌هاب...');
+    setStatus('در حال بررسی نسخهٔ جدید...');
     try {
-      const branch = cleanBranch(branchInput ? branchInput.value : updateBranch) || DEFAULT_BRANCH;
-      await storeBranch(branch);
-      const latest = await fetchLatestVersion(branch);
+      const latest = await fetchLatestVersion();
       const cmp = compareVersions(latest, currentVersion);
       if (cmp === 0) {
-        setStatus(`نسخهٔ شما (v${currentVersion}) با آخرین نسخهٔ شاخهٔ «${branch}» برابر است ✓`, 'ok');
+        setStatus(`نسخهٔ شما (v${currentVersion}) به‌روز است ✓`, 'ok');
         return;
       }
       if (cmp < 0) {
-        setStatus(`نسخهٔ نصب‌شدهٔ شما (v${currentVersion}) از نسخهٔ شاخهٔ «${branch}» جدیدتر است؛ دانگرید انجام نشد.`, 'ok');
+        setStatus(`نسخهٔ نصب‌شدهٔ شما (v${currentVersion}) جدیدتر از نسخهٔ منتشرشده است؛ دانگرید انجام نشد.`, 'ok');
         return;
       }
 
       const approved = window.confirm(
-        `نسخهٔ جدید v${latest} در شاخهٔ «${branch}» پیدا شد. ZIP این شاخه دانلود شود؟\n\n` +
+        `نسخهٔ جدید v${latest} پیدا شد. مایل به دانلود به‌روزرسانی هستید؟\n\n` +
         'پس از دانلود باید فایل‌ها را دستی جایگزین و افزونه را Reload کنید.'
       );
       if (!approved) {
@@ -120,10 +79,10 @@
         return;
       }
 
-      setStatus(`تأیید شد؛ در حال دانلود نسخهٔ v${latest} از شاخهٔ «${branch}»...`, 'warn');
-      await downloadLatest(branch);
+      setStatus(`تأیید شد؛ در حال دانلود نسخهٔ v${latest}...`, 'warn');
+      await downloadLatest();
       setStatus(
-        `نسخهٔ v${latest} از شاخهٔ «${branch}» دانلود شد. فایل ZIP را روی پوشهٔ فعلی اکستنشن استخراج (جایگزین) کن، ` +
+        `نسخهٔ v${latest} دانلود شد. فایل ZIP را روی پوشهٔ فعلی اکستنشن استخراج (جایگزین) کن، ` +
         'بعد در chrome://extensions دکمهٔ Reload را بزن.',
         'ok'
       );

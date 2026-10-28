@@ -11,21 +11,15 @@ const b64 = (obj) => Buffer.from(JSON.stringify(obj), 'utf8').toString('base64')
 
 function boot(fetchImpl, downloadsImpl, currentVersion = '2.46', confirmImpl = () => true) {
   const dom = new JSDOM(
-    '<!DOCTYPE html><html><body><button id="updateBtn"></button><div id="updateStatus" class="hidden"></div>' +
-      '<input id="updateBranch"><button id="saveUpdateBranch"></button></body></html>',
+    '<!DOCTYPE html><html><body><button id="updateBtn"></button><div id="updateStatus" class="hidden"></div></body></html>',
     { url: 'chrome-extension://ext/popup.html', pretendToBeVisual: true, runScripts: 'dangerously' }
   );
   const { window } = dom;
   const ctx = dom.getInternalVMContext();
   const downloads = [];
-  const stored = {};
   const confirmCalls = [];
   window.chrome = {
     runtime: { getManifest: () => ({ version: currentVersion }) },
-    storage: { local: {
-      get: async (key) => ({ [key]: stored[key] }),
-      set: async (values) => Object.assign(stored, values)
-    } },
     downloads: { download: async (opts) => { downloads.push(opts); if (downloadsImpl) downloadsImpl(opts); return 1; } }
   };
   window.confirm = (message) => { confirmCalls.push(message); return confirmImpl(message); };
@@ -35,8 +29,7 @@ function boot(fetchImpl, downloadsImpl, currentVersion = '2.46', confirmImpl = (
   return {
     window, downloads, confirmCalls,
     btn: window.document.getElementById('updateBtn'),
-    status: window.document.getElementById('updateStatus'),
-    branchInput: window.document.getElementById('updateBranch')
+    status: window.document.getElementById('updateStatus')
   };
 }
 
@@ -52,8 +45,8 @@ const jsonResponse = (manifest) => ({
     const h = boot(async (url) => { checkedUrl = url; return jsonResponse({ version: '2.46' }); });
     h.btn.click();
     await sleep(10);
-    check('up-to-date: success message shown', h.status.classList.contains('ok') && /آخرین نسخه/.test(h.status.textContent), h.status.textContent);
-    check('version check uses the configured update branch', /ref=arena%2Ftest-updater/.test(checkedUrl), checkedUrl);
+    check('up-to-date: success message shown', h.status.classList.contains('ok') && /به‌روز است/.test(h.status.textContent), h.status.textContent);
+    check('version check automatically uses the build update channel', /ref=arena%2Ftest-updater/.test(checkedUrl), checkedUrl);
     check('up-to-date: nothing downloaded', h.downloads.length === 0);
     check('up-to-date: button re-enabled', !h.btn.disabled);
   }
@@ -68,17 +61,6 @@ const jsonResponse = (manifest) => ({
     check('new version: asks for approval before downloading', h.confirmCalls.length === 1 && /دانلود/.test(h.confirmCalls[0]));
     check('new version: instruction message mentions Reload',
       h.status.classList.contains('ok') && /Reload/.test(h.status.textContent) && /2\.47\.1/.test(h.status.textContent), h.status.textContent);
-  }
-
-  // A user may target any valid GitHub branch without changing the extension source.
-  {
-    let checkedUrl = '';
-    const h = boot(async (url) => { checkedUrl = url; return jsonResponse({ version: '2.47.1' }); });
-    h.branchInput.value = 'feature/other-branch';
-    h.btn.click();
-    await sleep(10);
-    check('custom branch: manifest request uses the entered branch', /ref=feature%2Fother-branch/.test(checkedUrl), checkedUrl);
-    check('custom branch: download uses the same branch', /feature\/other-branch/.test(h.downloads[0] && h.downloads[0].url));
   }
 
   // Declining confirmation cancels the update without downloading anything.
