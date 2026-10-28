@@ -123,8 +123,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.58', manifest.version === '2.58' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۵۸'));
+  check('manifest and viewer version badge are synchronized at 2.59', manifest.version === '2.59' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۵۹'));
   const viewerCss = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
@@ -164,8 +164,14 @@ const $ = (id) => window.document.getElementById(id);
     !$('trOcrProfile') && /یک روش صفحه‌بندی/.test($('ocrMethodNote').textContent));
   check('optional AI settings stay collapsed to avoid clutter', $('aiSettings') && $('aiSettings').tagName === 'DETAILS' && !$('aiSettings').open);
   check('AI translation is opt-in and defaults off', $('trAiEnabled') && !$('trAiEnabled').checked);
-  check('AI key is a private password field inside the collapsed settings',
-    $('trAiKey').type === 'password' && $('aiSettings').contains($('trAiKey')));
+  check('named multi-key controls stay inside the collapsed settings',
+    $('aiProfileList') && $('trAiAddProfile') && $('aiSettings').contains($('aiProfileList')) &&
+    $('aiSettings').contains($('trAiAddProfile')));
+  await ev('aiSettingsReady');
+  check('each API profile has a custom-name field and a private password field',
+    $('aiProfileList').children.length === 1 &&
+    $('aiProfileList').querySelector('input[type="text"]') &&
+    $('aiProfileList').querySelector('input[type="password"]'));
   check('editable Skill and reset action are available',
     $('aiSettings').contains($('trAiSkill')) && $('aiSettings').contains($('trAiSkillReset')));
   check('AI key help links only to Google AI Studio',

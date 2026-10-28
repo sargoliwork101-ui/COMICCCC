@@ -17,7 +17,7 @@
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۲.۵۸</span>
+        <span class="version-pill">نسخهٔ ۲.۵۹</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -189,9 +189,11 @@
         <div class="ai-settings-body">
           <label class="check" title="اگر خاموش باشد، هیچ درخواست یا مصرفی از سهمیهٔ هوش مصنوعی انجام نمی‌شود"><input type="checkbox" id="trAiEnabled"><span>استفاده از ترجمهٔ یک‌جای هوش مصنوعی</span></label>
           <p class="note">پیش‌فرض خاموش است. فقط وقتی این گزینه روشن باشد و «شروع ترجمه» را بزنید، تمام متن‌های انتخاب‌شده در یک بستهٔ متنی برای Gemini ارسال می‌شوند.</p>
-          <label for="trAiKey">کلید Gemini API</label>
-          <input id="trAiKey" type="password" dir="ltr" autocomplete="off" spellcheck="false" placeholder="کلید خودتان را وارد کنید">
-          <p class="ai-help"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلید فقط در حافظهٔ محلی همین مرورگر ذخیره می‌شود.</p>
+          <label>کلیدهای Gemini API و نام دلخواه هرکدام</label>
+          <div id="aiProfileList" class="ai-profile-list"></div>
+          <button id="trAiAddProfile" class="mini" type="button">افزودن API</button>
+          <p class="ai-help"><a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">ساخت کلید رایگان در Google AI Studio</a> · کلیدها فقط در حافظهٔ محلی همین مرورگر ذخیره می‌شوند.</p>
+          <p class="note">ترتیب تلاش از بالا به پایین است. اگر یک کلید خطا بدهد یا سهمیه‌اش تمام شود، کلید بعدی فقط یک بار امتحان می‌شود. سهمیهٔ Gemini برای هر پروژه حساب می‌شود، نه برای هر کلید جدا.</p>
           <label for="trAiModel">مدل Gemini</label>
           <input id="trAiModel" type="text" dir="ltr" value="gemini-3.8-flash" spellcheck="false">
           <label for="trAiSkill">Skill / راهنمای سبک ترجمه</label>

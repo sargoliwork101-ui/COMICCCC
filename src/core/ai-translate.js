@@ -129,7 +129,48 @@ Keep each ID unchanged. Do not merge, omit, reorder or explain entries. Do not a
     return translationMap(text, knownIds);
   }
 
+  // کلیدها فقط به همان ترتیب فهرست و یک بار امتحان می‌شوند؛ جزئیات خطا هرگز خود کلید را ندارد.
+  async function translateWithFailover(options) {
+    const entries = Array.isArray(options.entries) ? options.entries : [];
+    if (!entries.length) return { translations: new Map(), profileId: '', profileName: '', attempts: [] };
+    const profiles = (Array.isArray(options.profiles) ? options.profiles : [])
+      .map((profile, index) => ({
+        id: String(profile && profile.id || `api-${index + 1}`),
+        name: String(profile && profile.name || '').trim() || `API ${index + 1}`,
+        apiKey: String(profile && profile.apiKey || '').trim()
+      }))
+      .filter((profile) => profile.apiKey);
+    if (!profiles.length) throw new Error('حداقل یک کلید Gemini معتبر وارد کنید.');
+
+    const attempts = [];
+    const abortError = () => {
+      const error = new Error('عملیات ترجمه لغو شد.');
+      error.name = 'AbortError';
+      return error;
+    };
+    for (const profile of profiles) {
+      if (options.signal && options.signal.aborted) throw abortError();
+      try {
+        const translations = await translateBatch(Object.assign({}, options, { apiKey: profile.apiKey }));
+        if (!translations.size) throw new Error('این کلید پاسخ قابل‌استفاده‌ای نداشت.');
+        attempts.push({ profileId: profile.id, name: profile.name, ok: true });
+        return { translations, profileId: profile.id, profileName: profile.name, attempts };
+      } catch (error) {
+        if ((options.signal && options.signal.aborted) || (error && error.name === 'AbortError')) throw error;
+        attempts.push({ profileId: profile.id, name: profile.name, ok: false, error });
+      }
+    }
+    const error = new Error('هیچ‌یک از کلیدهای Gemini پاسخ قابل‌استفاده‌ای ندادند.');
+    error.attempts = attempts;
+    throw error;
+  }
+
   function safeError(error) {
+    if (Array.isArray(error && error.attempts)) {
+      const details = error.attempts.map((attempt) =>
+        `${attempt.name}: ${attempt.ok ? 'پاسخ دریافت شد' : safeError(attempt.error)}`).join('؛ ');
+      if (details) return `${error.message} ${details}`;
+    }
     const status = Number(error && error.status);
     if (status === 400) return 'درخواست یا نام مدل Gemini معتبر نیست.';
     if (status === 401 || status === 403) return 'کلید API معتبر نیست یا اجازهٔ استفاده از این مدل را ندارد.';
@@ -139,7 +180,7 @@ Keep each ID unchanged. Do not merge, omit, reorder or explain entries. Do not a
     return error && error.message ? error.message : 'خطای ناشناخته در ترجمهٔ هوش مصنوعی.';
   }
 
-  const api = { DEFAULT_MODEL, DEFAULT_SKILL, buildText, translateBatch, translationMap, safeError, normalizeModel };
+  const api = { DEFAULT_MODEL, DEFAULT_SKILL, buildText, translateBatch, translateWithFailover, translationMap, safeError, normalizeModel };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AiTranslateTools = api;
 })(typeof window !== 'undefined' ? window : globalThis);

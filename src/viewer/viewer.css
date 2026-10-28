@@ -358,7 +358,12 @@ kbd { display: inline-block; padding: 1px 7px; border-radius: 7px; border: 1px s
 .ai-settings input[type=password] { direction: ltr; text-align: left; }
 .ai-settings textarea { min-height: 150px; resize: vertical; direction: rtl; text-align: right; line-height: 1.9; }
 .ai-settings input[type=password]:focus, .ai-settings textarea:focus { border-color: var(--a1); box-shadow: 0 0 0 3px rgba(139,123,255,.18); }
-.ai-settings #trAiSkillReset { align-self: flex-start; }
+.ai-settings #trAiSkillReset, .ai-settings #trAiAddProfile { align-self: flex-start; }
+.ai-profile-list { display: flex; flex-direction: column; gap: 8px; }
+.ai-profile-row { display: grid; grid-template-columns: minmax(76px,.7fr) minmax(110px,1.3fr) 30px; gap: 6px; align-items: center; }
+.ai-profile-row input { min-width: 0; padding: 8px 9px; font-size: 12px; }
+.ai-profile-name { direction: rtl !important; text-align: right !important; }
+.ai-profile-remove { width: 30px; min-width: 30px; height: 30px; padding: 0; border-radius: 8px; }
 .ai-help { margin: -4px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.8; }
 .ai-help a { color: #b9afff; text-decoration: none; }
 .ai-help a:hover { text-decoration: underline; }

@@ -8,7 +8,7 @@ const PNG = Buffer.from(
   'hex'
 );
 
-function makeHarness({ fetchImpl, jobUrls } = {}) {
+function makeHarness({ fetchImpl, jobUrls, aiSettings } = {}) {
   const html = fs.readFileSync(__dirname + '/../src/viewer/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
   const dom = new JSDOM(html, { url: 'https://example.com/viewer.html?job=testjob', pretendToBeVisual: true, runScripts: 'dangerously' });
   const { window } = dom;
@@ -22,6 +22,7 @@ function makeHarness({ fetchImpl, jobUrls } = {}) {
     urls: jobUrls || ['https://comic.test/a.png', 'https://comic.test/b.png', 'https://comic.test/c.png', 'https://comic.test/d.png'],
     name: 'comic.pdf', tabId: 7, pageUrl: 'https://comic.test/page', skippedInline: 2
   });
+  if (aiSettings) storageMap.set('gemini_translation_settings_v1', aiSettings);
   let scriptingCalls = 0;
   window.chrome = {
     runtime: { id: 'extid123', getURL: (p) => 'chrome-extension://extid123/' + p },
@@ -719,14 +720,16 @@ prepare = async (it, r) => {
     await h.ev('aiSettingsReady');
     h.ev(`OcrTools.createOcrWorker=async()=>({recognize:async()=>({data:{blocks:[]}}),setParameters:async()=>{},terminate:async()=>{}});
       OcrTools.ocrBitmap=async()=>[{text:'Hello',conf:90,x0:10,x1:90,y0:10,y1:30}];
-      OcrTools.groupLines=()=>[{id:1,enabled:true,bg:'auto',tr:'',text:'Hello',x0:10,x1:90,y0:10,y1:30,lineH:16}];`);
+      OcrTools.groupLines=()=>[{id:1,enabled:true,bg:'auto',tr:'',text:'Hello',x0:10,x1:90,y0:10,y1:30,lineH:16}];
+      window.__aiIds=(options)=>[...JSON.parse(options.body).contents[0].parts[0].text.matchAll(/^\\[(p[0-9]+-b[0-9]+)\\]/gm)].map(m=>m[1]);
+      window.__aiOk=(translations)=>({ok:true,status:200,json:async()=>({candidates:[{content:{parts:[{text:JSON.stringify(translations)}]}}]})});`);
     h.$('trOnlySel').checked = false;
     return h;
   };
   {
     const h = await prepareAiTranslationHarness();
     h.ev(`window.__aiCalls=0; window.__freeCalls=0;
-      AiTranslateTools.translateBatch=async()=>{window.__aiCalls++;return new Map();};
+      AiTranslateTools.translateWithFailover=async()=>{window.__aiCalls++;return {translations:new Map()};};
       TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
     h.$('trAiEnabled').checked = false;
     await h.ev('runTranslate()');
@@ -737,11 +740,11 @@ prepare = async (it, r) => {
   {
     const h = await prepareAiTranslationHarness();
     h.ev(`window.__aiCalls=0; window.__freeCalls=0; window.__aiEntryCount=0;
-      AiTranslateTools.translateBatch=async(options)=>{window.__aiCalls++;window.__aiEntryCount=options.entries.length;
-        return new Map(options.entries.map(entry=>[entry.id,'ترجمه طبیعی '+entry.id]));};
+      window.fetch=async(url,options)=>{window.__aiCalls++;const ids=window.__aiIds(options);window.__aiEntryCount=ids.length;
+        return window.__aiOk(ids.map(id=>({id,translation:'ترجمه طبیعی '+id})));};
       TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
     h.$('trAiEnabled').checked = true;
-    h.$('trAiKey').value = 'test-local-key';
+    h.ev(`aiProfiles=[makeAiProfile('شخصی','test-local-key')];renderAiProfiles();`);
     h.$('trAiSkill').value = 'لحن صمیمی و طبیعی';
     await h.ev('runTranslate()');
     check('AI opt-in sends all selected pages in one request', h.ev('window.__aiCalls') === 1 && h.ev('window.__aiEntryCount') === 2,
@@ -749,20 +752,21 @@ prepare = async (it, r) => {
     check('successful AI batch never spends the old per-bubble fallback', h.ev('window.__freeCalls') === 0);
     check('AI translations render back onto every image', h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr.startsWith("ترجمه طبیعی"))'));
     check('AI settings stay local for the next use', h.storageMap.get('gemini_translation_settings_v1') &&
-      h.storageMap.get('gemini_translation_settings_v1').apiKey === 'test-local-key' &&
+      h.storageMap.get('gemini_translation_settings_v1').profiles[0].apiKey === 'test-local-key' &&
+      h.storageMap.get('gemini_translation_settings_v1').profiles[0].name === 'شخصی' &&
       h.storageMap.get('gemini_translation_settings_v1').skill === 'لحن صمیمی و طبیعی');
     check('API key never enters the page profile', !JSON.stringify(h.ev('collectPageProfile()')).includes('test-local-key'));
-    check('completed status mentions the single AI request', /یک درخواست/.test(h.$('statusText').textContent), h.$('statusText').textContent);
+    check('completed status safely names the successful profile', /شخصی/.test(h.$('statusText').textContent), h.$('statusText').textContent);
   }
   {
     const h = await prepareAiTranslationHarness();
     h.ev(`window.__aiCalls=0; window.__freeCalls=0;
-      AiTranslateTools.translateBatch=async()=>{window.__aiCalls++;const e=new Error('quota');e.status=429;throw e;};
+      window.fetch=async()=>{window.__aiCalls++;return {ok:false,status:429,json:async()=>({})};};
       TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه جایگزین',ok:true};};`);
     h.$('trAiEnabled').checked = true;
-    h.$('trAiKey').value = 'test-local-key';
+    h.ev(`aiProfiles=[makeAiProfile('تک‌کلید','test-local-key')];renderAiProfiles();`);
     await h.ev('runTranslate()');
-    check('AI failure is not retried to conserve quota', h.ev('window.__aiCalls') === 1);
+    check('one failed AI profile is not retried to conserve quota', h.ev('window.__aiCalls') === 1);
     check('AI failure falls back only once per missing bubble', h.ev('window.__freeCalls') === 2,
       h.ev('window.__freeCalls'));
     check('fallback still produces translated images', h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr==="ترجمه جایگزین")'));
@@ -772,20 +776,78 @@ prepare = async (it, r) => {
   {
     const h = await prepareAiTranslationHarness();
     h.ev(`window.__aiCalls=0; window.__freeCalls=0;
-      AiTranslateTools.translateBatch=async(options)=>{window.__aiCalls++;return new Promise((resolve,reject)=>{
+      window.fetch=async(url,options)=>{window.__aiCalls++;return new Promise((resolve,reject)=>{
         options.signal.addEventListener('abort',()=>reject(new Error('aborted')));
       });};
       TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
     h.$('trAiEnabled').checked = true;
-    h.$('trAiKey').value = 'test-local-key';
+    h.ev(`aiProfiles=[makeAiProfile('در حال کار','test-local-key'),makeAiProfile('پشتیبان','backup-key')];renderAiProfiles();`);
     const running = h.ev('runTranslate()');
     for (let i = 0; i < 60 && h.ev('window.__aiCalls') === 0; i++) await sleep(20);
     check('AI request is in flight before cancellation', h.ev('window.__aiCalls') === 1);
     h.$('btnStopTr').click();
     await running;
-    check('stopping aborts AI without starting fallback requests', h.ev('window.__freeCalls') === 0 && h.ev('TR.aiController') === null);
+    check('stopping aborts AI without another key or fallback requests',
+      h.ev('window.__freeCalls') === 0 && h.ev('window.__aiCalls') === 1 && h.ev('TR.aiController') === null);
     check('stopped AI run releases the UI and reports cancellation', !h.ev('building') && /متوقف/.test(h.$('statusText').textContent),
       h.$('statusText').textContent);
+  }
+
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0; window.__freeCalls=0; window.__aiKeys=[];
+      window.fetch=async(url,options)=>{window.__aiCalls++;const key=options.headers['x-goog-api-key'];window.__aiKeys.push(key);
+        if(key==='first-test-key')return {ok:false,status:429,json:async()=>({})};
+        const ids=window.__aiIds(options);return window.__aiOk(ids.map(id=>({id,translation:'ترجمهٔ پشتیبان '+id})));};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiEnabled').checked = true;
+    h.ev(`aiProfiles=[makeAiProfile('کلید اول','first-test-key'),makeAiProfile('کلید دوم','second-test-key')];renderAiProfiles();`);
+    await h.ev('runTranslate()');
+    check('integration moves from exhausted first key to named backup in order',
+      h.ev('window.__aiCalls') === 2 && h.ev('window.__aiKeys.join(",")') === 'first-test-key,second-test-key',
+      h.ev('window.__aiKeys'));
+    check('backup success avoids ordinary fallback and renders every translation',
+      h.ev('window.__freeCalls') === 0 && h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr.startsWith("ترجمهٔ پشتیبان"))'));
+    const settings = h.storageMap.get('gemini_translation_settings_v1');
+    check('both custom profile names and keys are stored locally in order', settings &&
+      settings.profiles.length === 2 && settings.profiles[0].name === 'کلید اول' &&
+      settings.profiles[1].name === 'کلید دوم' && settings.profiles[1].apiKey === 'second-test-key');
+    check('neither failover key leaks into errors or the page profile',
+      !h.$('failed').textContent.includes('first-test-key') &&
+      !JSON.stringify(h.ev('collectPageProfile()')).includes('second-test-key'));
+  }
+  {
+    const h = makeHarness({
+      jobUrls: ['https://comic.test/a.png'],
+      aiSettings: { enabled: true, apiKey: 'legacy-test-key', model: 'gemini-2.5-flash', skill: 'Skill قبلی' }
+    });
+    await h.ev('aiSettingsReady');
+    check('existing single-key settings migrate without losing key, model, Skill, or opt-in',
+      h.ev('aiProfiles.length') === 1 && h.ev('aiProfiles[0].apiKey') === 'legacy-test-key' &&
+      h.ev('aiProfiles[0].name') === 'کلید اصلی' && h.$('trAiEnabled').checked &&
+      h.$('trAiModel').value === 'gemini-2.5-flash' && h.$('trAiSkill').value === 'Skill قبلی');
+    check('migrated key appears in a private password row inside collapsed AI settings',
+      h.$('aiProfileList').querySelectorAll('.ai-profile-row').length === 1 &&
+      h.$('aiProfileList').querySelector('input[type="password"]').value === 'legacy-test-key' &&
+      h.$('aiSettings').contains(h.$('aiProfileList')));
+    await h.ev('saveAiSettings()');
+    check('migration saves the new local profile structure',
+      h.storageMap.get('gemini_translation_settings_v1').profiles[0].apiKey === 'legacy-test-key');
+    h.$('trAiAddProfile').click();
+    await sleep(0);
+    const rows = h.$('aiProfileList').querySelectorAll('.ai-profile-row');
+    check('add API creates another named profile row', rows.length === 2 &&
+      rows[1].querySelector('input[type="text"]') && rows[1].querySelector('input[type="password"]'));
+    const nameInput = rows[1].querySelector('input[type="text"]');
+    const keyInput = rows[1].querySelector('input[type="password"]');
+    nameInput.value = 'ذخیرهٔ من'; keyInput.value = 'ui-second-key';
+    nameInput.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    keyInput.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    await h.ev('saveAiSettings()');
+    const saved = h.storageMap.get('gemini_translation_settings_v1');
+    check('custom name and second secret entered in the UI persist locally',
+      saved.profiles.length === 2 && saved.profiles[1].name === 'ذخیرهٔ من' &&
+      saved.profiles[1].apiKey === 'ui-second-key');
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL EDGE-CASE TESTS PASSED');

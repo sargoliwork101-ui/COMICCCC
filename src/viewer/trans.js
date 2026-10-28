@@ -3,27 +3,77 @@
 // این فایل بعد از viewer.js بارگذاری می‌شود و از متغیرهای آن (items، building، ...) استفاده می‌کند.
 const TR = { worker: null, lang: null, cancel: false, aiController: null };
 const AI_SETTINGS_KEY = 'gemini_translation_settings_v1';
+let aiProfiles = [], aiProfileSerial = 0;
 
+function makeAiProfile(name = '', apiKey = '', id = '') {
+  aiProfileSerial++;
+  return {
+    id: String(id || `gemini-${Date.now().toString(36)}-${aiProfileSerial}`),
+    name: String(name || ''), apiKey: String(apiKey || '')
+  };
+}
+function renderAiProfiles() {
+  const container = $('aiProfileList');
+  container.textContent = '';
+  aiProfiles.forEach((profile, index) => {
+    const row = document.createElement('div');
+    row.className = 'ai-profile-row';
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text'; nameInput.className = 'ai-profile-name';
+    nameInput.value = profile.name; nameInput.placeholder = `API ${index + 1}`;
+    nameInput.setAttribute('aria-label', `نام دلخواه API ${index + 1}`);
+    nameInput.addEventListener('input', () => { profile.name = nameInput.value; });
+    nameInput.addEventListener('change', saveAiSettings);
+    const keyInput = document.createElement('input');
+    keyInput.type = 'password'; keyInput.autocomplete = 'off'; keyInput.spellcheck = false;
+    keyInput.value = profile.apiKey; keyInput.placeholder = 'کلید API';
+    keyInput.setAttribute('aria-label', `کلید API ${index + 1}`);
+    keyInput.addEventListener('input', () => { profile.apiKey = keyInput.value; });
+    keyInput.addEventListener('change', saveAiSettings);
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'mini warn ai-profile-remove'; remove.textContent = '×';
+    remove.title = 'حذف این API'; remove.setAttribute('aria-label', `حذف API ${index + 1}`);
+    remove.disabled = aiProfiles.length === 1;
+    remove.onclick = () => {
+      aiProfiles.splice(index, 1);
+      if (!aiProfiles.length) aiProfiles.push(makeAiProfile('کلید اول'));
+      renderAiProfiles(); saveAiSettings();
+    };
+    row.append(nameInput, keyInput, remove);
+    container.appendChild(row);
+  });
+}
 async function loadAiSettings() {
   try {
     const stored = await chrome.storage.local.get(AI_SETTINGS_KEY);
     const settings = stored[AI_SETTINGS_KEY] || {};
     $('trAiEnabled').checked = settings.enabled === true;
-    $('trAiKey').value = typeof settings.apiKey === 'string' ? settings.apiKey : '';
+    aiProfiles = Array.isArray(settings.profiles)
+      ? settings.profiles.map((profile) => makeAiProfile(
+        profile && profile.name, profile && profile.apiKey, profile && profile.id)) : [];
+    // انتقال خودکار کلید ذخیره‌شده در نسخهٔ تک‌کلیدی، بدون پاک‌کردن آن.
+    if (!aiProfiles.length && typeof settings.apiKey === 'string' && settings.apiKey.trim()) {
+      aiProfiles = [makeAiProfile('کلید اصلی', settings.apiKey)];
+    }
+    if (!aiProfiles.length) aiProfiles = [makeAiProfile('کلید اول')];
     $('trAiModel').value = typeof settings.model === 'string' && settings.model.trim()
       ? settings.model.trim() : AiTranslateTools.DEFAULT_MODEL;
     $('trAiSkill').value = typeof settings.skill === 'string' && settings.skill.trim()
       ? settings.skill : AiTranslateTools.DEFAULT_SKILL;
   } catch (error) {
     console.warn('خواندن تنظیمات ترجمهٔ هوش مصنوعی ناموفق بود', error);
+    aiProfiles = [makeAiProfile('کلید اول')];
     $('trAiSkill').value = AiTranslateTools.DEFAULT_SKILL;
   }
+  renderAiProfiles();
 }
 async function saveAiSettings() {
   try {
     await chrome.storage.local.set({ [AI_SETTINGS_KEY]: {
       enabled: $('trAiEnabled').checked,
-      apiKey: $('trAiKey').value.trim(),
+      profiles: aiProfiles.map((profile) => ({
+        id: profile.id, name: profile.name.trim(), apiKey: profile.apiKey.trim()
+      })),
       model: $('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODEL,
       skill: $('trAiSkill').value.trim() || AiTranslateTools.DEFAULT_SKILL
     } });
@@ -78,13 +128,15 @@ async function runTranslate() {
   }
   const aiMode = $('trAiEnabled').checked;
   const aiConfig = aiMode ? {
-    apiKey: $('trAiKey').value,
+    profiles: aiProfiles.map((profile) => ({
+      id: profile.id, name: profile.name.trim(), apiKey: profile.apiKey.trim()
+    })).filter((profile) => profile.apiKey),
     model: $('trAiModel').value,
     skill: $('trAiSkill').value
   } : null;
   if (aiMode) {
     try {
-      if (!aiConfig.apiKey.trim()) throw new Error('برای استفاده از ترجمهٔ هوش مصنوعی، ابتدا کلید API را وارد کنید.');
+      if (!aiConfig.profiles.length) throw new Error('برای استفاده از ترجمهٔ هوش مصنوعی، حداقل یک کلید API را وارد کنید.');
       AiTranslateTools.normalizeModel(aiConfig.model);
     } catch (error) {
       $('aiSettings').open = true;
@@ -190,7 +242,7 @@ async function runTranslate() {
       drawThumb(it);
     }
 
-    // در حالت اختیاری AI، همهٔ صفحه‌ها اول OCR می‌شوند و سپس فقط یک درخواست برای کل متن ارسال می‌شود.
+    // در حالت اختیاری AI، همهٔ صفحه‌ها اول OCR می‌شوند و کل متن در یک بسته برای هر کلید لازم ارسال می‌شود.
     if (aiMode && aiItems.length && !TR.cancel && $('ocrEnabled').checked) {
       const entries = [];
       aiItems.forEach((it) => {
@@ -202,15 +254,17 @@ async function runTranslate() {
       });
       setStatus(`متن ${aiItems.length} تصویر خوانده شد؛ ${entries.length} حباب در یک بستهٔ متنی برای ترجمهٔ طبیعی ارسال می‌شود...`);
       $('progressBar').style.width = '60%';
-      let translations = new Map(), aiError = null;
+      let translations = new Map(), aiError = null, aiProfileName = '';
       TR.aiController = new AbortController();
       try {
-        translations = await AiTranslateTools.translateBatch({
+        const aiResult = await AiTranslateTools.translateWithFailover({
           ...aiConfig,
           sourceLang: L.sl,
           entries,
           signal: TR.aiController.signal
         });
+        translations = aiResult.translations;
+        aiProfileName = aiResult.profileName || '';
       } catch (error) {
         if (!TR.cancel) aiError = error;
       } finally {
@@ -230,10 +284,10 @@ async function runTranslate() {
         } else if (missing.length) {
           aiNotice = `${missing.length} متن برای تکمیل به ترجمهٔ معمولی فرستاده شد`;
         } else {
-          aiNotice = 'همهٔ متن‌ها در یک درخواست با هوش مصنوعی ترجمه شدند';
+          aiNotice = 'همهٔ متن‌ها با هوش مصنوعی ترجمه شدند' + (aiProfileName ? ` (${aiProfileName})` : '');
         }
 
-        // فقط موارد ناموفق/جاافتاده به روش قبلی می‌روند؛ درخواست AI برای صرفه‌جویی در سهمیه تکرار نمی‌شود.
+        // فقط موارد ناموفق/جاافتاده به روش قبلی می‌روند؛ پاسخ موفق AI برای صرفه‌جویی در سهمیه تکرار نمی‌شود.
         let next = 0, finished = 0;
         if (missing.length) setStatus(`${missing.length} متن با ترجمهٔ معمولی تکمیل می‌شود...`);
         await Promise.all(Array.from({ length: Math.min(3, missing.length) }, async () => {
@@ -893,9 +947,17 @@ $('ocrEnabled').addEventListener('change', async () => {
   }
   refreshSummary();
 });
-['trAiEnabled', 'trAiKey', 'trAiModel', 'trAiSkill'].forEach((id) => {
+['trAiEnabled', 'trAiModel', 'trAiSkill'].forEach((id) => {
   $(id).addEventListener('change', () => { $('trAiError').textContent = ''; saveAiSettings(); });
 });
+$('trAiAddProfile').onclick = async () => {
+  await aiSettingsReady;
+  aiProfiles.push(makeAiProfile(`API ${aiProfiles.length + 1}`));
+  renderAiProfiles(); saveAiSettings();
+  const rows = $('aiProfileList').querySelectorAll('.ai-profile-row');
+  const keyInput = rows[rows.length - 1].querySelector('input[type="password"]');
+  keyInput.focus();
+};
 $('trAiSkillReset').onclick = async () => {
   await aiSettingsReady;
   $('trAiSkill').value = AiTranslateTools.DEFAULT_SKILL;

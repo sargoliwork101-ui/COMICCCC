@@ -87,6 +87,95 @@ function check(name, condition, extra) {
     check('safe quota message never exposes the API key', !AiTranslateTools.safeError(caught).includes('private-key'));
   }
 
+  {
+    const calls = [];
+    const fetchFn = async (url, options) => {
+      const key = options.headers['x-goog-api-key'];
+      calls.push(key);
+      if (key === 'key-quota') return { ok: false, status: 429, json: async () => ({}) };
+      if (key === 'key-offline') throw new Error('ارتباط برقرار نشد');
+      const text = key === 'key-empty' ? '[]' : JSON.stringify(entries.map((entry) => ({
+        id: entry.id, translation: 'ترجمهٔ ' + entry.id
+      })));
+      return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text }] } }] }) };
+    };
+    const result = await AiTranslateTools.translateWithFailover({
+      entries,
+      profiles: [
+        { id: 'a', name: 'سهمیهٔ تمام‌شده', apiKey: 'key-quota' },
+        { id: 'b', name: 'قطع ارتباط', apiKey: 'key-offline' },
+        { id: 'c', name: 'پاسخ خالی', apiKey: 'key-empty' },
+        { id: 'd', name: 'کلید سالم', apiKey: 'key-good' }
+      ],
+      fetchFn
+    });
+    check('failover tries named keys once in their displayed order',
+      calls.join(',') === 'key-quota,key-offline,key-empty,key-good', calls);
+    check('quota, network, and unusable responses all advance to the next key',
+      result.profileId === 'd' && result.profileName === 'کلید سالم' && result.translations.size === 3 &&
+      result.attempts.length === 4);
+  }
+  {
+    let calls = 0;
+    const result = await AiTranslateTools.translateWithFailover({
+      entries,
+      profiles: [{ name: 'پاسخ ناقص', apiKey: 'partial-key' }, { name: 'مصرف نشود', apiKey: 'unused-key' }],
+      fetchFn: async () => {
+        calls++;
+        return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify([
+          { id: entries[0].id, translation: 'فقط ترجمهٔ اول' }
+        ]) }] } }] }) };
+      }
+    });
+    check('a usable partial response does not spend every remaining key',
+      calls === 1 && result.profileName === 'پاسخ ناقص' && result.translations.size === 1, calls);
+  }
+  {
+    let calls = 0, caught = null;
+    await AiTranslateTools.translateWithFailover({
+      entries: [entries[0]],
+      profiles: [{ name: 'حساب اول', apiKey: 'private-one' }, { name: 'حساب دوم', apiKey: 'private-two' }],
+      fetchFn: async () => { calls++; return { ok: false, status: 429, json: async () => ({}) }; }
+    }).catch((error) => { caught = error; });
+    const message = caught ? AiTranslateTools.safeError(caught) : '';
+    check('all exhausted keys stop after one attempt each', calls === 2 && caught && caught.attempts.length === 2, calls);
+    check('combined error names profiles without exposing either secret',
+      /حساب اول/.test(message) && /حساب دوم/.test(message) &&
+      !message.includes('private-one') && !message.includes('private-two'), message);
+  }
+  {
+    const controller = new AbortController();
+    let calls = 0;
+    const running = AiTranslateTools.translateWithFailover({
+      entries: [entries[0]],
+      profiles: [{ name: 'در حال انتظار', apiKey: 'waiting-key' }, { name: 'بعد از لغو ممنوع', apiKey: 'after-abort-key' }],
+      signal: controller.signal,
+      fetchFn: async (url, options) => {
+        calls++;
+        return new Promise((resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            const error = new Error('aborted'); error.name = 'AbortError'; reject(error);
+          });
+        });
+      }
+    }).catch((error) => error);
+    await Promise.resolve();
+    controller.abort();
+    const caught = await running;
+    check('abort stops failover instead of starting the next key',
+      calls === 1 && caught && caught.name === 'AbortError', { calls, name: caught && caught.name });
+  }
+  {
+    let calls = 0, caught = null;
+    await AiTranslateTools.translateWithFailover({
+      entries: [entries[0]], profiles: [{ name: 'خالی', apiKey: '   ' }],
+      fetchFn: async () => { calls++; }
+    }).catch((error) => { caught = error; });
+    check('blank key profiles are rejected without a request', calls === 0 && caught && /کلید/.test(caught.message));
+    const empty = await AiTranslateTools.translateWithFailover({ entries: [], fetchFn: async () => { calls++; } });
+    check('empty text selection still spends no request even with no profiles', calls === 0 && empty.translations.size === 0);
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL AI TRANSLATION TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((error) => { console.error('TEST CRASH:', error); process.exit(2); });
