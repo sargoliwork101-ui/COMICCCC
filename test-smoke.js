@@ -132,8 +132,44 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
   // ---------- OCR ----------
   check('looksReal eng accepts sentence', OcrTools.looksReal('Hello world this is real', 'eng') === true);
   check('looksReal eng rejects noise', OcrTools.looksReal('--- ... !!!', 'eng') === false);
+  {
+    const w = 31, h = 31, original = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < original.length; i += 4) {
+      original[i] = original[i + 1] = original[i + 2] = 220;
+      original[i + 3] = 255;
+    }
+    for (let y = 0; y < h; y++) { const i = (y * w + 15) * 4; original[i] = original[i + 1] = original[i + 2] = 205; }
+    let processed;
+    const src = { getContext: () => ({ getImageData: () => ({ data: new Uint8ClampedArray(original) }) }) };
+    OcrTools.makePass(src, w, h, 'adaptive', () => ({ getContext: () => ({ putImageData: (image) => { processed = new Uint8ClampedArray(image.data); } }) }));
+    check('OCR adaptive contrast separates low-contrast text from background', processed[(15 * w + 15) * 4] === 0 && processed[(15 * w + 14) * 4] === 255);
+    check('OCR-only contrast processing leaves its input pixels untouched', original[(15 * w + 15) * 4] === 205 && original[(15 * w + 14) * 4] === 220);
+  }
+  {
+    const srcPixels = new Uint8ClampedArray([200,200,200,255, 210,210,210,255]);
+    let contrasted;
+    OcrTools.makePass({ getContext: () => ({ getImageData: () => ({ data: new Uint8ClampedArray(srcPixels) }) }) }, 2, 1, 'gray',
+      () => ({ getContext: () => ({ putImageData: (image) => { contrasted = image.data; } }) }));
+    check('global contrast stretch boosts a low-range OCR slice', contrasted[0] === 0 && contrasted[4] === 255);
+  }
   check('looksReal jpn accepts kana', OcrTools.looksReal('こんにちは', 'jpn') === true);
   check('looksReal kor', OcrTools.looksReal('안녕하세요 세상', 'kor') === true);
+  {
+    const pageModes = [], attempted = [];
+    let passCount = 0;
+    const worker = { setParameters: async (parameters) => pageModes.push(parameters.tessedit_pageseg_mode) };
+    const lines = await OcrTools.ocrWithProfiles({}, worker, {
+      profile: 'auto', lang: 'eng', cjk: false, enhanceContrast: true, precise: false
+    }, async (_bmp, _worker, options) => {
+      attempted.push({ profile: options.profile, passes: options.passes });
+      passCount++;
+      return passCount === 1 ? [] : [{ text: 'hello world', conf: 70 }];
+    });
+    check('automatic OCR fallback tries the dense profile after a failed sparse pass',
+      JSON.stringify(pageModes) === JSON.stringify(['11', '6']) && attempted.map((entry) => entry.profile).join(',') === 'sparse,dense');
+    check('alternate OCR profile keeps adaptive contrast enabled', attempted[1].passes.includes('adaptive'));
+    check('automatic OCR fallback returns the successful method result', lines.length === 1 && lines[0].text === 'hello world');
+  }
 
   // groupLines: two close lines merge into one block
   {

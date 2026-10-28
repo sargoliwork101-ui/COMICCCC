@@ -55,7 +55,9 @@ async function runTranslate() {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
   let totalBlocks = 0, doneImgs = 0, trFail = 0, noText = 0, rawTotal = 0, keptTotal = 0;
-  const passes = $('trPrecise').checked ? ['gray', 'bubbles', 'wmask'] : ['gray', 'bubbles'];
+  const ocrProfile = $('trOcrProfile').value;
+  const enhanceContrast = $('trContrast').checked;
+  const precise = $('trPrecise').checked;
   const errs = [];
   try {
     setStatus('در حال بارگذاری موتور تشخیص متن... (بار اول کمی طول می‌کشد)');
@@ -77,7 +79,11 @@ async function runTranslate() {
         let lines;
         const stats = { raw: 0, kept: 0 };
         try {
-          lines = await OcrTools.ocrBitmap(bmp, TR.worker, { cjk: L.cjk, lang, passes, stats, onSlice: (f) => prog(f * 0.6) });
+          lines = await OcrTools.ocrWithProfiles(bmp, TR.worker, {
+            cjk: L.cjk, lang, profile: ocrProfile, enhanceContrast, precise, stats,
+            onSlice: (f) => prog(f * 0.6),
+            onProfile: (profile, index, count) => setStatus(`روش OCR ${index + 1} از ${count}: ${profile.name} — تصویر ${k + 1} از ${list.length}...`)
+          });
         } finally { bmp.close(); }
         if (!$('ocrEnabled').checked) {
           it.ocr = null; it.edited = null;

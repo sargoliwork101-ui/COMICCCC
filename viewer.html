@@ -36,7 +36,8 @@
             <section class="top-menu-section">
               <h2 class="top-menu-title">OCR، ترجمه و تصاویر ناموفق</h2>
               <div class="top-menu-ocr">
-                <label class="check" title="با خاموش‌کردن این گزینه، OCR و ترجمه غیرفعال می‌شود و تصویرها به نسخهٔ اصلی برمی‌گردند"><input type="checkbox" id="ocrEnabled" checked><span>فعال‌بودن OCR</span></label>
+                <label class="check" title="کنتراست محلی فقط روی نسخهٔ موقت OCR اعمال می‌شود؛ تصویر اصلی و خروجی تغییر نمی‌کند"><input type="checkbox" id="trContrast" checked><span>افزایش کنتراست فقط برای OCR</span></label>
+      <label class="check" title="با خاموش‌کردن این گزینه، OCR و ترجمه غیرفعال می‌شود و تصویرها به نسخهٔ اصلی برمی‌گردند"><input type="checkbox" id="ocrEnabled" checked><span>فعال‌بودن OCR</span></label>
                 <button class="mini accent" id="btnTranslate" disabled>ترجمهٔ متن تصاویر به فارسی</button>
                 <button class="mini hidden" id="btnTxt">ذخیرهٔ متن‌ها (TXT)</button>
                 <button class="mini warn hidden" id="btnRetry">تلاش مجدد برای ناموفق‌ها</button>
@@ -179,6 +180,14 @@
         <option value="jpn">日本語 (ژاپنی)</option>
         <option value="chi_sim">中文 (چینی ساده)</option>
       </select>
+      <label for="trOcrProfile">روش تشخیص متن</label>
+      <select id="trOcrProfile" class="sel">
+        <option value="auto" selected>خودکار؛ روش‌های جایگزین در صورت نتیجهٔ ضعیف</option>
+        <option value="sparse">روش ۱: متن‌های پراکنده (پیش‌فرض)</option>
+        <option value="dense">روش ۲: متن فشرده و بلوک‌بندی‌شده</option>
+        <option value="comic">روش ۳: کمیک و حباب گفتگو</option>
+      </select>
+      <p class="note">سه گزینه از موتور آفلاین Tesseract با شیوهٔ صفحه‌بندی متفاوت استفاده می‌کنند؛ در حالت خودکار، اگر نتیجه ضعیف باشد روش بعدی امتحان می‌شود.</p>
       <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
       <label class="check" title="اگر خاموش باشد، متن اصلی پاک نمی‌شود و ترجمه با حاشیه روی تصویر قرار می‌گیرد"><input type="checkbox" id="trErase" checked><span>پاک‌کردن متن اصلی زیر ترجمه</span></label>
       <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>

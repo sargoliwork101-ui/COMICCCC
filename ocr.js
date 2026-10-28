@@ -103,6 +103,57 @@
         const v = Math.min(d[i], d[i + 1], d[i + 2]) > 215 ? 0 : 255;
         d[i] = d[i + 1] = d[i + 2] = v;
       }
+    } else if (mode === 'adaptive') {
+      // OCR-only local contrast: adaptive thresholding reads dark lettering over uneven artwork.
+      // A rolling row buffer avoids allocating a full-size integral image for long webtoon pages.
+      const radius = Math.min(15, Math.floor((Math.min(w, h) - 1) / 2));
+      const windowSize = radius * 2 + 1;
+      const ring = new Array(windowSize);
+      const vertical = new Uint32Array(w);
+      const horizontalRow = (y) => {
+        const gray = new Uint8Array(w);
+        const sums = new Uint16Array(w);
+        const row = y * w * 4;
+        for (let x = 0; x < w; x++) {
+          const i = row + x * 4;
+          gray[x] = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+        }
+        let sum = 0;
+        for (let x = 0; x <= radius && x < w; x++) sum += gray[x];
+        for (let x = 0; x < w; x++) {
+          const left = Math.max(0, x - radius), right = Math.min(w - 1, x + radius);
+          const count = right - left + 1;
+          sums[x] = Math.min(65535, Math.round(sum * windowSize / count));
+          if (x - radius >= 0) sum -= gray[x - radius];
+          if (x + radius + 1 < w) sum += gray[x + radius + 1];
+        }
+        return sums;
+      };
+      let firstRow = 0, lastRow = -1;
+      for (let y = 0; y < h; y++) {
+        const wantedFirst = Math.max(0, y - radius);
+        while (firstRow < wantedFirst) {
+          const old = ring[firstRow % windowSize];
+          for (let x = 0; x < w; x++) vertical[x] -= old[x];
+          firstRow++;
+        }
+        const wantedLast = Math.min(h - 1, y + radius);
+        while (lastRow < wantedLast) {
+          lastRow++;
+          const values = horizontalRow(lastRow);
+          ring[lastRow % windowSize] = values;
+          for (let x = 0; x < w; x++) vertical[x] += values[x];
+        }
+        const verticalCount = lastRow - firstRow + 1;
+        const row = y * w * 4;
+        for (let x = 0; x < w; x++) {
+          const i = row + x * 4;
+          const gray = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+          const mean = vertical[x] / (windowSize * verticalCount);
+          const value = gray <= mean - 7 ? 0 : 255;
+          d[i] = d[i + 1] = d[i + 2] = value;
+        }
+      }
     } else {
       const hist = new Uint32Array(256);
       for (let i = 0; i < d.length; i += 4) {
@@ -114,7 +165,8 @@
       for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * 0.01) { lo = v; break; } }
       acc = 0;
       for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= total * 0.01) { hi = v; break; } }
-      if (hi - lo >= 30) {
+      // Stretch even low-contrast artwork (unless the slice is a single flat color).
+      if (hi > lo) {
         const k = 255 / (hi - lo);
         for (let i = 0; i < d.length; i += 4) {
           const v = Math.max(0, Math.min(255, (d[i] - lo) * k));
@@ -233,6 +285,57 @@
     return raw;
   }
 
+  const OCR_PROFILES = {
+    sparse: { psm: '11', name: 'متن پراکنده' },
+    dense: { psm: '6', name: 'بلوک متنی فشرده' },
+    comic: { psm: '12', name: 'کمیک و حباب گفتگو' }
+  };
+
+  function profilePasses(profile, opts) {
+    const adaptive = opts.enhanceContrast ? ['adaptive'] : [];
+    const whiteText = opts.precise ? ['wmask'] : [];
+    if (profile === 'dense') return [...adaptive, 'gray', ...whiteText];
+    if (profile === 'comic') return [...adaptive, 'gray', 'bubbles', ...whiteText];
+    return ['gray', ...adaptive, 'bubbles', ...whiteText];
+  }
+
+  function rateRecognition(lines, cjk) {
+    if (!lines || !lines.length) return { score: 0, reliable: false };
+    const chars = lines.reduce((sum, line) => sum + Array.from(line.text || '').length, 0);
+    const confidence = lines.reduce((sum, line) => sum + (Number(line.conf) || 0), 0) / lines.length;
+    const score = confidence + Math.min(15, lines.length * 2) + Math.min(10, chars * 0.1);
+    return { score, reliable: confidence >= 58 && chars >= (cjk ? 1 : 3) };
+  }
+
+  // Auto mode tries two alternate Tesseract page-segmentation profiles only when the previous pass is weak.
+  async function ocrWithProfiles(bmp, worker, opts, recognizerFn) {
+    const o = Object.assign({ profile: 'auto', enhanceContrast: true, precise: false }, opts);
+    const profileIds = o.profile === 'auto' ? ['sparse', 'dense', 'comic'] : [OCR_PROFILES[o.profile] ? o.profile : 'sparse'];
+    const recognize = recognizerFn || o.recognizer || api.ocrBitmap;
+    let best = null, bestRating = { score: -1, reliable: false }, lastError = null;
+    for (let index = 0; index < profileIds.length; index++) {
+      const id = profileIds[index], profile = OCR_PROFILES[id];
+      if (o.onProfile) o.onProfile(profile, index, profileIds.length);
+      try {
+        await worker.setParameters({ tessedit_pageseg_mode: profile.psm, preserve_interword_spaces: '1' });
+        const localStats = { raw: 0, kept: 0 };
+        const lines = await recognize(bmp, worker, {
+          ...o, profile: id, passes: profilePasses(id, o), stats: localStats,
+          onSlice: o.onSlice ? (fraction) => o.onSlice((index + fraction) / profileIds.length) : undefined
+        });
+        const rating = rateRecognition(lines, o.cjk);
+        if (!best || rating.score > bestRating.score) { best = { lines, stats: localStats }; bestRating = rating; }
+        if (rating.reliable || o.profile !== 'auto') break;
+      } catch (error) {
+        lastError = error;
+        if (o.profile !== 'auto') throw error;
+      }
+    }
+    if (!best && lastError) throw lastError;
+    if (o.stats && best) { o.stats.raw += best.stats.raw; o.stats.kept += best.stats.kept; }
+    return best ? best.lines : [];
+  }
+
   async function createOcrWorker(lang, logger) {
     const base = chrome.runtime.getURL('ocr/');
     const worker = await Tesseract.createWorker(lang, 1, {
@@ -248,6 +351,6 @@
     return worker;
   }
 
-  const api = { LANGS, extractLines, groupLines, ocrBitmap, createOcrWorker, looksReal };
+  const api = { LANGS, OCR_PROFILES, extractLines, groupLines, makePass, ocrBitmap, ocrWithProfiles, createOcrWorker, looksReal };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.OcrTools = api;
 })(typeof window !== 'undefined' ? window : globalThis);
