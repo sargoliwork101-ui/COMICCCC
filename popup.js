@@ -1,6 +1,29 @@
 const startBtn = document.getElementById('startBtn');
 const statusBox = document.getElementById('statusBox');
 const statusText = document.getElementById('statusText');
+// کنترل‌های مخصوص کتاب‌خوان‌های صفحه‌ای (سقف صفحه و انتخابگرهای دستی)؛ پیش‌فرض مخفی و بر اساس آدرس تب باز می‌شوند
+const readerOnlyFields = document.getElementById('readerOnlyFields');
+
+// ---- reader-only field helpers (marker block; extracted by unit tests) ----
+function isPagedReaderUrl(url) {
+  try {
+    return new URL(url).hostname.startsWith('books.google.');
+  } catch {
+    return false;
+  }
+}
+function applyReaderOnlyFields(url) {
+  if (readerOnlyFields) readerOnlyFields.classList.toggle('hidden', !isPagedReaderUrl(url));
+}
+// ---- end reader-only field helpers ----
+
+// آدرس تب فعال؛ روی نوارهای مرورگر (chrome://) یا تب‌های بدون دسترسی، کانتینر مخفی می‌ماند
+if (typeof chrome !== 'undefined' && chrome.tabs && typeof chrome.tabs.query === 'function') {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const url = tabs && tabs[0] && tabs[0].url;
+    if (url) applyReaderOnlyFields(url);
+  });
+}
 // متن وضعیت (پیشرفت) را بدون نمایش باکس به‌روز می‌کند؛ پیشرفت واقعی روی خود صفحه با پوشش تمام‌صفحه دیده می‌شود
 const setStatus = (text) => {
   statusText.innerText = text;

@@ -13,7 +13,7 @@
       <h1>PIC TO PDF</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v2.36</span>
+    <span class="version-pill">v2.37</span>
   </div>
 
   <div class="field">
@@ -31,25 +31,28 @@
     <input type="text" id="pdfName" value="comic" spellcheck="false">
   </div>
 
-  <div class="field">
-    <label for="pageLimit" title="فقط برای خواندن خودکار Google Books؛ خالی بودن یعنی همهٔ صفحات">حداکثر تعداد صفحات (Google Books)</label>
-    <input type="number" id="pageLimit" min="1" step="1" inputmode="numeric" spellcheck="false"
-      placeholder="خالی = همهٔ صفحات کتاب">
-  </div>
+  <!-- این کنترل‌ها فقط روی تب‌های کتاب‌خوان صفحه‌ای (مثل Google Books) نمایش داده می‌شوند؛ popup.js بر اساس آدرس تب بازشان می‌کند -->
+  <div id="readerOnlyFields" class="hidden">
+    <div class="field">
+      <label for="pageLimit" title="خالی بودن یعنی همهٔ صفحات بدون محدودیت خوانده شوند">حداکثر تعداد صفحات</label>
+      <input type="number" id="pageLimit" min="1" step="1" inputmode="numeric" spellcheck="false"
+        placeholder="خالی = همهٔ صفحات">
+    </div>
 
-  <details class="advanced">
-    <summary>تنظیمات پیشرفته — انتخابگر دستی از F12</summary>
-    <p class="mode-hint">وقتی افزونه خودش دکمهٔ بعدی یا تصاویر را پیدا نمی‌کند، آدرس المان را از DevTools بدهید:
-      روی المان صفحه راست‌کلیک ← <b>Inspect</b> ← در پنل درخت DOM روی المان راست‌کلیک ← <b>Copy</b> ← <b>Copy selector</b>.</p>
-    <div class="field">
-      <label for="nextSelector">انتخابگر CSS دکمهٔ صفحهٔ بعدی (اختیاری)</label>
-      <input type="text" id="nextSelector" dir="ltr" spellcheck="false" placeholder='مثال: button[aria-label="Next page"]'>
-    </div>
-    <div class="field">
-      <label for="imageSelector">انتخابگر CSS تصاویر صفحه (اختیاری)</label>
-      <input type="text" id="imageSelector" dir="ltr" spellcheck="false" placeholder="مثال: .reader-content img.page">
-    </div>
-  </details>
+    <details class="advanced">
+      <summary>تنظیمات پیشرفته — انتخابگر دستی المان از F12</summary>
+      <p class="mode-hint">وقتی افزونه خودش دکمهٔ بعدی یا تصاویر را پیدا نمی‌کند، آدرس المان را از DevTools بدهید:
+        روی المان صفحه راست‌کلیک ← <b>Inspect</b> ← در پنل درخت DOM روی المان راست‌کلیک ← <b>Copy</b> ← <b>Copy selector</b>.</p>
+      <div class="field">
+        <label for="nextSelector">انتخابگر CSS دکمهٔ صفحهٔ بعدی (اختیاری)</label>
+        <input type="text" id="nextSelector" dir="ltr" spellcheck="false" placeholder='مثال: button[aria-label="Next page"]'>
+      </div>
+      <div class="field">
+        <label for="imageSelector">انتخابگر CSS تصاویر صفحه (اختیاری)</label>
+        <input type="text" id="imageSelector" dir="ltr" spellcheck="false" placeholder="مثال: .reader-content img.page">
+      </div>
+    </details>
+  </div>
 
   <div class="box hidden" id="statusBox">
     <div id="statusText"></div>
