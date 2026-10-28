@@ -479,6 +479,25 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     await sleep(120);
   }
 
+  // ---- clear one block's translation without deleting OCR or sibling translations ----
+  {
+    h.ev('items[0].w = 200; items[0].h = 200; items[0].ocr = { lang: "eng", blocks: [' +
+      '{ id: 1, text: "first OCR", tr: "first translation", enabled: true, bg: "white", x0: 0, y0: 0, x1: 80, y1: 40, lineH: 16 },' +
+      '{ id: 2, text: "second OCR", tr: "second translation", enabled: true, bg: "white", x0: 0, y0: 50, x1: 80, y1: 90, lineH: 16 }] }; openEditor(items[0])');
+    const rows = [...h.$('edList').querySelectorAll('.blk')];
+    const clearButton = rows[0].querySelector('.blk-clear-translation');
+    check('each translation block has a clear-translation action', !!clearButton);
+    clearButton.click();
+    await sleep(120);
+    check('clearing removes only the selected translation and keeps its OCR source',
+      h.ev('items[0].ocr.blocks[0].tr === "" && items[0].ocr.blocks[0].text === "first OCR"') &&
+      rows[0].querySelector('.blk-editor').textContent === '');
+    check('clearing one translation preserves sibling translation and rendered image',
+      h.ev('items[0].ocr.blocks[1].tr === "second translation" && !!items[0].edited'));
+    h.$('edClose').click();
+    await sleep(120);
+  }
+
   {
     h.ev('items[0].ocr = { lang: "eng", blocks: [' +
       '{ id: 1, text: "a", tr: "one", enabled: true, bg: "white", x0: 0, y0: 0, x1: 80, y1: 40, lineH: 16 },' +

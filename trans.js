@@ -600,7 +600,10 @@ function buildEditor() {
       ${makeToolbar(b)}
       <div class="blk-orig"><label class="blk-orig-label">متن OCR (قابل اصلاح)</label>
         <textarea class="blk-orig-text" rows="2" aria-label="اصلاح متن تشخیص‌داده‌شده"></textarea>
-        <button type="button" class="fmt-btn blk-retranslate" title="ترجمهٔ دوبارهٔ متن اصلاح‌شده به فارسی">ترجمهٔ دوباره</button>
+        <div class="blk-actions">
+          <button type="button" class="fmt-btn blk-retranslate" title="ترجمهٔ دوبارهٔ متن اصلاح‌شده به فارسی">ترجمهٔ دوباره</button>
+          <button type="button" class="fmt-btn blk-clear-translation" title="پاک‌کردن فقط ترجمهٔ این متن؛ متن OCR و بقیهٔ ترجمه‌ها باقی می‌مانند">پاک‌کردن ترجمه</button>
+        </div>
       </div>
       <div class="blk-editor" data-id="${escapeEditorText(b.id)}" contenteditable="true" role="textbox" aria-label="ترجمهٔ قابل ویرایش" spellcheck="true"></div>
       <div class="blk-help">متن را همین‌جا اصلاح کنید؛ برای ویرایش روی تصویر، دستگیرهٔ بالای کادر را بکشید تا جابه‌جا شود و دستگیره‌های دور کادر را برای تغییر اندازه بکشید.</div>`;
@@ -631,6 +634,22 @@ function buildEditor() {
     });
     row.querySelector('.blk-retranslate').addEventListener('click', (event) =>
       retranslateBlock(it, b, originalField, editor, overlay, event.currentTarget));
+    row.querySelector('.blk-clear-translation').addEventListener('click', (event) => {
+      b.tr = '';
+      b.richHtml = '';
+      editor.innerHTML = '';
+      overlay.innerHTML = '';
+      updatePreviewScale();
+      scheduleApply();
+      const button = event.currentTarget;
+      button.textContent = 'پاک شد ✓';
+      button.disabled = true;
+      setTimeout(() => {
+        if (!button.isConnected) return;
+        button.textContent = 'پاک‌کردن ترجمه';
+        button.disabled = false;
+      }, 1400);
+    });
     row.querySelectorAll('.blk-format button').forEach((button) => {
       button.addEventListener('mousedown', (event) => event.preventDefault());
       button.addEventListener('click', () => {
