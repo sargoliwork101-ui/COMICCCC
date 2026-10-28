@@ -1,7 +1,7 @@
 export default [
   {
     files: ['*.js'],
-    ignores: ['node_modules/**', 'test-*.js', 'debug*.js', 'jspdf.umd.min.js', 'tesseract.min.js', 'ocr/**'],
+    ignores: ['node_modules/**', 'test-*.js', 'debug*.js', 'jspdf.umd.min.js', 'tesseract.min.js', 'pdf.min.js', 'pdf.worker.min.js', 'ocr/**'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
@@ -22,6 +22,9 @@ export default [
         getComputedStyle: 'readonly', URLSearchParams: 'readonly',
         AbortController: 'readonly', ResizeObserver: 'readonly',
         atob: 'readonly', btoa: 'readonly',
+        indexedDB: 'readonly', IDBKeyRange: 'readonly', DOMException: 'readonly',
+        File: 'readonly',
+        pdfjsLib: 'readonly', PdfStore: 'readonly', PdfImport: 'readonly',
         // globals shared across the extension's classic scripts
         PdfBuilder: 'readonly', OcrTools: 'readonly', Typeset: 'readonly', TranslateTools: 'readonly',
         $: 'readonly', items: 'writable', building: 'writable', loading: 'writable',

@@ -133,6 +133,16 @@ function looksLikeImage(b) {
 }
 
 async function fetchImageBlob(url, tabId, signal) {
+  // صفحه‌های PDF واردشده از IndexedDB محلی خوانده می‌شوند، نه از شبکه
+  if (typeof PdfStore !== 'undefined' && PdfStore.isInternalUrl(url)) {
+    try {
+      const blob = await PdfStore.getPage(url);
+      if (blob && looksLikeImage(blob)) return { blob, error: null };
+      return { blob: null, error: 'صفحهٔ PDF در حافظهٔ محلی پیدا نشد' };
+    } catch (e) {
+      return { blob: null, error: 'خواندن صفحهٔ PDF از حافظهٔ محلی ناموفق بود' + (e && e.message ? `: ${e.message}` : '') };
+    }
+  }
   let directError = 'دریافت مستقیم ناموفق بود';
   try {
     const res = await fetch(url, { credentials: 'include', signal });
@@ -2116,7 +2126,14 @@ async function main() {
     outlineObserver.observe(document.querySelector('.wrap'));
   }
   window.addEventListener('resize', () => drawGroupOutlines());
-  window.addEventListener('pagehide', () => { chrome.storage.local.remove(jobKey); clearRefererRule(); });
+  window.addEventListener('pagehide', () => {
+    chrome.storage.local.remove(jobKey);
+    clearRefererRule();
+    // حافظهٔ محلی صفحات PDF واردشده با بسته‌شدن viewer آزاد می‌شود
+    if (typeof PdfStore !== 'undefined' && job && Array.isArray(job.urls)) {
+      PdfStore.deleteJobPages(job.urls).catch((e) => console.warn('پاک‌سازی حافظهٔ PDF ناموفق بود', e));
+    }
+  });
 
   await loadAll(items);
 }

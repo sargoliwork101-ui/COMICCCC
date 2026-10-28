@@ -71,6 +71,22 @@ function bootBackground(initialStorage) {
     check('response ok with tab id', response && response.ok === true && response.tabId === 42, response);
   }
 
+  // 2b. imported PDF job: no sender tab, source flag persisted
+  {
+    const b = bootBackground({});
+    let response = null;
+    b.listeners.message(
+      { type: 'WTPDF_LOCAL_JOB', urls: ['pdf-internal://x/0', 'pdf-internal://x/1'], name: 'book.pdf', source: 'pdf-import' },
+      {},
+      (r) => { response = r; }
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    const jobKey = [...b.store.keys()].find((k) => k.startsWith('job_'));
+    const job = b.store.get(jobKey);
+    check('local job stored with pdf-import source', job && job.source === 'pdf-import' && job.urls.length === 2 && job.tabId === null, job);
+    check('local job opens viewer and responds', response && response.ok === true && response.tabId === 42, response);
+  }
+
   // 3. unrelated messages are ignored (no return value, no throw)
   {
     const b = bootBackground({});

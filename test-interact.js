@@ -60,7 +60,7 @@ function boot() {
   window.DragEvent = class DragEvent extends window.MouseEvent {
     constructor(type, init = {}) { super(type, init); this.dataTransfer = init.dataTransfer; }
   };
-  for (const f of ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'viewer.js', 'trans.js']) {
+  for (const f of ['jspdf.umd.min.js', 'pdfbuilder.js', 'pdfstore.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'viewer.js', 'trans.js']) {
     vm.runInContext(fs.readFileSync(__dirname + '/' + f, 'utf8'), ctx, { filename: f });
   }
   return { dom, window, ctx, ev, $: (id) => window.document.getElementById(id) };
@@ -73,6 +73,23 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
 (async () => {
   const h = boot();
   for (let i = 0; i < 50; i++) { await sleep(80); if (!h.ev('loading')) break; }
+
+  // ---- imported-PDF pages come from the local store, never the network ----
+  {
+    const internal = 'pdf-internal://imp1/0';
+    h.ev(`PdfStore.getPage = async (u) => u === '${internal}' ? new Blob([new Uint8Array([0x89,0x50])], {type:'image/png'}) : null;`);
+    let networkTouched = false;
+    const realFetch = h.window.fetch;
+    h.window.fetch = (...a) => { networkTouched = true; return realFetch(...a); };
+    const r1 = await h.ev(`fetchImageBlob('${internal}', null, undefined)`);
+    check('internal pdf page resolves from local store', r1 && r1.blob && r1.error === null, r1 && r1.error);
+    check('internal pdf page never hits the network', networkTouched === false);
+    const r2 = await h.ev(`fetchImageBlob('pdf-internal://imp1/9', null, undefined)`);
+    check('missing local page gives a readable error', r2 && r2.blob === null && /محلی/.test(r2.error), r2 && r2.error);
+    const r3 = await h.ev(`fetchImageBlob('https://comic.test/a.png', null, undefined)`);
+    check('ordinary urls still use the network path', r3 && r3.blob && networkTouched === true, r3 && r3.error);
+    h.window.fetch = realFetch;
+  }
 
   // ---- helpers ----
   check('cleanFolderName strips illegal chars', h.ev(`cleanFolderName('a/b\\\\c:d*e?f"g<h>i|j')`) === 'a_b_c_d_e_f_g_h_i_j');
