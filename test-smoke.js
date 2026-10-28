@@ -245,6 +245,12 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('italic regular-weight font built', calls.font.some((f) => /^italic 400 /.test(f)), calls.font);
   }
   {
+    const calls = renderWith({ align: 'left', tx0: 80, ty0: 90, tx1: 120, ty1: 130 });
+    check('resized translation area positions the text independently of OCR erasure area',
+      calls.fillText.length > 0 && calls.fillText[0].x > 80 && calls.fillText[0].x < 82 &&
+      calls.fillText[0].y > 90 && calls.fillText[0].y < 110, calls.fillText[0]);
+  }
+  {
     const calls = renderWith({ align: 'center', size: 33 });
     check('center align applied to canvas', calls.textAlign.every((a) => a === 'center'));
     check('manual font size honored over auto-fit', calls.font.some((f) => f.includes('33px')), calls.font);

@@ -17,6 +17,16 @@ function boot() {
   Object.defineProperty(window.Element.prototype, 'innerText', {
     get() { return this.textContent; }, set(v) { this.textContent = v; }, configurable: true
   });
+  window.document.execCommand = (command) => {
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount || selection.isCollapsed) return true;
+    const tag = { bold: 'strong', italic: 'em', underline: 'u', strikeThrough: 's' }[command];
+    if (!tag) return true;
+    const range = selection.getRangeAt(0), wrapper = window.document.createElement(tag);
+    wrapper.appendChild(range.extractContents()); range.insertNode(wrapper);
+    selection.removeAllRanges(); const next = window.document.createRange(); next.selectNodeContents(wrapper); selection.addRange(next);
+    return true;
+  };
   const storageMap = new Map([['job_testjob', {
     urls: ['https://comic.test/a.png', 'https://comic.test/b.png', 'https://comic.test/c.png'],
     name: 'comic.pdf', tabId: null, pageUrl: 'https://comic.test/page', skippedInline: 0
@@ -373,51 +383,6 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([0, 3, 1, 2]));
   h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
 
-  // ---- Word-like character styling: the block toolbar acts on the textarea selection (2.44/2.46) ----
-  {
-    const ta = h.window.document.createElement('textarea');
-    ta.value = 'hello brave world';
-    h.window.document.body.appendChild(ta);
-    h.window.__wrapTa = ta;
-    ta.focus();
-    // wrap the selected word "brave" with bold markers
-    ta.setSelectionRange(6, 11);
-    h.ev(`wrapSelection(__wrapTa, '**', '**')`);
-    check('inline wrap inserts bold markers around the selection', ta.value === 'hello **brave** world', ta.value);
-    check('inline wrap keeps the inner text selected', ta.selectionStart === 8 && ta.selectionEnd === 13, [ta.selectionStart, ta.selectionEnd]);
-    // pressing the same button again on the same selection removes the markers
-    h.ev(`wrapSelection(__wrapTa, '**', '**')`);
-    check('inline wrap toggles off when the marked selection is wrapped again', ta.value === 'hello brave world', ta.value);
-    // no selection -> an empty marker pair is inserted with the caret inside
-    ta.value = 'abc'; ta.setSelectionRange(1, 1);
-    h.ev(`wrapSelection(__wrapTa, '__', '__')`);
-    check('inline wrap with no selection inserts an empty pair', ta.value === 'a____bc', ta.value);
-    check('caret lands inside the empty marker pair', ta.selectionStart === 3 && ta.selectionEnd === 3, [ta.selectionStart, ta.selectionEnd]);
-    // italic and bold markers coexist on different words and survive the round trip
-    ta.value = 'one two'; ta.setSelectionRange(0, 3);
-    h.ev(`wrapSelection(__wrapTa, '*', '*')`);
-    check('italic marker applied independently', ta.value === '*one* two', ta.value);
-    ta.remove();
-  }
-  {
-    // parameter tags: size wraps the selection, re-applying replaces the parameter; color can be unwrapped
-    const ta = h.window.document.createElement('textarea');
-    ta.value = 'hello world';
-    h.window.document.body.appendChild(ta);
-    h.window.__tagTa = ta;
-    ta.setSelectionRange(6, 11);
-    h.ev(`wrapTagSelection(__tagTa, 'size', '24')`);
-    check('size tag wraps the selection', ta.value === 'hello [size=24]world[/size]', ta.value);
-    h.ev(`wrapTagSelection(__tagTa, 'size', '30')`);
-    check('re-applying size replaces the parameter in place', ta.value === 'hello [size=30]world[/size]', ta.value);
-    h.ev(`wrapTagSelection(__tagTa, 'color', '#ff0000')`);
-    check('color tag wraps the same selection inside the size tag',
-      ta.value === 'hello [size=30][color=#ff0000]world[/color][/size]', ta.value);
-    check('color auto unwrap removes only the color tag',
-      h.ev(`unwrapTagSelection(__tagTa, 'color')`) === true &&
-      ta.value === 'hello [size=30]world[/size]', ta.value);
-    ta.remove();
-  }
   // ---- OCR source text copy button inside the editor ----
   {
     let copied = '';
@@ -429,87 +394,71 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     await sleep(10);
     check('copy button puts the English OCR text on the clipboard', copied === 'Recognizable english sentence', copied);
     check('copy button shows the copied state', copyBtn.classList.contains('copied'));
-    check('copy button sits inline beside the OCR source text',
-      copyBtn.parentElement.classList.contains('blk-orig') &&
-      copyBtn.parentElement.querySelector('.blk-orig-text').textContent === 'Recognizable english sentence');
+    check('OCR source is displayed in the block card',
+      h.$('edList').querySelector('.blk-orig-text').textContent === 'Recognizable english sentence');
     h.$('edClose').click();
     await sleep(120); // let the final asynchronous preview render settle before the next editor test
   }
 
+  // ---- Word-like rich-text editing, direct image editing, resizing, and focus-safe rendering ----
   {
-    // the shared block toolbar drives both block-level (no selection) and inline (selection) styling
-    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "hi", tr: "hello world", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
-    const edList = h.$('edList');
-    const edTa = edList.querySelector('textarea');
-    const boldBtn = edList.querySelector('.blk-bold');
-    const underBtn = edList.querySelector('.blk-under');
-    check('separate inline row removed; only the block toolbar exists',
-      !edList.querySelector('.blk-inline') && !!boldBtn && !!underBtn);
-    // no selection: bold toggles the whole block flag
-    edTa.setSelectionRange(0, 0);
-    boldBtn.click();
-    check('bold without selection toggles the block flag', h.ev('items[0].ocr.blocks[0].bold') === false);
-    // with a selection: the same button inserts inline markers and leaves the block flag untouched
-    edTa.setSelectionRange(6, 11);
-    boldBtn.click();
-    check('bold with selection inserts inline markers only',
-      edTa.value === 'hello **world**' && h.ev('items[0].ocr.blocks[0].bold') === false, edTa.value);
-    check('bold button shows active state for the marked selection', boldBtn.classList.contains('active'));
-    // selecting everything and underlining applies underline to the whole line via markers
-    edTa.setSelectionRange(0, edTa.value.length);
-    underBtn.click();
-    check('select-all underline marks the whole line', edTa.value === '__hello **world**__', edTa.value);
+    h.ev('items[0].w = 200; items[0].h = 200; items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "original", tr: "hello world", enabled: true, bg: "white", x0: 20, y0: 20, x1: 80, y1: 60, lineH: 16 }] }; openEditor(items[0])');
+    const row = h.$('edList').querySelector('.blk');
+    const field = row.querySelector('.blk-editor');
+    const bold = row.querySelector('.blk-bold');
+    check('translation is edited in a Word-like contenteditable', field && field.getAttribute('contenteditable') === 'true' && field.textContent === 'hello world');
+    check('formatting toolbar includes common controls', !!bold && !!row.querySelector('.blk-italic') && !!row.querySelector('.blk-under') && !!row.querySelector('.blk-undo') && !!row.querySelector('.blk-redo'));
+    check('format syntax is not exposed as text', !field.textContent.includes('**') && !field.textContent.includes('[size='));
+
+    field.focus();
+    const text = field.firstChild;
+    const selection = h.window.getSelection();
+    const range = h.window.document.createRange(); range.setStart(text, 6); range.setEnd(text, 11);
+    selection.removeAllRanges(); selection.addRange(range);
+    bold.click();
+    check('toolbar applies semantic rich text markup', /<strong>|<b>/i.test(h.ev('items[0].ocr.blocks[0].richHtml')) &&
+      h.ev('items[0].ocr.blocks[0].tr') === 'hello world', h.ev('items[0].ocr.blocks[0].richHtml'));
+    check('rich formatting is never represented by visible marker characters', !field.textContent.includes('**'));
+
+    const overlay = h.$('edBoxes').querySelector('.ed-box-text');
+    overlay.textContent = 'edited over the image';
+    overlay.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    check('direct image-box editing syncs the sidebar', h.ev('items[0].ocr.blocks[0].tr') === 'edited over the image' && field.textContent === 'edited over the image');
+    check('overlay provides eight resize handles', h.$('edBoxes').querySelectorAll('.ed-resize').length === 8);
+
+    const stage = h.window.document.querySelector('.ed-stage');
+    stage.getBoundingClientRect = () => ({ left: 0, top: 0, right: 200, bottom: 200, width: 200, height: 200 });
+    const handle = h.$('edBoxes').querySelector('.ed-resize-se');
+    handle.setPointerCapture = () => {};
+    const pointer = (type, x, y) => {
+      const event = new h.window.Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, { clientX: { value: x }, clientY: { value: y }, pointerId: { value: 1 } });
+      return event;
+    };
+    handle.dispatchEvent(pointer('pointerdown', 80, 60));
+    handle.dispatchEvent(pointer('pointermove', 110, 90));
+    handle.dispatchEvent(pointer('pointerup', 110, 90));
+    check('dragging a resize handle changes translation box geometry', h.ev('items[0].ocr.blocks[0].tx1 > 80 && items[0].ocr.blocks[0].ty1 > 60'),
+      h.ev('[items[0].ocr.blocks[0].tx1,items[0].ocr.blocks[0].ty1]'));
     h.$('edClose').click();
-    await sleep(120); // let the final asynchronous preview render settle before the next editor test
+    await sleep(120);
   }
 
-  // ---- editor textarea undo/redo history ----
-  {
-    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "hi", tr: "first", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
-    const undoTa = h.$('edList').querySelector('textarea');
-    undoTa.value = 'second';
-    undoTa.dispatchEvent(new h.window.Event('input', { bubbles: true }));
-    undoTa.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
-    check('Ctrl+Z restores the previous text edit', undoTa.value === 'first' && h.ev('items[0].ocr.blocks[0].tr') === 'first', undoTa.value);
-    undoTa.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true, cancelable: true }));
-    check('Ctrl+Y reapplies the undone text edit', undoTa.value === 'second' && h.ev('items[0].ocr.blocks[0].tr') === 'second', undoTa.value);
-    undoTa.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }));
-    undoTa.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'z', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
-    check('Ctrl+Shift+Z also reapplies the text edit', undoTa.value === 'second');
-    h.$('edClose').click();
-    await sleep(120); // close out the queued preview render before checking focus gating
-  }
-
-  // ---- editor refresh gating: no re-render while a field is focused, flush on blur (2.45) ----
   {
     h.ev('items[0].ocr = { lang: "eng", blocks: [' +
       '{ id: 1, text: "a", tr: "one", enabled: true, bg: "white", x0: 0, y0: 0, x1: 80, y1: 40, lineH: 16 },' +
-      '{ id: 2, text: "b", tr: "two", enabled: true, bg: "white", x0: 0, y0: 50, x1: 80, y1: 90, lineH: 16 }] };' +
-      'openEditor(items[0])');
+      '{ id: 2, text: "b", tr: "two", enabled: true, bg: "white", x0: 0, y0: 50, x1: 80, y1: 90, lineH: 16 }] }; openEditor(items[0])');
     h.ev('window.__applyCalls = 0; window.__origApplyEditor = applyEditor;' +
       'applyEditor = async function(){ window.__applyCalls++; return window.__origApplyEditor.apply(this, arguments); }');
-    const edList2 = h.$('edList');
-    const tas = [...edList2.querySelectorAll('textarea')];
-    tas[0].focus();
-    tas[0].value = 'edited while focused';
-    tas[0].dispatchEvent(new h.window.Event('input', { bubbles: true }));
-    await sleep(1000); // longer than the 900ms time trigger
-    check('no re-render while the textarea stays focused', h.ev('window.__applyCalls') === 0, h.ev('window.__applyCalls'));
-    // moving focus straight to another block's field also must not flush (user is still editing)
-    tas[1].focus();
-    await sleep(60);
-    check('switching to another editor field keeps the render pending', h.ev('window.__applyCalls') === 0);
-    // leaving the editor fields flushes immediately
-    h.window.document.body.focus();
-    tas[1].blur();
-    await sleep(120);
-    check('blur out of the editor flushes the pending render', h.ev('window.__applyCalls') === 1, h.ev('window.__applyCalls'));
-    // without any focused field, the 900ms time trigger works as the fallback
-    h.ev('window.__applyCalls = 0');
-    tas[0].value = 'unfocused edit';
-    tas[0].dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    const fields = [...h.$('edList').querySelectorAll('.blk-editor')];
+    fields[0].focus(); fields[0].textContent = 'editing without interruption';
+    fields[0].dispatchEvent(new h.window.Event('input', { bubbles: true }));
     await sleep(1000);
-    check('time trigger renders when no editor field is focused', h.ev('window.__applyCalls') >= 1, h.ev('window.__applyCalls'));
+    check('preview does not rerender while a rich-text field is focused', h.ev('window.__applyCalls') === 0, h.ev('window.__applyCalls'));
+    fields[1].focus(); await sleep(50);
+    check('moving to another block keeps editing session active', h.ev('window.__applyCalls') === 0);
+    fields[1].blur(); await sleep(120);
+    check('leaving rich-text fields flushes the pending preview', h.ev('window.__applyCalls') === 1, h.ev('window.__applyCalls'));
     h.ev('applyEditor = window.__origApplyEditor');
     h.$('edClose').click();
   }

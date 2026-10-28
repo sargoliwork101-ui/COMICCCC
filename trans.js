@@ -174,175 +174,199 @@ async function copyPlainText(text) {
   }
 }
 
-// ---------- ویرایشگر ----------
+// ---------- ویرایشگر متن غنی ----------
 let EDI = null, edUrl = null, edTimer = null, edDirty = false, edBusy = false, edPending = false;
-// تاریخچهٔ مستقل هر متن ویرایشگر؛ برای Ctrl/Cmd+Z و Ctrl/Cmd+Y، حتی بعد از تغییرات قالب‌بندی.
-const editorUndoHistory = new WeakMap();
-function ensureEditorHistory(block, value) {
-  let history = editorUndoHistory.get(block);
-  if (!history || history.entries[history.index].value !== value) {
-    history = { entries: [{ value, start: value.length, end: value.length }], index: 0 };
-    editorUndoHistory.set(block, history);
-  }
-  return history;
-}
-function recordEditorHistory(block, textarea) {
-  let history = editorUndoHistory.get(block);
-  if (!history) {
-    history = { entries: [{ value: textarea.value, start: textarea.selectionStart, end: textarea.selectionEnd }], index: 0 };
-    editorUndoHistory.set(block, history);
-  }
-  const current = history.entries[history.index];
-  if (current.value === textarea.value) {
-    current.start = textarea.selectionStart;
-    current.end = textarea.selectionEnd;
-    return;
-  }
-  history.entries.splice(history.index + 1);
-  history.entries.push({ value: textarea.value, start: textarea.selectionStart, end: textarea.selectionEnd });
-  if (history.entries.length > 100) history.entries.shift();
-  history.index = history.entries.length - 1;
-}
-function moveEditorHistory(block, textarea, delta) {
-  const history = ensureEditorHistory(block, textarea.value);
-  const next = history.index + delta;
-  if (next < 0 || next >= history.entries.length) return false;
-  history.index = next;
-  const entry = history.entries[next];
-  textarea.value = entry.value;
-  block.tr = entry.value;
-  textarea.setSelectionRange(Math.min(entry.start, entry.value.length), Math.min(entry.end, entry.value.length));
-  textarea.dispatchEvent(new Event('input', { bubbles: true }));
-  return true;
-}
-// تریگر زمانی اطمینان: همان ۹۰۰ms قبلی، اما وقتی کاربر هنوز داخل فیلدهای ویرایشگر است رندر عقب می‌افتد
+let activeRichEditor = null, richSelectionRange = null;
 const EDITOR_APPLY_DELAY = 900;
-// وضعیت صریح فوکوس فیلدها (روی مرورگرها هم در لحظهٔ focusout قابل اعتمادتر از activeElement است)
 let edFieldFocused = false;
-const editorFieldEl = (el) => {
-  if (!el || !el.closest || !el.closest('#edList')) return null;
-  return ['TEXTAREA', 'INPUT', 'SELECT'].includes(el.tagName) ? el : null;
-};
-// دکمه‌ها عمداً فیلد حساب نمی‌شوند تا بعد از کلیک روی آن‌ها تریگر زمانی ۹۰۰ms بتواند رندر را انجام دهد.
+const editorFieldEl = (el) => el && el.closest && el.closest('#editor') &&
+  (el.isContentEditable || el.getAttribute('contenteditable') === 'true' || ['INPUT', 'SELECT'].includes(el.tagName)) ? el : null;
 function isEditorInputFocused() { return edFieldFocused; }
 
-function setEdImage(item = EDI) {
-  if (!item) return;
-  const blob = item.edited ? item.edited.blob : item.blob;
-  if (edUrl) URL.revokeObjectURL(edUrl);
-  edUrl = URL.createObjectURL(blob);
-  $('edImg').src = edUrl;
+function escapeEditorText(value) {
+  return String(value || '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 }
-
+function legacyMarksToHtml(value) {
+  if (!value || typeof Typeset === 'undefined' || !Typeset.hasInlineMarks(value)) return escapeEditorText(value).replace(/\n/g, '<br>');
+  return Typeset.tokenizeInline(value).map((run) => {
+    let text = escapeEditorText(run.t).replace(/\n/g, '<br>');
+    if (run.bold) text = `<strong>${text}</strong>`;
+    if (run.italic) text = `<em>${text}</em>`;
+    if (run.underline) text = `<u>${text}</u>`;
+    const styles = [];
+    if (run.size) styles.push(`font-size:${Math.max(8, Math.min(160, run.size))}px`);
+    if (run.color) styles.push(`color:${run.color}`);
+    if (styles.length) text = `<span style="${styles.join(';')}">${text}</span>`;
+    return text;
+  }).join('');
+}
+function safeEditorHtml(html) {
+  const root = document.createElement('div');
+  root.innerHTML = html || '';
+  const walk = (node, isRoot = false) => {
+    if (node.nodeType === 3) return escapeEditorText(node.nodeValue);
+    if (node.nodeType !== 1) return '';
+    const tag = node.tagName.toLowerCase();
+    if (tag === 'br') { return '<br>'; }
+    let inner = [...node.childNodes].map((child) => walk(child)).join('');
+    if (tag === 'div' || tag === 'p') { return inner + (isRoot ? '' : '<br>'); }
+    if (tag === 'ul' || tag === 'ol') {
+      return [...node.children].map((li, i) =>
+        `${tag === 'ul' ? '•' : `${i + 1}.`} ${[...li.childNodes].map((child) => walk(child)).join('')}<br>`).join('');
+    }
+    if (tag === 'li') return inner;
+    if (['b', 'strong'].includes(tag)) return `<strong>${inner}</strong>`;
+    if (['i', 'em'].includes(tag)) return `<em>${inner}</em>`;
+    if (tag === 'u') return `<u>${inner}</u>`;
+    if (tag === 's' || tag === 'strike' || tag === 'del') return `<s>${inner}</s>`;
+    if (tag === 'span') {
+      const styles = [];
+      const size = Number.parseFloat(node.style.fontSize);
+      if (Number.isFinite(size)) styles.push(`font-size:${Math.max(8, Math.min(160, size))}px`);
+      const weight = node.style.fontWeight;
+      if (weight === 'bold' || Number(weight) >= 600) styles.push('font-weight:700');
+      else if (weight === 'normal' || weight === '400') styles.push('font-weight:400');
+      if (node.style.fontStyle === 'italic') styles.push('font-style:italic');
+      else if (node.style.fontStyle === 'normal') styles.push('font-style:normal');
+      const decoration = node.style.textDecorationLine || node.style.textDecoration;
+      if (decoration && decoration.includes('underline')) styles.push('text-decoration:underline');
+      if (decoration && decoration.includes('line-through')) styles.push('text-decoration:line-through');
+      const color = node.style.color;
+      if (/^#[\da-f]{3,8}$/i.test(color) || /^rgba?\([\d\s,.%]+\)$/i.test(color)) styles.push(`color:${color}`);
+      return styles.length ? `<span style="${styles.join(';')}">${inner}</span>` : inner;
+    }
+    return inner;
+  };
+  return [...root.childNodes].map((node) => walk(node)).join('');
+}
+function plainTextFromHtml(html) {
+  const root = document.createElement('div'); root.innerHTML = html || '';
+  const walk = (node) => {
+    if (node.nodeType === 3) return node.nodeValue;
+    if (node.nodeType !== 1) return '';
+    const tag = node.tagName.toLowerCase();
+    if (tag === 'br') return '\n';
+    const text = [...node.childNodes].map(walk).join('');
+    return ['div', 'p', 'li'].includes(tag) ? text + '\n' : text;
+  };
+  return [...root.childNodes].map(walk).join('').replace(/\n+$/g, '');
+}
+function normalizeLegacyBlock(block) {
+  if (!block.richHtml && block.tr && typeof Typeset !== 'undefined' && Typeset.hasInlineMarks(block.tr)) {
+    block.richHtml = legacyMarksToHtml(block.tr);
+    block.tr = Typeset.stripInlineMarkers(block.tr);
+  }
+  block.richHtml = safeEditorHtml(block.richHtml || escapeEditorText(block.tr || '').replace(/\n/g, '<br>'));
+  block.tr = plainTextFromHtml(block.richHtml);
+}
 function setActiveBlock(id, scroll) {
-  document.querySelectorAll('.blk').forEach((r) => r.classList.toggle('active', +r.dataset.id === id));
-  document.querySelectorAll('.ed-box').forEach((r) => r.classList.toggle('active', +r.dataset.id === id));
+  document.querySelectorAll('.blk').forEach((r) => r.classList.toggle('active', String(r.dataset.id) === String(id)));
+  document.querySelectorAll('.ed-box').forEach((r) => r.classList.toggle('active', String(r.dataset.id) === String(id)));
   if (scroll) {
     const row = document.querySelector(`.blk[data-id="${id}"]`);
-    if (row) { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); const ta = row.querySelector('textarea'); if (ta) ta.focus(); }
+    if (row) { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); const field = row.querySelector('.blk-editor'); if (field) field.focus(); }
   }
 }
-
 function scheduleApply() {
-  edDirty = true;
-  clearTimeout(edTimer);
-  // تا وقتی کاربر در حال کار روی فیلدهاست رندر نمی‌کنیم (نه تصویر پیش‌نمایش می‌پرد نه بندانگشتی)؛
-  // تایمر ۹۰۰ms به‌عنوان شبکهٔ اطمینان باقی است و در حالت فوکوس دوباره مسلح می‌شود.
-  // رندر واقعی با blur فیلد (پایان کار کاربر) یا بستن ویرایشگر اتفاق می‌افتد.
+  edDirty = true; clearTimeout(edTimer);
   edTimer = setTimeout(() => {
     if (isEditorInputFocused()) { scheduleApply(); return; }
     applyEditor();
   }, EDITOR_APPLY_DELAY);
 }
-
-// پایان کار کاربر روی یک فیلد: اگر تغییر معلق مانده، بلافاصله رندر کن
-function flushEditorOnBlur() {
-  if (edDirty) applyEditor();
+function flushEditorOnBlur() { if (edDirty) applyEditor(); }
+function updateRichBlock(blockId, source) {
+  if (!EDI) return;
+  const block = EDI.ocr.blocks.find((b) => String(b.id) === String(blockId));
+  if (!block) return;
+  block.richHtml = safeEditorHtml(source.innerHTML);
+  block.tr = plainTextFromHtml(block.richHtml);
+  document.querySelectorAll(`.blk-editor[data-id="${blockId}"], .ed-box-text[data-id="${blockId}"]`).forEach((field) => {
+    if (field !== source) field.innerHTML = block.richHtml || '';
+  });
+  scheduleApply();
 }
-
-// ---------- استایل درون‌متنی وردی: دکمه‌های نوار بلوک روی متن انتخاب‌شده، در نبود انتخاب روی کل بلوک ----------
-// مارکرهای ساده: **بولد** *ایتالیک* __زیرخط__؛ تگ‌ها: [size=24]..[/size] و [color=#hex]..[/color].
-// دور متن انتخاب‌شدهٔ textarea مارکر می‌گذارد؛ اگر انتخاب دقیقاً داخل همان جفت مارکر باشد، آن را برمی‌دارد.
-function wrapSelection(ta, open, close) {
-  const s = ta.selectionStart, e = ta.selectionEnd;
-  const value = ta.value;
-  const sel = value.slice(s, e);
-  const before = value.slice(Math.max(0, s - open.length), s);
-  const after = value.slice(e, e + close.length);
-  let next, caretS, caretE;
-  if (sel && before === open && after === close) {
-    next = value.slice(0, s - open.length) + sel + value.slice(e + close.length);
-    caretS = s - open.length;
-    caretE = caretS + sel.length;
-  } else if (sel) {
-    next = value.slice(0, s) + open + sel + close + value.slice(e);
-    caretS = s + open.length;
-    caretE = e + open.length;
-  } else {
-    // انتخابی نیست: جفت مارکر خالی می‌گذاریم و نشانگر را وسطش می‌بریم
-    next = value.slice(0, s) + open + close + value.slice(e);
-    caretS = caretE = s + open.length;
-  }
-  ta.value = next;
-  ta.focus();
-  ta.setSelectionRange(caretS, caretE);
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
+function runRichCommand(command, value) {
+  if (!activeRichEditor) return;
+  activeRichEditor.focus();
+  document.execCommand(command, false, value || null);
+  updateRichBlock(activeRichEditor.dataset.id, activeRichEditor);
+  syncRichToolbarState();
 }
-
-// تگ پارامتری (size/color): اگر انتخاب داخل تگ همان نوع باشد فقط پارامتر عوض می‌شود، وگرنه تگ تازه دورش می‌نشیند
-function wrapTagSelection(ta, tag, param) {
-  const s = ta.selectionStart, e = ta.selectionEnd;
-  const value = ta.value, sel = value.slice(s, e);
-  if (!sel) {
-    wrapSelection(ta, `[${tag}=${param}]`, `[/${tag}]`);
-    return;
-  }
-  const before = value.slice(0, s), after = value.slice(e);
-  const openRe = new RegExp(`\\[${tag}=[^\\]]+\\]$`);
-  const closeRe = new RegExp(`^\\[/${tag}\\]`);
-  const bm = before.match(openRe), am = after.match(closeRe);
-  let next, caretS, caretE;
-  if (bm && am) {
-    // فقط پارامتر تگ باز عوض می‌شود؛ تگ بسته و محتوای انتخاب دست می‌خورند
-    const newBefore = before.slice(0, bm.index) + `[${tag}=${param}]`;
-    next = newBefore + sel + after;
-    caretS = newBefore.length;
-    caretE = caretS + sel.length;
-  } else {
-    const open = `[${tag}=${param}]`, close = `[/${tag}]`;
-    next = before + open + sel + close + after;
-    caretS = s + open.length;
-    caretE = e + open.length;
-  }
-  ta.value = next;
-  ta.focus();
-  ta.setSelectionRange(caretS, caretE);
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
-// حذف تگ پارامتری دور انتخاب (برای رنگ خودکار روی انتخاب)
-function unwrapTagSelection(ta, tag) {
-  const s = ta.selectionStart, e = ta.selectionEnd;
-  const value = ta.value, sel = value.slice(s, e);
-  if (!sel) return false;
-  const before = value.slice(0, s), after = value.slice(e);
-  const bm = before.match(new RegExp(`\\[${tag}=[^\\]]+\\]$`));
-  const am = after.match(new RegExp(`^\\[/${tag}\\]`));
-  if (!bm || !am) return false;
-  const newBefore = before.slice(0, bm.index);
-  ta.value = newBefore + sel + after.slice(am[0].length);
-  ta.focus();
-  ta.setSelectionRange(newBefore.length, newBefore.length + sel.length);
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
+function applyRichStyle(property, value) {
+  const editor = activeRichEditor;
+  const selection = window.getSelection();
+  let range = selection && selection.rangeCount && editor && editor.contains(selection.anchorNode)
+    ? selection.getRangeAt(0).cloneRange() : null;
+  if (!range && richSelectionRange && editor && editor.contains(richSelectionRange.startContainer)) range = richSelectionRange.cloneRange();
+  if (!editor || !range || range.collapsed) return false;
+  const span = document.createElement('span');
+  if (property === 'fontSize') span.style.fontSize = `${Math.max(8, Math.min(160, Number(value) || 16))}px`;
+  else if (property === 'color' && (/^#[\da-f]{3,8}$/i.test(value) || /^rgba?\([\d\s,.%]+\)$/i.test(value))) span.style.color = value;
+  else return false;
+  try {
+    span.appendChild(range.extractContents()); range.insertNode(span);
+    selection.removeAllRanges(); const next = document.createRange(); next.selectNodeContents(span); selection.addRange(next);
+    richSelectionRange = next.cloneRange();
+  } catch { return false; }
+  updateRichBlock(editor.dataset.id, editor);
   return true;
 }
-
-// آیا متن انتخاب‌شده دقیقاً داخل جفت مارکر داده‌شده است؟ (برای وضعیت فعال دکمه‌ها مثل ورد)
-function selectionHasMark(ta, mark) {
-  const s = ta.selectionStart, e = ta.selectionEnd;
-  if (s === e) return null;
-  const v = ta.value;
-  return v.slice(Math.max(0, s - mark.length), s) === mark && v.slice(e, e + mark.length) === mark;
+function hasRichSelection(editor) {
+  const selection = window.getSelection();
+  const current = selection && selection.rangeCount && editor && editor.contains(selection.anchorNode)
+    ? selection.getRangeAt(0) : null;
+  const range = current || (richSelectionRange && editor && editor.contains(richSelectionRange.startContainer) ? richSelectionRange : null);
+  return !!(range && !range.collapsed);
+}
+function insertPlainPaste(event, editor) {
+  event.preventDefault();
+  const text = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
+  editor.focus();
+  document.execCommand('insertText', false, text);
+  updateRichBlock(editor.dataset.id, editor);
+}
+function selectRichEditor(editor) {
+  activeRichEditor = editor;
+  setActiveBlock(editor.dataset.id, false);
+}
+function syncRichToolbarState() {
+  if (!activeRichEditor || typeof document.queryCommandState !== 'function') return;
+  const row = document.querySelector(`.blk[data-id="${activeRichEditor.dataset.id}"]`);
+  if (!row) return;
+  [['bold', '.blk-bold'], ['italic', '.blk-italic'], ['underline', '.blk-under'], ['strikeThrough', '.blk-strike']].forEach(([command, selector]) => {
+    let active = false;
+    try { active = document.queryCommandState(command); } catch { active = false; }
+    const button = row.querySelector(selector);
+    if (button) { button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active)); }
+  });
+}
+function syncBlockTextStyles(block, editor, overlay) {
+  const baseSize = block.size || Math.max(10, Math.round((block.lineH || 16) * 1.1));
+  [editor, overlay].forEach((field) => {
+    field.setAttribute('dir', block.dir);
+    field.style.textAlign = block.align;
+    field.style.fontWeight = block.bold ? '700' : '400';
+    field.style.fontStyle = block.italic ? 'italic' : 'normal';
+    field.style.textDecoration = block.underline ? 'underline' : 'none';
+    field.style.color = block.color || (field.classList.contains('ed-box-text') ? '#fff' : 'var(--text)');
+    field.style.fontSize = `${baseSize}px`;
+  });
+  overlay.dataset.baseSize = String(baseSize);
+}
+function updatePreviewScale() {
+  if (!EDI) return;
+  const stage = document.querySelector('.ed-stage');
+  if (!stage || !EDI.w) return;
+  const stageWidth = stage.getBoundingClientRect().width;
+  if (!stageWidth) return;
+  const scale = stageWidth / EDI.w;
+  stage.querySelectorAll('.ed-box-text').forEach((field) => {
+    field.style.transform = `scale(${scale})`;
+    field.style.width = `${100 / scale}%`;
+    field.style.height = `${100 / scale}%`;
+    field.style.fontSize = `${Math.max(8, field.dataset.baseSize || 14)}px`;
+  });
 }
 
 async function applyEditor() {
@@ -355,8 +379,7 @@ async function applyEditor() {
   clearTimeout(edTimer);
   try {
     await renderEdited(item);
-    // پیش‌نمایش ویرایشگر فقط وقتی هنوز روی همین آیتم باز است به‌روز شود
-    if (EDI === item) setEdImage(item);
+    // پیش‌نمایش ویرایشگر با لایهٔ زندهٔ متن به‌روز می‌شود؛ تصویر اصلی زیر آن ثابت می‌ماند.
     refreshCard(item);
     drawThumb(item);
   } catch (e) {
@@ -369,185 +392,168 @@ async function applyEditor() {
 }
 
 function buildEditor() {
-  const it = EDI, bl = it.ocr.blocks;
+  const it = EDI, blocks = it.ocr.blocks;
   const list = $('edList'), boxes = $('edBoxes');
   list.innerHTML = ''; boxes.innerHTML = '';
-  edFieldFocused = false; // فیلدهای قبلی با بازسازی لیست از بین رفته‌اند
-  if (!bl.length) { list.innerHTML = '<div class="ed-empty">در این تصویر متنی پیدا نشد.</div>'; return; }
+  activeRichEditor = null; edFieldFocused = false;
+  if (!blocks.length) { list.innerHTML = '<div class="ed-empty">در این تصویر متنی پیدا نشد.</div>'; return; }
 
-  // پیش‌فرض قالب‌بندی هر بلوک؛ دکمهٔ بازنشانی هم همین مقادیر را برمی‌گرداند
-  const FMT_DEFAULTS = { dir: 'rtl', align: 'right', bold: true, italic: false, underline: false, size: null, color: null };
-  bl.forEach((b) => {
-    // پیش‌فرض‌های قالب‌بندی برای بلوک‌های ساخته‌شده در نسخه‌های قبل (فیلدها هنوز وجود ندارند)
+  const makeToolbar = (block) => `<div class="blk-format" role="toolbar" aria-label="قالب‌بندی متن">
+    <div class="dir-group" title="جهت متن"><button type="button" class="fmt-btn blk-dir-rtl" title="راست‌به‌چپ">RTL</button><button type="button" class="fmt-btn blk-dir-ltr" title="چپ‌به‌راست">LTR</button></div>
+    <select class="sel blk-align" title="تراز متن"><option value="right">راست‌چین</option><option value="center">وسط‌چین</option><option value="left">چپ‌چین</option></select>
+    <button type="button" class="fmt-btn blk-bold" data-command="bold" title="پررنگ"><b>B</b></button>
+    <button type="button" class="fmt-btn blk-italic" data-command="italic" title="کج"><i>I</i></button>
+    <button type="button" class="fmt-btn blk-under" data-command="underline" title="زیرخط"><u>U</u></button>
+    <button type="button" class="fmt-btn blk-strike" data-command="strikeThrough" title="خط‌خورده">S̶</button>
+    <button type="button" class="fmt-btn blk-bullet" data-command="insertUnorderedList" title="فهرست نشانه‌دار">•≡</button>
+    <button type="button" class="fmt-btn blk-numbered" data-command="insertOrderedList" title="فهرست شماره‌دار">1≡</button>
+    <label class="size-field">اندازه <input type="number" class="blk-size" min="8" max="160" step="1" placeholder="خودکار" aria-label="اندازهٔ قلم"></label>
+    <label class="color-field">رنگ <input type="color" class="blk-color" value="#0b0b0b" aria-label="رنگ قلم"></label>
+    <button type="button" class="fmt-btn blk-undo" data-command="undo" title="واگرد">↶</button>
+    <button type="button" class="fmt-btn blk-redo" data-command="redo" title="ازنو">↷</button>
+    <button type="button" class="fmt-btn blk-clear" data-command="removeFormat" title="پاک‌کردن قالب‌بندی">Tx</button>
+  </div>`;
+
+  blocks.forEach((b) => {
     b.dir = b.dir === 'ltr' ? 'ltr' : 'rtl';
-    b.align = b.align === 'center' || b.align === 'left' ? b.align : 'right';
-    b.bold = b.bold !== false;
-    b.italic = !!b.italic;
-    b.underline = !!b.underline;
+    b.align = ['center', 'left'].includes(b.align) ? b.align : 'right';
+    b.bold = b.bold !== false; b.italic = !!b.italic; b.underline = !!b.underline;
     b.size = Number.isFinite(+b.size) && +b.size > 0 ? +b.size : null;
-    b.color = /^#[0-9a-fA-F]{6}$/.test(b.color) ? b.color : null;
-    const box = document.createElement('div');
-    box.className = 'ed-box' + (b.enabled ? '' : ' off');
-    box.dataset.id = b.id;
-    box.style.cssText = `left:${(b.x0 / it.w) * 100}%;top:${(b.y0 / it.h) * 100}%;width:${((b.x1 - b.x0) / it.w) * 100}%;height:${((b.y1 - b.y0) / it.h) * 100}%`;
-    box.innerHTML = `<span>${b.id}</span>`;
-    box.onclick = () => setActiveBlock(b.id, true);
-    boxes.appendChild(box);
+    b.color = /^#[\da-f]{6}$/i.test(b.color) ? b.color : null;
+    normalizeLegacyBlock(b);
 
-    const row = document.createElement('div');
-    row.className = 'blk' + (b.enabled ? '' : ' off');
-    row.dataset.id = b.id;
+    const box = document.createElement('div');
+    box.className = `ed-box${b.enabled ? '' : ' off'}`; box.dataset.id = b.id;
+    boxes.appendChild(box);
+    const overlay = document.createElement('div');
+    overlay.className = 'ed-box-text'; overlay.dataset.id = b.id;
+    overlay.contentEditable = 'true'; overlay.setAttribute('contenteditable', 'true'); overlay.setAttribute('role', 'textbox'); overlay.setAttribute('aria-label', `ویرایش مستقیم ترجمه ${b.id}`);
+    overlay.setAttribute('dir', b.dir); overlay.spellcheck = true; overlay.innerHTML = b.richHtml || '';
+    overlay.dataset.baseSize = String(b.size || Math.max(10, Math.round((b.lineH || 16) * 1.1)));
+    box.appendChild(overlay);
+    ['n','ne','e','se','s','sw','w','nw'].forEach((dir) => {
+      const handle = document.createElement('button'); handle.type = 'button'; handle.className = `ed-resize ed-resize-${dir}`;
+      handle.dataset.dir = dir; handle.setAttribute('aria-label', `تغییر اندازهٔ کادر ${dir}`); box.appendChild(handle);
+    });
+    const setGeometry = () => {
+      const x0 = Number.isFinite(b.tx0) ? b.tx0 : b.x0, y0 = Number.isFinite(b.ty0) ? b.ty0 : b.y0;
+      const x1 = Number.isFinite(b.tx1) ? b.tx1 : b.x1, y1 = Number.isFinite(b.ty1) ? b.ty1 : b.y1;
+      box.style.left = `${x0 / it.w * 100}%`; box.style.top = `${y0 / it.h * 100}%`;
+      box.style.width = `${(x1 - x0) / it.w * 100}%`; box.style.height = `${(y1 - y0) / it.h * 100}%`;
+      updatePreviewScale();
+    };
+    setGeometry();
+    box.classList.toggle('off', !b.enabled);
+    box.classList.toggle('active', false);
+    box.addEventListener('pointerdown', (event) => {
+      if (event.target === box) selectRichEditor(overlay);
+    });
+    overlay.addEventListener('focus', () => { selectRichEditor(overlay); edFieldFocused = true; });
+    overlay.addEventListener('input', () => updateRichBlock(b.id, overlay));
+    overlay.addEventListener('paste', (event) => insertPlainPaste(event, overlay));
+    overlay.addEventListener('focusout', (event) => {
+      if (editorFieldEl(event.relatedTarget)) return;
+      edFieldFocused = false; flushEditorOnBlur();
+    });
+    box.querySelectorAll('.ed-resize').forEach((handle) => handle.addEventListener('pointerdown', (event) => {
+      event.preventDefault(); event.stopPropagation();
+      const stageRect = document.querySelector('.ed-stage').getBoundingClientRect();
+      const sx = it.w / stageRect.width, sy = it.h / stageRect.height;
+      const dir = handle.dataset.dir;
+      let x0 = Number.isFinite(b.tx0) ? b.tx0 : b.x0, y0 = Number.isFinite(b.ty0) ? b.ty0 : b.y0;
+      let x1 = Number.isFinite(b.tx1) ? b.tx1 : b.x1, y1 = Number.isFinite(b.ty1) ? b.ty1 : b.y1;
+      const origin = { x: event.clientX, y: event.clientY, x0, y0, x1, y1 };
+      handle.setPointerCapture(event.pointerId);
+      const move = (ev) => {
+        const dx = (ev.clientX - origin.x) * sx, dy = (ev.clientY - origin.y) * sy;
+        const minW = Math.min(20, it.w), minH = Math.min(16, it.h);
+        x0 = origin.x0; y0 = origin.y0; x1 = origin.x1; y1 = origin.y1;
+        if (dir.includes('w')) x0 = Math.max(0, Math.min(origin.x1 - minW, origin.x0 + dx));
+        if (dir.includes('e')) x1 = Math.min(it.w, Math.max(origin.x0 + minW, origin.x1 + dx));
+        if (dir.includes('n')) y0 = Math.max(0, Math.min(origin.y1 - minH, origin.y0 + dy));
+        if (dir.includes('s')) y1 = Math.min(it.h, Math.max(origin.y0 + minH, origin.y1 + dy));
+        b.tx0 = x0; b.ty0 = y0; b.tx1 = x1; b.ty1 = y1;
+        setGeometry(); scheduleApply();
+      };
+      const stop = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', stop); handle.removeEventListener('pointercancel', stop); };
+      handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', stop); handle.addEventListener('pointercancel', stop);
+    }));
+
+    const row = document.createElement('div'); row.className = `blk${b.enabled ? '' : ' off'}`; row.dataset.id = b.id;
     row.innerHTML = `<div class="blk-top"><span class="blk-n">${b.id}</span>
       <label><input type="checkbox" ${b.enabled ? 'checked' : ''}> جایگزین شود</label>
       <select class="sel blk-bg"><option value="auto">پس‌زمینه: خودکار</option><option value="white">پس‌زمینه: سفید</option>
-      <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن (متن با حاشیه)</option></select></div>
-      <div class="blk-format">
-        <div class="dir-group" title="جهت متن (راست‌به‌چپ / چپ‌به‌راست)">
-          <button type="button" class="fmt-btn blk-dir-rtl">RTL</button>
-          <button type="button" class="fmt-btn blk-dir-ltr">LTR</button>
-        </div>
-        <select class="sel blk-align" title="چیدمان فیزیکی خط‌ها">
-          <option value="right">راست‌چین</option>
-          <option value="center">وسط‌چین</option>
-          <option value="left">چپ‌چین</option>
-        </select>
-        <button type="button" class="fmt-btn blk-bold" title="پررنگ: روی متن انتخاب‌شده یا کل بلوک بدون انتخاب">B</button>
-        <button type="button" class="fmt-btn blk-italic" title="ایتالیک: روی متن انتخاب‌شده یا کل بلوک بدون انتخاب">I</button>
-        <button type="button" class="fmt-btn blk-under" title="زیرخط: روی متن انتخاب‌شده یا کل بلوک بدون انتخاب">U</button>
-        <label class="size-field">اندازهٔ فونت
-          <input type="number" class="blk-size" min="8" max="160" step="1" placeholder="خودکار" title="با متن انتخاب‌شده فقط همان بخش تغییر اندازه می‌دهد؛ بدون انتخاب، کل بلوک">
-        </label>
-        <label class="color-field" title="رنگ: با متن انتخاب‌شده فقط همان بخش رنگ می‌گیرد؛ بدون انتخاب کل بلوک. «خودکار» بر اساس روشنی پس‌زمینه است">رنگ
-          <input type="color" class="blk-color" value="#0b0b0b">
-          <button type="button" class="fmt-btn blk-color-auto">خودکار</button>
-        </label>
-        <button type="button" class="fmt-btn blk-reset" title="بازنشانی همهٔ قالب‌بندی‌های این متن به پیش‌فرض">↺</button>
-      </div>
-      <div class="blk-orig"><span class="blk-orig-text"></span><button type="button" class="blk-copy-orig" title="کپی متن شناسایی‌شدهٔ انگلیسی (OCR)" aria-label="کپی متن انگلیسی">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-      </button></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>`;
-    row.querySelector('.blk-orig-text').textContent = b.text;
-    const ta = row.querySelector('textarea'); ta.value = b.tr || '';
-    ensureEditorHistory(b, ta.value);
-    const sel = row.querySelector('.blk-bg'); sel.value = b.bg;
-    const chk = row.querySelector('.blk-top input');
-    ta.oninput = () => { b.tr = ta.value; recordEditorHistory(b, ta); scheduleApply(); };
-    ta.onfocus = () => setActiveBlock(b.id, false);
-    sel.onchange = () => { b.bg = sel.value; scheduleApply(); };
-    chk.onchange = () => { b.enabled = chk.checked; row.classList.toggle('off', !b.enabled); box.classList.toggle('off', !b.enabled); scheduleApply(); };
-
-    const rtlBtn = row.querySelector('.blk-dir-rtl');
-    const ltrBtn = row.querySelector('.blk-dir-ltr');
-    const alignSel = row.querySelector('.blk-align');
-    const boldBtn = row.querySelector('.blk-bold');
-    const italicBtn = row.querySelector('.blk-italic');
-    const underBtn = row.querySelector('.blk-under');
-    const sizeInput = row.querySelector('.blk-size');
-    const colorInput = row.querySelector('.blk-color');
-    const colorAutoBtn = row.querySelector('.blk-color-auto');
-    const resetBtn = row.querySelector('.blk-reset');
-    // یک همگام‌ساز واحد: وضعیت همهٔ کنترل‌ها را از روی دادهٔ بلوک بازسازی می‌کند
-    const syncFmt = () => {
-      rtlBtn.classList.toggle('active', b.dir === 'rtl');
-      ltrBtn.classList.toggle('active', b.dir === 'ltr');
-      boldBtn.classList.toggle('active', b.bold);
-      italicBtn.classList.toggle('active', b.italic);
-      underBtn.classList.toggle('active', b.underline);
-      alignSel.value = b.align;
-      sizeInput.value = b.size ? String(b.size) : '';
-      colorAutoBtn.classList.toggle('active', !b.color);
-      colorInput.value = b.color || '#0b0b0b';
-      colorInput.classList.toggle('is-auto', !b.color);
-      ta.style.direction = b.dir; // پیش‌نمایش ویرایش هم جهت واقعی متن را نشان دهد
-    };
-    syncFmt();
-    // وضعیت فعال B/I/U هنگام تغییر انتخاب: وضعیت مارکر درون‌متنی انتخاب، در غیر این صورت وضعیت کل بلوک
-    const italicSelectionMark = () => {
-      const s = ta.selectionStart, e = ta.selectionEnd, v = ta.value;
-      if (s === e) return null;
-      return v.slice(Math.max(0, s - 1), s) === '*' && v.slice(e, e + 1) === '*' &&
-        v.slice(Math.max(0, s - 2), s) !== '**' && v.slice(e, e + 2) !== '**';
-    };
-    const syncSelectionFmt = () => {
-      const boldMark = selectionHasMark(ta, '**');
-      if (boldMark === null) { syncFmt(); return; }
-      boldBtn.classList.toggle('active', boldMark);
-      italicBtn.classList.toggle('active', !!italicSelectionMark());
-      underBtn.classList.toggle('active', !!selectionHasMark(ta, '__'));
-    };
-    ['select', 'keyup', 'click', 'focus'].forEach((evt) => ta.addEventListener(evt, syncSelectionFmt));
-    rtlBtn.onclick = () => { b.dir = 'rtl'; syncFmt(); scheduleApply(); };
-    ltrBtn.onclick = () => { b.dir = 'ltr'; syncFmt(); scheduleApply(); };
-    alignSel.onchange = () => { b.align = alignSel.value; scheduleApply(); };
-    // B/I/U مثل ورد: متن انتخاب‌شده باشد روی همان انتخاب، وگرنه روی کل بلوک
-    boldBtn.onclick = () => {
-      if (ta.selectionStart !== ta.selectionEnd) { wrapSelection(ta, '**', '**'); syncSelectionFmt(); }
-      else { b.bold = !b.bold; syncFmt(); }
-      scheduleApply();
-    };
-    italicBtn.onclick = () => {
-      if (ta.selectionStart !== ta.selectionEnd) { wrapSelection(ta, '*', '*'); syncSelectionFmt(); }
-      else { b.italic = !b.italic; syncFmt(); }
-      scheduleApply();
-    };
-    underBtn.onclick = () => {
-      if (ta.selectionStart !== ta.selectionEnd) { wrapSelection(ta, '__', '__'); syncSelectionFmt(); }
-      else { b.underline = !b.underline; syncFmt(); }
-      scheduleApply();
-    };
-    sizeInput.onchange = () => {
-      const n = Number.parseInt(sizeInput.value, 10);
-      const hasSelection = ta.selectionStart !== ta.selectionEnd;
-      if (!(Number.isFinite(n) && n >= 8)) {
-        // ورودی نامعتبر: داخل انتخاب بی‌اثر است، در غیر این صورت اندازهٔ کل بلوک به خودکار برمی‌گردد
-        if (hasSelection) sizeInput.value = b.size ? String(b.size) : '';
-        else { b.size = null; sizeInput.value = ''; scheduleApply(); }
-        return;
-      }
-      const size = Math.min(160, n);
-      if (hasSelection) {
-        // اندازه فقط برای متن انتخاب‌شده؛ فیلد بلوک به مقدار کل‌بلوک برمی‌گردد
-        wrapTagSelection(ta, 'size', String(size));
-        sizeInput.value = b.size ? String(b.size) : '';
-      } else {
-        b.size = size;
-        sizeInput.value = String(b.size);
-      }
-      scheduleApply();
-    };
-    colorInput.oninput = () => {
-      if (ta.selectionStart !== ta.selectionEnd) {
-        // رنگ فقط برای متن انتخاب‌شده؛ رنگ بلوک دست نمی‌خورد
-        wrapTagSelection(ta, 'color', colorInput.value);
-        colorInput.value = b.color || '#0b0b0b';
-      } else {
-        b.color = colorInput.value;
-      }
-      syncFmt();
-      scheduleApply();
-    };
-    colorAutoBtn.onclick = () => {
-      if (ta.selectionStart !== ta.selectionEnd) unwrapTagSelection(ta, 'color');
-      else b.color = null;
-      syncFmt();
-      scheduleApply();
-    };
-    resetBtn.onclick = () => { Object.assign(b, FMT_DEFAULTS); syncFmt(); scheduleApply(); };
-    // کپی متن انگلیسی OCRشدهٔ همین بلوک در کلیپ‌بورد، بدون خروج از ویرایشگر
-    const copyOrigBtn = row.querySelector('.blk-copy-orig');
-    copyOrigBtn.onclick = async () => {
+      <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن</option></select>
+      <button type="button" class="fmt-btn blk-copy-orig" title="کپی متن OCR">کپی متن اصلی</button></div>
+      ${makeToolbar(b)}
+      <div class="blk-orig"><span class="blk-orig-text"></span></div>
+      <div class="blk-editor" data-id="${escapeEditorText(b.id)}" contenteditable="true" role="textbox" aria-label="ترجمهٔ قابل ویرایش" spellcheck="true"></div>
+      <div class="blk-help">می‌توانید متن را همین‌جا یا مستقیماً روی کادر تصویر ویرایش کنید؛ برای تغییر اندازه، دستگیره‌های کادر را بکشید.</div>`;
+    row.querySelector('.blk-orig-text').textContent = b.text || '';
+    const editor = row.querySelector('.blk-editor'); editor.setAttribute('dir', b.dir); editor.innerHTML = b.richHtml || '';
+    syncBlockTextStyles(b, editor, overlay);
+    row.querySelector('.blk-bg').value = b.bg || 'auto';
+    row.querySelector('.blk-editor').addEventListener('focus', () => { selectRichEditor(editor); edFieldFocused = true; });
+    editor.addEventListener('input', () => updateRichBlock(b.id, editor));
+    editor.addEventListener('paste', (event) => insertPlainPaste(event, editor));
+    editor.addEventListener('focusout', (event) => {
+      if (editorFieldEl(event.relatedTarget)) return;
+      edFieldFocused = false; flushEditorOnBlur();
+    });
+    row.querySelector('.blk-top input').addEventListener('change', (event) => {
+      b.enabled = event.target.checked; row.classList.toggle('off', !b.enabled); box.classList.toggle('off', !b.enabled); scheduleApply();
+    });
+    row.querySelector('.blk-bg').addEventListener('change', (event) => { b.bg = event.target.value; scheduleApply(); });
+    row.querySelector('.blk-copy-orig').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
       const ok = await copyPlainText(b.text || '');
-      copyOrigBtn.classList.toggle('copied', ok);
-      copyOrigBtn.title = ok ? 'کپی شد ✓' : 'کپی ناموفق بود';
-      setTimeout(() => {
-        copyOrigBtn.classList.remove('copied');
-        copyOrigBtn.title = 'کپی متن شناسایی‌شدهٔ انگلیسی (OCR)';
-      }, 1400);
-    };
+      button.classList.toggle('copied', ok);
+      button.title = ok ? 'کپی شد ✓' : 'کپی ناموفق بود';
+      setTimeout(() => { button.classList.remove('copied'); button.title = 'کپی متن OCR'; }, 1400);
+    });
+    row.querySelectorAll('.blk-format button').forEach((button) => {
+      button.addEventListener('mousedown', (event) => event.preventDefault());
+      button.addEventListener('click', () => {
+        if (button.classList.contains('blk-dir-rtl') || button.classList.contains('blk-dir-ltr')) {
+          b.dir = button.classList.contains('blk-dir-rtl') ? 'rtl' : 'ltr';
+          syncBlockTextStyles(b, editor, overlay); scheduleApply(); return;
+        }
+        const command = button.dataset.command;
+        if (command) runRichCommand(command);
+      });
+    });
+    row.querySelector('.blk-align').value = b.align;
+    row.querySelector('.blk-align').addEventListener('change', (event) => { b.align = event.target.value; syncBlockTextStyles(b, editor, overlay); scheduleApply(); });
+    row.querySelector('.blk-size').value = b.size || '';
+    row.querySelector('.blk-size').addEventListener('change', (event) => {
+      const size = Number(event.target.value);
+      const selection = activeRichEditor && String(activeRichEditor.dataset.id) === String(b.id) && hasRichSelection(activeRichEditor);
+      if (selection && applyRichStyle('fontSize', size)) return;
+      b.size = size >= 8 ? Math.min(160, size) : null;
+      syncBlockTextStyles(b, editor, overlay);
+      scheduleApply();
+    });
+    row.querySelector('.blk-color').addEventListener('input', (event) => {
+      const selection = activeRichEditor && String(activeRichEditor.dataset.id) === String(b.id) && hasRichSelection(activeRichEditor);
+      if (selection && applyRichStyle('color', event.target.value)) return;
+      b.color = event.target.value; syncBlockTextStyles(b, editor, overlay); scheduleApply();
+    });
     list.appendChild(row);
   });
+  updatePreviewScale();
+  if (!window.__editorResizeBound) {
+    window.addEventListener('resize', updatePreviewScale); window.__editorResizeBound = true;
+  }
+}
+
+function setEdImage(item = EDI) {
+  if (!item) return;
+  // نمایش تصویر اصلی زیر لایهٔ قابل‌ویرایش؛ نمایش خروجیِ ازقبل‌رندرشده متن را دوبار نشان می‌داد.
+  const blob = item.blob;
+  if (edUrl) URL.revokeObjectURL(edUrl);
+  edUrl = URL.createObjectURL(blob);
+  $('edImg').onload = updatePreviewScale;
+  $('edImg').src = edUrl;
 }
 
 function openEditor(it) {
@@ -557,6 +563,7 @@ function openEditor(it) {
   buildEditor();
   setEdImage();
   $('editor').classList.remove('hidden');
+  requestAnimationFrame(updatePreviewScale);
   document.body.style.overflow = 'hidden';
 }
 
@@ -568,7 +575,9 @@ async function closeEditor() {
   $('editor').classList.add('hidden');
   document.body.style.overflow = '';
   if (edUrl) { URL.revokeObjectURL(edUrl); edUrl = null; }
+  $('edImg').onload = null;
   $('edImg').removeAttribute('src');
+  activeRichEditor = null;
   EDI = null;
   refreshAll();
 }
@@ -628,27 +637,19 @@ $('edRevert').onclick = async () => {
   await applyEditor();
 };
 $('btnTxt').onclick = exportText;
-// پایان کار کاربر روی فیلدها (کلیک بیرون از فیلد، رفتن به پیش‌نمایش): تغییرات معلق بلافاصله رندر می‌شوند.
-// focusout حباب‌دار است و با بازسازی innerHTML فهرست در buildEditor هم از بین نمی‌رود.
-$('edList').addEventListener('keydown', (e) => {
-  const textarea = e.target && e.target.closest ? e.target.closest('textarea') : null;
-  if (!textarea || !(e.ctrlKey || e.metaKey) || e.altKey) return;
-  const key = e.key.toLowerCase();
-  const undo = key === 'z' && !e.shiftKey;
-  const redo = key === 'y' || (key === 'z' && e.shiftKey);
-  if (!undo && !redo) return;
-  e.preventDefault();
-  e.stopPropagation();
-  const row = textarea.closest('.blk');
-  const block = EDI && EDI.ocr.blocks.find((candidate) => String(candidate.id) === row.dataset.id);
-  if (block && moveEditorHistory(block, textarea, undo ? -1 : 1)) scheduleApply();
+document.addEventListener('selectionchange', () => {
+  const selection = window.getSelection();
+  if (activeRichEditor && selection && selection.rangeCount && activeRichEditor.contains(selection.anchorNode)) {
+    richSelectionRange = selection.getRangeAt(0).cloneRange();
+    syncRichToolbarState();
+  }
 });
-$('edList').addEventListener('focusin', (e) => {
+// فوکوس در هر دو سطح (ویرایشگر کناری و کادر روی تصویر) حفظ می‌شود؛ رندر فقط پس از خروج از فیلد انجام می‌گیرد.
+$('editor').addEventListener('focusin', (e) => {
   if (editorFieldEl(e.target)) edFieldFocused = true;
 });
-$('edList').addEventListener('focusout', (e) => {
+$('editor').addEventListener('focusout', (e) => {
   if (!editorFieldEl(e.target)) return;
-  // جابه‌جایی بین دو فیلد ویرایشگر یعنی کاربر هنوز مشغول است؛ رندر معلق می‌ماند
   if (editorFieldEl(e.relatedTarget)) return;
   edFieldFocused = false;
   flushEditorOnBlur();
