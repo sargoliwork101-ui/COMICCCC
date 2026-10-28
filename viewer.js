@@ -2027,10 +2027,14 @@ async function restorePageProfile() {
 
 // ---------- شروع ----------
 async function main() {
-  const jobId = new URLSearchParams(location.search).get('job');
-  jobKey = 'job_' + jobId;
-  const stored = await chrome.storage.local.get(jobKey);
-  job = stored[jobKey];
+  const params = new URLSearchParams(location.search);
+  const jobId = params.get('job');
+  const standalonePdfWorkspace = params.get('pdfWorkspace') === '1';
+  jobKey = 'job_' + (jobId || 'pdf_workspace');
+  const stored = jobId ? await chrome.storage.local.get(jobKey) : {};
+  job = stored[jobKey] || (standalonePdfWorkspace
+    ? { urls: [], name: 'comic.pdf', tabId: null, pageUrl: '' }
+    : null);
   if (!job) {
     $('loadText').innerText = 'اطلاعات کار پیدا نشد. دوباره از popup شروع کنید.';
     return;
@@ -2038,7 +2042,7 @@ async function main() {
   $('pdfName').value = (job.name || 'comic').replace(/\.pdf$/i, '');
   pageProfileKey = makePageProfileKey(job.pageUrl || '');
   await checkSavedPageProfile();
-  await setRefererRule(job.pageUrl);
+  if (job.pageUrl) await setRefererRule(job.pageUrl);
 
   const grid = $('grid');
   grid.addEventListener('dragover', (ev) => {
@@ -2112,7 +2116,7 @@ async function main() {
     else reorderByDrop(draggedItem, target, before);
     suppressCardClickUntil = Date.now() + 350;
   });
-  items = job.urls.map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pageGroup: null, state: 'loading', selected: true }));
+  items = (job.urls || []).map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pageGroup: null, state: 'loading', selected: true }));
   nextItemUid = items.length;
   items.forEach((it) => grid.appendChild(makeCard(it)));
 
@@ -2224,6 +2228,7 @@ async function main() {
   window.addEventListener('pagehide', () => { chrome.storage.local.remove(jobKey); clearRefererRule(); });
 
   await loadAll(items);
+  if (standalonePdfWorkspace) await openPdfImportTab();
 }
 
 main().catch((e) => {
