@@ -1,15 +1,23 @@
-// jobهای یتیم (مثلاً وقتی تب viewer کرش کرده یا بسته شده و pagehide اجرا نشده) را پاک کن تا فضای storage پر نشود
+// Jobهای تازه ممکن است متعلق به تب‌های بازیابی‌شدهٔ مرورگر باشند؛ فقط داده‌های بیشتر از ۷ روز پاک می‌شوند.
+const JOB_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 async function pruneOrphanJobs() {
   try {
     const all = await chrome.storage.local.get(null);
-    const orphanKeys = Object.keys(all).filter((key) => key.startsWith('job_'));
-    if (orphanKeys.length) await chrome.storage.local.remove(orphanKeys);
+    const now = Date.now();
+    const expiredKeys = Object.entries(all)
+      .filter(([key, job]) => key.startsWith('job_') && Number.isFinite(job && job.createdAt) &&
+        now - job.createdAt > JOB_RETENTION_MS)
+      .map(([key]) => key);
+    if (expiredKeys.length) await chrome.storage.local.remove(expiredKeys);
   } catch (e) {
     console.warn('پاک‌سازی jobهای قدیمی ناموفق بود', e);
   }
 }
 chrome.runtime.onStartup.addListener(pruneOrphanJobs);
-chrome.runtime.onInstalled.addListener(pruneOrphanJobs);
+// به‌روزرسانی افزونه نباید jobهای باز تب‌های فعلی را حذف کند؛ فقط نصب اولیه پاک‌سازی می‌شود.
+chrome.runtime.onInstalled.addListener((details = {}) => {
+  if (details.reason === 'install') return pruneOrphanJobs();
+});
 
 // ---------- Google Books: استخراج صفحه‌ها از API رسمی reader (jscmd=click3) ----------
 // صفحه‌های کتاب‌خوان گوگل به‌صورت کاشی‌های ۲۵۶px داخل iframe نمایش داده می‌شوند و اسکن DOM تصویر کامل ندارد؛
@@ -230,6 +238,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === 'WTPDF_URLS') {
     const jobId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     const job = {
+      createdAt: Date.now(),
       urls: msg.urls,
       name: msg.name,
       tabId: sender.tab ? sender.tab.id : null,

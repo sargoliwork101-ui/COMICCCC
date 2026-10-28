@@ -38,20 +38,23 @@ function bootBackground(initialStorage) {
 }
 
 (async () => {
-  // 1. orphan job pruning on startup keeps non-job keys
+  // 1. startup cleanup removes only expired jobs; active and legacy jobs survive tab restoration
   {
     const b = bootBackground({
-      job_abc: { urls: ['u'] },
-      job_def: { urls: ['v'] },
+      job_active: { createdAt: Date.now(), urls: ['u'] },
+      job_expired: { createdAt: Date.now() - 8 * 24 * 60 * 60 * 1000, urls: ['v'] },
+      job_legacy: { urls: ['legacy'] },
       page_profile_123: { version: 1 },
       other_setting: { keep: true }
     });
     await b.listeners.startup();
-    check('startup removes orphan jobs', !b.store.has('job_abc') && !b.store.has('job_def'));
+    check('startup removes expired jobs only', !b.store.has('job_expired') && b.store.has('job_active'));
+    check('startup preserves legacy jobs without timestamps', b.store.has('job_legacy'));
     check('startup keeps profile and settings', b.store.has('page_profile_123') && b.store.has('other_setting'));
-    // idempotent on empty storage
-    await b.listeners.installed();
-    check('installed pruning is safe with no jobs', b.store.size === 2, b.store.size);
+    await b.listeners.installed({ reason: 'update' });
+    check('extension update preserves active jobs', b.store.has('job_active'));
+    await b.listeners.installed({ reason: 'install' });
+    check('install cleanup remains safe', b.store.has('job_active') && b.store.has('job_legacy'));
   }
 
   // 2. normal message flow stores the job and opens the viewer tab
@@ -67,7 +70,8 @@ function bootBackground(initialStorage) {
     check('listener signals async response', keepOpen === true);
     await new Promise((r) => setTimeout(r, 10));
     const jobKey = [...b.store.keys()].find((k) => k.startsWith('job_'));
-    check('job stored', !!jobKey && b.store.get(jobKey).urls.length === 2 && b.store.get(jobKey).tabId === 7);
+    check('job stored with cleanup timestamp', !!jobKey && b.store.get(jobKey).urls.length === 2 &&
+      b.store.get(jobKey).tabId === 7 && Number.isFinite(b.store.get(jobKey).createdAt));
     check('response ok with tab id', response && response.ok === true && response.tabId === 42, response);
   }
 
