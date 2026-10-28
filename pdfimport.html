@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>تبدیل PDF به تصویر — PIC TO PDF</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="pdfimport.css">
+</head>
+<body>
+  <main class="imp-wrap" id="pdfImportPage">
+    <div class="imp-card">
+      <div class="imp-head">
+        <span class="brand-logo"><img src="icon128.png" alt=""></span>
+        <div>
+          <h1>تبدیل PDF به تصویر</h1>
+          <p>هر صفحه به یک تصویر JPEG تبدیل و در پیش‌نمایش افزونه باز می‌شود</p>
+        </div>
+      </div>
+
+      <div class="imp-filename" id="impName" title=""></div>
+
+      <!-- حالت در حال کار -->
+      <section id="impWorking" class="imp-state">
+        <div class="imp-spinner" aria-hidden="true"></div>
+        <div class="imp-stage" id="impStage">در حال خواندن فایل PDF...</div>
+        <div class="imp-progress">
+          <div class="imp-bar"><div class="imp-bar-fill" id="impBar"></div></div>
+          <span class="imp-pct" id="impPct">0%</span>
+        </div>
+        <p class="imp-note">این تب را نبندید؛ پس از پایان، پیش‌نمایش خودکار باز و این تب بسته می‌شود.</p>
+      </section>
+
+      <!-- حالت موفقیت -->
+      <section id="impDone" class="imp-state hidden">
+        <div class="imp-ok">✓</div>
+        <div class="imp-stage">تبدیل کامل شد؛ در حال باز کردن پیش‌نمایش...</div>
+        <button type="button" class="btn" id="impDoneClose">بستن این تب</button>
+      </section>
+
+      <!-- حالت خطا -->
+      <section id="impError" class="imp-state hidden">
+        <div class="imp-err">✕</div>
+        <div class="imp-stage">تبدیل PDF ناموفق بود</div>
+        <p class="imp-error-msg" id="impErrorMsg"></p>
+        <div class="imp-actions">
+          <button type="button" class="btn accent" id="impRetry">تلاش دوباره</button>
+          <button type="button" class="btn" id="impClose">بستن</button>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="pdf.min.js"></script>
+  <script src="pdfstore.js"></script>
+  <script src="pdfimport.js"></script>
+</body>
+</html>

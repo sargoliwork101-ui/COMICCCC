@@ -1,0 +1,34 @@
+.imp-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.imp-card { width: min(560px, 100%); background: var(--surface); border: 1px solid var(--line);
+  border-radius: 20px; padding: 28px; box-shadow: var(--glow); }
+.imp-head { display: flex; align-items: center; gap: 14px; }
+.imp-head .brand-logo { width: 52px; height: 52px; }
+.imp-head h1 { margin: 0; font: 800 17px/1.4 'Vazirmatn', sans-serif; }
+.imp-head p { margin: 2px 0 0; color: var(--muted); font: 500 12px/1.6 'Vazirmatn', sans-serif; }
+.imp-filename { margin: 18px 0 4px; padding: 10px 14px; border-radius: 12px; background: rgba(255,255,255,.04);
+  border: 1px solid var(--line2); font: 700 13px/1.6 'Vazirmatn', sans-serif; direction: ltr; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imp-state { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 26px 8px 8px; }
+.imp-state.hidden { display: none; }
+.imp-spinner { width: 46px; height: 46px; border-radius: 50%;
+  border: 3px solid rgba(139,123,255,.22); border-top-color: var(--a1); animation: imp-spin .8s linear infinite; }
+@keyframes imp-spin { to { transform: rotate(360deg); } }
+.imp-stage { font: 700 13.5px/1.8 'Vazirmatn', sans-serif; color: var(--text); text-align: center; }
+.imp-progress { width: 100%; display: flex; align-items: center; gap: 12px; }
+.imp-bar { flex: 1; height: 10px; border-radius: 999px; background: rgba(255,255,255,.06); overflow: hidden; }
+.imp-bar-fill { height: 100%; width: 0; border-radius: 999px; background: var(--grad);
+  transition: width .2s ease; }
+.imp-pct { font: 700 12px 'Vazirmatn', sans-serif; color: var(--muted); min-width: 42px; text-align: center; }
+.imp-note { margin: 0; color: var(--faint); font: 500 11.5px/1.7 'Vazirmatn', sans-serif; text-align: center; }
+.imp-ok { width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--grad-ok); color: #fff; font-size: 26px; font-weight: 800; box-shadow: var(--glow-ok); }
+.imp-err { width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center;
+  background: linear-gradient(135deg, #f87171, #ef4444); color: #fff; font-size: 24px; font-weight: 800; }
+.imp-error-msg { margin: 0; color: var(--muted); font: 600 12px/1.8 'Vazirmatn', sans-serif;
+  text-align: center; max-width: 440px; word-break: break-word; }
+.imp-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.imp-actions .btn, .imp-state .btn { width: auto; padding: 9px 22px; border-radius: 10px;
+  border: 1px solid var(--line2); background: rgba(255,255,255,.05); color: var(--text);
+  font: 700 12.5px 'Vazirmatn', sans-serif; cursor: pointer; }
+.imp-actions .btn.accent { background: var(--grad); border-color: transparent; color: #fff; }
+.imp-actions .btn:hover, .imp-state .btn:hover { border-color: var(--a1); }

@@ -237,6 +237,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       skippedInline: Number(msg.skippedInline) || 0,
       source: msg.source || 'web'
     };
+    // تب اختصاصی تبدیل PDF پس از باز شدن viewer بسته می‌شود تا جایش را پیش‌نمایش بگیرد
+    const importTabId = msg.type === 'WTPDF_LOCAL_JOB' && sender.tab ? sender.tab.id : null;
+    const closeImportTab = () => {
+      if (importTabId == null || typeof chrome.tabs.remove !== 'function') return;
+      try { chrome.tabs.remove(importTabId, () => void chrome.runtime.lastError); } catch { /* تب احتمالاً خودش بسته شده */ }
+    };
     chrome.storage.local.set({ ['job_' + jobId]: job }).then(() => {
       chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') + '?job=' + jobId }, (tab) => {
         if (chrome.runtime.lastError || !tab || tab.id == null) {
@@ -249,10 +255,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           chrome.tabs.update(tab.id, { autoDiscardable: false }, () => {
             if (chrome.runtime.lastError) console.warn('Could not disable automatic tab discard:', chrome.runtime.lastError.message);
             sendResponse({ ok: true, tabId: tab.id });
+            closeImportTab();
           });
         } catch (error) {
           console.warn('Could not protect the work tab from automatic discard:', error);
           sendResponse({ ok: true, tabId: tab.id });
+          closeImportTab();
         }
       });
     }).catch((error) => {

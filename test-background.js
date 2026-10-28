@@ -28,13 +28,15 @@ function bootBackground(initialStorage) {
     },
     tabs: {
       create: (opts, cb) => cb({ id: 42 }),
-      update: (id, patch, cb) => cb()
+      update: (id, patch, cb) => cb(),
+      remove: (id, cb) => { removedTabs.push(id); if (cb) cb(); }
     }
   };
+  const removedTabs = [];
   const ctx = { chrome, console, URL, setTimeout, Math, Date, Promise };
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(__dirname + '/background.js', 'utf8'), ctx, { filename: 'background.js' });
-  return { chrome, listeners, store, ctx };
+  return { chrome, listeners, store, ctx, removedTabs };
 }
 
 (async () => {
@@ -69,22 +71,24 @@ function bootBackground(initialStorage) {
     const jobKey = [...b.store.keys()].find((k) => k.startsWith('job_'));
     check('job stored', !!jobKey && b.store.get(jobKey).urls.length === 2 && b.store.get(jobKey).tabId === 7);
     check('response ok with tab id', response && response.ok === true && response.tabId === 42, response);
+    check('web jobs never close the sender tab', b.removedTabs.length === 0, b.removedTabs);
   }
 
-  // 2b. imported PDF job: no sender tab, source flag persisted
+  // 2b. imported PDF job: sent from the dedicated import tab, which gets closed after the viewer opens
   {
     const b = bootBackground({});
     let response = null;
     b.listeners.message(
       { type: 'WTPDF_LOCAL_JOB', urls: ['pdf-internal://x/0', 'pdf-internal://x/1'], name: 'book.pdf', source: 'pdf-import' },
-      {},
+      { tab: { id: 9, url: 'chrome-extension://ext/pdfimport.html?id=x' } },
       (r) => { response = r; }
     );
     await new Promise((r) => setTimeout(r, 10));
     const jobKey = [...b.store.keys()].find((k) => k.startsWith('job_'));
     const job = b.store.get(jobKey);
-    check('local job stored with pdf-import source', job && job.source === 'pdf-import' && job.urls.length === 2 && job.tabId === null, job);
+    check('local job stored with pdf-import source', job && job.source === 'pdf-import' && job.urls.length === 2 && job.tabId === 9, job);
     check('local job opens viewer and responds', response && response.ok === true && response.tabId === 42, response);
+    check('import tab is closed once the viewer opens', b.removedTabs.length === 1 && b.removedTabs[0] === 9, b.removedTabs);
   }
 
   // 3. unrelated messages are ignored (no return value, no throw)
