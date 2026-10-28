@@ -106,6 +106,30 @@ function bootBackground(fetchImpl) {
     check('walk queried initial plus unresolved pids only', b.fetchCalls.length === 3, b.fetchCalls.length);
   check('walk used click3 endpoint', b.fetchCalls.every((u) => u.includes('jscmd=click3')));
 
+  // 5a. page limit stops the walk after N collected pages (for very long books)
+  {
+    const bl = bootBackground();
+    const limited = await bl.ctx.walkGoogleBooks('https://books.google.com/books?id=B1', null, null, 2);
+    check('limit: only two pages returned', limited.availablePages === 2 && limited.urls.length === 2, limited);
+    check('limit: limited flag set and order preserved', limited.limited === true &&
+      limited.urls[0].includes('pg=PA1') && limited.urls[1].includes('pg=PA2'), limited);
+    check('limit: no requests beyond what the cap needs', bl.fetchCalls.length <= 3, bl.fetchCalls.length);
+
+    let response = null;
+    bl.listeners.message(
+      { type: 'WTPDF_GBOOKS_SCAN', pageUrl: 'https://books.google.com/books?id=B1', pageLimit: 1 },
+      { tab: { id: 31 } },
+      (r) => { response = r; }
+    );
+    await waitFor(() => response !== null);
+    check('limit: SCAN message honors pageLimit', response && response.ok && response.urls.length === 1 &&
+      response.limited === true, response);
+
+    // zero/garbage limit means unlimited
+    const full = await bl.ctx.walkGoogleBooks('https://books.google.com/books?id=B1', null, null, 0);
+    check('limit: zero means unlimited', full.availablePages === 3, full);
+  }
+
   // 5b. transient failures are retried with backoff instead of dropping the page
   {
     const flaky = (url) => {

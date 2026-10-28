@@ -87,7 +87,8 @@ async function fetchClick3(origin, id, firstPid, pid, shouldCancel) {
 // کلید لغو per-tab؛ فقط یک عملیات در هر تب فعال است
 const gbookCancels = new Map();
 
-async function walkGoogleBooks(pageUrl, tabId, onProgress) {
+async function walkGoogleBooks(pageUrl, tabId, onProgress, limit) {
+  limit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 0; // 0 = بدون محدودیت
   const id = parseGoogleBooksId(pageUrl);
   if (!id) throw new Error('شناسهٔ کتاب در آدرس صفحه پیدا نشد');
   const origin = googleBooksOrigin(pageUrl);
@@ -120,11 +121,17 @@ async function walkGoogleBooks(pageUrl, tabId, onProgress) {
   const attempts = new Map();
   let consecutiveErrors = 0;
   let lastError = null;
+  let limited = false;
+  let lastAttemptedIndex = -1;
   while (true) {
     if (isCancelled()) { const e = new Error('cancelled'); e.cancelled = true; throw e; }
-    const pid = order.find((candidate) =>
+    // سقف تعداد صفحه: به محض رسیدن به N صفحهٔ برداشت‌شده پیمایش تمام می‌شود
+    if (limit > 0 && srcByPid.size >= limit) { limited = true; break; }
+    const pidIndex = order.findIndex((candidate) =>
       !srcByPid.has(candidate) && !definitiveEmpty.has(candidate) && (attempts.get(candidate) || 0) < GB_MAX_ROUNDS);
-    if (!pid) break;
+    if (pidIndex < 0) break;
+    const pid = order[pidIndex];
+    lastAttemptedIndex = Math.max(lastAttemptedIndex, pidIndex);
     const round = (attempts.get(pid) || 0) + 1;
     attempts.set(pid, round);
     if (onProgress) {
@@ -158,14 +165,17 @@ async function walkGoogleBooks(pageUrl, tabId, onProgress) {
     await new Promise((r) => setTimeout(r, Math.round(pause)));
   }
 
-  const failedPids = order.filter((pid) => !srcByPid.has(pid));
-  const urls = order
-    .filter((pid) => srcByPid.has(pid))
-    .map((pid) => normalizeGoogleBooksSrc(srcByPid.get(pid)));
+  // با سقف، پاسخ‌های هدیهٔ مجاور ممکن است چند صفحهٔ اضافه آورده باشند؛ به N صفحهٔ اول برش می‌زنیم
+  let picked = order.filter((pid) => srcByPid.has(pid));
+  if (limit > 0) { limited = limited || picked.length > limit; picked = picked.slice(0, limit); }
+  const urls = picked.map((pid) => normalizeGoogleBooksSrc(srcByPid.get(pid)));
   if (!urls.length) throw new Error('هیچ صفحهٔ قابل‌پیش‌نمایشی برای این کتاب پیدا نشد');
+  // صفحات ناموفق فقط در محدودهٔ پردازش‌شده شمرده می‌شوند تا با سقف اشتباه گزارش نشوند
+  const scope = limited ? order.slice(0, lastAttemptedIndex + 1) : order;
+  const failedPids = scope.filter((pid) => !srcByPid.has(pid));
   return {
     urls, totalPages: order.length, availablePages: urls.length,
-    failedPages: failedPids.length, origin, id
+    failedPages: failedPids.length, limited: limited || (limit > 0 && urls.length >= limit), origin, id
   };
 }
 
@@ -193,7 +203,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try { await chrome.tabs.sendMessage(tabId, Object.assign({ type: 'WTPDF_GBOOKS_PROGRESS' }, progress)); }
       catch { /* تب بسته شده یا ناوبری کرده؛ بی‌خطر */ }
     };
-    walkGoogleBooks(pageUrl, tabId, report)
+    const pageLimit = Number.isFinite(msg.pageLimit) && msg.pageLimit > 0 ? Math.floor(msg.pageLimit) : 0;
+    walkGoogleBooks(pageUrl, tabId, report, pageLimit)
       .then((result) => { if (tabId != null) gbookCancels.delete(tabId); sendResponse(Object.assign({ ok: true }, result)); })
       .catch((error) => {
         if (tabId != null) gbookCancels.delete(tabId);

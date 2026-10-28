@@ -37,6 +37,15 @@ startBtn.addEventListener('click', async () => {
   let pdfName = document.getElementById('pdfName').value.trim() || 'comic';
   if (!pdfName.toLowerCase().endsWith('.pdf')) pdfName += '.pdf';
 
+  // سقف صفحات Google Books: صفر/خالی یعنی بدون محدودیت
+  const parsedLimit = Number.parseInt(document.getElementById('pageLimit').value, 10);
+  const pageLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 0;
+  const options = {
+    pageLimit,
+    nextSelector: document.getElementById('nextSelector').value.trim(),
+    imageSelector: document.getElementById('imageSelector').value.trim()
+  };
+
   startBtn.disabled = true;
   // خطای اجرای قبلی را پاک کن؛ این بار فقط در صورت بروز خطا باکس ظاهر می‌شود
   hideStatus();
@@ -64,7 +73,7 @@ startBtn.addEventListener('click', async () => {
     const results = await chrome.scripting.executeScript({
       target: injectionTarget,
       func: scrapeAndSend,
-      args: [pdfName, collectMode]
+      args: [pdfName, collectMode, options]
     });
     const res = results[0] && results[0].result;
     if (res && res.busy) {
@@ -101,8 +110,13 @@ async function probeBookFrame() {
 
 // این تابع داخل صفحهٔ وب اجرا می‌شود
 // mode: 'scroll' (پیش‌فرض) | 'auto' (ورق‌زدن خودکار) | 'manual' (ورق‌زدن دستی کاربر)
-async function scrapeAndSend(pdfName, mode) {
+// opts: { pageLimit, nextSelector, imageSelector }
+async function scrapeAndSend(pdfName, mode, opts) {
   mode = mode === 'auto' || mode === 'manual' ? mode : 'scroll';
+  opts = opts || {};
+  const pageLimit = Number.isFinite(opts.pageLimit) && opts.pageLimit > 0 ? Math.floor(opts.pageLimit) : 0;
+  const nextSelector = typeof opts.nextSelector === 'string' ? opts.nextSelector : '';
+  const imageSelector = typeof opts.imageSelector === 'string' ? opts.imageSelector : '';
   if (window.__wtpdfRunning) return { busy: true };
   window.__wtpdfRunning = true;
 
@@ -212,9 +226,36 @@ async function scrapeAndSend(pdfName, mode) {
     if (!seen.has(abs)) { seen.add(abs); urls.push(abs); }
   };
 
+  // اسکن محدود به انتخابگر CSS دستی کاربر (کپی‌شده از F12)؛ اگر انتخابگر چیزی نیافت، false یعنی به اسکن عمومی برگرد
+  const scanImagesBySelector = () => {
+    let nodes;
+    try { nodes = Array.from(document.querySelectorAll(imageSelector)); }
+    catch { return false; } // انتخابگر نامعتبر؛ اسکن عمومی ادامه می‌کند
+    if (!nodes.length) return false;
+    nodes.forEach((el) => {
+      if (!el || !el.isConnected) return;
+      if (el.tagName === 'IMG') { add(bestSrc(el)); return; }
+      if (el.tagName === 'SOURCE') {
+        const srcset = el.getAttribute('srcset') || el.getAttribute('data-srcset');
+        if (srcset) { const first = srcset.split(',')[0].trim().split(/\s+/)[0]; add(first); }
+        return;
+      }
+      // المان‌های container: هم تصاویر داخلی و هم background-image خودشان
+      if (el.querySelectorAll) el.querySelectorAll('img').forEach((img) => add(bestSrc(img)));
+      const r = el.getBoundingClientRect();
+      if (r.width >= 250 || r.height >= 250) {
+        const bg = getComputedStyle(el).backgroundImage;
+        const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
+        if (m) add(m[1]);
+      }
+    });
+    return true;
+  };
+
   // یک بار کل DOM را اسکن می‌کند و فقط تعداد تصاویر «تازه» را برمی‌گرداند
   const scanImages = () => {
     const before = urls.length;
+    if (imageSelector && scanImagesBySelector()) return urls.length - before;
     document.querySelectorAll('img').forEach((img) => {
       const src = bestSrc(img);
       const rect = img.getBoundingClientRect();
@@ -338,7 +379,9 @@ async function scrapeAndSend(pdfName, mode) {
     gbookScanActive = true;
     try {
       say('در حال اتصال به کتاب‌خوان Google Books و خواندن فهرست صفحه‌ها...');
-      const res = await chrome.runtime.sendMessage({ type: 'WTPDF_GBOOKS_SCAN', pageUrl: location.href });
+      const res = await chrome.runtime.sendMessage({
+        type: 'WTPDF_GBOOKS_SCAN', pageUrl: location.href, pageLimit
+      });
       if (!res || !res.ok) {
         if (res && res.cancelled) cancelled = true;
         throw new Error(res && res.error ? res.error : 'پاسخی از Google Books دریافت نشد');
@@ -411,14 +454,21 @@ async function scrapeAndSend(pdfName, mode) {
     const attempts = new Map();
     let consecutiveErrors = 0;
     let lastError = null;
+    let limited = false;
+    let lastAttemptedIndex = -1;
     while (true) {
       if (cancelled) { const e = new Error('cancelled'); e.cancelled = true; throw e; }
-      const pid = order.find((candidate) =>
+      // سقف تعداد صفحه: به محض رسیدن به N صفحهٔ برداشت‌شده پیمایش تمام می‌شود
+      if (pageLimit > 0 && srcByPid.size >= pageLimit) { limited = true; break; }
+      const pidIndex = order.findIndex((candidate) =>
         !srcByPid.has(candidate) && !definitiveEmpty.has(candidate) && (attempts.get(candidate) || 0) < T.gbookRounds);
-      if (!pid) break;
+      if (pidIndex < 0) break;
+      const pid = order[pidIndex];
+      lastAttemptedIndex = Math.max(lastAttemptedIndex, pidIndex);
       const round = (attempts.get(pid) || 0) + 1;
       attempts.set(pid, round);
-      say(`در حال خواندن صفحات کتاب از Google Books...\n${srcByPid.size} صفحهٔ قابل‌پیش‌نمایش از ${order.length} صفحه`);
+      say(`در حال خواندن صفحات کتاب از Google Books...\n${srcByPid.size} صفحهٔ قابل‌پیش‌نمایش از ${order.length} صفحه` +
+        (pageLimit ? ` (سقف: ${pageLimit})` : ''));
       try {
         const data = await gbFetchClick3(pid);
         merge(data);
@@ -441,11 +491,17 @@ async function scrapeAndSend(pdfName, mode) {
       }
       await sleep(Math.round(pause));
     }
-    const urls = order.filter((pid) => srcByPid.has(pid)).map((pid) => gbNormalizeSrc(srcByPid.get(pid)));
+    // با سقف، پاسخ‌های هدیهٔ مجاور ممکن است چند صفحهٔ اضافه آورده باشند؛ به N صفحهٔ اول برش می‌زنیم
+    let picked = order.filter((pid) => srcByPid.has(pid));
+    if (pageLimit > 0) { limited = limited || picked.length > pageLimit; picked = picked.slice(0, pageLimit); }
+    const urls = picked.map((pid) => gbNormalizeSrc(srcByPid.get(pid)));
     if (!urls.length) throw new Error('هیچ صفحهٔ قابل‌پیش‌نمایشی برای این کتاب پیدا نشد');
+    // صفحات ناموفق فقط در محدودهٔ پردازش‌شده شمرده می‌شوند تا با سقف اشتباه گزارش نشوند
+    const scope = limited ? order.slice(0, lastAttemptedIndex + 1) : order;
+    const failedPages = scope.filter((pid) => !srcByPid.has(pid)).length;
     return {
       ok: true, urls, totalPages: order.length, availablePages: urls.length,
-      failedPages: order.length - urls.length
+      failedPages, limited: limited || (pageLimit > 0 && urls.length >= pageLimit)
     };
   };
 
@@ -466,9 +522,14 @@ async function scrapeAndSend(pdfName, mode) {
     };
     const collectedPids = new Set();
     const inFlight = new Set();
-    const refreshCount = () => { countEl.textContent = `${urls.length} تصویر جمع شد`; };
+    let limitReached = false;
+    const refreshCount = () => {
+      countEl.textContent = limitReached && pageLimit
+        ? `${urls.length} تصویر (به سقف ${pageLimit} رسیدی)`
+        : `${urls.length} تصویر جمع شد`;
+    };
     const grab = async (pid) => {
-      if (!pid || inFlight.has(pid) || cancelled) return;
+      if (!pid || inFlight.has(pid) || cancelled || limitReached) return;
       inFlight.add(pid);
       try {
         const res = transport === 'inpage'
@@ -479,6 +540,10 @@ async function scrapeAndSend(pdfName, mode) {
         if (!cancelled && res && res.ok && res.src) {
           add(res.src);
           collectedPids.add(pid);
+          if (pageLimit > 0 && urls.length >= pageLimit) {
+            limitReached = true;
+            say(`به سقف ${pageLimit} صفحه رسیدی؛ صفحه‌های جدید دیگر برداشته نمی‌شوند. برای پایان «تمام شد ✓» را بزن.`);
+          }
           refreshCount();
         }
       } catch {
@@ -492,7 +557,7 @@ async function scrapeAndSend(pdfName, mode) {
     await grab(pidFromHref(location.href));
     // گوگل‌بوک با هر ورق، پارامتر pg آدرس را عوض می‌کند؛ همان شاخص برای دنبال‌کردن صفحه‌ها کافی است
     const timer = setInterval(() => {
-      if (cancelled) return;
+      if (cancelled || limitReached) return;
       const pid = pidFromHref(location.href);
       if (!collectedPids.has(pid)) grab(pid);
     }, T.gbookManualPoll);
@@ -554,6 +619,12 @@ async function scrapeAndSend(pdfName, mode) {
 
   // امتیازدارترین دکمهٔ قابل‌مشاهدهٔ «بعدی» را برمی‌گرداند یا null
   const findNextButton = () => {
+    // انتخابگر دستی کاربر (کپی از F12) در اولویت مطلق است؛ اگر نامعتبر/مخفی بود به heuristic عمومی برمی‌گردیم
+    if (nextSelector) {
+      let manual;
+      try { manual = document.querySelector(nextSelector); } catch { manual = null; }
+      if (manual && isUsableControl(manual)) return manual;
+    }
     const scored = new Map();
     const consider = (el, score) => { if (el && el.isConnected && !scored.has(el)) scored.set(el, score); };
 
@@ -728,9 +799,10 @@ async function scrapeAndSend(pdfName, mode) {
       return { count: 0, skippedInline };
     }
 
-    const gbNote = gbookResult && gbookResult.failedPages
-      ? ` (${gbookResult.failedPages} صفحهٔ غیرقابل‌پیش‌نمایش کنار گذاشته شد)`
-      : '';
+    const notes = [];
+    if (gbookResult && gbookResult.limited) notes.push('به سقف تعیین‌شده رسیدیم');
+    if (gbookResult && gbookResult.failedPages) notes.push(`${gbookResult.failedPages} صفحهٔ غیرقابل‌پیش‌نمایش کنار گذاشته شد`);
+    const gbNote = notes.length ? ` (${notes.join('؛ ')})` : '';
     say(effectiveMode === 'manual'
       ? `${urls.length} تصویر آماده است. در حال باز کردن پیش‌نمایش...`
       : `${urls.length} تصویر پیدا شد${gbNote}. در حال باز کردن پیش‌نمایش...`);

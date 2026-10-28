@@ -36,13 +36,15 @@ body {
   background: rgba(139,123,255,.14); border: 1px solid rgba(139,123,255,.35); padding: 4px 11px; border-radius: 999px; }
 
 label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
-input[type=text] {
+input[type=text], input[type=number] {
   width: 100%; background: rgba(255,255,255,.04); border: 1px solid var(--line2); border-radius: 12px;
   padding: 10px 13px; color: var(--text); font: 500 14px 'Vazirmatn', sans-serif; outline: none;
   direction: ltr; text-align: left; transition: border-color .15s, box-shadow .15s, background .15s;
 }
-input[type=text]::placeholder { color: var(--faint); direction: rtl; }
-input[type=text]:focus { border-color: var(--a1); background: rgba(255,255,255,.06); box-shadow: 0 0 0 3px rgba(139,123,255,.22); }
+input[type=text]::placeholder, input[type=number]::placeholder { color: var(--faint); direction: rtl; }
+input[type=text]:focus, input[type=number]:focus { border-color: var(--a1); background: rgba(255,255,255,.06); box-shadow: 0 0 0 3px rgba(139,123,255,.22); }
+input[type=number] { direction: rtl; text-align: right; }
+input[type=number]::placeholder { direction: rtl; }
 
 .box { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
 

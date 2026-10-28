@@ -10,3 +10,12 @@ body { width: 360px; padding: 18px; display: flex; flex-direction: column; gap: 
 .mode-btn:hover { color: var(--text); }
 .mode-btn.active { background: var(--grad); color: #fff; box-shadow: var(--glow); }
 .mode-hint { margin: 7px 2px 0; font: 500 10.5px/1.7 'Vazirmatn', sans-serif; color: var(--faint); }
+
+.advanced { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 12px; padding: 10px 13px; }
+.advanced > summary { cursor: pointer; font: 700 12px 'Vazirmatn', sans-serif; color: var(--muted); list-style: none; position: relative; padding-inline-start: 18px; }
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced > summary::before { content: '▸'; position: absolute; inset-inline-start: 0; color: var(--a1); transition: transform .15s; }
+.advanced[open] > summary::before { transform: rotate(90deg); }
+.advanced[open] > summary { margin-bottom: 10px; }
+.advanced .field { margin-top: 10px; }
+.advanced b { color: var(--text); font-weight: 700; }

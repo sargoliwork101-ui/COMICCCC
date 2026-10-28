@@ -310,6 +310,88 @@ function makeHarness(pageUrl, fetchImpl) {
     check('probe: unrelated frame not detected', probeOther.isReader === false, probeOther);
   }
 
+  // ========== M. in-frame walk honors the page limit ==========
+  {
+    const fetchImpl = click3Fetch({ pids: ['PA1', 'PA2', 'PA3', 'PA4'], srcPids: ['PA1', 'PA2', 'PA3'] });
+    const h = makeHarness('https://books.google.com/books?id=B1', fetchImpl);
+    const res = await h.window.eval('scrapeAndSend("book.pdf", "auto", { pageLimit: 2 })');
+    check('limit: walk stops after two collected pages', res && res.count === 2, res);
+    check('limit: ending note mentions the cap', /سقف/.test(h.getLastJobNote()), h.getLastJobNote());
+  }
+
+  // ========== N. manual mode stops adding after the cap ==========
+  {
+    const fetchImpl = click3Fetch({ pids: ['PA1', 'PA2', 'PA3'], srcPids: ['PA1', 'PA2', 'PA3'] });
+    const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1', fetchImpl);
+    const running = h.window.eval('scrapeAndSend("book.pdf", "manual", { pageLimit: 2 })');
+    await tick();
+    h.window.history.replaceState(null, '', 'https://books.google.com/books?id=B1&pg=PA2');
+    await sleep(30);
+    h.window.history.replaceState(null, '', 'https://books.google.com/books?id=B1&pg=PA3');
+    await sleep(30);
+    check('manual cap: counter shows the cap message',
+      /سقف\s*2/.test(h.window.document.querySelector('.wtpdf-count').textContent),
+      h.window.document.querySelector('.wtpdf-count').textContent);
+    h.window.document.querySelector('.wtpdf-done').click();
+    const res = await running;
+    check('manual cap: only two images collected', res && res.count === 2, res);
+  }
+
+  // ========== O. manual CSS selector drives the next-button click ==========
+  {
+    const h = makeHarness('https://comic.test/episode/1');
+    const page1 = h.img('https://cdn.test/page-1.jpg', 300, 420);
+    h.window.document.body.appendChild(page1);
+    // decoy "previous" button the heuristics must ignore
+    const prev = h.window.document.createElement('button');
+    prev.setAttribute('aria-label', 'Previous page');
+    prev.textContent = '‹';
+    h.window.document.body.appendChild(prev);
+    // unlabeled control that only the manual selector can identify
+    const next = h.window.document.createElement('div');
+    next.className = 'my-next-control';
+    next.setAttribute('role', 'button');
+    next.textContent = '›';
+    let clicks = 0;
+    next.addEventListener('click', () => {
+      clicks++;
+      if (clicks === 1) h.window.document.body.appendChild(h.img('https://cdn.test/page-2.jpg', 300, 420));
+    });
+    h.window.document.body.appendChild(next);
+    const res = await h.window.eval('scrapeAndSend("c.pdf", "auto", { nextSelector: ".my-next-control" })');
+    check('next selector: chosen control was clicked', clicks >= 1, clicks);
+    check('next selector: both pages collected', res && res.count === 2, res);
+  }
+
+  // ========== P. image CSS selector restricts collection; bad selector falls back ==========
+  {
+    const h = makeHarness('https://comic.test/episode/2');
+    const comic = h.window.document.createElement('div');
+    comic.className = 'comic';
+    comic.appendChild(h.img('https://cdn.test/comic-1.jpg', 300, 420));
+    comic.appendChild(h.img('https://cdn.test/comic-2.jpg', 300, 420));
+    h.window.document.body.appendChild(comic);
+    // decoy big image outside the container that generic scanning would collect
+    h.window.document.body.appendChild(h.img('https://cdn.test/banner-ad.jpg', 500, 300));
+
+    const targeted = await h.window.eval('scrapeAndSend("c.pdf", "scroll", { imageSelector: ".comic img" })');
+    const job1 = h.urlJobs().slice(-1)[0];
+    check('image selector: only selector matches collected', targeted && targeted.count === 2 &&
+      job1.urls.every((u) => u.includes('comic-')), job1 && job1.urls);
+
+    // a selector matching nothing must transparently fall back to the generic scanner
+    const h2 = makeHarness('https://comic.test/episode/3');
+    h2.window.document.body.appendChild(h2.img('https://cdn.test/only.jpg', 300, 420));
+    const fallback = await h2.window.eval('scrapeAndSend("c.pdf", "scroll", { imageSelector: ".nope-missing" })');
+    check('image selector: unmatched selector falls back to generic scan', fallback && fallback.count === 1, fallback);
+
+    // an invalid selector string must not throw and must fall back too
+    const h3 = makeHarness('https://comic.test/episode/4');
+    h3.window.document.body.appendChild(h3.img('https://cdn.test/only2.jpg', 300, 420));
+    const invalid = await h3.window.eval('scrapeAndSend("c.pdf", "scroll", { imageSelector: "!!!bad selector(((" })');
+    check('image selector: invalid selector falls back without throwing', invalid && invalid.count === 1, invalid);
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL GBOOKS POPUP TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

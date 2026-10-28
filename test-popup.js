@@ -64,6 +64,11 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('version pill present', !!pdoc.querySelector('.version-pill'));
   check('start button present', !!pdoc.getElementById('startBtn'));
   check('file name input present', !!pdoc.getElementById('pdfName'));
+  check('page limit input present', pdoc.getElementById('pageLimit') &&
+    pdoc.getElementById('pageLimit').type === 'number');
+  check('manual next selector input present', !!pdoc.getElementById('nextSelector'));
+  check('manual image selector input present', !!pdoc.getElementById('imageSelector'));
+  check('advanced F12 section present', !!pdoc.querySelector('.advanced summary'));
   check('idle status box hidden with no filler text', pdoc.getElementById('statusBox').classList.contains('hidden') &&
     pdoc.getElementById('statusText').textContent.trim() === '');
 }
