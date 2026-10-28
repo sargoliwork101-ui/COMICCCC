@@ -201,33 +201,89 @@ function flushEditorOnBlur() {
   if (edDirty) applyEditor();
 }
 
-// استایل درون‌متنی روی متن انتخاب‌شدهٔ textarea: دور انتخاب مارکر می‌گذارد (یا مارکر موجود را برمی‌دارد)
-// مارکرها: **بولد** *ایتالیک* __زیرخط__؛ typeset هنگام رندر آن‌ها را به استایل واقعی تبدیل می‌کند.
-function wrapInlineSelection(ta, mark) {
+// ---------- استایل درون‌متنی وردی: دکمه‌های نوار بلوک روی متن انتخاب‌شده، در نبود انتخاب روی کل بلوک ----------
+// مارکرهای ساده: **بولد** *ایتالیک* __زیرخط__؛ تگ‌ها: [size=24]..[/size] و [color=#hex]..[/color].
+// دور متن انتخاب‌شدهٔ textarea مارکر می‌گذارد؛ اگر انتخاب دقیقاً داخل همان جفت مارکر باشد، آن را برمی‌دارد.
+function wrapSelection(ta, open, close) {
   const s = ta.selectionStart, e = ta.selectionEnd;
   const value = ta.value;
   const sel = value.slice(s, e);
-  const before = value.slice(Math.max(0, s - mark.length), s);
-  const after = value.slice(e, e + mark.length);
+  const before = value.slice(Math.max(0, s - open.length), s);
+  const after = value.slice(e, e + close.length);
   let next, caretS, caretE;
-  if (sel && before === mark && after === mark) {
-    // انتخاب دقیقاً داخل یک جفت مارکر همان نوع است: حذف مارکر
-    next = value.slice(0, s - mark.length) + sel + value.slice(e + mark.length);
-    caretS = s - mark.length;
+  if (sel && before === open && after === close) {
+    next = value.slice(0, s - open.length) + sel + value.slice(e + close.length);
+    caretS = s - open.length;
     caretE = caretS + sel.length;
   } else if (sel) {
-    next = value.slice(0, s) + mark + sel + mark + value.slice(e);
-    caretS = s + mark.length;
-    caretE = e + mark.length;
+    next = value.slice(0, s) + open + sel + close + value.slice(e);
+    caretS = s + open.length;
+    caretE = e + open.length;
   } else {
     // انتخابی نیست: جفت مارکر خالی می‌گذاریم و نشانگر را وسطش می‌بریم
-    next = value.slice(0, s) + mark + mark + value.slice(e);
-    caretS = caretE = s + mark.length;
+    next = value.slice(0, s) + open + close + value.slice(e);
+    caretS = caretE = s + open.length;
   }
   ta.value = next;
   ta.focus();
   ta.setSelectionRange(caretS, caretE);
   ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// تگ پارامتری (size/color): اگر انتخاب داخل تگ همان نوع باشد فقط پارامتر عوض می‌شود، وگرنه تگ تازه دورش می‌نشیند
+function wrapTagSelection(ta, tag, param) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const value = ta.value, sel = value.slice(s, e);
+  if (!sel) {
+    wrapSelection(ta, `[${tag}=${param}]`, `[/${tag}]`);
+    return;
+  }
+  const before = value.slice(0, s), after = value.slice(e);
+  const openRe = new RegExp(`\\[${tag}=[^\\]]+\\]$`);
+  const closeRe = new RegExp(`^\\[/${tag}\\]`);
+  const bm = before.match(openRe), am = after.match(closeRe);
+  let next, caretS, caretE;
+  if (bm && am) {
+    // فقط پارامتر تگ باز عوض می‌شود؛ تگ بسته و محتوای انتخاب دست می‌خورند
+    const newBefore = before.slice(0, bm.index) + `[${tag}=${param}]`;
+    next = newBefore + sel + after;
+    caretS = newBefore.length;
+    caretE = caretS + sel.length;
+  } else {
+    const open = `[${tag}=${param}]`, close = `[/${tag}]`;
+    next = before + open + sel + close + after;
+    caretS = s + open.length;
+    caretE = e + open.length;
+  }
+  ta.value = next;
+  ta.focus();
+  ta.setSelectionRange(caretS, caretE);
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// حذف تگ پارامتری دور انتخاب (برای رنگ خودکار روی انتخاب)
+function unwrapTagSelection(ta, tag) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const value = ta.value, sel = value.slice(s, e);
+  if (!sel) return false;
+  const before = value.slice(0, s), after = value.slice(e);
+  const bm = before.match(new RegExp(`\\[${tag}=[^\\]]+\\]$`));
+  const am = after.match(new RegExp(`^\\[/${tag}\\]`));
+  if (!bm || !am) return false;
+  const newBefore = before.slice(0, bm.index);
+  ta.value = newBefore + sel + after.slice(am[0].length);
+  ta.focus();
+  ta.setSelectionRange(newBefore.length, newBefore.length + sel.length);
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+}
+
+// آیا متن انتخاب‌شده دقیقاً داخل جفت مارکر داده‌شده است؟ (برای وضعیت فعال دکمه‌ها مثل ورد)
+function selectionHasMark(ta, mark) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  if (s === e) return null;
+  const v = ta.value;
+  return v.slice(Math.max(0, s - mark.length), s) === mark && v.slice(e, e + mark.length) === mark;
 }
 
 async function applyEditor() {
@@ -296,26 +352,19 @@ function buildEditor() {
           <option value="center">وسط‌چین</option>
           <option value="left">چپ‌چین</option>
         </select>
-        <button type="button" class="fmt-btn blk-bold" title="متن پررنگ (بولد)">B</button>
-        <button type="button" class="fmt-btn blk-italic" title="متن ایتالیک (کج)">I</button>
-        <button type="button" class="fmt-btn blk-under" title="زیرخط متن">U</button>
+        <button type="button" class="fmt-btn blk-bold" title="پررنگ: روی متن انتخاب‌شده یا کل بلوک بدون انتخاب">B</button>
+        <button type="button" class="fmt-btn blk-italic" title="ایتالیک: روی متن انتخاب‌شده یا کل بلوک بدون انتخاب">I</button>
+        <button type="button" class="fmt-btn blk-under" title="زیرخط: روی متن انتخاب‌شده یا کل بلوک بدون انتخاب">U</button>
         <label class="size-field">اندازهٔ فونت
-          <input type="number" class="blk-size" min="8" max="160" step="1" placeholder="خودکار" title="اگر خالی باشد، بهترین اندازه به‌صورت خودکار انتخاب می‌شود">
+          <input type="number" class="blk-size" min="8" max="160" step="1" placeholder="خودکار" title="با متن انتخاب‌شده فقط همان بخش تغییر اندازه می‌دهد؛ بدون انتخاب، کل بلوک">
         </label>
-        <label class="color-field" title="رنگ متن؛ «خودکار» بر اساس روشنی پس‌زمینه انتخاب می‌شود">رنگ
+        <label class="color-field" title="رنگ: با متن انتخاب‌شده فقط همان بخش رنگ می‌گیرد؛ بدون انتخاب کل بلوک. «خودکار» بر اساس روشنی پس‌زمینه است">رنگ
           <input type="color" class="blk-color" value="#0b0b0b">
           <button type="button" class="fmt-btn blk-color-auto">خودکار</button>
         </label>
         <button type="button" class="fmt-btn blk-reset" title="بازنشانی همهٔ قالب‌بندی‌های این متن به پیش‌فرض">↺</button>
       </div>
-      <div class="blk-orig"></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>
-      <div class="blk-inline">
-        <span class="inl-label">استایل یک کلمه:</span>
-        <button type="button" class="fmt-btn inl-bold" title="پررنگ‌کردن کلمه/عبارت انتخاب‌شده (**متن**)">B</button>
-        <button type="button" class="fmt-btn inl-italic" title="ایتالیک‌کردن کلمه/عبارت انتخاب‌شده (*متن*)">I</button>
-        <button type="button" class="fmt-btn inl-under" title="زیرخط‌گذاشتن کلمه/عبارت انتخاب‌شده (__متن__)">U</button>
-        <span class="inl-hint">کلمه را داخل کادر انتخاب کن، بعد دکمه را بزن؛ دوباره‌زدن همان دکمه مارکر را برمی‌دارد.</span>
-      </div>`;
+      <div class="blk-orig"></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>`;
     row.querySelector('.blk-orig').textContent = b.text;
     const ta = row.querySelector('textarea'); ta.value = b.tr || '';
     const sel = row.querySelector('.blk-bg'); sel.value = b.bg;
@@ -350,24 +399,78 @@ function buildEditor() {
       ta.style.direction = b.dir; // پیش‌نمایش ویرایش هم جهت واقعی متن را نشان دهد
     };
     syncFmt();
+    // وضعیت فعال B/I/U هنگام تغییر انتخاب: وضعیت مارکر درون‌متنی انتخاب، در غیر این صورت وضعیت کل بلوک
+    const italicSelectionMark = () => {
+      const s = ta.selectionStart, e = ta.selectionEnd, v = ta.value;
+      if (s === e) return null;
+      return v.slice(Math.max(0, s - 1), s) === '*' && v.slice(e, e + 1) === '*' &&
+        v.slice(Math.max(0, s - 2), s) !== '**' && v.slice(e, e + 2) !== '**';
+    };
+    const syncSelectionFmt = () => {
+      const boldMark = selectionHasMark(ta, '**');
+      if (boldMark === null) { syncFmt(); return; }
+      boldBtn.classList.toggle('active', boldMark);
+      italicBtn.classList.toggle('active', !!italicSelectionMark());
+      underBtn.classList.toggle('active', !!selectionHasMark(ta, '__'));
+    };
+    ['select', 'keyup', 'click', 'focus'].forEach((evt) => ta.addEventListener(evt, syncSelectionFmt));
     rtlBtn.onclick = () => { b.dir = 'rtl'; syncFmt(); scheduleApply(); };
     ltrBtn.onclick = () => { b.dir = 'ltr'; syncFmt(); scheduleApply(); };
     alignSel.onchange = () => { b.align = alignSel.value; scheduleApply(); };
-    boldBtn.onclick = () => { b.bold = !b.bold; syncFmt(); scheduleApply(); };
-    italicBtn.onclick = () => { b.italic = !b.italic; syncFmt(); scheduleApply(); };
-    underBtn.onclick = () => { b.underline = !b.underline; syncFmt(); scheduleApply(); };
-    sizeInput.onchange = () => {
-      const n = Number.parseInt(sizeInput.value, 10);
-      b.size = Number.isFinite(n) && n >= 8 ? Math.min(160, n) : null;
-      sizeInput.value = b.size ? String(b.size) : '';
+    // B/I/U مثل ورد: متن انتخاب‌شده باشد روی همان انتخاب، وگرنه روی کل بلوک
+    boldBtn.onclick = () => {
+      if (ta.selectionStart !== ta.selectionEnd) { wrapSelection(ta, '**', '**'); syncSelectionFmt(); }
+      else { b.bold = !b.bold; syncFmt(); }
       scheduleApply();
     };
-    colorInput.oninput = () => { b.color = colorInput.value; syncFmt(); scheduleApply(); };
-    colorAutoBtn.onclick = () => { b.color = null; syncFmt(); scheduleApply(); };
+    italicBtn.onclick = () => {
+      if (ta.selectionStart !== ta.selectionEnd) { wrapSelection(ta, '*', '*'); syncSelectionFmt(); }
+      else { b.italic = !b.italic; syncFmt(); }
+      scheduleApply();
+    };
+    underBtn.onclick = () => {
+      if (ta.selectionStart !== ta.selectionEnd) { wrapSelection(ta, '__', '__'); syncSelectionFmt(); }
+      else { b.underline = !b.underline; syncFmt(); }
+      scheduleApply();
+    };
+    sizeInput.onchange = () => {
+      const n = Number.parseInt(sizeInput.value, 10);
+      const hasSelection = ta.selectionStart !== ta.selectionEnd;
+      if (!(Number.isFinite(n) && n >= 8)) {
+        // ورودی نامعتبر: داخل انتخاب بی‌اثر است، در غیر این صورت اندازهٔ کل بلوک به خودکار برمی‌گردد
+        if (hasSelection) sizeInput.value = b.size ? String(b.size) : '';
+        else { b.size = null; sizeInput.value = ''; scheduleApply(); }
+        return;
+      }
+      const size = Math.min(160, n);
+      if (hasSelection) {
+        // اندازه فقط برای متن انتخاب‌شده؛ فیلد بلوک به مقدار کل‌بلوک برمی‌گردد
+        wrapTagSelection(ta, 'size', String(size));
+        sizeInput.value = b.size ? String(b.size) : '';
+      } else {
+        b.size = size;
+        sizeInput.value = String(b.size);
+      }
+      scheduleApply();
+    };
+    colorInput.oninput = () => {
+      if (ta.selectionStart !== ta.selectionEnd) {
+        // رنگ فقط برای متن انتخاب‌شده؛ رنگ بلوک دست نمی‌خورد
+        wrapTagSelection(ta, 'color', colorInput.value);
+        colorInput.value = b.color || '#0b0b0b';
+      } else {
+        b.color = colorInput.value;
+      }
+      syncFmt();
+      scheduleApply();
+    };
+    colorAutoBtn.onclick = () => {
+      if (ta.selectionStart !== ta.selectionEnd) unwrapTagSelection(ta, 'color');
+      else b.color = null;
+      syncFmt();
+      scheduleApply();
+    };
     resetBtn.onclick = () => { Object.assign(b, FMT_DEFAULTS); syncFmt(); scheduleApply(); };
-    row.querySelector('.inl-bold').onclick = () => wrapInlineSelection(ta, '**');
-    row.querySelector('.inl-italic').onclick = () => wrapInlineSelection(ta, '*');
-    row.querySelector('.inl-under').onclick = () => wrapInlineSelection(ta, '__');
     list.appendChild(row);
   });
 }

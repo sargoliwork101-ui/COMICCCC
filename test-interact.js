@@ -373,39 +373,74 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([0, 3, 1, 2]));
   h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
 
-  // ---- inline word styling in the translation editor (2.44) ----
+  // ---- Word-like character styling: the block toolbar acts on the textarea selection (2.44/2.46) ----
   {
     const ta = h.window.document.createElement('textarea');
     ta.value = 'hello brave world';
     h.window.document.body.appendChild(ta);
+    h.window.__wrapTa = ta;
     ta.focus();
     // wrap the selected word "brave" with bold markers
     ta.setSelectionRange(6, 11);
-    h.ev(`wrapInlineSelection(document.querySelector('textarea'), '**')`);
+    h.ev(`wrapSelection(__wrapTa, '**', '**')`);
     check('inline wrap inserts bold markers around the selection', ta.value === 'hello **brave** world', ta.value);
     check('inline wrap keeps the inner text selected', ta.selectionStart === 8 && ta.selectionEnd === 13, [ta.selectionStart, ta.selectionEnd]);
     // pressing the same button again on the same selection removes the markers
-    h.ev(`wrapInlineSelection(document.querySelector('textarea'), '**')`);
+    h.ev(`wrapSelection(__wrapTa, '**', '**')`);
     check('inline wrap toggles off when the marked selection is wrapped again', ta.value === 'hello brave world', ta.value);
     // no selection -> an empty marker pair is inserted with the caret inside
     ta.value = 'abc'; ta.setSelectionRange(1, 1);
-    h.ev(`wrapInlineSelection(document.querySelector('textarea'), '__')`);
+    h.ev(`wrapSelection(__wrapTa, '__', '__')`);
     check('inline wrap with no selection inserts an empty pair', ta.value === 'a____bc', ta.value);
     check('caret lands inside the empty marker pair', ta.selectionStart === 3 && ta.selectionEnd === 3, [ta.selectionStart, ta.selectionEnd]);
     // italic and bold markers coexist on different words and survive the round trip
     ta.value = 'one two'; ta.setSelectionRange(0, 3);
-    h.ev(`wrapInlineSelection(document.querySelector('textarea'), '*')`);
+    h.ev(`wrapSelection(__wrapTa, '*', '*')`);
     check('italic marker applied independently', ta.value === '*one* two', ta.value);
     ta.remove();
   }
   {
-    // the built editor rows carry the three inline style buttons and a guidance hint
-    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "hi", tr: "سلام **دنیا**", enabled: true, bg: "white", x0: 0, y0: 0, x1: 80, y1: 40, lineH: 16 }] }; openEditor(items[0])');
+    // parameter tags: size wraps the selection, re-applying replaces the parameter; color can be unwrapped
+    const ta = h.window.document.createElement('textarea');
+    ta.value = 'hello world';
+    h.window.document.body.appendChild(ta);
+    h.window.__tagTa = ta;
+    ta.setSelectionRange(6, 11);
+    h.ev(`wrapTagSelection(__tagTa, 'size', '24')`);
+    check('size tag wraps the selection', ta.value === 'hello [size=24]world[/size]', ta.value);
+    h.ev(`wrapTagSelection(__tagTa, 'size', '30')`);
+    check('re-applying size replaces the parameter in place', ta.value === 'hello [size=30]world[/size]', ta.value);
+    h.ev(`wrapTagSelection(__tagTa, 'color', '#ff0000')`);
+    check('color tag wraps the same selection inside the size tag',
+      ta.value === 'hello [size=30][color=#ff0000]world[/color][/size]', ta.value);
+    check('color auto unwrap removes only the color tag',
+      h.ev(`unwrapTagSelection(__tagTa, 'color')`) === true &&
+      ta.value === 'hello [size=30]world[/size]', ta.value);
+    ta.remove();
+  }
+  {
+    // the shared block toolbar drives both block-level (no selection) and inline (selection) styling
+    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "hi", tr: "hello world", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
     const edList = h.$('edList');
-    check('editor builds the inline button row',
-      !!edList.querySelector('.inl-bold') && !!edList.querySelector('.inl-italic') && !!edList.querySelector('.inl-under'));
     const edTa = edList.querySelector('textarea');
-    check('editor textarea keeps the inline markers', edTa.value.includes('**دنیا**'), edTa.value);
+    const boldBtn = edList.querySelector('.blk-bold');
+    const underBtn = edList.querySelector('.blk-under');
+    check('separate inline row removed; only the block toolbar exists',
+      !edList.querySelector('.blk-inline') && !!boldBtn && !!underBtn);
+    // no selection: bold toggles the whole block flag
+    edTa.setSelectionRange(0, 0);
+    boldBtn.click();
+    check('bold without selection toggles the block flag', h.ev('items[0].ocr.blocks[0].bold') === false);
+    // with a selection: the same button inserts inline markers and leaves the block flag untouched
+    edTa.setSelectionRange(6, 11);
+    boldBtn.click();
+    check('bold with selection inserts inline markers only',
+      edTa.value === 'hello **world**' && h.ev('items[0].ocr.blocks[0].bold') === false, edTa.value);
+    check('bold button shows active state for the marked selection', boldBtn.classList.contains('active'));
+    // selecting everything and underlining applies underline to the whole line via markers
+    edTa.setSelectionRange(0, edTa.value.length);
+    underBtn.click();
+    check('select-all underline marks the whole line', edTa.value === '__hello **world**__', edTa.value);
     h.$('edClose').click();
   }
 

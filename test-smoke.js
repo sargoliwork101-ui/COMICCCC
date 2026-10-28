@@ -314,6 +314,24 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
       calls.textAlign.every((a) => a === 'right') &&
       calls.fillText.some((f) => f.t === 'no markers here'), calls.textAlign);
   }
+  {
+    const runs = Typeset.tokenizeInline('a [size=24]big[/size] b [color=#ff0000]red[/color]');
+    const sizeRun = runs.find((r) => r.t === 'big');
+    const colorRun = runs.find((r) => r.t === 'red');
+    check('tokenizeInline parses size and color tags',
+      sizeRun && sizeRun.size === 24 && colorRun && colorRun.color === '#ff0000', runs);
+    check('stripInlineMarkers removes size/color tags too',
+      Typeset.stripInlineMarkers('a [size=24]big[/size] [color=#ff0000]red[/color]') === 'a big red');
+  }
+  {
+    const calls = renderWith({ tr: 'a [size=24]big[/size] b' });
+    check('inline size word renders at its own font size',
+      calls.fillText.some((f) => f.t === 'big') && calls.font.some((f) => f.includes('24px')), calls.font);
+  }
+  {
+    const calls = renderWith({ tr: 'x [color=#ff0000]red[/color] y' });
+    check('inline color word reaches fillStyle', calls.fillStyles.includes('#ff0000'), calls.fillStyles);
+  }
 
   // ---------- Translate with mock fetch ----------
   {
