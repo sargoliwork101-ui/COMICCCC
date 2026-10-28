@@ -279,6 +279,42 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('invalid color/dir fall back safely', st.color === null && st.dir === 'rtl', st);
   }
 
+  // ---------- Typeset inline (per-word) formatting (2.44) ----------
+  {
+    check('hasInlineMarks detects markers',
+      Typeset.hasInlineMarks('a **b** c *d* e __f__') === true &&
+      Typeset.hasInlineMarks('plain text with * unmatched') === false);
+    const runs = Typeset.tokenizeInline('سلام **دنیا** *کج* __خط__');
+    check('tokenizeInline splits styled runs',
+      runs.some((r) => r.t === 'دنیا' && r.bold) &&
+      runs.some((r) => r.t === 'کج' && r.italic) &&
+      runs.some((r) => r.t === 'خط' && r.underline) &&
+      runs.some((r) => r.t.includes('سلام') && !r.bold && !r.italic && !r.underline), runs);
+    check('stripInlineMarkers keeps the words only',
+      Typeset.stripInlineMarkers('سلام **دنیا** *کج* __خط__') === 'سلام دنیا کج خط');
+  }
+  {
+    // block is non-bold; the inline bold word must switch font to 700 while neighbors stay 400
+    const calls = renderWith({ bold: false, tr: 'one **two** three' });
+    check('inline bold word drawn separately',
+      calls.fillText.some((f) => f.t === 'two') &&
+      calls.fillText.some((f) => f.t === 'one') &&
+      calls.fillText.some((f) => f.t === 'three'), calls.fillText.map((f) => f.t));
+    check('inline bold uses 700 while plain words use 400 in a non-bold block',
+      calls.font.some((f) => /700/.test(f)) && calls.font.some((f) => /400/.test(f)), calls.font);
+  }
+  {
+    const calls = renderWith({ bold: false, underline: false, tr: 'base __u__ base' });
+    check('inline underline draws a stroked path without block underline',
+      calls.beginPath >= 1 && calls.stroke >= 1 && calls.lineTo >= 1);
+  }
+  {
+    const calls = renderWith({ tr: 'no markers here' });
+    check('plain text still uses the single-run path (right align)',
+      calls.textAlign.every((a) => a === 'right') &&
+      calls.fillText.some((f) => f.t === 'no markers here'), calls.textAlign);
+  }
+
   // ---------- Translate with mock fetch ----------
   {
     const fetchFn = async (url) => ({

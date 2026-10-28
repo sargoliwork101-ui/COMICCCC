@@ -180,6 +180,35 @@ function scheduleApply() {
   edTimer = setTimeout(applyEditor, 900);
 }
 
+// استایل درون‌متنی روی متن انتخاب‌شدهٔ textarea: دور انتخاب مارکر می‌گذارد (یا مارکر موجود را برمی‌دارد)
+// مارکرها: **بولد** *ایتالیک* __زیرخط__؛ typeset هنگام رندر آن‌ها را به استایل واقعی تبدیل می‌کند.
+function wrapInlineSelection(ta, mark) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const value = ta.value;
+  const sel = value.slice(s, e);
+  const before = value.slice(Math.max(0, s - mark.length), s);
+  const after = value.slice(e, e + mark.length);
+  let next, caretS, caretE;
+  if (sel && before === mark && after === mark) {
+    // انتخاب دقیقاً داخل یک جفت مارکر همان نوع است: حذف مارکر
+    next = value.slice(0, s - mark.length) + sel + value.slice(e + mark.length);
+    caretS = s - mark.length;
+    caretE = caretS + sel.length;
+  } else if (sel) {
+    next = value.slice(0, s) + mark + sel + mark + value.slice(e);
+    caretS = s + mark.length;
+    caretE = e + mark.length;
+  } else {
+    // انتخابی نیست: جفت مارکر خالی می‌گذاریم و نشانگر را وسطش می‌بریم
+    next = value.slice(0, s) + mark + mark + value.slice(e);
+    caretS = caretE = s + mark.length;
+  }
+  ta.value = next;
+  ta.focus();
+  ta.setSelectionRange(caretS, caretE);
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 async function applyEditor() {
   if (!EDI) return;
   if (edBusy) { edPending = true; return; }
@@ -257,7 +286,14 @@ function buildEditor() {
         </label>
         <button type="button" class="fmt-btn blk-reset" title="بازنشانی همهٔ قالب‌بندی‌های این متن به پیش‌فرض">↺</button>
       </div>
-      <div class="blk-orig"></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>`;
+      <div class="blk-orig"></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>
+      <div class="blk-inline">
+        <span class="inl-label">استایل یک کلمه:</span>
+        <button type="button" class="fmt-btn inl-bold" title="پررنگ‌کردن کلمه/عبارت انتخاب‌شده (**متن**)">B</button>
+        <button type="button" class="fmt-btn inl-italic" title="ایتالیک‌کردن کلمه/عبارت انتخاب‌شده (*متن*)">I</button>
+        <button type="button" class="fmt-btn inl-under" title="زیرخط‌گذاشتن کلمه/عبارت انتخاب‌شده (__متن__)">U</button>
+        <span class="inl-hint">کلمه را داخل کادر انتخاب کن، بعد دکمه را بزن؛ دوباره‌زدن همان دکمه مارکر را برمی‌دارد.</span>
+      </div>`;
     row.querySelector('.blk-orig').textContent = b.text;
     const ta = row.querySelector('textarea'); ta.value = b.tr || '';
     const sel = row.querySelector('.blk-bg'); sel.value = b.bg;
@@ -307,6 +343,9 @@ function buildEditor() {
     colorInput.oninput = () => { b.color = colorInput.value; syncFmt(); scheduleApply(); };
     colorAutoBtn.onclick = () => { b.color = null; syncFmt(); scheduleApply(); };
     resetBtn.onclick = () => { Object.assign(b, FMT_DEFAULTS); syncFmt(); scheduleApply(); };
+    row.querySelector('.inl-bold').onclick = () => wrapInlineSelection(ta, '**');
+    row.querySelector('.inl-italic').onclick = () => wrapInlineSelection(ta, '*');
+    row.querySelector('.inl-under').onclick = () => wrapInlineSelection(ta, '__');
     list.appendChild(row);
   });
 }
@@ -342,7 +381,11 @@ function exportText() {
   done.forEach((it) => {
     out += `===== تصویر ${String(it.i + 1).padStart(pad, '0')} =====\n\n`;
     it.ocr.blocks.forEach((b) => {
-      out += `[${b.id}] ${b.text}\n    ← ${b.tr && b.tr.trim() ? b.tr.trim() : '(بدون ترجمه)'}\n\n`;
+      // خروجی متنی ساده مارکرهای استایل درون‌متنی را ندارد
+      const tr = b.tr && b.tr.trim()
+        ? (typeof Typeset !== 'undefined' ? Typeset.stripInlineMarkers(b.tr) : b.tr).trim()
+        : '';
+      out += `[${b.id}] ${b.text}\n    ← ${tr || '(بدون ترجمه)'}\n\n`;
     });
   });
   const blob = new Blob(['\ufeff' + out], { type: 'text/plain;charset=utf-8' });

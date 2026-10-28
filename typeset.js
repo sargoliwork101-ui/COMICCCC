@@ -40,6 +40,106 @@
     return lines;
   }
 
+  // ---------- قالب‌بندی درون‌متنی: استایل یک کلمه/عبارت داخل متن یک بلوک ----------
+  // نشانگرها: **پررنگ** *ایتالیک* __زیرخط__؛ نشانگر جفت‌نشده مثل متن عادی رفتار می‌کند و تو در تو پشتیبانی نمی‌شود.
+  const INLINE_TEST_RE = /(\*\*[\s\S]+?\*\*|__[\s\S]+?__|\*[^*\n]+?\*)/;
+  const INLINE_TOKEN_RE = /\*\*[\s\S]+?\*\*|__[\s\S]+?__|\*[^*\n]+?\*/g;
+
+  function hasInlineMarks(text) { return INLINE_TEST_RE.test(String(text || '')); }
+
+  // متن را به قطعه‌هایی با استایل درون‌متنی می‌شکند؛ قطعهٔ عادی بدون پرچم است
+  function tokenizeInline(text) {
+    const runs = [];
+    const push = (t, style) => { if (t) runs.push(Object.assign({ t }, style)); };
+    let last = 0, m;
+    INLINE_TOKEN_RE.lastIndex = 0;
+    while ((m = INLINE_TOKEN_RE.exec(text))) {
+      if (m.index > last) push(text.slice(last, m.index), {});
+      const tok = m[0];
+      if (tok.startsWith('**')) push(tok.slice(2, -2), { bold: true });
+      else if (tok.startsWith('__')) push(tok.slice(2, -2), { underline: true });
+      else push(tok.slice(1, -1), { italic: true });
+      last = INLINE_TOKEN_RE.lastIndex;
+    }
+    if (last < text.length) push(text.slice(last), {});
+    return runs;
+  }
+
+  // برای خروجی متنی ساده: فقط نشانگرها حذف می‌شوند و خود کلمه‌ها می‌مانند
+  function stripInlineMarkers(text) {
+    return String(text || '')
+      .replace(/\*\*([\s\S]+?)\*\*/g, '$1')
+      .replace(/__([\s\S]+?)__/g, '$1')
+      .replace(/\*([^*\n]+?)\*/g, '$1');
+  }
+
+  // توکن‌های کلمه‌ای با استایل چسبیده؛ فاصله‌های چندتایی مثل wrapWords قدیمی به یک فاصله تقلیل می‌یابند
+  function inlineWords(text) {
+    const words = [];
+    tokenizeInline(text).forEach((run) => {
+      run.t.split(/\s+/).filter(Boolean).forEach((w) => {
+        words.push({ t: w, bold: !!run.bold, italic: !!run.italic, underline: !!run.underline });
+      });
+    });
+    return words;
+  }
+
+  // پیشوند فونت یک کلمه = پیش‌فرض بلوک + استایل درون‌متنی (مارکر صریح همیشه روشن می‌کند)
+  function inlineFontPrefix(st, w) {
+    const weight = w.bold ? true : st.bold !== false;
+    const italic = w.italic || st.italic;
+    return `${italic ? 'italic ' : ''}${weight ? '700' : '400'} `;
+  }
+  const baseFontPrefix = (st) => `${st.italic ? 'italic ' : ''}${st.bold !== false ? '700' : '400'} `;
+
+  // عرض هر کلمه با فونت خودش + عرض فاصله با فونت پایهٔ بلوک
+  function measureLine(ctx, line, st, size) {
+    const baseFont = `${baseFontPrefix(st)}${size}px ${FONT}`;
+    ctx.font = baseFont;
+    const spaceW = ctx.measureText(' ').width;
+    const widths = line.map((w) => {
+      ctx.font = `${inlineFontPrefix(st, w)}${size}px ${FONT}`;
+      return ctx.measureText(w.t).width;
+    });
+    ctx.font = baseFont;
+    const width = widths.reduce((sum, v, i) => sum + v + (i ? spaceW : 0), 0);
+    return { widths, spaceW, width };
+  }
+
+  // شکستن خط با اندازهٔ مشخص؛ هر کلمه با فونت خودش اندازه می‌شود
+  function wrapInlineAt(ctx, words, maxW, st, size) {
+    const baseFont = `${baseFontPrefix(st)}${size}px ${FONT}`;
+    ctx.font = baseFont;
+    const spaceW = ctx.measureText(' ').width;
+    const widthOf = (w) => {
+      ctx.font = `${inlineFontPrefix(st, w)}${size}px ${FONT}`;
+      return ctx.measureText(w.t).width;
+    };
+    const lines = [];
+    let cur = [], curW = 0;
+    for (const w of words) {
+      const ww = widthOf(w);
+      if (!cur.length) { cur = [w]; curW = ww; }
+      else if (curW + spaceW + ww <= maxW) { cur.push(w); curW += spaceW + ww; }
+      else { lines.push(cur); cur = [w]; curW = ww; }
+    }
+    if (cur.length) lines.push(cur);
+    ctx.font = baseFont;
+    return lines;
+  }
+
+  // معادل fit برای متن‌های دارای مارکر؛ بهترین اندازه‌ای که همهٔ خطوط در کادر جا شوند
+  function fitInline(ctx, text, boxW, boxH, maxSize, minSize, st) {
+    const words = inlineWords(text);
+    for (let s = maxSize; s >= minSize; s--) {
+      const lines = wrapInlineAt(ctx, words, boxW, st, s);
+      const widest = Math.max(...lines.map((ln) => measureLine(ctx, ln, st, s).width));
+      const lh = s * 1.55;
+      if (lines.length * lh <= boxH * 1.2 && widest <= boxW * 1.04) return { size: s, lines, lh };
+    }
+    return { size: minSize, lines: wrapInlineAt(ctx, words, boxW, st, minSize), lh: minSize * 1.55 };
+  }
+
   function fit(ctx, text, boxW, boxH, maxSize, minSize, fontPrefix = '700 ') {
     for (let s = maxSize; s >= minSize; s--) {
       ctx.font = `${fontPrefix}${s}px ${FONT}`;
@@ -100,16 +200,21 @@
       if (fill) { ctx.fillStyle = fill; ctx.fillRect(box.x0, box.y0, bw, bh); }
 
       const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
+      const sourceText = b.tr.trim();
+      const inline = hasInlineMarks(sourceText);
       // سایز دستی کاربر جای حالت خودکار می‌نشیند؛ در غیر این صورت بهترین سایز برای جاشدن در کادر
       let f;
-      if (st.size) {
+      if (inline) {
+        f = st.size
+          ? { size: st.size, lines: wrapInlineAt(ctx, inlineWords(sourceText), bw * 0.96, st, st.size), lh: st.size * 1.55 }
+          : fitInline(ctx, sourceText, bw * 0.96, bh * 0.96, maxSize, 10, st);
+      } else if (st.size) {
         ctx.font = `${fontPrefix}${st.size}px ${FONT}`;
-        f = { size: st.size, lines: wrapWords(ctx, b.tr.trim(), bw * 0.96), lh: st.size * 1.55 };
+        f = { size: st.size, lines: wrapWords(ctx, sourceText, bw * 0.96), lh: st.size * 1.55 };
       } else {
-        f = fit(ctx, b.tr.trim(), bw * 0.96, bh * 0.96, maxSize, 10, fontPrefix);
+        f = fit(ctx, sourceText, bw * 0.96, bh * 0.96, maxSize, 10, fontPrefix);
       }
       if ('direction' in ctx) ctx.direction = st.dir;
-      ctx.textAlign = st.align;
       ctx.textBaseline = 'middle';
       const totalH = f.lines.length * f.lh;
       let y = (box.y0 + box.y1) / 2 - totalH / 2 + f.lh / 2;
@@ -117,6 +222,37 @@
       const anchorX = st.align === 'left' ? box.x0 + bw * 0.02
         : st.align === 'center' ? (box.x0 + box.x1) / 2
         : box.x1 - bw * 0.02;
+      if (inline) {
+        // مسیر درون‌متنی: هر کلمه با فونت خودش و در موقعیت فیزیکی محاسبه‌شده رسم می‌شود
+        ctx.textAlign = 'left';
+        f.lines.forEach((line) => {
+          const m = measureLine(ctx, line, st, f.size);
+          let x = st.align === 'left' ? anchorX
+            : st.align === 'center' ? anchorX - m.width / 2
+            : anchorX - m.width;
+          // در پاراگراف RTL اولین کلمهٔ منطقی سمت راست است؛ پس ترتیب دیداری برعکس می‌شود
+          const visual = st.dir === 'rtl' ? line.map((_, i) => line.length - 1 - i) : line.map((_, i) => i);
+          visual.forEach((idx) => {
+            const w = line[idx];
+            ctx.font = `${inlineFontPrefix(st, w)}${f.size}px ${FONT}`;
+            if (stroke) { ctx.lineWidth = Math.max(3, f.size / 5); ctx.strokeStyle = stroke; ctx.lineJoin = 'round'; ctx.strokeText(w.t, x, y); }
+            ctx.fillStyle = txt;
+            ctx.fillText(w.t, x, y);
+            if (st.underline || w.underline) {
+              ctx.strokeStyle = txt;
+              ctx.lineWidth = Math.max(1, f.size / 14);
+              ctx.beginPath();
+              ctx.moveTo(x, y + f.size * 0.55);
+              ctx.lineTo(x + m.widths[idx], y + f.size * 0.55);
+              ctx.stroke();
+            }
+            x += m.widths[idx] + m.spaceW;
+          });
+          y += f.lh;
+        });
+        return;
+      }
+      ctx.textAlign = st.align;
       f.lines.forEach((ln) => {
         if (stroke) { ctx.lineWidth = Math.max(3, f.size / 5); ctx.strokeStyle = stroke; ctx.lineJoin = 'round'; ctx.strokeText(ln, anchorX, y); }
         ctx.fillStyle = txt;
@@ -138,6 +274,9 @@
     return cv;
   }
 
-  const api = { render, sampleBg, fit, wrapWords, blockStyle };
+  const api = {
+    render, sampleBg, fit, wrapWords, blockStyle,
+    hasInlineMarks, tokenizeInline, stripInlineMarkers, inlineWords, fitInline
+  };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Typeset = api;
 })(typeof window !== 'undefined' ? window : globalThis);

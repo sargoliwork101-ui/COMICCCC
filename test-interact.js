@@ -373,6 +373,42 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([0, 3, 1, 2]));
   h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
 
+  // ---- inline word styling in the translation editor (2.44) ----
+  {
+    const ta = h.window.document.createElement('textarea');
+    ta.value = 'hello brave world';
+    h.window.document.body.appendChild(ta);
+    ta.focus();
+    // wrap the selected word "brave" with bold markers
+    ta.setSelectionRange(6, 11);
+    h.ev(`wrapInlineSelection(document.querySelector('textarea'), '**')`);
+    check('inline wrap inserts bold markers around the selection', ta.value === 'hello **brave** world', ta.value);
+    check('inline wrap keeps the inner text selected', ta.selectionStart === 8 && ta.selectionEnd === 13, [ta.selectionStart, ta.selectionEnd]);
+    // pressing the same button again on the same selection removes the markers
+    h.ev(`wrapInlineSelection(document.querySelector('textarea'), '**')`);
+    check('inline wrap toggles off when the marked selection is wrapped again', ta.value === 'hello brave world', ta.value);
+    // no selection -> an empty marker pair is inserted with the caret inside
+    ta.value = 'abc'; ta.setSelectionRange(1, 1);
+    h.ev(`wrapInlineSelection(document.querySelector('textarea'), '__')`);
+    check('inline wrap with no selection inserts an empty pair', ta.value === 'a____bc', ta.value);
+    check('caret lands inside the empty marker pair', ta.selectionStart === 3 && ta.selectionEnd === 3, [ta.selectionStart, ta.selectionEnd]);
+    // italic and bold markers coexist on different words and survive the round trip
+    ta.value = 'one two'; ta.setSelectionRange(0, 3);
+    h.ev(`wrapInlineSelection(document.querySelector('textarea'), '*')`);
+    check('italic marker applied independently', ta.value === '*one* two', ta.value);
+    ta.remove();
+  }
+  {
+    // the built editor rows carry the three inline style buttons and a guidance hint
+    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "hi", tr: "سلام **دنیا**", enabled: true, bg: "white", x0: 0, y0: 0, x1: 80, y1: 40, lineH: 16 }] }; openEditor(items[0])');
+    const edList = h.$('edList');
+    check('editor builds the inline button row',
+      !!edList.querySelector('.inl-bold') && !!edList.querySelector('.inl-italic') && !!edList.querySelector('.inl-under'));
+    const edTa = edList.querySelector('textarea');
+    check('editor textarea keeps the inline markers', edTa.value.includes('**دنیا**'), edTa.value);
+    h.$('edClose').click();
+  }
+
   // ---- output settings open/close ----
   const settings = h.$('outputSettings');
   settings.open = true;
