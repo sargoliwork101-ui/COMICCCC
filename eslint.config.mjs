@@ -8,8 +8,10 @@ export default [
       globals: {
         window: 'readonly', document: 'readonly', console: 'readonly', fetch: 'readonly',
         Blob: 'readonly', URL: 'readonly', FileReader: 'readonly', Promise: 'readonly',
-        setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly',
+        setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly',
+        MutationObserver: 'readonly',
         requestAnimationFrame: 'readonly', navigator: 'readonly', location: 'readonly',
+        history: 'readonly',
         chrome: 'readonly', Tesseract: 'readonly', confirm: 'readonly', alert: 'readonly',
         ClipboardItem: 'readonly', Event: 'readonly', Uint8Array: 'readonly',
         Uint8ClampedArray: 'readonly', Uint32Array: 'readonly', Int32Array: 'readonly',
@@ -19,6 +21,7 @@ export default [
         globalThis: 'readonly', module: 'readonly', exports: 'writable', self: 'readonly',
         getComputedStyle: 'readonly', URLSearchParams: 'readonly',
         AbortController: 'readonly', ResizeObserver: 'readonly',
+        atob: 'readonly', btoa: 'readonly',
         // globals shared across the extension's classic scripts
         PdfBuilder: 'readonly', OcrTools: 'readonly', Typeset: 'readonly', TranslateTools: 'readonly',
         $: 'readonly', items: 'writable', building: 'writable', loading: 'writable',

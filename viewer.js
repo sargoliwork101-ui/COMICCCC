@@ -6,6 +6,7 @@ const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const ICON_CROP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v13a2 2 0 0 0 2 2h13M3 6h13a2 2 0 0 1 2 2v13"/></svg>';
 const ICON_DUPLICATE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';
 const ICON_DELETE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m4 4v6m6-6v6"/></svg>';
+const ICON_RETRY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
 const CONCURRENCY = 4;
 const MAX_CANVAS_H = 16000;
 const APP_TITLE = 'PIC TO PDF';
@@ -224,7 +225,7 @@ function makeCard(it) {
   const el = document.createElement('div');
   el.className = 'item selected';
   el.draggable = true;
-  el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید';
+  el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید. داخل یک گروه، رهاکردن روی لبهٔ کارت هم‌گروه فقط ترتیب داخلی گروه را عوض می‌کند؛ برای خروج از گروه، کارت را در فضای خالی شبکه رها کنید';
   el.innerHTML = `<div class="tw"><canvas width="240" height="320"></canvas><div class="spin">در حال دریافت...</div>
     <span class="idx">${it.i + 1}${it.dupNo ? ` · کپی ${it.dupNo}` : ''}</span><span class="tick">${ICON_CHECK}</span>
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
@@ -232,7 +233,9 @@ function makeCard(it) {
     <button class="edit" title="ویرایش ترجمه">${ICON_EDIT}</button>
     <button class="duplicate" title="ساخت نسخهٔ مستقل">${ICON_DUPLICATE}</button>
     <button class="delete" title="حذف این تصویر" aria-label="حذف تصویر">${ICON_DELETE}</button>
-    <span class="fa-badge">ترجمه شد</span><span class="page-group-badge hidden"></span></div><div class="meta">…</div>
+    <span class="fa-badge">ترجمه شد</span><span class="page-group-badge hidden"></span></div>
+    <button class="retry" type="button" title="تلاش مجدد برای بارگیری این تصویر" aria-label="تلاش مجدد برای بارگیری">${ICON_RETRY}<span>تلاش مجدد</span></button>
+    <div class="meta">…</div>
     <div class="order-control"><span>ترتیب در PDF</span><input class="page-order" type="number" min="1" step="1" value="${it.pdfOrder || it.i + 1}" aria-label="ترتیب در PDF"></div>`;
   const orderInput = el.querySelector('.page-order');
   orderInput.addEventListener('click', (ev) => ev.stopPropagation());
@@ -282,6 +285,7 @@ function makeCard(it) {
     if (ev.target.closest('.edit')) { if (typeof openEditor === 'function') openEditor(it); return; }
     if (ev.target.closest('.duplicate')) { duplicateItem(it); return; }
     if (ev.target.closest('.delete')) { deleteItem(it); return; }
+    if (ev.target.closest('.retry')) { retryItem(it); return; }
     if (it.state !== 'ok') return;
     if (ev.shiftKey && lastClicked != null) {
       const ordered = Array.from($('grid').children).map((node) => items.find((item) => item.el === node)).filter((item) => item && item.state === 'ok');
@@ -327,18 +331,34 @@ function duplicateItem(source) {
   refreshAll();
   drawThumb(duplicate);
 }
+// حذف واقعی مجموعه‌ای از کارت‌ها پس از تأیید؛ مشترک بین حذف تکی و حذف دسته‌جمعی
+function removeItemsFromGrid(targets) {
+  const remove = new Set(targets);
+  if (cropItem && remove.has(cropItem)) closeCropper();
+  if (lbItem && remove.has(lbItem)) closeLightbox();
+  targets.forEach((it) => {
+    if (it.el && it.el.parentNode) it.el.parentNode.removeChild(it.el);
+    if (lastClicked === it.uid) lastClicked = null;
+  });
+  items = items.filter((item) => !remove.has(item));
+  cleanupPageGroups();
+  updatePdfOrderFromGrid();
+  refreshAll();
+}
 function deleteItem(it) {
   if (!it || building || loading) return;
   if (!confirm(`تصویر ${it.i + 1} حذف شود؟`)) return;
   if (editingPageGroupId !== null) cancelPageGroupEdit();
-  if (cropItem === it) closeCropper();
-  if (lbItem === it) closeLightbox();
-  items = items.filter((item) => item !== it);
-  if (it.el && it.el.parentNode) it.el.parentNode.removeChild(it.el);
-  if (lastClicked === it.uid) lastClicked = null;
-  cleanupPageGroups();
-  updatePdfOrderFromGrid();
-  refreshAll();
+  removeItemsFromGrid([it]);
+}
+// حذف دسته‌جمعی: فقط کارت‌های بارگیری‌شده و انتخاب‌شده؛ یک تأیید برای کل مجموعه
+function deleteSelectedItems() {
+  if (building || loading) return;
+  const targets = items.filter((it) => it.state === 'ok' && it.selected);
+  if (!targets.length) return;
+  if (!confirm(`${targets.length} تصویر انتخاب‌شده حذف شوند؟`)) return;
+  if (editingPageGroupId !== null) cancelPageGroupEdit();
+  removeItemsFromGrid(targets);
 }
 
 // پالت رنگی گروه‌ها: هر گروه شمارهٔ نمایشی خودش رنگ ثابتی دارد تا گروه‌ها به‌راحتی از هم تفکیک شوند
@@ -436,6 +456,8 @@ function refreshCard(it, groupView = buildPageGroupView()) {
   const groupBadge = el.querySelector('.page-group-badge');
   const deleteButton = el.querySelector('.delete');
   if (deleteButton) deleteButton.disabled = loading || building;
+  const retryButton = el.querySelector('.retry');
+  if (retryButton) retryButton.disabled = loading || building;
   const groupId = Number(it.pageGroup);
   const groupMembers = groupView.membersById.get(groupId);
   const displayNumber = groupView.numberById.get(groupId);
@@ -470,6 +492,14 @@ function refreshCard(it, groupView = buildPageGroupView()) {
     meta.innerText = 'دانلود نشد';
     meta.title = it.error || 'علت دقیق بارگیری نامشخص است';
   } else {
+    // حالت بارگیری: کارتی که قبلاً شکست خورده و دوباره تلاش می‌شود، spin خود را از دست داده؛ بازسازی‌اش کن
+    const tw = el.querySelector('.tw');
+    if (tw && !spin) {
+      const freshSpin = document.createElement('div');
+      freshSpin.className = 'spin';
+      freshSpin.innerText = 'در حال دریافت...';
+      tw.appendChild(freshSpin);
+    }
     meta.innerText = '…';
   }
 }
@@ -577,6 +607,30 @@ async function loadAll(list) {
   }
 }
 
+// تلاش مجدد برای بارگیری یک کارت ناموفق، بدون نمایش overlay تمام‌صفحه
+async function retryItem(it) {
+  if (!it || loading || building || it.state !== 'failed') return;
+  // تلاش مجدد تکی هم یک «بارگیری» واقعی است؛ فلگ سراسری فعال شود تا دکمه‌های کارت/نوار ابزار
+  // و شمارش هشدارها همان رفتار بارگیری سراسری را داشته باشند و کلیک هم‌زمان ممکن نباشد
+  loading = true;
+  jobCancelRequested = false;
+  loadAbortController = new AbortController();
+  const signal = loadAbortController.signal;
+  it.state = 'loading';
+  it.error = '';
+  it.selected = false;
+  refreshCard(it);
+  refreshSummary();
+  try {
+    // با سیگنال اختصاصی، ESC همانند بارگیری سراسری این تلاش تکی را هم لغو می‌کند
+    await loadOne(it, signal);
+  } finally {
+    loading = false;
+    loadAbortController = null;
+  }
+  refreshAll();
+}
+
 // ---------- مرتب‌سازی کارت‌ها / ترتیب خروجی PDF ----------
 function sortGridByPdfOrder() {
   const grid = $('grid');
@@ -608,7 +662,15 @@ function refreshSummary(groupView = buildPageGroupView()) {
   if (topCount) topCount.innerText = `${sel} انتخاب`;
   $('btnRetry').classList.toggle('hidden', failedN === 0 || loading);
   $('btnRetry').disabled = building || editingPageGroupId !== null;
+  const retryAllButton = $('btnRetryAll');
+  if (retryAllButton) {
+    retryAllButton.classList.toggle('hidden', failedN === 0 || loading);
+    retryAllButton.disabled = building || editingPageGroupId !== null;
+  }
   ['btnAll', 'btnNone', 'btnInv'].forEach((id) => { $(id).disabled = building || editingPageGroupId !== null; });
+  // حذف دسته‌جمعی فقط وقتی ممکن است که حداقل یک کارت سالم انتخاب‌شده وجود داشته باشد
+  const deleteSelButton = $('btnDeleteSel');
+  if (deleteSelButton) deleteSelButton.disabled = loading || building || editingPageGroupId !== null || sel === 0;
   $('buildBtn').disabled = loading || building || editingPageGroupId !== null || sel === 0;
   $('saveImgBtn').disabled = loading || building || editingPageGroupId !== null || sel === 0;
   $('seamless').disabled = loading || building || $('twoPerPage').checked;
@@ -825,6 +887,7 @@ function clearDragDropHint() {
     dragDropTargetEl = null;
   }
   dragGroupDrop = false;
+  $('grid').classList.remove('extract-zone');
   clearInsertMarker();
 }
 
@@ -851,13 +914,11 @@ function planDrop(dragged, targetEl, before) {
 }
 
 // پیش‌نمایش زندهٔ شماره صفحه‌ها حین درگ (بدون جابه‌جایی DOM تا لحظهٔ رهاکردن)
-function previewDragOrder(dragged, targetEl, before) {
+function previewOrderFor(movingEls, anchorNode) {
   const grid = $('grid');
-  const plan = planDrop(dragged, targetEl, before);
-  if (!plan) { restoreDragOrderPreview(); return; }
-  const tentative = Array.from(grid.children).filter((el) => !plan.movingEls.includes(el));
-  const anchorIndex = plan.anchor ? tentative.indexOf(plan.anchor) : tentative.length;
-  tentative.splice(anchorIndex, 0, ...plan.movingEls);
+  const tentative = Array.from(grid.children).filter((el) => !movingEls.includes(el));
+  const anchorIndex = anchorNode ? tentative.indexOf(anchorNode) : tentative.length;
+  tentative.splice(anchorIndex, 0, ...movingEls);
   tentative.forEach((el, index) => {
     const input = el.querySelector('.page-order');
     if (!input) return;
@@ -869,6 +930,11 @@ function previewDragOrder(dragged, targetEl, before) {
     void input.offsetWidth;
     input.classList.add('order-flash');
   });
+}
+function previewDragOrder(dragged, targetEl, before) {
+  const plan = planDrop(dragged, targetEl, before);
+  if (!plan) { restoreDragOrderPreview(); return; }
+  previewOrderFor(plan.movingEls, plan.anchor);
 }
 // بازگرداندن شماره‌ها به ترتیب واقعی فعلی شبکه (وقتی درگ لغو می‌شود یا روی نوار گروهی می‌رویم)
 function restoreDragOrderPreview() {
@@ -887,6 +953,108 @@ function reorderByDrop(dragged, targetEl, before) {
   if (!plan) return false;
   const firstRects = captureGridRects();
   plan.movingEls.forEach((el) => grid.insertBefore(el, plan.anchor));
+  updatePdfOrderFromGrid();
+  playGridMove(firstRects);
+  return true;
+}
+
+// چیدمان داخلی گروه: فقط همان کارتِ کشیده‌شده بین اعضای «همین» بلوک جابه‌جا می‌شود؛
+// بلوک گروه پیوسته و سرجایش می‌ماند و عضویت گروه هیچ تغییری نمی‌کند.
+function buildInternalOrder(dragged, targetEl, before) {
+  const gid = Number(dragged.pageGroup);
+  if (!gid) return null;
+  const blockEls = gridGroupBlock(gid);
+  if (!blockEls.includes(dragged.el) || !blockEls.includes(targetEl)) return null;
+  const remaining = blockEls.filter((el) => el !== dragged.el);
+  const targetIndex = remaining.indexOf(targetEl);
+  if (targetIndex < 0) return null;
+  const insertAt = before ? targetIndex : targetIndex + 1;
+  remaining.splice(insertAt, 0, dragged.el);
+  return { blockEls, nextBlockEls: remaining };
+}
+
+// پیش‌نمایش شماره صفحه‌ها برای جابه‌جایی داخل گروه (بدون تغییر DOM تا لحظهٔ رهاکردن)
+function previewInternalOrder(dragged, targetEl, before) {
+  const grid = $('grid');
+  const plan = buildInternalOrder(dragged, targetEl, before);
+  if (!plan) { restoreDragOrderPreview(); return; }
+  const tentative = [];
+  for (const el of Array.from(grid.children)) {
+    if (el === plan.blockEls[0]) tentative.push(...plan.nextBlockEls);
+    if (plan.blockEls.includes(el)) continue;
+    tentative.push(el);
+  }
+  tentative.forEach((el, index) => {
+    const input = el.querySelector('.page-order');
+    if (!input) return;
+    const next = String(index + 1);
+    if (input.value === next) return;
+    input.value = next;
+    input.classList.remove('order-flash');
+    void input.offsetWidth;
+    input.classList.add('order-flash');
+  });
+}
+
+// اعمال جابه‌جایی داخل گروه روی DOM؛ اگر عملاً ترتیبی عوض نشده false برمی‌گرداند
+function reorderWithinGroup(dragged, targetEl, before) {
+  const plan = buildInternalOrder(dragged, targetEl, before);
+  if (!plan) return false;
+  const unchanged = plan.nextBlockEls.every((el, i) => el === plan.blockEls[i]);
+  if (unchanged) return false;
+  const grid = $('grid');
+  // لنگرِ بعد از بلوک ثابت می‌ماند تا گروه پیوسته و در همان موقعیت قبلی بازچیده شود
+  const anchorAfterBlock = plan.blockEls[plan.blockEls.length - 1].nextSibling;
+  const firstRects = captureGridRects();
+  plan.nextBlockEls.forEach((el) => grid.insertBefore(el, anchorAfterBlock));
+  updatePdfOrderFromGrid();
+  playGridMove(firstRects);
+  return true;
+}
+
+// ---------- رهاکردن در فضای خالی شبکه: استخراج تک‌کارت از گروه ----------
+// نزدیک‌ترین کارت به نشانگر را لنگر درج می‌کند؛ RTL: نیمهٔ راست کارت یعنی درج قبل از آن
+function nearestCardAnchor(clientX, clientY) {
+  const cards = Array.from($('grid').querySelectorAll('.item'));
+  if (!cards.length) return { anchorEl: null, before: false };
+  let anchorEl = null, bestDist = Infinity;
+  for (const el of cards) {
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const dist = Math.hypot(cx - clientX, cy - clientY);
+    if (dist < bestDist) { bestDist = dist; anchorEl = el; }
+  }
+  const r = anchorEl.getBoundingClientRect();
+  return { anchorEl, before: clientX > r.left + r.width / 2 };
+}
+
+// پیش‌نمایش رهاکردن در فضای خالی: همیشه حرکت یک کارت تکی است (نه بلوک گروه)
+function previewEmptyAreaDrop(clientX, clientY) {
+  const { anchorEl, before } = nearestCardAnchor(clientX, clientY);
+  if (!anchorEl || anchorEl === draggedItem.el) {
+    $('grid').classList.remove('extract-zone');
+    clearInsertMarker();
+    restoreDragOrderPreview();
+    return;
+  }
+  $('grid').classList.add('extract-zone');
+  setInsertMarker(anchorEl, before, false);
+  previewOrderFor([draggedItem.el], before ? anchorEl : anchorEl.nextSibling);
+}
+
+// کارت کشیده‌شده در فضای خالی رها شده؛ اگر عضو گروه باشد فقط همان کارت از گروه خارج می‌شود
+function dropOnEmptyArea(clientX, clientY) {
+  const { anchorEl, before } = nearestCardAnchor(clientX, clientY);
+  if (!anchorEl || anchorEl === draggedItem.el) return false;
+  const anchorNode = before ? anchorEl : anchorEl.nextSibling;
+  if (anchorNode === draggedItem.el) return false;
+  const wasGrouped = Number(draggedItem.pageGroup) > 0;
+  const grid = $('grid');
+  const firstRects = captureGridRects();
+  if (wasGrouped) draggedItem.pageGroup = null;
+  grid.insertBefore(draggedItem.el, anchorNode);
+  // اگر گروه با خروج این کارت تک‌عضو شود، cleanup خودش آن گروه را منحل می‌کند
+  if (wasGrouped) cleanupPageGroups();
   updatePdfOrderFromGrid();
   playGridMove(firstRects);
   return true;
@@ -1787,7 +1955,9 @@ async function main() {
     ev.preventDefault();
     ev.dataTransfer.dropEffect = 'move';
     const target = ev.target.closest ? ev.target.closest('.item') : null;
-    if (!target || target === draggedItem.el) { clearDragDropHint(); clearInsertMarker(); restoreDragOrderPreview(); return; }
+    // فضای خالی شبکه: رهاکردن اینجا کارت را از گروه خارج و در همان محل درج می‌کند
+    if (!target) { previewEmptyAreaDrop(ev.clientX, ev.clientY); return; }
+    if (target === draggedItem.el) { clearDragDropHint(); clearInsertMarker(); restoreDragOrderPreview(); return; }
     const rect = target.getBoundingClientRect();
     const targetItem = items.find((it) => it.el === target);
     const groupable = targetItem && targetItem.state === 'ok' && draggedItem.state === 'ok';
@@ -1805,11 +1975,16 @@ async function main() {
       dragGroupDrop = true;
     } else {
       clearDragDropHint();
-      // نشانگر محل درج؛ برای جابه‌جایی گروهی با رنگ و ضخامت متفاوت از کارت تکی
       const sameGroupBlock = !!draggedGroupItems && draggedGroupItems.some((member) => member.el === target);
-      if (sameGroupBlock) { clearInsertMarker(); restoreDragOrderPreview(); return; }
       // RTL: نیمهٔ راست کارت یعنی درج قبل از آن، نیمهٔ چپ یعنی بعد از آن
       const before = ev.clientX > rect.left + rect.width / 2;
+      if (sameGroupBlock) {
+        // چیدمان داخلی گروه: روی لبهٔ کارتِ هم‌گروه، فقط همین کارت داخل بلوک جابه‌جا می‌شود
+        setInsertMarker(target, before, false);
+        previewInternalOrder(draggedItem, target, before);
+        return;
+      }
+      // نشانگر محل درج؛ برای جابه‌جایی گروهی با رنگ و ضخامت متفاوت از کارت تکی
       setInsertMarker(target, before, !!draggedGroupItems);
       // شماره صفحه‌های زیر کارت‌ها به‌صورت زنده با محل درج جدید به‌روز می‌شوند
       previewDragOrder(draggedItem, target, before);
@@ -1830,7 +2005,8 @@ async function main() {
     const wantGroup = dragGroupDrop;
     clearDragDropHint();
     clearInsertMarker();
-    if (!target || target === draggedItem.el) return;
+    if (!target) { dropOnEmptyArea(ev.clientX, ev.clientY); suppressCardClickUntil = Date.now() + 350; return; }
+    if (target === draggedItem.el) return;
     if (wantGroup) {
       const targetItem = items.find((it) => it.el === target);
       groupCardsByDrop(draggedItem, targetItem);
@@ -1840,7 +2016,9 @@ async function main() {
     const rect = target.getBoundingClientRect();
     // شبکه از راست به چپ است: سمت راست کارت یعنی درج قبل از آن در ترتیب DOM.
     const before = ev.clientX > rect.left + rect.width / 2;
-    reorderByDrop(draggedItem, target, before);
+    const sameGroupBlock = !!draggedGroupItems && draggedGroupItems.some((member) => member.el === target);
+    if (sameGroupBlock) reorderWithinGroup(draggedItem, target, before);
+    else reorderByDrop(draggedItem, target, before);
     suppressCardClickUntil = Date.now() + 350;
   });
   items = job.urls.map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pageGroup: null, state: 'loading', selected: true }));
@@ -1850,6 +2028,7 @@ async function main() {
   $('btnAll').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = true; }); refreshAll(); };
   $('btnNone').onclick = () => { items.forEach((it) => { it.selected = false; }); refreshAll(); };
   $('btnInv').onclick = () => { items.forEach((it) => { if (it.state === 'ok') it.selected = !it.selected; }); refreshAll(); };
+  $('btnDeleteSel').onclick = deleteSelectedItems;
   $('btnGroupPage').onclick = groupSelectedItems;
   $('btnCancelGroupEdit').onclick = cancelPageGroupEdit;
   $('btnUngroupPage').onclick = ungroupSelectedItems;
@@ -1857,6 +2036,7 @@ async function main() {
   $('restoreProfileBtn').onclick = restorePageProfile;
   $('deleteProfileBtn').onclick = deletePageProfile;
   $('btnRetry').onclick = () => { loadAll(items.filter((it) => it.state === 'failed')); };
+  $('btnRetryAll').onclick = () => { loadAll(items.filter((it) => it.state === 'failed')); };
   $('buildBtn').onclick = onBuild;
   $('saveImgBtn').onclick = onSaveImages;
   $('modePdf').onclick = () => setMode('pdf');

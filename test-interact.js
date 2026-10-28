@@ -272,6 +272,226 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     chips[0].style.getPropertyValue('--gc') !== chips[1].style.getPropertyValue('--gc'));
   h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
 
+  // ---- in-group reorder: edge drop on a same-group member moves only that card inside the block ----
+  // start from a known grid order [0,1,2,3]; the duplicate card (uid 3) stays outside the group
+  h.ev('[...items].sort((a,b)=>a.uid-b.uid).forEach(i => document.getElementById("grid").appendChild(i.el)); updatePdfOrderFromGrid()');
+  h.ev('items[0].pageGroup = 1; items[1].pageGroup = 1; items[2].pageGroup = 1; cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+  const dt5 = { effectAllowed: '', setData() {}, dropEffect: '' };
+  const groupBefore = h.ev('items.map(i => i.pageGroup)');
+  // drag the first card to after the last member
+  cards[0].getBoundingClientRect = rect156;
+  cards[2].getBoundingClientRect = rect156;
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt5, bubbles: true }));
+  cards[2].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt5, clientX: 10, bubbles: true })); // left edge -> after
+  check('in-group edge dragover uses a single (non-group) insertion marker',
+    cards[2].classList.contains('drag-insert-after') && !cards[2].classList.contains('drag-insert-group'));
+  const internalPreview = cards.map((c) => c.querySelector('.page-order').value);
+  check('in-group drag previews tentative internal order live',
+    JSON.stringify(internalPreview) === JSON.stringify(['3', '1', '2']), internalPreview);
+  const domStillStable = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);
+  check('in-group dragover keeps DOM untouched until drop',
+    JSON.stringify(domStillStable) === JSON.stringify([0, 1, 2, 3]), domStillStable);
+  cards[2].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt5, clientX: 10, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt5, bubbles: true }));
+  const internalOrder = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);
+  check('edge drop reorders within the group', JSON.stringify(internalOrder) === JSON.stringify([1, 2, 0, 3]), internalOrder);
+  check('in-group reorder never changes membership',
+    JSON.stringify(h.ev('items.map(i => i.pageGroup)')) === JSON.stringify(groupBefore));
+  check('in-group reorder renumbers pdf order',
+    JSON.stringify([...grid.children].map((n) => n.querySelector('.page-order').value)) === JSON.stringify(['1', '2', '3', '4']));
+  check('group stays one contiguous block after internal reorder',
+    outlineLayer.querySelectorAll('.group-outline').length === 1);
+
+  // move the same card back before the first member via the right edge
+  cards[1].getBoundingClientRect = rect156;
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt5, bubbles: true }));
+  cards[1].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt5, clientX: 150, bubbles: true })); // right edge -> before
+  cards[1].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt5, clientX: 150, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt5, bubbles: true }));
+  const restoredOrder = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);
+  check('before-edge drop moves the card to the start of the group',
+    JSON.stringify(restoredOrder) === JSON.stringify([0, 1, 2, 3]), restoredOrder);
+
+  // center-band drop on a same-group member is still a no-op
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt5, bubbles: true }));
+  cards[1].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt5, clientX: 78, bubbles: true }));
+  cards[1].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt5, clientX: 78, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt5, bubbles: true }));
+  check('center-band same-group drop stays a no-op',
+    JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([0, 1, 2, 3]));
+  h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+
+  // ---- empty-area drop: drag a group member into grid whitespace to extract just that card ----
+  const gcards = () => [...grid.children];
+  const rectAt = (left) => ({ left, width: 156, top: 0, height: 200, right: left + 156, bottom: 200 });
+  const resetGrid = () => h.ev('[...items].sort((a,b)=>a.uid-b.uid).forEach(i => document.getElementById("grid").appendChild(i.el)); updatePdfOrderFromGrid()');
+  const pinRects = () => gcards().forEach((c, i) => { c.getBoundingClientRect = () => rectAt(i * 166); });
+  resetGrid();
+  h.ev('items[0].pageGroup = 1; items[1].pageGroup = 1; items[2].pageGroup = 1; cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+  pinRects();
+  const dt6 = { effectAllowed: '', setData() {}, dropEffect: '' };
+  gcards()[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt6, bubbles: true }));
+  // dragover over the grid itself (whitespace past the last card); nearest anchor is card 3
+  grid.dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt6, clientX: 600, clientY: 100, bubbles: true }));
+  check('empty-area dragover marks the grid as an extract zone', grid.classList.contains('extract-zone'));
+  check('empty-area dragover shows a single insertion marker on the anchor',
+    gcards()[3].classList.contains('drag-insert-before') && !gcards()[3].classList.contains('drag-insert-group'));
+  check('empty-area drag previews the extracted single-card order',
+    JSON.stringify(gcards().map((c) => c.querySelector('.page-order').value)) === JSON.stringify(['3', '1', '2', '4']));
+  check('empty-area dragover keeps DOM untouched',
+    JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([0, 1, 2, 3]));
+  grid.dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt6, clientX: 600, clientY: 100, bubbles: true }));
+  gcards()[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt6, bubbles: true }));
+  check('empty-area drop moves only the dragged card',
+    JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([1, 2, 0, 3]));
+  check('empty-area drop removes the card from its group',
+    JSON.stringify(h.ev('items.map(i => i.pageGroup)')) === JSON.stringify([null, 1, 1, null]),
+    h.ev('items.map(i => i.pageGroup)'));
+  check('remaining group stays one contiguous outline box',
+    outlineLayer.querySelectorAll('.group-outline').length === 1);
+  check('extract-zone visual cleared after drop', !grid.classList.contains('extract-zone'));
+
+  // a two-member group dissolves when one card is extracted
+  resetGrid();
+  h.ev('items.forEach(i => i.pageGroup = null); items[1].pageGroup = 2; items[2].pageGroup = 2; cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+  pinRects();
+  gcards()[1].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt6, bubbles: true }));
+  grid.dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt6, clientX: 600, clientY: 100, bubbles: true }));
+  gcards()[1].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt6, bubbles: true }));
+  check('extracting from a two-member group dissolves the group',
+    h.ev('items.every(i => !i.pageGroup)') === true, h.ev('items.map(i => i.pageGroup)'));
+  check('dissolved group leaves no outline box', outlineLayer.classList.contains('hidden') ||
+    outlineLayer.querySelectorAll('.group-outline').length === 0);
+
+  // ungrouped cards can also be reordered via an empty-area drop without touching membership
+  resetGrid();
+  pinRects();
+  gcards()[3].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt6, bubbles: true }));
+  grid.dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt6, clientX: 50, clientY: 100, bubbles: true }));
+  gcards()[3].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt6, bubbles: true }));
+  check('empty-area drop reorders an ungrouped card too',
+    JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([0, 3, 1, 2]));
+  h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+
+  // ---- Word-like character styling: the block toolbar acts on the textarea selection (2.44/2.46) ----
+  {
+    const ta = h.window.document.createElement('textarea');
+    ta.value = 'hello brave world';
+    h.window.document.body.appendChild(ta);
+    h.window.__wrapTa = ta;
+    ta.focus();
+    // wrap the selected word "brave" with bold markers
+    ta.setSelectionRange(6, 11);
+    h.ev(`wrapSelection(__wrapTa, '**', '**')`);
+    check('inline wrap inserts bold markers around the selection', ta.value === 'hello **brave** world', ta.value);
+    check('inline wrap keeps the inner text selected', ta.selectionStart === 8 && ta.selectionEnd === 13, [ta.selectionStart, ta.selectionEnd]);
+    // pressing the same button again on the same selection removes the markers
+    h.ev(`wrapSelection(__wrapTa, '**', '**')`);
+    check('inline wrap toggles off when the marked selection is wrapped again', ta.value === 'hello brave world', ta.value);
+    // no selection -> an empty marker pair is inserted with the caret inside
+    ta.value = 'abc'; ta.setSelectionRange(1, 1);
+    h.ev(`wrapSelection(__wrapTa, '__', '__')`);
+    check('inline wrap with no selection inserts an empty pair', ta.value === 'a____bc', ta.value);
+    check('caret lands inside the empty marker pair', ta.selectionStart === 3 && ta.selectionEnd === 3, [ta.selectionStart, ta.selectionEnd]);
+    // italic and bold markers coexist on different words and survive the round trip
+    ta.value = 'one two'; ta.setSelectionRange(0, 3);
+    h.ev(`wrapSelection(__wrapTa, '*', '*')`);
+    check('italic marker applied independently', ta.value === '*one* two', ta.value);
+    ta.remove();
+  }
+  {
+    // parameter tags: size wraps the selection, re-applying replaces the parameter; color can be unwrapped
+    const ta = h.window.document.createElement('textarea');
+    ta.value = 'hello world';
+    h.window.document.body.appendChild(ta);
+    h.window.__tagTa = ta;
+    ta.setSelectionRange(6, 11);
+    h.ev(`wrapTagSelection(__tagTa, 'size', '24')`);
+    check('size tag wraps the selection', ta.value === 'hello [size=24]world[/size]', ta.value);
+    h.ev(`wrapTagSelection(__tagTa, 'size', '30')`);
+    check('re-applying size replaces the parameter in place', ta.value === 'hello [size=30]world[/size]', ta.value);
+    h.ev(`wrapTagSelection(__tagTa, 'color', '#ff0000')`);
+    check('color tag wraps the same selection inside the size tag',
+      ta.value === 'hello [size=30][color=#ff0000]world[/color][/size]', ta.value);
+    check('color auto unwrap removes only the color tag',
+      h.ev(`unwrapTagSelection(__tagTa, 'color')`) === true &&
+      ta.value === 'hello [size=30]world[/size]', ta.value);
+    ta.remove();
+  }
+  // ---- OCR source text copy button inside the editor ----
+  {
+    let copied = '';
+    h.window.navigator.clipboard = { writeText: async (t) => { copied = t; } };
+    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "Recognizable english sentence", tr: "ترجمه", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
+    const copyBtn = h.$('edList').querySelector('.blk-copy-orig');
+    check('editor exposes an OCR copy button', !!copyBtn);
+    copyBtn.click();
+    await sleep(10);
+    check('copy button puts the English OCR text on the clipboard', copied === 'Recognizable english sentence', copied);
+    check('copy button shows the copied state', copyBtn.classList.contains('copied'));
+    h.$('edClose').click();
+  }
+
+  {
+    // the shared block toolbar drives both block-level (no selection) and inline (selection) styling
+    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "hi", tr: "hello world", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
+    const edList = h.$('edList');
+    const edTa = edList.querySelector('textarea');
+    const boldBtn = edList.querySelector('.blk-bold');
+    const underBtn = edList.querySelector('.blk-under');
+    check('separate inline row removed; only the block toolbar exists',
+      !edList.querySelector('.blk-inline') && !!boldBtn && !!underBtn);
+    // no selection: bold toggles the whole block flag
+    edTa.setSelectionRange(0, 0);
+    boldBtn.click();
+    check('bold without selection toggles the block flag', h.ev('items[0].ocr.blocks[0].bold') === false);
+    // with a selection: the same button inserts inline markers and leaves the block flag untouched
+    edTa.setSelectionRange(6, 11);
+    boldBtn.click();
+    check('bold with selection inserts inline markers only',
+      edTa.value === 'hello **world**' && h.ev('items[0].ocr.blocks[0].bold') === false, edTa.value);
+    check('bold button shows active state for the marked selection', boldBtn.classList.contains('active'));
+    // selecting everything and underlining applies underline to the whole line via markers
+    edTa.setSelectionRange(0, edTa.value.length);
+    underBtn.click();
+    check('select-all underline marks the whole line', edTa.value === '__hello **world**__', edTa.value);
+    h.$('edClose').click();
+  }
+
+  // ---- editor refresh gating: no re-render while a field is focused, flush on blur (2.45) ----
+  {
+    h.ev('items[0].ocr = { lang: "eng", blocks: [' +
+      '{ id: 1, text: "a", tr: "one", enabled: true, bg: "white", x0: 0, y0: 0, x1: 80, y1: 40, lineH: 16 },' +
+      '{ id: 2, text: "b", tr: "two", enabled: true, bg: "white", x0: 0, y0: 50, x1: 80, y1: 90, lineH: 16 }] };' +
+      'openEditor(items[0])');
+    h.ev('window.__applyCalls = 0; window.__origApplyEditor = applyEditor;' +
+      'applyEditor = async function(){ window.__applyCalls++; return window.__origApplyEditor.apply(this, arguments); }');
+    const edList2 = h.$('edList');
+    const tas = [...edList2.querySelectorAll('textarea')];
+    tas[0].focus();
+    tas[0].value = 'edited while focused';
+    tas[0].dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    await sleep(1000); // longer than the 900ms time trigger
+    check('no re-render while the textarea stays focused', h.ev('window.__applyCalls') === 0, h.ev('window.__applyCalls'));
+    // moving focus straight to another block's field also must not flush (user is still editing)
+    tas[1].focus();
+    await sleep(60);
+    check('switching to another editor field keeps the render pending', h.ev('window.__applyCalls') === 0);
+    // leaving the editor fields flushes immediately
+    h.window.document.body.focus();
+    tas[1].blur();
+    await sleep(120);
+    check('blur out of the editor flushes the pending render', h.ev('window.__applyCalls') === 1, h.ev('window.__applyCalls'));
+    // without any focused field, the 900ms time trigger works as the fallback
+    h.ev('window.__applyCalls = 0');
+    tas[0].value = 'unfocused edit';
+    tas[0].dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    await sleep(1000);
+    check('time trigger renders when no editor field is focused', h.ev('window.__applyCalls') >= 1, h.ev('window.__applyCalls'));
+    h.ev('applyEditor = window.__origApplyEditor');
+    h.$('edClose').click();
+  }
+
   // ---- output settings open/close ----
   const settings = h.$('outputSettings');
   settings.open = true;

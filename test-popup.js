@@ -64,6 +64,23 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('version pill present', !!pdoc.querySelector('.version-pill'));
   check('start button present', !!pdoc.getElementById('startBtn'));
   check('file name input present', !!pdoc.getElementById('pdfName'));
+  check('page limit input present', pdoc.getElementById('pageLimit') &&
+    pdoc.getElementById('pageLimit').type === 'number');
+  check('manual next selector input present', !!pdoc.getElementById('nextSelector'));
+  check('manual image selector input present', !!pdoc.getElementById('imageSelector'));
+  check('advanced F12 section present', !!pdoc.querySelector('.advanced summary'));
+  const pagedFields = pdoc.getElementById('pagedModeFields');
+  check('paged-mode container exists and hides both controls by default',
+    pagedFields && pagedFields.classList.contains('hidden') &&
+    pagedFields.contains(pdoc.getElementById('pageLimit')) &&
+    !!pagedFields.querySelector('.advanced'));
+  const scrollFields = pdoc.getElementById('scrollModeFields');
+  check('scroll-mode container with deep-search checkbox is visible by default',
+    scrollFields && !scrollFields.classList.contains('hidden') &&
+    pdoc.getElementById('deepSearch') && pdoc.getElementById('deepSearch').type === 'checkbox' &&
+    scrollFields.contains(pdoc.getElementById('deepSearch')));
+  check('page limit label is generic (no site name)',
+    !/Google Books/i.test(pdoc.querySelector('label[for="pageLimit"]').textContent));
   check('idle status box hidden with no filler text', pdoc.getElementById('statusBox').classList.contains('hidden') &&
     pdoc.getElementById('statusText').textContent.trim() === '');
 }
@@ -73,8 +90,31 @@ check('popup has setStatus helper (text only)', /const setStatus = \(text\)/.tes
 check('popup reveals the box only via showError', /const showError = \(text\)/.test(popupCode) &&
   /statusBox\.classList\.remove\('hidden'\)/.test(popupCode));
 
+// mode-gated visibility helper, extracted from popup.js and unit-tested directly
+{
+  const match = popupCode.match(/const applyModeFields = \(mode\) => \{[\s\S]*?\};/);
+  const pagedStub = window.document.createElement('div');
+  pagedStub.className = 'hidden';
+  const scrollStub = window.document.createElement('div'); // starts visible like the real container
+  window.pagedModeFields = pagedStub;
+  window.scrollModeFields = scrollStub;
+  // const bindings do not survive separate eval calls; assign the helper onto the global instead
+  window.eval(match[0].replace('const applyModeFields', 'window.applyModeFields'));
+  window.eval('applyModeFields("scroll")');
+  check('helper: scroll mode hides the paged fields', pagedStub.classList.contains('hidden'));
+  check('helper: scroll mode shows the scroll fields', !scrollStub.classList.contains('hidden'));
+  window.eval('applyModeFields("auto")');
+  check('helper: auto mode reveals the paged fields', !pagedStub.classList.contains('hidden'));
+  check('helper: auto mode hides the scroll fields', scrollStub.classList.contains('hidden'));
+  window.eval('applyModeFields("manual")');
+  check('helper: manual mode keeps the paged fields visible', !pagedStub.classList.contains('hidden'));
+  window.eval('applyModeFields("scroll")');
+  check('helper: returning to scroll restores both containers',
+    pagedStub.classList.contains('hidden') && !scrollStub.classList.contains('hidden'));
+}
+
 // interactive behavior: run the real popup.html + popup.js with a mocked chrome API
-async function runPopupOnce(executeResult, shouldReject) {
+async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   const dom2 = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
     url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
   });
@@ -87,19 +127,30 @@ async function runPopupOnce(executeResult, shouldReject) {
     configurable: true
   });
   w.chrome = {
+    // start handler resolves the active tab before injecting; the popup itself no longer uses tabs for field visibility
     tabs: { query: async () => [{ id: 1 }] },
     scripting: {
       executeScript: shouldReject
         ? async () => { throw new Error('Cannot access chrome:// URLs'); }
-        : async () => [{ result: executeResult }]
+        : async (opts) => {
+          // stage 1: frame probe; stage 2: the real scrape injection
+          if (opts.func && opts.func.name === 'probeBookFrame') {
+            return [{ frameId: 0, result: { isReader: false, href: 'https://comic.test/ep', id: '' } }];
+          }
+          return [{ result: executeResult }];
+        }
     }
   };
   vm.runInContext(popupCode, c, { filename: 'popup.js' });
-  w.document.getElementById('startBtn').click();
-  await new Promise((r) => setTimeout(r, 10));
+  if (clickStart) {
+    w.document.getElementById('startBtn').click();
+    await new Promise((r) => setTimeout(r, 10));
+  }
   return {
+    win: w,
     boxHidden: w.document.getElementById('statusBox').classList.contains('hidden'),
-    text: w.document.getElementById('statusText').textContent
+    text: w.document.getElementById('statusText').textContent,
+    pagedHidden: w.document.getElementById('pagedModeFields').classList.contains('hidden')
   };
 }
 
@@ -155,12 +206,14 @@ async function runPopupOnce(executeResult, shouldReject) {
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   const cancelRes = await cancelRun;
   check('ESC returns a cancelled result', cancelRes && cancelRes.cancelled === true && cancelRes.count === 0, cancelRes);
-  check('cancelled scrape sends no WTPDF_URLS message', sent.length === messagesBefore, sent.length);
+  // ESC may also send a WTPDF_GBOOKS_CANCEL control message; only WTPDF_URLS jobs must be counted
+  const urlJobs = () => sent.filter((m) => m.type === 'WTPDF_URLS').length;
+  check('cancelled scrape sends no WTPDF_URLS message', urlJobs() === messagesBefore, urlJobs());
   check('overlay removed after cancel', !window.document.querySelector('.wtpdf-overlay'));
   check('running flag reset after cancel', window.__wtpdfRunning === false);
   // leftover ESC keypress must not start or cancel anything new (listener was removed in finally)
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-  check('no overlay reappears from a stray ESC', !window.document.querySelector('.wtpdf-overlay') && sent.length === messagesBefore);
+  check('no overlay reappears from a stray ESC', !window.document.querySelector('.wtpdf-overlay') && urlJobs() === messagesBefore);
 
   // interactive popup status box: hidden on success, visible only on error/warning
   const successRun = await runPopupOnce({ count: 5, skippedInline: 0 });
@@ -175,6 +228,55 @@ async function runPopupOnce(executeResult, shouldReject) {
   check('failed run shows the box with the error', !errorRun.boxHidden && /خطا/.test(errorRun.text), errorRun);
   const secondSuccess = await runPopupOnce({ count: 2 });
   check('later success clears a previously shown error', secondSuccess.boxHidden && secondSuccess.text === '', secondSuccess);
+  // mode-specific controls follow the selected collection mode, never the site hostname
+  const modePopup = await runPopupOnce({ count: 1 }, false, false);
+  const mpw = modePopup.win;
+  const fieldsEl = mpw.document.getElementById('pagedModeFields');
+  const scrollEl = mpw.document.getElementById('scrollModeFields');
+  check('default scroll mode hides the paged controls', fieldsEl.classList.contains('hidden'));
+  check('default scroll mode shows the deep-search checkbox', !scrollEl.classList.contains('hidden'));
+  mpw.document.querySelector('.mode-btn[data-mode="auto"]').click();
+  check('switching to auto mode reveals the paged controls on any site',
+    !fieldsEl.classList.contains('hidden') && mpw.document.getElementById('pageLimit'));
+  check('switching to auto mode hides the deep-search checkbox', scrollEl.classList.contains('hidden'));
+  mpw.document.querySelector('.mode-btn[data-mode="manual"]').click();
+  check('manual mode keeps the paged controls visible', !fieldsEl.classList.contains('hidden'));
+  mpw.document.querySelector('.mode-btn[data-mode="scroll"]').click();
+  check('switching back to scroll restores the field visibility',
+    fieldsEl.classList.contains('hidden') && !scrollEl.classList.contains('hidden'));
+
+  // two-stage injection: a reader frame reported by the probe must become the scrape target
+  {
+    const calls = [];
+    const dom3 = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const w3 = dom3.window;
+    Object.defineProperty(w3.Element.prototype, 'innerText', {
+      get() { return this.textContent; }, set(v) { this.textContent = v; }, configurable: true
+    });
+    w3.chrome = {
+      tabs: { query: async () => [{ id: 1 }] },
+      scripting: {
+        executeScript: async (opts) => {
+          calls.push(opts);
+          if (opts.func && opts.func.name === 'probeBookFrame') {
+            return [
+              { frameId: 0, result: { isReader: false, href: 'https://www.google.com/books/edition/T/B1abcdef', id: '' } },
+              { frameId: 77, result: { isReader: true, href: 'https://books.google.com/books?id=B1abcdef&output=embed', id: 'B1abcdef' } }
+            ];
+          }
+          return [{ result: { count: 4, skippedInline: 0 } }];
+        }
+      }
+    };
+    vm.runInContext(popupCode, dom3.getInternalVMContext(), { filename: 'popup.js' });
+    w3.document.getElementById('startBtn').click();
+    await new Promise((r) => setTimeout(r, 10));
+    check('frame probe runs across all frames', calls[0] && calls[0].target && calls[0].target.allFrames === true, calls[0]);
+    check('scrape injected into the reader frame only',
+      calls[1] && calls[1].target && calls[1].target.frameIds && calls[1].target.frameIds[0] === 77, calls[1] && calls[1].target);
+  }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL POPUP TESTS PASSED');
   process.exit(failures ? 1 : 0);

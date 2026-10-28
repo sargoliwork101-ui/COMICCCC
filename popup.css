@@ -1,2 +1,42 @@
 body { width: 360px; padding: 18px; display: flex; flex-direction: column; gap: 16px; }
 #statusText { font-size: 12.5px; line-height: 1.9; white-space: pre-line; font-weight: 500; color: #cfd4e2; }
+
+.mode-seg { display: flex; gap: 5px; background: rgba(255,255,255,.05); border: 1px solid var(--line2); border-radius: 12px; padding: 4px; }
+.mode-btn {
+  flex: 1; border: 0; background: transparent; color: var(--muted); border-radius: 9px;
+  padding: 9px 4px; cursor: pointer; font: 600 11px/1.4 'Vazirmatn', sans-serif;
+  transition: background .15s, color .15s, box-shadow .15s;
+}
+.mode-btn:hover { color: var(--text); }
+.mode-btn.active { background: var(--grad); color: #fff; box-shadow: var(--glow); }
+.mode-hint { margin: 7px 2px 0; font: 500 10.5px/1.7 'Vazirmatn', sans-serif; color: var(--faint); }
+
+.update-btn { flex: none; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px;
+  border: 1px solid var(--line2); background: rgba(255,255,255,.05); color: var(--muted); cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s; }
+.update-btn:hover { color: var(--text); border-color: var(--a1); }
+.update-btn:disabled { opacity: .6; cursor: default; }
+.update-btn svg { width: 17px; height: 17px; }
+.update-btn.spinning svg { animation: wtpdf-spin .8s linear infinite; }
+.update-status { font: 600 11px/1.8 'Vazirmatn', sans-serif; padding: 8px 11px; border-radius: 10px;
+  background: rgba(255,255,255,.05); border: 1px solid var(--line2); }
+.update-status.ok { color: #6ee7b7; border-color: rgba(52,211,153,.45); }
+.update-status.warn { color: #fcd34d; border-color: rgba(251,191,36,.45); }
+.update-status.err { color: #fda4af; border-color: rgba(251,113,133,.45); }
+@keyframes wtpdf-spin { to { transform: rotate(360deg); } }
+
+.advanced { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 12px; padding: 10px 13px; }
+.advanced > summary { cursor: pointer; font: 700 12px 'Vazirmatn', sans-serif; color: var(--muted); list-style: none; position: relative; padding-inline-start: 18px; }
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced > summary::before { content: '▸'; position: absolute; inset-inline-start: 0; color: var(--a1); transition: transform .15s; }
+.advanced[open] > summary::before { transform: rotate(90deg); }
+.advanced[open] > summary { margin-bottom: 10px; }
+.advanced .field { margin-top: 10px; }
+.advanced b { color: var(--text); font-weight: 700; }
+
+.check-field { display: flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
+.check-field input[type="checkbox"] {
+  width: 17px; height: 17px; flex: none; accent-color: var(--a1); cursor: pointer; margin: 0;
+}
+.check-field span { font: 700 13px/1.5 'Vazirmatn', sans-serif; color: var(--text); }
+#scrollModeFields .mode-hint { margin-top: 6px; }

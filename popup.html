@@ -13,12 +13,63 @@
       <h1>PIC TO PDF</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v2.24</span>
+    <span class="version-pill">v2.47</span>
+    <button type="button" id="updateBtn" class="update-btn" title="بررسی و دانلود به‌روزرسانی از گیت‌هاب"
+      aria-label="بررسی به‌روزرسانی">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
+        stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+        <path d="M21 3v6h-6" />
+      </svg>
+    </button>
+  </div>
+  <div id="updateStatus" class="update-status hidden" role="status" aria-live="polite"></div>
+
+  <div class="field">
+    <label>روش جمع‌آوری تصاویر</label>
+    <div class="mode-seg" id="modeSeg" role="group" aria-label="روش جمع‌آوری تصاویر">
+      <button type="button" class="mode-btn active" data-mode="scroll" title="اسکرول خودکار تا انتهای صفحه؛ مناسب کمیک و وب‌تون تودرتو">اسکرول صفحه</button>
+      <button type="button" class="mode-btn" data-mode="auto" title="خود افزونه روی مثلث یا دکمهٔ صفحهٔ بعدی کلیک می‌کند؛ مناسب کتاب‌های صفحه‌ای مثل Google Books">ورق‌زدن خودکار</button>
+      <button type="button" class="mode-btn" data-mode="manual" title="خودت روی صفحهٔ بعدی کلیک می‌کنی و افزونه هر تصویر تازه را خودش برمی‌دارد؛ با دکمهٔ «تمام شد» پایان می‌دهی">ورق‌زدن دستی</button>
+    </div>
+    <p class="mode-hint">اسکرول برای کمیک‌های تودرتو؛ ورق‌زدن برای سایت‌های صفحه‌ای که با کلیک روی مثلث عوض می‌شوند.</p>
   </div>
 
   <div class="field">
     <label for="pdfName">نام فایل خروجی</label>
     <input type="text" id="pdfName" value="comic" spellcheck="false">
+  </div>
+
+  <!-- فقط در حالت اسکرول صفحه نمایش داده می‌شود؛ popup.js با تغییر حالت باز/بسته‌اش می‌کند -->
+  <div id="scrollModeFields">
+    <label class="check-field" for="deepSearch">
+      <input type="checkbox" id="deepSearch">
+      <span>جستجوی عمیق</span>
+    </label>
+    <p class="mode-hint">به‌صورت پیش‌فرض فقط تصاویر اصلی کمیک جمع می‌شوند؛ با تیک‌زدن این گزینه همهٔ تصاویر صفحه (ریز و درشت، شامل بنر و آیکون) با روش کامل بررسی می‌شوند.</p>
+  </div>
+
+  <!-- این کنترل‌ها فقط در حالت‌های ورق‌زدن خودکار/دستی نمایش داده می‌شوند (روی هر سایتی)؛ popup.js بر اساس حالت انتخابی بازشان می‌کند -->
+  <div id="pagedModeFields" class="hidden">
+    <div class="field">
+      <label for="pageLimit" title="خالی بودن یعنی همهٔ صفحات بدون محدودیت خوانده شوند">حداکثر تعداد صفحات</label>
+      <input type="number" id="pageLimit" min="1" step="1" inputmode="numeric" spellcheck="false"
+        placeholder="خالی = همهٔ صفحات">
+    </div>
+
+    <details class="advanced">
+      <summary>تنظیمات پیشرفته — انتخابگر دستی المان از F12</summary>
+      <p class="mode-hint">وقتی افزونه خودش دکمهٔ بعدی یا تصاویر را پیدا نمی‌کند، آدرس المان را از DevTools بدهید:
+        روی المان صفحه راست‌کلیک ← <b>Inspect</b> ← در پنل درخت DOM روی المان راست‌کلیک ← <b>Copy</b> ← <b>Copy selector</b>.</p>
+      <div class="field">
+        <label for="nextSelector">انتخابگر CSS دکمهٔ صفحهٔ بعدی (اختیاری)</label>
+        <input type="text" id="nextSelector" dir="ltr" spellcheck="false" placeholder='مثال: button[aria-label="Next page"]'>
+      </div>
+      <div class="field">
+        <label for="imageSelector">انتخابگر CSS تصاویر صفحه (اختیاری)</label>
+        <input type="text" id="imageSelector" dir="ltr" spellcheck="false" placeholder="مثال: .reader-content img.page">
+      </div>
+    </details>
   </div>
 
   <div class="box hidden" id="statusBox">
@@ -31,5 +82,6 @@
   </button>
 
   <script src="popup.js"></script>
+  <script src="update.js"></script>
 </body>
 </html>

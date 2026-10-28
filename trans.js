@@ -154,11 +154,41 @@ async function runTranslate() {
   }
 }
 
+// کپی متن ساده در کلیپ‌بورد؛ در نبود Clipboard API (مجوز/پروتکل) از روش قدیمی textarea استفاده می‌کند
+async function copyPlainText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    ta.remove();
+    return ok;
+  }
+}
+
 // ---------- ویرایشگر ----------
 let EDI = null, edUrl = null, edTimer = null, edDirty = false, edBusy = false, edPending = false;
+// تریگر زمانی اطمینان: همان ۹۰۰ms قبلی، اما وقتی کاربر هنوز داخل فیلدهای ویرایشگر است رندر عقب می‌افتد
+const EDITOR_APPLY_DELAY = 900;
+// وضعیت صریح فوکوس فیلدها (روی مرورگرها هم در لحظهٔ focusout قابل اعتمادتر از activeElement است)
+let edFieldFocused = false;
+const editorFieldEl = (el) => {
+  if (!el || !el.closest || !el.closest('#edList')) return null;
+  return ['TEXTAREA', 'INPUT', 'SELECT'].includes(el.tagName) ? el : null;
+};
+// دکمه‌ها عمداً فیلد حساب نمی‌شوند تا بعد از کلیک روی آن‌ها تریگر زمانی ۹۰۰ms بتواند رندر را انجام دهد.
+function isEditorInputFocused() { return edFieldFocused; }
 
-function setEdImage() {
-  const blob = EDI.edited ? EDI.edited.blob : EDI.blob;
+function setEdImage(item = EDI) {
+  if (!item) return;
+  const blob = item.edited ? item.edited.blob : item.blob;
   if (edUrl) URL.revokeObjectURL(edUrl);
   edUrl = URL.createObjectURL(blob);
   $('edImg').src = edUrl;
@@ -176,19 +206,119 @@ function setActiveBlock(id, scroll) {
 function scheduleApply() {
   edDirty = true;
   clearTimeout(edTimer);
-  edTimer = setTimeout(applyEditor, 900);
+  // تا وقتی کاربر در حال کار روی فیلدهاست رندر نمی‌کنیم (نه تصویر پیش‌نمایش می‌پرد نه بندانگشتی)؛
+  // تایمر ۹۰۰ms به‌عنوان شبکهٔ اطمینان باقی است و در حالت فوکوس دوباره مسلح می‌شود.
+  // رندر واقعی با blur فیلد (پایان کار کاربر) یا بستن ویرایشگر اتفاق می‌افتد.
+  edTimer = setTimeout(() => {
+    if (isEditorInputFocused()) { scheduleApply(); return; }
+    applyEditor();
+  }, EDITOR_APPLY_DELAY);
+}
+
+// پایان کار کاربر روی یک فیلد: اگر تغییر معلق مانده، بلافاصله رندر کن
+function flushEditorOnBlur() {
+  if (edDirty) applyEditor();
+}
+
+// ---------- استایل درون‌متنی وردی: دکمه‌های نوار بلوک روی متن انتخاب‌شده، در نبود انتخاب روی کل بلوک ----------
+// مارکرهای ساده: **بولد** *ایتالیک* __زیرخط__؛ تگ‌ها: [size=24]..[/size] و [color=#hex]..[/color].
+// دور متن انتخاب‌شدهٔ textarea مارکر می‌گذارد؛ اگر انتخاب دقیقاً داخل همان جفت مارکر باشد، آن را برمی‌دارد.
+function wrapSelection(ta, open, close) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const value = ta.value;
+  const sel = value.slice(s, e);
+  const before = value.slice(Math.max(0, s - open.length), s);
+  const after = value.slice(e, e + close.length);
+  let next, caretS, caretE;
+  if (sel && before === open && after === close) {
+    next = value.slice(0, s - open.length) + sel + value.slice(e + close.length);
+    caretS = s - open.length;
+    caretE = caretS + sel.length;
+  } else if (sel) {
+    next = value.slice(0, s) + open + sel + close + value.slice(e);
+    caretS = s + open.length;
+    caretE = e + open.length;
+  } else {
+    // انتخابی نیست: جفت مارکر خالی می‌گذاریم و نشانگر را وسطش می‌بریم
+    next = value.slice(0, s) + open + close + value.slice(e);
+    caretS = caretE = s + open.length;
+  }
+  ta.value = next;
+  ta.focus();
+  ta.setSelectionRange(caretS, caretE);
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// تگ پارامتری (size/color): اگر انتخاب داخل تگ همان نوع باشد فقط پارامتر عوض می‌شود، وگرنه تگ تازه دورش می‌نشیند
+function wrapTagSelection(ta, tag, param) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const value = ta.value, sel = value.slice(s, e);
+  if (!sel) {
+    wrapSelection(ta, `[${tag}=${param}]`, `[/${tag}]`);
+    return;
+  }
+  const before = value.slice(0, s), after = value.slice(e);
+  const openRe = new RegExp(`\\[${tag}=[^\\]]+\\]$`);
+  const closeRe = new RegExp(`^\\[/${tag}\\]`);
+  const bm = before.match(openRe), am = after.match(closeRe);
+  let next, caretS, caretE;
+  if (bm && am) {
+    // فقط پارامتر تگ باز عوض می‌شود؛ تگ بسته و محتوای انتخاب دست می‌خورند
+    const newBefore = before.slice(0, bm.index) + `[${tag}=${param}]`;
+    next = newBefore + sel + after;
+    caretS = newBefore.length;
+    caretE = caretS + sel.length;
+  } else {
+    const open = `[${tag}=${param}]`, close = `[/${tag}]`;
+    next = before + open + sel + close + after;
+    caretS = s + open.length;
+    caretE = e + open.length;
+  }
+  ta.value = next;
+  ta.focus();
+  ta.setSelectionRange(caretS, caretE);
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// حذف تگ پارامتری دور انتخاب (برای رنگ خودکار روی انتخاب)
+function unwrapTagSelection(ta, tag) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const value = ta.value, sel = value.slice(s, e);
+  if (!sel) return false;
+  const before = value.slice(0, s), after = value.slice(e);
+  const bm = before.match(new RegExp(`\\[${tag}=[^\\]]+\\]$`));
+  const am = after.match(new RegExp(`^\\[/${tag}\\]`));
+  if (!bm || !am) return false;
+  const newBefore = before.slice(0, bm.index);
+  ta.value = newBefore + sel + after.slice(am[0].length);
+  ta.focus();
+  ta.setSelectionRange(newBefore.length, newBefore.length + sel.length);
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+}
+
+// آیا متن انتخاب‌شده دقیقاً داخل جفت مارکر داده‌شده است؟ (برای وضعیت فعال دکمه‌ها مثل ورد)
+function selectionHasMark(ta, mark) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  if (s === e) return null;
+  const v = ta.value;
+  return v.slice(Math.max(0, s - mark.length), s) === mark && v.slice(e, e + mark.length) === mark;
 }
 
 async function applyEditor() {
   if (!EDI) return;
   if (edBusy) { edPending = true; return; }
+  // آیتم را در همان ابتدا تثبیت کن؛ اگر حین رندر ناهمگام، ویرایشگر بسته یا به تصویر دیگری منتقل شد،
+  // فراخوانی‌های بعدی به EDI تهی‌شده دست نزنند و رندر آیتم قبلی سالم کامل شود
+  const item = EDI;
   edBusy = true; edDirty = false;
   clearTimeout(edTimer);
   try {
-    await renderEdited(EDI);
-    setEdImage();
-    refreshCard(EDI);
-    drawThumb(EDI);
+    await renderEdited(item);
+    // پیش‌نمایش ویرایشگر فقط وقتی هنوز روی همین آیتم باز است به‌روز شود
+    if (EDI === item) setEdImage(item);
+    refreshCard(item);
+    drawThumb(item);
   } catch (e) {
     console.warn(e);
     alert('خطا در ساخت تصویر: ' + (e && e.message ? e.message : e));
@@ -202,9 +332,20 @@ function buildEditor() {
   const it = EDI, bl = it.ocr.blocks;
   const list = $('edList'), boxes = $('edBoxes');
   list.innerHTML = ''; boxes.innerHTML = '';
+  edFieldFocused = false; // فیلدهای قبلی با بازسازی لیست از بین رفته‌اند
   if (!bl.length) { list.innerHTML = '<div class="ed-empty">در این تصویر متنی پیدا نشد.</div>'; return; }
 
+  // پیش‌فرض قالب‌بندی هر بلوک؛ دکمهٔ بازنشانی هم همین مقادیر را برمی‌گرداند
+  const FMT_DEFAULTS = { dir: 'rtl', align: 'right', bold: true, italic: false, underline: false, size: null, color: null };
   bl.forEach((b) => {
+    // پیش‌فرض‌های قالب‌بندی برای بلوک‌های ساخته‌شده در نسخه‌های قبل (فیلدها هنوز وجود ندارند)
+    b.dir = b.dir === 'ltr' ? 'ltr' : 'rtl';
+    b.align = b.align === 'center' || b.align === 'left' ? b.align : 'right';
+    b.bold = b.bold !== false;
+    b.italic = !!b.italic;
+    b.underline = !!b.underline;
+    b.size = Number.isFinite(+b.size) && +b.size > 0 ? +b.size : null;
+    b.color = /^#[0-9a-fA-F]{6}$/.test(b.color) ? b.color : null;
     const box = document.createElement('div');
     box.className = 'ed-box' + (b.enabled ? '' : ' off');
     box.dataset.id = b.id;
@@ -218,17 +359,154 @@ function buildEditor() {
     row.dataset.id = b.id;
     row.innerHTML = `<div class="blk-top"><span class="blk-n">${b.id}</span>
       <label><input type="checkbox" ${b.enabled ? 'checked' : ''}> جایگزین شود</label>
+      <button type="button" class="fmt-btn blk-copy-orig" title="کپی متن شناسایی‌شدهٔ انگلیسی (OCR)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+      </button>
       <select class="sel blk-bg"><option value="auto">پس‌زمینه: خودکار</option><option value="white">پس‌زمینه: سفید</option>
       <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن (متن با حاشیه)</option></select></div>
+      <div class="blk-format">
+        <div class="dir-group" title="جهت متن (راست‌به‌چپ / چپ‌به‌راست)">
+          <button type="button" class="fmt-btn blk-dir-rtl">RTL</button>
+          <button type="button" class="fmt-btn blk-dir-ltr">LTR</button>
+        </div>
+        <select class="sel blk-align" title="چیدمان فیزیکی خط‌ها">
+          <option value="right">راست‌چین</option>
+          <option value="center">وسط‌چین</option>
+          <option value="left">چپ‌چین</option>
+        </select>
+        <button type="button" class="fmt-btn blk-bold" title="پررنگ: روی متن انتخاب‌شده یا کل بلوک بدون انتخاب">B</button>
+        <button type="button" class="fmt-btn blk-italic" title="ایتالیک: روی متن انتخاب‌شده یا کل بلوک بدون انتخاب">I</button>
+        <button type="button" class="fmt-btn blk-under" title="زیرخط: روی متن انتخاب‌شده یا کل بلوک بدون انتخاب">U</button>
+        <label class="size-field">اندازهٔ فونت
+          <input type="number" class="blk-size" min="8" max="160" step="1" placeholder="خودکار" title="با متن انتخاب‌شده فقط همان بخش تغییر اندازه می‌دهد؛ بدون انتخاب، کل بلوک">
+        </label>
+        <label class="color-field" title="رنگ: با متن انتخاب‌شده فقط همان بخش رنگ می‌گیرد؛ بدون انتخاب کل بلوک. «خودکار» بر اساس روشنی پس‌زمینه است">رنگ
+          <input type="color" class="blk-color" value="#0b0b0b">
+          <button type="button" class="fmt-btn blk-color-auto">خودکار</button>
+        </label>
+        <button type="button" class="fmt-btn blk-reset" title="بازنشانی همهٔ قالب‌بندی‌های این متن به پیش‌فرض">↺</button>
+      </div>
       <div class="blk-orig"></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>`;
     row.querySelector('.blk-orig').textContent = b.text;
     const ta = row.querySelector('textarea'); ta.value = b.tr || '';
-    const sel = row.querySelector('select'); sel.value = b.bg;
-    const chk = row.querySelector('input');
+    const sel = row.querySelector('.blk-bg'); sel.value = b.bg;
+    const chk = row.querySelector('.blk-top input');
     ta.oninput = () => { b.tr = ta.value; scheduleApply(); };
     ta.onfocus = () => setActiveBlock(b.id, false);
     sel.onchange = () => { b.bg = sel.value; scheduleApply(); };
     chk.onchange = () => { b.enabled = chk.checked; row.classList.toggle('off', !b.enabled); box.classList.toggle('off', !b.enabled); scheduleApply(); };
+
+    const rtlBtn = row.querySelector('.blk-dir-rtl');
+    const ltrBtn = row.querySelector('.blk-dir-ltr');
+    const alignSel = row.querySelector('.blk-align');
+    const boldBtn = row.querySelector('.blk-bold');
+    const italicBtn = row.querySelector('.blk-italic');
+    const underBtn = row.querySelector('.blk-under');
+    const sizeInput = row.querySelector('.blk-size');
+    const colorInput = row.querySelector('.blk-color');
+    const colorAutoBtn = row.querySelector('.blk-color-auto');
+    const resetBtn = row.querySelector('.blk-reset');
+    // یک همگام‌ساز واحد: وضعیت همهٔ کنترل‌ها را از روی دادهٔ بلوک بازسازی می‌کند
+    const syncFmt = () => {
+      rtlBtn.classList.toggle('active', b.dir === 'rtl');
+      ltrBtn.classList.toggle('active', b.dir === 'ltr');
+      boldBtn.classList.toggle('active', b.bold);
+      italicBtn.classList.toggle('active', b.italic);
+      underBtn.classList.toggle('active', b.underline);
+      alignSel.value = b.align;
+      sizeInput.value = b.size ? String(b.size) : '';
+      colorAutoBtn.classList.toggle('active', !b.color);
+      colorInput.value = b.color || '#0b0b0b';
+      colorInput.classList.toggle('is-auto', !b.color);
+      ta.style.direction = b.dir; // پیش‌نمایش ویرایش هم جهت واقعی متن را نشان دهد
+    };
+    syncFmt();
+    // وضعیت فعال B/I/U هنگام تغییر انتخاب: وضعیت مارکر درون‌متنی انتخاب، در غیر این صورت وضعیت کل بلوک
+    const italicSelectionMark = () => {
+      const s = ta.selectionStart, e = ta.selectionEnd, v = ta.value;
+      if (s === e) return null;
+      return v.slice(Math.max(0, s - 1), s) === '*' && v.slice(e, e + 1) === '*' &&
+        v.slice(Math.max(0, s - 2), s) !== '**' && v.slice(e, e + 2) !== '**';
+    };
+    const syncSelectionFmt = () => {
+      const boldMark = selectionHasMark(ta, '**');
+      if (boldMark === null) { syncFmt(); return; }
+      boldBtn.classList.toggle('active', boldMark);
+      italicBtn.classList.toggle('active', !!italicSelectionMark());
+      underBtn.classList.toggle('active', !!selectionHasMark(ta, '__'));
+    };
+    ['select', 'keyup', 'click', 'focus'].forEach((evt) => ta.addEventListener(evt, syncSelectionFmt));
+    rtlBtn.onclick = () => { b.dir = 'rtl'; syncFmt(); scheduleApply(); };
+    ltrBtn.onclick = () => { b.dir = 'ltr'; syncFmt(); scheduleApply(); };
+    alignSel.onchange = () => { b.align = alignSel.value; scheduleApply(); };
+    // B/I/U مثل ورد: متن انتخاب‌شده باشد روی همان انتخاب، وگرنه روی کل بلوک
+    boldBtn.onclick = () => {
+      if (ta.selectionStart !== ta.selectionEnd) { wrapSelection(ta, '**', '**'); syncSelectionFmt(); }
+      else { b.bold = !b.bold; syncFmt(); }
+      scheduleApply();
+    };
+    italicBtn.onclick = () => {
+      if (ta.selectionStart !== ta.selectionEnd) { wrapSelection(ta, '*', '*'); syncSelectionFmt(); }
+      else { b.italic = !b.italic; syncFmt(); }
+      scheduleApply();
+    };
+    underBtn.onclick = () => {
+      if (ta.selectionStart !== ta.selectionEnd) { wrapSelection(ta, '__', '__'); syncSelectionFmt(); }
+      else { b.underline = !b.underline; syncFmt(); }
+      scheduleApply();
+    };
+    sizeInput.onchange = () => {
+      const n = Number.parseInt(sizeInput.value, 10);
+      const hasSelection = ta.selectionStart !== ta.selectionEnd;
+      if (!(Number.isFinite(n) && n >= 8)) {
+        // ورودی نامعتبر: داخل انتخاب بی‌اثر است، در غیر این صورت اندازهٔ کل بلوک به خودکار برمی‌گردد
+        if (hasSelection) sizeInput.value = b.size ? String(b.size) : '';
+        else { b.size = null; sizeInput.value = ''; scheduleApply(); }
+        return;
+      }
+      const size = Math.min(160, n);
+      if (hasSelection) {
+        // اندازه فقط برای متن انتخاب‌شده؛ فیلد بلوک به مقدار کل‌بلوک برمی‌گردد
+        wrapTagSelection(ta, 'size', String(size));
+        sizeInput.value = b.size ? String(b.size) : '';
+      } else {
+        b.size = size;
+        sizeInput.value = String(b.size);
+      }
+      scheduleApply();
+    };
+    colorInput.oninput = () => {
+      if (ta.selectionStart !== ta.selectionEnd) {
+        // رنگ فقط برای متن انتخاب‌شده؛ رنگ بلوک دست نمی‌خورد
+        wrapTagSelection(ta, 'color', colorInput.value);
+        colorInput.value = b.color || '#0b0b0b';
+      } else {
+        b.color = colorInput.value;
+      }
+      syncFmt();
+      scheduleApply();
+    };
+    colorAutoBtn.onclick = () => {
+      if (ta.selectionStart !== ta.selectionEnd) unwrapTagSelection(ta, 'color');
+      else b.color = null;
+      syncFmt();
+      scheduleApply();
+    };
+    resetBtn.onclick = () => { Object.assign(b, FMT_DEFAULTS); syncFmt(); scheduleApply(); };
+    // کپی متن انگلیسی OCRشدهٔ همین بلوک در کلیپ‌بورد، بدون خروج از ویرایشگر
+    const copyOrigBtn = row.querySelector('.blk-copy-orig');
+    copyOrigBtn.onclick = async () => {
+      const ok = await copyPlainText(b.text || '');
+      copyOrigBtn.classList.toggle('copied', ok);
+      copyOrigBtn.title = ok ? 'کپی شد ✓' : 'کپی ناموفق بود';
+      setTimeout(() => {
+        copyOrigBtn.classList.remove('copied');
+        copyOrigBtn.title = 'کپی متن شناسایی‌شدهٔ انگلیسی (OCR)';
+      }, 1400);
+    };
     list.appendChild(row);
   });
 }
@@ -246,6 +524,7 @@ function openEditor(it) {
 async function closeEditor() {
   if (!EDI) return;
   clearTimeout(edTimer);
+  edFieldFocused = false;
   if (edDirty) await applyEditor();
   $('editor').classList.add('hidden');
   document.body.style.overflow = '';
@@ -264,7 +543,11 @@ function exportText() {
   done.forEach((it) => {
     out += `===== تصویر ${String(it.i + 1).padStart(pad, '0')} =====\n\n`;
     it.ocr.blocks.forEach((b) => {
-      out += `[${b.id}] ${b.text}\n    ← ${b.tr && b.tr.trim() ? b.tr.trim() : '(بدون ترجمه)'}\n\n`;
+      // خروجی متنی ساده مارکرهای استایل درون‌متنی را ندارد
+      const tr = b.tr && b.tr.trim()
+        ? (typeof Typeset !== 'undefined' ? Typeset.stripInlineMarkers(b.tr) : b.tr).trim()
+        : '';
+      out += `[${b.id}] ${b.text}\n    ← ${tr || '(بدون ترجمه)'}\n\n`;
     });
   });
   const blob = new Blob(['\ufeff' + out], { type: 'text/plain;charset=utf-8' });
@@ -306,6 +589,18 @@ $('edRevert').onclick = async () => {
   await applyEditor();
 };
 $('btnTxt').onclick = exportText;
+// پایان کار کاربر روی فیلدها (کلیک بیرون از فیلد، رفتن به پیش‌نمایش): تغییرات معلق بلافاصله رندر می‌شوند.
+// focusout حباب‌دار است و با بازسازی innerHTML فهرست در buildEditor هم از بین نمی‌رود.
+$('edList').addEventListener('focusin', (e) => {
+  if (editorFieldEl(e.target)) edFieldFocused = true;
+});
+$('edList').addEventListener('focusout', (e) => {
+  if (!editorFieldEl(e.target)) return;
+  // جابه‌جایی بین دو فیلد ویرایشگر یعنی کاربر هنوز مشغول است؛ رندر معلق می‌ماند
+  if (editorFieldEl(e.relatedTarget)) return;
+  edFieldFocused = false;
+  flushEditorOnBlur();
+});
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!$('editor').classList.contains('hidden')) closeEditor();

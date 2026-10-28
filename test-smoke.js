@@ -204,6 +204,135 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('fit returns size/lines/lh', f && f.size >= 10 && Array.isArray(f.lines) && f.lh > 0, f);
   }
 
+  // ---------- Typeset per-block formatting (2.27) ----------
+  function recordingCtx() {
+    const calls = { font: [], textAlign: [], direction: [], fillStyles: [], fillText: [], strokeText: 0, beginPath: 0, stroke: 0, lineTo: 0 };
+    const ctx = {
+      textBaseline: '', lineWidth: 0, strokeStyle: '', lineJoin: '',
+      drawImage() {}, fillRect() {},
+      measureText: (s) => ({ width: String(s).length * 6 }),
+      getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }),
+      fillText(t, x, y) { calls.fillText.push({ t, x, y }); },
+      strokeText() { calls.strokeText++; },
+      beginPath() { calls.beginPath++; },
+      stroke() { calls.stroke++; },
+      moveTo() {}, lineTo() { calls.lineTo++; }
+    };
+    let font = '', textAlign = '', direction = '', fillStyle = '';
+    Object.defineProperty(ctx, 'font', { get: () => font, set: (v) => { font = v; calls.font.push(v); }, configurable: true });
+    Object.defineProperty(ctx, 'textAlign', { get: () => textAlign, set: (v) => { textAlign = v; calls.textAlign.push(v); }, configurable: true });
+    Object.defineProperty(ctx, 'direction', { get: () => direction, set: (v) => { direction = v; calls.direction.push(v); }, configurable: true });
+    Object.defineProperty(ctx, 'fillStyle', { get: () => fillStyle, set: (v) => { fillStyle = v; calls.fillStyles.push(v); }, configurable: true });
+    return { ctx, calls };
+  }
+  const fmtBase = { enabled: true, tr: 'سلام دنیا', x0: 10, y0: 10, x1: 190, y1: 80, lineH: 16, bg: 'white' };
+  const renderWith = (extra) => {
+    const { ctx, calls } = recordingCtx();
+    Typeset.render({ width: 200, height: 200 }, [{ ...fmtBase, ...extra }],
+      { createCanvas: () => ({ width: 200, height: 200, getContext: () => ctx }) });
+    return calls;
+  };
+  {
+    const calls = renderWith({});
+    check('legacy block defaults to right align', calls.textAlign.every((a) => a === 'right'), calls.textAlign);
+    check('default font is bold 700 without italic', calls.font.some((f) => /700/.test(f) && !/italic/.test(f)), calls.font);
+    check('no underline path by default', calls.stroke === 0 && calls.beginPath === 0);
+    check('fillText invoked for translation', calls.fillText.length >= 1);
+  }
+  {
+    const calls = renderWith({ align: 'left', bold: false, italic: true });
+    check('left align applied to canvas', calls.textAlign.every((a) => a === 'left'));
+    check('italic regular-weight font built', calls.font.some((f) => /^italic 400 /.test(f)), calls.font);
+  }
+  {
+    const calls = renderWith({ align: 'center', size: 33 });
+    check('center align applied to canvas', calls.textAlign.every((a) => a === 'center'));
+    check('manual font size honored over auto-fit', calls.font.some((f) => f.includes('33px')), calls.font);
+  }
+  {
+    const calls = renderWith({ underline: true });
+    check('underline draws a stroked path', calls.beginPath >= 1 && calls.stroke >= 1 && calls.lineTo >= 1);
+  }
+  {
+    const calls = renderWith({ bg: 'none' });
+    check('bg none keeps outline strokeText', calls.strokeText >= 1);
+  }
+  {
+    const st = Typeset.blockStyle({});
+    check('blockStyle safe defaults', st.dir === 'rtl' && st.align === 'right' && st.bold === true &&
+      st.italic === false && st.underline === false && st.size === null && st.color === null, st);
+  }
+  {
+    const calls = renderWith({});
+    check('default canvas direction is rtl', calls.direction.every((d) => d === 'rtl'), calls.direction);
+  }
+  {
+    const calls = renderWith({ dir: 'ltr' });
+    check('ltr block sets canvas direction ltr', calls.direction.every((d) => d === 'ltr'), calls.direction);
+  }
+  {
+    const calls = renderWith({ color: '#e11d48' });
+    check('manual text color reaches fillStyle before drawing', calls.fillStyles.includes('#e11d48'), calls.fillStyles);
+  }
+  {
+    const st = Typeset.blockStyle({ color: 'not-a-color', dir: 'sideways' });
+    check('invalid color/dir fall back safely', st.color === null && st.dir === 'rtl', st);
+  }
+
+  // ---------- Typeset inline (per-word) formatting (2.44) ----------
+  {
+    check('hasInlineMarks detects markers',
+      Typeset.hasInlineMarks('a **b** c *d* e __f__') === true &&
+      Typeset.hasInlineMarks('plain text with * unmatched') === false);
+    const runs = Typeset.tokenizeInline('سلام **دنیا** *کج* __خط__');
+    check('tokenizeInline splits styled runs',
+      runs.some((r) => r.t === 'دنیا' && r.bold) &&
+      runs.some((r) => r.t === 'کج' && r.italic) &&
+      runs.some((r) => r.t === 'خط' && r.underline) &&
+      runs.some((r) => r.t.includes('سلام') && !r.bold && !r.italic && !r.underline), runs);
+    check('stripInlineMarkers keeps the words only',
+      Typeset.stripInlineMarkers('سلام **دنیا** *کج* __خط__') === 'سلام دنیا کج خط');
+  }
+  {
+    // block is non-bold; the inline bold word must switch font to 700 while neighbors stay 400
+    const calls = renderWith({ bold: false, tr: 'one **two** three' });
+    check('inline bold word drawn separately',
+      calls.fillText.some((f) => f.t === 'two') &&
+      calls.fillText.some((f) => f.t === 'one') &&
+      calls.fillText.some((f) => f.t === 'three'), calls.fillText.map((f) => f.t));
+    check('inline bold uses 700 while plain words use 400 in a non-bold block',
+      calls.font.some((f) => /700/.test(f)) && calls.font.some((f) => /400/.test(f)), calls.font);
+  }
+  {
+    const calls = renderWith({ bold: false, underline: false, tr: 'base __u__ base' });
+    check('inline underline draws a stroked path without block underline',
+      calls.beginPath >= 1 && calls.stroke >= 1 && calls.lineTo >= 1);
+  }
+  {
+    const calls = renderWith({ tr: 'no markers here' });
+    check('plain text still uses the single-run path (right align)',
+      calls.textAlign.every((a) => a === 'right') &&
+      calls.fillText.some((f) => f.t === 'no markers here'), calls.textAlign);
+  }
+  {
+    const runs = Typeset.tokenizeInline('a [size=24]big[/size] b [color=#ff0000]red[/color]');
+    const sizeRun = runs.find((r) => r.t === 'big');
+    const colorRun = runs.find((r) => r.t === 'red');
+    check('tokenizeInline parses size and color tags',
+      sizeRun && sizeRun.size === 24 && colorRun && colorRun.color === '#ff0000', runs);
+    check('stripInlineMarkers removes size/color tags too',
+      Typeset.stripInlineMarkers('a [size=24]big[/size] [color=#ff0000]red[/color]') === 'a big red');
+  }
+  {
+    const calls = renderWith({ tr: 'a [size=24]big[/size] b' });
+    check('inline size word renders at its own font size',
+      calls.fillText.some((f) => f.t === 'big') && calls.font.some((f) => f.includes('24px')), calls.font);
+  }
+  {
+    const calls = renderWith({ tr: 'x [color=#ff0000]red[/color] y' });
+    check('inline color word reaches fillStyle', calls.fillStyles.includes('#ff0000'), calls.fillStyles);
+  }
+
   // ---------- Translate with mock fetch ----------
   {
     const fetchFn = async (url) => ({

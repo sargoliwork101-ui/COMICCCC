@@ -102,12 +102,103 @@ function check(name, cond, extra) {
     let items = h.ev('items');
     check('all failed when network down', items.every((it) => it.state === 'failed'), items.map((i) => i.state));
     check('retry button visible', !h.$('btnRetry').classList.contains('hidden'));
+    check('toolbar retry-all button visible', !h.$('btnRetryAll').classList.contains('hidden'));
     check('failed cards not selected', items.every((it) => !it.selected));
+    // 2.25: every failed card shows its own retry button
+    const cardRetryButtons = [...h.$('grid').querySelectorAll('.item .retry')];
+    check('one per-card retry button per card', cardRetryButtons.length === items.length);
+    check('per-card retry shown on failed items', items.every((it) => it.el.classList.contains('failed')));
+
+    // per-card retry: only the clicked card is retried; others stay failed
+    h.window.fetch = async (url) => {
+      if (String(url).includes('a.png')) {
+        return { ok: true, status: 200, blob: async () => new h.window.Blob([PNG], { type: 'image/png' }), json: async () => [[]] };
+      }
+      throw new Error('still down');
+    };
+    cardRetryButtons[0].click();
+    for (let i = 0; i < 60; i++) { await sleep(60); if (h.ev('items')[0].state !== 'loading') break; }
+    items = h.ev('items');
+    check('per-card retry recovers only that card', items[0].state === 'ok' &&
+      items.slice(1).every((it) => it.state === 'failed'), items.map((i) => i.state));
+    check('recovered card loses the failed class (retry hidden again)', !items[0].el.classList.contains('failed'));
+    check('toolbar retry-all stays visible while failures remain', !h.$('btnRetryAll').classList.contains('hidden'));
+
+    // toolbar retry-all recovers the rest
     failAll = false;
-    h.$('btnRetry').click();
+    h.window.fetch = async () => ({ ok: true, status: 200, blob: async () => new h.window.Blob([PNG], { type: 'image/png' }), json: async () => [[]] });
+    h.$('btnRetryAll').click();
     for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
     items = h.ev('items');
     check('retry recovers all', items.every((it) => it.state === 'ok'), items.map((i) => i.state));
+    check('retry-all hidden after full recovery', h.$('btnRetryAll').classList.contains('hidden'));
+  }
+
+  // ---------- 2b. single-card retry: progress indicator + control lock while in flight ----------
+  {
+    const h = makeHarness({
+      fetchImpl: async () => { throw new Error('network down'); }
+    });
+    h.window.chrome.scripting.executeScript = async () => { throw new Error('blocked'); };
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    let items = h.ev('items');
+    check('2b: all cards failed first', items.every((it) => it.state === 'failed'), items.map((i) => i.state));
+    const firstCard = items[0].el;
+    check('2b: failed card has no spin before retry', !firstCard.querySelector('.spin'));
+
+    // یک fetch معوق تا تلاش مجدد تکی را در حالت «در حال دریافت» نگه داریم
+    let resolveFetch = null;
+    h.window.fetch = () => new Promise((resolve) => {
+      resolveFetch = () => resolve({
+        ok: true, status: 200,
+        blob: async () => new h.window.Blob([PNG], { type: 'image/png' }),
+        json: async () => [[]]
+      });
+    });
+    firstCard.querySelector('.retry').click();
+    for (let i = 0; i < 60; i++) { await sleep(40); if (items[0].state === 'loading') break; }
+    check('2b: retry flips the card back to loading', items[0].state === 'loading', items[0].state);
+    check('2b: global loading flag armed during single retry', h.ev('loading') === true);
+    check('2b: spin recreated inside .tw during retry', !!firstCard.querySelector('.tw .spin'));
+    check('2b: card retry button disabled during retry', firstCard.querySelector('.retry').disabled === true);
+    check('2b: card delete button disabled during retry', firstCard.querySelector('.delete').disabled === true);
+    check('2b: toolbar retry-all hidden while a retry runs', h.$('btnRetryAll').classList.contains('hidden'));
+    check('2b: build blocked while a retry runs', h.$('buildBtn').disabled === true);
+
+    resolveFetch();
+    for (let i = 0; i < 60; i++) { await sleep(60); if (items[0].state === 'ok') break; }
+    items = h.ev('items');
+    check('2b: retried card recovers', items[0].state === 'ok', items[0].state);
+    check('2b: loading flag cleared after retry', h.ev('loading') === false);
+    check('2b: spin removed after successful retry', !items[0].el.querySelector('.spin'));
+    check('2b: other cards stay failed and still offer retry',
+      items.slice(1).every((it) => it.state === 'failed' && !it.el.querySelector('.retry').disabled),
+      items.map((i) => i.state));
+  }
+
+  // ---------- 2c. ESC cancels an in-flight single-card retry ----------
+  {
+    const h = makeHarness({
+      fetchImpl: async () => { throw new Error('network down'); }
+    });
+    h.window.chrome.scripting.executeScript = async () => { throw new Error('blocked'); };
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    const items = h.ev('items');
+    check('2c: all failed before retry', items.every((it) => it.state === 'failed'));
+    // مثل بارگیری سراسری: abort سیگنال، fetch را با خطا رد می‌کند
+    h.window.fetch = (url, opts) => new Promise((resolve, reject) => {
+      if (opts && opts.signal) opts.signal.addEventListener('abort', () => reject(new Error('Aborted')));
+    });
+    items[0].el.querySelector('.retry').click();
+    for (let i = 0; i < 60; i++) { await sleep(40); if (items[0].state === 'loading') break; }
+    check('2c: retry started', items[0].state === 'loading' && h.ev('loading') === true);
+    h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    for (let i = 0; i < 60; i++) { await sleep(40); if (!h.ev('loading')) break; }
+    check('2c: loading flag cleared after ESC', h.ev('loading') === false);
+    check('2c: abort controller released', h.ev('loadAbortController') === null);
+    check('2c: card back to failed with cancel reason', items[0].state === 'failed' && /لغو/.test(items[0].error || ''), items[0].error);
+    check('2c: spin removed again after cancel', !items[0].el.querySelector('.spin'));
+    check('2c: retry offered again after cancel', items[0].el.querySelector('.retry').disabled === false);
   }
 
   // ---------- 3. non-image bytes -> failed ----------
@@ -432,6 +523,36 @@ prepare = async (it, r) => {
     check('stop button hidden again', h.$('btnStopTr').classList.contains('hidden'));
     check('cancel mentioned in status', /متوقف/.test(h.$('statusText').textContent), h.$('statusText').textContent);
     check('job hint hidden when work ends', h.$('jobHint').classList.contains('hidden'));
+  }
+
+  // ---------- 17. closing the editor mid-render must not alert or lose the render ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ev(`OcrTools.createOcrWorker=async()=>({recognize:async()=>({data:{blocks:[]}}),setParameters:async()=>{},terminate:async()=>{}});
+    OcrTools.ocrBitmap=async()=>[{text:'Hello',conf:90,x0:10,x1:90,y0:10,y1:30}];
+    OcrTools.groupLines=()=>[{id:1,enabled:true,bg:'auto',tr:'سلام',text:'Hello',x0:10,x1:90,y0:10,y1:30,lineH:16}];`);
+    h.$('btnTranslate').click(); h.$('trStart').click();
+    for (let i = 0; i < 80; i++) { await sleep(80); if (!h.ev('building')) break; }
+    let alertCount = 0;
+    h.window.alert = (m) => { alertCount++; console.log('  [unexpected alert]', m); };
+    const target = h.ev('items.find(i=>i.ocr)');
+    h.ev('openEditor(items.find(i=>i.ocr))');
+    // رندر را پشت یک دروازه نگه می‌داریم تا ویرایشگر دقیقاً وسط await بسته شود
+    h.ev(`globalThis.__origRE = renderEdited;
+    globalThis.__gate = new Promise((resolve) => { globalThis.__releaseGate = resolve; });
+    renderEdited = async (it) => { await globalThis.__gate; return globalThis.__origRE(it); };
+    applyEditor();`);
+    await sleep(60);
+    check('apply was in flight when editor closed', h.ev('edBusy') === true && h.ev('EDI') !== null);
+    await h.ev('closeEditor()');
+    check('editor closed while render pending', h.ev('EDI') === null && h.$('editor').classList.contains('hidden'));
+    h.ev('globalThis.__releaseGate()');
+    for (let i = 0; i < 30; i++) { await sleep(60); if (h.ev('edBusy') === false) break; }
+    check('no spurious error alert after mid-render close', alertCount === 0, alertCount);
+    check('in-flight render still updated the item blob', !!target.edited);
+    check('busy flag released after render settles', h.ev('edBusy') === false);
+    h.ev('renderEdited = globalThis.__origRE;');
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL EDGE-CASE TESTS PASSED');
