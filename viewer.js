@@ -225,7 +225,7 @@ function makeCard(it) {
   const el = document.createElement('div');
   el.className = 'item selected';
   el.draggable = true;
-  el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید';
+  el.title = 'برای جابه‌جایی بکشید و روی لبهٔ کارت رها کنید؛ برای گروه‌بندی، روی وسط کارت دیگر رها کنید. داخل یک گروه، رهاکردن روی لبهٔ کارت هم‌گروه فقط ترتیب داخلی گروه را عوض می‌کند';
   el.innerHTML = `<div class="tw"><canvas width="240" height="320"></canvas><div class="spin">در حال دریافت...</div>
     <span class="idx">${it.i + 1}${it.dupNo ? ` · کپی ${it.dupNo}` : ''}</span><span class="tick">${ICON_CHECK}</span>
     <button class="zoom" title="مشاهدهٔ بزرگ">${ICON_ZOOM}</button>
@@ -949,6 +949,60 @@ function reorderByDrop(dragged, targetEl, before) {
   if (!plan) return false;
   const firstRects = captureGridRects();
   plan.movingEls.forEach((el) => grid.insertBefore(el, plan.anchor));
+  updatePdfOrderFromGrid();
+  playGridMove(firstRects);
+  return true;
+}
+
+// چیدمان داخلی گروه: فقط همان کارتِ کشیده‌شده بین اعضای «همین» بلوک جابه‌جا می‌شود؛
+// بلوک گروه پیوسته و سرجایش می‌ماند و عضویت گروه هیچ تغییری نمی‌کند.
+function buildInternalOrder(dragged, targetEl, before) {
+  const gid = Number(dragged.pageGroup);
+  if (!gid) return null;
+  const blockEls = gridGroupBlock(gid);
+  if (!blockEls.includes(dragged.el) || !blockEls.includes(targetEl)) return null;
+  const remaining = blockEls.filter((el) => el !== dragged.el);
+  const targetIndex = remaining.indexOf(targetEl);
+  if (targetIndex < 0) return null;
+  const insertAt = before ? targetIndex : targetIndex + 1;
+  remaining.splice(insertAt, 0, dragged.el);
+  return { blockEls, nextBlockEls: remaining };
+}
+
+// پیش‌نمایش شماره صفحه‌ها برای جابه‌جایی داخل گروه (بدون تغییر DOM تا لحظهٔ رهاکردن)
+function previewInternalOrder(dragged, targetEl, before) {
+  const grid = $('grid');
+  const plan = buildInternalOrder(dragged, targetEl, before);
+  if (!plan) { restoreDragOrderPreview(); return; }
+  const tentative = [];
+  for (const el of Array.from(grid.children)) {
+    if (el === plan.blockEls[0]) tentative.push(...plan.nextBlockEls);
+    if (plan.blockEls.includes(el)) continue;
+    tentative.push(el);
+  }
+  tentative.forEach((el, index) => {
+    const input = el.querySelector('.page-order');
+    if (!input) return;
+    const next = String(index + 1);
+    if (input.value === next) return;
+    input.value = next;
+    input.classList.remove('order-flash');
+    void input.offsetWidth;
+    input.classList.add('order-flash');
+  });
+}
+
+// اعمال جابه‌جایی داخل گروه روی DOM؛ اگر عملاً ترتیبی عوض نشده false برمی‌گرداند
+function reorderWithinGroup(dragged, targetEl, before) {
+  const plan = buildInternalOrder(dragged, targetEl, before);
+  if (!plan) return false;
+  const unchanged = plan.nextBlockEls.every((el, i) => el === plan.blockEls[i]);
+  if (unchanged) return false;
+  const grid = $('grid');
+  // لنگرِ بعد از بلوک ثابت می‌ماند تا گروه پیوسته و در همان موقعیت قبلی بازچیده شود
+  const anchorAfterBlock = plan.blockEls[plan.blockEls.length - 1].nextSibling;
+  const firstRects = captureGridRects();
+  plan.nextBlockEls.forEach((el) => grid.insertBefore(el, anchorAfterBlock));
   updatePdfOrderFromGrid();
   playGridMove(firstRects);
   return true;
@@ -1867,11 +1921,16 @@ async function main() {
       dragGroupDrop = true;
     } else {
       clearDragDropHint();
-      // نشانگر محل درج؛ برای جابه‌جایی گروهی با رنگ و ضخامت متفاوت از کارت تکی
       const sameGroupBlock = !!draggedGroupItems && draggedGroupItems.some((member) => member.el === target);
-      if (sameGroupBlock) { clearInsertMarker(); restoreDragOrderPreview(); return; }
       // RTL: نیمهٔ راست کارت یعنی درج قبل از آن، نیمهٔ چپ یعنی بعد از آن
       const before = ev.clientX > rect.left + rect.width / 2;
+      if (sameGroupBlock) {
+        // چیدمان داخلی گروه: روی لبهٔ کارتِ هم‌گروه، فقط همین کارت داخل بلوک جابه‌جا می‌شود
+        setInsertMarker(target, before, false);
+        previewInternalOrder(draggedItem, target, before);
+        return;
+      }
+      // نشانگر محل درج؛ برای جابه‌جایی گروهی با رنگ و ضخامت متفاوت از کارت تکی
       setInsertMarker(target, before, !!draggedGroupItems);
       // شماره صفحه‌های زیر کارت‌ها به‌صورت زنده با محل درج جدید به‌روز می‌شوند
       previewDragOrder(draggedItem, target, before);
@@ -1902,7 +1961,9 @@ async function main() {
     const rect = target.getBoundingClientRect();
     // شبکه از راست به چپ است: سمت راست کارت یعنی درج قبل از آن در ترتیب DOM.
     const before = ev.clientX > rect.left + rect.width / 2;
-    reorderByDrop(draggedItem, target, before);
+    const sameGroupBlock = !!draggedGroupItems && draggedGroupItems.some((member) => member.el === target);
+    if (sameGroupBlock) reorderWithinGroup(draggedItem, target, before);
+    else reorderByDrop(draggedItem, target, before);
     suppressCardClickUntil = Date.now() + 350;
   });
   items = job.urls.map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pageGroup: null, state: 'loading', selected: true }));

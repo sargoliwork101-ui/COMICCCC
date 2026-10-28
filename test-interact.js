@@ -272,6 +272,55 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     chips[0].style.getPropertyValue('--gc') !== chips[1].style.getPropertyValue('--gc'));
   h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
 
+  // ---- in-group reorder: edge drop on a same-group member moves only that card inside the block ----
+  // start from a known grid order [0,1,2,3]; the duplicate card (uid 3) stays outside the group
+  h.ev('[...items].sort((a,b)=>a.uid-b.uid).forEach(i => document.getElementById("grid").appendChild(i.el)); updatePdfOrderFromGrid()');
+  h.ev('items[0].pageGroup = 1; items[1].pageGroup = 1; items[2].pageGroup = 1; cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+  const dt5 = { effectAllowed: '', setData() {}, dropEffect: '' };
+  const groupBefore = h.ev('items.map(i => i.pageGroup)');
+  // drag the first card to after the last member
+  cards[0].getBoundingClientRect = rect156;
+  cards[2].getBoundingClientRect = rect156;
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt5, bubbles: true }));
+  cards[2].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt5, clientX: 10, bubbles: true })); // left edge -> after
+  check('in-group edge dragover uses a single (non-group) insertion marker',
+    cards[2].classList.contains('drag-insert-after') && !cards[2].classList.contains('drag-insert-group'));
+  const internalPreview = cards.map((c) => c.querySelector('.page-order').value);
+  check('in-group drag previews tentative internal order live',
+    JSON.stringify(internalPreview) === JSON.stringify(['3', '1', '2']), internalPreview);
+  const domStillStable = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);
+  check('in-group dragover keeps DOM untouched until drop',
+    JSON.stringify(domStillStable) === JSON.stringify([0, 1, 2, 3]), domStillStable);
+  cards[2].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt5, clientX: 10, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt5, bubbles: true }));
+  const internalOrder = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);
+  check('edge drop reorders within the group', JSON.stringify(internalOrder) === JSON.stringify([1, 2, 0, 3]), internalOrder);
+  check('in-group reorder never changes membership',
+    JSON.stringify(h.ev('items.map(i => i.pageGroup)')) === JSON.stringify(groupBefore));
+  check('in-group reorder renumbers pdf order',
+    JSON.stringify([...grid.children].map((n) => n.querySelector('.page-order').value)) === JSON.stringify(['1', '2', '3', '4']));
+  check('group stays one contiguous block after internal reorder',
+    outlineLayer.querySelectorAll('.group-outline').length === 1);
+
+  // move the same card back before the first member via the right edge
+  cards[1].getBoundingClientRect = rect156;
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt5, bubbles: true }));
+  cards[1].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt5, clientX: 150, bubbles: true })); // right edge -> before
+  cards[1].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt5, clientX: 150, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt5, bubbles: true }));
+  const restoredOrder = h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`);
+  check('before-edge drop moves the card to the start of the group',
+    JSON.stringify(restoredOrder) === JSON.stringify([0, 1, 2, 3]), restoredOrder);
+
+  // center-band drop on a same-group member is still a no-op
+  cards[0].dispatchEvent(new h.window.DragEvent('dragstart', { dataTransfer: dt5, bubbles: true }));
+  cards[1].dispatchEvent(new h.window.DragEvent('dragover', { dataTransfer: dt5, clientX: 78, bubbles: true }));
+  cards[1].dispatchEvent(new h.window.DragEvent('drop', { dataTransfer: dt5, clientX: 78, bubbles: true }));
+  cards[0].dispatchEvent(new h.window.DragEvent('dragend', { dataTransfer: dt5, bubbles: true }));
+  check('center-band same-group drop stays a no-op',
+    JSON.stringify(h.ev(`[...document.getElementById('grid').children].map(n=>items.find(i=>i.el===n).uid)`)) === JSON.stringify([0, 1, 2, 3]));
+  h.ev('items.forEach(i => i.pageGroup = null); cleanupPageGroups(); normalizeGroupLayout(); refreshAll()');
+
   // ---- output settings open/close ----
   const settings = h.$('outputSettings');
   settings.open = true;
