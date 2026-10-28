@@ -4,7 +4,7 @@ if (pdfConvertBtn) {
   pdfConvertBtn.addEventListener('click', async () => {
     pdfConvertBtn.disabled = true;
     try {
-      await chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html?pdfWorkspace=1'), active: true });
+      await chrome.tabs.create({ url: chrome.runtime.getURL('src/viewer/viewer.html?pdfWorkspace=1'), active: true });
     } catch (error) {
       showError('بازکردن فضای تبدیل PDF ناموفق بود: ' + (error && error.message ? error.message : error));
       pdfConvertBtn.disabled = false;
@@ -274,12 +274,15 @@ async function scrapeAndSend(pdfName, mode, opts) {
       pictureSources.forEach((source) => parseSet(source.srcset || source.getAttribute('data-srcset'), 1));
     }
 
-    // Lazy source URLs are common on comic sites; retain them as candidates rather than ignoring them
-    // merely because a lower-resolution placeholder has already loaded.
-    for (const name of ['data-src', 'data-lazy-src', 'data-url']) {
+    // آدرس‌های lazy معتبر نباید به thumbnailِ لودشده ببازند. اگر تصویر فعلی واقعاً وضوح بیشتری دارد، همان حفظ می‌شود.
+    for (const name of ['data-src', 'data-lazy-src']) {
       const lazy = img.getAttribute(name);
-      addCandidate(lazy, urlResolution(toAbsolute(lazy)), 4);
+      const lazyUrl = toAbsolute(lazy);
+      addCandidate(lazy, urlResolution(lazyUrl) || renderedWidth + 1, 4);
     }
+    // data-url روی بعضی سایت‌ها نشانی صفحه است، نه لزوماً تصویر؛ اولویت تشخیصی آن را بالا نمی‌بریم.
+    const dataUrl = img.getAttribute('data-url');
+    addCandidate(dataUrl, urlResolution(toAbsolute(dataUrl)), 4);
     addCandidate(img.getAttribute('src'), urlResolution(toAbsolute(img.getAttribute('src'))), 2);
     addCandidate(active, Math.max(urlResolution(active), img.complete && img.naturalWidth > 0 ? img.naturalWidth : 0), 5);
 
@@ -305,6 +308,8 @@ async function scrapeAndSend(pdfName, mode, opts) {
   let inlineDataBytes = 0, skippedInline = 0;
   const add = (src) => {
     if (!src) return;
+    // سقف حالت دستی در اسکن نهایی و MutationObserver هم حفظ شود؛ Google Books کنترل جداگانهٔ خودش را دارد.
+    if (mode === 'manual' && !gbook && pageLimit > 0 && urls.length >= pageLimit) return;
     let abs;
     if (/^data:image\//i.test(src)) {
       abs = src;
@@ -818,10 +823,10 @@ async function scrapeAndSend(pdfName, mode, opts) {
     };
 
     // سیگنال ۱: هوک pushState/replaceState (readerهای SPA بدون رفرش)
-    const origPush = history.pushState.bind(history);
-    const origReplace = history.replaceState.bind(history);
-    history.pushState = function (...args) { const r = origPush(...args); scheduleSignal(); return r; };
-    history.replaceState = function (...args) { const r = origReplace(...args); scheduleSignal(); return r; };
+    const origPush = history.pushState;
+    const origReplace = history.replaceState;
+    history.pushState = function (...args) { const r = origPush.apply(history, args); scheduleSignal(); return r; };
+    history.replaceState = function (...args) { const r = origReplace.apply(history, args); scheduleSignal(); return r; };
     // سیگنال ۲: رویدادهای مرورگر
     window.addEventListener('popstate', scheduleSignal);
     window.addEventListener('hashchange', scheduleSignal);
@@ -1004,6 +1009,10 @@ async function scrapeAndSend(pdfName, mode, opts) {
     say(`ورق‌زدن خودکار — صفحهٔ ${page} — ${urls.length} تصویر`);
 
     while (page < T.maxPages && !cancelled) {
+      if (pageLimit > 0 && page >= pageLimit) {
+        say(`به سقف ${pageLimit} صفحه رسیدیم؛ جمع‌آوری متوقف شد.\nدر مجموع ${urls.length} تصویر.`);
+        return;
+      }
       const btn = findNextButton();
       if (!btn) {
         say(`دکمهٔ «بعدی» پیدا نشد؛ به پایان رسیدیم.\nدر مجموع ${urls.length} تصویر جمع شد.`);
@@ -1038,7 +1047,9 @@ async function scrapeAndSend(pdfName, mode, opts) {
     const refreshCount = () => {
       if (urls.length !== lastCount) {
         lastCount = urls.length;
-        countEl.textContent = `${urls.length} تصویر جمع شد`;
+        countEl.textContent = pageLimit > 0 && urls.length >= pageLimit
+          ? `${urls.length} تصویر (به سقف ${pageLimit} رسیدی)`
+          : `${urls.length} تصویر جمع شد`;
       }
     };
     scanImages();

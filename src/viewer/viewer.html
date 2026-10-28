@@ -3,21 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <title>PIC TO PDF</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="../shared/style.css">
   <link rel="stylesheet" href="viewer.css">
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-in">
       <div class="brand">
-        <span class="brand-logo"><img src="icon128.png" alt=""></span>
+        <span class="brand-logo"><img src="../../assets/icons/icon128.png" alt=""></span>
         <div class="brand-text">
           <h1>PIC TO PDF</h1>
           <p>تصاویر را انتخاب، مرتب و ویرایش کنید و خروجی PDF یا تصویر بگیرید</p>
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۲.۵۵</span>
+        <span class="version-pill">نسخهٔ ۲.۵۶</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -245,13 +245,13 @@
     <div class="lbscroll"><img id="lbImg" alt=""></div>
   </div>
 
-  <script src="jspdf.umd.min.js"></script>
-  <script src="pdfbuilder.js"></script>
-  <script src="tesseract.min.js"></script>
-  <script src="ocr.js"></script>
-  <script src="typeset.js"></script>
-  <script src="translate.js"></script>
-  <script src="pdf-import-store.js"></script>
+  <script src="../../vendor/jspdf.umd.min.js"></script>
+  <script src="../core/pdfbuilder.js"></script>
+  <script src="../../vendor/tesseract.min.js"></script>
+  <script src="../core/ocr.js"></script>
+  <script src="../core/typeset.js"></script>
+  <script src="../core/translate.js"></script>
+  <script src="../core/pdf-import-store.js"></script>
   <script src="viewer.js"></script>
   <script src="trans.js"></script>
 </body>

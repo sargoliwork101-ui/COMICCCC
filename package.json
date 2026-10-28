@@ -1,10 +1,10 @@
 {
   "name": "pic-to-pdf-extension",
-  "version": "2.55.0",
+  "version": "2.56.0",
   "private": true,
   "description": "افزونهٔ Chrome برای جمع‌آوری تصاویر کمیک و وب‌تون و خروجی PDF/تصویر به‌همراه OCR و ترجمه",
   "scripts": {
-    "test": "node test-smoke.js && node test-popup.js && node test-background.js && node test-dom.js && node test-errors.js && node test-interact.js && node test-navigation.js && node test-gbooks-background.js && node test-gbooks-popup.js && node test-update.js",
+    "test": "node tests/test-paths.js && node tests/test-smoke.js && node tests/test-popup.js && node tests/test-background.js && node tests/test-dom.js && node tests/test-errors.js && node tests/test-interact.js && node tests/test-navigation.js && node tests/test-gbooks-background.js && node tests/test-gbooks-popup.js && node tests/test-update.js",
     "lint": "eslint ."
   },
   "devDependencies": {

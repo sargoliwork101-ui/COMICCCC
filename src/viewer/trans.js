@@ -691,7 +691,15 @@ async function closeEditor() {
   if (!EDI) return;
   clearTimeout(edTimer);
   edFieldFocused = false;
-  if (edDirty) await applyEditor();
+  if (edDirty) {
+    if (edBusy) {
+      // رندر جدید را صف کن و تا پایان آن EDI را نگه دار؛ وگرنه رندر صف‌گذاشته‌شده آیتم خودش را از دست می‌دهد.
+      edPending = true;
+      while (edBusy) await new Promise((resolve) => setTimeout(resolve, 10));
+    } else {
+      await applyEditor();
+    }
+  }
   $('editor').classList.add('hidden');
   document.body.style.overflow = '';
   if (edUrl) { URL.revokeObjectURL(edUrl); edUrl = null; }

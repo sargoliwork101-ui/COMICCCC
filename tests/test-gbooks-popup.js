@@ -117,7 +117,7 @@ function makeHarness(pageUrl, fetchImpl) {
     gbookPause: 1, gbookBackoff: [1, 1, 1], gbookRounds: 3, gbookTimeout: 1000
   };
 
-  const code = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+  const code = fs.readFileSync(__dirname + '/../src/popup/popup.js', 'utf8');
   const start = code.indexOf('async function probeBookFrame');
   vm.runInContext(code.slice(start), ctx, { filename: 'popup.js' });
 
@@ -183,6 +183,8 @@ function makeHarness(pageUrl, fetchImpl) {
   {
     const fetchImpl = click3Fetch({ pids: ['PA1', 'PA2', 'PA3'], srcPids: ['PA1', 'PA2', 'PA3'] });
     const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1', fetchImpl);
+    const originalPushState = h.window.history.pushState;
+    const originalReplaceState = h.window.history.replaceState;
     const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
     await tick();
     await tick();
@@ -206,6 +208,8 @@ function makeHarness(pageUrl, fetchImpl) {
     check('in-frame manual: Done returns viewed pages in order',
       res && res.count === 3 && JSON.stringify(h.urlJobs()[0].urls) === JSON.stringify(API_URLS), res);
     check('in-frame manual: panel removed', !h.window.document.querySelector('.wtpdf-root'));
+    check('in-frame manual: history hooks restored exactly',
+      h.window.history.pushState === originalPushState && h.window.history.replaceState === originalReplaceState);
   }
 
   // ========== E. in-frame manual recovers a transient fetch error by polling ==========

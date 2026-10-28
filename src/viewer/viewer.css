@@ -406,7 +406,8 @@ kbd { display: inline-block; padding: 1px 7px; border-radius: 7px; border: 1px s
 .blk-copy-orig { display: inline-grid; place-items: center; width: 1em; min-width: 1em; height: 1em; margin-inline-start: .35em; padding: 0; border: 0; border-radius: 3px; background: transparent; color: inherit; font-size: inherit; line-height: inherit; vertical-align: -.08em; cursor: pointer; }
 .blk-copy-orig svg { display: block; width: 1em; height: 1em; }
 .blk-copy-orig:hover { color: var(--text); }
-.blk-top .blk-copy-orig { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 72px; height: 30px; margin: 0; padding: 0 9px; font-size: 11px; vertical-align: middle; }\n.blk-copy-orig.copied { color: #34d399; border-color: #34d399; }
+.blk-top .blk-copy-orig { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 72px; height: 30px; margin: 0; padding: 0 9px; font-size: 11px; vertical-align: middle; }
+.blk-copy-orig.copied { color: #34d399; border-color: #34d399; }
 .blk-editor { width: 100%; min-height: 84px; max-height: 320px; overflow: auto; resize: vertical; background: rgba(255,255,255,.04); border: 1px solid var(--line2); border-radius: 10px;
   padding: 9px 11px; color: var(--text); font: 600 14px/1.8 'Vazirmatn', sans-serif; outline: none; direction: rtl; white-space: pre-wrap; overflow-wrap: anywhere; }
 .blk-editor:focus { border-color: var(--a1); box-shadow: 0 0 0 3px rgba(139,123,255,.22); }

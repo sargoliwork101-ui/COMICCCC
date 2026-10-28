@@ -246,9 +246,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       skippedInline: Number(msg.skippedInline) || 0
     };
     chrome.storage.local.set({ ['job_' + jobId]: job }).then(() => {
-      chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html') + '?job=' + jobId }, (tab) => {
+      chrome.tabs.create({ url: chrome.runtime.getURL('src/viewer/viewer.html') + '?job=' + jobId }, (tab) => {
         if (chrome.runtime.lastError || !tab || tab.id == null) {
           const error = chrome.runtime.lastError;
+          // اگر تب پیش‌نمایش باز نشد، job بدون مصرف‌کننده نباید تا پاک‌سازی دوره‌ای باقی بماند.
+          chrome.storage.local.remove('job_' + jobId).catch((cleanupError) => {
+            console.warn('پاک‌سازی job ناموفق ممکن نشد', cleanupError);
+          });
           sendResponse({ ok: false, error: error ? error.message : 'preview tab could not be opened' });
           return;
         }

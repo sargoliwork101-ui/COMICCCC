@@ -69,7 +69,7 @@ function bootBackground(fetchImpl) {
     AbortController, fetch: fetchMock
   };
   vm.createContext(ctx);
-  vm.runInContext(fs.readFileSync(__dirname + '/background.js', 'utf8'), ctx, { filename: 'background.js' });
+  vm.runInContext(fs.readFileSync(__dirname + '/../src/background.js', 'utf8'), ctx, { filename: 'background.js' });
   return { ctx, listeners, fetchCalls };
 }
 

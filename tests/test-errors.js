@@ -9,7 +9,7 @@ const PNG = Buffer.from(
 );
 
 function makeHarness({ fetchImpl, jobUrls } = {}) {
-  const html = fs.readFileSync(__dirname + '/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
+  const html = fs.readFileSync(__dirname + '/../src/viewer/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
   const dom = new JSDOM(html, { url: 'https://example.com/viewer.html?job=testjob', pretendToBeVisual: true, runScripts: 'dangerously' });
   const { window } = dom;
   const ctx = dom.getInternalVMContext();
@@ -56,7 +56,7 @@ function makeHarness({ fetchImpl, jobUrls } = {}) {
   window.scrollTo = () => {};
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
-  for (const f of ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'viewer.js', 'trans.js']) {
+  for (const f of ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/viewer/viewer.js', '../src/viewer/trans.js']) {
     vm.runInContext(fs.readFileSync(__dirname + '/' + f, 'utf8'), ctx, { filename: f });
   }
   return { dom, window, ctx, ev, storageMap, get scriptingCalls() { return scriptingCalls; }, $: (id) => window.document.getElementById(id) };
@@ -553,6 +553,139 @@ prepare = async (it, r) => {
     check('in-flight render still updated the item blob', !!target.edited);
     check('busy flag released after render settles', h.ev('edBusy') === false);
     h.ev('renderEdited = globalThis.__origRE;');
+  }
+
+  // ---------- 18. duplicate numbers stay unique after an older copy is removed ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ev('duplicateItem(items[0]); duplicateItem(items[0]);');
+    h.ev('removeItemsFromGrid([items.find((it) => it.dupNo === 1)]); duplicateItem(items[0]);');
+    const numbers = h.ev('items.filter((it) => it.i === 0 && it.dupNo).map((it) => it.dupNo).sort((a, b) => a - b)');
+    check('duplicate numbers are not reused after deletion', JSON.stringify(numbers) === '[2,3]', numbers);
+  }
+
+  // ---------- 19. imported PDF source indices do not collide after deleting a card ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ev('removeItemsFromGrid([items[1]])');
+    h.ctx.PDFImportStore = {
+      getSession: async () => ({ token: 'import-test', status: 'complete', fileName: 'book.pdf', count: 2 }),
+      getPages: async () => [1, 2].map((pageNumber) => ({
+        token: 'import-test', pageNumber, fileName: 'book.pdf', width: 1, height: 1,
+        blob: new h.window.Blob([PNG], { type: 'image/png' })
+      })),
+      deleteSession: async () => {}
+    };
+    h.ev('pendingPdfImportToken = "import-test"');
+    await h.ev('receiveImportedPdf("import-test")');
+    const indices = h.ev('items.map((it) => it.i)');
+    check('PDF import keeps every source index unique', new Set(indices).size === indices.length, indices);
+    check('PDF import continues after the greatest existing index',
+      JSON.stringify(indices) === '[0,2,3,4,5]', indices);
+  }
+
+  // ---------- 20. extreme PDF scaling can never produce a zero-height slicing step ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    const originalBitmap = h.window.createImageBitmap;
+    try {
+      h.window.createImageBitmap = async () => ({ width: 1, height: 2, close() {} });
+      const segments = await h.ev(`prepare({
+        i: 99, uid: 999, blob: new Blob(['x']), w: 1, h: 2,
+        info: { fmt: 'PNG', ok: false, w: 1, h: 2 }, edited: null, cropRect: null
+      }, PdfBuilder.SAFE_PT + 1)`);
+      check('extreme PDF scaling still slices with a one-pixel minimum step',
+        segments.length === 2 && segments.every((segment) => segment.h === 1), segments.map((segment) => segment.h));
+    } finally {
+      h.window.createImageBitmap = originalBitmap;
+    }
+  }
+
+  // ---------- 21. closing a dirty editor during a render flushes the latest edit ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ev(`items[0].ocr = { lang: 'eng', blocks: [{
+      id: 1, enabled: true, bg: 'auto', tr: 'first', text: 'Hello',
+      x0: 0, x1: 10, y0: 0, y1: 10, lineH: 10
+    }] };
+    openEditor(items[0]);
+    globalThis.__renderedTexts = [];
+    globalThis.__gate = new Promise((resolve) => { globalThis.__releaseGate = resolve; });
+    renderEdited = async (it) => {
+      const text = it.ocr.blocks[0].tr;
+      globalThis.__renderedTexts.push(text);
+      if (globalThis.__renderedTexts.length === 1) await globalThis.__gate;
+    };
+    applyEditor();`);
+    await sleep(60);
+    check('dirty-close test begins with a render in flight', h.ev('edBusy') === true);
+    h.ev(`items[0].ocr.blocks[0].tr = 'latest';
+    edDirty = true;
+    globalThis.__closeWithDirty = closeEditor();`);
+    await sleep(30);
+    h.ev('globalThis.__releaseGate()');
+    await h.ev('globalThis.__closeWithDirty');
+    const rendered = h.ev('globalThis.__renderedTexts');
+    check('queued close renders the latest edit instead of losing its item',
+      JSON.stringify(rendered) === '["first","latest"]', rendered);
+    check('dirty close finishes and releases the editor', h.ev('EDI') === null && h.ev('edBusy') === false);
+  }
+
+  // ---------- 22. PDF conversion avoids unnecessary lossy recompression ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    const encodes = [];
+    const originalToDataURL = h.window.HTMLCanvasElement.prototype.toDataURL;
+    try {
+      h.window.HTMLCanvasElement.prototype.toDataURL = function (type, quality) {
+        encodes.push({ type, quality });
+        return originalToDataURL.call(this, type, quality);
+      };
+      const webp = await h.ev(`prepare({
+        i: 100, uid: 100, blob: new Blob(['x']), w: 1, h: 1,
+        info: { fmt: 'WEBP', ok: false, w: 1, h: 1 }, edited: null, cropRect: null
+      }, 1)`);
+      const jpeg = await h.ev(`prepare({
+        i: 101, uid: 101, blob: new Blob(['x']), w: 1, h: 1,
+        info: { fmt: 'JPEG', ok: false, w: 1, h: 1 }, edited: null, cropRect: null
+      }, 1)`);
+      check('non-JPEG source is converted to lossless PNG for PDF', webp[0].fmt === 'PNG', webp[0]);
+      check('JPEG slicing uses maximum encoder quality',
+        jpeg[0].fmt === 'JPEG' && encodes.some((entry) => entry.type === 'image/jpeg' && entry.quality === 1), encodes);
+    } finally {
+      h.window.HTMLCanvasElement.prototype.toDataURL = originalToDataURL;
+    }
+  }
+
+  // ---------- 23. thumbnails contain the entire tall image at high quality ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    let options = null, drawing = null, closed = false;
+    const originalBitmap = h.window.createImageBitmap;
+    try {
+      h.window.createImageBitmap = async (blob, opts) => {
+        options = opts;
+        return { width: 240, height: 3000, close() { closed = true; } };
+      };
+      const canvas = h.ev('items[0]').el.querySelector('canvas');
+      canvas.getContext = () => ({
+        fillStyle: '', fillRect() {},
+        drawImage(...args) { drawing = args; }
+      });
+      await h.ev('drawThumb(items[0])');
+      check('thumbnail uses high-quality resizing', options && options.resizeQuality === 'high', options);
+      check('thumbnail scales the whole tall image instead of cropping its bottom',
+        drawing && drawing.length === 5 && Math.abs(drawing[3] - 25.6) < 0.001 && drawing[4] === 320, drawing);
+      check('thumbnail bitmap is released after drawing', closed === true);
+    } finally {
+      h.window.createImageBitmap = originalBitmap;
+    }
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL EDGE-CASE TESTS PASSED');

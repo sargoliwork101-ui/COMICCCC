@@ -33,7 +33,7 @@ function bootBackground(initialStorage) {
   };
   const ctx = { chrome, console, URL, setTimeout, Math, Date, Promise };
   vm.createContext(ctx);
-  vm.runInContext(fs.readFileSync(__dirname + '/background.js', 'utf8'), ctx, { filename: 'background.js' });
+  vm.runInContext(fs.readFileSync(__dirname + '/../src/background.js', 'utf8'), ctx, { filename: 'background.js' });
   return { chrome, listeners, store, ctx };
 }
 
@@ -75,7 +75,26 @@ function bootBackground(initialStorage) {
     check('response ok with tab id', response && response.ok === true && response.tabId === 42, response);
   }
 
-  // 3. unrelated messages are ignored (no return value, no throw)
+  // 3. a failed preview-tab creation removes its orphaned job
+  {
+    const b = bootBackground({});
+    b.chrome.tabs.create = (opts, cb) => {
+      b.chrome.runtime.lastError = { message: 'tab creation blocked' };
+      cb(null);
+      b.chrome.runtime.lastError = null;
+    };
+    let response = null;
+    b.listeners.message(
+      { type: 'WTPDF_URLS', urls: ['a'], name: 'c.pdf' },
+      { tab: { id: 7, url: 'https://comic.test/ep' } },
+      (r) => { response = r; }
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    check('failed tab creation reports the error', response && response.ok === false, response);
+    check('failed tab creation leaves no orphan job', ![...b.store.keys()].some((k) => k.startsWith('job_')));
+  }
+
+  // 4. unrelated messages are ignored (no return value, no throw)
   {
     const b = bootBackground({});
     const ret = b.listeners.message({ type: 'SOMETHING_ELSE' }, {}, () => {});

@@ -1,7 +1,7 @@
 export default [
   {
-    files: ['*.js'],
-    ignores: ['node_modules/**', 'test-*.js', 'debug*.js', 'jspdf.umd.min.js', 'tesseract.min.js', 'ocr/**'],
+    files: ['**/*.js'],
+    ignores: ['node_modules/**', 'tests/**', 'debug*.js', 'vendor/**'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',

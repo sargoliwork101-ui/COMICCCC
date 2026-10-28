@@ -41,7 +41,7 @@ function makeHarness() {
   // snappy timings for the navigation state machine
   window.__wtpdfTimings = { poll: 1, clickTimeout: 40, settle: 1, stuckLimit: 2, maxPages: 10, manualRescan: 1 };
 
-  const code = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+  const code = fs.readFileSync(__dirname + '/../src/popup/popup.js', 'utf8');
   const fnCode = code.slice(code.indexOf('async function scrapeAndSend'));
   vm.runInContext(fnCode, ctx, { filename: 'popup.js' });
 
@@ -338,6 +338,43 @@ function makeHarness() {
     // without the tick, the same page is back to the strict comic-only scanner
     const strict = await window.eval('scrapeAndSend("strict-again.pdf", "scroll")');
     check('deep search off: strict scanner returns only the comic page', strict.count === 1, strict);
+  }
+
+  // ---------- 14. the user page limit also applies outside Google Books ----------
+  {
+    const h = makeHarness();
+    const { window, img, sent } = h;
+    const page = img('https://cdn.test/limit-auto-1.jpg');
+    window.document.body.appendChild(page);
+    const next = window.document.createElement('button');
+    next.setAttribute('aria-label', 'Next page');
+    let clicks = 0;
+    next.addEventListener('click', () => {
+      clicks++;
+      page.setAttribute('src', `https://cdn.test/limit-auto-${clicks + 1}.jpg`);
+    });
+    window.document.body.appendChild(next);
+    const res = await window.eval('scrapeAndSend("limit-auto.pdf", "auto", { pageLimit: 2 })');
+    check('auto page limit stops before an extra click', clicks === 1, clicks);
+    check('auto page limit returns exactly the first two pages',
+      res.count === 2 && sent[0].urls.every((url) => !url.endsWith('-3.jpg')), sent[0] && sent[0].urls);
+  }
+  {
+    const h = makeHarness();
+    const { window, img, sent, flush } = h;
+    const page = img('https://cdn.test/limit-manual-1.jpg');
+    window.document.body.appendChild(page);
+    const running = window.eval('scrapeAndSend("limit-manual.pdf", "manual", { pageLimit: 2 })');
+    await flush(); await flush();
+    page.setAttribute('src', 'https://cdn.test/limit-manual-2.jpg');
+    await flush(); await flush();
+    page.setAttribute('src', 'https://cdn.test/limit-manual-3.jpg');
+    await flush(); await flush();
+    window.document.querySelector('.wtpdf-done').click();
+    const res = await running;
+    const urls = sent[0] && sent[0].urls;
+    check('manual page limit keeps later scans from exceeding the cap',
+      res.count === 2 && urls.length === 2 && urls.every((url) => !url.endsWith('-3.jpg')), urls);
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL NAVIGATION TESTS PASSED');

@@ -286,7 +286,7 @@
   }
 
   async function createOcrWorker(lang, logger) {
-    const base = chrome.runtime.getURL('ocr/');
+    const base = chrome.runtime.getURL('vendor/ocr/');
     const worker = await Tesseract.createWorker(lang, 1, {
       workerPath: base + 'worker.min.js',
       corePath: base + 'core',

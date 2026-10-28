@@ -4,7 +4,7 @@ const path = require('path');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
-const html = fs.readFileSync(path.join(__dirname, 'viewer.html'), 'utf8')
+const html = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.html'), 'utf8')
   .replace(/<script[\s\S]*?<\/script>/g, ''); // scripts evaluated manually in the window realm
 
 const dom = new JSDOM(html, {
@@ -89,7 +89,7 @@ window.scrollTo = () => {};
 window.HTMLElement.prototype.scrollIntoView = () => {};
 window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
 
-const scripts = ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'pdf-import-store.js', 'viewer.js', 'trans.js'];
+const scripts = ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/pdf-import-store.js', '../src/viewer/viewer.js', '../src/viewer/trans.js'];
 for (const f of scripts) {
   const code = fs.readFileSync(path.join(__dirname, f), 'utf8');
   try {
@@ -119,21 +119,23 @@ const $ = (id) => window.document.getElementById(id);
   // 2.24: rebranded to PIC TO PDF
   check('viewer title uses PIC TO PDF', /PIC TO PDF/.test(window.document.title), window.document.title);
   check('viewer brand h1 uses PIC TO PDF', window.document.querySelector('.brand-text h1').textContent.trim() === 'PIC TO PDF');
-  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'manifest.json'), 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../manifest.json'), 'utf8'));
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.55', manifest.version === '2.55' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۵۵'));
+  check('manifest and viewer version badge are synchronized at 2.56', manifest.version === '2.56' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۵۶'));
+  const viewerCss = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
-    /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(fs.readFileSync(path.join(__dirname, 'viewer.css'), 'utf8')));
+    /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
+  check('stylesheet has no literal newline escape that breaks a selector', !viewerCss.includes('\\n'));
   check('PDF-to-image import opens the dedicated converter tab',
     !!window.document.getElementById('btnImportPdf') &&
     /زبانهٔ جدا/.test(window.document.getElementById('btnImportPdf').title));
-  check('manifest icon files declared', [16, 32, 48, 128].every((s) => manifest.icons[String(s)] === `icon${s}.png`) &&
-    manifest.action.default_icon['128'] === 'icon128.png');
+  check('manifest icon files declared', [16, 32, 48, 128].every((s) => manifest.icons[String(s)] === `assets/icons/icon${s}.png`) &&
+    manifest.action.default_icon['128'] === 'assets/icons/icon128.png');
   check('brand logo points at the new icon file',
-    window.document.querySelector('.brand-logo img').getAttribute('src') === 'icon128.png');
+    window.document.querySelector('.brand-logo img').getAttribute('src') === '../../assets/icons/icon128.png');
   check('footer grouped shell present', !!window.document.querySelector('.dock .dock-side') &&
     !!window.document.querySelector('.dock .dock-center') && !!window.document.querySelector('.dock .dock-actions'));
   for (const id of ['selCount', 'modePdf', 'modeImg', 'outputSettings', 'buildBtn', 'saveImgBtn']) {
