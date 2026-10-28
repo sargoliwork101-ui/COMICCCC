@@ -394,8 +394,8 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     await sleep(10);
     check('copy button puts the English OCR text on the clipboard', copied === 'Recognizable english sentence', copied);
     check('copy button shows the copied state', copyBtn.classList.contains('copied'));
-    check('OCR source is displayed in the block card',
-      h.$('edList').querySelector('.blk-orig-text').textContent === 'Recognizable english sentence');
+    check('OCR source is editable in the block card',
+      h.$('edList').querySelector('.blk-orig-text').value === 'Recognizable english sentence');
     h.$('edClose').click();
     await sleep(120); // let the final asynchronous preview render settle before the next editor test
   }
@@ -452,6 +452,29 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     handle.dispatchEvent(pointer('pointerup', 110, 90));
     check('dragging a resize handle changes translation box geometry', h.ev('items[0].ocr.blocks[0].tx1 > 80 && items[0].ocr.blocks[0].ty1 > 60'),
       h.ev('[items[0].ocr.blocks[0].tx1,items[0].ocr.blocks[0].ty1]'));
+    const moveHandle = h.$('edBoxes').querySelector('.ed-move');
+    check('translation box has a visible move handle', !!moveHandle);
+    moveHandle.setPointerCapture = () => {};
+    const beforeMove = h.ev('({x0:items[0].ocr.blocks[0].tx0 || items[0].ocr.blocks[0].x0, y0:items[0].ocr.blocks[0].ty0 || items[0].ocr.blocks[0].y0, w:(items[0].ocr.blocks[0].tx1 || items[0].ocr.blocks[0].x1)-(items[0].ocr.blocks[0].tx0 || items[0].ocr.blocks[0].x0), h:(items[0].ocr.blocks[0].ty1 || items[0].ocr.blocks[0].y1)-(items[0].ocr.blocks[0].ty0 || items[0].ocr.blocks[0].y0)})');
+    moveHandle.dispatchEvent(pointer('pointerdown', 100, 100));
+    moveHandle.dispatchEvent(pointer('pointermove', 120, 130));
+    moveHandle.dispatchEvent(pointer('pointerup', 120, 130));
+    const afterMove = h.ev('({x0:items[0].ocr.blocks[0].tx0, y0:items[0].ocr.blocks[0].ty0, w:items[0].ocr.blocks[0].tx1-items[0].ocr.blocks[0].tx0, h:items[0].ocr.blocks[0].ty1-items[0].ocr.blocks[0].ty0})');
+    check('dragging the move handle repositions the box without resizing it',
+      afterMove.x0 === beforeMove.x0 + 20 && afterMove.y0 === beforeMove.y0 + 30 && afterMove.w === beforeMove.w && afterMove.h === beforeMove.h,
+      { beforeMove, afterMove });
+
+    const originalField = row.querySelector('.blk-orig-text');
+    originalField.value = 'corrected OCR source';
+    originalField.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    h.ev('window.__retranslateCalls = []; TranslateTools.translate = async (text, sl) => { window.__retranslateCalls.push({text, sl}); return {text:"retranslated text", ok:true}; };');
+    row.querySelector('.blk-retranslate').click();
+    await sleep(150);
+    check('corrected OCR text is stored on the block', h.ev('items[0].ocr.blocks[0].text') === 'corrected OCR source');
+    check('retranslate action uses the corrected OCR and detected language',
+      h.ev('window.__retranslateCalls.length === 1 && window.__retranslateCalls[0].text === "corrected OCR source" && window.__retranslateCalls[0].sl === "en"'));
+    check('retranslated text updates both editors and saved preview',
+      h.ev('items[0].ocr.blocks[0].tr === "retranslated text"') && field.textContent === 'retranslated text' && overlay.textContent === 'retranslated text' && !!h.ev('items[0].edited'));
     h.$('edClose').click();
     await sleep(120);
   }

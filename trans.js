@@ -173,6 +173,42 @@ async function copyPlainText(text) {
     return ok;
   }
 }
+async function retranslateBlock(item, block, originalField, editor, overlay, button) {
+  const source = String(originalField.value || '');
+  block.text = source;
+  if (!source.trim()) { button.title = 'ابتدا متن OCR را اصلاح کنید'; return; }
+  const lang = OcrTools.LANGS[item.ocr.lang] || OcrTools.LANGS.eng;
+  const oldLabel = button.textContent;
+  button.disabled = true; button.textContent = 'در حال ترجمه…';
+  try {
+    const result = await TranslateTools.translate(source.trim(), lang.sl);
+    if (!result.ok || !result.text) throw new Error('ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید.');
+    block.tr = result.text;
+    block.richHtml = safeEditorHtml(escapeEditorText(result.text).replace(/\n/g, '<br>'));
+    if (EDI === item) {
+      editor.innerHTML = block.richHtml;
+      overlay.innerHTML = block.richHtml;
+      updatePreviewScale();
+      edDirty = true;
+      await applyEditor();
+    } else {
+      await renderEdited(item);
+      refreshCard(item); drawThumb(item);
+    }
+    button.textContent = 'ترجمه شد ✓';
+    button.title = `ترجمه از ${lang.name} به فارسی انجام شد`;
+  } catch (error) {
+    button.textContent = 'ترجمه ناموفق';
+    button.title = error && error.message ? error.message : String(error);
+  } finally {
+    button.disabled = false;
+    setTimeout(() => {
+      if (!button.isConnected) return;
+      button.textContent = oldLabel;
+      button.title = 'ترجمهٔ دوبارهٔ متن اصلاح‌شده به فارسی';
+    }, 1800);
+  }
+}
 
 // ---------- ویرایشگر متن غنی ----------
 let EDI = null, edUrl = null, edTimer = null, edDirty = false, edBusy = false, edPending = false;
@@ -456,6 +492,10 @@ function buildEditor() {
     overlay.setAttribute('dir', b.dir); overlay.spellcheck = true; overlay.innerHTML = b.richHtml || '';
     overlay.dataset.baseSize = String(b.size || Math.max(10, Math.round((b.lineH || 16) * 1.1)));
     box.appendChild(overlay);
+    const moveHandle = document.createElement('button');
+    moveHandle.type = 'button'; moveHandle.className = 'ed-move'; moveHandle.textContent = '⠿';
+    moveHandle.setAttribute('aria-label', `جابجایی کادر متن ${b.id}`); moveHandle.title = 'برای جابجایی کادر بکشید';
+    box.appendChild(moveHandle);
     ['n','ne','e','se','s','sw','w','nw'].forEach((dir) => {
       const handle = document.createElement('button'); handle.type = 'button'; handle.className = `ed-resize ed-resize-${dir}`;
       handle.dataset.dir = dir; handle.setAttribute('aria-label', `تغییر اندازهٔ کادر ${dir}`); box.appendChild(handle);
@@ -470,8 +510,36 @@ function buildEditor() {
     setGeometry();
     box.classList.toggle('off', !b.enabled);
     box.classList.toggle('active', false);
+    const startBoxMove = (event, handle) => {
+      event.preventDefault(); event.stopPropagation();
+      selectRichEditor(overlay);
+      const stageRect = document.querySelector('.ed-stage').getBoundingClientRect();
+      if (!stageRect.width || !stageRect.height) return;
+      const sx = it.w / stageRect.width, sy = it.h / stageRect.height;
+      const x0 = Number.isFinite(b.tx0) ? b.tx0 : b.x0, y0 = Number.isFinite(b.ty0) ? b.ty0 : b.y0;
+      const x1 = Number.isFinite(b.tx1) ? b.tx1 : b.x1, y1 = Number.isFinite(b.ty1) ? b.ty1 : b.y1;
+      const origin = { x: event.clientX, y: event.clientY, x0, y0, x1, y1 };
+      handle.setPointerCapture(event.pointerId);
+      const move = (ev) => {
+        const width = origin.x1 - origin.x0, height = origin.y1 - origin.y0;
+        const nextX0 = Math.max(0, Math.min(it.w - width, origin.x0 + (ev.clientX - origin.x) * sx));
+        const nextY0 = Math.max(0, Math.min(it.h - height, origin.y0 + (ev.clientY - origin.y) * sy));
+        b.tx0 = nextX0; b.tx1 = nextX0 + width;
+        b.ty0 = nextY0; b.ty1 = nextY0 + height;
+        setGeometry(); scheduleApply();
+      };
+      const stop = () => {
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', stop);
+        handle.removeEventListener('pointercancel', stop);
+      };
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', stop);
+      handle.addEventListener('pointercancel', stop);
+    };
+    moveHandle.addEventListener('pointerdown', (event) => startBoxMove(event, moveHandle));
     box.addEventListener('pointerdown', (event) => {
-      if (event.target === box) selectRichEditor(overlay);
+      if (event.target === box) startBoxMove(event, box);
     });
     overlay.addEventListener('focus', () => { selectRichEditor(overlay); edFieldFocused = true; });
     overlay.addEventListener('input', () => updateRichBlock(b.id, overlay));
@@ -511,10 +579,16 @@ function buildEditor() {
       <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن</option></select>
       <button type="button" class="fmt-btn blk-copy-orig" title="کپی متن OCR">کپی متن اصلی</button></div>
       ${makeToolbar(b)}
-      <div class="blk-orig"><span class="blk-orig-text"></span></div>
+      <div class="blk-orig"><label class="blk-orig-label">متن OCR (قابل اصلاح)</label>
+        <textarea class="blk-orig-text" rows="2" aria-label="اصلاح متن تشخیص‌داده‌شده"></textarea>
+        <button type="button" class="fmt-btn blk-retranslate" title="ترجمهٔ دوبارهٔ متن اصلاح‌شده به فارسی">ترجمهٔ دوباره</button>
+      </div>
       <div class="blk-editor" data-id="${escapeEditorText(b.id)}" contenteditable="true" role="textbox" aria-label="ترجمهٔ قابل ویرایش" spellcheck="true"></div>
-      <div class="blk-help">می‌توانید متن را همین‌جا یا مستقیماً روی کادر تصویر ویرایش کنید؛ برای تغییر اندازه، دستگیره‌های کادر را بکشید.</div>`;
-    row.querySelector('.blk-orig-text').textContent = b.text || '';
+      <div class="blk-help">متن را همین‌جا اصلاح کنید؛ برای ویرایش روی تصویر، دستگیرهٔ بالای کادر را بکشید تا جابه‌جا شود و دستگیره‌های دور کادر را برای تغییر اندازه بکشید.</div>`;
+    const originalField = row.querySelector('.blk-orig-text');
+    originalField.dir = 'auto';
+    originalField.value = b.text || '';
+    originalField.addEventListener('input', () => { b.text = originalField.value; });
     const editor = row.querySelector('.blk-editor'); editor.setAttribute('dir', b.dir); editor.innerHTML = b.richHtml || '';
     syncBlockTextStyles(b, editor, overlay);
     row.querySelector('.blk-bg').value = b.bg || 'auto';
@@ -536,6 +610,8 @@ function buildEditor() {
       button.title = ok ? 'کپی شد ✓' : 'کپی ناموفق بود';
       setTimeout(() => { button.classList.remove('copied'); button.title = 'کپی متن OCR'; }, 1400);
     });
+    row.querySelector('.blk-retranslate').addEventListener('click', (event) =>
+      retranslateBlock(it, b, originalField, editor, overlay, event.currentTarget));
     row.querySelectorAll('.blk-format button').forEach((button) => {
       button.addEventListener('mousedown', (event) => event.preventDefault());
       button.addEventListener('click', () => {

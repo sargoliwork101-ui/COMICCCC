@@ -276,19 +276,23 @@
       };
       const bw = layoutBox.x1 - layoutBox.x0, bh = layoutBox.y1 - layoutBox.y0;
 
-      let fill = null, txt = '#0b0b0b', stroke = null;
+      let sourceFill = null, targetFill = null, txt = '#0b0b0b', stroke = null;
       if (b.bg === 'none') {
         txt = '#ffffff'; stroke = '#000000';
-      } else if (b.bg === 'white') { fill = '#ffffff'; }
-      else if (b.bg === 'black') { fill = '#000000'; txt = '#fafafa'; }
+      } else if (b.bg === 'white') { sourceFill = targetFill = '#ffffff'; }
+      else if (b.bg === 'black') { sourceFill = targetFill = '#000000'; txt = '#fafafa'; }
       else {
-        const s = sampleBg(ctx, box, W, H);
-        fill = `rgb(${s.r},${s.g},${s.b})`;
-        txt = lum(s.r, s.g, s.b) > 150 ? '#0b0b0b' : '#fafafa';
+        // هر دو محل را قبل از هرگونه پاک‌کردن نمونه‌برداری کن: محل OCR و کل سطح زیر کادر نهایی.
+        const sourceBg = sampleBg(ctx, box, W, H);
+        const targetBg = sampleBg(ctx, layoutBox, W, H);
+        sourceFill = `rgb(${sourceBg.r},${sourceBg.g},${sourceBg.b})`;
+        targetFill = `rgb(${targetBg.r},${targetBg.g},${targetBg.b})`;
+        txt = lum(targetBg.r, targetBg.g, targetBg.b) > 150 ? '#0b0b0b' : '#fafafa';
       }
       // رنگ دستی کاربر بر انتخاب خودکار اولویت دارد (زیرخط هم با همین رنگ رسم می‌شود)
       if (st.color) txt = st.color;
-      if (fill) { ctx.fillStyle = fill; ctx.fillRect(box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0); }
+      if (sourceFill) { ctx.fillStyle = sourceFill; ctx.fillRect(box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0); }
+      if (targetFill) { ctx.fillStyle = targetFill; ctx.fillRect(layoutBox.x0, layoutBox.y0, bw, bh); }
 
       const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
       const sourceText = b.tr.trim();

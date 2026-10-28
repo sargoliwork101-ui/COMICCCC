@@ -211,8 +211,10 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     const block = { enabled: true, tr: 'text', x0: 20, y0: 30, x1: 40, y1: 50,
       tx0: 100, ty0: 110, tx1: 150, ty1: 160, lineH: 10, size: 10, bg: 'white' };
     Typeset.render(bmp, [block], { createCanvas: () => ({ width: 200, height: 200, getContext: () => ctx }) });
-    check('moving the translation box does not shift or resize the original-text erasure area',
+    check('original OCR text is erased at its original padded location',
       JSON.stringify(fillCalls[0]) === JSON.stringify([16, 26, 28, 28]), fillCalls[0]);
+    check('the whole final text box is erased beneath the placed text',
+      JSON.stringify(fillCalls[1]) === JSON.stringify([100, 110, 50, 50]), fillCalls[1]);
     check('saved text is clipped to the translation box',
       JSON.stringify(clipRects[0]) === JSON.stringify([100, 110, 50, 50]), clipRects[0]);
   }
