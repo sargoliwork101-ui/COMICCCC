@@ -82,7 +82,7 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   const pdoc = popupDom.window.document;
   check('chips block removed from popup', !pdoc.querySelector('.chips, .chip'));
   check('modern brand logo in popup', !!pdoc.querySelector('.brand .brand-logo img'));
-  check('version pill present', !!pdoc.querySelector('.version-pill'));
+  check('version pill present and matches extension version', pdoc.querySelector('.version-pill') && pdoc.querySelector('.version-pill').textContent === `v${require('./manifest.json').version}`);
   check('start button present', !!pdoc.getElementById('startBtn'));
   check('PDF-to-image action is clearly visible in popup',
     !!pdoc.getElementById('pdfConvertBtn') && /تبدیل PDF به تصویر/.test(pdoc.getElementById('pdfConvertBtn').textContent));

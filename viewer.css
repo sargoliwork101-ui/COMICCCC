@@ -1,5 +1,5 @@
 body { min-height: 100vh; padding-bottom: calc(132px + env(safe-area-inset-bottom)); overflow-x: clip; }
-.topbar { position: relative; z-index: 60; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, rgba(17,21,28,.92), rgba(17,21,28,.72));
+.topbar { position: sticky; top: 0; z-index: 60; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, rgba(17,21,28,.92), rgba(17,21,28,.72));
   backdrop-filter: blur(16px); }
 .topbar-in { max-width: 1200px; margin: 0 auto; padding: 14px clamp(12px, 4vw, 28px); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .brand-logo { width: 46px; height: 46px; flex: none; border-radius: 14px; overflow: hidden; display: grid; place-items: center;
