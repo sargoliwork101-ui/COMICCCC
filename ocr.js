@@ -17,6 +17,26 @@
   };
   const ALLOWED = /[0-9.,!?'"“”‘’:;…~\-—()（）、。！？「」]/g;
 
+  const ENGLISH_BIGRAMS = new Set('th he in er an re on at en nd ti es or te of ed is it al ar st to nt ng se ha as ou io le ve co me de hi ri ro ic ne ea ra ce li ch ll be ma si om ur'.split(' '));
+
+  // خروجی‌های مشکوک نگه داشته می‌شوند تا کاربر بتواند OCR را دستی اصلاح کند؛ فقط خودکار ترجمه نمی‌شوند.
+  function needsManualReview(text, lang) {
+    const flat = text.replace(/\s+/g, '');
+    if (!flat) return true;
+    const script = SCRIPT[lang];
+    const scriptChars = script ? (flat.match(script) || []).length : flat.length;
+    const allowedChars = (flat.match(ALLOWED) || []).length;
+    const unsupported = flat.length - scriptChars - allowedChars - (flat.match(/[0-9]/g) || []).length;
+    if (unsupported > 0) return true;
+    if (lang !== 'eng') return false;
+    const words = text.toUpperCase().match(/[A-Z]{6,}/g) || [];
+    return words.some((word) => {
+      let common = 0;
+      for (let i = 0; i < word.length - 1; i++) if (ENGLISH_BIGRAMS.has(word.slice(i, i + 2).toLowerCase())) common++;
+      return common / (word.length - 1) < 0.24;
+    });
+  }
+
   // آیا این خط واقعاً از زبان انتخاب‌شده است؟ (حذف خروجی‌های بی‌معنی OCR)
   function looksReal(text, lang) {
     const flat = text.replace(/\s+/g, '');
@@ -25,7 +45,8 @@
     if (!re) return true;
     const sc = (flat.match(re) || []).length;
     const al = (flat.match(ALLOWED) || []).length;
-    return sc / flat.length >= 0.55 && (sc + al) / flat.length >= 0.9;
+    // Be permissive at extraction time: suspicious symbols should trigger review, not make OCR text disappear.
+    return sc / flat.length >= 0.4 && (sc + al) / flat.length >= 0.65;
   }
 
   // خروجی خام tesseract (blocks) را به آرایهٔ ساده از خط‌ها تبدیل می‌کند
@@ -43,7 +64,7 @@
       if (!looksReal(text, lang)) return;
       // خط‌های خیلی کوتاه فقط با اطمینان بالا پذیرفته می‌شوند (حذف نویز)
       if (letterCount(text) < (cjk ? 2 : 5) && l.confidence < 70) return;
-      out.push({ text, conf: l.confidence, x0: l.bbox.x0 + xOffset, x1: l.bbox.x1 + xOffset, y0: l.bbox.y0 + yOffset, y1: l.bbox.y1 + yOffset });
+      out.push({ text, conf: l.confidence, needsReview: needsManualReview(text, lang), x0: l.bbox.x0 + xOffset, x1: l.bbox.x1 + xOffset, y0: l.bbox.y0 + yOffset, y1: l.bbox.y1 + yOffset });
     })));
     return out;
   }
@@ -86,6 +107,7 @@
         x0, y0, x1, y1,
         text: g.map((l) => l.text).join(cjk ? '' : ' ').replace(/\s+/g, ' ').trim(),
         conf: g.reduce((s, l) => s + l.conf, 0) / g.length,
+        needsReview: g.some((l) => l.needsReview),
         lineH: g.reduce((s, l) => s + (l.y1 - l.y0), 0) / g.length,
         lines: g.length
       });
@@ -289,7 +311,8 @@
   const OCR_PROFILES = {
     sparse: { psm: '11', minConf: 40, name: 'متن پراکنده' },
     dense: { psm: '6', minConf: 30, name: 'بلوک متنی فشرده' },
-    comic: { psm: '12', minConf: 25, name: 'کمیک و حباب گفتگو' }
+    comic: { psm: '12', minConf: 25, name: 'کمیک و حباب گفتگو' },
+    line: { psm: '13', minConf: 25, name: 'خط منفرد با LSTM' }
   };
 
   function profilePasses(profile, opts) {
@@ -297,6 +320,7 @@
     const whiteText = opts.precise ? ['wmask'] : [];
     if (profile === 'dense') return [...adaptive, 'gray', ...whiteText];
     if (profile === 'comic') return [...adaptive, 'gray', 'bubbles', ...whiteText];
+    if (profile === 'line') return [...adaptive, 'gray', ...whiteText];
     return ['gray', ...adaptive, 'bubbles', ...whiteText];
   }
 
@@ -309,31 +333,56 @@
     return { score, reliable: confidence >= 72 && chars >= (cjk ? 4 : 12) };
   }
 
-  // Auto mode tries two alternate Tesseract page-segmentation profiles only when the previous pass is weak.
+  function normalizedCandidate(lines) {
+    return (lines || []).map((line) => line.text || '').join(' ').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  }
+  function candidateSimilarity(a, b) {
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    const grams = (text) => new Set(Array.from({ length: Math.max(0, text.length - 1) }, (_, i) => text.slice(i, i + 2)));
+    const aa = grams(a), bb = grams(b);
+    if (!aa.size || !bb.size) return 0;
+    let shared = 0;
+    aa.forEach((gram) => { if (bb.has(gram)) shared++; });
+    return (2 * shared) / (aa.size + bb.size);
+  }
+
+  // Run each local Tesseract LSTM segmentation profile and compare their readings instead of trusting one confidence score.
   async function ocrWithProfiles(bmp, worker, opts, recognizerFn) {
     const o = Object.assign({ profile: 'auto', enhanceContrast: true, precise: false }, opts);
-    const profileIds = o.profile === 'auto' ? ['sparse', 'dense', 'comic'] : [OCR_PROFILES[o.profile] ? o.profile : 'sparse'];
+    const profileIds = o.profile === 'auto' ? ['sparse', 'dense', 'comic', 'line'] : [OCR_PROFILES[o.profile] ? o.profile : 'sparse'];
     const recognize = recognizerFn || o.recognizer || api.ocrBitmap;
     let best = null, bestRating = { score: -1, reliable: false }, lastError = null;
+    const candidates = [];
     for (let index = 0; index < profileIds.length; index++) {
       const id = profileIds[index], profile = OCR_PROFILES[id];
       if (o.onProfile) o.onProfile(profile, index, profileIds.length);
       try {
-        await worker.setParameters({ tessedit_pageseg_mode: profile.psm, preserve_interword_spaces: '1' });
+        await worker.setParameters({ tessedit_ocr_engine_mode: '1', tessedit_pageseg_mode: profile.psm, preserve_interword_spaces: '1' });
         const localStats = { raw: 0, kept: 0 };
         const lines = await recognize(bmp, worker, {
           ...o, profile: id, minConf: profile.minConf, passes: profilePasses(id, o), stats: localStats,
           onSlice: o.onSlice ? (fraction) => o.onSlice((index + fraction) / profileIds.length) : undefined
         });
+        candidates.push(normalizedCandidate(lines));
         const rating = rateRecognition(lines, o.cjk);
         if (!best || rating.score > bestRating.score) { best = { lines, stats: localStats }; bestRating = rating; }
-        if (rating.reliable || o.profile !== 'auto') break;
+        if (o.profile !== 'auto') break;
       } catch (error) {
         lastError = error;
+        candidates.push('');
         if (o.profile !== 'auto') throw error;
       }
     }
     if (!best && lastError) throw lastError;
+    if (o.profile === 'auto' && best && best.lines.length) {
+      const bestText = normalizedCandidate(best.lines);
+      const peerTexts = candidates.slice();
+      const bestIndex = peerTexts.indexOf(bestText);
+      if (bestIndex >= 0) peerTexts.splice(bestIndex, 1);
+      const corroboratingProfiles = peerTexts.filter((text) => candidateSimilarity(bestText, text) >= 0.58).length;
+      if (corroboratingProfiles < 2) best.lines.forEach((line) => { line.needsReview = true; });
+    }
     if (o.stats && best) { o.stats.raw += best.stats.raw; o.stats.kept += best.stats.kept; }
     return best ? best.lines : [];
   }
@@ -349,7 +398,7 @@
       cacheMethod: 'none',
       logger: logger || (() => {})
     });
-    await worker.setParameters({ tessedit_pageseg_mode: '11', preserve_interword_spaces: '1' });
+    await worker.setParameters({ tessedit_ocr_engine_mode: '1', tessedit_pageseg_mode: '11', preserve_interword_spaces: '1' });
     return worker;
   }
 

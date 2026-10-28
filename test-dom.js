@@ -151,8 +151,8 @@ const $ = (id) => window.document.getElementById(id);
     !topMenu.contains($('groupMenu')));
   check('OCR-only contrast control exists and defaults on', !!$('trContrast') && $('trContrast').checked &&
     /فقط برای OCR/.test($('trContrast').parentElement.textContent));
-  check('Tesseract settings offer two alternate OCR profiles with automatic fallback',
-    $('trOcrProfile').value === 'auto' && ['sparse', 'dense', 'comic'].every((id) => $('trOcrProfile').querySelector(`option[value="${id}"]`)));
+  check('Tesseract settings offer four local OCR profiles with automatic comparison',
+    $('trOcrProfile').value === 'auto' && ['sparse', 'dense', 'comic', 'line'].every((id) => $('trOcrProfile').querySelector(`option[value="${id}"]`)));
 
   // 2.21: ESC cancellation affordances exist in the shell
   const jobHint = $('jobHint');
@@ -267,10 +267,11 @@ const $ = (id) => window.document.getElementById(id);
   check('ocr on re-enables translate', !$('btnTranslate').disabled);
 
   ev(`OcrTools.createOcrWorker = async () => ({ recognize: async () => ({ data: { blocks: [] } }), setParameters: async () => {}, terminate: async () => {} });
-    OcrTools.ocrBitmap = async (bmp, worker, opts) => { window.__ocrPasses = opts.passes.slice(); window.__ocrProfile = opts.profile; return [{ text: 'Hello world from OCR', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30 }]; };
+    OcrTools.ocrBitmap = async (bmp, worker, opts) => { window.__ocrPasses = opts.passes.slice(); window.__ocrProfiles = window.__ocrProfiles || []; window.__ocrProfiles.push(opts.profile); return [{ text: 'Hello world from OCR', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30 }]; };
     OcrTools.groupLines = (lines) => [
       { id: 1, enabled: true, bg: 'auto', tr: '', text: 'Hello', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30, lineH: 16 },
-      { id: 2, enabled: true, bg: 'auto', tr: '', text: 'uncertain', conf: 30, x0: 10, x1: 90, y0: 50, y1: 70, lineH: 16 }
+      { id: 2, enabled: true, bg: 'auto', tr: '', text: 'uncertain', conf: 30, x0: 10, x1: 90, y0: 50, y1: 70, lineH: 16 },
+      { id: 3, enabled: true, bg: 'auto', tr: '', text: 'NG BEYAYN®BIE', conf: 94, needsReview: true, x0: 10, x1: 90, y0: 90, y1: 110, lineH: 16 }
     ];`);
   $('trOnlySel').checked = false;
   $('btnTranslate').click();
@@ -279,12 +280,15 @@ const $ = (id) => window.document.getElementById(id);
   for (let i = 0; i < 80; i++) { await sleep(100); if (!ev('building')) break; }
   check('translate finished', !ev('building'));
   check('adaptive contrast pass is sent only through OCR processing', ev('window.__ocrPasses.includes("adaptive")'));
-  check('automatic OCR profile starts with Tesseract sparse-text mode', ev('window.__ocrProfile === "sparse"'));
+  check('automatic OCR profile starts with Tesseract sparse-text mode', ev('window.__ocrProfiles[0] === "sparse"'));
   check('ocr data attached', items.some((it) => it.ocr && it.ocr.blocks.length), items.map((it) => !!(it.ocr && it.ocr.blocks.length)));
   const translated = items.find((it) => it.ocr && it.ocr.blocks.length);
   check('translation filled from mock fetch', translated && translated.ocr.blocks[0].tr === 'سلام', translated && translated.ocr.blocks[0].tr);
   check('low-confidence OCR is retained for correction, not auto-translated as gibberish',
-    translated && translated.ocr.blocks[1].tr === '' && translated.ocr.blocks[1].text === 'uncertain' && /اطمینان OCR پایین/.test($('statusText').textContent));
+    translated && translated.ocr.blocks[1].tr === '' && translated.ocr.blocks[1].text === 'uncertain');
+  check('high-confidence but suspicious OCR is also retained for review, not auto-translated',
+    translated && translated.ocr.blocks[2].tr === '' && translated.ocr.blocks[2].text === 'NG BEYAYN®BIE' && translated.ocr.blocks[2].needsReview === true && /بازبینی/.test($('statusText').textContent),
+    { block: translated && translated.ocr.blocks[2], status: $('statusText').textContent });
   check('edited image produced', !!translated.edited);
 
   ev('openEditor(items.find((it) => it.ocr && it.ocr.blocks.length))');

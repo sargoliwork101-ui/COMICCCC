@@ -182,12 +182,13 @@
       </select>
       <label for="trOcrProfile">روش تشخیص متن</label>
       <select id="trOcrProfile" class="sel">
-        <option value="auto" selected>خودکار؛ روش‌های جایگزین در صورت نتیجهٔ ضعیف</option>
-        <option value="sparse">روش ۱: متن‌های پراکنده (پیش‌فرض)</option>
+        <option value="auto" selected>خودکار؛ مقایسهٔ ۴ روش و بازبینی موارد مشکوک</option>
+        <option value="sparse">روش ۱: متن‌های پراکنده</option>
         <option value="dense">روش ۲: متن فشرده و بلوک‌بندی‌شده</option>
         <option value="comic">روش ۳: کمیک و حباب گفتگو</option>
+        <option value="line">روش ۴: خط منفرد با LSTM</option>
       </select>
-      <p class="note">سه گزینه از موتور آفلاین Tesseract با شیوهٔ صفحه‌بندی متفاوت استفاده می‌کنند؛ در حالت خودکار، اگر نتیجه ضعیف باشد روش بعدی امتحان می‌شود.</p>
+      <p class="note">همهٔ روش‌ها محلی و بر پایهٔ Tesseract LSTM هستند. در حالت خودکار، چهار شیوهٔ صفحه‌بندی و کنتراست OCR مقایسه می‌شوند؛ اگر نتیجه‌ها با هم نخوانند یا خروجی مشکوک باشد، متن حفظ می‌شود و خودکار ترجمه نمی‌شود تا دستی بازبینی شود.</p>
       <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
       <label class="check" title="اگر خاموش باشد، متن اصلی پاک نمی‌شود و ترجمه با حاشیه روی تصویر قرار می‌گیرد"><input type="checkbox" id="trErase" checked><span>پاک‌کردن متن اصلی زیر ترجمه</span></label>
       <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>

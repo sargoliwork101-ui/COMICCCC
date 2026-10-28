@@ -99,13 +99,13 @@ async function runTranslate() {
         if (!blocks.length) { noText++; it.edited = null; }
         else {
           const minTranslateConfidence = 55;
-          const translatable = blocks.filter((block) => Number.isFinite(block.conf) && block.conf >= minTranslateConfidence);
+          const translatable = blocks.filter((block) => Number.isFinite(block.conf) && block.conf >= minTranslateConfidence && !block.needsReview);
           const reviewCount = blocks.length - translatable.length;
           totalBlocks += blocks.length;
           translatedBlocks += translatable.length;
           reviewBlocks += reviewCount;
           if (reviewCount) {
-            setStatus(`${reviewCount} متن با اطمینان OCR پایین برای جلوگیری از ترجمهٔ بی‌معنی فعلاً رد شد؛ تصویر ${k + 1} از ${list.length}. در ویرایشگر متن OCR را اصلاح و «ترجمهٔ دوباره» را بزنید.`);
+            setStatus(`${reviewCount} متن به‌دلیل اطمینان پایین یا اختلاف بین روش‌های OCR برای جلوگیری از ترجمهٔ بی‌معنی نیاز به بازبینی دارد؛ تصویر ${k + 1} از ${list.length}. متن OCR را در ویرایشگر اصلاح کنید و «ترجمهٔ دوباره» را بزنید.`);
           }
           if (translatable.length) {
             setStatus(`در حال ترجمهٔ ${translatable.length} متن مطمئن در تصویر ${k + 1} از ${list.length}...`);
@@ -151,12 +151,12 @@ async function runTranslate() {
       setStatus(`متنی پیدا نشد. موتور OCR کار کرد (${rawTotal} خط خام، ${keptTotal} خط معتبر) ولی متن قابل‌قبولی نبود. ` +
         `مطمئن شوید زبان درست انتخاب شده (الان: ${L.name}) و گزینهٔ «دقت بالاتر» روشن است.`);
     } else if (translatedBlocks && trFail >= translatedBlocks) {
-      setStatus('متن‌های مطمئن خوانده شد ولی ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید. متن‌های OCR با اطمینان پایین در ویرایشگر برای اصلاح باقی مانده‌اند.');
+      setStatus('متن‌های مطمئن خوانده شد ولی ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید. متن‌های کم‌اطمینان یا دارای اختلاف بین روش‌های OCR در ویرایشگر برای بازبینی باقی مانده‌اند.');
     } else if (!translatedBlocks && reviewBlocks) {
-      setStatus(`${reviewBlocks} متن شناسایی شد ولی اطمینان OCR کافی نبود؛ برای جلوگیری از ترجمهٔ چرت، ترجمهٔ خودکار انجام نشد. روی ✎ تصویر بزنید، متن OCR را اصلاح کنید و «ترجمهٔ دوباره» را بزنید.`);
+      setStatus(`${reviewBlocks} متن به‌دلیل اطمینان پایین یا اختلاف بین روش‌های OCR نیاز به بازبینی دارد؛ برای جلوگیری از ترجمهٔ بی‌معنی، خودکار ترجمه نشد. روی ✎ تصویر بزنید، متن OCR را اصلاح کنید و «ترجمهٔ دوباره» را بزنید.`);
     } else {
       setStatus(`${TR.cancel ? 'متوقف شد. ' : ''}${translatedBlocks} متن مطمئن در ${doneImgs} تصویر ترجمه شد` +
-        (reviewBlocks ? ` — ${reviewBlocks} متن با اطمینان OCR پایین برای اصلاح دستی کنار گذاشته شد` : '') +
+        (reviewBlocks ? ` — ${reviewBlocks} متن به‌دلیل اطمینان پایین یا اختلاف OCR برای بازبینی کنار گذاشته شد` : '') +
         (noText ? ` (${noText} تصویر بدون متن)` : '') +
         (trFail ? ` — ترجمهٔ ${trFail} متن ناموفق بود` : '') +
         '. روی دکمهٔ ✎ هر تصویر بزنید تا ترجمه‌ها را ویرایش کنید.');
@@ -593,6 +593,7 @@ function buildEditor() {
 
     const row = document.createElement('div'); row.className = `blk${b.enabled ? '' : ' off'}`; row.dataset.id = b.id;
     row.innerHTML = `<div class="blk-top"><span class="blk-n">${b.id}</span>
+      ${b.needsReview ? '<span class="blk-review-badge" title="چند روش OCR نتیجهٔ یکسانی ندادند یا متن نویسهٔ مشکوک دارد">نیاز به بازبینی</span>' : ''}
       <label><input type="checkbox" ${b.enabled ? 'checked' : ''}> جایگزین شود</label>
       <select class="sel blk-bg"><option value="auto">پس‌زمینه: خودکار</option><option value="white">پس‌زمینه: سفید</option>
       <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن</option></select>
