@@ -3,7 +3,8 @@
 // این دکمه آخرین نسخه را از گیت‌هاب می‌خواند، بستهٔ ZIP را دانلود می‌کند و مراحل جایگزینی را راهنمایی می‌کند.
 (function () {
   const REPO = 'sargoliwork101-ui/COMICCCC';
-  const BRANCH = 'main';
+  // Published builds use main; development builds set their channel in update-channel.js.
+  const BRANCH = window.PIC_TO_PDF_UPDATE_BRANCH || 'main';
 
   const btn = document.getElementById('updateBtn');
   const statusEl = document.getElementById('updateStatus');
@@ -34,7 +35,7 @@
   }
 
   async function fetchLatestVersion() {
-    const url = `https://api.github.com/repos/${REPO}/contents/manifest.json?ref=${BRANCH}&_=${Date.now()}`;
+    const url = `https://api.github.com/repos/${REPO}/contents/manifest.json?ref=${encodeURIComponent(BRANCH)}&_=${Date.now()}`;
     const res = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
     if (res.status === 403 || res.status === 429) {
       throw new Error('محدودیت درخواست گیت‌هاب؛ چند دقیقهٔ دیگر دوباره تلاش کن');
@@ -48,7 +49,8 @@
   }
 
   async function downloadLatest() {
-    const zipUrl = `https://codeload.github.com/${REPO}/zip/refs/heads/${BRANCH}`;
+    const branchPath = BRANCH.split('/').map(encodeURIComponent).join('/');
+    const zipUrl = `https://codeload.github.com/${REPO}/zip/refs/heads/${branchPath}`;
     if (chrome.downloads && typeof chrome.downloads.download === 'function') {
       await chrome.downloads.download({ url: zipUrl, filename: 'PIC-TO-PDF-latest.zip', saveAs: false });
     } else {
@@ -62,8 +64,12 @@
     try {
       const latest = await fetchLatestVersion();
       const cmp = compareVersions(latest, currentVersion);
-      if (cmp <= 0) {
-        setStatus(`نسخهٔ شما (v${currentVersion}) آخرین نسخه است ✓`, 'ok');
+      if (cmp === 0) {
+        setStatus(`نسخهٔ شما (v${currentVersion}) با آخرین نسخهٔ کانال ${BRANCH} برابر است ✓`, 'ok');
+        return;
+      }
+      if (cmp < 0) {
+        setStatus(`نسخهٔ نصب‌شدهٔ شما (v${currentVersion}) از نسخهٔ کانال ${BRANCH} جدیدتر است؛ دانگرید انجام نشد.`, 'ok');
         return;
       }
       setStatus(`نسخهٔ جدید v${latest} پیدا شد؛ در حال دانلود بستهٔ به‌روزرسانی...`, 'warn');
