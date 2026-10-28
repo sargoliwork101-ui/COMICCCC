@@ -662,27 +662,51 @@ prepare = async (it, r) => {
     }
   }
 
-  // ---------- 23. thumbnails contain the entire tall image at high quality ----------
+  // ---------- 23. thumbnails contain every source corner at high quality ----------
   {
     const h = makeHarness();
     for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
-    let options = null, drawing = null, closed = false;
+    let options = null, drawing = null, closed = false, bitmap = null;
+    let nativeSize = { width: 240, height: 3000 };
     const originalBitmap = h.window.createImageBitmap;
     try {
       h.window.createImageBitmap = async (blob, opts) => {
         options = opts;
-        return { width: 240, height: 3000, close() { closed = true; } };
+        const width = opts && opts.resizeWidth ? opts.resizeWidth : nativeSize.width;
+        const height = opts && opts.resizeHeight
+          ? opts.resizeHeight : Math.max(1, Math.round(nativeSize.height * width / nativeSize.width));
+        bitmap = { width, height, close() { closed = true; } };
+        return bitmap;
       };
       const canvas = h.ev('items[0]').el.querySelector('canvas');
       canvas.getContext = () => ({
-        fillStyle: '', fillRect() {},
+        fillStyle: '', fillRect() {}, imageSmoothingEnabled: false, imageSmoothingQuality: 'low',
         drawImage(...args) { drawing = args; }
       });
-      await h.ev('drawThumb(items[0])');
-      check('thumbnail uses high-quality resizing', options && options.resizeQuality === 'high', options);
-      check('thumbnail scales the whole tall image instead of cropping its bottom',
-        drawing && drawing.length === 5 && Math.abs(drawing[3] - 25.6) < 0.001 && drawing[4] === 320, drawing);
-      check('thumbnail bitmap is released after drawing', closed === true);
+      const capture = async (width, height) => {
+        nativeSize = { width, height };
+        options = null; drawing = null; closed = false; bitmap = null;
+        await h.ev(`items[0].w = ${width}; items[0].h = ${height}; items[0].info = {fmt:'PNG',w:${width},h:${height},ok:false}`);
+        await h.ev('drawThumb(items[0])');
+        return { options, drawing, closed, bitmap };
+      };
+      const checkWholeImage = (label, result) => {
+        const { drawing: args, bitmap: bmp } = result;
+        const scale = bmp ? Math.min(240 / bmp.width, 320 / bmp.height) : 0;
+        check(`${label}: complete source rectangle is drawn`, args && args.length === 9 &&
+          args[1] === 0 && args[2] === 0 && args[3] === bmp.width && args[4] === bmp.height, args);
+        check(`${label}: destination stays inside the card without cropping`, args &&
+          args[5] >= 0 && args[6] >= 0 && args[5] + args[7] <= 240 && args[6] + args[8] <= 320 &&
+          Math.abs(args[7] - bmp.width * scale) < 0.001 && Math.abs(args[8] - bmp.height * scale) < 0.001, args);
+        check(`${label}: bitmap is released`, result.closed === true);
+      };
+      const tall = await capture(240, 3000);
+      check('thumbnail uses high-quality resizing', tall.options && tall.options.resizeQuality === 'high', tall.options);
+      checkWholeImage('tall thumbnail', tall);
+      check('tall thumbnail fits the complete height', tall.drawing && tall.drawing[8] === 320, tall.drawing);
+      const wide = await capture(3000, 240);
+      checkWholeImage('wide thumbnail', wide);
+      check('wide thumbnail fits the complete width', wide.drawing && wide.drawing[7] === 240, wide.drawing);
     } finally {
       h.window.createImageBitmap = originalBitmap;
     }

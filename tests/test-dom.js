@@ -123,12 +123,19 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.56', manifest.version === '2.56' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۵۶'));
+  check('manifest and viewer version badge are synchronized at 2.57', manifest.version === '2.57' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۵۷'));
   const viewerCss = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
   check('stylesheet has no literal newline escape that breaks a selector', !viewerCss.includes('\\n'));
+  const hasZeroRadius = (block) => /border-radius:\s*0(?:\D|$)/.test(block);
+  const thumbFrame = viewerCss.match(/(?:^|\n)\.tw\s*\{([^}]*)\}/);
+  check('thumbnail frame does not round off image corners', !!thumbFrame && hasZeroRadius(thumbFrame[1]));
+  const lightboxImage = viewerCss.match(/\.lbscroll img\s*\{([^}]*)\}/);
+  const editorImage = viewerCss.match(/\.ed-stage img\s*\{([^}]*)\}/);
+  check('large and editor previews keep square image corners',
+    !!lightboxImage && !!editorImage && hasZeroRadius(lightboxImage[1]) && hasZeroRadius(editorImage[1]));
   check('PDF-to-image import opens the dedicated converter tab',
     !!window.document.getElementById('btnImportPdf') &&
     /زبانهٔ جدا/.test(window.document.getElementById('btnImportPdf').title));

@@ -547,7 +547,10 @@ async function drawThumb(it) {
       const scale = Math.min(c.width / bmp.width, c.height / bmp.height);
       const dw = Math.max(1, bmp.width * scale), dh = Math.max(1, bmp.height * scale);
       const dx = (c.width - dw) / 2, dy = (c.height - dh) / 2;
-      ctx.drawImage(bmp, dx, dy, dw, dh);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      // هر چهار گوشهٔ منبع رسم می‌شود؛ هیچ بخشی از تصویر به‌عنوان برشِ پیش‌نمایش حذف نمی‌شود.
+      ctx.drawImage(bmp, 0, 0, bmp.width, bmp.height, dx, dy, dw, dh);
     } finally { bmp.close(); }
   } catch (e) { console.warn('پیش‌نمایش تصویر ناموفق', e); }
 }

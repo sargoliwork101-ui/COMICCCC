@@ -126,7 +126,7 @@ body { min-height: 100vh; padding-bottom: calc(132px + env(safe-area-inset-botto
 .item.group-moving .meta { color: var(--group-color, #34d399); }
 .item.group-moving.dragging .tw { animation: none; }
 @keyframes group-carry { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
-.tw { position: relative; aspect-ratio: 3 / 4; border-radius: 14px; overflow: hidden; background: var(--surface2);
+.tw { position: relative; aspect-ratio: 3 / 4; border-radius: 0; overflow: hidden; background: var(--surface2);
   border: 1px solid var(--line2); transition: transform .14s, box-shadow .14s, filter .14s, opacity .14s, border-color .14s; }
 .tw canvas { width: 100%; height: 100%; display: block; }
 .item:hover .tw { transform: translateY(-3px); border-color: rgba(255,255,255,.3); }
@@ -260,7 +260,7 @@ kbd { display: inline-block; padding: 1px 7px; border-radius: 7px; border: 1px s
   background: rgba(255,255,255,.08); color: var(--text); font-size: 16px; cursor: pointer; flex: none; transition: background .15s; }
 #lbClose:hover { background: var(--grad); border-color: transparent; }
 .lbscroll { flex: 1; overflow: auto; text-align: center; padding: 0 16px 30px; }
-.lbscroll img { max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 20px 60px rgba(0,0,0,.7); background: #fff; }
+.lbscroll img { max-width: 100%; height: auto; border-radius: 0; box-shadow: 0 20px 60px rgba(0,0,0,.7); background: #fff; }
 
 #cropper { position: fixed; inset: 0; z-index: 110; display: flex; flex-direction: column; background: var(--bg); }
 .crop-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px; background: var(--surface); border-bottom: 1px solid var(--line); }
@@ -363,7 +363,7 @@ kbd { display: inline-block; padding: 1px 7px; border-radius: 7px; border: 1px s
 .ed-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(280px, 42%) 1fr; }
 .ed-preview { overflow: auto; padding: 16px; border-left: 1px solid var(--line); background: #0b0d12; }
 .ed-stage { position: relative; width: 100%; max-width: 560px; margin: 0 auto; }
-.ed-stage img { width: 100%; height: auto; display: block; border-radius: 6px; background: #fff; }
+.ed-stage img { width: 100%; height: auto; display: block; border-radius: 0; background: #fff; }
 #edBoxes { position: absolute; inset: 0; pointer-events: none; }
 .ed-box { position: absolute; box-sizing: border-box; outline: 2px solid rgba(139,123,255,.95); background: rgba(139,123,255,.08); border-radius: 4px; pointer-events: auto; }
 .ed-box.off { outline-color: rgba(255,255,255,.35); background: transparent; outline-style: dashed; }
