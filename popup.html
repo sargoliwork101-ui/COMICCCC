@@ -13,7 +13,7 @@
       <h1>PIC TO PDF</h1>
       <p>کمیک را به PDF یا تصویر تبدیل کن</p>
     </div>
-    <span class="version-pill">v2.49</span>
+    <span class="version-pill">v2.50</span>
     <button type="button" id="updateBtn" class="update-btn" title="بررسی و دانلود به‌روزرسانی از گیت‌هاب"
       aria-label="بررسی به‌روزرسانی">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"
@@ -24,6 +24,14 @@
     </button>
   </div>
   <div id="updateStatus" class="update-status hidden" role="status" aria-live="polite"></div>
+  <details class="update-channel-settings" id="updateChannelSettings">
+    <summary>شاخهٔ دریافت به‌روزرسانی</summary>
+    <div class="update-channel-row">
+      <input type="text" id="updateBranch" dir="ltr" spellcheck="false" aria-label="نام شاخهٔ GitHub برای به‌روزرسانی">
+      <button type="button" class="mini" id="saveUpdateBranch">ذخیره</button>
+    </div>
+    <p class="mode-hint">نام شاخهٔ مخزن GitHub را وارد کنید؛ مثلاً main یا arena/نام-شاخه.</p>
+  </details>
 
   <div class="field">
     <label>روش جمع‌آوری تصاویر</label>
