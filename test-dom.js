@@ -37,14 +37,18 @@ storageMap.set('job_testjob', {
 });
 
 window.chrome = {
-  runtime: { id: 'extid123', getURL: (p) => 'chrome-extension://extid123/' + p },
+  runtime: { id: 'extid123', getURL: (p) => 'chrome-extension://extid123/' + p, onMessage: { addListener: (listener) => { window.__runtimeMessageListener = listener; } } },
   storage: { local: {
     get: async (key) => (typeof key === 'string' ? { [key]: storageMap.get(key) } : Object.fromEntries([...storageMap])),
     set: async (obj) => { Object.entries(obj).forEach(([k, v]) => storageMap.set(k, v)); },
     remove: async (key) => { storageMap.delete(key); }
   } },
   declarativeNetRequest: { updateSessionRules: async () => {} },
-  tabs: { create: async () => ({}), update: async () => {} },
+  tabs: {
+    getCurrent: async () => ({ id: 17 }),
+    create: async (options) => { window.__openedPdfImportUrl = options.url; return { id: 18 }; },
+    update: async () => {}
+  },
   scripting: { executeScript: async () => [{ result: { data: 'data:image/png;base64,' + PNG.toString('base64') } }] },
   downloads: { download: async () => 1 }
 };
@@ -75,7 +79,7 @@ window.scrollTo = () => {};
 window.HTMLElement.prototype.scrollIntoView = () => {};
 window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
 
-const scripts = ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'viewer.js', 'trans.js'];
+const scripts = ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'pdf-import-store.js', 'viewer.js', 'trans.js'];
 for (const f of scripts) {
   const code = fs.readFileSync(path.join(__dirname, f), 'utf8');
   try {
@@ -108,6 +112,10 @@ const $ = (id) => window.document.getElementById(id);
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'manifest.json'), 'utf8'));
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
+  check('extension remains Manifest V3', manifest.manifest_version === 3);
+  check('PDF-to-image import opens the dedicated converter tab',
+    !!window.document.getElementById('btnImportPdf') &&
+    /زبانهٔ جدا/.test(window.document.getElementById('btnImportPdf').title));
   check('manifest icon files declared', [16, 32, 48, 128].every((s) => manifest.icons[String(s)] === `icon${s}.png`) &&
     manifest.action.default_icon['128'] === 'icon128.png');
   check('brand logo points at the new icon file',
@@ -145,6 +153,12 @@ const $ = (id) => window.document.getElementById(id);
   const items = ev('items');
   check('all 3 images loaded ok', items.length === 3 && items.every((it) => it.state === 'ok'), items.map((i) => i.state));
   check('cards rendered', $('grid').children.length === 3);
+  $('btnImportPdf').click();
+  await sleep(20);
+  check('PDF converter opens in a separate extension tab',
+    /pdf-import\.html\?/.test(window.__openedPdfImportUrl || '') && /returnTab=17/.test(window.__openedPdfImportUrl || ''),
+    window.__openedPdfImportUrl);
+  ev('pendingPdfImportToken = null');
   check('summary shows 3 selected', /3/.test($('selCount').textContent), $('selCount').textContent);
   check('build button enabled', !$('buildBtn').disabled);
   check('retry hidden (no failures)', $('btnRetry').classList.contains('hidden'));

@@ -63,6 +63,8 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('modern brand logo in popup', !!pdoc.querySelector('.brand .brand-logo img'));
   check('version pill present', !!pdoc.querySelector('.version-pill'));
   check('start button present', !!pdoc.getElementById('startBtn'));
+  check('PDF-to-image action is clearly visible in popup',
+    !!pdoc.getElementById('pdfConvertBtn') && /تبدیل PDF به تصویر/.test(pdoc.getElementById('pdfConvertBtn').textContent));
   check('file name input present', !!pdoc.getElementById('pdfName'));
   check('page limit input present', pdoc.getElementById('pageLimit') &&
     pdoc.getElementById('pageLimit').type === 'number');
@@ -155,6 +157,24 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
 }
 
 (async () => {
+  // The popup shortcut opens a fresh preview workspace; that workspace then opens the PDF picker tab.
+  {
+    const pdfDom = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const pdfWindow = pdfDom.window;
+    let openedUrl = '';
+    pdfWindow.chrome = {
+      runtime: { getURL: (path) => `chrome-extension://ext/${path}` },
+      tabs: { create: async (options) => { openedUrl = options.url; return { id: 22 }; } }
+    };
+    vm.runInContext(popupCode, pdfDom.getInternalVMContext(), { filename: 'popup.js' });
+    pdfWindow.document.getElementById('pdfConvertBtn').click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('PDF shortcut opens a dedicated empty preview workspace',
+      openedUrl === 'chrome-extension://ext/viewer.html?pdfWorkspace=1', openedUrl);
+  }
+
   // start scraping without awaiting: the overlay is created synchronously before the first await,
   // so it is already in the DOM while the job is in flight
   const running = window.eval('scrapeAndSend("comic.pdf")');

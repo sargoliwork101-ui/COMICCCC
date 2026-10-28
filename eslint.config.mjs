@@ -6,7 +6,7 @@ export default [
       ecmaVersion: 2022,
       sourceType: 'script',
       globals: {
-        window: 'readonly', document: 'readonly', console: 'readonly', fetch: 'readonly',
+        window: 'readonly', document: 'readonly', console: 'readonly', fetch: 'readonly', indexedDB: 'readonly',
         Blob: 'readonly', URL: 'readonly', FileReader: 'readonly', Promise: 'readonly',
         setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly',
         MutationObserver: 'readonly',
@@ -30,7 +30,7 @@ export default [
         setStatus: 'readonly', setTaskTitle: 'readonly', setJobHint: 'readonly',
         refreshAll: 'readonly',
         refreshCard: 'readonly', refreshSummary: 'readonly', drawThumb: 'readonly',
-        openEditor: 'readonly'
+        openEditor: 'readonly', PDFImportStore: 'readonly'
       }
     },
     rules: {

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>تبدیل PDF به تصویر · PIC TO PDF</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="pdf-import.css">
+</head>
+<body>
+  <header class="import-header">
+    <div class="brand">
+      <span class="brand-logo"><img src="icon128.png" alt=""></span>
+      <div class="brand-text">
+        <h1>PIC TO PDF</h1>
+        <p>تبدیل PDF به تصویر</p>
+      </div>
+    </div>
+    <span class="version-pill">ابزار تبدیل</span>
+  </header>
+
+  <main class="import-main">
+    <section class="import-card" aria-labelledby="importTitle">
+      <h2 id="importTitle">انتخاب فایل PDF</h2>
+      <p class="import-description">هر صفحه به‌صورت تصویر ساخته می‌شود و بعد از پایان، به فهرست تصاویر در برگهٔ پیش‌نمایش برمی‌گردد. پردازش کاملاً محلی است.</p>
+      <input id="pdfFile" type="file" accept="application/pdf,.pdf" class="hidden" aria-label="انتخاب فایل PDF">
+      <button id="choosePdf" class="btn" type="button">انتخاب فایل PDF</button>
+      <div id="selectedFile" class="selected-file hidden"></div>
+      <div id="progressArea" class="progress-area hidden" role="status" aria-live="polite">
+        <div class="progress-heading"><strong id="progressLabel">در حال آماده‌سازی...</strong><span id="progressCount"></span></div>
+        <div class="bar"><div id="progressBar"></div></div>
+      </div>
+      <p id="statusText" class="import-status" role="status">این برگه را باز نگه دارید تا تبدیل کامل شود.</p>
+      <button id="retryButton" class="btn ghost hidden" type="button">انتخاب PDF دیگری</button>
+    </section>
+  </main>
+
+  <script src="pdf-import-store.js"></script>
+  <script src="pdf-import.js"></script>
+</body>
+</html>

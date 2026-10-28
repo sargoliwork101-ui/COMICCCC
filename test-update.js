@@ -9,7 +9,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const b64 = (obj) => Buffer.from(JSON.stringify(obj), 'utf8').toString('base64');
 
-function boot(fetchImpl, downloadsImpl) {
+function boot(fetchImpl, downloadsImpl, currentVersion = '2.46', confirmImpl = () => true) {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body><button id="updateBtn"></button><div id="updateStatus" class="hidden"></div></body></html>',
     { url: 'chrome-extension://ext/popup.html', pretendToBeVisual: true, runScripts: 'dangerously' }
@@ -17,13 +17,20 @@ function boot(fetchImpl, downloadsImpl) {
   const { window } = dom;
   const ctx = dom.getInternalVMContext();
   const downloads = [];
+  const confirmCalls = [];
   window.chrome = {
-    runtime: { getManifest: () => ({ version: '2.46' }) },
+    runtime: { getManifest: () => ({ version: currentVersion }) },
     downloads: { download: async (opts) => { downloads.push(opts); if (downloadsImpl) downloadsImpl(opts); return 1; } }
   };
+  window.confirm = (message) => { confirmCalls.push(message); return confirmImpl(message); };
   window.fetch = fetchImpl;
+  window.PIC_TO_PDF_UPDATE_BRANCH = 'arena/test-updater';
   vm.runInContext(fs.readFileSync(__dirname + '/update.js', 'utf8'), ctx, { filename: 'update.js' });
-  return { window, downloads, btn: window.document.getElementById('updateBtn'), status: window.document.getElementById('updateStatus') };
+  return {
+    window, downloads, confirmCalls,
+    btn: window.document.getElementById('updateBtn'),
+    status: window.document.getElementById('updateStatus')
+  };
 }
 
 const jsonResponse = (manifest) => ({
@@ -34,10 +41,12 @@ const jsonResponse = (manifest) => ({
 (async () => {
   // 1. same version -> up-to-date message, no download
   {
-    const h = boot(async () => jsonResponse({ version: '2.46' }));
+    let checkedUrl = '';
+    const h = boot(async (url) => { checkedUrl = url; return jsonResponse({ version: '2.46' }); });
     h.btn.click();
     await sleep(10);
-    check('up-to-date: success message shown', h.status.classList.contains('ok') && /آخرین نسخه/.test(h.status.textContent), h.status.textContent);
+    check('up-to-date: success message shown', h.status.classList.contains('ok') && /به‌روز است/.test(h.status.textContent), h.status.textContent);
+    check('version check automatically uses the build update channel', /ref=arena%2Ftest-updater/.test(checkedUrl), checkedUrl);
     check('up-to-date: nothing downloaded', h.downloads.length === 0);
     check('up-to-date: button re-enabled', !h.btn.disabled);
   }
@@ -47,10 +56,30 @@ const jsonResponse = (manifest) => ({
     const h = boot(async () => jsonResponse({ version: '2.47.1' }));
     h.btn.click();
     await sleep(10);
-    check('new version: download requested from codeload',
-      h.downloads.length === 1 && /codeload\.github\.com/.test(h.downloads[0].url) && /main/.test(h.downloads[0].url), h.downloads);
+    check('new version: download requested from the configured codeload branch',
+      h.downloads.length === 1 && /codeload\.github\.com/.test(h.downloads[0].url) && /arena\/test-updater/.test(h.downloads[0].url), h.downloads);
+    check('new version: asks for approval before downloading', h.confirmCalls.length === 1 && /دانلود/.test(h.confirmCalls[0]));
     check('new version: instruction message mentions Reload',
       h.status.classList.contains('ok') && /Reload/.test(h.status.textContent) && /2\.47\.1/.test(h.status.textContent), h.status.textContent);
+  }
+
+  // Declining confirmation cancels the update without downloading anything.
+  {
+    const h = boot(async () => jsonResponse({ version: '2.47.1' }), null, '2.46', () => false);
+    h.btn.click();
+    await sleep(10);
+    check('cancelled update: asks once and downloads nothing', h.confirmCalls.length === 1 && h.downloads.length === 0);
+    check('cancelled update: shows cancellation status', /لغو شد/.test(h.status.textContent), h.status.textContent);
+  }
+
+  // A newer installed build must never be mislabeled as the latest published channel build.
+  {
+    const h = boot(async () => jsonResponse({ version: '2.45' }), null, '2.46');
+    h.btn.click();
+    await sleep(10);
+    check('newer local version: correctly reports channel is older',
+      h.status.classList.contains('ok') && /جدیدتر/.test(h.status.textContent), h.status.textContent);
+    check('newer local version: does not download or downgrade', h.downloads.length === 0);
   }
 
   // 3. GitHub rate limit (403) -> friendly Persian error, no download

@@ -104,6 +104,8 @@ let nextPageGroupId = 1;
 let editingPageGroupId = null;
 let editingPageGroupSelection = null;
 let nextItemUid = 0;
+let pendingPdfImportToken = null;
+let receivingPdfImport = false;
 
 // ---------- دانلود تصاویر ----------
 async function setRefererRule(pageUrl) {
@@ -607,6 +609,93 @@ async function loadAll(list) {
   }
 }
 
+// بازکردن ابزار PDF در یک تب جدا؛ فایل بزرگ از طریق IndexedDB بین دو تب ردوبدل می‌شود.
+async function openPdfImportTab() {
+  if (loading || building || editingPageGroupId !== null) return;
+  const token = (globalThis.crypto && globalThis.crypto.randomUUID)
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  let returnTabId = null;
+  try {
+    const currentTab = await chrome.tabs.getCurrent();
+    if (currentTab && Number.isInteger(currentTab.id)) returnTabId = currentTab.id;
+  } catch { /* پیش‌نمایش ممکن است در محیطی بدون tabs.getCurrent باز شده باشد */ }
+
+  pendingPdfImportToken = token;
+  const query = new URLSearchParams({ token });
+  if (returnTabId !== null) query.set('returnTab', String(returnTabId));
+  try {
+    await chrome.tabs.create({ url: chrome.runtime.getURL(`pdf-import.html?${query}`), active: true });
+    $('loadText').innerText = 'فایل PDF را در زبانهٔ تازه انتخاب کنید؛ پس از تبدیل به این پیش‌نمایش برمی‌گردد.';
+  } catch (error) {
+    pendingPdfImportToken = null;
+    alert(`بازکردن زبانهٔ تبدیل PDF ناموفق بود: ${error && error.message ? error.message : error}`);
+  }
+}
+
+async function receiveImportedPdf(token = pendingPdfImportToken) {
+  if (!token || token !== pendingPdfImportToken || receivingPdfImport || typeof PDFImportStore === 'undefined') return;
+  receivingPdfImport = true;
+  try {
+    const session = await PDFImportStore.getSession(token);
+    if (!session || !['complete', 'failed'].includes(session.status)) return;
+    const pages = await PDFImportStore.getPages(token);
+    if (!pages.length) {
+      $('loadText').innerText = session.error
+        ? `تبدیل PDF ناموفق بود: ${session.error}`
+        : 'فایلی از زبانهٔ تبدیل دریافت نشد.';
+      pendingPdfImportToken = null;
+      await PDFImportStore.deleteSession(token);
+      return;
+    }
+
+    loading = true;
+    const overlay = $('loadingOverlay');
+    overlay.classList.remove('hidden');
+    $('loadingOverlayText').innerText = 'در حال افزودن تصویرهای PDF...';
+    $('loadingOverlayCount').innerText = `۰ از ${pages.length} صفحه`;
+    $('loadingOverlayBar').style.width = '0%';
+    setTaskTitle('در حال دریافت صفحه‌های PDF');
+    refreshSummary();
+
+    for (let index = 0; index < pages.length; index++) {
+      const page = pages[index];
+      const itemIndex = items.length;
+      const item = {
+        i: itemIndex, uid: nextItemUid++, url: '', pdfOrder: itemIndex + 1, pageGroup: null,
+        state: 'ok', selected: true, blob: page.blob,
+        info: { fmt: 'PNG', w: page.width, h: page.height, ok: true },
+        w: page.width, h: page.height, error: '', edited: null, cropRect: null, cropCache: null, ocr: null,
+        sourcePdf: page.fileName || session.fileName || 'document.pdf', sourcePdfPage: page.pageNumber
+      };
+      items.push(item);
+      $('grid').appendChild(makeCard(item));
+      drawThumb(item);
+      const done = index + 1;
+      const percent = Math.round((done / pages.length) * 100);
+      $('loadingOverlayCount').innerText = `${done} از ${pages.length} صفحه`;
+      $('loadingOverlayBar').style.width = `${percent}%`;
+      $('loadText').innerText = `افزودن صفحه‌های PDF به فهرست... ${done} از ${pages.length}`;
+    }
+
+    pendingPdfImportToken = null;
+    await PDFImportStore.deleteSession(token);
+    $('loadText').innerText = session.status === 'failed'
+      ? `${pages.length} صفحه اضافه شد؛ تبدیل PDF در صفحهٔ ${session.count + 1} متوقف شد: ${session.error || 'خطای ناشناخته'}`
+      : `${pages.length} صفحه از «${session.fileName || 'PDF'}» به فهرست تصاویر اضافه شد.`;
+  } catch (error) {
+    console.error('Receiving converted PDF pages failed', error);
+    $('loadText').innerText = `دریافت تصویرهای PDF ناموفق بود: ${error && error.message ? error.message : error}`;
+  } finally {
+    loading = false;
+    $('loadingOverlay').classList.add('hidden');
+    setTaskTitle();
+    updatePdfOrderFromGrid();
+    refreshAll();
+    receivingPdfImport = false;
+  }
+}
+
 // تلاش مجدد برای بارگیری یک کارت ناموفق، بدون نمایش overlay تمام‌صفحه
 async function retryItem(it) {
   if (!it || loading || building || it.state !== 'failed') return;
@@ -667,6 +756,8 @@ function refreshSummary(groupView = buildPageGroupView()) {
     retryAllButton.classList.toggle('hidden', failedN === 0 || loading);
     retryAllButton.disabled = building || editingPageGroupId !== null;
   }
+  const importPdfButton = $('btnImportPdf');
+  if (importPdfButton) importPdfButton.disabled = loading || building || editingPageGroupId !== null;
   ['btnAll', 'btnNone', 'btnInv'].forEach((id) => { $(id).disabled = building || editingPageGroupId !== null; });
   // حذف دسته‌جمعی فقط وقتی ممکن است که حداقل یک کارت سالم انتخاب‌شده وجود داشته باشد
   const deleteSelButton = $('btnDeleteSel');
@@ -1936,10 +2027,14 @@ async function restorePageProfile() {
 
 // ---------- شروع ----------
 async function main() {
-  const jobId = new URLSearchParams(location.search).get('job');
-  jobKey = 'job_' + jobId;
-  const stored = await chrome.storage.local.get(jobKey);
-  job = stored[jobKey];
+  const params = new URLSearchParams(location.search);
+  const jobId = params.get('job');
+  const standalonePdfWorkspace = params.get('pdfWorkspace') === '1';
+  jobKey = 'job_' + (jobId || 'pdf_workspace');
+  const stored = jobId ? await chrome.storage.local.get(jobKey) : {};
+  job = stored[jobKey] || (standalonePdfWorkspace
+    ? { urls: [], name: 'comic.pdf', tabId: null, pageUrl: '' }
+    : null);
   if (!job) {
     $('loadText').innerText = 'اطلاعات کار پیدا نشد. دوباره از popup شروع کنید.';
     return;
@@ -1947,7 +2042,7 @@ async function main() {
   $('pdfName').value = (job.name || 'comic').replace(/\.pdf$/i, '');
   pageProfileKey = makePageProfileKey(job.pageUrl || '');
   await checkSavedPageProfile();
-  await setRefererRule(job.pageUrl);
+  if (job.pageUrl) await setRefererRule(job.pageUrl);
 
   const grid = $('grid');
   grid.addEventListener('dragover', (ev) => {
@@ -2021,7 +2116,7 @@ async function main() {
     else reorderByDrop(draggedItem, target, before);
     suppressCardClickUntil = Date.now() + 350;
   });
-  items = job.urls.map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pageGroup: null, state: 'loading', selected: true }));
+  items = (job.urls || []).map((url, i) => ({ i, uid: i, url, pdfOrder: i + 1, pageGroup: null, state: 'loading', selected: true }));
   nextItemUid = items.length;
   items.forEach((it) => grid.appendChild(makeCard(it)));
 
@@ -2039,6 +2134,20 @@ async function main() {
   $('btnRetryAll').onclick = () => { loadAll(items.filter((it) => it.state === 'failed')); };
   $('buildBtn').onclick = onBuild;
   $('saveImgBtn').onclick = onSaveImages;
+  $('btnImportPdf').onclick = openPdfImportTab;
+  if (chrome.runtime.onMessage && chrome.runtime.onMessage.addListener) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!message || message.type !== 'PIC_TO_PDF_IMPORT_COMPLETE' || message.token !== pendingPdfImportToken) return false;
+      receiveImportedPdf(message.token).then(() => sendResponse({ ok: true })).catch((error) => {
+        sendResponse({ ok: false, error: error && error.message ? error.message : String(error) });
+      });
+      return true;
+    });
+  }
+  window.addEventListener('focus', () => receiveImportedPdf());
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') receiveImportedPdf();
+  });
   $('modePdf').onclick = () => setMode('pdf');
   $('modeImg').onclick = () => setMode('img');
   const outputSettings = $('outputSettings');
@@ -2119,6 +2228,7 @@ async function main() {
   window.addEventListener('pagehide', () => { chrome.storage.local.remove(jobKey); clearRefererRule(); });
 
   await loadAll(items);
+  if (standalonePdfWorkspace) await openPdfImportTab();
 }
 
 main().catch((e) => {

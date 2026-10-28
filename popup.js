@@ -1,4 +1,16 @@
 const startBtn = document.getElementById('startBtn');
+const pdfConvertBtn = document.getElementById('pdfConvertBtn');
+if (pdfConvertBtn) {
+  pdfConvertBtn.addEventListener('click', async () => {
+    pdfConvertBtn.disabled = true;
+    try {
+      await chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html?pdfWorkspace=1'), active: true });
+    } catch (error) {
+      showError('بازکردن فضای تبدیل PDF ناموفق بود: ' + (error && error.message ? error.message : error));
+      pdfConvertBtn.disabled = false;
+    }
+  });
+}
 const statusBox = document.getElementById('statusBox');
 const statusText = document.getElementById('statusText');
 // کنترل‌های مخصوص حالت‌های ورق‌زدن (سقف صفحه و انتخابگرهای دستی)؛ مستقل از سایت، فقط بر اساس حالت انتخابی باز می‌شوند

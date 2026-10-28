@@ -1,3 +1,4 @@
+/* exported openEditor */ // viewer.js این تابع سراسری را برای بازکردن ادیتور صدا می‌زند.
 // ---------- ترجمهٔ متن تصاویر + ویرایشگر ترجمه + خروجی متنی ----------
 // این فایل بعد از viewer.js بارگذاری می‌شود و از متغیرهای آن (items، building، ...) استفاده می‌کند.
 const TR = { worker: null, lang: null, cancel: false };
@@ -175,6 +176,45 @@ async function copyPlainText(text) {
 
 // ---------- ویرایشگر ----------
 let EDI = null, edUrl = null, edTimer = null, edDirty = false, edBusy = false, edPending = false;
+// تاریخچهٔ مستقل هر متن ویرایشگر؛ برای Ctrl/Cmd+Z و Ctrl/Cmd+Y، حتی بعد از تغییرات قالب‌بندی.
+const editorUndoHistory = new WeakMap();
+function ensureEditorHistory(block, value) {
+  let history = editorUndoHistory.get(block);
+  if (!history || history.entries[history.index].value !== value) {
+    history = { entries: [{ value, start: value.length, end: value.length }], index: 0 };
+    editorUndoHistory.set(block, history);
+  }
+  return history;
+}
+function recordEditorHistory(block, textarea) {
+  let history = editorUndoHistory.get(block);
+  if (!history) {
+    history = { entries: [{ value: textarea.value, start: textarea.selectionStart, end: textarea.selectionEnd }], index: 0 };
+    editorUndoHistory.set(block, history);
+  }
+  const current = history.entries[history.index];
+  if (current.value === textarea.value) {
+    current.start = textarea.selectionStart;
+    current.end = textarea.selectionEnd;
+    return;
+  }
+  history.entries.splice(history.index + 1);
+  history.entries.push({ value: textarea.value, start: textarea.selectionStart, end: textarea.selectionEnd });
+  if (history.entries.length > 100) history.entries.shift();
+  history.index = history.entries.length - 1;
+}
+function moveEditorHistory(block, textarea, delta) {
+  const history = ensureEditorHistory(block, textarea.value);
+  const next = history.index + delta;
+  if (next < 0 || next >= history.entries.length) return false;
+  history.index = next;
+  const entry = history.entries[next];
+  textarea.value = entry.value;
+  block.tr = entry.value;
+  textarea.setSelectionRange(Math.min(entry.start, entry.value.length), Math.min(entry.end, entry.value.length));
+  textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+}
 // تریگر زمانی اطمینان: همان ۹۰۰ms قبلی، اما وقتی کاربر هنوز داخل فیلدهای ویرایشگر است رندر عقب می‌افتد
 const EDITOR_APPLY_DELAY = 900;
 // وضعیت صریح فوکوس فیلدها (روی مرورگرها هم در لحظهٔ focusout قابل اعتمادتر از activeElement است)
@@ -359,12 +399,6 @@ function buildEditor() {
     row.dataset.id = b.id;
     row.innerHTML = `<div class="blk-top"><span class="blk-n">${b.id}</span>
       <label><input type="checkbox" ${b.enabled ? 'checked' : ''}> جایگزین شود</label>
-      <button type="button" class="fmt-btn blk-copy-orig" title="کپی متن شناسایی‌شدهٔ انگلیسی (OCR)">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"
-          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-        </svg>
-      </button>
       <select class="sel blk-bg"><option value="auto">پس‌زمینه: خودکار</option><option value="white">پس‌زمینه: سفید</option>
       <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن (متن با حاشیه)</option></select></div>
       <div class="blk-format">
@@ -389,12 +423,17 @@ function buildEditor() {
         </label>
         <button type="button" class="fmt-btn blk-reset" title="بازنشانی همهٔ قالب‌بندی‌های این متن به پیش‌فرض">↺</button>
       </div>
-      <div class="blk-orig"></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>`;
-    row.querySelector('.blk-orig').textContent = b.text;
+      <div class="blk-orig"><span class="blk-orig-text"></span><button type="button" class="blk-copy-orig" title="کپی متن شناسایی‌شدهٔ انگلیسی (OCR)" aria-label="کپی متن انگلیسی">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+        </svg>
+      </button></div><textarea rows="2" placeholder="ترجمهٔ فارسی..."></textarea>`;
+    row.querySelector('.blk-orig-text').textContent = b.text;
     const ta = row.querySelector('textarea'); ta.value = b.tr || '';
+    ensureEditorHistory(b, ta.value);
     const sel = row.querySelector('.blk-bg'); sel.value = b.bg;
     const chk = row.querySelector('.blk-top input');
-    ta.oninput = () => { b.tr = ta.value; scheduleApply(); };
+    ta.oninput = () => { b.tr = ta.value; recordEditorHistory(b, ta); scheduleApply(); };
     ta.onfocus = () => setActiveBlock(b.id, false);
     sel.onchange = () => { b.bg = sel.value; scheduleApply(); };
     chk.onchange = () => { b.enabled = chk.checked; row.classList.toggle('off', !b.enabled); box.classList.toggle('off', !b.enabled); scheduleApply(); };
@@ -591,6 +630,19 @@ $('edRevert').onclick = async () => {
 $('btnTxt').onclick = exportText;
 // پایان کار کاربر روی فیلدها (کلیک بیرون از فیلد، رفتن به پیش‌نمایش): تغییرات معلق بلافاصله رندر می‌شوند.
 // focusout حباب‌دار است و با بازسازی innerHTML فهرست در buildEditor هم از بین نمی‌رود.
+$('edList').addEventListener('keydown', (e) => {
+  const textarea = e.target && e.target.closest ? e.target.closest('textarea') : null;
+  if (!textarea || !(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const key = e.key.toLowerCase();
+  const undo = key === 'z' && !e.shiftKey;
+  const redo = key === 'y' || (key === 'z' && e.shiftKey);
+  if (!undo && !redo) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const row = textarea.closest('.blk');
+  const block = EDI && EDI.ocr.blocks.find((candidate) => String(candidate.id) === row.dataset.id);
+  if (block && moveEditorHistory(block, textarea, undo ? -1 : 1)) scheduleApply();
+});
 $('edList').addEventListener('focusin', (e) => {
   if (editorFieldEl(e.target)) edFieldFocused = true;
 });
