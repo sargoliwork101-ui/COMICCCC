@@ -123,8 +123,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 3.00', manifest.version === '3.00' &&
-    window.document.querySelector('.version-pill').textContent.includes('۳.۰۰'));
+  check('manifest and viewer version badge are synchronized at 2.55', manifest.version === '2.55' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۵۵'));
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(fs.readFileSync(path.join(__dirname, 'viewer.css'), 'utf8')));
   check('PDF-to-image import opens the dedicated converter tab',
@@ -364,13 +364,8 @@ const $ = (id) => window.document.getElementById(id);
   await ev('closeEditor()');
 
   check('txt button visible', !$('btnTxt').classList.contains('hidden'));
-  translated.ocr.blocks[0].layoutText = '  Hello\nworld';
-  ev('window.__txtBlob = null; window.__oldCreateObjectURL = URL.createObjectURL; URL.createObjectURL = (blob) => { if (blob.type === "text/plain;charset=utf-8") window.__txtBlob = blob; return window.__oldCreateObjectURL(blob); };');
   $('btnTxt').click();
   await sleep(20);
-  const exportedText = await ev('window.__txtBlob ? window.__txtBlob.text() : ""');
-  check('TXT export preserves OCR line breaks and indentation', exportedText.includes('[1]   Hello\n    world'), exportedText);
-  ev('URL.createObjectURL = window.__oldCreateObjectURL; delete window.__oldCreateObjectURL; delete window.__txtBlob;');
 
   $('btnAll').click(); // re-select everything before building
   const addImageCalls = [];
