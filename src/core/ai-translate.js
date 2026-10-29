@@ -129,6 +129,33 @@ Keep each ID unchanged. Do not merge, omit, reorder or explain entries. Do not a
     return translationMap(text, knownIds);
   }
 
+  // تست سبک فقط مشخصات مدل را می‌گیرد؛ متن کمیک یا درخواست تولید ترجمه ارسال نمی‌شود.
+  async function testConnection(options) {
+    const apiKey = String(options.apiKey || '').trim();
+    if (!apiKey) throw new Error('برای تست ارتباط، ابتدا کلید API را وارد کنید.');
+    const model = normalizeModel(options.model);
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model);
+    const fetchFn = options.fetchFn || ((url0, opts) => fetch(url0, opts));
+    let response;
+    try {
+      response = await fetchFn(url, {
+        method: 'GET', headers: { 'x-goog-api-key': apiKey },
+        credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer', signal: options.signal
+      });
+    } catch (error) {
+      if (error && error.name === 'AbortError') throw error;
+      throw new Error('ارتباط با Gemini برقرار نشد؛ اینترنت یا دسترسی به سرویس را بررسی کنید.');
+    }
+    if (!response.ok) {
+      const error = new Error('Gemini HTTP ' + response.status);
+      error.status = response.status;
+      throw error;
+    }
+    const data = await response.json();
+    if (!data || data.name !== `models/${model}`) throw new Error('پاسخ Gemini برای تست مدل معتبر نبود.');
+    return { model, name: data.name };
+  }
+
   // کلیدها فقط به همان ترتیب فهرست و یک بار امتحان می‌شوند؛ جزئیات خطا هرگز خود کلید را ندارد.
   async function translateWithFailover(options) {
     const entries = Array.isArray(options.entries) ? options.entries : [];
@@ -180,7 +207,7 @@ Keep each ID unchanged. Do not merge, omit, reorder or explain entries. Do not a
     return error && error.message ? error.message : 'خطای ناشناخته در ترجمهٔ هوش مصنوعی.';
   }
 
-  const api = { DEFAULT_MODEL, DEFAULT_SKILL, buildText, translateBatch, translateWithFailover, translationMap, safeError, normalizeModel };
+  const api = { DEFAULT_MODEL, DEFAULT_SKILL, buildText, testConnection, translateBatch, translateWithFailover, translationMap, safeError, normalizeModel };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AiTranslateTools = api;
 })(typeof window !== 'undefined' ? window : globalThis);

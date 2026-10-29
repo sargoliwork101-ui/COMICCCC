@@ -817,6 +817,33 @@ prepare = async (it, r) => {
       !JSON.stringify(h.ev('collectPageProfile()')).includes('second-test-key'));
   }
   {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`aiProfiles=[makeAiProfile('تست من','connection-ui-key')];renderAiProfiles();
+      window.__connectionCalls=[];
+      window.fetch=async(url,options)=>{window.__connectionCalls.push({url,options});
+        return {ok:true,status:200,json:async()=>({name:'models/gemini-3.8-flash'})};};`);
+    const testButton = h.$('aiProfileList').querySelector('.ai-profile-test');
+    testButton.click();
+    for (let i = 0; i < 60 && testButton.disabled; i++) await sleep(10);
+    const status = h.$('aiProfileList').querySelector('.ai-profile-status');
+    check('profile test button checks only that key with a lightweight model GET',
+      h.ev('window.__connectionCalls.length') === 1 &&
+      h.ev('window.__connectionCalls[0].options.method') === 'GET' &&
+      h.ev('window.__connectionCalls[0].options.headers["x-goog-api-key"]') === 'connection-ui-key' &&
+      h.ev('window.__connectionCalls[0].url').includes('/v1beta/models/gemini-3.8-flash') &&
+      !h.ev('window.__connectionCalls[0].url').includes('generateContent') &&
+      h.ev('window.__connectionCalls[0].options.body') === undefined);
+    check('successful profile test shows a clear result beside the key',
+      /اتصال برقرار است/.test(status.textContent) && status.classList.contains('ok') && !testButton.disabled,
+      status.textContent);
+    h.ev(`window.fetch=async()=>({ok:false,status:401,json:async()=>({})});`);
+    testButton.click();
+    for (let i = 0; i < 60 && testButton.disabled; i++) await sleep(10);
+    check('failed profile test explains the error without exposing the key',
+      /کلید API/.test(status.textContent) && status.classList.contains('bad') &&
+      !status.textContent.includes('connection-ui-key') && !testButton.disabled, status.textContent);
+  }
+  {
     const h = makeHarness({
       jobUrls: ['https://comic.test/a.png'],
       aiSettings: { enabled: true, apiKey: 'legacy-test-key', model: 'gemini-2.5-flash', skill: 'Skill قبلی' }

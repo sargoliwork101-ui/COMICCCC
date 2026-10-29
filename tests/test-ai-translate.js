@@ -176,6 +176,48 @@ function check(name, condition, extra) {
     check('empty text selection still spends no request even with no profiles', calls === 0 && empty.translations.size === 0);
   }
 
+  {
+    const calls = [], signal = { marker: 'connection-signal' };
+    const result = await AiTranslateTools.testConnection({
+      apiKey: 'connection-private-key', model: 'models/gemini-3.8-flash', signal,
+      fetchFn: async (url, options) => {
+        calls.push({ url, options });
+        return { ok: true, status: 200, json: async () => ({ name: 'models/gemini-3.8-flash' }) };
+      }
+    });
+    const request = calls[0];
+    check('connection test uses one lightweight model GET, never generateContent',
+      calls.length === 1 && request.options.method === 'GET' &&
+      request.url === 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash' &&
+      !request.url.includes('generateContent') && request.options.body === undefined);
+    check('connection test keeps the key in headers and preserves privacy options',
+      request.options.headers['x-goog-api-key'] === 'connection-private-key' &&
+      !request.url.includes('connection-private-key') && request.options.credentials === 'omit' &&
+      request.options.referrerPolicy === 'no-referrer' && request.options.signal === signal);
+    check('connection test validates the selected model response', result.model === 'gemini-3.8-flash');
+  }
+  {
+    let calls = 0, blankError = null, modelError = null;
+    const fetchFn = async () => { calls++; };
+    await AiTranslateTools.testConnection({ apiKey: ' ', fetchFn }).catch((error) => { blankError = error; });
+    await AiTranslateTools.testConnection({ apiKey: 'x', model: '../bad', fetchFn }).catch((error) => { modelError = error; });
+    check('connection test rejects blank keys and invalid models before a request',
+      calls === 0 && blankError && /کلید/.test(blankError.message) && modelError && /مدل/.test(modelError.message));
+  }
+  {
+    let denied = null, offline = null;
+    await AiTranslateTools.testConnection({
+      apiKey: 'denied-private-key', fetchFn: async () => ({ ok: false, status: 401, json: async () => ({}) })
+    }).catch((error) => { denied = error; });
+    await AiTranslateTools.testConnection({
+      apiKey: 'x', fetchFn: async () => { throw new Error('socket failed'); }
+    }).catch((error) => { offline = error; });
+    check('connection test reports denied keys without exposing the secret',
+      denied && /کلید API/.test(AiTranslateTools.safeError(denied)) &&
+      !AiTranslateTools.safeError(denied).includes('denied-private-key'));
+    check('connection test turns network failure into a clear Persian message', offline && /ارتباط با Gemini/.test(offline.message));
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL AI TRANSLATION TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((error) => { console.error('TEST CRASH:', error); process.exit(2); });

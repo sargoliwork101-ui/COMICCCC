@@ -123,8 +123,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.59', manifest.version === '2.59' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۵۹'));
+  check('manifest and viewer version badge are synchronized at 2.60', manifest.version === '2.60' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۶۰'));
   const viewerCss = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
@@ -168,10 +168,11 @@ const $ = (id) => window.document.getElementById(id);
     $('aiProfileList') && $('trAiAddProfile') && $('aiSettings').contains($('aiProfileList')) &&
     $('aiSettings').contains($('trAiAddProfile')));
   await ev('aiSettingsReady');
-  check('each API profile has a custom-name field and a private password field',
+  check('each API profile has a name, private key field, and its own connection test',
     $('aiProfileList').children.length === 1 &&
     $('aiProfileList').querySelector('input[type="text"]') &&
-    $('aiProfileList').querySelector('input[type="password"]'));
+    $('aiProfileList').querySelector('input[type="password"]') &&
+    $('aiProfileList').querySelector('.ai-profile-test'));
   check('editable Skill and reset action are available',
     $('aiSettings').contains($('trAiSkill')) && $('aiSettings').contains($('trAiSkillReset')));
   check('AI key help links only to Google AI Studio',

@@ -18,6 +18,12 @@ function renderAiProfiles() {
   aiProfiles.forEach((profile, index) => {
     const row = document.createElement('div');
     row.className = 'ai-profile-row';
+    const status = document.createElement('span');
+    status.className = 'ai-profile-status'; status.setAttribute('role', 'status');
+    const showStatus = (message, type = '') => {
+      status.textContent = message;
+      status.className = 'ai-profile-status' + (type ? ` ${type}` : '');
+    };
     const nameInput = document.createElement('input');
     nameInput.type = 'text'; nameInput.className = 'ai-profile-name';
     nameInput.value = profile.name; nameInput.placeholder = `API ${index + 1}`;
@@ -28,8 +34,28 @@ function renderAiProfiles() {
     keyInput.type = 'password'; keyInput.autocomplete = 'off'; keyInput.spellcheck = false;
     keyInput.value = profile.apiKey; keyInput.placeholder = 'کلید API';
     keyInput.setAttribute('aria-label', `کلید API ${index + 1}`);
-    keyInput.addEventListener('input', () => { profile.apiKey = keyInput.value; });
+    keyInput.addEventListener('input', () => { profile.apiKey = keyInput.value; showStatus(''); });
     keyInput.addEventListener('change', saveAiSettings);
+    const test = document.createElement('button');
+    test.type = 'button'; test.className = 'mini ai-profile-test'; test.textContent = 'تست';
+    test.title = 'تست اتصال این کلید با مدل انتخاب‌شده؛ بدون ارسال متن کمیک';
+    test.setAttribute('aria-label', `تست اتصال API ${index + 1}`);
+    test.onclick = async () => {
+      const apiKey = profile.apiKey.trim();
+      const model = $('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODEL;
+      if (!apiKey) { showStatus('ابتدا کلید API را وارد کنید.', 'bad'); keyInput.focus(); return; }
+      const unchanged = () => profile.apiKey.trim() === apiKey &&
+        ($('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODEL) === model;
+      test.disabled = true; test.textContent = '…'; showStatus('در حال بررسی ارتباط...');
+      try {
+        await AiTranslateTools.testConnection({ apiKey, model });
+        showStatus(unchanged() ? 'اتصال برقرار است ✓' : 'کلید یا مدل تغییر کرد؛ دوباره تست کنید.', unchanged() ? 'ok' : '');
+      } catch (error) {
+        showStatus(unchanged() ? AiTranslateTools.safeError(error) : 'کلید یا مدل تغییر کرد؛ دوباره تست کنید.', unchanged() ? 'bad' : '');
+      } finally {
+        test.disabled = false; test.textContent = 'تست';
+      }
+    };
     const remove = document.createElement('button');
     remove.type = 'button'; remove.className = 'mini warn ai-profile-remove'; remove.textContent = '×';
     remove.title = 'حذف این API'; remove.setAttribute('aria-label', `حذف API ${index + 1}`);
@@ -39,7 +65,7 @@ function renderAiProfiles() {
       if (!aiProfiles.length) aiProfiles.push(makeAiProfile('کلید اول'));
       renderAiProfiles(); saveAiSettings();
     };
-    row.append(nameInput, keyInput, remove);
+    row.append(nameInput, keyInput, test, remove, status);
     container.appendChild(row);
   });
 }
@@ -948,7 +974,11 @@ $('ocrEnabled').addEventListener('change', async () => {
   refreshSummary();
 });
 ['trAiEnabled', 'trAiModel', 'trAiSkill'].forEach((id) => {
-  $(id).addEventListener('change', () => { $('trAiError').textContent = ''; saveAiSettings(); });
+  $(id).addEventListener('change', () => {
+    $('trAiError').textContent = '';
+    if (id === 'trAiModel') $('aiProfileList').querySelectorAll('.ai-profile-status').forEach((status) => { status.textContent = ''; });
+    saveAiSettings();
+  });
 });
 $('trAiAddProfile').onclick = async () => {
   await aiSettingsReady;
