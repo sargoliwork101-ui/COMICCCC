@@ -12,7 +12,7 @@ const b64 = (obj) => Buffer.from(JSON.stringify(obj), 'utf8').toString('base64')
 function boot(fetchImpl, downloadsImpl, currentVersion = '2.46', confirmImpl = () => true) {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body><button id="updateBtn"></button><div id="updateStatus" class="hidden"></div></body></html>',
-    { url: 'chrome-extension://ext/popup.html', pretendToBeVisual: true, runScripts: 'dangerously' }
+    { url: 'chrome-extension://ext/src/popup/popup.html', pretendToBeVisual: true, runScripts: 'dangerously' }
   );
   const { window } = dom;
   const ctx = dom.getInternalVMContext();
@@ -25,7 +25,7 @@ function boot(fetchImpl, downloadsImpl, currentVersion = '2.46', confirmImpl = (
   window.confirm = (message) => { confirmCalls.push(message); return confirmImpl(message); };
   window.fetch = fetchImpl;
   window.PIC_TO_PDF_UPDATE_BRANCH = 'arena/test-updater';
-  vm.runInContext(fs.readFileSync(__dirname + '/update.js', 'utf8'), ctx, { filename: 'update.js' });
+  vm.runInContext(fs.readFileSync(__dirname + '/../src/popup/update.js', 'utf8'), ctx, { filename: 'update.js' });
   return {
     window, downloads, confirmCalls,
     btn: window.document.getElementById('updateBtn'),

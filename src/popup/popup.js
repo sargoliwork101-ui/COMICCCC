@@ -4,7 +4,7 @@ if (pdfConvertBtn) {
   pdfConvertBtn.addEventListener('click', async () => {
     pdfConvertBtn.disabled = true;
     try {
-      await chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html?pdfWorkspace=1'), active: true });
+      await chrome.tabs.create({ url: chrome.runtime.getURL('src/viewer/viewer.html?pdfWorkspace=1'), active: true });
     } catch (error) {
       showError('بازکردن فضای تبدیل PDF ناموفق بود: ' + (error && error.message ? error.message : error));
       pdfConvertBtn.disabled = false;
@@ -126,7 +126,8 @@ async function probeBookFrame() {
   try {
     const u = new URL(location.href);
     const id = u.searchParams.get('id') || u.searchParams.get('nid') || '';
-    return { isReader: u.hostname.startsWith('books.google.') && !!id, href: location.href, id };
+    const isBooksPath = u.pathname.split('/').filter(Boolean)[0] === 'books';
+    return { isReader: u.hostname.startsWith('books.google.') && isBooksPath && !!id, href: location.href, id };
   } catch {
     return { isReader: false, href: '', id: '' };
   }
@@ -174,8 +175,9 @@ async function scrapeAndSend(pdfName, mode, opts) {
     let u;
     try { u = new URL(href); } catch { return null; }
     const inFrame = u.hostname.startsWith('books.google.');
+    const isBooksPath = u.pathname.split('/').filter(Boolean)[0] === 'books';
     const byId = u.searchParams.get('id');
-    if (byId && /^[\w-]+$/.test(byId) && /(^|\.)google\./i.test(u.hostname)) {
+    if (byId && /^[\w-]+$/.test(byId) && /(^|\.)google\./i.test(u.hostname) && isBooksPath) {
       return { id: byId, origin: inFrame ? u.origin : 'https://books.google.com', inFrame, embedded: false };
     }
     if (/(^|\.)google\.[a-z.]+$/i.test(u.hostname) && u.pathname.includes('/books/edition/')) {
@@ -188,7 +190,8 @@ async function scrapeAndSend(pdfName, mode, opts) {
       try {
         const fu = new URL(frame.src);
         const fid = fu.searchParams.get('id');
-        if (fid && /^[\w-]+$/.test(fid)) return { id: fid, origin: fu.origin, inFrame: false, embedded: true };
+        const isBooksPath = fu.pathname.split('/').filter(Boolean)[0] === 'books';
+        if (fid && /^[\w-]+$/.test(fid) && isBooksPath) return { id: fid, origin: fu.origin, inFrame: false, embedded: true };
       } catch { /* قاب نامعتبر */ }
     }
     return null;
@@ -200,34 +203,105 @@ async function scrapeAndSend(pdfName, mode, opts) {
     ? (mode === 'manual' && gbook.inFrame ? 'manual' : 'auto')
     : mode;
 
-  const PLACEHOLDER = /blank|loading|placeholder|spacer|pixel|1x1|lazy\.(gif|png|jpg)/i;
+  // «lazy.png» اغلب نام فایل واقعی سایت است، نه placeholder؛ خود کلمهٔ lazy را به‌تنهایی فیلتر نکن.
+  const PLACEHOLDER = /(?:^|[/_.-])(blank|loading|placeholder|spacer|pixel|1x1)(?:[/_.-]|$)/i;
 
-  // منبعی را بردار که خود مرورگر با موفقیت نمایش داده؛ در غیر این صورت سراغ آدرس‌های lazy و srcset برو.
+  // میان منبعِ بارگذاری‌شده و گزینه‌های با وضوح بالاتر در صفت‌ها و srcset مقایسه کن.
   const bestSrc = (img) => {
-    const active = img.currentSrc || img.src;
-    if (img.complete && img.naturalWidth > 0 && active && !PLACEHOLDER.test(active)) return active;
-    const lazy = img.dataset.original || img.dataset.full || img.dataset.zoom || img.dataset.src ||
-      img.dataset.lazySrc || img.getAttribute('data-url');
-    if (lazy && !PLACEHOLDER.test(lazy)) return lazy;
+    const toAbsolute = (value) => {
+      const raw = String(value || '').trim();
+      if (!raw || PLACEHOLDER.test(raw)) return '';
+      if (/^(?:data:image\/|blob:)/i.test(raw)) return raw;
+      try { return new URL(raw, document.baseURI || location.href).href; } catch { return ''; }
+    };
+    const active = toAbsolute(img.currentSrc || img.src);
 
-    const cands = [];
-    const parseSet = (s) => {
-      (s || '').split(',').forEach((part) => {
-        const p = part.trim().split(/\s+/);
-        if (!p[0]) return;
-        let w = 0;
-        if (p[1] && p[1].endsWith('w')) w = parseFloat(p[1]);
-        else if (p[1] && p[1].endsWith('x')) w = parseFloat(p[1]) * 1000;
-        cands.push({ url: p[0], w });
+    // سایت‌ها معمولاً نسخهٔ اصلی را روی یکی از این صفات نگه می‌دارند و src را به thumbnail می‌دهند.
+    // قبلاً اگر thumbnail لود شده بود، همین ابتدای تابع برگردانده می‌شد و این آدرس‌های بهتر نادیده گرفته می‌شدند.
+    for (const name of ['data-original', 'data-original-src', 'data-full', 'data-full-src', 'data-zoom', 'data-hires', 'data-high-res']) {
+      const original = toAbsolute(img.getAttribute(name));
+      if (original) return original;
+    }
+
+    const renderedWidth = img.clientWidth || img.getBoundingClientRect().width || img.naturalWidth || 1000;
+    const candidates = [];
+    const addCandidate = (value, score = 0, priority = 0) => {
+      const url = toAbsolute(value);
+      if (!url) return;
+      candidates.push({ url, score, priority });
+    };
+    const urlResolution = (url) => {
+      try {
+        const u = new URL(url);
+        for (const [key, value] of u.searchParams) {
+          if (/^(w|width|maxwidth|max_width|imgwidth|image_width)$/i.test(key)) {
+            const n = Number.parseFloat(value);
+            if (Number.isFinite(n) && n > 0) return n;
+          }
+        }
+      } catch { /* data/blob URL or malformed URL */ }
+      const pathMatch = String(url).match(/(?:^|[/_-])(?:w|width)[=_-]?(\d{3,5})(?=[/_?.-]|$)/i);
+      return pathMatch ? Number(pathMatch[1]) : 0;
+    };
+    const parseSet = (set, priority = 0) => {
+      // srcset descriptors (w/x) communicate the actual candidate size; choose the largest available.
+      (set || '').split(',').forEach((part) => {
+        const [value, descriptor] = part.trim().split(/\s+/);
+        if (!value) return;
+        let score = urlResolution(value);
+        if (descriptor && /w$/i.test(descriptor)) {
+          const width = Number.parseFloat(descriptor);
+          if (Number.isFinite(width)) score = Math.max(score, width);
+        } else if (descriptor && /x$/i.test(descriptor)) {
+          const density = Number.parseFloat(descriptor);
+          if (Number.isFinite(density)) score = Math.max(score, density * renderedWidth);
+        }
+        addCandidate(value, score, priority);
       });
     };
-    parseSet(img.srcset);
-    parseSet(img.dataset.srcset);
-    const pic = img.closest('picture');
-    if (pic) pic.querySelectorAll('source').forEach((s) => parseSet(s.srcset));
-    const withW = cands.filter((c) => c.w > 0).sort((a, b) => b.w - a.w);
-    if (withW.length) return withW[0].url;
-    return active || lazy || (cands[0] && cands[0].url);
+
+    const picture = img.closest('picture');
+    const pictureSources = picture ? [...picture.querySelectorAll('source')].filter((source) => {
+      if (!source.media) return true;
+      try { return typeof window.matchMedia !== 'function' || window.matchMedia(source.media).matches; }
+      catch { return false; }
+    }) : [];
+    // If the browser selected a <picture><source>, restrict the candidates to that same art direction/format.
+    const selectedSource = pictureSources.find((source) =>
+      (source.srcset || source.getAttribute('data-srcset') || '').split(',').some((part) => toAbsolute(part.trim().split(/\s+/)[0]) === active));
+    if (selectedSource) {
+      parseSet(selectedSource.srcset || selectedSource.getAttribute('data-srcset'), 3);
+    } else {
+      parseSet(img.getAttribute('srcset'), 2);
+      parseSet(img.getAttribute('data-srcset'), 2);
+      pictureSources.forEach((source) => parseSet(source.srcset || source.getAttribute('data-srcset'), 1));
+    }
+
+    // آدرس‌های lazy معتبر نباید به thumbnailِ لودشده ببازند. اگر تصویر فعلی واقعاً وضوح بیشتری دارد، همان حفظ می‌شود.
+    for (const name of ['data-src', 'data-lazy-src']) {
+      const lazy = img.getAttribute(name);
+      const lazyUrl = toAbsolute(lazy);
+      addCandidate(lazy, urlResolution(lazyUrl) || renderedWidth + 1, 4);
+    }
+    // data-url روی بعضی سایت‌ها نشانی صفحه است، نه لزوماً تصویر؛ اولویت تشخیصی آن را بالا نمی‌بریم.
+    const dataUrl = img.getAttribute('data-url');
+    addCandidate(dataUrl, urlResolution(toAbsolute(dataUrl)), 4);
+    addCandidate(img.getAttribute('src'), urlResolution(toAbsolute(img.getAttribute('src'))), 2);
+    addCandidate(active, Math.max(urlResolution(active), img.complete && img.naturalWidth > 0 ? img.naturalWidth : 0), 5);
+
+    // A thumbnail is often wrapped in a direct link to the original image. Only trust it when it
+    // unmistakably points to an image resource; ordinary chapter/navigation links are ignored.
+    const anchor = img.closest('a[href]');
+    if (anchor) {
+      const href = toAbsolute(anchor.getAttribute('href'));
+      if (/\.(?:jpe?g|png|webp|avif|gif|bmp|tiff?)(?:[?#]|$)/i.test(href)) {
+        const naturalWidth = img.complete && img.naturalWidth > 0 ? img.naturalWidth : renderedWidth;
+        addCandidate(href, Math.max(urlResolution(href), naturalWidth + 1), 6);
+      }
+    }
+
+    candidates.sort((a, b) => b.score - a.score || b.priority - a.priority);
+    return candidates.length ? candidates[0].url : active;
   };
 
   // ---------- مخزن مشترک تصاویر (هر سه حالت از همین استفاده می‌کنند) ----------
@@ -237,12 +311,19 @@ async function scrapeAndSend(pdfName, mode, opts) {
   let inlineDataBytes = 0, skippedInline = 0;
   const add = (src) => {
     if (!src) return;
+    // سقف حالت دستی در اسکن نهایی و MutationObserver هم حفظ شود؛ Google Books کنترل جداگانهٔ خودش را دارد.
+    if (mode === 'manual' && !gbook && pageLimit > 0 && urls.length >= pageLimit) return;
     let abs;
     if (/^data:image\//i.test(src)) {
       abs = src;
       if (seen.has(abs)) return;
       const bytes = Math.ceil(src.length * 0.75);
-      if (inlineDataBytes + bytes > INLINE_DATA_BUDGET) { skippedInline++; return; }
+      if (inlineDataBytes + bytes > INLINE_DATA_BUDGET) {
+        // همان data URI در اسکن‌های بعدی دوباره شمرده نشود.
+        seen.add(abs);
+        skippedInline++;
+        return;
+      }
       inlineDataBytes += bytes;
     } else if (/^blob:/i.test(src)) abs = src;
     else {
@@ -750,10 +831,10 @@ async function scrapeAndSend(pdfName, mode, opts) {
     };
 
     // سیگنال ۱: هوک pushState/replaceState (readerهای SPA بدون رفرش)
-    const origPush = history.pushState.bind(history);
-    const origReplace = history.replaceState.bind(history);
-    history.pushState = function (...args) { const r = origPush(...args); scheduleSignal(); return r; };
-    history.replaceState = function (...args) { const r = origReplace(...args); scheduleSignal(); return r; };
+    const origPush = history.pushState;
+    const origReplace = history.replaceState;
+    history.pushState = function (...args) { const r = origPush.apply(history, args); scheduleSignal(); return r; };
+    history.replaceState = function (...args) { const r = origReplace.apply(history, args); scheduleSignal(); return r; };
     // سیگنال ۲: رویدادهای مرورگر
     window.addEventListener('popstate', scheduleSignal);
     window.addEventListener('hashchange', scheduleSignal);
@@ -936,6 +1017,10 @@ async function scrapeAndSend(pdfName, mode, opts) {
     say(`ورق‌زدن خودکار — صفحهٔ ${page} — ${urls.length} تصویر`);
 
     while (page < T.maxPages && !cancelled) {
+      if (pageLimit > 0 && page >= pageLimit) {
+        say(`به سقف ${pageLimit} صفحه رسیدیم؛ جمع‌آوری متوقف شد.\nدر مجموع ${urls.length} تصویر.`);
+        return;
+      }
       const btn = findNextButton();
       if (!btn) {
         say(`دکمهٔ «بعدی» پیدا نشد؛ به پایان رسیدیم.\nدر مجموع ${urls.length} تصویر جمع شد.`);
@@ -970,7 +1055,9 @@ async function scrapeAndSend(pdfName, mode, opts) {
     const refreshCount = () => {
       if (urls.length !== lastCount) {
         lastCount = urls.length;
-        countEl.textContent = `${urls.length} تصویر جمع شد`;
+        countEl.textContent = pageLimit > 0 && urls.length >= pageLimit
+          ? `${urls.length} تصویر (به سقف ${pageLimit} رسیدی)`
+          : `${urls.length} تصویر جمع شد`;
       }
     };
     scanImages();

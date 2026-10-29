@@ -28,6 +28,42 @@ window.document.body.appendChild(img({ src: 'https://cdn.test/small.gif' }, 100,
 const srcset = img({ src: 'https://cdn.test/loading.gif' }, 300, 300);
 srcset.setAttribute('srcset', 'https://cdn.test/set-1x.jpg 1x, https://cdn.test/set-2x.jpg 2x');
 window.document.body.appendChild(srcset);
+// Regression: the browser has already loaded a small src candidate, but a larger responsive file exists.
+const responsiveLoaded = img({ src: 'https://cdn.test/comic-page-300.jpg' }, 300, 420);
+responsiveLoaded.setAttribute('srcset', 'https://cdn.test/comic-page-300.jpg 300w, https://cdn.test/comic-page-1800.jpg 1800w');
+Object.defineProperty(responsiveLoaded, 'currentSrc', { value: 'https://cdn.test/comic-page-300.jpg', configurable: true });
+window.document.body.appendChild(responsiveLoaded);
+// Regression: a loaded thumbnail must not take precedence over an explicit original/full-resolution URL.
+const dataOriginal = img({ src: 'https://cdn.test/thumbnail-240.jpg', 'data-original': 'https://cdn.test/comic-original-2400.jpg' }, 300, 420);
+Object.defineProperty(dataOriginal, 'currentSrc', { value: 'https://cdn.test/thumbnail-240.jpg', configurable: true });
+window.document.body.appendChild(dataOriginal);
+// Regression: data-src must also beat an already loaded thumbnail, including an image not loaded yet.
+const lazyLoaded = img({ src: 'https://cdn.test/lazy-loaded-thumb.jpg', 'data-src': 'https://cdn.test/lazy-loaded-original.jpg' }, 300, 420);
+Object.defineProperty(lazyLoaded, 'currentSrc', { value: 'https://cdn.test/lazy-loaded-thumb.jpg', configurable: true });
+window.document.body.appendChild(lazyLoaded);
+const lazyPending = img({ src: 'https://cdn.test/tiny-preview.jpg', 'data-src': 'https://cdn.test/lazy-pending-original.jpg' }, 300, 420);
+Object.defineProperties(lazyPending, {
+  naturalWidth: { value: 0, configurable: true }, complete: { value: false, configurable: true },
+  currentSrc: { value: 'https://cdn.test/tiny-preview.jpg', configurable: true }
+});
+window.document.body.appendChild(lazyPending);
+// A genuinely larger active image must not be replaced by a lower-resolution lazy fallback.
+const highResActive = img({ src: 'https://cdn.test/active-high-res.jpg', 'data-src': 'https://cdn.test/lazy-fallback-small.jpg' }, 2000, 2800);
+Object.defineProperty(highResActive, 'currentSrc', { value: 'https://cdn.test/active-high-res.jpg', configurable: true });
+highResActive.getBoundingClientRect = () => ({ width: 300, height: 420, top: 0, left: 0, right: 300, bottom: 420 });
+window.document.body.appendChild(highResActive);
+const linkedOriginal = window.document.createElement('a');
+linkedOriginal.href = 'https://cdn.test/comic-linked-original.jpg';
+linkedOriginal.appendChild(img({ src: 'https://cdn.test/comic-linked-thumb.jpg' }, 300, 420));
+window.document.body.appendChild(linkedOriginal);
+const picture = window.document.createElement('picture');
+const pictureSource = window.document.createElement('source');
+pictureSource.setAttribute('srcset', 'https://cdn.test/picture-page-320.jpg 320w, https://cdn.test/picture-page-1600.jpg 1600w');
+picture.appendChild(pictureSource);
+const pictureImage = img({ src: 'https://cdn.test/picture-fallback.jpg' }, 300, 420);
+Object.defineProperty(pictureImage, 'currentSrc', { value: 'https://cdn.test/picture-page-320.jpg', configurable: true });
+picture.appendChild(pictureImage);
+window.document.body.appendChild(picture);
 // CSS background element
 const div = window.document.createElement('div');
 div.style.backgroundImage = 'url("https://cdn.test/bg.webp")';
@@ -47,7 +83,7 @@ Object.defineProperty(window.document.body, 'scrollHeight', { value: 1600, confi
 // run timers immediately so the scroll settle loop finishes fast
 window.setTimeout = (cb) => global.setTimeout(cb, 0);
 
-const code = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+const code = fs.readFileSync(__dirname + '/../src/popup/popup.js', 'utf8');
 // extract only scrapeAndSend (the top-level click listener needs extension chrome.tabs which is absent here)
 const fnCode = code.slice(code.indexOf('async function scrapeAndSend'));
 vm.runInContext(fnCode, ctx, { filename: 'popup.js' });
@@ -57,11 +93,11 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
 
 // popup.html shell: chips removed, modern brand kept, single start button
 {
-  const popupDom = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'));
+  const popupDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'));
   const pdoc = popupDom.window.document;
   check('chips block removed from popup', !pdoc.querySelector('.chips, .chip'));
   check('modern brand logo in popup', !!pdoc.querySelector('.brand .brand-logo img'));
-  check('version pill present', !!pdoc.querySelector('.version-pill'));
+  check('version pill present and matches extension version', pdoc.querySelector('.version-pill') && pdoc.querySelector('.version-pill').textContent === `v${require('../manifest.json').version}`);
   check('start button present', !!pdoc.getElementById('startBtn'));
   check('PDF-to-image action is clearly visible in popup',
     !!pdoc.getElementById('pdfConvertBtn') && /تبدیل PDF به تصویر/.test(pdoc.getElementById('pdfConvertBtn').textContent));
@@ -87,7 +123,7 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     pdoc.getElementById('statusText').textContent.trim() === '');
 }
 // popup.js keeps the status box hidden unless an error/warning actually happens
-const popupCode = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+const popupCode = fs.readFileSync(__dirname + '/../src/popup/popup.js', 'utf8');
 check('popup has setStatus helper (text only)', /const setStatus = \(text\)/.test(popupCode));
 check('popup reveals the box only via showError', /const showError = \(text\)/.test(popupCode) &&
   /statusBox\.classList\.remove\('hidden'\)/.test(popupCode));
@@ -117,8 +153,8 @@ check('popup reveals the box only via showError', /const showError = \(text\)/.t
 
 // interactive behavior: run the real popup.html + popup.js with a mocked chrome API
 async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
-  const dom2 = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
-    url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+  const dom2 = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+    url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
   });
   const w = dom2.window;
   const c = dom2.getInternalVMContext();
@@ -159,8 +195,8 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
 (async () => {
   // The popup shortcut opens a fresh preview workspace; that workspace then opens the PDF picker tab.
   {
-    const pdfDom = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
-      url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    const pdfDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
     });
     const pdfWindow = pdfDom.window;
     let openedUrl = '';
@@ -172,7 +208,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     pdfWindow.document.getElementById('pdfConvertBtn').click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('PDF shortcut opens a dedicated empty preview workspace',
-      openedUrl === 'chrome-extension://ext/viewer.html?pdfWorkspace=1', openedUrl);
+      openedUrl === 'chrome-extension://ext/src/viewer/viewer.html?pdfWorkspace=1', openedUrl);
   }
 
   // start scraping without awaiting: the overlay is created synchronously before the first await,
@@ -209,6 +245,20 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   check('relative URL resolved', urls.includes('https://comic.test/relative/x.jpg'));
   check('small image filtered', !urls.some((u) => u.includes('small.gif')));
   check('srcset 2x chosen', urls.includes('https://cdn.test/set-2x.jpg') && !urls.includes('https://cdn.test/place.gif'));
+  check('loaded responsive image uses its largest srcset candidate',
+    urls.includes('https://cdn.test/comic-page-1800.jpg') && !urls.includes('https://cdn.test/comic-page-300.jpg'), urls);
+  check('explicit data-original beats an already loaded thumbnail',
+    urls.includes('https://cdn.test/comic-original-2400.jpg') && !urls.includes('https://cdn.test/thumbnail-240.jpg'), urls);
+  check('data-src beats an already loaded thumbnail',
+    urls.includes('https://cdn.test/lazy-loaded-original.jpg') && !urls.includes('https://cdn.test/lazy-loaded-thumb.jpg'), urls);
+  check('data-src wins before the placeholder finishes loading',
+    urls.includes('https://cdn.test/lazy-pending-original.jpg') && !urls.includes('https://cdn.test/tiny-preview.jpg'), urls);
+  check('higher-resolution active image is preserved over a lazy fallback',
+    urls.includes('https://cdn.test/active-high-res.jpg') && !urls.includes('https://cdn.test/lazy-fallback-small.jpg'), urls);
+  check('direct image link is preferred over its thumbnail',
+    urls.includes('https://cdn.test/comic-linked-original.jpg') && !urls.includes('https://cdn.test/comic-linked-thumb.jpg'), urls);
+  check('picture source uses its highest candidate',
+    urls.includes('https://cdn.test/picture-page-1600.jpg') && !urls.includes('https://cdn.test/picture-page-320.jpg'), urls);
   check('css background collected', urls.includes('https://cdn.test/bg.webp'));
   check('no duplicates', new Set(urls).size === urls.length);
   check('message payload fields', sent[0].type === 'WTPDF_URLS' && sent[0].name === 'comic.pdf' && sent[0].pageUrl === 'https://comic.test/episode/1?x=1');
@@ -268,8 +318,8 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   // two-stage injection: a reader frame reported by the probe must become the scrape target
   {
     const calls = [];
-    const dom3 = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
-      url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    const dom3 = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
     });
     const w3 = dom3.window;
     Object.defineProperty(w3.Element.prototype, 'innerText', {

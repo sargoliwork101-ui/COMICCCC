@@ -117,7 +117,7 @@ function makeHarness(pageUrl, fetchImpl) {
     gbookPause: 1, gbookBackoff: [1, 1, 1], gbookRounds: 3, gbookTimeout: 1000
   };
 
-  const code = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+  const code = fs.readFileSync(__dirname + '/../src/popup/popup.js', 'utf8');
   const start = code.indexOf('async function probeBookFrame');
   vm.runInContext(code.slice(start), ctx, { filename: 'popup.js' });
 
@@ -183,6 +183,8 @@ function makeHarness(pageUrl, fetchImpl) {
   {
     const fetchImpl = click3Fetch({ pids: ['PA1', 'PA2', 'PA3'], srcPids: ['PA1', 'PA2', 'PA3'] });
     const h = makeHarness('https://books.google.com/books?id=B1&pg=PA1', fetchImpl);
+    const originalPushState = h.window.history.pushState;
+    const originalReplaceState = h.window.history.replaceState;
     const running = h.window.eval('scrapeAndSend("book.pdf", "manual")');
     await tick();
     await tick();
@@ -206,6 +208,8 @@ function makeHarness(pageUrl, fetchImpl) {
     check('in-frame manual: Done returns viewed pages in order',
       res && res.count === 3 && JSON.stringify(h.urlJobs()[0].urls) === JSON.stringify(API_URLS), res);
     check('in-frame manual: panel removed', !h.window.document.querySelector('.wtpdf-root'));
+    check('in-frame manual: history hooks restored exactly',
+      h.window.history.pushState === originalPushState && h.window.history.replaceState === originalReplaceState);
   }
 
   // ========== E. in-frame manual recovers a transient fetch error by polling ==========
@@ -296,6 +300,14 @@ function makeHarness(pageUrl, fetchImpl) {
     h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     check('non-GB: no stray cancel control message', h.cancelJobs().length === 0, h.cancelJobs().length);
   }
+  {
+    const h = makeHarness('https://www.google.com/search?id=NOTABOOK1');
+    h.window.document.body.appendChild(h.img('https://cdn.test/search-image.jpg', 300, 420));
+    const res = await h.window.eval('scrapeAndSend("search.pdf", "auto")');
+    check('non-books Google URL with id never starts a Books scan', h.scanJobs().length === 0);
+    check('non-books Google URL still uses ordinary image collection',
+      res && res.count === 1 && h.urlJobs().length === 1, res);
+  }
 
   // ========== L. frame probe identifies only the books.google.* reader frame ==========
   {
@@ -308,6 +320,9 @@ function makeHarness(pageUrl, fetchImpl) {
     const other = makeHarness('https://comic.test/ep');
     const probeOther = await other.window.eval('probeBookFrame()');
     check('probe: unrelated frame not detected', probeOther.isReader === false, probeOther);
+    const nonBook = makeHarness('https://books.google.com/search?id=NOTABOOK1');
+    const probeNonBook = await nonBook.window.eval('probeBookFrame()');
+    check('probe: id parameter outside a Books reader path is not enough', probeNonBook.isReader === false, probeNonBook);
   }
 
   // ========== M. in-frame walk honors the page limit ==========

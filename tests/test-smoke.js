@@ -1,8 +1,8 @@
 // Smoke tests (node) for pure logic of the extension
-const PdfBuilder = require('./pdfbuilder.js');
-const OcrTools = require('./ocr.js');
-const Typeset = require('./typeset.js');
-const TranslateTools = require('./translate.js');
+const PdfBuilder = require('../src/core/pdfbuilder.js');
+const OcrTools = require('../src/core/ocr.js');
+const Typeset = require('../src/core/typeset.js');
+const TranslateTools = require('../src/core/translate.js');
 
 let failures = 0;
 function check(name, cond, extra) {
@@ -132,8 +132,30 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
   // ---------- OCR ----------
   check('looksReal eng accepts sentence', OcrTools.looksReal('Hello world this is real', 'eng') === true);
   check('looksReal eng rejects noise', OcrTools.looksReal('--- ... !!!', 'eng') === false);
+  {
+    const w = 31, h = 31, original = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < original.length; i += 4) {
+      original[i] = original[i + 1] = original[i + 2] = 220;
+      original[i + 3] = 255;
+    }
+    for (let y = 0; y < h; y++) { const i = (y * w + 15) * 4; original[i] = original[i + 1] = original[i + 2] = 205; }
+    let processed;
+    const src = { getContext: () => ({ getImageData: () => ({ data: new Uint8ClampedArray(original) }) }) };
+    OcrTools.makePass(src, w, h, 'adaptive', () => ({ getContext: () => ({ putImageData: (image) => { processed = new Uint8ClampedArray(image.data); } }) }));
+    check('OCR adaptive contrast separates low-contrast text from background', processed[(15 * w + 15) * 4] === 0 && processed[(15 * w + 14) * 4] === 255);
+    check('OCR-only contrast processing leaves its input pixels untouched', original[(15 * w + 15) * 4] === 205 && original[(15 * w + 14) * 4] === 220);
+  }
+  {
+    const srcPixels = new Uint8ClampedArray([200,200,200,255, 210,210,210,255]);
+    let contrasted;
+    OcrTools.makePass({ getContext: () => ({ getImageData: () => ({ data: new Uint8ClampedArray(srcPixels) }) }) }, 2, 1, 'gray',
+      () => ({ getContext: () => ({ putImageData: (image) => { contrasted = image.data; } }) }));
+    check('global contrast stretch boosts a low-range OCR slice', contrasted[0] === 0 && contrasted[4] === 255);
+  }
   check('looksReal jpn accepts kana', OcrTools.looksReal('こんにちは', 'jpn') === true);
   check('looksReal kor', OcrTools.looksReal('안녕하세요 세상', 'kor') === true);
+  check('OCR uses the established single local Tesseract path',
+    typeof OcrTools.ocrWithProfiles === 'undefined' && !OcrTools.OCR_PROFILES);
 
   // groupLines: two close lines merge into one block
   {
@@ -171,6 +193,19 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('extractLines offset applied', out[0] && out[0].y0 === 0);
     const out2 = OcrTools.extractLines(data, 50, false, 40, 'eng', null, 30);
     check('extractLines x/y offsets', out2[0] && out2[0].y0 === 50 && out2[0].x0 === 30, out2[0]);
+    const garbled = { blocks: [{ paragraphs: [{ lines: [
+      { text: 'NG BEYAYN®BIE', confidence: 94, bbox: { x0: 5, x1: 145, y0: 0, y1: 18 } }
+    ] }] }] };
+    const sampleLine = OcrTools.extractLines(garbled, 0, false, 25, 'eng')[0];
+    check('established OCR filter preserves the reported text for manual correction',
+      sampleLine && sampleLine.text === 'NG BEYAYN®BIE', sampleLine);
+    const groupedSample = OcrTools.groupLines([sampleLine], false)[0];
+    check('reported OCR result survives grouping', groupedSample && groupedSample.text === 'NG BEYAYN®BIE');
+    const tiny = { blocks: [{ paragraphs: [{ lines: [
+      { text: 'small', confidence: 35, bbox: { x0: 5, x1: 35, y0: 0, y1: 9 } }
+    ] }] }] };
+    check('single-pass OCR accepts lettering at its established minimum height',
+      OcrTools.extractLines(tiny, 0, false, 25, 'eng').length === 1);
   }
 
   // ---------- Typeset ----------
@@ -197,11 +232,35 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('Typeset render returns canvas', cv && cv.width === 200 && cv.height === 200);
   }
   {
+    const fillCalls = [], clipRects = [];
+    const ctx = new Proxy({}, {
+      get(t, prop) {
+        if (prop === 'measureText') return (s) => ({ width: String(s).length * 6 });
+        if (prop === 'fillRect') return (...args) => fillCalls.push(args);
+        if (prop === 'rect') return (...args) => clipRects.push(args);
+        return typeof prop === 'string' ? (() => {}) : undefined;
+      },
+      set() { return true; }
+    });
+    const bmp = { width: 200, height: 200 };
+    const block = { enabled: true, tr: 'text', x0: 20, y0: 30, x1: 40, y1: 50,
+      tx0: 100, ty0: 110, tx1: 150, ty1: 160, lineH: 10, size: 10, bg: 'white' };
+    Typeset.render(bmp, [block], { createCanvas: () => ({ width: 200, height: 200, getContext: () => ctx }) });
+    check('original OCR text is erased at its original padded location',
+      JSON.stringify(fillCalls[0]) === JSON.stringify([16, 26, 28, 28]), fillCalls[0]);
+    check('the whole final text box is erased beneath the placed text',
+      JSON.stringify(fillCalls[1]) === JSON.stringify([100, 110, 50, 50]), fillCalls[1]);
+    check('saved text is clipped to the translation box',
+      JSON.stringify(clipRects[0]) === JSON.stringify([100, 110, 50, 50]), clipRects[0]);
+  }
+  {
     const ctx = mockCtx();
     const lines = Typeset.wrapWords(ctx, 'one two three four five six seven', 20);
     check('wrapWords returns array', Array.isArray(lines) && lines.length >= 1);
     const f = Typeset.fit(ctx, 'hello', 100, 100, 40, 10);
     check('fit returns size/lines/lh', f && f.size >= 10 && Array.isArray(f.lines) && f.lh > 0, f);
+    const tight = Typeset.fit(ctx, 'hello world', 100, 15, 40, 8);
+    check('auto-fit never deliberately lets text exceed the translation box height', tight.lines.length * tight.lh <= 15, tight);
   }
 
   // ---------- Typeset per-block formatting (2.27) ----------
@@ -209,7 +268,7 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     const calls = { font: [], textAlign: [], direction: [], fillStyles: [], fillText: [], strokeText: 0, beginPath: 0, stroke: 0, lineTo: 0 };
     const ctx = {
       textBaseline: '', lineWidth: 0, strokeStyle: '', lineJoin: '',
-      drawImage() {}, fillRect() {},
+      drawImage() {}, fillRect() {}, save() {}, restore() {}, rect() {}, clip() {},
       measureText: (s) => ({ width: String(s).length * 6 }),
       getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }),
       fillText(t, x, y) { calls.fillText.push({ t, x, y }); },
@@ -236,13 +295,19 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     const calls = renderWith({});
     check('legacy block defaults to right align', calls.textAlign.every((a) => a === 'right'), calls.textAlign);
     check('default font is bold 700 without italic', calls.font.some((f) => /700/.test(f) && !/italic/.test(f)), calls.font);
-    check('no underline path by default', calls.stroke === 0 && calls.beginPath === 0);
+    check('no underline path by default', calls.stroke === 0 && calls.lineTo === 0);
     check('fillText invoked for translation', calls.fillText.length >= 1);
   }
   {
     const calls = renderWith({ align: 'left', bold: false, italic: true });
     check('left align applied to canvas', calls.textAlign.every((a) => a === 'left'));
     check('italic regular-weight font built', calls.font.some((f) => /^italic 400 /.test(f)), calls.font);
+  }
+  {
+    const calls = renderWith({ align: 'left', tx0: 80, ty0: 90, tx1: 120, ty1: 130 });
+    check('resized translation area positions the text independently of OCR erasure area',
+      calls.fillText.length > 0 && calls.fillText[0].x > 80 && calls.fillText[0].x < 82 &&
+      calls.fillText[0].y > 90 && calls.fillText[0].y < 110, calls.fillText[0]);
   }
   {
     const calls = renderWith({ align: 'center', size: 33 });

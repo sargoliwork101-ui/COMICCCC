@@ -3,21 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <title>PIC TO PDF</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="../shared/style.css">
   <link rel="stylesheet" href="viewer.css">
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-in">
       <div class="brand">
-        <span class="brand-logo"><img src="icon128.png" alt=""></span>
+        <span class="brand-logo"><img src="../../assets/icons/icon128.png" alt=""></span>
         <div class="brand-text">
           <h1>PIC TO PDF</h1>
           <p>تصاویر را انتخاب، مرتب و ویرایش کنید و خروجی PDF یا تصویر بگیرید</p>
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۲.۵۱</span>
+        <span class="version-pill">نسخهٔ ۲.۶۴</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -36,7 +36,8 @@
             <section class="top-menu-section">
               <h2 class="top-menu-title">OCR، ترجمه و تصاویر ناموفق</h2>
               <div class="top-menu-ocr">
-                <label class="check" title="با خاموش‌کردن این گزینه، OCR و ترجمه غیرفعال می‌شود و تصویرها به نسخهٔ اصلی برمی‌گردند"><input type="checkbox" id="ocrEnabled" checked><span>فعال‌بودن OCR</span></label>
+                <label class="check" title="کنتراست محلی فقط روی نسخهٔ موقت OCR اعمال می‌شود؛ تصویر اصلی و خروجی تغییر نمی‌کند"><input type="checkbox" id="trContrast" checked><span>افزایش کنتراست فقط برای OCR</span></label>
+      <label class="check" title="با خاموش‌کردن این گزینه، OCR و ترجمه غیرفعال می‌شود و تصویرها به نسخهٔ اصلی برمی‌گردند"><input type="checkbox" id="ocrEnabled" checked><span>فعال‌بودن OCR</span></label>
                 <button class="mini accent" id="btnTranslate" disabled>ترجمهٔ متن تصاویر به فارسی</button>
                 <button class="mini hidden" id="btnTxt">ذخیرهٔ متن‌ها (TXT)</button>
                 <button class="mini warn hidden" id="btnRetry">تلاش مجدد برای ناموفق‌ها</button>
@@ -179,9 +180,36 @@
         <option value="jpn">日本語 (ژاپنی)</option>
         <option value="chi_sim">中文 (چینی ساده)</option>
       </select>
+      <p id="ocrMethodNote" class="note">تشخیص متن با موتور محلی Tesseract و یک روش صفحه‌بندی انجام می‌شود؛ تنظیم‌های افزایش کنتراست و دقت بالاتر فقط روی تصویر موقت OCR اثر دارند.</p>
       <label class="check"><input type="checkbox" id="trOnlySel" checked><span>فقط تصاویر انتخاب‌شده</span></label>
       <label class="check" title="اگر خاموش باشد، متن اصلی پاک نمی‌شود و ترجمه با حاشیه روی تصویر قرار می‌گیرد"><input type="checkbox" id="trErase" checked><span>پاک‌کردن متن اصلی زیر ترجمه</span></label>
       <label class="check" title="یک روش خواندن اضافه برای متن سفید با حاشیه روی نقاشی؛ حدود ۴۰٪ کندتر"><input type="checkbox" id="trPrecise" checked><span>دقت بالاتر (کندتر)</span></label>
+      <details class="ai-settings" id="aiSettings">
+        <summary>ترجمهٔ هوش مصنوعی (اختیاری)</summary>
+        <div class="ai-settings-body">
+          <label class="check" title="اگر خاموش باشد، هیچ درخواست یا مصرفی از سهمیهٔ هوش مصنوعی انجام نمی‌شود"><input type="checkbox" id="trAiEnabled"><span>استفاده از ترجمهٔ یک‌جای هوش مصنوعی</span></label>
+          <p class="note">پیش‌فرض خاموش است. فقط با اقدام شما، متن به سرویس و نام مدلی که خودتان انتخاب کرده‌اید ارسال می‌شود.</p>
+          <label for="trAiProvider">سرویس هوش مصنوعی</label>
+          <select id="trAiProvider" class="sel">
+            <option value="gemini">Google Gemini</option>
+            <option value="openai">OpenAI</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="avalai">AvalAI</option>
+          </select>
+          <label>کلیدهای API سرویس انتخاب‌شده و نام دلخواه هرکدام</label>
+          <div id="aiProfileList" class="ai-profile-list"></div>
+          <button id="trAiAddProfile" class="mini" type="button">افزودن API</button>
+          <p class="ai-help"><a id="trAiKeyHelp" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلیدها فقط در حافظهٔ محلی همین مرورگر ذخیره می‌شوند.</p>
+          <p class="note">دکمهٔ «تست» هر ردیف فقط اتصال همان کلید و مدل را بررسی می‌کند و متن کمیک ارسال نمی‌شود. ترتیب تلاش برای ترجمه از بالا به پایین است و هر کلید فقط یک بار امتحان می‌شود. در Gemini، سهمیه برای هر پروژه حساب می‌شود.</p>
+          <label for="trAiModel">نام مدل در سرویس انتخاب‌شده</label>
+          <input id="trAiModel" type="text" dir="ltr" value="gemini-2.5-flash" spellcheck="false">
+          <label for="trAiSkill">Skill / راهنمای سبک ترجمه</label>
+          <textarea id="trAiSkill" rows="8" spellcheck="false" placeholder="لحن، شیوهٔ ترجمهٔ نام‌ها و سلیقهٔ خودتان را بنویسید"></textarea>
+          <button id="trAiSkillReset" class="mini" type="button">بازگردانی Skill پیشنهادی</button>
+          <p id="trAiPrivacy" class="note">متن‌ها برای ترجمه به Google ارسال می‌شوند. محتوای پلن رایگان Gemini برای بهبود محصولات Google استفاده می‌شود؛ متن حساس نفرستید.</p>
+          <p id="trAiError" class="ai-error" role="alert"></p>
+        </div>
+      </details>
       <p class="note">زبان را درست انتخاب کنید؛ اگر زبان اشتباه باشد چیزی خوانده نمی‌شود. ترجمه به اینترنت نیاز دارد. دقت خواندن متن روی فونت‌های خیلی تزیینی یا متن روی نقاشی کمتر است؛ همه‌چیز را می‌توانید بعداً ویرایش کنید.</p>
       <div class="modal-actions">
         <button id="trStart" class="btn">شروع ترجمه</button>
@@ -193,6 +221,13 @@
   <div id="editor" class="hidden">
     <div class="ed-head">
       <div id="edTitle">ویرایش ترجمه</div>
+      <div class="ed-view-controls" role="group" aria-label="بزرگ‌نمایی و جابه‌جایی تصویر">
+        <button class="mini" id="edZoomOut" type="button" title="کوچک‌نمایی" aria-label="کوچک‌نمایی">−</button>
+        <output id="edZoomLevel" class="ed-zoom-level" aria-label="درصد بزرگ‌نمایی">—</output>
+        <button class="mini" id="edZoomIn" type="button" title="بزرگ‌نمایی" aria-label="بزرگ‌نمایی">+</button>
+        <button class="mini" id="edZoomFit" type="button" title="جا دادن عرض تصویر در ناحیهٔ پیش‌نمایش">جا دادن</button>
+        <button class="mini" id="edZoomActual" type="button" title="نمایش هر پیکسل تصویر با اندازهٔ واقعی">اندازهٔ واقعی ۱۰۰٪</button>
+      </div>
       <div class="ed-actions">
         <button class="mini accent" id="edApply">به‌روزرسانی پیش‌نمایش</button>
         <button class="mini warn" id="edRevert">بازگردانی به تصویر اصلی</button>
@@ -200,7 +235,7 @@
       </div>
     </div>
     <div class="ed-body">
-      <div class="ed-preview"><div class="ed-stage"><img id="edImg" alt=""><div id="edBoxes"></div></div></div>
+      <div class="ed-preview" title="چرخ موس برای زوم؛ کشیدن فضای خالی تصویر برای جابه‌جایی؛ روی صفحهٔ لمسی با دو انگشت زوم کنید"><div class="ed-stage"><img id="edImg" alt="" draggable="false"><div id="edBoxes"></div></div></div>
       <div class="ed-list" id="edList"></div>
     </div>
   </div>
@@ -243,13 +278,14 @@
     <div class="lbscroll"><img id="lbImg" alt=""></div>
   </div>
 
-  <script src="jspdf.umd.min.js"></script>
-  <script src="pdfbuilder.js"></script>
-  <script src="tesseract.min.js"></script>
-  <script src="ocr.js"></script>
-  <script src="typeset.js"></script>
-  <script src="translate.js"></script>
-  <script src="pdf-import-store.js"></script>
+  <script src="../../vendor/jspdf.umd.min.js"></script>
+  <script src="../core/pdfbuilder.js"></script>
+  <script src="../../vendor/tesseract.min.js"></script>
+  <script src="../core/ocr.js"></script>
+  <script src="../core/typeset.js"></script>
+  <script src="../core/translate.js"></script>
+  <script src="../core/ai-translate.js"></script>
+  <script src="../core/pdf-import-store.js"></script>
   <script src="viewer.js"></script>
   <script src="trans.js"></script>
 </body>

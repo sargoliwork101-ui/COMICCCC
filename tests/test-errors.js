@@ -8,8 +8,8 @@ const PNG = Buffer.from(
   'hex'
 );
 
-function makeHarness({ fetchImpl, jobUrls } = {}) {
-  const html = fs.readFileSync(__dirname + '/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
+function makeHarness({ fetchImpl, jobUrls, aiSettings } = {}) {
+  const html = fs.readFileSync(__dirname + '/../src/viewer/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
   const dom = new JSDOM(html, { url: 'https://example.com/viewer.html?job=testjob', pretendToBeVisual: true, runScripts: 'dangerously' });
   const { window } = dom;
   const ctx = dom.getInternalVMContext();
@@ -22,6 +22,7 @@ function makeHarness({ fetchImpl, jobUrls } = {}) {
     urls: jobUrls || ['https://comic.test/a.png', 'https://comic.test/b.png', 'https://comic.test/c.png', 'https://comic.test/d.png'],
     name: 'comic.pdf', tabId: 7, pageUrl: 'https://comic.test/page', skippedInline: 2
   });
+  if (aiSettings) storageMap.set('gemini_translation_settings_v1', aiSettings);
   let scriptingCalls = 0;
   window.chrome = {
     runtime: { id: 'extid123', getURL: (p) => 'chrome-extension://extid123/' + p },
@@ -56,7 +57,7 @@ function makeHarness({ fetchImpl, jobUrls } = {}) {
   window.scrollTo = () => {};
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
-  for (const f of ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'viewer.js', 'trans.js']) {
+  for (const f of ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/ai-translate.js', '../src/viewer/viewer.js', '../src/viewer/trans.js']) {
     vm.runInContext(fs.readFileSync(__dirname + '/' + f, 'utf8'), ctx, { filename: f });
   }
   return { dom, window, ctx, ev, storageMap, get scriptingCalls() { return scriptingCalls; }, $: (id) => window.document.getElementById(id) };
@@ -553,6 +554,439 @@ prepare = async (it, r) => {
     check('in-flight render still updated the item blob', !!target.edited);
     check('busy flag released after render settles', h.ev('edBusy') === false);
     h.ev('renderEdited = globalThis.__origRE;');
+  }
+
+  // ---------- 18. duplicate numbers stay unique after an older copy is removed ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ev('duplicateItem(items[0]); duplicateItem(items[0]);');
+    h.ev('removeItemsFromGrid([items.find((it) => it.dupNo === 1)]); duplicateItem(items[0]);');
+    const numbers = h.ev('items.filter((it) => it.i === 0 && it.dupNo).map((it) => it.dupNo).sort((a, b) => a - b)');
+    check('duplicate numbers are not reused after deletion', JSON.stringify(numbers) === '[2,3]', numbers);
+  }
+
+  // ---------- 19. imported PDF source indices do not collide after deleting a card ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ev('removeItemsFromGrid([items[1]])');
+    h.ctx.PDFImportStore = {
+      getSession: async () => ({ token: 'import-test', status: 'complete', fileName: 'book.pdf', count: 2 }),
+      getPages: async () => [1, 2].map((pageNumber) => ({
+        token: 'import-test', pageNumber, fileName: 'book.pdf', width: 1, height: 1,
+        blob: new h.window.Blob([PNG], { type: 'image/png' })
+      })),
+      deleteSession: async () => {}
+    };
+    h.ev('pendingPdfImportToken = "import-test"');
+    await h.ev('receiveImportedPdf("import-test")');
+    const indices = h.ev('items.map((it) => it.i)');
+    check('PDF import keeps every source index unique', new Set(indices).size === indices.length, indices);
+    check('PDF import continues after the greatest existing index',
+      JSON.stringify(indices) === '[0,2,3,4,5]', indices);
+  }
+
+  // ---------- 19b. repeated conversions from the same PDF tool tab are all accepted ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    const sessions = new Map();
+    h.ctx.PDFImportStore = {
+      getSession: async (token) => sessions.get(token) || null,
+      getPages: async (token) => sessions.get(token) ? sessions.get(token).pages : [],
+      deleteSession: async (token) => { sessions.delete(token); }
+    };
+    const offer = (fileName, finishedAt) => {
+      const token = 'import-repeat';
+      sessions.set(token, {
+        token, status: 'complete', fileName, count: 1, finishedAt,
+        pages: [{ token, pageNumber: 1, fileName, width: 1, height: 1,
+          blob: new h.window.Blob([PNG], { type: 'image/png' }) }]
+      });
+    };
+    h.ev('pendingPdfImportToken = "import-repeat"');
+    offer('first.pdf', 1);
+    await h.ev('receiveImportedPdf("import-repeat")');
+    offer('first.pdf', 1); // همان اعلان در صورت تکرار focus/message نباید صفحه را دوباره بیافزاید.
+    await h.ev('receiveImportedPdf("import-repeat")');
+    offer('second.pdf', 2);
+    await h.ev('receiveImportedPdf("import-repeat")');
+    check('second PDF from the same converter tab is not ignored',
+      h.ev('items.filter((it) => it.sourcePdf === "first.pdf").length') === 1 &&
+      h.ev('items.filter((it) => it.sourcePdf === "second.pdf").length') === 1,
+      h.ev('items.map((it) => it.sourcePdf || "")'));
+  }
+
+  // ---------- 19c. a pending PDF import cannot clear another task's loading state ----------
+  {
+    const h = makeHarness({ jobUrls: ['https://comic.test/a.png'] });
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ctx.PDFImportStore = {
+      getSession: async () => ({ token: 'import-wait', status: 'complete', fileName: 'queued.pdf', count: 1, finishedAt: 1 }),
+      getPages: async () => [{ token: 'import-wait', pageNumber: 1, fileName: 'queued.pdf', width: 1, height: 1,
+        blob: new h.window.Blob([PNG], { type: 'image/png' }) }],
+      deleteSession: async () => {}
+    };
+    h.ev('pendingPdfImportToken = "import-wait"; loading = true;');
+    const waiting = h.ev('receiveImportedPdf("import-wait")');
+    await sleep(40);
+    check('PDF receive waits instead of releasing an active image load',
+      h.ev('loading') === true && h.ev('receivingPdfImport') === true &&
+      h.ev('items.some((it) => it.sourcePdf === "queued.pdf")') === false);
+    h.ev('loading = false');
+    await waiting;
+    check('waiting PDF import runs after the other task and releases only its own guard',
+      h.ev('receivingPdfImport') === false && h.ev('loading') === false &&
+      h.ev('items.filter((it) => it.sourcePdf === "queued.pdf").length') === 1);
+  }
+
+  // ---------- 20. extreme PDF scaling can never produce a zero-height slicing step ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    const originalBitmap = h.window.createImageBitmap;
+    try {
+      h.window.createImageBitmap = async () => ({ width: 1, height: 2, close() {} });
+      const segments = await h.ev(`prepare({
+        i: 99, uid: 999, blob: new Blob(['x']), w: 1, h: 2,
+        info: { fmt: 'PNG', ok: false, w: 1, h: 2 }, edited: null, cropRect: null
+      }, PdfBuilder.SAFE_PT + 1)`);
+      check('extreme PDF scaling still slices with a one-pixel minimum step',
+        segments.length === 2 && segments.every((segment) => segment.h === 1), segments.map((segment) => segment.h));
+    } finally {
+      h.window.createImageBitmap = originalBitmap;
+    }
+  }
+
+  // ---------- 21. closing a dirty editor during a render flushes the latest edit ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ev(`items[0].ocr = { lang: 'eng', blocks: [{
+      id: 1, enabled: true, bg: 'auto', tr: 'first', text: 'Hello',
+      x0: 0, x1: 10, y0: 0, y1: 10, lineH: 10
+    }] };
+    openEditor(items[0]);
+    globalThis.__renderedTexts = [];
+    globalThis.__gate = new Promise((resolve) => { globalThis.__releaseGate = resolve; });
+    renderEdited = async (it) => {
+      const text = it.ocr.blocks[0].tr;
+      globalThis.__renderedTexts.push(text);
+      if (globalThis.__renderedTexts.length === 1) await globalThis.__gate;
+    };
+    applyEditor();`);
+    await sleep(60);
+    check('dirty-close test begins with a render in flight', h.ev('edBusy') === true);
+    h.ev(`items[0].ocr.blocks[0].tr = 'latest';
+    edDirty = true;
+    globalThis.__closeWithDirty = closeEditor();`);
+    await sleep(30);
+    h.ev('globalThis.__releaseGate()');
+    await h.ev('globalThis.__closeWithDirty');
+    const rendered = h.ev('globalThis.__renderedTexts');
+    check('queued close renders the latest edit instead of losing its item',
+      JSON.stringify(rendered) === '["first","latest"]', rendered);
+    check('dirty close finishes and releases the editor', h.ev('EDI') === null && h.ev('edBusy') === false);
+  }
+
+  // ---------- 22. PDF conversion avoids unnecessary lossy recompression ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    const encodes = [];
+    const originalToDataURL = h.window.HTMLCanvasElement.prototype.toDataURL;
+    try {
+      h.window.HTMLCanvasElement.prototype.toDataURL = function (type, quality) {
+        encodes.push({ type, quality });
+        return originalToDataURL.call(this, type, quality);
+      };
+      const webp = await h.ev(`prepare({
+        i: 100, uid: 100, blob: new Blob(['x']), w: 1, h: 1,
+        info: { fmt: 'WEBP', ok: false, w: 1, h: 1 }, edited: null, cropRect: null
+      }, 1)`);
+      const jpeg = await h.ev(`prepare({
+        i: 101, uid: 101, blob: new Blob(['x']), w: 1, h: 1,
+        info: { fmt: 'JPEG', ok: false, w: 1, h: 1 }, edited: null, cropRect: null
+      }, 1)`);
+      check('non-JPEG source is converted to lossless PNG for PDF', webp[0].fmt === 'PNG', webp[0]);
+      check('JPEG slicing uses maximum encoder quality',
+        jpeg[0].fmt === 'JPEG' && encodes.some((entry) => entry.type === 'image/jpeg' && entry.quality === 1), encodes);
+    } finally {
+      h.window.HTMLCanvasElement.prototype.toDataURL = originalToDataURL;
+    }
+  }
+
+  // ---------- 23. thumbnails contain every source corner at high quality ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    let options = null, drawing = null, closed = false, bitmap = null;
+    let nativeSize = { width: 240, height: 3000 };
+    const originalBitmap = h.window.createImageBitmap;
+    try {
+      h.window.createImageBitmap = async (blob, opts) => {
+        options = opts;
+        const width = opts && opts.resizeWidth ? opts.resizeWidth : nativeSize.width;
+        const height = opts && opts.resizeHeight
+          ? opts.resizeHeight : Math.max(1, Math.round(nativeSize.height * width / nativeSize.width));
+        bitmap = { width, height, close() { closed = true; } };
+        return bitmap;
+      };
+      const canvas = h.ev('items[0]').el.querySelector('canvas');
+      canvas.getContext = () => ({
+        fillStyle: '', fillRect() {}, imageSmoothingEnabled: false, imageSmoothingQuality: 'low',
+        drawImage(...args) { drawing = args; }
+      });
+      const capture = async (width, height) => {
+        nativeSize = { width, height };
+        options = null; drawing = null; closed = false; bitmap = null;
+        await h.ev(`items[0].w = ${width}; items[0].h = ${height}; items[0].info = {fmt:'PNG',w:${width},h:${height},ok:false}`);
+        await h.ev('drawThumb(items[0])');
+        return { options, drawing, closed, bitmap };
+      };
+      const checkWholeImage = (label, result) => {
+        const { drawing: args, bitmap: bmp } = result;
+        const scale = bmp ? Math.min(240 / bmp.width, 320 / bmp.height) : 0;
+        check(`${label}: complete source rectangle is drawn`, args && args.length === 9 &&
+          args[1] === 0 && args[2] === 0 && args[3] === bmp.width && args[4] === bmp.height, args);
+        check(`${label}: destination stays inside the card without cropping`, args &&
+          args[5] >= 0 && args[6] >= 0 && args[5] + args[7] <= 240 && args[6] + args[8] <= 320 &&
+          Math.abs(args[7] - bmp.width * scale) < 0.001 && Math.abs(args[8] - bmp.height * scale) < 0.001, args);
+        check(`${label}: bitmap is released`, result.closed === true);
+      };
+      const tall = await capture(240, 3000);
+      check('thumbnail uses high-quality resizing', tall.options && tall.options.resizeQuality === 'high', tall.options);
+      checkWholeImage('tall thumbnail', tall);
+      check('tall thumbnail fits the complete height', tall.drawing && tall.drawing[8] === 320, tall.drawing);
+      const wide = await capture(3000, 240);
+      checkWholeImage('wide thumbnail', wide);
+      check('wide thumbnail fits the complete width', wide.drawing && wide.drawing[7] === 240, wide.drawing);
+    } finally {
+      h.window.createImageBitmap = originalBitmap;
+    }
+  }
+
+  // ---------- 24. optional whole-context AI translation and fallback ----------
+  const prepareAiTranslationHarness = async () => {
+    const h = makeHarness({ jobUrls: ['https://comic.test/a.png', 'https://comic.test/b.png'] });
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    await h.ev('aiSettingsReady');
+    h.ev(`OcrTools.createOcrWorker=async()=>({recognize:async()=>({data:{blocks:[]}}),setParameters:async()=>{},terminate:async()=>{}});
+      OcrTools.ocrBitmap=async()=>[{text:'Hello',conf:90,x0:10,x1:90,y0:10,y1:30}];
+      OcrTools.groupLines=()=>[{id:1,enabled:true,bg:'auto',tr:'',text:'Hello',x0:10,x1:90,y0:10,y1:30,lineH:16}];
+      window.__aiIds=(options)=>{const body=JSON.parse(options.body);const text=body.contents?body.contents[0].parts[0].text:body.messages[1].content;
+        return [...text.matchAll(/^\\[(p[0-9]+-b[0-9]+)\\]/gm)].map(m=>m[1]);};
+      window.__aiOk=(translations)=>({ok:true,status:200,json:async()=>({candidates:[{content:{parts:[{text:JSON.stringify(translations)}]}}]})});
+      window.__openAiOk=(translations)=>({ok:true,status:200,json:async()=>({choices:[{message:{content:JSON.stringify({translations})}}]})});`);
+    h.$('trOnlySel').checked = false;
+    return h;
+  };
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0; window.__freeCalls=0;
+      AiTranslateTools.translateWithFailover=async()=>{window.__aiCalls++;return {translations:new Map()};};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiEnabled').checked = false;
+    await h.ev('runTranslate()');
+    check('AI opt-in off spends zero Gemini requests', h.ev('window.__aiCalls') === 0);
+    check('AI opt-in off preserves the established translation path', h.ev('window.__freeCalls') === 2,
+      h.ev('window.__freeCalls'));
+  }
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0; window.__freeCalls=0; window.__aiEntryCount=0;
+      window.fetch=async(url,options)=>{window.__aiCalls++;const ids=window.__aiIds(options);window.__aiEntryCount=ids.length;
+        return window.__aiOk(ids.map(id=>({id,translation:'ترجمه طبیعی '+id})));};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiEnabled').checked = true;
+    h.ev(`aiProfiles=[makeAiProfile('شخصی','test-local-key')];renderAiProfiles();`);
+    h.$('trAiSkill').value = 'لحن صمیمی و طبیعی';
+    await h.ev('runTranslate()');
+    check('AI opt-in sends all selected pages in one request', h.ev('window.__aiCalls') === 1 && h.ev('window.__aiEntryCount') === 2,
+      { calls: h.ev('window.__aiCalls'), entries: h.ev('window.__aiEntryCount') });
+    check('successful AI batch never spends the old per-bubble fallback', h.ev('window.__freeCalls') === 0);
+    check('AI translations render back onto every image', h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr.startsWith("ترجمه طبیعی"))'));
+    check('AI settings stay local for the next use', h.storageMap.get('gemini_translation_settings_v1') &&
+      h.storageMap.get('gemini_translation_settings_v1').providers.gemini.profiles[0].apiKey === 'test-local-key' &&
+      h.storageMap.get('gemini_translation_settings_v1').providers.gemini.profiles[0].name === 'شخصی' &&
+      h.storageMap.get('gemini_translation_settings_v1').skill === 'لحن صمیمی و طبیعی');
+    check('API key never enters the page profile', !JSON.stringify(h.ev('collectPageProfile()')).includes('test-local-key'));
+    check('completed status safely names the successful profile', /شخصی/.test(h.$('statusText').textContent), h.$('statusText').textContent);
+  }
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0; window.__freeCalls=0;
+      window.fetch=async()=>{window.__aiCalls++;return {ok:false,status:429,json:async()=>({})};};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه جایگزین',ok:true};};`);
+    h.$('trAiEnabled').checked = true;
+    h.ev(`aiProfiles=[makeAiProfile('تک‌کلید','test-local-key')];renderAiProfiles();`);
+    await h.ev('runTranslate()');
+    check('one failed AI profile is not retried to conserve quota', h.ev('window.__aiCalls') === 1);
+    check('AI failure falls back only once per missing bubble', h.ev('window.__freeCalls') === 2,
+      h.ev('window.__freeCalls'));
+    check('fallback still produces translated images', h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr==="ترجمه جایگزین")'));
+    check('fallback is explained without exposing the key', /جایگزین/.test(h.$('statusText').textContent) &&
+      !h.$('failed').textContent.includes('test-local-key') && /سقف/.test(h.$('failed').textContent), h.$('failed').textContent);
+  }
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0; window.__freeCalls=0;
+      window.fetch=async(url,options)=>{window.__aiCalls++;return new Promise((resolve,reject)=>{
+        options.signal.addEventListener('abort',()=>reject(new Error('aborted')));
+      });};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiEnabled').checked = true;
+    h.ev(`aiProfiles=[makeAiProfile('در حال کار','test-local-key'),makeAiProfile('پشتیبان','backup-key')];renderAiProfiles();`);
+    const running = h.ev('runTranslate()');
+    for (let i = 0; i < 60 && h.ev('window.__aiCalls') === 0; i++) await sleep(20);
+    check('AI request is in flight before cancellation', h.ev('window.__aiCalls') === 1);
+    h.$('btnStopTr').click();
+    await running;
+    check('stopping aborts AI without another key or fallback requests',
+      h.ev('window.__freeCalls') === 0 && h.ev('window.__aiCalls') === 1 && h.ev('TR.aiController') === null);
+    check('stopped AI run releases the UI and reports cancellation', !h.ev('building') && /متوقف/.test(h.$('statusText').textContent),
+      h.$('statusText').textContent);
+  }
+
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0; window.__freeCalls=0; window.__aiKeys=[];
+      window.fetch=async(url,options)=>{window.__aiCalls++;const key=options.headers['x-goog-api-key'];window.__aiKeys.push(key);
+        if(key==='first-test-key')return {ok:false,status:429,json:async()=>({})};
+        const ids=window.__aiIds(options);return window.__aiOk(ids.map(id=>({id,translation:'ترجمهٔ پشتیبان '+id})));};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiEnabled').checked = true;
+    h.ev(`aiProfiles=[makeAiProfile('کلید اول','first-test-key'),makeAiProfile('کلید دوم','second-test-key')];renderAiProfiles();`);
+    await h.ev('runTranslate()');
+    check('integration moves from exhausted first key to named backup in order',
+      h.ev('window.__aiCalls') === 2 && h.ev('window.__aiKeys.join(",")') === 'first-test-key,second-test-key',
+      h.ev('window.__aiKeys'));
+    check('backup success avoids ordinary fallback and renders every translation',
+      h.ev('window.__freeCalls') === 0 && h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr.startsWith("ترجمهٔ پشتیبان"))'));
+    const settings = h.storageMap.get('gemini_translation_settings_v1');
+    check('both custom profile names and keys are stored locally in order', settings &&
+      settings.providers.gemini.profiles.length === 2 && settings.providers.gemini.profiles[0].name === 'کلید اول' &&
+      settings.providers.gemini.profiles[1].name === 'کلید دوم' && settings.providers.gemini.profiles[1].apiKey === 'second-test-key');
+    check('neither failover key leaks into errors or the page profile',
+      !h.$('failed').textContent.includes('first-test-key') &&
+      !JSON.stringify(h.ev('collectPageProfile()')).includes('second-test-key'));
+  }
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0;window.__freeCalls=0;
+      window.fetch=async(url,options)=>{window.__aiCalls++;window.__lastProviderRequest={url,options};
+        const ids=window.__aiIds(options);return window.__openAiOk(ids.map(id=>({id,translation:'OpenAI UI '+id})));};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiProvider').value = 'openai';
+    h.$('trAiProvider').dispatchEvent(new h.window.Event('change', { bubbles: true }));
+    await sleep(0);
+    h.ev(`aiProfiles=[makeAiProfile('OpenAI من','openai-ui-key')];renderAiProfiles();`);
+    h.$('trAiModel').value = 'gpt-4.1-mini';
+    h.$('trAiEnabled').checked = true;
+    await h.ev('runTranslate()');
+    check('OpenAI UI sends the exact custom model to OpenAI, not Gemini',
+      h.ev('window.__aiCalls') === 1 && h.ev('window.__lastProviderRequest.url') === 'https://api.openai.com/v1/chat/completions' &&
+      h.ev('JSON.parse(window.__lastProviderRequest.options.body).model') === 'gpt-4.1-mini' &&
+      h.ev('window.__lastProviderRequest.options.headers.Authorization') === 'Bearer openai-ui-key' &&
+      !h.ev('window.__lastProviderRequest.url').includes('googleapis'));
+    check('OpenAI UI response renders without ordinary fallback',
+      h.ev('window.__freeCalls') === 0 && h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr.startsWith("OpenAI UI"))'));
+    const providerSettings = h.storageMap.get('gemini_translation_settings_v1');
+    check('selected provider, custom model, and its own key are stored independently',
+      providerSettings.provider === 'openai' && providerSettings.providers.openai.model === 'gpt-4.1-mini' &&
+      providerSettings.providers.openai.profiles[0].apiKey === 'openai-ui-key');
+    h.$('trAiProvider').value = 'gemini';
+    h.$('trAiProvider').dispatchEvent(new h.window.Event('change', { bubbles: true }));
+    await sleep(0);
+    check('switching to Gemini does not reuse the OpenAI key or model',
+      h.$('trAiModel').value === 'gemini-2.5-flash' && h.ev('aiProfiles.every(p=>p.apiKey!=="openai-ui-key")'));
+    h.$('trAiProvider').value = 'openai';
+    h.$('trAiProvider').dispatchEvent(new h.window.Event('change', { bubbles: true }));
+    await sleep(0);
+    check('switching back restores the OpenAI custom model and key',
+      h.$('trAiModel').value === 'gpt-4.1-mini' && h.ev('aiProfiles[0].apiKey') === 'openai-ui-key');
+  }
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0;window.__freeCalls=0;
+      window.fetch=async(url,options)=>{window.__aiCalls++;window.__lastAvalAiRequest={url,options};
+        const ids=window.__aiIds(options);return window.__openAiOk(ids.map(id=>({id,translation:'AvalAI UI '+id})));};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiProvider').value = 'avalai';
+    h.$('trAiProvider').dispatchEvent(new h.window.Event('change', { bubbles: true }));
+    await sleep(0);
+    h.ev(`aiProfiles=[makeAiProfile('آوال‌ای من','avalai-ui-key')];renderAiProfiles();`);
+    h.$('trAiEnabled').checked = true;
+    await h.ev('runTranslate()');
+    check('AvalAI UI sends gpt-6-luna to AvalAI with its own key',
+      h.ev('window.__aiCalls') === 1 && h.ev('window.__lastAvalAiRequest.url') === 'https://api.avalai.ir/v1/chat/completions' &&
+      h.ev('JSON.parse(window.__lastAvalAiRequest.options.body).model') === 'gpt-6-luna' &&
+      h.ev('window.__lastAvalAiRequest.options.headers.Authorization') === 'Bearer avalai-ui-key');
+    check('AvalAI UI response renders and its settings stay local',
+      h.ev('window.__freeCalls') === 0 && h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr.startsWith("AvalAI UI"))') &&
+      h.storageMap.get('gemini_translation_settings_v1').provider === 'avalai' &&
+      h.storageMap.get('gemini_translation_settings_v1').providers.avalai.profiles[0].apiKey === 'avalai-ui-key');
+  }
+  {
+    const h = await prepareAiTranslationHarness();
+    h.ev(`aiProfiles=[makeAiProfile('تست من','connection-ui-key')];renderAiProfiles();
+      window.__connectionCalls=[];
+      window.fetch=async(url,options)=>{window.__connectionCalls.push({url,options});
+        return {ok:true,status:200,json:async()=>({name:'models/gemini-2.5-flash'})};};`);
+    const testButton = h.$('aiProfileList').querySelector('.ai-profile-test');
+    testButton.click();
+    for (let i = 0; i < 60 && testButton.disabled; i++) await sleep(10);
+    const status = h.$('aiProfileList').querySelector('.ai-profile-status');
+    check('profile test button checks only that key with a lightweight model GET',
+      h.ev('window.__connectionCalls.length') === 1 &&
+      h.ev('window.__connectionCalls[0].options.method') === 'GET' &&
+      h.ev('window.__connectionCalls[0].options.headers["x-goog-api-key"]') === 'connection-ui-key' &&
+      h.ev('window.__connectionCalls[0].url').includes('/v1beta/models/gemini-2.5-flash') &&
+      !h.ev('window.__connectionCalls[0].url').includes('generateContent') &&
+      h.ev('window.__connectionCalls[0].options.body') === undefined);
+    check('successful profile test shows a clear result beside the key',
+      /اتصال برقرار است/.test(status.textContent) && status.classList.contains('ok') && !testButton.disabled,
+      status.textContent);
+    h.ev(`window.fetch=async()=>({ok:false,status:401,json:async()=>({})});`);
+    testButton.click();
+    for (let i = 0; i < 60 && testButton.disabled; i++) await sleep(10);
+    check('failed profile test explains the error without exposing the key',
+      /کلید API/.test(status.textContent) && status.classList.contains('bad') &&
+      !status.textContent.includes('connection-ui-key') && !testButton.disabled, status.textContent);
+  }
+  {
+    const h = makeHarness({
+      jobUrls: ['https://comic.test/a.png'],
+      aiSettings: { enabled: true, apiKey: 'legacy-test-key', model: 'gemini-2.5-flash', skill: 'Skill قبلی' }
+    });
+    await h.ev('aiSettingsReady');
+    check('existing single-key settings migrate without losing key, model, Skill, or opt-in',
+      h.ev('aiProfiles.length') === 1 && h.ev('aiProfiles[0].apiKey') === 'legacy-test-key' &&
+      h.ev('aiProfiles[0].name') === 'کلید اصلی' && h.$('trAiEnabled').checked &&
+      h.$('trAiModel').value === 'gemini-2.5-flash' && h.$('trAiSkill').value === 'Skill قبلی');
+    check('migrated key appears in a private password row inside collapsed AI settings',
+      h.$('aiProfileList').querySelectorAll('.ai-profile-row').length === 1 &&
+      h.$('aiProfileList').querySelector('input[type="password"]').value === 'legacy-test-key' &&
+      h.$('aiSettings').contains(h.$('aiProfileList')));
+    await h.ev('saveAiSettings()');
+    check('migration saves the new local profile structure',
+      h.storageMap.get('gemini_translation_settings_v1').providers.gemini.profiles[0].apiKey === 'legacy-test-key');
+    h.$('trAiAddProfile').click();
+    await sleep(0);
+    const rows = h.$('aiProfileList').querySelectorAll('.ai-profile-row');
+    check('add API creates another named profile row', rows.length === 2 &&
+      rows[1].querySelector('input[type="text"]') && rows[1].querySelector('input[type="password"]'));
+    const nameInput = rows[1].querySelector('input[type="text"]');
+    const keyInput = rows[1].querySelector('input[type="password"]');
+    nameInput.value = 'ذخیرهٔ من'; keyInput.value = 'ui-second-key';
+    nameInput.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    keyInput.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+    await h.ev('saveAiSettings()');
+    const saved = h.storageMap.get('gemini_translation_settings_v1');
+    check('custom name and second secret entered in the UI persist locally',
+      saved.providers.gemini.profiles.length === 2 && saved.providers.gemini.profiles[1].name === 'ذخیرهٔ من' &&
+      saved.providers.gemini.profiles[1].apiKey === 'ui-second-key');
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL EDGE-CASE TESTS PASSED');

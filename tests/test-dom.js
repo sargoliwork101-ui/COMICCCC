@@ -4,7 +4,7 @@ const path = require('path');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
-const html = fs.readFileSync(path.join(__dirname, 'viewer.html'), 'utf8')
+const html = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.html'), 'utf8')
   .replace(/<script[\s\S]*?<\/script>/g, ''); // scripts evaluated manually in the window realm
 
 const dom = new JSDOM(html, {
@@ -22,6 +22,16 @@ Object.defineProperty(window.Element.prototype, 'innerText', {
   set(v) { this.textContent = v; },
   configurable: true
 });
+window.document.execCommand = (command) => {
+  const selection = window.getSelection();
+  if (!selection || !selection.rangeCount || selection.isCollapsed) return true;
+  const tag = { bold: 'strong', italic: 'em', underline: 'u', strikeThrough: 's' }[command];
+  if (!tag) return true;
+  const range = selection.getRangeAt(0), wrapper = window.document.createElement(tag);
+  wrapper.appendChild(range.extractContents()); range.insertNode(wrapper);
+  selection.removeAllRanges(); const next = window.document.createRange(); next.selectNodeContents(wrapper); selection.addRange(next);
+  return true;
+};
 
 // ---- minimal 1x1 PNG bytes ----
 const PNG = Buffer.from(
@@ -43,7 +53,7 @@ window.chrome = {
     set: async (obj) => { Object.entries(obj).forEach(([k, v]) => storageMap.set(k, v)); },
     remove: async (key) => { storageMap.delete(key); }
   } },
-  declarativeNetRequest: { updateSessionRules: async () => {} },
+  declarativeNetRequest: { updateSessionRules: async (options) => { window.__lastSessionRuleUpdate = options; } },
   tabs: {
     getCurrent: async () => ({ id: 17 }),
     create: async (options) => { window.__openedPdfImportUrl = options.url; return { id: 18 }; },
@@ -79,7 +89,7 @@ window.scrollTo = () => {};
 window.HTMLElement.prototype.scrollIntoView = () => {};
 window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
 
-const scripts = ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'pdf-import-store.js', 'viewer.js', 'trans.js'];
+const scripts = ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/ai-translate.js', '../src/core/pdf-import-store.js', '../src/viewer/viewer.js', '../src/viewer/trans.js'];
 for (const f of scripts) {
   const code = fs.readFileSync(path.join(__dirname, f), 'utf8');
   try {
@@ -109,17 +119,30 @@ const $ = (id) => window.document.getElementById(id);
   // 2.24: rebranded to PIC TO PDF
   check('viewer title uses PIC TO PDF', /PIC TO PDF/.test(window.document.title), window.document.title);
   check('viewer brand h1 uses PIC TO PDF', window.document.querySelector('.brand-text h1').textContent.trim() === 'PIC TO PDF');
-  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'manifest.json'), 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../manifest.json'), 'utf8'));
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
+  check('manifest and viewer version badge are synchronized at 2.64', manifest.version === '2.64' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۶۴'));
+  const viewerCss = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.css'), 'utf8');
+  check('topbar keeps the hamburger visible while the page scrolls',
+    /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
+  check('stylesheet has no literal newline escape that breaks a selector', !viewerCss.includes('\\n'));
+  const hasZeroRadius = (block) => /border-radius:\s*0(?:\D|$)/.test(block);
+  const thumbFrame = viewerCss.match(/(?:^|\n)\.tw\s*\{([^}]*)\}/);
+  check('thumbnail frame does not round off image corners', !!thumbFrame && hasZeroRadius(thumbFrame[1]));
+  const lightboxImage = viewerCss.match(/\.lbscroll img\s*\{([^}]*)\}/);
+  const editorImage = viewerCss.match(/\.ed-stage img\s*\{([^}]*)\}/);
+  check('large and editor previews keep square image corners',
+    !!lightboxImage && !!editorImage && hasZeroRadius(lightboxImage[1]) && hasZeroRadius(editorImage[1]));
   check('PDF-to-image import opens the dedicated converter tab',
     !!window.document.getElementById('btnImportPdf') &&
     /زبانهٔ جدا/.test(window.document.getElementById('btnImportPdf').title));
-  check('manifest icon files declared', [16, 32, 48, 128].every((s) => manifest.icons[String(s)] === `icon${s}.png`) &&
-    manifest.action.default_icon['128'] === 'icon128.png');
+  check('manifest icon files declared', [16, 32, 48, 128].every((s) => manifest.icons[String(s)] === `assets/icons/icon${s}.png`) &&
+    manifest.action.default_icon['128'] === 'assets/icons/icon128.png');
   check('brand logo points at the new icon file',
-    window.document.querySelector('.brand-logo img').getAttribute('src') === 'icon128.png');
+    window.document.querySelector('.brand-logo img').getAttribute('src') === '../../assets/icons/icon128.png');
   check('footer grouped shell present', !!window.document.querySelector('.dock .dock-side') &&
     !!window.document.querySelector('.dock .dock-center') && !!window.document.querySelector('.dock .dock-actions'));
   for (const id of ['selCount', 'modePdf', 'modeImg', 'outputSettings', 'buildBtn', 'saveImgBtn']) {
@@ -135,6 +158,37 @@ const $ = (id) => window.document.getElementById(id);
   }
   check('group menu stays in toolbar, outside hamburger', !!window.document.querySelector('.toolbar #groupMenu') &&
     !topMenu.contains($('groupMenu')));
+  check('OCR-only contrast control exists and defaults on', !!$('trContrast') && $('trContrast').checked &&
+    /فقط برای OCR/.test($('trContrast').parentElement.textContent));
+  check('OCR uses one local Tesseract page-segmentation method',
+    !$('trOcrProfile') && /یک روش صفحه‌بندی/.test($('ocrMethodNote').textContent));
+  check('optional AI settings stay collapsed to avoid clutter', $('aiSettings') && $('aiSettings').tagName === 'DETAILS' && !$('aiSettings').open);
+  check('AI translation is opt-in and defaults off', $('trAiEnabled') && !$('trAiEnabled').checked);
+  check('named multi-key controls stay inside the collapsed settings',
+    $('aiProfileList') && $('trAiAddProfile') && $('aiSettings').contains($('aiProfileList')) &&
+    $('aiSettings').contains($('trAiAddProfile')));
+  await ev('aiSettingsReady');
+  check('each API profile has a name, private key field, and its own connection test',
+    $('aiProfileList').children.length === 1 &&
+    $('aiProfileList').querySelector('input[type="text"]') &&
+    $('aiProfileList').querySelector('input[type="password"]') &&
+    $('aiProfileList').querySelector('.ai-profile-test'));
+  check('provider selector offers Gemini, OpenAI, OpenRouter, and AvalAI',
+    ['gemini', 'openai', 'openrouter', 'avalai'].every((id) => $('trAiProvider').querySelector(`option[value="${id}"]`)));
+  check('editable Skill and reset action are available',
+    $('aiSettings').contains($('trAiSkill')) && $('aiSettings').contains($('trAiSkillReset')));
+  check('AI key help starts with the official Google AI Studio link',
+    window.document.querySelector('#aiSettings a[href="https://aistudio.google.com/apikey"][rel="noopener noreferrer"]') !== null);
+  $('trAiProvider').value = 'openrouter';
+  $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('switching provider updates the model and official key link',
+    $('trAiModel').value === 'openai/gpt-4o-mini' && $('trAiKeyHelp').href === 'https://openrouter.ai/settings/keys');
+  $('trAiProvider').value = 'avalai';
+  $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('AvalAI uses its own default model and documentation link',
+    $('trAiModel').value === 'gpt-6-luna' && $('trAiKeyHelp').href === 'https://docs.avalai.ir/en/quickstart');
+  $('trAiProvider').value = 'gemini';
+  $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
 
   // 2.21: ESC cancellation affordances exist in the shell
   const jobHint = $('jobHint');
@@ -152,6 +206,12 @@ const $ = (id) => window.document.getElementById(id);
   }
   const items = ev('items');
   check('all 3 images loaded ok', items.length === 3 && items.every((it) => it.state === 'ok'), items.map((i) => i.state));
+  const sessionRule = window.__lastSessionRuleUpdate && window.__lastSessionRuleUpdate.addRules[0];
+  const refererExclusions = sessionRule && sessionRule.condition.excludedRequestDomains || [];
+  check('image Referer rule never rewrites AI provider requests',
+    ['translate.googleapis.com', 'api.mymemory.translated.net', 'generativelanguage.googleapis.com',
+      'api.openai.com', 'openrouter.ai', 'api.avalai.ir'].every((host) => refererExclusions.includes(host)),
+    refererExclusions);
   check('cards rendered', $('grid').children.length === 3);
   $('btnImportPdf').click();
   await sleep(20);
@@ -249,101 +309,101 @@ const $ = (id) => window.document.getElementById(id);
   check('ocr on re-enables translate', !$('btnTranslate').disabled);
 
   ev(`OcrTools.createOcrWorker = async () => ({ recognize: async () => ({ data: { blocks: [] } }), setParameters: async () => {}, terminate: async () => {} });
-    OcrTools.ocrBitmap = async () => [{ text: 'Hello', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30 }];
-    OcrTools.groupLines = (lines) => [{ id: 1, enabled: true, bg: 'auto', tr: '', text: 'Hello', x0: 10, x1: 90, y0: 10, y1: 30, lineH: 16 }];`);
+    OcrTools.ocrBitmap = async (bmp, worker, opts) => { window.__ocrCalls = (window.__ocrCalls || 0) + 1; window.__ocrPasses = opts.passes.slice(); return [{ text: 'Hello world from OCR', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30 }]; };
+    OcrTools.groupLines = (lines) => [
+      { id: 1, enabled: true, bg: 'auto', tr: '', text: 'Hello', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30, lineH: 16 },
+      { id: 2, enabled: true, bg: 'auto', tr: '', text: 'uncertain', conf: 30, x0: 10, x1: 90, y0: 50, y1: 70, lineH: 16 },
+      { id: 3, enabled: true, bg: 'auto', tr: '', text: 'NG BEYAYN®BIE', conf: 94, x0: 10, x1: 90, y0: 90, y1: 110, lineH: 16 }
+    ];`);
   $('trOnlySel').checked = false;
   $('btnTranslate').click();
   check('translate dialog opens', !$('trDialog').classList.contains('hidden'));
   $('trStart').click();
   for (let i = 0; i < 80; i++) { await sleep(100); if (!ev('building')) break; }
   check('translate finished', !ev('building'));
+  check('adaptive contrast pass is sent only through OCR processing', ev('window.__ocrPasses.includes("adaptive")'));
+  check('one Tesseract OCR call per image uses the standard preprocessing path',
+    ev('window.__ocrCalls === 3 && window.__ocrPasses.includes("gray") && window.__ocrPasses.includes("bubbles") && window.__ocrPasses.includes("adaptive")'));
   check('ocr data attached', items.some((it) => it.ocr && it.ocr.blocks.length), items.map((it) => !!(it.ocr && it.ocr.blocks.length)));
   const translated = items.find((it) => it.ocr && it.ocr.blocks.length);
   check('translation filled from mock fetch', translated && translated.ocr.blocks[0].tr === 'سلام', translated && translated.ocr.blocks[0].tr);
+  check('single-pass path translates all extracted text, including low-confidence blocks',
+    translated && translated.ocr.blocks[1].tr === 'سلام' && translated.ocr.blocks[1].text === 'uncertain');
+  check('single-pass path translates the remaining extracted blocks too',
+    translated && translated.ocr.blocks[2].tr === 'سلام' && translated.ocr.blocks[2].text === 'NG BEYAYN®BIE');
   check('edited image produced', !!translated.edited);
 
   ev('openEditor(items.find((it) => it.ocr && it.ocr.blocks.length))');
   check('editor opens', !$('editor').classList.contains('hidden'));
-  const ta = window.document.querySelector('.blk textarea');
-  check('editor textarea has translation', ta && ta.value === 'سلام', ta && ta.value);
+  const richEditor = window.document.querySelector('.blk-editor');
+  check('Word-like contenteditable contains translated text', richEditor && richEditor.textContent.trim() === 'سلام', richEditor && richEditor.textContent);
+  check('rich editor does not expose formatting marker syntax', richEditor && !richEditor.textContent.includes('**') && !richEditor.textContent.includes('[size=') && !richEditor.textContent.includes('[color='));
 
-  // 2.27: per-block formatting toolbar
   const fmtRow = window.document.querySelector('.blk-format');
-  check('format toolbar rendered per block', !!fmtRow);
+  check('rich-text toolbar rendered per block', !!fmtRow);
   const blk0 = translated.ocr.blocks[0];
-  check('block normalized to right/bold defaults', blk0.align === 'right' && blk0.bold === true &&
-    blk0.italic === false && blk0.underline === false && blk0.size === null, blk0);
   const alignSel = fmtRow.querySelector('.blk-align');
   const boldBtn = fmtRow.querySelector('.blk-bold');
   const italicBtn = fmtRow.querySelector('.blk-italic');
   const underBtn = fmtRow.querySelector('.blk-under');
   const sizeInput = fmtRow.querySelector('.blk-size');
-  check('align select starts on right', alignSel.value === 'right');
-  check('bold button shows active state', boldBtn.classList.contains('active'));
-  boldBtn.click();
-  check('bold toggle flips block and button', blk0.bold === false && !boldBtn.classList.contains('active'));
-  italicBtn.click();
-  check('italic toggle flips block and button', blk0.italic === true && italicBtn.classList.contains('active'));
-  underBtn.click();
-  check('underline toggle flips block and button', blk0.underline === true && underBtn.classList.contains('active'));
-  alignSel.value = 'center';
-  alignSel.dispatchEvent(new window.Event('change', { bubbles: true }));
-  check('align select updates block', blk0.align === 'center');
-  check('size input blank means auto size', sizeInput.value === '');
-  sizeInput.value = '40';
-  sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
-  check('manual size stored on block', blk0.size === 40 && sizeInput.value === '40');
-  sizeInput.value = '9999';
-  sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
-  check('oversized font clamped to 160', blk0.size === 160 && sizeInput.value === '160');
-  sizeInput.value = '';
-  sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
-  check('clearing size returns to auto (null)', blk0.size === null && sizeInput.value === '');
-  await sleep(1000); // اجازه بده رندر debounceشدهٔ ویرایشگر کامل شود
-  check('edited image survives formatting edits', !!translated.edited);
+  check('alignment starts at right', alignSel.value === 'right');
+  check('toolbar has common Word-like controls', !!boldBtn && !!italicBtn && !!underBtn && !!fmtRow.querySelector('.blk-bullet') && !!fmtRow.querySelector('.blk-numbered'));
+  alignSel.value = 'center'; alignSel.dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('alignment selection updates block', blk0.align === 'center');
 
-  // 2.28: جهت متن RTL/LTR، رنگ دستی و بازنشانی
+  // Rich formatting is represented as markup in the model, never as literal marker characters in the editor.
+  richEditor.focus();
+  const textNode = richEditor.firstChild;
+  const range = window.document.createRange(); range.selectNodeContents(textNode);
+  window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+  boldBtn.click();
+  check('bold toolbar applies real rich markup', /<strong>|<b>/i.test(blk0.richHtml) && blk0.tr === 'سلام', { html: blk0.richHtml, text: blk0.tr });
+  check('canvas renderer receives bold styled words without markers', window.Typeset.richHtmlWords(blk0.richHtml).some((word) => word.bold && word.t === 'سلام'));
+  const richParagraphs = window.Typeset.richHtmlWords('<div>سطر اول</div><div><u>سطر دوم</u></div>');
+  check('rich-text renderer preserves paragraph breaks and underline styling', richParagraphs.some((word) => word.t === 'سطر' && word.lineBreakBefore && word.underline), richParagraphs);
+  const splitWord = window.Typeset.richHtmlWords('hel<strong>lo</strong> there');
+  check('formatting inside a word does not insert a fake space', splitWord.map((word) => word.t).join('') === 'hellothere' && splitWord[1].spaceBefore === false, splitWord);
+  window.getSelection().collapseToEnd();
+  check('rich markup remains hidden from visible text', !richEditor.textContent.includes('**') && !richEditor.textContent.includes('[size=') && !richEditor.textContent.includes('[color='));
+
+  sizeInput.value = '40'; sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('font-size control updates block default when no selection', blk0.size === 40);
+  sizeInput.value = '9999'; sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('font size is clamped to safe maximum', blk0.size === 160);
+  sizeInput.value = ''; sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('empty font-size restores automatic sizing', blk0.size === null);
+
   const rtlBtn = fmtRow.querySelector('.blk-dir-rtl');
   const ltrBtn = fmtRow.querySelector('.blk-dir-ltr');
-  const colorInput = fmtRow.querySelector('.blk-color');
-  const colorAutoBtn = fmtRow.querySelector('.blk-color-auto');
-  const resetBtn = fmtRow.querySelector('.blk-reset');
-  check('direction controls rendered', !!rtlBtn && !!ltrBtn);
-  check('block defaults to rtl direction', blk0.dir === 'rtl' && rtlBtn.classList.contains('active'));
-  check('textarea reflects rtl direction', ta.style.direction === 'rtl', ta.style.direction);
+  check('RTL and LTR controls are available', !!rtlBtn && !!ltrBtn);
   ltrBtn.click();
-  check('ltr toggle flips block, button and textarea', blk0.dir === 'ltr' &&
-    ltrBtn.classList.contains('active') && !rtlBtn.classList.contains('active') && ta.style.direction === 'ltr');
+  check('LTR action updates block and both editor surfaces', blk0.dir === 'ltr' && richEditor.getAttribute('dir') === 'ltr' && window.document.querySelector('.ed-box-text').getAttribute('dir') === 'ltr');
   rtlBtn.click();
-  check('rtl toggle restores direction', blk0.dir === 'rtl' && rtlBtn.classList.contains('active'));
-  check('color starts in auto mode', blk0.color === null && colorAutoBtn.classList.contains('active') &&
-    colorInput.classList.contains('is-auto'));
-  colorInput.value = '#e11d48';
-  colorInput.dispatchEvent(new window.Event('input', { bubbles: true }));
-  check('picking a color stores it and exits auto', blk0.color === '#e11d48' &&
-    !colorAutoBtn.classList.contains('active') && !colorInput.classList.contains('is-auto'));
-  colorAutoBtn.click();
-  check('auto color button clears manual color', blk0.color === null && colorAutoBtn.classList.contains('active'));
-  // چند تغییر بده و بعد بازنشانی کن؛ همه‌چیز باید به پیش‌فرض برگردد
-  ltrBtn.click();
-  alignSel.value = 'left';
-  alignSel.dispatchEvent(new window.Event('change', { bubbles: true }));
-  italicBtn.click();
-  sizeInput.value = '55';
-  sizeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
-  resetBtn.click();
-  check('reset restores all formatting defaults', blk0.dir === 'rtl' && blk0.align === 'right' &&
-    blk0.bold === true && blk0.italic === false && blk0.underline === false &&
-    blk0.size === null && blk0.color === null,
-    { dir: blk0.dir, align: blk0.align, bold: blk0.bold, italic: blk0.italic, under: blk0.underline, size: blk0.size, color: blk0.color });
-  check('reset re-syncs the controls', rtlBtn.classList.contains('active') && boldBtn.classList.contains('active') &&
-    !italicBtn.classList.contains('active') && alignSel.value === 'right' && sizeInput.value === '' &&
-    colorAutoBtn.classList.contains('active') && ta.style.direction === 'rtl');
+  check('RTL action restores direction', blk0.dir === 'rtl' && richEditor.getAttribute('dir') === 'rtl');
+
+  const directEditor = window.document.querySelector('.ed-box-text');
+  check('image overlay is directly editable', !!directEditor && directEditor.getAttribute('contenteditable') === 'true');
+  directEditor.innerHTML = '<div>سطر یک</div><div>سطر دو</div>';
+  directEditor.dispatchEvent(new window.Event('input', { bubbles: true }));
+  check('paragraph breaks are retained in the translation model', blk0.tr === 'سطر یک\nسطر دو', blk0.tr);
+  check('paragraphs render as forced line breaks', window.Typeset.richHtmlWords(blk0.richHtml).some((word) => word.t === 'سطر' && word.lineBreakBefore));
+  directEditor.innerHTML = '<span>ترجمهٔ روی تصویر</span>';
+  directEditor.dispatchEvent(new window.Event('input', { bubbles: true }));
+  check('typing in image box updates translation and sidebar', blk0.tr === 'ترجمهٔ روی تصویر' && richEditor.textContent === 'ترجمهٔ روی تصویر', { text: blk0.tr, sidebar: richEditor.textContent });
+  check('resizable overlay handles exist for each text box', window.document.querySelector('.ed-box-text').closest('.ed-box').querySelectorAll('.ed-resize').length === 8);
   await sleep(1000);
-  check('edited image survives reset', !!translated.edited);
+  check('edited image survives rich-text edits', !!translated.edited);
 
   await ev('closeEditor()');
   check('editor closes', $('editor').classList.contains('hidden'));
+
+  blk0.tr = 'قبل **متن پررنگ** بعد'; delete blk0.richHtml;
+  ev('openEditor(items.find((it) => it.ocr && it.ocr.blocks.length))');
+  const migratedEditor = window.document.querySelector('.blk-editor');
+  check('legacy marker translations open as editable formatted text', migratedEditor.textContent === 'قبل متن پررنگ بعد' && /<strong>|<b>/i.test(blk0.richHtml), { text: migratedEditor.textContent, html: blk0.richHtml });
+  check('legacy syntax is removed from the editable value', !migratedEditor.textContent.includes('**'));
+  await ev('closeEditor()');
 
   check('txt button visible', !$('btnTxt').classList.contains('hidden'));
   $('btnTxt').click();

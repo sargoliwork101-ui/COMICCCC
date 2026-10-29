@@ -19,7 +19,12 @@ function requestJobCancel() {
   jobCancelRequested = true;
   if (loadAbortController) { try { loadAbortController.abort(); } catch { /* کنترلر قبلاً بسته شده */ } }
   // TR در trans.js تعریف شده و حلقهٔ ترجمه همان پرچم را می‌خواند
-  try { if (typeof TR !== 'undefined' && TR) TR.cancel = true; } catch { /* trans.js هنوز بارگذاری نشده */ }
+  try {
+    if (typeof TR !== 'undefined' && TR) {
+      TR.cancel = true;
+      if (TR.aiController) TR.aiController.abort();
+    }
+  } catch { /* trans.js هنوز بارگذاری نشده یا درخواست قبلاً تمام شده */ }
 }
 
 // راهنمای لغو با ESC در پنل نتیجه، فقط هنگام اجرای کار دیده می‌شود
@@ -106,6 +111,8 @@ let editingPageGroupSelection = null;
 let nextItemUid = 0;
 let pendingPdfImportToken = null;
 let receivingPdfImport = false;
+// آخرین نسخهٔ دریافت‌شدهٔ هر تبدیل؛ برای پذیرش PDF بعدی از همان زبانه بدون ورود تکراری یک نسخه.
+let lastReceivedPdfImportKey = '';
 
 // ---------- دانلود تصاویر ----------
 async function setRefererRule(pageUrl) {
@@ -120,7 +127,10 @@ async function setRefererRule(pageUrl) {
         condition: {
           resourceTypes: ['xmlhttprequest'],
           initiatorDomains: [chrome.runtime.id],
-          excludedRequestDomains: ['translate.googleapis.com', 'api.mymemory.translated.net']
+          excludedRequestDomains: [
+            'translate.googleapis.com', 'api.mymemory.translated.net',
+            'generativelanguage.googleapis.com', 'api.openai.com', 'openrouter.ai', 'api.avalai.ir'
+          ]
         }
       }]
     });
@@ -313,7 +323,7 @@ function makeDuplicateData(source) {
   return {
     ...state,
     uid: nextItemUid++,
-    dupNo: items.filter((it) => it.i === source.i).length,
+    dupNo: items.reduce((max, it) => it.i === source.i ? Math.max(max, Number(it.dupNo) || 0) : max, 0) + 1,
     selected: true,
     pageGroup: null,
     cropRect: source.cropRect ? { ...source.cropRect } : null,
@@ -532,15 +542,26 @@ async function getDisplaySource(it) {
 }
 
 async function drawThumb(it) {
+  // فقط آخرین درخواست پیش‌نمایش مجاز است روی کارت بنویسد تا نتیجهٔ قدیمی جای کراپ/ویرایش تازه را نگیرد.
+  const request = (it.thumbRequest || 0) + 1;
+  it.thumbRequest = request;
   try {
     const src = await getDisplaySource(it);
-    const bmp = await createImageBitmap(src.blob, { resizeWidth: 240, resizeQuality: 'medium' });
-    const c = it.el.querySelector('canvas'), ctx = c.getContext('2d');
-    ctx.fillStyle = '#171c26'; ctx.fillRect(0, 0, c.width, c.height);
-    const dh = Math.min(bmp.height, c.height);
-    const dy = bmp.height < c.height ? Math.round((c.height - bmp.height) / 2) : 0;
-    ctx.drawImage(bmp, 0, 0, bmp.width, dh, 0, dy, bmp.width, dh);
-    bmp.close();
+    const bmp = await createImageBitmap(src.blob, { resizeWidth: 240, resizeQuality: 'high' });
+    try {
+      if (it.thumbRequest !== request) return;
+      const c = it.el.querySelector('canvas'), ctx = c && c.getContext('2d');
+      if (!ctx) return;
+      ctx.fillStyle = '#171c26'; ctx.fillRect(0, 0, c.width, c.height);
+      // کل تصویر با حفظ نسبت داخل کادر می‌آید؛ برشِ ناخواستهٔ انتهای تصاویر بلند حذف شد.
+      const scale = Math.min(c.width / bmp.width, c.height / bmp.height);
+      const dw = Math.max(1, bmp.width * scale), dh = Math.max(1, bmp.height * scale);
+      const dx = (c.width - dw) / 2, dy = (c.height - dh) / 2;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      // هر چهار گوشهٔ منبع رسم می‌شود؛ هیچ بخشی از تصویر به‌عنوان برشِ پیش‌نمایش حذف نمی‌شود.
+      ctx.drawImage(bmp, 0, 0, bmp.width, bmp.height, dx, dy, dw, dh);
+    } finally { bmp.close(); }
   } catch (e) { console.warn('پیش‌نمایش تصویر ناموفق', e); }
 }
 
@@ -625,7 +646,7 @@ async function openPdfImportTab() {
   const query = new URLSearchParams({ token });
   if (returnTabId !== null) query.set('returnTab', String(returnTabId));
   try {
-    await chrome.tabs.create({ url: chrome.runtime.getURL(`pdf-import.html?${query}`), active: true });
+    await chrome.tabs.create({ url: chrome.runtime.getURL(`src/pdf-import/pdf-import.html?${query}`), active: true });
     $('loadText').innerText = 'فایل PDF را در زبانهٔ تازه انتخاب کنید؛ پس از تبدیل به این پیش‌نمایش برمی‌گردد.';
   } catch (error) {
     pendingPdfImportToken = null;
@@ -636,20 +657,38 @@ async function openPdfImportTab() {
 async function receiveImportedPdf(token = pendingPdfImportToken) {
   if (!token || token !== pendingPdfImportToken || receivingPdfImport || typeof PDFImportStore === 'undefined') return;
   receivingPdfImport = true;
+  let ownsLoading = false;
+  const waitForIdle = async () => {
+    while (token === pendingPdfImportToken && (loading || building || editingPageGroupId !== null)) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return token === pendingPdfImportToken;
+  };
   try {
     const session = await PDFImportStore.getSession(token);
     if (!session || !['complete', 'failed'].includes(session.status)) return;
+    const receiptKey = JSON.stringify([
+      token, session.finishedAt || 0, session.status, session.fileName || '', session.count || 0
+    ]);
+    if (receiptKey === lastReceivedPdfImportKey) {
+      // اگر پاک‌سازی قبلی ناقص مانده باشد دوباره انجام می‌شود، اما صفحه‌ها تکرار نمی‌شوند.
+      await PDFImportStore.deleteSession(token);
+      return;
+    }
     const pages = await PDFImportStore.getPages(token);
+    // کاربر ممکن است هنگام خواندن فایل کار دیگری را شروع کرده باشد؛ دوباره نوبت می‌گیریم.
+    if (!await waitForIdle()) return;
     if (!pages.length) {
       $('loadText').innerText = session.error
         ? `تبدیل PDF ناموفق بود: ${session.error}`
         : 'فایلی از زبانهٔ تبدیل دریافت نشد.';
-      pendingPdfImportToken = null;
+      lastReceivedPdfImportKey = receiptKey;
       await PDFImportStore.deleteSession(token);
       return;
     }
 
     loading = true;
+    ownsLoading = true;
     const overlay = $('loadingOverlay');
     overlay.classList.remove('hidden');
     $('loadingOverlayText').innerText = 'در حال افزودن تصویرهای PDF...';
@@ -658,9 +697,11 @@ async function receiveImportedPdf(token = pendingPdfImportToken) {
     setTaskTitle('در حال دریافت صفحه‌های PDF');
     refreshSummary();
 
+    let nextSourceIndex = items.reduce((max, it) =>
+      Number.isInteger(it.i) ? Math.max(max, it.i + 1) : max, 0);
     for (let index = 0; index < pages.length; index++) {
       const page = pages[index];
-      const itemIndex = items.length;
+      const itemIndex = nextSourceIndex++;
       const item = {
         i: itemIndex, uid: nextItemUid++, url: '', pdfOrder: itemIndex + 1, pageGroup: null,
         state: 'ok', selected: true, blob: page.blob,
@@ -678,7 +719,8 @@ async function receiveImportedPdf(token = pendingPdfImportToken) {
       $('loadText').innerText = `افزودن صفحه‌های PDF به فهرست... ${done} از ${pages.length}`;
     }
 
-    pendingPdfImportToken = null;
+    // token برای «انتخاب PDF دیگری» در همان زبانه فعال می‌ماند؛ نسخه با finishedAt جدید پذیرفته می‌شود.
+    lastReceivedPdfImportKey = receiptKey;
     await PDFImportStore.deleteSession(token);
     $('loadText').innerText = session.status === 'failed'
       ? `${pages.length} صفحه اضافه شد؛ تبدیل PDF در صفحهٔ ${session.count + 1} متوقف شد: ${session.error || 'خطای ناشناخته'}`
@@ -687,11 +729,13 @@ async function receiveImportedPdf(token = pendingPdfImportToken) {
     console.error('Receiving converted PDF pages failed', error);
     $('loadText').innerText = `دریافت تصویرهای PDF ناموفق بود: ${error && error.message ? error.message : error}`;
   } finally {
-    loading = false;
-    $('loadingOverlay').classList.add('hidden');
-    setTaskTitle();
-    updatePdfOrderFromGrid();
-    refreshAll();
+    if (ownsLoading) {
+      loading = false;
+      $('loadingOverlay').classList.add('hidden');
+      setTaskTitle();
+      updatePdfOrderFromGrid();
+      refreshAll();
+    }
     receivingPdfImport = false;
   }
 }
@@ -1443,7 +1487,8 @@ function handleOverlayKeydown(e) {
 async function decodeSlices(it, maxSrcH) {
   // it می‌تواند خود تصویر یا نسخهٔ ویرایش‌شده (edited) باشد
   const bmp = await createImageBitmap(it.blob, { imageOrientation: 'none' });
-  const asPng = it.info && it.info.fmt === 'PNG';
+  // JPEG فقط برای منبع JPEG استفاده می‌شود؛ WebP/AVIF/SVG و سایر فرمت‌ها بدون افتِ اضافه به PNG می‌روند.
+  const asPng = !it.info || it.info.fmt !== 'JPEG';
   const segs = [];
   try {
     for (let y = 0; y < bmp.height; y += maxSrcH) {
@@ -1455,7 +1500,7 @@ async function decodeSlices(it, maxSrcH) {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(bmp, 0, y, bmp.width, sh, 0, 0, bmp.width, sh);
-      const data = canvas.toDataURL(asPng ? 'image/png' : 'image/jpeg', 0.98);
+      const data = canvas.toDataURL(asPng ? 'image/png' : 'image/jpeg', 1);
       canvas.width = canvas.height = 0;
       segs.push({ data, fmt: asPng ? 'PNG' : 'JPEG', w: bmp.width, h: sh, alias: `i${it.pdfKey || it.uid || it.i}_${y}` });
     }
@@ -1465,7 +1510,8 @@ async function decodeSlices(it, maxSrcH) {
 
 async function prepare(it, r) {
   const src = await getDisplaySource(it);
-  const rawMax = Math.floor(PdfBuilder.SAFE_PT / r);
+  // در نسبت‌های بسیار بزرگ، مقدار صفر باعث حلقهٔ بی‌پایان decodeSlices می‌شد؛ حداقل یک پیکسل کافی است.
+  const rawMax = Math.max(1, Math.floor(PdfBuilder.SAFE_PT / r));
   const inf = src.info;
   const key = it.pdfKey || it.uid || it.i;
   // فایل JPEG/PNG بدون هیچ فشرده‌سازی مجدد
@@ -1485,7 +1531,7 @@ async function fallback(seg) {
   ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(bmp, 0, 0);
   bmp.close();
-  const data = canvas.toDataURL('image/jpeg', 0.98);
+  const data = canvas.toDataURL('image/jpeg', 1);
   canvas.width = canvas.height = 0;
   return { data, fmt: 'JPEG' };
 }
