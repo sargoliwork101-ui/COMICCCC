@@ -1,6 +1,6 @@
 {
   "name": "pic-to-pdf-extension",
-  "version": "2.61.0",
+  "version": "2.62.0",
   "private": true,
   "description": "افزونهٔ Chrome برای جمع‌آوری تصاویر کمیک و وب‌تون و خروجی PDF/تصویر به‌همراه OCR و ترجمه",
   "scripts": {

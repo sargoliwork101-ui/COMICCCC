@@ -855,6 +855,27 @@ prepare = async (it, r) => {
   }
   {
     const h = await prepareAiTranslationHarness();
+    h.ev(`window.__aiCalls=0;window.__freeCalls=0;
+      window.fetch=async(url,options)=>{window.__aiCalls++;window.__lastAvalAiRequest={url,options};
+        const ids=window.__aiIds(options);return window.__openAiOk(ids.map(id=>({id,translation:'AvalAI UI '+id})));};
+      TranslateTools.translate=async()=>{window.__freeCalls++;return {text:'ترجمه معمولی',ok:true};};`);
+    h.$('trAiProvider').value = 'avalai';
+    h.$('trAiProvider').dispatchEvent(new h.window.Event('change', { bubbles: true }));
+    await sleep(0);
+    h.ev(`aiProfiles=[makeAiProfile('آوال‌ای من','avalai-ui-key')];renderAiProfiles();`);
+    h.$('trAiEnabled').checked = true;
+    await h.ev('runTranslate()');
+    check('AvalAI UI sends gpt-6-luna to AvalAI with its own key',
+      h.ev('window.__aiCalls') === 1 && h.ev('window.__lastAvalAiRequest.url') === 'https://api.avalai.ir/v1/chat/completions' &&
+      h.ev('JSON.parse(window.__lastAvalAiRequest.options.body).model') === 'gpt-6-luna' &&
+      h.ev('window.__lastAvalAiRequest.options.headers.Authorization') === 'Bearer avalai-ui-key');
+    check('AvalAI UI response renders and its settings stay local',
+      h.ev('window.__freeCalls') === 0 && h.ev('items.every(it=>it.edited && it.ocr.blocks[0].tr.startsWith("AvalAI UI"))') &&
+      h.storageMap.get('gemini_translation_settings_v1').provider === 'avalai' &&
+      h.storageMap.get('gemini_translation_settings_v1').providers.avalai.profiles[0].apiKey === 'avalai-ui-key');
+  }
+  {
+    const h = await prepareAiTranslationHarness();
     h.ev(`aiProfiles=[makeAiProfile('تست من','connection-ui-key')];renderAiProfiles();
       window.__connectionCalls=[];
       window.fetch=async(url,options)=>{window.__connectionCalls.push({url,options});

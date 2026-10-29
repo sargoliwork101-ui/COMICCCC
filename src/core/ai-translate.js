@@ -12,6 +12,10 @@
     openrouter: {
       label: 'OpenRouter', defaultModel: 'openai/gpt-4o-mini',
       keyUrl: 'https://openrouter.ai/settings/keys', keyLabel: 'ساخت کلید در OpenRouter'
+    },
+    avalai: {
+      label: 'AvalAI', defaultModel: 'gpt-6-luna',
+      keyUrl: 'https://docs.avalai.ir/en/quickstart', keyLabel: 'راهنمای AvalAI'
     }
   };
   const DEFAULT_MODEL = PROVIDERS.gemini.defaultModel;
@@ -168,7 +172,9 @@ Keep each ID unchanged. Do not merge, omit, reorder or explain entries. Do not a
         }
       };
     } else {
-      url = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : 'https://openrouter.ai/api/v1/chat/completions';
+      url = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions'
+        : provider === 'openrouter' ? 'https://openrouter.ai/api/v1/chat/completions'
+          : 'https://api.avalai.ir/v1/chat/completions';
       headers.Authorization = `Bearer ${apiKey}`;
       body = {
         model,
@@ -208,7 +214,8 @@ Keep each ID unchanged. Do not merge, omit, reorder or explain entries. Do not a
     const model = normalizeModel(options.model, provider);
     const url = provider === 'gemini'
       ? 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model)
-      : provider === 'openai' ? 'https://api.openai.com/v1/models' : 'https://openrouter.ai/api/v1/models';
+      : provider === 'openai' ? 'https://api.openai.com/v1/models'
+        : provider === 'openrouter' ? 'https://openrouter.ai/api/v1/models' : 'https://api.avalai.ir/v1/models';
     const headers = provider === 'gemini' ? { 'x-goog-api-key': apiKey } : { Authorization: `Bearer ${apiKey}` };
     const fetchFn = options.fetchFn || ((url0, opts) => fetch(url0, opts));
     let response;

@@ -219,6 +219,35 @@ function check(name, condition, extra) {
     check('OpenRouter content parts are parsed correctly', result.get(entries[0].id) === 'ترجمهٔ OpenRouter');
   }
   {
+    let translationRequest = null, connectionRequest = null;
+    const result = await AiTranslateTools.translateBatch({
+      provider: 'avalai', apiKey: 'avalai-private-key', model: 'gpt-6-luna', entries: [entries[0]],
+      fetchFn: async (url, options) => {
+        translationRequest = { url, options };
+        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+          translations: [{ id: entries[0].id, translation: 'ترجمهٔ AvalAI' }]
+        }) } }] }) };
+      }
+    });
+    const body = JSON.parse(translationRequest.options.body);
+    check('AvalAI translation uses its exact endpoint, model, and Bearer key',
+      translationRequest.url === 'https://api.avalai.ir/v1/chat/completions' && body.model === 'gpt-6-luna' &&
+      translationRequest.options.headers.Authorization === 'Bearer avalai-private-key' &&
+      !translationRequest.url.includes('openai.com') && !translationRequest.url.includes('openrouter.ai'));
+    check('AvalAI chat response maps back to the stable bubble ID', result.get(entries[0].id) === 'ترجمهٔ AvalAI');
+    const connection = await AiTranslateTools.testConnection({
+      provider: 'avalai', apiKey: 'avalai-private-key', model: 'gpt-6-luna',
+      fetchFn: async (url, options) => {
+        connectionRequest = { url, options };
+        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'gpt-6-luna' }] }) };
+      }
+    });
+    check('AvalAI connection test checks gpt-6-luna through its authenticated model list',
+      connection.model === 'gpt-6-luna' && connectionRequest.url === 'https://api.avalai.ir/v1/models' &&
+      connectionRequest.options.method === 'GET' && connectionRequest.options.body === undefined &&
+      connectionRequest.options.headers.Authorization === 'Bearer avalai-private-key');
+  }
+  {
     const calls = [];
     const openAi = await AiTranslateTools.testConnection({
       provider: 'openai', apiKey: 'openai-test-key', model: 'gpt-4.1-mini',

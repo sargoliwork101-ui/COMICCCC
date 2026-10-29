@@ -123,8 +123,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.61', manifest.version === '2.61' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۶۱'));
+  check('manifest and viewer version badge are synchronized at 2.62', manifest.version === '2.62' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۶۲'));
   const viewerCss = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
@@ -173,8 +173,8 @@ const $ = (id) => window.document.getElementById(id);
     $('aiProfileList').querySelector('input[type="text"]') &&
     $('aiProfileList').querySelector('input[type="password"]') &&
     $('aiProfileList').querySelector('.ai-profile-test'));
-  check('provider selector offers Gemini, OpenAI, and OpenRouter',
-    ['gemini', 'openai', 'openrouter'].every((id) => $('trAiProvider').querySelector(`option[value="${id}"]`)));
+  check('provider selector offers Gemini, OpenAI, OpenRouter, and AvalAI',
+    ['gemini', 'openai', 'openrouter', 'avalai'].every((id) => $('trAiProvider').querySelector(`option[value="${id}"]`)));
   check('editable Skill and reset action are available',
     $('aiSettings').contains($('trAiSkill')) && $('aiSettings').contains($('trAiSkillReset')));
   check('AI key help starts with the official Google AI Studio link',
@@ -183,6 +183,10 @@ const $ = (id) => window.document.getElementById(id);
   $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
   check('switching provider updates the model and official key link',
     $('trAiModel').value === 'openai/gpt-4o-mini' && $('trAiKeyHelp').href === 'https://openrouter.ai/settings/keys');
+  $('trAiProvider').value = 'avalai';
+  $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('AvalAI uses its own default model and documentation link',
+    $('trAiModel').value === 'gpt-6-luna' && $('trAiKeyHelp').href === 'https://docs.avalai.ir/en/quickstart');
   $('trAiProvider').value = 'gemini';
   $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
 
