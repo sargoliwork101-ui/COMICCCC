@@ -53,7 +53,7 @@ window.chrome = {
     set: async (obj) => { Object.entries(obj).forEach(([k, v]) => storageMap.set(k, v)); },
     remove: async (key) => { storageMap.delete(key); }
   } },
-  declarativeNetRequest: { updateSessionRules: async () => {} },
+  declarativeNetRequest: { updateSessionRules: async (options) => { window.__lastSessionRuleUpdate = options; } },
   tabs: {
     getCurrent: async () => ({ id: 17 }),
     create: async (options) => { window.__openedPdfImportUrl = options.url; return { id: 18 }; },
@@ -123,8 +123,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.63', manifest.version === '2.63' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۶۳'));
+  check('manifest and viewer version badge are synchronized at 2.64', manifest.version === '2.64' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۶۴'));
   const viewerCss = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
@@ -206,6 +206,12 @@ const $ = (id) => window.document.getElementById(id);
   }
   const items = ev('items');
   check('all 3 images loaded ok', items.length === 3 && items.every((it) => it.state === 'ok'), items.map((i) => i.state));
+  const sessionRule = window.__lastSessionRuleUpdate && window.__lastSessionRuleUpdate.addRules[0];
+  const refererExclusions = sessionRule && sessionRule.condition.excludedRequestDomains || [];
+  check('image Referer rule never rewrites AI provider requests',
+    ['translate.googleapis.com', 'api.mymemory.translated.net', 'generativelanguage.googleapis.com',
+      'api.openai.com', 'openrouter.ai', 'api.avalai.ir'].every((host) => refererExclusions.includes(host)),
+    refererExclusions);
   check('cards rendered', $('grid').children.length === 3);
   $('btnImportPdf').click();
   await sleep(20);

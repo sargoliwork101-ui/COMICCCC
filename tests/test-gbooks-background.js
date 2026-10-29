@@ -80,6 +80,10 @@ function bootBackground(fetchImpl) {
   check('id from old ?id= URL', b.ctx.parseGoogleBooksId('https://books.google.com/books?id=abc123XYZ&pg=PA1') === 'abc123XYZ');
   check('id from edition URL', b.ctx.parseGoogleBooksId('https://www.google.com/books/edition/A_Textbook/4ciReKlOVHIC?hl=en&gbpv=1') === '4ciReKlOVHIC');
   check('id null for unrelated URL', b.ctx.parseGoogleBooksId('https://comic.test/episode/1') === null);
+  check('id null for non-Google URL with an id parameter',
+    b.ctx.parseGoogleBooksId('https://comic.test/books?id=abc123XYZ') === null);
+  check('id null for a non-books Google URL with an id parameter',
+    b.ctx.parseGoogleBooksId('https://www.google.com/search?id=abc123XYZ') === null);
   check('id null for malformed edition segment', b.ctx.parseGoogleBooksId('https://www.google.com/books/edition/Title/ab') === null);
 
   // 2. origin selection

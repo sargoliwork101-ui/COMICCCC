@@ -111,6 +111,8 @@ let editingPageGroupSelection = null;
 let nextItemUid = 0;
 let pendingPdfImportToken = null;
 let receivingPdfImport = false;
+// آخرین نسخهٔ دریافت‌شدهٔ هر تبدیل؛ برای پذیرش PDF بعدی از همان زبانه بدون ورود تکراری یک نسخه.
+let lastReceivedPdfImportKey = '';
 
 // ---------- دانلود تصاویر ----------
 async function setRefererRule(pageUrl) {
@@ -125,7 +127,10 @@ async function setRefererRule(pageUrl) {
         condition: {
           resourceTypes: ['xmlhttprequest'],
           initiatorDomains: [chrome.runtime.id],
-          excludedRequestDomains: ['translate.googleapis.com', 'api.mymemory.translated.net']
+          excludedRequestDomains: [
+            'translate.googleapis.com', 'api.mymemory.translated.net',
+            'generativelanguage.googleapis.com', 'api.openai.com', 'openrouter.ai', 'api.avalai.ir'
+          ]
         }
       }]
     });
@@ -652,20 +657,38 @@ async function openPdfImportTab() {
 async function receiveImportedPdf(token = pendingPdfImportToken) {
   if (!token || token !== pendingPdfImportToken || receivingPdfImport || typeof PDFImportStore === 'undefined') return;
   receivingPdfImport = true;
+  let ownsLoading = false;
+  const waitForIdle = async () => {
+    while (token === pendingPdfImportToken && (loading || building || editingPageGroupId !== null)) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return token === pendingPdfImportToken;
+  };
   try {
     const session = await PDFImportStore.getSession(token);
     if (!session || !['complete', 'failed'].includes(session.status)) return;
+    const receiptKey = JSON.stringify([
+      token, session.finishedAt || 0, session.status, session.fileName || '', session.count || 0
+    ]);
+    if (receiptKey === lastReceivedPdfImportKey) {
+      // اگر پاک‌سازی قبلی ناقص مانده باشد دوباره انجام می‌شود، اما صفحه‌ها تکرار نمی‌شوند.
+      await PDFImportStore.deleteSession(token);
+      return;
+    }
     const pages = await PDFImportStore.getPages(token);
+    // کاربر ممکن است هنگام خواندن فایل کار دیگری را شروع کرده باشد؛ دوباره نوبت می‌گیریم.
+    if (!await waitForIdle()) return;
     if (!pages.length) {
       $('loadText').innerText = session.error
         ? `تبدیل PDF ناموفق بود: ${session.error}`
         : 'فایلی از زبانهٔ تبدیل دریافت نشد.';
-      pendingPdfImportToken = null;
+      lastReceivedPdfImportKey = receiptKey;
       await PDFImportStore.deleteSession(token);
       return;
     }
 
     loading = true;
+    ownsLoading = true;
     const overlay = $('loadingOverlay');
     overlay.classList.remove('hidden');
     $('loadingOverlayText').innerText = 'در حال افزودن تصویرهای PDF...';
@@ -696,7 +719,8 @@ async function receiveImportedPdf(token = pendingPdfImportToken) {
       $('loadText').innerText = `افزودن صفحه‌های PDF به فهرست... ${done} از ${pages.length}`;
     }
 
-    pendingPdfImportToken = null;
+    // token برای «انتخاب PDF دیگری» در همان زبانه فعال می‌ماند؛ نسخه با finishedAt جدید پذیرفته می‌شود.
+    lastReceivedPdfImportKey = receiptKey;
     await PDFImportStore.deleteSession(token);
     $('loadText').innerText = session.status === 'failed'
       ? `${pages.length} صفحه اضافه شد؛ تبدیل PDF در صفحهٔ ${session.count + 1} متوقف شد: ${session.error || 'خطای ناشناخته'}`
@@ -705,11 +729,13 @@ async function receiveImportedPdf(token = pendingPdfImportToken) {
     console.error('Receiving converted PDF pages failed', error);
     $('loadText').innerText = `دریافت تصویرهای PDF ناموفق بود: ${error && error.message ? error.message : error}`;
   } finally {
-    loading = false;
-    $('loadingOverlay').classList.add('hidden');
-    setTaskTitle();
-    updatePdfOrderFromGrid();
-    refreshAll();
+    if (ownsLoading) {
+      loading = false;
+      $('loadingOverlay').classList.add('hidden');
+      setTaskTitle();
+      updatePdfOrderFromGrid();
+      refreshAll();
+    }
     receivingPdfImport = false;
   }
 }

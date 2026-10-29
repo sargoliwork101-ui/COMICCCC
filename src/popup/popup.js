@@ -126,7 +126,8 @@ async function probeBookFrame() {
   try {
     const u = new URL(location.href);
     const id = u.searchParams.get('id') || u.searchParams.get('nid') || '';
-    return { isReader: u.hostname.startsWith('books.google.') && !!id, href: location.href, id };
+    const isBooksPath = u.pathname.split('/').filter(Boolean)[0] === 'books';
+    return { isReader: u.hostname.startsWith('books.google.') && isBooksPath && !!id, href: location.href, id };
   } catch {
     return { isReader: false, href: '', id: '' };
   }
@@ -174,8 +175,9 @@ async function scrapeAndSend(pdfName, mode, opts) {
     let u;
     try { u = new URL(href); } catch { return null; }
     const inFrame = u.hostname.startsWith('books.google.');
+    const isBooksPath = u.pathname.split('/').filter(Boolean)[0] === 'books';
     const byId = u.searchParams.get('id');
-    if (byId && /^[\w-]+$/.test(byId) && /(^|\.)google\./i.test(u.hostname)) {
+    if (byId && /^[\w-]+$/.test(byId) && /(^|\.)google\./i.test(u.hostname) && isBooksPath) {
       return { id: byId, origin: inFrame ? u.origin : 'https://books.google.com', inFrame, embedded: false };
     }
     if (/(^|\.)google\.[a-z.]+$/i.test(u.hostname) && u.pathname.includes('/books/edition/')) {
@@ -188,7 +190,8 @@ async function scrapeAndSend(pdfName, mode, opts) {
       try {
         const fu = new URL(frame.src);
         const fid = fu.searchParams.get('id');
-        if (fid && /^[\w-]+$/.test(fid)) return { id: fid, origin: fu.origin, inFrame: false, embedded: true };
+        const isBooksPath = fu.pathname.split('/').filter(Boolean)[0] === 'books';
+        if (fid && /^[\w-]+$/.test(fid) && isBooksPath) return { id: fid, origin: fu.origin, inFrame: false, embedded: true };
       } catch { /* قاب نامعتبر */ }
     }
     return null;
@@ -315,7 +318,12 @@ async function scrapeAndSend(pdfName, mode, opts) {
       abs = src;
       if (seen.has(abs)) return;
       const bytes = Math.ceil(src.length * 0.75);
-      if (inlineDataBytes + bytes > INLINE_DATA_BUDGET) { skippedInline++; return; }
+      if (inlineDataBytes + bytes > INLINE_DATA_BUDGET) {
+        // همان data URI در اسکن‌های بعدی دوباره شمرده نشود.
+        seen.add(abs);
+        skippedInline++;
+        return;
+      }
       inlineDataBytes += bytes;
     } else if (/^blob:/i.test(src)) abs = src;
     else {

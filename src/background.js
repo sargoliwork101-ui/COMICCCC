@@ -27,12 +27,13 @@ chrome.runtime.onInstalled.addListener((details = {}) => {
 function parseGoogleBooksId(url) {
   let u;
   try { u = new URL(url); } catch { return null; }
+  const pathParts = u.pathname.split('/').filter(Boolean);
+  const isBooksUrl = /(^|\.)google\.[a-z.]+$/i.test(u.hostname) && pathParts[0] === 'books';
+  if (!isBooksUrl) return null;
   const qid = u.searchParams.get('id');
   if (qid && /^[\w-]+$/.test(qid)) return qid;
-  if (/(^|\.)google\.[a-z.]+$/i.test(u.hostname) && u.pathname.includes('/books/')) {
-    const seg = u.pathname.split('/').filter(Boolean).pop();
-    if (seg && /^[\w-]{6,}$/.test(seg)) return seg;
-  }
+  const seg = pathParts[pathParts.length - 1];
+  if (seg && /^[\w-]{6,}$/.test(seg)) return seg;
   return null;
 }
 

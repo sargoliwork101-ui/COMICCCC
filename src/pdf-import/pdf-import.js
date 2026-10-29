@@ -25,6 +25,18 @@ function blobFromCanvas(canvas) {
 function safeMessage(error) {
   return error && error.message ? error.message : String(error || 'خطای ناشناخته');
 }
+function viewportForPdfPage(page) {
+  const baseViewport = page.getViewport({ scale: 1 });
+  const scale = Math.min(
+    2,
+    16000 / baseViewport.width,
+    16000 / baseViewport.height,
+    Math.sqrt(48000000 / (baseViewport.width * baseViewport.height))
+  );
+  if (!Number.isFinite(scale) || scale <= 0) throw new Error('ابعاد این صفحهٔ PDF قابل‌پردازش نیست');
+  // کفِ مصنوعی برای scale می‌توانست سقف ابعاد و حافظه را در صفحه‌های بسیار بزرگ باطل کند.
+  return page.getViewport({ scale });
+}
 async function notifyPreview(session) {
   await PDFImportStore.putSession(session);
   if (!chrome.runtime || !chrome.runtime.sendMessage) return;
@@ -78,14 +90,7 @@ async function convertPdf(file) {
     setProgress(0, pdf.numPages, 'در حال تبدیل صفحه‌ها');
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
       const page = await pdf.getPage(pageNumber);
-      const baseViewport = page.getViewport({ scale: 1 });
-      const scale = Math.min(
-        2,
-        16000 / baseViewport.width,
-        16000 / baseViewport.height,
-        Math.sqrt(48000000 / (baseViewport.width * baseViewport.height))
-      );
-      const viewport = page.getViewport({ scale: Math.max(0.1, scale) });
+      const viewport = viewportForPdfPage(page);
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.ceil(viewport.width));
       canvas.height = Math.max(1, Math.ceil(viewport.height));

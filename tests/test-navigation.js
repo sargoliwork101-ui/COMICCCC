@@ -377,6 +377,19 @@ function makeHarness() {
       res.count === 2 && urls.length === 2 && urls.every((url) => !url.endsWith('-3.jpg')), urls);
   }
 
+  // ---------- 15. an oversized inline image is counted once across repeated scans ----------
+  {
+    const h = makeHarness();
+    const { window, img } = h;
+    const oversized = 'data:image/png;base64,' + 'A'.repeat(6 * 1024 * 1024);
+    const image = img('https://cdn.test/thumb.jpg', 800, 1200);
+    image.setAttribute('data-original', oversized);
+    window.document.body.appendChild(image);
+    const res = await window.eval('scrapeAndSend("oversized-inline.pdf", "scroll", { deepSearch: true })');
+    check('oversized inline skip count is not duplicated by final rescanning',
+      res && res.count === 0 && res.skippedInline === 1, res && res.skippedInline);
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL NAVIGATION TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

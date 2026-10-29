@@ -587,6 +587,60 @@ prepare = async (it, r) => {
       JSON.stringify(indices) === '[0,2,3,4,5]', indices);
   }
 
+  // ---------- 19b. repeated conversions from the same PDF tool tab are all accepted ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    const sessions = new Map();
+    h.ctx.PDFImportStore = {
+      getSession: async (token) => sessions.get(token) || null,
+      getPages: async (token) => sessions.get(token) ? sessions.get(token).pages : [],
+      deleteSession: async (token) => { sessions.delete(token); }
+    };
+    const offer = (fileName, finishedAt) => {
+      const token = 'import-repeat';
+      sessions.set(token, {
+        token, status: 'complete', fileName, count: 1, finishedAt,
+        pages: [{ token, pageNumber: 1, fileName, width: 1, height: 1,
+          blob: new h.window.Blob([PNG], { type: 'image/png' }) }]
+      });
+    };
+    h.ev('pendingPdfImportToken = "import-repeat"');
+    offer('first.pdf', 1);
+    await h.ev('receiveImportedPdf("import-repeat")');
+    offer('first.pdf', 1); // همان اعلان در صورت تکرار focus/message نباید صفحه را دوباره بیافزاید.
+    await h.ev('receiveImportedPdf("import-repeat")');
+    offer('second.pdf', 2);
+    await h.ev('receiveImportedPdf("import-repeat")');
+    check('second PDF from the same converter tab is not ignored',
+      h.ev('items.filter((it) => it.sourcePdf === "first.pdf").length') === 1 &&
+      h.ev('items.filter((it) => it.sourcePdf === "second.pdf").length') === 1,
+      h.ev('items.map((it) => it.sourcePdf || "")'));
+  }
+
+  // ---------- 19c. a pending PDF import cannot clear another task's loading state ----------
+  {
+    const h = makeHarness({ jobUrls: ['https://comic.test/a.png'] });
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ctx.PDFImportStore = {
+      getSession: async () => ({ token: 'import-wait', status: 'complete', fileName: 'queued.pdf', count: 1, finishedAt: 1 }),
+      getPages: async () => [{ token: 'import-wait', pageNumber: 1, fileName: 'queued.pdf', width: 1, height: 1,
+        blob: new h.window.Blob([PNG], { type: 'image/png' }) }],
+      deleteSession: async () => {}
+    };
+    h.ev('pendingPdfImportToken = "import-wait"; loading = true;');
+    const waiting = h.ev('receiveImportedPdf("import-wait")');
+    await sleep(40);
+    check('PDF receive waits instead of releasing an active image load',
+      h.ev('loading') === true && h.ev('receivingPdfImport') === true &&
+      h.ev('items.some((it) => it.sourcePdf === "queued.pdf")') === false);
+    h.ev('loading = false');
+    await waiting;
+    check('waiting PDF import runs after the other task and releases only its own guard',
+      h.ev('receivingPdfImport') === false && h.ev('loading') === false &&
+      h.ev('items.filter((it) => it.sourcePdf === "queued.pdf").length') === 1);
+  }
+
   // ---------- 20. extreme PDF scaling can never produce a zero-height slicing step ----------
   {
     const h = makeHarness();

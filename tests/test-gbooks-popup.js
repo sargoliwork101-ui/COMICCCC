@@ -300,6 +300,14 @@ function makeHarness(pageUrl, fetchImpl) {
     h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     check('non-GB: no stray cancel control message', h.cancelJobs().length === 0, h.cancelJobs().length);
   }
+  {
+    const h = makeHarness('https://www.google.com/search?id=NOTABOOK1');
+    h.window.document.body.appendChild(h.img('https://cdn.test/search-image.jpg', 300, 420));
+    const res = await h.window.eval('scrapeAndSend("search.pdf", "auto")');
+    check('non-books Google URL with id never starts a Books scan', h.scanJobs().length === 0);
+    check('non-books Google URL still uses ordinary image collection',
+      res && res.count === 1 && h.urlJobs().length === 1, res);
+  }
 
   // ========== L. frame probe identifies only the books.google.* reader frame ==========
   {
@@ -312,6 +320,9 @@ function makeHarness(pageUrl, fetchImpl) {
     const other = makeHarness('https://comic.test/ep');
     const probeOther = await other.window.eval('probeBookFrame()');
     check('probe: unrelated frame not detected', probeOther.isReader === false, probeOther);
+    const nonBook = makeHarness('https://books.google.com/search?id=NOTABOOK1');
+    const probeNonBook = await nonBook.window.eval('probeBookFrame()');
+    check('probe: id parameter outside a Books reader path is not enough', probeNonBook.isReader === false, probeNonBook);
   }
 
   // ========== M. in-frame walk honors the page limit ==========
