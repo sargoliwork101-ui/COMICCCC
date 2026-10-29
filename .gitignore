@@ -1,3 +1,14 @@
 node_modules/
 npm-debug.log*
 .DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+python_app/.venv/
+python_app/.data/
+python_app/static/assets/models/
+python_app/exports/
+*.egg-info/
+
+python_app/build/
+python_app/dist/
