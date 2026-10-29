@@ -3,14 +3,44 @@
 // این فایل بعد از viewer.js بارگذاری می‌شود و از متغیرهای آن (items، building، ...) استفاده می‌کند.
 const TR = { worker: null, lang: null, cancel: false, aiController: null };
 const AI_SETTINGS_KEY = 'gemini_translation_settings_v1';
-let aiProfiles = [], aiProfileSerial = 0;
+const AI_PROVIDER_IDS = Object.keys(AiTranslateTools.PROVIDERS);
+let aiProvider = 'gemini', aiProviderSettings = {}, aiProfiles = [], aiProfileSerial = 0;
 
 function makeAiProfile(name = '', apiKey = '', id = '') {
   aiProfileSerial++;
   return {
-    id: String(id || `gemini-${Date.now().toString(36)}-${aiProfileSerial}`),
+    id: String(id || `api-${Date.now().toString(36)}-${aiProfileSerial}`),
     name: String(name || ''), apiKey: String(apiKey || '')
   };
+}
+function captureAiProvider() {
+  const data = aiProviderSettings[aiProvider];
+  if (!data) return;
+  data.model = $('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODELS[aiProvider];
+  data.profiles = aiProfiles;
+}
+function updateAiProviderUi() {
+  const info = AiTranslateTools.PROVIDERS[aiProvider];
+  $('trAiProvider').value = aiProvider;
+  $('trAiModel').placeholder = info.defaultModel;
+  $('trAiKeyHelp').href = info.keyUrl;
+  $('trAiKeyHelp').textContent = info.keyLabel;
+  $('trAiPrivacy').textContent = aiProvider === 'gemini'
+    ? 'متن‌ها برای ترجمه به Google ارسال می‌شوند. محتوای پلن رایگان Gemini برای بهبود محصولات Google استفاده می‌شود؛ متن حساس نفرستید.'
+    : `متن‌ها برای ترجمه به ${info.label} ارسال می‌شوند؛ شرایط حریم خصوصی همان سرویس را بررسی کنید و متن حساس نفرستید.`;
+}
+function showAiProvider(provider) {
+  aiProvider = AiTranslateTools.normalizeProvider(provider);
+  if (!aiProviderSettings[aiProvider]) {
+    aiProviderSettings[aiProvider] = { model: AiTranslateTools.DEFAULT_MODELS[aiProvider], profiles: [] };
+  }
+  const data = aiProviderSettings[aiProvider];
+  aiProfiles = Array.isArray(data.profiles) ? data.profiles : [];
+  if (!aiProfiles.length) aiProfiles.push(makeAiProfile('کلید اول'));
+  data.profiles = aiProfiles;
+  $('trAiModel').value = data.model || AiTranslateTools.DEFAULT_MODELS[aiProvider];
+  updateAiProviderUi();
+  renderAiProfiles();
 }
 function renderAiProfiles() {
   const container = $('aiProfileList');
@@ -42,13 +72,14 @@ function renderAiProfiles() {
     test.setAttribute('aria-label', `تست اتصال API ${index + 1}`);
     test.onclick = async () => {
       const apiKey = profile.apiKey.trim();
-      const model = $('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODEL;
+      const provider = aiProvider;
+      const model = $('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODELS[provider];
       if (!apiKey) { showStatus('ابتدا کلید API را وارد کنید.', 'bad'); keyInput.focus(); return; }
-      const unchanged = () => profile.apiKey.trim() === apiKey &&
-        ($('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODEL) === model;
+      const unchanged = () => aiProvider === provider && profile.apiKey.trim() === apiKey &&
+        ($('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODELS[provider]) === model;
       test.disabled = true; test.textContent = '…'; showStatus('در حال بررسی ارتباط...');
       try {
-        await AiTranslateTools.testConnection({ apiKey, model });
+        await AiTranslateTools.testConnection({ provider, apiKey, model });
         showStatus(unchanged() ? 'اتصال برقرار است ✓' : 'کلید یا مدل تغییر کرد؛ دوباره تست کنید.', unchanged() ? 'ok' : '');
       } catch (error) {
         showStatus(unchanged() ? AiTranslateTools.safeError(error) : 'کلید یا مدل تغییر کرد؛ دوباره تست کنید.', unchanged() ? 'bad' : '');
@@ -74,33 +105,50 @@ async function loadAiSettings() {
     const stored = await chrome.storage.local.get(AI_SETTINGS_KEY);
     const settings = stored[AI_SETTINGS_KEY] || {};
     $('trAiEnabled').checked = settings.enabled === true;
-    aiProfiles = Array.isArray(settings.profiles)
-      ? settings.profiles.map((profile) => makeAiProfile(
-        profile && profile.name, profile && profile.apiKey, profile && profile.id)) : [];
-    // انتقال خودکار کلید ذخیره‌شده در نسخهٔ تک‌کلیدی، بدون پاک‌کردن آن.
-    if (!aiProfiles.length && typeof settings.apiKey === 'string' && settings.apiKey.trim()) {
-      aiProfiles = [makeAiProfile('کلید اصلی', settings.apiKey)];
-    }
-    if (!aiProfiles.length) aiProfiles = [makeAiProfile('کلید اول')];
-    $('trAiModel').value = typeof settings.model === 'string' && settings.model.trim()
-      ? settings.model.trim() : AiTranslateTools.DEFAULT_MODEL;
+    const providerStore = settings.providers && typeof settings.providers === 'object' ? settings.providers : null;
+    AI_PROVIDER_IDS.forEach((id) => {
+      const raw = providerStore && providerStore[id] && typeof providerStore[id] === 'object' ? providerStore[id] : {};
+      const legacy = id === 'gemini' && !providerStore;
+      const rawProfiles = legacy ? settings.profiles : raw.profiles;
+      let profiles = Array.isArray(rawProfiles)
+        ? rawProfiles.map((profile) => makeAiProfile(profile && profile.name, profile && profile.apiKey, profile && profile.id)) : [];
+      // انتقال تنظیمات نسخه‌های قبلی به فضای مستقل Gemini، بدون حذف کلید یا مدل قبلی.
+      if (legacy && !profiles.length && typeof settings.apiKey === 'string' && settings.apiKey.trim()) {
+        profiles = [makeAiProfile('کلید اصلی', settings.apiKey)];
+      }
+      const rawModel = legacy ? settings.model : raw.model;
+      aiProviderSettings[id] = {
+        model: typeof rawModel === 'string' && rawModel.trim() ? rawModel.trim() : AiTranslateTools.DEFAULT_MODELS[id],
+        profiles
+      };
+    });
     $('trAiSkill').value = typeof settings.skill === 'string' && settings.skill.trim()
       ? settings.skill : AiTranslateTools.DEFAULT_SKILL;
+    showAiProvider(AI_PROVIDER_IDS.includes(settings.provider) ? settings.provider : 'gemini');
   } catch (error) {
     console.warn('خواندن تنظیمات ترجمهٔ هوش مصنوعی ناموفق بود', error);
-    aiProfiles = [makeAiProfile('کلید اول')];
+    aiProviderSettings = {};
     $('trAiSkill').value = AiTranslateTools.DEFAULT_SKILL;
+    showAiProvider('gemini');
   }
-  renderAiProfiles();
 }
 async function saveAiSettings() {
   try {
+    captureAiProvider();
+    const providers = {};
+    AI_PROVIDER_IDS.forEach((id) => {
+      const data = aiProviderSettings[id] || { model: AiTranslateTools.DEFAULT_MODELS[id], profiles: [] };
+      providers[id] = {
+        model: data.model || AiTranslateTools.DEFAULT_MODELS[id],
+        profiles: (Array.isArray(data.profiles) ? data.profiles : []).map((profile) => ({
+          id: profile.id, name: profile.name.trim(), apiKey: profile.apiKey.trim()
+        }))
+      };
+    });
     await chrome.storage.local.set({ [AI_SETTINGS_KEY]: {
       enabled: $('trAiEnabled').checked,
-      profiles: aiProfiles.map((profile) => ({
-        id: profile.id, name: profile.name.trim(), apiKey: profile.apiKey.trim()
-      })),
-      model: $('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODEL,
+      provider: aiProvider,
+      providers,
       skill: $('trAiSkill').value.trim() || AiTranslateTools.DEFAULT_SKILL
     } });
     return true;
@@ -154,6 +202,7 @@ async function runTranslate() {
   }
   const aiMode = $('trAiEnabled').checked;
   const aiConfig = aiMode ? {
+    provider: aiProvider,
     profiles: aiProfiles.map((profile) => ({
       id: profile.id, name: profile.name.trim(), apiKey: profile.apiKey.trim()
     })).filter((profile) => profile.apiKey),
@@ -163,7 +212,7 @@ async function runTranslate() {
   if (aiMode) {
     try {
       if (!aiConfig.profiles.length) throw new Error('برای استفاده از ترجمهٔ هوش مصنوعی، حداقل یک کلید API را وارد کنید.');
-      AiTranslateTools.normalizeModel(aiConfig.model);
+      AiTranslateTools.normalizeModel(aiConfig.model, aiConfig.provider);
     } catch (error) {
       $('aiSettings').open = true;
       $('trAiError').textContent = error.message;
@@ -972,6 +1021,12 @@ $('ocrEnabled').addEventListener('change', async () => {
     }
   }
   refreshSummary();
+});
+$('trAiProvider').addEventListener('change', () => {
+  captureAiProvider();
+  showAiProvider($('trAiProvider').value);
+  $('trAiError').textContent = '';
+  saveAiSettings();
 });
 ['trAiEnabled', 'trAiModel', 'trAiSkill'].forEach((id) => {
   $(id).addEventListener('change', () => {

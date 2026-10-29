@@ -45,6 +45,9 @@ function check(name, condition, extra) {
     check('all bubble translations map back to their own IDs', result.size === 3 &&
       result.get('p0001-b002') === 'دروغ گفتی!' && result.get('p0002-b001') === 'لطفاً گوش کن.');
     const request = calls[0];
+    check('custom Gemini model is sent verbatim instead of the default model',
+      request.url.includes('/models/gemini-3.8-flash:generateContent') &&
+      AiTranslateTools.DEFAULT_MODEL !== 'gemini-3.8-flash', request.url);
     const body = JSON.parse(request.options.body);
     check('API key is sent in the header, never in URL or text payload',
       request.options.headers['x-goog-api-key'] === 'secret-test-key' &&
@@ -177,6 +180,70 @@ function check(name, condition, extra) {
   }
 
   {
+    const calls = [];
+    const result = await AiTranslateTools.translateBatch({
+      provider: 'openai', apiKey: 'openai-private-key', model: 'gpt-4.1-mini', sourceLang: 'en', skill: 'لحن صمیمی', entries,
+      fetchFn: async (url, options) => {
+        calls.push({ url, options });
+        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+          translations: entries.map((entry) => ({ id: entry.id, translation: 'OpenAI ' + entry.id }))
+        }) } }] }) };
+      }
+    });
+    const request = calls[0], body = JSON.parse(request.options.body);
+    check('OpenAI provider uses the selected custom model and its own endpoint',
+      calls.length === 1 && request.url === 'https://api.openai.com/v1/chat/completions' &&
+      body.model === 'gpt-4.1-mini' && body.messages[1].content.includes('COMIC_TXT'));
+    check('OpenAI key uses Bearer auth and never enters URL or payload',
+      request.options.headers.Authorization === 'Bearer openai-private-key' &&
+      !request.options.headers['x-goog-api-key'] && !request.url.includes('openai-private-key') &&
+      !request.options.body.includes('openai-private-key'));
+    check('OpenAI JSON object maps back to stable bubble IDs',
+      result.size === 3 && result.get(entries[1].id) === 'OpenAI ' + entries[1].id);
+  }
+  {
+    let request = null;
+    const result = await AiTranslateTools.translateBatch({
+      provider: 'openrouter', apiKey: 'openrouter-private-key', model: 'anthropic/claude-3.5-haiku', entries: [entries[0]],
+      fetchFn: async (url, options) => {
+        request = { url, options };
+        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: [
+          { type: 'text', text: JSON.stringify({ translations: [{ id: entries[0].id, translation: 'ترجمهٔ OpenRouter' }] }) }
+        ] } }] }) };
+      }
+    });
+    const body = JSON.parse(request.options.body);
+    check('OpenRouter accepts its slash-separated model ID and uses the OpenRouter endpoint',
+      request.url === 'https://openrouter.ai/api/v1/chat/completions' && body.model === 'anthropic/claude-3.5-haiku' &&
+      request.options.headers.Authorization === 'Bearer openrouter-private-key');
+    check('OpenRouter content parts are parsed correctly', result.get(entries[0].id) === 'ترجمهٔ OpenRouter');
+  }
+  {
+    const calls = [];
+    const openAi = await AiTranslateTools.testConnection({
+      provider: 'openai', apiKey: 'openai-test-key', model: 'gpt-4.1-mini',
+      fetchFn: async (url, options) => {
+        calls.push({ provider: 'openai', url, options });
+        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'gpt-4.1-mini' }] }) };
+      }
+    });
+    const openRouter = await AiTranslateTools.testConnection({
+      provider: 'openrouter', apiKey: 'openrouter-test-key', model: 'anthropic/claude-3.5-haiku',
+      fetchFn: async (url, options) => {
+        calls.push({ provider: 'openrouter', url, options });
+        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'anthropic/claude-3.5-haiku' }] }) };
+      }
+    });
+    check('connection tests check the selected OpenAI and OpenRouter models without generation',
+      openAi.model === 'gpt-4.1-mini' && openRouter.model === 'anthropic/claude-3.5-haiku' &&
+      calls[0].url === 'https://api.openai.com/v1/models' &&
+      calls[1].url === 'https://openrouter.ai/api/v1/models' &&
+      calls.every((call) => call.options.method === 'GET' && call.options.body === undefined));
+    check('non-Gemini connection tests use their own Bearer keys',
+      calls[0].options.headers.Authorization === 'Bearer openai-test-key' &&
+      calls[1].options.headers.Authorization === 'Bearer openrouter-test-key');
+  }
+  {
     const calls = [], signal = { marker: 'connection-signal' };
     const result = await AiTranslateTools.testConnection({
       apiKey: 'connection-private-key', model: 'models/gemini-3.8-flash', signal,
@@ -215,7 +282,7 @@ function check(name, condition, extra) {
     check('connection test reports denied keys without exposing the secret',
       denied && /کلید API/.test(AiTranslateTools.safeError(denied)) &&
       !AiTranslateTools.safeError(denied).includes('denied-private-key'));
-    check('connection test turns network failure into a clear Persian message', offline && /ارتباط با Gemini/.test(offline.message));
+    check('connection test turns network failure into a clear Persian message', offline && /ارتباط با/.test(offline.message));
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL AI TRANSLATION TESTS PASSED');
