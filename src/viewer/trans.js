@@ -485,6 +485,9 @@ async function retranslateBlock(item, block, originalField, editor, overlay, but
 let EDI = null, edUrl = null, edTimer = null, edDirty = false, edBusy = false, edPending = false;
 let activeRichEditor = null, richSelectionRange = null;
 const EDITOR_APPLY_DELAY = 900;
+const EDITOR_MIN_SCALE = 0.05, EDITOR_MAX_SCALE = 4;
+let edScale = 1, edZoomMode = 'fit', edPan = null, edPinch = null;
+const edPointers = new Map();
 let edFieldFocused = false;
 const editorFieldEl = (el) => el && el.closest && el.closest('#editor') &&
   (el.isContentEditable || el.getAttribute('contenteditable') === 'true' || ['INPUT', 'SELECT'].includes(el.tagName)) ? el : null;
@@ -565,6 +568,151 @@ function normalizeLegacyBlock(block) {
   }
   block.richHtml = safeEditorHtml(block.richHtml || escapeEditorText(block.tr || '').replace(/\n/g, '<br>'));
   block.tr = plainTextFromHtml(block.richHtml);
+}
+// ---------- زوم و جابه‌جایی پیش‌نمایش ویرایشگر؛ فقط نمایش تغییر می‌کند، نه مختصات OCR ----------
+function updateEditorZoomLabel(scale) {
+  const label = $('edZoomLevel');
+  if (label && Number.isFinite(scale)) label.textContent = `${Math.max(1, Math.round(scale * 100))}٪`;
+}
+function currentEditorScale() {
+  if (!EDI || !EDI.w) return edScale;
+  const stage = document.querySelector('.ed-stage');
+  const width = stage ? stage.getBoundingClientRect().width : 0;
+  return width > 0 ? width / EDI.w : edScale;
+}
+function editorFitWidth() {
+  const preview = document.querySelector('.ed-preview');
+  if (!preview) return 560;
+  const style = window.getComputedStyle(preview);
+  const padding = (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
+  const available = preview.clientWidth > 0 ? preview.clientWidth - padding : 560;
+  return Math.max(1, Math.min(560, available));
+}
+function setEditorStageScale(scale, anchor = null, mode = 'custom') {
+  if (!EDI || !EDI.w || !Number.isFinite(scale) || scale <= 0) return;
+  const stage = document.querySelector('.ed-stage'), preview = document.querySelector('.ed-preview');
+  if (!stage || !preview) return;
+  const nextScale = mode === 'fit' ? scale : Math.max(EDITOR_MIN_SCALE, Math.min(EDITOR_MAX_SCALE, scale));
+  const oldRect = stage.getBoundingClientRect(), previewRect = preview.getBoundingClientRect();
+  const point = anchor || {
+    x: previewRect.left + preview.clientWidth / 2,
+    y: previewRect.top + preview.clientHeight / 2
+  };
+  const ratioX = oldRect.width ? (point.x - oldRect.left) / oldRect.width : 0.5;
+  const ratioY = oldRect.height ? (point.y - oldRect.top) / oldRect.height : 0.5;
+  edScale = nextScale;
+  edZoomMode = mode;
+  stage.style.maxWidth = 'none';
+  stage.style.width = `${Math.max(1, nextScale * EDI.w)}px`;
+  // نقطهٔ زیر نشانگر هنگام زوم ثابت می‌ماند؛ margin و scroll فعلی هم در اندازه‌گیری لحاظ شده‌اند.
+  const newRect = stage.getBoundingClientRect();
+  if (oldRect.width && newRect.width) {
+    preview.scrollLeft += newRect.left + ratioX * newRect.width - point.x;
+  }
+  if (oldRect.height && newRect.height) {
+    preview.scrollTop += newRect.top + ratioY * newRect.height - point.y;
+  }
+  // خود اندازهٔ قلم در مختصات تصویر ثابت است؛ هنگام زوم فقط مقیاس نمایش لایه‌ها عوض می‌شود.
+  updatePreviewScale(false);
+  updateEditorZoomLabel(edScale);
+}
+function fitEditorPreview() {
+  if (!EDI || !EDI.w) return;
+  setEditorStageScale(editorFitWidth() / EDI.w, null, 'fit');
+}
+function zoomEditorBy(factor, anchor = null) {
+  if (!EDI) return;
+  setEditorStageScale(currentEditorScale() * factor, anchor, 'custom');
+}
+function centerEditorBlock(id) {
+  const preview = document.querySelector('.ed-preview');
+  const box = document.querySelector(`.ed-box[data-id="${id}"]`);
+  if (!preview || !box) return;
+  const previewRect = preview.getBoundingClientRect(), boxRect = box.getBoundingClientRect();
+  if (!boxRect.width && !boxRect.height) return;
+  preview.scrollLeft += boxRect.left + boxRect.width / 2 - (previewRect.left + preview.clientWidth / 2);
+  preview.scrollTop += boxRect.top + boxRect.height / 2 - (previewRect.top + preview.clientHeight / 2);
+}
+function handleEditorResize() {
+  if (!EDI) return;
+  if (edZoomMode === 'fit') fitEditorPreview();
+  else updatePreviewScale();
+}
+function clearEditorPointers() {
+  const preview = document.querySelector('.ed-preview');
+  if (preview) {
+    for (const id of edPointers.keys()) {
+      try {
+        if (preview.hasPointerCapture && preview.hasPointerCapture(id)) preview.releasePointerCapture(id);
+      } catch { /* قبلاً آزاد شده است */ }
+    }
+    preview.classList.remove('ed-panning');
+  }
+  edPointers.clear(); edPan = null; edPinch = null;
+}
+function beginEditorPinch() {
+  const entries = [...edPointers.entries()].slice(0, 2);
+  if (entries.length < 2) { edPinch = null; return; }
+  const a = entries[0][1], b = entries[1][1];
+  edPan = null;
+  edPinch = {
+    ids: [entries[0][0], entries[1][0]],
+    distance: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y)),
+    center: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+  };
+}
+function editorPreviewPointerDown(event) {
+  if (!EDI || (event.pointerType === 'mouse' && event.button !== 0)) return;
+  if (event.target.closest && event.target.closest('.ed-box')) return;
+  const preview = document.querySelector('.ed-preview');
+  if (!preview) return;
+  event.preventDefault();
+  edPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  try { if (preview.setPointerCapture) preview.setPointerCapture(event.pointerId); } catch { /* مرورگر قدیمی */ }
+  preview.classList.add('ed-panning');
+  if (edPointers.size === 1) {
+    edPinch = null;
+    edPan = { id: event.pointerId, x: event.clientX, y: event.clientY,
+      scrollLeft: preview.scrollLeft, scrollTop: preview.scrollTop };
+  } else if (edPointers.size >= 2) beginEditorPinch();
+}
+function editorPreviewPointerMove(event) {
+  if (!edPointers.has(event.pointerId)) return;
+  const preview = document.querySelector('.ed-preview');
+  if (!preview) return;
+  edPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (edPinch && edPointers.size >= 2) {
+    const points = edPinch.ids.map((id) => edPointers.get(id));
+    if (!points[0] || !points[1]) return;
+    event.preventDefault();
+    const center = { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
+    const distance = Math.max(1, Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y));
+    setEditorStageScale(currentEditorScale() * distance / edPinch.distance, edPinch.center, 'custom');
+    // حرکت مشترک دو انگشت هم تصویر را جابه‌جا می‌کند.
+    preview.scrollLeft -= center.x - edPinch.center.x;
+    preview.scrollTop -= center.y - edPinch.center.y;
+    edPinch.center = center; edPinch.distance = distance;
+    return;
+  }
+  if (!edPan || edPan.id !== event.pointerId || edPointers.size !== 1) return;
+  event.preventDefault();
+  preview.scrollLeft = edPan.scrollLeft - (event.clientX - edPan.x);
+  preview.scrollTop = edPan.scrollTop - (event.clientY - edPan.y);
+}
+function editorPreviewPointerEnd(event) {
+  if (!edPointers.has(event.pointerId)) return;
+  const preview = document.querySelector('.ed-preview');
+  edPointers.delete(event.pointerId);
+  try {
+    if (preview && preview.hasPointerCapture && preview.hasPointerCapture(event.pointerId)) preview.releasePointerCapture(event.pointerId);
+  } catch { /* قبلاً آزاد شده است */ }
+  edPinch = null; edPan = null;
+  if (edPointers.size >= 2) beginEditorPinch();
+  else if (edPointers.size === 1 && preview) {
+    const [id, point] = [...edPointers.entries()][0];
+    edPan = { id, x: point.x, y: point.y, scrollLeft: preview.scrollLeft, scrollTop: preview.scrollTop };
+  }
+  if (!edPointers.size && preview) preview.classList.remove('ed-panning');
 }
 function setActiveBlock(id, scroll) {
   document.querySelectorAll('.blk').forEach((r) => r.classList.toggle('active', String(r.dataset.id) === String(id)));
@@ -677,13 +825,15 @@ function syncBlockTextStyles(block, editor, overlay) {
   overlay.dataset.baseSize = String(baseSize);
   updatePreviewScale();
 }
-function updatePreviewScale() {
+function updatePreviewScale(recalculateText = true) {
   if (!EDI) return;
   const stage = document.querySelector('.ed-stage');
   if (!stage || !EDI.w) return;
   const stageWidth = stage.getBoundingClientRect().width;
   if (!stageWidth) return;
   const scale = stageWidth / EDI.w;
+  edScale = scale;
+  updateEditorZoomLabel(scale);
   stage.querySelectorAll('.ed-box-text').forEach((field) => {
     const block = EDI.ocr.blocks.find((item) => String(item.id) === String(field.dataset.id));
     if (!block) return;
@@ -697,7 +847,7 @@ function updatePreviewScale() {
     field.style.width = `${96 / scale}%`;
     field.style.height = `${96 / scale}%`;
     // Match Typeset.render's auto-fit and 2% inner margin before scaling logical image pixels down.
-    field.style.fontSize = `${previewTextSize(block, x1 - x0, y1 - y0)}px`;
+    if (recalculateText || !field.style.fontSize) field.style.fontSize = `${previewTextSize(block, x1 - x0, y1 - y0)}px`;
   });
 }
 
@@ -844,7 +994,7 @@ function buildEditor() {
     }));
 
     const row = document.createElement('div'); row.className = `blk${b.enabled ? '' : ' off'}`; row.dataset.id = b.id;
-    row.innerHTML = `<div class="blk-top"><span class="blk-n">${b.id}</span>
+    row.innerHTML = `<div class="blk-top"><button type="button" class="blk-n" title="نمایش این کادر روی تصویر" aria-label="نمایش کادر ${b.id} روی تصویر">${b.id}</button>
       <label><input type="checkbox" ${b.enabled ? 'checked' : ''}> جایگزین شود</label>
       <select class="sel blk-bg"><option value="auto">پس‌زمینه: خودکار</option><option value="white">پس‌زمینه: سفید</option>
       <option value="black">پس‌زمینه: مشکی</option><option value="none">بدون پاک‌کردن</option></select>
@@ -866,6 +1016,10 @@ function buildEditor() {
     const editor = row.querySelector('.blk-editor'); editor.setAttribute('dir', b.dir); editor.innerHTML = b.richHtml || '';
     syncBlockTextStyles(b, editor, overlay);
     row.querySelector('.blk-bg').value = b.bg || 'auto';
+    row.querySelector('.blk-n').addEventListener('click', () => {
+      setActiveBlock(b.id, false);
+      centerEditorBlock(b.id);
+    });
     row.querySelector('.blk-editor').addEventListener('focus', () => { selectRichEditor(editor); edFieldFocused = true; });
     editor.addEventListener('input', () => updateRichBlock(b.id, editor));
     editor.addEventListener('paste', (event) => insertPlainPaste(event, editor));
@@ -933,7 +1087,7 @@ function buildEditor() {
   });
   updatePreviewScale();
   if (!window.__editorResizeBound) {
-    window.addEventListener('resize', updatePreviewScale); window.__editorResizeBound = true;
+    window.addEventListener('resize', handleEditorResize); window.__editorResizeBound = true;
   }
 }
 
@@ -943,18 +1097,28 @@ function setEdImage(item = EDI) {
   const blob = item.blob;
   if (edUrl) URL.revokeObjectURL(edUrl);
   edUrl = URL.createObjectURL(blob);
-  $('edImg').onload = updatePreviewScale;
+  $('edImg').onload = () => {
+    if (edZoomMode === 'fit') fitEditorPreview();
+    else updatePreviewScale();
+  };
   $('edImg').src = edUrl;
 }
 
 function openEditor(it) {
   if (!it || !it.ocr) return;
-  EDI = it; edDirty = false;
+  clearEditorPointers();
+  EDI = it; edDirty = false; edScale = 1; edZoomMode = 'fit';
   $('edTitle').innerText = `ویرایش ترجمه — تصویر ${it.i + 1} (${it.ocr.blocks.length} متن)`;
   buildEditor();
   setEdImage();
   $('editor').classList.remove('hidden');
-  requestAnimationFrame(updatePreviewScale);
+  requestAnimationFrame(() => {
+    if (EDI !== it) return;
+    fitEditorPreview();
+    const preview = document.querySelector('.ed-preview');
+    if (preview) { preview.scrollLeft = 0; preview.scrollTop = 0; }
+    updatePreviewScale();
+  });
   document.body.style.overflow = 'hidden';
 }
 
@@ -972,6 +1136,7 @@ async function closeEditor() {
     }
   }
   $('editor').classList.add('hidden');
+  clearEditorPointers(); edScale = 1; edZoomMode = 'fit';
   document.body.style.overflow = '';
   if (edUrl) { URL.revokeObjectURL(edUrl); edUrl = null; }
   $('edImg').onload = null;
@@ -1053,6 +1218,20 @@ $('trClose').onclick = closeTrDialog;
 $('trStart').onclick = runTranslate;
 $('trDialog').addEventListener('click', (e) => { if (e.target.id === 'trDialog') closeTrDialog(); });
 $('btnStopTr').onclick = cancelTranslation;
+$('edZoomIn').onclick = () => zoomEditorBy(1.25);
+$('edZoomOut').onclick = () => zoomEditorBy(1 / 1.25);
+$('edZoomFit').onclick = fitEditorPreview;
+$('edZoomActual').onclick = () => setEditorStageScale(1, null, 'custom');
+const editorPreviewEl = document.querySelector('.ed-preview');
+editorPreviewEl.addEventListener('wheel', (event) => {
+  if (!EDI || !event.deltaY) return;
+  event.preventDefault();
+  zoomEditorBy(event.deltaY < 0 ? 1.15 : 1 / 1.15, { x: event.clientX, y: event.clientY });
+}, { passive: false });
+editorPreviewEl.addEventListener('pointerdown', editorPreviewPointerDown);
+editorPreviewEl.addEventListener('pointermove', editorPreviewPointerMove);
+editorPreviewEl.addEventListener('pointerup', editorPreviewPointerEnd);
+editorPreviewEl.addEventListener('pointercancel', editorPreviewPointerEnd);
 $('edApply').onclick = applyEditor;
 $('edClose').onclick = closeEditor;
 $('edRevert').onclick = async () => {

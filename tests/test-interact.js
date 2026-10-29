@@ -479,6 +479,105 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     await sleep(120);
   }
 
+  // ---- editor zoom, pointer-anchored wheel, drag pan, touch pinch, and block locating ----
+  {
+    h.ev('items[0].w = 200; items[0].h = 200; items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "original", tr: "zoomed text", enabled: true, bg: "white", x0: 20, y0: 20, x1: 80, y1: 60, lineH: 16 }] }; openEditor(items[0])');
+    await sleep(30);
+    const preview = h.window.document.querySelector('.ed-preview');
+    const zoomStage = h.window.document.querySelector('.ed-stage');
+    Object.defineProperties(preview, {
+      clientWidth: { get: () => 200, configurable: true },
+      clientHeight: { get: () => 200, configurable: true }
+    });
+    preview.getBoundingClientRect = () => ({ left: 0, top: 0, right: 200, bottom: 200, width: 200, height: 200 });
+    zoomStage.getBoundingClientRect = () => {
+      const width = Number.parseFloat(zoomStage.style.width) || 200, height = width;
+      const left = 16 - preview.scrollLeft, top = 16 - preview.scrollTop;
+      return { left, top, right: left + width, bottom: top + height, width, height };
+    };
+    preview.scrollLeft = 0; preview.scrollTop = 0;
+    check('editor exposes fit, actual-size, and zoom controls',
+      ['edZoomOut', 'edZoomLevel', 'edZoomIn', 'edZoomFit', 'edZoomActual'].every((id) => !!h.$(id)));
+    h.$('edZoomActual').click();
+    check('actual-size control shows one source pixel per screen pixel',
+      Number.parseFloat(zoomStage.style.width) === 200 && h.ev('edScale') === 1 &&
+      h.$('edBoxes').querySelector('.ed-box-text').style.transform === 'scale(1)');
+    h.$('edZoomOut').click();
+    check('zoom-out shrinks the image and OCR overlay together',
+      Number.parseFloat(zoomStage.style.width) === 160 && h.$('edBoxes').querySelector('.ed-box-text').style.transform === 'scale(0.8)');
+    h.$('edZoomActual').click(); h.$('edZoomIn').click();
+    check('zoom-in enlarges the image and OCR overlay together',
+      Number.parseFloat(zoomStage.style.width) === 250 && h.$('edBoxes').querySelector('.ed-box-text').style.transform === 'scale(1.25)');
+
+    const beforeWheel = zoomStage.getBoundingClientRect();
+    const wheelPoint = { x: 110, y: 120 };
+    const ratioX = (wheelPoint.x - beforeWheel.left) / beforeWheel.width;
+    const ratioY = (wheelPoint.y - beforeWheel.top) / beforeWheel.height;
+    zoomStage.dispatchEvent(new h.window.WheelEvent('wheel', {
+      deltaY: -100, clientX: wheelPoint.x, clientY: wheelPoint.y, bubbles: true, cancelable: true
+    }));
+    const afterWheel = zoomStage.getBoundingClientRect();
+    check('wheel zoom keeps the pointed image location stationary',
+      afterWheel.width > beforeWheel.width &&
+      Math.abs(afterWheel.left + ratioX * afterWheel.width - wheelPoint.x) < 0.01 &&
+      Math.abs(afterWheel.top + ratioY * afterWheel.height - wheelPoint.y) < 0.01);
+
+    const sendPointer = (target, type, pointerId, x, y, pointerType = 'mouse') => {
+      target.dispatchEvent(new h.window.PointerEvent(type, {
+        clientX: x, clientY: y, button: 0, pointerId, pointerType, bubbles: true, cancelable: true
+      }));
+    };
+    const panStart = { left: preview.scrollLeft, top: preview.scrollTop };
+    sendPointer(zoomStage, 'pointerdown', 7, 150, 150);
+    sendPointer(zoomStage, 'pointermove', 7, 110, 120);
+    sendPointer(zoomStage, 'pointerup', 7, 110, 120);
+    check('dragging empty image space pans without changing OCR geometry',
+      preview.scrollLeft === panStart.left + 40 && preview.scrollTop === panStart.top + 30 &&
+      h.ev('edPointers.size') === 0 && h.ev('items[0].ocr.blocks[0].x0') === 20);
+
+    h.ev('setEditorStageScale(2, null, "custom")');
+    const moveHandle = h.$('edBoxes').querySelector('.ed-move');
+    const beforeZoomMove = h.ev('({x:items[0].ocr.blocks[0].x0,y:items[0].ocr.blocks[0].y0,w:items[0].ocr.blocks[0].x1-items[0].ocr.blocks[0].x0})');
+    sendPointer(moveHandle, 'pointerdown', 8, 0, 0);
+    sendPointer(moveHandle, 'pointermove', 8, 20, 30);
+    sendPointer(moveHandle, 'pointerup', 8, 20, 30);
+    check('moving an OCR box at 200 percent keeps source-coordinate math correct',
+      h.ev('items[0].ocr.blocks[0].tx0') === beforeZoomMove.x + 10 &&
+      h.ev('items[0].ocr.blocks[0].ty0') === beforeZoomMove.y + 15 &&
+      h.ev('items[0].ocr.blocks[0].tx1-items[0].ocr.blocks[0].tx0') === beforeZoomMove.w &&
+      h.ev('edPointers.size') === 0);
+
+    h.ev('setEditorStageScale(1, null, "custom")');
+    preview.scrollLeft = 0; preview.scrollTop = 0;
+    sendPointer(zoomStage, 'pointerdown', 11, 80, 100, 'touch');
+    sendPointer(zoomStage, 'pointerdown', 12, 120, 100, 'touch');
+    sendPointer(zoomStage, 'pointermove', 11, 60, 100, 'touch');
+    sendPointer(zoomStage, 'pointermove', 12, 140, 100, 'touch');
+    check('two-finger pinch doubles the preview scale',
+      Number.parseFloat(zoomStage.style.width) === 400 && h.ev('edPointers.size') === 2);
+    const pinchScroll = preview.scrollLeft;
+    sendPointer(zoomStage, 'pointermove', 11, 80, 100, 'touch');
+    sendPointer(zoomStage, 'pointermove', 12, 160, 100, 'touch');
+    check('moving both touch points pans during pinch', preview.scrollLeft === pinchScroll - 20);
+    sendPointer(zoomStage, 'pointerup', 11, 80, 100, 'touch');
+    sendPointer(zoomStage, 'pointerup', 12, 160, 100, 'touch');
+    check('touch cleanup restores normal editor state',
+      h.ev('edPointers.size') === 0 && !preview.classList.contains('ed-panning'));
+
+    const locatedBox = h.$('edBoxes').querySelector('.ed-box');
+    preview.scrollTop = 0;
+    locatedBox.getBoundingClientRect = () => ({ left: 20, top: 600, right: 100, bottom: 660, width: 80, height: 60 });
+    h.$('edList').querySelector('.blk-n').click();
+    check('block number brings its OCR box into view and marks it active',
+      preview.scrollTop === 530 && locatedBox.classList.contains('active') &&
+      h.$('edList').querySelector('.blk').classList.contains('active'));
+    h.$('edZoomFit').click();
+    check('fit control restores the available preview width',
+      Number.parseFloat(zoomStage.style.width) === h.ev('editorFitWidth()') && h.ev('edZoomMode') === 'fit');
+    h.$('edClose').click();
+    await sleep(120);
+  }
+
   // ---- clear one block's translation without deleting OCR or sibling translations ----
   {
     h.ev('items[0].w = 200; items[0].h = 200; items[0].ocr = { lang: "eng", blocks: [' +

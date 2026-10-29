@@ -17,7 +17,7 @@
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۲.۶۲</span>
+        <span class="version-pill">نسخهٔ ۲.۶۳</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -221,6 +221,13 @@
   <div id="editor" class="hidden">
     <div class="ed-head">
       <div id="edTitle">ویرایش ترجمه</div>
+      <div class="ed-view-controls" role="group" aria-label="بزرگ‌نمایی و جابه‌جایی تصویر">
+        <button class="mini" id="edZoomOut" type="button" title="کوچک‌نمایی" aria-label="کوچک‌نمایی">−</button>
+        <output id="edZoomLevel" class="ed-zoom-level" aria-label="درصد بزرگ‌نمایی">—</output>
+        <button class="mini" id="edZoomIn" type="button" title="بزرگ‌نمایی" aria-label="بزرگ‌نمایی">+</button>
+        <button class="mini" id="edZoomFit" type="button" title="جا دادن عرض تصویر در ناحیهٔ پیش‌نمایش">جا دادن</button>
+        <button class="mini" id="edZoomActual" type="button" title="نمایش هر پیکسل تصویر با اندازهٔ واقعی">اندازهٔ واقعی ۱۰۰٪</button>
+      </div>
       <div class="ed-actions">
         <button class="mini accent" id="edApply">به‌روزرسانی پیش‌نمایش</button>
         <button class="mini warn" id="edRevert">بازگردانی به تصویر اصلی</button>
@@ -228,7 +235,7 @@
       </div>
     </div>
     <div class="ed-body">
-      <div class="ed-preview"><div class="ed-stage"><img id="edImg" alt=""><div id="edBoxes"></div></div></div>
+      <div class="ed-preview" title="چرخ موس برای زوم؛ کشیدن فضای خالی تصویر برای جابه‌جایی؛ روی صفحهٔ لمسی با دو انگشت زوم کنید"><div class="ed-stage"><img id="edImg" alt="" draggable="false"><div id="edBoxes"></div></div></div>
       <div class="ed-list" id="edList"></div>
     </div>
   </div>
