@@ -33,16 +33,41 @@
     xOffset = xOffset || 0;
     const out = [];
     (data.blocks || []).forEach((b) => (b.paragraphs || []).forEach((p) => (p.lines || []).forEach((l) => {
-      let text = (l.text || '').replace(/\s+/g, ' ').trim();
+      const words = Array.isArray(l.words) ? l.words.filter((w) => w && String(w.text || '').trim()) : [];
+      // اگر متن کامل خط برنگشته باشد، از خود واژه‌های همان خط بازیابی می‌شود.
+      const wordText = words.map((w) => String(w.text).trim()).join(cjk ? '' : ' ');
+      const rawText = String(l.text || '').trim() ? String(l.text) : wordText;
+      const leadingSpaces = (rawText.match(/^[\t ]*/) || [''])[0].replace(/\t/g, '  ').length;
+      let text = rawText.replace(/\s+/g, ' ').trim();
       if (cjk) text = text.replace(/\s+/g, '');
       if (stats) stats.raw++;
-      const h = l.bbox.y1 - l.bbox.y0;
-      if (!text || l.confidence < minConf || letterCount(text) < (cjk ? 1 : 2)) return;
+      const wordBoxes = words.map((w) => w.bbox).filter((box) => box &&
+        [box.x0, box.x1, box.y0, box.y1].every(Number.isFinite));
+      const bbox = l.bbox || (wordBoxes.length ? {
+        x0: Math.min(...wordBoxes.map((box) => box.x0)),
+        x1: Math.max(...wordBoxes.map((box) => box.x1)),
+        y0: Math.min(...wordBoxes.map((box) => box.y0)),
+        y1: Math.max(...wordBoxes.map((box) => box.y1))
+      } : null);
+      if (!bbox) return;
+      const wordConfidence = words.length
+        ? words.reduce((sum, w) => sum + (Number(w.confidence) || 0), 0) / words.length : 0;
+      const confidence = Number.isFinite(l.confidence) ? l.confidence : wordConfidence;
+      const h = bbox.y1 - bbox.y0;
+      if (!text || confidence < minConf || letterCount(text) < (cjk ? 1 : 2)) return;
       if (h < 8 || h > 220) return;
       if (!looksReal(text, lang)) return;
       // خط‌های خیلی کوتاه فقط با اطمینان بالا پذیرفته می‌شوند (حذف نویز)
-      if (letterCount(text) < (cjk ? 2 : 5) && l.confidence < 70) return;
-      out.push({ text, conf: l.confidence, x0: l.bbox.x0 + xOffset, x1: l.bbox.x1 + xOffset, y0: l.bbox.y0 + yOffset, y1: l.bbox.y1 + yOffset });
+      if (letterCount(text) < (cjk ? 2 : 5) && confidence < 70) return;
+      // مختصات خود حروف برای محاسبهٔ تورفتگی دقیق‌تر از کادر کلی خط است.
+      const textX0 = wordBoxes.length ? Math.min(...wordBoxes.map((box) => box.x0)) : bbox.x0;
+      const textX1 = wordBoxes.length ? Math.max(...wordBoxes.map((box) => box.x1)) : bbox.x1;
+      out.push({
+        text, conf: confidence, leadingSpaces,
+        x0: bbox.x0 + xOffset, x1: bbox.x1 + xOffset,
+        y0: bbox.y0 + yOffset, y1: bbox.y1 + yOffset,
+        textX0: textX0 + xOffset, textX1: textX1 + xOffset
+      });
     })));
     return out;
   }
@@ -78,14 +103,36 @@
 
     const blocks = [];
     groups.forEach((g) => {
-      g.sort((a, b) => a.y0 - b.y0);
+      g.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
       const x0 = Math.min(...g.map((l) => l.x0)), x1 = Math.max(...g.map((l) => l.x1));
       const y0 = Math.min(...g.map((l) => l.y0)), y1 = Math.max(...g.map((l) => l.y1));
+      const lineH = g.reduce((s, l) => s + (l.y1 - l.y0), 0) / g.length;
+      // شکستن فیزیکی خطوط حفظ می‌شود؛ تبدیل همه‌چیز به یک رشتهٔ صاف، ترتیب متن را به هم می‌ریخت.
+      const text = g.map((l) => l.text).join('\n');
+      const starts = g.map((l) => Number.isFinite(l.textX0) ? l.textX0 : l.x0);
+      const ends = g.map((l) => Number.isFinite(l.textX1) ? l.textX1 : l.x1);
+      const firstInk = Math.min(...starts), lastInk = Math.max(...ends);
+      const indentUnit = Math.max(4, lineH * 0.45);
+      const lineDetails = g.map((l, index) => {
+        const indentPx = Math.max(0, starts[index] - firstInk);
+        const rightInsetPx = Math.max(0, lastInk - ends[index]);
+        const geometrySpaces = Math.round(indentPx / indentUnit);
+        const reportedSpaces = Math.max(0, Number(l.leadingSpaces) || 0);
+        const indentSpaces = Math.min(40, Math.max(geometrySpaces, reportedSpaces));
+        return {
+          text: l.text, conf: l.conf,
+          x0: l.x0, x1: l.x1, y0: l.y0, y1: l.y1,
+          indentPx, rightInsetPx, indentSpaces
+        };
+      });
       blocks.push({
         x0, y0, x1, y1,
-        text: g.map((l) => l.text).join(cjk ? '' : ' ').replace(/\s+/g, ' ').trim(),
+        text,
+        // نسخهٔ نمایشی OCR تورفتگی و بیرون‌رفتگی خطوط را با فاصله و مختصات دقیق نگه می‌دارد.
+        layoutText: lineDetails.map((line) => ' '.repeat(line.indentSpaces) + line.text).join('\n'),
+        lineDetails,
         conf: g.reduce((s, l) => s + l.conf, 0) / g.length,
-        lineH: g.reduce((s, l) => s + (l.y1 - l.y0), 0) / g.length,
+        lineH,
         lines: g.length
       });
     });

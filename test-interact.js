@@ -387,15 +387,15 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   {
     let copied = '';
     h.window.navigator.clipboard = { writeText: async (t) => { copied = t; } };
-    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "Recognizable english sentence", tr: "ترجمه", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
+    h.ev('items[0].ocr = { lang: "eng", blocks: [{ id: 1, text: "Recognizable english sentence\\nsecond line", layoutText: "  Recognizable english sentence\\nsecond line", tr: "ترجمه", enabled: true, bg: "white", x0: 0, y0: 0, x1: 120, y1: 40, lineH: 16 }] }; openEditor(items[0])');
     const copyBtn = h.$('edList').querySelector('.blk-copy-orig');
     check('editor exposes an OCR copy button', !!copyBtn);
     copyBtn.click();
     await sleep(10);
-    check('copy button puts the English OCR text on the clipboard', copied === 'Recognizable english sentence', copied);
+    check('copy button preserves OCR line breaks and indentation', copied === '  Recognizable english sentence\nsecond line', copied);
     check('copy button shows the copied state', copyBtn.classList.contains('copied'));
-    check('OCR source is editable in the block card',
-      h.$('edList').querySelector('.blk-orig-text').value === 'Recognizable english sentence');
+    check('OCR source editor preserves line breaks and indentation',
+      h.$('edList').querySelector('.blk-orig-text').value === '  Recognizable english sentence\nsecond line');
     h.$('edClose').click();
     await sleep(120); // let the final asynchronous preview render settle before the next editor test
   }

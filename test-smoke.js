@@ -167,6 +167,20 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('groupLines merges close lines', blocks.length === 1, blocks.length);
     check('groupLines block has id/enabled/bg/tr', blocks[0] && blocks[0].id === 1 && blocks[0].enabled === true && blocks[0].bg === 'auto' && blocks[0].tr === '');
   }
+  // groupLines: physical line order and indentation/outdentation survive
+  {
+    const lines = [
+      { text: 'FIRST LINE', conf: 90, x0: 40, x1: 180, y0: 10, y1: 30, textX0: 40, textX1: 180 },
+      { text: 'indented second', conf: 90, x0: 76, x1: 220, y0: 32, y1: 52, textX0: 76, textX1: 220 },
+      { text: 'outdented third', conf: 90, x0: 22, x1: 190, y0: 54, y1: 74, textX0: 22, textX1: 190 }
+    ];
+    const block = OcrTools.groupLines(lines, false)[0];
+    check('groupLines preserves physical line breaks', block && block.text === 'FIRST LINE\nindented second\noutdented third', block && block.text);
+    check('groupLines exposes layout-aware OCR text', block && block.layoutText === '  FIRST LINE\n      indented second\noutdented third', block && block.layoutText);
+    check('groupLines keeps ordered line geometry', block && block.lineDetails.length === 3 &&
+      block.lineDetails[0].indentPx === 18 && block.lineDetails[1].indentPx === 54 && block.lineDetails[2].indentPx === 0 &&
+      block.lineDetails[0].rightInsetPx === 40 && block.lineDetails[2].rightInsetPx === 30, block && block.lineDetails);
+  }
   // groupLines: far apart lines stay separate
   {
     const lines = [
@@ -193,6 +207,20 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('extractLines offset applied', out[0] && out[0].y0 === 0);
     const out2 = OcrTools.extractLines(data, 50, false, 40, 'eng', null, 30);
     check('extractLines x/y offsets', out2[0] && out2[0].y0 === 50 && out2[0].x0 === 30, out2[0]);
+    const recovered = { blocks: [{ paragraphs: [{ lines: [
+      { text: '   ', confidence: 88, words: [
+        { text: 'Recovered', confidence: 90, bbox: { x0: 24, x1: 90, y0: 4, y1: 20 } },
+        { text: 'words', confidence: 90, bbox: { x0: 96, x1: 130, y0: 4, y1: 20 } }
+      ] }
+    ] }] }] };
+    const recoveredLine = OcrTools.extractLines(recovered, 0, false, 40, 'eng')[0];
+    check('extractLines recovers missing line text from ordered words', recoveredLine && recoveredLine.text === 'Recovered words', recoveredLine);
+    check('extractLines retains ink bounds for indentation', recoveredLine && recoveredLine.textX0 === 24 && recoveredLine.textX1 === 130, recoveredLine);
+    const spaced = { blocks: [{ paragraphs: [{ lines: [
+      { text: '  Indented text', confidence: 88, bbox: { x0: 20, x1: 150, y0: 0, y1: 20 } }
+    ] }] }] };
+    const spacedLine = OcrTools.extractLines(spaced, 0, false, 40, 'eng')[0];
+    check('extractLines retains reported leading indentation', spacedLine && spacedLine.leadingSpaces === 2 && spacedLine.text === 'Indented text', spacedLine);
     const garbled = { blocks: [{ paragraphs: [{ lines: [
       { text: 'NG BEYAYN®BIE', confidence: 94, bbox: { x0: 5, x1: 145, y0: 0, y1: 18 } }
     ] }] }] };

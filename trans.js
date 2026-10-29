@@ -3,6 +3,11 @@
 // این فایل بعد از viewer.js بارگذاری می‌شود و از متغیرهای آن (items، building، ...) استفاده می‌کند.
 const TR = { worker: null, lang: null, cancel: false };
 
+// متن نمایشی OCR شامل شکستن خطوط و تورفتگی است؛ متن سادهٔ block برای ترجمه حفظ می‌شود.
+function ocrDisplayText(block) {
+  return typeof block.layoutText === 'string' ? block.layoutText : String(block.text || '');
+}
+
 function openTrDialog() {
   if (!$('ocrEnabled').checked) return;
   $('trDialog').classList.remove('hidden');
@@ -175,13 +180,19 @@ async function copyPlainText(text) {
 }
 async function retranslateBlock(item, block, originalField, editor, overlay, button) {
   const source = String(originalField.value || '');
-  block.text = source;
+  const oldDisplay = ocrDisplayText(block);
+  if (source !== oldDisplay) {
+    block.text = source;
+    block.layoutText = null;
+    block.lineDetails = null;
+  }
   if (!source.trim()) { button.title = 'ابتدا متن OCR را اصلاح کنید'; return; }
   const lang = OcrTools.LANGS[item.ocr.lang] || OcrTools.LANGS.eng;
+  const translateSource = source === oldDisplay && block.text ? String(block.text) : source;
   const oldLabel = button.textContent;
   button.disabled = true; button.textContent = 'در حال ترجمه…';
   try {
-    const result = await TranslateTools.translate(source.trim(), lang.sl);
+    const result = await TranslateTools.translate(translateSource.trim(), lang.sl);
     if (!result.ok || !result.text) throw new Error('ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید.');
     block.tr = result.text;
     block.richHtml = safeEditorHtml(escapeEditorText(result.text).replace(/\n/g, '<br>'));
@@ -590,8 +601,13 @@ function buildEditor() {
       <div class="blk-help">متن را همین‌جا اصلاح کنید؛ برای ویرایش روی تصویر، دستگیرهٔ بالای کادر را بکشید تا جابه‌جا شود و دستگیره‌های دور کادر را برای تغییر اندازه بکشید.</div>`;
     const originalField = row.querySelector('.blk-orig-text');
     originalField.dir = 'auto';
-    originalField.value = b.text || '';
-    originalField.addEventListener('input', () => { b.text = originalField.value; });
+    originalField.value = ocrDisplayText(b);
+    originalField.addEventListener('input', () => {
+      b.text = originalField.value;
+      // پس از اصلاح دستی، همان متن کاربر معتبر است و فاصله‌های قدیمی نباید بازگردند.
+      b.layoutText = null;
+      b.lineDetails = null;
+    });
     const editor = row.querySelector('.blk-editor'); editor.setAttribute('dir', b.dir); editor.innerHTML = b.richHtml || '';
     syncBlockTextStyles(b, editor, overlay);
     row.querySelector('.blk-bg').value = b.bg || 'auto';
@@ -608,7 +624,7 @@ function buildEditor() {
     row.querySelector('.blk-bg').addEventListener('change', (event) => { b.bg = event.target.value; scheduleApply(); });
     row.querySelector('.blk-copy-orig').addEventListener('click', async (event) => {
       const button = event.currentTarget;
-      const ok = await copyPlainText(b.text || '');
+      const ok = await copyPlainText(ocrDisplayText(b));
       button.classList.toggle('copied', ok);
       button.title = ok ? 'کپی شد ✓' : 'کپی ناموفق بود';
       setTimeout(() => { button.classList.remove('copied'); button.title = 'کپی متن OCR'; }, 1400);
@@ -715,7 +731,12 @@ function exportText() {
       const tr = b.tr && b.tr.trim()
         ? (typeof Typeset !== 'undefined' ? Typeset.stripInlineMarkers(b.tr) : b.tr).trim()
         : '';
-      out += `[${b.id}] ${b.text}\n    ← ${tr || '(بدون ترجمه)'}\n\n`;
+      const sourceLines = ocrDisplayText(b).split('\n');
+      const sourcePrefix = `[${b.id}] `;
+      out += sourcePrefix + sourceLines[0] + '\n';
+      // هم‌ترازی ادامهٔ خطوط با آغاز متن، تورفتگی/بیرون‌رفتگی را در TXT هم حفظ می‌کند.
+      sourceLines.slice(1).forEach((line) => { out += ' '.repeat(sourcePrefix.length) + line + '\n'; });
+      out += `    ← ${tr || '(بدون ترجمه)'}\n\n`;
     });
   });
   const blob = new Blob(['\ufeff' + out], { type: 'text/plain;charset=utf-8' });
