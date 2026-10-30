@@ -9,15 +9,17 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
+from starlette.background import BackgroundTask
 
 from . import APP_NAME, APP_VERSION
 from .activity import ActivityLog, reporting
+from .backup import BackupError, make_backup, restore_backup
 from .exporter import build_images_zip, build_pdf, build_txt, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
 from .ocr_grouping import group_ocr_lines
 from .paths import STATIC_DIR
 from .schemas import (
-    AiConnectionTest, AiSettings, EngineDownloadRequest, EngineTestRequest, ExportRequest, OcrRequest, ProjectCreate,
+    AiConnectionTest, AiSettings, BackupRequest, EngineDownloadRequest, EngineTestRequest, ExportRequest, OcrRequest, ProjectCreate,
     SessionRequest, StateUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .sessions import SessionManager
@@ -120,6 +122,29 @@ def create_app() -> FastAPI:
     @app.post("/api/projects", status_code=201)
     def create_project(values: ProjectCreate | None = None) -> dict[str, Any]:
         return store.create(values.name if values else "پروژهٔ کمیک")
+
+    @app.post("/api/projects/restore", status_code=201)
+    async def restore_project(file: UploadFile = File(...)) -> dict[str, Any]:
+        activity.add("بازیابی بک‌آپ پروژه آغاز شد")
+        try:
+            state, drafts = await run_reported(restore_backup, store, file.file, pulse_label="بازیابی بک‌آپ")
+        except BackupError as exc:
+            activity.add(f"بازیابی بک‌آپ ناموفق بود: {exc}", "error")
+            raise HTTPException(400, str(exc)) from exc
+        activity.add(f"پروژهٔ «{state['name']}» به‌صورت پروژهٔ جدید بازیابی شد", "success", 1.0)
+        return {"project": state, "drafts": drafts}
+
+    @app.post("/api/projects/{project_id}/backup")
+    async def backup_project(project_id: str, values: BackupRequest) -> FileResponse:
+        project(project_id)
+        activity.add("ساخت بک‌آپ پروژه آغاز شد")
+        try:
+            path = await run_reported(make_backup, store, project_id, values.drafts, values.expected_updated_at, pulse_label="ساخت بک‌آپ")
+        except BackupError as exc:
+            activity.add(f"ساخت بک‌آپ ناموفق بود: {exc}", "error")
+            raise HTTPException(400, str(exc)) from exc
+        activity.add("بک‌آپ پروژه آماده است", "success", 1.0)
+        return FileResponse(path, media_type="application/zip", filename="comic-studio-project-backup.zip", background=BackgroundTask(path.unlink, missing_ok=True))
 
     @app.get("/api/projects/{project_id}")
     def get_project(project_id: str) -> dict[str, Any]:

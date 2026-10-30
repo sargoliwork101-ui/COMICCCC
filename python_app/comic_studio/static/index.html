@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.40">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.40">
+  <link rel="stylesheet" href="/style.css?v=3.41">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.41">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۴۰ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۴۱ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
     <button id="menuBtn" class="bt">☰ پروژه و تنظیمات</button>
   </header>
 
@@ -18,6 +18,8 @@
       <label>پروژه<select id="projectSelect" aria-label="بازکردن پروژه"></select></label>
       <label>نام پروژه<input id="projectName" aria-label="نام پروژه" value="پروژهٔ کمیک"></label>
       <div class="menu-actions"><button id="newProjectBtn" class="bt">پروژهٔ جدید</button><button id="deleteProjectBtn" class="bt danger">حذف پروژه</button></div>
+      <div class="menu-actions"><button id="backupProjectBtn" class="bt" type="button">بک‌آپ پروژه (ZIP)</button><button id="restoreProjectBtn" class="bt" type="button">بازیابی بک‌آپ</button><input id="restoreProjectInput" type="file" accept=".zip,application/zip" hidden></div>
+      <a id="backupDownloadLink" class="bt hidden" href="#" download>دانلود دوبارهٔ بک‌آپ</a><p class="hint">بک‌آپ شامل تصاویر، متن‌ها، پیش‌نمایش‌ها، خروجی‌ها و پیش‌نویس‌های این مرورگر است؛ کلیدهای API داخل آن نیستند. بازیابی پروژهٔ جدید می‌سازد.</p>
     </div>
     <button id="modelsBtn" class="mi">مدل‌های OCR و آزمایش</button>
     <button id="aiBtn" class="mi">ترجمهٔ رایگان / AI</button>
@@ -182,10 +184,10 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.40"></script>
-  <script src="/groups.js?v=3.40"></script>
-  <script src="/rich-sanitize.js?v=3.40"></script>
-  <script src="/rich-editor.js?v=3.40"></script>
-  <script src="/app.js?v=3.40"></script>
+  <script src="/typeset.js?v=3.41"></script>
+  <script src="/groups.js?v=3.41"></script>
+  <script src="/rich-sanitize.js?v=3.41"></script>
+  <script src="/rich-editor.js?v=3.41"></script>
+  <script src="/app.js?v=3.41"></script>
 </body>
 </html>

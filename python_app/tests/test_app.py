@@ -43,11 +43,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.40"
+    assert health.json()["version"] == "3.41"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۴۰ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۴۱ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -1062,3 +1062,128 @@ def test_single_block_ai_retranslation_splits_large_source_and_matches_preview(c
     assert result.status_code == 200, result.text
     assert seen == pieces
     assert result.json()['text'] == ' '.join(f'response{i + 1}' for i in range(len(pieces)))
+
+
+def test_portable_project_backup_restores_images_text_exports_and_browser_drafts(client, monkeypatch, tmp_path):
+    project, item = make_project(client)
+    route = f"/api/projects/{project['id']}"
+    project['name'] = 'انتقال پروژه'
+    project['images'][0].update({'crop': {'x': 1, 'y': 2, 'w': 150, 'h': 100}, 'groupId': 5})
+    project['images'][0]['blocks'] = [{
+        'id': 9, 'text': 'OCR text', 'tr': 'ترجمه', 'richHtml': '<p><b>ترجمه</b></p>',
+        'enabled': True, 'verticalAlign': 'top', 'sourceLines': [{'text': 'OCR text'}],
+        'x0': 5, 'y0': 5, 'x1': 150, 'y1': 40, 'lineH': 35,
+    }]
+    assert client.put(f'{route}/state', json={'state': project}).status_code == 200
+    edited = png_bytes(color='yellow')
+    assert client.post(f"{route}/images/{item['id']}/rendered", content=edited, headers={'Content-Type': 'image/png'}).status_code == 200
+    export = client.post(f'{route}/export', json={'kind': 'txt', 'image_ids': [item['id']], 'name': 'completed'})
+    assert export.status_code == 200, export.text
+    assert client.put('/api/ai-settings', json={'provider':'openai', 'api_key':'secret-never-include'}).status_code == 200
+    draft = {'imageId': item['id'], 'blockId': '9', 'mode': 'translation', 'value': {'html':'<p>draft</p>', 'base':'revision', 'time':'now', 'meta':{'align':'right'}}}
+    result = client.post(f'{route}/backup', json={'drafts':[draft]})
+    assert result.status_code == 200, result.text
+    assert result.headers['content-type'].startswith('application/zip')
+    zip_content = result.content
+    with zipfile.ZipFile(io.BytesIO(zip_content)) as z:
+        assert set(z.namelist()) == {'manifest.json', 'project.json', 'browser-drafts.json', f"images/{item['file']}", f"images/{item['id']}-edited.png", 'exports/completed.txt'}
+        assert b'secret-never-include' not in b''.join(z.read(name) for name in z.namelist())
+        assert z.read(f"images/{item['file']}") == png_bytes()
+        assert z.read(f"images/{item['id']}-edited.png") == edited
+    # A distinct data directory simulates the destination computer.
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path / 'destination'))
+    with TestClient(create_app()) as destination:
+        restored = destination.post('/api/projects/restore', files={'file':('backup.zip', zip_content, 'application/zip')})
+        assert restored.status_code == 201, restored.text
+        state = restored.json()['project']; assert state['id'] != project['id']
+        assert state['images'][0]['crop'] == project['images'][0]['crop']
+        assert state['images'][0]['groupId'] == 5
+        assert state['images'][0]['blocks'] == project['images'][0]['blocks']
+        assert restored.json()['drafts'] == [draft]
+        restored_route = f"/api/projects/{state['id']}"
+        assert destination.get(f"{restored_route}/images/{item['id']}/content").content == png_bytes()
+        assert destination.get(f"{restored_route}/images/{item['id']}/content?edited=true").content == edited
+        assert (tmp_path / 'destination' / 'projects' / state['id'] / 'exports' / 'completed.txt').exists()
+        assert destination.get('/api/ai-settings').json()['hasApiKey'] is False
+        state['images'][0]['blocks'][0]['tr'] = 'ادامه در سیستم تازه'
+        assert destination.put(f'{restored_route}/state', json={'state': state}).status_code == 200
+        out = destination.post(f'{restored_route}/export', json={'kind':'txt', 'image_ids':[item['id']], 'name':'continued'})
+        assert out.status_code == 200 and 'ادامه در سیستم تازه' in out.text
+        another = destination.post('/api/projects/restore', files={'file':('backup.zip', zip_content, 'application/zip')})
+        assert another.status_code == 201 and another.json()['project']['id'] != state['id']
+        assert destination.get(restored_route).json()['images'][0]['blocks'][0]['tr'] == 'ادامه در سیستم تازه'
+
+
+def test_backup_rejects_missing_image_instead_of_producing_incomplete_zip(client, tmp_path):
+    project, item = make_project(client)
+    (tmp_path / 'data' / 'projects' / project['id'] / 'images' / item['file']).unlink()
+    result = client.post(f"/api/projects/{project['id']}/backup", json={'drafts':[]})
+    assert result.status_code == 400
+    assert not list((tmp_path / 'data' / 'backup-temp').glob('*.zip'))
+
+
+@pytest.mark.parametrize('bad_member', ['../escape.txt', '/absolute.txt', 'images/../../escape.txt', 'images\\escape.png', 'exports/../evil.txt', 'project.json'])
+def test_restore_rejects_traversal_unknown_and_duplicate_members_atomically(client, bad_member, tmp_path):
+    project, _ = make_project(client)
+    backup = client.post(f"/api/projects/{project['id']}/backup", json={'drafts':[]}).content
+    modified = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(backup)) as source, zipfile.ZipFile(modified, 'w') as target:
+        for info in source.infolist(): target.writestr(info.filename, source.read(info))
+        target.writestr(bad_member, b'evil')
+    before = client.get('/api/projects').json()
+    response = client.post('/api/projects/restore', files={'file':('bad.zip', modified.getvalue(), 'application/zip')})
+    assert response.status_code == 400
+    assert client.get('/api/projects').json() == before
+    assert not (tmp_path / 'data' / 'escape.txt').exists()
+    assert not list((tmp_path / 'data' / 'restore-staging').iterdir())
+
+
+def test_restore_rejects_corrupt_and_missing_images_and_bad_manifest(client):
+    project, item = make_project(client)
+    backup = client.post(f"/api/projects/{project['id']}/backup", json={'drafts':[]}).content
+    for action in ('missing', 'corrupt', 'version'):
+        result = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(backup)) as original, zipfile.ZipFile(result, 'w') as target:
+            for info in original.infolist():
+                if action == 'missing' and info.filename == f"images/{item['file']}": continue
+                value = original.read(info)
+                if action == 'corrupt' and info.filename == f"images/{item['file']}": value = b'not a png'
+                if action == 'version' and info.filename == 'manifest.json': value = b'{"format":"comic-ocr-studio-project","version":999}'
+                target.writestr(info.filename, value)
+        response = client.post('/api/projects/restore', files={'file':('broken.zip', result.getvalue(), 'application/zip')})
+        assert response.status_code == 400, (action, response.text)
+    assert len(client.get('/api/projects').json()) == 1
+
+
+def test_restore_rejects_symlink_and_excessive_uncompressed_size(client, monkeypatch):
+    from comic_studio import backup as backup_module
+    project, _ = make_project(client)
+    backup = client.post(f"/api/projects/{project['id']}/backup", json={'drafts':[]}).content
+    buffer = io.BytesIO()
+    import stat
+    with zipfile.ZipFile(io.BytesIO(backup)) as original, zipfile.ZipFile(buffer, 'w') as target:
+        for info in original.infolist(): target.writestr(info.filename, original.read(info))
+        link = zipfile.ZipInfo('exports/evil.txt'); link.create_system = 3; link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        target.writestr(link, '../project.json')
+    assert client.post('/api/projects/restore', files={'file':('evil.zip', buffer.getvalue(), 'application/zip')}).status_code == 400
+    monkeypatch.setattr(backup_module, 'MAX_TOTAL', 1)
+    assert client.post('/api/projects/restore', files={'file':('oversize.zip', backup, 'application/zip')}).status_code == 400
+    assert len(client.get('/api/projects').json()) == 1
+
+
+def test_backup_includes_unselected_pages_and_rejects_stale_revision(client):
+    project, _ = make_project(client)
+    route = f"/api/projects/{project['id']}"
+    project = client.post(f'{route}/files', files={'files': ('second.png', png_bytes(color='red'), 'image/png')}).json()
+    project['images'][1]['selected'] = False
+    project = client.put(f'{route}/state', json={'state':project}).json()
+    stale = client.post(f'{route}/backup', json={'drafts':[], 'expected_updated_at':'old revision'})
+    assert stale.status_code == 409
+    good = client.post(f'{route}/backup', json={'drafts':[], 'expected_updated_at':project['updatedAt']})
+    assert good.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(good.content)) as archive:
+        assert all(f"images/{item['file']}" in archive.namelist() for item in project['images'])
+    result = client.post('/api/projects/restore', files={'file':('backup.zip', good.content, 'application/zip')})
+    assert result.status_code == 201
+    assert len(result.json()['project']['images']) == 2
+    assert result.json()['project']['images'][1]['selected'] is False

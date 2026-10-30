@@ -776,6 +776,43 @@ with pymupdf.open(pdf_path) as document:
     assert.ok(await page.$eval('#translationStatus', el => el.textContent.includes('2 درخواست با موفقیت ذخیره شد')));
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr), 'ترجمه صفحه یک');
     console.log('PASS: real AI sends pages sequentially and retains completed pages when the next one fails');
+
+    await page.keyboard.press('Escape');
+    let backupProject = await api(base, '/api/projects', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'Portable project'})});
+    const backupForm = new FormData(); backupForm.append('files', new Blob([fs.readFileSync(source)], {type:'image/png'}), 'portable.png');
+    backupProject = await api(base, `/api/projects/${backupProject.id}/files`, {method:'POST',body:backupForm});
+    backupProject.images[0].blocks = [{id:42,text:'Original OCR',tr:'ترجمهٔ قابل انتقال',richHtml:'<b>ترجمهٔ قابل انتقال</b>',enabled:true,bg:'white',x0:5,y0:5,x1:155,y1:45,lineH:40,dir:'rtl',align:'right'}];
+    await api(base, `/api/projects/${backupProject.id}/state`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:backupProject})});
+    await page.evaluate(async id => {await refreshProjectList(); const select=document.getElementById('projectSelect'); select.value=id; select.dispatchEvent(new Event('change',{bubbles:true}));}, backupProject.id);
+    await page.waitForFunction(id => state.project.id === id, {}, backupProject.id);
+    await page.evaluate(() => {
+      const item=state.project.images[0], block=item.blocks[0];
+      const key=`comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(item.id)}:${encodeURIComponent(block.id)}:translation`;
+      localStorage.setItem(key, JSON.stringify({html:'<p>portable draft</p>',base:inlineBlockSnapshot(block),time:'test',meta:null}));
+    });
+    await page.click('#menuBtn'); const backupDownload = nextDownload(cdp, downloads); await page.click('#backupProjectBtn');
+    const backupPath = await backupDownload; assert.ok(backupPath.endsWith('.zip') && fs.statSync(backupPath).size > 0);
+    await page.waitForFunction(() => !document.getElementById('backupDownloadLink').classList.contains('hidden'));
+    assert.equal(await page.$eval('#backupDownloadLink', el => el.download.endsWith('-backup.zip')), true);
+    page.once('dialog', dialog => dialog.accept());
+    await page.$eval('#restoreProjectInput', el => el.value = '');
+    const fileInput = await page.$('#restoreProjectInput'); await fileInput.uploadFile(backupPath);
+    await page.waitForFunction(id => state.project.id !== id && state.project.name === 'Portable project', {timeout:15000}, backupProject.id);
+    const restoredId = await page.evaluate(() => state.project.id);
+    assert.notEqual(restoredId, backupProject.id);
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr), 'ترجمهٔ قابل انتقال');
+    assert.equal(await page.evaluate(() => {
+      const item=state.project.images[0]; const key=`comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(item.id)}:42:translation`;
+      return JSON.parse(localStorage.getItem(key)).html;
+    }), '<p>portable draft</p>');
+    assert.equal((await api(base, `/api/projects/${backupProject.id}`)).images[0].blocks[0].tr, 'ترجمهٔ قابل انتقال');
+    execFileSync(python, ['-c', `
+import sys,zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    assert 'project.json' in archive.namelist() and 'browser-drafts.json' in archive.namelist()
+    assert not any(b'browser-local-secret' in archive.read(name) for name in archive.namelist())
+`, backupPath]);
+    console.log('PASS: browser downloads and restores a new project ZIP with image, text and local draft without API keys');
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');

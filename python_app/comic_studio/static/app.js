@@ -34,6 +34,7 @@ let translationPreviewAction = null;
 let translationPreviewTask = Promise.resolve();
 let overlayPreviewTask = Promise.resolve();
 let downloadUrl = null;
+let backupDownloadUrl = null;
 let previewRevision = 0;
 const imageRenderTasks = new Map();
 const imagePreviewVersions = new Map();
@@ -131,6 +132,7 @@ function startSession() {
 }
 function closeSession() {
   if (downloadUrl) { URL.revokeObjectURL(downloadUrl); downloadUrl = null; }
+  if (backupDownloadUrl) { URL.revokeObjectURL(backupDownloadUrl); backupDownloadUrl = null; }
   const body = JSON.stringify({ client_id: TAB_ID });
   try {
     if (navigator.sendBeacon?.('/api/session/close', new Blob([body], { type: 'application/json' }))) return;
@@ -189,7 +191,7 @@ function setBusy(message) {
   $('jobStatus').textContent = message || 'آماده';
   $('jobProgress').style.width = message ? '65%' : '0';
   if (translationRunning) { $('translationStatus').textContent = message || 'آماده'; $('translationProgress').style.width = message ? '65%' : '0'; }
-  document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button').forEach((el) => { el.disabled = !!message; });
+  document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button, #backupProjectBtn, #restoreProjectBtn, #restoreProjectInput, #newProjectBtn, #deleteProjectBtn, #projectSelect, #projectName').forEach((el) => { el.disabled = !!message; });
 }
 async function runJob(message, task) {
   await clearActivity(false);
@@ -519,6 +521,64 @@ function updateOcrEngineStatus() {
   $('ocrEngineStatus').textContent = engine.runtimeInstalled ? `${engine.description} وضعیت: آمادهٔ اجرا روی همین کامپیوتر.` : 'ابزار اجرای این مدل نصب نشده است؛ از «مدل‌ها و آزمایش» دکمهٔ آماده‌سازی را بزنید.';
   [...$('ocrLanguage').options].forEach((option) => { option.disabled = !engine.languages.includes(option.value); });
   if (!engine.languages.includes($('ocrLanguage').value)) $('ocrLanguage').value = engine.languages[0];
+}
+function projectBrowserDrafts(project) {
+  const prefix = `comic-studio-draft:${encodeURIComponent(project.id)}:`;
+  const valid = new Set(project.images.flatMap((image) => (image.blocks || []).filter((block) => block.id !== undefined).map((block) => `${image.id}\0${String(block.id)}`)));
+  const drafts = [];
+  try {
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index); if (!key?.startsWith(prefix)) continue;
+      const parts = key.slice(prefix.length).split(':'); if (parts.length !== 3) continue;
+      const [imageId, blockId] = parts.slice(0, 2).map(decodeURIComponent); const mode = parts[2];
+      if (!valid.has(`${imageId}\0${blockId}`) || !['ocr', 'translation'].includes(mode)) continue;
+      const value = JSON.parse(localStorage.getItem(key));
+      if (!value || typeof value.html !== 'string') throw new Error('پیش‌نویس مرورگر نامعتبر است');
+      drafts.push({ imageId, blockId, mode, value });
+    }
+  } catch { throw new Error('خواندن پیش‌نویس‌های این مرورگر ممکن نبود؛ بک‌آپ ناقص ساخته نشد.'); }
+  return drafts;
+}
+async function backupCurrentProject() {
+  if (!state.project) return;
+  await runJob('در حال ساخت بک‌آپ پروژه…', async () => {
+    await overlayPreviewTask;
+    const project = state.project; let revision;
+    do { const saving = saveProject(); revision = saveRevision; await saving; } while (state.project === project && revision !== saveRevision);
+    if (state.project !== project) throw new Error('پروژه تغییر کرد؛ دوباره بک‌آپ بگیرید.');
+    const drafts = projectBrowserDrafts(project);
+    const response = await fetch(`/api/projects/${project.id}/backup`, jsonOptions('POST', { drafts, expected_updated_at: project.updatedAt }));
+    if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `ساخت بک‌آپ ممکن نشد (HTTP ${response.status})`); }
+    const blob = await response.blob(); if (!blob.size) throw new Error('فایل بک‌آپ خالی است');
+    if (state.project !== project || revision !== saveRevision) throw new Error('پروژه هنگام ساخت بک‌آپ تغییر کرد؛ برای ثبت آخرین تغییرها دوباره بک‌آپ بگیرید.');
+    if (backupDownloadUrl) URL.revokeObjectURL(backupDownloadUrl);
+    backupDownloadUrl = URL.createObjectURL(blob);
+    const link = $('backupDownloadLink'); link.href = backupDownloadUrl;
+    link.download = `${safeName(project.name) || 'comic-studio'}-backup.zip`; link.textContent = 'دانلود دوبارهٔ بک‌آپ'; link.classList.remove('hidden'); link.click();
+    toast('بک‌آپ پروژه آماده شد؛ کلیدهای API داخل آن نیستند.');
+  });
+}
+async function restoreProjectBackup(file) {
+  if (!file || !confirm('بک‌آپ به‌صورت یک پروژهٔ جدید بازیابی شود؟ پروژه‌های فعلی حذف یا جایگزین نمی‌شوند.')) return;
+  await runJob('در حال بازیابی بک‌آپ…', async () => {
+    await saveProject(); const previous = state.project;
+    const form = new FormData(); form.append('file', file);
+    const result = await api('/api/projects/restore', { method: 'POST', body: form });
+    let failedDrafts = 0;
+    for (const draft of result.drafts || []) {
+      const key = `comic-studio-draft:${encodeURIComponent(result.project.id)}:${encodeURIComponent(draft.imageId)}:${encodeURIComponent(draft.blockId)}:${draft.mode}`;
+      try { localStorage.setItem(key, JSON.stringify(draft.value)); } catch { failedDrafts += 1; }
+    }
+    // Flush any edits made while the upload ran; never overwrite another opened project.
+    let opened = false;
+    while (state.project === previous) {
+      const saving = saveProject(); const revision = saveRevision; await saving;
+      if (state.project === previous && revision === saveRevision) { adoptProject(result.project); opened = true; break; }
+    }
+    await refreshProjectList(); $('menu').classList.add('hidden');
+    if (failedDrafts) toast(`پروژه بازیابی شد، ولی ${failedDrafts} پیش‌نویس در حافظهٔ مرورگر ذخیره نشد؛ فایل ZIP را نگه دارید.`, true);
+    else toast(opened ? 'بک‌آپ به‌صورت پروژهٔ جدید بازیابی شد.' : 'بک‌آپ بازیابی شد؛ پروژهٔ جدید را از فهرست پروژه‌ها باز کنید.');
+  });
 }
 async function importFiles(files) {
   if (!files.length) return;
@@ -1554,6 +1614,9 @@ function bindEvents() {
   bindGridDrop();
   $('menuBtn').addEventListener('click', () => $('menu').classList.toggle('hidden'));
   $('themeBtn').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('comic-studio-theme', document.body.classList.contains('light') ? 'light' : 'dark'); });
+  $('backupProjectBtn').addEventListener('click', () => backupCurrentProject().catch(() => {}));
+  $('restoreProjectBtn').addEventListener('click', () => $('restoreProjectInput').click());
+  $('restoreProjectInput').addEventListener('change', () => restoreProjectBackup($('restoreProjectInput').files?.[0]).catch(() => {}).finally(() => { $('restoreProjectInput').value = ''; }));
   $('newProjectBtn').addEventListener('click', async () => { if (!confirm('پروژهٔ جدید ساخته شود؟ پروژهٔ فعلی ذخیره می‌ماند.')) return; await saveProject(); await clearActivity(false); adoptProject(await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }))); await refreshProjectList(); });
   $('clearActivityBtn').addEventListener('click', () => clearActivity());
   $('deleteProjectBtn').addEventListener('click', async () => { if (!state.project || !confirm('این پروژه و تصاویرش برای همیشه حذف شود؟')) return; await api(`/api/projects/${state.project.id}`, { method: 'DELETE' }); const projects = await api('/api/projects'); const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' })); adoptProject(project); await refreshProjectList(); $('menu').classList.add('hidden'); });

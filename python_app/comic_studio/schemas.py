@@ -5,6 +5,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class BackupRequest(BaseModel):
+    expected_updated_at: str | None = None
+    drafts: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ProjectCreate(BaseModel):
     name: str = "پروژهٔ کمیک"
 
