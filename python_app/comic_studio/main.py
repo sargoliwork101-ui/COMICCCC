@@ -27,7 +27,8 @@ from .translation import (
     distribute_translation,
 )
 from .translation_plan import (
-    build_project_plan, build_single_plan, plan_preview, plan_signature,
+    AI_PARTS_KEY, build_project_plan, build_single_plan, call_plan, mark_completed_call, part_fingerprint,
+    plan_preview, plan_signature, saved_call,
 )
 
 
@@ -309,8 +310,17 @@ def create_app() -> FastAPI:
         if not blocks:
             activity.add("در تصاویر انتخاب‌شده متن فعالی برای ترجمه نیست", "warning")
             return state
+        calls_to_run = plan["calls"]
+        signed_plan = plan
+        if values.call_id is not None:
+            if values.provider == "free" or len(ids) != 1:
+                raise HTTPException(400, "A task requires one AI page")
+            calls_to_run = [call for call in plan["calls"] if call.get("call_id") == values.call_id]
+            if len(calls_to_run) != 1:
+                raise HTTPException(409, "بخش انتخاب‌شده تغییر کرده است؛ پیش‌نمایش تازه بگیرید.")
+            signed_plan = call_plan(plan, calls_to_run[0])
         if values.confirmation:
-            expected = plan_signature(plan, values.provider, values.source_language, translations.public_settings())
+            expected = plan_signature(signed_plan, values.provider, values.source_language, translations.public_settings())
             if values.confirmation != expected:
                 raise HTTPException(409, "متن یا تنظیمات بعد از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی و دوباره تأیید کنید.")
         source_texts = plan["source_texts"]
@@ -321,7 +331,7 @@ def create_app() -> FastAPI:
         elif values.provider == "free":
             activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ متن جمعی بیش از ۵۰۰ نویسه است و برای جلوگیری از خطای سقف، کادرها جدا و جمله‌ای ارسال می‌شوند")
         else:
-            activity.add(f"ترجمهٔ AI برای {len(plan['calls'])} صفحه و {len(blocks)} متن آغاز شد؛ هر صفحه جداگانه ارسال و ذخیره می‌شود")
+            activity.add(f"ترجمهٔ AI برای {len(calls_to_run)} درخواست و {len(blocks)} متن آغاز شد؛ هر درخواست جداگانه ارسال می‌شود")
         completed_ai = 0
         try:
             translated_blocks = [""] * len(blocks)
@@ -347,29 +357,51 @@ def create_app() -> FastAPI:
             else:
                 # Direct API clients can submit several pages too. Save each
                 # validated page atomically before sending the next one.
-                for index, call in enumerate(plan["calls"], start=1):
+                for index, call in enumerate(calls_to_run, start=1):
                     current = project(project_id)
                     if current.get("updatedAt", "") != expected_updated_at:
                         raise ProjectChangedError("پروژه در حین ترجمه تغییر کرد؛ صفحهٔ بعد ارسال نشد. صفحه‌های ذخیره‌شده حفظ شده‌اند.")
-                    if values.confirmation and values.confirmation != plan_signature(plan, values.provider, values.source_language, translations.public_settings()):
+                    if values.confirmation and values.confirmation != plan_signature(signed_plan, values.provider, values.source_language, translations.public_settings()):
                         raise HTTPException(409, "تنظیمات ترجمه تغییر کرده است؛ صفحهٔ بعد ارسال نشد. صفحه‌های ذخیره‌شده حفظ شده‌اند.")
-                    page_sources = [source_texts[i] for i in call["indices"]]
+                    settings = translations.public_settings()
+                    if saved_call(call, plan, values.provider, values.source_language, settings):
+                        continue
+                    page_sources = [source_texts[i] for i in call["indices"]] if call.get("combined") else [call["text"]]
                     label = call.get("image_name") or call["image_id"]
-                    page_index = values.batch_index if len(plan["calls"]) == 1 and values.batch_index and values.batch_total and values.batch_index <= values.batch_total else index
-                    page_total = values.batch_total if len(plan["calls"]) == 1 and values.batch_index and values.batch_total and values.batch_index <= values.batch_total else len(plan["calls"])
-                    activity.add(f"در حال ترجمهٔ صفحهٔ {page_index} از {page_total}: {label}", progress=(page_index - 1) / page_total)
+                    page_index = values.batch_index if len(calls_to_run) == 1 and values.batch_index and values.batch_total and values.batch_index <= values.batch_total else index
+                    page_total = values.batch_total if len(calls_to_run) == 1 and values.batch_index and values.batch_total and values.batch_index <= values.batch_total else len(calls_to_run)
+                    activity.add(f"در حال ترجمهٔ درخواست {page_index} از {page_total}: {label}" + (f" · بند {call['paragraph']}، بخش {call.get('part_index', 0) + 1} از {call.get('part_count', 1)}" if call.get("paragraph") else ""), progress=(page_index - 1) / page_total)
                     translated = await run_reported(
                         translations.translate, call["text"], values.source_language, values.provider, page_sources,
-                        pulse_label=f"ترجمهٔ صفحهٔ {page_index} از {page_total}",
+                        pulse_label=f"ترجمهٔ درخواست {page_index} از {page_total}",
                     )
                     page_result = distribute_translation(page_sources, translated)
-                    for block_index, text in zip(call["indices"], page_result):
-                        blocks[block_index]["tr"] = text
-                        blocks[block_index]["richHtml"] = ""
+                    completed_block = True
+                    if call.get("part_count", 1) > 1:
+                        completed_block = False
+                        block = blocks[call["indices"][0]]
+                        fingerprint = part_fingerprint(call, plan, values.provider, values.source_language, settings)
+                        saved = block.get(AI_PARTS_KEY)
+                        if not isinstance(saved, dict) or saved.get("fingerprint") != fingerprint or not isinstance(saved.get("parts"), dict):
+                            saved = {"fingerprint": fingerprint, "parts": {}}
+                        saved["parts"][str(call["part_index"])] = page_result[0]
+                        block[AI_PARTS_KEY] = saved
+                        if all(str(i) in saved["parts"] for i in range(call["part_count"])):
+                            output = saved["parts"]["0"]
+                            for i, join in enumerate(call["joins"], start=1):
+                                output += join + saved["parts"][str(i)]
+                            block["tr"] = output; block["richHtml"] = ""; block.pop(AI_PARTS_KEY, None)
+                            completed_block = True
+                    else:
+                        for block_index, text in zip(call["indices"], page_result):
+                            blocks[block_index]["tr"] = text
+                            blocks[block_index]["richHtml"] = ""
+                            blocks[block_index].pop(AI_PARTS_KEY, None)
+                    mark_completed_call(call, plan, values.provider, values.source_language, settings, completed_block)
                     store.save_if_unchanged(state, expected_updated_at)
                     expected_updated_at = state.get("updatedAt", "")
                     completed_ai += 1
-                    activity.add(f"صفحهٔ {page_index} از {page_total} ترجمه و ذخیره شد: {label}", "success", page_index / page_total)
+                    activity.add(f"درخواست {page_index} از {page_total} ترجمه و ذخیره شد: {label}", "success", page_index / page_total)
             if values.provider == "free":
                 for block, text in zip(blocks, translated_blocks):
                     block["tr"] = text
@@ -377,7 +409,7 @@ def create_app() -> FastAPI:
                 store.save_if_unchanged(state, expected_updated_at)
         except Exception as exc:
             if completed_ai:
-                message = f"{completed_ai} صفحه ذخیره شد؛ صفحهٔ ناموفق ذخیره نشد و صفحه‌های پس از آن ارسال نشدند. "
+                message = f"{completed_ai} درخواست ذخیره شد؛ درخواست ناموفق ذخیره نشد و درخواست‌های پس از آن ارسال نشدند. "
                 if isinstance(exc, HTTPException):
                     exc.detail = message + str(exc.detail)
                 else:
@@ -405,10 +437,15 @@ def create_app() -> FastAPI:
             if values.confirmation != expected:
                 raise HTTPException(409, "متن یا تنظیمات بعد از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی و دوباره تأیید کنید.")
         activity.add("ترجمهٔ دوبارهٔ یک خط آغاز شد")
+        plan = build_single_plan(values.text, values.provider)
         try:
-            translated = await run_reported(
-                translations.translate, values.text, values.source_language, values.provider,
-            )
+            responses = []
+            for call in plan["calls"]:
+                responses.append(await run_reported(translations.translate, call["text"], values.source_language, values.provider))
+            translated = responses[0] if responses else ""
+            if responses:
+                for index, join in enumerate(plan["calls"][0].get("joins", []), start=1):
+                    translated += join + responses[index]
         except Exception as exc:
             activity.add(f"ترجمهٔ دوباره ناموفق بود: {exc}", "error")
             raise

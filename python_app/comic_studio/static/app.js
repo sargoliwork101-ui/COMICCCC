@@ -543,7 +543,7 @@ function showTranslationRequestPreview(preview, action) {
   const container = $('translationPreviewRequests'); container.textContent = '';
   (preview.requests || []).forEach((request, index) => {
     const details = document.createElement('details'); details.className = 'payload-request'; details.open = (preview.requests.length === 1 || index === 0);
-    const summary = document.createElement('summary'); summary.textContent = `درخواست ${request.index}${request.imageName ? ` · صفحه: ${request.imageName}` : ''} · ${request.characters} نویسه`;
+    const summary = document.createElement('summary'); summary.textContent = `درخواست ${request.index}${request.imageName ? ` · صفحه: ${request.imageName}` : ''}${request.paragraph ? ` · بند ${request.paragraph}${request.partCount > 1 ? `، بخش ${request.part} از ${request.partCount}` : ''}` : ''} · ${request.characters} نویسه`;
     const text = document.createElement('pre'); text.dir = 'auto'; text.textContent = request.text;
     details.append(summary, text); container.appendChild(details);
   });
@@ -582,14 +582,14 @@ async function performTranslation(ids, provider, preview) {
         const result = await api(`/api/projects/${projectId}/translate`, jsonOptions('POST', { image_ids: ids, provider, source_language: language, confirmation: preview.signature }));
         adoptProject(result); setOverlayMode('translation', false); await saveProject(); await renderImagesText();
       } else {
-        if (!Array.isArray(preview.pages) || !preview.pages.length) throw new Error('فهرست صفحه‌های تأییدشده موجود نیست؛ دوباره پیش‌نمایش بگیرید.');
-        for (const [index, page] of preview.pages.entries()) {
+        if (!Array.isArray(preview.tasks) || !preview.tasks.length) throw new Error('فهرست درخواست‌های تأییدشده موجود نیست؛ دوباره پیش‌نمایش بگیرید.');
+        for (const [index, page] of preview.tasks.entries()) {
           currentPage = page.imageName || String(index + 1);
-          $('translationStatus').textContent = `صفحهٔ ${index + 1} از ${preview.pages.length}: ${currentPage}`;
+          $('translationStatus').textContent = `درخواست ${index + 1} از ${preview.tasks.length}: ${currentPage}${page.paragraph ? ` · بند ${page.paragraph}` : ''}`;
           phase = 'translation';
           const result = await api(`/api/projects/${projectId}/translate`, jsonOptions('POST', {
-            image_ids: [page.imageId], provider, source_language: language, confirmation: page.signature,
-            batch_index: index + 1, batch_total: preview.pages.length,
+            image_ids: [page.imageId], provider, source_language: language, confirmation: page.signature, call_id: page.callId,
+            batch_index: index + 1, batch_total: preview.tasks.length,
           }));
           // A successful response means the page has already been persisted.
           adoptProject(result); completed += 1; setOverlayMode('translation', false);
@@ -601,8 +601,8 @@ async function performTranslation(ids, provider, preview) {
     closeDialog('translationDialog'); toast('ترجمه روی تصویر آمد و پیش‌نمایش آماده شد');
   } catch (error) {
     if (provider !== 'free') {
-      const outcome = phase !== 'translation' ? 'ترجمهٔ این صفحه ذخیره شده، اما به‌روزرسانی پیش‌نمایش یا تنظیمات کامل نشد.' : (error.status ? 'صفحهٔ ناموفق ذخیره نشده است.' : 'وضعیت صفحهٔ جاری نامشخص است؛ قبل از ارسال دوباره گزارش و پروژه را بررسی کنید.');
-      error.message = `${completed} صفحه با موفقیت ذخیره شد؛ صفحهٔ «${currentPage || 'اول'}» متوقف شد. ${outcome} ${error.message || ''} برای ادامه فقط صفحه‌های باقی‌مانده را انتخاب کنید.`;
+      const outcome = phase !== 'translation' ? 'پاسخ این درخواست ذخیره شده، اما به‌روزرسانی پیش‌نمایش یا تنظیمات کامل نشد.' : (error.status ? 'پاسخ درخواست ناموفق ذخیره نشده است.' : 'وضعیت صفحهٔ جاری نامشخص است؛ قبل از ارسال دوباره گزارش و پروژه را بررسی کنید.');
+      error.message = `${completed} درخواست با موفقیت ذخیره شد؛ در صفحهٔ «${currentPage || 'اول'}» متوقف شد. ${outcome} ${error.message || ''} برای ادامه، فقط صفحه‌های باقی‌مانده و صفحهٔ ناتمام را انتخاب و پیش‌نمایش تازه را تأیید کنید؛ بخش‌های ذخیره‌شدهٔ صفحهٔ ناتمام دوباره فرستاده نمی‌شوند.`;
     }
     $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`; throw error;
   } finally {
