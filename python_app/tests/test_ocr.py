@@ -12,7 +12,7 @@ from PIL import Image
 
 from comic_studio.ocr import (
     ENGINE_INFO, EasyEngine, OcrError, OcrLine, RapidEngine, TesseractEngine,
-    _lines_from_rapid, _lines_from_tesseract, install_packages, recognize_image,
+    _extra_preprocess_image, _lines_from_rapid, _lines_from_tesseract, install_packages, recognize_image,
 )
 
 
@@ -196,3 +196,83 @@ def test_requested_model_catalog_marks_external_models_honestly():
     assert all(ENGINE_INFO[engine_id]["selectable"] is False for engine_id in expected)
     assert all(ENGINE_INFO[engine_id]["repository"].startswith("https://github.com/") for engine_id in expected)
     assert ENGINE_INFO["tesseract"]["selectable"] is True
+
+
+def test_bright_fallback_preprocess_has_requested_geometry_and_polarity():
+    image = Image.new("RGB", (8, 6), (20, 20, 20))
+    for x in range(2, 6):
+        for y in range(2, 4):
+            image.putpixel((x, y), (255, 255, 255))
+    processed = _extra_preprocess_image(image)
+    assert processed.size == (24, 18)
+    assert processed.mode == "RGB"
+    pixels = np.asarray(processed)
+    assert pixels.min() == 0
+    assert pixels.max() == 255
+    assert int((pixels[..., 0] == 0).sum()) > 0
+
+
+class ConditionalFallbackEngine:
+    def __init__(self, primary, fallback):
+        self.primary = primary
+        self.fallback = fallback
+        self.sizes = []
+
+    def recognize(self, image: Image.Image, language: str):
+        self.sizes.append(image.size)
+        lines = self.primary if image.size == (40, 20) else self.fallback
+        return [OcrLine(text, confidence, polygon) for text, confidence, polygon in lines]
+
+
+def line(text, confidence, polygon=None):
+    return text, confidence, polygon or [[2, 2], [20, 2], [20, 12], [2, 12]]
+
+
+def test_empty_primary_uses_bright_fallback_and_restores_coordinates():
+    engine = ConditionalFallbackEngine([], [line("BRIGHT", 0.94, [[6, 6], [60, 6], [60, 36], [6, 36]])])
+    blocks = recognize_image(engine, Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
+    assert engine.sizes == [(40, 20), (120, 60)]
+    assert [block["text"] for block in blocks] == ["BRIGHT"]
+    assert blocks[0]["x0"] == pytest.approx(2)
+    assert blocks[0]["y0"] == pytest.approx(2)
+    assert blocks[0]["x1"] == pytest.approx(20)
+    assert blocks[0]["y1"] == pytest.approx(12)
+
+
+def test_short_high_confidence_primary_still_gets_one_fallback_attempt():
+    engine = ConditionalFallbackEngine(
+        [line("I", 0.99)], [line("HI", 0.98, [[6, 6], [60, 6], [60, 36], [6, 36]])],
+    )
+    blocks = recognize_image(engine, Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
+    assert engine.sizes == [(40, 20), (120, 60)]
+    assert blocks[0]["text"] == "HI"
+
+
+def test_worse_fallback_never_replaces_low_confidence_primary():
+    engine = ConditionalFallbackEngine([line("abc", 0.54)], [line("x", 0.99)])
+    blocks = recognize_image(engine, Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
+    assert len(engine.sizes) == 2
+    assert [block["text"] for block in blocks] == ["abc"]
+    assert blocks[0]["conf"] == pytest.approx(54)
+
+
+def test_better_confidence_can_replace_a_weak_primary_with_same_length():
+    engine = ConditionalFallbackEngine([line("abc", 0.54)], [line("xyz", 0.91)])
+    blocks = recognize_image(engine, Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
+    assert len(engine.sizes) == 2
+    assert [block["text"] for block in blocks] == ["xyz"]
+
+
+def test_strong_primary_does_not_run_fallback(monkeypatch):
+    engine = ConditionalFallbackEngine([line("GOOD TEXT", 0.96)], [])
+    monkeypatch.setattr("comic_studio.ocr._extra_preprocess_image", lambda image: pytest.fail("fallback ran"))
+    blocks = recognize_image(engine, Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
+    assert engine.sizes == [(40, 20)]
+    assert blocks[0]["text"] == "GOOD TEXT"
+
+
+def test_fallback_preprocess_failure_returns_primary(monkeypatch):
+    engine = ConditionalFallbackEngine([line("abc", 0.54)], [])
+    monkeypatch.setattr("comic_studio.ocr._extra_preprocess_image", lambda image: (_ for _ in ()).throw(RuntimeError("no cv2")))
+    blocks = recognize_image(engine, Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
+    assert blocks[0]["text"] == "abc"

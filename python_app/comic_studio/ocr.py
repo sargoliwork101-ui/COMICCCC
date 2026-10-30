@@ -18,6 +18,13 @@ from PIL import Image, ImageOps
 
 from .paths import models_dir
 
+# Optional bright-white-text fallback. The original OCR path always runs first.
+EXTRA_PREPROCESS_SCALE = 3
+EXTRA_PREPROCESS_THRESHOLD = 200
+EXTRA_PREPROCESS_MIN_CONFIDENCE = 0.55
+EXTRA_PREPROCESS_MIN_CHARS = 3
+EXTRA_PREPROCESS_ENABLED = True
+
 LANGUAGES = {
     "eng": {"name": "English", "source": "en"},
     "kor": {"name": "한국어", "source": "ko"},
@@ -615,15 +622,16 @@ def preprocess(image: Image.Image, contrast: bool, precise: bool) -> tuple[Image
     return image, scale
 
 
-def recognize_image(
+def _recognize_image_primary(
     engine: Any,
     image: Image.Image,
     language: str,
     contrast: bool = True,
     precise: bool = True,
     min_confidence: float = 0.35,
+    input_scale: float = 1.0,
 ) -> list[dict[str, Any]]:
-    """Run OCR in bounded slices and return ordered physical lines with exact geometry."""
+    """The established OCR path; input_scale only restores fallback geometry."""
     prepared, scale = preprocess(image, contrast, precise)
     width, height = prepared.size
     slice_height = 3000
@@ -649,8 +657,9 @@ def recognize_image(
     lines.sort(key=lambda line: (round(((line.box[1] + line.box[3]) / 2) / 12) * 12, line.box[0], line.box[1]))
     blocks = []
     for index, line in enumerate(lines, start=1):
-        x0, y0, x1, y1 = [value / scale for value in line.box]
-        polygon = [[x / scale, y / scale] for x, y in line.polygon]
+        coordinate_scale = scale * input_scale
+        x0, y0, x1, y1 = [value / coordinate_scale for value in line.box]
+        polygon = [[x / coordinate_scale, y / coordinate_scale] for x, y in line.polygon]
         line_h = max(8.0, y1 - y0)
         blocks.append({
             "id": index,
@@ -673,3 +682,78 @@ def recognize_image(
             "color": None,
         })
     return blocks
+
+
+def _extra_preprocess_image(image: Image.Image) -> Image.Image:
+    """Isolate very bright letter fills, then make them dark on white."""
+    import cv2
+
+    rgb = np.asarray(ImageOps.exif_transpose(image).convert("RGB"))
+    enlarged = cv2.resize(
+        rgb, None, fx=EXTRA_PREPROCESS_SCALE, fy=EXTRA_PREPROCESS_SCALE,
+        interpolation=cv2.INTER_CUBIC,
+    )
+    gray = cv2.cvtColor(enlarged, cv2.COLOR_RGB2GRAY)
+    _, bright = cv2.threshold(gray, EXTRA_PREPROCESS_THRESHOLD, 255, cv2.THRESH_BINARY)
+    inverted = cv2.bitwise_not(bright)
+    return Image.fromarray(inverted, mode="L").convert("RGB")
+
+
+def _result_metrics(blocks: list[dict[str, Any]]) -> tuple[int, float]:
+    """Return valid character count and character-weighted confidence."""
+    texts = [str(block.get("text", "")) for block in blocks]
+    counts = [sum(char.isalnum() for char in text) for text in texts]
+    total = sum(counts)
+    if not total:
+        return 0, 0.0
+    weighted = sum(
+        max(0.0, min(1.0, float(block.get("conf", 0.0)) / 100.0)) * count
+        for block, count in zip(blocks, counts)
+    )
+    return total, weighted / total
+
+
+def _needs_extra_preprocess(blocks: list[dict[str, Any]]) -> bool:
+    if not blocks:
+        return True
+    chars, confidence = _result_metrics(blocks)
+    return chars < EXTRA_PREPROCESS_MIN_CHARS or confidence < EXTRA_PREPROCESS_MIN_CONFIDENCE
+
+
+def _better_fallback(candidate: list[dict[str, Any]], primary: list[dict[str, Any]]) -> bool:
+    candidate_chars, candidate_confidence = _result_metrics(candidate)
+    primary_chars, primary_confidence = _result_metrics(primary)
+    if not candidate_chars:
+        return False
+    if not primary_chars:
+        return True
+    # More text must not come with a substantial confidence regression.
+    if candidate_chars > primary_chars:
+        return candidate_confidence >= primary_confidence - 0.05
+    if candidate_chars == primary_chars:
+        return candidate_confidence > primary_confidence + 0.005
+    return False
+
+
+def recognize_image(
+    engine: Any,
+    image: Image.Image,
+    language: str,
+    contrast: bool = True,
+    precise: bool = True,
+    min_confidence: float = 0.35,
+) -> list[dict[str, Any]]:
+    """Run the established OCR first, using bright-text preprocessing only as fallback."""
+    primary = _recognize_image_primary(engine, image, language, contrast, precise, min_confidence)
+    if not EXTRA_PREPROCESS_ENABLED or not _needs_extra_preprocess(primary):
+        return primary
+    try:
+        fallback_image = _extra_preprocess_image(image)
+        fallback = _recognize_image_primary(
+            engine, fallback_image, language, False, False, min_confidence,
+            input_scale=EXTRA_PREPROCESS_SCALE,
+        )
+    except Exception:
+        # An optional preprocessing backend must never break the established OCR result.
+        return primary
+    return fallback if _better_fallback(fallback, primary) else primary
