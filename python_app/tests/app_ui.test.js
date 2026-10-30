@@ -58,7 +58,7 @@ const makeTranslationPreview = (body, single = false) => {
   const liveProject = vm.runInContext('state.project', context);
   const ids = single ? [] : (body.image_ids || liveProject.images.map((image) => image.id));
   const texts = single ? [body.text] : liveProject.images.filter((image) => ids.includes(image.id)).flatMap((image) => image.blocks).filter((block) => block.enabled !== false && String(block.text || '').trim()).map((block) => block.text.trim());
-  const collective = texts.join('␞');
+  const collective = texts.join('\n');
   const requests = provider === 'free' && collective.length <= 500 ? [collective] : provider === 'free' ? texts : [`Source language: English\n\n${collective}`];
   return {
     provider, providerLabel: provider === 'free' ? 'Google Translate (fallback: MyMemory)' : 'Selected AI', model: provider === 'free' ? '' : 'Mock model', base_url: provider === 'free' ? '' : 'https://ai.test/v1',

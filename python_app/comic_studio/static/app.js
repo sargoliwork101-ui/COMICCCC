@@ -1005,13 +1005,13 @@ function setBlockVisibility(block, visible) {
   const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
   card?.classList.toggle('disabled', !block.enabled);
   const toggle = card?.querySelector('[data-visibility]'); if (toggle) toggle.checked = block.enabled;
-  renderEditorBoxes(); scheduleSave();
+  renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
 }
 function setBlockTextMode(block, mode) {
   block.textMode = normalizeBlockTextMode(mode);
   const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
   const selector = card?.querySelector('[data-text-mode]'); if (selector) selector.value = block.textMode;
-  renderEditorBoxes(); scheduleSave();
+  renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
 }
 function renderEditorBoxes() {
   const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return; layer.textContent = '';
@@ -1021,8 +1021,8 @@ function renderEditorBoxes() {
     if (!display.enabled || !display.tr?.trim()) return; const box = boxOf(display); const scale = state.editorScale; const el = document.createElement('div'); el.className = `editor-box${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; el.dataset.id = block.id;
     el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
     const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
-    const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(block, false); });
-    const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(block, displayMode === 'ocr' ? 'translation' : 'ocr'); });
+    const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('pointerdown', (event) => event.stopPropagation()); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(block, false); });
+    const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('pointerdown', (event) => event.stopPropagation()); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(block, displayMode === 'ocr' ? 'translation' : 'ocr'); });
     const text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text.innerHTML = display.richHtml || plainToHtml(display.tr); styleRichElement(text, display, scale);
     if (displayMode === 'ocr') wireOcrElement(text, block); else wireRichElement(text, block);
     el.append(move, visibility, language, text); ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });

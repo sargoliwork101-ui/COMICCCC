@@ -100,6 +100,18 @@ async function editorRenderDifference(page) {
   });
 }
 
+async function secondSourceDarkPixels(page) {
+  return page.evaluate(() => {
+    const canvas = document.getElementById('editorCanvas');
+    const pixels = canvas.getContext('2d').getImageData(165, 75, 145, 45).data;
+    let dark = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index] < 80 && pixels[index + 1] < 80 && pixels[index + 2] < 80) dark += 1;
+    }
+    return dark;
+  });
+}
+
 function nextDownload(cdp, directory) {
   return new Promise((resolve, reject) => {
     let filename = null;
@@ -253,8 +265,8 @@ function nextDownload(cdp, directory) {
     await page.keyboard.press('Escape'); await page.click('#translateBtn');
     await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(translationRequests.length, 0, 'opening the exact payload preview must not send a translation');
-    assert.ok(await page.$eval('#translationPreviewRequests', (element) => element.textContent.includes('SOURCE ONE') && element.textContent.includes('␞') && element.textContent.includes('SOURCE TWO')));
-    assert.equal(await page.$eval('#translationPreviewRequests pre', (element) => element.textContent), 'SOURCE ONE␞SOURCE TWO␞SOURCE THREE', 'the real preview must not add newlines around separators');
+    assert.ok(await page.$eval('#translationPreviewRequests', (element) => element.textContent.includes('SOURCE ONE') && element.textContent.includes('SOURCE TWO') && !element.textContent.includes('␞')));
+    assert.equal(await page.$eval('#translationPreviewRequests pre', (element) => element.textContent), 'SOURCE ONE\nSOURCE TWO\nSOURCE THREE', 'the real preview must use ordinary line-based payloads');
     assert.ok(await page.$eval('#translationPreviewDestination', (element) => element.textContent.includes('Google Translate') && element.textContent.includes('MyMemory')));
     await page.click('#translationPreviewCancel');
     assert.equal(translationRequests.length, 0, 'cancelling the real browser preview must not send a translation');
@@ -280,6 +292,8 @@ function nextDownload(cdp, directory) {
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await editorRenderDifference(page), 0, 'typing must refresh the same final renderer without rebuilding the editor field');
     await page.select('#blockList .block-card[data-id="2"] [data-text-mode]', 'ocr');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await editorRenderDifference(page), 0, 'changing one line language must immediately refresh the real editor canvas');
     await page.click('#editorSelectAll'); await page.click('#editorSelectNone');
     await page.click('#editorBoxes .editor-box[data-id="2"] .box-move');
     await page.keyboard.down('Control');
@@ -293,7 +307,8 @@ function nextDownload(cdp, directory) {
       return state.selectedBlockIds.length === 3 && boxes.every((box) => box.x0 === boxes[0].x0 && box.x1 - box.x0 === 145 && box.y1 - box.y0 === 45) && blocks.map((block) => block.x0).join(',') === '5,165,10';
     }), true, 'real controls must match all three boxes to the first selection, align them, and preserve OCR coordinates');
 
-    await page.click('#editorSelectNone');
+    await page.$eval('#editorSelectNone', (button) => button.click());
+    assert.deepEqual(await page.evaluate(() => state.selectedBlockIds), [], 'the drag setup must clear the previous multi-selection');
     const overlapDrag = await page.evaluate(() => {
       const blocks = state.project.images[0].blocks; const source = boxOf(blocks[1]); const target = boxOf(blocks[0]);
       const rect = document.querySelector('#editorBoxes .editor-box[data-id="2"] .box-move').getBoundingClientRect();
@@ -302,18 +317,30 @@ function nextDownload(cdp, directory) {
     await page.mouse.move(overlapDrag.x, overlapDrag.y); await page.mouse.down();
     await page.mouse.move(overlapDrag.x + overlapDrag.dx, overlapDrag.y + overlapDrag.dy, { steps: 12 }); await page.mouse.up();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    assert.equal(await page.evaluate(() => {
+    const overlapAfterDrag = await page.evaluate(() => {
       const blocks = state.project.images[0].blocks; const first = boxOf(blocks[0]); const second = boxOf(blocks[1]);
-      return Math.abs(first.x0 - second.x0) < 1 && Math.abs(first.y0 - second.y0) < 1;
-    }), true, 'the real drag must overlap the first two boxes for the preview regression');
+      return { first, second, scale: state.editorScale, selected: state.selectedBlockIds, overlaps: Math.abs(first.x0 - second.x0) < 1 && Math.abs(first.y0 - second.y0) < 1 };
+    });
+    assert.equal(overlapAfterDrag.overlaps, true, `the real drag must overlap the first two boxes: ${JSON.stringify(overlapAfterDrag)}`);
     assert.equal(await editorRenderDifference(page), 0, 'editor canvas must be pixel-identical to the final renderer even with overlapping boxes');
     console.log('PASS: editor canvas matches final rendering with overlapping boxes');
     await page.mouse.move(overlapDrag.x + overlapDrag.dx, overlapDrag.y + overlapDrag.dy); await page.mouse.down();
     await page.mouse.move(overlapDrag.x, overlapDrag.y, { steps: 12 }); await page.mouse.up();
-    await page.click('#blockList .block-card[data-id="2"] [data-visibility]');
-    assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,false,true');
+    const coveredSourceDarkPixels = await secondSourceDarkPixels(page);
+    await sleep(400);
+    await page.$eval('#editorBoxes .editor-box[data-id="2"] .box-visibility', (eye) => eye.scrollIntoView({ block: 'center', inline: 'center' }));
+    await sleep(50);
+    await page.click('#editorBoxes .editor-box[data-id="2"] .box-visibility');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,false,true', 'the real eye click must toggle only its own block');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const revealedSourceDarkPixels = await secondSourceDarkPixels(page);
+    assert.ok(revealedSourceDarkPixels > coveredSourceDarkPixels + 10, `the eye must restore original source pixels, not just remove the DOM box (${coveredSourceDarkPixels} -> ${revealedSourceDarkPixels})`);
+    assert.equal(await editorRenderDifference(page), 0, 'the editor canvas must rerender after the eye hides a line');
+    console.log(`PASS: eye restores original source pixels beneath a hidden translation (${coveredSourceDarkPixels} -> ${revealedSourceDarkPixels} dark pixels)`);
     await page.click('#blockList .block-card[data-id="2"] [data-visibility]');
     assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,true,true');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await editorRenderDifference(page), 0, 'the editor canvas must rerender when the sidebar shows the line again');
     let uploaded = page.waitForResponse((response) => response.url().endsWith('/rendered') && response.request().method() === 'POST');
     await page.click('#editorApply'); await uploaded;
     uploaded = page.waitForResponse((response) => response.url().endsWith('/rendered') && response.request().method() === 'POST');

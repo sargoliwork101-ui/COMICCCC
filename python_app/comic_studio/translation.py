@@ -78,33 +78,48 @@ def split_free_query(text: str, limit: int = MAX_FREE_QUERY_CHARS) -> list[str]:
 
 
 def combine_translation_texts(source_texts: list[str]) -> str:
-    """Combine all blocks with unambiguous boundaries in one provider payload."""
-    return TRANSLATION_SEPARATOR.join(
+    """Join enabled OCR blocks with ordinary newlines, preserving inner lines."""
+    return "\n".join(
         str(source or "").replace(TRANSLATION_SEPARATOR, " ").strip() for source in source_texts
     )
 
 
+def _translation_lines(value: Any) -> list[str]:
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip().split("\n")
+
+
 def distribute_translation(source_texts: list[str], translated: str) -> list[str]:
-    """Split only at our separators; never guess or report a false successful mapping."""
+    """Return exactly each source block's share of a line-based translation."""
     count = len(source_texts)
     text = str(translated or "").strip()
     if not count:
         return []
-    if count == 1:
-        result = text.replace(TRANSLATION_SEPARATOR, "").strip()
-        if not result:
-            raise TranslationError("مترجم پاسخ خالی برگرداند؛ متن در کادر قرار نگرفت.")
-        return [result]
-    if TRANSLATION_SEPARATOR not in text:
-        raise TranslationError("جداکنندهٔ داخلی در پاسخ مترجم وجود ندارد؛ تقسیم متن انجام نشد.")
-    parts = [part.strip() for part in text.split(TRANSLATION_SEPARATOR)]
-    if len(parts) != count:
+    # Older provider responses remain readable, but new requests never contain
+    # or ask for this marker.
+    if TRANSLATION_SEPARATOR in text:
+        parts = [part.strip() for part in text.split(TRANSLATION_SEPARATOR)]
+        if len(parts) != count:
+            raise TranslationError(
+                f"تعداد جداکننده‌های پاسخ مترجم درست نیست؛ {count} بخش لازم بود اما {len(parts)} بخش رسید."
+            )
+        if any(not part for part in parts):
+            raise TranslationError("بخشی از پاسخ مترجم بین جداکننده‌ها خالی است؛ ترجمهٔ ناقص در کادرها قرار نگرفت.")
+        return parts
+    line_counts = [len(_translation_lines(source)) for source in source_texts]
+    translated_lines = _translation_lines(text)
+    expected = sum(line_counts)
+    if len(translated_lines) != expected:
         raise TranslationError(
-            f"تعداد جداکننده‌های پاسخ مترجم درست نیست؛ {count} بخش لازم بود اما {len(parts)} بخش رسید."
+            f"تعداد خطوط پاسخ ({len(translated_lines)}) با متن مبدأ ({expected}) یکسان نیست؛ هیچ ترجمه‌ای جابه‌جا نشد."
         )
-    if any(not part for part in parts):
-        raise TranslationError("بخشی از پاسخ مترجم بین جداکننده‌ها خالی است؛ ترجمهٔ ناقص در کادرها قرار نگرفت.")
-    return parts
+    if any(not line.strip() for line in translated_lines):
+        raise TranslationError("پاسخ ترجمه خط خالی دارد؛ هیچ ترجمه‌ای جابه‌جا نشد.")
+    result = []
+    cursor = 0
+    for line_count in line_counts:
+        result.append("\n".join(line.strip() for line in translated_lines[cursor:cursor + line_count]))
+        cursor += line_count
+    return result
 
 
 _ENCODED_LINE_BREAK = re.compile(r"&(?:amp;)?#(?:0*10|0*13|x0*a|x0*d);?", re.IGNORECASE)
@@ -266,11 +281,10 @@ def _ai_prompt(source_language: str) -> tuple[str, str]:
     source = LANGUAGES.get(source_language, LANGUAGES["eng"])["name"]
     return (
         "Translate the entire input to natural Persian using all paragraphs and comic bubbles together as shared context. "
-        "Translate each paragraph or bubble as one continuous unit, not as isolated lines. "
-        "Keep the original order and preserve names, numbers and sound effects. "
-        f"The {TRANSLATION_SEPARATOR} character is an internal record separator, not source text. "
-        f"Keep every {TRANSLATION_SEPARATOR} exactly unchanged, on its own line, and in the original order; never translate, remove, add, or duplicate it. "
-        "Return only the translation and the original separators, without adding labels, numbers, other markers, or explanations."
+        "Use every line as context while preserving the original order, names, numbers and sound effects. "
+        "Return exactly one output line for every input line, with the same number of lines. "
+        "Never merge, split, add, remove, or reorder lines; keep each translated line on one ordinary text line. "
+        "Return only the translation without adding labels, numbers, markers, code fences, or explanations."
     ), source
 
 
@@ -442,9 +456,9 @@ class TranslationService:
                     if not translated.strip():
                         raise TranslationError("این کلید پاسخ قابل‌استفاده‌ای نداشت.")
                     normalized = normalize_translation_text(translated)
-                    # A collective reply is usable only if every existing ␞ box
-                    # can be restored unambiguously; otherwise try the next key.
-                    distribute_translation([""] * (text.count(TRANSLATION_SEPARATOR) + 1), normalized)
+                    # Validate the exact total line count before accepting this key;
+                    # the project layer then groups lines by each source block.
+                    distribute_translation([text], normalized)
                     emit(f"پاسخ ترجمه با {name} دریافت شد.", "success")
                     return normalized
                 except Exception as exc:

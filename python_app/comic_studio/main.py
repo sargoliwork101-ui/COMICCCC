@@ -312,7 +312,7 @@ def create_app() -> FastAPI:
         elif values.provider == "free":
             activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ متن جمعی بیش از ۵۰۰ نویسه است و برای جلوگیری از خطای سقف، کادرها جدا و جمله‌ای ارسال می‌شوند")
         else:
-            activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همه با جداکنندهٔ داخلی در یک درخواست می‌روند")
+            activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همه در یک درخواست خط‌به‌خط می‌روند")
         try:
             translated_blocks = [""] * len(blocks)
             if combined_free:
@@ -339,7 +339,7 @@ def create_app() -> FastAPI:
                     translations.translate, combined_source, values.source_language, values.provider,
                     pulse_label="ترجمهٔ مشترک همهٔ متن‌های انتخاب‌شده",
                 )
-                activity.add("پاسخ مشترک AI رسید؛ در حال تقسیم از روی جداکننده‌ها", progress=0.5)
+                activity.add("پاسخ مشترک AI رسید؛ در حال تقسیم خطوط بر اساس تعداد خطوط هر کادر", progress=0.5)
                 translated_blocks = distribute_translation(source_texts, translated)
             for block, text in zip(blocks, translated_blocks):
                 block["tr"] = text

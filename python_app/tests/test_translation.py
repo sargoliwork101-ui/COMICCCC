@@ -40,10 +40,10 @@ def test_openai_payload_and_response(tmp_path, monkeypatch):
     assert captured["json"]["model"] == "demo"
     prompt = captured["json"]["messages"][0]["content"]
     assert "entire input" in prompt
-    assert "not as isolated lines" in prompt
+    assert "one output line for every input line" in prompt
     assert "without adding labels" in prompt
-    assert TRANSLATION_SEPARATOR in prompt
-    assert "unchanged" in prompt
+    assert TRANSLATION_SEPARATOR not in prompt
+    assert "same number of lines" in prompt
 
 
 def test_free_fallback_and_empty_text(tmp_path, monkeypatch):
@@ -132,24 +132,25 @@ def test_unknown_provider_is_rejected(tmp_path, monkeypatch):
         service.translate("hello", "eng", provider="unknown")
 
 
-def test_translation_separator_splits_exact_blocks_not_inner_newlines():
-    sources = ["first line", "second bubble", "third line"]
+def test_translation_lines_follow_each_block_line_count_without_markers():
+    sources = ["first line\nsecond line", "second bubble", "third line\ncontinuation"]
     payload = combine_translation_texts(sources)
-    assert payload == f"first line{TRANSLATION_SEPARATOR}second bubble{TRANSLATION_SEPARATOR}third line"
-    assert f"\n{TRANSLATION_SEPARATOR}" not in payload and f"{TRANSLATION_SEPARATOR}\n" not in payload
+    assert payload == "first line\nsecond line\nsecond bubble\nthird line\ncontinuation"
+    assert TRANSLATION_SEPARATOR not in payload
+    translated = "ترجمهٔ اول\nخط دوم\nحباب دوم\nخط سوم\nادامه"
+    assert distribute_translation(sources, translated) == ["ترجمهٔ اول\nخط دوم", "حباب دوم", "خط سوم\nادامه"]
     example = combine_translation_texts(["WHY ARE YOU", "RUNNING AROUND", "SO FRIVOLOUSLY,", "MY CHILD?"])
-    assert example == f"WHY ARE YOU{TRANSLATION_SEPARATOR}RUNNING AROUND{TRANSLATION_SEPARATOR}SO FRIVOLOUSLY,{TRANSLATION_SEPARATOR}MY CHILD?"
-    translated = f"ترجمهٔ اول\n{TRANSLATION_SEPARATOR}\nخط دوم\nادامهٔ همان کادر\n{TRANSLATION_SEPARATOR}\nترجمهٔ سوم"
-    assert distribute_translation(sources, translated) == ["ترجمهٔ اول", "خط دوم\nادامهٔ همان کادر", "ترجمهٔ سوم"]
+    assert example == "WHY ARE YOU\nRUNNING AROUND\nSO FRIVOLOUSLY,\nMY CHILD?"
+    assert distribute_translation(["one", "two", "three"], f"یک{TRANSLATION_SEPARATOR}دو{TRANSLATION_SEPARATOR}سه") == ["یک", "دو", "سه"]
 
 
 def test_translation_distribution_rejects_missing_or_empty_sections():
     with pytest.raises(TranslationError):
-        distribute_translation(["one", "two"], "یک\nدو")
+        distribute_translation(["one", "two"], "یک دو")
     with pytest.raises(TranslationError):
-        distribute_translation(["one", "two"], f"یک{TRANSLATION_SEPARATOR}")
+        distribute_translation(["one", "two"], "یک\nدو\nسه")
     with pytest.raises(TranslationError):
-        distribute_translation(["one", "two"], f"یک{TRANSLATION_SEPARATOR}دو{TRANSLATION_SEPARATOR}سه")
+        distribute_translation(["one", "two", "three"], "یک\n\nسه")
 
 
 def test_provider_settings_keep_models_and_keys_separate_without_exposing_secrets(tmp_path, monkeypatch):
@@ -275,12 +276,12 @@ def test_malformed_collective_response_uses_next_key(tmp_path, monkeypatch):
     def fake_post(url, **kwargs):
         key = kwargs["headers"]["Authorization"]
         calls.append(key)
-        text = "فقط یک بخش" if key == "Bearer bad-key" else f"بخش اول{TRANSLATION_SEPARATOR}بخش دوم"
+        text = "فقط یک خط" if key == "Bearer bad-key" else "بخش اول\nبخش دوم"
         return httpx.Response(200, json={"choices": [{"message": {"content": text}}]}, request=httpx.Request("POST", url))
 
     monkeypatch.setattr(httpx, "post", fake_post)
     source = combine_translation_texts(["first", "second"])
-    assert service.translate(source, "eng") == f"بخش اول{TRANSLATION_SEPARATOR}بخش دوم"
+    assert service.translate(source, "eng") == "بخش اول\nبخش دوم"
     assert calls == ["Bearer bad-key", "Bearer good-key"]
 
 

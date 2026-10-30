@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.28">
+  <link rel="stylesheet" href="/style.css?v=3.29">
 </head>
 <body>
   <header class="topbar">
@@ -102,7 +102,7 @@
     <p id="translationStatus" class="hint" role="status">آماده</p>
     <div class="bar"><div id="translationProgress" class="fill"></div></div>
     <div id="translationActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
-    <p class="hint">ابتدا متن کامل همهٔ درخواست‌ها و مقصد را می‌بینید؛ فقط تأیید صریح شما ارسال را آغاز می‌کند. در سرویس رایگان، متن OCR همهٔ کادرهای فعال انتخاب‌شده با جداکنندهٔ ␞ مستقیم و بدون خط جدید اطراف آن جمع می‌شود و اگر طولش حداکثر ۵۰۰ نویسه باشد، فقط در یک query می‌رود و پاسخ دقیقاً بین همان کادرها تقسیم می‌شود. اگر متن جمعی بیشتر از ۵۰۰ نویسه باشد، کادرها برای جلوگیری از خطای سقف جدا می‌روند و هر query در آخرین ته‌جمله قبل از سقف بسته می‌شود. با API هوش مصنوعی، همهٔ متن‌ها در یک درخواست جمعی با ␞ می‌روند. جداکننده در متن نهایی دیده نمی‌شود و نتیجه فقط بعد از موفقیت همهٔ بخش‌ها ذخیره می‌شود.</p>
+    <p class="hint">ابتدا متن کامل همهٔ درخواست‌ها و مقصد را می‌بینید؛ فقط تأیید صریح شما ارسال را آغاز می‌کند. در سرویس رایگان، متن OCR همهٔ کادرهای فعال انتخاب‌شده با خط جدید معمولی جمع می‌شود و اگر طولش حداکثر ۵۰۰ نویسه باشد، فقط در یک query می‌رود. پاسخ باید برای هر خط مبدأ دقیقاً یک خط ترجمه داشته باشد؛ خطوط بر اساس تعداد خطوط هر کادر به همان کادر برمی‌گردند. اگر متن جمعی بیشتر از ۵۰۰ نویسه باشد، کادرها برای جلوگیری از خطای سقف جدا می‌روند و هر query در آخرین ته‌جمله قبل از سقف بسته می‌شود. با API هوش مصنوعی نیز همهٔ متن‌ها در یک درخواست جمعی خط‌به‌خط می‌روند. نتیجه فقط بعد از بررسی تعداد خطوط و موفقیت همهٔ بخش‌ها ذخیره می‌شود.</p>
   </dialog>
 
   <dialog id="modelsDialog" class="dlg wide-dialog">
@@ -158,15 +158,15 @@
     <form method="dialog" class="dialog-head"><h2>بررسی متن قبل از ترجمه</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
     <p id="translationPreviewSummary" class="payload-summary"></p>
     <p id="translationPreviewDestination" class="hint" dir="auto"></p>
-    <p class="hint">هنوز هیچ متنی برای ترجمه ارسال نشده است. متن کامل هر درخواست را باز کنید و دقیقاً بررسی کنید؛ ␞ فقط مرز داخلی کادرهاست.</p>
+    <p class="hint">هنوز هیچ متنی برای ترجمه ارسال نشده است. متن کامل هر درخواست را باز کنید و دقیقاً بررسی کنید؛ هر خط مبدأ باید دقیقاً یک خط ترجمه در پاسخ داشته باشد.</p>
     <div id="translationPreviewRequests" class="payload-requests"></div>
     <details id="translationPreviewSystemWrap" class="payload-system"><summary>دستور سیستم همراه درخواست AI</summary><pre id="translationPreviewSystem" dir="auto"></pre></details>
     <p id="translationPreviewNote" class="hint"></p>
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.28"></script>
-  <script src="/groups.js?v=3.28"></script>
-  <script src="/app.js?v=3.28"></script>
+  <script src="/typeset.js?v=3.29"></script>
+  <script src="/groups.js?v=3.29"></script>
+  <script src="/app.js?v=3.29"></script>
 </body>
 </html>
