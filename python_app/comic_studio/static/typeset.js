@@ -114,7 +114,7 @@
   // مارکرهای قدیمی هم از همان مسیر قدیمی پشتیبانی می‌شوند.
   function richHtmlWords(html) {
     if (!html || typeof document === 'undefined') return [];
-    const root = document.createElement('div');
+    const root = document.createElement('template');
     root.innerHTML = html;
     const words = [];
     let pendingLineBreak = false, pendingSpace = false;
@@ -133,19 +133,25 @@
       }
       if (node.nodeType !== 1) return;
       const tag = node.tagName.toLowerCase();
+      if (['script', 'style', 'iframe', 'object', 'embed', 'svg', 'math'].includes(tag)) return;
+      // Canvas export has no DOM or clickable links. Show an explicit placeholder
+      // for images and a textual approximation of tables and separators.
+      if (tag === 'img') { const label = node.getAttribute('alt')?.trim() || 'تصویر'; words.push({ t: `[${label}]`, ...inherited, spaceBefore: pendingSpace, lineBreakBefore: pendingLineBreak }); pendingSpace = false; pendingLineBreak = false; return; }
+      if (tag === 'hr') { if (words.length) pendingLineBreak = true; words.push({ t: node.hasAttribute('data-readmore') ? '[ادامه مطلب]' : '────────', ...inherited, spaceBefore: false, lineBreakBefore: pendingLineBreak }); pendingLineBreak = true; pendingSpace = false; return; }
+      if ((tag === 'td' || tag === 'th') && node.previousElementSibling) { words.push({ t: '|', ...inherited, spaceBefore: true, lineBreakBefore: pendingLineBreak }); pendingLineBreak = false; pendingSpace = true; }
       if (tag === 'br') {
         // Consecutive explicit breaks represent real empty lines, not a single break.
         if (pendingLineBreak) words.push({ t: '', ...inherited, spaceBefore: false, lineBreakBefore: true });
         pendingLineBreak = true; pendingSpace = false; return;
       }
-      const isBlock = ['div', 'p', 'li'].includes(tag);
+      const isBlock = ['div', 'p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'blockquote', 'tr'].includes(tag);
       if (isBlock && words.length) { pendingLineBreak = true; pendingSpace = false; }
       const style = node.style || {};
       const next = { ...inherited };
       if (isBlock && ['left', 'center', 'right', 'justify'].includes(style.textAlign)) next.lineAlign = style.textAlign;
       const direction = style.direction || node.getAttribute('dir');
       if (isBlock && (direction === 'ltr' || direction === 'rtl')) next.lineDir = direction;
-      if (tag === 'b' || tag === 'strong') next.bold = true;
+      if (tag === 'b' || tag === 'strong' || /^h[1-6]$/.test(tag) || tag === 'th') next.bold = true;
       if (tag === 'i' || tag === 'em') next.italic = true;
       if (tag === 'u') next.underline = true;
       if (tag === 's' || tag === 'strike' || tag === 'del') next.strike = true;
@@ -172,7 +178,7 @@
       [...node.childNodes].forEach((child) => walk(child, next, childList));
       if (isBlock && words.length) pendingLineBreak = true;
     };
-    [...root.childNodes].forEach((node) => walk(node));
+    [...root.content.childNodes].forEach((node) => walk(node));
     return words;
   }
 
@@ -289,7 +295,10 @@
     const sourceFills = [], targetFills = [], textJobs = [];
 
     blocks.forEach((b) => {
-      if (!b.enabled || !b.tr || !b.tr.trim()) return;
+      if (!b.enabled) return;
+      const sourceText = String(b.tr || '').trim();
+      const richWords = !b._plainText && b.richHtml ? richHtmlWords(b.richHtml) : null;
+      if (!sourceText && !richWords?.some((word) => String(word.t || '').trim())) return;
       const st = blockStyle(b);
       const fontPrefix = `${st.italic ? 'italic ' : ''}${st.bold ? '700' : '400'} `;
       const pad = Math.max(4, Math.round(b.lineH * 0.3));
@@ -325,13 +334,12 @@
       if (targetFill) targetFills.push([targetFill, layoutBox.x0, layoutBox.y0, bw, bh]);
 
       const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
-      const sourceText = b.tr.trim();
       // Justified text uses word runs too, even for plain OCR; literal OCR markers remain literal.
       const inline = st.align === 'justify' || (!b._plainText && (!!b.richHtml || hasInlineMarks(sourceText)));
       // سایز دستی کاربر جای حالت خودکار می‌نشیند؛ در غیر این صورت بهترین سایز برای جاشدن در کادر
       let f;
       if (inline) {
-        const inWords = b._plainText ? plainWords(sourceText) : (b.richHtml ? richHtmlWords(b.richHtml) : inlineWords(sourceText));
+        const inWords = b._plainText ? plainWords(sourceText) : (richWords || inlineWords(sourceText));
         if (st.size) {
           const lines = wrapInlineAt(ctx, inWords, bw * 0.96, st, st.size);
           f = { size: st.size, lines, lh: st.size * 1.55, lineLh: lineHeightsFor(lines, st, st.size) };

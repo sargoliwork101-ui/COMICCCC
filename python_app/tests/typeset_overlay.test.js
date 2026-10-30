@@ -129,5 +129,9 @@ const blankLayout = captureLayout({ text: 'one\n\ntwo', html: '<div>one</div><di
 assert(blankLayout[2].y > blankLayout[1].y && blankLayout[1].y > blankLayout[0].y, 'empty paragraph occupies vertical space');
 const listWords = Typeset.richHtmlWords('<ol><li>first</li><li>second</li></ol><ul><li>third</li></ul>').map((word) => word.t);
 assert.deepStrictEqual(listWords, ['1.', 'first', '2.', 'second', '•', 'third'], 'list markers must reach the final renderer');
+const imageOnly = captureLayout({ text: '', html: '<img src="https://example.com/a.png" alt="sample">', align: 'left' });
+assert(imageOnly.some((point) => point.text === '[sample]'), 'image-only blocks must show their placeholder even without plain text');
+const hrOnly = captureLayout({ text: '', html: '<hr>', align: 'left' });
+assert(hrOnly.some((point) => point.text.includes('─')), 'separator-only blocks must not disappear');
 delete global.document;
 console.log('PASS: rich text justifies and list markers survive output rendering');

@@ -284,7 +284,7 @@ function nextDownload(cdp, directory) {
     console.log('PASS: delayed older preview cannot overwrite the latest translated render');
 
     await page.click('#grid .item .act button:nth-child(2)');
-    await page.waitForSelector('#editorDialog[open] #blockList .block-card[data-id="1"] [contenteditable="true"]');
+    await page.waitForSelector('#editorDialog[open] #blockList .block-card[data-id="1"]');
     // The focused box opens an isolated draft directly above it; no mutation until explicit Apply.
     await page.evaluate(() => { window.__inlineOriginal = JSON.parse(JSON.stringify(state.project.images[0].blocks[0])); window.__beforeInlineCanvas = document.getElementById('editorCanvas').toDataURL(); });
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text', { offset: { x: 75, y: 30 } });
@@ -302,7 +302,7 @@ function nextDownload(cdp, directory) {
       range.setStart(field.firstChild, 0); range.setEnd(field.firstChild, 3);
       const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); field.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
-    await page.click('#inlineEditorFormatting button[data-inline-command="bold"]');
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="پررنگ"]');
     await page.select('#inlineEditorAlign', 'justify');
     await page.$eval('#inlineEditorSize', (field) => { field.value = '24'; field.dispatchEvent(new Event('input', { bubbles: true })); });
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr === window.__inlineOriginal.tr && document.getElementById('editorCanvas').toDataURL() === window.__beforeInlineCanvas), true, 'draft text must not change the project or final preview before Apply');
@@ -310,7 +310,7 @@ function nextDownload(cdp, directory) {
     assert.equal(await page.$eval('#inlineEditor', (panel) => panel.classList.contains('hidden')), true);
     assert.equal(await page.evaluate(() => {
       const block = state.project.images[0].blocks[0];
-      return block.tr === 'new inline text' && /font-weight:\s*normal/i.test(block.richHtml) && block.align === 'justify' && block.size === 24 && document.querySelector('#blockList .block-card[data-id="1"] .translation-input').textContent === block.tr;
+      return block.tr === 'new inline text' && /font-weight:\s*normal/i.test(block.richHtml) && block.align === 'justify' && block.size === 24 && document.querySelectorAll('#blockList .block-card[data-id="1"] .block-readonly')[1].textContent.includes(block.tr);
     }), true, 'Apply must update only the selected block and synchronize its sidebar');
     assert.equal(await editorRenderDifference(page), 0, 'Apply must show the final output renderer immediately in the same editor');
     assert.notEqual(await page.$eval('#editorCanvas', (canvas) => canvas.toDataURL()), await page.evaluate(() => window.__beforeInlineCanvas));
@@ -350,9 +350,9 @@ function nextDownload(cdp, directory) {
     });
     await page.click('#inlineLineTools [data-line-align="center"]');
     assert.ok((await page.$eval('#inlineEditorField', (field) => field.innerHTML)).includes('text-align: center'));
-    await page.click('#inlineEditorFormatting [data-inline-command="undo"]');
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="واگرد"]');
     assert.ok(!(await page.$eval('#inlineEditorField', (field) => field.innerHTML)).includes('text-align: center'), 'undo must revert an individual line style');
-    await page.click('#inlineEditorFormatting [data-inline-command="redo"]');
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="ازنو"]');
     assert.ok((await page.$eval('#inlineEditorField', (field) => field.innerHTML)).includes('text-align: center'), 'redo must restore the line style');
     await page.keyboard.down('Control'); await page.keyboard.press('z'); await page.keyboard.up('Control');
     assert.ok(!(await page.$eval('#inlineEditorField', (field) => field.innerHTML)).includes('text-align: center'), 'Ctrl+Z must undo the line style');
@@ -366,7 +366,7 @@ function nextDownload(cdp, directory) {
       const block = state.project.images[0].blocks[0]; const root = document.createElement('div'); root.innerHTML = block.richHtml;
       const lines = Typeset.richHtmlWords(block.richHtml).filter((word) => word.t);
       await saveProject(); const saved = (await (await fetch(`/api/projects/${state.project.id}`)).json()).images[0].blocks[0];
-      return { text: block.tr, lines, savedHtml: saved.richHtml, html: block.richHtml, side: document.querySelector('#blockList .block-card[data-id="1"] .translation-input').textContent };
+      return { text: block.tr, lines, savedHtml: saved.richHtml, html: block.richHtml, side: document.querySelectorAll('#blockList .block-card[data-id="1"] .block-readonly')[1].textContent };
     });
     assert.equal(lineResult.text, 'first\nsecond\nthird');
     assert.equal(lineResult.savedHtml, lineResult.html, 'line styles must survive project persistence');
@@ -378,62 +378,78 @@ function nextDownload(cdp, directory) {
     await page.evaluate(() => { state.project.images[0].blocks[0] = window.__inlineOriginal; buildBlockList(); drawEditor(); const preview = document.querySelector('.editor-preview'); preview.scrollTop = 0; preview.scrollLeft = 0; });
     console.log('PASS: per-line formatting stays isolated, reaches the output, and persists');
 
-    // Real caret, toolbar and output typography regressions; keep the existing editor workflows below.
+    // Classic source/visual synchronization, sanitization, dialogs and draft recovery.
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.click('#inlineEditor .classic-tabs button:nth-child(2)');
+    await page.$eval('#inlineEditor .classic-source', el => { el.value='<h2>Hello</h2><p>linked text<script>alert(1)</script><a href="javascript:alert(2)" onclick="alert(3)">unsafe</a></p>'; el.dispatchEvent(new Event('input',{bubbles:true})); });
+    const safe = await page.evaluate(() => classicEditor.getHTML());
+    assert.ok(safe.includes('<h2>Hello</h2>') && safe.includes('unsafe') && !/script|javascript|onclick/.test(safe));
+    await page.click('#inlineEditor .classic-tabs button:nth-child(1)');
+    assert.ok((await page.$eval('#inlineEditorField', el => el.innerHTML)).includes('<h2>Hello</h2>'));
+    await page.evaluate(() => { const f=document.getElementById('inlineEditorField'); const node=f.querySelector('p').firstChild; const r=document.createRange();r.setStart(node,0);r.setEnd(node,6);const sel=getSelection();sel.removeAllRanges();sel.addRange(r);f.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); });
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="درج پیوند (Ctrl+K)"]');
+    await page.$eval('.classic-modal input[type=url]', el => {el.value='https://example.com/path';});
+    await page.$eval('.classic-modal input[type=checkbox]', el => {el.checked=true;});
+    await page.evaluate(() => document.querySelector('.classic-modal .classic-primary').click());
+    assert.equal(await page.$eval('#inlineEditorField a', el => el.href === 'https://example.com/path' && el.target === '_blank' && el.rel.includes('noopener')), true);
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="نمایش ابزارهای پیشرفته"]');
+    assert.equal(await page.$eval('#inlineEditor .classic-row:nth-child(2)', el => el.hidden), false);
+    await page.evaluate(() => { const f=document.getElementById('inlineEditorField');const r=document.createRange();r.selectNodeContents(f);r.collapse(false);const sel=getSelection();sel.removeAllRanges();sel.addRange(r);f.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); document.querySelector('#inlineEditor .classic-toolbar button[aria-label="درج جدول"]').click(); });
+    await page.evaluate(() => document.querySelector('.classic-modal .classic-primary').click());
+    assert.equal(await page.$$eval('#inlineEditorField table td', els => els.length), 4);
+    await page.evaluate(() => { const f=document.getElementById('inlineEditorField');const r=document.createRange();r.selectNodeContents(f);r.collapse(false);const sel=getSelection();sel.removeAllRanges();sel.addRange(r);f.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); document.querySelector('#inlineEditor .classic-toolbar button[aria-label="درج تصویر"]').click(); });
+    await (await page.$('.classic-modal input[type=file]')).uploadFile(source);
+    await page.$eval('.classic-modal input:not([type])', el => {el.value='نمونه';});
+    await page.evaluate(() => document.querySelector('.classic-modal .classic-primary').click());
+    await page.waitForFunction(() => !!document.querySelector('#inlineEditorField img'));
+    assert.ok((await page.$eval('#inlineEditorField img', el => el.getAttribute('src'))).startsWith('data:image/png;base64,'));
+    await page.evaluate(() => {const f=document.getElementById('inlineEditorField');const r=document.createRange();r.selectNodeContents(f);r.collapse(false);const sel=getSelection();sel.removeAllRanges();sel.addRange(r);f.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));const data=new DataTransfer();data.setData('text/html','<p style="color:red" onclick="alert(1)">pasted <b>bold</b><script>BAD</script></p>');data.setData('text/plain','pasted bold');f.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});
+    assert.ok((await page.$eval('#inlineEditorField', el => el.innerHTML)).includes('pasted'));
+    assert.ok(!/onclick|BAD|<script/i.test(await page.$eval('#inlineEditorField', el => el.innerHTML)));
+    await page.evaluate(() => { document.querySelector('#inlineEditor .classic-toolbar button[aria-label="چسباندن به‌صورت متن ساده"]').click(); const f=document.getElementById('inlineEditorField');const p=document.createElement('p');p.textContent='plain: ';f.appendChild(p);const r=document.createRange();r.selectNodeContents(p);r.collapse(false);const sel=getSelection();sel.removeAllRanges();sel.addRange(r);f.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));const data=new DataTransfer();data.setData('text/html','<b>PLAINONLY</b>');data.setData('text/plain','PLAINONLY');f.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data})); });
+    assert.ok((await page.$eval('#inlineEditorField', el => el.textContent)).includes('PLAINONLY'));
+    assert.equal(await page.$eval('#inlineEditorField', el => [...el.querySelectorAll('b,strong')].some(x => x.textContent.includes('PLAINONLY'))), false);
+    await page.$eval('#inlineEditorSize', el => {el.value='33';el.dispatchEvent(new Event('input',{bubbles:true}));});
+    await page.waitForFunction(() => Object.keys(localStorage).some(key => key.startsWith('comic-studio-draft:') && JSON.parse(localStorage.getItem(key)).meta?.size === '33'), {timeout:6000});
+    await page.$eval('#inlineEditorSize', el => {el.value='44';});
+    page.once('dialog', dialog => dialog.accept());
+    assert.equal(await page.evaluate(() => { const b=inlineDraft.block; return classicEditor.setContext(`comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(b.id)}:translation`, b.richHtml || plainToHtml(b.tr || ''), inlineBlockSnapshot(b)); }), true);
+    assert.equal(await page.$$eval('#inlineEditorField table td', els => els.length), 4, 'autosaved HTML recovers in the correct context');
+    assert.equal(await page.$eval('#inlineEditorSize', el => el.value), '33', 'autosave restores output settings as well as text');
+    page.once('dialog', dialog => dialog.accept());
+    await page.click('#inlineEditorApply');
+    const classicResult = await page.evaluate(() => {const b=state.project.images[0].blocks[0];return {html:b.richHtml,words:Typeset.richHtmlWords(b.richHtml).map(w=>w.t).join(' ')};});
+    assert.ok(classicResult.html.includes('<table>') && classicResult.html.includes('target="_blank"'));
+    assert.ok(classicResult.words.includes('|') && classicResult.words.includes('[نمونه]'), 'table and image must have visible textual approximations');
+    await page.evaluate(() => { state.project.images[0].blocks[0] = window.__inlineOriginal; buildBlockList(); drawEditor(); });
+    console.log('PASS: classic Visual/Text, safe HTML, link dialog, table and local draft recovery');
+
+    // There is exactly one writable field; redraw and zoom keep its caret stable.
+    assert.equal(await page.$$eval('#blockList textarea, #blockList [contenteditable="true"], #editorBoxes [contenteditable="true"]', (els) => els.length), 0);
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('alpha beta');
     await page.evaluate(() => {
-      const field = document.querySelector('#editorBoxes .editor-box[data-id="1"] .editor-box-text');
-      field.focus(); document.execCommand('selectAll'); document.execCommand('insertText', false, 'alpha beta');
-      const range = document.createRange(); range.setStart(field.firstChild, 5); range.collapse(true);
-      const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
-      window.__originalOverlay = field;
-      setEditorZoom(state.editorScale * 1.1); drawEditor(); drawEditor();
+      const field = document.getElementById('inlineEditorField'); const range = document.createRange(); range.setStart(field.firstChild, 5); range.collapse(true);
+      const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); field.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+      window.__originalOverlay = field; setEditorZoom(state.editorScale * 1.1); drawEditor(); drawEditor();
     });
-    assert.equal(await page.evaluate(() => {
-      const field = document.querySelector('#editorBoxes .editor-box[data-id="1"] .editor-box-text');
-      return field === window.__originalOverlay && document.activeElement === field && window.getSelection().anchorOffset === 5;
-    }), true, 'redraw and zoom must retain the same focused node and caret');
+    assert.equal(await page.evaluate(() => document.getElementById('inlineEditorField') === window.__originalOverlay && document.activeElement === window.__originalOverlay && getSelection().anchorOffset === 5), true);
     await page.keyboard.type('X');
-    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr), 'alphaX beta', 'typing must continue at the original caret after redraw');
-    assert.equal(await page.$eval('#blockList .block-card[data-id="1"] .translation-input', (field) => field.textContent), 'alphaX beta', 'typing on the image must update the sidebar');
-    assert.equal(await page.evaluate(() => (state.richFields.get('1') || []).length <= 2), true, 'redraw must not accumulate detached editors');
-    await page.evaluate(() => {
-      const field = document.querySelector('#blockList .block-card[data-id="1"] .translation-input');
-      field.focus(); const range = document.createRange(); range.setStart(field.firstChild, 0); range.setEnd(field.firstChild, 6);
-      const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
-      field.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-      window.__otherRichHtml = state.project.images[0].blocks[1].richHtml || '';
-    });
-    await page.click('#blockList .block-card[data-id="1"] button[aria-label="پررنگ"]');
-    assert.equal(await page.evaluate(() => {
-      const blocks = state.project.images[0].blocks;
-      return /font-weight:\s*normal/i.test(blocks[0].richHtml) && (blocks[1].richHtml || '') === window.__otherRichHtml;
-    }), true, 'formatting must apply to the selected text in its own block');
-    await page.keyboard.down('Control'); await page.keyboard.press('z'); await page.keyboard.up('Control');
-    assert.equal(await page.evaluate(() => !/font-weight:\s*normal/i.test(state.project.images[0].blocks[0].richHtml)), true, 'native undo must undo formatting without losing the editor');
-    const typography = await page.evaluate(async () => {
-      const card = document.querySelector('#blockList .block-card[data-id="1"]');
-      const field = card.querySelector('.translation-input'); const size = card.querySelector('[data-font-size="preview"]');
-      const align = card.querySelector('[data-align="text"]'); const before = getComputedStyle(field).fontSize;
-      align.value = 'justify'; align.dispatchEvent(new Event('change', { bubbles: true }));
-      size.value = '12'; size.dispatchEvent(new Event('change', { bubbles: true })); const small = document.getElementById('editorCanvas').toDataURL();
-      size.value = '30'; size.dispatchEvent(new Event('change', { bubbles: true })); const large = document.getElementById('editorCanvas').toDataURL();
-      const after = getComputedStyle(field).fontSize;
-      await saveProject();
-      const saved = await (await fetch(`/api/projects/${state.project.id}`)).json();
-      return { before, after, changed: small !== large, align: saved.images[0].blocks[0].align, size: saved.images[0].blocks[0].size };
-    });
-    assert.deepEqual(typography, { before: typography.before, after: typography.before, changed: true, align: 'justify', size: 30 }, 'font size changes image pixels and saved output settings but not sidebar size');
-    assert.equal(await editorRenderDifference(page), 0, 'justified editor preview must use the final output renderer');
-    await page.evaluate(() => {
-      const block = state.project.images[0].blocks[0]; block.align = 'right'; block.size = null;
-      const card = document.querySelector('#blockList .block-card[data-id="1"]'); card.querySelector('[data-align="text"]').value = 'right'; card.querySelector('[data-font-size="preview"]').value = ''; drawEditor();
-    });
-    console.log('PASS: stable typing and caret; justified output and font sizing leave the sidebar size unchanged');
-    await page.evaluate(() => {
-      const field = document.querySelector('#blockList .block-card[data-id="1"] [contenteditable="true"]');
-      field.focus(); document.execCommand('selectAll'); document.execCommand('insertText', false, 'ویرایش تازه ۳٫۲۱');
-    });
-    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    assert.equal(await editorRenderDifference(page), 0, 'typing must refresh the same final renderer without rebuilding the editor field');
+    assert.equal(await page.$eval('#inlineEditorField', el => el.textContent), 'alphaX beta');
+    const beforeSize = await page.$eval('#inlineEditorField', el => getComputedStyle(el).fontSize);
+    await page.select('#inlineEditorAlign', 'justify');
+    await page.$eval('#inlineEditorSize', el => { el.value='12'; }); await page.click('#inlineEditorApply');
+    const small = await page.$eval('#editorCanvas', el => el.toDataURL());
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.$eval('#inlineEditorSize', el => { el.value='30'; });
+    assert.equal(await page.$eval('#inlineEditorField', el => getComputedStyle(el).fontSize), beforeSize);
+    await page.click('#inlineEditorApply');
+    assert.notEqual(await page.$eval('#editorCanvas', el => el.toDataURL()), small, 'output size must affect image pixels');
+    assert.equal(await editorRenderDifference(page), 0);
+    await page.evaluate(() => { const block = state.project.images[0].blocks[0]; block.align='right'; block.size=null; drawEditor(); });
+    console.log('PASS: one editor retains caret; typography affects output rather than editor size');
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('ویرایش تازه ۳٫۲۱'); await page.click('#inlineEditorApply');
     await page.select('#blockList .block-card[data-id="2"] [data-text-mode]', 'ocr');
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await editorRenderDifference(page), 0, 'changing one line language must immediately refresh the real editor canvas');

@@ -8,7 +8,7 @@ const state = {
   project: null, engines: [], ai: null, editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
   cropId: null, crop: null, cropPointer: null, modelBusy: null, dragId: null, dragIds: [],
   dragMode: null, groupEditId: null, groupSnapshot: null, lastSelectedId: null,
-  previewId: null, richEditor: null, richRange: null, richFields: new Map(),
+  previewId: null,
 };
 let saveTimer = null;
 let saveTask = Promise.resolve();
@@ -26,6 +26,7 @@ let localActivityId = 0;
 let editorCloseTask = null;
 let editorCanvasFrame = 0;
 let inlineDraft = null;
+let classicEditor = null;
 let jobBusy = false;
 let translationRunning = false;
 let translationPreviewAction = null;
@@ -180,39 +181,8 @@ function imageUrl(item, edited = false, cropped = false) {
 function escapeHtml(value) { const el = document.createElement('div'); el.textContent = String(value ?? ''); return el.innerHTML; }
 function plainToHtml(value) { return escapeHtml(value).replace(/\n/g, '<br>'); }
 function safeName(value) { return String(value || 'comic-translated').replace(/[<>:\"/\\|?*]/g, '-'); }
-function sanitizeHtml(html) {
-  const root = document.createElement('div'); root.innerHTML = html || '';
-  const allowed = new Set(['DIV', 'P', 'BR', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'SPAN', 'UL', 'OL', 'LI']);
-  const walk = (node) => {
-    if (node.nodeType === Node.TEXT_NODE) return escapeHtml(node.nodeValue);
-    if (node.nodeType !== Node.ELEMENT_NODE) return '';
-    const tag = node.tagName;
-    const children = [...node.childNodes].map(walk).join('');
-    if (tag === 'BR') return '<br>';
-    if (!allowed.has(tag)) return children;
-    let style = '';
-    if (['SPAN', 'DIV', 'P', 'LI'].includes(tag)) {
-      const size = parseFloat(node.style.fontSize);
-      if (Number.isFinite(size)) style += `font-size:${Math.max(8, Math.min(160, size))}px;`;
-      const color = node.style.color;
-      const rgb = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i.exec(color);
-      if (/^#[0-9a-f]{6}$/i.test(color)) style += `color:${color};`;
-      else if (rgb && rgb.slice(1).every((part) => Number(part) <= 255)) style += `color:#${rgb.slice(1).map((part) => Number(part).toString(16).padStart(2, '0')).join('')};`;
-      if (node.style.fontWeight) style += `font-weight:${node.style.fontWeight === 'bold' || Number(node.style.fontWeight) >= 600 ? 'bold' : 'normal'};`;
-      if (node.style.fontStyle) style += `font-style:${node.style.fontStyle === 'italic' ? 'italic' : 'normal'};`;
-      const decoration = node.style.textDecorationLine || node.style.textDecoration || '';
-      const safeDecoration = ['underline', 'line-through'].filter((value) => decoration.includes(value)).join(' ');
-      if (safeDecoration) style += `text-decoration:${safeDecoration};`;
-      if (['DIV', 'P', 'LI'].includes(tag)) {
-        if (['left', 'center', 'right', 'justify'].includes(node.style.textAlign)) style += `text-align:${node.style.textAlign};`;
-        const direction = node.style.direction || node.getAttribute('dir');
-        if (direction === 'rtl' || direction === 'ltr') style += `direction:${direction};`;
-      }
-    }
-    return `<${tag.toLowerCase()}${style ? ` style="${style}"` : ''}>${children}</${tag.toLowerCase()}>`;
-  };
-  return [...root.childNodes].map(walk).join('');
-}
+function sanitizeHtml(html) { return window.ComicSanitize.sanitize(html); }
+
 function setBusy(message) {
   jobBusy = !!message;
   $('jobStatus').textContent = message || 'آماده';
@@ -319,7 +289,8 @@ function overlayBlock(block, mode = currentOverlayMode()) {
   return { ...block, tr: block.text || '', richHtml: '', dir: 'ltr', align: ['center', 'justify'].includes(block.align) ? block.align : 'left', _plainText: true };
 }
 function overlayBlocks(item, mode = currentOverlayMode()) { return (item.blocks || []).map((block) => overlayBlock(block, mode)); }
-function hasOverlayText(item, mode = currentOverlayMode()) { return overlayBlocks(item, mode).some((block) => block.enabled && block.tr?.trim()); }
+function hasRenderableText(block) { return !!block.tr?.trim() || !!(!block._plainText && block.richHtml && Typeset.richHtmlWords(block.richHtml).some((word) => String(word.t || '').trim())); }
+function hasOverlayText(item, mode = currentOverlayMode()) { return overlayBlocks(item, mode).some((block) => block.enabled && hasRenderableText(block)); }
 function renderAll() { renderGrid(); updateEngineOptions(); }
 function updateSummary() {
   const total = state.project?.images.length || 0;
@@ -866,7 +837,7 @@ async function saveAiSettings(options = {}) {
 function editorItem() { return state.project?.images.find((item) => item.id === state.editorId); }
 function boxOf(block) { return { x0: Number.isFinite(block.tx0) ? block.tx0 : block.x0, y0: Number.isFinite(block.ty0) ? block.ty0 : block.y0, x1: Number.isFinite(block.tx1) ? block.tx1 : block.x1, y1: Number.isFinite(block.ty1) ? block.ty1 : block.y1 }; }
 async function openEditor(imageId) {
-  await ensureFont(); state.editorId = imageId; state.richFields = new Map(); state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null; $('editorStage').classList.remove('panning'); const item = state.project.images.find((entry) => entry.id === imageId); $('editorTitle').textContent = `ویرایش — ${item.name}`; showDialog('editorDialog');
+  await ensureFont(); state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null; $('editorStage').classList.remove('panning'); const item = state.project.images.find((entry) => entry.id === imageId); $('editorTitle').textContent = `ویرایش — ${item.name}`; showDialog('editorDialog');
   const response = await fetch(imageUrl(item)); state.editorBitmap?.close?.(); state.editorBitmap = await createImageBitmap(await response.blob()); $('editorCanvas').width = state.editorBitmap.width; $('editorCanvas').height = state.editorBitmap.height; buildBlockList(); fitEditor(); drawEditor();
 }
 function resizeEditorStage() {
@@ -945,57 +916,19 @@ function styleRichElement(element, block, scale = 1, preview = false) {
   element.style.caretColor = preview ? (style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff')) : '';
   element.style.textDecoration = style.underline ? 'underline' : '';
 }
-function updateRichBlock(block, element) {
-  block.tr = element.innerText.replace(/\u00a0/g, ' '); block.richHtml = sanitizeHtml(element.innerHTML);
-  const fields = (state.richFields.get(String(block.id)) || []).filter((field) => field.isConnected);
-  state.richFields.set(String(block.id), fields);
-  fields.forEach((other) => { if (other !== element && document.activeElement !== other) { other.innerHTML = block.richHtml || plainToHtml(block.tr); } });
-  scheduleEditorCanvasDraw(); scheduleSave();
-}
-function rememberRichSelection(element) {
-  state.richEditor = element; const selection = window.getSelection();
-  if (selection?.rangeCount && element.contains(selection.anchorNode) && element.contains(selection.focusNode)) state.richRange = selection.getRangeAt(0).cloneRange();
-  else state.richRange = null;
-}
-function wireRichElement(element, block) {
-  const key = String(block.id); if (!state.richFields.has(key)) state.richFields.set(key, []); state.richFields.get(key).push(element);
-  element.addEventListener('focus', () => rememberRichSelection(element)); element.addEventListener('keyup', () => rememberRichSelection(element)); element.addEventListener('mouseup', () => rememberRichSelection(element));
-  element.addEventListener('input', () => updateRichBlock(block, element));
-  element.addEventListener('paste', (event) => { event.preventDefault(); document.execCommand('insertText', false, event.clipboardData.getData('text/plain')); });
-}
-function wireOcrElement(element, block) {
-  element.addEventListener('input', () => {
-    block.text = (element.innerText ?? element.textContent ?? '').replace(/\u00a0/g, ' ');
-    const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
-    const source = card?.querySelector('textarea'); if (source) source.value = block.text;
-    scheduleEditorCanvasDraw(); scheduleSave();
-  });
-  element.addEventListener('paste', (event) => { event.preventDefault(); document.execCommand('insertText', false, event.clipboardData.getData('text/plain')); });
-}
-function runRichCommand(command, value = null, target = null) {
-  const fields = target ? (state.richFields.get(String(target.id)) || []).filter((field) => field.isConnected) : [];
-  const previous = state.richEditor;
-  const element = target ? (fields.includes(previous) ? previous : fields.find((field) => field.closest('.block-card'))) : previous;
-  if (!element?.isConnected) return;
-  element.focus();
-  if (element === previous && state.richRange && element.contains(state.richRange.startContainer) && element.contains(state.richRange.endContainer)) {
-    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(state.richRange);
-  }
-  document.execCommand('styleWithCSS', false, true); document.execCommand(command, false, value); element.dispatchEvent(new Event('input', { bubbles: true })); rememberRichSelection(element);
-}
 // A draft belongs to one image box. Nothing reaches the project or canvas until Apply.
 function inlineBlockSnapshot(block) {
   return JSON.stringify([block.text || '', block.tr || '', block.richHtml || '', block.dir || '', block.align || '', block.size ?? null, block.color || null]);
 }
 function inlineDraftChanged() {
   if (!inlineDraft) return false;
-  return $('inlineEditorField').innerHTML !== inlineDraft.html || $('inlineEditorDirection').value !== inlineDraft.dir ||
+  return (inlineDraft.mode === 'ocr' ? $('inlineEditorField').innerHTML : classicEditor.getHTML()) !== inlineDraft.html || $('inlineEditorDirection').value !== inlineDraft.dir ||
     $('inlineEditorAlign').value !== inlineDraft.align || $('inlineEditorSize').value !== inlineDraft.size || inlineDraft.color !== inlineDraft.originalColor;
 }
 function closeInlineEditor(force = false) {
   if (!inlineDraft) return true;
   if (!force && inlineDraftChanged() && !confirm('تغییرهای این متن ثبت نشده‌اند. از آن‌ها صرف‌نظر شود؟')) return false;
-  $('inlineEditor').classList.add('hidden'); inlineDraft = null;
+  classicEditor.clearDraft(); $('inlineEditor').classList.add('hidden'); inlineDraft = null;
   return true;
 }
 function positionInlineEditor() {
@@ -1047,7 +980,7 @@ function restoreInlineHistory(step) {
     const range = document.createRange(); range.setStart(start, Math.min(entry.startOffset, maxOffset(start))); range.setEnd(end, Math.min(entry.endOffset, maxOffset(end)));
     const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
   }
-  rememberInlineRange(); syncInlineLineControls();
+  rememberInlineRange(); syncInlineLineControls(); classicEditor.notifyChange();
 }
 function inlineCommand(command) {
   if (!inlineDraft) return;
@@ -1058,13 +991,13 @@ function inlineCommand(command) {
   if (range && field.contains(range.startContainer) && field.contains(range.endContainer)) {
     const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
   }
-  document.execCommand('styleWithCSS', false, true); document.execCommand(command, false, null); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+  document.execCommand('styleWithCSS', false, true); document.execCommand(command, false, null); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); classicEditor.notifyChange();
 }
 function inlineParagraphFrom(node) {
   const field = $('inlineEditorField');
   let element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
   while (element && element !== field) {
-    if (['DIV', 'P', 'LI'].includes(element.tagName)) return element;
+    if (['DIV', 'P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'PRE', 'BLOCKQUOTE'].includes(element.tagName)) return element;
     element = element.parentElement;
   }
   return null;
@@ -1103,12 +1036,12 @@ function ensureInlineParagraph() {
 function setInlineLineStyle(property, value) {
   const line = ensureInlineParagraph(); if (!line) return;
   line.style[property] = value;
-  rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+  rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); classicEditor.notifyChange();
 }
 function resetInlineLineStyle() {
   const line = ensureInlineParagraph(); if (!line) return;
   ['textAlign', 'direction', 'fontSize', 'color'].forEach((key) => { line.style[key] = ''; });
-  rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+  rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); classicEditor.notifyChange();
 }
 function openInlineEditor(block) {
   if (!block || !editorItem()) return;
@@ -1117,18 +1050,20 @@ function openInlineEditor(block) {
   const mode = blockOverlayMode(block);
   if (mode === 'none') return;
   const field = $('inlineEditorField'); const direction = mode === 'ocr' ? 'ltr' : (block.dir === 'ltr' ? 'ltr' : 'rtl');
-  field.innerHTML = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || plainToHtml(block.tr || ''));
+  const originalHtml = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || plainToHtml(block.tr || ''));
+  classicEditor.setPlainMode(mode === 'ocr');
+  const draftKey = `comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(block.id)}:${mode}`;
   styleRichElement(field, overlayBlock(block)); field.dir = direction; field.style.direction = direction;
   $('inlineEditorTitle').textContent = `ویرایش ${mode === 'ocr' ? 'متن اصلی' : 'ترجمه'} · کادر ${block.id}`;
-  $('inlineEditorFormatting').classList.toggle('hidden', mode === 'ocr');
   $('inlineLineTools').classList.toggle('hidden', mode === 'ocr');
   $('inlineEditorDirection').value = direction; $('inlineEditorDirection').disabled = mode === 'ocr';
   $('inlineEditorAlign').value = mode === 'ocr' ? overlayBlock(block).align : (block.align || 'right');
   $('inlineEditorSize').value = block.size || '';
   $('inlineEditorColor').value = block.color || '#ffffff';
-  inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: field.innerHTML,
+  inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: mode === 'ocr' ? plainToHtml(block.text || '') : sanitizeHtml(originalHtml),
     dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, size: $('inlineEditorSize').value,
     color: block.color || null, originalColor: block.color || null, range: null, history: [], historyIndex: -1, muteHistory: false };
+  classicEditor.setContext(draftKey, originalHtml, inlineBlockSnapshot(block));
   $('inlineEditor').classList.remove('hidden'); positionInlineEditor(); field.focus(); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
 }
 function applyInlineEditor() {
@@ -1138,11 +1073,13 @@ function applyInlineEditor() {
     toast('این کادر در جای دیگری تغییر کرده است؛ برای جلوگیری از حذف ویرایش‌ها، متن ثبت نشد.', true); return false;
   }
   const field = $('inlineEditorField');
-  const text = (field.innerText ?? field.textContent ?? '').replace(/\u00a0/g, ' ');
+  const text = classicEditor.getText();
+  const rich = draft.mode === 'ocr' ? '' : classicEditor.getHTML();
+  if (draft.mode !== 'ocr' && (/<(?:a|img|table|hr|blockquote|h[1-6]|pre)\b/i.test(rich) || /margin-(?:left|right):/i.test(rich)) && !confirm('HTML ذخیره می‌شود، اما خروجی تصویر/PDF عکس را با متن جایگزین، جدول را به‌صورت متن و تیتر، نقل‌قول و خط جداکننده را ساده نشان می‌دهد؛ پیوندها هم در تصویر کلیک‌پذیر نیستند. ادامه دهید؟')) return false;
   const size = $('inlineEditorSize').value.trim(); const value = Number(size);
   if (size && (!Number.isFinite(value) || value < 8 || value > 160)) { toast('اندازهٔ قلم باید بین ۸ و ۱۶۰ باشد.', true); return false; }
   if (draft.mode === 'ocr') block.text = text;
-  else { block.tr = text; block.richHtml = sanitizeHtml(field.innerHTML); if ($('inlineEditorDirection').value !== draft.dir) block.dir = $('inlineEditorDirection').value; }
+  else { block.tr = text; block.richHtml = rich; if ($('inlineEditorDirection').value !== draft.dir) block.dir = $('inlineEditorDirection').value; }
   if ($('inlineEditorAlign').value !== draft.align) block.align = $('inlineEditorAlign').value;
   if (size !== draft.size) block.size = size ? Math.round(value) : null;
   if (draft.color !== draft.originalColor) block.color = draft.color;
@@ -1328,34 +1265,25 @@ function renderEditorBoxes() {
     }
     // Reuse the actual editing node so zoom, redraw and other controls do not destroy the caret or undo history.
     el._block = block;
-    el.classList.toggle('selected', selected.has(key)); el.classList.toggle('active', String(state.activeBlockId) === key); el.classList.toggle('empty', !display.tr?.trim());
+    el.classList.toggle('selected', selected.has(key)); el.classList.toggle('active', String(state.activeBlockId) === key); el.classList.toggle('empty', !hasRenderableText(display));
     el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
     const language = el.querySelector('.box-language'); language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید';
     let text = el.querySelector('.editor-box-text');
     if (!text || el.dataset.mode !== displayMode || text._block !== block) {
       if (text) text.remove();
-      text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text._block = block;
-      text.setAttribute('aria-label', `ویرایش متن ${block.id} روی تصویر`);
-      text.addEventListener('click', (event) => { if (!event.ctrlKey && !event.metaKey) { event.stopPropagation(); openInlineEditor(el._block); } });
-      text.innerHTML = display.richHtml || plainToHtml(display.tr);
-      if (displayMode === 'ocr') wireOcrElement(text, block); else wireRichElement(text, block);
+      text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'false'; text._block = block;
+      text.setAttribute('aria-label', `ویرایش متن ${block.id} روی تصویر`); text.setAttribute('role', 'button'); text.tabIndex = 0;
+      text.addEventListener('click', (event) => { event.preventDefault(); if (!event.ctrlKey && !event.metaKey) { event.stopPropagation(); openInlineEditor(el._block); } });
+      text.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openInlineEditor(el._block); } });
+      text.innerHTML = plainToHtml(display.tr || '');
       el.insertBefore(text, el.querySelector('.resize-handle')); el.dataset.mode = displayMode;
     } else if (document.activeElement !== text) {
-      const html = display.richHtml || plainToHtml(display.tr);
+      const html = plainToHtml(display.tr || '');
       if (text.innerHTML !== html) text.innerHTML = html;
-    }
-    if (displayMode !== 'ocr') {
-      const fields = state.richFields.get(key) || [];
-      if (!fields.includes(text)) state.richFields.set(key, [...fields, text]);
     }
     styleRichElement(text, display, scale, true);
   });
   existing.forEach((el, key) => { if (!visible.has(key)) el.remove(); });
-  // Discard disconnected views rather than retaining one on every redraw.
-  for (const [key, fields] of state.richFields) {
-    const live = fields.filter((field) => field.isConnected);
-    if (live.length) state.richFields.set(key, live); else state.richFields.delete(key);
-  }
   updateEditorSelection();
 }
 function startBoxDrag(event, block, el) {
@@ -1404,21 +1332,28 @@ function startBoxDrag(event, block, el) {
   };
   el.addEventListener('pointermove', move); el.addEventListener('pointerup', stop); el.addEventListener('pointercancel', stop); el.addEventListener('lostpointercapture', stop);
 }
-async function retranslateBlock(block, source, translation) {
-  const text = source.value;
-  const provider = state.ai?.provider || 'free';
-  const sourceLanguage = $('ocrLanguage').value;
+async function retranslateBlock(block) {
+  if (inlineDraft?.block === block && !closeInlineEditor()) return;
+  const text = block.text || ''; const snapshot = inlineBlockSnapshot(block);
+  const provider = state.ai?.provider || 'free'; const sourceLanguage = $('ocrLanguage').value;
   try {
     const preview = await api('/api/translate-text/preview', jsonOptions('POST', { text, source_language: sourceLanguage, provider }));
     showTranslationRequestPreview(preview, async () => {
+      if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
       const result = await api('/api/translate-text', jsonOptions('POST', { text, source_language: sourceLanguage, provider, confirmation: preview.signature }));
-      block.text = text; block.tr = result.text; block.richHtml = plainToHtml(result.text);
-      translation.innerHTML = block.richHtml; drawEditor(); scheduleSave();
+      if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
+      block.tr = result.text; block.richHtml = plainToHtml(result.text);
+      buildBlockList(); drawEditor(); scheduleSave();
     });
   } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
 }
+async function copyBlockText(text) {
+  if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+  else { const temp = document.createElement('textarea'); temp.value = text; temp.style.position = 'fixed'; temp.style.opacity = '0'; document.body.appendChild(temp); temp.select(); document.execCommand('copy'); temp.remove(); }
+  toast('کپی شد');
+}
 function buildBlockList() {
-  const item = editorItem(); const list = $('blockList'); list.textContent = ''; state.richFields = new Map(); const selected = new Set(editorSelectedKeys()); if (!item.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; updateEditorSelection(); return; }
+  const item = editorItem(); const list = $('blockList'); list.textContent = ''; const selected = new Set(editorSelectedKeys()); if (!item?.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; updateEditorSelection(); return; }
   item.blocks.forEach((block) => {
     const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', (event) => selectEditorBlock(block.id, false, event.ctrlKey || event.metaKey));
     const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabled.dataset.visibility = 'sidebar'; enabled.setAttribute('aria-label', `نمایش متن ${block.id} روی تصویر`); enabledLabel.append(enabled, document.createTextNode(` نمایش متن ${block.id} روی تصویر · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
@@ -1426,30 +1361,12 @@ function buildBlockList() {
     const languageRow = document.createElement('div'); languageRow.className = 'block-tools block-language-tools';
     const languageLabel = document.createElement('label'); languageLabel.className = 'block-language-label'; languageLabel.appendChild(document.createTextNode('نمایش همین متن:'));
     const language = document.createElement('select'); language.dataset.textMode = 'sidebar'; language.setAttribute('aria-label', `زبان نمایش متن ${block.id} روی تصویر`); [['translation', 'فارسی / ترجمه'], ['ocr', 'انگلیسی / OCR']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; language.appendChild(option); }); language.value = blockTextMode(block); languageLabel.appendChild(language); languageRow.appendChild(languageLabel);
-    const source = document.createElement('textarea'); source.value = block.text || ''; source.dir = 'auto'; source.setAttribute('aria-label', 'متن OCR');
-    const translation = document.createElement('div'); translation.className = 'translation-input'; translation.contentEditable = 'true'; translation.setAttribute('role', 'textbox'); translation.setAttribute('aria-multiline', 'true'); translation.setAttribute('aria-label', `ویرایش ترجمهٔ متن ${block.id}`); translation.innerHTML = block.richHtml || plainToHtml(block.tr || ''); styleRichElement(translation, block); wireRichElement(translation, block);
-    const tools = document.createElement('div'); tools.className = 'block-tools';
-    const command = (label, name, title = label) => { const button = makeButton(label, () => runRichCommand(name, null, block), 'bt'); button.title = title; button.setAttribute('aria-label', title); button.addEventListener('mousedown', (event) => event.preventDefault()); return button; };
-    tools.append(command('B', 'bold', 'پررنگ'), command('I', 'italic', 'ایتالیک'), command('U', 'underline', 'زیرخط'), command('S', 'strikeThrough', 'خط‌خورده'), command('•', 'insertUnorderedList', 'فهرست'), command('1.', 'insertOrderedList', 'فهرست عددی'), command('↶', 'undo', 'واگرد'), command('↷', 'redo', 'ازنو'), command('⌫', 'removeFormat', 'حذف قالب'));
-    const align = document.createElement('select'); align.dataset.align = 'text'; align.setAttribute('aria-label', 'تراز متن در تصویر'); [['right', 'راست‌چین'], ['center', 'وسط‌چین'], ['left', 'چپ‌چین'], ['justify', 'جاستیفای (دوطرفه)']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; align.appendChild(option); }); align.value = block.align || 'right';
-    const setDirection = (direction) => { block.dir = direction; block.align = direction === 'rtl' ? 'right' : 'left'; align.value = block.align; styleRichElement(translation, block); drawEditor(); scheduleSave(); };
-    const rtl = makeButton('راست‌به‌چپ', () => setDirection('rtl')); const ltr = makeButton('چپ‌به‌راست', () => setDirection('ltr'));
-    const size = document.createElement('input'); size.type = 'number'; size.min = '8'; size.max = '160'; size.placeholder = 'خودکار'; size.value = block.size || ''; size.dataset.fontSize = 'preview'; size.setAttribute('aria-label', 'اندازهٔ فونت روی تصویر'); size.title = 'اندازهٔ فونت روی تصویر؛ خالی یعنی خودکار';
-    const setSize = (value) => { block.size = value == null ? null : Math.max(8, Math.min(160, Math.round(value))); size.value = block.size || ''; drawEditor(); scheduleSave(); };
-    const adjustSize = (delta) => { const box = boxOf(block); setSize((Number(block.size) || overlaySize(overlayBlock(block, currentOverlayMode()), box.x1 - box.x0, box.y1 - box.y0)) + delta); };
-    const smaller = makeButton('A−', () => adjustSize(-1)); smaller.title = 'کوچک‌تر کردن متن روی تصویر'; smaller.setAttribute('aria-label', smaller.title);
-    const larger = makeButton('A+', () => adjustSize(1)); larger.title = 'بزرگ‌تر کردن متن روی تصویر'; larger.setAttribute('aria-label', larger.title);
-    const autoSize = makeButton('اندازهٔ خودکار', () => setSize(null));
-    const color = document.createElement('input'); color.type = 'color'; color.value = block.color || '#ffffff'; color.setAttribute('aria-label', 'رنگ متن روی تصویر');
-    const autoColor = makeButton('رنگ خودکار', () => { block.color = null; drawEditor(); scheduleSave(); });
-    tools.append(rtl, ltr, align, smaller, size, larger, autoSize, color, autoColor);
+    const source = document.createElement('p'); source.className = 'block-readonly'; source.dir = 'auto'; source.textContent = `متن اصلی: ${block.text || '—'}`;
+    const translation = document.createElement('p'); translation.className = 'block-readonly'; translation.dir = 'auto'; translation.textContent = `ترجمه: ${block.tr || '—'}`;
     const actions = document.createElement('div'); actions.className = 'block-tools';
-    actions.append(makeButton('کپی متن اصلی', async () => { if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(source.value); else { source.focus(); source.select(); document.execCommand('copy'); } toast('کپی شد'); }), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block, source, translation)), makeButton('پاک‌کردن ترجمه', () => { block.tr = ''; block.richHtml = ''; translation.innerHTML = ''; drawEditor(); scheduleSave(); }));
-    enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; drawEditor(); scheduleSave(); }); source.addEventListener('input', () => { block.text = source.value; if (blockOverlayMode(block) === 'ocr') drawEditor(); scheduleSave(); });
-    align.addEventListener('change', () => { block.align = align.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); });
-    size.addEventListener('change', () => { const value = Number(size.value); setSize(size.value.trim() && Number.isFinite(value) ? value : null); });
-    color.addEventListener('input', () => { block.color = color.value; drawEditor(); scheduleSave(); });
-    card.append(head, languageRow, source, translation, tools, actions); list.appendChild(card);
+    actions.append(makeButton('ویرایش همین متن', () => { if (!block.enabled || blockOverlayMode(block) === 'none') { toast('ابتدا نمایش متن روی تصویر را فعال کنید.', true); return; } openInlineEditor(block); }), makeButton('کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block)), makeButton('پاک‌کردن ترجمه', () => { if (inlineDraft?.block === block && !closeInlineEditor()) return; if (!confirm('ترجمهٔ این کادر پاک شود؟')) return; block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave(); }));
+    enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; drawEditor(); scheduleSave(); });
+    card.append(head, languageRow, source, translation, actions); list.appendChild(card);
   });
   updateEditorSelection();
 }
@@ -1504,7 +1421,7 @@ async function copyPreview() {
 
 // ---------- Events and startup ----------
 function bindEvents() {
-  window.addEventListener('pagehide', closeSession);
+  window.addEventListener('pagehide', () => { if (inlineDraft) classicEditor.saveDraft(); closeSession(); });
   bindGridDrop();
   $('menuBtn').addEventListener('click', () => $('menu').classList.toggle('hidden'));
   $('themeBtn').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('comic-studio-theme', document.body.classList.contains('light') ? 'light' : 'dark'); });
@@ -1533,15 +1450,15 @@ function bindEvents() {
   $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); if (inlineDraft) closeInlineEditor(); else closeEditor().catch((error) => toast(error.message, true)); });
   $('inlineEditorApply').addEventListener('click', applyInlineEditor);
   $('inlineEditorCancel').addEventListener('click', () => closeInlineEditor());
+  classicEditor = window.createEditor('#inlineEditorField', {
+    undo: () => restoreInlineHistory(-1), redo: () => restoreInlineHistory(1),
+    onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); } },
+    getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, size: $('inlineEditorSize').value, color: inlineDraft.color } : null,
+    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (meta.size === '' || (+meta.size >= 8 && +meta.size <= 160)) $('inlineEditorSize').value = meta.size; if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || '#ffffff'; } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; },
+  });
   const inlineField = $('inlineEditorField');
   ['keyup', 'mouseup', 'focus'].forEach((name) => inlineField.addEventListener(name, () => { rememberInlineRange(); syncInlineLineControls(); }));
   inlineField.addEventListener('input', () => { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); });
-  inlineField.addEventListener('keydown', (event) => {
-    if (!(event.ctrlKey || event.metaKey)) return;
-    const key = event.key.toLowerCase();
-    if (key === 'z' || key === 'y') { event.preventDefault(); event.stopPropagation(); restoreInlineHistory(key === 'y' || event.shiftKey ? 1 : -1); }
-  });
-  inlineField.addEventListener('paste', (event) => { event.preventDefault(); document.execCommand('insertText', false, event.clipboardData.getData('text/plain')); });
   $('inlineEditor').querySelectorAll('[data-inline-command]').forEach((button) => {
     button.addEventListener('mousedown', (event) => event.preventDefault());
     button.addEventListener('click', () => inlineCommand(button.dataset.inlineCommand));
@@ -1559,10 +1476,11 @@ function bindEvents() {
   $('inlineLineColor').addEventListener('input', () => setInlineLineStyle('color', $('inlineLineColor').value));
   $('inlineLineReset').addEventListener('mousedown', (event) => event.preventDefault());
   $('inlineLineReset').addEventListener('click', resetInlineLineStyle);
-  $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; });
-  $('inlineEditorAlign').addEventListener('change', () => { inlineField.style.textAlign = $('inlineEditorAlign').value; });
-  $('inlineEditorColor').addEventListener('input', () => { if (inlineDraft) inlineDraft.color = $('inlineEditorColor').value; });
-  $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) inlineDraft.color = null; });
+  $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; classicEditor.notifyChange(); });
+  $('inlineEditorAlign').addEventListener('change', () => { inlineField.style.textAlign = $('inlineEditorAlign').value; classicEditor.notifyChange(); });
+  $('inlineEditorColor').addEventListener('input', () => { if (inlineDraft) { inlineDraft.color = $('inlineEditorColor').value; classicEditor.notifyChange(); } });
+  $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) { inlineDraft.color = null; classicEditor.notifyChange(); } });
+  $('inlineEditorSize').addEventListener('input', () => { if (inlineDraft) classicEditor.notifyChange(); });
   document.querySelector('.editor-preview').addEventListener('scroll', positionInlineEditor);
   $('editorZoomOut').addEventListener('click', () => setEditorZoom(state.editorScale / 1.25)); $('editorZoomIn').addEventListener('click', () => setEditorZoom(state.editorScale * 1.25)); $('editorZoomActual').addEventListener('click', () => setEditorZoom(1)); $('editorZoomFit').addEventListener('click', fitEditor);
   document.querySelector('.editor-preview').addEventListener('wheel', handleEditorWheel, { passive: false });

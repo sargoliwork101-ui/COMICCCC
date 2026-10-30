@@ -160,6 +160,7 @@ window.HTMLElement.prototype.releasePointerCapture = function (pointerId) { if (
 window.Typeset = {
   blockStyle(block) { return { dir: block.dir === 'ltr' ? 'ltr' : 'rtl', align: block.align || 'right', bold: true, italic: false, underline: false, size: 12, color: null }; },
   hasInlineMarks() { return false; },
+  richHtmlWords() { return []; },
   render(bitmap, blocks) {
     canvasRenderCount += 1;
     renderedBlocks = blocks;
@@ -167,7 +168,7 @@ window.Typeset = {
   },
 };
 
-for (const file of ['groups.js', 'app.js']) {
+for (const file of ['groups.js', 'rich-sanitize.js', 'rich-editor.js', 'app.js']) {
   vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -327,10 +328,12 @@ function check(name, condition) {
   secondOcrOverlay.dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
   const ocrCard = $('blockList').querySelector('.block-card[data-id="2"]');
   check('clicking OCR overlay selects its sidebar editor without moving the page', ocrCard.classList.contains('active') && secondOcrOverlay.parentElement.classList.contains('active') && !ocrOverlay.parentElement.classList.contains('active') && scrollIntoViewCalls.length === 0);
-  ocrOverlay.innerText = 'CORRECTED OCR';
-  ocrOverlay.dispatchEvent(new window.Event('input', { bubbles: true }));
-  check('editing the OCR overlay updates source text without changing translation', vm.runInContext("state.project.images[0].blocks[0].text === 'CORRECTED OCR' && state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
-  check('OCR overlay editing stays synchronized with the source field', $('blockList').querySelector('textarea').value === 'CORRECTED OCR');
+  check('OCR overlay is a click target, not a second editor', ocrOverlay.contentEditable === 'false' && !$('blockList').querySelector('textarea,[contenteditable="true"]'));
+  vm.runInContext('openInlineEditor(state.project.images[0].blocks[0])', context);
+  const editorField = $('inlineEditorField'); editorField.textContent = 'CORRECTED OCR'; editorField.dispatchEvent(new window.Event('input', { bubbles: true }));
+  vm.runInContext('applyInlineEditor()', context);
+  check('the single popup updates OCR without changing translation', vm.runInContext("state.project.images[0].blocks[0].text === 'CORRECTED OCR' && state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
+  check('OCR display is synchronized with the read-only source card', $('blockList').querySelector('.block-readonly').textContent.includes('CORRECTED OCR'));
   vm.runInContext("setOverlayMode('translation', false); renderEditorBoxes()", context);
   check('editor selector restores the translated overlay', $('editorBoxes').querySelector('.editor-box-text')?.textContent === 'سلام دنیا');
   vm.runInContext('selectEditorBlock(1, false)', context);
@@ -560,7 +563,7 @@ function check(name, condition) {
   $('translationPreviewConfirm').click();
   await vm.runInContext('translationPreviewTask', context);
   check('per-block confirmation sends the same previewed text and signature', singleTranslationCalls.length === 1 && singleTranslationCalls[0].text === 'NEW OCR' && singleTranslationCalls[0].confirmation === 'ui-confirmation-signature');
-  check('confirmed per-block translation returns to its own editable box', retranslateButton.closest('.block-card').textContent.includes('ترجمهٔ تکی تازه'));
+  check('confirmed per-block translation appears on its read-only card', $('blockList').querySelector('.block-card').textContent.includes('ترجمهٔ تکی تازه'));
   await vm.runInContext('closeEditor()', context);
 
   const revertsBeforeSelector = revertCalls;
