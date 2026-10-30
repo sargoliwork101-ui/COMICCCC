@@ -32,9 +32,18 @@ class TextTranslateRequest(BaseModel):
 
 class AiSettings(BaseModel):
     provider: str = "free"
-    base_url: str = "https://api.avalai.ir/v1"
-    model: str = "gpt-6-luna"
+    base_url: str | None = None
+    model: str | None = None
     api_key: str | None = None
+    providers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class AiConnectionTest(BaseModel):
+    provider: str | None = None
+    profile_id: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
 
 
 class EngineTestRequest(BaseModel):

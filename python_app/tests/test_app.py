@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import zipfile
 
+import httpx
 import pymupdf
 import pytest
 from fastapi.testclient import TestClient
@@ -42,12 +43,41 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.25"
+    assert health.json()["version"] == "3.26"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۲۵ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۲۶ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
+
+
+def test_ai_connection_endpoint_tests_the_selected_saved_profile(client, monkeypatch):
+    saved = client.put("/api/ai-settings", json={
+        "provider": "openrouter",
+        "providers": {"openrouter": {
+            "model": "anthropic/claude-api-test",
+            "profiles": [
+                {"id": "first", "name": "اول", "api_key": "first-api-secret"},
+                {"id": "second", "name": "دوم", "api_key": "second-api-secret"},
+            ],
+        }},
+    })
+    assert saved.status_code == 200, saved.text
+    assert "first-api-secret" not in saved.text and "second-api-secret" not in saved.text
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return httpx.Response(200, json={"data": [{"id": "anthropic/claude-api-test"}]}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    tested = client.post("/api/ai-settings/test", json={"provider": "openrouter", "profile_id": "second"})
+    assert tested.status_code == 200, tested.text
+    assert tested.json()["model"] == "anthropic/claude-api-test"
+    assert captured["url"] == "https://openrouter.ai/api/v1/models"
+    assert captured["headers"]["Authorization"] == "Bearer second-api-secret"
+    assert "second-api-secret" not in tested.text
 
 
 def test_project_image_render_and_all_exports(client):

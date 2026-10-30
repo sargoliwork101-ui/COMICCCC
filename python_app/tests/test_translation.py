@@ -147,3 +147,160 @@ def test_translation_distribution_rejects_missing_or_empty_sections():
         distribute_translation(["one", "two"], f"یک{TRANSLATION_SEPARATOR}")
     with pytest.raises(TranslationError):
         distribute_translation(["one", "two"], f"یک{TRANSLATION_SEPARATOR}دو{TRANSLATION_SEPARATOR}سه")
+
+
+def test_provider_settings_keep_models_and_keys_separate_without_exposing_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    public = service.save_settings({
+        "provider": "openai",
+        "providers": {
+            "openai": {"model": "gpt-custom", "profiles": [{"id": "open-1", "name": "OpenAI من", "api_key": "open-secret"}]},
+            "gemini": {"model": "gemini-custom", "profiles": [{"id": "gem-1", "name": "Gemini من", "api_key": "gem-secret"}]},
+        },
+    })
+    assert public["providers"]["openai"]["model"] == "gpt-custom"
+    assert public["providers"]["gemini"]["model"] == "gemini-custom"
+    assert public["providers"]["openai"]["profiles"] == [{"id": "open-1", "name": "OpenAI من", "hasApiKey": True}]
+    assert "open-secret" not in json.dumps(public) and "gem-secret" not in json.dumps(public)
+
+    public = service.save_settings({"provider": "gemini", "providers": public["providers"]})
+    secret = service._secret()
+    assert public["provider"] == "gemini"
+    assert secret["providers"]["openai"]["profiles"][0]["api_key"] == "open-secret"
+    assert secret["providers"]["gemini"]["profiles"][0]["api_key"] == "gem-secret"
+
+
+def test_gemini_uses_its_model_endpoint_header_and_response_parts(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({"provider": "gemini", "model": "models/gemini-test", "api_key": "gemini-secret"})
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "سلام"}, {"text": "دنیا"}]}}]}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert service.translate("Hello", "eng", provider="gemini") == "سلامدنیا"
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent"
+    assert captured["headers"]["x-goog-api-key"] == "gemini-secret"
+    assert "gemini-secret" not in captured["url"]
+    assert captured["json"]["contents"][0]["parts"][0]["text"].endswith("Hello")
+
+
+def test_openrouter_content_parts_and_named_key_failover(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({
+        "provider": "openrouter",
+        "providers": {"openrouter": {
+            "model": "anthropic/claude-test",
+            "profiles": [
+                {"id": "quota", "name": "سهمیه تمام", "api_key": "first-secret"},
+                {"id": "working", "name": "کلید سالم", "api_key": "second-secret"},
+            ],
+        }},
+    })
+    calls = []
+
+    def fake_post(url, **kwargs):
+        key = kwargs["headers"]["Authorization"]
+        calls.append((url, key, kwargs["json"]))
+        if key == "Bearer first-secret":
+            return httpx.Response(429, json={"error": "quota"}, request=httpx.Request("POST", url))
+        return httpx.Response(200, json={"choices": [{"message": {"content": [{"type": "text", "text": "موفق"}]}}]}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert service.translate("Hello", "eng", provider="openrouter") == "موفق"
+    assert len(calls) == 2
+    assert calls[0][0] == calls[1][0] == "https://openrouter.ai/api/v1/chat/completions"
+    assert calls[1][2]["model"] == "anthropic/claude-test"
+
+
+def test_connection_test_rejects_missing_selected_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({"provider": "openai", "base_url": "http://local.test/v1", "model": "missing-model", "api_key": "secret"})
+
+    def fake_get(url, **kwargs):
+        return httpx.Response(200, json={"data": [{"id": "another-model"}]}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    with pytest.raises(TranslationError, match="missing-model"):
+        service.test_connection()
+
+
+def test_all_failed_keys_stop_once_and_errors_hide_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({
+        "provider": "avalai",
+        "providers": {"avalai": {"profiles": [
+            {"id": "a", "name": "حساب اول", "api_key": "private-one"},
+            {"id": "b", "name": "حساب دوم", "api_key": "private-two"},
+        ]}},
+    })
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(kwargs["headers"]["Authorization"])
+        return httpx.Response(401, json={}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    with pytest.raises(TranslationError) as caught:
+        service.translate("Hello", "eng", provider="avalai")
+    message = str(caught.value)
+    assert len(calls) == 2
+    assert "حساب اول" in message and "حساب دوم" in message
+    assert "private-one" not in message and "private-two" not in message
+
+
+def test_malformed_collective_response_uses_next_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({
+        "provider": "openai", "base_url": "http://local.test/v1", "model": "demo",
+        "providers": {"openai": {"base_url": "http://local.test/v1", "model": "demo", "profiles": [
+            {"id": "bad", "name": "پاسخ ناقص", "api_key": "bad-key"},
+            {"id": "good", "name": "پاسخ کامل", "api_key": "good-key"},
+        ]}},
+    })
+    calls = []
+
+    def fake_post(url, **kwargs):
+        key = kwargs["headers"]["Authorization"]
+        calls.append(key)
+        text = "فقط یک بخش" if key == "Bearer bad-key" else f"بخش اول{TRANSLATION_SEPARATOR}بخش دوم"
+        return httpx.Response(200, json={"choices": [{"message": {"content": text}}]}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    source = combine_translation_texts(["first", "second"])
+    assert service.translate(source, "eng") == f"بخش اول{TRANSLATION_SEPARATOR}بخش دوم"
+    assert calls == ["Bearer bad-key", "Bearer good-key"]
+
+
+def test_legacy_avalai_settings_migrate_without_losing_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.path.parent.mkdir(parents=True, exist_ok=True)
+    service.path.write_text(json.dumps({
+        "provider": "openai", "base_url": "https://api.avalai.ir/v1",
+        "model": "gpt-6-luna", "api_key": "legacy-secret",
+    }))
+    public = service.public_settings()
+    assert public["provider"] == "avalai"
+    assert public["model"] == "gpt-6-luna"
+    assert public["providers"]["avalai"]["profiles"][0]["hasApiKey"] is True
+    assert "legacy-secret" not in json.dumps(public)
+
+
+def test_key_only_update_preserves_custom_model_and_base_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({"provider": "openai", "base_url": "http://local.test/v1", "model": "local-custom", "api_key": "first"})
+    public = service.save_settings({"provider": "openai", "api_key": "replacement"})
+    assert public["base_url"] == "http://local.test/v1"
+    assert public["model"] == "local-custom"
+    assert service._secret()["api_key"] == "replacement"

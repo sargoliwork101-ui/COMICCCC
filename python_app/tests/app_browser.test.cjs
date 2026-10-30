@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
@@ -94,6 +95,18 @@ function nextDownload(cdp, directory) {
   const downloads = path.join(temporary, 'downloads'); fs.mkdirSync(downloads);
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
+  const aiRequests = [];
+  const aiServer = http.createServer((request, response) => {
+    aiRequests.push({ method: request.method, url: request.url, authorization: request.headers.authorization || '' });
+    response.setHeader('Content-Type', 'application/json');
+    if (request.method === 'GET' && request.url === '/v1/models' && request.headers.authorization === 'Bearer browser-local-secret') {
+      response.end(JSON.stringify({ data: [{ id: 'local-browser-model' }] }));
+      return;
+    }
+    response.statusCode = 401; response.end(JSON.stringify({ error: 'unexpected test request' }));
+  });
+  await new Promise((resolve, reject) => aiServer.listen(0, '127.0.0.1', resolve).once('error', reject));
+  const aiBase = `http://127.0.0.1:${aiServer.address().port}/v1`;
   const server = spawn(python, ['-m', 'comic_studio', '--host', '127.0.0.1', '--port', String(port), '--no-browser'], {
     cwd: pythonApp,
     env: { ...process.env, COMIC_STUDIO_DATA: path.join(temporary, 'data') },
@@ -146,6 +159,30 @@ function nextDownload(cdp, directory) {
     await page.waitForFunction(() => state.project.images[0].edited === true, { timeout: 5000 });
     assert.equal(await previewDifference(page), 0, 'reopening saved translations must render them on the main page');
     console.log('PASS: real browser renders saved translations when a project opens');
+
+    await page.click('#menuBtn'); await page.click('#aiBtn');
+    await page.waitForSelector('#aiDialog[open] #aiProvider');
+    await page.select('#aiProvider', 'openai');
+    for (const [selector, value] of [['#aiBaseUrl', aiBase], ['#aiModel', 'local-browser-model']]) {
+      await page.click(selector); await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control'); await page.type(selector, value);
+    }
+    await page.type('.ai-profile-key', 'browser-local-secret');
+    await page.click('.ai-profile-test');
+    await page.waitForFunction(() => document.getElementById('aiStatus').textContent.includes('local-browser-model'), { timeout: 10000 }).catch(async (error) => {
+      console.error('AI dialog diagnostic:', await page.evaluate(() => ({ status: document.getElementById('aiStatus').textContent, provider: document.getElementById('aiProvider').value, model: document.getElementById('aiModel').value, baseUrl: document.getElementById('aiBaseUrl').value, rowStatus: document.querySelector('.ai-profile-status')?.textContent })), aiRequests);
+      throw error;
+    });
+    assert.equal(aiRequests.length, 1, 'the row test must make one model-list request and no generation request');
+    assert.deepEqual(aiRequests[0], { method: 'GET', url: '/v1/models', authorization: 'Bearer browser-local-secret' });
+    const browserAiSettings = await api(base, '/api/ai-settings');
+    assert.equal(browserAiSettings.provider, 'openai');
+    assert.equal(browserAiSettings.model, 'local-browser-model');
+    assert.equal(browserAiSettings.providers.openai.profiles[0].hasApiKey, true);
+    assert.ok(!JSON.stringify(browserAiSettings).includes('browser-local-secret'), 'public settings must not return the browser-entered secret');
+    assert.equal(await page.$eval('.ai-profile-key', (input) => input.value), '', 'the saved secret must be cleared from the real password field');
+    await page.select('#aiProvider', 'free'); await page.click('#saveAiBtn');
+    await page.waitForFunction(() => state.ai.provider === 'free'); await page.keyboard.press('Escape');
+    console.log('PASS: real AI dialog tests the selected model through Python without exposing its API key');
 
     project = await api(base, `/api/projects/${projectId}`);
     await api(base, `/api/projects/${projectId}/images/${imageId}/revert`, { method: 'POST' });
@@ -282,6 +319,7 @@ with pymupdf.open(pdf_path) as document:
   } finally {
     if (browser) await browser.close();
     if (server.exitCode === null) server.kill('SIGTERM');
+    await new Promise((resolve) => aiServer.close(resolve));
     fs.rmSync(temporary, { recursive: true, force: true });
   }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -16,7 +16,7 @@ from .exporter import build_images_zip, build_pdf, build_txt, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
 from .paths import STATIC_DIR, project_root
 from .schemas import (
-    AiSettings, EngineDownloadRequest, EngineTestRequest, ExportRequest, OcrRequest, ProjectCreate,
+    AiConnectionTest, AiSettings, EngineDownloadRequest, EngineTestRequest, ExportRequest, OcrRequest, ProjectCreate,
     SessionRequest, StateUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .sessions import SessionManager
@@ -358,13 +358,14 @@ def create_app() -> FastAPI:
     @app.put("/api/ai-settings")
     def save_ai_settings(values: AiSettings) -> dict[str, Any]:
         try:
-            return translations.save_settings(values.model_dump())
+            return translations.save_settings(values.model_dump(exclude_none=True))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
     @app.post("/api/ai-settings/test")
-    async def test_ai_settings() -> dict[str, Any]:
-        return await run_in_threadpool(translations.test_connection)
+    async def test_ai_settings(values: AiConnectionTest | None = None) -> dict[str, Any]:
+        overrides = values.model_dump(exclude_none=True) if values else {}
+        return await run_in_threadpool(translations.test_connection, overrides)
 
     @app.post("/api/projects/{project_id}/export")
     async def export(project_id: str, values: ExportRequest) -> FileResponse:

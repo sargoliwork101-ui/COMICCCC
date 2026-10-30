@@ -31,6 +31,20 @@ let activityFeed = { entries: [], next: 0 };
 let renderedBlocks = null;
 let renderedUploads = 0;
 const exportRequests = [];
+const aiSaveRequests = [];
+const aiTestRequests = [];
+const aiProviderDefaults = {
+  gemini: ['gemini-2.5-flash', 'https://generativelanguage.googleapis.com/v1beta'],
+  openai: ['gpt-4o-mini', 'https://api.openai.com/v1'],
+  openrouter: ['openai/gpt-4o-mini', 'https://openrouter.ai/api/v1'],
+  avalai: ['gpt-6-luna', 'https://api.avalai.ir/v1'],
+};
+let aiSettings = {
+  provider: 'free', base_url: '', model: '', hasApiKey: false,
+  providers: Object.fromEntries(Object.entries(aiProviderDefaults).map(([id, [model, baseUrl]]) => [id, {
+    model, defaultModel: model, base_url: baseUrl, keyUrl: 'https://example.invalid/key', keyLabel: `کلید ${id}`, profiles: [],
+  }])),
+};
 const jsonResponse = (payload, status = 200) => ({
   ok: status >= 200 && status < 300, status,
   headers: { get: () => 'application/json' },
@@ -43,7 +57,31 @@ window.fetch = async (url, options = {}) => {
   if (pathname === '/api/projects' && options.method === 'POST') return jsonResponse(project, 201);
   if (pathname === `/api/projects/${project.id}`) return jsonResponse(project);
   if (pathname === '/api/engines') return jsonResponse([engine]);
-  if (pathname === '/api/ai-settings') return jsonResponse({ provider: 'free', base_url: '', model: '', hasApiKey: false });
+  if (pathname === '/api/ai-settings/test' && options.method === 'POST') {
+    const request = JSON.parse(options.body); aiTestRequests.push(request);
+    return jsonResponse({ ok: true, model: request.model, message: `اتصال برقرار است؛ مدل ${request.model} در دسترس است.` });
+  }
+  if (pathname === '/api/ai-settings' && options.method === 'PUT') {
+    const request = JSON.parse(options.body); aiSaveRequests.push(request);
+    const providers = {};
+    Object.entries(aiProviderDefaults).forEach(([id, [defaultModel, defaultBase]]) => {
+      const previous = aiSettings.providers[id] || {};
+      const incoming = request.providers?.[id] || {};
+      const oldProfiles = previous.profiles || [];
+      providers[id] = {
+        ...previous, model: incoming.model || previous.model || defaultModel,
+        base_url: incoming.base_url || previous.base_url || defaultBase,
+        profiles: (incoming.profiles || oldProfiles).map((profile) => ({
+          id: profile.id, name: profile.name || '',
+          hasApiKey: !!profile.api_key || oldProfiles.some((old) => old.id === profile.id && old.hasApiKey),
+        })),
+      };
+    });
+    const active = providers[request.provider];
+    aiSettings = { provider: request.provider, providers, model: active?.model || '', base_url: active?.base_url || '', hasApiKey: !!active?.profiles.some((profile) => profile.hasApiKey) };
+    return jsonResponse(aiSettings);
+  }
+  if (pathname === '/api/ai-settings') return jsonResponse(aiSettings);
   if (pathname === '/api/activity') return jsonResponse(activityFeed);
   if (pathname === '/api/activity/clear' && options.method === 'POST') { activityClears += 1; return jsonResponse({ ok: true, next: 0 }); }
   if (pathname === '/api/session/heartbeat') return jsonResponse({ ok: true, active: 1 });
@@ -144,6 +182,42 @@ function check(name, condition) {
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   await sleep(0);
   check('Escape closes the editor dialog', !$('editorDialog').open);
+
+  $('aiBtn').click(); await sleep(20);
+  check('AI dialog offers free, Gemini, OpenAI, OpenRouter, and AvalAI', $('aiDialog').open && ['free', 'gemini', 'openai', 'openrouter', 'avalai'].every((id) => $('aiProvider').querySelector(`option[value="${id}"]`)));
+  $('aiProvider').value = 'openrouter'; $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('provider selection loads its own endpoint and exact default model', $('aiBaseUrl').value === 'https://openrouter.ai/api/v1' && $('aiModel').value === 'openai/gpt-4o-mini' && !$('aiFields').classList.contains('hidden'));
+  check('an AI provider starts with one editable API row', $('aiProfiles').querySelectorAll('.ai-profile-row').length === 1);
+  let rows = $('aiProfiles').querySelectorAll('.ai-profile-row');
+  rows[0].querySelector('.ai-profile-name').value = 'کلید اول OpenRouter';
+  rows[0].querySelector('.ai-profile-name').dispatchEvent(new window.Event('input', { bubbles: true }));
+  rows[0].querySelector('.ai-profile-key').value = 'openrouter-first-secret';
+  rows[0].querySelector('.ai-profile-key').dispatchEvent(new window.Event('input', { bubbles: true }));
+  $('aiAddProfile').click();
+  rows = $('aiProfiles').querySelectorAll('.ai-profile-row');
+  rows[1].querySelector('.ai-profile-name').value = 'کلید دوم OpenRouter';
+  rows[1].querySelector('.ai-profile-name').dispatchEvent(new window.Event('input', { bubbles: true }));
+  rows[1].querySelector('.ai-profile-key').value = 'openrouter-second-secret';
+  rows[1].querySelector('.ai-profile-key').dispatchEvent(new window.Event('input', { bubbles: true }));
+  $('aiModel').value = 'anthropic/claude-ui-test';
+  rows[0].querySelector('.ai-profile-test').click(); await sleep(30);
+  const savedAi = aiSaveRequests.at(-1);
+  check('row test first saves both named keys with the selected provider and model', savedAi.provider === 'openrouter' && savedAi.model === 'anthropic/claude-ui-test' && savedAi.providers.openrouter.profiles.length === 2 && savedAi.providers.openrouter.profiles[0].api_key === 'openrouter-first-secret' && savedAi.providers.openrouter.profiles[1].api_key === 'openrouter-second-secret');
+  check('row test uses the stored selected profile without resending its secret', aiTestRequests.length === 1 && aiTestRequests[0].profile_id === savedAi.providers.openrouter.profiles[0].id && aiTestRequests[0].model === 'anthropic/claude-ui-test' && !('api_key' in aiTestRequests[0]));
+  check('successful row test is visible in the real dialog', $('aiStatus').textContent.includes('اتصال برقرار است') && $('aiProfiles').querySelector('.ai-profile-status').textContent.includes('✓'));
+  check('saved secrets are cleared from password fields and absent from the DOM', [...$('aiProfiles').querySelectorAll('.ai-profile-key')].every((input) => input.value === '' && input.placeholder.includes('ذخیره شده')) && !$('aiDialog').innerHTML.includes('openrouter-first-secret'));
+  $('aiProvider').value = 'gemini'; $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('switching providers does not reuse OpenRouter model or keys', $('aiModel').value === 'gemini-2.5-flash' && $('aiProfiles').querySelectorAll('.ai-profile-row').length === 1 && $('aiProfiles').querySelector('.ai-profile-key').value === '' && !$('aiProfiles').querySelector('.ai-profile-key').placeholder.includes('ذخیره شده') && $('aiBaseUrlField').classList.contains('hidden'));
+  $('aiProvider').value = 'openrouter'; $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('switching back restores only OpenRouter settings and named profiles', $('aiModel').value === 'anthropic/claude-ui-test' && $('aiProfiles').querySelectorAll('.ai-profile-row').length === 2 && $('aiProfiles').querySelector('.ai-profile-name').value === 'کلید اول OpenRouter');
+  $('aiProfiles').querySelectorAll('.ai-profile-remove')[1].click();
+  check('removing a profile updates the actual rows', $('aiProfiles').querySelectorAll('.ai-profile-row').length === 1);
+  $('saveAiBtn').click(); await sleep(20);
+  check('saving after removal persists only the remaining profile', aiSaveRequests.at(-1).providers.openrouter.profiles.length === 1);
+  $('aiProvider').value = 'free'; $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('free mode hides all AI request controls', $('aiFields').classList.contains('hidden'));
+  $('saveAiBtn').click(); await sleep(20);
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
 
   const css = fs.readFileSync(path.join(root, 'style.css'), 'utf8');
   const unselectedRules = css.match(/\.item:not\(\.selected\) \.tw\{[^}]*\}/g) || [];

@@ -642,9 +642,145 @@ async function testEngine(engineId) {
   try { const result = await api(`/api/engines/${engineId}/test`, jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value })); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
   catch (error) { $('modelTestResult').textContent = error.message; appendLocalActivity(`آزمایش موتور ناموفق بود: ${error.message}`, 'error'); }
 }
-async function loadAiSettings() { state.ai = await api('/api/ai-settings'); $('aiProvider').value = state.ai.provider || 'free'; $('aiBaseUrl').value = state.ai.base_url || 'https://api.avalai.ir/v1'; $('aiModel').value = state.ai.model || 'gpt-6-luna'; $('aiKey').placeholder = state.ai.hasApiKey ? 'کلید ذخیره شده؛ برای تغییر، کلید تازه بدهید' : 'کلید API'; updateAiFields(); }
-function updateAiFields() { $('aiFields').classList.toggle('hidden', $('aiProvider').value !== 'openai'); }
-async function saveAiSettings() { state.ai = await api('/api/ai-settings', jsonOptions('PUT', { provider: $('aiProvider').value, base_url: $('aiBaseUrl').value, model: $('aiModel').value, api_key: $('aiKey').value || null })); $('aiKey').value = ''; await loadAiSettings(); toast('تنظیمات ترجمه ذخیره شد'); }
+const AI_PROVIDER_IDS = ['gemini', 'openai', 'openrouter', 'avalai'];
+const AI_FALLBACKS = {
+  gemini: { label: 'Google Gemini', model: 'gemini-2.5-flash', defaultModel: 'gemini-2.5-flash', base_url: 'https://generativelanguage.googleapis.com/v1beta', keyUrl: 'https://aistudio.google.com/apikey', keyLabel: 'ساخت کلید در Google AI Studio', profiles: [] },
+  openai: { label: 'OpenAI', model: 'gpt-4o-mini', defaultModel: 'gpt-4o-mini', base_url: 'https://api.openai.com/v1', keyUrl: 'https://platform.openai.com/api-keys', keyLabel: 'ساخت کلید در OpenAI', profiles: [] },
+  openrouter: { label: 'OpenRouter', model: 'openai/gpt-4o-mini', defaultModel: 'openai/gpt-4o-mini', base_url: 'https://openrouter.ai/api/v1', keyUrl: 'https://openrouter.ai/settings/keys', keyLabel: 'ساخت کلید در OpenRouter', profiles: [] },
+  avalai: { label: 'AvalAI', model: 'gpt-6-luna', defaultModel: 'gpt-6-luna', base_url: 'https://api.avalai.ir/v1', keyUrl: 'https://docs.avalai.ir/en/quickstart', keyLabel: 'راهنمای AvalAI', profiles: [] },
+};
+let aiEditorProvider = 'free';
+let aiEditorProfiles = [];
+let aiProfileSerial = 0;
+const aiEditorDrafts = new Map();
+function aiInfo(provider = aiEditorProvider) { return state.ai?.providers?.[provider] || AI_FALLBACKS[provider] || AI_FALLBACKS.avalai; }
+function makeAiProfile(profile = {}, index = 0) {
+  aiProfileSerial += 1;
+  return {
+    id: String(profile.id || `api-${Date.now().toString(36)}-${aiProfileSerial}`),
+    name: String(profile.name || ''), hasApiKey: profile.hasApiKey === true,
+    apiKey: String(profile.apiKey || ''),
+  };
+}
+function captureAiProvider() {
+  if (!AI_PROVIDER_IDS.includes(aiEditorProvider)) return;
+  aiEditorDrafts.set(aiEditorProvider, {
+    model: $('aiModel').value.trim(), base_url: $('aiBaseUrl').value.trim(),
+    profiles: aiEditorProfiles.map((profile) => ({ ...profile })),
+  });
+}
+function updateAiProviderUi() {
+  const info = aiInfo();
+  $('aiKeyHelp').href = info.keyUrl;
+  $('aiKeyHelp').textContent = info.keyLabel;
+  $('aiBaseUrlField').classList.toggle('hidden', aiEditorProvider === 'gemini');
+  $('aiModel').placeholder = info.defaultModel || info.model || '';
+}
+function renderAiProfiles() {
+  const container = $('aiProfiles');
+  container.textContent = '';
+  aiEditorProfiles.forEach((profile, index) => {
+    const row = document.createElement('div');
+    row.className = 'ai-profile-row'; row.dataset.profileId = profile.id;
+    const name = document.createElement('input');
+    name.type = 'text'; name.className = 'ai-profile-name'; name.value = profile.name;
+    name.placeholder = `API ${index + 1}`; name.setAttribute('aria-label', `نام دلخواه API ${index + 1}`);
+    name.addEventListener('input', () => { profile.name = name.value; });
+    const key = document.createElement('input');
+    key.type = 'password'; key.className = 'ai-profile-key'; key.dir = 'ltr';
+    key.autocomplete = 'off'; key.spellcheck = false; key.value = profile.apiKey;
+    key.placeholder = profile.hasApiKey ? 'کلید ذخیره شده؛ برای تغییر، کلید تازه بدهید' : 'کلید API';
+    key.setAttribute('aria-label', `کلید API ${index + 1}`);
+    key.addEventListener('input', () => { profile.apiKey = key.value; $('aiStatus').textContent = ''; });
+    const test = document.createElement('button');
+    test.type = 'button'; test.className = 'bt ai-profile-test'; test.textContent = 'تست';
+    test.title = 'تست همین کلید و مدل بدون ارسال متن کمیک';
+    test.setAttribute('aria-label', `تست اتصال API ${index + 1}`);
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'bt danger ai-profile-remove'; remove.textContent = '×';
+    remove.title = 'حذف این API'; remove.setAttribute('aria-label', `حذف API ${index + 1}`);
+    remove.disabled = aiEditorProfiles.length === 1;
+    remove.addEventListener('click', () => {
+      aiEditorProfiles.splice(index, 1);
+      if (!aiEditorProfiles.length) aiEditorProfiles.push(makeAiProfile());
+      renderAiProfiles();
+    });
+    const status = document.createElement('span');
+    status.className = 'ai-profile-status'; status.setAttribute('role', 'status');
+    test.addEventListener('click', async () => {
+      const provider = aiEditorProvider;
+      const profileId = profile.id;
+      const model = $('aiModel').value.trim();
+      const baseUrl = $('aiBaseUrl').value.trim();
+      if (!profile.apiKey.trim() && !profile.hasApiKey) {
+        status.textContent = 'ابتدا کلید API را وارد کنید.'; key.focus(); return;
+      }
+      test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی…';
+      try {
+        await saveAiSettings({ quiet: true });
+        const result = await api('/api/ai-settings/test', jsonOptions('POST', {
+          provider, profile_id: profileId, model, base_url: baseUrl,
+        }));
+        $('aiStatus').textContent = result.message;
+        const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
+        if (currentRow) currentRow.querySelector('.ai-profile-status').textContent = 'اتصال برقرار است ✓';
+      } catch (error) {
+        $('aiStatus').textContent = error.message;
+        const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
+        (currentRow?.querySelector('.ai-profile-status') || status).textContent = error.message;
+      } finally {
+        const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
+        const currentTest = currentRow?.querySelector('.ai-profile-test') || test;
+        currentTest.disabled = false; currentTest.textContent = 'تست';
+      }
+    });
+    row.append(name, key, test, remove, status); container.appendChild(row);
+  });
+}
+function showAiProvider(provider, capture = true) {
+  if (capture && provider !== aiEditorProvider) captureAiProvider();
+  aiEditorProvider = AI_PROVIDER_IDS.includes(provider) ? provider : 'free';
+  $('aiProvider').value = aiEditorProvider;
+  $('aiFields').classList.toggle('hidden', aiEditorProvider === 'free');
+  if (aiEditorProvider === 'free') { $('aiStatus').textContent = ''; return; }
+  const info = aiInfo();
+  const draft = aiEditorDrafts.get(aiEditorProvider);
+  const sourceProfiles = draft?.profiles || info.profiles || [];
+  aiEditorProfiles = sourceProfiles.map((profile, index) => makeAiProfile(profile, index));
+  if (!aiEditorProfiles.length) aiEditorProfiles.push(makeAiProfile({ name: 'کلید اول' }));
+  $('aiModel').value = draft?.model || info.model || info.defaultModel || '';
+  $('aiBaseUrl').value = draft?.base_url || info.base_url || '';
+  updateAiProviderUi(); renderAiProfiles(); $('aiStatus').textContent = '';
+}
+async function loadAiSettings() {
+  state.ai = await api('/api/ai-settings');
+  aiEditorDrafts.clear(); showAiProvider(state.ai.provider || 'free', false);
+}
+function aiSettingsPayload() {
+  captureAiProvider();
+  const providers = {};
+  AI_PROVIDER_IDS.forEach((provider) => {
+    const info = aiInfo(provider);
+    const draft = aiEditorDrafts.get(provider);
+    const profiles = draft?.profiles || info.profiles || [];
+    providers[provider] = {
+      model: draft?.model || info.model || info.defaultModel,
+      base_url: draft?.base_url || info.base_url,
+      profiles: profiles.map((profile) => ({
+        id: profile.id, name: profile.name || '',
+        ...(profile.apiKey?.trim() ? { api_key: profile.apiKey.trim() } : {}),
+      })),
+    };
+  });
+  const active = providers[aiEditorProvider];
+  return { provider: aiEditorProvider, model: active?.model || null, base_url: active?.base_url || null, providers };
+}
+async function saveAiSettings(options = {}) {
+  state.ai = await api('/api/ai-settings', jsonOptions('PUT', aiSettingsPayload()));
+  aiEditorDrafts.clear(); showAiProvider(state.ai.provider || 'free', false);
+  if (!options.quiet) toast('تنظیمات ترجمه ذخیره شد');
+  return state.ai;
+}
 
 // ---------- Full-page translation editor ----------
 function editorItem() { return state.project?.images.find((item) => item.id === state.editorId); }
@@ -999,7 +1135,7 @@ function bindEvents() {
   $('duplicateBtn').addEventListener('click', () => duplicateImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('ocrBtn').addEventListener('click', () => { updateEngineOptions(); showDialog('ocrDialog'); }); $('ocrEngine').addEventListener('change', updateOcrEngineStatus); $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
-  $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', updateAiFields); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => toast(error.message, true))); $('testAiBtn').addEventListener('click', async () => { try { await saveAiSettings(); const result = await api('/api/ai-settings/test', { method: 'POST' }); $('aiStatus').textContent = result.message; } catch (error) { $('aiStatus').textContent = error.message; } });
+  $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => { $('aiStatus').textContent = error.message; toast(error.message, true); }));
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
