@@ -71,7 +71,7 @@ const lastFillIndex = paintOrder.findLastIndex((entry) => entry.rect);
 assert(firstTextIndex >= 0 && lastFillIndex >= 0 && lastFillIndex < firstTextIndex, 'all erasures and target fills must finish before any text is painted');
 console.log('PASS: later erasures and box fills cannot cover previously rendered text');
 
-function captureLayout({ text, html = '', dir = 'ltr', align = 'justify', plain = false, width = 100 }) {
+function captureLayout({ text, html = '', dir = 'ltr', align = 'justify', plain = false, width = 100, verticalAlign }) {
   const drawn = [];
   const ctx = new Proxy({
     direction: 'inherit',
@@ -82,7 +82,7 @@ function captureLayout({ text, html = '', dir = 'ltr', align = 'justify', plain 
     set(target, property, value) { target[property] = value; return true; },
   });
   Typeset.render({ width: 300, height: 200 }, [{ enabled: true, tr: text, richHtml: html, _plainText: plain,
-    x0: 0, y0: 0, x1: width, y1: 180, lineH: 12, size: 12, bg: 'white', dir, align,
+    x0: 0, y0: 0, x1: width, y1: 180, lineH: 12, size: 12, bg: 'white', dir, align, verticalAlign,
   }], { createCanvas: (w, h) => ({ width: w, height: h, getContext: () => ctx }) });
   return drawn;
 }
@@ -110,6 +110,19 @@ const literal = captureLayout({ text: 'one *two* three four five', plain: true }
 assert(literal.some((point) => point.text === '*two*'), 'justified OCR should not interpret literal markers');
 console.log('PASS: justified lines fill both edges in RTL and LTR without stretching paragraph endings');
 
+assert.equal(Typeset.blockStyle({}).verticalAlign, 'middle', 'legacy projects stay centred');
+assert.equal(Typeset.blockStyle({ verticalAlign: 'invalid' }).verticalAlign, 'middle');
+for (const align of ['left', 'justify']) {
+  const positions = ['top', 'middle', 'bottom'].map((verticalAlign) => captureLayout({ text: 'one\ntwo', plain: true, align, verticalAlign }));
+  const firstYs = positions.map((lines) => lines[0].y);
+  assert(firstYs[0] < firstYs[1] && firstYs[1] < firstYs[2], `plain ${align} text respects vertical position`);
+  assert(Math.abs(firstYs[0] - 12.9) < 0.01);
+  assert(Math.abs(positions[2][1].y - (180 - 3.6 - 9.3)) < 0.01);
+  assert.equal(captureLayout({ text: 'one\ntwo', plain: true, align })[0].y, firstYs[1], 'legacy positioning is unchanged');
+}
+console.log('PASS: vertical top, middle and bottom work for plain and justified OCR');
+
+
 const { JSDOM } = require('jsdom');
 global.document = new JSDOM('').window.document;
 const rich = captureLayout({ text: 'one two three four five six', html: '<b>one</b> two three four five six' });
@@ -123,6 +136,14 @@ assert.equal(secondLine.x, (100 - 'second'.length * 6) / 2, 'second paragraph mu
 assert.equal(thirdLine.x, 98 - 'third'.length * 6, 'third paragraph must align right');
 assert.match(firstLine.font, /16px/); assert.equal(firstLine.dir, 'ltr');
 assert.match(firstLine.color, /rgb\(255, 0, 0\)|#ff0000/i);
+const mixedSizes = '<div style="font-size:20px">first</div><div style="font-size:40px">second</div>';
+const mixedLegacy = captureLayout({ text: 'first\nsecond', html: mixedSizes, align: 'left' });
+assert(Math.abs(mixedLegacy[1].y - mixedLegacy[0].y - 31) < 0.01, 'legacy mixed-size placement is unchanged');
+const mixedTop = captureLayout({ text: 'first\nsecond', html: mixedSizes, align: 'left', verticalAlign: 'top' });
+const mixedBottom = captureLayout({ text: 'first\nsecond', html: mixedSizes, align: 'left', verticalAlign: 'bottom' });
+assert(Math.abs(mixedTop[0].y - (3.6 + 15.5)) < 0.01);
+assert(Math.abs(mixedTop[1].y - mixedTop[0].y - (31 + 62) / 2) < 0.01, 'different line heights use their own centres');
+assert(Math.abs(mixedBottom[1].y - (180 - 3.6 - 31)) < 0.01, 'last large line remains aligned to the bottom');
 const blanks = Typeset.richHtmlWords('<div>one</div><div><br></div><div>two</div>');
 assert.deepStrictEqual(blanks.map((word) => word.t), ['one', '', 'two'], 'blank paragraphs must remain visible in layout');
 const blankLayout = captureLayout({ text: 'one\n\ntwo', html: '<div>one</div><div><br></div><div>two</div>' });

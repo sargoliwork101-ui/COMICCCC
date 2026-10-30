@@ -275,6 +275,7 @@
     return {
       dir: b.dir === 'ltr' ? 'ltr' : 'rtl',       // جهت متن: پیش‌فرض راست‌به‌چپ
       align: ['center', 'left', 'justify'].includes(b.align) ? b.align : 'right', // physical alignment; old projects default right
+      verticalAlign: ['top', 'bottom'].includes(b.verticalAlign) ? b.verticalAlign : 'middle', // old projects keep their centred layout
       bold: b.bold !== false,           // پیش‌فرض مثل گذشته: پررنگ
       italic: !!b.italic,
       underline: !!b.underline,
@@ -361,7 +362,13 @@
       if ('direction' in ctx) ctx.direction = st.dir;
       ctx.textBaseline = 'middle';
       const totalH = inline ? f.lineLh.reduce((sum, v) => sum + v, 0) : f.lines.length * f.lh;
-      let y = (layoutBox.y0 + layoutBox.y1) / 2 - totalH / 2 + (inline ? f.lineLh[0] : f.lh) / 2;
+      const insetY = Math.max(0, bh * 0.02);
+      // Top/bottom anchor the entire text block, including wrapped and blank lines.
+      // Preserve the previous centred placement for projects without this option.
+      const textTop = st.verticalAlign === 'top' ? layoutBox.y0 + insetY
+        : st.verticalAlign === 'bottom' ? layoutBox.y1 - insetY - totalH
+        : (layoutBox.y0 + layoutBox.y1 - totalH) / 2;
+      let y = textTop + (inline ? f.lineLh[0] : f.lh) / 2;
       // لنگر هر خط بر اساس چیدمان انتخابی، با حاشیهٔ کوچک از لبهٔ کادر
       const anchorX = st.align === 'left' || (st.align === 'justify' && st.dir === 'ltr') ? layoutBox.x0 + bw * 0.02
         : st.align === 'center' ? (layoutBox.x0 + layoutBox.x1) / 2
@@ -417,7 +424,12 @@
             const gapAfter = hasGapAfter ? m.spaceW + extraGap : 0;
             x += m.widths[idx] + gapAfter;
           });
-          y += f.lineLh[li];
+          if (li + 1 < f.lineLh.length) {
+            // Keep the exact legacy placement for older projects. Explicit vertical
+            // alignment uses the centres of adjacent (possibly different) line heights.
+            y += ['top', 'middle', 'bottom'].includes(b.verticalAlign)
+              ? (f.lineLh[li] + f.lineLh[li + 1]) / 2 : f.lineLh[li];
+          }
         });
         ctx.restore();
         return;

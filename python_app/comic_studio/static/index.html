@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.36">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.36">
+  <link rel="stylesheet" href="/style.css?v=3.37">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.37">
 </head>
 <body>
   <header class="topbar">
@@ -149,8 +149,9 @@
       <section id="inlineEditor" class="inline-editor hidden" role="region" aria-label="ویرایش متن انتخاب‌شده">
         <div class="inline-editor-head"><strong id="inlineEditorTitle">ابزار متن</strong><div><button id="inlineEditorCancel" type="button" aria-label="لغو ویرایش">لغو</button><button id="inlineEditorApply" type="button" class="primary">ثبت</button></div></div>
         <div id="inlineEditorField" class="inline-editor-field" contenteditable="true" role="textbox" aria-multiline="true" aria-label="متن انتخاب‌شده"></div>
-        <div id="inlineLineTools" class="inline-editor-tools inline-line-tools" aria-label="تنظیم خط انتخاب‌شده">
-          <label>اندازهٔ خط روی تصویر<input id="inlineLineSize" type="number" min="8" max="160" placeholder="پیش‌فرض" aria-label="اندازهٔ خط انتخاب‌شده روی تصویر"></label><button id="inlineLineReset" type="button" title="حذف تنظیمات اختصاصی این خط">پیش‌فرض خط</button>
+        <div class="inline-editor-tools inline-line-tools">
+          <label>جای عمودی متن در کادر<select id="inlineVerticalAlign" aria-label="جای عمودی متن در کادر"><option value="top">بالا</option><option value="middle">وسط</option><option value="bottom">پایین</option></select></label>
+          <div id="inlineLineTools" class="inline-editor-tools" aria-label="تنظیم خط انتخاب‌شده"><label>اندازهٔ خط روی تصویر<input id="inlineLineSize" type="number" min="8" max="160" placeholder="پیش‌فرض" aria-label="اندازهٔ خط انتخاب‌شده روی تصویر"></label><button id="inlineLineReset" type="button" title="حذف تنظیمات اختصاصی این خط">پیش‌فرض خط</button></div>
         </div>
         <details class="inline-box-settings"><summary>تنظیمات پیش‌فرض کل کادر</summary><div class="inline-editor-tools">
           <label>جهت<select id="inlineEditorDirection" aria-label="جهت متن"><option value="rtl">راست‌به‌چپ</option><option value="ltr">چپ‌به‌راست</option></select></label>
@@ -159,7 +160,7 @@
           <label>رنگ<input id="inlineEditorColor" type="color" aria-label="رنگ متن روی تصویر"></label><button id="inlineEditorAutoColor" type="button">رنگ خودکار</button>
         </div></details>
       </section>
-    </div><div class="editor-side"><div class="editor-help">برای هر متن می‌توانید جداگانه «فارسی / ترجمه» یا «انگلیسی / OCR» را انتخاب کنید: دکمهٔ فا/EN روی همان کادر یا انتخابگر «نمایش همین متن» در کارتش این کار را می‌کند. انتخاب کلی بالای صفحه پیش‌فرض متن‌های بدون انتخاب جداگانه است و «بدون متن» همه را پنهان می‌کند. با 👁 روی هر کادر یا تیک «نمایش متن»، فقط همان خط پنهان یا نمایان می‌شود؛ متن و ترجمه‌اش حذف نمی‌شود. روی متن داخل تصویر کلیک کنید؛ متن را داخل همان کادر ویرایش کنید و ابزارهای آن را بالای کادر ببینید. با «ثبت» نتیجه در همان صفحه نمایش داده می‌شود. کارت کنار تصویر فقط کنترل و نمایش دارد؛ دکمهٔ ویرایش آن نیز همین کادر را فعال می‌کند. چرخ ماوس زوم می‌کند و کشیدن فضای خالی تصویر را جابه‌جا می‌کند؛ برای جابه‌جایی کادر، ⠿ یا لبهٔ آن را بکشید. متن زیر کادرها همان رندر واقعی خروجی است و هنگام تایپ یا کشیدن تازه می‌شود. تنظیم اندازه و رنگ پیش‌فرض مربوط به تصویر و خروجی است. تراز «جاستیفای» خط‌های شکسته را از دو طرف تنظیم می‌کند. Ctrl+S ذخیره می‌کند.</div><div class="editor-multi-tools" aria-label="انتخاب و تراز گروهی متن‌ها"><button id="editorSelectAll" class="bt" type="button">انتخاب همه</button><button id="editorSelectNone" class="bt" type="button">لغو انتخاب</button><span id="editorSelectionStatus" class="editor-selection-status" role="status">متنی انتخاب نشده</span><span class="hint-inline">Ctrl/⌘ + کلیک برای چند انتخاب؛ کشیدن ⠿ همه را جابه‌جا می‌کند؛ اولین انتخاب مرجع هم‌اندازه است؛ برای اصلاح تشخیص، متن‌های انتخاب‌شده را پیش از ترجمه ادغام یا کادر ادغام‌شده را جدا کنید.</span><button id="editorMergeText" class="bt" type="button" title="ادغام متن‌های انتخاب‌شده پیش از ترجمه">ادغام متن‌ها</button><button id="editorSplitText" class="bt" type="button" title="بازگرداندن خط‌های یک کادر ادغام‌شده">جداکردن خط‌ها</button><button id="editorSameSize" class="bt" type="button" title="عرض و ارتفاع همهٔ کادرهای انتخاب‌شده برابر اولین انتخاب؛ مرکز هر کادر تا حد امکان حفظ می‌شود">هم‌اندازه با اولی</button><button id="editorAlignLeft" class="bt" type="button" title="تراز لبه‌های چپ کادرها">چپ</button><button id="editorAlignCenter" class="bt" type="button" title="تراز مراکز افقی کادرها">وسط افقی</button><button id="editorAlignRight" class="bt" type="button" title="تراز لبه‌های راست کادرها">راست</button><button id="editorAlignTop" class="bt" type="button" title="تراز لبه‌های بالای کادرها">بالا</button><button id="editorAlignMiddle" class="bt" type="button" title="تراز مراکز عمودی کادرها">وسط عمودی</button><button id="editorAlignBottom" class="bt" type="button" title="تراز لبه‌های پایین کادرها">پایین</button></div><div id="blockList"></div></div></div>
+    </div><div class="editor-side"><div class="editor-help">برای هر متن می‌توانید جداگانه «فارسی / ترجمه» یا «انگلیسی / OCR» را انتخاب کنید: دکمهٔ فا/EN روی همان کادر یا انتخابگر «نمایش همین متن» در کارتش این کار را می‌کند. انتخاب کلی بالای صفحه پیش‌فرض متن‌های بدون انتخاب جداگانه است و «بدون متن» همه را پنهان می‌کند. با 👁 روی هر کادر یا تیک «نمایش متن»، فقط همان خط پنهان یا نمایان می‌شود؛ متن و ترجمه‌اش حذف نمی‌شود. روی متن داخل تصویر کلیک کنید؛ متن را داخل همان کادر ویرایش کنید و ابزارهای آن را بالای کادر ببینید. با «جای عمودی متن در کادر» می‌توانید متن را بالا، وسط یا پایین بگذارید؛ با «ثبت» نتیجه در همان صفحه و خروجی نمایش داده می‌شود. کارت کنار تصویر فقط کنترل و نمایش دارد؛ دکمهٔ ویرایش آن نیز همین کادر را فعال می‌کند. چرخ ماوس زوم می‌کند و کشیدن فضای خالی تصویر را جابه‌جا می‌کند؛ برای جابه‌جایی کادر، ⠿ یا لبهٔ آن را بکشید. متن زیر کادرها همان رندر واقعی خروجی است و پس از ثبت یا هنگام کشیدن تازه می‌شود. تنظیم اندازه و رنگ پیش‌فرض مربوط به تصویر و خروجی است. تراز «جاستیفای» خط‌های شکسته را از دو طرف تنظیم می‌کند. Ctrl+S ذخیره می‌کند.</div><div class="editor-multi-tools" aria-label="انتخاب و تراز گروهی متن‌ها"><button id="editorSelectAll" class="bt" type="button">انتخاب همه</button><button id="editorSelectNone" class="bt" type="button">لغو انتخاب</button><span id="editorSelectionStatus" class="editor-selection-status" role="status">متنی انتخاب نشده</span><span class="hint-inline">Ctrl/⌘ + کلیک برای چند انتخاب؛ کشیدن ⠿ همه را جابه‌جا می‌کند؛ اولین انتخاب مرجع هم‌اندازه است؛ برای اصلاح تشخیص، متن‌های انتخاب‌شده را پیش از ترجمه ادغام یا کادر ادغام‌شده را جدا کنید.</span><button id="editorMergeText" class="bt" type="button" title="ادغام متن‌های انتخاب‌شده پیش از ترجمه">ادغام متن‌ها</button><button id="editorSplitText" class="bt" type="button" title="بازگرداندن خط‌های یک کادر ادغام‌شده">جداکردن خط‌ها</button><button id="editorSameSize" class="bt" type="button" title="عرض و ارتفاع همهٔ کادرهای انتخاب‌شده برابر اولین انتخاب؛ مرکز هر کادر تا حد امکان حفظ می‌شود">هم‌اندازه با اولی</button><button id="editorAlignLeft" class="bt" type="button" title="تراز لبه‌های چپ کادرها">چپ</button><button id="editorAlignCenter" class="bt" type="button" title="تراز مراکز افقی کادرها">وسط افقی</button><button id="editorAlignRight" class="bt" type="button" title="تراز لبه‌های راست کادرها">راست</button><button id="editorAlignTop" class="bt" type="button" title="تراز لبه‌های بالای کادرها">بالا</button><button id="editorAlignMiddle" class="bt" type="button" title="تراز مراکز عمودی کادرها">وسط عمودی</button><button id="editorAlignBottom" class="bt" type="button" title="تراز لبه‌های پایین کادرها">پایین</button></div><div id="blockList"></div></div></div>
   </dialog>
 
   <dialog id="cropDialog" class="dlg crop-dialog">
@@ -181,10 +182,10 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.36"></script>
-  <script src="/groups.js?v=3.36"></script>
-  <script src="/rich-sanitize.js?v=3.36"></script>
-  <script src="/rich-editor.js?v=3.36"></script>
-  <script src="/app.js?v=3.36"></script>
+  <script src="/typeset.js?v=3.37"></script>
+  <script src="/groups.js?v=3.37"></script>
+  <script src="/rich-sanitize.js?v=3.37"></script>
+  <script src="/rich-editor.js?v=3.37"></script>
+  <script src="/app.js?v=3.37"></script>
 </body>
 </html>

@@ -330,6 +330,13 @@ function check(name, condition) {
   check('clicking OCR overlay selects its sidebar editor without moving the page', ocrCard.classList.contains('active') && secondOcrOverlay.parentElement.classList.contains('active') && !ocrOverlay.parentElement.classList.contains('active') && scrollIntoViewCalls.length === 0);
   check('OCR overlay is a click target, not a second editor', ocrOverlay.contentEditable === 'false' && !$('blockList').querySelector('textarea,[contenteditable="true"]'));
   vm.runInContext('openInlineEditor(state.project.images[0].blocks[0])', context);
+  $('inlineVerticalAlign').value = 'top'; $('inlineVerticalAlign').dispatchEvent(new window.Event('change', { bubbles: true }));
+  window.confirm = () => false;
+  check('vertical-only draft is protected when declining discard', vm.runInContext('closeInlineEditor()', context) === false && !$('inlineEditor').classList.contains('hidden'));
+  window.confirm = () => true; $('inlineVerticalAlign').value = 'middle';
+  vm.runInContext("state.project.images[0].blocks[0].verticalAlign = 'bottom'", context);
+  check('a concurrent vertical placement edit is not overwritten', vm.runInContext('applyInlineEditor()', context) === false && $('inlineEditorField').isConnected);
+  vm.runInContext('delete state.project.images[0].blocks[0].verticalAlign', context);
   const editorField = $('inlineEditorField'); editorField.textContent = 'CORRECTED OCR'; editorField.dispatchEvent(new window.Event('input', { bubbles: true }));
   vm.runInContext('applyInlineEditor()', context);
   check('the single popup updates OCR without changing translation', vm.runInContext("state.project.images[0].blocks[0].text === 'CORRECTED OCR' && state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));

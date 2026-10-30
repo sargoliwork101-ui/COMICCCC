@@ -285,6 +285,7 @@ function nextDownload(cdp, directory) {
 
     await page.click('#grid .item .act button:nth-child(2)');
     await page.waitForSelector('#editorDialog[open] #blockList .block-card[data-id="1"]');
+    assert.equal(await page.$eval('#inlineEditor', el => el.classList.contains('hidden')), true, 'toolbar is hidden before selecting a box');
     // The focused box opens an isolated draft directly above it; no mutation until explicit Apply.
     await page.evaluate(() => { window.__inlineOriginal = JSON.parse(JSON.stringify(state.project.images[0].blocks[0])); window.__beforeInlineCanvas = document.getElementById('editorCanvas').toDataURL(); });
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text', { offset: { x: 75, y: 30 } });
@@ -301,6 +302,11 @@ function nextDownload(cdp, directory) {
     assert.equal(await page.evaluate(() => { const b=document.querySelector('#editorBoxes .editor-box[data-id="1"]');const f=document.getElementById('inlineEditorField');const bar=document.getElementById('inlineEditor');return f.parentElement===b && bar.getBoundingClientRect().bottom <= b.getBoundingClientRect().top+2; }), true, 'on a narrow viewport tools remain above the same editable box');
     await page.setViewport(originalViewport);
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const blank = await page.evaluate(() => { const r=document.getElementById('editorBoxes').getBoundingClientRect(); return {x:r.left+160*state.editorScale,y:r.top+60*state.editorScale}; });
+    await page.mouse.click(blank.x, blank.y);
+    assert.equal(await page.$eval('#inlineEditor', el => el.classList.contains('hidden')), true, 'clicking blank image hides the contextual tools');
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.waitForSelector('#inlineEditor:not(.hidden)');
     const popupPosition = await page.evaluate(() => {
       const view = document.querySelector('.editor-view').getBoundingClientRect(); const panel = document.getElementById('inlineEditor').getBoundingClientRect();
       return panel.left >= view.left - 1 && panel.right <= view.right + 1 && panel.top >= view.top - 1 && panel.bottom <= view.bottom + 1;
@@ -309,6 +315,13 @@ function nextDownload(cdp, directory) {
     await page.focus('#inlineEditorField');
     await page.evaluate(() => document.execCommand('selectAll'));
     await page.keyboard.type('new inline text');
+    assert.equal(await page.$eval('#inlineVerticalAlign', el => el.value), 'middle', 'legacy blocks retain the previous centred default');
+    await page.select('#inlineVerticalAlign', 'bottom');
+    const bottomPadding = await page.$eval('#inlineEditorField', el => parseFloat(el.style.paddingTop));
+    await page.select('#inlineVerticalAlign', 'top');
+    const topPadding = await page.$eval('#inlineEditorField', el => parseFloat(el.style.paddingTop));
+    assert.equal(topPadding, 3, 'editable text starts at the top');
+    assert.ok(bottomPadding > topPadding, 'the editable text moves when bottom is selected');
     await page.evaluate(() => {
       const field = document.getElementById('inlineEditorField'); const range = document.createRange();
       range.setStart(field.firstChild, 0); range.setEnd(field.firstChild, 3);
@@ -323,15 +336,30 @@ function nextDownload(cdp, directory) {
     assert.equal(await page.$$eval('#editorBoxes [contenteditable="true"], #editorBoxes [contenteditable="plaintext-only"]', els => els.length), 0, 'Apply removes the editable surface from the image box');
     assert.equal(await page.evaluate(() => {
       const block = state.project.images[0].blocks[0];
-      return block.tr === 'new inline text' && /font-weight:\s*normal/i.test(block.richHtml) && block.align === 'justify' && block.size === 24 && document.querySelectorAll('#blockList .block-card[data-id="1"] .block-readonly')[1].textContent.includes(block.tr);
+      return block.tr === 'new inline text' && /font-weight:\s*normal/i.test(block.richHtml) && block.align === 'justify' && block.verticalAlign === 'top' && block.size === 24 && document.querySelectorAll('#blockList .block-card[data-id="1"] .block-readonly')[1].textContent.includes(block.tr);
     }), true, 'Apply must update only the selected block and synchronize its sidebar');
     assert.equal(await editorRenderDifference(page), 0, 'Apply must show the final output renderer immediately in the same editor');
     assert.notEqual(await page.$eval('#editorCanvas', (canvas) => canvas.toDataURL()), await page.evaluate(() => window.__beforeInlineCanvas));
     await page.evaluate(() => saveProject());
     assert.equal(await page.evaluate(async () => (await (await fetch(`/api/projects/${state.project.id}`)).json()).images[0].blocks[0].tr), 'new inline text', 'applied edits must be saved');
+    assert.equal(await page.evaluate(async () => (await (await fetch(`/api/projects/${state.project.id}`)).json()).images[0].blocks[0].verticalAlign), 'top', 'vertical placement must persist with the project');
+    const topCanvas = await page.$eval('#editorCanvas', el => el.toDataURL());
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.select('#inlineVerticalAlign', 'bottom'); await page.click('#inlineEditorApply');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].verticalAlign), 'bottom');
+    assert.notEqual(await page.$eval('#editorCanvas', el => el.toDataURL()), topCanvas, 'top and bottom must change output pixels');
+    assert.equal(await editorRenderDifference(page), 0, 'preview and final image use the same vertical positioning');
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text', { offset: { x: 75, y: 30 } });
     await page.waitForSelector('#inlineEditor:not(.hidden)');
     await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('discard this draft');
+    const blankWhileDirty = await page.evaluate(() => { const r=document.getElementById('editorBoxes').getBoundingClientRect(); return {x:r.left+160*state.editorScale,y:r.top+60*state.editorScale}; });
+    await page.mouse.move(blankWhileDirty.x, blankWhileDirty.y); await page.mouse.down();
+    await page.mouse.move(blankWhileDirty.x + 12, blankWhileDirty.y + 12, { steps: 3 }); await page.mouse.up();
+    assert.equal(await page.$eval('#inlineEditor', el => el.classList.contains('hidden')), false, 'panning must not dismiss the toolbar');
+    const blankAfterPan = await page.evaluate(() => { const r=document.getElementById('editorBoxes').getBoundingClientRect(); return {x:r.left+160*state.editorScale,y:r.top+60*state.editorScale}; });
+    page.once('dialog', dialog => dialog.dismiss()); await page.mouse.click(blankAfterPan.x, blankAfterPan.y);
+    assert.equal(await page.$eval('#inlineEditorField', field => field.textContent), 'discard this draft', 'declining discard on blank image preserves the draft');
+    assert.equal(await page.$eval('#inlineEditor', el => el.classList.contains('hidden')), false);
     page.once('dialog', (dialog) => dialog.dismiss());
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[1]));
     assert.equal(await page.$eval('#inlineEditorField', (field) => field.textContent), 'discard this draft', 'declining the switch must retain the current draft');
@@ -341,11 +369,13 @@ function nextDownload(cdp, directory) {
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr), 'new inline text', 'Cancel must not store draft text');
     await page.select('#blockList .block-card[data-id="1"] [data-text-mode]', 'ocr');
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text', { offset: { x: 75, y: 30 } });
+    assert.equal(await page.$eval('#inlineVerticalAlign', el => el.value), 'bottom', 'OCR uses the same placement control');
+    await page.select('#inlineVerticalAlign', 'top');
     await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('corrected source');
     await page.click('#inlineEditorApply');
     assert.equal(await page.evaluate(() => {
       const block = state.project.images[0].blocks[0];
-      return block.text === 'corrected source' && block.tr === 'new inline text' && block.align === 'justify';
+      return block.text === 'corrected source' && block.tr === 'new inline text' && block.align === 'justify' && block.verticalAlign === 'top';
     }), true, 'source editing must preserve translation and its existing alignment');
     await page.evaluate(() => { state.project.images[0].blocks[0] = window.__inlineOriginal; buildBlockList(); drawEditor(); const preview = document.querySelector('.editor-preview'); preview.scrollTop = 0; preview.scrollLeft = 0; });
     console.log('PASS: clicking a box opens a draft editor; Apply renders and saves while Cancel preserves the previous text');
@@ -428,13 +458,16 @@ function nextDownload(cdp, directory) {
     assert.equal(await page.evaluate(() => !!document.getElementById('inlineEditorField').closest('.classic-fullscreen')), true);
     await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => document.getElementById('inlineEditorField').parentElement === document.querySelector('#editorBoxes .editor-box[data-id="1"]') && !document.getElementById('inlineEditor').classList.contains('hidden')), true, 'Escape exits fullscreen back into the same box');
+    await page.select('#inlineVerticalAlign', 'bottom');
     await page.$eval('#inlineEditorSize', el => {el.value='33';el.dispatchEvent(new Event('input',{bubbles:true}));});
     await page.waitForFunction(() => Object.keys(localStorage).some(key => key.startsWith('comic-studio-draft:') && JSON.parse(localStorage.getItem(key)).meta?.size === '33'), {timeout:6000});
     await page.$eval('#inlineEditorSize', el => {el.value='44';});
+    await page.select('#inlineVerticalAlign', 'top');
     page.once('dialog', dialog => dialog.accept());
     assert.equal(await page.evaluate(() => { const b=inlineDraft.block; return classicEditor.setContext(`comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(b.id)}:translation`, b.richHtml || plainToHtml(b.tr || ''), inlineBlockSnapshot(b)); }), true);
     assert.equal(await page.$$eval('#inlineEditorField table td', els => els.length), 4, 'autosaved HTML recovers in the correct context');
     assert.equal(await page.$eval('#inlineEditorSize', el => el.value), '33', 'autosave restores output settings as well as text');
+    assert.equal(await page.$eval('#inlineVerticalAlign', el => el.value), 'bottom', 'autosave restores vertical alignment');
     page.once('dialog', dialog => dialog.accept());
     await page.click('#inlineEditorApply');
     const classicResult = await page.evaluate(() => {const b=state.project.images[0].blocks[0];return {html:b.richHtml,words:Typeset.richHtmlWords(b.richHtml).map(w=>w.t).join(' ')};});
@@ -468,8 +501,12 @@ function nextDownload(cdp, directory) {
     await page.evaluate(() => { const block = state.project.images[0].blocks[0]; block.align='right'; block.size=null; drawEditor(); });
     console.log('PASS: one editor retains caret; typography affects output rather than editor size');
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
-    await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('ویرایش تازه ۳٫۲۱'); await page.click('#inlineEditorApply');
+    await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('ویرایش تازه ۳٫۲۱');
+    await page.select('#inlineVerticalAlign', 'top'); await page.click('#inlineEditorApply');
     await page.select('#blockList .block-card[data-id="2"] [data-text-mode]', 'ocr');
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[1]));
+    await page.select('#inlineVerticalAlign', 'bottom'); await page.click('#inlineEditorApply');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].verticalAlign === 'top' && state.project.images[0].blocks[1].verticalAlign === 'bottom'), true);
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await editorRenderDifference(page), 0, 'changing one line language must immediately refresh the real editor canvas');
     await page.click('#editorSelectAll'); await page.click('#editorSelectNone');
@@ -526,6 +563,7 @@ function nextDownload(cdp, directory) {
     await page.waitForFunction(() => !document.getElementById('editorDialog').open && !state.editorId);
     assert.equal(await previewDifference(page), 0, 'main preview must contain the latest rich-text edit and mixed language choices');
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[1].textMode), 'ocr');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].verticalAlign === 'top' && state.project.images[0].blocks[1].verticalAlign === 'bottom'), true, 'mixed vertical positions survive preview and export setup');
     console.log('PASS: real editor events preserve latest edits, same-size multi-alignment, mixed languages, and visibility');
 
     await page.reload({ waitUntil: 'networkidle0' }); await page.waitForSelector('#grid .item img');

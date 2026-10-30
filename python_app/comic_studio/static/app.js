@@ -918,12 +918,12 @@ function styleRichElement(element, block, scale = 1, preview = false) {
 }
 // A draft belongs to one image box. Nothing reaches the project or canvas until Apply.
 function inlineBlockSnapshot(block) {
-  return JSON.stringify([block.text || '', block.tr || '', block.richHtml || '', block.dir || '', block.align || '', block.size ?? null, block.color || null]);
+  return JSON.stringify([block.text || '', block.tr || '', block.richHtml || '', block.dir || '', block.align || '', block.size ?? null, block.color || null, block.verticalAlign || '']);
 }
 function inlineDraftChanged() {
   if (!inlineDraft) return false;
   return (inlineDraft.mode === 'ocr' ? $('inlineEditorField').innerHTML : classicEditor.getHTML()) !== inlineDraft.html || $('inlineEditorDirection').value !== inlineDraft.dir ||
-    $('inlineEditorAlign').value !== inlineDraft.align || $('inlineEditorSize').value !== inlineDraft.size || inlineDraft.color !== inlineDraft.originalColor;
+    $('inlineEditorAlign').value !== inlineDraft.align || $('inlineVerticalAlign').value !== inlineDraft.verticalAlign || $('inlineEditorSize').value !== inlineDraft.size || inlineDraft.color !== inlineDraft.originalColor;
 }
 function closeInlineEditor(force = false) {
   if (!inlineDraft) return true;
@@ -931,7 +931,7 @@ function closeInlineEditor(force = false) {
   classicEditor.clearDraft(); classicEditor.exitFullscreen();
   const box = classicEditor.field.closest('.editor-box'); const preview = document.querySelector('.editor-preview');
   const oldTop = box?.getBoundingClientRect().top;
-  classicEditor.detachField(); box?.classList.remove('editing');
+  classicEditor.field.style.paddingTop = ''; classicEditor.detachField(); box?.classList.remove('editing');
   $('inlineEditor').classList.add('hidden'); inlineDraft = null;
   preview.style.paddingTop = '';
   if (box && Number.isFinite(oldTop)) preview.scrollTop += box.getBoundingClientRect().top - oldTop;
@@ -962,6 +962,19 @@ function positionInlineEditor() {
   const x = Math.max(8, Math.min(Math.max(8, bounds.width - width - 8), target.right - bounds.left - width));
   const y = Math.max(8, Math.min(Math.max(8, bounds.height - height - 8), target.top - bounds.top - height - 4));
   panel.style.left = `${x}px`; panel.style.top = `${y}px`;
+  positionEditingText();
+}
+// Position the editable text without changing its font size or the saved HTML.
+function positionEditingText() {
+  const field = $('inlineEditorField');
+  if (!inlineDraft || field.hidden || !field.closest('.editor-box.editing') || !field.clientHeight) return;
+  field.style.paddingTop = '3px';
+  const range = document.createRange(); range.selectNodeContents(field);
+  const contentHeight = range.getBoundingClientRect?.().height || 0;
+  const lineHeight = parseFloat(getComputedStyle(field).lineHeight) || 22.5;
+  const remaining = Math.max(0, field.clientHeight - Math.max(lineHeight, contentHeight) - 6);
+  const align = $('inlineVerticalAlign').value;
+  field.style.paddingTop = `${3 + (align === 'bottom' ? remaining : align === 'middle' ? remaining / 2 : 0)}px`;
 }
 function rememberInlineRange() {
   if (!inlineDraft) return;
@@ -1063,10 +1076,11 @@ function openInlineEditor(block) {
   $('inlineLineTools').classList.toggle('hidden', mode === 'ocr');
   $('inlineEditorDirection').value = direction; $('inlineEditorDirection').disabled = mode === 'ocr';
   $('inlineEditorAlign').value = mode === 'ocr' ? overlayBlock(block).align : (block.align || 'right');
+  $('inlineVerticalAlign').value = ['top', 'bottom'].includes(block.verticalAlign) ? block.verticalAlign : 'middle';
   $('inlineEditorSize').value = block.size || '';
   $('inlineEditorColor').value = block.color || '#ffffff';
   inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: mode === 'ocr' ? plainToHtml(block.text || '') : sanitizeHtml(originalHtml),
-    dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, size: $('inlineEditorSize').value,
+    dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: $('inlineEditorSize').value,
     color: block.color || null, originalColor: block.color || null, range: null, history: [], historyIndex: -1, muteHistory: false };
   classicEditor.setContext(draftKey, originalHtml, inlineBlockSnapshot(block));
   const background = block.bg || 'auto';
@@ -1090,6 +1104,7 @@ function applyInlineEditor() {
   if (draft.mode === 'ocr') block.text = text;
   else { block.tr = text; block.richHtml = rich; if ($('inlineEditorDirection').value !== draft.dir) block.dir = $('inlineEditorDirection').value; }
   if ($('inlineEditorAlign').value !== draft.align) block.align = $('inlineEditorAlign').value;
+  if ($('inlineVerticalAlign').value !== draft.verticalAlign) block.verticalAlign = $('inlineVerticalAlign').value;
   if (size !== draft.size) block.size = size ? Math.round(value) : null;
   if (draft.color !== draft.originalColor) block.color = draft.color;
   closeInlineEditor(true); buildBlockList(); drawEditor(); scheduleSave();
@@ -1332,6 +1347,7 @@ function startBoxDrag(event, block, el) {
       block.tx0 = x0; block.tx1 = x1; block.ty0 = y0; block.ty1 = y1;
     }
     el.style.left = `${block.tx0 * scale}px`; el.style.top = `${block.ty0 * scale}px`; el.style.width = `${(block.tx1 - block.tx0) * scale}px`; el.style.height = `${(block.ty1 - block.ty0) * scale}px`;
+    if (inlineDraft?.block === block) positionInlineEditor();
     scheduleEditorCanvasDraw(); changed = true;
   };
   const stop = () => {
@@ -1465,10 +1481,10 @@ function bindEvents() {
     align: (value) => setInlineLineStyle('textAlign', value),
     direction: (value) => setInlineLineStyle('direction', value),
     color: (value) => { if (inlineDraft?.range?.collapsed) { setInlineLineStyle('color', value); return true; } return false; },
-    onFullscreen: (enabled) => { if (enabled) classicEditor.detachField(); else { const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft?.block.id)); if (box) classicEditor.attachField(box); } },
-    onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); } },
-    getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, size: $('inlineEditorSize').value, color: inlineDraft.color } : null,
-    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (meta.size === '' || (+meta.size >= 8 && +meta.size <= 160)) $('inlineEditorSize').value = meta.size; if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || '#ffffff'; } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; },
+    onFullscreen: (enabled) => { if (enabled) { $('inlineEditorField').style.paddingTop = ''; classicEditor.detachField(); } else { const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft?.block.id)); if (box) { classicEditor.attachField(box); positionEditingText(); } } },
+    onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); positionEditingText(); } },
+    getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: $('inlineEditorSize').value, color: inlineDraft.color } : null,
+    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) $('inlineVerticalAlign').value = meta.verticalAlign; if (meta.size === '' || (+meta.size >= 8 && +meta.size <= 160)) $('inlineEditorSize').value = meta.size; if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || '#ffffff'; } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; },
   });
   const inlineField = $('inlineEditorField');
   ['keyup', 'mouseup', 'focus'].forEach((name) => inlineField.addEventListener(name, () => { rememberInlineRange(); syncInlineLineControls(); }));
@@ -1485,10 +1501,18 @@ function bindEvents() {
   $('inlineLineReset').addEventListener('click', resetInlineLineStyle);
   $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; classicEditor.notifyChange(); });
   $('inlineEditorAlign').addEventListener('change', () => { inlineField.style.textAlign = $('inlineEditorAlign').value; classicEditor.notifyChange(); });
+  $('inlineVerticalAlign').addEventListener('change', () => { if (inlineDraft) { positionEditingText(); classicEditor.notifyChange(); } });
   $('inlineEditorColor').addEventListener('input', () => { if (inlineDraft) { inlineDraft.color = $('inlineEditorColor').value; classicEditor.notifyChange(); } });
   $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) { inlineDraft.color = null; classicEditor.notifyChange(); } });
   $('inlineEditorSize').addEventListener('input', () => { if (inlineDraft) classicEditor.notifyChange(); });
-  document.querySelector('.editor-preview').addEventListener('scroll', positionInlineEditor);
+  const imagePreview = document.querySelector('.editor-preview'); let blankPointer = null;
+  imagePreview.addEventListener('pointerdown', (event) => { blankPointer = !event.target.closest('.editor-box') && event.button === 0 ? { x: event.clientX, y: event.clientY } : null; });
+  imagePreview.addEventListener('click', (event) => {
+    const start = blankPointer; blankPointer = null;
+    if (!start || event.target.closest('.editor-box') || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 4) return;
+    if (!closeInlineEditor()) return; clearEditorSelection();
+  });
+  imagePreview.addEventListener('scroll', positionInlineEditor);
   $('editorZoomOut').addEventListener('click', () => setEditorZoom(state.editorScale / 1.25)); $('editorZoomIn').addEventListener('click', () => setEditorZoom(state.editorScale * 1.25)); $('editorZoomActual').addEventListener('click', () => setEditorZoom(1)); $('editorZoomFit').addEventListener('click', fitEditor);
   document.querySelector('.editor-preview').addEventListener('wheel', handleEditorWheel, { passive: false });
   $('editorStage').addEventListener('pointerdown', startEditorPan); $('editorStage').addEventListener('pointermove', moveEditorPan); $('editorStage').addEventListener('pointerup', stopEditorPan); $('editorStage').addEventListener('pointercancel', stopEditorPan); $('editorStage').addEventListener('lostpointercapture', stopEditorPan);

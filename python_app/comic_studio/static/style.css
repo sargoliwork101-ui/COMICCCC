@@ -52,3 +52,5 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 .editor-box.editing{z-index:20}.editor-box.editing>.editor-box-text{visibility:hidden}.editor-box.editing>.box-move,.editor-box.editing>.box-visibility,.editor-box.editing>.box-language{display:none}
 .editor-box.editing>#inlineEditorField,.editor-box.editing>.classic-source{position:absolute;inset:0;z-index:3;display:block;width:100%;height:100%;min-width:0;min-height:0;max-width:none;max-height:none;margin:0;padding:3px;resize:none;overflow:auto;border:0!important;border-radius:0!important;background:var(--editing-bg,var(--surface));color:var(--editing-fg,var(--text));font:15px/1.5 Vazirmatn,Tahoma,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;box-shadow:inset 0 0 0 2px var(--a1);outline:none}
 .editor-box.editing>.classic-source{direction:ltr;text-align:left;font:12px/1.4 monospace}.editor-box.editing>[hidden]{display:none!important}
+
+#inlineLineTools{margin:0;align-items:end}
