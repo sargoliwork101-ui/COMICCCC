@@ -43,11 +43,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.27"
+    assert health.json()["version"] == "3.28"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۲۷ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۲۸ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -222,7 +222,8 @@ def test_translation_preview_shows_exact_free_payload_without_sending(client, mo
     assert response.status_code == 200, response.text
     preview = response.json()
     assert preview["requestCount"] == 1
-    assert preview["requests"][0]["text"] == f"Hello\n{TRANSLATION_SEPARATOR}\nworld"
+    assert preview["requests"][0]["text"] == f"Hello{TRANSLATION_SEPARATOR}world"
+    assert "\n␞\n" not in preview["requests"][0]["text"]
     assert "Google Translate" in preview["providerLabel"] and "MyMemory" in preview["providerLabel"]
     assert preview["base_url"] == "https://translate.googleapis.com/translate_a/single"
     assert preview["fallback_url"] == "https://api.mymemory.translated.net/get"
@@ -340,7 +341,7 @@ def test_free_translation_combines_ocr_blocks_when_payload_fits_500(client, monk
     preview = client.post(f"/api/projects/{project['id']}/translation-preview", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"}).json()
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng", "confirmation": preview["signature"]})
     assert response.status_code == 200, response.text
-    assert calls == [f"Hello\n{TRANSLATION_SEPARATOR}\nworld\n{TRANSLATION_SEPARATOR}\nAnother bubble"]
+    assert calls == [f"Hello{TRANSLATION_SEPARATOR}world{TRANSLATION_SEPARATOR}Another bubble"]
     blocks = response.json()["images"][0]["blocks"]
     assert [block["tr"] for block in blocks] == ["سلام\nدر دو خط", "دنیا", "حباب دیگر"]
     assert all(block["richHtml"] == "" for block in blocks)
@@ -415,7 +416,7 @@ def test_ai_translation_uses_one_request_across_images_and_reports_stages(client
     assert preview.json()["requests"][0]["text"].startswith("Source language: English\n\nPage 0 first")
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": ids, "provider": "openai", "source_language": "eng", "confirmation": preview.json()["signature"]})
     assert response.status_code == 200, response.text
-    assert calls == [f"Page 0 first\n{TRANSLATION_SEPARATOR}\nPage 0 distant\n{TRANSLATION_SEPARATOR}\nPage 1 first\n{TRANSLATION_SEPARATOR}\nPage 1 distant"]
+    assert calls == [f"Page 0 first{TRANSLATION_SEPARATOR}Page 0 distant{TRANSLATION_SEPARATOR}Page 1 first{TRANSLATION_SEPARATOR}Page 1 distant"]
     assert [[block["tr"] for block in image["blocks"]] for image in response.json()["images"]] == [["یک", "دو"], ["سه", "چهار"]]
     feed = client.get("/api/activity?after=0").json()["entries"]
     assert any("تقسیم" in entry["message"] and entry["progress"] == pytest.approx(0.5) for entry in feed)

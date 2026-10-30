@@ -79,7 +79,7 @@ def split_free_query(text: str, limit: int = MAX_FREE_QUERY_CHARS) -> list[str]:
 
 def combine_translation_texts(source_texts: list[str]) -> str:
     """Combine all blocks with unambiguous boundaries in one provider payload."""
-    return f"\n{TRANSLATION_SEPARATOR}\n".join(
+    return TRANSLATION_SEPARATOR.join(
         str(source or "").replace(TRANSLATION_SEPARATOR, " ").strip() for source in source_texts
     )
 

@@ -254,6 +254,7 @@ function nextDownload(cdp, directory) {
     await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(translationRequests.length, 0, 'opening the exact payload preview must not send a translation');
     assert.ok(await page.$eval('#translationPreviewRequests', (element) => element.textContent.includes('SOURCE ONE') && element.textContent.includes('␞') && element.textContent.includes('SOURCE TWO')));
+    assert.equal(await page.$eval('#translationPreviewRequests pre', (element) => element.textContent), 'SOURCE ONE␞SOURCE TWO␞SOURCE THREE', 'the real preview must not add newlines around separators');
     assert.ok(await page.$eval('#translationPreviewDestination', (element) => element.textContent.includes('Google Translate') && element.textContent.includes('MyMemory')));
     await page.click('#translationPreviewCancel');
     assert.equal(translationRequests.length, 0, 'cancelling the real browser preview must not send a translation');

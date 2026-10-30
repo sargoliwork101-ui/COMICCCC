@@ -135,7 +135,10 @@ def test_unknown_provider_is_rejected(tmp_path, monkeypatch):
 def test_translation_separator_splits_exact_blocks_not_inner_newlines():
     sources = ["first line", "second bubble", "third line"]
     payload = combine_translation_texts(sources)
-    assert payload == f"first line\n{TRANSLATION_SEPARATOR}\nsecond bubble\n{TRANSLATION_SEPARATOR}\nthird line"
+    assert payload == f"first line{TRANSLATION_SEPARATOR}second bubble{TRANSLATION_SEPARATOR}third line"
+    assert f"\n{TRANSLATION_SEPARATOR}" not in payload and f"{TRANSLATION_SEPARATOR}\n" not in payload
+    example = combine_translation_texts(["WHY ARE YOU", "RUNNING AROUND", "SO FRIVOLOUSLY,", "MY CHILD?"])
+    assert example == f"WHY ARE YOU{TRANSLATION_SEPARATOR}RUNNING AROUND{TRANSLATION_SEPARATOR}SO FRIVOLOUSLY,{TRANSLATION_SEPARATOR}MY CHILD?"
     translated = f"ترجمهٔ اول\n{TRANSLATION_SEPARATOR}\nخط دوم\nادامهٔ همان کادر\n{TRANSLATION_SEPARATOR}\nترجمهٔ سوم"
     assert distribute_translation(sources, translated) == ["ترجمهٔ اول", "خط دوم\nادامهٔ همان کادر", "ترجمهٔ سوم"]
 
