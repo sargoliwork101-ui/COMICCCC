@@ -101,6 +101,20 @@ function check(name, condition) {
   $('grid').querySelector('.tick').click();
   check('one checkbox click selects the image again', $('grid').querySelector('.item').classList.contains('selected'));
 
+  for (let round = 0; round < 6; round += 1) {
+    await vm.runInContext('saveProject()', context);
+    const before = vm.runInContext('state.project.images[0].selected', context);
+    $('grid').querySelector('.tick').click();
+    const after = vm.runInContext('state.project.images[0].selected', context);
+    check(`checkbox stays one-click after save ${round + 1}`, after === !before && $('grid').querySelector('.tick').checked === after && $('grid').querySelector('.item').classList.contains('selected') === after);
+  }
+  for (let round = 0; round < 2; round += 1) {
+    await vm.runInContext('saveProject()', context);
+    const before = vm.runInContext('state.project.images[0].selected', context);
+    $('grid').querySelector('img').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    check(`image stays one-click after save ${round + 1}`, vm.runInContext('state.project.images[0].selected', context) === !before);
+  }
+
   $('modelsBtn').click();
   check('models dialog opens', $('modelsDialog').open);
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
@@ -116,6 +130,8 @@ function check(name, condition) {
   check('Escape closes the editor dialog', !$('editorDialog').open);
 
   const css = fs.readFileSync(path.join(root, 'style.css'), 'utf8');
+  const unselectedRules = css.match(/\.item:not\(\.selected\) \.tw\{[^}]*\}/g) || [];
+  check('unselected thumbnails are visibly gray without a bright override', unselectedRules.some((rule) => rule.includes('grayscale(')) && unselectedRules.every((rule) => !rule.includes('filter:none')));
   check('model cards are in one vertical column', /\.model-group-grid\{[^}]*grid-template-columns:minmax\(0,1fr\)/.test(css));
   check('dialog headers remain sticky', /\.dlg>\.dialog-head\{[^}]*position:sticky/.test(css));
   check('success activity keeps readable message text', /\.activity-line\.success\{color:var\(--text\)\}/.test(css));

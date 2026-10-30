@@ -182,10 +182,15 @@ function scheduleSave() {
 async function saveProject() {
   clearTimeout(saveTimer);
   if (!state.project) return;
-  G.normalizeLayout(state.project.images);
-  const result = await api(`/api/projects/${state.project.id}/state`, jsonOptions('PUT', { state: state.project }));
-  state.project = result; G.normalizeLayout(state.project.images);
-  $('saveState').textContent = 'ذخیره شد';
+  const project = state.project;
+  G.normalizeLayout(project.images);
+  const result = await api(`/api/projects/${project.id}/state`, jsonOptions('PUT', { state: project }));
+  // Keep the live object identity: cards and editor fields must never point at a detached pre-save project.
+  // The response is a snapshot and may also be older than edits made while the request was in flight.
+  if (state.project === project) {
+    project.updatedAt = result.updatedAt || project.updatedAt;
+    $('saveState').textContent = 'ذخیره شد';
+  }
   refreshProjectList().catch(() => {});
 }
 function adoptProject(project) {
@@ -242,12 +247,21 @@ function makeButton(label, handler, className = 'bt') {
   return button;
 }
 function groupColor(groupId) { return GROUP_COLORS[(Math.max(1, Number(groupId) || 1) - 1) % GROUP_COLORS.length]; }
+function updateSelectionDisplay() {
+  const byId = new Map((state.project?.images || []).map((item) => [item.id, item]));
+  document.querySelectorAll('#grid .item').forEach((card) => {
+    const item = byId.get(card.dataset.id); if (!item) return;
+    card.classList.toggle('selected', !!item.selected);
+    const tick = card.querySelector('.tick'); if (tick) tick.checked = !!item.selected;
+  });
+  updateSummary();
+}
 function setSelected(item, value, event = null) {
   if (event?.shiftKey && state.lastSelectedId) {
     const ordered = sortedImages(); const a = ordered.findIndex((entry) => entry.id === state.lastSelectedId); const b = ordered.findIndex((entry) => entry.id === item.id);
     if (a >= 0 && b >= 0) ordered.slice(Math.min(a, b), Math.max(a, b) + 1).forEach((entry) => { entry.selected = value; });
   } else item.selected = value;
-  state.lastSelectedId = item.id; renderGrid(); scheduleSave();
+  state.lastSelectedId = item.id; updateSelectionDisplay(); scheduleSave();
 }
 
 // ---------- Grid, group manager, and drag/drop ----------
@@ -267,8 +281,8 @@ function renderGrid() {
     frame.appendChild(image);
     const tick = document.createElement('input'); tick.type = 'checkbox'; tick.className = 'tick'; tick.checked = !!item.selected; tick.setAttribute('aria-label', `انتخاب ${item.name}`);
     tick.addEventListener('click', (event) => {
-      // Handle the native click once; rendering below restores the visual checked state.
-      event.preventDefault(); event.stopPropagation(); setSelected(item, !item.selected, event);
+      // The browser has already applied the new checkbox value; consume this one click without cancelling it.
+      event.stopPropagation(); setSelected(item, tick.checked, event);
     });
     const act = document.createElement('div'); act.className = 'act';
     act.append(makeButton('👁', () => openPreview(item), 'bt'), makeButton('✎', () => openEditor(item.id), 'bt'), makeButton('✂', () => openCrop(item.id), 'bt crop-mark'), makeButton('⧉', () => duplicateImages([item.id]), 'bt'), makeButton('🗑', () => deleteImages([item.id]), 'bt danger'));
@@ -293,6 +307,7 @@ function renderGrid() {
       setSelected(item, !item.selected, event);
     });
     card.addEventListener('dragstart', (event) => {
+      if (event.target.closest('button,input,select,textarea')) { event.preventDefault(); return; }
       state.dragId = item.id; state.dragIds = info ? info.members.map((entry) => entry.id) : [item.id];
       card.classList.add('dragging');
       if (info) info.members.forEach((entry) => grid.querySelector(`[data-id="${entry.id}"]`)?.classList.add('group-moving'));

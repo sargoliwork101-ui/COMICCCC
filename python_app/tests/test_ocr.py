@@ -111,6 +111,14 @@ def test_install_lock_error_explains_recovery(monkeypatch):
         install_packages(["torch>=2.2,<3"])
 
 
+def test_install_permission_error_points_to_admin_launcher(monkeypatch):
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 1, "", "[WinError 5] Access is denied")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(OcrError, match="start_windows_admin.bat"):
+        install_packages(["torch>=2.2,<3"])
+
+
 def test_easyocr_runtime_is_installed_on_explicit_preparation(monkeypatch):
     engine = EasyEngine()
     checks = iter([False, True])

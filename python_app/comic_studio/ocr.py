@@ -83,6 +83,9 @@ def install_packages(packages: list[str]) -> None:
         if "WinError 32" in details or "being used by another process" in details:
             details += ("\nComic OCR Studio: a second Python/pip installer or antivirus may be locking the temporary file. "
                         "Close other Python/installer windows, restart Windows if needed, and retry one installation only.")
+        if "WinError 5" in details or "Access is denied" in details:
+            details += ("\nComic OCR Studio: Windows denied write access. Close the app, start start_windows_admin.bat, "
+                        "approve the UAC prompt, and retry the explicit OCR installation.")
         emit(f"نصب بسته‌های OCR ناموفق بود: {details}", "error")
         raise OcrError(f"OCR runtime installation failed: {details}")
     importlib.invalidate_caches()
