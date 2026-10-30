@@ -23,6 +23,8 @@ const overlayProject = (text, translation) => ({
   }] }],
 });
 const beacons = [];
+const scrollIntoViewCalls = [];
+let activityClears = 0;
 let renderedBlocks = null;
 let renderedUploads = 0;
 const jsonResponse = (payload, status = 200) => ({
@@ -39,6 +41,7 @@ window.fetch = async (url, options = {}) => {
   if (pathname === '/api/engines') return jsonResponse([engine]);
   if (pathname === '/api/ai-settings') return jsonResponse({ provider: 'free', base_url: '', model: '', hasApiKey: false });
   if (pathname === '/api/activity') return jsonResponse({ entries: [], next: 0 });
+  if (pathname === '/api/activity/clear' && options.method === 'POST') { activityClears += 1; return jsonResponse({ ok: true, next: 0 }); }
   if (pathname === '/api/session/heartbeat') return jsonResponse({ ok: true, active: 1 });
   if (pathname === `/api/projects/${project.id}/state`) return jsonResponse(JSON.parse(options.body).state);
   if (pathname === `/api/projects/${project.id}/ocr`) return jsonResponse(overlayProject('NEW OCR', ''));
@@ -51,7 +54,7 @@ window.navigator.sendBeacon = (url, body) => { beacons.push({ url, body }); retu
 window.confirm = () => true;
 window.requestAnimationFrame = (callback) => setTimeout(callback, 0);
 window.cancelAnimationFrame = (id) => clearTimeout(id);
-window.HTMLElement.prototype.scrollIntoView = () => {};
+window.HTMLElement.prototype.scrollIntoView = function (options) { scrollIntoViewCalls.push({ element: this, options }); };
 window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
 window.HTMLDialogElement.prototype.close = function () { this.open = false; };
 window.document.execCommand = () => true;
@@ -141,7 +144,7 @@ function check(name, condition) {
   check('multiline OCR activity preserves line breaks', /\.activity-message\{[^}]*white-space:pre-wrap/.test(css));
   check('existing projects default to translation overlays', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
 
-  vm.runInContext(`state.project.images[0].blocks = [{ id: 1, text: 'HELLO WORLD', tr: 'سلام دنیا', richHtml: '<b>سلام دنیا</b>', enabled: true, bg: 'white', x0: 5, y0: 5, x1: 150, y1: 45, lineH: 40, dir: 'rtl', align: 'right' }]`, context);
+  vm.runInContext(`state.project.images[0].blocks = [{ id: 1, text: 'HELLO WORLD', tr: 'سلام دنیا', richHtml: '<b>سلام دنیا</b>', enabled: true, bg: 'white', x0: 5, y0: 5, x1: 150, y1: 45, lineH: 40, dir: 'rtl', align: 'right' }, { id: 2, text: 'SECOND OCR', tr: 'متن دوم', richHtml: '', enabled: true, bg: 'white', x0: 180, y0: 80, x1: 300, y1: 120, lineH: 40, dir: 'ltr', align: 'left' }]`, context);
   vm.runInContext("setOverlayMode('ocr', false)", context);
   check('OCR mode is synchronized between editor and export', $('overlayMode').value === 'ocr' && $('exportOverlayMode').value === 'ocr');
   await vm.runInContext('renderAndUpload(state.project.images[0])', context);
@@ -154,12 +157,20 @@ function check(name, condition) {
   vm.runInContext("state.editorId = 'image-ui'; state.editorScale = 1; setOverlayMode('ocr', false); buildBlockList(); renderEditorBoxes()", context);
   const ocrOverlay = $('editorBoxes').querySelector('.editor-box-text');
   check('editor shows recognized OCR text directly on the image', ocrOverlay?.textContent === 'HELLO WORLD' && ocrOverlay?.dir === 'ltr');
+  scrollIntoViewCalls.length = 0;
+  const secondOcrOverlay = $('editorBoxes').querySelectorAll('.editor-box-text')[1];
+  secondOcrOverlay.dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  const ocrCard = $('blockList').querySelector('.block-card[data-id="2"]');
+  check('clicking OCR overlay selects and scrolls its sidebar editor', ocrCard.classList.contains('active') && secondOcrOverlay.parentElement.classList.contains('active') && !ocrOverlay.parentElement.classList.contains('active') && scrollIntoViewCalls.at(-1)?.element === ocrCard);
   ocrOverlay.innerText = 'CORRECTED OCR';
   ocrOverlay.dispatchEvent(new window.Event('input', { bubbles: true }));
   check('editing the OCR overlay updates source text without changing translation', vm.runInContext("state.project.images[0].blocks[0].text === 'CORRECTED OCR' && state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
   check('OCR overlay editing stays synchronized with the source field', $('blockList').querySelector('textarea').value === 'CORRECTED OCR');
   vm.runInContext("setOverlayMode('translation', false); renderEditorBoxes()", context);
   check('editor selector restores the translated overlay', $('editorBoxes').querySelector('.editor-box-text')?.textContent === 'سلام دنیا');
+  scrollIntoViewCalls.length = 0;
+  $('editorBoxes').querySelectorAll('.editor-box-text')[1].dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  check('clicking translated overlay selects and scrolls the same sidebar editor', ocrCard.classList.contains('active') && $('blockList').querySelectorAll('.block-card.active').length === 1 && scrollIntoViewCalls.at(-1)?.element === ocrCard);
   const editorBox = $('editorBoxes').querySelector('.editor-box');
   const moveHandle = editorBox.querySelector('[data-move]');
   check('editor box has a visible button for dragging', moveHandle?.tagName === 'BUTTON' && moveHandle.title.includes('جابه‌جایی'));
@@ -197,8 +208,24 @@ function check(name, condition) {
   editorBox.dispatchEvent(pointer('pointerup', 165, 55));
   const afterResize = geometry();
   check('resize handles still work after adding box dragging', afterResize.x0 === 0 && afterResize.y0 === 0 && afterResize.width === 165 && afterResize.height === 55);
-  vm.runInContext('state.editorId = null', context);
+  const editorPreview = window.document.querySelector('.editor-preview');
+  Object.defineProperties(editorPreview, { clientWidth: { value: 400, configurable: true }, clientHeight: { value: 300, configurable: true } });
+  const beforeZoom = JSON.stringify(geometry());
+  $('editorZoomIn').click();
+  check('zoom control scales image and overlays without changing saved geometry', vm.runInContext('state.editorScale', context) === 1.25 && $('editorStage').style.width === '400px' && $('editorZoomLabel').textContent === '125٪' && JSON.stringify(geometry()) === beforeZoom);
+  const beforeWheelZoom = vm.runInContext('state.editorScale', context);
+  const wheel = new window.WheelEvent('wheel', { deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true, clientX: 50, clientY: 50 });
+  editorPreview.dispatchEvent(wheel);
+  check('Ctrl and mouse wheel zoom the image at the preview', vm.runInContext('state.editorScale', context) > beforeWheelZoom && wheel.defaultPrevented);
+  editorPreview.scrollLeft = 10; editorPreview.scrollTop = 20;
+  $('editorStage').dispatchEvent(pointer('pointerdown', 100, 100));
+  $('editorStage').dispatchEvent(pointer('pointermove', 70, 60));
+  $('editorStage').dispatchEvent(pointer('pointerup', 70, 60));
+  check('dragging empty canvas pans the zoomed image', editorPreview.scrollLeft === 40 && editorPreview.scrollTop === 60 && vm.runInContext('state.editorPan', context) === null);
+  vm.runInContext("state.editorId = null; appendLocalActivity('OLD JOB')", context);
+  const clearsBeforeOcr = activityClears;
   await vm.runInContext('runOcr()', context);
+  check('starting a new job clears the previous job log', activityClears === clearsBeforeOcr + 1 && !$('activityLog').textContent.includes('OLD JOB') && $('activityLog').textContent.includes('OCR محلی'));
   check('finishing OCR automatically selects OCR display mode', $('overlayMode').value === 'ocr' && $('exportOverlayMode').value === 'ocr');
   check('finishing OCR places the new recognized text on the image', renderedBlocks[0].tr === 'NEW OCR' && renderedBlocks[0]._plainText === true);
   await vm.runInContext('runTranslation()', context);
@@ -208,6 +235,12 @@ function check(name, condition) {
   vm.runInContext("appendLocalActivity('در حال دانلود آزمایشی')", context);
   check('live activity is visible on the page', $('activityLog').textContent.includes('در حال دانلود آزمایشی'));
   check('live activity is mirrored in model dialog', $('modelActivityLog').textContent.includes('در حال دانلود آزمایشی'));
+  const clearsBeforeButton = activityClears;
+  $('clearActivityBtn').click();
+  await sleep(0);
+  check('clear button empties every activity view and the server feed', activityClears === clearsBeforeButton + 1 && [...window.document.querySelectorAll('.activity-log')].every((log) => log.textContent === ''));
+  vm.runInContext("appendLocalActivity('NEW JOB')", context);
+  check('new activity remains after a manual clear', [...window.document.querySelectorAll('.activity-log')].every((log) => log.textContent.includes('NEW JOB') && !log.textContent.includes('در حال دانلود آزمایشی')));
 
   window.dispatchEvent(new window.Event('pagehide'));
   check('closing a tab sends a close beacon', beacons.some((entry) => entry.url === '/api/session/close'));

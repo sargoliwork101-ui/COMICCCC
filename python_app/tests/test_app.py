@@ -42,10 +42,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.10"
+    assert health.json()["version"] == "3.11"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
+    assert '<span class="ver">۳.۱۱ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
 
 
@@ -181,6 +182,20 @@ def test_activity_feed_contains_progress_during_explicit_download(client, monkey
     assert any(entry["message"] == "در حال دانلود مدل آزمایشی" and entry["progress"] == pytest.approx(0.42) for entry in feed["entries"])
     later = client.get(f"/api/activity?after={feed['next']}").json()
     assert later["entries"] == []
+
+
+def test_activity_clear_removes_history_without_reusing_ids(client):
+    activity = client.app.state.activity
+    activity.add("گزارش قدیمی")
+    before = client.get("/api/activity?after=0").json()
+    response = client.post("/api/activity/clear")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "next": before["next"]}
+    assert client.get("/api/activity?after=0").json()["entries"] == []
+    activity.add("گزارش کار جدید")
+    later = client.get(f"/api/activity?after={before['next']}").json()
+    assert [entry["message"] for entry in later["entries"]] == ["گزارش کار جدید"]
+    assert later["entries"][0]["id"] > before["next"]
 
 
 def test_browser_session_heartbeat_and_close(client):

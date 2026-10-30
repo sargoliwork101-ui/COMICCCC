@@ -33,6 +33,12 @@ class ActivityLog:
             self._next_id += 1
             self._entries.append(entry)
 
+    def clear(self) -> int:
+        """Remove history and return the id at the atomic clear point."""
+        with self._lock:
+            self._entries.clear()
+            return self._next_id - 1
+
     def since(self, after: int = 0) -> dict[str, Any]:
         with self._lock:
             return {

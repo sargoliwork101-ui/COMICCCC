@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const G = window.StudioGroups;
 const GROUP_COLORS = ['#34d399', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa', '#2dd4bf', '#fb923c', '#e879f9'];
 const state = {
-  project: null, engines: [], ai: null, editorId: null, editorBitmap: null, editorScale: 1,
+  project: null, engines: [], ai: null, editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null,
   cropId: null, crop: null, cropPointer: null, modelBusy: null, dragId: null, dragIds: [],
   dragMode: null, groupEditId: null, groupSnapshot: null, lastSelectedId: null,
   previewId: null, richEditor: null, richRange: null, richFields: new Map(),
@@ -17,6 +17,7 @@ let activityAfter = 0;
 let activityEntries = [];
 let activityPollTimer = null;
 let activityPollInFlight = false;
+let activityGeneration = 0;
 let sessionTimer = null;
 let localActivityId = 0;
 let editorCloseTask = null;
@@ -54,14 +55,16 @@ function appendLocalActivity(message, kind = 'info') {
 async function pollActivity() {
   if (activityPollInFlight) return;
   activityPollInFlight = true;
+  const generation = activityGeneration;
   try {
     const response = await fetch(`/api/activity?after=${activityAfter}`, { cache: 'no-store' });
     if (!response.ok) return;
     const payload = await response.json();
+    if (generation !== activityGeneration) return;
+    activityAfter = Math.max(activityAfter, Number(payload.next) || 0);
     (payload.entries || []).forEach((entry) => {
       if (!activityEntries.some((existing) => existing.id === entry.id)) activityEntries.push(entry);
     });
-    activityAfter = Math.max(activityAfter, Number(payload.next) || 0);
     activityEntries = activityEntries.slice(-100);
     const latest = payload.entries?.at(-1);
     if (jobBusy && latest) {
@@ -78,6 +81,21 @@ function startActivityFeed() {
     activityPollTimer = setInterval(pollActivity, 700);
     activityPollTimer.unref?.();
   }
+}
+async function clearActivity(notify = true) {
+  ++activityGeneration; activityEntries = []; renderActivity();
+  let succeeded = false;
+  try {
+    const result = await api('/api/activity/clear', { method: 'POST' });
+    activityAfter = Math.max(activityAfter, Number(result?.next) || 0); succeeded = true;
+  } catch (error) {
+    if (notify) toast(error.message || 'پاک‌کردن گزارش ممکن نبود', true);
+  } finally {
+    // Invalidate polls that began before or during the clear so old entries cannot reappear.
+    ++activityGeneration; activityEntries = []; renderActivity();
+    if (!jobBusy) { $('jobStatus').textContent = 'آماده'; $('jobProgress').style.width = '0'; }
+  }
+  if (notify && succeeded) toast('گزارش کارها پاک شد');
 }
 async function heartbeat() {
   try {
@@ -170,6 +188,7 @@ function setBusy(message) {
   document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button').forEach((el) => { el.disabled = !!message; });
 }
 async function runJob(message, task) {
+  await clearActivity(false);
   setBusy(message); appendLocalActivity(message); $('activityDetails').open = true;
   try { return await task(); }
   catch (error) { console.error(error); appendLocalActivity(`خطا: ${error.message || error}`, 'error'); toast(error.message || error, true); throw error; }
@@ -554,11 +573,48 @@ async function saveAiSettings() { state.ai = await api('/api/ai-settings', jsonO
 function editorItem() { return state.project?.images.find((item) => item.id === state.editorId); }
 function boxOf(block) { return { x0: Number.isFinite(block.tx0) ? block.tx0 : block.x0, y0: Number.isFinite(block.ty0) ? block.ty0 : block.y0, x1: Number.isFinite(block.tx1) ? block.tx1 : block.x1, y1: Number.isFinite(block.ty1) ? block.ty1 : block.y1 }; }
 async function openEditor(imageId) {
-  await ensureFont(); state.editorId = imageId; state.richFields = new Map(); const item = state.project.images.find((entry) => entry.id === imageId); $('editorTitle').textContent = `ویرایش — ${item.name}`; showDialog('editorDialog');
+  await ensureFont(); state.editorId = imageId; state.richFields = new Map(); state.activeBlockId = null; state.editorPan = null; $('editorStage').classList.remove('panning'); const item = state.project.images.find((entry) => entry.id === imageId); $('editorTitle').textContent = `ویرایش — ${item.name}`; showDialog('editorDialog');
   const response = await fetch(imageUrl(item)); state.editorBitmap?.close?.(); state.editorBitmap = await createImageBitmap(await response.blob()); $('editorCanvas').width = state.editorBitmap.width; $('editorCanvas').height = state.editorBitmap.height; buildBlockList(); fitEditor(); drawEditor();
 }
+function resizeEditorStage() {
+  const item = editorItem(); if (!item) return;
+  const scale = state.editorScale || 1; const w = item.width * scale; const h = item.height * scale; const preview = document.querySelector('.editor-preview');
+  $('editorStage').style.width = `${w}px`; $('editorStage').style.height = `${h}px`; $('editorCanvas').style.width = `${w}px`; $('editorCanvas').style.height = `${h}px`;
+  preview.classList.toggle('oversized', w > Math.max(0, preview.clientWidth - 30) + 1);
+  $('editorZoomLabel').textContent = `${Math.round(scale * 100)}٪`;
+  renderEditorBoxes();
+}
 function fitEditor() {
-  const item = editorItem(); if (!item) return; const available = Math.max(250, document.querySelector('.editor-preview').clientWidth - 35); state.editorScale = Math.min(1, available / item.width); const w = item.width * state.editorScale; const h = item.height * state.editorScale; $('editorStage').style.width = `${w}px`; $('editorStage').style.height = `${h}px`; $('editorCanvas').style.width = `${w}px`; $('editorCanvas').style.height = `${h}px`; renderEditorBoxes();
+  const item = editorItem(); if (!item) return;
+  const available = Math.max(250, document.querySelector('.editor-preview').clientWidth - 35); state.editorFitScale = Math.min(1, available / item.width); setEditorZoom(state.editorFitScale);
+}
+function setEditorZoom(value, anchor = null) {
+  const item = editorItem(); if (!item) return;
+  const preview = document.querySelector('.editor-preview'); const stage = $('editorStage'); const oldScale = state.editorScale || 1;
+  const minScale = Math.min(.1, state.editorFitScale || .1); const scale = Math.max(minScale, Math.min(4, Number(value) || oldScale));
+  const viewportX = anchor?.x ?? preview.clientWidth / 2; const viewportY = anchor?.y ?? preview.clientHeight / 2;
+  const imageX = (preview.scrollLeft + viewportX - stage.offsetLeft) / oldScale; const imageY = (preview.scrollTop + viewportY - stage.offsetTop) / oldScale;
+  state.editorScale = scale; resizeEditorStage();
+  preview.scrollLeft = Math.max(0, stage.offsetLeft + imageX * scale - viewportX); preview.scrollTop = Math.max(0, stage.offsetTop + imageY * scale - viewportY);
+}
+function startEditorPan(event) {
+  if (!state.editorId || (event.button !== 0 && event.button !== 1) || event.target.closest('.editor-box')) return;
+  const preview = document.querySelector('.editor-preview'); const stage = $('editorStage');
+  state.editorPan = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: preview.scrollLeft, top: preview.scrollTop };
+  stage.setPointerCapture(event.pointerId); stage.classList.add('panning'); event.preventDefault();
+}
+function moveEditorPan(event) {
+  const pan = state.editorPan; if (!pan || pan.pointerId !== event.pointerId) return;
+  const preview = document.querySelector('.editor-preview'); preview.scrollLeft = pan.left - (event.clientX - pan.x); preview.scrollTop = pan.top - (event.clientY - pan.y); event.preventDefault();
+}
+function stopEditorPan(event) {
+  const pan = state.editorPan; if (!pan || (event.pointerId !== undefined && pan.pointerId !== event.pointerId)) return;
+  const stage = $('editorStage'); state.editorPan = null; stage.classList.remove('panning'); if (stage.hasPointerCapture?.(pan.pointerId)) stage.releasePointerCapture(pan.pointerId);
+}
+function handleEditorWheel(event) {
+  if (!state.editorId || (!event.ctrlKey && !event.metaKey)) return;
+  event.preventDefault(); const rect = document.querySelector('.editor-preview').getBoundingClientRect();
+  setEditorZoom(state.editorScale * (event.deltaY < 0 ? 1.15 : 1 / 1.15), { x: event.clientX - rect.left, y: event.clientY - rect.top });
 }
 function drawEditor() {
   const item = editorItem(); if (!item || !state.editorBitmap) return; const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d'); ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(state.editorBitmap, 0, 0); renderEditorBoxes();
@@ -609,12 +665,20 @@ function runRichCommand(command, value = null) {
   element.focus(); if (state.richRange && element.contains(state.richRange.startContainer)) { const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(state.richRange); }
   document.execCommand('styleWithCSS', false, true); document.execCommand(command, false, value); element.dispatchEvent(new Event('input')); rememberRichSelection(element);
 }
+function selectEditorBlock(blockId, scroll = true) {
+  const key = String(blockId); state.activeBlockId = key;
+  document.querySelectorAll('#editorBoxes .editor-box').forEach((box) => box.classList.toggle('active', box.dataset.id === key));
+  let selectedCard = null;
+  document.querySelectorAll('#blockList .block-card').forEach((card) => { const active = card.dataset.id === key; card.classList.toggle('active', active); if (active) selectedCard = card; });
+  // Do not focus the sidebar field: the user can keep typing exactly where they clicked on the image.
+  if (scroll && selectedCard) selectedCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
 function renderEditorBoxes() {
   const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return; layer.textContent = '';
   const mode = currentOverlayMode();
   (item.blocks || []).forEach((block) => {
     const display = overlayBlock(block, mode);
-    if (!display.enabled || !display.tr?.trim()) return; const box = boxOf(display); const scale = state.editorScale; const el = document.createElement('div'); el.className = 'editor-box'; el.dataset.id = block.id;
+    if (!display.enabled || !display.tr?.trim()) return; const box = boxOf(display); const scale = state.editorScale; const el = document.createElement('div'); el.className = `editor-box${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; el.dataset.id = block.id;
     el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
     const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
     const text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text.innerHTML = display.richHtml || plainToHtml(display.tr); styleRichElement(text, display, scale);
@@ -625,7 +689,7 @@ function renderEditorBoxes() {
     }
     if (mode === 'ocr') wireOcrElement(text, block); else wireRichElement(text, block);
     el.append(move, text); ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
-    el.addEventListener('pointerdown', (event) => startBoxDrag(event, block, el)); layer.appendChild(el);
+    el.addEventListener('pointerdown', (event) => { selectEditorBlock(block.id); startBoxDrag(event, block, el); }); layer.appendChild(el);
   });
 }
 function startBoxDrag(event, block, el) {
@@ -667,7 +731,7 @@ function startBoxDrag(event, block, el) {
 function buildBlockList() {
   const item = editorItem(); const list = $('blockList'); list.textContent = ''; state.richFields = new Map(); if (!item.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; return; }
   item.blocks.forEach((block) => {
-    const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}`; card.dataset.id = block.id;
+    const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', () => selectEditorBlock(block.id, false));
     const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabledLabel.append(enabled, document.createTextNode(` متن ${block.id} · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
     const bg = document.createElement('select'); [['auto', 'پس‌زمینه خودکار'], ['white', 'سفید'], ['black', 'مشکی'], ['none', 'بدون پاک‌کردن']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; bg.appendChild(option); }); bg.value = block.bg || 'auto'; head.appendChild(bg);
     const source = document.createElement('textarea'); source.value = block.text || ''; source.dir = 'auto'; source.setAttribute('aria-label', 'متن OCR');
@@ -690,7 +754,7 @@ async function applyEditor() { const item = editorItem(); if (!item) return; awa
 async function closeEditor() {
   if (editorCloseTask) return editorCloseTask;
   editorCloseTask = (async () => {
-    await applyEditor(); closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; state.editorId = null;
+    await applyEditor(); closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; state.editorId = null; state.editorPan = null; state.activeBlockId = null;
   })();
   try { await editorCloseTask; } finally { editorCloseTask = null; }
 }
@@ -740,7 +804,8 @@ function bindEvents() {
   bindGridDrop();
   $('menuBtn').addEventListener('click', () => $('menu').classList.toggle('hidden'));
   $('themeBtn').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('comic-studio-theme', document.body.classList.contains('light') ? 'light' : 'dark'); });
-  $('newProjectBtn').addEventListener('click', async () => { if (!confirm('پروژهٔ جدید ساخته شود؟ پروژهٔ فعلی ذخیره می‌ماند.')) return; await saveProject(); adoptProject(await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }))); await refreshProjectList(); });
+  $('newProjectBtn').addEventListener('click', async () => { if (!confirm('پروژهٔ جدید ساخته شود؟ پروژهٔ فعلی ذخیره می‌ماند.')) return; await saveProject(); await clearActivity(false); adoptProject(await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }))); await refreshProjectList(); });
+  $('clearActivityBtn').addEventListener('click', () => clearActivity());
   $('deleteProjectBtn').addEventListener('click', async () => { if (!state.project || !confirm('این پروژه و تصاویرش برای همیشه حذف شود؟')) return; await api(`/api/projects/${state.project.id}`, { method: 'DELETE' }); const projects = await api('/api/projects'); const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' })); adoptProject(project); await refreshProjectList(); $('menu').classList.add('hidden'); });
   $('projectSelect').addEventListener('change', () => loadProject($('projectSelect').value).catch((error) => toast(error.message, true)));
   $('projectName').addEventListener('change', () => { state.project.name = $('projectName').value; scheduleSave(); });
@@ -757,6 +822,9 @@ function bindEvents() {
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', updateAiFields); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => toast(error.message, true))); $('testAiBtn').addEventListener('click', async () => { try { await saveAiSettings(); const result = await api('/api/ai-settings/test', { method: 'POST' }); $('aiStatus').textContent = result.message; } catch (error) { $('aiStatus').textContent = error.message; } });
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
   $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); closeEditor().catch((error) => toast(error.message, true)); });
+  $('editorZoomOut').addEventListener('click', () => setEditorZoom(state.editorScale / 1.25)); $('editorZoomIn').addEventListener('click', () => setEditorZoom(state.editorScale * 1.25)); $('editorZoomActual').addEventListener('click', () => setEditorZoom(1)); $('editorZoomFit').addEventListener('click', fitEditor);
+  document.querySelector('.editor-preview').addEventListener('wheel', handleEditorWheel, { passive: false });
+  $('editorStage').addEventListener('pointerdown', startEditorPan); $('editorStage').addEventListener('pointermove', moveEditorPan); $('editorStage').addEventListener('pointerup', stopEditorPan); $('editorStage').addEventListener('pointercancel', stopEditorPan); $('editorStage').addEventListener('lostpointercapture', stopEditorPan);
   $('previewCopy').addEventListener('click', copyPreview);
   window.addEventListener('resize', () => { if (state.editorId) fitEditor(); if (state.cropId) drawCropRect(); scheduleOutlines(); });
   ['cropX', 'cropY', 'cropW', 'cropH'].forEach((id) => $(id).addEventListener('change', readCropInputs)); $('cropRatio').addEventListener('change', changeCropRatio); $('cropStage').addEventListener('pointerdown', cropPointerDown); $('cropStage').addEventListener('pointermove', cropPointerMove); const stopCrop = () => { state.cropPointer = null; }; $('cropStage').addEventListener('pointerup', stopCrop); $('cropStage').addEventListener('pointercancel', stopCrop);

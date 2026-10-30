@@ -81,6 +81,10 @@ def create_app() -> FastAPI:
     def activity_feed(after: int = 0) -> dict[str, Any]:
         return activity.since(max(0, after))
 
+    @app.post("/api/activity/clear")
+    def clear_activity() -> dict[str, Any]:
+        return {"ok": True, "next": activity.clear()}
+
     @app.post("/api/session/heartbeat")
     def session_heartbeat(values: SessionRequest) -> dict[str, Any]:
         return {"ok": True, "active": sessions.heartbeat(values.client_id)}
