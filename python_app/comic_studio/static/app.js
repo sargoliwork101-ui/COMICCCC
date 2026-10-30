@@ -928,20 +928,39 @@ function inlineDraftChanged() {
 function closeInlineEditor(force = false) {
   if (!inlineDraft) return true;
   if (!force && inlineDraftChanged() && !confirm('تغییرهای این متن ثبت نشده‌اند. از آن‌ها صرف‌نظر شود؟')) return false;
-  classicEditor.clearDraft(); $('inlineEditor').classList.add('hidden'); inlineDraft = null;
+  classicEditor.clearDraft(); classicEditor.exitFullscreen();
+  const box = classicEditor.field.closest('.editor-box'); const preview = document.querySelector('.editor-preview');
+  const oldTop = box?.getBoundingClientRect().top;
+  classicEditor.detachField(); box?.classList.remove('editing');
+  $('inlineEditor').classList.add('hidden'); inlineDraft = null;
+  preview.style.paddingTop = '';
+  if (box && Number.isFinite(oldTop)) preview.scrollTop += box.getBoundingClientRect().top - oldTop;
   return true;
 }
 function positionInlineEditor() {
   if (!inlineDraft) return;
-  const view = document.querySelector('.editor-view'); const panel = $('inlineEditor');
+  const view = document.querySelector('.editor-view'); const panel = $('inlineEditor'); const preview = document.querySelector('.editor-preview');
   const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
   if (!box || !view || panel.classList.contains('hidden')) return;
-  const bounds = view.getBoundingClientRect(); const target = box.getBoundingClientRect();
-  const width = panel.offsetWidth; const height = panel.offsetHeight;
+  // Add room only when needed, keeping the box stationary where scrolling
+  // allows it. Ordinary scrolling must not pull the image back to the editor.
+  let bounds = view.getBoundingClientRect(); let target = box.getBoundingClientRect();
+  const height = panel.offsetHeight; const needed = height + 8;
+  if (inlineDraft.toolbarHeight !== height) {
+    inlineDraft.toolbarHeight = height;
+    const shortfall = Math.max(0, bounds.top + needed - target.top);
+    if (shortfall > 0) {
+      const oldTop = target.top; const previousPadding = parseFloat(preview.style.paddingTop) || 15;
+      preview.style.paddingTop = `${Math.ceil(previousPadding + shortfall)}px`;
+      preview.scrollTop += box.getBoundingClientRect().top - oldTop;
+      target = box.getBoundingClientRect();
+      if (target.top < bounds.top + needed && preview.scrollTop > 0) preview.scrollTop -= bounds.top + needed - target.top;
+      target = box.getBoundingClientRect();
+    }
+  }
+  const width = panel.offsetWidth;
   const x = Math.max(8, Math.min(Math.max(8, bounds.width - width - 8), target.right - bounds.left - width));
-  let y = target.top - bounds.top - height - 8;
-  if (y < 8) y = target.bottom - bounds.top + 8;
-  y = Math.max(8, Math.min(Math.max(8, bounds.height - height - 8), y));
+  const y = Math.max(8, Math.min(Math.max(8, bounds.height - height - 8), target.top - bounds.top - height - 4));
   panel.style.left = `${x}px`; panel.style.top = `${y}px`;
 }
 function rememberInlineRange() {
@@ -982,17 +1001,6 @@ function restoreInlineHistory(step) {
   }
   rememberInlineRange(); syncInlineLineControls(); classicEditor.notifyChange();
 }
-function inlineCommand(command) {
-  if (!inlineDraft) return;
-  if (command === 'undo' || command === 'redo') { restoreInlineHistory(command === 'undo' ? -1 : 1); return; }
-  if (inlineDraft.mode === 'ocr') return;
-  const field = $('inlineEditorField'); const range = inlineDraft.range;
-  field.focus();
-  if (range && field.contains(range.startContainer) && field.contains(range.endContainer)) {
-    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
-  }
-  document.execCommand('styleWithCSS', false, true); document.execCommand(command, false, null); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); classicEditor.notifyChange();
-}
 function inlineParagraphFrom(node) {
   const field = $('inlineEditorField');
   let element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
@@ -1005,13 +1013,7 @@ function inlineParagraphFrom(node) {
 function syncInlineLineControls() {
   if (!inlineDraft || inlineDraft.mode === 'ocr') return;
   const line = inlineParagraphFrom(inlineDraft.range?.startContainer);
-  $('inlineLineDirection').value = line?.style.direction || '';
   $('inlineLineSize').value = line?.style.fontSize ? String(Math.round(parseFloat(line.style.fontSize))) : '';
-  const color = line?.style.color || ''; const rgb = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i.exec(color);
-  $('inlineLineColor').value = /^#[0-9a-f]{6}$/i.test(color) ? color : rgb ? `#${rgb.slice(1).map((part) => Number(part).toString(16).padStart(2, '0')).join('')}` : '#ffffff';
-  $('inlineLineTools').querySelectorAll('[data-line-align]').forEach((button) => {
-    button.setAttribute('aria-pressed', String(!!line?.style.textAlign && button.dataset.lineAlign === line.style.textAlign));
-  });
 }
 function ensureInlineParagraph() {
   const field = $('inlineEditorField'); const range = inlineDraft?.range;
@@ -1045,10 +1047,13 @@ function resetInlineLineStyle() {
 }
 function openInlineEditor(block) {
   if (!block || !editorItem()) return;
-  if (inlineDraft?.block === block) { $('inlineEditorField').focus(); return; }
+  if (inlineDraft?.block === block) { classicEditor.focus(); return; }
   if (!closeInlineEditor()) return;
   const mode = blockOverlayMode(block);
   if (mode === 'none') return;
+  selectEditorBlock(block.id, true);
+  const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((entry) => entry.dataset.id === String(block.id));
+  if (!box) { toast('ابتدا نمایش این کادر را فعال کنید.', true); return; }
   const field = $('inlineEditorField'); const direction = mode === 'ocr' ? 'ltr' : (block.dir === 'ltr' ? 'ltr' : 'rtl');
   const originalHtml = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || plainToHtml(block.tr || ''));
   classicEditor.setPlainMode(mode === 'ocr');
@@ -1064,7 +1069,11 @@ function openInlineEditor(block) {
     dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, size: $('inlineEditorSize').value,
     color: block.color || null, originalColor: block.color || null, range: null, history: [], historyIndex: -1, muteHistory: false };
   classicEditor.setContext(draftKey, originalHtml, inlineBlockSnapshot(block));
-  $('inlineEditor').classList.remove('hidden'); positionInlineEditor(); field.focus(); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+  const background = block.bg || 'auto';
+  box.style.setProperty('--editing-bg', background === 'white' ? '#fff' : background === 'black' ? '#101010' : 'var(--surface)');
+  box.style.setProperty('--editing-fg', background === 'white' ? '#202020' : background === 'black' ? '#fff' : 'var(--text)');
+  box.classList.add('editing'); classicEditor.attachField(box);
+  $('inlineEditor').classList.remove('hidden'); positionInlineEditor(); classicEditor.focus(); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
 }
 function applyInlineEditor() {
   if (!inlineDraft) return true;
@@ -1258,6 +1267,7 @@ function renderEditorBoxes() {
       ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
       el.addEventListener('pointerdown', (event) => {
         const activeBlock = el._block; const additive = event.ctrlKey || event.metaKey; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
+        if (inlineDraft && inlineDraft.block !== activeBlock && !additive) return;
         if (!(dragTarget && !additive && editorSelectedKeys().includes(String(activeBlock.id)))) selectEditorBlock(activeBlock.id, true, additive);
         startBoxDrag(event, activeBlock, el);
       });
@@ -1452,6 +1462,10 @@ function bindEvents() {
   $('inlineEditorCancel').addEventListener('click', () => closeInlineEditor());
   classicEditor = window.createEditor('#inlineEditorField', {
     undo: () => restoreInlineHistory(-1), redo: () => restoreInlineHistory(1),
+    align: (value) => setInlineLineStyle('textAlign', value),
+    direction: (value) => setInlineLineStyle('direction', value),
+    color: (value) => { if (inlineDraft?.range?.collapsed) { setInlineLineStyle('color', value); return true; } return false; },
+    onFullscreen: (enabled) => { if (enabled) classicEditor.detachField(); else { const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft?.block.id)); if (box) classicEditor.attachField(box); } },
     onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); } },
     getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, size: $('inlineEditorSize').value, color: inlineDraft.color } : null,
     onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (meta.size === '' || (+meta.size >= 8 && +meta.size <= 160)) $('inlineEditorSize').value = meta.size; if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || '#ffffff'; } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; },
@@ -1459,21 +1473,14 @@ function bindEvents() {
   const inlineField = $('inlineEditorField');
   ['keyup', 'mouseup', 'focus'].forEach((name) => inlineField.addEventListener(name, () => { rememberInlineRange(); syncInlineLineControls(); }));
   inlineField.addEventListener('input', () => { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); });
-  $('inlineEditor').querySelectorAll('[data-inline-command]').forEach((button) => {
-    button.addEventListener('mousedown', (event) => event.preventDefault());
-    button.addEventListener('click', () => inlineCommand(button.dataset.inlineCommand));
-  });
-  $('inlineLineTools').querySelectorAll('[data-line-align]').forEach((button) => {
-    button.addEventListener('mousedown', (event) => event.preventDefault());
-    button.addEventListener('click', () => setInlineLineStyle('textAlign', button.dataset.lineAlign));
-  });
-  $('inlineLineDirection').addEventListener('change', () => setInlineLineStyle('direction', $('inlineLineDirection').value));
+  ['pointerdown', 'click'].forEach((name) => inlineField.addEventListener(name, (event) => event.stopPropagation()));
+  $('inlineEditor').addEventListener('click', () => requestAnimationFrame(positionInlineEditor));
+  $('inlineEditor').querySelector('details').addEventListener('toggle', () => requestAnimationFrame(positionInlineEditor));
   $('inlineLineSize').addEventListener('change', () => {
     const value = $('inlineLineSize').value.trim(); const size = Number(value);
     if (value && (!Number.isFinite(size) || size < 8 || size > 160)) { toast('اندازهٔ خط باید بین ۸ و ۱۶۰ باشد.', true); return; }
     setInlineLineStyle('fontSize', value ? `${Math.round(size)}px` : '');
   });
-  $('inlineLineColor').addEventListener('input', () => setInlineLineStyle('color', $('inlineLineColor').value));
   $('inlineLineReset').addEventListener('mousedown', (event) => event.preventDefault());
   $('inlineLineReset').addEventListener('click', resetInlineLineStyle);
   $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; classicEditor.notifyChange(); });
@@ -1491,6 +1498,7 @@ function bindEvents() {
   $('cropReset').addEventListener('click', () => { cropItem().crop = null; state.crop = null; closeDialog('cropDialog'); renderGrid(); scheduleSave(); }); $('cropApply').addEventListener('click', () => { readCropInputs(); cropItem().crop = state.crop; closeDialog('cropDialog'); renderGrid(); scheduleSave(); });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      if (inlineDraft && classicEditor.element.classList.contains('classic-fullscreen')) { classicEditor.exitFullscreen(); classicEditor.focus(); event.preventDefault(); event.stopPropagation(); return; }
       if (inlineDraft) { closeInlineEditor(); event.preventDefault(); event.stopPropagation(); return; }
       if (closeTopDialog()) { event.preventDefault(); event.stopPropagation(); }
       else $('menu').classList.add('hidden');

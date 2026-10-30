@@ -289,6 +289,18 @@ function nextDownload(cdp, directory) {
     await page.evaluate(() => { window.__inlineOriginal = JSON.parse(JSON.stringify(state.project.images[0].blocks[0])); window.__beforeInlineCanvas = document.getElementById('editorCanvas').toDataURL(); });
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text', { offset: { x: 75, y: 30 } });
     await page.waitForSelector('#inlineEditor:not(.hidden)');
+    const inPlace = await page.evaluate(() => {
+      const box = document.querySelector('#editorBoxes .editor-box[data-id="1"]'); const field = document.getElementById('inlineEditorField'); const a = box.getBoundingClientRect(); const b = field.getBoundingClientRect(); const bar = document.getElementById('inlineEditor').getBoundingClientRect();
+      return { attached: field.parentElement === box, aligned: Math.abs(a.left-b.left) < 3 && Math.abs(a.top-b.top) < 3 && Math.abs(a.width-b.width) <= 5 && Math.abs(a.height-b.height) <= 5, above: bar.bottom <= a.top + 2, single: document.querySelectorAll('#editorBoxes [contenteditable="true"]').length === 1 };
+    });
+    assert.deepEqual(inPlace, {attached:true, aligned:true, above:true, single:true}, 'the actual clicked box must be the sole editor, with tools immediately above it');
+    assert.equal(await page.$$eval('#inlineEditor [data-line-align], #inlineEditor #inlineLineDirection, #inlineEditor #inlineLineColor', els => els.length), 0, 'duplicate line controls are removed');
+    const originalViewport = page.viewport();
+    await page.setViewport({ width: 600, height: 700, deviceScaleFactor: 1 });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => { const b=document.querySelector('#editorBoxes .editor-box[data-id="1"]');const f=document.getElementById('inlineEditorField');const bar=document.getElementById('inlineEditor');return f.parentElement===b && bar.getBoundingClientRect().bottom <= b.getBoundingClientRect().top+2; }), true, 'on a narrow viewport tools remain above the same editable box');
+    await page.setViewport(originalViewport);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const popupPosition = await page.evaluate(() => {
       const view = document.querySelector('.editor-view').getBoundingClientRect(); const panel = document.getElementById('inlineEditor').getBoundingClientRect();
       return panel.left >= view.left - 1 && panel.right <= view.right + 1 && panel.top >= view.top - 1 && panel.bottom <= view.bottom + 1;
@@ -308,6 +320,7 @@ function nextDownload(cdp, directory) {
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr === window.__inlineOriginal.tr && document.getElementById('editorCanvas').toDataURL() === window.__beforeInlineCanvas), true, 'draft text must not change the project or final preview before Apply');
     await page.click('#inlineEditorApply');
     assert.equal(await page.$eval('#inlineEditor', (panel) => panel.classList.contains('hidden')), true);
+    assert.equal(await page.$$eval('#editorBoxes [contenteditable="true"], #editorBoxes [contenteditable="plaintext-only"]', els => els.length), 0, 'Apply removes the editable surface from the image box');
     assert.equal(await page.evaluate(() => {
       const block = state.project.images[0].blocks[0];
       return block.tr === 'new inline text' && /font-weight:\s*normal/i.test(block.richHtml) && block.align === 'justify' && block.size === 24 && document.querySelectorAll('#blockList .block-card[data-id="1"] .block-readonly')[1].textContent.includes(block.tr);
@@ -348,7 +361,7 @@ function nextDownload(cdp, directory) {
       const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
       field.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
-    await page.click('#inlineLineTools [data-line-align="center"]');
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="تراز وسط"]');
     assert.ok((await page.$eval('#inlineEditorField', (field) => field.innerHTML)).includes('text-align: center'));
     await page.click('#inlineEditor .classic-toolbar button[aria-label="واگرد"]');
     assert.ok(!(await page.$eval('#inlineEditorField', (field) => field.innerHTML)).includes('text-align: center'), 'undo must revert an individual line style');
@@ -359,8 +372,9 @@ function nextDownload(cdp, directory) {
     await page.keyboard.down('Control'); await page.keyboard.down('Shift'); await page.keyboard.press('z'); await page.keyboard.up('Shift'); await page.keyboard.up('Control');
     assert.ok((await page.$eval('#inlineEditorField', (field) => field.innerHTML)).includes('text-align: center'), 'Ctrl+Shift+Z must redo the line style');
     await page.$eval('#inlineLineSize', (field) => { field.value = '20'; field.dispatchEvent(new Event('change', { bubbles: true })); });
-    await page.select('#inlineLineDirection', 'ltr');
-    await page.$eval('#inlineLineColor', (field) => { field.value = '#ff0000'; field.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="نمایش ابزارهای پیشرفته"]');
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="چپ‌به‌راست"]');
+    await page.$eval('#inlineEditor .classic-color', (field) => { field.value = '#ff0000'; field.dispatchEvent(new Event('input', { bubbles: true })); });
     await page.click('#inlineEditorApply');
     const lineResult = await page.evaluate(async () => {
       const block = state.project.images[0].blocks[0]; const root = document.createElement('div'); root.innerHTML = block.richHtml;
@@ -381,7 +395,8 @@ function nextDownload(cdp, directory) {
     // Classic source/visual synchronization, sanitization, dialogs and draft recovery.
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
     await page.click('#inlineEditor .classic-tabs button:nth-child(2)');
-    await page.$eval('#inlineEditor .classic-source', el => { el.value='<h2>Hello</h2><p>linked text<script>alert(1)</script><a href="javascript:alert(2)" onclick="alert(3)">unsafe</a></p>'; el.dispatchEvent(new Event('input',{bubbles:true})); });
+    assert.equal(await page.$eval('#editorBoxes .editor-box.editing .classic-source', el => el.parentElement === document.querySelector('#editorBoxes .editor-box[data-id="1"]')), true, 'Text mode also uses the clicked box');
+    await page.$eval('#editorBoxes .editor-box.editing .classic-source', el => { el.value='<h2>Hello</h2><p>linked text<script>alert(1)</script><a href="javascript:alert(2)" onclick="alert(3)">unsafe</a></p>'; el.dispatchEvent(new Event('input',{bubbles:true})); });
     const safe = await page.evaluate(() => classicEditor.getHTML());
     assert.ok(safe.includes('<h2>Hello</h2>') && safe.includes('unsafe') && !/script|javascript|onclick/.test(safe));
     await page.click('#inlineEditor .classic-tabs button:nth-child(1)');
@@ -409,6 +424,10 @@ function nextDownload(cdp, directory) {
     await page.evaluate(() => { document.querySelector('#inlineEditor .classic-toolbar button[aria-label="چسباندن به‌صورت متن ساده"]').click(); const f=document.getElementById('inlineEditorField');const p=document.createElement('p');p.textContent='plain: ';f.appendChild(p);const r=document.createRange();r.selectNodeContents(p);r.collapse(false);const sel=getSelection();sel.removeAllRanges();sel.addRange(r);f.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));const data=new DataTransfer();data.setData('text/html','<b>PLAINONLY</b>');data.setData('text/plain','PLAINONLY');f.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data})); });
     assert.ok((await page.$eval('#inlineEditorField', el => el.textContent)).includes('PLAINONLY'));
     assert.equal(await page.$eval('#inlineEditorField', el => [...el.querySelectorAll('b,strong')].some(x => x.textContent.includes('PLAINONLY'))), false);
+    await page.evaluate(() => document.querySelector('#inlineEditor .classic-toolbar button[aria-label="تمام‌صفحه"]').click());
+    assert.equal(await page.evaluate(() => !!document.getElementById('inlineEditorField').closest('.classic-fullscreen')), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => document.getElementById('inlineEditorField').parentElement === document.querySelector('#editorBoxes .editor-box[data-id="1"]') && !document.getElementById('inlineEditor').classList.contains('hidden')), true, 'Escape exits fullscreen back into the same box');
     await page.$eval('#inlineEditorSize', el => {el.value='33';el.dispatchEvent(new Event('input',{bubbles:true}));});
     await page.waitForFunction(() => Object.keys(localStorage).some(key => key.startsWith('comic-studio-draft:') && JSON.parse(localStorage.getItem(key)).meta?.size === '33'), {timeout:6000});
     await page.$eval('#inlineEditorSize', el => {el.value='44';});

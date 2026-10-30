@@ -339,7 +339,7 @@ function check(name, condition) {
   vm.runInContext('selectEditorBlock(1, false)', context);
   scrollIntoViewCalls.length = 0;
   $('editorBoxes').querySelectorAll('.editor-box-text')[1].dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
-  check('clicking translated overlay selects the same sidebar editor without moving the page', ocrCard.classList.contains('active') && $('blockList').querySelectorAll('.block-card.active').length === 1 && scrollIntoViewCalls.length === 0);
+  check('clicking translated overlay selects the same sidebar card without moving the page', $('blockList').querySelector('.block-card[data-id="2"]').classList.contains('active') && $('blockList').querySelectorAll('.block-card.active').length === 1 && scrollIntoViewCalls.length === 0);
   const scrollCount = scrollIntoViewCalls.length;
   $('editorBoxes').querySelectorAll('.editor-box-text')[1].dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
   check('clicking the active editor again does not repeatedly scroll the sidebar', scrollIntoViewCalls.length === scrollCount);
