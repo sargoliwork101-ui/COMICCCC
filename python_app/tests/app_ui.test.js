@@ -59,6 +59,9 @@ window.URL.createObjectURL = () => 'blob:ui-test';
 window.URL.revokeObjectURL = () => {};
 window.createImageBitmap = async () => ({ width: 320, height: 200, close() {} });
 window.HTMLCanvasElement.prototype.getContext = () => ({});
+window.HTMLElement.prototype.setPointerCapture = function (pointerId) { this._capturedPointerId = pointerId; };
+window.HTMLElement.prototype.hasPointerCapture = function (pointerId) { return this._capturedPointerId === pointerId; };
+window.HTMLElement.prototype.releasePointerCapture = function (pointerId) { if (this._capturedPointerId === pointerId) delete this._capturedPointerId; };
 window.Typeset = {
   blockStyle(block) { return { dir: block.dir === 'ltr' ? 'ltr' : 'rtl', align: block.align || 'right', bold: true, italic: false, underline: false, size: 12, color: null }; },
   hasInlineMarks() { return false; },
@@ -155,8 +158,46 @@ function check(name, condition) {
   ocrOverlay.dispatchEvent(new window.Event('input', { bubbles: true }));
   check('editing the OCR overlay updates source text without changing translation', vm.runInContext("state.project.images[0].blocks[0].text === 'CORRECTED OCR' && state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
   check('OCR overlay editing stays synchronized with the source field', $('blockList').querySelector('textarea').value === 'CORRECTED OCR');
-  vm.runInContext("setOverlayMode('translation', false); renderEditorBoxes(); state.editorId = null", context);
+  vm.runInContext("setOverlayMode('translation', false); renderEditorBoxes()", context);
   check('editor selector restores the translated overlay', $('editorBoxes').querySelector('.editor-box-text')?.textContent === 'سلام دنیا');
+  const editorBox = $('editorBoxes').querySelector('.editor-box');
+  const moveHandle = editorBox.querySelector('[data-move]');
+  check('editor box has a visible button for dragging', moveHandle?.tagName === 'BUTTON' && moveHandle.title.includes('جابه‌جایی'));
+  const pointer = (type, x, y) => {
+    const event = new window.Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperties(event, { clientX: { value: x }, clientY: { value: y }, pointerId: { value: 1 }, button: { value: 0 } });
+    return event;
+  };
+  const geometry = () => vm.runInContext(`(() => { const b = state.project.images[0].blocks[0]; return { x0: b.tx0, y0: b.ty0, width: b.tx1 - b.tx0, height: b.ty1 - b.ty0 }; })()`, context);
+  moveHandle.dispatchEvent(pointer('pointerdown', 100, 100));
+  editorBox.dispatchEvent(pointer('pointermove', 120, 130));
+  editorBox.dispatchEvent(pointer('pointerup', 120, 130));
+  const afterHandle = geometry();
+  check('dragging the visible handle moves without resizing', afterHandle.x0 === 25 && afterHandle.y0 === 35 && afterHandle.width === 145 && afterHandle.height === 40);
+  editorBox.dispatchEvent(pointer('pointerdown', 25, 35));
+  editorBox.dispatchEvent(pointer('pointermove', 35, 30));
+  editorBox.dispatchEvent(pointer('pointerup', 35, 30));
+  const afterBorder = geometry();
+  check('dragging the box border also moves the whole box', afterBorder.x0 === 35 && afterBorder.y0 === 30 && afterBorder.width === 145 && afterBorder.height === 40);
+  moveHandle.dispatchEvent(pointer('pointerdown', 100, 100));
+  editorBox.dispatchEvent(pointer('pointermove', -900, -900));
+  editorBox.dispatchEvent(pointer('pointerup', -900, -900));
+  const atBounds = geometry();
+  check('dragging beyond page bounds preserves box dimensions', atBounds.x0 === 0 && atBounds.y0 === 0 && atBounds.width === 145 && atBounds.height === 40);
+  const beforeTextPointer = geometry();
+  const translatedText = editorBox.querySelector('.editor-box-text');
+  translatedText.dispatchEvent(pointer('pointerdown', 10, 10));
+  editorBox.dispatchEvent(pointer('pointermove', 40, 40));
+  editorBox.dispatchEvent(pointer('pointerup', 40, 40));
+  const afterTextPointer = geometry();
+  check('text editing pointer input does not accidentally move the box', JSON.stringify(afterTextPointer) === JSON.stringify(beforeTextPointer));
+  const resizeHandle = editorBox.querySelector('[data-dir="se"]');
+  resizeHandle.dispatchEvent(pointer('pointerdown', 145, 40));
+  editorBox.dispatchEvent(pointer('pointermove', 165, 55));
+  editorBox.dispatchEvent(pointer('pointerup', 165, 55));
+  const afterResize = geometry();
+  check('resize handles still work after adding box dragging', afterResize.x0 === 0 && afterResize.y0 === 0 && afterResize.width === 165 && afterResize.height === 55);
+  vm.runInContext('state.editorId = null', context);
   await vm.runInContext('runOcr()', context);
   check('finishing OCR automatically selects OCR display mode', $('overlayMode').value === 'ocr' && $('exportOverlayMode').value === 'ocr');
   check('finishing OCR places the new recognized text on the image', renderedBlocks[0].tr === 'NEW OCR' && renderedBlocks[0]._plainText === true);

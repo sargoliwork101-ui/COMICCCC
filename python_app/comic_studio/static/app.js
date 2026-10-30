@@ -616,7 +616,7 @@ function renderEditorBoxes() {
     const display = overlayBlock(block, mode);
     if (!display.enabled || !display.tr?.trim()) return; const box = boxOf(display); const scale = state.editorScale; const el = document.createElement('div'); el.className = 'editor-box'; el.dataset.id = block.id;
     el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
-    const move = document.createElement('span'); move.className = 'box-move'; move.textContent = `متن ${block.id}`; move.dataset.move = '1';
+    const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
     const text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text.innerHTML = display.richHtml || plainToHtml(display.tr); styleRichElement(text, display, scale);
     if ((display.bg || 'auto') !== 'none') {
       let fill = display.bg === 'white' ? '#ffffff' : display.bg === 'black' ? '#000000' : null;
@@ -629,9 +629,40 @@ function renderEditorBoxes() {
   });
 }
 function startBoxDrag(event, block, el) {
-  const handle = event.target.closest('[data-dir], [data-move]'); if (!handle) return; event.preventDefault(); event.stopPropagation(); const direction = handle.dataset.dir || 'move'; const start = boxOf(block); const origin = { x: event.clientX, y: event.clientY }; el.setPointerCapture(event.pointerId);
-  const move = (ev) => { const dx = (ev.clientX - origin.x) / state.editorScale; const dy = (ev.clientY - origin.y) / state.editorScale; const item = editorItem(); let { x0, y0, x1, y1 } = start; if (direction === 'move') { x0 += dx; x1 += dx; y0 += dy; y1 += dy; } else { if (direction.includes('w')) x0 += dx; if (direction.includes('e')) x1 += dx; if (direction.includes('n')) y0 += dy; if (direction.includes('s')) y1 += dy; } if (x1 - x0 < 20 || y1 - y0 < 16) return; block.tx0 = Math.max(0, Math.min(item.width, x0)); block.tx1 = Math.max(0, Math.min(item.width, x1)); block.ty0 = Math.max(0, Math.min(item.height, y0)); block.ty1 = Math.max(0, Math.min(item.height, y1)); const scale = state.editorScale; el.style.left = `${block.tx0 * scale}px`; el.style.top = `${block.ty0 * scale}px`; el.style.width = `${(block.tx1 - block.tx0) * scale}px`; el.style.height = `${(block.ty1 - block.ty0) * scale}px`; };
-  const stop = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', stop); el.removeEventListener('pointercancel', stop); drawEditor(); scheduleSave(); }; el.addEventListener('pointermove', move); el.addEventListener('pointerup', stop); el.addEventListener('pointercancel', stop);
+  if (event.button !== 0) return;
+  const resize = event.target.closest('[data-dir]'); const moveHandle = event.target.closest('[data-move]');
+  // Text remains editable: dragging starts on the visible handle or the box border, not inside the text itself.
+  if (!resize && !moveHandle && event.target !== el) return;
+  const item = editorItem(); if (!item) return;
+  event.preventDefault(); event.stopPropagation();
+  const direction = resize?.dataset.dir || 'move'; const start = boxOf(block); const origin = { x: event.clientX, y: event.clientY }; const scale = state.editorScale || 1;
+  let changed = false; let finished = false;
+  el.setPointerCapture(event.pointerId); el.classList.add('dragging');
+  const move = (ev) => {
+    const dx = (ev.clientX - origin.x) / scale; const dy = (ev.clientY - origin.y) / scale;
+    if (direction === 'move') {
+      const width = start.x1 - start.x0; const height = start.y1 - start.y0;
+      const x0 = Math.max(0, Math.min(Math.max(0, item.width - width), start.x0 + dx));
+      const y0 = Math.max(0, Math.min(Math.max(0, item.height - height), start.y0 + dy));
+      block.tx0 = x0; block.tx1 = x0 + width; block.ty0 = y0; block.ty1 = y0 + height;
+    } else {
+      let { x0, y0, x1, y1 } = start; const minW = Math.min(20, item.width); const minH = Math.min(16, item.height);
+      if (direction.includes('w')) x0 = Math.max(0, Math.min(start.x1 - minW, start.x0 + dx));
+      if (direction.includes('e')) x1 = Math.min(item.width, Math.max(start.x0 + minW, start.x1 + dx));
+      if (direction.includes('n')) y0 = Math.max(0, Math.min(start.y1 - minH, start.y0 + dy));
+      if (direction.includes('s')) y1 = Math.min(item.height, Math.max(start.y0 + minH, start.y1 + dy));
+      block.tx0 = x0; block.tx1 = x1; block.ty0 = y0; block.ty1 = y1;
+    }
+    el.style.left = `${block.tx0 * scale}px`; el.style.top = `${block.ty0 * scale}px`; el.style.width = `${(block.tx1 - block.tx0) * scale}px`; el.style.height = `${(block.ty1 - block.ty0) * scale}px`;
+    changed = true;
+  };
+  const stop = () => {
+    if (finished) return; finished = true;
+    el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', stop); el.removeEventListener('pointercancel', stop); el.removeEventListener('lostpointercapture', stop);
+    el.classList.remove('dragging'); if (el.hasPointerCapture?.(event.pointerId)) el.releasePointerCapture(event.pointerId);
+    if (changed) { drawEditor(); scheduleSave(); }
+  };
+  el.addEventListener('pointermove', move); el.addEventListener('pointerup', stop); el.addEventListener('pointercancel', stop); el.addEventListener('lostpointercapture', stop);
 }
 function buildBlockList() {
   const item = editorItem(); const list = $('blockList'); list.textContent = ''; state.richFields = new Map(); if (!item.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; return; }
