@@ -106,6 +106,7 @@ function nextDownload(cdp, directory) {
     project.images[0].blocks = [
       { id: 1, text: 'SOURCE ONE', tr: 'ترجمهٔ اول', richHtml: '', enabled: true, bg: 'white', x0: 5, y0: 5, x1: 155, y1: 45, lineH: 40, dir: 'rtl', align: 'right' },
       { id: 2, text: 'SOURCE TWO', tr: 'ترجمهٔ دوم', richHtml: '', enabled: true, bg: 'white', x0: 165, y0: 75, x1: 310, y1: 120, lineH: 40, dir: 'rtl', align: 'right' },
+      { id: 3, text: 'SOURCE THREE', tr: 'ترجمهٔ سوم', richHtml: '', enabled: true, bg: 'white', x0: 10, y0: 140, x1: 150, y1: 185, lineH: 40, dir: 'rtl', align: 'right' },
     ];
     await api(base, `/api/projects/${projectId}/state`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: project }),
@@ -113,7 +114,7 @@ function nextDownload(cdp, directory) {
 
     const chromiumModule = await import('@sparticuz/chromium');
     const chromium = chromiumModule.default;
-    const chromiumRoot = path.resolve(path.dirname(require.resolve('@sparticuz/chromium')), '..', '..');
+    const chromiumRoot = path.resolve(path.dirname(require.resolve('@sparticuz/chromium')), '..');
     await chromiumModule.inflate(path.join(chromiumRoot, 'bin', 'al2023.tar.br'));
     chromiumModule.setupLambdaEnvironment('/tmp/al2023/lib');
     browser = await puppeteer.launch({
@@ -182,14 +183,22 @@ function nextDownload(cdp, directory) {
       field.focus(); document.execCommand('selectAll'); document.execCommand('insertText', false, 'ویرایش تازه ۳٫۲۱');
     });
     await page.select('#blockList .block-card[data-id="2"] [data-text-mode]', 'ocr');
-    await page.click('#editorSelectAll'); await page.click('#editorAlignLeft');
+    await page.click('#editorSelectAll'); await page.click('#editorSelectNone');
+    await page.click('#editorBoxes .editor-box[data-id="2"] .box-move');
+    await page.keyboard.down('Control');
+    await page.click('#editorBoxes .editor-box[data-id="1"] .box-move');
+    await page.click('#editorBoxes .editor-box[data-id="3"] .box-move');
+    await page.keyboard.up('Control');
+    assert.equal(await page.evaluate(() => state.selectedBlockIds.join(',')), '2,1,3', 'real pointer order must make block 2 the reference');
+    await page.click('#editorSameSize'); await page.click('#editorAlignLeft');
     assert.equal(await page.evaluate(() => {
-      const blocks = state.project.images[0].blocks; return boxOf(blocks[0]).x0 === boxOf(blocks[1]).x0 && state.selectedBlockIds.length === 2;
-    }), true, 'real controls must multi-select and align both text boxes');
+      const blocks = state.project.images[0].blocks; const boxes = blocks.map((block) => boxOf(block));
+      return state.selectedBlockIds.length === 3 && boxes.every((box) => box.x0 === boxes[0].x0 && box.x1 - box.x0 === 145 && box.y1 - box.y0 === 45) && blocks.map((block) => block.x0).join(',') === '5,165,10';
+    }), true, 'real controls must match all three boxes to the first selection, align them, and preserve OCR coordinates');
     await page.click('#blockList .block-card[data-id="2"] [data-visibility]');
-    assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,false');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,false,true');
     await page.click('#blockList .block-card[data-id="2"] [data-visibility]');
-    assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,true');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,true,true');
     let uploaded = page.waitForResponse((response) => response.url().endsWith('/rendered') && response.request().method() === 'POST');
     await page.click('#editorApply'); await uploaded;
     uploaded = page.waitForResponse((response) => response.url().endsWith('/rendered') && response.request().method() === 'POST');
@@ -197,7 +206,7 @@ function nextDownload(cdp, directory) {
     await page.waitForFunction(() => !document.getElementById('editorDialog').open && !state.editorId);
     assert.equal(await previewDifference(page), 0, 'main preview must contain the latest rich-text edit and mixed language choices');
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[1].textMode), 'ocr');
-    console.log('PASS: real editor events preserve latest edits, multi-alignment, mixed languages, and visibility');
+    console.log('PASS: real editor events preserve latest edits, same-size multi-alignment, mixed languages, and visibility');
 
     await page.reload({ waitUntil: 'networkidle0' }); await page.waitForSelector('#grid .item img');
     await page.waitForFunction(() => state.project.images[0].edited === true, { timeout: 5000 });
@@ -215,7 +224,7 @@ function nextDownload(cdp, directory) {
     const latestEdit = Buffer.from(await (await fetch(`${base}/api/projects/${projectId}/images/${imageId}/content?edited=true`)).arrayBuffer());
     const editedPath = path.join(temporary, 'latest-edited.png'); fs.writeFileSync(editedPath, latestEdit);
     const text = fs.readFileSync(files.txt, 'utf8');
-    assert.ok(text.includes('ویرایش تازه ۳٫۲۱') && text.includes('SOURCE TWO') && text.includes('ترجمهٔ دوم'));
+    assert.ok(text.includes('ویرایش تازه ۳٫۲۱') && text.includes('SOURCE TWO') && text.includes('ترجمهٔ دوم') && text.includes('SOURCE THREE') && text.includes('ترجمهٔ سوم'));
     execFileSync(python, ['-c', `
 import io, sys, zipfile
 import pymupdf

@@ -747,7 +747,8 @@ function editorSelectedKeys() {
 }
 function selectedEditorBlocks() {
   const item = editorItem(); if (!item) return [];
-  const selected = new Set(editorSelectedKeys()); return (item.blocks || []).filter((block) => selected.has(String(block.id)));
+  const byId = new Map((item.blocks || []).map((block) => [String(block.id), block]));
+  return editorSelectedKeys().map((key) => byId.get(key)).filter(Boolean);
 }
 function updateEditorSelection() {
   const selected = new Set(editorSelectedKeys()); state.selectedBlockIds = [...selected];
@@ -758,7 +759,7 @@ function updateEditorSelection() {
   document.querySelectorAll('#blockList .block-card').forEach((card) => {
     card.classList.toggle('selected', selected.has(card.dataset.id)); card.classList.toggle('active', card.dataset.id === String(state.activeBlockId));
   });
-  if ($('editorSelectionStatus')) $('editorSelectionStatus').textContent = selected.size ? `${selected.size.toLocaleString('fa-IR')} متن انتخاب شده` : 'متنی انتخاب نشده';
+  if ($('editorSelectionStatus')) $('editorSelectionStatus').textContent = selected.size ? `${selected.size.toLocaleString('fa-IR')} متن انتخاب شده · مرجع: متن ${state.selectedBlockIds[0]}` : 'متنی انتخاب نشده';
 }
 function selectEditorBlock(blockId, scroll = true, additive = false) {
   const key = String(blockId); const selected = new Set(editorSelectedKeys());
@@ -777,6 +778,19 @@ function selectAllEditorBlocks() {
   updateEditorSelection();
 }
 function clearEditorSelection() { state.selectedBlockIds = []; state.activeBlockId = null; updateEditorSelection(); }
+function sameSizeSelectedBoxes() {
+  const item = editorItem(); const blocks = selectedEditorBlocks();
+  if (!item || blocks.length < 2) { toast('اول یک کادر مرجع و سپس حداقل یک کادر دیگر را انتخاب کنید', true); return; }
+  const [reference, ...targets] = blocks; const referenceBox = boxOf(reference);
+  const width = referenceBox.x1 - referenceBox.x0, height = referenceBox.y1 - referenceBox.y0;
+  targets.forEach((block) => {
+    const box = boxOf(block); const centerX = (box.x0 + box.x1) / 2, centerY = (box.y0 + box.y1) / 2;
+    const x0 = Math.max(0, Math.min(item.width - width, centerX - width / 2));
+    const y0 = Math.max(0, Math.min(item.height - height, centerY - height / 2));
+    block.tx0 = x0; block.tx1 = x0 + width; block.ty0 = y0; block.ty1 = y0 + height;
+  });
+  drawEditor(); scheduleSave();
+}
 function alignSelectedBoxes(direction) {
   const item = editorItem(); const blocks = selectedEditorBlocks();
   if (!item || blocks.length < 2) { toast('برای تراز گروهی حداقل دو متن را انتخاب کنید', true); return; }
@@ -985,6 +999,7 @@ function bindEvents() {
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', updateAiFields); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => toast(error.message, true))); $('testAiBtn').addEventListener('click', async () => { try { await saveAiSettings(); const result = await api('/api/ai-settings/test', { method: 'POST' }); $('aiStatus').textContent = result.message; } catch (error) { $('aiStatus').textContent = error.message; } });
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
+  $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
   [['editorAlignLeft', 'left'], ['editorAlignCenter', 'center'], ['editorAlignRight', 'right'], ['editorAlignTop', 'top'], ['editorAlignMiddle', 'middle'], ['editorAlignBottom', 'bottom']].forEach(([id, direction]) => $(id).addEventListener('click', () => alignSelectedBoxes(direction)));
   $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); closeEditor().catch((error) => toast(error.message, true)); });
   $('editorZoomOut').addEventListener('click', () => setEditorZoom(state.editorScale / 1.25)); $('editorZoomIn').addEventListener('click', () => setEditorZoom(state.editorScale * 1.25)); $('editorZoomActual').addEventListener('click', () => setEditorZoom(1)); $('editorZoomFit').addEventListener('click', fitEditor);
