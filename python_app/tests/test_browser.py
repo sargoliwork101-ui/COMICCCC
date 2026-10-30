@@ -10,12 +10,21 @@ def test_prompt_selects_browser_and_new_window():
     printed = []
     selected = browser.ask_preferences(lambda _: next(answers), printed.append)
     assert selected == ("chrome", "new")
-    assert any("پنجره" in line for line in printed)
+    assert any("Where should" in line for line in printed)
+    assert any("Which browser" in line for line in printed)
 
 
 def test_prompt_can_leave_browser_closed():
     selected = browser.ask_preferences(lambda _: "5", lambda _: None)
     assert selected == ("none", "existing")
+
+
+def test_browser_preferences_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    browser.save_preferences("chrome", "new")
+    assert browser.load_preferences() == ("chrome", "new")
+    (tmp_path / "browser-preferences.json").write_text("not json", encoding="utf-8")
+    assert browser.load_preferences() is None
 
 
 def test_selected_browser_uses_new_window(monkeypatch):
@@ -53,13 +62,35 @@ def test_interactive_launcher_asks_and_passes_both_choices(monkeypatch):
         def start(self): self.callback()
     monkeypatch.setattr(launcher.sys, "stdin", Tty())
     monkeypatch.setattr(launcher.sys, "argv", ["run.py"])
+    monkeypatch.setattr(launcher, "load_preferences", lambda: None)
     monkeypatch.setattr(launcher, "ask_preferences", lambda: ("firefox", "new"))
+    monkeypatch.setattr(launcher, "save_preferences", lambda name, window: calls.append(("saved", name, window)))
     monkeypatch.setattr(launcher.threading, "Timer", Timer)
     monkeypatch.setattr(launcher, "open_url", lambda url, name, window: calls.append((url, name, window)))
     monkeypatch.setattr(launcher, "run_server", lambda host, port: calls.append("server"))
     launcher.main()
-    assert calls[0] == ("http://127.0.0.1:8765", "firefox", "new")
+    assert calls[0] == ("saved", "firefox", "new")
+    assert calls[1] == ("http://127.0.0.1:8765", "firefox", "new")
     assert calls[-1] == "server"
+
+
+def test_saved_launcher_choice_skips_prompt(monkeypatch):
+    import comic_studio.__main__ as launcher
+    calls = []
+    class Tty:
+        def isatty(self): return True
+    class Timer:
+        def __init__(self, delay, callback): self.callback = callback; self.daemon = False
+        def start(self): self.callback()
+    monkeypatch.setattr(launcher.sys, "stdin", Tty())
+    monkeypatch.setattr(launcher.sys, "argv", ["run.py"])
+    monkeypatch.setattr(launcher, "load_preferences", lambda: ("chrome", "new"))
+    monkeypatch.setattr(launcher, "ask_preferences", lambda: (_ for _ in ()).throw(AssertionError("prompt called")))
+    monkeypatch.setattr(launcher.threading, "Timer", Timer)
+    monkeypatch.setattr(launcher, "open_url", lambda url, name, window: calls.append((url, name, window)))
+    monkeypatch.setattr(launcher, "run_server", lambda host, port: None)
+    launcher.main()
+    assert calls == [("http://127.0.0.1:8765", "chrome", "new")]
 
 
 def test_no_browser_launch_does_not_ask(monkeypatch):

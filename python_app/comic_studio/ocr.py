@@ -25,6 +25,19 @@ EXTRA_PREPROCESS_THRESHOLD = 200
 EXTRA_PREPROCESS_MIN_CONFIDENCE = 0.55
 EXTRA_PREPROCESS_MIN_CHARS = 3
 EXTRA_PREPROCESS_ENABLED = True
+# Optional comic-bubble fallback. These thresholds are intentionally easy to tune.
+BUBBLE_PREPROCESS_ENABLED = True
+BUBBLE_DARK_THRESHOLD = 110
+BUBBLE_MIN_AREA = 8000
+BUBBLE_CLOSE_KERNEL = 25
+BUBBLE_MASK_ERODE = 15
+BUBBLE_BG_MIN_VALUE = 15
+BUBBLE_UNIFORM_TOLERANCE = 20
+BUBBLE_UNIFORM_MIN_RATIO = 0.55
+BUBBLE_INK_RATIO = 0.45
+BUBBLE_SCALE = 3
+BUBBLE_PADDING = 30
+BUBBLE_MIN_REGION_CONFIDENCE = 60.0
 # Several tabs may request preparation together; never run two pip processes at once.
 _INSTALL_LOCK = threading.Lock()
 
@@ -444,14 +457,14 @@ class TesseractEngine:
             temporary.unlink(missing_ok=True)
             raise OcrError(f"Tesseract language download failed for {language}: {exc}. The official tessdata_fast host must be reachable.") from exc
 
-    def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+    def _recognize_with_psm(self, image: Image.Image, language: str, psm: str) -> list[OcrLine]:
         executable = _tesseract_executable()
         if not executable:
             raise OcrError("Tesseract is not installed. Install the binary and use the explicit language download button.")
         if language not in self.ready_languages:
             raise OcrError(f"Tesseract language {language} is not ready. Use the explicit model download button first.")
         buffer = io.BytesIO(); image.convert("RGB").save(buffer, "PNG")
-        command = [executable, "stdin", "stdout", "-l", language, "--psm", "11"]
+        command = [executable, "stdin", "stdout", "-l", language, "--psm", psm]
         if (self._model_dir() / f"{language}.traineddata").is_file():
             command.extend(["--tessdata-dir", str(self._model_dir())])
         command.append("tsv")
@@ -463,6 +476,12 @@ class TesseractEngine:
             details = (result.stderr or result.stdout or b"Tesseract failed")[-1800:]
             raise OcrError(f"Tesseract failed: {details.decode('utf-8', 'replace') if isinstance(details, bytes) else details}")
         return _lines_from_tesseract(result.stdout.decode("utf-8", "replace") if isinstance(result.stdout, bytes) else result.stdout)
+
+    def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+        return self._recognize_with_psm(image, language, "11")
+
+    def recognize_bubble(self, image: Image.Image, language: str) -> list[OcrLine]:
+        return self._recognize_with_psm(image, language, "6")
 
 
 class ManualEngine:
@@ -644,6 +663,36 @@ def preprocess(image: Image.Image, contrast: bool, precise: bool) -> tuple[Image
     return image, scale
 
 
+def _blocks_from_lines(lines: list[OcrLine], coordinate_scale: float = 1.0) -> list[dict[str, Any]]:
+    """Build the unchanged public block schema from positioned OCR lines."""
+    blocks = []
+    for index, line in enumerate(lines, start=1):
+        x0, y0, x1, y1 = [value / coordinate_scale for value in line.box]
+        polygon = [[x / coordinate_scale, y / coordinate_scale] for x, y in line.polygon]
+        line_h = max(8.0, y1 - y0)
+        blocks.append({
+            "id": index,
+            "text": line.text,
+            "tr": "",
+            "richHtml": "",
+            "conf": round(line.confidence * 100, 2),
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "polygon": polygon,
+            "lineH": line_h,
+            "sourceIndent": min(40, max(0, round(x0 / max(4.0, line_h * 0.45)))),
+            "enabled": True,
+            "bg": "auto",
+            "dir": "rtl",
+            "align": "right",
+            "bold": True,
+            "italic": False,
+            "underline": False,
+            "size": None,
+            "color": None,
+        })
+    return blocks
+
+
 def _recognize_image_primary(
     engine: Any,
     image: Image.Image,
@@ -677,33 +726,7 @@ def _recognize_image_primary(
             break
     # Reading order is stable: physical row first, then horizontal position. No text is flattened.
     lines.sort(key=lambda line: (round(((line.box[1] + line.box[3]) / 2) / 12) * 12, line.box[0], line.box[1]))
-    blocks = []
-    for index, line in enumerate(lines, start=1):
-        coordinate_scale = scale * input_scale
-        x0, y0, x1, y1 = [value / coordinate_scale for value in line.box]
-        polygon = [[x / coordinate_scale, y / coordinate_scale] for x, y in line.polygon]
-        line_h = max(8.0, y1 - y0)
-        blocks.append({
-            "id": index,
-            "text": line.text,
-            "tr": "",
-            "richHtml": "",
-            "conf": round(line.confidence * 100, 2),
-            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
-            "polygon": polygon,
-            "lineH": line_h,
-            "sourceIndent": min(40, max(0, round(x0 / max(4.0, line_h * 0.45)))),
-            "enabled": True,
-            "bg": "auto",
-            "dir": "rtl",
-            "align": "right",
-            "bold": True,
-            "italic": False,
-            "underline": False,
-            "size": None,
-            "color": None,
-        })
-    return blocks
+    return _blocks_from_lines(lines, scale * input_scale)
 
 
 def _extra_preprocess_image(image: Image.Image) -> Image.Image:
@@ -719,6 +742,104 @@ def _extra_preprocess_image(image: Image.Image) -> Image.Image:
     _, bright = cv2.threshold(gray, EXTRA_PREPROCESS_THRESHOLD, 255, cv2.THRESH_BINARY)
     inverted = cv2.bitwise_not(bright)
     return Image.fromarray(inverted, mode="L").convert("RGB")
+
+
+def _bubble_preprocess_regions(image: Image.Image) -> list[tuple[Image.Image, int, int]]:
+    """Return scaled, padded binary bubble crops with their original x/y offsets."""
+    import cv2
+
+    gray = np.asarray(ImageOps.exif_transpose(image).convert("L"))
+    dark = np.where(gray < BUBBLE_DARK_THRESHOLD, 255, 0).astype(np.uint8)
+    close_kernel = np.ones((BUBBLE_CLOSE_KERNEL, BUBBLE_CLOSE_KERNEL), dtype=np.uint8)
+    closed = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, close_kernel)
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    erode_kernel = np.ones((BUBBLE_MASK_ERODE, BUBBLE_MASK_ERODE), dtype=np.uint8)
+    regions: list[tuple[Image.Image, int, int]] = []
+    for contour in contours:
+        if cv2.contourArea(contour) < BUBBLE_MIN_AREA:
+            continue
+        x, y, width, height = cv2.boundingRect(contour)
+        local_contour = contour - np.array([[[x, y]]], dtype=np.int32)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.drawContours(mask, [local_contour], -1, 255, thickness=cv2.FILLED)
+        mask = cv2.erode(mask, erode_kernel)
+        gray_crop = gray[y:y + height, x:x + width]
+        inside = gray_crop[mask > 0]
+        if not inside.size:
+            continue
+        background_pixels = inside[inside > BUBBLE_BG_MIN_VALUE]
+        if not background_pixels.size:
+            continue
+        background = float(np.median(background_pixels))
+        uniform = np.abs(inside.astype(np.float32) - background) <= BUBBLE_UNIFORM_TOLERANCE
+        if np.count_nonzero(uniform) / inside.size < BUBBLE_UNIFORM_MIN_RATIO:
+            continue
+        ink = (gray_crop < background * BUBBLE_INK_RATIO) & (mask > 0)
+        binary = np.full(gray_crop.shape, 255, dtype=np.uint8)
+        binary[ink] = 0
+        enlarged = cv2.resize(
+            binary, None, fx=BUBBLE_SCALE, fy=BUBBLE_SCALE,
+            interpolation=cv2.INTER_CUBIC,
+        )
+        padded = cv2.copyMakeBorder(
+            enlarged, BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING,
+            cv2.BORDER_CONSTANT, value=255,
+        )
+        regions.append((Image.fromarray(padded).convert("RGB"), x, y))
+    regions.sort(key=lambda region: (region[2], region[1]))
+    return regions
+
+
+def _bubble_region_confidence(lines: list[OcrLine]) -> float:
+    """Approximate the region's word mean; Tesseract lines already contain word means."""
+    weighted = []
+    for line in lines:
+        if not line.text.strip():
+            continue
+        words = max(1, len(line.text.split()))
+        confidence = max(0.0, min(1.0, float(line.confidence)))
+        weighted.append((words, confidence))
+    total = sum(words for words, _ in weighted)
+    if not total:
+        return 0.0
+    return 100.0 * sum(words * confidence for words, confidence in weighted) / total
+
+
+def _recognize_bubble_lines(engine: Any, image: Image.Image, language: str) -> list[OcrLine]:
+    # Only Tesseract needs a different page-segmentation mode for a single bubble.
+    recognizer = getattr(engine, "recognize_bubble", None)
+    return recognizer(image, language) if callable(recognizer) else engine.recognize(image, language)
+
+
+def _recognize_bubble(
+    engine: Any,
+    image: Image.Image,
+    language: str,
+    min_confidence: float,
+) -> list[dict[str, Any]]:
+    regions = _bubble_preprocess_regions(image)
+    blocks: list[dict[str, Any]] = []
+    for prepared, offset_x, offset_y in sorted(regions, key=lambda region: (region[2], region[1])):
+        lines = [line for line in _recognize_bubble_lines(engine, prepared, language) if line.text.strip()]
+        if not lines or _bubble_region_confidence(lines) < BUBBLE_MIN_REGION_CONFIDENCE:
+            continue
+        restored = []
+        for line in lines:
+            if line.confidence < min_confidence:
+                continue
+            polygon = [[
+                (x - BUBBLE_PADDING) / BUBBLE_SCALE + offset_x,
+                (y - BUBBLE_PADDING) / BUBBLE_SCALE + offset_y,
+            ] for x, y in line.polygon]
+            restored.append(OcrLine(line.text, line.confidence, polygon))
+        restored.sort(key=lambda line: (
+            round(((line.box[1] + line.box[3]) / 2) / 12) * 12,
+            line.box[0], line.box[1],
+        ))
+        blocks.extend(_blocks_from_lines(restored))
+    for index, block in enumerate(blocks, start=1):
+        block["id"] = index
+    return blocks
 
 
 def _result_metrics(blocks: list[dict[str, Any]]) -> tuple[int, float]:
@@ -765,23 +886,38 @@ def recognize_image(
     precise: bool = True,
     min_confidence: float = 0.35,
 ) -> list[dict[str, Any]]:
-    """Run the established OCR first, using bright-text preprocessing only as fallback."""
+    """Run the established OCR first; optional fallbacks only compete after a weak result."""
     primary = _recognize_image_primary(engine, image, language, contrast, precise, min_confidence)
-    if not EXTRA_PREPROCESS_ENABLED or not _needs_extra_preprocess(primary):
+    if not _needs_extra_preprocess(primary):
         return primary
-    emit("نتیجهٔ OCR اصلی ضعیف یا کوتاه است؛ پیش‌پردازش تکمیلی متن روشن اجرا می‌شود")
-    try:
-        fallback_image = _extra_preprocess_image(image)
-        fallback = _recognize_image_primary(
-            engine, fallback_image, language, False, False, min_confidence,
-            input_scale=EXTRA_PREPROCESS_SCALE,
-        )
-    except Exception:
-        # An optional preprocessing backend must never break the established OCR result.
-        emit("پیش‌پردازش تکمیلی ممکن نبود؛ نتیجهٔ OCR اصلی حفظ شد", "warning")
-        return primary
-    if _better_fallback(fallback, primary):
-        emit("نتیجهٔ پیش‌پردازش تکمیلی بهتر بود و انتخاب شد", "success")
-        return fallback
-    emit("نتیجهٔ OCR اصلی بهتر بود و حفظ شد")
-    return primary
+    best = primary
+    if EXTRA_PREPROCESS_ENABLED:
+        emit("نتیجهٔ OCR اصلی ضعیف یا کوتاه است؛ پیش‌پردازش تکمیلی متن روشن اجرا می‌شود")
+        try:
+            fallback_image = _extra_preprocess_image(image)
+            fallback = _recognize_image_primary(
+                engine, fallback_image, language, False, False, min_confidence,
+                input_scale=EXTRA_PREPROCESS_SCALE,
+            )
+        except Exception:
+            # An optional preprocessing backend must never break the established OCR result.
+            emit("پیش‌پردازش تکمیلی ممکن نبود؛ نتیجهٔ OCR اصلی حفظ شد", "warning")
+        else:
+            if _better_fallback(fallback, best):
+                emit("نتیجهٔ پیش‌پردازش تکمیلی بهتر بود و انتخاب شد", "success")
+                best = fallback
+            else:
+                emit("نتیجهٔ OCR اصلی بهتر بود و حفظ شد")
+    if BUBBLE_PREPROCESS_ENABLED:
+        emit("پیش‌پردازش حباب کمیک برای مقایسه اجرا می‌شود")
+        try:
+            bubble = _recognize_bubble(engine, image, language, min_confidence)
+        except Exception:
+            emit("پیش‌پردازش حباب ممکن نبود؛ بهترین نتیجهٔ فعلی حفظ شد", "warning")
+        else:
+            if _better_fallback(bubble, best):
+                emit("نتیجهٔ پیش‌پردازش حباب بهتر بود و انتخاب شد", "success")
+                best = bubble
+            else:
+                emit("نتیجهٔ حباب بهتر نبود؛ بهترین نتیجهٔ فعلی حفظ شد")
+    return best

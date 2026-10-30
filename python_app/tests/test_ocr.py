@@ -14,7 +14,7 @@ from PIL import Image
 
 from comic_studio.ocr import (
     ENGINE_INFO, EasyEngine, OcrError, OcrLine, RapidEngine, TesseractEngine,
-    _extra_preprocess_image, _lines_from_rapid, _lines_from_tesseract, install_packages, recognize_image,
+    _bubble_preprocess_regions, _extra_preprocess_image, _lines_from_rapid, _lines_from_tesseract, install_packages, recognize_image,
 )
 
 
@@ -192,6 +192,23 @@ def test_tesseract_tsv_words_become_positioned_lines():
     assert lines[0].confidence == pytest.approx(0.85)
 
 
+def test_tesseract_bubble_uses_psm6_without_changing_normal_psm(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    monkeypatch.setattr(TesseractEngine, "ready_languages", property(lambda self: ["eng"]))
+    commands = []
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "level\tpage_num\tblock_num\tpar_num\tline_num\tleft\ttop\twidth\theight\tconf\ttext\n", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    engine = TesseractEngine()
+    image = Image.new("RGB", (40, 20), "white")
+    engine.recognize(image, "eng")
+    engine.recognize_bubble(image, "eng")
+    assert commands[0][commands[0].index("--psm") + 1] == "11"
+    assert commands[1][commands[1].index("--psm") + 1] == "6"
+
+
 def test_tesseract_normal_ocr_never_downloads_a_missing_language(tmp_path, monkeypatch):
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
     engine = TesseractEngine()
@@ -242,6 +259,34 @@ def test_bright_fallback_preprocess_has_requested_geometry_and_polarity():
     assert int((pixels[..., 0] == 0).sum()) > 0
 
 
+def test_bubble_preprocess_builds_scaled_binary_crop():
+    pixels = np.full((160, 220), 230, dtype=np.uint8)
+    pixels[20:140, 20:200] = 80
+    pixels[55:95, 65:105] = 240  # white outline around the dark letter body
+    pixels[60:90, 70:100] = 0
+    regions = _bubble_preprocess_regions(Image.fromarray(pixels).convert("RGB"))
+    assert len(regions) == 1
+    processed, x, y = regions[0]
+    assert (x, y) == (20, 20)
+    assert processed.size == (600, 420)  # 180x120 crop, 3x scale, 30px padding
+    assert processed.mode == "RGB"
+    values = np.asarray(processed)
+    assert np.all(values[:30] == 255)
+    assert np.any(values == 0)
+
+
+def test_bubble_preprocess_rejects_small_and_nonuniform_regions():
+    small = np.full((80, 80), 230, dtype=np.uint8)
+    small[10:50, 10:50] = 0
+    assert _bubble_preprocess_regions(Image.fromarray(small).convert("RGB")) == []
+    pixels = np.full((160, 220), 230, dtype=np.uint8)
+    pixels[20:140, 20:200] = 80
+    for y in range(30, 130, 10):
+        for x in range(30, 190, 10):
+            pixels[y:y + 10, x:x + 10] = 0 if ((x + y) // 10) % 2 else 230
+    assert _bubble_preprocess_regions(Image.fromarray(pixels).convert("RGB")) == []
+
+
 class ConditionalFallbackEngine:
     def __init__(self, primary, fallback):
         self.primary = primary
@@ -256,6 +301,47 @@ class ConditionalFallbackEngine:
 
 def line(text, confidence, polygon=None):
     return text, confidence, polygon or [[2, 2], [20, 2], [20, 12], [2, 12]]
+
+
+def test_bubble_fallback_orders_regions_and_restores_public_blocks(monkeypatch):
+    class Engine:
+        def __init__(self): self.sizes = []
+        def recognize(self, image, language):
+            self.sizes.append(image.size)
+            if image.size == (40, 20):
+                return []
+            text = "TOP" if image.size == (90, 60) else "BOTTOM"
+            return [OcrLine(text, 0.91, [[30, 30], [60, 30], [60, 45], [30, 45]])]
+    engine = Engine()
+    top = Image.new("RGB", (90, 60), "white")
+    bottom = Image.new("RGB", (120, 60), "white")
+    monkeypatch.setattr("comic_studio.ocr.EXTRA_PREPROCESS_ENABLED", False)
+    monkeypatch.setattr("comic_studio.ocr._bubble_preprocess_regions", lambda image: [(bottom, 10, 100), (top, 10, 20)])
+    blocks = recognize_image(engine, Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
+    assert engine.sizes == [(40, 20), (90, 60), (120, 60)]
+    assert [block["text"] for block in blocks] == ["TOP", "BOTTOM"]
+    assert [block["id"] for block in blocks] == [1, 2]
+    assert blocks[0]["x0"] == pytest.approx(10)
+    assert blocks[0]["x1"] == pytest.approx(20)
+    assert blocks[0]["y0"] == pytest.approx(20)
+    assert blocks[1]["y0"] == pytest.approx(100)
+    assert {"tr", "richHtml", "polygon", "lineH", "enabled", "bg", "dir", "align"} <= set(blocks[0])
+
+
+def test_bubble_region_confidence_is_word_weighted(monkeypatch):
+    class Engine:
+        def recognize(self, image, language):
+            if image.size == (40, 20):
+                return []
+            return [
+                OcrLine("one two three", 0.40, [[30, 30], [90, 30], [90, 45], [30, 45]]),
+                OcrLine("good", 0.90, [[30, 50], [90, 50], [90, 65], [30, 65]]),
+            ]
+    prepared = Image.new("RGB", (150, 100), "white")
+    monkeypatch.setattr("comic_studio.ocr.EXTRA_PREPROCESS_ENABLED", False)
+    monkeypatch.setattr("comic_studio.ocr._bubble_preprocess_regions", lambda image: [(prepared, 0, 0)])
+    blocks = recognize_image(Engine(), Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
+    assert blocks == []  # (3*40 + 1*90) / 4 = 52.5, so the whole region is rejected
 
 
 def test_empty_primary_uses_bright_fallback_and_restores_coordinates():
@@ -296,9 +382,17 @@ def test_better_confidence_can_replace_a_weak_primary_with_same_length():
 def test_strong_primary_does_not_run_fallback(monkeypatch):
     engine = ConditionalFallbackEngine([line("GOOD TEXT", 0.96)], [])
     monkeypatch.setattr("comic_studio.ocr._extra_preprocess_image", lambda image: pytest.fail("fallback ran"))
+    monkeypatch.setattr("comic_studio.ocr._bubble_preprocess_regions", lambda image: pytest.fail("bubble fallback ran"))
     blocks = recognize_image(engine, Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
     assert engine.sizes == [(40, 20)]
     assert blocks[0]["text"] == "GOOD TEXT"
+
+
+def test_bubble_failure_preserves_existing_bright_fallback(monkeypatch):
+    engine = ConditionalFallbackEngine([], [line("BRIGHT", 0.94, [[6, 6], [60, 6], [60, 36], [6, 36]])])
+    monkeypatch.setattr("comic_studio.ocr._bubble_preprocess_regions", lambda image: (_ for _ in ()).throw(RuntimeError("no cv2")))
+    blocks = recognize_image(engine, Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
+    assert [block["text"] for block in blocks] == ["BRIGHT"]
 
 
 def test_fallback_preprocess_failure_returns_primary(monkeypatch):
