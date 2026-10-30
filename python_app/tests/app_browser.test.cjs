@@ -182,6 +182,10 @@ function nextDownload(cdp, directory) {
       field.focus(); document.execCommand('selectAll'); document.execCommand('insertText', false, 'ویرایش تازه ۳٫۲۱');
     });
     await page.select('#blockList .block-card[data-id="2"] [data-text-mode]', 'ocr');
+    await page.click('#editorSelectAll'); await page.click('#editorAlignLeft');
+    assert.equal(await page.evaluate(() => {
+      const blocks = state.project.images[0].blocks; return boxOf(blocks[0]).x0 === boxOf(blocks[1]).x0 && state.selectedBlockIds.length === 2;
+    }), true, 'real controls must multi-select and align both text boxes');
     await page.click('#blockList .block-card[data-id="2"] [data-visibility]');
     assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,false');
     await page.click('#blockList .block-card[data-id="2"] [data-visibility]');
@@ -193,7 +197,7 @@ function nextDownload(cdp, directory) {
     await page.waitForFunction(() => !document.getElementById('editorDialog').open && !state.editorId);
     assert.equal(await previewDifference(page), 0, 'main preview must contain the latest rich-text edit and mixed language choices');
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[1].textMode), 'ocr');
-    console.log('PASS: real editor events preserve the latest edit, mixed languages, and independent visibility');
+    console.log('PASS: real editor events preserve latest edits, multi-alignment, mixed languages, and visibility');
 
     await page.reload({ waitUntil: 'networkidle0' }); await page.waitForSelector('#grid .item img');
     await page.waitForFunction(() => state.project.images[0].edited === true, { timeout: 5000 });

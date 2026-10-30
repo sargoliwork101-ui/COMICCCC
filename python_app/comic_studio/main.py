@@ -21,7 +21,10 @@ from .schemas import (
 )
 from .sessions import SessionManager
 from .store import ProjectStore
-from .translation import TranslationError, TranslationService, combine_translation_texts, distribute_translation
+from .translation import (
+    MAX_FREE_QUERY_CHARS, TranslationError, TranslationService,
+    combine_translation_texts, distribute_translation,
+)
 
 
 def create_app() -> FastAPI:
@@ -280,16 +283,27 @@ def create_app() -> FastAPI:
             block for item in items for block in item.get("blocks", [])
             if block.get("enabled", True) and str(block.get("text", "")).strip()
         ]
-        if values.provider == "free":
-            activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ هر کادر جدا و هر query حداکثر ۵۰۰ نویسه ارسال می‌شود")
-        else:
-            activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همه با جداکنندهٔ داخلی در یک درخواست می‌روند")
         if not blocks:
             activity.add("در تصاویر انتخاب‌شده متن فعالی برای ترجمه نیست", "warning")
             return state
         source_texts = [str(block.get("text", "")).strip() for block in blocks]
+        combined_source = combine_translation_texts(source_texts)
+        combined_free = values.provider == "free" and len(combined_source) <= MAX_FREE_QUERY_CHARS
+        if combined_free:
+            activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همهٔ متن OCR در یک query جمعی {len(combined_source)} نویسه‌ای ارسال می‌شود")
+        elif values.provider == "free":
+            activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ متن جمعی بیش از ۵۰۰ نویسه است و برای جلوگیری از خطای سقف، کادرها جدا و جمله‌ای ارسال می‌شوند")
+        else:
+            activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همه با جداکنندهٔ داخلی در یک درخواست می‌روند")
         try:
-            if values.provider == "free":
+            if combined_free:
+                translated = await run_reported(
+                    translations.translate, combined_source, values.source_language, values.provider,
+                    pulse_label="ترجمهٔ جمعی free همهٔ متن‌های OCR انتخاب‌شده",
+                )
+                activity.add("پاسخ مشترک free رسید؛ در حال تقسیم دقیق بین کادرهای OCR", progress=0.5)
+                translated_blocks = distribute_translation(source_texts, translated)
+            elif values.provider == "free":
                 translated_blocks = []
                 for index, source_text in enumerate(source_texts, start=1):
                     activity.add(f"ترجمهٔ رایگان متن {index} از {len(blocks)}", progress=(index - 1) / len(blocks))
@@ -304,7 +318,7 @@ def create_app() -> FastAPI:
                     activity.add(f"متن {index} از {len(blocks)} ترجمه و آمادهٔ نشستن در کادر خودش شد", progress=index / len(blocks))
             else:
                 translated = await run_reported(
-                    translations.translate, combine_translation_texts(source_texts), values.source_language, values.provider,
+                    translations.translate, combined_source, values.source_language, values.provider,
                     pulse_label="ترجمهٔ مشترک همهٔ متن‌های انتخاب‌شده",
                 )
                 activity.add("پاسخ مشترک AI رسید؛ در حال تقسیم از روی جداکننده‌ها", progress=0.5)
@@ -316,7 +330,9 @@ def create_app() -> FastAPI:
         except Exception as exc:
             activity.add(f"ترجمه ناموفق بود: {exc}", "error")
             raise
-        if values.provider == "free":
+        if combined_free:
+            activity.add(f"همهٔ {len(blocks)} متن OCR با هم و در یک درخواست free ترجمه و در کادرهای خودشان قرار گرفتند", "success", 1.0)
+        elif values.provider == "free":
             activity.add(f"هر {len(blocks)} متن جدا ترجمه و در کادرهای خودشان قرار گرفتند", "success", 1.0)
         else:
             activity.add(f"همهٔ {len(blocks)} متن با هم و در یک درخواست AI ترجمه و در کادرها قرار گرفتند", "success", 1.0)

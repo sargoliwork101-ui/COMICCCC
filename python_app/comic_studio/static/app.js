@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const G = window.StudioGroups;
 const GROUP_COLORS = ['#34d399', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa', '#2dd4bf', '#fb923c', '#e879f9'];
 const state = {
-  project: null, engines: [], ai: null, editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null,
+  project: null, engines: [], ai: null, editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
   cropId: null, crop: null, cropPointer: null, modelBusy: null, dragId: null, dragIds: [],
   dragMode: null, groupEditId: null, groupSnapshot: null, lastSelectedId: null,
   previewId: null, richEditor: null, richRange: null, richFields: new Map(),
@@ -649,7 +649,7 @@ async function saveAiSettings() { state.ai = await api('/api/ai-settings', jsonO
 function editorItem() { return state.project?.images.find((item) => item.id === state.editorId); }
 function boxOf(block) { return { x0: Number.isFinite(block.tx0) ? block.tx0 : block.x0, y0: Number.isFinite(block.ty0) ? block.ty0 : block.y0, x1: Number.isFinite(block.tx1) ? block.tx1 : block.x1, y1: Number.isFinite(block.ty1) ? block.ty1 : block.y1 }; }
 async function openEditor(imageId) {
-  await ensureFont(); state.editorId = imageId; state.richFields = new Map(); state.activeBlockId = null; state.editorPan = null; $('editorStage').classList.remove('panning'); const item = state.project.images.find((entry) => entry.id === imageId); $('editorTitle').textContent = `ویرایش — ${item.name}`; showDialog('editorDialog');
+  await ensureFont(); state.editorId = imageId; state.richFields = new Map(); state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null; $('editorStage').classList.remove('panning'); const item = state.project.images.find((entry) => entry.id === imageId); $('editorTitle').textContent = `ویرایش — ${item.name}`; showDialog('editorDialog');
   const response = await fetch(imageUrl(item)); state.editorBitmap?.close?.(); state.editorBitmap = await createImageBitmap(await response.blob()); $('editorCanvas').width = state.editorBitmap.width; $('editorCanvas').height = state.editorBitmap.height; buildBlockList(); fitEditor(); drawEditor();
 }
 function resizeEditorStage() {
@@ -741,13 +741,66 @@ function runRichCommand(command, value = null) {
   element.focus(); if (state.richRange && element.contains(state.richRange.startContainer)) { const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(state.richRange); }
   document.execCommand('styleWithCSS', false, true); document.execCommand(command, false, value); element.dispatchEvent(new Event('input')); rememberRichSelection(element);
 }
-function selectEditorBlock(blockId, scroll = true) {
-  const key = String(blockId); state.activeBlockId = key;
-  document.querySelectorAll('#editorBoxes .editor-box').forEach((box) => box.classList.toggle('active', box.dataset.id === key));
-  let selectedCard = null;
-  document.querySelectorAll('#blockList .block-card').forEach((card) => { const active = card.dataset.id === key; card.classList.toggle('active', active); if (active) selectedCard = card; });
+function editorSelectedKeys() {
+  const item = editorItem(); const valid = new Set((item?.blocks || []).map((block) => String(block.id)));
+  return (state.selectedBlockIds || []).map(String).filter((key) => valid.has(key));
+}
+function selectedEditorBlocks() {
+  const item = editorItem(); if (!item) return [];
+  const selected = new Set(editorSelectedKeys()); return (item.blocks || []).filter((block) => selected.has(String(block.id)));
+}
+function updateEditorSelection() {
+  const selected = new Set(editorSelectedKeys()); state.selectedBlockIds = [...selected];
+  if (!selected.has(String(state.activeBlockId))) state.activeBlockId = [...selected].at(-1) || null;
+  document.querySelectorAll('#editorBoxes .editor-box').forEach((box) => {
+    box.classList.toggle('selected', selected.has(box.dataset.id)); box.classList.toggle('active', box.dataset.id === String(state.activeBlockId));
+  });
+  document.querySelectorAll('#blockList .block-card').forEach((card) => {
+    card.classList.toggle('selected', selected.has(card.dataset.id)); card.classList.toggle('active', card.dataset.id === String(state.activeBlockId));
+  });
+  if ($('editorSelectionStatus')) $('editorSelectionStatus').textContent = selected.size ? `${selected.size.toLocaleString('fa-IR')} متن انتخاب شده` : 'متنی انتخاب نشده';
+}
+function selectEditorBlock(blockId, scroll = true, additive = false) {
+  const key = String(blockId); const selected = new Set(editorSelectedKeys());
+  if (additive) { if (selected.has(key)) selected.delete(key); else selected.add(key); }
+  else { selected.clear(); selected.add(key); }
+  state.selectedBlockIds = [...selected]; state.activeBlockId = selected.has(key) ? key : [...selected].at(-1) || null;
+  updateEditorSelection();
+  const selectedCard = [...document.querySelectorAll('#blockList .block-card')].find((card) => card.dataset.id === String(state.activeBlockId));
   // Do not focus the sidebar field: the user can keep typing exactly where they clicked on the image.
   if (scroll && selectedCard) selectedCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function selectAllEditorBlocks() {
+  const item = editorItem(); if (!item) return;
+  state.selectedBlockIds = (item.blocks || []).map((block) => String(block.id));
+  if (!state.selectedBlockIds.includes(String(state.activeBlockId))) state.activeBlockId = state.selectedBlockIds.at(-1) || null;
+  updateEditorSelection();
+}
+function clearEditorSelection() { state.selectedBlockIds = []; state.activeBlockId = null; updateEditorSelection(); }
+function alignSelectedBoxes(direction) {
+  const item = editorItem(); const blocks = selectedEditorBlocks();
+  if (!item || blocks.length < 2) { toast('برای تراز گروهی حداقل دو متن را انتخاب کنید', true); return; }
+  const entries = blocks.map((block) => { const box = boxOf(block); return { block, box, width: box.x1 - box.x0, height: box.y1 - box.y0 }; });
+  const W = item.width, H = item.height;
+  const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+  let reference;
+  if (direction === 'left') reference = clamp(Math.min(...entries.map((entry) => entry.box.x0)), 0, Math.min(...entries.map((entry) => W - entry.width)));
+  if (direction === 'right') reference = clamp(Math.max(...entries.map((entry) => entry.box.x1)), Math.max(...entries.map((entry) => entry.width)), W);
+  if (direction === 'center') reference = clamp((Math.min(...entries.map((entry) => entry.box.x0)) + Math.max(...entries.map((entry) => entry.box.x1))) / 2, Math.max(...entries.map((entry) => entry.width / 2)), Math.min(...entries.map((entry) => W - entry.width / 2)));
+  if (direction === 'top') reference = clamp(Math.min(...entries.map((entry) => entry.box.y0)), 0, Math.min(...entries.map((entry) => H - entry.height)));
+  if (direction === 'bottom') reference = clamp(Math.max(...entries.map((entry) => entry.box.y1)), Math.max(...entries.map((entry) => entry.height)), H);
+  if (direction === 'middle') reference = clamp((Math.min(...entries.map((entry) => entry.box.y0)) + Math.max(...entries.map((entry) => entry.box.y1))) / 2, Math.max(...entries.map((entry) => entry.height / 2)), Math.min(...entries.map((entry) => H - entry.height / 2)));
+  entries.forEach(({ block, box, width, height }) => {
+    let x0 = box.x0, y0 = box.y0;
+    if (direction === 'left') x0 = reference;
+    if (direction === 'right') x0 = reference - width;
+    if (direction === 'center') x0 = reference - width / 2;
+    if (direction === 'top') y0 = reference;
+    if (direction === 'bottom') y0 = reference - height;
+    if (direction === 'middle') y0 = reference - height / 2;
+    block.tx0 = x0; block.tx1 = x0 + width; block.ty0 = y0; block.ty1 = y0 + height;
+  });
+  drawEditor(); scheduleSave();
 }
 function setBlockVisibility(block, visible) {
   block.enabled = !!visible;
@@ -764,10 +817,10 @@ function setBlockTextMode(block, mode) {
 }
 function renderEditorBoxes() {
   const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return; layer.textContent = '';
-  const mode = currentOverlayMode();
+  const mode = currentOverlayMode(); const selected = new Set(editorSelectedKeys());
   (item.blocks || []).forEach((block) => {
     const display = overlayBlock(block, mode); const displayMode = blockOverlayMode(block, mode);
-    if (!display.enabled || !display.tr?.trim()) return; const box = boxOf(display); const scale = state.editorScale; const el = document.createElement('div'); el.className = `editor-box${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; el.dataset.id = block.id;
+    if (!display.enabled || !display.tr?.trim()) return; const box = boxOf(display); const scale = state.editorScale; const el = document.createElement('div'); el.className = `editor-box${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; el.dataset.id = block.id;
     el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
     const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
     const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(block, false); });
@@ -780,8 +833,13 @@ function renderEditorBoxes() {
     }
     if (displayMode === 'ocr') wireOcrElement(text, block); else wireRichElement(text, block);
     el.append(move, visibility, language, text); ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
-    el.addEventListener('pointerdown', (event) => { selectEditorBlock(block.id); startBoxDrag(event, block, el); }); layer.appendChild(el);
+    el.addEventListener('pointerdown', (event) => {
+      const additive = event.ctrlKey || event.metaKey; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
+      if (!(dragTarget && !additive && editorSelectedKeys().includes(String(block.id)))) selectEditorBlock(block.id, true, additive);
+      startBoxDrag(event, block, el);
+    }); layer.appendChild(el);
   });
+  updateEditorSelection();
 }
 function startBoxDrag(event, block, el) {
   if (event.button !== 0) return;
@@ -791,15 +849,25 @@ function startBoxDrag(event, block, el) {
   const item = editorItem(); if (!item) return;
   event.preventDefault(); event.stopPropagation();
   const direction = resize?.dataset.dir || 'move'; const start = boxOf(block); const origin = { x: event.clientX, y: event.clientY }; const scale = state.editorScale || 1;
+  const selected = selectedEditorBlocks();
+  const movingBlocks = direction === 'move' && selected.includes(block) ? selected : [block];
+  const movingStarts = movingBlocks.map((movingBlock) => ({ block: movingBlock, start: boxOf(movingBlock) }));
   let changed = false; let finished = false;
   el.setPointerCapture(event.pointerId); el.classList.add('dragging');
   const move = (ev) => {
     const dx = (ev.clientX - origin.x) / scale; const dy = (ev.clientY - origin.y) / scale;
     if (direction === 'move') {
-      const width = start.x1 - start.x0; const height = start.y1 - start.y0;
-      const x0 = Math.max(0, Math.min(Math.max(0, item.width - width), start.x0 + dx));
-      const y0 = Math.max(0, Math.min(Math.max(0, item.height - height), start.y0 + dy));
-      block.tx0 = x0; block.tx1 = x0 + width; block.ty0 = y0; block.ty1 = y0 + height;
+      const minDx = Math.max(...movingStarts.map((entry) => -entry.start.x0));
+      const maxDx = Math.min(...movingStarts.map((entry) => item.width - entry.start.x1));
+      const minDy = Math.max(...movingStarts.map((entry) => -entry.start.y0));
+      const maxDy = Math.min(...movingStarts.map((entry) => item.height - entry.start.y1));
+      const groupDx = Math.max(minDx, Math.min(maxDx, dx)); const groupDy = Math.max(minDy, Math.min(maxDy, dy));
+      movingStarts.forEach((entry) => {
+        const moving = entry.block; const initial = entry.start; const width = initial.x1 - initial.x0; const height = initial.y1 - initial.y0;
+        moving.tx0 = initial.x0 + groupDx; moving.tx1 = moving.tx0 + width; moving.ty0 = initial.y0 + groupDy; moving.ty1 = moving.ty0 + height;
+        const boxEl = moving === block ? el : [...document.querySelectorAll('#editorBoxes .editor-box')].find((candidate) => candidate.dataset.id === String(moving.id));
+        if (boxEl) { boxEl.style.left = `${moving.tx0 * scale}px`; boxEl.style.top = `${moving.ty0 * scale}px`; }
+      });
     } else {
       let { x0, y0, x1, y1 } = start; const minW = Math.min(20, item.width); const minH = Math.min(16, item.height);
       if (direction.includes('w')) x0 = Math.max(0, Math.min(start.x1 - minW, start.x0 + dx));
@@ -820,9 +888,9 @@ function startBoxDrag(event, block, el) {
   el.addEventListener('pointermove', move); el.addEventListener('pointerup', stop); el.addEventListener('pointercancel', stop); el.addEventListener('lostpointercapture', stop);
 }
 function buildBlockList() {
-  const item = editorItem(); const list = $('blockList'); list.textContent = ''; state.richFields = new Map(); if (!item.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; return; }
+  const item = editorItem(); const list = $('blockList'); list.textContent = ''; state.richFields = new Map(); const selected = new Set(editorSelectedKeys()); if (!item.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; updateEditorSelection(); return; }
   item.blocks.forEach((block) => {
-    const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', () => selectEditorBlock(block.id, false));
+    const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', (event) => selectEditorBlock(block.id, false, event.ctrlKey || event.metaKey));
     const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabled.dataset.visibility = 'sidebar'; enabled.setAttribute('aria-label', `نمایش متن ${block.id} روی تصویر`); enabledLabel.append(enabled, document.createTextNode(` نمایش متن ${block.id} روی تصویر · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
     const bg = document.createElement('select'); [['auto', 'پس‌زمینه خودکار'], ['white', 'سفید'], ['black', 'مشکی'], ['none', 'بدون پاک‌کردن']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; bg.appendChild(option); }); bg.value = block.bg || 'auto'; head.appendChild(bg);
     const languageRow = document.createElement('div'); languageRow.className = 'block-tools block-language-tools';
@@ -843,12 +911,13 @@ function buildBlockList() {
     align.addEventListener('change', () => { block.align = align.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); size.addEventListener('change', () => { const value = Number(size.value); block.size = value >= 8 ? Math.min(160, value) : null; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); color.addEventListener('input', () => { block.color = color.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); });
     card.append(head, languageRow, source, translation, tools, actions); list.appendChild(card);
   });
+  updateEditorSelection();
 }
 async function applyEditor() { const item = editorItem(); if (!item) return; await overlayPreviewTask; await saveProject(); await renderAndUpload(item); renderGrid(); }
 async function closeEditor() {
   if (editorCloseTask) return editorCloseTask;
   editorCloseTask = (async () => {
-    await applyEditor(); closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; state.editorId = null; state.editorPan = null; state.activeBlockId = null;
+    await applyEditor(); closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
   })();
   try { await editorCloseTask; } finally { editorCloseTask = null; }
 }
@@ -915,6 +984,8 @@ function bindEvents() {
   $('ocrBtn').addEventListener('click', () => { updateEngineOptions(); showDialog('ocrDialog'); }); $('ocrEngine').addEventListener('change', updateOcrEngineStatus); $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', updateAiFields); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => toast(error.message, true))); $('testAiBtn').addEventListener('click', async () => { try { await saveAiSettings(); const result = await api('/api/ai-settings/test', { method: 'POST' }); $('aiStatus').textContent = result.message; } catch (error) { $('aiStatus').textContent = error.message; } });
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
+  $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
+  [['editorAlignLeft', 'left'], ['editorAlignCenter', 'center'], ['editorAlignRight', 'right'], ['editorAlignTop', 'top'], ['editorAlignMiddle', 'middle'], ['editorAlignBottom', 'bottom']].forEach(([id, direction]) => $(id).addEventListener('click', () => alignSelectedBoxes(direction)));
   $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); closeEditor().catch((error) => toast(error.message, true)); });
   $('editorZoomOut').addEventListener('click', () => setEditorZoom(state.editorScale / 1.25)); $('editorZoomIn').addEventListener('click', () => setEditorZoom(state.editorScale * 1.25)); $('editorZoomActual').addEventListener('click', () => setEditorZoom(1)); $('editorZoomFit').addEventListener('click', fitEditor);
   document.querySelector('.editor-preview').addEventListener('wheel', handleEditorWheel, { passive: false });
