@@ -4,12 +4,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import APP_NAME, APP_VERSION
-from .exporter import build_images_zip, build_pdf, build_txt
+from .exporter import build_images_zip, build_pdf, build_txt, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
 from .paths import STATIC_DIR, project_root
 from .schemas import (
@@ -62,6 +62,14 @@ def create_app() -> FastAPI:
     def get_project(project_id: str) -> dict[str, Any]:
         return project(project_id)
 
+    @app.delete("/api/projects/{project_id}", status_code=204)
+    def delete_project(project_id: str) -> Response:
+        try:
+            store.delete_project(project_id)
+        except KeyError as exc:
+            raise HTTPException(404, "Project not found") from exc
+        return Response(status_code=204)
+
     @app.put("/api/projects/{project_id}/state")
     def update_state(project_id: str, update: StateUpdate) -> dict[str, Any]:
         project(project_id)
@@ -82,8 +90,12 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/projects/{project_id}/images/{image_id}/content")
-    def image_content(project_id: str, image_id: str, edited: bool = False) -> FileResponse:
+    def image_content(project_id: str, image_id: str, edited: bool = False, cropped: bool = False) -> Response:
         try:
+            if cropped:
+                item = store.image(project_id, image_id)
+                data, _, _, _ = image_payload(store, project_id, item, "png")
+                return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
             path = store.image_path(project_id, image_id, edited)
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(404, "Image not found") from exc
@@ -100,6 +112,13 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Image not found") from exc
         except Exception as exc:
             raise HTTPException(400, f"Invalid PNG: {exc}") from exc
+
+    @app.post("/api/projects/{project_id}/images/{image_id}/revert")
+    def revert_rendered(project_id: str, image_id: str) -> dict[str, Any]:
+        try:
+            return store.revert_rendered(project_id, image_id)
+        except KeyError as exc:
+            raise HTTPException(404, "Image not found") from exc
 
     @app.post("/api/projects/{project_id}/duplicate")
     def duplicate(project_id: str, ids: list[str] = Body(...)) -> dict[str, Any]:

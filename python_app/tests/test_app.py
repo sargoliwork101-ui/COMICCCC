@@ -42,7 +42,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.01"
+    assert health.json()["version"] == "3.02"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -208,3 +208,56 @@ def test_invalid_upload_and_missing_project(client):
     )
     assert response.status_code == 400
     assert client.get("/api/projects/not-real").status_code == 404
+
+
+def test_group_members_become_one_pdf_page_and_pairs_skip_groups(client):
+    project = client.post("/api/projects", json={}).json()
+    response = client.post(
+        f"/api/projects/{project['id']}/files",
+        files=[("files", (f"page-{index}.png", png_bytes((320 + index * 10, 200)), "image/png")) for index in range(4)],
+    )
+    assert response.status_code == 200, response.text
+    project = response.json()
+    project["images"][0]["groupId"] = 1
+    project["images"][1]["groupId"] = 1
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    ids = [item["id"] for item in project["images"]]
+    response = client.post(f"/api/projects/{project['id']}/export", json={"kind": "pdf", "image_ids": ids, "name": "grouped"})
+    assert response.status_code == 200, response.text
+    with pymupdf.open(stream=response.content, filetype="pdf") as document:
+        assert len(document) == 3  # one composed group page plus two ungrouped pages
+    response = client.post(f"/api/projects/{project['id']}/export", json={"kind": "pdf", "image_ids": ids, "name": "grouped-pairs", "two_per_page": True})
+    assert response.status_code == 200, response.text
+    with pymupdf.open(stream=response.content, filetype="pdf") as document:
+        assert len(document) == 2  # the group stays whole; only the other two are paired
+
+
+def test_cropped_preview_revert_and_project_delete(client):
+    project, item = make_project(client)
+    project["images"][0]["crop"] = {"x": 10, "y": 10, "w": 120, "h": 80}
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    response = client.get(f"/api/projects/{project['id']}/images/{item['id']}/content?cropped=true")
+    assert response.status_code == 200
+    with Image.open(io.BytesIO(response.content)) as preview:
+        assert preview.size == (120, 80)
+    rendered = png_bytes((320, 200), "white")
+    assert client.post(f"/api/projects/{project['id']}/images/{item['id']}/rendered", content=rendered, headers={"Content-Type": "image/png"}).status_code == 200
+    response = client.post(f"/api/projects/{project['id']}/images/{item['id']}/revert")
+    assert response.status_code == 200
+    assert response.json()["images"][0]["edited"] is False
+    assert client.delete(f"/api/projects/{project['id']}").status_code == 204
+    assert client.get(f"/api/projects/{project['id']}").status_code == 404
+
+
+def test_duplicate_is_inserted_after_source_without_group_membership(client):
+    project, item = make_project(client)
+    project["images"][0]["groupId"] = 7
+    # A singleton is cleaned by the UI, but the server still must not copy it.
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    response = client.post(f"/api/projects/{project['id']}/duplicate", json=[item["id"]])
+    assert response.status_code == 200
+    images = response.json()["images"]
+    assert len(images) == 2
+    assert images[1]["name"].startswith("کپی")
+    assert images[1]["groupId"] is None
+    assert images[1]["order"] == 1

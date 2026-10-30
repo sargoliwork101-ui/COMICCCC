@@ -7,58 +7,78 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header class="app-header">
-    <div class="brand"><strong>Comic OCR Studio</strong><span>نسخهٔ ۳.۰۱ — مستقل از افزونه</span></div>
-    <div class="project-bar">
-      <select id="projectSelect" aria-label="بازکردن پروژه"></select>
-      <button id="newProjectBtn" class="ghost">پروژهٔ جدید</button>
-      <input id="projectName" aria-label="نام پروژه" value="پروژهٔ کمیک">
-      <span id="saveState" class="save-state">آماده</span>
-    </div>
+  <header class="topbar">
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۰۲ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <button id="menuBtn" class="bt">☰ پروژه و تنظیمات</button>
   </header>
 
-  <main>
-    <section class="main-actions panel">
-      <label class="button primary file-button">ورود PDF یا تصاویر
-        <input id="fileInput" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif" multiple hidden>
-      </label>
-      <button id="ocrBtn" class="primary">OCR آفلاین</button>
-      <button id="translateBtn">ترجمه</button>
-      <button id="modelsBtn">مدل‌ها و آزمایش</button>
-      <button id="aiBtn">AI و ترجمه</button>
-      <button id="exportBtn" class="success">خروجی</button>
-      <span id="jobStatus" role="status"></span>
-    </section>
+  <div id="menu" class="menu hidden">
+    <div class="mi project-controls">
+      <label>پروژه<select id="projectSelect" aria-label="بازکردن پروژه"></select></label>
+      <label>نام پروژه<input id="projectName" aria-label="نام پروژه" value="پروژهٔ کمیک"></label>
+      <div class="menu-actions"><button id="newProjectBtn" class="bt">پروژهٔ جدید</button><button id="deleteProjectBtn" class="bt danger">حذف پروژه</button></div>
+    </div>
+    <button id="modelsBtn" class="mi">مدل‌های OCR و آزمایش</button>
+    <button id="aiBtn" class="mi">ترجمهٔ رایگان / AI</button>
+    <button id="themeBtn" class="mi">تغییر تم روشن / تیره</button>
+    <div class="mi save-line"><span id="saveState">آماده</span><span>ذخیرهٔ خودکار روی همین کامپیوتر</span></div>
+  </div>
 
-    <section class="selection-actions panel">
-      <span id="selectionSummary">هنوز فایلی وارد نشده است</span>
-      <div>
-        <button id="selectAllBtn" class="ghost">انتخاب همه</button>
-        <button id="selectNoneBtn" class="ghost">لغو انتخاب</button>
-        <button id="invertBtn" class="ghost">معکوس</button>
-        <button id="groupBtn" class="ghost">گروه‌بندی انتخاب‌ها</button>
-        <button id="ungroupBtn" class="ghost">لغو گروه</button>
-        <button id="duplicateBtn" class="ghost">ساخت کپی</button>
-        <button id="deleteBtn" class="danger ghost">حذف</button>
+  <main id="mainwrap">
+    <section class="panel">
+      <div class="toolbar main-actions">
+        <label class="bt primary file-button">⬇ ورود PDF یا تصاویر
+          <input id="fileInput" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif" multiple hidden>
+        </label>
+        <button id="ocrBtn" class="bt primary">OCR آفلاین</button>
+        <button id="translateBtn" class="bt">ترجمهٔ انتخاب‌شده‌ها</button>
+        <span class="grow"></span>
+        <span id="selectionSummary" class="muted">هنوز فایلی وارد نشده است</span>
+      </div>
+      <div class="row2 selection-actions">
+        <button id="selectAllBtn" class="bt">انتخاب همه</button>
+        <button id="selectNoneBtn" class="bt">لغو انتخاب</button>
+        <button id="invertBtn" class="bt">معکوس</button>
+        <button id="groupBtn" class="bt">گروه‌بندی / ادغام</button>
+        <button id="ungroupBtn" class="bt">لغو گروه</button>
+        <button id="duplicateBtn" class="bt">ساخت کپی</button>
+        <button id="deleteBtn" class="bt danger">حذف تصاویر</button>
+        <span class="hint-inline">کارت‌ها را بکشید: وسط کارت = گروه، لبه‌ها = جابه‌جایی، لبهٔ کارت هم‌گروه = ترتیب داخلی، فضای خالی = خارج‌کردن از گروه</span>
       </div>
     </section>
 
-    <section id="grid" class="image-grid" aria-live="polite"></section>
+    <section id="groupPanel" class="panel group-panel hidden">
+      <div class="group-panel-head"><div><strong>گروه‌های صفحات</strong><span class="muted">هر گروه در PDF یک صفحهٔ عمودی می‌شود.</span></div><button id="cancelGroupEdit" class="bt hidden">لغو ویرایش</button></div>
+      <div id="groupList" class="group-list"></div>
+      <div id="groupEditStatus" class="hint-inline">برای ویرایش اعضا، «ویرایش» یک گروه را بزنید و سپس کارت‌ها را انتخاب یا لغو انتخاب کنید.</div>
+    </section>
+
+    <section id="grid" class="grid" aria-live="polite"></section>
+    <div id="groupOutlines" aria-hidden="true"></div>
     <section id="emptyState" class="empty-state">
-      <h1>از خروجی افزونه شروع کنید</h1>
-      <p>PDF یا چند تصویر را وارد کنید. هیچ تصویری برای OCR به اینترنت فرستاده نمی‌شود.</p>
-      <p>ترجمهٔ رایگان یا AI فقط در صورت انتخاب شما به سرویس آنلاین متصل می‌شود.</p>
+      <h2>از خروجی افزونه شروع کنید</h2>
+      <p>PDF یا چند تصویر را وارد کنید. تصویرها برای OCR از همین کامپیوتر خارج نمی‌شوند.</p>
+      <p>ترجمهٔ رایگان یا AI فقط با انتخاب شما به سرویس آنلاین متصل می‌شود.</p>
+    </section>
+    <section id="result" class="panel result-panel">
+      <div class="row"><strong>وضعیت</strong><span id="jobStatus" role="status">آماده</span><span class="grow"></span><span class="muted">PDF · ZIP · TXT</span></div>
+      <div class="bar"><div id="jobProgress" class="fill"></div></div>
     </section>
   </main>
 
-  <dialog id="ocrDialog" class="small-dialog">
+  <footer id="dock">
+    <span class="muted">نام خروجی</span><input id="exportName" value="comic-translated" aria-label="نام فایل خروجی">
+    <button id="exportPdfBtn" class="bt success">PDF</button>
+    <button id="exportImagesBtn" class="bt">ZIP تصاویر</button>
+    <button id="exportTxtBtn" class="bt">TXT</button>
+    <button id="exportBtn" class="bt">تنظیمات خروجی</button>
+  </footer>
+
+  <dialog id="ocrDialog" class="dlg small-dialog">
     <form method="dialog" class="dialog-head"><h2>OCR آفلاین</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
     <div class="form-grid">
       <label>موتور OCR<select id="ocrEngine"></select></label>
-      <label>زبان متن<select id="ocrLanguage">
-        <option value="eng">English</option><option value="kor">한국어</option>
-        <option value="jpn">日本語</option><option value="chi_sim">中文</option>
-      </select></label>
+      <label>زبان متن<select id="ocrLanguage"><option value="eng">English</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label>
       <label>حداقل اطمینان<input id="ocrConfidence" type="number" min="0" max="0.95" step="0.05" value="0.35"></label>
     </div>
     <div class="checks">
@@ -68,71 +88,51 @@
       <label><input id="ocrErase" type="checkbox" checked> پاک‌کردن متن اصلی زیر ترجمه</label>
     </div>
     <p id="ocrEngineStatus" class="hint"></p>
-    <div class="dialog-actions"><button id="startOcrBtn" class="primary">شروع OCR</button></div>
+    <div class="dialog-actions"><button id="startOcrBtn" class="bt primary">شروع OCR</button></div>
   </dialog>
 
-  <dialog id="modelsDialog" class="wide-dialog">
+  <dialog id="modelsDialog" class="dlg wide-dialog">
     <form method="dialog" class="dialog-head"><h2>مدل‌های OCR و آزمایش</h2><button class="icon" value="cancel">×</button></form>
     <p class="hint">Tesseract در افزونه اصلی می‌ماند. این مدل‌ها فقط برای برنامهٔ مستقل Python هستند و بدون کلیک شما دانلود نمی‌شوند.</p>
     <div id="engineCards" class="engine-cards"></div>
-    <div class="test-panel">
-      <label>زبان مدل و آزمایش<select id="testLanguage"><option value="eng">English</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label>
-      <span>آماده‌سازی فقط همین زبان را نصب/دانلود می‌کند. آزمایش روی نخستین تصویر انتخاب‌شده انجام می‌شود و پروژه را تغییر نمی‌دهد.</span>
-    </div>
+    <div class="test-panel"><label>زبان مدل و آزمایش<select id="testLanguage"><option value="eng">English</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label><span>آماده‌سازی فقط همین زبان را نصب/دانلود می‌کند. آزمایش روی نخستین تصویر انتخاب‌شده انجام می‌شود و پروژه را تغییر نمی‌دهد.</span></div>
     <pre id="modelTestResult" class="test-result" dir="auto"></pre>
   </dialog>
 
-  <dialog id="aiDialog" class="small-dialog">
+  <dialog id="aiDialog" class="dlg small-dialog">
     <form method="dialog" class="dialog-head"><h2>ترجمه و AI</h2><button class="icon" value="cancel">×</button></form>
     <label>روش ترجمه<select id="aiProvider"><option value="free">سرویس رایگان فعلی</option><option value="openai">AI سازگار با OpenAI</option></select></label>
-    <div id="aiFields" class="form-grid hidden">
-      <label>نشانی API<input id="aiBaseUrl" dir="ltr" value="https://api.avalai.ir/v1"></label>
-      <label>مدل<input id="aiModel" dir="ltr" value="gpt-6-luna"></label>
-      <label>کلید API<input id="aiKey" type="password" dir="ltr" autocomplete="off" placeholder="فقط روی همین کامپیوتر ذخیره می‌شود"></label>
-    </div>
+    <div id="aiFields" class="form-grid hidden"><label>نشانی API<input id="aiBaseUrl" dir="ltr" value="https://api.avalai.ir/v1"></label><label>مدل<input id="aiModel" dir="ltr" value="gpt-6-luna"></label><label>کلید API<input id="aiKey" type="password" dir="ltr" autocomplete="off" placeholder="فقط روی همین کامپیوتر ذخیره می‌شود"></label></div>
     <p class="hint">تصویر برای ترجمه ارسال نمی‌شود؛ فقط متن OCR به سرویس انتخابی داده می‌شود. برای AI آفلاین می‌توانید نشانی یک سرویس محلی سازگار با OpenAI بدهید.</p>
     <div id="aiStatus" class="hint" role="status"></div>
-    <div class="dialog-actions"><button id="testAiBtn">آزمایش اتصال</button><button id="saveAiBtn" class="primary">ذخیره</button></div>
+    <div class="dialog-actions"><button id="testAiBtn" class="bt">آزمایش اتصال</button><button id="saveAiBtn" class="bt primary">ذخیره</button></div>
   </dialog>
 
-  <dialog id="exportDialog" class="small-dialog">
-    <form method="dialog" class="dialog-head"><h2>خروجی نهایی</h2><button class="icon" value="cancel">×</button></form>
+  <dialog id="exportDialog" class="dlg small-dialog">
+    <form method="dialog" class="dialog-head"><h2>تنظیمات خروجی</h2><button class="icon" value="cancel">×</button></form>
     <label>نوع خروجی<select id="exportKind"><option value="pdf">PDF ترجمه‌شده</option><option value="images">تصاویر جداگانه (ZIP)</option><option value="txt">متن OCR و ترجمه (TXT)</option></select></label>
-    <label>نام فایل<input id="exportName" value="comic-translated"></label>
-    <div id="pdfExportFields" class="checks">
-      <label><input id="exportSeamless" type="checkbox"> همهٔ تصاویر پشت سر هم در یک صفحهٔ بلند</label>
-      <label><input id="exportUniform" type="checkbox"> قاب‌های هم‌اندازه</label>
-      <label><input id="exportTwo" type="checkbox"> دو تصویر در هر صفحه</label>
-    </div>
-    <div id="imageExportFields" class="form-grid hidden">
-      <label>فرمت<select id="exportFormat"><option value="orig">اصلی / PNG برای ویرایش‌شده</option><option value="png">PNG</option><option value="jpg">JPEG کیفیت ۱۰۰٪</option></select></label>
-      <label>زیرپوشه داخل ZIP<input id="exportFolder" placeholder="اختیاری"></label>
-    </div>
-    <p class="hint">فقط تصاویر انتخاب‌شده و با همان ترتیب نمایش‌داده‌شده خروجی می‌گیرند. ویرایش و برش نیز اعمال می‌شود.</p>
-    <div class="dialog-actions"><button id="startExportBtn" class="success">ساخت و دانلود</button></div>
+    <div id="pdfExportFields" class="checks"><label><input id="exportSeamless" type="checkbox"> همهٔ تصاویر پشت سر هم در یک صفحهٔ بلند</label><label><input id="exportUniform" type="checkbox"> قاب‌های هم‌اندازه</label><label><input id="exportTwo" type="checkbox"> دو تصویر در هر صفحه (گروه‌ها جدا می‌مانند)</label></div>
+    <div id="imageExportFields" class="form-grid hidden"><label>فرمت<select id="exportFormat"><option value="orig">اصلی / PNG برای ویرایش‌شده</option><option value="png">PNG</option><option value="jpg">JPEG کیفیت ۱۰۰٪</option></select></label><label>زیرپوشه داخل ZIP<input id="exportFolder" placeholder="اختیاری"></label></div>
+    <p class="hint">فقط تصاویر انتخاب‌شده و با ترتیب نمایش‌داده‌شده خروجی می‌گیرند. اعضای هر گروه در یک صفحهٔ عمودی PDF کنار هم قرار می‌گیرند.</p>
+    <div class="dialog-actions"><button id="startExportBtn" class="bt success">ساخت و دانلود</button></div>
   </dialog>
 
-  <dialog id="editorDialog" class="editor-dialog">
-    <div class="dialog-head"><h2 id="editorTitle">ویرایش ترجمه</h2><div><button id="editorApply">به‌روزرسانی پیش‌نمایش</button><button id="editorClose" class="primary">ذخیره و بستن</button></div></div>
-    <div class="editor-body">
-      <div class="editor-preview"><div id="editorStage"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div>
-      <div class="editor-side"><div class="editor-help">متن و جعبه‌ها را ویرایش کنید. دستگیرهٔ بالا جابه‌جا می‌کند و دستگیره‌های دور کادر اندازه را تغییر می‌دهند.</div><div id="blockList"></div></div>
-    </div>
+  <dialog id="editorDialog" class="dlg editor-dialog">
+    <div class="dialog-head"><h2 id="editorTitle">ویرایش ترجمه</h2><div><button id="editorRevert" class="bt danger">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt">به‌روزرسانی پیش‌نمایش</button><button id="editorClose" class="bt primary">ذخیره و بستن</button></div></div>
+    <div class="editor-body"><div class="editor-preview"><div id="editorStage"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div><div class="editor-side"><div class="editor-help">روی متن داخل تصویر یا کارت سمت راست تایپ کنید. دستگیرهٔ بالا جابه‌جا می‌کند و دستگیره‌های دور کادر اندازه را تغییر می‌دهند. Ctrl+S ذخیره می‌کند.</div><div id="blockList"></div></div></div>
   </dialog>
 
-  <dialog id="cropDialog" class="crop-dialog">
+  <dialog id="cropDialog" class="dlg crop-dialog">
     <form method="dialog" class="dialog-head"><h2>برش تصویر</h2><button class="icon" value="cancel">×</button></form>
-    <div class="crop-workspace"><div id="cropStage"><img id="cropImage" alt=""><div id="cropRect"></div></div></div>
-    <div class="form-grid crop-inputs">
-      <label>X<input id="cropX" type="number" min="0"></label><label>Y<input id="cropY" type="number" min="0"></label>
-      <label>عرض<input id="cropW" type="number" min="1"></label><label>ارتفاع<input id="cropH" type="number" min="1"></label>
-    </div>
-    <div class="dialog-actions"><button id="cropReset">حذف برش</button><button id="cropApply" class="primary">اعمال برش</button></div>
+    <div class="crop-workspace"><div id="cropStage"><img id="cropImage" alt=""><div id="cropRect"><i data-dir="nw"></i><i data-dir="n"></i><i data-dir="ne"></i><i data-dir="e"></i><i data-dir="se"></i><i data-dir="s"></i><i data-dir="sw"></i><i data-dir="w"></i></div></div></div>
+    <div class="form-grid crop-inputs"><label>X<input id="cropX" type="number" min="0"></label><label>Y<input id="cropY" type="number" min="0"></label><label>عرض<input id="cropW" type="number" min="1"></label><label>ارتفاع<input id="cropH" type="number" min="1"></label><label>نسبت<select id="cropRatio"><option value="0">آزاد</option><option value="0.70710678">A4 عمودی</option><option value="0.66666667">۲:۳</option><option value="0.75">۳:۴</option><option value="1">مربع</option><option value="1.33333333">۴:۳</option><option value="1.77777778">۱۶:۹</option></select></label></div>
+    <div class="dialog-actions"><button id="cropReset" class="bt">حذف برش</button><button id="cropApply" class="bt primary">اعمال برش</button></div>
   </dialog>
 
-  <dialog id="previewDialog" class="preview-dialog"><form method="dialog"><button class="icon">×</button></form><img id="previewImage" alt=""></dialog>
+  <dialog id="previewDialog" class="dlg preview-dialog"><form method="dialog"><button class="icon" aria-label="بستن">×</button><button id="previewCopy" type="button" class="bt">کپی تصویر</button></form><img id="previewImage" alt=""></dialog>
   <div id="toast" role="status"></div>
   <script src="/typeset.js"></script>
+  <script src="/groups.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import math
 import re
 import zipfile
 from collections import Counter
@@ -70,6 +71,87 @@ def image_payload(store: ProjectStore, project_id: str, item: dict[str, Any], im
         return buffer.getvalue(), "png", image.width, image.height
 
 
+def compose_images(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Join grouped pages vertically, like the extension, using lossless PNG."""
+    if len(entries) == 1:
+        return entries[0]
+    common_width = max(entry["w"] for entry in entries)
+    raw_height = sum(entry["h"] * common_width / entry["w"] for entry in entries)
+    scale = min(
+        1.0,
+        16000.0 / max(common_width, 1),
+        16000.0 / max(raw_height, 1),
+        math.sqrt(180_000_000.0 / max(common_width * raw_height, 1)),
+    )
+    widths = [max(1, round(entry["w"] * scale)) for entry in entries]
+    heights = [max(1, round(entry["h"] * (common_width / entry["w"]) * scale)) for entry in entries]
+    canvas = Image.new("RGB", (max(1, round(common_width * scale)), sum(heights)), "white")
+    y = 0
+    for entry, width, height in zip(entries, widths, heights):
+        with Image.open(io.BytesIO(entry["data"])) as opened:
+            image = opened.convert("RGB")
+            if image.size != (width, height):
+                image = image.resize((width, height), Image.Resampling.LANCZOS)
+            x = (canvas.width - width) // 2
+            canvas.paste(image, (x, y))
+        y += height
+    buffer = io.BytesIO()
+    canvas.save(buffer, "PNG")
+    return {
+        "data": buffer.getvalue(), "w": canvas.width, "h": canvas.height,
+        "order": min(entry.get("order", 0) for entry in entries), "grouped": True,
+    }
+
+
+def prepare_pdf_entries(
+    store: ProjectStore, state: dict[str, Any], images: list[dict[str, Any]], two_per_page: bool,
+) -> list[dict[str, Any]]:
+    source = []
+    for item in images:
+        data, _, width, height = image_payload(store, state["id"], item)
+        source.append({
+            "data": data, "w": width, "h": height, "order": int(item.get("order", 0)),
+            "groupId": item.get("groupId"), "grouped": False,
+        })
+    counts: Counter[str] = Counter(
+        str(entry["groupId"]) for entry in source
+        if entry["groupId"] is not None and str(entry["groupId"]).strip()
+    )
+    grouped: list[dict[str, Any]] = []
+    consumed: set[str] = set()
+    for entry in source:
+        key = str(entry["groupId"]) if entry["groupId"] is not None else ""
+        if not key or counts[key] < 2:
+            grouped.append(entry)
+            continue
+        if key in consumed:
+            continue
+        consumed.add(key)
+        members = [candidate for candidate in source if str(candidate["groupId"]) == key]
+        grouped.append(compose_images(members))
+    if not two_per_page:
+        return grouped
+
+    # Groups always keep their own composed page; only adjacent ungrouped pages are paired.
+    result: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        for index in range(0, len(pending), 2):
+            pair = pending[index:index + 2]
+            result.append(compose_images(pair) if len(pair) == 2 else pair[0])
+        pending.clear()
+
+    for entry in grouped:
+        if entry.get("grouped"):
+            flush()
+            result.append(entry)
+        else:
+            pending.append(entry)
+    flush()
+    return result
+
+
 def _page_scale(width: float, height: float) -> float:
     return min(0.75, HARD_PT / max(width, 1), SAFE_PT / max(height, 1))
 
@@ -96,14 +178,11 @@ def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
     images = selected_images(state, request.get("image_ids", []))
     if not images:
         raise ValueError("No images selected")
-    entries = []
-    for item in images:
-        data, _, width, height = image_payload(store, state["id"], item)
-        entries.append({"data": data, "w": width, "h": height})
-    document = fitz.open()
     seamless = bool(request.get("seamless"))
     uniform = bool(request.get("uniform_size")) and not seamless
     two_per_page = bool(request.get("two_per_page")) and not seamless
+    entries = prepare_pdf_entries(store, state, images, two_per_page)
+    document = fitz.open()
     if seamless:
         common_width = Counter(entry["w"] for entry in entries).most_common(1)[0][0]
         scaled = []
@@ -123,15 +202,6 @@ def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
             pending_height += entry["h"]
         if pending:
             _insert(document, common_width, pending_height, pending, stacked=True)
-    elif two_per_page:
-        for index in range(0, len(entries), 2):
-            pair = entries[index:index + 2]
-            page_width = max(entry["w"] for entry in pair)
-            normalized = []
-            for entry in pair:
-                ratio = page_width / entry["w"]
-                normalized.append({**entry, "w": page_width, "h": entry["h"] * ratio})
-            _insert(document, page_width, sum(entry["h"] for entry in normalized), normalized, stacked=True)
     elif uniform:
         page_width = max(entry["w"] for entry in entries)
         page_height = max(entry["h"] for entry in entries)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import shutil
 import threading
@@ -162,6 +163,15 @@ class ProjectStore:
                 item["edited"] = True
         return self.save(state)
 
+    def revert_rendered(self, project_id: str, image_id: str) -> dict[str, Any]:
+        self.image(project_id, image_id)
+        (project_root(project_id) / "images" / f"{image_id}-edited.png").unlink(missing_ok=True)
+        state = self.get(project_id)
+        for item in state["images"]:
+            if item["id"] == image_id:
+                item["edited"] = False
+        return self.save(state)
+
     def import_files(self, project_id: str, files: list[tuple[str, bytes]], pdf_scale: float = 2.0) -> dict[str, Any]:
         state = self.get(project_id)
         for filename, content in files:
@@ -187,7 +197,14 @@ class ProjectStore:
             if len(document) > 1000:
                 raise ValueError("PDF has too many pages")
             for index, page in enumerate(document):
-                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                # Keep the extension's 2x default, but cap extreme page sizes before rasterization.
+                rect = page.rect
+                page_scale = min(
+                    scale, 16000.0 / max(rect.width, 1), 16000.0 / max(rect.height, 1),
+                    math.sqrt(48_000_000.0 / max(rect.width * rect.height, 1)),
+                )
+                page_scale = max(0.1, page_scale)
+                pix = page.get_pixmap(matrix=fitz.Matrix(page_scale, page_scale), alpha=False)
                 png = pix.tobytes("png")
                 self._import_image(state, f"{Path(filename).stem} — صفحهٔ {index + 1}.png", png)
 
@@ -223,22 +240,30 @@ class ProjectStore:
     def duplicate(self, project_id: str, image_ids: list[str]) -> dict[str, Any]:
         state = self.get(project_id)
         originals = {item["id"]: item for item in state["images"]}
-        additions = []
+        additions: dict[str, dict[str, Any]] = {}
         for image_id in image_ids:
-            if image_id not in originals:
+            if image_id not in originals or image_id in additions:
                 continue
             old = originals[image_id]
             new = json.loads(json.dumps(old))
             new["id"] = new_id()
             new["name"] = f"کپی — {old['name']}"
             new["file"] = f"{new['id']}{Path(old['file']).suffix}"
-            new["order"] = self._next_order(state) + len(additions)
+            # A copy starts independent, rather than silently enlarging the original group.
+            new["groupId"] = None
             shutil.copyfile(project_root(project_id) / "images" / old["file"], project_root(project_id) / "images" / new["file"])
             old_edited = project_root(project_id) / "images" / f"{old['id']}-edited.png"
             if old_edited.exists():
                 shutil.copyfile(old_edited, project_root(project_id) / "images" / f"{new['id']}-edited.png")
-            additions.append(new)
-        state["images"].extend(additions)
+            additions[image_id] = new
+        merged = []
+        for item in state["images"]:
+            merged.append(item)
+            if item["id"] in additions:
+                merged.append(additions[item["id"]])
+        for index, item in enumerate(merged):
+            item["order"] = index
+        state["images"] = merged
         return self.save(state)
 
     def delete(self, project_id: str, image_ids: list[str]) -> dict[str, Any]:
@@ -249,3 +274,7 @@ class ProjectStore:
             for path in (project_root(project_id) / "images").glob(f"{image_id}*"):
                 path.unlink(missing_ok=True)
         return self.save(state)
+
+    def delete_project(self, project_id: str) -> None:
+        self.get(project_id)  # validates the id and prevents deleting an arbitrary path
+        shutil.rmtree(project_root(project_id))
