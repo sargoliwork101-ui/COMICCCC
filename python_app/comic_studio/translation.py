@@ -30,7 +30,7 @@ MAX_FREE_QUERY_CHARS = 500
 
 
 def split_free_query(text: str, limit: int = MAX_FREE_QUERY_CHARS) -> list[str]:
-    """Keep every free-provider query within its limit, preferring sentence boundaries."""
+    """Close at the last sentence end within the limit; never fill it with a partial next sentence."""
     remaining = str(text or "").strip()
     if limit < 1:
         raise ValueError("Query limit must be positive")
@@ -42,7 +42,7 @@ def split_free_query(text: str, limit: int = MAX_FREE_QUERY_CHARS) -> list[str]:
         sentence_cut = 0
         for match in re.finditer(r"[.!?…。！？][\"'”’»)]*", window):
             sentence_cut = match.end()
-        cut = sentence_cut if sentence_cut >= max(1, limit // 2) else 0
+        cut = sentence_cut if sentence_cut > 0 else 0
         if not cut:
             cut = max(window.rfind("\n"), window.rfind(" "))
         if cut <= 0:

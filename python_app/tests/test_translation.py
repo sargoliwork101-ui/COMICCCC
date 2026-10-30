@@ -113,6 +113,16 @@ def test_free_query_split_prefers_sentence_boundaries():
     assert all(len(part) <= 500 for part in parts)
 
 
+def test_free_query_closes_at_sentence_end_instead_of_filling_500():
+    first = "A" * 100 + "."
+    second = ("word " * 89).strip() + "."
+    assert len(first + " " + second) > 500
+    assert len(second) <= 500
+    parts = split_free_query(first + " " + second)
+    assert parts == [first, second]
+    assert all(len(part) <= 500 for part in parts)
+
+
 def test_unknown_provider_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
     service = TranslationService()
