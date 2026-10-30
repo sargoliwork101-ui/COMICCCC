@@ -25,6 +25,7 @@ let sessionTimer = null;
 let localActivityId = 0;
 let editorCloseTask = null;
 let editorCanvasFrame = 0;
+let inlineDraft = null;
 let jobBusy = false;
 let translationRunning = false;
 let translationPreviewAction = null;
@@ -190,13 +191,23 @@ function sanitizeHtml(html) {
     if (tag === 'BR') return '<br>';
     if (!allowed.has(tag)) return children;
     let style = '';
-    if (tag === 'SPAN') {
+    if (['SPAN', 'DIV', 'P', 'LI'].includes(tag)) {
       const size = parseFloat(node.style.fontSize);
       if (Number.isFinite(size)) style += `font-size:${Math.max(8, Math.min(160, size))}px;`;
-      if (/^#[0-9a-f]{6}$/i.test(node.style.color)) style += `color:${node.style.color};`;
-      if (node.style.fontWeight) style += `font-weight:${node.style.fontWeight === 'bold' ? 'bold' : 'normal'};`;
+      const color = node.style.color;
+      const rgb = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i.exec(color);
+      if (/^#[0-9a-f]{6}$/i.test(color)) style += `color:${color};`;
+      else if (rgb && rgb.slice(1).every((part) => Number(part) <= 255)) style += `color:#${rgb.slice(1).map((part) => Number(part).toString(16).padStart(2, '0')).join('')};`;
+      if (node.style.fontWeight) style += `font-weight:${node.style.fontWeight === 'bold' || Number(node.style.fontWeight) >= 600 ? 'bold' : 'normal'};`;
       if (node.style.fontStyle) style += `font-style:${node.style.fontStyle === 'italic' ? 'italic' : 'normal'};`;
-      if (node.style.textDecorationLine) style += `text-decoration:${node.style.textDecorationLine};`;
+      const decoration = node.style.textDecorationLine || node.style.textDecoration || '';
+      const safeDecoration = ['underline', 'line-through'].filter((value) => decoration.includes(value)).join(' ');
+      if (safeDecoration) style += `text-decoration:${safeDecoration};`;
+      if (['DIV', 'P', 'LI'].includes(tag)) {
+        if (['left', 'center', 'right', 'justify'].includes(node.style.textAlign)) style += `text-align:${node.style.textAlign};`;
+        const direction = node.style.direction || node.getAttribute('dir');
+        if (direction === 'rtl' || direction === 'ltr') style += `direction:${direction};`;
+      }
     }
     return `<${tag.toLowerCase()}${style ? ` style="${style}"` : ''}>${children}</${tag.toLowerCase()}>`;
   };
@@ -276,6 +287,9 @@ function queueOverlayPreviewRefresh() {
 }
 function setOverlayMode(mode, redraw = true) {
   if (!state.project) return overlayPreviewTask;
+  if (inlineDraft && normalizeOverlayMode(mode) !== currentOverlayMode() && !closeInlineEditor()) {
+    $('overlayMode').value = currentOverlayMode(); $('exportOverlayMode').value = currentOverlayMode(); return overlayPreviewTask;
+  }
   state.project.settings = state.project.settings || {};
   state.project.settings.overlayMode = normalizeOverlayMode(mode);
   $('overlayMode').value = state.project.settings.overlayMode;
@@ -302,7 +316,7 @@ function overlayBlock(block, mode = currentOverlayMode()) {
   const effectiveMode = blockOverlayMode(block, mode);
   if (effectiveMode === 'none') return { ...block, tr: '', richHtml: '' };
   if (effectiveMode !== 'ocr') return block;
-  return { ...block, tr: block.text || '', richHtml: '', dir: 'ltr', align: block.align === 'center' ? 'center' : 'left', _plainText: true };
+  return { ...block, tr: block.text || '', richHtml: '', dir: 'ltr', align: ['center', 'justify'].includes(block.align) ? block.align : 'left', _plainText: true };
 }
 function overlayBlocks(item, mode = currentOverlayMode()) { return (item.blocks || []).map((block) => overlayBlock(block, mode)); }
 function hasOverlayText(item, mode = currentOverlayMode()) { return overlayBlocks(item, mode).some((block) => block.enabled && block.tr?.trim()); }
@@ -875,6 +889,7 @@ function setEditorZoom(value, anchor = null) {
   const imageX = (preview.scrollLeft + viewportX - stage.offsetLeft) / oldScale; const imageY = (preview.scrollTop + viewportY - stage.offsetTop) / oldScale;
   state.editorScale = scale; resizeEditorStage();
   preview.scrollLeft = Math.max(0, stage.offsetLeft + imageX * scale - viewportX); preview.scrollTop = Math.max(0, stage.offsetTop + imageY * scale - viewportY);
+  positionInlineEditor();
 }
 function startEditorPan(event) {
   if (!state.editorId || (event.button !== 0 && event.button !== 1) || event.target.closest('.editor-box')) return;
@@ -904,7 +919,7 @@ function scheduleEditorCanvasDraw() {
   if (editorCanvasFrame) return;
   editorCanvasFrame = requestAnimationFrame(() => { editorCanvasFrame = 0; drawEditorCanvas(); });
 }
-function drawEditor() { drawEditorCanvas(); renderEditorBoxes(); }
+function drawEditor() { drawEditorCanvas(); renderEditorBoxes(); positionInlineEditor(); }
 function overlaySize(block, width, height) {
   try {
     const style = Typeset.blockStyle(block); const maxSize = Math.max(12, Math.min(64, Math.round((block.lineH || height) * 1.1)));
@@ -920,16 +935,27 @@ function overlaySize(block, width, height) {
     return Math.max(8, Math.min(160, Number(block.size) || Math.min(42, Math.max(10, height / Math.max(1.8, String(block.tr || '').split('\n').length * 1.65)))));
   }
 }
-function styleRichElement(element, block, scale = 1) {
-  const box = boxOf(block); const style = Typeset.blockStyle(block); element.dir = style.dir; element.style.direction = style.dir; element.style.textAlign = style.align; element.style.fontSize = `${overlaySize(block, box.x1 - box.x0, box.y1 - box.y0) * scale}px`; element.style.fontWeight = style.bold ? '700' : '400'; element.style.fontStyle = style.italic ? 'italic' : 'normal'; element.style.color = style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff'); element.style.caretColor = element.style.color; element.style.textDecoration = style.underline ? 'underline' : '';
+function styleRichElement(element, block, scale = 1, preview = false) {
+  const box = boxOf(block); const style = Typeset.blockStyle(block);
+  element.dir = style.dir; element.style.direction = style.dir; element.style.textAlign = style.align;
+  // The sidebar is an editing surface, not the output: output size and colour affect only the image.
+  element.style.fontSize = preview ? `${overlaySize(block, box.x1 - box.x0, box.y1 - box.y0) * scale}px` : '';
+  element.style.fontWeight = style.bold ? '700' : '400'; element.style.fontStyle = style.italic ? 'italic' : 'normal';
+  element.style.color = preview ? (style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff')) : '';
+  element.style.caretColor = preview ? (style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff')) : '';
+  element.style.textDecoration = style.underline ? 'underline' : '';
 }
 function updateRichBlock(block, element) {
   block.tr = element.innerText.replace(/\u00a0/g, ' '); block.richHtml = sanitizeHtml(element.innerHTML);
-  const fields = state.richFields.get(String(block.id)) || []; fields.forEach((other) => { if (other !== element) { other.innerHTML = block.richHtml || plainToHtml(block.tr); } });
+  const fields = (state.richFields.get(String(block.id)) || []).filter((field) => field.isConnected);
+  state.richFields.set(String(block.id), fields);
+  fields.forEach((other) => { if (other !== element && document.activeElement !== other) { other.innerHTML = block.richHtml || plainToHtml(block.tr); } });
   scheduleEditorCanvasDraw(); scheduleSave();
 }
 function rememberRichSelection(element) {
-  state.richEditor = element; const selection = window.getSelection(); if (selection?.rangeCount && element.contains(selection.anchorNode)) state.richRange = selection.getRangeAt(0).cloneRange();
+  state.richEditor = element; const selection = window.getSelection();
+  if (selection?.rangeCount && element.contains(selection.anchorNode) && element.contains(selection.focusNode)) state.richRange = selection.getRangeAt(0).cloneRange();
+  else state.richRange = null;
 }
 function wireRichElement(element, block) {
   const key = String(block.id); if (!state.richFields.has(key)) state.richFields.set(key, []); state.richFields.get(key).push(element);
@@ -946,11 +972,185 @@ function wireOcrElement(element, block) {
   });
   element.addEventListener('paste', (event) => { event.preventDefault(); document.execCommand('insertText', false, event.clipboardData.getData('text/plain')); });
 }
-function runRichCommand(command, value = null) {
-  const element = state.richEditor; if (!element) return;
-  element.focus(); if (state.richRange && element.contains(state.richRange.startContainer)) { const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(state.richRange); }
-  document.execCommand('styleWithCSS', false, true); document.execCommand(command, false, value); element.dispatchEvent(new Event('input')); rememberRichSelection(element);
+function runRichCommand(command, value = null, target = null) {
+  const fields = target ? (state.richFields.get(String(target.id)) || []).filter((field) => field.isConnected) : [];
+  const previous = state.richEditor;
+  const element = target ? (fields.includes(previous) ? previous : fields.find((field) => field.closest('.block-card'))) : previous;
+  if (!element?.isConnected) return;
+  element.focus();
+  if (element === previous && state.richRange && element.contains(state.richRange.startContainer) && element.contains(state.richRange.endContainer)) {
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(state.richRange);
+  }
+  document.execCommand('styleWithCSS', false, true); document.execCommand(command, false, value); element.dispatchEvent(new Event('input', { bubbles: true })); rememberRichSelection(element);
 }
+// A draft belongs to one image box. Nothing reaches the project or canvas until Apply.
+function inlineBlockSnapshot(block) {
+  return JSON.stringify([block.text || '', block.tr || '', block.richHtml || '', block.dir || '', block.align || '', block.size ?? null, block.color || null]);
+}
+function inlineDraftChanged() {
+  if (!inlineDraft) return false;
+  return $('inlineEditorField').innerHTML !== inlineDraft.html || $('inlineEditorDirection').value !== inlineDraft.dir ||
+    $('inlineEditorAlign').value !== inlineDraft.align || $('inlineEditorSize').value !== inlineDraft.size || inlineDraft.color !== inlineDraft.originalColor;
+}
+function closeInlineEditor(force = false) {
+  if (!inlineDraft) return true;
+  if (!force && inlineDraftChanged() && !confirm('تغییرهای این متن ثبت نشده‌اند. از آن‌ها صرف‌نظر شود؟')) return false;
+  $('inlineEditor').classList.add('hidden'); inlineDraft = null;
+  return true;
+}
+function positionInlineEditor() {
+  if (!inlineDraft) return;
+  const view = document.querySelector('.editor-view'); const panel = $('inlineEditor');
+  const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
+  if (!box || !view || panel.classList.contains('hidden')) return;
+  const bounds = view.getBoundingClientRect(); const target = box.getBoundingClientRect();
+  const width = panel.offsetWidth; const height = panel.offsetHeight;
+  const x = Math.max(8, Math.min(Math.max(8, bounds.width - width - 8), target.right - bounds.left - width));
+  let y = target.top - bounds.top - height - 8;
+  if (y < 8) y = target.bottom - bounds.top + 8;
+  y = Math.max(8, Math.min(Math.max(8, bounds.height - height - 8), y));
+  panel.style.left = `${x}px`; panel.style.top = `${y}px`;
+}
+function rememberInlineRange() {
+  if (!inlineDraft) return;
+  const field = $('inlineEditorField'); const selection = window.getSelection();
+  if (selection?.rangeCount && field.contains(selection.anchorNode) && field.contains(selection.focusNode)) inlineDraft.range = selection.getRangeAt(0).cloneRange();
+}
+function inlineRangePath(node, root) {
+  const path = []; while (node && node !== root) { const parent = node.parentNode; if (!parent) return null; path.unshift([...parent.childNodes].indexOf(node)); node = parent; }
+  return node === root ? path : null;
+}
+function inlineHistoryEntry() {
+  const field = $('inlineEditorField'); const selection = window.getSelection();
+  const range = selection?.rangeCount && field.contains(selection.anchorNode) && field.contains(selection.focusNode) ? selection.getRangeAt(0) : inlineDraft?.range;
+  return { html: field.innerHTML, start: range ? inlineRangePath(range.startContainer, field) : null, startOffset: range?.startOffset || 0,
+    end: range ? inlineRangePath(range.endContainer, field) : null, endOffset: range?.endOffset || 0 };
+}
+function recordInlineHistory() {
+  if (!inlineDraft || inlineDraft.muteHistory) return;
+  const entry = inlineHistoryEntry(); const history = inlineDraft.history;
+  if (history[inlineDraft.historyIndex]?.html === entry.html) { history[inlineDraft.historyIndex] = entry; return; }
+  history.splice(inlineDraft.historyIndex + 1); history.push(entry);
+  if (history.length > 100) history.shift();
+  inlineDraft.historyIndex = history.length - 1;
+}
+function restoreInlineHistory(step) {
+  if (!inlineDraft) return;
+  const index = inlineDraft.historyIndex + step;
+  if (index < 0 || index >= inlineDraft.history.length) return;
+  inlineDraft.historyIndex = index; const entry = inlineDraft.history[index]; const field = $('inlineEditorField');
+  field.innerHTML = entry.html; field.focus();
+  const resolve = (path) => Array.isArray(path) ? path.reduce((node, i) => node?.childNodes[i], field) : null;
+  const start = resolve(entry.start); const end = resolve(entry.end);
+  const maxOffset = (node) => node.nodeType === Node.TEXT_NODE ? node.length : node.childNodes.length;
+  if (start && end) {
+    const range = document.createRange(); range.setStart(start, Math.min(entry.startOffset, maxOffset(start))); range.setEnd(end, Math.min(entry.endOffset, maxOffset(end)));
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  }
+  rememberInlineRange(); syncInlineLineControls();
+}
+function inlineCommand(command) {
+  if (!inlineDraft) return;
+  if (command === 'undo' || command === 'redo') { restoreInlineHistory(command === 'undo' ? -1 : 1); return; }
+  if (inlineDraft.mode === 'ocr') return;
+  const field = $('inlineEditorField'); const range = inlineDraft.range;
+  field.focus();
+  if (range && field.contains(range.startContainer) && field.contains(range.endContainer)) {
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  }
+  document.execCommand('styleWithCSS', false, true); document.execCommand(command, false, null); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+}
+function inlineParagraphFrom(node) {
+  const field = $('inlineEditorField');
+  let element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  while (element && element !== field) {
+    if (['DIV', 'P', 'LI'].includes(element.tagName)) return element;
+    element = element.parentElement;
+  }
+  return null;
+}
+function syncInlineLineControls() {
+  if (!inlineDraft || inlineDraft.mode === 'ocr') return;
+  const line = inlineParagraphFrom(inlineDraft.range?.startContainer);
+  $('inlineLineDirection').value = line?.style.direction || '';
+  $('inlineLineSize').value = line?.style.fontSize ? String(Math.round(parseFloat(line.style.fontSize))) : '';
+  const color = line?.style.color || ''; const rgb = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i.exec(color);
+  $('inlineLineColor').value = /^#[0-9a-f]{6}$/i.test(color) ? color : rgb ? `#${rgb.slice(1).map((part) => Number(part).toString(16).padStart(2, '0')).join('')}` : '#ffffff';
+  $('inlineLineTools').querySelectorAll('[data-line-align]').forEach((button) => {
+    button.setAttribute('aria-pressed', String(!!line?.style.textAlign && button.dataset.lineAlign === line.style.textAlign));
+  });
+}
+function ensureInlineParagraph() {
+  const field = $('inlineEditorField'); const range = inlineDraft?.range;
+  if (!inlineDraft || inlineDraft.mode === 'ocr' || !range || !field.contains(range.startContainer)) {
+    toast('ابتدا داخل خط موردنظر کلیک کنید.', true); return null;
+  }
+  field.focus(); const selection = window.getSelection(); const cursor = range.cloneRange(); cursor.collapse(true);
+  selection.removeAllRanges(); selection.addRange(cursor);
+  let line = inlineParagraphFrom(selection.anchorNode);
+  if (!line) {
+    // Browser paragraph boundaries include existing BRs, so only the chosen logical line is wrapped.
+    inlineDraft.muteHistory = true;
+    try { document.execCommand('formatBlock', false, 'div'); } finally { inlineDraft.muteHistory = false; }
+    line = inlineParagraphFrom(selection.anchorNode);
+    // Chromium leaves the BR immediately before its new DIV, which otherwise
+    // turns one legacy line break into two in innerText and saved translations.
+    if (line?.previousSibling?.nodeName === 'BR') line.previousSibling.remove();
+  }
+  if (!line) { toast('انتخاب این خط ممکن نشد؛ دوباره داخل متن کلیک کنید.', true); return null; }
+  rememberInlineRange(); return line;
+}
+function setInlineLineStyle(property, value) {
+  const line = ensureInlineParagraph(); if (!line) return;
+  line.style[property] = value;
+  rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+}
+function resetInlineLineStyle() {
+  const line = ensureInlineParagraph(); if (!line) return;
+  ['textAlign', 'direction', 'fontSize', 'color'].forEach((key) => { line.style[key] = ''; });
+  rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+}
+function openInlineEditor(block) {
+  if (!block || !editorItem()) return;
+  if (inlineDraft?.block === block) { $('inlineEditorField').focus(); return; }
+  if (!closeInlineEditor()) return;
+  const mode = blockOverlayMode(block);
+  if (mode === 'none') return;
+  const field = $('inlineEditorField'); const direction = mode === 'ocr' ? 'ltr' : (block.dir === 'ltr' ? 'ltr' : 'rtl');
+  field.innerHTML = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || plainToHtml(block.tr || ''));
+  styleRichElement(field, overlayBlock(block)); field.dir = direction; field.style.direction = direction;
+  $('inlineEditorTitle').textContent = `ویرایش ${mode === 'ocr' ? 'متن اصلی' : 'ترجمه'} · کادر ${block.id}`;
+  $('inlineEditorFormatting').classList.toggle('hidden', mode === 'ocr');
+  $('inlineLineTools').classList.toggle('hidden', mode === 'ocr');
+  $('inlineEditorDirection').value = direction; $('inlineEditorDirection').disabled = mode === 'ocr';
+  $('inlineEditorAlign').value = mode === 'ocr' ? overlayBlock(block).align : (block.align || 'right');
+  $('inlineEditorSize').value = block.size || '';
+  $('inlineEditorColor').value = block.color || '#ffffff';
+  inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: field.innerHTML,
+    dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, size: $('inlineEditorSize').value,
+    color: block.color || null, originalColor: block.color || null, range: null, history: [], historyIndex: -1, muteHistory: false };
+  $('inlineEditor').classList.remove('hidden'); positionInlineEditor(); field.focus(); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+}
+function applyInlineEditor() {
+  if (!inlineDraft) return true;
+  const draft = inlineDraft; const block = draft.block;
+  if (!editorItem()?.blocks?.includes(block) || inlineBlockSnapshot(block) !== draft.snapshot) {
+    toast('این کادر در جای دیگری تغییر کرده است؛ برای جلوگیری از حذف ویرایش‌ها، متن ثبت نشد.', true); return false;
+  }
+  const field = $('inlineEditorField');
+  const text = (field.innerText ?? field.textContent ?? '').replace(/\u00a0/g, ' ');
+  const size = $('inlineEditorSize').value.trim(); const value = Number(size);
+  if (size && (!Number.isFinite(value) || value < 8 || value > 160)) { toast('اندازهٔ قلم باید بین ۸ و ۱۶۰ باشد.', true); return false; }
+  if (draft.mode === 'ocr') block.text = text;
+  else { block.tr = text; block.richHtml = sanitizeHtml(field.innerHTML); if ($('inlineEditorDirection').value !== draft.dir) block.dir = $('inlineEditorDirection').value; }
+  if ($('inlineEditorAlign').value !== draft.align) block.align = $('inlineEditorAlign').value;
+  if (size !== draft.size) block.size = size ? Math.round(value) : null;
+  if (draft.color !== draft.originalColor) block.color = draft.color;
+  closeInlineEditor(true); buildBlockList(); drawEditor(); scheduleSave();
+  toast('متن ثبت شد و پیش‌نمایش نهایی به‌روز شد');
+  return true;
+}
+
 function editorSelectedKeys() {
   const item = editorItem(); const valid = new Set((item?.blocks || []).map((block) => String(block.id)));
   return (state.selectedBlockIds || []).map(String).filter((key) => valid.has(key));
@@ -973,13 +1173,22 @@ function updateEditorSelection() {
 }
 function selectEditorBlock(blockId, scroll = true, additive = false) {
   const key = String(blockId); const selected = new Set(editorSelectedKeys());
+  const alreadyActive = selected.size === 1 && selected.has(key) && String(state.activeBlockId) === key;
   if (additive) { if (selected.has(key)) selected.delete(key); else selected.add(key); }
   else { selected.clear(); selected.add(key); }
   state.selectedBlockIds = [...selected]; state.activeBlockId = selected.has(key) ? key : [...selected].at(-1) || null;
   updateEditorSelection();
   const selectedCard = [...document.querySelectorAll('#blockList .block-card')].find((card) => card.dataset.id === String(state.activeBlockId));
   // Do not focus the sidebar field: the user can keep typing exactly where they clicked on the image.
-  if (scroll && selectedCard) selectedCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (scroll && selectedCard && !alreadyActive) {
+    // Scroll only the sidebar, not the dialog/page or the image underneath the pointer.
+    const side = document.querySelector('.editor-side');
+    if (side) {
+      const viewport = side.getBoundingClientRect(); const card = selectedCard.getBoundingClientRect();
+      if (card.top < viewport.top) side.scrollTop -= viewport.top - card.top;
+      else if (card.bottom > viewport.bottom) side.scrollTop += card.bottom - viewport.bottom;
+    }
+  }
 }
 function selectAllEditorBlocks() {
   const item = editorItem(); if (!item) return;
@@ -992,6 +1201,7 @@ function joinedOcrText(blocks) {
   return blocks.map((block) => String(block.text || '').trim().replace(/\s+/g, ' ')).filter(Boolean).join(' ');
 }
 function mergeSelectedText() {
+  if (inlineDraft && !closeInlineEditor()) return;
   const item = editorItem(); const blocks = selectedEditorBlocks();
   if (!item || blocks.length < 2) { toast('برای ادغام، حداقل دو متن را انتخاب کنید', true); return; }
   if (blocks.some((block) => String(block.tr || '').trim() || String(block.richHtml || '').trim())) {
@@ -1013,6 +1223,7 @@ function mergeSelectedText() {
   buildBlockList(); drawEditor(); scheduleSave();
 }
 function splitSelectedText() {
+  if (inlineDraft && !closeInlineEditor()) return;
   const item = editorItem(); const blocks = selectedEditorBlocks();
   if (!item || blocks.length !== 1 || !Array.isArray(blocks[0].sourceLines) || blocks[0].sourceLines.length < 2) {
     toast('یک کادر ادغام‌شده را برای جداکردن انتخاب کنید', true); return;
@@ -1066,6 +1277,12 @@ function alignSelectedBoxes(direction) {
   drawEditor(); scheduleSave();
 }
 function setBlockVisibility(block, visible) {
+  if (inlineDraft?.block === block && !closeInlineEditor()) {
+    const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
+    const toggle = card?.querySelector('[data-visibility]');
+    if (toggle) toggle.checked = !!block.enabled;
+    return;
+  }
   block.enabled = !!visible;
   const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
   card?.classList.toggle('disabled', !block.enabled);
@@ -1073,30 +1290,72 @@ function setBlockVisibility(block, visible) {
   renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
 }
 function setBlockTextMode(block, mode) {
+  if (inlineDraft?.block === block && !closeInlineEditor()) {
+    const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
+    const selector = card?.querySelector('[data-text-mode]'); if (selector) selector.value = blockTextMode(block);
+    return;
+  }
   block.textMode = normalizeBlockTextMode(mode);
   const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
   const selector = card?.querySelector('[data-text-mode]'); if (selector) selector.value = block.textMode;
   renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
 }
 function renderEditorBoxes() {
-  const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return; layer.textContent = '';
+  const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return;
   const mode = currentOverlayMode(); const selected = new Set(editorSelectedKeys());
+  const existing = new Map([...layer.children].map((element) => [element.dataset.id, element]));
+  const visible = new Set();
   (item.blocks || []).forEach((block) => {
     const display = overlayBlock(block, mode); const displayMode = blockOverlayMode(block, mode);
-    if (!display.enabled || !display.tr?.trim()) return; const box = boxOf(display); const scale = state.editorScale; const el = document.createElement('div'); el.className = `editor-box${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; el.dataset.id = block.id;
+    const key = String(block.id);
+    if (!display.enabled || displayMode === 'none') return;
+    visible.add(key);
+    const box = boxOf(display); const scale = state.editorScale;
+    let el = existing.get(key);
+    if (!el) {
+      el = document.createElement('div'); el.className = 'editor-box'; el.dataset.id = key;
+      const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
+      const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('pointerdown', (event) => event.stopPropagation()); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(el._block, false); });
+      const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('pointerdown', (event) => event.stopPropagation()); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(el._block, el.dataset.mode === 'ocr' ? 'translation' : 'ocr'); });
+      el.append(move, visibility, language);
+      ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
+      el.addEventListener('pointerdown', (event) => {
+        const activeBlock = el._block; const additive = event.ctrlKey || event.metaKey; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
+        if (!(dragTarget && !additive && editorSelectedKeys().includes(String(activeBlock.id)))) selectEditorBlock(activeBlock.id, true, additive);
+        startBoxDrag(event, activeBlock, el);
+      });
+      layer.appendChild(el);
+    }
+    // Reuse the actual editing node so zoom, redraw and other controls do not destroy the caret or undo history.
+    el._block = block;
+    el.classList.toggle('selected', selected.has(key)); el.classList.toggle('active', String(state.activeBlockId) === key); el.classList.toggle('empty', !display.tr?.trim());
     el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
-    const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
-    const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('pointerdown', (event) => event.stopPropagation()); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(block, false); });
-    const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('pointerdown', (event) => event.stopPropagation()); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(block, displayMode === 'ocr' ? 'translation' : 'ocr'); });
-    const text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text.innerHTML = display.richHtml || plainToHtml(display.tr); styleRichElement(text, display, scale);
-    if (displayMode === 'ocr') wireOcrElement(text, block); else wireRichElement(text, block);
-    el.append(move, visibility, language, text); ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
-    el.addEventListener('pointerdown', (event) => {
-      const additive = event.ctrlKey || event.metaKey; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
-      if (!(dragTarget && !additive && editorSelectedKeys().includes(String(block.id)))) selectEditorBlock(block.id, true, additive);
-      startBoxDrag(event, block, el);
-    }); layer.appendChild(el);
+    const language = el.querySelector('.box-language'); language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید';
+    let text = el.querySelector('.editor-box-text');
+    if (!text || el.dataset.mode !== displayMode || text._block !== block) {
+      if (text) text.remove();
+      text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text._block = block;
+      text.setAttribute('aria-label', `ویرایش متن ${block.id} روی تصویر`);
+      text.addEventListener('click', (event) => { if (!event.ctrlKey && !event.metaKey) { event.stopPropagation(); openInlineEditor(el._block); } });
+      text.innerHTML = display.richHtml || plainToHtml(display.tr);
+      if (displayMode === 'ocr') wireOcrElement(text, block); else wireRichElement(text, block);
+      el.insertBefore(text, el.querySelector('.resize-handle')); el.dataset.mode = displayMode;
+    } else if (document.activeElement !== text) {
+      const html = display.richHtml || plainToHtml(display.tr);
+      if (text.innerHTML !== html) text.innerHTML = html;
+    }
+    if (displayMode !== 'ocr') {
+      const fields = state.richFields.get(key) || [];
+      if (!fields.includes(text)) state.richFields.set(key, [...fields, text]);
+    }
+    styleRichElement(text, display, scale, true);
   });
+  existing.forEach((el, key) => { if (!visible.has(key)) el.remove(); });
+  // Discard disconnected views rather than retaining one on every redraw.
+  for (const [key, fields] of state.richFields) {
+    const live = fields.filter((field) => field.isConnected);
+    if (live.length) state.richFields.set(key, live); else state.richFields.delete(key);
+  }
   updateEditorSelection();
 }
 function startBoxDrag(event, block, el) {
@@ -1168,31 +1427,42 @@ function buildBlockList() {
     const languageLabel = document.createElement('label'); languageLabel.className = 'block-language-label'; languageLabel.appendChild(document.createTextNode('نمایش همین متن:'));
     const language = document.createElement('select'); language.dataset.textMode = 'sidebar'; language.setAttribute('aria-label', `زبان نمایش متن ${block.id} روی تصویر`); [['translation', 'فارسی / ترجمه'], ['ocr', 'انگلیسی / OCR']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; language.appendChild(option); }); language.value = blockTextMode(block); languageLabel.appendChild(language); languageRow.appendChild(languageLabel);
     const source = document.createElement('textarea'); source.value = block.text || ''; source.dir = 'auto'; source.setAttribute('aria-label', 'متن OCR');
-    const translation = document.createElement('div'); translation.contentEditable = 'true'; translation.innerHTML = block.richHtml || plainToHtml(block.tr || ''); styleRichElement(translation, block); wireRichElement(translation, block);
+    const translation = document.createElement('div'); translation.className = 'translation-input'; translation.contentEditable = 'true'; translation.setAttribute('role', 'textbox'); translation.setAttribute('aria-multiline', 'true'); translation.setAttribute('aria-label', `ویرایش ترجمهٔ متن ${block.id}`); translation.innerHTML = block.richHtml || plainToHtml(block.tr || ''); styleRichElement(translation, block); wireRichElement(translation, block);
     const tools = document.createElement('div'); tools.className = 'block-tools';
-    const command = (label, name, title = label) => { const button = makeButton(label, () => runRichCommand(name), 'bt'); button.title = title; return button; };
+    const command = (label, name, title = label) => { const button = makeButton(label, () => runRichCommand(name, null, block), 'bt'); button.title = title; button.setAttribute('aria-label', title); button.addEventListener('mousedown', (event) => event.preventDefault()); return button; };
     tools.append(command('B', 'bold', 'پررنگ'), command('I', 'italic', 'ایتالیک'), command('U', 'underline', 'زیرخط'), command('S', 'strikeThrough', 'خط‌خورده'), command('•', 'insertUnorderedList', 'فهرست'), command('1.', 'insertOrderedList', 'فهرست عددی'), command('↶', 'undo', 'واگرد'), command('↷', 'redo', 'ازنو'), command('⌫', 'removeFormat', 'حذف قالب'));
-    const rtl = makeButton('راست‌به‌چپ', () => { block.dir = 'rtl'; translation.dir = 'rtl'; runRichCommand('justifyRight'); drawEditor(); scheduleSave(); }); const ltr = makeButton('چپ‌به‌راست', () => { block.dir = 'ltr'; translation.dir = 'ltr'; runRichCommand('justifyLeft'); drawEditor(); scheduleSave(); });
-    const align = document.createElement('select'); [['right', 'راست'], ['center', 'وسط'], ['left', 'چپ']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; align.appendChild(option); }); align.value = block.align || 'right';
-    const size = document.createElement('input'); size.type = 'number'; size.min = '8'; size.max = '160'; size.placeholder = 'اندازه'; size.value = block.size || ''; const color = document.createElement('input'); color.type = 'color'; color.value = block.color || '#ffffff';
-    tools.append(rtl, ltr, align, size, color);
+    const align = document.createElement('select'); align.dataset.align = 'text'; align.setAttribute('aria-label', 'تراز متن در تصویر'); [['right', 'راست‌چین'], ['center', 'وسط‌چین'], ['left', 'چپ‌چین'], ['justify', 'جاستیفای (دوطرفه)']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; align.appendChild(option); }); align.value = block.align || 'right';
+    const setDirection = (direction) => { block.dir = direction; block.align = direction === 'rtl' ? 'right' : 'left'; align.value = block.align; styleRichElement(translation, block); drawEditor(); scheduleSave(); };
+    const rtl = makeButton('راست‌به‌چپ', () => setDirection('rtl')); const ltr = makeButton('چپ‌به‌راست', () => setDirection('ltr'));
+    const size = document.createElement('input'); size.type = 'number'; size.min = '8'; size.max = '160'; size.placeholder = 'خودکار'; size.value = block.size || ''; size.dataset.fontSize = 'preview'; size.setAttribute('aria-label', 'اندازهٔ فونت روی تصویر'); size.title = 'اندازهٔ فونت روی تصویر؛ خالی یعنی خودکار';
+    const setSize = (value) => { block.size = value == null ? null : Math.max(8, Math.min(160, Math.round(value))); size.value = block.size || ''; drawEditor(); scheduleSave(); };
+    const adjustSize = (delta) => { const box = boxOf(block); setSize((Number(block.size) || overlaySize(overlayBlock(block, currentOverlayMode()), box.x1 - box.x0, box.y1 - box.y0)) + delta); };
+    const smaller = makeButton('A−', () => adjustSize(-1)); smaller.title = 'کوچک‌تر کردن متن روی تصویر'; smaller.setAttribute('aria-label', smaller.title);
+    const larger = makeButton('A+', () => adjustSize(1)); larger.title = 'بزرگ‌تر کردن متن روی تصویر'; larger.setAttribute('aria-label', larger.title);
+    const autoSize = makeButton('اندازهٔ خودکار', () => setSize(null));
+    const color = document.createElement('input'); color.type = 'color'; color.value = block.color || '#ffffff'; color.setAttribute('aria-label', 'رنگ متن روی تصویر');
+    const autoColor = makeButton('رنگ خودکار', () => { block.color = null; drawEditor(); scheduleSave(); });
+    tools.append(rtl, ltr, align, smaller, size, larger, autoSize, color, autoColor);
     const actions = document.createElement('div'); actions.className = 'block-tools';
     actions.append(makeButton('کپی متن اصلی', async () => { if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(source.value); else { source.focus(); source.select(); document.execCommand('copy'); } toast('کپی شد'); }), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block, source, translation)), makeButton('پاک‌کردن ترجمه', () => { block.tr = ''; block.richHtml = ''; translation.innerHTML = ''; drawEditor(); scheduleSave(); }));
     enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; drawEditor(); scheduleSave(); }); source.addEventListener('input', () => { block.text = source.value; if (blockOverlayMode(block) === 'ocr') drawEditor(); scheduleSave(); });
-    align.addEventListener('change', () => { block.align = align.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); size.addEventListener('change', () => { const value = Number(size.value); block.size = value >= 8 ? Math.min(160, value) : null; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); color.addEventListener('input', () => { block.color = color.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); });
+    align.addEventListener('change', () => { block.align = align.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); });
+    size.addEventListener('change', () => { const value = Number(size.value); setSize(size.value.trim() && Number.isFinite(value) ? value : null); });
+    color.addEventListener('input', () => { block.color = color.value; drawEditor(); scheduleSave(); });
     card.append(head, languageRow, source, translation, tools, actions); list.appendChild(card);
   });
   updateEditorSelection();
 }
-async function applyEditor() { const item = editorItem(); if (!item) return; await overlayPreviewTask; await saveProject(); await renderAndUpload(item); renderGrid(); }
+async function applyEditor() { const item = editorItem(); if (!item) return !inlineDraft; if (!applyInlineEditor()) return false; await overlayPreviewTask; await saveProject(); await renderAndUpload(item); renderGrid(); return true; }
 async function closeEditor() {
   if (editorCloseTask) return editorCloseTask;
   editorCloseTask = (async () => {
-    await applyEditor(); closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
+    if (!await applyEditor()) return;
+    closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
   })();
   try { await editorCloseTask; } finally { editorCloseTask = null; }
 }
-async function revertEditor() { const item = editorItem(); if (!item) return; item.blocks.forEach((block) => { block.enabled = false; }); await saveProject(); await renderAndUpload(item); drawEditor(); buildBlockList(); renderGrid(); toast('تصویر اصلی بازیابی شد؛ متن‌ها برای استفادهٔ بعدی باقی ماندند'); }
+async function revertEditor() { const item = editorItem(); if (!item || !closeInlineEditor()) return; item.blocks.forEach((block) => { block.enabled = false; }); await saveProject(); await renderAndUpload(item); drawEditor(); buildBlockList(); renderGrid(); toast('تصویر اصلی بازیابی شد؛ متن‌ها برای استفادهٔ بعدی باقی ماندند'); }
 
 // ---------- Crop with aspect ratio, moving, and eight handles ----------
 function cropItem() { return state.project.images.find((item) => item.id === state.cropId); }
@@ -1260,7 +1530,40 @@ function bindEvents() {
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
   [['editorAlignLeft', 'left'], ['editorAlignCenter', 'center'], ['editorAlignRight', 'right'], ['editorAlignTop', 'top'], ['editorAlignMiddle', 'middle'], ['editorAlignBottom', 'bottom']].forEach(([id, direction]) => $(id).addEventListener('click', () => alignSelectedBoxes(direction)));
-  $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); closeEditor().catch((error) => toast(error.message, true)); });
+  $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); if (inlineDraft) closeInlineEditor(); else closeEditor().catch((error) => toast(error.message, true)); });
+  $('inlineEditorApply').addEventListener('click', applyInlineEditor);
+  $('inlineEditorCancel').addEventListener('click', () => closeInlineEditor());
+  const inlineField = $('inlineEditorField');
+  ['keyup', 'mouseup', 'focus'].forEach((name) => inlineField.addEventListener(name, () => { rememberInlineRange(); syncInlineLineControls(); }));
+  inlineField.addEventListener('input', () => { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); });
+  inlineField.addEventListener('keydown', (event) => {
+    if (!(event.ctrlKey || event.metaKey)) return;
+    const key = event.key.toLowerCase();
+    if (key === 'z' || key === 'y') { event.preventDefault(); event.stopPropagation(); restoreInlineHistory(key === 'y' || event.shiftKey ? 1 : -1); }
+  });
+  inlineField.addEventListener('paste', (event) => { event.preventDefault(); document.execCommand('insertText', false, event.clipboardData.getData('text/plain')); });
+  $('inlineEditor').querySelectorAll('[data-inline-command]').forEach((button) => {
+    button.addEventListener('mousedown', (event) => event.preventDefault());
+    button.addEventListener('click', () => inlineCommand(button.dataset.inlineCommand));
+  });
+  $('inlineLineTools').querySelectorAll('[data-line-align]').forEach((button) => {
+    button.addEventListener('mousedown', (event) => event.preventDefault());
+    button.addEventListener('click', () => setInlineLineStyle('textAlign', button.dataset.lineAlign));
+  });
+  $('inlineLineDirection').addEventListener('change', () => setInlineLineStyle('direction', $('inlineLineDirection').value));
+  $('inlineLineSize').addEventListener('change', () => {
+    const value = $('inlineLineSize').value.trim(); const size = Number(value);
+    if (value && (!Number.isFinite(size) || size < 8 || size > 160)) { toast('اندازهٔ خط باید بین ۸ و ۱۶۰ باشد.', true); return; }
+    setInlineLineStyle('fontSize', value ? `${Math.round(size)}px` : '');
+  });
+  $('inlineLineColor').addEventListener('input', () => setInlineLineStyle('color', $('inlineLineColor').value));
+  $('inlineLineReset').addEventListener('mousedown', (event) => event.preventDefault());
+  $('inlineLineReset').addEventListener('click', resetInlineLineStyle);
+  $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; });
+  $('inlineEditorAlign').addEventListener('change', () => { inlineField.style.textAlign = $('inlineEditorAlign').value; });
+  $('inlineEditorColor').addEventListener('input', () => { if (inlineDraft) inlineDraft.color = $('inlineEditorColor').value; });
+  $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) inlineDraft.color = null; });
+  document.querySelector('.editor-preview').addEventListener('scroll', positionInlineEditor);
   $('editorZoomOut').addEventListener('click', () => setEditorZoom(state.editorScale / 1.25)); $('editorZoomIn').addEventListener('click', () => setEditorZoom(state.editorScale * 1.25)); $('editorZoomActual').addEventListener('click', () => setEditorZoom(1)); $('editorZoomFit').addEventListener('click', fitEditor);
   document.querySelector('.editor-preview').addEventListener('wheel', handleEditorWheel, { passive: false });
   $('editorStage').addEventListener('pointerdown', startEditorPan); $('editorStage').addEventListener('pointermove', moveEditorPan); $('editorStage').addEventListener('pointerup', stopEditorPan); $('editorStage').addEventListener('pointercancel', stopEditorPan); $('editorStage').addEventListener('lostpointercapture', stopEditorPan);
@@ -1270,6 +1573,7 @@ function bindEvents() {
   $('cropReset').addEventListener('click', () => { cropItem().crop = null; state.crop = null; closeDialog('cropDialog'); renderGrid(); scheduleSave(); }); $('cropApply').addEventListener('click', () => { readCropInputs(); cropItem().crop = state.crop; closeDialog('cropDialog'); renderGrid(); scheduleSave(); });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      if (inlineDraft) { closeInlineEditor(); event.preventDefault(); event.stopPropagation(); return; }
       if (closeTopDialog()) { event.preventDefault(); event.stopPropagation(); }
       else $('menu').classList.add('hidden');
       return;

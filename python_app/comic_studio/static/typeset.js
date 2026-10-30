@@ -79,10 +79,10 @@
   }
 
   // توکن‌های کلمه‌ای با استایل چسبیده؛ فاصله‌های چندتایی مثل wrapWords قدیمی به یک فاصله تقلیل می‌یابند
-  function inlineWords(text) {
+  function wordsFromRuns(runs) {
     const words = [];
     let pendingSpace = false, pendingLineBreak = false;
-    tokenizeInline(text).forEach((run) => {
+    runs.forEach((run) => {
       run.t.split(/(\s+)/).filter(Boolean).forEach((part) => {
         if (/^\s+$/.test(part)) {
           if (part.includes('\n')) { pendingLineBreak = true; pendingSpace = false; }
@@ -98,6 +98,8 @@
     });
     return words;
   }
+  function inlineWords(text) { return wordsFromRuns(tokenizeInline(text)); }
+  function plainWords(text) { return wordsFromRuns([{ t: String(text || '') }]); }
 
   // محتوای ویرایشگر غنی را به کلمه‌های امن با استایل محاسبه‌شده تبدیل می‌کند.
   // مارکرهای قدیمی هم از همان مسیر قدیمی پشتیبانی می‌شوند.
@@ -107,7 +109,7 @@
     root.innerHTML = html;
     const words = [];
     let pendingLineBreak = false, pendingSpace = false;
-    const walk = (node, inherited = {}) => {
+    const walk = (node, inherited = {}, list = null) => {
       if (node.nodeType === 3) {
         String(node.nodeValue || '').split(/(\s+)/).filter(Boolean).forEach((part) => {
           if (/^\s+$/.test(part)) {
@@ -122,11 +124,18 @@
       }
       if (node.nodeType !== 1) return;
       const tag = node.tagName.toLowerCase();
-      if (tag === 'br') { pendingLineBreak = true; pendingSpace = false; return; }
+      if (tag === 'br') {
+        // Consecutive explicit breaks represent real empty lines, not a single break.
+        if (pendingLineBreak) words.push({ t: '', ...inherited, spaceBefore: false, lineBreakBefore: true });
+        pendingLineBreak = true; pendingSpace = false; return;
+      }
       const isBlock = ['div', 'p', 'li'].includes(tag);
       if (isBlock && words.length) { pendingLineBreak = true; pendingSpace = false; }
       const style = node.style || {};
       const next = { ...inherited };
+      if (isBlock && ['left', 'center', 'right', 'justify'].includes(style.textAlign)) next.lineAlign = style.textAlign;
+      const direction = style.direction || node.getAttribute('dir');
+      if (isBlock && (direction === 'ltr' || direction === 'rtl')) next.lineDir = direction;
       if (tag === 'b' || tag === 'strong') next.bold = true;
       if (tag === 'i' || tag === 'em') next.italic = true;
       if (tag === 'u') next.underline = true;
@@ -141,7 +150,17 @@
       const size = Number.parseFloat(style.fontSize);
       if (Number.isFinite(size)) next.size = Math.max(8, Math.min(160, size));
       if (style.color) next.color = style.color;
-      [...node.childNodes].forEach((child) => walk(child, next));
+      if (isBlock && !String(node.textContent || '').trim() && !node.querySelector('img')) {
+        words.push({ t: '', ...next, spaceBefore: false, lineBreakBefore: words.length > 0 });
+        pendingLineBreak = true; pendingSpace = false; return;
+      }
+      if (tag === 'li' && list) {
+        const marker = list.ordered ? `${list.next++}.` : '•';
+        words.push({ t: marker, ...next, spaceBefore: false, lineBreakBefore: pendingLineBreak });
+        pendingLineBreak = false; pendingSpace = true;
+      }
+      const childList = tag === 'ol' || tag === 'ul' ? { ordered: tag === 'ol', next: 1 } : list;
+      [...node.childNodes].forEach((child) => walk(child, next, childList));
       if (isBlock && words.length) pendingLineBreak = true;
     };
     [...root.childNodes].forEach((node) => walk(node));
@@ -240,7 +259,7 @@
   function blockStyle(b) {
     return {
       dir: b.dir === 'ltr' ? 'ltr' : 'rtl',       // جهت متن: پیش‌فرض راست‌به‌چپ
-      align: b.align === 'center' || b.align === 'left' ? b.align : 'right', // چیدمان فیزیکی: پیش‌فرض راست‌چین
+      align: ['center', 'left', 'justify'].includes(b.align) ? b.align : 'right', // physical alignment; old projects default right
       bold: b.bold !== false,           // پیش‌فرض مثل گذشته: پررنگ
       italic: !!b.italic,
       underline: !!b.underline,
@@ -298,11 +317,12 @@
 
       const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
       const sourceText = b.tr.trim();
-      const inline = !b._plainText && (!!b.richHtml || hasInlineMarks(sourceText));
+      // Justified text uses word runs too, even for plain OCR; literal OCR markers remain literal.
+      const inline = st.align === 'justify' || (!b._plainText && (!!b.richHtml || hasInlineMarks(sourceText)));
       // سایز دستی کاربر جای حالت خودکار می‌نشیند؛ در غیر این صورت بهترین سایز برای جاشدن در کادر
       let f;
       if (inline) {
-        const inWords = b.richHtml ? richHtmlWords(b.richHtml) : inlineWords(sourceText);
+        const inWords = b._plainText ? plainWords(sourceText) : (b.richHtml ? richHtmlWords(b.richHtml) : inlineWords(sourceText));
         if (st.size) {
           const lines = wrapInlineAt(ctx, inWords, bw * 0.96, st, st.size);
           f = { size: st.size, lines, lh: st.size * 1.55, lineLh: lineHeightsFor(lines, st, st.size) };
@@ -326,7 +346,7 @@
       const totalH = inline ? f.lineLh.reduce((sum, v) => sum + v, 0) : f.lines.length * f.lh;
       let y = (layoutBox.y0 + layoutBox.y1) / 2 - totalH / 2 + (inline ? f.lineLh[0] : f.lh) / 2;
       // لنگر هر خط بر اساس چیدمان انتخابی، با حاشیهٔ کوچک از لبهٔ کادر
-      const anchorX = st.align === 'left' ? layoutBox.x0 + bw * 0.02
+      const anchorX = st.align === 'left' || (st.align === 'justify' && st.dir === 'ltr') ? layoutBox.x0 + bw * 0.02
         : st.align === 'center' ? (layoutBox.x0 + layoutBox.x1) / 2
         : layoutBox.x1 - bw * 0.02;
       if (inline) {
@@ -334,11 +354,22 @@
         ctx.textAlign = 'left';
         f.lines.forEach((line, li) => {
           const m = measureLine(ctx, line, st, f.size);
-          let x = st.align === 'left' ? anchorX
-            : st.align === 'center' ? anchorX - m.width / 2
-            : anchorX - m.width;
+          const lineAlign = line[0]?.lineAlign || st.align; const lineDir = line[0]?.lineDir || st.dir;
+          if ('direction' in ctx) ctx.direction = lineDir;
+          const lineAnchor = lineAlign === 'left' || (lineAlign === 'justify' && lineDir === 'ltr') ? layoutBox.x0 + bw * 0.02
+            : lineAlign === 'center' ? (layoutBox.x0 + layoutBox.x1) / 2 : layoutBox.x1 - bw * 0.02;
+          const leftAligned = lineAlign === 'left' || (lineAlign === 'justify' && lineDir === 'ltr');
+          const gapCount = line.slice(1).filter((word) => word.spaceBefore !== false).length;
+          // Do not stretch the last line of a paragraph, explicit line breaks, or single-word lines.
+          const nextLine = f.lines[li + 1];
+          const justify = lineAlign === 'justify' && nextLine && !nextLine[0].lineBreakBefore && gapCount > 0;
+          const extraGap = justify ? Math.max(0, bw * 0.96 - m.width) / gapCount : 0;
+          const paintedWidth = m.width + extraGap * gapCount;
+          let x = leftAligned ? lineAnchor
+            : lineAlign === 'center' ? lineAnchor - paintedWidth / 2
+            : lineAnchor - paintedWidth;
           // در پاراگراف RTL اولین کلمهٔ منطقی سمت راست است؛ پس ترتیب دیداری برعکس می‌شود
-          const visual = st.dir === 'rtl' ? line.map((_, i) => line.length - 1 - i) : line.map((_, i) => i);
+          const visual = lineDir === 'rtl' ? line.map((_, i) => line.length - 1 - i) : line.map((_, i) => i);
           visual.forEach((idx) => {
             const w = line[idx];
             const wSize = effWordSize(w, f.size, st);
@@ -363,9 +394,10 @@
               ctx.lineTo(x + m.widths[idx], y - wSize * 0.2);
               ctx.stroke();
             }
-            const gapAfter = st.dir === 'rtl'
-              ? (line[idx].spaceBefore === false ? 0 : m.spaceW)
-              : (line[idx + 1] && line[idx + 1].spaceBefore !== false ? m.spaceW : 0);
+            const hasGapAfter = lineDir === 'rtl'
+              ? (idx > 0 && line[idx].spaceBefore !== false)
+              : (idx + 1 < line.length && line[idx + 1].spaceBefore !== false);
+            const gapAfter = hasGapAfter ? m.spaceW + extraGap : 0;
             x += m.widths[idx] + gapAfter;
           });
           y += f.lineLh[li];

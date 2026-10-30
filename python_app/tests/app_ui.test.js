@@ -304,6 +304,7 @@ function check(name, condition) {
   check('OCR mode is synchronized between editor and export', $('overlayMode').value === 'ocr' && $('exportOverlayMode').value === 'ocr');
   await vm.runInContext('renderAndUpload(state.project.images[0])', context);
   check('OCR preview renders the recognized source text', renderedBlocks[0].tr === 'HELLO WORLD' && renderedBlocks[0]._plainText === true && renderedBlocks[0].richHtml === '');
+  check('OCR mode respects explicit justified alignment', vm.runInContext("overlayBlock({ text: 'one two', align: 'justify' }, 'ocr').align === 'justify'", context));
   check('OCR preview does not overwrite the saved translation', vm.runInContext("state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
   vm.runInContext("setOverlayMode('translation', false)", context);
   await vm.runInContext('renderAndUpload(state.project.images[0])', context);
@@ -315,6 +316,8 @@ function check(name, condition) {
   check('none mode is synchronized and restores the original image', $('overlayMode').value === 'none' && $('exportOverlayMode').value === 'none' && revertCalls === revertsBeforeNone + 1 && vm.runInContext('state.project.images[0].edited', context) === false);
   check('none mode preserves saved OCR and translation text', vm.runInContext("state.project.images[0].blocks[0].text === 'HELLO WORLD' && state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
   vm.runInContext("state.editorId = 'image-ui'; state.editorScale = 1; buildBlockList(); renderEditorBoxes()", context);
+  const sanitizedStyle = vm.runInContext(`sanitizeHtml('<span style="font-weight:700;color:rgb(12, 34, 56);text-decoration:underline line-through">text</span>')`, context);
+  check('saved rich formatting preserves numeric bold, RGB color and decorations safely', sanitizedStyle.includes('font-weight:bold') && sanitizedStyle.includes('color:#0c2238') && sanitizedStyle.includes('underline') && sanitizedStyle.includes('line-through'));
   check('none mode hides image text boxes but keeps sidebar editors', $('editorBoxes').children.length === 0 && $('blockList').querySelectorAll('.block-card').length === 2);
   vm.runInContext("setOverlayMode('ocr', false); buildBlockList(); renderEditorBoxes()", context);
   const ocrOverlay = $('editorBoxes').querySelector('.editor-box-text');
@@ -323,16 +326,20 @@ function check(name, condition) {
   const secondOcrOverlay = $('editorBoxes').querySelectorAll('.editor-box-text')[1];
   secondOcrOverlay.dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
   const ocrCard = $('blockList').querySelector('.block-card[data-id="2"]');
-  check('clicking OCR overlay selects and scrolls its sidebar editor', ocrCard.classList.contains('active') && secondOcrOverlay.parentElement.classList.contains('active') && !ocrOverlay.parentElement.classList.contains('active') && scrollIntoViewCalls.at(-1)?.element === ocrCard);
+  check('clicking OCR overlay selects its sidebar editor without moving the page', ocrCard.classList.contains('active') && secondOcrOverlay.parentElement.classList.contains('active') && !ocrOverlay.parentElement.classList.contains('active') && scrollIntoViewCalls.length === 0);
   ocrOverlay.innerText = 'CORRECTED OCR';
   ocrOverlay.dispatchEvent(new window.Event('input', { bubbles: true }));
   check('editing the OCR overlay updates source text without changing translation', vm.runInContext("state.project.images[0].blocks[0].text === 'CORRECTED OCR' && state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
   check('OCR overlay editing stays synchronized with the source field', $('blockList').querySelector('textarea').value === 'CORRECTED OCR');
   vm.runInContext("setOverlayMode('translation', false); renderEditorBoxes()", context);
   check('editor selector restores the translated overlay', $('editorBoxes').querySelector('.editor-box-text')?.textContent === 'سلام دنیا');
+  vm.runInContext('selectEditorBlock(1, false)', context);
   scrollIntoViewCalls.length = 0;
   $('editorBoxes').querySelectorAll('.editor-box-text')[1].dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
-  check('clicking translated overlay selects and scrolls the same sidebar editor', ocrCard.classList.contains('active') && $('blockList').querySelectorAll('.block-card.active').length === 1 && scrollIntoViewCalls.at(-1)?.element === ocrCard);
+  check('clicking translated overlay selects the same sidebar editor without moving the page', ocrCard.classList.contains('active') && $('blockList').querySelectorAll('.block-card.active').length === 1 && scrollIntoViewCalls.length === 0);
+  const scrollCount = scrollIntoViewCalls.length;
+  $('editorBoxes').querySelectorAll('.editor-box-text')[1].dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  check('clicking the active editor again does not repeatedly scroll the sidebar', scrollIntoViewCalls.length === scrollCount);
   const editorBox = $('editorBoxes').querySelector('.editor-box');
   const moveHandle = editorBox.querySelector('[data-move]');
   check('editor box has a visible button for dragging', moveHandle?.tagName === 'BUTTON' && moveHandle.title.includes('جابه‌جایی'));
@@ -485,6 +492,17 @@ function check(name, condition) {
   await vm.runInContext('renderAndUpload(state.project.images[0])', context);
   check('rendering preserves independent per-line visibility choices', renderedBlocks.length === 2 && renderedBlocks[0].enabled === false && renderedBlocks[1].enabled === true);
   lineToggles[0].click();
+  vm.runInContext(`window._beforeInline = JSON.parse(JSON.stringify(state.project.images[0].blocks[0]));
+    Object.assign(state.project.images[0].blocks[0], {tr: '', richHtml: '', textMode: 'translation', enabled: true}); renderEditorBoxes()`, context);
+  const emptyInlineBox = $('editorBoxes').querySelector('.editor-box[data-id="1"]');
+  check('an empty translation still exposes a clickable box', !!emptyInlineBox && emptyInlineBox.classList.contains('empty'));
+  emptyInlineBox.querySelector('.editor-box-text').click();
+  check('clicking an empty box opens the contextual editor', !$('inlineEditor').classList.contains('hidden'));
+  $('inlineEditorField').textContent = 'draft';
+  vm.runInContext("state.project.images[0].blocks[0].tr = 'external edit'", context);
+  $('inlineEditorApply').click();
+  check('a stale inline draft does not overwrite another edit and remains available to copy', vm.runInContext("state.project.images[0].blocks[0].tr === 'external edit'", context) && !$('inlineEditor').classList.contains('hidden') && $('inlineEditorField').textContent === 'draft');
+  vm.runInContext('closeInlineEditor(true); state.project.images[0].blocks[0] = window._beforeInline; buildBlockList(); drawEditor()', context);
   vm.runInContext(`window._priorBlocks = JSON.parse(JSON.stringify(state.project.images[0].blocks));
     state.project.images[0].blocks = [
       {id: 10, text: 'WHY ARE YOU', tr: '', richHtml: '', enabled: true, bg: 'white', x0: 10, y0: 10, x1: 140, y1: 30, lineH: 20},
