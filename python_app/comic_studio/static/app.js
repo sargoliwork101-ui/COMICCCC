@@ -24,6 +24,10 @@ let editorCloseTask = null;
 let jobBusy = false;
 let translationRunning = false;
 let overlayPreviewTask = Promise.resolve();
+let downloadUrl = null;
+let previewRevision = 0;
+const imageRenderTasks = new Map();
+const imagePreviewVersions = new Map();
 
 function browserTabId() {
   try {
@@ -117,6 +121,7 @@ function startSession() {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) heartbeat(); });
 }
 function closeSession() {
+  if (downloadUrl) { URL.revokeObjectURL(downloadUrl); downloadUrl = null; }
   const body = JSON.stringify({ client_id: TAB_ID });
   try {
     if (navigator.sendBeacon?.('/api/session/close', new Blob([body], { type: 'application/json' }))) return;
@@ -157,7 +162,11 @@ function sortedImages() { return G.byOrder(state.project?.images || []); }
 function selectedImages() { return sortedImages().filter((item) => item.selected); }
 function imageUrl(item, edited = false, cropped = false) {
   const query = new URLSearchParams();
-  if (edited) query.set('edited', 'true');
+  if (edited) {
+    query.set('edited', 'true');
+    const version = imagePreviewVersions.get(`${state.project?.id}:${item.id}`);
+    if (version) query.set('v', String(version));
+  }
   if (cropped) query.set('cropped', 'true');
   return `/api/projects/${state.project.id}/images/${item.id}/content${query.toString() ? `?${query}` : ''}`;
 }
@@ -477,7 +486,7 @@ async function refreshProjectList() {
   const projects = await api('/api/projects'); const select = $('projectSelect'); const current = state.project?.id; select.textContent = '';
   projects.forEach((project) => { const option = document.createElement('option'); option.value = project.id; option.textContent = `${project.name} (${project.images})`; option.selected = project.id === current; select.appendChild(option); });
 }
-async function loadProject(id) { const project = await api(`/api/projects/${id}`); adoptProject(project); await refreshProjectList(); }
+async function loadProject(id) { const project = await api(`/api/projects/${id}`); adoptProject(project); await refreshProjectList(); await renderImagesText(); }
 function collectOutputSettings() {
   if (!state.project) return; state.project.settings = state.project.settings || {};
   state.project.settings.output = { name: $('exportName').value, seamless: $('exportSeamless').checked, uniformSize: $('exportUniform').checked, twoPerPage: $('exportTwo').checked, imageFormat: $('exportFormat').value, folderName: $('exportFolder').value };
@@ -528,18 +537,34 @@ async function runTranslation() {
 
 // ---------- Typeset preview and export ----------
 async function ensureFont() { if (document.fonts?.load) { try { await document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'); } catch { /* fallback */ } } }
-async function renderAndUpload(item) {
-  const blocks = overlayBlocks(item); const active = blocks.some((block) => block.enabled && block.tr?.trim());
+async function renderAndUploadNow(item, projectId, mode) {
+  const blocks = overlayBlocks(item, mode); const active = blocks.some((block) => block.enabled && block.tr?.trim());
   if (!active) {
-    await api(`/api/projects/${state.project.id}/images/${item.id}/revert`, { method: 'POST' });
-    const current = state.project.images.find((entry) => entry.id === item.id); if (current) current.edited = false; return;
+    await api(`/api/projects/${projectId}/images/${item.id}/revert`, { method: 'POST' });
+    imagePreviewVersions.set(`${projectId}:${item.id}`, ++previewRevision);
+    const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null; if (current) current.edited = false; return;
   }
-  await ensureFont(); const response = await fetch(imageUrl(item)); if (!response.ok) throw new Error('تصویر اصلی باز نشد');
+  await ensureFont(); const response = await fetch(`/api/projects/${projectId}/images/${item.id}/content`); if (!response.ok) throw new Error('تصویر اصلی باز نشد');
   const bitmap = await createImageBitmap(await response.blob()); let canvas;
   try { canvas = Typeset.render(bitmap, blocks); } finally { bitmap.close(); }
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-  await api(`/api/projects/${state.project.id}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
-  canvas.width = canvas.height = 0; const current = state.project.images.find((entry) => entry.id === item.id); if (current) current.edited = true;
+  if (!blob) throw new Error(`ساخت PNG برای «${item.name}» ممکن نشد؛ تصویر خیلی بزرگ یا حافظهٔ مرورگر کم است`);
+  await api(`/api/projects/${projectId}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
+  imagePreviewVersions.set(`${projectId}:${item.id}`, ++previewRevision);
+  canvas.width = canvas.height = 0; const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null; if (current) current.edited = true;
+}
+function renderAndUpload(item) {
+  const projectId = state.project?.id;
+  if (!projectId) return Promise.resolve();
+  const key = `${projectId}:${item.id}`;
+  const mode = currentOverlayMode();
+  const previous = imageRenderTasks.get(key) || Promise.resolve();
+  // A slow older canvas/upload must finish before the newer request for this same image.
+  // Other images remain independent, and a failed earlier render does not block later attempts.
+  const task = previous.catch(() => {}).then(() => renderAndUploadNow(item, projectId, mode));
+  imageRenderTasks.set(key, task);
+  task.finally(() => { if (imageRenderTasks.get(key) === task) imageRenderTasks.delete(key); }).catch(() => {});
+  return task;
 }
 async function renderImagesText(ids = null) {
   const wanted = ids ? new Set(ids) : null;
@@ -554,10 +579,15 @@ async function exportResult(kind = null) {
   collectOutputSettings(); await saveProject(); const exportKind = $('exportKind').value;
   if (exportKind !== 'txt') { for (const item of selectedImages()) if (hasOverlayText(item) || item.edited) await renderAndUpload(item); renderGrid(); }
   const response = await fetch(`/api/projects/${state.project.id}/export`, jsonOptions('POST', { kind: exportKind, image_ids: selectedImages().map((item) => item.id), name: safeName($('exportName').value), seamless: $('exportSeamless').checked, uniform_size: $('exportUniform').checked, two_per_page: $('exportTwo').checked, image_format: $('exportFormat').value, folder_name: $('exportFolder').value }));
-  if (!response.ok) { const payload = await response.json(); throw new Error(payload.detail || 'خروجی ساخته نشد'); }
-  const blob = await response.blob(); const disposition = response.headers.get('content-disposition') || ''; const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
-  const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = match ? decodeURIComponent(match[1]) : `${safeName($('exportName').value)}.${exportKind === 'images' ? 'zip' : exportKind}`; document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(link.href), 5000);
-  closeDialog('exportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد');
+  if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `خروجی ساخته نشد (HTTP ${response.status})`); }
+  const blob = await response.blob();
+  if (!blob.size) throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
+  const disposition = response.headers.get('content-disposition') || ''; const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+  if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+  downloadUrl = URL.createObjectURL(blob);
+  const link = $('downloadLink'); link.href = downloadUrl; link.download = match ? decodeURIComponent(match[1]) : `${safeName($('exportName').value)}.${exportKind === 'images' ? 'zip' : exportKind}`;
+  link.textContent = `دانلود ${link.download}`; link.classList.remove('hidden'); link.click();
+  closeDialog('exportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
 }
 
 // ---------- Models and AI (explicit downloads remain user initiated) ----------
@@ -822,7 +852,7 @@ async function closeEditor() {
   })();
   try { await editorCloseTask; } finally { editorCloseTask = null; }
 }
-async function revertEditor() { const item = editorItem(); if (!item) return; item.blocks.forEach((block) => { block.enabled = false; }); await saveProject(); await api(`/api/projects/${state.project.id}/images/${item.id}/revert`, { method: 'POST' }); item.edited = false; drawEditor(); buildBlockList(); renderGrid(); toast('تصویر اصلی بازیابی شد؛ متن‌ها برای استفادهٔ بعدی باقی ماندند'); }
+async function revertEditor() { const item = editorItem(); if (!item) return; item.blocks.forEach((block) => { block.enabled = false; }); await saveProject(); await renderAndUpload(item); drawEditor(); buildBlockList(); renderGrid(); toast('تصویر اصلی بازیابی شد؛ متن‌ها برای استفادهٔ بعدی باقی ماندند'); }
 
 // ---------- Crop with aspect ratio, moving, and eight handles ----------
 function cropItem() { return state.project.images.find((item) => item.id === state.cropId); }
@@ -906,7 +936,7 @@ function bindEvents() {
 }
 async function init() {
   bindEvents(); startActivityFeed(); startSession();
-  try { const [projects, engines, ai] = await Promise.all([api('/api/projects'), api('/api/engines'), api('/api/ai-settings')]); state.engines = engines; state.ai = ai; const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' })); adoptProject(project); await refreshProjectList(); await loadAiSettings(); }
+  try { const [projects, engines, ai] = await Promise.all([api('/api/projects'), api('/api/engines'), api('/api/ai-settings')]); state.engines = engines; state.ai = ai; const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' })); adoptProject(project); await refreshProjectList(); await loadAiSettings(); await renderImagesText(); }
   catch (error) { toast(`راه‌اندازی ناموفق: ${error.message}`, true); }
 }
 init();

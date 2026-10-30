@@ -251,6 +251,7 @@ function check(name, condition) {
   check('mixed English and Persian choices reach the preview and export renderer', renderedBlocks[0].tr === 'CORRECTED OCR' && renderedBlocks[0]._plainText === true && renderedBlocks[1].tr === 'متن دوم' && !renderedBlocks[1]._plainText);
   await vm.runInContext("exportResult('images')", context);
   check('actual ZIP export preserves the same mixed per-line languages', exportRequests.at(-1)?.kind === 'images' && renderedBlocks[0].tr === 'CORRECTED OCR' && renderedBlocks[0]._plainText === true && renderedBlocks[1].tr === 'متن دوم' && !renderedBlocks[1]._plainText);
+  check('successful export leaves a persistent manual download link', !$('downloadLink').classList.contains('hidden') && $('downloadLink').href === 'blob:ui-test' && $('downloadLink').download === 'mixed.zip');
   $('editorBoxes').querySelector('.editor-box[data-id="1"] .box-language').click();
   check('on-image language button switches only that text back to Persian', $('editorBoxes').querySelector('.editor-box[data-id="1"] .editor-box-text')?.textContent === 'سلام دنیا' && $('editorBoxes').querySelector('.editor-box[data-id="2"] .editor-box-text')?.textContent === 'متن دوم' && languageSelectors[0].value === 'translation');
   $('overlayMode').value = 'ocr';
