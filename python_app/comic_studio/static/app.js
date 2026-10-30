@@ -704,6 +704,13 @@ function selectEditorBlock(blockId, scroll = true) {
   // Do not focus the sidebar field: the user can keep typing exactly where they clicked on the image.
   if (scroll && selectedCard) selectedCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
+function setBlockVisibility(block, visible) {
+  block.enabled = !!visible;
+  const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
+  card?.classList.toggle('disabled', !block.enabled);
+  const toggle = card?.querySelector('[data-visibility]'); if (toggle) toggle.checked = block.enabled;
+  renderEditorBoxes(); scheduleSave();
+}
 function renderEditorBoxes() {
   const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return; layer.textContent = '';
   const mode = currentOverlayMode();
@@ -712,6 +719,7 @@ function renderEditorBoxes() {
     if (!display.enabled || !display.tr?.trim()) return; const box = boxOf(display); const scale = state.editorScale; const el = document.createElement('div'); el.className = `editor-box${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; el.dataset.id = block.id;
     el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
     const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
+    const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(block, false); });
     const text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text.innerHTML = display.richHtml || plainToHtml(display.tr); styleRichElement(text, display, scale);
     if ((display.bg || 'auto') !== 'none') {
       let fill = display.bg === 'white' ? '#ffffff' : display.bg === 'black' ? '#000000' : null;
@@ -719,7 +727,7 @@ function renderEditorBoxes() {
       text.style.background = fill; text.style.textShadow = 'none';
     }
     if (mode === 'ocr') wireOcrElement(text, block); else wireRichElement(text, block);
-    el.append(move, text); ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
+    el.append(move, visibility, text); ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
     el.addEventListener('pointerdown', (event) => { selectEditorBlock(block.id); startBoxDrag(event, block, el); }); layer.appendChild(el);
   });
 }
@@ -763,7 +771,7 @@ function buildBlockList() {
   const item = editorItem(); const list = $('blockList'); list.textContent = ''; state.richFields = new Map(); if (!item.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; return; }
   item.blocks.forEach((block) => {
     const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', () => selectEditorBlock(block.id, false));
-    const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabledLabel.append(enabled, document.createTextNode(` متن ${block.id} · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
+    const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabled.dataset.visibility = 'sidebar'; enabled.setAttribute('aria-label', `نمایش متن ${block.id} روی تصویر`); enabledLabel.append(enabled, document.createTextNode(` نمایش متن ${block.id} روی تصویر · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
     const bg = document.createElement('select'); [['auto', 'پس‌زمینه خودکار'], ['white', 'سفید'], ['black', 'مشکی'], ['none', 'بدون پاک‌کردن']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; bg.appendChild(option); }); bg.value = block.bg || 'auto'; head.appendChild(bg);
     const source = document.createElement('textarea'); source.value = block.text || ''; source.dir = 'auto'; source.setAttribute('aria-label', 'متن OCR');
     const translation = document.createElement('div'); translation.contentEditable = 'true'; translation.innerHTML = block.richHtml || plainToHtml(block.tr || ''); styleRichElement(translation, block); wireRichElement(translation, block);
@@ -776,7 +784,7 @@ function buildBlockList() {
     tools.append(rtl, ltr, align, size, color);
     const actions = document.createElement('div'); actions.className = 'block-tools';
     actions.append(makeButton('کپی متن اصلی', async () => { if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(source.value); else { source.focus(); source.select(); document.execCommand('copy'); } toast('کپی شد'); }), makeButton('ترجمهٔ دوباره', async () => { const result = await api('/api/translate-text', jsonOptions('POST', { text: source.value, source_language: $('ocrLanguage').value, provider: state.ai?.provider || 'free' })); block.text = source.value; block.tr = result.text; block.richHtml = plainToHtml(result.text); translation.innerHTML = block.richHtml; drawEditor(); scheduleSave(); }), makeButton('پاک‌کردن ترجمه', () => { block.tr = ''; block.richHtml = ''; translation.innerHTML = ''; drawEditor(); scheduleSave(); }));
-    enabled.addEventListener('change', () => { block.enabled = enabled.checked; card.classList.toggle('disabled', !block.enabled); drawEditor(); scheduleSave(); }); bg.addEventListener('change', () => { block.bg = bg.value; scheduleSave(); }); source.addEventListener('input', () => { block.text = source.value; if (currentOverlayMode() === 'ocr') drawEditor(); scheduleSave(); });
+    enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); bg.addEventListener('change', () => { block.bg = bg.value; scheduleSave(); }); source.addEventListener('input', () => { block.text = source.value; if (currentOverlayMode() === 'ocr') drawEditor(); scheduleSave(); });
     align.addEventListener('change', () => { block.align = align.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); size.addEventListener('change', () => { const value = Number(size.value); block.size = value >= 8 ? Math.min(160, value) : null; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); color.addEventListener('input', () => { block.color = color.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); });
     card.append(head, source, translation, tools, actions); list.appendChild(card);
   });

@@ -234,6 +234,18 @@ function check(name, condition) {
   $('editorStage').dispatchEvent(pointer('pointermove', 70, 60));
   $('editorStage').dispatchEvent(pointer('pointerup', 70, 60));
   check('dragging empty canvas pans the zoomed image', editorPreview.scrollLeft === 40 && editorPreview.scrollTop === 60 && vm.runInContext('state.editorPan', context) === null);
+
+  check('each line has its own on-image and sidebar visibility controls', $('editorBoxes').querySelectorAll('.box-visibility').length === 2 && $('blockList').querySelectorAll('[data-visibility]').length === 2 && $('blockList').textContent.includes('نمایش متن 1 روی تصویر'));
+  const lineToggles = $('blockList').querySelectorAll('[data-visibility]');
+  lineToggles[1].click();
+  check('hiding one line leaves the other line visible', $('editorBoxes').children.length === 1 && $('editorBoxes').querySelector('.editor-box').dataset.id === '1' && vm.runInContext("state.project.images[0].blocks.map((block) => block.enabled).join(',')", context) === 'true,false');
+  $('editorBoxes').querySelector('.editor-box[data-id="1"] .box-visibility').click();
+  check('the on-image eye hides only its line without deleting text or changing global mode', $('editorBoxes').children.length === 0 && vm.runInContext("state.project.images[0].blocks[0].tr === 'سلام دنیا' && state.project.images[0].blocks[1].tr === 'متن دوم' && state.project.settings.overlayMode === 'translation'", context));
+  lineToggles[1].click();
+  check('sidebar can reshow one hidden line independently', $('editorBoxes').children.length === 1 && $('editorBoxes').querySelector('.editor-box').dataset.id === '2' && vm.runInContext("state.project.images[0].blocks.map((block) => block.enabled).join(',')", context) === 'false,true');
+  await vm.runInContext('renderAndUpload(state.project.images[0])', context);
+  check('rendering preserves independent per-line visibility choices', renderedBlocks.length === 2 && renderedBlocks[0].enabled === false && renderedBlocks[1].enabled === true);
+  lineToggles[0].click();
   vm.runInContext("state.editorId = null; appendLocalActivity('OLD JOB')", context);
   const clearsBeforeOcr = activityClears;
   await vm.runInContext('runOcr()', context);
