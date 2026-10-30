@@ -49,3 +49,24 @@ assert(eraseOperations.rects.some((rect) => JSON.stringify(rect) === JSON.string
 assert(eraseOperations.rects.some((rect) => JSON.stringify(rect) === JSON.stringify([200, 50, 150, 40])));
 assert(eraseOperations.texts.includes('ترجمه'));
 console.log('PASS: translated output erases the original OCR area even when the translation box moves');
+
+const paintOrder = [];
+const overlapCtx = new Proxy({
+  measureText: (text) => ({ width: String(text).length * 6 }),
+  fillRect: (...args) => paintOrder.push({ rect: args }),
+  fillText: (text) => paintOrder.push({ text }),
+}, {
+  get(target, property) {
+    if (property in target) return target[property];
+    return typeof property === 'string' ? () => {} : undefined;
+  },
+  set() { return true; },
+});
+Typeset.render({ width: 500, height: 220 }, [
+  { enabled: true, tr: 'FIRST', richHtml: '', x0: 10, y0: 10, x1: 50, y1: 30, tx0: 100, ty0: 100, tx1: 180, ty1: 140, lineH: 20, bg: 'white', dir: 'ltr', align: 'left' },
+  { enabled: true, tr: 'SECOND', richHtml: '', x0: 90, y0: 90, x1: 190, y1: 150, tx0: 300, ty0: 100, tx1: 400, ty1: 140, lineH: 20, bg: 'white', dir: 'ltr', align: 'left' },
+], { createCanvas: (width, height) => ({ width, height, getContext: () => overlapCtx }) });
+const firstTextIndex = paintOrder.findIndex((entry) => entry.text);
+const lastFillIndex = paintOrder.findLastIndex((entry) => entry.rect);
+assert(firstTextIndex >= 0 && lastFillIndex >= 0 && lastFillIndex < firstTextIndex, 'all erasures and target fills must finish before any text is painted');
+console.log('PASS: later erasures and box fills cannot cover previously rendered text');

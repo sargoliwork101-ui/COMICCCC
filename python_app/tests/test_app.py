@@ -42,11 +42,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.24"
+    assert health.json()["version"] == "3.25"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۲۴ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۲۵ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
 
 

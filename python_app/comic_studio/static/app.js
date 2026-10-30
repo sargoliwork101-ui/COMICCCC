@@ -21,6 +21,7 @@ let activityGeneration = 0;
 let sessionTimer = null;
 let localActivityId = 0;
 let editorCloseTask = null;
+let editorCanvasFrame = 0;
 let jobBusy = false;
 let translationRunning = false;
 let overlayPreviewTask = Promise.resolve();
@@ -692,9 +693,16 @@ function handleEditorWheel(event) {
   event.preventDefault(); const rect = document.querySelector('.editor-preview').getBoundingClientRect();
   setEditorZoom(state.editorScale * (event.deltaY < 0 ? 1.15 : 1 / 1.15), { x: event.clientX - rect.left, y: event.clientY - rect.top });
 }
-function drawEditor() {
-  const item = editorItem(); if (!item || !state.editorBitmap) return; const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d'); ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(state.editorBitmap, 0, 0); renderEditorBoxes();
+function drawEditorCanvas() {
+  const item = editorItem(); if (!item || !state.editorBitmap) return;
+  const rendered = Typeset.render(state.editorBitmap, overlayBlocks(item)); const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(rendered, 0, 0);
 }
+function scheduleEditorCanvasDraw() {
+  if (editorCanvasFrame) return;
+  editorCanvasFrame = requestAnimationFrame(() => { editorCanvasFrame = 0; drawEditorCanvas(); });
+}
+function drawEditor() { drawEditorCanvas(); renderEditorBoxes(); }
 function overlaySize(block, width, height) {
   try {
     const style = Typeset.blockStyle(block); const maxSize = Math.max(12, Math.min(64, Math.round((block.lineH || height) * 1.1)));
@@ -711,12 +719,12 @@ function overlaySize(block, width, height) {
   }
 }
 function styleRichElement(element, block, scale = 1) {
-  const box = boxOf(block); const style = Typeset.blockStyle(block); element.dir = style.dir; element.style.direction = style.dir; element.style.textAlign = style.align; element.style.fontSize = `${overlaySize(block, box.x1 - box.x0, box.y1 - box.y0) * scale}px`; element.style.fontWeight = style.bold ? '700' : '400'; element.style.fontStyle = style.italic ? 'italic' : 'normal'; element.style.color = style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff'); element.style.textDecoration = style.underline ? 'underline' : '';
+  const box = boxOf(block); const style = Typeset.blockStyle(block); element.dir = style.dir; element.style.direction = style.dir; element.style.textAlign = style.align; element.style.fontSize = `${overlaySize(block, box.x1 - box.x0, box.y1 - box.y0) * scale}px`; element.style.fontWeight = style.bold ? '700' : '400'; element.style.fontStyle = style.italic ? 'italic' : 'normal'; element.style.color = style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff'); element.style.caretColor = element.style.color; element.style.textDecoration = style.underline ? 'underline' : '';
 }
 function updateRichBlock(block, element) {
   block.tr = element.innerText.replace(/\u00a0/g, ' '); block.richHtml = sanitizeHtml(element.innerHTML);
   const fields = state.richFields.get(String(block.id)) || []; fields.forEach((other) => { if (other !== element) { other.innerHTML = block.richHtml || plainToHtml(block.tr); } });
-  scheduleSave();
+  scheduleEditorCanvasDraw(); scheduleSave();
 }
 function rememberRichSelection(element) {
   state.richEditor = element; const selection = window.getSelection(); if (selection?.rangeCount && element.contains(selection.anchorNode)) state.richRange = selection.getRangeAt(0).cloneRange();
@@ -732,7 +740,7 @@ function wireOcrElement(element, block) {
     block.text = (element.innerText ?? element.textContent ?? '').replace(/\u00a0/g, ' ');
     const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
     const source = card?.querySelector('textarea'); if (source) source.value = block.text;
-    scheduleSave();
+    scheduleEditorCanvasDraw(); scheduleSave();
   });
   element.addEventListener('paste', (event) => { event.preventDefault(); document.execCommand('insertText', false, event.clipboardData.getData('text/plain')); });
 }
@@ -840,11 +848,6 @@ function renderEditorBoxes() {
     const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(block, false); });
     const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(block, displayMode === 'ocr' ? 'translation' : 'ocr'); });
     const text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text.innerHTML = display.richHtml || plainToHtml(display.tr); styleRichElement(text, display, scale);
-    if ((display.bg || 'auto') !== 'none') {
-      let fill = display.bg === 'white' ? '#ffffff' : display.bg === 'black' ? '#000000' : null;
-      if (!fill) { const sample = Typeset.sampleBg($('editorCanvas').getContext('2d'), box, item.width, item.height); fill = `rgb(${sample.r},${sample.g},${sample.b})`; const luminance = .2126 * sample.r + .7152 * sample.g + .0722 * sample.b; if (!display.color) text.style.color = luminance > 150 ? '#0b0b0b' : '#fafafa'; }
-      text.style.background = fill; text.style.textShadow = 'none';
-    }
     if (displayMode === 'ocr') wireOcrElement(text, block); else wireRichElement(text, block);
     el.append(move, visibility, language, text); ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
     el.addEventListener('pointerdown', (event) => {
@@ -891,7 +894,7 @@ function startBoxDrag(event, block, el) {
       block.tx0 = x0; block.tx1 = x1; block.ty0 = y0; block.ty1 = y1;
     }
     el.style.left = `${block.tx0 * scale}px`; el.style.top = `${block.ty0 * scale}px`; el.style.width = `${(block.tx1 - block.tx0) * scale}px`; el.style.height = `${(block.ty1 - block.ty0) * scale}px`;
-    changed = true;
+    scheduleEditorCanvasDraw(); changed = true;
   };
   const stop = () => {
     if (finished) return; finished = true;

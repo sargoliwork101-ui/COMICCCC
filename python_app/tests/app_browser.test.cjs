@@ -59,6 +59,20 @@ async function previewDifference(page) {
   });
 }
 
+async function editorRenderDifference(page) {
+  return page.evaluate(() => {
+    const item = state.project.images[0];
+    const expected = Typeset.render(state.editorBitmap, overlayBlocks(item));
+    const actual = document.getElementById('editorCanvas');
+    if (actual.width !== expected.width || actual.height !== expected.height) return -1;
+    const a = actual.getContext('2d').getImageData(0, 0, actual.width, actual.height).data;
+    const e = expected.getContext('2d').getImageData(0, 0, expected.width, expected.height).data;
+    let different = 0;
+    for (let i = 0; i < a.length; i += 1) if (a[i] !== e[i]) different += 1;
+    return different;
+  });
+}
+
 function nextDownload(cdp, directory) {
   return new Promise((resolve, reject) => {
     let filename = null;
@@ -182,6 +196,8 @@ function nextDownload(cdp, directory) {
       const field = document.querySelector('#blockList .block-card[data-id="1"] [contenteditable="true"]');
       field.focus(); document.execCommand('selectAll'); document.execCommand('insertText', false, 'ویرایش تازه ۳٫۲۱');
     });
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await editorRenderDifference(page), 0, 'typing must refresh the same final renderer without rebuilding the editor field');
     await page.select('#blockList .block-card[data-id="2"] [data-text-mode]', 'ocr');
     await page.click('#editorSelectAll'); await page.click('#editorSelectNone');
     await page.click('#editorBoxes .editor-box[data-id="2"] .box-move');
@@ -195,6 +211,24 @@ function nextDownload(cdp, directory) {
       const blocks = state.project.images[0].blocks; const boxes = blocks.map((block) => boxOf(block));
       return state.selectedBlockIds.length === 3 && boxes.every((box) => box.x0 === boxes[0].x0 && box.x1 - box.x0 === 145 && box.y1 - box.y0 === 45) && blocks.map((block) => block.x0).join(',') === '5,165,10';
     }), true, 'real controls must match all three boxes to the first selection, align them, and preserve OCR coordinates');
+
+    await page.click('#editorSelectNone');
+    const overlapDrag = await page.evaluate(() => {
+      const blocks = state.project.images[0].blocks; const source = boxOf(blocks[1]); const target = boxOf(blocks[0]);
+      const rect = document.querySelector('#editorBoxes .editor-box[data-id="2"] .box-move').getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, dx: (target.x0 - source.x0) * state.editorScale, dy: (target.y0 - source.y0) * state.editorScale };
+    });
+    await page.mouse.move(overlapDrag.x, overlapDrag.y); await page.mouse.down();
+    await page.mouse.move(overlapDrag.x + overlapDrag.dx, overlapDrag.y + overlapDrag.dy, { steps: 12 }); await page.mouse.up();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => {
+      const blocks = state.project.images[0].blocks; const first = boxOf(blocks[0]); const second = boxOf(blocks[1]);
+      return Math.abs(first.x0 - second.x0) < 1 && Math.abs(first.y0 - second.y0) < 1;
+    }), true, 'the real drag must overlap the first two boxes for the preview regression');
+    assert.equal(await editorRenderDifference(page), 0, 'editor canvas must be pixel-identical to the final renderer even with overlapping boxes');
+    console.log('PASS: editor canvas matches final rendering with overlapping boxes');
+    await page.mouse.move(overlapDrag.x + overlapDrag.dx, overlapDrag.y + overlapDrag.dy); await page.mouse.down();
+    await page.mouse.move(overlapDrag.x, overlapDrag.y, { steps: 12 }); await page.mouse.up();
     await page.click('#blockList .block-card[data-id="2"] [data-visibility]');
     assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,false,true');
     await page.click('#blockList .block-card[data-id="2"] [data-visibility]');

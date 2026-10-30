@@ -257,6 +257,8 @@
     const cv = mk(W, H);
     const ctx = cv.getContext('2d');
     ctx.drawImage(bmp, 0, 0);
+    // Paint in three phases so no later erasure/background can hide an earlier translation.
+    const sourceFills = [], targetFills = [], textJobs = [];
 
     blocks.forEach((b) => {
       if (!b.enabled || !b.tr || !b.tr.trim()) return;
@@ -291,8 +293,8 @@
       }
       // رنگ دستی کاربر بر انتخاب خودکار اولویت دارد (زیرخط هم با همین رنگ رسم می‌شود)
       if (st.color) txt = st.color;
-      if (sourceFill) { ctx.fillStyle = sourceFill; ctx.fillRect(box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0); }
-      if (targetFill) { ctx.fillStyle = targetFill; ctx.fillRect(layoutBox.x0, layoutBox.y0, bw, bh); }
+      if (sourceFill) sourceFills.push([sourceFill, box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0]);
+      if (targetFill) targetFills.push([targetFill, layoutBox.x0, layoutBox.y0, bw, bh]);
 
       const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
       const sourceText = b.tr.trim();
@@ -313,6 +315,7 @@
       } else {
         f = fit(ctx, sourceText, bw * 0.96, bh * 0.96, maxSize, 8, fontPrefix);
       }
+      textJobs.push(() => {
       // Keep the actual output inside the editable translation box, even for manually enlarged text.
       ctx.save();
       ctx.beginPath();
@@ -389,7 +392,12 @@
         y += f.lh;
       });
       ctx.restore();
+      });
     });
+    const paintRect = ([style, x, y, width, height]) => { ctx.fillStyle = style; ctx.fillRect(x, y, width, height); };
+    sourceFills.forEach(paintRect);
+    targetFills.forEach(paintRect);
+    textJobs.forEach((paintText) => paintText());
     return cv;
   }
 
