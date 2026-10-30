@@ -43,12 +43,14 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.26"
+    assert health.json()["version"] == "3.27"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۲۶ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۲۷ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
+    assert "no-store" in client.get("/").headers.get("cache-control", "")
+    assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
 
 
 def test_ai_connection_endpoint_tests_the_selected_saved_profile(client, monkeypatch):
@@ -200,6 +202,124 @@ def test_ocr_endpoint_stores_geometry_without_network(client, monkeypatch):
     assert any(entry["kind"] == "success" and "OCR تمام شد" in entry["message"] for entry in feed["entries"])
 
 
+def test_translation_preview_shows_exact_free_payload_without_sending(client, monkeypatch):
+    from comic_studio.translation import TRANSLATION_SEPARATOR, TranslationService
+    project, item = make_project(client)
+    project["images"][0]["blocks"] = [
+        {"id": 1, "text": "Hello", "tr": "old one", "enabled": True},
+        {"id": 2, "text": "world", "tr": "old two", "enabled": True},
+        {"id": 3, "text": "disabled", "tr": "old three", "enabled": False},
+    ]
+    assert client.put(f"/api/projects/{project['id']}/state", json={ "state": project }).status_code == 200
+
+    def must_not_send(*args, **kwargs):
+        raise AssertionError("preview must not call the translator")
+
+    monkeypatch.setattr(TranslationService, "translate", must_not_send)
+    response = client.post(f"/api/projects/{project['id']}/translation-preview", json={
+        "image_ids": [item["id"]], "provider": "free", "source_language": "eng",
+    })
+    assert response.status_code == 200, response.text
+    preview = response.json()
+    assert preview["requestCount"] == 1
+    assert preview["requests"][0]["text"] == f"Hello\n{TRANSLATION_SEPARATOR}\nworld"
+    assert "Google Translate" in preview["providerLabel"] and "MyMemory" in preview["providerLabel"]
+    assert preview["base_url"] == "https://translate.googleapis.com/translate_a/single"
+    assert preview["fallback_url"] == "https://api.mymemory.translated.net/get"
+    assert preview["signature"]
+    stored = client.get(f"/api/projects/{project['id']}").json()
+    assert [block["tr"] for block in stored["images"][0]["blocks"]] == ["old one", "old two", "old three"]
+
+
+def test_translation_preview_expands_real_500_character_queries(client):
+    project, item = make_project(client)
+    source = "x" * 600
+    project["images"][0]["blocks"] = [{"id": 1, "text": source, "tr": "old", "enabled": True}]
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    response = client.post(f"/api/projects/{project['id']}/translation-preview", json={
+        "image_ids": [item["id"]], "provider": "free", "source_language": "eng",
+    })
+    assert response.status_code == 200, response.text
+    requests = response.json()["requests"]
+    assert [len(request["text"]) for request in requests] == [500, 100]
+    assert "".join(request["text"] for request in requests) == source
+
+
+def test_translation_confirmation_rejects_changed_project_text(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    project, item = make_project(client)
+    project["images"][0]["blocks"] = [{"id": 1, "text": "before", "tr": "old", "enabled": True}]
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    preview = client.post(f"/api/projects/{project['id']}/translation-preview", json={
+        "image_ids": [item["id"]], "provider": "free", "source_language": "eng",
+    }).json()
+    project["images"][0]["blocks"][0]["text"] = "after"
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    monkeypatch.setattr(TranslationService, "translate", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stale confirmation must not send")))
+    response = client.post(f"/api/projects/{project['id']}/translate", json={
+        "image_ids": [item["id"]], "provider": "free", "source_language": "eng",
+        "confirmation": preview["signature"],
+    })
+    assert response.status_code == 409
+    assert client.get(f"/api/projects/{project['id']}").json()["images"][0]["blocks"][0]["tr"] == "old"
+
+
+def test_ai_and_single_text_previews_show_full_user_message(client):
+    project, item = make_project(client)
+    project["images"][0]["blocks"] = [{"id": 1, "text": "Hello AI", "tr": "old", "enabled": True}]
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    response = client.post(f"/api/projects/{project['id']}/translation-preview", json={
+        "image_ids": [item["id"]], "provider": "openai", "source_language": "eng",
+    })
+    assert response.status_code == 200, response.text
+    preview = response.json()
+    assert preview["requests"][0]["text"] == "Source language: English\n\nHello AI"
+    assert "entire input" in preview["systemPrompt"]
+    assert preview["model"] == "gpt-4o-mini"
+
+    single = client.post("/api/translate-text/preview", json={
+        "text": "  Single line  ", "provider": "free", "source_language": "eng",
+    })
+    assert single.status_code == 200, single.text
+    assert single.json()["requests"][0]["text"] == "Single line"
+
+
+def test_single_text_confirmation_previews_then_sends_the_same_text(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    calls = []
+    monkeypatch.setattr(TranslationService, "_free", lambda self, text, source_language: calls.append(text) or "پاسخ تکی")
+    preview = client.post("/api/translate-text/preview", json={"text": "Exact single text", "provider": "free", "source_language": "eng"})
+    assert preview.status_code == 200, preview.text
+    assert calls == []
+    response = client.post("/api/translate-text", json={
+        "text": "Exact single text", "provider": "free", "source_language": "eng",
+        "confirmation": preview.json()["signature"],
+    })
+    assert response.status_code == 200, response.text
+    assert response.json() == {"text": "پاسخ تکی"}
+    assert calls == ["Exact single text"]
+
+
+def test_ai_destination_change_invalidates_preview_before_sending(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    project, item = make_project(client)
+    project["images"][0]["blocks"] = [{"id": 1, "text": "Hello AI", "tr": "old", "enabled": True}]
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    preview = client.post(f"/api/projects/{project['id']}/translation-preview", json={
+        "image_ids": [item["id"]], "provider": "openai", "source_language": "eng",
+    }).json()
+    changed = client.put("/api/ai-settings", json={"provider": "openai", "providers": {"openai": {
+        "model": "different-model", "base_url": "https://example.com/v2",
+    }}})
+    assert changed.status_code == 200, changed.text
+    monkeypatch.setattr(TranslationService, "translate", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stale AI destination must not send")))
+    response = client.post(f"/api/projects/{project['id']}/translate", json={
+        "image_ids": [item["id"]], "provider": "openai", "source_language": "eng",
+        "confirmation": preview["signature"],
+    })
+    assert response.status_code == 409
+
+
 def test_free_translation_combines_ocr_blocks_when_payload_fits_500(client, monkeypatch):
     from comic_studio.translation import TRANSLATION_SEPARATOR, TranslationService
     project, item = make_project(client)
@@ -217,7 +337,8 @@ def test_free_translation_combines_ocr_blocks_when_payload_fits_500(client, monk
         return f"سلام&#10در دو خط\n{TRANSLATION_SEPARATOR}\nدنیا\n{TRANSLATION_SEPARATOR}\nحباب دیگر"
 
     monkeypatch.setattr(TranslationService, "_free", fake_free)
-    response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"})
+    preview = client.post(f"/api/projects/{project['id']}/translation-preview", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"}).json()
+    response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng", "confirmation": preview["signature"]})
     assert response.status_code == 200, response.text
     assert calls == [f"Hello\n{TRANSLATION_SEPARATOR}\nworld\n{TRANSLATION_SEPARATOR}\nAnother bubble"]
     blocks = response.json()["images"][0]["blocks"]
@@ -289,7 +410,10 @@ def test_ai_translation_uses_one_request_across_images_and_reports_stages(client
 
     monkeypatch.setattr(TranslationService, "translate", fake_translate)
     ids = [image["id"] for image in project["images"]]
-    response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": ids, "provider": "openai", "source_language": "eng"})
+    preview = client.post(f"/api/projects/{project['id']}/translation-preview", json={"image_ids": ids, "provider": "openai", "source_language": "eng"})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["requests"][0]["text"].startswith("Source language: English\n\nPage 0 first")
+    response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": ids, "provider": "openai", "source_language": "eng", "confirmation": preview.json()["signature"]})
     assert response.status_code == 200, response.text
     assert calls == [f"Page 0 first\n{TRANSLATION_SEPARATOR}\nPage 0 distant\n{TRANSLATION_SEPARATOR}\nPage 1 first\n{TRANSLATION_SEPARATOR}\nPage 1 distant"]
     assert [[block["tr"] for block in image["blocks"]] for image in response.json()["images"]] == [["یک", "دو"], ["سه", "چهار"]]

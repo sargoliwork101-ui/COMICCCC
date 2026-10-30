@@ -33,6 +33,9 @@ let renderedUploads = 0;
 const exportRequests = [];
 const aiSaveRequests = [];
 const aiTestRequests = [];
+const translationPreviewCalls = [];
+const translationCalls = [];
+const singleTranslationCalls = [];
 const aiProviderDefaults = {
   gemini: ['gemini-2.5-flash', 'https://generativelanguage.googleapis.com/v1beta'],
   openai: ['gpt-4o-mini', 'https://api.openai.com/v1'],
@@ -50,6 +53,21 @@ const jsonResponse = (payload, status = 200) => ({
   headers: { get: () => 'application/json' },
   json: async () => payload,
 });
+const makeTranslationPreview = (body, single = false) => {
+  const provider = body.provider || 'free';
+  const liveProject = vm.runInContext('state.project', context);
+  const ids = single ? [] : (body.image_ids || liveProject.images.map((image) => image.id));
+  const texts = single ? [body.text] : liveProject.images.filter((image) => ids.includes(image.id)).flatMap((image) => image.blocks).filter((block) => block.enabled !== false && String(block.text || '').trim()).map((block) => block.text.trim());
+  const collective = texts.join('\n␞\n');
+  const requests = provider === 'free' && collective.length <= 500 ? [collective] : provider === 'free' ? texts : [`Source language: English\n\n${collective}`];
+  return {
+    provider, providerLabel: provider === 'free' ? 'Google Translate (fallback: MyMemory)' : 'Selected AI', model: provider === 'free' ? '' : 'Mock model', base_url: provider === 'free' ? '' : 'https://ai.test/v1',
+    blockCount: texts.length, requestCount: requests.length,
+    requests: requests.map((text, index) => ({ index: index + 1, characters: text.length, text })),
+    systemPrompt: provider === 'free' ? '' : 'entire input', signature: 'ui-confirmation-signature',
+    note: 'فقط بعد از تأیید شما ارسال می‌شود.',
+  };
+};
 window.fetch = async (url, options = {}) => {
   const parsed = new URL(url, 'http://127.0.0.1:8765');
   const pathname = parsed.pathname;
@@ -87,7 +105,23 @@ window.fetch = async (url, options = {}) => {
   if (pathname === '/api/session/heartbeat') return jsonResponse({ ok: true, active: 1 });
   if (pathname === `/api/projects/${project.id}/state`) return jsonResponse(JSON.parse(options.body).state);
   if (pathname === `/api/projects/${project.id}/ocr`) return jsonResponse(overlayProject('NEW OCR', ''));
-  if (pathname === `/api/projects/${project.id}/translate`) { if (translationGate) await translationGate; return jsonResponse(overlayProject('NEW OCR', 'ترجمهٔ تازه')); }
+  if (pathname === `/api/projects/${project.id}/translation-preview`) {
+    const request = JSON.parse(options.body); translationPreviewCalls.push(request);
+    return jsonResponse(makeTranslationPreview(request));
+  }
+  if (pathname === `/api/projects/${project.id}/translate`) {
+    translationCalls.push(JSON.parse(options.body));
+    if (translationGate) await translationGate;
+    return jsonResponse(overlayProject('NEW OCR', 'ترجمهٔ تازه'));
+  }
+  if (pathname === '/api/translate-text/preview') {
+    const request = JSON.parse(options.body); translationPreviewCalls.push(request);
+    return jsonResponse(makeTranslationPreview(request, true));
+  }
+  if (pathname === '/api/translate-text') {
+    singleTranslationCalls.push(JSON.parse(options.body));
+    return jsonResponse({ text: 'ترجمهٔ تکی تازه' });
+  }
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/rendered`) { renderedUploads += 1; return jsonResponse({ ok: true }); }
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/revert`) { revertCalls += 1; return jsonResponse({ ok: true }); }
   if (pathname === `/api/projects/${project.id}/export` && options.method === 'POST') {
@@ -109,7 +143,7 @@ window.URL.createObjectURL = () => 'blob:ui-test';
 window.URL.revokeObjectURL = () => {};
 window.HTMLAnchorElement.prototype.click = function () {};
 window.createImageBitmap = async () => ({ width: 320, height: 200, close() {} });
-window.HTMLCanvasElement.prototype.getContext = () => ({});
+window.HTMLCanvasElement.prototype.getContext = () => ({ clearRect() {}, drawImage() {} });
 window.HTMLElement.prototype.setPointerCapture = function (pointerId) { this._capturedPointerId = pointerId; };
 window.HTMLElement.prototype.hasPointerCapture = function (pointerId) { return this._capturedPointerId === pointerId; };
 window.HTMLElement.prototype.releasePointerCapture = function (pointerId) { if (this._capturedPointerId === pointerId) delete this._capturedPointerId; };
@@ -400,9 +434,15 @@ function check(name, condition) {
   check('starting a new job clears the previous job log', activityClears === clearsBeforeOcr + 1 && !$('activityLog').textContent.includes('OLD JOB') && $('activityLog').textContent.includes('OCR محلی'));
   check('finishing OCR automatically selects OCR display mode', $('overlayMode').value === 'ocr' && $('exportOverlayMode').value === 'ocr');
   check('finishing OCR places the new recognized text on the image', renderedBlocks[0].tr === 'NEW OCR' && renderedBlocks[0]._plainText === true);
+  await vm.runInContext('runTranslation()', context);
+  check('translation first shows every exact outgoing request without sending', $('translationPreviewDialog').open && translationCalls.length === 0 && $('translationPreviewRequests').textContent.includes('NEW OCR') && $('translationPreviewDestination').textContent.includes('Google Translate'));
+  $('translationPreviewCancel').click();
+  check('cancelling translation preview sends nothing', !$('translationPreviewDialog').open && translationCalls.length === 0);
   let releaseTranslation;
   translationGate = new Promise((resolve) => { releaseTranslation = resolve; });
-  const translationTask = vm.runInContext('runTranslation()', context);
+  await vm.runInContext('runTranslation()', context);
+  check('a fresh translation preview is required after cancellation', $('translationPreviewDialog').open && translationPreviewCalls.length === 2 && translationCalls.length === 0);
+  $('translationPreviewConfirm').click();
   await sleep(20);
   check('translation shows a live progress dialog and activity while pending', $('translationDialog').open && $('translationStatus').textContent.includes('ترجمه') && $('translationActivityLog').textContent.includes('ترجمه') && $('translationProgress').style.width !== '0%');
   activityFeed = { entries: [{ id: 500, message: 'ترجمهٔ مشترک تصویر 1 از 2 در حال انجام است', kind: 'info', progress: 0.5, time: new Date().toISOString() }], next: 500 };
@@ -410,17 +450,27 @@ function check(name, condition) {
   check('server translation progress updates the visible dialog percentage', $('translationStatus').textContent.includes('تصویر 1 از 2') && $('translationProgress').style.width === '50%' && $('translationActivityLog').textContent.includes('تصویر 1 از 2'));
   activityFeed = { entries: [], next: 500 };
   translationGate = null; releaseTranslation();
-  await translationTask;
+  await vm.runInContext('translationPreviewTask', context);
+  check('confirmed execution carries the exact preview signature', translationCalls.length === 1 && translationCalls[0].confirmation === 'ui-confirmation-signature');
   check('translation progress dialog closes after success', !$('translationDialog').open);
   check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
   check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
+  await vm.runInContext('openEditor(state.project.images[0].id)', context);
+  const retranslateButton = [...$('blockList').querySelectorAll('button')].find((button) => button.textContent === 'ترجمهٔ دوباره');
+  retranslateButton.click(); await sleep(20);
+  check('per-block retranslation also previews before any direct send', $('translationPreviewDialog').open && $('translationPreviewRequests').textContent.includes('NEW OCR') && singleTranslationCalls.length === 0);
+  $('translationPreviewConfirm').click();
+  await vm.runInContext('translationPreviewTask', context);
+  check('per-block confirmation sends the same previewed text and signature', singleTranslationCalls.length === 1 && singleTranslationCalls[0].text === 'NEW OCR' && singleTranslationCalls[0].confirmation === 'ui-confirmation-signature');
+  check('confirmed per-block translation returns to its own editable box', retranslateButton.closest('.block-card').textContent.includes('ترجمهٔ تکی تازه'));
+  await vm.runInContext('closeEditor()', context);
 
   const revertsBeforeSelector = revertCalls;
   $('exportOverlayMode').value = 'none';
   $('exportOverlayMode').dispatchEvent(new window.Event('change', { bubbles: true }));
   await sleep(500);
   check('the real export selector immediately restores original thumbnails in no-text mode', revertCalls === revertsBeforeSelector + 1 && vm.runInContext('state.project.images[0].edited', context) === false && !$('grid').querySelector('img').src.includes('edited=true'));
-  check('the real no-text selector keeps saved OCR and translation', vm.runInContext("state.project.images[0].blocks[0].text === 'NEW OCR' && state.project.images[0].blocks[0].tr === 'ترجمهٔ تازه'", context));
+  check('the real no-text selector keeps saved OCR and translation', vm.runInContext("state.project.images[0].blocks[0].text === 'NEW OCR' && state.project.images[0].blocks[0].tr === 'ترجمهٔ تکی تازه'", context));
   $('overlayMode').value = 'ocr';
   $('overlayMode').dispatchEvent(new window.Event('change', { bubbles: true }));
   await sleep(500);

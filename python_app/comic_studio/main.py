@@ -22,8 +22,11 @@ from .schemas import (
 from .sessions import SessionManager
 from .store import ProjectStore
 from .translation import (
-    MAX_FREE_QUERY_CHARS, TranslationError, TranslationService,
-    combine_translation_texts, distribute_translation,
+    TranslationError, TranslationService, combine_translation_texts,
+    distribute_translation,
+)
+from .translation_plan import (
+    build_project_plan, build_single_plan, plan_preview, plan_signature,
 )
 
 
@@ -37,6 +40,13 @@ def create_app() -> FastAPI:
     app.state.activity = activity
     app.state.sessions = sessions
     activity.add("برنامه آماده است")
+
+    @app.middleware("http")
+    async def prevent_stale_interface(request: Request, call_next: Any) -> Response:
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.endswith((".html", ".js", ".css")):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     async def run_reported(function: Any, *args: Any, pulse_label: str | None = None) -> Any:
         stop_pulse = threading.Event()
@@ -274,21 +284,29 @@ def create_app() -> FastAPI:
         activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
         return state
 
+    @app.post("/api/projects/{project_id}/translation-preview")
+    def translation_preview(project_id: str, values: TranslateRequest) -> dict[str, Any]:
+        state = project(project_id)
+        ids = image_ids(state, values.image_ids)
+        plan = build_project_plan(state, ids, values.provider)
+        return plan_preview(plan, values.provider, values.source_language, translations.public_settings())
+
     @app.post("/api/projects/{project_id}/translate")
     async def run_translation(project_id: str, values: TranslateRequest) -> dict[str, Any]:
         state = project(project_id)
         ids = image_ids(state, values.image_ids)
-        items = [item for item in sorted(state["images"], key=lambda entry: entry.get("order", 0)) if item["id"] in ids]
-        blocks = [
-            block for item in items for block in item.get("blocks", [])
-            if block.get("enabled", True) and str(block.get("text", "")).strip()
-        ]
+        plan = build_project_plan(state, ids, values.provider)
+        items, blocks = plan["items"], plan["blocks"]
         if not blocks:
             activity.add("در تصاویر انتخاب‌شده متن فعالی برای ترجمه نیست", "warning")
             return state
-        source_texts = [str(block.get("text", "")).strip() for block in blocks]
+        if values.confirmation:
+            expected = plan_signature(plan, values.provider, values.source_language, translations.public_settings())
+            if values.confirmation != expected:
+                raise HTTPException(409, "متن یا تنظیمات بعد از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی و دوباره تأیید کنید.")
+        source_texts = plan["source_texts"]
+        combined_free = plan["combined_free"]
         combined_source = combine_translation_texts(source_texts)
-        combined_free = values.provider == "free" and len(combined_source) <= MAX_FREE_QUERY_CHARS
         if combined_free:
             activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همهٔ متن OCR در یک query جمعی {len(combined_source)} نویسه‌ای ارسال می‌شود")
         elif values.provider == "free":
@@ -296,6 +314,7 @@ def create_app() -> FastAPI:
         else:
             activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همه با جداکنندهٔ داخلی در یک درخواست می‌روند")
         try:
+            translated_blocks = [""] * len(blocks)
             if combined_free:
                 translated = await run_reported(
                     translations.translate, combined_source, values.source_language, values.provider,
@@ -304,17 +323,16 @@ def create_app() -> FastAPI:
                 activity.add("پاسخ مشترک free رسید؛ در حال تقسیم دقیق بین کادرهای OCR", progress=0.5)
                 translated_blocks = distribute_translation(source_texts, translated)
             elif values.provider == "free":
-                translated_blocks = []
-                for index, source_text in enumerate(source_texts, start=1):
+                for index, call in enumerate(plan["calls"], start=1):
                     activity.add(f"ترجمهٔ رایگان متن {index} از {len(blocks)}", progress=(index - 1) / len(blocks))
                     translated = await run_reported(
-                        translations.translate, source_text, values.source_language, values.provider,
+                        translations.translate, call["text"], values.source_language, values.provider,
                         pulse_label=f"ترجمهٔ رایگان متن {index} از {len(blocks)}",
                     )
                     translated = translated.strip()
                     if not translated:
                         raise TranslationError(f"مترجم برای متن {index} پاسخ خالی برگرداند؛ ترجمه‌ها در کادرها قرار نگرفتند.")
-                    translated_blocks.append(translated)
+                    translated_blocks[call["indices"][0]] = translated
                     activity.add(f"متن {index} از {len(blocks)} ترجمه و آمادهٔ نشستن در کادر خودش شد", progress=index / len(blocks))
             else:
                 translated = await run_reported(
@@ -338,8 +356,18 @@ def create_app() -> FastAPI:
             activity.add(f"همهٔ {len(blocks)} متن با هم و در یک درخواست AI ترجمه و در کادرها قرار گرفتند", "success", 1.0)
         return state
 
+    @app.post("/api/translate-text/preview")
+    def translate_text_preview(values: TextTranslateRequest) -> dict[str, Any]:
+        plan = build_single_plan(values.text, values.provider)
+        return plan_preview(plan, values.provider, values.source_language, translations.public_settings())
+
     @app.post("/api/translate-text")
     async def translate_text(values: TextTranslateRequest) -> dict[str, str]:
+        if values.confirmation:
+            plan = build_single_plan(values.text, values.provider)
+            expected = plan_signature(plan, values.provider, values.source_language, translations.public_settings())
+            if values.confirmation != expected:
+                raise HTTPException(409, "متن یا تنظیمات بعد از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی و دوباره تأیید کنید.")
         activity.add("ترجمهٔ دوبارهٔ یک خط آغاز شد")
         try:
             translated = await run_reported(

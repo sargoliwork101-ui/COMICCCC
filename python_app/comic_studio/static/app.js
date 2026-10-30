@@ -24,6 +24,8 @@ let editorCloseTask = null;
 let editorCanvasFrame = 0;
 let jobBusy = false;
 let translationRunning = false;
+let translationPreviewAction = null;
+let translationPreviewTask = Promise.resolve();
 let overlayPreviewTask = Promise.resolve();
 let downloadUrl = null;
 let previewRevision = 0;
@@ -520,12 +522,50 @@ async function runOcr() {
     adoptProject(result); setOverlayMode('ocr', false); await saveProject(); await renderImagesText(); closeDialog('ocrDialog'); toast('متن OCR روی تصویر آمد؛ برای بررسی و ویرایش، دکمهٔ ✎ را بزنید');
   });
 }
+function showTranslationRequestPreview(preview, action) {
+  translationPreviewAction = action;
+  $('translationPreviewSummary').textContent = `${preview.blockCount} متن · ${preview.requestCount} درخواست واقعی برای بررسی`;
+  const destination = [preview.providerLabel, preview.model && `مدل: ${preview.model}`, preview.base_url && `نشانی: ${preview.base_url}`, preview.fallback_url && `فقط هنگام خطا: ${preview.fallback_url}`].filter(Boolean).join(' · ');
+  $('translationPreviewDestination').textContent = destination;
+  $('translationPreviewNote').textContent = preview.note || '';
+  const container = $('translationPreviewRequests'); container.textContent = '';
+  (preview.requests || []).forEach((request, index) => {
+    const details = document.createElement('details'); details.className = 'payload-request'; details.open = (preview.requests.length === 1 || index === 0);
+    const summary = document.createElement('summary'); summary.textContent = `درخواست ${request.index} · ${request.characters} نویسه`;
+    const text = document.createElement('pre'); text.dir = 'auto'; text.textContent = request.text;
+    details.append(summary, text); container.appendChild(details);
+  });
+  const hasSystemPrompt = !!preview.systemPrompt;
+  $('translationPreviewSystemWrap').classList.toggle('hidden', !hasSystemPrompt);
+  $('translationPreviewSystem').textContent = preview.systemPrompt || '';
+  $('translationPreviewConfirm').disabled = !preview.requests?.length;
+  showDialog('translationPreviewDialog');
+}
+function cancelTranslationRequestPreview() { translationPreviewAction = null; closeDialog('translationPreviewDialog'); }
+async function confirmTranslationRequestPreview() {
+  const action = translationPreviewAction;
+  if (!action) return;
+  translationPreviewAction = null; $('translationPreviewConfirm').disabled = true;
+  closeDialog('translationPreviewDialog');
+  try { translationPreviewTask = action(); await translationPreviewTask; }
+  catch (error) { toast(error.message || 'ترجمه ناموفق بود', true); }
+  finally { $('translationPreviewConfirm').disabled = false; }
+}
 async function runTranslation() {
   const ids = selectedImages().map((item) => item.id); if (!ids.length) { toast('حداقل یک تصویر را انتخاب کنید', true); return; }
+  if (translationRunning) return;
+  try {
+    await saveProject();
+    const provider = state.ai?.provider || 'free';
+    const preview = await api(`/api/projects/${state.project.id}/translation-preview`, jsonOptions('POST', { image_ids: ids, provider, source_language: $('ocrLanguage').value }));
+    showTranslationRequestPreview(preview, () => performTranslation(ids, provider, preview.signature));
+  } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
+}
+async function performTranslation(ids, provider, confirmation) {
   translationRunning = true; showDialog('translationDialog'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; $('translationProgress').style.width = '0';
   try {
     await runJob('در حال ترجمهٔ متن‌ها…', async () => {
-      await saveProject(); const result = await api(`/api/projects/${state.project.id}/translate`, jsonOptions('POST', { image_ids: ids, provider: state.ai?.provider || 'free', source_language: $('ocrLanguage').value }));
+      const result = await api(`/api/projects/${state.project.id}/translate`, jsonOptions('POST', { image_ids: ids, provider, source_language: $('ocrLanguage').value, confirmation }));
       adoptProject(result); setOverlayMode('translation', false); await saveProject(); await renderImagesText();
     });
     closeDialog('translationDialog'); toast('ترجمه روی تصویر آمد و پیش‌نمایش آماده شد');
@@ -1040,6 +1080,19 @@ function startBoxDrag(event, block, el) {
   };
   el.addEventListener('pointermove', move); el.addEventListener('pointerup', stop); el.addEventListener('pointercancel', stop); el.addEventListener('lostpointercapture', stop);
 }
+async function retranslateBlock(block, source, translation) {
+  const text = source.value;
+  const provider = state.ai?.provider || 'free';
+  const sourceLanguage = $('ocrLanguage').value;
+  try {
+    const preview = await api('/api/translate-text/preview', jsonOptions('POST', { text, source_language: sourceLanguage, provider }));
+    showTranslationRequestPreview(preview, async () => {
+      const result = await api('/api/translate-text', jsonOptions('POST', { text, source_language: sourceLanguage, provider, confirmation: preview.signature }));
+      block.text = text; block.tr = result.text; block.richHtml = plainToHtml(result.text);
+      translation.innerHTML = block.richHtml; drawEditor(); scheduleSave();
+    });
+  } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
+}
 function buildBlockList() {
   const item = editorItem(); const list = $('blockList'); list.textContent = ''; state.richFields = new Map(); const selected = new Set(editorSelectedKeys()); if (!item.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; updateEditorSelection(); return; }
   item.blocks.forEach((block) => {
@@ -1059,7 +1112,7 @@ function buildBlockList() {
     const size = document.createElement('input'); size.type = 'number'; size.min = '8'; size.max = '160'; size.placeholder = 'اندازه'; size.value = block.size || ''; const color = document.createElement('input'); color.type = 'color'; color.value = block.color || '#ffffff';
     tools.append(rtl, ltr, align, size, color);
     const actions = document.createElement('div'); actions.className = 'block-tools';
-    actions.append(makeButton('کپی متن اصلی', async () => { if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(source.value); else { source.focus(); source.select(); document.execCommand('copy'); } toast('کپی شد'); }), makeButton('ترجمهٔ دوباره', async () => { const result = await api('/api/translate-text', jsonOptions('POST', { text: source.value, source_language: $('ocrLanguage').value, provider: state.ai?.provider || 'free' })); block.text = source.value; block.tr = result.text; block.richHtml = plainToHtml(result.text); translation.innerHTML = block.richHtml; drawEditor(); scheduleSave(); }), makeButton('پاک‌کردن ترجمه', () => { block.tr = ''; block.richHtml = ''; translation.innerHTML = ''; drawEditor(); scheduleSave(); }));
+    actions.append(makeButton('کپی متن اصلی', async () => { if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(source.value); else { source.focus(); source.select(); document.execCommand('copy'); } toast('کپی شد'); }), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block, source, translation)), makeButton('پاک‌کردن ترجمه', () => { block.tr = ''; block.richHtml = ''; translation.innerHTML = ''; drawEditor(); scheduleSave(); }));
     enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; scheduleSave(); }); source.addEventListener('input', () => { block.text = source.value; if (blockOverlayMode(block) === 'ocr') drawEditor(); scheduleSave(); });
     align.addEventListener('change', () => { block.align = align.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); size.addEventListener('change', () => { const value = Number(size.value); block.size = value >= 8 ? Math.min(160, value) : null; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); color.addEventListener('input', () => { block.color = color.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); });
     card.append(head, languageRow, source, translation, tools, actions); list.appendChild(card);
@@ -1135,6 +1188,7 @@ function bindEvents() {
   $('duplicateBtn').addEventListener('click', () => duplicateImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('ocrBtn').addEventListener('click', () => { updateEngineOptions(); showDialog('ocrDialog'); }); $('ocrEngine').addEventListener('change', updateOcrEngineStatus); $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
+  $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { translationPreviewAction = null; });
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => { $('aiStatus').textContent = error.message; toast(error.message, true); }));
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);

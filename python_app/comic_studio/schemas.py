@@ -22,12 +22,14 @@ class TranslateRequest(BaseModel):
     image_ids: list[str] = Field(default_factory=list)
     provider: str = "free"
     source_language: str = "eng"
+    confirmation: str | None = None
 
 
 class TextTranslateRequest(BaseModel):
     text: str
     source_language: str = "eng"
     provider: str = "free"
+    confirmation: str | None = None
 
 
 class AiSettings(BaseModel):

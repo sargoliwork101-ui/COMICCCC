@@ -60,6 +60,32 @@ async function previewDifference(page) {
   });
 }
 
+async function overlapPixelEvidence(page) {
+  return page.evaluate(() => {
+    const source = document.createElement('canvas'); source.width = 320; source.height = 160;
+    const sourceContext = source.getContext('2d'); sourceContext.fillStyle = '#ffffff'; sourceContext.fillRect(0, 0, 320, 160);
+    const earlier = { id: 'red', tr: 'AAAA', enabled: true, bg: 'white', color: '#ff0000', size: 52, lineH: 60, dir: 'ltr', align: 'center', x0: 20, y0: 15, x1: 220, y1: 85 };
+    const later = { id: 'green', tr: 'B', enabled: true, bg: 'black', color: '#00ff00', size: 44, lineH: 60, dir: 'ltr', align: 'left', x0: 150, y0: 50, x1: 300, y1: 135 };
+    const rendered = Typeset.render(source, [earlier, later]);
+    const countPixels = (canvas) => {
+      const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+      let redInsideLaterBackground = 0; let greenText = 0;
+      for (let y = 0; y < canvas.height; y += 1) for (let x = 0; x < canvas.width; x += 1) {
+        const offset = (y * canvas.width + x) * 4; const [r, g, b] = pixels.subarray(offset, offset + 3);
+        if (x >= 150 && x < 220 && y >= 50 && y < 85 && r > 180 && g < 100 && b < 100) redInsideLaterBackground += 1;
+        if (r < 100 && g > 180 && b < 100) greenText += 1;
+      }
+      return { redInsideLaterBackground, greenText };
+    };
+    const actual = countPixels(rendered);
+    const coveredControl = document.createElement('canvas'); coveredControl.width = rendered.width; coveredControl.height = rendered.height;
+    const controlContext = coveredControl.getContext('2d'); controlContext.drawImage(rendered, 0, 0);
+    controlContext.fillStyle = '#000000'; controlContext.fillRect(later.x0, later.y0, later.x1 - later.x0, later.y1 - later.y0);
+    const covered = countPixels(coveredControl);
+    return { ...actual, redAfterIntentionalCover: covered.redInsideLaterBackground };
+  });
+}
+
 async function editorRenderDifference(page) {
   return page.evaluate(() => {
     const item = state.project.images[0];
@@ -159,6 +185,11 @@ function nextDownload(cdp, directory) {
     await page.waitForFunction(() => state.project.images[0].edited === true, { timeout: 5000 });
     assert.equal(await previewDifference(page), 0, 'reopening saved translations must render them on the main page');
     console.log('PASS: real browser renders saved translations when a project opens');
+    const overlapPixels = await overlapPixelEvidence(page);
+    assert.ok(overlapPixels.redInsideLaterBackground > 20, `earlier red text must remain visible inside the later background; got ${JSON.stringify(overlapPixels)}`);
+    assert.ok(overlapPixels.greenText > 10, 'the later block text must also be visibly painted');
+    assert.equal(overlapPixels.redAfterIntentionalCover, 0, 'the control must prove that this pixel assertion detects a later erasure');
+    console.log(`PASS: real pixels preserve earlier text inside a later background (${overlapPixels.redInsideLaterBackground} red pixels; covered control 0)`);
 
     await page.click('#menuBtn'); await page.click('#aiBtn');
     await page.waitForSelector('#aiDialog[open] #aiProvider');
@@ -197,10 +228,12 @@ function nextDownload(cdp, directory) {
 
     await page.setRequestInterception(true);
     let held = null; let second = null; let renderRequests = 0; let secondDone;
+    const translationRequests = [];
     const secondUpload = new Promise((resolve) => { secondDone = resolve; });
     const onRequest = (request) => {
       const url = new URL(request.url());
       if (url.pathname === `/api/projects/${projectId}/translate`) {
+        translationRequests.push(JSON.parse(request.postData() || '{}'));
         request.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(translated) }).catch(() => {});
         return;
       }
@@ -218,11 +251,21 @@ function nextDownload(cdp, directory) {
     const heldStarted = Date.now(); while (!held && Date.now() - heldStarted < 5000) await sleep(50);
     assert.ok(held, 'the older preview request must be pending for the ordering regression');
     await page.keyboard.press('Escape'); await page.click('#translateBtn');
+    await page.waitForSelector('#translationPreviewDialog[open]');
+    assert.equal(translationRequests.length, 0, 'opening the exact payload preview must not send a translation');
+    assert.ok(await page.$eval('#translationPreviewRequests', (element) => element.textContent.includes('SOURCE ONE') && element.textContent.includes('␞') && element.textContent.includes('SOURCE TWO')));
+    assert.ok(await page.$eval('#translationPreviewDestination', (element) => element.textContent.includes('Google Translate') && element.textContent.includes('MyMemory')));
+    await page.click('#translationPreviewCancel');
+    assert.equal(translationRequests.length, 0, 'cancelling the real browser preview must not send a translation');
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    await page.click('#translationPreviewConfirm');
     await Promise.race([secondUpload, sleep(1200)]);
     await held.continue();
     await page.waitForFunction(() => !document.getElementById('translationDialog').open, { timeout: 15000 });
     await page.evaluate(() => overlayPreviewTask); await sleep(300);
     assert.ok(renderRequests >= 2, 'the race must include both the old and new real canvas uploads');
+    assert.equal(translationRequests.length, 1, 'only explicit confirmation may execute the previewed translation');
+    assert.match(translationRequests[0].confirmation || '', /^[a-f0-9]{64}$/, 'execution must carry the exact preview signature');
     assert.equal(await previewDifference(page), 0, 'an older delayed upload must not replace the latest translation');
     page.off('request', onRequest); page.off('response', onResponse); await page.setRequestInterception(false);
     console.log('PASS: delayed older preview cannot overwrite the latest translated render');

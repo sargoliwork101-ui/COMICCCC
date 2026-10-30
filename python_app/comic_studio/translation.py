@@ -274,6 +274,17 @@ def _ai_prompt(source_language: str) -> tuple[str, str]:
     ), source
 
 
+def translation_request_view(text: str, source_language: str, provider: str) -> dict[str, Any]:
+    """Return the exact user-visible request text without performing network I/O."""
+    clean = str(text or "").strip()
+    if provider == "free":
+        return {"texts": split_free_query(clean), "systemPrompt": ""}
+    if provider not in AI_PROVIDERS:
+        raise TranslationError("Unknown translation provider")
+    system_prompt, source = _ai_prompt(source_language)
+    return {"texts": [f"Source language: {source}\n\n{clean}"], "systemPrompt": system_prompt}
+
+
 class TranslationService:
     def __init__(self) -> None:
         self.path = data_dir() / "ai-settings.json"
