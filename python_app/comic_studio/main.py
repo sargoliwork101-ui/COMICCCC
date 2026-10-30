@@ -21,7 +21,7 @@ from .schemas import (
 )
 from .sessions import SessionManager
 from .store import ProjectStore
-from .translation import TranslationError, TranslationService
+from .translation import TranslationError, TranslationService, distribute_translation, group_translation_blocks
 
 
 def create_app() -> FastAPI:
@@ -275,24 +275,25 @@ def create_app() -> FastAPI:
     async def run_translation(project_id: str, values: TranslateRequest) -> dict[str, Any]:
         state = project(project_id)
         ids = image_ids(state, values.image_ids)
-        activity.add(f"ترجمهٔ {len(ids)} تصویر آغاز شد")
+        work = [(item, group_translation_blocks(item.get("blocks", []))) for item in state["images"] if item["id"] in ids]
+        total = sum(len(groups) for _, groups in work)
+        activity.add(f"ترجمهٔ {len(ids)} تصویر و {total} بخش آغاز شد")
         completed = 0
         try:
-            for item in state["images"]:
-                if item["id"] not in ids:
-                    continue
-                completed += 1
-                activity.add(f"ترجمهٔ تصویر {completed} از {len(ids)}: {item['name']}", progress=(completed - 1) / max(1, len(ids)))
-                for block in item.get("blocks", []):
-                    if not block.get("enabled", True) or not block.get("text", "").strip():
-                        continue
+            for image_index, (item, groups) in enumerate(work, start=1):
+                activity.add(f"ترجمهٔ تصویر {image_index} از {len(work)}: {item['name']}", progress=completed / max(1, total))
+                for group in groups:
+                    source_texts = [str(block.get("text", "")).strip() for block in group]
                     translated = await run_reported(
-                        translations.translate, block["text"], values.source_language, values.provider,
-                        pulse_label=f"ترجمهٔ {item['name']}",
+                        translations.translate, "\n".join(source_texts), values.source_language, values.provider,
+                        pulse_label=f"ترجمهٔ بخش {completed + 1} از {total} در {item['name']}",
                     )
-                    block["tr"] = translated
-                    block["richHtml"] = ""
-                activity.add(f"ترجمهٔ {item['name']} تمام شد", progress=completed / max(1, len(ids)))
+                    for block, text in zip(group, distribute_translation(source_texts, translated)):
+                        block["tr"] = text
+                        block["richHtml"] = ""
+                    completed += 1
+                    activity.add(f"بخش {completed} از {total} در «{item['name']}» ترجمه شد", progress=completed / max(1, total))
+                activity.add(f"ترجمهٔ {item['name']} تمام شد", progress=completed / max(1, total))
             store.save(state)
         except Exception as exc:
             activity.add(f"ترجمه ناموفق بود: {exc}", "error")

@@ -25,6 +25,9 @@ const overlayProject = (text, translation) => ({
 const beacons = [];
 const scrollIntoViewCalls = [];
 let activityClears = 0;
+let revertCalls = 0;
+let translationGate = null;
+let activityFeed = { entries: [], next: 0 };
 let renderedBlocks = null;
 let renderedUploads = 0;
 const jsonResponse = (payload, status = 200) => ({
@@ -40,13 +43,14 @@ window.fetch = async (url, options = {}) => {
   if (pathname === `/api/projects/${project.id}`) return jsonResponse(project);
   if (pathname === '/api/engines') return jsonResponse([engine]);
   if (pathname === '/api/ai-settings') return jsonResponse({ provider: 'free', base_url: '', model: '', hasApiKey: false });
-  if (pathname === '/api/activity') return jsonResponse({ entries: [], next: 0 });
+  if (pathname === '/api/activity') return jsonResponse(activityFeed);
   if (pathname === '/api/activity/clear' && options.method === 'POST') { activityClears += 1; return jsonResponse({ ok: true, next: 0 }); }
   if (pathname === '/api/session/heartbeat') return jsonResponse({ ok: true, active: 1 });
   if (pathname === `/api/projects/${project.id}/state`) return jsonResponse(JSON.parse(options.body).state);
   if (pathname === `/api/projects/${project.id}/ocr`) return jsonResponse(overlayProject('NEW OCR', ''));
-  if (pathname === `/api/projects/${project.id}/translate`) return jsonResponse(overlayProject('NEW OCR', 'ترجمهٔ تازه'));
+  if (pathname === `/api/projects/${project.id}/translate`) { if (translationGate) await translationGate; return jsonResponse(overlayProject('NEW OCR', 'ترجمهٔ تازه')); }
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/rendered`) { renderedUploads += 1; return jsonResponse({ ok: true }); }
+  if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/revert`) { revertCalls += 1; return jsonResponse({ ok: true }); }
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/content`) return { ok: true, blob: async () => new window.Blob() };
   throw new Error(`Unmocked request: ${options.method || 'GET'} ${url}`);
 };
@@ -125,7 +129,7 @@ function check(name, condition) {
   check('models dialog opens', $('modelsDialog').open);
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   check('Escape closes the models dialog', !$('modelsDialog').open);
-  for (const id of ['ocrDialog', 'aiDialog', 'exportDialog', 'cropDialog']) {
+  for (const id of ['ocrDialog', 'translationDialog', 'aiDialog', 'exportDialog', 'cropDialog']) {
     vm.runInContext(`showDialog('${id}')`, context);
     window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     check(`Escape closes ${id}`, !$(id).open);
@@ -154,7 +158,14 @@ function check(name, condition) {
   await vm.runInContext('renderAndUpload(state.project.images[0])', context);
   check('translation mode restores translated preview text and formatting', renderedBlocks[0].tr === 'سلام دنیا' && renderedBlocks[0].richHtml === '<b>سلام دنیا</b>' && !renderedBlocks[0]._plainText);
   check('both overlay modes upload a rendered image', renderedUploads === 2);
-  vm.runInContext("state.editorId = 'image-ui'; state.editorScale = 1; setOverlayMode('ocr', false); buildBlockList(); renderEditorBoxes()", context);
+  vm.runInContext("setOverlayMode('none', false)", context);
+  const revertsBeforeNone = revertCalls;
+  await vm.runInContext('renderAndUpload(state.project.images[0])', context);
+  check('none mode is synchronized and restores the original image', $('overlayMode').value === 'none' && $('exportOverlayMode').value === 'none' && revertCalls === revertsBeforeNone + 1 && vm.runInContext('state.project.images[0].edited', context) === false);
+  check('none mode preserves saved OCR and translation text', vm.runInContext("state.project.images[0].blocks[0].text === 'HELLO WORLD' && state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
+  vm.runInContext("state.editorId = 'image-ui'; state.editorScale = 1; buildBlockList(); renderEditorBoxes()", context);
+  check('none mode hides image text boxes but keeps sidebar editors', $('editorBoxes').children.length === 0 && $('blockList').querySelectorAll('.block-card').length === 2);
+  vm.runInContext("setOverlayMode('ocr', false); buildBlockList(); renderEditorBoxes()", context);
   const ocrOverlay = $('editorBoxes').querySelector('.editor-box-text');
   check('editor shows recognized OCR text directly on the image', ocrOverlay?.textContent === 'HELLO WORLD' && ocrOverlay?.dir === 'ltr');
   scrollIntoViewCalls.length = 0;
@@ -228,7 +239,18 @@ function check(name, condition) {
   check('starting a new job clears the previous job log', activityClears === clearsBeforeOcr + 1 && !$('activityLog').textContent.includes('OLD JOB') && $('activityLog').textContent.includes('OCR محلی'));
   check('finishing OCR automatically selects OCR display mode', $('overlayMode').value === 'ocr' && $('exportOverlayMode').value === 'ocr');
   check('finishing OCR places the new recognized text on the image', renderedBlocks[0].tr === 'NEW OCR' && renderedBlocks[0]._plainText === true);
-  await vm.runInContext('runTranslation()', context);
+  let releaseTranslation;
+  translationGate = new Promise((resolve) => { releaseTranslation = resolve; });
+  const translationTask = vm.runInContext('runTranslation()', context);
+  await sleep(20);
+  check('translation shows a live progress dialog and activity while pending', $('translationDialog').open && $('translationStatus').textContent.includes('ترجمه') && $('translationActivityLog').textContent.includes('ترجمه') && $('translationProgress').style.width !== '0%');
+  activityFeed = { entries: [{ id: 500, message: 'بخش 1 از 2 در حال ترجمه است', kind: 'info', progress: 0.5, time: new Date().toISOString() }], next: 500 };
+  await vm.runInContext('pollActivity()', context);
+  check('server translation progress updates the visible dialog percentage', $('translationStatus').textContent.includes('بخش 1 از 2') && $('translationProgress').style.width === '50%' && $('translationActivityLog').textContent.includes('بخش 1 از 2'));
+  activityFeed = { entries: [], next: 500 };
+  translationGate = null; releaseTranslation();
+  await translationTask;
+  check('translation progress dialog closes after success', !$('translationDialog').open);
   check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
   check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
 

@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from comic_studio.translation import TranslationError, TranslationService
+from comic_studio.translation import TranslationError, TranslationService, distribute_translation, group_translation_blocks
 
 
 def test_ai_settings_do_not_expose_key(tmp_path, monkeypatch):
@@ -53,3 +53,26 @@ def test_unknown_provider_is_rejected(tmp_path, monkeypatch):
         service.save_settings({"provider": "unknown"})
     with pytest.raises(TranslationError):
         service.translate("hello", "eng", provider="unknown")
+
+
+def test_translation_groups_join_paragraph_lines_not_neighboring_bubbles():
+    def block(text, x0, y0, x1, y1, enabled=True):
+        return {"text": text, "x0": x0, "y0": y0, "x1": x1, "y1": y1, "lineH": y1 - y0, "enabled": enabled}
+    blocks = [
+        block("first", 10, 10, 180, 35),
+        block("second", 30, 42, 160, 67),
+        block("side", 300, 12, 450, 37),
+        block("distant", 10, 150, 180, 175),
+        block("disabled", 20, 72, 170, 97, False),
+    ]
+    groups = group_translation_blocks(blocks)
+    assert [[block["text"] for block in group] for group in groups] == [["first", "second"], ["side"], ["distant"]]
+
+
+def test_group_translation_distribution_preserves_all_text():
+    assert distribute_translation(["one", "two"], "یک\nدو") == ["یک", "دو"]
+    translated = "یک دو سه چهار پنج شش"
+    distributed = distribute_translation(["a", "longer", "longest line"], translated)
+    assert len(distributed) == 3
+    assert all(distributed)
+    assert " ".join(distributed) == translated

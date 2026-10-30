@@ -22,6 +22,7 @@ let sessionTimer = null;
 let localActivityId = 0;
 let editorCloseTask = null;
 let jobBusy = false;
+let translationRunning = false;
 
 function browserTabId() {
   try {
@@ -70,6 +71,10 @@ async function pollActivity() {
     if (jobBusy && latest) {
       $('jobStatus').textContent = latest.message;
       if (latest.progress !== null && latest.progress !== undefined) $('jobProgress').style.width = `${Math.round(latest.progress * 100)}%`;
+      if (translationRunning) {
+        $('translationStatus').textContent = latest.message;
+        if (latest.progress !== null && latest.progress !== undefined) $('translationProgress').style.width = `${Math.round(latest.progress * 100)}%`;
+      }
     }
     if (payload.entries?.length) renderActivity();
   } catch { /* the server may be shutting down; do not create a toast loop */ }
@@ -185,6 +190,7 @@ function setBusy(message) {
   jobBusy = !!message;
   $('jobStatus').textContent = message || 'آماده';
   $('jobProgress').style.width = message ? '65%' : '0';
+  if (translationRunning) { $('translationStatus').textContent = message || 'آماده'; $('translationProgress').style.width = message ? '65%' : '0'; }
   document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button').forEach((el) => { el.disabled = !!message; });
 }
 async function runJob(message, task) {
@@ -234,17 +240,19 @@ function adoptProject(project) {
   setOverlayMode(settings.overlayMode || 'translation', false);
   renderAll();
 }
-function currentOverlayMode() { return state.project?.settings?.overlayMode === 'ocr' ? 'ocr' : 'translation'; }
+function normalizeOverlayMode(mode) { return mode === 'ocr' || mode === 'none' ? mode : 'translation'; }
+function currentOverlayMode() { return normalizeOverlayMode(state.project?.settings?.overlayMode); }
 function setOverlayMode(mode, redraw = true) {
   if (!state.project) return;
   state.project.settings = state.project.settings || {};
-  state.project.settings.overlayMode = mode === 'ocr' ? 'ocr' : 'translation';
+  state.project.settings.overlayMode = normalizeOverlayMode(mode);
   $('overlayMode').value = state.project.settings.overlayMode;
   $('exportOverlayMode').value = state.project.settings.overlayMode;
   if (redraw && state.editorId) drawEditor();
   if (redraw) scheduleSave();
 }
 function overlayBlock(block, mode = currentOverlayMode()) {
+  if (mode === 'none') return { ...block, tr: '', richHtml: '' };
   if (mode !== 'ocr') return block;
   return { ...block, tr: block.text || '', richHtml: '', dir: 'ltr', align: block.align === 'center' ? 'center' : 'left', _plainText: true };
 }
@@ -478,7 +486,18 @@ async function runOcr() {
 }
 async function runTranslation() {
   const ids = selectedImages().map((item) => item.id); if (!ids.length) { toast('حداقل یک تصویر را انتخاب کنید', true); return; }
-  await runJob('در حال ترجمهٔ متن‌ها…', async () => { await saveProject(); const result = await api(`/api/projects/${state.project.id}/translate`, jsonOptions('POST', { image_ids: ids, provider: state.ai?.provider || 'free', source_language: $('ocrLanguage').value })); adoptProject(result); setOverlayMode('translation', false); await saveProject(); await renderImagesText(); toast('ترجمه روی تصویر آمد و پیش‌نمایش آماده شد'); });
+  translationRunning = true; showDialog('translationDialog'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; $('translationProgress').style.width = '0';
+  try {
+    await runJob('در حال ترجمهٔ متن‌ها…', async () => {
+      await saveProject(); const result = await api(`/api/projects/${state.project.id}/translate`, jsonOptions('POST', { image_ids: ids, provider: state.ai?.provider || 'free', source_language: $('ocrLanguage').value }));
+      adoptProject(result); setOverlayMode('translation', false); await saveProject(); await renderImagesText();
+    });
+    closeDialog('translationDialog'); toast('ترجمه روی تصویر آمد و پیش‌نمایش آماده شد');
+  } catch (error) {
+    $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`; throw error;
+  } finally {
+    translationRunning = false;
+  }
 }
 
 // ---------- Typeset preview and export ----------

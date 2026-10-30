@@ -42,11 +42,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.11"
+    assert health.json()["version"] == "3.12"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۱۱ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۱۲ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
 
 
@@ -147,6 +147,34 @@ def test_ocr_endpoint_stores_geometry_without_network(client, monkeypatch):
     feed = client.get("/api/activity?after=0").json()
     assert any("متن خوانده‌شده" in entry["message"] and "خط آزمایش" in entry["message"] for entry in feed["entries"])
     assert any(entry["kind"] == "success" and "OCR تمام شد" in entry["message"] for entry in feed["entries"])
+
+
+def test_translation_sends_each_bubble_together_and_reports_group_progress(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    project, item = make_project(client)
+    project["images"][0]["blocks"] = [
+        {"id": 1, "text": "Hello", "tr": "old", "richHtml": "old", "enabled": True, "x0": 10, "y0": 10, "x1": 180, "y1": 35, "lineH": 25},
+        {"id": 2, "text": "world", "tr": "old", "richHtml": "old", "enabled": True, "x0": 30, "y0": 42, "x1": 160, "y1": 67, "lineH": 25},
+        {"id": 3, "text": "Another bubble", "tr": "old", "richHtml": "old", "enabled": True, "x0": 10, "y0": 150, "x1": 180, "y1": 175, "lineH": 25},
+    ]
+    response = client.put(f"/api/projects/{project['id']}/state", json={"state": project})
+    assert response.status_code == 200
+    calls = []
+
+    def fake_translate(self, text, source_language, provider=None):
+        calls.append(text)
+        return {"Hello\nworld": "سلام\nدنیا", "Another bubble": "حباب دیگر"}[text]
+
+    monkeypatch.setattr(TranslationService, "translate", fake_translate)
+    response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"})
+    assert response.status_code == 200, response.text
+    assert calls == ["Hello\nworld", "Another bubble"]
+    blocks = response.json()["images"][0]["blocks"]
+    assert [block["tr"] for block in blocks] == ["سلام", "دنیا", "حباب دیگر"]
+    assert all(block["richHtml"] == "" for block in blocks)
+    feed = client.get("/api/activity?after=0").json()["entries"]
+    assert any("بخش 1 از 2" in entry["message"] and entry["progress"] == pytest.approx(0.5) for entry in feed)
+    assert any("بخش 2 از 2" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
 
 
 def test_model_download_receives_only_selected_language(client, monkeypatch):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,78 @@ DEFAULTS = {
 
 class TranslationError(RuntimeError):
     pass
+
+
+def _paragraph_geometry(block: dict[str, Any]) -> tuple[float, float, float, float, float] | None:
+    try:
+        x0, y0, x1, y1 = (float(block.get(key)) for key in ("x0", "y0", "x1", "y1"))
+        line_h = float(block.get("lineH") or y1 - y0)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (x0, y0, x1, y1, line_h)) or x1 <= x0 or y1 <= y0 or line_h <= 0:
+        return None
+    return x0, y0, x1, y1, line_h
+
+
+def _same_paragraph(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    a = _paragraph_geometry(first)
+    b = _paragraph_geometry(second)
+    if not a or not b:
+        return False
+    top, bottom = (a, b) if a[1] <= b[1] else (b, a)
+    gap = bottom[1] - top[3]
+    if gap < -.35 * min(top[4], bottom[4]) or gap > .9 * max(top[4], bottom[4]):
+        return False
+    overlap = min(top[2], bottom[2]) - max(top[0], bottom[0])
+    return overlap >= .2 * min(top[2] - top[0], bottom[2] - bottom[0])
+
+
+def group_translation_blocks(blocks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Cluster adjacent OCR lines into bubbles/paragraphs without changing their schema."""
+    eligible = [index for index, block in enumerate(blocks) if block.get("enabled", True) and str(block.get("text", "")).strip()]
+    parent = {index: index for index in eligible}
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for position, first in enumerate(eligible):
+        for second in eligible[position + 1:]:
+            if _same_paragraph(blocks[first], blocks[second]):
+                parent[find(second)] = find(first)
+    clusters: dict[int, list[int]] = {}
+    for index in eligible:
+        clusters.setdefault(find(index), []).append(index)
+    return [[blocks[index] for index in indices] for indices in sorted(clusters.values(), key=lambda values: values[0])]
+
+
+def distribute_translation(source_texts: list[str], translated: str) -> list[str]:
+    """Keep exact line mapping when possible and never drop a merged translation."""
+    count = len(source_texts)
+    text = str(translated or "").strip()
+    if not count:
+        return []
+    if count == 1:
+        return [text]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) == count:
+        return lines
+    words = text.split()
+    if len(words) < count:
+        return [text] + [""] * (count - 1)
+    weights = [max(1, len(str(source).strip())) for source in source_texts]
+    total_weight = sum(weights)
+    result = []
+    offset = 0
+    for index, weight in enumerate(weights[:-1]):
+        wanted = round(len(words) * weight / total_weight)
+        size = max(1, min(wanted, len(words) - offset - (count - index - 1)))
+        result.append(" ".join(words[offset:offset + size]))
+        offset += size
+    result.append(" ".join(words[offset:]))
+    return result
 
 
 class TranslationService:
@@ -110,8 +183,8 @@ class TranslationService:
             "model": settings["model"],
             "messages": [
                 {"role": "system", "content": (
-                    "Translate comic dialogue to natural Persian. Preserve every physical line break, "
-                    "indentation, name, number and sound effect. Return only the translation; no explanations."
+                    "Translate each complete comic bubble or paragraph to natural Persian as one contextual unit. "
+                    "Preserve every physical line break, indentation, name, number and sound effect. Return only the translation; no explanations."
                 )},
                 {"role": "user", "content": f"Source language: {source}\n\n{text}"},
             ],

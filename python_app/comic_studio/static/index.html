@@ -8,7 +8,7 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۱۱ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۱۲ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
     <button id="menuBtn" class="bt">☰ پروژه و تنظیمات</button>
   </header>
 
@@ -97,6 +97,14 @@
     <div class="dialog-actions"><button id="startOcrBtn" class="bt primary">شروع OCR</button></div>
   </dialog>
 
+  <dialog id="translationDialog" class="dlg small-dialog">
+    <form method="dialog" class="dialog-head"><h2>ترجمهٔ متن‌ها</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <p id="translationStatus" class="hint" role="status">آماده</p>
+    <div class="bar"><div id="translationProgress" class="fill"></div></div>
+    <div id="translationActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
+    <p class="hint">متن خطوطِ یک حباب یا پاراگراف با هم و در یک درخواست ترجمه می‌شود. گزارش و پیشرفت هر بخش همین‌جا دیده می‌شود.</p>
+  </dialog>
+
   <dialog id="modelsDialog" class="dlg wide-dialog">
     <form method="dialog" class="dialog-head"><h2>مدل‌های OCR و آزمایش</h2><button class="icon" value="cancel">×</button></form>
     <p class="hint">هیچ مدلی بدون کلیک شما دانلود نمی‌شود. بخش اول مستقیماً با ویرایشگر کار می‌کند. بخش دوم فقط لینک رسمی دانلود/راه‌اندازی دارد؛ این مدل‌های VLM به محیط جدا و خروجی سازگار با کادرهای کمیک نیاز دارند و فعلاً در فهرست اجرای OCR ظاهر نمی‌شوند. <a href="https://github.com/sargoliwork101-ui/COMICCCC/blob/arena/343b59d6-comicccc/python_app/README.md" target="_blank" rel="noopener noreferrer">راهنمای نصب برنامه از همین شاخهٔ GitHub</a>. لینک کارت‌های بخش دوم برای نصب جداگانه و طبق README همان پروژه است، نه نصب خودکار داخل این برنامه.</p>
@@ -119,18 +127,18 @@
   <dialog id="exportDialog" class="dlg small-dialog">
     <form method="dialog" class="dialog-head"><h2>تنظیمات خروجی</h2><button class="icon" value="cancel">×</button></form>
     <label>نوع خروجی<select id="exportKind"><option value="pdf">PDF</option><option value="images">تصاویر جداگانه (ZIP)</option><option value="txt">متن OCR و ترجمه (TXT)</option></select></label>
-    <label>متن روی تصاویر<select id="exportOverlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option></select></label>
+    <label>متن روی تصاویر<select id="exportOverlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label>
     <div id="pdfExportFields" class="checks"><label><input id="exportSeamless" type="checkbox"> همهٔ تصاویر پشت سر هم در یک صفحهٔ بلند</label><label><input id="exportUniform" type="checkbox"> قاب‌های هم‌اندازه</label><label><input id="exportTwo" type="checkbox"> دو تصویر در هر صفحه (گروه‌ها جدا می‌مانند)</label></div>
     <div id="imageExportFields" class="form-grid hidden"><label>فرمت<select id="exportFormat"><option value="orig">اصلی / PNG برای ویرایش‌شده</option><option value="png">PNG</option><option value="jpg">JPEG کیفیت ۱۰۰٪</option></select></label><label>زیرپوشه داخل ZIP<input id="exportFolder" placeholder="اختیاری"></label></div>
-    <p class="hint">برای PDF و ZIP، انتخاب «متن اصلی OCR» یا «ترجمه» تعیین می‌کند کدام متن روی تصویر قرار بگیرد. فقط تصاویر انتخاب‌شده خروجی می‌گیرند و اعضای هر گروه در یک صفحهٔ عمودی PDF می‌مانند.</p>
+    <p class="hint">برای PDF و ZIP، انتخاب «متن اصلی OCR»، «ترجمه» یا «بدون متن» تعیین می‌کند کدام متن روی تصویر قرار بگیرد؛ «بدون متن» تصویر اصلی را خروجی می‌دهد. فقط تصاویر انتخاب‌شده خروجی می‌گیرند و اعضای هر گروه در یک صفحهٔ عمودی PDF می‌مانند.</p>
     <div id="exportActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <div class="dialog-actions"><button id="startExportBtn" class="bt success">ساخت و دانلود</button></div>
   </dialog>
 
   <dialog id="editorDialog" class="dlg editor-dialog">
-    <div class="dialog-head"><h2 id="editorTitle">ویرایش متن</h2><div><label class="overlay-mode-control">متن روی تصویر<select id="overlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option></select></label><button id="editorRevert" class="bt danger">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt">به‌روزرسانی پیش‌نمایش</button><button id="editorClose" class="bt primary">ذخیره و بستن</button></div></div>
+    <div class="dialog-head"><h2 id="editorTitle">ویرایش متن</h2><div><label class="overlay-mode-control">متن روی تصویر<select id="overlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label><button id="editorRevert" class="bt danger">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt">به‌روزرسانی پیش‌نمایش</button><button id="editorClose" class="bt primary">ذخیره و بستن</button></div></div>
     <div class="editor-toolbar"><div class="editor-zoom-controls" aria-label="زوم تصویر"><button id="editorZoomOut" type="button" aria-label="کوچک‌نمایی">−</button><output id="editorZoomLabel" aria-live="polite">100٪</output><button id="editorZoomIn" type="button" aria-label="بزرگ‌نمایی">+</button><button id="editorZoomActual" type="button">۱۰۰٪</button><button id="editorZoomFit" type="button">عرض صفحه</button></div><span class="hint">فضای خالی تصویر را برای جابه‌جایی بکشید؛ Ctrl + چرخ ماوس برای زوم.</span></div>
-    <div class="editor-body"><div class="editor-preview"><div id="editorStage" title="فضای خالی تصویر را بکشید تا جابه‌جا شود"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div><div class="editor-side"><div class="editor-help">با انتخاب «متن اصلی OCR» همان متن خوانده‌شده و با انتخاب «ترجمه» متن ترجمه روی تصویر می‌آید. روی متن داخل تصویر یا کارت سمت راست تایپ کنید. برای جابه‌جایی، ⠿ یا لبهٔ کادر را بکشید؛ Ctrl+S ذخیره می‌کند.</div><div id="blockList"></div></div></div>
+    <div class="editor-body"><div class="editor-preview"><div id="editorStage" title="فضای خالی تصویر را بکشید تا جابه‌جا شود"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div><div class="editor-side"><div class="editor-help">با انتخاب «متن اصلی OCR» یا «ترجمه» همان متن روی تصویر می‌آید و «بدون متن» تصویر اصلی را نشان می‌دهد. روی متن داخل تصویر یا کارت سمت راست تایپ کنید. برای جابه‌جایی، ⠿ یا لبهٔ کادر را بکشید؛ Ctrl+S ذخیره می‌کند.</div><div id="blockList"></div></div></div>
   </dialog>
 
   <dialog id="cropDialog" class="dlg crop-dialog">
