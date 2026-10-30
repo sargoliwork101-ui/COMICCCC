@@ -56,7 +56,7 @@ def test_interactive_launcher_asks_and_passes_both_choices(monkeypatch):
     monkeypatch.setattr(launcher, "ask_preferences", lambda: ("firefox", "new"))
     monkeypatch.setattr(launcher.threading, "Timer", Timer)
     monkeypatch.setattr(launcher, "open_url", lambda url, name, window: calls.append((url, name, window)))
-    monkeypatch.setattr(launcher.uvicorn, "run", lambda *args, **kwargs: calls.append("server"))
+    monkeypatch.setattr(launcher, "run_server", lambda host, port: calls.append("server"))
     launcher.main()
     assert calls[0] == ("http://127.0.0.1:8765", "firefox", "new")
     assert calls[-1] == "server"
@@ -66,5 +66,5 @@ def test_no_browser_launch_does_not_ask(monkeypatch):
     import comic_studio.__main__ as launcher
     monkeypatch.setattr(launcher.sys, "argv", ["run.py", "--no-browser"])
     monkeypatch.setattr(launcher, "ask_preferences", lambda: (_ for _ in ()).throw(AssertionError("prompt called")))
-    monkeypatch.setattr(launcher.uvicorn, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(launcher, "run_server", lambda host, port: None)
     launcher.main()

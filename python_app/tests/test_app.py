@@ -42,7 +42,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.04"
+    assert health.json()["version"] == "3.05"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -161,6 +161,29 @@ def test_model_download_error_is_returned_to_the_ui(client, monkeypatch):
     response = client.post("/api/engines/rapidocr-v5/download", json={"language": "eng"})
     assert response.status_code == 503
     assert "model host blocked" in response.json()["detail"]
+
+
+def test_activity_feed_contains_progress_during_explicit_download(client, monkeypatch):
+    from comic_studio.activity import emit
+    from comic_studio.main import EngineRegistry
+    def fake_download(self, engine_id, language):
+        emit("در حال دانلود مدل آزمایشی", progress=0.42)
+    monkeypatch.setattr(EngineRegistry, "download", fake_download)
+    response = client.post("/api/engines/rapidocr-v5/download", json={"language": "eng"})
+    assert response.status_code == 200, response.text
+    feed = client.get("/api/activity?after=0").json()
+    assert any(entry["message"] == "در حال دانلود مدل آزمایشی" and entry["progress"] == pytest.approx(0.42) for entry in feed["entries"])
+    later = client.get(f"/api/activity?after={feed['next']}").json()
+    assert later["entries"] == []
+
+
+def test_browser_session_heartbeat_and_close(client):
+    response = client.post("/api/session/heartbeat", json={"client_id": "test-tab-0001"})
+    assert response.status_code == 200
+    assert response.json()["active"] == 1
+    response = client.post("/api/session/close", json={"client_id": "test-tab-0001"})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "active": 0, "accepted": True}
 
 
 def test_external_model_guide_is_explicit_and_not_executable(client):

@@ -9,6 +9,18 @@ import uvicorn
 from .browser import BrowserError, ask_preferences, open_url
 
 
+def run_server(host: str, port: int) -> None:
+    """Run one server whose lifetime can follow the last open app tab."""
+    from .main import app
+
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, reload=False, access_log=False))
+    app.state.sessions.on_empty = lambda: setattr(server, "should_exit", True)
+    try:
+        server.run()
+    finally:
+        app.state.sessions.stop()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Comic OCR Studio")
     parser.add_argument("--host", default="127.0.0.1")
@@ -38,7 +50,7 @@ def main() -> None:
         timer = threading.Timer(1.0, open_selected_browser)
         timer.daemon = True
         timer.start()
-    uvicorn.run("comic_studio.main:app", host=args.host, port=args.port, reload=False, access_log=False)
+    run_server(args.host, args.port)
 
 
 if __name__ == "__main__":

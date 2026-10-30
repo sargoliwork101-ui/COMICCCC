@@ -13,6 +13,91 @@ const state = {
 let saveTimer = null;
 let toastTimer = null;
 let outlineFrame = null;
+let activityAfter = 0;
+let activityEntries = [];
+let activityPollTimer = null;
+let activityPollInFlight = false;
+let sessionTimer = null;
+let localActivityId = 0;
+let jobBusy = false;
+
+function browserTabId() {
+  try {
+    const existing = sessionStorage.getItem('comic-studio-tab-id');
+    if (existing) return existing;
+  } catch { /* storage can be unavailable in private contexts */ }
+  const id = globalThis.crypto?.randomUUID?.() || `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try { sessionStorage.setItem('comic-studio-tab-id', id); } catch { /* keep the in-memory id */ }
+  return id;
+}
+const TAB_ID = browserTabId();
+
+function renderActivity() {
+  document.querySelectorAll('.activity-log').forEach((target) => {
+    target.textContent = '';
+    activityEntries.slice(-100).forEach((entry) => {
+      const line = document.createElement('div'); line.className = `activity-line ${entry.kind || 'info'}`;
+      const time = document.createElement('span'); time.className = 'activity-time';
+      const date = new Date(entry.time || Date.now()); time.textContent = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const message = document.createElement('span'); message.textContent = entry.message;
+      line.append(time, message); target.appendChild(line);
+    });
+    target.scrollTop = target.scrollHeight;
+  });
+}
+function appendLocalActivity(message, kind = 'info') {
+  if (!message) return;
+  activityEntries.push({ id: --localActivityId, message: String(message), kind, time: new Date().toISOString() });
+  activityEntries = activityEntries.slice(-100); renderActivity();
+}
+async function pollActivity() {
+  if (activityPollInFlight) return;
+  activityPollInFlight = true;
+  try {
+    const response = await fetch(`/api/activity?after=${activityAfter}`, { cache: 'no-store' });
+    if (!response.ok) return;
+    const payload = await response.json();
+    (payload.entries || []).forEach((entry) => {
+      if (!activityEntries.some((existing) => existing.id === entry.id)) activityEntries.push(entry);
+    });
+    activityAfter = Math.max(activityAfter, Number(payload.next) || 0);
+    activityEntries = activityEntries.slice(-100);
+    const latest = payload.entries?.at(-1);
+    if (jobBusy && latest) {
+      $('jobStatus').textContent = latest.message;
+      if (latest.progress !== null && latest.progress !== undefined) $('jobProgress').style.width = `${Math.round(latest.progress * 100)}%`;
+    }
+    if (payload.entries?.length) renderActivity();
+  } catch { /* the server may be shutting down; do not create a toast loop */ }
+  finally { activityPollInFlight = false; }
+}
+function startActivityFeed() {
+  pollActivity();
+  if (!activityPollTimer) {
+    activityPollTimer = setInterval(pollActivity, 700);
+    activityPollTimer.unref?.();
+  }
+}
+async function heartbeat() {
+  try {
+    await fetch('/api/session/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: TAB_ID }), cache: 'no-store' });
+  } catch { /* a closed server needs no further browser-side error */ }
+}
+function startSession() {
+  heartbeat();
+  if (!sessionTimer) {
+    sessionTimer = setInterval(heartbeat, 15000);
+    sessionTimer.unref?.();
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) heartbeat(); });
+}
+function closeSession() {
+  const body = JSON.stringify({ client_id: TAB_ID });
+  try {
+    if (navigator.sendBeacon?.('/api/session/close', new Blob([body], { type: 'application/json' }))) return;
+  } catch { /* use the keepalive fallback below */ }
+  fetch('/api/session/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
+}
 
 function toast(message, error = false) {
   const el = $('toast');
@@ -71,14 +156,15 @@ function sanitizeHtml(html) {
   return [...root.childNodes].map(walk).join('');
 }
 function setBusy(message) {
+  jobBusy = !!message;
   $('jobStatus').textContent = message || 'آماده';
   $('jobProgress').style.width = message ? '65%' : '0';
   document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button').forEach((el) => { el.disabled = !!message; });
 }
 async function runJob(message, task) {
-  setBusy(message);
+  setBusy(message); appendLocalActivity(message); $('activityDetails').open = true;
   try { return await task(); }
-  catch (error) { console.error(error); toast(error.message || error, true); throw error; }
+  catch (error) { console.error(error); appendLocalActivity(`خطا: ${error.message || error}`, 'error'); toast(error.message || error, true); throw error; }
   finally { setBusy(''); }
 }
 function scheduleSave() {
@@ -151,8 +237,8 @@ function renderGrid() {
     card.dataset.id = item.id; card.draggable = true;
     if (info) card.style.setProperty('--group-color', groupColor(info.id));
     const frame = document.createElement('div'); frame.className = 'tw';
-    const image = document.createElement('img'); image.src = imageUrl(item, !!item.edited, true); image.alt = item.name; image.loading = 'lazy';
-    image.addEventListener('load', scheduleOutlines); image.addEventListener('click', (event) => { event.stopPropagation(); openPreview(item); });
+    const image = document.createElement('img'); image.src = imageUrl(item, !!item.edited, true); image.alt = item.name; image.loading = 'lazy'; image.draggable = false;
+    image.addEventListener('load', scheduleOutlines); image.addEventListener('click', (event) => { event.stopPropagation(); setSelected(item, !item.selected, event); });
     frame.appendChild(image);
     const tick = document.createElement('input'); tick.type = 'checkbox'; tick.className = 'tick'; tick.checked = !!item.selected; tick.setAttribute('aria-label', `انتخاب ${item.name}`);
     tick.addEventListener('click', (event) => event.stopPropagation()); tick.addEventListener('change', (event) => setSelected(item, tick.checked, event));
@@ -402,16 +488,16 @@ function renderModels() {
 }
 async function downloadEngine(engine) {
   if (state.modelBusy) return; const language = $('testLanguage').value; if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return; }
-  state.modelBusy = engine.id; $('modelTestResult').textContent = `آماده‌سازی ${engine.name} برای ${language} آغاز شد؛ فقط مدل همین زبان دانلود می‌شود.`; renderModels();
-  try { const result = await api(`/api/engines/${engine.id}/download`, jsonOptions('POST', { language })); state.engines = result.engines; $('modelTestResult').textContent = `مدل ${engine.name} برای ${language} آماده است.`; updateEngineOptions(); toast('مدل آماده است'); }
-  catch (error) { $('modelTestResult').textContent = `آماده‌سازی ناموفق بود:\n${error.message}\n\nاتصال اینترنت و دسترسی به میزبان مدل را بررسی کنید.`; toast(error.message, true); }
+  state.modelBusy = engine.id; $('modelTestResult').textContent = `آماده‌سازی ${engine.name} برای ${language} آغاز شد؛ فقط مدل همین زبان دانلود می‌شود.`; appendLocalActivity(`آماده‌سازی ${engine.name} برای ${language} آغاز شد`); renderModels();
+  try { const result = await api(`/api/engines/${engine.id}/download`, jsonOptions('POST', { language })); state.engines = result.engines; $('modelTestResult').textContent = `مدل ${engine.name} برای ${language} آماده است.`; appendLocalActivity(`مدل ${engine.name} آماده شد`, 'success'); updateEngineOptions(); toast('مدل آماده است'); }
+  catch (error) { $('modelTestResult').textContent = `آماده‌سازی ناموفق بود:\n${error.message}\n\nاتصال اینترنت و دسترسی به میزبان مدل را بررسی کنید.`; appendLocalActivity(`آماده‌سازی ناموفق بود: ${error.message}`, 'error'); toast(error.message, true); }
   finally { state.modelBusy = null; renderModels(); }
 }
 async function testEngine(engineId) {
   if (state.modelBusy) return; const item = selectedImages()[0] || sortedImages()[0]; if (!item) { toast('ابتدا یک تصویر وارد کنید', true); return; }
-  $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…';
-  try { const result = await api(`/api/engines/${engineId}/test`, jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value })); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; }
-  catch (error) { $('modelTestResult').textContent = error.message; }
+  $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
+  try { const result = await api(`/api/engines/${engineId}/test`, jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value })); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
+  catch (error) { $('modelTestResult').textContent = error.message; appendLocalActivity(`آزمایش موتور ناموفق بود: ${error.message}`, 'error'); }
 }
 async function loadAiSettings() { state.ai = await api('/api/ai-settings'); $('aiProvider').value = state.ai.provider || 'free'; $('aiBaseUrl').value = state.ai.base_url || 'https://api.avalai.ir/v1'; $('aiModel').value = state.ai.model || 'gpt-6-luna'; $('aiKey').placeholder = state.ai.hasApiKey ? 'کلید ذخیره شده؛ برای تغییر، کلید تازه بدهید' : 'کلید API'; updateAiFields(); }
 function updateAiFields() { $('aiFields').classList.toggle('hidden', $('aiProvider').value !== 'openai'); }
@@ -555,6 +641,7 @@ async function copyPreview() {
 
 // ---------- Events and startup ----------
 function bindEvents() {
+  window.addEventListener('pagehide', closeSession);
   bindGridDrop();
   $('menuBtn').addEventListener('click', () => $('menu').classList.toggle('hidden'));
   $('themeBtn').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('comic-studio-theme', document.body.classList.contains('light') ? 'light' : 'dark'); });
@@ -583,7 +670,7 @@ function bindEvents() {
   if (localStorage.getItem('comic-studio-theme') === 'light') document.body.classList.add('light');
 }
 async function init() {
-  bindEvents();
+  bindEvents(); startActivityFeed(); startSession();
   try { const [projects, engines, ai] = await Promise.all([api('/api/projects'), api('/api/engines'), api('/api/ai-settings')]); state.engines = engines; state.ai = ai; const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' })); adoptProject(project); await refreshProjectList(); await loadAiSettings(); }
   catch (error) { toast(`راه‌اندازی ناموفق: ${error.message}`, true); }
 }

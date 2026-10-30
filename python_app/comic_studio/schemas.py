@@ -47,6 +47,10 @@ class EngineDownloadRequest(BaseModel):
     language: str = "eng"
 
 
+class SessionRequest(BaseModel):
+    client_id: str = Field(min_length=8, max_length=120)
+
+
 class ExportRequest(BaseModel):
     kind: Literal["pdf", "images", "txt"]
     image_ids: list[str] = Field(default_factory=list)

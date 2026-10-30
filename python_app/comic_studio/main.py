@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -9,13 +11,15 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import APP_NAME, APP_VERSION
+from .activity import ActivityLog, reporting
 from .exporter import build_images_zip, build_pdf, build_txt, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
 from .paths import STATIC_DIR, project_root
 from .schemas import (
     AiSettings, EngineDownloadRequest, EngineTestRequest, ExportRequest, OcrRequest, ProjectCreate,
-    StateUpdate, TextTranslateRequest, TranslateRequest,
+    SessionRequest, StateUpdate, TextTranslateRequest, TranslateRequest,
 )
+from .sessions import SessionManager
 from .store import ProjectStore
 from .translation import TranslationError, TranslationService
 
@@ -25,6 +29,29 @@ def create_app() -> FastAPI:
     store = ProjectStore()
     registry = EngineRegistry()
     translations = TranslationService()
+    activity = ActivityLog()
+    sessions = SessionManager()
+    app.state.activity = activity
+    app.state.sessions = sessions
+    activity.add("برنامه آماده است")
+
+    async def run_reported(function: Any, *args: Any, pulse_label: str | None = None) -> Any:
+        stop_pulse = threading.Event()
+        started = time.monotonic()
+        pulse = None
+        if pulse_label:
+            def report_alive() -> None:
+                while not stop_pulse.wait(5):
+                    activity.add(f"{pulse_label} همچنان در حال انجام است · {int(time.monotonic() - started)} ثانیه")
+            pulse = threading.Thread(target=report_alive, daemon=True)
+            pulse.start()
+        try:
+            with reporting(activity.add):
+                return await run_in_threadpool(function, *args)
+        finally:
+            stop_pulse.set()
+            if pulse:
+                pulse.join(timeout=0.1)
 
     def project(project_id: str) -> dict[str, Any]:
         try:
@@ -49,6 +76,19 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         return {"name": APP_NAME, "version": APP_VERSION, "offlineOcr": True, "scraping": False}
+
+    @app.get("/api/activity")
+    def activity_feed(after: int = 0) -> dict[str, Any]:
+        return activity.since(max(0, after))
+
+    @app.post("/api/session/heartbeat")
+    def session_heartbeat(values: SessionRequest) -> dict[str, Any]:
+        return {"ok": True, "active": sessions.heartbeat(values.client_id)}
+
+    @app.post("/api/session/close")
+    def session_close(values: SessionRequest) -> dict[str, Any]:
+        active, accepted = sessions.close(values.client_id)
+        return {"ok": True, "active": active, "accepted": accepted}
 
     @app.get("/api/projects")
     def projects() -> list[dict[str, Any]]:
@@ -84,10 +124,17 @@ def create_app() -> FastAPI:
             payloads.append((Path(upload.filename or "image.png").name, content))
         if not payloads:
             raise HTTPException(400, "No files supplied")
+        activity.add(f"دریافت و آماده‌سازی {len(payloads)} فایل آغاز شد")
         try:
-            return await run_in_threadpool(store.import_files, project_id, payloads)
+            result = await run_reported(store.import_files, project_id, payloads, pulse_label="ورود و آماده‌سازی فایل")
+            activity.add(f"{len(result.get('images', []))} تصویر در پروژه آماده است", "success", 1.0)
+            return result
         except (ValueError, RuntimeError) as exc:
+            activity.add(f"ورود فایل ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            activity.add(f"ورود فایل ناموفق بود: {exc}", "error")
+            raise
 
     @app.get("/api/projects/{project_id}/images/{image_id}/content")
     def image_content(project_id: str, image_id: str, edited: bool = False, cropped: bool = False) -> Response:
@@ -141,7 +188,13 @@ def create_app() -> FastAPI:
         language = values.language if values else "eng"
         if language not in info["languages"]:
             raise HTTPException(400, "This engine does not support the selected language")
-        await run_in_threadpool(registry.download, engine_id, language)
+        activity.add(f"آماده‌سازی {info['name']} برای زبان {language} آغاز شد؛ دانلود فقط با درخواست شما انجام می‌شود")
+        try:
+            await run_reported(registry.download, engine_id, language, pulse_label=f"آماده‌سازی {info['name']}")
+        except Exception as exc:
+            activity.add(f"آماده‌سازی {info['name']} ناموفق بود: {exc}", "error")
+            raise
+        activity.add(f"مدل {info['name']} برای {language} آماده شد", "success", 1.0)
         return {"ok": True, "language": language, "engines": registry.status()}
 
     @app.post("/api/engines/{engine_id}/test")
@@ -159,7 +212,13 @@ def create_app() -> FastAPI:
         from PIL import Image
         with Image.open(path) as im:
             image = im.copy()
-        blocks = await run_in_threadpool(recognize_image, engine, image, values.language, True, True, 0.2)
+        activity.add(f"آزمایش {ENGINE_INFO[engine_id]['name']} روی {path.name} آغاز شد")
+        try:
+            blocks = await run_reported(recognize_image, engine, image, values.language, True, True, 0.2, pulse_label=f"آزمایش {ENGINE_INFO[engine_id]['name']}")
+        except Exception as exc:
+            activity.add(f"آزمایش موتور ناموفق بود: {exc}", "error")
+            raise
+        activity.add(f"آزمایش تمام شد؛ {len(blocks)} خط تشخیص داده شد", "success", 1.0)
         return {"engine": engine_id, "imageId": values.image_id, "blocks": blocks}
 
     @app.post("/api/projects/{project_id}/ocr")
@@ -173,48 +232,76 @@ def create_app() -> FastAPI:
         ids = image_ids(state, values.image_ids)
         if not ids:
             raise HTTPException(400, "No images selected")
-        for item in state["images"]:
-            if item["id"] not in ids:
-                continue
-            path = store.image_path(project_id, item["id"])
-            from PIL import Image
-            with Image.open(path) as im:
-                image = im.copy()
-            blocks = await run_in_threadpool(
-                recognize_image, engine, image, values.language,
-                values.contrast, values.precise, values.min_confidence,
-            )
-            for block in blocks:
-                block["bg"] = "auto" if state.get("settings", {}).get("eraseOriginal", True) else "none"
-            item["blocks"] = blocks
-            item["edited"] = False
-            (project_root(project_id) / "images" / f"{item['id']}-edited.png").unlink(missing_ok=True)
-        store.save(state)
+        activity.add(f"OCR محلی برای {len(ids)} تصویر آغاز شد")
+        completed = 0
+        try:
+            for item in state["images"]:
+                if item["id"] not in ids:
+                    continue
+                completed += 1
+                activity.add(f"OCR تصویر {completed} از {len(ids)}: {item['name']}", progress=(completed - 1) / len(ids))
+                path = store.image_path(project_id, item["id"])
+                from PIL import Image
+                with Image.open(path) as im:
+                    image = im.copy()
+                blocks = await run_reported(
+                    recognize_image, engine, image, values.language,
+                    values.contrast, values.precise, values.min_confidence,
+                    pulse_label=f"OCR {item['name']}",
+                )
+                for block in blocks:
+                    block["bg"] = "auto" if state.get("settings", {}).get("eraseOriginal", True) else "none"
+                item["blocks"] = blocks
+                item["edited"] = False
+                (project_root(project_id) / "images" / f"{item['id']}-edited.png").unlink(missing_ok=True)
+                activity.add(f"{item['name']}: {len(blocks)} خط متن", progress=completed / len(ids))
+            store.save(state)
+        except Exception as exc:
+            activity.add(f"OCR ناموفق بود: {exc}", "error")
+            raise
+        activity.add("OCR همهٔ تصاویر انتخاب‌شده تمام شد", "success", 1.0)
         return state
 
     @app.post("/api/projects/{project_id}/translate")
     async def run_translation(project_id: str, values: TranslateRequest) -> dict[str, Any]:
         state = project(project_id)
         ids = image_ids(state, values.image_ids)
-        for item in state["images"]:
-            if item["id"] not in ids:
-                continue
-            for block in item.get("blocks", []):
-                if not block.get("enabled", True) or not block.get("text", "").strip():
+        activity.add(f"ترجمهٔ {len(ids)} تصویر آغاز شد")
+        completed = 0
+        try:
+            for item in state["images"]:
+                if item["id"] not in ids:
                     continue
-                translated = await run_in_threadpool(
-                    translations.translate, block["text"], values.source_language, values.provider,
-                )
-                block["tr"] = translated
-                block["richHtml"] = ""
-        store.save(state)
+                completed += 1
+                activity.add(f"ترجمهٔ تصویر {completed} از {len(ids)}: {item['name']}", progress=(completed - 1) / max(1, len(ids)))
+                for block in item.get("blocks", []):
+                    if not block.get("enabled", True) or not block.get("text", "").strip():
+                        continue
+                    translated = await run_reported(
+                        translations.translate, block["text"], values.source_language, values.provider,
+                        pulse_label=f"ترجمهٔ {item['name']}",
+                    )
+                    block["tr"] = translated
+                    block["richHtml"] = ""
+                activity.add(f"ترجمهٔ {item['name']} تمام شد", progress=completed / max(1, len(ids)))
+            store.save(state)
+        except Exception as exc:
+            activity.add(f"ترجمه ناموفق بود: {exc}", "error")
+            raise
+        activity.add("ترجمهٔ متن‌های انتخاب‌شده تمام شد", "success", 1.0)
         return state
 
     @app.post("/api/translate-text")
     async def translate_text(values: TextTranslateRequest) -> dict[str, str]:
-        translated = await run_in_threadpool(
-            translations.translate, values.text, values.source_language, values.provider,
-        )
+        activity.add("ترجمهٔ دوبارهٔ یک خط آغاز شد")
+        try:
+            translated = await run_reported(
+                translations.translate, values.text, values.source_language, values.provider,
+            )
+        except Exception as exc:
+            activity.add(f"ترجمهٔ دوباره ناموفق بود: {exc}", "error")
+            raise
+        activity.add("ترجمهٔ دوبارهٔ خط تمام شد", "success")
         return {"text": translated}
 
     @app.get("/api/ai-settings")
@@ -238,15 +325,21 @@ def create_app() -> FastAPI:
         if not values.image_ids:
             raise HTTPException(400, "No images selected")
         request = values.model_dump()
+        activity.add(f"ساخت خروجی {values.kind.upper()} آغاز شد")
         try:
             if values.kind == "pdf":
-                path = await run_in_threadpool(build_pdf, store, state, request)
+                path = await run_reported(build_pdf, store, state, request, pulse_label="ساخت PDF")
             elif values.kind == "images":
-                path = await run_in_threadpool(build_images_zip, store, state, request)
+                path = await run_reported(build_images_zip, store, state, request, pulse_label="ساخت ZIP")
             else:
-                path = await run_in_threadpool(build_txt, store, state, request)
+                path = await run_reported(build_txt, store, state, request, pulse_label="ساخت TXT")
         except ValueError as exc:
+            activity.add(f"ساخت خروجی ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            activity.add(f"ساخت خروجی ناموفق بود: {exc}", "error")
+            raise
+        activity.add(f"خروجی {values.kind.upper()} آماده شد", "success", 1.0)
         media_type = {"pdf": "application/pdf", "images": "application/zip", "txt": "text/plain; charset=utf-8"}[values.kind]
         return FileResponse(path, media_type=media_type, filename=path.name)
 

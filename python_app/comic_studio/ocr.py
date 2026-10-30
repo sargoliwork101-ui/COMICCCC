@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageOps
 
+from .activity import emit
 from .paths import models_dir
 
 # Optional bright-white-text fallback. The original OCR path always runs first.
@@ -55,14 +56,18 @@ def install_packages(packages: list[str]) -> None:
     if not packages:
         return
     command = [sys.executable, "-m", "pip", "install", *packages]
+    emit(f"نصب بسته‌های OCR آغاز شد: {', '.join(packages)}")
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False)
     except Exception as exc:
+        emit(f"نصب بسته‌های OCR ناموفق بود: {exc}", "error")
         raise OcrError(f"Could not install the OCR runtime: {exc}") from exc
     if result.returncode:
         details = (result.stderr or result.stdout or "pip failed")[-1800:].strip()
+        emit(f"نصب بسته‌های OCR ناموفق بود: {details}", "error")
         raise OcrError(f"OCR runtime installation failed: {details}")
     importlib.invalidate_caches()
+    emit("نصب بسته‌های OCR تمام شد", "success")
 
 
 def _lines_from_rapid(result: Any) -> list[OcrLine]:
@@ -169,6 +174,7 @@ class RapidEngine:
 
     def _ensure_runtime(self) -> None:
         if not self.runtime_installed:
+            emit("بستهٔ اجرای RapidOCR موجود نیست؛ نصب آگاهانه آغاز می‌شود")
             install_packages(["rapidocr>=3.10,<3.11", "onnxruntime>=1.20,<2"])
         if not self.runtime_installed:
             raise OcrError("RapidOCR was installed but cannot be imported. Restart the application and try again.")
@@ -183,6 +189,7 @@ class RapidEngine:
                 raise OcrError(f"{self.id} model is not ready. Use the explicit model download button first.")
         with self._lock:
             if language not in self._instances:
+                emit(f"بارگذاری یا دانلود مدل {self.id} برای {language} آغاز شد")
                 try:
                     self._instances[language] = self._create(language)
                 except Exception as exc:
@@ -202,7 +209,9 @@ class RapidEngine:
         languages = [language] if self.version == "v5" else ["eng"]
         for selected in languages:
             try:
+                emit(f"آماده‌سازی مدل {self.id} برای {selected}؛ ممکن است دانلود چند دقیقه طول بکشد")
                 self._warm(self._get(selected, allow_download=True))
+                emit(f"مدل {self.id} برای {selected} بارگذاری و آزمایش شد", "success")
             except OcrError:
                 raise
             except Exception as exc:
@@ -257,6 +266,7 @@ class EasyEngine:
 
     def _ensure_runtime(self) -> None:
         if not self.runtime_installed:
+            emit("بستهٔ اجرای EasyOCR موجود نیست؛ نصب آگاهانه آغاز می‌شود")
             install_packages(["easyocr>=1.7,<2", "torch>=2.2,<3"])
         if not self.runtime_installed:
             raise OcrError("EasyOCR was installed but cannot be imported. Restart the application and try again.")
@@ -271,6 +281,7 @@ class EasyEngine:
         lang = {"eng": "en", "kor": "ko", "jpn": "ja", "chi_sim": "ch_sim"}.get(language, "en")
         with self._lock:
             if lang not in self._readers:
+                emit(f"بارگذاری یا دانلود مدل EasyOCR برای {language} آغاز شد")
                 import easyocr
                 try:
                     self._readers[lang] = easyocr.Reader(
@@ -284,9 +295,11 @@ class EasyEngine:
     def download(self, language: str = "eng") -> None:
         self._ensure_runtime()
         try:
+            emit(f"آماده‌سازی EasyOCR برای {language}؛ فقط مدل همین زبان دریافت می‌شود")
             self._reader(language, True)
             self._model_dir().mkdir(parents=True, exist_ok=True)
             (self._model_dir() / f".ready-{language}").write_text("downloaded by user request\n", encoding="utf-8")
+            emit(f"مدل EasyOCR برای {language} آماده شد", "success")
         except OcrError:
             raise
         except Exception as exc:
@@ -401,6 +414,7 @@ class TesseractEngine:
         temporary = self._model_dir() / f".{language}.traineddata.part"
         target = self._model_dir() / f"{language}.traineddata"
         try:
+            emit(f"دانلود فایل زبان Tesseract ({language}) از منبع رسمی آغاز شد")
             request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio"})
             with urllib.request.urlopen(request, timeout=180) as response, temporary.open("wb") as output:
                 total = 0
@@ -409,12 +423,14 @@ class TesseractEngine:
                     if not chunk:
                         break
                     total += len(chunk)
+                    emit(f"Tesseract {language}: {total / (1024 * 1024):.1f} مگابایت دریافت شد")
                     if total > 50 * 1024 * 1024:
                         raise OcrError("The selected Tesseract language file is unexpectedly large.")
                     output.write(chunk)
             if temporary.stat().st_size < 1000:
                 raise OcrError("The downloaded Tesseract language file is empty or invalid.")
             os.replace(temporary, target)
+            emit(f"فایل زبان Tesseract ({language}) ذخیره شد", "success")
         except OcrError:
             temporary.unlink(missing_ok=True)
             raise
@@ -747,6 +763,7 @@ def recognize_image(
     primary = _recognize_image_primary(engine, image, language, contrast, precise, min_confidence)
     if not EXTRA_PREPROCESS_ENABLED or not _needs_extra_preprocess(primary):
         return primary
+    emit("نتیجهٔ OCR اصلی ضعیف یا کوتاه است؛ پیش‌پردازش تکمیلی متن روشن اجرا می‌شود")
     try:
         fallback_image = _extra_preprocess_image(image)
         fallback = _recognize_image_primary(
@@ -755,5 +772,10 @@ def recognize_image(
         )
     except Exception:
         # An optional preprocessing backend must never break the established OCR result.
+        emit("پیش‌پردازش تکمیلی ممکن نبود؛ نتیجهٔ OCR اصلی حفظ شد", "warning")
         return primary
-    return fallback if _better_fallback(fallback, primary) else primary
+    if _better_fallback(fallback, primary):
+        emit("نتیجهٔ پیش‌پردازش تکمیلی بهتر بود و انتخاب شد", "success")
+        return fallback
+    emit("نتیجهٔ OCR اصلی بهتر بود و حفظ شد")
+    return primary

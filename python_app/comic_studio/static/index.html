@@ -8,7 +8,7 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۰۳ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۰۵ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
     <button id="menuBtn" class="bt">☰ پروژه و تنظیمات</button>
   </header>
 
@@ -63,6 +63,10 @@
     <section id="result" class="panel result-panel">
       <div class="row"><strong>وضعیت</strong><span id="jobStatus" role="status">آماده</span><span class="grow"></span><span class="muted">PDF · ZIP · TXT</span></div>
       <div class="bar"><div id="jobProgress" class="fill"></div></div>
+      <details id="activityDetails" class="activity-details" open>
+        <summary>گزارش زندهٔ کارها</summary>
+        <div id="activityLog" class="activity-log" role="log" aria-live="polite"></div>
+      </details>
     </section>
   </main>
 
@@ -88,6 +92,7 @@
       <label><input id="ocrErase" type="checkbox" checked> پاک‌کردن متن اصلی زیر ترجمه</label>
     </div>
     <p id="ocrEngineStatus" class="hint"></p>
+    <div id="ocrActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <div class="dialog-actions"><button id="startOcrBtn" class="bt primary">شروع OCR</button></div>
   </dialog>
 
@@ -97,6 +102,7 @@
     <div id="engineCards" class="engine-cards"></div>
     <div class="test-panel"><label>زبان مدل و آزمایش<select id="testLanguage"><option value="eng">English</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label><span>آماده‌سازی فقط همین زبان را نصب/دانلود می‌کند. آزمایش روی نخستین تصویر انتخاب‌شده انجام می‌شود و پروژه را تغییر نمی‌دهد.</span></div>
     <pre id="modelTestResult" class="test-result" dir="auto"></pre>
+    <div id="modelActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
   </dialog>
 
   <dialog id="aiDialog" class="dlg small-dialog">
@@ -114,6 +120,7 @@
     <div id="pdfExportFields" class="checks"><label><input id="exportSeamless" type="checkbox"> همهٔ تصاویر پشت سر هم در یک صفحهٔ بلند</label><label><input id="exportUniform" type="checkbox"> قاب‌های هم‌اندازه</label><label><input id="exportTwo" type="checkbox"> دو تصویر در هر صفحه (گروه‌ها جدا می‌مانند)</label></div>
     <div id="imageExportFields" class="form-grid hidden"><label>فرمت<select id="exportFormat"><option value="orig">اصلی / PNG برای ویرایش‌شده</option><option value="png">PNG</option><option value="jpg">JPEG کیفیت ۱۰۰٪</option></select></label><label>زیرپوشه داخل ZIP<input id="exportFolder" placeholder="اختیاری"></label></div>
     <p class="hint">فقط تصاویر انتخاب‌شده و با ترتیب نمایش‌داده‌شده خروجی می‌گیرند. اعضای هر گروه در یک صفحهٔ عمودی PDF کنار هم قرار می‌گیرند.</p>
+    <div id="exportActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <div class="dialog-actions"><button id="startExportBtn" class="bt success">ساخت و دانلود</button></div>
   </dialog>
 
