@@ -135,8 +135,11 @@ def create_app() -> FastAPI:
     @app.post("/api/engines/{engine_id}/download")
     async def download_engine(engine_id: str, values: EngineDownloadRequest | None = None) -> dict[str, Any]:
         registry.get(engine_id)
+        info = ENGINE_INFO[engine_id]
+        if info.get("action") == "guide":
+            return {"ok": False, "guide": True, "engine": {"id": engine_id, **info}, "engines": registry.status()}
         language = values.language if values else "eng"
-        if language not in ENGINE_INFO[engine_id]["languages"]:
+        if language not in info["languages"]:
             raise HTTPException(400, "This engine does not support the selected language")
         await run_in_threadpool(registry.download, engine_id, language)
         return {"ok": True, "language": language, "engines": registry.status()}
@@ -144,6 +147,8 @@ def create_app() -> FastAPI:
     @app.post("/api/engines/{engine_id}/test")
     async def test_engine(engine_id: str, values: EngineTestRequest) -> dict[str, Any]:
         engine = registry.get(engine_id)
+        if not ENGINE_INFO[engine_id].get("selectable", False):
+            raise HTTPException(400, "This model requires its official external runtime and is not a direct comic OCR engine")
         if values.language not in ENGINE_INFO[engine_id]["languages"]:
             raise HTTPException(400, "This engine does not support the selected language")
         state = project(values.project_id)
@@ -161,6 +166,8 @@ def create_app() -> FastAPI:
     async def run_ocr(project_id: str, values: OcrRequest) -> dict[str, Any]:
         state = project(project_id)
         engine = registry.get(values.engine)
+        if not ENGINE_INFO[values.engine].get("selectable", False):
+            raise HTTPException(400, "This model requires its official external runtime and is not a direct comic OCR engine")
         if values.language not in LANGUAGES or values.language not in ENGINE_INFO[values.engine]["languages"]:
             raise HTTPException(400, "This engine does not support the selected language")
         ids = image_ids(state, values.image_ids)

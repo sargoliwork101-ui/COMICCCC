@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import csv
 import importlib.util
+import io
+import os
+import shutil
 import subprocess
 import sys
 import threading
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -293,12 +298,184 @@ class EasyEngine:
         return lines
 
 
+def _tesseract_executable() -> str | None:
+    executable = shutil.which("tesseract")
+    if executable:
+        return executable
+    if os.name == "nt":
+        candidates = [
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tesseract-OCR" / "tesseract.exe",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Tesseract-OCR" / "tesseract.exe",
+            Path(os.environ.get("LocalAppData", str(Path.home() / "AppData" / "Local"))) / "Programs" / "Tesseract-OCR" / "tesseract.exe",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def _lines_from_tesseract(payload: str) -> list[OcrLine]:
+    """Turn Tesseract TSV words into physical lines and bounding boxes."""
+    groups: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
+    reader = csv.DictReader(io.StringIO(payload), delimiter="\t")
+    for row in reader:
+        if row.get("level") != "5" or not (row.get("text") or "").strip():
+            continue
+        key = tuple(row.get(key, "") for key in ("page_num", "block_num", "par_num", "line_num"))
+        groups.setdefault(key, []).append(row)
+    lines = []
+    for words in groups.values():
+        try:
+            boxes = [(float(row["left"]), float(row["top"]), float(row["width"]), float(row["height"])) for row in words]
+            x0 = min(box[0] for box in boxes); y0 = min(box[1] for box in boxes)
+            x1 = max(box[0] + box[2] for box in boxes); y1 = max(box[1] + box[3] for box in boxes)
+            scores = [float(row.get("conf", "-1")) for row in words]
+            valid_scores = [score / 100.0 for score in scores if score >= 0]
+            confidence = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        text = " ".join((row.get("text") or "").strip() for row in words).strip()
+        if text:
+            lines.append(OcrLine(text, confidence, [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]))
+    return lines
+
+
+class TesseractEngine:
+    id = "tesseract"
+
+    def __init__(self) -> None:
+        self._system_languages: set[str] | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def runtime_installed(self) -> bool:
+        return bool(_tesseract_executable())
+
+    def _model_dir(self) -> Path:
+        return models_dir() / "tesseract"
+
+    def _expected_models(self, language: str) -> list[str]:
+        return [f"{language}.traineddata"]
+
+    def _get_system_languages(self) -> set[str]:
+        if self._system_languages is not None:
+            return self._system_languages
+        executable = _tesseract_executable()
+        if not executable:
+            return set()
+        try:
+            result = subprocess.run([executable, "--list-langs"], capture_output=True, text=True, timeout=30, check=False)
+            if result.returncode == 0:
+                self._system_languages = {line.strip() for line in result.stdout.splitlines()[1:] if line.strip()}
+            else:
+                self._system_languages = set()
+        except Exception:
+            self._system_languages = set()
+        return self._system_languages
+
+    @property
+    def ready_languages(self) -> list[str]:
+        if not self.runtime_installed:
+            return []
+        system = self._get_system_languages()
+        return [language for language in LANGUAGES if language in system or all((self._model_dir() / name).is_file() for name in self._expected_models(language))]
+
+    @property
+    def model_ready(self) -> bool:
+        return bool(self.ready_languages)
+
+    def download(self, language: str = "eng") -> None:
+        if not self.runtime_installed:
+            raise OcrError("Tesseract executable is not installed. Install it from the official project first; pip alone cannot install the Tesseract binary. https://github.com/tesseract-ocr/tesseract")
+        if language not in LANGUAGES:
+            raise OcrError(f"Unsupported Tesseract language: {language}")
+        self._model_dir().mkdir(parents=True, exist_ok=True)
+        url = f"https://github.com/tesseract-ocr/tessdata_fast/raw/main/{language}.traineddata"
+        temporary = self._model_dir() / f".{language}.traineddata.part"
+        target = self._model_dir() / f"{language}.traineddata"
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio"})
+            with urllib.request.urlopen(request, timeout=180) as response, temporary.open("wb") as output:
+                total = 0
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > 50 * 1024 * 1024:
+                        raise OcrError("The selected Tesseract language file is unexpectedly large.")
+                    output.write(chunk)
+            if temporary.stat().st_size < 1000:
+                raise OcrError("The downloaded Tesseract language file is empty or invalid.")
+            os.replace(temporary, target)
+        except OcrError:
+            temporary.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            temporary.unlink(missing_ok=True)
+            raise OcrError(f"Tesseract language download failed for {language}: {exc}. The official tessdata_fast host must be reachable.") from exc
+
+    def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+        executable = _tesseract_executable()
+        if not executable:
+            raise OcrError("Tesseract is not installed. Install the binary and use the explicit language download button.")
+        if language not in self.ready_languages:
+            raise OcrError(f"Tesseract language {language} is not ready. Use the explicit model download button first.")
+        buffer = io.BytesIO(); image.convert("RGB").save(buffer, "PNG")
+        command = [executable, "stdin", "stdout", "-l", language, "--psm", "11"]
+        if (self._model_dir() / f"{language}.traineddata").is_file():
+            command.extend(["--tessdata-dir", str(self._model_dir())])
+        command.append("tsv")
+        try:
+            result = subprocess.run(command, input=buffer.getvalue(), capture_output=True, timeout=180, check=False)
+        except Exception as exc:
+            raise OcrError(f"Tesseract failed: {exc}") from exc
+        if result.returncode:
+            details = (result.stderr or result.stdout or b"Tesseract failed")[-1800:]
+            raise OcrError(f"Tesseract failed: {details.decode('utf-8', 'replace') if isinstance(details, bytes) else details}")
+        return _lines_from_tesseract(result.stdout.decode("utf-8", "replace") if isinstance(result.stdout, bytes) else result.stdout)
+
+
+class ManualEngine:
+    """Catalog entry for a model whose official pipeline is not a direct line-OCR adapter."""
+    def __init__(self, engine_id: str) -> None:
+        self.id = engine_id
+
+    @property
+    def runtime_installed(self) -> bool:
+        return False
+
+    @property
+    def ready_languages(self) -> list[str]:
+        return []
+
+    @property
+    def model_ready(self) -> bool:
+        return False
+
+    def download(self, language: str = "eng") -> None:
+        raise OcrError("This model needs its official runtime and a separate compatible adapter. Use the official guide linked in the model card; no files were downloaded.")
+
+    def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+        raise OcrError("This model is listed for manual/external setup and is not a direct comic line-OCR engine in this application.")
+
+
+def _external_info(name: str, family: str, description: str, repository: str, requirements: str, limitations: str) -> dict[str, Any]:
+    return {
+        "name": name, "family": family, "description": description,
+        "languages": [], "selectable": False, "action": "guide",
+        "repository": repository, "requirements": requirements, "limitations": limitations,
+        "install": "راهنمای رسمی روی کارت مدل",
+    }
+
+
 ENGINE_INFO = {
     "rapidocr-v6": {
         "name": "PP-OCRv6 Small",
         "family": "RapidOCR / ONNX",
         "description": "مدل جدید و سبک برای متن عمومی؛ مناسب انگلیسی، چینی و ژاپنی.",
         "languages": ["eng", "jpn", "chi_sim"],
+        "selectable": True, "action": "download",
         "install": "python -m pip install -e \".[ocr]\"",
     },
     "rapidocr-v5": {
@@ -306,6 +483,7 @@ ENGINE_INFO = {
         "family": "RapidOCR / ONNX",
         "description": "بستهٔ چندزبانه با مدل اختصاصی کره‌ای و پشتیبانی از زبان‌های فعلی برنامه.",
         "languages": ["eng", "kor", "jpn", "chi_sim"],
+        "selectable": True, "action": "download",
         "install": "python -m pip install -e \".[ocr]\"",
     },
     "easyocr": {
@@ -313,8 +491,83 @@ ENGINE_INFO = {
         "family": "CRAFT + CRNN / ONNX یا PyTorch",
         "description": "گزینهٔ مستقل و سنگین‌تر برای مقایسهٔ دقت در چهار زبان.",
         "languages": ["eng", "kor", "jpn", "chi_sim"],
+        "selectable": True, "action": "download",
         "install": "python -m pip install -e \".[easyocr]\"",
     },
+    "tesseract": {
+        "name": "Tesseract",
+        "family": "Tesseract CLI / TSV",
+        "description": "موتور متن‌خوان کلاسیک با خروجی موقعیت‌دار؛ اجرای محلی و بدون ارسال تصویر به اینترنت.",
+        "languages": ["eng", "kor", "jpn", "chi_sim"],
+        "selectable": True, "action": "download",
+        "repository": "https://github.com/tesseract-ocr/tesseract",
+        "requirements": "برنامهٔ اجرایی Tesseract باید جداگانه نصب شود؛ فایل زبان انتخابی با دکمهٔ آماده‌سازی دانلود می‌شود.",
+        "limitations": "کیفیت به فونت و چیدمان صفحه وابسته است؛ نصب پایتون به‌تنهایی فایل اجرایی Tesseract را نصب نمی‌کند.",
+        "install": "https://github.com/tesseract-ocr/tesseract",
+    },
+    "paddleocr-vl-1-6": _external_info(
+        "PaddleOCR-VL-1.6", "PaddleOCR / VLM",
+        "مدل تحلیل سند و تشخیص متن، فرمول و جدول؛ برای اجرای کامل به زیرساخت VLM نیاز دارد.",
+        "https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/PaddleOCR-VL.md",
+        "Python/Backend سازگار با PaddleOCR-VL و فضای کافی برای مدل و وابستگی‌ها.",
+        "خروجی مستقیم آن خطوط حباب کمیک با مختصات برنامه نیست؛ فعلاً فقط راهنمای رسمی و دانلود دستی ارائه می‌شود.",
+    ),
+    "mineru-2-5-pro": _external_info(
+        "MinerU2.5-Pro", "MinerU / Document pipeline",
+        "پایپ‌لاین تبدیل PDF و سند به خروجی ساختاریافته، نه یک جایگزین مستقیم برای OCR حباب کمیک.",
+        "https://github.com/opendatalab/MinerU",
+        "محیط رسمی MinerU و مدل/Backend متناسب با سخت‌افزار کاربر.",
+        "به پردازش سند و خروجی Markdown/JSON تمرکز دارد؛ آداپتور مختصات حباب در برنامه موجود نیست.",
+    ),
+    "glm-ocr": _external_info(
+        "GLM-OCR", "GLM / VLM",
+        "مدل چندوجهی OCR و تحلیل سند با گزینهٔ اجرای محلی یا سرویس.",
+        "https://github.com/zai-org/GLM-OCR",
+        "vLLM/SGLang/Ollama یا سرویس ابری رسمی؛ نیازمند فضای مدل و حافظهٔ مناسب.",
+        "استفادهٔ ابری تصویر را از کامپیوتر خارج می‌کند؛ حالت محلی به Backend جدا و آداپتور خروجی نیاز دارد.",
+    ),
+    "deepseek-ocr-2": _external_info(
+        "DeepSeek-OCR-2", "DeepSeek / VLM",
+        "مدل پژوهشی بینایی‌ـ‌زبان برای درک سند و OCR.",
+        "https://github.com/deepseek-ai/DeepSeek-OCR-2",
+        "محیط رسمی CUDA/PyTorch و حافظهٔ GPU مناسب؛ نصب سادهٔ pip کافی نیست.",
+        "مدل سنگین است و خروجی آن به‌صورت پیش‌فرض کادرهای خط‌به‌خط برنامه را تولید نمی‌کند.",
+    ),
+    "got-ocr-2": _external_info(
+        "GOT-OCR 2.0", "GOT / VLM",
+        "مدل end-to-end برای OCR عمومی و اسناد، با راه‌اندازی رسمی جداگانه.",
+        "https://github.com/Ucas-HaoranWei/GOT-OCR2.0",
+        "وابستگی‌های رسمی، وزن‌های مدل و حافظهٔ کافی؛ پیش از استفادهٔ تجاری مجوز را بررسی کنید.",
+        "خروجی سند/متن با مختصات موردنیاز ویرایشگر کمیک یکسان نیست؛ اجرای مستقیم فعال نیست.",
+    ),
+    "dots-ocr": _external_info(
+        "dots.ocr", "dots / VLM",
+        "مدل چندزبانهٔ تحلیل سند و OCR با خروجی ساختاریافته.",
+        "https://github.com/studio-dots-ai/dots.ocr",
+        "محیط رسمی مدل، Backend مناسب و فضای قابل‌توجه برای وزن‌ها.",
+        "به آداپتور تبدیل خروجی به کادرهای حباب نیاز دارد؛ دانلود از طریق لینک رسمی و با انتخاب کاربر انجام می‌شود.",
+    ),
+    "olmocr": _external_info(
+        "olmOCR", "AllenAI / VLM",
+        "ابزار/مدل OCR و تبدیل اسناد به متن ساختاریافته با تمرکز بر PDF.",
+        "https://github.com/allenai/olmocr",
+        "معمولاً GPU و محیط vLLM یا سرور جدا؛ مدل‌ها حجم و حافظهٔ زیادی لازم دارند.",
+        "برای تحلیل سند ساخته شده، نه تشخیص مستقیم حباب‌های کمیک با همان مختصات برنامه.",
+    ),
+    "hunyuan-ocr": _external_info(
+        "HunyuanOCR", "Tencent Hunyuan / VLM",
+        "مدل OCR بینایی‌ـ‌زبان با گزینه‌های vLLM و اجرای PC-side در پروژهٔ رسمی.",
+        "https://github.com/Tencent-Hunyuan/HunyuanOCR",
+        "CUDA/Backend رسمی یا llama.cpp و مدل تبدیل‌شده؛ به راهنمای نسخهٔ انتخابی رجوع کنید.",
+        "نسخه‌ها و Backendها تفاوت دارند؛ بدون آداپتور خروجی، در OCR داخلی برنامه فعال نیست.",
+    ),
+    "surya": _external_info(
+        "Surya", "Datalab / OCR + Layout",
+        "ابزار OCR و تحلیل چیدمان چندزبانه؛ نسخه‌های جدید به Backend استنتاج جدا وابسته‌اند.",
+        "https://github.com/datalab-to/surya",
+        "surya-ocr و vLLM با GPU یا llama.cpp روی CPU؛ مدل و Backend باید جدا آماده شوند.",
+        "مجوز وزن‌ها با مجوز کد متفاوت است و API نسخه‌ها تغییر می‌کند؛ اتصال مستقیم فعلی عمداً غیرفعال است.",
+    ),
 }
 
 
@@ -324,7 +577,11 @@ class EngineRegistry:
             "rapidocr-v6": RapidEngine("rapidocr-v6", "v6"),
             "rapidocr-v5": RapidEngine("rapidocr-v5", "v5"),
             "easyocr": EasyEngine(),
+            "tesseract": TesseractEngine(),
         }
+        for engine_id, info in ENGINE_INFO.items():
+            if info.get("action") == "guide":
+                self.engines[engine_id] = ManualEngine(engine_id)
 
     def get(self, engine_id: str):
         if engine_id not in self.engines:

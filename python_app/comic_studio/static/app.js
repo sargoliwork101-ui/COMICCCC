@@ -306,7 +306,7 @@ function collectOcrSettings() {
 }
 function updateEngineOptions() {
   const select = $('ocrEngine'); const previous = select.value || state.project?.settings?.ocrEngine || 'rapidocr-v6'; select.textContent = '';
-  state.engines.forEach((engine) => { const option = document.createElement('option'); option.value = engine.id; option.textContent = `${engine.name}${engine.runtimeInstalled ? '' : ' (نیازمند نصب)'}`; select.appendChild(option); });
+  state.engines.filter((engine) => engine.selectable !== false).forEach((engine) => { const option = document.createElement('option'); option.value = engine.id; option.textContent = `${engine.name}${engine.runtimeInstalled ? '' : ' (نیازمند نصب)'}`; select.appendChild(option); });
   select.value = state.engines.some((engine) => engine.id === previous) ? previous : 'rapidocr-v6'; updateOcrEngineStatus();
 }
 function updateOcrEngineStatus() {
@@ -365,14 +365,40 @@ async function exportResult(kind = null) {
 // ---------- Models and AI (explicit downloads remain user initiated) ----------
 function renderModels() {
   const container = $('engineCards'); container.textContent = ''; const language = $('testLanguage').value;
-  state.engines.forEach((engine) => {
-    const card = document.createElement('section'); card.className = 'engine-card'; const title = document.createElement('h3'); title.textContent = engine.name;
-    const family = document.createElement('div'); family.className = 'hint'; family.textContent = engine.family; const description = document.createElement('p'); description.textContent = engine.description;
-    const status = document.createElement('div'); status.className = 'engine-status'; const supported = engine.languages.includes(language); const ready = supported && (engine.readyLanguages || []).includes(language);
-    status.textContent = state.modelBusy === engine.id ? 'در حال نصب بسته و دانلود مدل؛ لطفاً صبر کنید…' : !supported ? 'این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند.' : !engine.runtimeInstalled ? 'بسته نصب نیست؛ دکمهٔ آماده‌سازی آن را نصب می‌کند.' : ready ? 'مدل زبان انتخاب‌شده آماده و آفلاین است.' : 'مدل زبان انتخاب‌شده هنوز آماده نیست؛ دکمهٔ آماده‌سازی را بزنید.';
-    const buttons = document.createElement('div'); buttons.className = 'card-buttons'; const prepare = makeButton('آماده‌سازی / دانلود مدل', () => downloadEngine(engine)); const test = makeButton('آزمایش روی تصویر', () => testEngine(engine.id)); prepare.disabled = !!state.modelBusy || !supported; test.disabled = !!state.modelBusy || !supported; buttons.append(prepare, test);
-    card.append(title, family, description, status, buttons); container.appendChild(card);
-  });
+  const addGroup = (title, engines, external = false) => {
+    if (!engines.length) return;
+    const group = document.createElement('section'); group.className = 'model-group';
+    const heading = document.createElement('h3'); heading.className = 'model-group-title'; heading.textContent = title; group.appendChild(heading);
+    const cards = document.createElement('div'); cards.className = 'model-group-grid'; group.appendChild(cards); container.appendChild(group);
+    engines.forEach((engine) => {
+      const card = document.createElement('section'); card.className = `engine-card${external ? ' external-engine' : ''}`;
+      const titleEl = document.createElement('h3'); titleEl.textContent = engine.name;
+      const family = document.createElement('div'); family.className = 'hint'; family.textContent = engine.family;
+      const description = document.createElement('p'); description.textContent = engine.description;
+      const status = document.createElement('div'); status.className = 'engine-status';
+      card.append(titleEl, family, description, status);
+      if (external) {
+        status.textContent = 'اجرای جداگانه · آداپتور مستقیم OCR کمیک ندارد';
+        const requirements = document.createElement('div'); requirements.className = 'engine-limit'; requirements.textContent = engine.requirements || '';
+        const limitations = document.createElement('div'); limitations.className = 'engine-limit'; limitations.textContent = engine.limitations || '';
+        const buttons = document.createElement('div'); buttons.className = 'card-buttons';
+        const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'دانلود / راهنمای رسمی';
+        buttons.appendChild(guide); card.append(requirements, limitations, buttons);
+      } else {
+        const supported = engine.languages.includes(language); const ready = supported && (engine.readyLanguages || []).includes(language);
+        status.textContent = state.modelBusy === engine.id ? 'در حال نصب بسته و دانلود مدل؛ لطفاً صبر کنید…' : !supported ? 'این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند.' : !engine.runtimeInstalled ? 'بسته یا برنامهٔ اجرایی نصب نیست؛ دکمهٔ آماده‌سازی را بزنید.' : ready ? 'مدل زبان انتخاب‌شده آماده و آفلاین است.' : 'مدل زبان انتخاب‌شده هنوز آماده نیست؛ دکمهٔ آماده‌سازی را بزنید.';
+        if (engine.requirements) { const requirements = document.createElement('div'); requirements.className = 'engine-limit'; requirements.textContent = engine.requirements; card.appendChild(requirements); }
+        const buttons = document.createElement('div'); buttons.className = 'card-buttons';
+        const prepare = makeButton('آماده‌سازی / دانلود مدل', () => downloadEngine(engine)); const test = makeButton('آزمایش روی تصویر', () => testEngine(engine.id));
+        prepare.disabled = !!state.modelBusy || !supported; test.disabled = !!state.modelBusy || !supported; buttons.append(prepare, test);
+        if (engine.repository) { const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'نصب / راهنمای رسمی'; buttons.appendChild(guide); }
+        card.appendChild(buttons);
+      }
+      cards.appendChild(card);
+    });
+  };
+  addGroup('قابل اجرا در برنامه — خروجی موقعیت‌دار', state.engines.filter((engine) => engine.selectable !== false));
+  addGroup('دانلود و راه‌اندازی جداگانه — فعلاً خارج از OCR داخلی', state.engines.filter((engine) => engine.selectable === false), true);
 }
 async function downloadEngine(engine) {
   if (state.modelBusy) return; const language = $('testLanguage').value; if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return; }

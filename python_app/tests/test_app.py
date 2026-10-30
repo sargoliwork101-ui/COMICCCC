@@ -42,7 +42,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.02"
+    assert health.json()["version"] == "3.03"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -161,6 +161,21 @@ def test_model_download_error_is_returned_to_the_ui(client, monkeypatch):
     response = client.post("/api/engines/rapidocr-v5/download", json={"language": "eng"})
     assert response.status_code == 503
     assert "model host blocked" in response.json()["detail"]
+
+
+def test_external_model_guide_is_explicit_and_not_executable(client):
+    response = client.get("/api/engines")
+    assert response.status_code == 200
+    engines = {entry["id"]: entry for entry in response.json()}
+    assert "paddleocr-vl-1-6" in engines
+    assert engines["paddleocr-vl-1-6"]["selectable"] is False
+    response = client.post("/api/engines/glm-ocr/download", json={"language": "eng"})
+    assert response.status_code == 200
+    assert response.json()["guide"] is True
+    assert response.json()["ok"] is False
+    response = client.post("/api/engines/glm-ocr/test", json={"project_id": "missing", "image_id": "missing", "language": "eng"})
+    assert response.status_code == 400
+    assert "external runtime" in response.json()["detail"]
 
 
 def test_pdf_import(client):

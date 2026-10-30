@@ -3,14 +3,14 @@ setlocal EnableExtensions
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem Comic OCR Studio 3.02 - one-click Windows setup and launcher.
+rem Comic OCR Studio 3.03 - one-click Windows setup and launcher.
 rem The first run installs the packages below into an isolated .venv.
-rem To force a reinstall, delete .venv\.comic-ocr-studio-3.02.ready and run again.
+rem To force a reinstall, delete .venv\.comic-ocr-studio-3.03.ready and run again.
 
 set "APP_DIR=%CD%"
 set "VENV_DIR=%APP_DIR%\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
-set "READY=%VENV_DIR%\.comic-ocr-studio-3.02.ready"
+set "READY=%VENV_DIR%\.comic-ocr-studio-3.03.ready"
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 
 if exist "%VENV_PYTHON%" goto have_venv
@@ -65,7 +65,7 @@ type nul > "%READY%"
 if errorlevel 1 goto failed
 
 :run_app
-echo [Comic OCR Studio] Starting the application. The browser should open shortly...
+echo [Comic OCR Studio] Starting. Answer the browser and window questions below...
 "%VENV_PYTHON%" "%APP_DIR%\run.py"
 if errorlevel 1 goto failed
 goto finished

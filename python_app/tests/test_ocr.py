@@ -10,7 +10,10 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from comic_studio.ocr import EasyEngine, OcrError, OcrLine, RapidEngine, _lines_from_rapid, install_packages, recognize_image
+from comic_studio.ocr import (
+    ENGINE_INFO, EasyEngine, OcrError, OcrLine, RapidEngine, TesseractEngine,
+    _lines_from_rapid, _lines_from_tesseract, install_packages, recognize_image,
+)
 
 
 def test_modern_and_legacy_rapid_results():
@@ -146,3 +149,50 @@ def test_real_pp_ocr_v6_smoke():
     assert "HELLO" in text
     assert "TEST" in text
     assert all(block["x1"] > block["x0"] for block in blocks)
+
+
+def test_tesseract_tsv_words_become_positioned_lines():
+    payload = "level\tpage_num\tblock_num\tpar_num\tline_num\tleft\ttop\twidth\theight\tconf\ttext\n" \
+        "5\t1\t1\t1\t1\t4\t5\t20\t10\t90\tHello\n" \
+        "5\t1\t1\t1\t1\t26\t5\t20\t10\t80\tworld\n"
+    lines = _lines_from_tesseract(payload)
+    assert len(lines) == 1
+    assert lines[0].text == "Hello world"
+    assert lines[0].box == [4.0, 5.0, 46.0, 15.0]
+    assert lines[0].confidence == pytest.approx(0.85)
+
+
+def test_tesseract_normal_ocr_never_downloads_a_missing_language(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    engine = TesseractEngine()
+    engine._system_languages = set()
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    with pytest.raises(OcrError, match="explicit model download"):
+        engine.recognize(Image.new("RGB", (40, 20)), "eng")
+
+
+def test_tesseract_explicit_download_uses_selected_language(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    engine = TesseractEngine()
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    seen = []
+    class Response:
+        def __init__(self): self.stream = __import__("io").BytesIO(b"x" * 2000)
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, size=-1): return self.stream.read(size)
+    def fake_urlopen(request, timeout):
+        seen.append((request.full_url, timeout))
+        return Response()
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", fake_urlopen)
+    engine.download("kor")
+    assert seen[0][0].endswith("/kor.traineddata")
+    assert (tmp_path / "models" / "tesseract" / "kor.traineddata").stat().st_size == 2000
+
+
+def test_requested_model_catalog_marks_external_models_honestly():
+    expected = {"paddleocr-vl-1-6", "mineru-2-5-pro", "glm-ocr", "deepseek-ocr-2", "got-ocr-2", "dots-ocr", "olmocr", "hunyuan-ocr", "surya"}
+    assert expected <= set(ENGINE_INFO)
+    assert all(ENGINE_INFO[engine_id]["selectable"] is False for engine_id in expected)
+    assert all(ENGINE_INFO[engine_id]["repository"].startswith("https://github.com/") for engine_id in expected)
+    assert ENGINE_INFO["tesseract"]["selectable"] is True
