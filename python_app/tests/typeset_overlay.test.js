@@ -28,3 +28,24 @@ const translated = renderText({ tr: 'HELLO *WORLD*' });
 assert(translated.includes('HELLO') && translated.includes('WORLD'));
 assert(translated.every((text) => !text.includes('*')));
 console.log('PASS: translation mode keeps existing inline formatting behavior');
+
+const eraseOperations = { rects: [], texts: [] };
+const eraseCtx = new Proxy({
+  measureText: (text) => ({ width: String(text).length * 6 }),
+  fillRect: (...args) => eraseOperations.rects.push(args),
+  fillText: (text) => eraseOperations.texts.push(text),
+}, {
+  get(target, property) {
+    if (property in target) return target[property];
+    return typeof property === 'string' ? () => {} : undefined;
+  },
+  set() { return true; },
+});
+Typeset.render({ width: 500, height: 120 }, [{
+  enabled: true, tr: 'ترجمه', richHtml: '', x0: 10, y0: 10, x1: 110, y1: 40,
+  tx0: 200, ty0: 50, tx1: 350, ty1: 90, lineH: 30, bg: 'white', dir: 'rtl', align: 'right',
+}], { createCanvas: (width, height) => ({ width, height, getContext: () => eraseCtx }) });
+assert(eraseOperations.rects.some((rect) => JSON.stringify(rect) === JSON.stringify([1, 1, 118, 48])));
+assert(eraseOperations.rects.some((rect) => JSON.stringify(rect) === JSON.stringify([200, 50, 150, 40])));
+assert(eraseOperations.texts.includes('ترجمه'));
+console.log('PASS: translated output erases the original OCR area even when the translation box moves');

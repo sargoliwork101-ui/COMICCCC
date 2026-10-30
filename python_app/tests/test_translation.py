@@ -7,7 +7,7 @@ import pytest
 
 from comic_studio.translation import (
     TRANSLATION_SEPARATOR, TranslationError, TranslationService,
-    combine_translation_texts, distribute_translation,
+    combine_translation_texts, distribute_translation, split_free_query,
 )
 
 
@@ -63,7 +63,7 @@ def test_translation_decodes_literal_newline_entities(tmp_path, monkeypatch):
     assert service.translate("one\u241etwo", "eng") == f"اول{TRANSLATION_SEPARATOR}دوم"
 
 
-def test_free_fallback_does_not_truncate_a_shared_page(tmp_path, monkeypatch):
+def test_free_fallback_splits_every_long_query_at_500_chars(tmp_path, monkeypatch):
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
     service = TranslationService()
     text = "x" * 600
@@ -98,9 +98,19 @@ def test_free_fallback_does_not_truncate_a_shared_page(tmp_path, monkeypatch):
             return Response({"responseData": {"translatedText": "ترجمهٔ کامل"}})
 
     monkeypatch.setattr(httpx, "Client", Client)
-    assert service._free(text, "eng") == "ترجمهٔ کامل"
-    assert len(calls) == 2
-    assert calls[1][1]["params"]["q"] == text
+    assert service._free(text, "eng") == "ترجمهٔ کامل ترجمهٔ کامل"
+    assert len(calls) == 4
+    query_lengths = [len(call[1]["params"]["q"]) for call in calls]
+    assert query_lengths == [500, 500, 100, 100]
+    assert all(length <= 500 for length in query_lengths)
+
+
+def test_free_query_split_prefers_sentence_boundaries():
+    first = "A" * 300 + "."
+    second = "B" * 300 + "."
+    parts = split_free_query(first + " " + second)
+    assert parts == [first, second]
+    assert all(len(part) <= 500 for part in parts)
 
 
 def test_unknown_provider_is_rejected(tmp_path, monkeypatch):

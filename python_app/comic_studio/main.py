@@ -280,18 +280,35 @@ def create_app() -> FastAPI:
             block for item in items for block in item.get("blocks", [])
             if block.get("enabled", True) and str(block.get("text", "")).strip()
         ]
-        activity.add(f"ترجمهٔ {len(items)} تصویر و {len(blocks)} خط آغاز شد؛ همهٔ متن‌ها با جداکنندهٔ داخلی در یک درخواست می‌روند")
+        if values.provider == "free":
+            activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ هر کادر جدا و هر query حداکثر ۵۰۰ نویسه ارسال می‌شود")
+        else:
+            activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همه با جداکنندهٔ داخلی در یک درخواست می‌روند")
         if not blocks:
             activity.add("در تصاویر انتخاب‌شده متن فعالی برای ترجمه نیست", "warning")
             return state
         source_texts = [str(block.get("text", "")).strip() for block in blocks]
         try:
-            translated = await run_reported(
-                translations.translate, combine_translation_texts(source_texts), values.source_language, values.provider,
-                pulse_label="ترجمهٔ مشترک همهٔ متن‌های انتخاب‌شده",
-            )
-            activity.add("پاسخ مشترک رسید؛ در حال تقسیم متن و نشاندن آن در کادرهای قبلی", progress=0.5)
-            translated_blocks = distribute_translation(source_texts, translated)
+            if values.provider == "free":
+                translated_blocks = []
+                for index, source_text in enumerate(source_texts, start=1):
+                    activity.add(f"ترجمهٔ رایگان متن {index} از {len(blocks)}", progress=(index - 1) / len(blocks))
+                    translated = await run_reported(
+                        translations.translate, source_text, values.source_language, values.provider,
+                        pulse_label=f"ترجمهٔ رایگان متن {index} از {len(blocks)}",
+                    )
+                    translated = translated.strip()
+                    if not translated:
+                        raise TranslationError(f"مترجم برای متن {index} پاسخ خالی برگرداند؛ ترجمه‌ها در کادرها قرار نگرفتند.")
+                    translated_blocks.append(translated)
+                    activity.add(f"متن {index} از {len(blocks)} ترجمه و آمادهٔ نشستن در کادر خودش شد", progress=index / len(blocks))
+            else:
+                translated = await run_reported(
+                    translations.translate, combine_translation_texts(source_texts), values.source_language, values.provider,
+                    pulse_label="ترجمهٔ مشترک همهٔ متن‌های انتخاب‌شده",
+                )
+                activity.add("پاسخ مشترک AI رسید؛ در حال تقسیم از روی جداکننده‌ها", progress=0.5)
+                translated_blocks = distribute_translation(source_texts, translated)
             for block, text in zip(blocks, translated_blocks):
                 block["tr"] = text
                 block["richHtml"] = ""
@@ -299,7 +316,10 @@ def create_app() -> FastAPI:
         except Exception as exc:
             activity.add(f"ترجمه ناموفق بود: {exc}", "error")
             raise
-        activity.add(f"همهٔ {len(blocks)} خط با هم و در یک درخواست ترجمه و در کادرها قرار گرفتند", "success", 1.0)
+        if values.provider == "free":
+            activity.add(f"هر {len(blocks)} متن جدا ترجمه و در کادرهای خودشان قرار گرفتند", "success", 1.0)
+        else:
+            activity.add(f"همهٔ {len(blocks)} متن با هم و در یک درخواست AI ترجمه و در کادرها قرار گرفتند", "success", 1.0)
         return state
 
     @app.post("/api/translate-text")

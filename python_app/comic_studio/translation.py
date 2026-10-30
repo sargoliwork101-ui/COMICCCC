@@ -26,6 +26,34 @@ class TranslationError(RuntimeError):
 # U+241E SYMBOL FOR RECORD SEPARATOR: one visible-to-the-provider, non-linguistic
 # character that is reserved for internal boundaries and removed before display.
 TRANSLATION_SEPARATOR = "\u241e"
+MAX_FREE_QUERY_CHARS = 500
+
+
+def split_free_query(text: str, limit: int = MAX_FREE_QUERY_CHARS) -> list[str]:
+    """Keep every free-provider query within its limit, preferring sentence boundaries."""
+    remaining = str(text or "").strip()
+    if limit < 1:
+        raise ValueError("Query limit must be positive")
+    if not remaining:
+        return []
+    chunks = []
+    while len(remaining) > limit:
+        window = remaining[:limit]
+        sentence_cut = 0
+        for match in re.finditer(r"[.!?…。！？][\"'”’»)]*", window):
+            sentence_cut = match.end()
+        cut = sentence_cut if sentence_cut >= max(1, limit // 2) else 0
+        if not cut:
+            cut = max(window.rfind("\n"), window.rfind(" "))
+        if cut <= 0:
+            cut = limit
+        chunk = remaining[:cut].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[cut:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 
 def combine_translation_texts(source_texts: list[str]) -> str:
@@ -125,31 +153,40 @@ class TranslationService:
 
     def _free(self, text: str, source_language: str) -> str:
         source = LANGUAGES.get(source_language, LANGUAGES["eng"])["source"]
-        errors = []
+        queries = split_free_query(text)
+        translated_parts = []
         with httpx.Client(timeout=35, follow_redirects=True) as client:
-            try:
-                response = client.get(
-                    "https://translate.googleapis.com/translate_a/single",
-                    params={"client": "gtx", "sl": source, "tl": "fa", "dt": "t", "q": text},
-                )
-                response.raise_for_status()
-                payload = response.json()
-                translated = "".join(part[0] or "" for part in (payload[0] or [])).strip()
-                if translated:
-                    return translated
-            except Exception as exc:
-                errors.append(str(exc))
-            try:
-                response = client.get(
-                    "https://api.mymemory.translated.net/get",
-                    params={"q": text, "langpair": f"{source.split('-')[0]}|fa"},
-                )
-                response.raise_for_status()
-                translated = str(response.json().get("responseData", {}).get("translatedText", "")).strip()
-                if translated and "MYMEMORY WARNING" not in translated.upper():
-                    return translated
-            except Exception as exc:
-                errors.append(str(exc))
+            for query in queries:
+                translated_parts.append(self._free_query(client, query, source))
+        return " ".join(part.strip() for part in translated_parts if part.strip()).strip()
+
+    def _free_query(self, client: httpx.Client, text: str, source: str) -> str:
+        errors = []
+        try:
+            response = client.get(
+                "https://translate.googleapis.com/translate_a/single",
+                params={"client": "gtx", "sl": source, "tl": "fa", "dt": "t", "q": text},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            translated = "".join(part[0] or "" for part in (payload[0] or [])).strip()
+            if translated:
+                return translated
+            errors.append("Google returned no translation")
+        except Exception as exc:
+            errors.append(str(exc))
+        try:
+            response = client.get(
+                "https://api.mymemory.translated.net/get",
+                params={"q": text, "langpair": f"{source.split('-')[0]}|fa"},
+            )
+            response.raise_for_status()
+            translated = str(response.json().get("responseData", {}).get("translatedText", "")).strip()
+            if translated and "MYMEMORY WARNING" not in translated.upper():
+                return translated
+            errors.append("MyMemory returned no translation")
+        except Exception as exc:
+            errors.append(str(exc))
         raise TranslationError("Free translation failed: " + "; ".join(errors[-2:]))
 
     def _openai(self, text: str, source_language: str, settings: dict[str, Any]) -> str:
