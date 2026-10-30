@@ -21,7 +21,7 @@ from .schemas import (
 )
 from .sessions import SessionManager
 from .store import ProjectStore
-from .translation import TranslationError, TranslationService, distribute_translation
+from .translation import TranslationError, TranslationService, combine_translation_texts, distribute_translation
 
 
 def create_app() -> FastAPI:
@@ -280,18 +280,19 @@ def create_app() -> FastAPI:
             block for item in items for block in item.get("blocks", [])
             if block.get("enabled", True) and str(block.get("text", "")).strip()
         ]
-        activity.add(f"ترجمهٔ {len(items)} تصویر و {len(blocks)} خط آغاز شد؛ همهٔ متن‌ها ساده و بدون نشانه در یک درخواست می‌روند")
+        activity.add(f"ترجمهٔ {len(items)} تصویر و {len(blocks)} خط آغاز شد؛ همهٔ متن‌ها با جداکنندهٔ داخلی در یک درخواست می‌روند")
         if not blocks:
             activity.add("در تصاویر انتخاب‌شده متن فعالی برای ترجمه نیست", "warning")
             return state
         source_texts = [str(block.get("text", "")).strip() for block in blocks]
         try:
             translated = await run_reported(
-                translations.translate, "\n".join(source_texts), values.source_language, values.provider,
+                translations.translate, combine_translation_texts(source_texts), values.source_language, values.provider,
                 pulse_label="ترجمهٔ مشترک همهٔ متن‌های انتخاب‌شده",
             )
             activity.add("پاسخ مشترک رسید؛ در حال تقسیم متن و نشاندن آن در کادرهای قبلی", progress=0.5)
-            for block, text in zip(blocks, distribute_translation(source_texts, translated)):
+            translated_blocks = distribute_translation(source_texts, translated)
+            for block, text in zip(blocks, translated_blocks):
                 block["tr"] = text
                 block["richHtml"] = ""
             store.save(state)

@@ -23,39 +23,49 @@ class TranslationError(RuntimeError):
     pass
 
 
+# U+241E SYMBOL FOR RECORD SEPARATOR: one visible-to-the-provider, non-linguistic
+# character that is reserved for internal boundaries and removed before display.
+TRANSLATION_SEPARATOR = "\u241e"
+
+
+def combine_translation_texts(source_texts: list[str]) -> str:
+    """Combine all blocks with unambiguous boundaries in one provider payload."""
+    return f"\n{TRANSLATION_SEPARATOR}\n".join(
+        str(source or "").replace(TRANSLATION_SEPARATOR, " ").strip() for source in source_texts
+    )
+
+
 def distribute_translation(source_texts: list[str], translated: str) -> list[str]:
-    """Keep exact line mapping when possible and never drop a merged translation."""
+    """Split only at our separators; never guess or report a false successful mapping."""
     count = len(source_texts)
     text = str(translated or "").strip()
     if not count:
         return []
     if count == 1:
-        return [text]
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if len(lines) == count:
-        return lines
-    words = text.split()
-    if len(words) < count:
-        return [text] + [""] * (count - 1)
-    weights = [max(1, len(str(source).strip())) for source in source_texts]
-    total_weight = sum(weights)
-    result = []
-    offset = 0
-    for index, weight in enumerate(weights[:-1]):
-        wanted = round(len(words) * weight / total_weight)
-        size = max(1, min(wanted, len(words) - offset - (count - index - 1)))
-        result.append(" ".join(words[offset:offset + size]))
-        offset += size
-    result.append(" ".join(words[offset:]))
-    return result
+        result = text.replace(TRANSLATION_SEPARATOR, "").strip()
+        if not result:
+            raise TranslationError("مترجم پاسخ خالی برگرداند؛ متن در کادر قرار نگرفت.")
+        return [result]
+    if TRANSLATION_SEPARATOR not in text:
+        raise TranslationError("جداکنندهٔ داخلی در پاسخ مترجم وجود ندارد؛ تقسیم متن انجام نشد.")
+    parts = [part.strip() for part in text.split(TRANSLATION_SEPARATOR)]
+    if len(parts) != count:
+        raise TranslationError(
+            f"تعداد جداکننده‌های پاسخ مترجم درست نیست؛ {count} بخش لازم بود اما {len(parts)} بخش رسید."
+        )
+    if any(not part for part in parts):
+        raise TranslationError("بخشی از پاسخ مترجم بین جداکننده‌ها خالی است؛ ترجمهٔ ناقص در کادرها قرار نگرفت.")
+    return parts
 
 
 _ENCODED_LINE_BREAK = re.compile(r"&(?:amp;)?#(?:0*10|0*13|x0*a|x0*d);?", re.IGNORECASE)
+_ENCODED_TRANSLATION_SEPARATOR = re.compile(r"&(?:amp;)?#(?:0*9246|x0*241e);?", re.IGNORECASE)
 
 
 def normalize_translation_text(value: Any) -> str:
     """Decode provider-escaped text so entities never become visible overlay content."""
-    text = _ENCODED_LINE_BREAK.sub("\n", str(value or ""))
+    text = _ENCODED_TRANSLATION_SEPARATOR.sub(TRANSLATION_SEPARATOR, str(value or ""))
+    text = _ENCODED_LINE_BREAK.sub("\n", text)
     text = html.unescape(text)
     return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
@@ -153,7 +163,9 @@ class TranslationService:
                     "Translate the entire input to natural Persian using all paragraphs and comic bubbles together as shared context. "
                     "Translate each paragraph or bubble as one continuous unit, not as isolated lines. "
                     "Keep the original order and preserve names, numbers and sound effects. "
-                    "Return only the translation without adding labels, numbers, markers, or explanations."
+                    f"The {TRANSLATION_SEPARATOR} character is an internal record separator, not source text. "
+                    f"Keep every {TRANSLATION_SEPARATOR} exactly unchanged, on its own line, and in the original order; never translate, remove, add, or duplicate it. "
+                    "Return only the translation and the original separators, without adding labels, numbers, other markers, or explanations."
                 )},
                 {"role": "user", "content": f"Source language: {source}\n\n{text}"},
             ],

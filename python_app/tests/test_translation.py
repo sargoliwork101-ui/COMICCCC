@@ -5,7 +5,10 @@ import json
 import httpx
 import pytest
 
-from comic_studio.translation import TranslationError, TranslationService, distribute_translation
+from comic_studio.translation import (
+    TRANSLATION_SEPARATOR, TranslationError, TranslationService,
+    combine_translation_texts, distribute_translation,
+)
 
 
 def test_ai_settings_do_not_expose_key(tmp_path, monkeypatch):
@@ -39,6 +42,8 @@ def test_openai_payload_and_response(tmp_path, monkeypatch):
     assert "entire input" in prompt
     assert "not as isolated lines" in prompt
     assert "without adding labels" in prompt
+    assert TRANSLATION_SEPARATOR in prompt
+    assert "unchanged" in prompt
 
 
 def test_free_fallback_and_empty_text(tmp_path, monkeypatch):
@@ -54,6 +59,8 @@ def test_translation_decodes_literal_newline_entities(tmp_path, monkeypatch):
     service = TranslationService()
     monkeypatch.setattr(service, "_free", lambda text, language: "اول&#10دوم&amp;#10;سوم&#x0A;چهارم")
     assert service.translate("one\ntwo\nthree\nfour", "eng") == "اول\nدوم\nسوم\nچهارم"
+    monkeypatch.setattr(service, "_free", lambda text, language: "اول&amp;#x241E;دوم")
+    assert service.translate("one\u241etwo", "eng") == f"اول{TRANSLATION_SEPARATOR}دوم"
 
 
 def test_free_fallback_does_not_truncate_a_shared_page(tmp_path, monkeypatch):
@@ -105,10 +112,18 @@ def test_unknown_provider_is_rejected(tmp_path, monkeypatch):
         service.translate("hello", "eng", provider="unknown")
 
 
-def test_translation_distribution_preserves_all_text():
-    assert distribute_translation(["one", "two"], "یک\nدو") == ["یک", "دو"]
-    translated = "یک دو سه چهار پنج شش"
-    distributed = distribute_translation(["a", "longer", "longest line"], translated)
-    assert len(distributed) == 3
-    assert all(distributed)
-    assert " ".join(distributed) == translated
+def test_translation_separator_splits_exact_blocks_not_inner_newlines():
+    sources = ["first line", "second bubble", "third line"]
+    payload = combine_translation_texts(sources)
+    assert payload == f"first line\n{TRANSLATION_SEPARATOR}\nsecond bubble\n{TRANSLATION_SEPARATOR}\nthird line"
+    translated = f"ترجمهٔ اول\n{TRANSLATION_SEPARATOR}\nخط دوم\nادامهٔ همان کادر\n{TRANSLATION_SEPARATOR}\nترجمهٔ سوم"
+    assert distribute_translation(sources, translated) == ["ترجمهٔ اول", "خط دوم\nادامهٔ همان کادر", "ترجمهٔ سوم"]
+
+
+def test_translation_distribution_rejects_missing_or_empty_sections():
+    with pytest.raises(TranslationError):
+        distribute_translation(["one", "two"], "یک\nدو")
+    with pytest.raises(TranslationError):
+        distribute_translation(["one", "two"], f"یک{TRANSLATION_SEPARATOR}")
+    with pytest.raises(TranslationError):
+        distribute_translation(["one", "two"], f"یک{TRANSLATION_SEPARATOR}دو{TRANSLATION_SEPARATOR}سه")

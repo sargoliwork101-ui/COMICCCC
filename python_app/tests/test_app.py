@@ -42,11 +42,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.17"
+    assert health.json()["version"] == "3.18"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۱۷ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۱۸ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
 
 
@@ -170,8 +170,8 @@ def test_ocr_endpoint_stores_geometry_without_network(client, monkeypatch):
     assert any(entry["kind"] == "success" and "OCR تمام شد" in entry["message"] for entry in feed["entries"])
 
 
-def test_translation_sends_all_selected_text_as_one_plain_payload(client, monkeypatch):
-    from comic_studio.translation import TranslationService
+def test_translation_sends_all_selected_text_as_one_separated_payload(client, monkeypatch):
+    from comic_studio.translation import TRANSLATION_SEPARATOR, TranslationService
     project, item = make_project(client)
     project["images"][0]["blocks"] = [
         {"id": 1, "text": "Hello", "tr": "old", "richHtml": "old", "enabled": True, "x0": 10, "y0": 10, "x1": 180, "y1": 35, "lineH": 25},
@@ -184,22 +184,22 @@ def test_translation_sends_all_selected_text_as_one_plain_payload(client, monkey
 
     def fake_free(self, text, source_language):
         calls.append(text)
-        return "سلام&#10دنیا&amp;#10;حباب دیگر"
+        return f"سلام&#10در دو خط&amp;#x241E;دنیا{TRANSLATION_SEPARATOR}حباب دیگر"
 
     monkeypatch.setattr(TranslationService, "_free", fake_free)
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"})
     assert response.status_code == 200, response.text
-    assert calls == ["Hello\nworld\nAnother bubble"]
+    assert calls == [f"Hello\n{TRANSLATION_SEPARATOR}\nworld\n{TRANSLATION_SEPARATOR}\nAnother bubble"]
     blocks = response.json()["images"][0]["blocks"]
-    assert [block["tr"] for block in blocks] == ["سلام", "دنیا", "حباب دیگر"]
+    assert [block["tr"] for block in blocks] == ["سلام\nدر دو خط", "دنیا", "حباب دیگر"]
     assert all(block["richHtml"] == "" for block in blocks)
-    assert all("[[[" not in block["tr"] and "&#10" not in block["tr"] for block in blocks)
+    assert all(TRANSLATION_SEPARATOR not in block["tr"] and "&#10" not in block["tr"] and "[[[" not in block["tr"] for block in blocks)
     feed = client.get("/api/activity?after=0").json()["entries"]
     assert any("یک درخواست" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
 
 
 def test_translation_uses_one_request_across_images_and_reports_stages(client, monkeypatch):
-    from comic_studio.translation import TranslationService
+    from comic_studio.translation import TRANSLATION_SEPARATOR, TranslationService
     project, _ = make_project(client)
     response = client.post(
         f"/api/projects/{project['id']}/files",
@@ -216,17 +216,37 @@ def test_translation_uses_one_request_across_images_and_reports_stages(client, m
 
     def fake_translate(self, text, source_language, provider=None):
         calls.append(text)
-        return "یک\nدو\nسه\nچهار"
+        return TRANSLATION_SEPARATOR.join(["یک", "دو", "سه", "چهار"])
 
     monkeypatch.setattr(TranslationService, "translate", fake_translate)
     ids = [image["id"] for image in project["images"]]
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": ids, "provider": "free", "source_language": "eng"})
     assert response.status_code == 200, response.text
-    assert calls == ["Page 0 first\nPage 0 distant\nPage 1 first\nPage 1 distant"]
+    assert calls == [f"Page 0 first\n{TRANSLATION_SEPARATOR}\nPage 0 distant\n{TRANSLATION_SEPARATOR}\nPage 1 first\n{TRANSLATION_SEPARATOR}\nPage 1 distant"]
     assert [[block["tr"] for block in image["blocks"]] for image in response.json()["images"]] == [["یک", "دو"], ["سه", "چهار"]]
     feed = client.get("/api/activity?after=0").json()["entries"]
     assert any("تقسیم" in entry["message"] and entry["progress"] == pytest.approx(0.5) for entry in feed)
     assert any("یک درخواست" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
+
+
+def test_translation_rejects_unseparated_response_without_false_success(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    project, item = make_project(client)
+    project["images"][0]["blocks"] = [
+        {"id": 1, "text": "Hello", "tr": "قبلی یک", "richHtml": "قبلی یک", "enabled": True},
+        {"id": 2, "text": "World", "tr": "قبلی دو", "richHtml": "قبلی دو", "enabled": True},
+    ]
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    monkeypatch.setattr(TranslationService, "translate", lambda self, text, source_language, provider=None: "یک\nدو")
+    response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"})
+    assert response.status_code == 502
+    assert "جداکننده" in response.json()["detail"]
+    stored = client.get(f"/api/projects/{project['id']}").json()
+    assert [block["tr"] for block in stored["images"][0]["blocks"]] == ["قبلی یک", "قبلی دو"]
+    assert [block["richHtml"] for block in stored["images"][0]["blocks"]] == ["قبلی یک", "قبلی دو"]
+    feed = client.get("/api/activity?after=0").json()["entries"]
+    assert any(entry["kind"] == "error" and "ترجمه ناموفق" in entry["message"] for entry in feed)
+    assert not any(entry["kind"] == "success" and "با هم و در یک درخواست" in entry["message"] for entry in feed)
 
 
 def test_model_download_receives_only_selected_language(client, monkeypatch):
