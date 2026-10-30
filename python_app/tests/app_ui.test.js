@@ -222,12 +222,13 @@ function check(name, condition) {
   const editorPreview = window.document.querySelector('.editor-preview');
   Object.defineProperties(editorPreview, { clientWidth: { value: 400, configurable: true }, clientHeight: { value: 300, configurable: true } });
   const beforeZoom = JSON.stringify(geometry());
+  check('zoom controls float directly over the translation editing image', window.document.querySelector('.editor-view > .editor-zoom-floating')?.contains($('editorZoomIn')) && /\.editor-zoom-floating\{[^}]*position:absolute/.test(css));
   $('editorZoomIn').click();
   check('zoom control scales image and overlays without changing saved geometry', vm.runInContext('state.editorScale', context) === 1.25 && $('editorStage').style.width === '400px' && $('editorZoomLabel').textContent === '125٪' && JSON.stringify(geometry()) === beforeZoom);
   const beforeWheelZoom = vm.runInContext('state.editorScale', context);
-  const wheel = new window.WheelEvent('wheel', { deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true, clientX: 50, clientY: 50 });
+  const wheel = new window.WheelEvent('wheel', { deltaY: -100, ctrlKey: false, bubbles: true, cancelable: true, clientX: 50, clientY: 50 });
   editorPreview.dispatchEvent(wheel);
-  check('Ctrl and mouse wheel zoom the image at the preview', vm.runInContext('state.editorScale', context) > beforeWheelZoom && wheel.defaultPrevented);
+  check('mouse wheel zooms the translation editing image without a modifier', vm.runInContext('state.editorScale', context) > beforeWheelZoom && wheel.defaultPrevented);
   editorPreview.scrollLeft = 10; editorPreview.scrollTop = 20;
   $('editorStage').dispatchEvent(pointer('pointerdown', 100, 100));
   $('editorStage').dispatchEvent(pointer('pointermove', 70, 60));

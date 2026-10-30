@@ -631,7 +631,7 @@ function stopEditorPan(event) {
   const stage = $('editorStage'); state.editorPan = null; stage.classList.remove('panning'); if (stage.hasPointerCapture?.(pan.pointerId)) stage.releasePointerCapture(pan.pointerId);
 }
 function handleEditorWheel(event) {
-  if (!state.editorId || (!event.ctrlKey && !event.metaKey)) return;
+  if (!state.editorId) return;
   event.preventDefault(); const rect = document.querySelector('.editor-preview').getBoundingClientRect();
   setEditorZoom(state.editorScale * (event.deltaY < 0 ? 1.15 : 1 / 1.15), { x: event.clientX - rect.left, y: event.clientY - rect.top });
 }
