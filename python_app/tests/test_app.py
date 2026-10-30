@@ -42,7 +42,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.07"
+    assert health.json()["version"] == "3.08"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -116,10 +116,13 @@ def test_duplicate_group_reorder_and_delete(client):
     project["images"][0]["groupId"] = "گروه ۱"
     project["images"][1]["groupId"] = "گروه ۱"
     project["images"][0]["selected"] = False
+    project["settings"]["overlayMode"] = "ocr"
     project["images"].reverse()
     response = client.put(f"/api/projects/{project_id}/state", json={"state": project})
     assert response.status_code == 200
     assert response.json()["images"][0]["groupId"] == "گروه ۱"
+    assert response.json()["settings"]["overlayMode"] == "ocr"
+    assert client.get(f"/api/projects/{project_id}").json()["settings"]["overlayMode"] == "ocr"
     ids = [entry["id"] for entry in response.json()["images"]]
     response = client.post(f"/api/projects/{project_id}/delete", json=ids[:1])
     assert response.status_code == 200
@@ -140,6 +143,9 @@ def test_ocr_endpoint_stores_geometry_without_network(client, monkeypatch):
     block = response.json()["images"][0]["blocks"][0]
     assert block["text"] == "خط آزمایش"
     assert block["bg"] == "auto"
+    feed = client.get("/api/activity?after=0").json()
+    assert any("متن خوانده‌شده" in entry["message"] and "خط آزمایش" in entry["message"] for entry in feed["entries"])
+    assert any(entry["kind"] == "success" and "OCR تمام شد" in entry["message"] for entry in feed["entries"])
 
 
 def test_model_download_receives_only_selected_language(client, monkeypatch):

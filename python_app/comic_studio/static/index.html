@@ -8,7 +8,7 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۰۷ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۰۸ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
     <button id="menuBtn" class="bt">☰ پروژه و تنظیمات</button>
   </header>
 
@@ -89,9 +89,10 @@
       <label><input id="ocrOnlySelected" type="checkbox" checked> فقط تصاویر انتخاب‌شده</label>
       <label><input id="ocrContrast" type="checkbox" checked> افزایش کنتراست نسخهٔ موقت OCR</label>
       <label><input id="ocrPrecise" type="checkbox" checked> بزرگ‌نمایی برای دقت بیشتر</label>
-      <label><input id="ocrErase" type="checkbox" checked> پاک‌کردن متن اصلی زیر ترجمه</label>
+      <label><input id="ocrErase" type="checkbox" checked> پاک‌کردن متن قبلی زیر متن نمایش‌داده‌شده</label>
     </div>
     <p id="ocrEngineStatus" class="hint"></p>
+    <p class="hint">بعد از OCR، متن خوانده‌شده در گزارش و روی تصویر می‌آید تا پیش از ترجمه بررسی و ویرایش شود.</p>
     <div id="ocrActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <div class="dialog-actions"><button id="startOcrBtn" class="bt primary">شروع OCR</button></div>
   </dialog>
@@ -116,17 +117,18 @@
 
   <dialog id="exportDialog" class="dlg small-dialog">
     <form method="dialog" class="dialog-head"><h2>تنظیمات خروجی</h2><button class="icon" value="cancel">×</button></form>
-    <label>نوع خروجی<select id="exportKind"><option value="pdf">PDF ترجمه‌شده</option><option value="images">تصاویر جداگانه (ZIP)</option><option value="txt">متن OCR و ترجمه (TXT)</option></select></label>
+    <label>نوع خروجی<select id="exportKind"><option value="pdf">PDF</option><option value="images">تصاویر جداگانه (ZIP)</option><option value="txt">متن OCR و ترجمه (TXT)</option></select></label>
+    <label>متن روی تصاویر<select id="exportOverlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option></select></label>
     <div id="pdfExportFields" class="checks"><label><input id="exportSeamless" type="checkbox"> همهٔ تصاویر پشت سر هم در یک صفحهٔ بلند</label><label><input id="exportUniform" type="checkbox"> قاب‌های هم‌اندازه</label><label><input id="exportTwo" type="checkbox"> دو تصویر در هر صفحه (گروه‌ها جدا می‌مانند)</label></div>
     <div id="imageExportFields" class="form-grid hidden"><label>فرمت<select id="exportFormat"><option value="orig">اصلی / PNG برای ویرایش‌شده</option><option value="png">PNG</option><option value="jpg">JPEG کیفیت ۱۰۰٪</option></select></label><label>زیرپوشه داخل ZIP<input id="exportFolder" placeholder="اختیاری"></label></div>
-    <p class="hint">فقط تصاویر انتخاب‌شده و با ترتیب نمایش‌داده‌شده خروجی می‌گیرند. اعضای هر گروه در یک صفحهٔ عمودی PDF کنار هم قرار می‌گیرند.</p>
+    <p class="hint">برای PDF و ZIP، انتخاب «متن اصلی OCR» یا «ترجمه» تعیین می‌کند کدام متن روی تصویر قرار بگیرد. فقط تصاویر انتخاب‌شده خروجی می‌گیرند و اعضای هر گروه در یک صفحهٔ عمودی PDF می‌مانند.</p>
     <div id="exportActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <div class="dialog-actions"><button id="startExportBtn" class="bt success">ساخت و دانلود</button></div>
   </dialog>
 
   <dialog id="editorDialog" class="dlg editor-dialog">
-    <div class="dialog-head"><h2 id="editorTitle">ویرایش ترجمه</h2><div><button id="editorRevert" class="bt danger">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt">به‌روزرسانی پیش‌نمایش</button><button id="editorClose" class="bt primary">ذخیره و بستن</button></div></div>
-    <div class="editor-body"><div class="editor-preview"><div id="editorStage"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div><div class="editor-side"><div class="editor-help">روی متن داخل تصویر یا کارت سمت راست تایپ کنید. دستگیرهٔ بالا جابه‌جا می‌کند و دستگیره‌های دور کادر اندازه را تغییر می‌دهند. Ctrl+S ذخیره می‌کند.</div><div id="blockList"></div></div></div>
+    <div class="dialog-head"><h2 id="editorTitle">ویرایش متن</h2><div><label class="overlay-mode-control">متن روی تصویر<select id="overlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option></select></label><button id="editorRevert" class="bt danger">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt">به‌روزرسانی پیش‌نمایش</button><button id="editorClose" class="bt primary">ذخیره و بستن</button></div></div>
+    <div class="editor-body"><div class="editor-preview"><div id="editorStage"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div><div class="editor-side"><div class="editor-help">با انتخاب «متن اصلی OCR» همان متن خوانده‌شده و با انتخاب «ترجمه» متن ترجمه روی تصویر می‌آید. روی متن داخل تصویر یا کارت سمت راست تایپ کنید. دستگیرهٔ بالا جابه‌جا می‌کند و Ctrl+S ذخیره می‌کند.</div><div id="blockList"></div></div></div>
   </dialog>
 
   <dialog id="cropDialog" class="dlg crop-dialog">

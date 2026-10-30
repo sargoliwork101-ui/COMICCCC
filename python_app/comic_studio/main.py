@@ -232,14 +232,14 @@ def create_app() -> FastAPI:
         ids = image_ids(state, values.image_ids)
         if not ids:
             raise HTTPException(400, "No images selected")
-        activity.add(f"OCR محلی برای {len(ids)} تصویر آغاز شد")
+        activity.add(f"خواندن متن در {len(ids)} تصویر آغاز شد")
         completed = 0
         try:
             for item in state["images"]:
                 if item["id"] not in ids:
                     continue
                 completed += 1
-                activity.add(f"OCR تصویر {completed} از {len(ids)}: {item['name']}", progress=(completed - 1) / len(ids))
+                activity.add(f"در حال خواندن تصویر {completed} از {len(ids)}: {item['name']}", progress=(completed - 1) / len(ids))
                 path = store.image_path(project_id, item["id"])
                 from PIL import Image
                 with Image.open(path) as im:
@@ -247,19 +247,24 @@ def create_app() -> FastAPI:
                 blocks = await run_reported(
                     recognize_image, engine, image, values.language,
                     values.contrast, values.precise, values.min_confidence,
-                    pulse_label=f"OCR {item['name']}",
+                    pulse_label=f"در حال خواندن {item['name']}",
                 )
                 for block in blocks:
                     block["bg"] = "auto" if state.get("settings", {}).get("eraseOriginal", True) else "none"
                 item["blocks"] = blocks
                 item["edited"] = False
                 (project_root(project_id) / "images" / f"{item['id']}-edited.png").unlink(missing_ok=True)
-                activity.add(f"{item['name']}: {len(blocks)} خط متن", progress=completed / len(ids))
+                activity.add(f"در «{item['name']}» {len(blocks)} تکه متن پیدا شد", progress=completed / len(ids))
+                recognized_lines = [block.get("text", "").strip() for block in blocks if block.get("text", "").strip()]
+                if recognized_lines:
+                    activity.add(f"متن خوانده‌شده در «{item['name']}»:\n" + "\n".join(recognized_lines))
+                else:
+                    activity.add(f"در «{item['name']}» متنی پیدا نشد", "warning")
             store.save(state)
         except Exception as exc:
-            activity.add(f"OCR ناموفق بود: {exc}", "error")
+            activity.add(f"خواندن متن ناموفق بود: {exc}", "error")
             raise
-        activity.add("OCR همهٔ تصاویر انتخاب‌شده تمام شد", "success", 1.0)
+        activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
         return state
 
     @app.post("/api/projects/{project_id}/translate")

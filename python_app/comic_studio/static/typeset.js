@@ -296,7 +296,7 @@
 
       const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
       const sourceText = b.tr.trim();
-      const inline = !!b.richHtml || hasInlineMarks(sourceText);
+      const inline = !b._plainText && (!!b.richHtml || hasInlineMarks(sourceText));
       // سایز دستی کاربر جای حالت خودکار می‌نشیند؛ در غیر این صورت بهترین سایز برای جاشدن در کادر
       let f;
       if (inline) {

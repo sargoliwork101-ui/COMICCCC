@@ -16,7 +16,15 @@ const project = {
 };
 const summary = { id: project.id, name: project.name, updatedAt: '', images: 1 };
 const engine = { id: 'rapidocr-v6', name: 'RapidOCR', selectable: true, runtimeInstalled: true, languages: ['eng'], readyLanguages: ['eng'], description: '', family: '' };
+const overlayProject = (text, translation) => ({
+  ...project, settings: { output: {} }, images: [{ ...project.images[0], selected: true, edited: false, blocks: [{
+    id: 1, text, tr: translation, richHtml: translation ? `<b>${translation}</b>` : '', enabled: true,
+    bg: 'white', x0: 5, y0: 5, x1: 150, y1: 45, lineH: 40, dir: 'rtl', align: 'right',
+  }] }],
+});
 const beacons = [];
+let renderedBlocks = null;
+let renderedUploads = 0;
 const jsonResponse = (payload, status = 200) => ({
   ok: status >= 200 && status < 300, status,
   headers: { get: () => 'application/json' },
@@ -33,6 +41,9 @@ window.fetch = async (url, options = {}) => {
   if (pathname === '/api/activity') return jsonResponse({ entries: [], next: 0 });
   if (pathname === '/api/session/heartbeat') return jsonResponse({ ok: true, active: 1 });
   if (pathname === `/api/projects/${project.id}/state`) return jsonResponse(JSON.parse(options.body).state);
+  if (pathname === `/api/projects/${project.id}/ocr`) return jsonResponse(overlayProject('NEW OCR', ''));
+  if (pathname === `/api/projects/${project.id}/translate`) return jsonResponse(overlayProject('NEW OCR', 'ترجمهٔ تازه'));
+  if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/rendered`) { renderedUploads += 1; return jsonResponse({ ok: true }); }
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/content`) return { ok: true, blob: async () => new window.Blob() };
   throw new Error(`Unmocked request: ${options.method || 'GET'} ${url}`);
 };
@@ -46,6 +57,16 @@ window.HTMLDialogElement.prototype.close = function () { this.open = false; };
 window.document.execCommand = () => true;
 window.URL.createObjectURL = () => 'blob:ui-test';
 window.URL.revokeObjectURL = () => {};
+window.createImageBitmap = async () => ({ width: 320, height: 200, close() {} });
+window.HTMLCanvasElement.prototype.getContext = () => ({});
+window.Typeset = {
+  blockStyle(block) { return { dir: block.dir === 'ltr' ? 'ltr' : 'rtl', align: block.align || 'right', bold: true, italic: false, underline: false, size: 12, color: null }; },
+  hasInlineMarks() { return false; },
+  render(bitmap, blocks) {
+    renderedBlocks = blocks;
+    return { width: 320, height: 200, toBlob(callback) { callback(new window.Blob(['png'], { type: 'image/png' })); } };
+  },
+};
 
 for (const file of ['groups.js', 'app.js']) {
   vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
@@ -97,6 +118,35 @@ function check(name, condition) {
   const css = fs.readFileSync(path.join(root, 'style.css'), 'utf8');
   check('model cards are in one vertical column', /\.model-group-grid\{[^}]*grid-template-columns:minmax\(0,1fr\)/.test(css));
   check('dialog headers remain sticky', /\.dlg>\.dialog-head\{[^}]*position:sticky/.test(css));
+  check('success activity keeps readable message text', /\.activity-line\.success\{color:var\(--text\)\}/.test(css));
+  check('multiline OCR activity preserves line breaks', /\.activity-message\{[^}]*white-space:pre-wrap/.test(css));
+  check('existing projects default to translation overlays', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
+
+  vm.runInContext(`state.project.images[0].blocks = [{ id: 1, text: 'HELLO WORLD', tr: 'سلام دنیا', richHtml: '<b>سلام دنیا</b>', enabled: true, bg: 'white', x0: 5, y0: 5, x1: 150, y1: 45, lineH: 40, dir: 'rtl', align: 'right' }]`, context);
+  vm.runInContext("setOverlayMode('ocr', false)", context);
+  check('OCR mode is synchronized between editor and export', $('overlayMode').value === 'ocr' && $('exportOverlayMode').value === 'ocr');
+  await vm.runInContext('renderAndUpload(state.project.images[0])', context);
+  check('OCR preview renders the recognized source text', renderedBlocks[0].tr === 'HELLO WORLD' && renderedBlocks[0]._plainText === true && renderedBlocks[0].richHtml === '');
+  check('OCR preview does not overwrite the saved translation', vm.runInContext("state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
+  vm.runInContext("setOverlayMode('translation', false)", context);
+  await vm.runInContext('renderAndUpload(state.project.images[0])', context);
+  check('translation mode restores translated preview text and formatting', renderedBlocks[0].tr === 'سلام دنیا' && renderedBlocks[0].richHtml === '<b>سلام دنیا</b>' && !renderedBlocks[0]._plainText);
+  check('both overlay modes upload a rendered image', renderedUploads === 2);
+  vm.runInContext("state.editorId = 'image-ui'; state.editorScale = 1; setOverlayMode('ocr', false); buildBlockList(); renderEditorBoxes()", context);
+  const ocrOverlay = $('editorBoxes').querySelector('.editor-box-text');
+  check('editor shows recognized OCR text directly on the image', ocrOverlay?.textContent === 'HELLO WORLD' && ocrOverlay?.dir === 'ltr');
+  ocrOverlay.innerText = 'CORRECTED OCR';
+  ocrOverlay.dispatchEvent(new window.Event('input', { bubbles: true }));
+  check('editing the OCR overlay updates source text without changing translation', vm.runInContext("state.project.images[0].blocks[0].text === 'CORRECTED OCR' && state.project.images[0].blocks[0].tr === 'سلام دنیا'", context));
+  check('OCR overlay editing stays synchronized with the source field', $('blockList').querySelector('textarea').value === 'CORRECTED OCR');
+  vm.runInContext("setOverlayMode('translation', false); renderEditorBoxes(); state.editorId = null", context);
+  check('editor selector restores the translated overlay', $('editorBoxes').querySelector('.editor-box-text')?.textContent === 'سلام دنیا');
+  await vm.runInContext('runOcr()', context);
+  check('finishing OCR automatically selects OCR display mode', $('overlayMode').value === 'ocr' && $('exportOverlayMode').value === 'ocr');
+  check('finishing OCR places the new recognized text on the image', renderedBlocks[0].tr === 'NEW OCR' && renderedBlocks[0]._plainText === true);
+  await vm.runInContext('runTranslation()', context);
+  check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
+  check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
 
   vm.runInContext("appendLocalActivity('در حال دانلود آزمایشی')", context);
   check('live activity is visible on the page', $('activityLog').textContent.includes('در حال دانلود آزمایشی'));

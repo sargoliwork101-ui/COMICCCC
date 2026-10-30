@@ -40,7 +40,7 @@ function renderActivity() {
       const line = document.createElement('div'); line.className = `activity-line ${entry.kind || 'info'}`;
       const time = document.createElement('span'); time.className = 'activity-time';
       const date = new Date(entry.time || Date.now()); time.textContent = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      const message = document.createElement('span'); message.textContent = entry.message;
+      const message = document.createElement('span'); message.className = 'activity-message'; message.textContent = entry.message;
       line.append(time, message); target.appendChild(line);
     });
     target.scrollTop = target.scrollHeight;
@@ -207,8 +207,25 @@ function adoptProject(project) {
   $('exportTwo').checked = !!output.twoPerPage;
   $('exportFormat').value = output.imageFormat || 'orig';
   $('exportFolder').value = output.folderName || '';
+  setOverlayMode(settings.overlayMode || 'translation', false);
   renderAll();
 }
+function currentOverlayMode() { return state.project?.settings?.overlayMode === 'ocr' ? 'ocr' : 'translation'; }
+function setOverlayMode(mode, redraw = true) {
+  if (!state.project) return;
+  state.project.settings = state.project.settings || {};
+  state.project.settings.overlayMode = mode === 'ocr' ? 'ocr' : 'translation';
+  $('overlayMode').value = state.project.settings.overlayMode;
+  $('exportOverlayMode').value = state.project.settings.overlayMode;
+  if (redraw && state.editorId) drawEditor();
+  if (redraw) scheduleSave();
+}
+function overlayBlock(block, mode = currentOverlayMode()) {
+  if (mode !== 'ocr') return block;
+  return { ...block, tr: block.text || '', richHtml: '', dir: 'ltr', align: block.align === 'center' ? 'center' : 'left', _plainText: true };
+}
+function overlayBlocks(item, mode = currentOverlayMode()) { return (item.blocks || []).map((block) => overlayBlock(block, mode)); }
+function hasOverlayText(item, mode = currentOverlayMode()) { return overlayBlocks(item, mode).some((block) => block.enabled && block.tr?.trim()); }
 function renderAll() { renderGrid(); updateEngineOptions(); }
 function updateSummary() {
   const total = state.project?.images.length || 0;
@@ -422,36 +439,40 @@ async function runOcr() {
   if (!ids.length) throw new Error('حداقل یک تصویر را انتخاب کنید');
   await runJob('OCR محلی در حال اجراست…', async () => {
     const result = await api(`/api/projects/${state.project.id}/ocr`, jsonOptions('POST', { image_ids: ids, engine: $('ocrEngine').value, language: $('ocrLanguage').value, contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, min_confidence: Number($('ocrConfidence').value) || .35 }));
-    adoptProject(result); closeDialog('ocrDialog'); toast(`${result.images.reduce((sum, item) => sum + (item.blocks?.length || 0), 0)} خط متن تشخیص داده شد`);
+    adoptProject(result); setOverlayMode('ocr', false); await saveProject(); await renderImagesText(); closeDialog('ocrDialog'); toast('متن OCR روی تصویر آمد؛ برای بررسی و ویرایش، دکمهٔ ✎ را بزنید');
   });
 }
 async function runTranslation() {
   const ids = selectedImages().map((item) => item.id); if (!ids.length) { toast('حداقل یک تصویر را انتخاب کنید', true); return; }
-  await runJob('در حال ترجمهٔ متن‌ها…', async () => { await saveProject(); const result = await api(`/api/projects/${state.project.id}/translate`, jsonOptions('POST', { image_ids: ids, provider: state.ai?.provider || 'free', source_language: $('ocrLanguage').value })); adoptProject(result); await renderAllTranslated(); toast('ترجمه و پیش‌نمایش تصاویر آماده شد'); });
+  await runJob('در حال ترجمهٔ متن‌ها…', async () => { await saveProject(); const result = await api(`/api/projects/${state.project.id}/translate`, jsonOptions('POST', { image_ids: ids, provider: state.ai?.provider || 'free', source_language: $('ocrLanguage').value })); adoptProject(result); setOverlayMode('translation', false); await saveProject(); await renderImagesText(); toast('ترجمه روی تصویر آمد و پیش‌نمایش آماده شد'); });
 }
 
 // ---------- Typeset preview and export ----------
 async function ensureFont() { if (document.fonts?.load) { try { await document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'); } catch { /* fallback */ } } }
 async function renderAndUpload(item) {
-  const active = (item.blocks || []).some((block) => block.enabled && block.tr && block.tr.trim());
+  const blocks = overlayBlocks(item); const active = blocks.some((block) => block.enabled && block.tr?.trim());
   if (!active) {
     await api(`/api/projects/${state.project.id}/images/${item.id}/revert`, { method: 'POST' });
     const current = state.project.images.find((entry) => entry.id === item.id); if (current) current.edited = false; return;
   }
   await ensureFont(); const response = await fetch(imageUrl(item)); if (!response.ok) throw new Error('تصویر اصلی باز نشد');
   const bitmap = await createImageBitmap(await response.blob()); let canvas;
-  try { canvas = Typeset.render(bitmap, item.blocks || []); } finally { bitmap.close(); }
+  try { canvas = Typeset.render(bitmap, blocks); } finally { bitmap.close(); }
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
   await api(`/api/projects/${state.project.id}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
   canvas.width = canvas.height = 0; const current = state.project.images.find((entry) => entry.id === item.id); if (current) current.edited = true;
 }
-async function renderAllTranslated() { for (const item of sortedImages()) if ((item.blocks || []).some((block) => block.enabled && block.tr?.trim()) || item.edited) await renderAndUpload(item); renderGrid(); }
+async function renderImagesText(ids = null) {
+  const wanted = ids ? new Set(ids) : null;
+  for (const item of sortedImages()) if ((!wanted || wanted.has(item.id)) && (hasOverlayText(item) || item.edited)) await renderAndUpload(item);
+  renderGrid();
+}
 function updateExportFields() { const kind = $('exportKind').value; $('pdfExportFields').classList.toggle('hidden', kind !== 'pdf'); $('imageExportFields').classList.toggle('hidden', kind !== 'images'); }
 async function exportResult(kind = null) {
   if (kind) $('exportKind').value = kind;
   if (!selectedImages().length) throw new Error('حداقل یک تصویر را برای خروجی انتخاب کنید');
   collectOutputSettings(); await saveProject(); const exportKind = $('exportKind').value;
-  if (exportKind !== 'txt') for (const item of selectedImages()) if ((item.blocks || []).some((block) => block.enabled && block.tr?.trim()) || item.edited) await renderAndUpload(item);
+  if (exportKind !== 'txt') { for (const item of selectedImages()) if (hasOverlayText(item) || item.edited) await renderAndUpload(item); renderGrid(); }
   const response = await fetch(`/api/projects/${state.project.id}/export`, jsonOptions('POST', { kind: exportKind, image_ids: selectedImages().map((item) => item.id), name: safeName($('exportName').value), seamless: $('exportSeamless').checked, uniform_size: $('exportUniform').checked, two_per_page: $('exportTwo').checked, image_format: $('exportFormat').value, folder_name: $('exportFolder').value }));
   if (!response.ok) { const payload = await response.json(); throw new Error(payload.detail || 'خروجی ساخته نشد'); }
   const blob = await response.blob(); const disposition = response.headers.get('content-disposition') || ''; const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
@@ -532,7 +553,7 @@ function overlaySize(block, width, height) {
     const style = Typeset.blockStyle(block); const maxSize = Math.max(12, Math.min(64, Math.round((block.lineH || height) * 1.1)));
     const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d');
     if (style.size) return style.size;
-    if (block.richHtml || Typeset.hasInlineMarks(block.tr || '')) {
+    if (!block._plainText && (block.richHtml || Typeset.hasInlineMarks(block.tr || ''))) {
       const words = block.richHtml ? Typeset.richHtmlWords(block.richHtml) : Typeset.inlineWords(block.tr || '');
       return Typeset.fitInline(ctx, words, width * .96, height * .96, maxSize, 8, style).size;
     }
@@ -559,6 +580,15 @@ function wireRichElement(element, block) {
   element.addEventListener('input', () => updateRichBlock(block, element));
   element.addEventListener('paste', (event) => { event.preventDefault(); document.execCommand('insertText', false, event.clipboardData.getData('text/plain')); });
 }
+function wireOcrElement(element, block) {
+  element.addEventListener('input', () => {
+    block.text = (element.innerText ?? element.textContent ?? '').replace(/\u00a0/g, ' ');
+    const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
+    const source = card?.querySelector('textarea'); if (source) source.value = block.text;
+    scheduleSave();
+  });
+  element.addEventListener('paste', (event) => { event.preventDefault(); document.execCommand('insertText', false, event.clipboardData.getData('text/plain')); });
+}
 function runRichCommand(command, value = null) {
   const element = state.richEditor; if (!element) return;
   element.focus(); if (state.richRange && element.contains(state.richRange.startContainer)) { const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(state.richRange); }
@@ -566,17 +596,19 @@ function runRichCommand(command, value = null) {
 }
 function renderEditorBoxes() {
   const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return; layer.textContent = '';
+  const mode = currentOverlayMode();
   (item.blocks || []).forEach((block) => {
-    if (!block.enabled || !block.tr?.trim()) return; const box = boxOf(block); const scale = state.editorScale; const el = document.createElement('div'); el.className = 'editor-box'; el.dataset.id = block.id;
+    const display = overlayBlock(block, mode);
+    if (!display.enabled || !display.tr?.trim()) return; const box = boxOf(display); const scale = state.editorScale; const el = document.createElement('div'); el.className = 'editor-box'; el.dataset.id = block.id;
     el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
     const move = document.createElement('span'); move.className = 'box-move'; move.textContent = `متن ${block.id}`; move.dataset.move = '1';
-    const text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text.innerHTML = block.richHtml || plainToHtml(block.tr); styleRichElement(text, block, scale);
-    if ((block.bg || 'auto') !== 'none') {
-      let fill = block.bg === 'white' ? '#ffffff' : block.bg === 'black' ? '#000000' : null;
-      if (!fill) { const sample = Typeset.sampleBg($('editorCanvas').getContext('2d'), box, item.width, item.height); fill = `rgb(${sample.r},${sample.g},${sample.b})`; const luminance = .2126 * sample.r + .7152 * sample.g + .0722 * sample.b; if (!block.color) text.style.color = luminance > 150 ? '#0b0b0b' : '#fafafa'; }
+    const text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text.innerHTML = display.richHtml || plainToHtml(display.tr); styleRichElement(text, display, scale);
+    if ((display.bg || 'auto') !== 'none') {
+      let fill = display.bg === 'white' ? '#ffffff' : display.bg === 'black' ? '#000000' : null;
+      if (!fill) { const sample = Typeset.sampleBg($('editorCanvas').getContext('2d'), box, item.width, item.height); fill = `rgb(${sample.r},${sample.g},${sample.b})`; const luminance = .2126 * sample.r + .7152 * sample.g + .0722 * sample.b; if (!display.color) text.style.color = luminance > 150 ? '#0b0b0b' : '#fafafa'; }
       text.style.background = fill; text.style.textShadow = 'none';
     }
-    wireRichElement(text, block);
+    if (mode === 'ocr') wireOcrElement(text, block); else wireRichElement(text, block);
     el.append(move, text); ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
     el.addEventListener('pointerdown', (event) => startBoxDrag(event, block, el)); layer.appendChild(el);
   });
@@ -603,7 +635,7 @@ function buildBlockList() {
     tools.append(rtl, ltr, align, size, color);
     const actions = document.createElement('div'); actions.className = 'block-tools';
     actions.append(makeButton('کپی متن اصلی', async () => { if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(source.value); else { source.focus(); source.select(); document.execCommand('copy'); } toast('کپی شد'); }), makeButton('ترجمهٔ دوباره', async () => { const result = await api('/api/translate-text', jsonOptions('POST', { text: source.value, source_language: $('ocrLanguage').value, provider: state.ai?.provider || 'free' })); block.text = source.value; block.tr = result.text; block.richHtml = plainToHtml(result.text); translation.innerHTML = block.richHtml; drawEditor(); scheduleSave(); }), makeButton('پاک‌کردن ترجمه', () => { block.tr = ''; block.richHtml = ''; translation.innerHTML = ''; drawEditor(); scheduleSave(); }));
-    enabled.addEventListener('change', () => { block.enabled = enabled.checked; card.classList.toggle('disabled', !block.enabled); drawEditor(); scheduleSave(); }); bg.addEventListener('change', () => { block.bg = bg.value; scheduleSave(); }); source.addEventListener('input', () => { block.text = source.value; scheduleSave(); });
+    enabled.addEventListener('change', () => { block.enabled = enabled.checked; card.classList.toggle('disabled', !block.enabled); drawEditor(); scheduleSave(); }); bg.addEventListener('change', () => { block.bg = bg.value; scheduleSave(); }); source.addEventListener('input', () => { block.text = source.value; if (currentOverlayMode() === 'ocr') drawEditor(); scheduleSave(); });
     align.addEventListener('change', () => { block.align = align.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); size.addEventListener('change', () => { const value = Number(size.value); block.size = value >= 8 ? Math.min(160, value) : null; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); color.addEventListener('input', () => { block.color = color.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); });
     card.append(head, source, translation, tools, actions); list.appendChild(card);
   });
@@ -677,7 +709,7 @@ function bindEvents() {
   $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('ocrBtn').addEventListener('click', () => { updateEngineOptions(); showDialog('ocrDialog'); }); $('ocrEngine').addEventListener('change', updateOcrEngineStatus); $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', updateAiFields); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => toast(error.message, true))); $('testAiBtn').addEventListener('click', async () => { try { await saveAiSettings(); const result = await api('/api/ai-settings/test', { method: 'POST' }); $('aiStatus').textContent = result.message; } catch (error) { $('aiStatus').textContent = error.message; } });
-  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
+  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
   $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); closeEditor().catch((error) => toast(error.message, true)); });
   $('previewCopy').addEventListener('click', copyPreview);
   window.addEventListener('resize', () => { if (state.editorId) fitEditor(); if (state.cropId) drawCropRect(); scheduleOutlines(); });
