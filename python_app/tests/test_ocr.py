@@ -4,6 +4,8 @@ import importlib.util
 import os
 import subprocess
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -79,6 +81,34 @@ def test_explicit_runtime_install_uses_the_app_python(monkeypatch):
     assert calls[0][0][:4] == [sys.executable, "-m", "pip", "install"]
     assert calls[0][0][-1] == "easyocr>=1.7,<2"
     assert calls[0][1]["check"] is False
+
+
+def test_runtime_installations_do_not_overlap(monkeypatch):
+    active = 0
+    maximum = 0
+    counter_lock = threading.Lock()
+    def fake_run(command, **kwargs):
+        nonlocal active, maximum
+        with counter_lock:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.03)
+        with counter_lock:
+            active -= 1
+        return subprocess.CompletedProcess(command, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    workers = [threading.Thread(target=install_packages, args=(["example-package"],)) for _ in range(2)]
+    for worker in workers: worker.start()
+    for worker in workers: worker.join()
+    assert maximum == 1
+
+
+def test_install_lock_error_explains_recovery(monkeypatch):
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 1, "", "[WinError 32] The process cannot access the file because it is being used by another process")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(OcrError, match="one installation only"):
+        install_packages(["torch>=2.2,<3"])
 
 
 def test_easyocr_runtime_is_installed_on_explicit_preparation(monkeypatch):

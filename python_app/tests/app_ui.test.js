@@ -72,6 +72,31 @@ function check(name, condition) {
 
   $('grid').querySelector('.act button').click();
   check('eye button still opens preview instead of changing selection', $('previewDialog').open && $('grid').querySelector('.item').classList.contains('selected'));
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check('Escape closes the preview dialog', !$('previewDialog').open);
+
+  $('grid').querySelector('.tick').click();
+  check('one checkbox click deselects the image', !$('grid').querySelector('.item').classList.contains('selected'));
+  $('grid').querySelector('.tick').click();
+  check('one checkbox click selects the image again', $('grid').querySelector('.item').classList.contains('selected'));
+
+  $('modelsBtn').click();
+  check('models dialog opens', $('modelsDialog').open);
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check('Escape closes the models dialog', !$('modelsDialog').open);
+  for (const id of ['ocrDialog', 'aiDialog', 'exportDialog', 'cropDialog']) {
+    vm.runInContext(`showDialog('${id}')`, context);
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    check(`Escape closes ${id}`, !$(id).open);
+  }
+  vm.runInContext("showDialog('editorDialog')", context);
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  await sleep(0);
+  check('Escape closes the editor dialog', !$('editorDialog').open);
+
+  const css = fs.readFileSync(path.join(root, 'style.css'), 'utf8');
+  check('model cards are in one vertical column', /\.model-group-grid\{[^}]*grid-template-columns:minmax\(0,1fr\)/.test(css));
+  check('dialog headers remain sticky', /\.dlg>\.dialog-head\{[^}]*position:sticky/.test(css));
 
   vm.runInContext("appendLocalActivity('در حال دانلود آزمایشی')", context);
   check('live activity is visible on the page', $('activityLog').textContent.includes('در حال دانلود آزمایشی'));

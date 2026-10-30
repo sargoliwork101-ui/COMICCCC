@@ -19,6 +19,7 @@ let activityPollTimer = null;
 let activityPollInFlight = false;
 let sessionTimer = null;
 let localActivityId = 0;
+let editorCloseTask = null;
 let jobBusy = false;
 
 function browserTabId() {
@@ -121,6 +122,13 @@ async function api(url, options = {}) {
 function jsonOptions(method, value) { return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }; }
 function showDialog(id) { if (!$(id).open) $(id).showModal(); }
 function closeDialog(id) { if ($(id).open) $(id).close(); }
+function closeTopDialog() {
+  const dialog = [...document.querySelectorAll('dialog[open]')].at(-1);
+  if (!dialog) return false;
+  if (dialog.id === 'editorDialog') closeEditor().catch((error) => toast(error.message, true));
+  else closeDialog(dialog.id);
+  return true;
+}
 function sortedImages() { return G.byOrder(state.project?.images || []); }
 function selectedImages() { return sortedImages().filter((item) => item.selected); }
 function imageUrl(item, edited = false, cropped = false) {
@@ -241,7 +249,10 @@ function renderGrid() {
     image.addEventListener('load', scheduleOutlines); image.addEventListener('click', (event) => { event.stopPropagation(); setSelected(item, !item.selected, event); });
     frame.appendChild(image);
     const tick = document.createElement('input'); tick.type = 'checkbox'; tick.className = 'tick'; tick.checked = !!item.selected; tick.setAttribute('aria-label', `انتخاب ${item.name}`);
-    tick.addEventListener('click', (event) => event.stopPropagation()); tick.addEventListener('change', (event) => setSelected(item, tick.checked, event));
+    tick.addEventListener('click', (event) => {
+      // Handle the native click once; rendering below restores the visual checked state.
+      event.preventDefault(); event.stopPropagation(); setSelected(item, !item.selected, event);
+    });
     const act = document.createElement('div'); act.className = 'act';
     act.append(makeButton('👁', () => openPreview(item), 'bt'), makeButton('✎', () => openEditor(item.id), 'bt'), makeButton('✂', () => openCrop(item.id), 'bt crop-mark'), makeButton('⧉', () => duplicateImages([item.id]), 'bt'), makeButton('🗑', () => deleteImages([item.id]), 'bt danger'));
     const name = document.createElement('div'); name.className = 'name';
@@ -598,7 +609,13 @@ function buildBlockList() {
   });
 }
 async function applyEditor() { const item = editorItem(); if (!item) return; await saveProject(); await renderAndUpload(item); renderGrid(); }
-async function closeEditor() { await applyEditor(); closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; state.editorId = null; }
+async function closeEditor() {
+  if (editorCloseTask) return editorCloseTask;
+  editorCloseTask = (async () => {
+    await applyEditor(); closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; state.editorId = null;
+  })();
+  try { await editorCloseTask; } finally { editorCloseTask = null; }
+}
 async function revertEditor() { const item = editorItem(); if (!item) return; item.blocks.forEach((block) => { block.enabled = false; }); await saveProject(); await api(`/api/projects/${state.project.id}/images/${item.id}/revert`, { method: 'POST' }); item.edited = false; drawEditor(); buildBlockList(); renderGrid(); toast('تصویر اصلی بازیابی شد؛ متن‌ها برای استفادهٔ بعدی باقی ماندند'); }
 
 // ---------- Crop with aspect ratio, moving, and eight handles ----------
@@ -666,7 +683,15 @@ function bindEvents() {
   window.addEventListener('resize', () => { if (state.editorId) fitEditor(); if (state.cropId) drawCropRect(); scheduleOutlines(); });
   ['cropX', 'cropY', 'cropW', 'cropH'].forEach((id) => $(id).addEventListener('change', readCropInputs)); $('cropRatio').addEventListener('change', changeCropRatio); $('cropStage').addEventListener('pointerdown', cropPointerDown); $('cropStage').addEventListener('pointermove', cropPointerMove); const stopCrop = () => { state.cropPointer = null; }; $('cropStage').addEventListener('pointerup', stopCrop); $('cropStage').addEventListener('pointercancel', stopCrop);
   $('cropReset').addEventListener('click', () => { cropItem().crop = null; state.crop = null; closeDialog('cropDialog'); renderGrid(); scheduleSave(); }); $('cropApply').addEventListener('click', () => { readCropInputs(); cropItem().crop = state.crop; closeDialog('cropDialog'); renderGrid(); scheduleSave(); });
-  document.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.editorId) { event.preventDefault(); applyEditor().catch((error) => toast(error.message, true)); } if (event.key === 'Enter' && state.cropId && $('cropDialog').open && !event.target.matches('input,select')) { event.preventDefault(); $('cropApply').click(); } });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      if (closeTopDialog()) { event.preventDefault(); event.stopPropagation(); }
+      else $('menu').classList.add('hidden');
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.editorId) { event.preventDefault(); applyEditor().catch((error) => toast(error.message, true)); }
+    if (event.key === 'Enter' && state.cropId && $('cropDialog').open && !event.target.matches('input,select')) { event.preventDefault(); $('cropApply').click(); }
+  });
   if (localStorage.getItem('comic-studio-theme') === 'light') document.body.classList.add('light');
 }
 async function init() {

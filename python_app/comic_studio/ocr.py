@@ -25,6 +25,8 @@ EXTRA_PREPROCESS_THRESHOLD = 200
 EXTRA_PREPROCESS_MIN_CONFIDENCE = 0.55
 EXTRA_PREPROCESS_MIN_CHARS = 3
 EXTRA_PREPROCESS_ENABLED = True
+# Several tabs may request preparation together; never run two pip processes at once.
+_INSTALL_LOCK = threading.Lock()
 
 LANGUAGES = {
     "eng": {"name": "English", "source": "en"},
@@ -58,12 +60,16 @@ def install_packages(packages: list[str]) -> None:
     command = [sys.executable, "-m", "pip", "install", *packages]
     emit(f"نصب بسته‌های OCR آغاز شد: {', '.join(packages)}")
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False)
+        with _INSTALL_LOCK:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False)
     except Exception as exc:
         emit(f"نصب بسته‌های OCR ناموفق بود: {exc}", "error")
         raise OcrError(f"Could not install the OCR runtime: {exc}") from exc
     if result.returncode:
         details = (result.stderr or result.stdout or "pip failed")[-1800:].strip()
+        if "WinError 32" in details or "being used by another process" in details:
+            details += ("\nComic OCR Studio: a second Python/pip installer or antivirus may be locking the temporary file. "
+                        "Close other Python/installer windows, restart Windows if needed, and retry one installation only.")
         emit(f"نصب بسته‌های OCR ناموفق بود: {details}", "error")
         raise OcrError(f"OCR runtime installation failed: {details}")
     importlib.invalidate_caches()
