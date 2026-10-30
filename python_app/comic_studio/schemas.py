@@ -15,6 +15,7 @@ class OcrRequest(BaseModel):
     language: str = "eng"
     contrast: bool = True
     precise: bool = True
+    group_lines: bool = False
     min_confidence: float = Field(default=0.35, ge=0.0, le=1.0)
 
 

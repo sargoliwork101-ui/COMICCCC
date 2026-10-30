@@ -14,13 +14,14 @@ from . import APP_NAME, APP_VERSION
 from .activity import ActivityLog, reporting
 from .exporter import build_images_zip, build_pdf, build_txt, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
-from .paths import STATIC_DIR, project_root
+from .ocr_grouping import group_ocr_lines
+from .paths import STATIC_DIR
 from .schemas import (
     AiConnectionTest, AiSettings, EngineDownloadRequest, EngineTestRequest, ExportRequest, OcrRequest, ProjectCreate,
     SessionRequest, StateUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .sessions import SessionManager
-from .store import ProjectStore
+from .store import ProjectChangedError, ProjectStore
 from .translation import (
     TranslationError, TranslationService, combine_translation_texts,
     distribute_translation,
@@ -85,6 +86,10 @@ def create_app() -> FastAPI:
     @app.exception_handler(TranslationError)
     async def translation_error(_: Request, exc: TranslationError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=502)
+
+    @app.exception_handler(ProjectChangedError)
+    async def project_changed(_: Request, exc: ProjectChangedError) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -241,6 +246,7 @@ def create_app() -> FastAPI:
     @app.post("/api/projects/{project_id}/ocr")
     async def run_ocr(project_id: str, values: OcrRequest) -> dict[str, Any]:
         state = project(project_id)
+        expected_updated_at = state.get("updatedAt", "")
         engine = registry.get(values.engine)
         if not ENGINE_INFO[values.engine].get("selectable", False):
             raise HTTPException(400, "This model requires its official external runtime and is not a direct comic OCR engine")
@@ -268,16 +274,18 @@ def create_app() -> FastAPI:
                 )
                 for block in blocks:
                     block["bg"] = "auto" if state.get("settings", {}).get("eraseOriginal", True) else "none"
+                if values.group_lines:
+                    blocks = group_ocr_lines(blocks)
                 item["blocks"] = blocks
                 item["edited"] = False
-                (project_root(project_id) / "images" / f"{item['id']}-edited.png").unlink(missing_ok=True)
                 activity.add(f"در «{item['name']}» {len(blocks)} تکه متن پیدا شد", progress=completed / len(ids))
                 recognized_lines = [block.get("text", "").strip() for block in blocks if block.get("text", "").strip()]
                 if recognized_lines:
                     activity.add(f"متن خوانده‌شده در «{item['name']}»:\n" + "\n".join(recognized_lines))
                 else:
                     activity.add(f"در «{item['name']}» متنی پیدا نشد", "warning")
-            store.save(state)
+            # Preserve both concurrent edits and old previews if processing or saving fails.
+            store.save_ocr_result(state, expected_updated_at, ids)
         except Exception as exc:
             activity.add(f"خواندن متن ناموفق بود: {exc}", "error")
             raise
@@ -294,6 +302,7 @@ def create_app() -> FastAPI:
     @app.post("/api/projects/{project_id}/translate")
     async def run_translation(project_id: str, values: TranslateRequest) -> dict[str, Any]:
         state = project(project_id)
+        expected_updated_at = state.get("updatedAt", "")
         ids = image_ids(state, values.image_ids)
         plan = build_project_plan(state, ids, values.provider)
         items, blocks = plan["items"], plan["blocks"]
@@ -312,7 +321,7 @@ def create_app() -> FastAPI:
         elif values.provider == "free":
             activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ متن جمعی بیش از ۵۰۰ نویسه است و برای جلوگیری از خطای سقف، کادرها جدا و جمله‌ای ارسال می‌شوند")
         else:
-            activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همه با جداکنندهٔ داخلی در یک درخواست می‌روند")
+            activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همه با خط جدید در یک درخواست می‌روند")
         try:
             translated_blocks = [""] * len(blocks)
             if combined_free:
@@ -336,15 +345,15 @@ def create_app() -> FastAPI:
                     activity.add(f"متن {index} از {len(blocks)} ترجمه و آمادهٔ نشستن در کادر خودش شد", progress=index / len(blocks))
             else:
                 translated = await run_reported(
-                    translations.translate, combined_source, values.source_language, values.provider,
+                    translations.translate, combined_source, values.source_language, values.provider, source_texts,
                     pulse_label="ترجمهٔ مشترک همهٔ متن‌های انتخاب‌شده",
                 )
-                activity.add("پاسخ مشترک AI رسید؛ در حال تقسیم از روی جداکننده‌ها", progress=0.5)
+                activity.add("پاسخ مشترک AI رسید؛ در حال تقسیم خطوط بر اساس هر کادر", progress=0.5)
                 translated_blocks = distribute_translation(source_texts, translated)
             for block, text in zip(blocks, translated_blocks):
                 block["tr"] = text
                 block["richHtml"] = ""
-            store.save(state)
+            store.save_if_unchanged(state, expected_updated_at)
         except Exception as exc:
             activity.add(f"ترجمه ناموفق بود: {exc}", "error")
             raise

@@ -100,6 +100,18 @@ async function editorRenderDifference(page) {
   });
 }
 
+async function secondSourceDarkPixels(page) {
+  return page.evaluate(() => {
+    const canvas = document.getElementById('editorCanvas');
+    const pixels = canvas.getContext('2d').getImageData(165, 75, 145, 45).data;
+    let dark = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index] < 80 && pixels[index + 1] < 80 && pixels[index + 2] < 80) dark += 1;
+    }
+    return dark;
+  });
+}
+
 function nextDownload(cdp, directory) {
   return new Promise((resolve, reject) => {
     let filename = null;
@@ -253,8 +265,8 @@ function nextDownload(cdp, directory) {
     await page.keyboard.press('Escape'); await page.click('#translateBtn');
     await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(translationRequests.length, 0, 'opening the exact payload preview must not send a translation');
-    assert.ok(await page.$eval('#translationPreviewRequests', (element) => element.textContent.includes('SOURCE ONE') && element.textContent.includes('␞') && element.textContent.includes('SOURCE TWO')));
-    assert.equal(await page.$eval('#translationPreviewRequests pre', (element) => element.textContent), 'SOURCE ONE␞SOURCE TWO␞SOURCE THREE', 'the real preview must not add newlines around separators');
+    assert.ok(await page.$eval('#translationPreviewRequests', (element) => element.textContent.includes('SOURCE ONE') && element.textContent.includes('SOURCE TWO') && !element.textContent.includes('␞')));
+    assert.equal(await page.$eval('#translationPreviewRequests pre', (element) => element.textContent), 'SOURCE ONE\nSOURCE TWO\nSOURCE THREE', 'the real preview must use ordinary line-based payloads');
     assert.ok(await page.$eval('#translationPreviewDestination', (element) => element.textContent.includes('Google Translate') && element.textContent.includes('MyMemory')));
     await page.click('#translationPreviewCancel');
     assert.equal(translationRequests.length, 0, 'cancelling the real browser preview must not send a translation');
@@ -280,6 +292,8 @@ function nextDownload(cdp, directory) {
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await editorRenderDifference(page), 0, 'typing must refresh the same final renderer without rebuilding the editor field');
     await page.select('#blockList .block-card[data-id="2"] [data-text-mode]', 'ocr');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await editorRenderDifference(page), 0, 'changing one line language must immediately refresh the real editor canvas');
     await page.click('#editorSelectAll'); await page.click('#editorSelectNone');
     await page.click('#editorBoxes .editor-box[data-id="2"] .box-move');
     await page.keyboard.down('Control');
@@ -293,7 +307,8 @@ function nextDownload(cdp, directory) {
       return state.selectedBlockIds.length === 3 && boxes.every((box) => box.x0 === boxes[0].x0 && box.x1 - box.x0 === 145 && box.y1 - box.y0 === 45) && blocks.map((block) => block.x0).join(',') === '5,165,10';
     }), true, 'real controls must match all three boxes to the first selection, align them, and preserve OCR coordinates');
 
-    await page.click('#editorSelectNone');
+    await page.$eval('#editorSelectNone', (button) => button.click());
+    assert.deepEqual(await page.evaluate(() => state.selectedBlockIds), [], 'the drag setup must clear the previous multi-selection');
     const overlapDrag = await page.evaluate(() => {
       const blocks = state.project.images[0].blocks; const source = boxOf(blocks[1]); const target = boxOf(blocks[0]);
       const rect = document.querySelector('#editorBoxes .editor-box[data-id="2"] .box-move').getBoundingClientRect();
@@ -302,18 +317,30 @@ function nextDownload(cdp, directory) {
     await page.mouse.move(overlapDrag.x, overlapDrag.y); await page.mouse.down();
     await page.mouse.move(overlapDrag.x + overlapDrag.dx, overlapDrag.y + overlapDrag.dy, { steps: 12 }); await page.mouse.up();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    assert.equal(await page.evaluate(() => {
+    const overlapAfterDrag = await page.evaluate(() => {
       const blocks = state.project.images[0].blocks; const first = boxOf(blocks[0]); const second = boxOf(blocks[1]);
-      return Math.abs(first.x0 - second.x0) < 1 && Math.abs(first.y0 - second.y0) < 1;
-    }), true, 'the real drag must overlap the first two boxes for the preview regression');
+      return { first, second, scale: state.editorScale, selected: state.selectedBlockIds, overlaps: Math.abs(first.x0 - second.x0) < 1 && Math.abs(first.y0 - second.y0) < 1 };
+    });
+    assert.equal(overlapAfterDrag.overlaps, true, `the real drag must overlap the first two boxes: ${JSON.stringify(overlapAfterDrag)}`);
     assert.equal(await editorRenderDifference(page), 0, 'editor canvas must be pixel-identical to the final renderer even with overlapping boxes');
     console.log('PASS: editor canvas matches final rendering with overlapping boxes');
     await page.mouse.move(overlapDrag.x + overlapDrag.dx, overlapDrag.y + overlapDrag.dy); await page.mouse.down();
     await page.mouse.move(overlapDrag.x, overlapDrag.y, { steps: 12 }); await page.mouse.up();
-    await page.click('#blockList .block-card[data-id="2"] [data-visibility]');
-    assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,false,true');
+    const coveredSourceDarkPixels = await secondSourceDarkPixels(page);
+    await sleep(400);
+    await page.$eval('#editorBoxes .editor-box[data-id="2"] .box-visibility', (eye) => eye.scrollIntoView({ block: 'center', inline: 'center' }));
+    await sleep(50);
+    await page.click('#editorBoxes .editor-box[data-id="2"] .box-visibility');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,false,true', 'the real eye click must toggle only its own block');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const revealedSourceDarkPixels = await secondSourceDarkPixels(page);
+    assert.ok(revealedSourceDarkPixels > coveredSourceDarkPixels + 10, `the eye must restore original source pixels, not just remove the DOM box (${coveredSourceDarkPixels} -> ${revealedSourceDarkPixels})`);
+    assert.equal(await editorRenderDifference(page), 0, 'the editor canvas must rerender after the eye hides a line');
+    console.log(`PASS: eye restores original source pixels beneath a hidden translation (${coveredSourceDarkPixels} -> ${revealedSourceDarkPixels} dark pixels)`);
     await page.click('#blockList .block-card[data-id="2"] [data-visibility]');
     assert.equal(await page.evaluate(() => state.project.images[0].blocks.map((block) => block.enabled).join(',')), 'true,true,true');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await editorRenderDifference(page), 0, 'the editor canvas must rerender when the sidebar shows the line again');
     let uploaded = page.waitForResponse((response) => response.url().endsWith('/rendered') && response.request().method() === 'POST');
     await page.click('#editorApply'); await uploaded;
     uploaded = page.waitForResponse((response) => response.url().endsWith('/rendered') && response.request().method() === 'POST');
@@ -354,6 +381,66 @@ with pymupdf.open(pdf_path) as document:
     with Image.open(io.BytesIO(info['image'])) as opened:
         assert ImageChops.difference(opened.convert('RGBA'), expected).getbbox() is None
 `, files.zip, files.pdf, editedPath]);
+    const other = await api(base, '/api/projects', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Project switch test' }),
+    });
+    await page.evaluate(async (id) => {
+      await refreshProjectList();
+      document.querySelector('#grid .tick').click(); // a debounced change immediately followed by a switch
+      const select = document.getElementById('projectSelect');
+      select.value = id; select.dispatchEvent(new Event('change', { bubbles: true }));
+    }, other.id);
+    await page.waitForFunction((id) => state.project.id === id, {}, other.id);
+    const original = await api(base, `/api/projects/${projectId}`);
+    assert.equal(original.images[0].selected, false, 'switching projects must save the pending selection in the original project');
+    await page.evaluate((id) => {
+      const select = document.getElementById('projectSelect');
+      select.value = id; select.dispatchEvent(new Event('change', { bubbles: true }));
+    }, projectId);
+    await page.waitForFunction((id) => state.project.id === id, {}, projectId);
+    assert.equal(await page.evaluate(() => state.project.images[0].selected), false);
+    console.log('PASS: switching projects preserves a pending selection and restores it on return');
+
+    let paragraph = await api(base, '/api/projects', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Paragraph grouping test' }),
+    });
+    const paragraphForm = new FormData(); paragraphForm.append('files', new Blob([fs.readFileSync(source)], { type: 'image/png' }), 'paragraph.png');
+    paragraph = await api(base, `/api/projects/${paragraph.id}/files`, { method: 'POST', body: paragraphForm });
+    paragraph.settings.overlayMode = 'ocr';
+    paragraph.images[0].blocks = [
+      { id: 10, text: 'WHY ARE YOU', tr: '', richHtml: '', enabled: true, bg: 'white', x0: 10, y0: 10, x1: 160, y1: 35, lineH: 25, dir: 'rtl', align: 'right' },
+      { id: 11, text: 'RUNNING AROUND', tr: '', richHtml: '', enabled: true, bg: 'white', x0: 10, y0: 40, x1: 160, y1: 65, lineH: 25, dir: 'rtl', align: 'right' },
+    ];
+    await api(base, `/api/projects/${paragraph.id}/state`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: paragraph }),
+    });
+    await page.evaluate(async (id) => {
+      await refreshProjectList();
+      const select = document.getElementById('projectSelect'); select.value = id;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }, paragraph.id);
+    await page.waitForFunction((id) => state.project.id === id && state.project.images[0]?.edited, {}, paragraph.id);
+    await page.click('#grid .item .act button:nth-child(2)');
+    await page.waitForSelector('#editorDialog[open] #blockList .block-card');
+    await page.click('#editorSelectAll'); await page.click('#editorMergeText');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].text), 'WHY ARE YOU RUNNING AROUND');
+    assert.equal(await page.$$eval('#blockList .block-card', (cards) => cards.length), 1);
+    await page.click('#editorClose'); await page.waitForFunction(() => !state.editorId);
+    const paragraphSaved = await api(base, `/api/projects/${paragraph.id}`);
+    assert.equal(paragraphSaved.images[0].blocks[0].sourceLines.length, 2);
+    const paragraphPreview = await api(base, `/api/projects/${paragraph.id}/translation-preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_ids: [paragraph.images[0].id], provider: 'free' }),
+    });
+    assert.equal(paragraphPreview.blockCount, 1);
+    assert.equal(paragraphPreview.requests[0].text, 'WHY ARE YOU RUNNING AROUND');
+    await page.click('#grid .item .act button:nth-child(2)');
+    await page.waitForSelector('#editorDialog[open] #blockList .block-card');
+    await page.click('#editorSelectAll'); await page.click('#editorSplitText');
+    assert.equal(await page.$$eval('#blockList .block-card', (cards) => cards.length), 2);
+    await page.click('#editorClose'); await page.waitForFunction(() => !state.editorId);
+    assert.equal((await api(base, `/api/projects/${paragraph.id}`)).images[0].blocks.length, 2);
+    console.log('PASS: manual paragraph merge, translation preview, saved source lines and split work in Chromium');
     assert.deepEqual(browserErrors, [], 'the real render/export path must not produce browser errors');
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');

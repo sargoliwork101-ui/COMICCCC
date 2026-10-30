@@ -29,7 +29,12 @@ let revertCalls = 0;
 let translationGate = null;
 let activityFeed = { entries: [], next: 0 };
 let renderedBlocks = null;
+let canvasRenderCount = 0;
 let renderedUploads = 0;
+let saveGate = null;
+const stateSaveRequests = [];
+const ocrRequests = [];
+let projectGetCount = 0;
 const exportRequests = [];
 const aiSaveRequests = [];
 const aiTestRequests = [];
@@ -58,7 +63,7 @@ const makeTranslationPreview = (body, single = false) => {
   const liveProject = vm.runInContext('state.project', context);
   const ids = single ? [] : (body.image_ids || liveProject.images.map((image) => image.id));
   const texts = single ? [body.text] : liveProject.images.filter((image) => ids.includes(image.id)).flatMap((image) => image.blocks).filter((block) => block.enabled !== false && String(block.text || '').trim()).map((block) => block.text.trim());
-  const collective = texts.join('␞');
+  const collective = texts.join('\n');
   const requests = provider === 'free' && collective.length <= 500 ? [collective] : provider === 'free' ? texts : [`Source language: English\n\n${collective}`];
   return {
     provider, providerLabel: provider === 'free' ? 'Google Translate (fallback: MyMemory)' : 'Selected AI', model: provider === 'free' ? '' : 'Mock model', base_url: provider === 'free' ? '' : 'https://ai.test/v1',
@@ -73,7 +78,7 @@ window.fetch = async (url, options = {}) => {
   const pathname = parsed.pathname;
   if (pathname === '/api/projects' && (!options.method || options.method === 'GET')) return jsonResponse([summary]);
   if (pathname === '/api/projects' && options.method === 'POST') return jsonResponse(project, 201);
-  if (pathname === `/api/projects/${project.id}`) return jsonResponse(project);
+  if (pathname === `/api/projects/${project.id}`) { projectGetCount += 1; return jsonResponse(project); }
   if (pathname === '/api/engines') return jsonResponse([engine]);
   if (pathname === '/api/ai-settings/test' && options.method === 'POST') {
     const request = JSON.parse(options.body); aiTestRequests.push(request);
@@ -103,8 +108,13 @@ window.fetch = async (url, options = {}) => {
   if (pathname === '/api/activity') return jsonResponse(activityFeed);
   if (pathname === '/api/activity/clear' && options.method === 'POST') { activityClears += 1; return jsonResponse({ ok: true, next: 0 }); }
   if (pathname === '/api/session/heartbeat') return jsonResponse({ ok: true, active: 1 });
-  if (pathname === `/api/projects/${project.id}/state`) return jsonResponse(JSON.parse(options.body).state);
-  if (pathname === `/api/projects/${project.id}/ocr`) return jsonResponse(overlayProject('NEW OCR', ''));
+  if (pathname === `/api/projects/${project.id}/state`) {
+    const saved = JSON.parse(options.body).state;
+    stateSaveRequests.push(saved);
+    if (saveGate) await saveGate;
+    return jsonResponse(saved);
+  }
+  if (pathname === `/api/projects/${project.id}/ocr`) { ocrRequests.push(JSON.parse(options.body)); return jsonResponse(overlayProject('NEW OCR', '')); }
   if (pathname === `/api/projects/${project.id}/translation-preview`) {
     const request = JSON.parse(options.body); translationPreviewCalls.push(request);
     return jsonResponse(makeTranslationPreview(request));
@@ -151,6 +161,7 @@ window.Typeset = {
   blockStyle(block) { return { dir: block.dir === 'ltr' ? 'ltr' : 'rtl', align: block.align || 'right', bold: true, italic: false, underline: false, size: 12, color: null }; },
   hasInlineMarks() { return false; },
   render(bitmap, blocks) {
+    canvasRenderCount += 1;
     renderedBlocks = blocks;
     return { width: 320, height: 200, toBlob(callback) { callback(new window.Blob(['png'], { type: 'image/png' })); } };
   },
@@ -202,6 +213,32 @@ function check(name, condition) {
     $('grid').querySelector('img').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     check(`image stays one-click after save ${round + 1}`, vm.runInContext('state.project.images[0].selected', context) === !before);
   }
+
+  let releaseSave;
+  saveGate = new Promise((resolve) => { releaseSave = resolve; });
+  const beforeConcurrentSaves = stateSaveRequests.length;
+  vm.runInContext("state.project.name = 'old save'", context);
+  const firstSave = vm.runInContext('saveProject()', context);
+  await sleep(0);
+  vm.runInContext("state.project.name = 'new save'", context);
+  const secondSave = vm.runInContext('saveProject()', context);
+  await sleep(0);
+  check('newer save waits for an earlier in-flight save', stateSaveRequests.length === beforeConcurrentSaves + 1 && stateSaveRequests.at(-1).name === 'old save');
+  saveGate = null; releaseSave();
+  await Promise.all([firstSave, secondSave]);
+  check('save queue sends the newer snapshot last', stateSaveRequests.at(-1).name === 'new save');
+
+  saveGate = new Promise((resolve) => { releaseSave = resolve; });
+  vm.runInContext("state.project.name = 'pending edit'; scheduleSave()", context);
+  const getsBeforeSwitch = projectGetCount;
+  const switchProject = vm.runInContext("loadProject('project-ui')", context);
+  await sleep(0);
+  check('opening a project waits for pending edits to be saved', projectGetCount === getsBeforeSwitch && stateSaveRequests.at(-1).name === 'pending edit');
+  vm.runInContext("state.project.name = 'edit during switch'; scheduleSave()", context);
+  saveGate = null; releaseSave();
+  await switchProject;
+  check('edits made while switching are also saved before the project changes', stateSaveRequests.at(-1).name === 'edit during switch');
+  check('project loads only after pending saves finish', projectGetCount >= getsBeforeSwitch + 1);
 
   $('modelsBtn').click();
   check('models dialog opens', $('modelsDialog').open);
@@ -398,10 +435,22 @@ function check(name, condition) {
 
   check('each line has its own on-image and sidebar language controls', $('editorBoxes').querySelectorAll('.box-language').length === 2 && $('blockList').querySelectorAll('[data-text-mode]').length === 2);
   const languageSelectors = $('blockList').querySelectorAll('[data-text-mode]');
+  vm.runInContext('state.editorBitmap = {width: 320, height: 200, close() {}}', context);
+  await sleep(20);
+  const backgroundSelector = $('blockList').querySelector('.block-card .block-head select');
+  const rendersBeforeBackground = canvasRenderCount;
+  backgroundSelector.value = 'black';
+  backgroundSelector.dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('changing a background redraws the editor canvas immediately', canvasRenderCount > rendersBeforeBackground && renderedBlocks[0].bg === 'black');
+  backgroundSelector.value = 'white';
+  backgroundSelector.dispatchEvent(new window.Event('change', { bubbles: true }));
+  const rendersBeforeLanguage = canvasRenderCount;
   languageSelectors[0].value = 'ocr';
   languageSelectors[0].dispatchEvent(new window.Event('change', { bubbles: true }));
   check('sidebar language selector changes only its own line to English', $('editorBoxes').querySelector('.editor-box[data-id="1"] .editor-box-text')?.textContent === 'CORRECTED OCR' && $('editorBoxes').querySelector('.editor-box[data-id="2"] .editor-box-text')?.textContent === 'متن دوم' && vm.runInContext("state.project.images[0].blocks[0].textMode === 'ocr' && !state.project.images[0].blocks[1].textMode", context));
   check('changing one line language preserves both eye choices and the global mode', vm.runInContext("state.project.images[0].blocks.every((block) => block.enabled) && state.project.settings.overlayMode === 'translation'", context));
+  await sleep(20);
+  check('changing one line language redraws the editor canvas immediately', canvasRenderCount > rendersBeforeLanguage && renderedBlocks[0].tr === 'CORRECTED OCR' && renderedBlocks[0]._plainText === true);
   await vm.runInContext('renderAndUpload(state.project.images[0])', context);
   check('mixed English and Persian choices reach the preview and export renderer', renderedBlocks[0].tr === 'CORRECTED OCR' && renderedBlocks[0]._plainText === true && renderedBlocks[1].tr === 'متن دوم' && !renderedBlocks[1]._plainText);
   await vm.runInContext("exportResult('images')", context);
@@ -418,9 +467,17 @@ function check(name, condition) {
   vm.runInContext('renderEditorBoxes()', context);
 
   check('each line has its own on-image and sidebar visibility controls', $('editorBoxes').querySelectorAll('.box-visibility').length === 2 && $('blockList').querySelectorAll('[data-visibility]').length === 2 && $('blockList').textContent.includes('نمایش متن 1 روی تصویر'));
+  vm.runInContext("selectEditorBlock(2, false)", context);
+  $('editorBoxes').querySelector('.editor-box[data-id="1"] .box-visibility').dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  $('editorBoxes').querySelector('.editor-box[data-id="1"] .box-language').dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  check('eye and language pointerdown do not change the selection', vm.runInContext("state.selectedBlockIds.join(',') === '2'", context));
   const lineToggles = $('blockList').querySelectorAll('[data-visibility]');
+  await sleep(20);
+  const rendersBeforeVisibility = canvasRenderCount;
   lineToggles[1].click();
   check('hiding one line leaves the other line visible', $('editorBoxes').children.length === 1 && $('editorBoxes').querySelector('.editor-box').dataset.id === '1' && vm.runInContext("state.project.images[0].blocks.map((block) => block.enabled).join(',')", context) === 'true,false');
+  await sleep(20);
+  check('hiding one line redraws the editor canvas immediately', canvasRenderCount > rendersBeforeVisibility && renderedBlocks[0].enabled === true && renderedBlocks[1].enabled === false);
   $('editorBoxes').querySelector('.editor-box[data-id="1"] .box-visibility').click();
   check('the on-image eye hides only its line without deleting text or changing global mode', $('editorBoxes').children.length === 0 && vm.runInContext("state.project.images[0].blocks[0].tr === 'سلام دنیا' && state.project.images[0].blocks[1].tr === 'متن دوم' && state.project.settings.overlayMode === 'translation'", context));
   lineToggles[1].click();
@@ -428,9 +485,32 @@ function check(name, condition) {
   await vm.runInContext('renderAndUpload(state.project.images[0])', context);
   check('rendering preserves independent per-line visibility choices', renderedBlocks.length === 2 && renderedBlocks[0].enabled === false && renderedBlocks[1].enabled === true);
   lineToggles[0].click();
-  vm.runInContext("state.editorId = null; appendLocalActivity('OLD JOB')", context);
+  vm.runInContext(`window._priorBlocks = JSON.parse(JSON.stringify(state.project.images[0].blocks));
+    state.project.images[0].blocks = [
+      {id: 10, text: 'WHY ARE YOU', tr: '', richHtml: '', enabled: true, bg: 'white', x0: 10, y0: 10, x1: 140, y1: 30, lineH: 20},
+      {id: 11, text: 'RUNNING AROUND', tr: '', richHtml: '', enabled: true, bg: 'white', x0: 10, y0: 35, x1: 150, y1: 55, lineH: 20}
+    ]; state.selectedBlockIds = []; buildBlockList(); drawEditor();`, context);
+  $('editorSelectAll').click(); $('editorMergeText').click();
+  check('manual merge creates one editable OCR paragraph and retains both original lines', vm.runInContext("state.project.images[0].blocks.length === 1 && state.project.images[0].blocks[0].text === 'WHY ARE YOU RUNNING AROUND' && state.project.images[0].blocks[0].sourceLines.length === 2", context));
+  $('editorSplitText').click();
+  check('manual split restores original lines and their geometry', vm.runInContext("state.project.images[0].blocks.length === 2 && state.project.images[0].blocks[1].id === 11 && state.project.images[0].blocks[1].y0 === 35", context));
+  $('editorMergeText').click();
+  vm.runInContext("state.project.images[0].blocks[0].text = 'WHY ARE YOU  RUNNING AROUND';", context);
+  $('editorSplitText').click();
+  check('splitting never discards whitespace edits in merged OCR text', vm.runInContext("state.project.images[0].blocks.length === 1 && state.project.images[0].blocks[0].text === 'WHY ARE YOU  RUNNING AROUND'", context));
+  vm.runInContext("state.project.images[0].blocks[0].text = 'WHY ARE YOU RUNNING AROUND'; state.project.images[0].blocks[0].tr = 'ترجمه';", context);
+  $('editorSplitText').click();
+  check('splitting never discards a translation', vm.runInContext("state.project.images[0].blocks.length === 1 && state.project.images[0].blocks[0].tr === 'ترجمه'", context));
+  vm.runInContext("state.project.images[0].blocks = window._priorBlocks; state.selectedBlockIds = []; buildBlockList(); drawEditor(); state.editorId = null; appendLocalActivity('OLD JOB')", context);
   const clearsBeforeOcr = activityClears;
+  $('ocrConfidence').value = '0';
   await vm.runInContext('runOcr()', context);
+  check('OCR accepts zero confidence without substituting the default', ocrRequests.at(-1).min_confidence === 0);
+  check('automatic paragraph grouping is requested by default', ocrRequests.at(-1).group_lines === true);
+  $('ocrGroupLines').checked = false;
+  vm.runInContext('collectOcrSettings()', context);
+  check('automatic paragraph grouping can be disabled without altering existing blocks', vm.runInContext('state.project.settings.groupOcrLines === false && state.project.images[0].blocks.length === 1', context));
+  $('ocrGroupLines').checked = true; vm.runInContext('collectOcrSettings()', context);
   check('starting a new job clears the previous job log', activityClears === clearsBeforeOcr + 1 && !$('activityLog').textContent.includes('OLD JOB') && $('activityLog').textContent.includes('OCR محلی'));
   check('finishing OCR automatically selects OCR display mode', $('overlayMode').value === 'ocr' && $('exportOverlayMode').value === 'ocr');
   check('finishing OCR places the new recognized text on the image', renderedBlocks[0].tr === 'NEW OCR' && renderedBlocks[0]._plainText === true);

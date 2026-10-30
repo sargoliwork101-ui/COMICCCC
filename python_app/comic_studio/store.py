@@ -20,6 +20,10 @@ Image.MAX_IMAGE_PIXELS = 100_000_000
 ALLOWED_IMAGES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 
 
+class ProjectChangedError(Exception):
+    """A long-running operation was based on an outdated project snapshot."""
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -104,6 +108,27 @@ class ProjectStore:
             atomic_json(project_root(state["id"]) / "project.json", state)
             return state
 
+    def save_if_unchanged(self, state: dict[str, Any], expected_updated_at: str) -> dict[str, Any]:
+        """Do not overwrite edits made while OCR or translation was running."""
+        with self._lock:
+            try:
+                current = self.get(state["id"])
+            except KeyError as exc:
+                raise ProjectChangedError("پروژه در حین پردازش حذف شده است؛ نتیجه ذخیره نشد.") from exc
+            if current.get("updatedAt") != expected_updated_at:
+                raise ProjectChangedError("پروژه در حین پردازش تغییر کرد؛ برای حفظ ویرایش‌ها نتیجه ذخیره نشد. دوباره تلاش کنید.")
+            return self.save(state)
+
+    def save_ocr_result(self, state: dict[str, Any], expected_updated_at: str, image_ids: list[str]) -> dict[str, Any]:
+        # Keep preview uploads from racing between the version check and cleanup.
+        with self._lock:
+            self.save_if_unchanged(state, expected_updated_at)
+            images_dir = project_root(state["id"]) / "images"
+            for item in state["images"]:
+                if item["id"] in image_ids:
+                    (images_dir / f"{item['id']}-edited.png").unlink(missing_ok=True)
+            return state
+
     def update_state(self, project_id: str, incoming: dict[str, Any]) -> dict[str, Any]:
         """Merge UI state while keeping server-owned file metadata and paths safe."""
         with self._lock:
@@ -146,43 +171,53 @@ class ProjectStore:
         return path
 
     def save_rendered(self, project_id: str, image_id: str, content: bytes) -> dict[str, Any]:
-        item = self.image(project_id, image_id)
-        if len(content) > 100 * 1024 * 1024:
-            raise ValueError("Rendered image is too large")
-        with Image.open(io.BytesIO(content)) as im:
-            if (im.format or "").upper() != "PNG":
-                raise ValueError("Rendered image must be PNG")
-            if im.size != (item["width"], item["height"]):
-                raise ValueError("Rendered image dimensions do not match the source")
-            im.verify()
-        path = project_root(project_id) / "images" / f"{image_id}-edited.png"
-        path.write_bytes(content)
-        state = self.get(project_id)
-        for item in state["images"]:
-            if item["id"] == image_id:
-                item["edited"] = True
-        return self.save(state)
+        with self._lock:
+            item = self.image(project_id, image_id)
+            if len(content) > 100 * 1024 * 1024:
+                raise ValueError("Rendered image is too large")
+            with Image.open(io.BytesIO(content)) as im:
+                if (im.format or "").upper() != "PNG":
+                    raise ValueError("Rendered image must be PNG")
+                if im.size != (item["width"], item["height"]):
+                    raise ValueError("Rendered image dimensions do not match the source")
+                im.verify()
+            path = project_root(project_id) / "images" / f"{image_id}-edited.png"
+            path.write_bytes(content)
+            state = self.get(project_id)
+            for item in state["images"]:
+                if item["id"] == image_id:
+                    item["edited"] = True
+            return self.save(state)
 
     def revert_rendered(self, project_id: str, image_id: str) -> dict[str, Any]:
-        self.image(project_id, image_id)
-        (project_root(project_id) / "images" / f"{image_id}-edited.png").unlink(missing_ok=True)
-        state = self.get(project_id)
-        for item in state["images"]:
-            if item["id"] == image_id:
-                item["edited"] = False
-        return self.save(state)
+        with self._lock:
+            self.image(project_id, image_id)
+            (project_root(project_id) / "images" / f"{image_id}-edited.png").unlink(missing_ok=True)
+            state = self.get(project_id)
+            for item in state["images"]:
+                if item["id"] == image_id:
+                    item["edited"] = False
+            return self.save(state)
 
     def import_files(self, project_id: str, files: list[tuple[str, bytes]], pdf_scale: float = 2.0) -> dict[str, Any]:
         state = self.get(project_id)
-        for filename, content in files:
-            suffix = Path(filename).suffix.lower()
-            if suffix == ".pdf":
-                self._import_pdf(state, filename, content, pdf_scale)
-            elif suffix in ALLOWED_IMAGES:
-                self._import_image(state, filename, content)
-            else:
-                raise ValueError(f"Unsupported file: {filename}")
-        return self.save(state)
+        expected_updated_at = state.get("updatedAt", "")
+        original_count = len(state["images"])
+        try:
+            for filename, content in files:
+                suffix = Path(filename).suffix.lower()
+                if suffix == ".pdf":
+                    self._import_pdf(state, filename, content, pdf_scale)
+                elif suffix in ALLOWED_IMAGES:
+                    self._import_image(state, filename, content)
+                else:
+                    raise ValueError(f"Unsupported file: {filename}")
+            return self.save_if_unchanged(state, expected_updated_at)
+        except Exception:
+            # A failed batch must not leave orphan images (including PDF pages).
+            for item in state["images"][original_count:]:
+                (project_root(project_id) / "images" / item["file"]).unlink(missing_ok=True)
+            raise
 
     def _next_order(self, state: dict[str, Any]) -> int:
         return max((int(item.get("order", 0)) for item in state["images"]), default=-1) + 1
@@ -211,16 +246,24 @@ class ProjectStore:
     def _import_image(self, state: dict[str, Any], filename: str, content: bytes) -> None:
         if len(content) > 150 * 1024 * 1024:
             raise ValueError(f"Image is too large: {filename}")
-        with Image.open(io.BytesIO(content)) as im:
-            im.load()
-            image_format = (im.format or "PNG").upper()
-            width, height = im.size
-        if width < 1 or height < 1 or width * height > 100_000_000:
-            raise ValueError(f"Invalid image dimensions: {filename}")
+        try:
+            with Image.open(io.BytesIO(content)) as im:
+                image_format = (im.format or "PNG").upper()
+                width, height = im.size
+                if width < 1 or height < 1 or width * height > 100_000_000:
+                    raise ValueError(f"Invalid image dimensions: {filename}")
+                im.load()
+        except (OSError, Image.DecompressionBombError) as exc:
+            raise ValueError(f"Invalid or unsupported image: {filename}") from exc
         image_id = new_id()
         extension = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "BMP": ".bmp", "GIF": ".gif"}.get(image_format, ".png")
         file_name = f"{image_id}{extension}"
-        (project_root(state["id"]) / "images" / file_name).write_bytes(content)
+        image_path = project_root(state["id"]) / "images" / file_name
+        try:
+            image_path.write_bytes(content)
+        except OSError:
+            image_path.unlink(missing_ok=True)
+            raise
         state["images"].append({
             "id": image_id,
             "name": Path(filename).name,
@@ -238,43 +281,51 @@ class ProjectStore:
         })
 
     def duplicate(self, project_id: str, image_ids: list[str]) -> dict[str, Any]:
-        state = self.get(project_id)
-        originals = {item["id"]: item for item in state["images"]}
-        additions: dict[str, dict[str, Any]] = {}
-        for image_id in image_ids:
-            if image_id not in originals or image_id in additions:
-                continue
-            old = originals[image_id]
-            new = json.loads(json.dumps(old))
-            new["id"] = new_id()
-            new["name"] = f"کپی — {old['name']}"
-            new["file"] = f"{new['id']}{Path(old['file']).suffix}"
-            # A copy starts independent, rather than silently enlarging the original group.
-            new["groupId"] = None
-            shutil.copyfile(project_root(project_id) / "images" / old["file"], project_root(project_id) / "images" / new["file"])
-            old_edited = project_root(project_id) / "images" / f"{old['id']}-edited.png"
-            if old_edited.exists():
-                shutil.copyfile(old_edited, project_root(project_id) / "images" / f"{new['id']}-edited.png")
-            additions[image_id] = new
-        merged = []
-        for item in state["images"]:
-            merged.append(item)
-            if item["id"] in additions:
-                merged.append(additions[item["id"]])
-        for index, item in enumerate(merged):
-            item["order"] = index
-        state["images"] = merged
-        return self.save(state)
+        with self._lock:
+            state = self.get(project_id)
+            originals = {item["id"]: item for item in state["images"]}
+            additions: dict[str, dict[str, Any]] = {}
+            for image_id in image_ids:
+                if image_id not in originals or image_id in additions:
+                    continue
+                old = originals[image_id]
+                new = json.loads(json.dumps(old))
+                new["id"] = new_id()
+                new["name"] = f"کپی — {old['name']}"
+                new["file"] = f"{new['id']}{Path(old['file']).suffix}"
+                # A copy starts independent, rather than silently enlarging the original group.
+                new["groupId"] = None
+                shutil.copyfile(project_root(project_id) / "images" / old["file"], project_root(project_id) / "images" / new["file"])
+                old_edited = project_root(project_id) / "images" / f"{old['id']}-edited.png"
+                if old_edited.exists():
+                    shutil.copyfile(old_edited, project_root(project_id) / "images" / f"{new['id']}-edited.png")
+                additions[image_id] = new
+            merged = []
+            for item in state["images"]:
+                merged.append(item)
+                if item["id"] in additions:
+                    merged.append(additions[item["id"]])
+            for index, item in enumerate(merged):
+                item["order"] = index
+            state["images"] = merged
+            return self.save(state)
 
     def delete(self, project_id: str, image_ids: list[str]) -> dict[str, Any]:
-        state = self.get(project_id)
-        ids = set(image_ids)
-        state["images"] = [item for item in state["images"] if item["id"] not in ids]
-        for image_id in ids:
-            for path in (project_root(project_id) / "images").glob(f"{image_id}*"):
-                path.unlink(missing_ok=True)
-        return self.save(state)
+        with self._lock:
+            state = self.get(project_id)
+            ids = set(image_ids)
+            removed = [item for item in state["images"] if item["id"] in ids]
+            state["images"] = [item for item in state["images"] if item["id"] not in ids]
+            # Commit metadata before deleting files so a failed save leaves the project usable.
+            self.save(state)
+            # Resolve only actual project members; untrusted IDs must never be glob patterns.
+            for item in removed:
+                images_dir = project_root(project_id) / "images"
+                (images_dir / item["file"]).unlink(missing_ok=True)
+                (images_dir / f"{item['id']}-edited.png").unlink(missing_ok=True)
+            return state
 
     def delete_project(self, project_id: str) -> None:
-        self.get(project_id)  # validates the id and prevents deleting an arbitrary path
-        shutil.rmtree(project_root(project_id))
+        with self._lock:
+            self.get(project_id)  # validates the id and prevents deleting an arbitrary path
+            shutil.rmtree(project_root(project_id))

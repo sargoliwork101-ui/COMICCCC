@@ -63,6 +63,8 @@ def plan_signature(
         "model": config.get("model", "") if provider != "free" else "",
         "base_url": config.get("base_url", "") if provider != "free" else "",
         "keys": plan["keys"],
+        # Equal joined payloads can have different per-box line boundaries.
+        "source_texts": plan["source_texts"],
         "texts": [call["text"] for call in plan["calls"]],
     }
     encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")

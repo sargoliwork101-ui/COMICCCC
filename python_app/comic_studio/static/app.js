@@ -11,6 +11,9 @@ const state = {
   previewId: null, richEditor: null, richRange: null, richFields: new Map(),
 };
 let saveTimer = null;
+let saveTask = Promise.resolve();
+let saveRevision = 0;
+let projectLoadRevision = 0;
 let toastTimer = null;
 let outlineFrame = null;
 let activityAfter = 0;
@@ -214,7 +217,7 @@ async function runJob(message, task) {
   finally { setBusy(''); }
 }
 function scheduleSave() {
-  clearTimeout(saveTimer); $('saveState').textContent = 'در حال ذخیره…';
+  clearTimeout(saveTimer); ++saveRevision; $('saveState').textContent = 'در حال ذخیره…';
   saveTimer = setTimeout(() => saveProject().catch((error) => toast(error.message, true)), 350);
 }
 async function saveProject() {
@@ -222,14 +225,20 @@ async function saveProject() {
   if (!state.project) return;
   const project = state.project;
   G.normalizeLayout(project.images);
-  const result = await api(`/api/projects/${project.id}/state`, jsonOptions('PUT', { state: project }));
-  // Keep the live object identity: cards and editor fields must never point at a detached pre-save project.
-  // The response is a snapshot and may also be older than edits made while the request was in flight.
-  if (state.project === project) {
-    project.updatedAt = result.updatedAt || project.updatedAt;
-    $('saveState').textContent = 'ذخیره شد';
-  }
-  refreshProjectList().catch(() => {});
+  const revision = ++saveRevision;
+  // Capture the state now, but serialize requests so a slow older save cannot overwrite a newer one.
+  const options = jsonOptions('PUT', { state: project });
+  const task = saveTask.catch(() => {}).then(async () => {
+    const result = await api(`/api/projects/${project.id}/state`, options);
+    // Keep the live object identity: cards and editor fields must never point at a detached snapshot.
+    if (state.project === project) {
+      project.updatedAt = result.updatedAt || project.updatedAt;
+      if (revision === saveRevision) $('saveState').textContent = 'ذخیره شد';
+    }
+    refreshProjectList().catch(() => {});
+  });
+  saveTask = task;
+  return task;
 }
 function adoptProject(project) {
   state.project = project;
@@ -242,6 +251,7 @@ function adoptProject(project) {
   $('ocrLanguage').value = settings.ocrLanguage || 'eng';
   $('ocrContrast').checked = settings.contrast !== false;
   $('ocrPrecise').checked = settings.precise !== false;
+  $('ocrGroupLines').checked = settings.groupOcrLines !== false;
   $('ocrErase').checked = settings.eraseOriginal !== false;
   const output = settings.output || {};
   $('exportName').value = output.name || 'comic-translated';
@@ -489,14 +499,29 @@ async function refreshProjectList() {
   const projects = await api('/api/projects'); const select = $('projectSelect'); const current = state.project?.id; select.textContent = '';
   projects.forEach((project) => { const option = document.createElement('option'); option.value = project.id; option.textContent = `${project.name} (${project.images})`; option.selected = project.id === current; select.appendChild(option); });
 }
-async function loadProject(id) { const project = await api(`/api/projects/${id}`); adoptProject(project); await refreshProjectList(); await renderImagesText(); }
+async function loadProject(id) {
+  const revision = ++projectLoadRevision;
+  const previous = state.project;
+  // Flush edits before switching. If another edit arrives while saving/loading, flush it too.
+  while (state.project === previous && revision === projectLoadRevision) {
+    const saving = saveProject();
+    const savedRevision = saveRevision;
+    await saving;
+    if (state.project !== previous || revision !== projectLoadRevision) return;
+    const project = await api(`/api/projects/${id}`);
+    if (state.project !== previous || revision !== projectLoadRevision) return;
+    if (savedRevision !== saveRevision) continue;
+    adoptProject(project); await refreshProjectList(); await renderImagesText();
+    return;
+  }
+}
 function collectOutputSettings() {
   if (!state.project) return; state.project.settings = state.project.settings || {};
   state.project.settings.output = { name: $('exportName').value, seamless: $('exportSeamless').checked, uniformSize: $('exportUniform').checked, twoPerPage: $('exportTwo').checked, imageFormat: $('exportFormat').value, folderName: $('exportFolder').value };
 }
 function collectOcrSettings() {
   state.project.settings = state.project.settings || {};
-  Object.assign(state.project.settings, { ocrEngine: $('ocrEngine').value, ocrLanguage: $('ocrLanguage').value, contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, eraseOriginal: $('ocrErase').checked });
+  Object.assign(state.project.settings, { ocrEngine: $('ocrEngine').value, ocrLanguage: $('ocrLanguage').value, contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, groupOcrLines: $('ocrGroupLines').checked, eraseOriginal: $('ocrErase').checked });
 }
 function updateEngineOptions() {
   const select = $('ocrEngine'); const previous = select.value || state.project?.settings?.ocrEngine || 'rapidocr-v6'; select.textContent = '';
@@ -518,7 +543,8 @@ async function runOcr() {
   const ids = $('ocrOnlySelected').checked ? selectedImages().map((item) => item.id) : sortedImages().map((item) => item.id);
   if (!ids.length) throw new Error('حداقل یک تصویر را انتخاب کنید');
   await runJob('OCR محلی در حال اجراست…', async () => {
-    const result = await api(`/api/projects/${state.project.id}/ocr`, jsonOptions('POST', { image_ids: ids, engine: $('ocrEngine').value, language: $('ocrLanguage').value, contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, min_confidence: Number($('ocrConfidence').value) || .35 }));
+    const confidence = $('ocrConfidence').value.trim();
+    const result = await api(`/api/projects/${state.project.id}/ocr`, jsonOptions('POST', { image_ids: ids, engine: $('ocrEngine').value, language: $('ocrLanguage').value, contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, group_lines: $('ocrGroupLines').checked, min_confidence: confidence === '' ? .35 : Number(confidence) }));
     adoptProject(result); setOverlayMode('ocr', false); await saveProject(); await renderImagesText(); closeDialog('ocrDialog'); toast('متن OCR روی تصویر آمد؛ برای بررسی و ویرایش، دکمهٔ ✎ را بزنید');
   });
 }
@@ -962,6 +988,45 @@ function selectAllEditorBlocks() {
   updateEditorSelection();
 }
 function clearEditorSelection() { state.selectedBlockIds = []; state.activeBlockId = null; updateEditorSelection(); }
+function joinedOcrText(blocks) {
+  return blocks.map((block) => String(block.text || '').trim().replace(/\s+/g, ' ')).filter(Boolean).join(' ');
+}
+function mergeSelectedText() {
+  const item = editorItem(); const blocks = selectedEditorBlocks();
+  if (!item || blocks.length < 2) { toast('برای ادغام، حداقل دو متن را انتخاب کنید', true); return; }
+  if (blocks.some((block) => String(block.tr || '').trim() || String(block.richHtml || '').trim())) {
+    toast('برای حفظ ترجمه و قالب‌بندی، ادغام فقط پیش از ترجمه انجام می‌شود', true); return;
+  }
+  const ordered = [...blocks].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+  const x0 = Math.min(...ordered.map((b) => b.x0)); const y0 = Math.min(...ordered.map((b) => b.y0));
+  const x1 = Math.max(...ordered.map((b) => b.x1)); const y1 = Math.max(...ordered.map((b) => b.y1));
+  const snapshots = JSON.parse(JSON.stringify(ordered));
+  const merged = { ...snapshots[0], text: joinedOcrText(snapshots), tr: '', richHtml: '', x0, y0, x1, y1,
+    polygon: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], sourceLines: snapshots };
+  // The merged box has its own layout; original geometries remain intact in sourceLines.
+  delete merged.tx0; delete merged.ty0; delete merged.tx1; delete merged.ty1;
+  const selected = new Set(blocks.map((block) => String(block.id)));
+  const firstIndex = item.blocks.findIndex((block) => selected.has(String(block.id)));
+  item.blocks = item.blocks.filter((block) => !selected.has(String(block.id)));
+  item.blocks.splice(firstIndex, 0, merged);
+  state.selectedBlockIds = [String(merged.id)]; state.activeBlockId = String(merged.id);
+  buildBlockList(); drawEditor(); scheduleSave();
+}
+function splitSelectedText() {
+  const item = editorItem(); const blocks = selectedEditorBlocks();
+  if (!item || blocks.length !== 1 || !Array.isArray(blocks[0].sourceLines) || blocks[0].sourceLines.length < 2) {
+    toast('یک کادر ادغام‌شده را برای جداکردن انتخاب کنید', true); return;
+  }
+  const block = blocks[0];
+  if (String(block.tr || '').trim() || String(block.richHtml || '').trim() || String(block.text || '') !== joinedOcrText(block.sourceLines)) {
+    toast('برای جلوگیری از حذف ویرایش‌ها، جداکردن فقط پیش از ترجمه و تغییر متن ادغام‌شده ممکن است', true); return;
+  }
+  const index = item.blocks.indexOf(block);
+  const originals = JSON.parse(JSON.stringify(block.sourceLines));
+  item.blocks.splice(index, 1, ...originals);
+  state.selectedBlockIds = originals.map((entry) => String(entry.id)); state.activeBlockId = state.selectedBlockIds[0] || null;
+  buildBlockList(); drawEditor(); scheduleSave();
+}
 function sameSizeSelectedBoxes() {
   const item = editorItem(); const blocks = selectedEditorBlocks();
   if (!item || blocks.length < 2) { toast('اول یک کادر مرجع و سپس حداقل یک کادر دیگر را انتخاب کنید', true); return; }
@@ -1005,13 +1070,13 @@ function setBlockVisibility(block, visible) {
   const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
   card?.classList.toggle('disabled', !block.enabled);
   const toggle = card?.querySelector('[data-visibility]'); if (toggle) toggle.checked = block.enabled;
-  renderEditorBoxes(); scheduleSave();
+  renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
 }
 function setBlockTextMode(block, mode) {
   block.textMode = normalizeBlockTextMode(mode);
   const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
   const selector = card?.querySelector('[data-text-mode]'); if (selector) selector.value = block.textMode;
-  renderEditorBoxes(); scheduleSave();
+  renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
 }
 function renderEditorBoxes() {
   const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return; layer.textContent = '';
@@ -1021,8 +1086,8 @@ function renderEditorBoxes() {
     if (!display.enabled || !display.tr?.trim()) return; const box = boxOf(display); const scale = state.editorScale; const el = document.createElement('div'); el.className = `editor-box${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; el.dataset.id = block.id;
     el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
     const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
-    const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(block, false); });
-    const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(block, displayMode === 'ocr' ? 'translation' : 'ocr'); });
+    const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('pointerdown', (event) => event.stopPropagation()); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(block, false); });
+    const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('pointerdown', (event) => event.stopPropagation()); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(block, displayMode === 'ocr' ? 'translation' : 'ocr'); });
     const text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'true'; text.innerHTML = display.richHtml || plainToHtml(display.tr); styleRichElement(text, display, scale);
     if (displayMode === 'ocr') wireOcrElement(text, block); else wireRichElement(text, block);
     el.append(move, visibility, language, text); ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
@@ -1113,7 +1178,7 @@ function buildBlockList() {
     tools.append(rtl, ltr, align, size, color);
     const actions = document.createElement('div'); actions.className = 'block-tools';
     actions.append(makeButton('کپی متن اصلی', async () => { if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(source.value); else { source.focus(); source.select(); document.execCommand('copy'); } toast('کپی شد'); }), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block, source, translation)), makeButton('پاک‌کردن ترجمه', () => { block.tr = ''; block.richHtml = ''; translation.innerHTML = ''; drawEditor(); scheduleSave(); }));
-    enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; scheduleSave(); }); source.addEventListener('input', () => { block.text = source.value; if (blockOverlayMode(block) === 'ocr') drawEditor(); scheduleSave(); });
+    enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; drawEditor(); scheduleSave(); }); source.addEventListener('input', () => { block.text = source.value; if (blockOverlayMode(block) === 'ocr') drawEditor(); scheduleSave(); });
     align.addEventListener('change', () => { block.align = align.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); size.addEventListener('change', () => { const value = Number(size.value); block.size = value >= 8 ? Math.min(160, value) : null; styleRichElement(translation, block); drawEditor(); scheduleSave(); }); color.addEventListener('input', () => { block.color = color.value; styleRichElement(translation, block); drawEditor(); scheduleSave(); });
     card.append(head, languageRow, source, translation, tools, actions); list.appendChild(card);
   });
@@ -1192,6 +1257,7 @@ function bindEvents() {
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => { $('aiStatus').textContent = error.message; toast(error.message, true); }));
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
+  $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
   [['editorAlignLeft', 'left'], ['editorAlignCenter', 'center'], ['editorAlignRight', 'right'], ['editorAlignTop', 'top'], ['editorAlignMiddle', 'middle'], ['editorAlignBottom', 'bottom']].forEach(([id, direction]) => $(id).addEventListener('click', () => alignSelectedBoxes(direction)));
   $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); closeEditor().catch((error) => toast(error.message, true)); });
