@@ -21,10 +21,7 @@ from .schemas import (
 )
 from .sessions import SessionManager
 from .store import ProjectStore
-from .translation import (
-    TranslationError, TranslationService, distribute_grouped_translation,
-    group_translation_blocks, serialize_translation_groups,
-)
+from .translation import TranslationError, TranslationService, distribute_translation
 
 
 def create_app() -> FastAPI:
@@ -278,34 +275,30 @@ def create_app() -> FastAPI:
     async def run_translation(project_id: str, values: TranslateRequest) -> dict[str, Any]:
         state = project(project_id)
         ids = image_ids(state, values.image_ids)
-        work = [(item, group_translation_blocks(item.get("blocks", []))) for item in state["images"] if item["id"] in ids]
-        total = sum(1 for _, groups in work if groups)
-        activity.add(f"ترجمهٔ {len(ids)} تصویر آغاز شد؛ همهٔ حباب‌ها و پاراگراف‌های هر تصویر با هم و در یک درخواست می‌روند")
-        completed = 0
+        items = [item for item in sorted(state["images"], key=lambda entry: entry.get("order", 0)) if item["id"] in ids]
+        blocks = [
+            block for item in items for block in item.get("blocks", [])
+            if block.get("enabled", True) and str(block.get("text", "")).strip()
+        ]
+        activity.add(f"ترجمهٔ {len(items)} تصویر و {len(blocks)} خط آغاز شد؛ همهٔ متن‌ها ساده و بدون نشانه در یک درخواست می‌روند")
+        if not blocks:
+            activity.add("در تصاویر انتخاب‌شده متن فعالی برای ترجمه نیست", "warning")
+            return state
+        source_texts = [str(block.get("text", "")).strip() for block in blocks]
         try:
-            for image_index, (item, groups) in enumerate(work, start=1):
-                if not groups:
-                    activity.add(f"در «{item['name']}» متن فعالی برای ترجمه نیست", "warning")
-                    continue
-                activity.add(f"ترجمهٔ مشترک تصویر {image_index} از {len(work)}: {item['name']}", progress=completed / max(1, total))
-                translated = await run_reported(
-                    translations.translate, serialize_translation_groups(groups), values.source_language, values.provider,
-                    pulse_label=f"ترجمهٔ مشترک همهٔ متن‌های {item['name']}",
-                )
-                blocks = [block for group in groups for block in group]
-                for block, text in zip(blocks, distribute_grouped_translation(groups, translated)):
-                    block["tr"] = text
-                    block["richHtml"] = ""
-                completed += 1
-                activity.add(
-                    f"همهٔ {len(groups)} حباب/پاراگراف «{item['name']}» با هم و در یک درخواست ترجمه شدند؛ تصویر {completed} از {total}",
-                    progress=completed / max(1, total),
-                )
+            translated = await run_reported(
+                translations.translate, "\n".join(source_texts), values.source_language, values.provider,
+                pulse_label="ترجمهٔ مشترک همهٔ متن‌های انتخاب‌شده",
+            )
+            activity.add("پاسخ مشترک رسید؛ در حال تقسیم متن و نشاندن آن در کادرهای قبلی", progress=0.5)
+            for block, text in zip(blocks, distribute_translation(source_texts, translated)):
+                block["tr"] = text
+                block["richHtml"] = ""
             store.save(state)
         except Exception as exc:
             activity.add(f"ترجمه ناموفق بود: {exc}", "error")
             raise
-        activity.add("ترجمهٔ متن‌های انتخاب‌شده تمام شد", "success", 1.0)
+        activity.add(f"همهٔ {len(blocks)} خط با هم و در یک درخواست ترجمه و در کادرها قرار گرفتند", "success", 1.0)
         return state
 
     @app.post("/api/translate-text")

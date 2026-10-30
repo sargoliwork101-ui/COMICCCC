@@ -42,11 +42,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.15"
+    assert health.json()["version"] == "3.16"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۱۵ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۱۶ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
 
 
@@ -167,7 +167,7 @@ def test_ocr_endpoint_stores_geometry_without_network(client, monkeypatch):
     assert any(entry["kind"] == "success" and "OCR تمام شد" in entry["message"] for entry in feed["entries"])
 
 
-def test_translation_sends_every_bubble_in_one_image_request(client, monkeypatch):
+def test_translation_sends_all_selected_text_as_one_plain_payload(client, monkeypatch):
     from comic_studio.translation import TranslationService
     project, item = make_project(client)
     project["images"][0]["blocks"] = [
@@ -179,27 +179,23 @@ def test_translation_sends_every_bubble_in_one_image_request(client, monkeypatch
     assert response.status_code == 200
     calls = []
 
-    def fake_translate(self, text, source_language, provider=None):
+    def fake_free(self, text, source_language):
         calls.append(text)
-        assert "Hello\nworld" in text
-        assert "Another bubble" in text
-        return "[[[1]]]\nسلام دنیا\n[[[2]]]\nحباب دیگر"
+        return "سلام&#10دنیا&amp;#10;حباب دیگر"
 
-    monkeypatch.setattr(TranslationService, "translate", fake_translate)
+    monkeypatch.setattr(TranslationService, "_free", fake_free)
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"})
     assert response.status_code == 200, response.text
-    assert len(calls) == 1
-    assert calls[0].count("Hello") == 1
+    assert calls == ["Hello\nworld\nAnother bubble"]
     blocks = response.json()["images"][0]["blocks"]
-    assert " ".join(block["tr"] for block in blocks[:2]) == "سلام دنیا"
-    assert blocks[2]["tr"] == "حباب دیگر"
+    assert [block["tr"] for block in blocks] == ["سلام", "دنیا", "حباب دیگر"]
     assert all(block["richHtml"] == "" for block in blocks)
-    assert all("[[[" not in block["tr"] for block in blocks)
+    assert all("[[[" not in block["tr"] and "&#10" not in block["tr"] for block in blocks)
     feed = client.get("/api/activity?after=0").json()["entries"]
     assert any("یک درخواست" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
 
 
-def test_shared_translation_progress_is_per_image_not_per_line(client, monkeypatch):
+def test_translation_uses_one_request_across_images_and_reports_stages(client, monkeypatch):
     from comic_studio.translation import TranslationService
     project, _ = make_project(client)
     response = client.post(
@@ -217,17 +213,17 @@ def test_shared_translation_progress_is_per_image_not_per_line(client, monkeypat
 
     def fake_translate(self, text, source_language, provider=None):
         calls.append(text)
-        return "[[[1]]]\nترجمهٔ اول\n[[[2]]]\nترجمهٔ دوم"
+        return "یک\nدو\nسه\nچهار"
 
     monkeypatch.setattr(TranslationService, "translate", fake_translate)
     ids = [image["id"] for image in project["images"]]
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": ids, "provider": "free", "source_language": "eng"})
     assert response.status_code == 200, response.text
-    assert len(calls) == 2
-    assert all("[[[1]]]" in call and "[[[2]]]" in call and "first" in call and "distant" in call for call in calls)
+    assert calls == ["Page 0 first\nPage 0 distant\nPage 1 first\nPage 1 distant"]
+    assert [[block["tr"] for block in image["blocks"]] for image in response.json()["images"]] == [["یک", "دو"], ["سه", "چهار"]]
     feed = client.get("/api/activity?after=0").json()["entries"]
-    completed = [entry for entry in feed if "با هم و در یک درخواست ترجمه شدند" in entry["message"]]
-    assert [entry["progress"] for entry in completed] == [pytest.approx(0.5), pytest.approx(1.0)]
+    assert any("تقسیم" in entry["message"] and entry["progress"] == pytest.approx(0.5) for entry in feed)
+    assert any("یک درخواست" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
 
 
 def test_model_download_receives_only_selected_language(client, monkeypatch):

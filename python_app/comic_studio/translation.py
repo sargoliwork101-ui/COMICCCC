@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import html
 import json
-import math
 import os
 import re
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,51 +21,6 @@ DEFAULTS = {
 
 class TranslationError(RuntimeError):
     pass
-
-
-def _paragraph_geometry(block: dict[str, Any]) -> tuple[float, float, float, float, float] | None:
-    try:
-        x0, y0, x1, y1 = (float(block.get(key)) for key in ("x0", "y0", "x1", "y1"))
-        line_h = float(block.get("lineH") or y1 - y0)
-    except (TypeError, ValueError):
-        return None
-    if not all(math.isfinite(value) for value in (x0, y0, x1, y1, line_h)) or x1 <= x0 or y1 <= y0 or line_h <= 0:
-        return None
-    return x0, y0, x1, y1, line_h
-
-
-def _same_paragraph(first: dict[str, Any], second: dict[str, Any]) -> bool:
-    a = _paragraph_geometry(first)
-    b = _paragraph_geometry(second)
-    if not a or not b:
-        return False
-    top, bottom = (a, b) if a[1] <= b[1] else (b, a)
-    gap = bottom[1] - top[3]
-    if gap < -.35 * min(top[4], bottom[4]) or gap > .9 * max(top[4], bottom[4]):
-        return False
-    overlap = min(top[2], bottom[2]) - max(top[0], bottom[0])
-    return overlap >= .2 * min(top[2] - top[0], bottom[2] - bottom[0])
-
-
-def group_translation_blocks(blocks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """Cluster adjacent OCR lines into bubbles/paragraphs without changing their schema."""
-    eligible = [index for index, block in enumerate(blocks) if block.get("enabled", True) and str(block.get("text", "")).strip()]
-    parent = {index: index for index in eligible}
-
-    def find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    for position, first in enumerate(eligible):
-        for second in eligible[position + 1:]:
-            if _same_paragraph(blocks[first], blocks[second]):
-                parent[find(second)] = find(first)
-    clusters: dict[int, list[int]] = {}
-    for index in eligible:
-        clusters.setdefault(find(index), []).append(index)
-    return [[blocks[index] for index in indices] for indices in sorted(clusters.values(), key=lambda values: values[0])]
 
 
 def distribute_translation(source_texts: list[str], translated: str) -> list[str]:
@@ -96,51 +50,14 @@ def distribute_translation(source_texts: list[str], translated: str) -> list[str
     return result
 
 
-_GROUP_MARKER = re.compile(r"\[\s*\[\s*\[\s*(\d+)\s*\]\s*\]\s*\]")
+_ENCODED_LINE_BREAK = re.compile(r"&(?:amp;)?#(?:0*10|0*13|x0*a|x0*d);?", re.IGNORECASE)
 
 
-def serialize_translation_groups(groups: list[list[dict[str, Any]]]) -> str:
-    """Put every bubble/paragraph of one image in a single marked request."""
-    sections = []
-    for index, group in enumerate(groups, start=1):
-        source = "\n".join(str(block.get("text", "")).strip() for block in group).strip()
-        sections.append(f"[[[{index}]]]\n{source}")
-    return "\n".join(sections)
-
-
-def parse_translation_groups(translated: str, count: int) -> list[str] | None:
-    """Read marked sections only when every marker is present exactly once and in order."""
-    text = str(translated or "").strip()
-    matches = list(_GROUP_MARKER.finditer(text))
-    if len(matches) != count or [int(match.group(1)) for match in matches] != list(range(1, count + 1)):
-        return None
-    if matches and text[:matches[0].start()].strip():
-        return None
-    sections = []
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        section = text[match.end():end].strip()
-        if not section:
-            return None
-        sections.append(section)
-    return sections
-
-
-def distribute_grouped_translation(groups: list[list[dict[str, Any]]], translated: str) -> list[str]:
-    """Map a shared page translation back to existing boxes without another request or text loss."""
-    blocks = [block for group in groups for block in group]
-    sections = parse_translation_groups(translated, len(groups))
-    if sections is not None:
-        result = []
-        for group, section in zip(groups, sections):
-            source_texts = [str(block.get("text", "")).strip() for block in group]
-            result.extend(distribute_translation(source_texts, section))
-        return result
-    # Free translators can occasionally remove markers. Keep their complete response rather than
-    # silently dropping text or falling back to separate line-by-line requests.
-    source_texts = [str(block.get("text", "")).strip() for block in blocks]
-    unmarked = _GROUP_MARKER.sub("", str(translated or "")).strip()
-    return distribute_translation(source_texts, unmarked)
+def normalize_translation_text(value: Any) -> str:
+    """Decode provider-escaped text so entities never become visible overlay content."""
+    text = _ENCODED_LINE_BREAK.sub("\n", str(value or ""))
+    text = html.unescape(text)
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 class TranslationService:
@@ -189,10 +106,12 @@ class TranslationService:
         settings = self._secret()
         selected = provider or settings.get("provider", "free")
         if selected == "free":
-            return self._free(text, source_language)
-        if selected == "openai":
-            return self._openai(text, source_language, settings)
-        raise TranslationError("Unknown translation provider")
+            translated = self._free(text, source_language)
+        elif selected == "openai":
+            translated = self._openai(text, source_language, settings)
+        else:
+            raise TranslationError("Unknown translation provider")
+        return normalize_translation_text(translated)
 
     def _free(self, text: str, source_language: str) -> str:
         source = LANGUAGES.get(source_language, LANGUAGES["eng"])["source"]
@@ -231,10 +150,10 @@ class TranslationService:
             "model": settings["model"],
             "messages": [
                 {"role": "system", "content": (
-                    "Translate comic dialogue and document paragraphs to natural Persian using the whole input as shared context. "
-                    "Translate each bubble or paragraph as one continuous unit, not as isolated lines. "
-                    "If [[[number]]] markers are present, keep every marker exactly unchanged, on its own line, and in the original order. "
-                    "Preserve names, numbers and sound effects. Return only the translation; no explanations."
+                    "Translate the entire input to natural Persian using all paragraphs and comic bubbles together as shared context. "
+                    "Translate each paragraph or bubble as one continuous unit, not as isolated lines. "
+                    "Keep the original order and preserve names, numbers and sound effects. "
+                    "Return only the translation without adding labels, numbers, markers, or explanations."
                 )},
                 {"role": "user", "content": f"Source language: {source}\n\n{text}"},
             ],
