@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from PIL import Image
 
-from comic_studio.ocr import OcrLine, RapidEngine, _lines_from_rapid, recognize_image
+from comic_studio.ocr import EasyEngine, OcrError, OcrLine, RapidEngine, _lines_from_rapid, install_packages, recognize_image
 
 
 def test_modern_and_legacy_rapid_results():
@@ -62,6 +64,68 @@ def test_v6_missing_model_does_not_download_during_normal_ocr(tmp_path, monkeypa
     monkeypatch.setattr(engine, "_v6_model_dir", lambda: tmp_path)
     with pytest.raises(Exception, match="explicit model download"):
         engine._get("eng")
+
+
+def test_explicit_runtime_install_uses_the_app_python(monkeypatch):
+    calls = []
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    install_packages(["easyocr>=1.7,<2"])
+    assert calls[0][0][:4] == [sys.executable, "-m", "pip", "install"]
+    assert calls[0][0][-1] == "easyocr>=1.7,<2"
+    assert calls[0][1]["check"] is False
+
+
+def test_easyocr_runtime_is_installed_on_explicit_preparation(monkeypatch):
+    engine = EasyEngine()
+    checks = iter([False, True])
+    installed = []
+    monkeypatch.setattr(EasyEngine, "runtime_installed", property(lambda self: next(checks)))
+    monkeypatch.setattr("comic_studio.ocr.install_packages", lambda packages: installed.extend(packages))
+    engine._ensure_runtime()
+    assert installed == ["easyocr>=1.7,<2", "torch>=2.2,<3"]
+
+
+def test_v5_preparation_downloads_only_the_requested_language(monkeypatch):
+    engine = RapidEngine("rapidocr-v5", "v5")
+    seen = []
+    monkeypatch.setattr(engine, "_ensure_runtime", lambda: None)
+    monkeypatch.setattr(engine, "_get", lambda language, allow_download: seen.append((language, allow_download)) or object())
+    monkeypatch.setattr(engine, "_warm", lambda received: seen.append("warmed"))
+    engine.download("kor")
+    assert seen == [("kor", True), "warmed"]
+
+
+def test_v5_download_errors_are_visible_as_ocr_errors(monkeypatch):
+    engine = RapidEngine("rapidocr-v5", "v5")
+    monkeypatch.setattr(engine, "_ensure_runtime", lambda: None)
+    monkeypatch.setattr(engine, "_get", lambda language, allow_download: (_ for _ in ()).throw(RuntimeError("model host blocked")))
+    with pytest.raises(OcrError, match="Model download failed"):
+        engine.download("eng")
+
+
+def test_easyocr_preparation_uses_selected_language_and_marks_it_ready(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    engine = EasyEngine()
+    seen = []
+    monkeypatch.setattr(engine, "_ensure_runtime", lambda: seen.append("runtime"))
+    monkeypatch.setattr(engine, "_reader", lambda language, download: seen.append((language, download)))
+    engine.download("kor")
+    assert seen == ["runtime", ("kor", True)]
+    assert (tmp_path / "models" / "easyocr" / ".ready-kor").is_file()
+
+
+def test_v5_ready_languages_are_checked_per_language(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    engine = RapidEngine("rapidocr-v5", "v5")
+    monkeypatch.setattr(RapidEngine, "runtime_installed", property(lambda self: True))
+    root = tmp_path / "models" / "rapidocr"
+    root.mkdir(parents=True)
+    for name in engine._expected_models("eng"):
+        (root / name).touch()
+    assert engine.ready_languages == ["eng"]
 
 
 @pytest.mark.real_ocr

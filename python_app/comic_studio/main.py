@@ -13,7 +13,7 @@ from .exporter import build_images_zip, build_pdf, build_txt
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
 from .paths import STATIC_DIR, project_root
 from .schemas import (
-    AiSettings, EngineTestRequest, ExportRequest, OcrRequest, ProjectCreate,
+    AiSettings, EngineDownloadRequest, EngineTestRequest, ExportRequest, OcrRequest, ProjectCreate,
     StateUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .store import ProjectStore
@@ -114,10 +114,13 @@ def create_app() -> FastAPI:
         return registry.status()
 
     @app.post("/api/engines/{engine_id}/download")
-    async def download_engine(engine_id: str) -> dict[str, Any]:
+    async def download_engine(engine_id: str, values: EngineDownloadRequest | None = None) -> dict[str, Any]:
         registry.get(engine_id)
-        await run_in_threadpool(registry.download, engine_id)
-        return {"ok": True, "engines": registry.status()}
+        language = values.language if values else "eng"
+        if language not in ENGINE_INFO[engine_id]["languages"]:
+            raise HTTPException(400, "This engine does not support the selected language")
+        await run_in_threadpool(registry.download, engine_id, language)
+        return {"ok": True, "language": language, "engines": registry.status()}
 
     @app.post("/api/engines/{engine_id}/test")
     async def test_engine(engine_id: str, values: EngineTestRequest) -> dict[str, Any]:

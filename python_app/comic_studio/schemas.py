@@ -43,6 +43,10 @@ class EngineTestRequest(BaseModel):
     language: str = "eng"
 
 
+class EngineDownloadRequest(BaseModel):
+    language: str = "eng"
+
+
 class ExportRequest(BaseModel):
     kind: Literal["pdf", "images", "txt"]
     image_ids: list[str] = Field(default_factory=list)

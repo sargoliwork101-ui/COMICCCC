@@ -42,7 +42,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.00"
+    assert health.json()["version"] == "3.01"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -140,6 +140,27 @@ def test_ocr_endpoint_stores_geometry_without_network(client, monkeypatch):
     block = response.json()["images"][0]["blocks"][0]
     assert block["text"] == "خط آزمایش"
     assert block["bg"] == "auto"
+
+
+def test_model_download_receives_only_selected_language(client, monkeypatch):
+    from comic_studio.main import EngineRegistry
+    calls = []
+    monkeypatch.setattr(EngineRegistry, "download", lambda self, engine_id, language: calls.append((engine_id, language)))
+    response = client.post("/api/engines/rapidocr-v5/download", json={"language": "kor"})
+    assert response.status_code == 200, response.text
+    assert response.json()["language"] == "kor"
+    assert calls == [("rapidocr-v5", "kor")]
+
+
+def test_model_download_error_is_returned_to_the_ui(client, monkeypatch):
+    from comic_studio.main import EngineRegistry
+    from comic_studio.ocr import OcrError
+    def fail(self, engine_id, language):
+        raise OcrError("model host blocked")
+    monkeypatch.setattr(EngineRegistry, "download", fail)
+    response = client.post("/api/engines/rapidocr-v5/download", json={"language": "eng"})
+    assert response.status_code == 503
+    assert "model host blocked" in response.json()["detail"]
 
 
 def test_pdf_import(client):

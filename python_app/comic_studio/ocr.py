@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,21 @@ class OcrLine:
 
 class OcrError(RuntimeError):
     pass
+
+
+def install_packages(packages: list[str]) -> None:
+    """Install a whitelisted runtime only after an explicit user preparation click."""
+    if not packages:
+        return
+    command = [sys.executable, "-m", "pip", "install", *packages]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False)
+    except Exception as exc:
+        raise OcrError(f"Could not install the OCR runtime: {exc}") from exc
+    if result.returncode:
+        details = (result.stderr or result.stdout or "pip failed")[-1800:].strip()
+        raise OcrError(f"OCR runtime installation failed: {details}")
+    importlib.invalidate_caches()
 
 
 def _lines_from_rapid(result: Any) -> list[OcrLine]:
@@ -78,16 +95,24 @@ class RapidEngine:
         return bool(importlib.util.find_spec("rapidocr")) and bool(importlib.util.find_spec("onnxruntime"))
 
     @property
-    def model_ready(self) -> bool:
+    def ready_languages(self) -> list[str]:
         if not self.runtime_installed:
-            return False
-        if self.version == "v6":
-            try:
+            return []
+        try:
+            if self.version == "v6":
                 root = self._v6_model_dir()
-                return (root / "PP-OCRv6_det_small.onnx").is_file() and (root / "PP-OCRv6_rec_small.onnx").is_file()
-            except Exception:
-                return False
-        return (models_dir() / "rapidocr" / ".v5-ready").is_file()
+                ready = all((root / name).is_file() for name in self._expected_models("eng"))
+                return ["eng", "jpn", "chi_sim"] if ready else []
+            return [
+                language for language in LANGUAGES
+                if all((self._model_dir() / name).is_file() for name in self._expected_models(language))
+            ]
+        except Exception:
+            return []
+
+    @property
+    def model_ready(self) -> bool:
+        return bool(self.ready_languages)
 
     def _language_names(self, language: str) -> tuple[str, str]:
         if self.version == "v6":
@@ -130,9 +155,15 @@ class RapidEngine:
             params["Global.model_root_dir"] = str(self._model_dir())
         return RapidOCR(params=params)
 
+    def _ensure_runtime(self) -> None:
+        if not self.runtime_installed:
+            install_packages(["rapidocr>=3.10,<3.11", "onnxruntime>=1.20,<2"])
+        if not self.runtime_installed:
+            raise OcrError("RapidOCR was installed but cannot be imported. Restart the application and try again.")
+
     def _get(self, language: str, allow_download: bool = False):
         if not self.runtime_installed:
-            raise OcrError("RapidOCR is not installed. Install the ocr extra first.")
+            raise OcrError("RapidOCR is not installed. Click the explicit preparation button to install it.")
         if not allow_download:
             root = self._model_dir() if self.version == "v5" else self._v6_model_dir()
             missing = [name for name in self._expected_models(language) if not (root / name).is_file()]
@@ -154,13 +185,20 @@ class RapidEngine:
         ImageDraw.Draw(sample).text((8, 15), "TEST", fill="black", font=ImageFont.load_default(size=32))
         engine(np.asarray(sample), use_cls=False)
 
-    def download(self) -> None:
-        languages = list(LANGUAGES) if self.version == "v5" else ["eng"]
-        for language in languages:
-            self._warm(self._get(language, allow_download=True))
-        if self.version == "v5":
-            self._model_dir().mkdir(parents=True, exist_ok=True)
-            (self._model_dir() / ".v5-ready").write_text("downloaded by user request\n", encoding="utf-8")
+    def download(self, language: str = "eng") -> None:
+        self._ensure_runtime()
+        languages = [language] if self.version == "v5" else ["eng"]
+        for selected in languages:
+            try:
+                self._warm(self._get(selected, allow_download=True))
+            except OcrError:
+                raise
+            except Exception as exc:
+                cause = f"; cause: {exc.__cause__}" if exc.__cause__ else ""
+                raise OcrError(
+                    f"Model download failed for {self.id} ({selected}): {exc}{cause}. "
+                    "Check the internet connection and model host access, then try again."
+                ) from exc
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         engine = self._get(language)
@@ -184,30 +222,63 @@ class EasyEngine:
     def runtime_installed(self) -> bool:
         return bool(importlib.util.find_spec("easyocr"))
 
+    def _model_dir(self) -> Path:
+        return models_dir() / "easyocr"
+
+    def _expected_models(self, language: str) -> list[str]:
+        recognition = {"eng": "english_g2.pth", "kor": "korean_g2.pth", "jpn": "japanese_g2.pth", "chi_sim": "zh_sim_g2.pth"}
+        return ["craft_mlt_25k.pth", recognition.get(language, "english_g2.pth")]
+
+    @property
+    def ready_languages(self) -> list[str]:
+        if not self.runtime_installed:
+            return []
+        return [
+            language for language in LANGUAGES
+            if all((self._model_dir() / name).is_file() for name in self._expected_models(language))
+            or (self._model_dir() / f".ready-{language}").is_file()
+        ]
+
     @property
     def model_ready(self) -> bool:
-        return any((models_dir() / "easyocr").glob("*.pth"))
+        return bool(self.ready_languages)
+
+    def _ensure_runtime(self) -> None:
+        if not self.runtime_installed:
+            install_packages(["easyocr>=1.7,<2", "torch>=2.2,<3"])
+        if not self.runtime_installed:
+            raise OcrError("EasyOCR was installed but cannot be imported. Restart the application and try again.")
 
     def _reader(self, language: str, download: bool):
         if not self.runtime_installed:
-            raise OcrError("EasyOCR is not installed. Install the easyocr extra first.")
+            raise OcrError("EasyOCR is not installed. Click the explicit preparation button to install it.")
+        if not download:
+            missing = [name for name in self._expected_models(language) if not (self._model_dir() / name).is_file()]
+            if missing and not (self._model_dir() / f".ready-{language}").is_file():
+                raise OcrError("EasyOCR model for this language is not ready. Click the explicit preparation button first.")
         lang = {"eng": "en", "kor": "ko", "jpn": "ja", "chi_sim": "ch_sim"}.get(language, "en")
         with self._lock:
             if lang not in self._readers:
                 import easyocr
                 try:
                     self._readers[lang] = easyocr.Reader(
-                        [lang], gpu=False, model_storage_directory=str(models_dir() / "easyocr"),
+                        [lang], gpu=False, model_storage_directory=str(self._model_dir()),
                         download_enabled=download, verbose=False,
                     )
                 except Exception as exc:
                     raise OcrError(f"Could not initialize EasyOCR: {exc}") from exc
         return self._readers[lang]
 
-    def download(self) -> None:
-        # Download every language only when explicitly requested by the user.
-        for language in LANGUAGES:
+    def download(self, language: str = "eng") -> None:
+        self._ensure_runtime()
+        try:
             self._reader(language, True)
+            self._model_dir().mkdir(parents=True, exist_ok=True)
+            (self._model_dir() / f".ready-{language}").write_text("downloaded by user request\n", encoding="utf-8")
+        except OcrError:
+            raise
+        except Exception as exc:
+            raise OcrError(f"EasyOCR model download failed for {language}: {exc}") from exc
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         reader = self._reader(language, False)
@@ -268,11 +339,12 @@ class EngineRegistry:
                 "id": engine_id, **info,
                 "runtimeInstalled": engine.runtime_installed,
                 "modelReady": engine.model_ready,
+                "readyLanguages": engine.ready_languages,
             })
         return result
 
-    def download(self, engine_id: str) -> None:
-        self.get(engine_id).download()
+    def download(self, engine_id: str, language: str = "eng") -> None:
+        self.get(engine_id).download(language)
 
 
 def preprocess(image: Image.Image, contrast: bool, precise: bool) -> tuple[Image.Image, float]:

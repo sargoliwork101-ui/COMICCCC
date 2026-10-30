@@ -2,7 +2,7 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const state = { project: null, engines: [], ai: null, dragId: null, editorId: null, editorBitmap: null, editorScale: 1, cropId: null, crop: null, cropPointer: null };
+const state = { project: null, engines: [], ai: null, dragId: null, editorId: null, editorBitmap: null, editorScale: 1, cropId: null, crop: null, cropPointer: null, modelBusy: null };
 let saveTimer = null;
 let toastTimer = null;
 
@@ -248,7 +248,7 @@ function updateOcrEngineStatus() {
   if (!engine) return;
   $('ocrEngineStatus').textContent = engine.runtimeInstalled
     ? `${engine.description} وضعیت: آمادهٔ اجرا روی همین کامپیوتر.`
-    : `ابزار اجرای این مدل نصب نشده است: ${engine.install}`;
+    : 'ابزار اجرای این مدل نصب نشده است؛ از پنجرهٔ «مدل‌ها و آزمایش» دکمهٔ آماده‌سازی را بزنید تا نصب شود.';
   [...$('ocrLanguage').options].forEach((option) => { option.disabled = !engine.languages.includes(option.value); });
   if (!engine.languages.includes($('ocrLanguage').value)) $('ocrLanguage').value = engine.languages[0];
 }
@@ -323,28 +323,54 @@ async function renderAllTranslated() {
 
 function renderModels() {
   const container = $('engineCards'); container.textContent = '';
+  const language = $('testLanguage').value;
   state.engines.forEach((engine) => {
     const card = document.createElement('section'); card.className = 'engine-card';
     const title = document.createElement('h3'); title.textContent = engine.name;
     const family = document.createElement('div'); family.className = 'hint'; family.textContent = engine.family;
     const description = document.createElement('p'); description.textContent = engine.description;
     const status = document.createElement('div'); status.className = 'engine-status';
-    status.textContent = engine.runtimeInstalled ? 'ابزار اجرا نصب است' : `نصب ابزار: ${engine.install}`;
+    const supported = engine.languages.includes(language);
+    const ready = supported && (engine.readyLanguages || []).includes(language);
+    status.textContent = state.modelBusy === engine.id ? 'در حال نصب بسته و دانلود مدل؛ لطفاً صبر کنید…'
+      : !supported ? 'این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند.'
+      : !engine.runtimeInstalled ? 'بسته نصب نیست؛ دکمهٔ آماده‌سازی آن را نصب می‌کند.'
+      : ready ? 'مدل زبان انتخاب‌شده آماده و آفلاین است.'
+      : 'مدل زبان انتخاب‌شده هنوز آماده نیست؛ دکمهٔ آماده‌سازی را بزنید.';
     const buttons = document.createElement('div'); buttons.className = 'card-buttons';
-    buttons.append(
-      makeButton('آماده‌سازی / دانلود مدل', async () => {
-        await runJob(`آماده‌سازی ${engine.name}…`, async () => {
-          const result = await api(`/api/engines/${engine.id}/download`, { method: 'POST' });
-          state.engines = result.engines; renderModels(); updateEngineOptions(); toast('مدل آماده است');
-        });
-      }),
-      makeButton('آزمایش روی تصویر', () => testEngine(engine.id)),
-    );
+    const prepare = makeButton('آماده‌سازی / دانلود مدل', () => downloadEngine(engine));
+    const test = makeButton('آزمایش روی تصویر', () => testEngine(engine.id));
+    prepare.disabled = !!state.modelBusy || !supported;
+    test.disabled = !!state.modelBusy || !supported;
+    buttons.append(prepare, test);
     card.append(title, family, description, status, buttons); container.appendChild(card);
   });
 }
 
+async function downloadEngine(engine) {
+  if (state.modelBusy) return;
+  const language = $('testLanguage').value;
+  if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return; }
+  state.modelBusy = engine.id;
+  $('modelTestResult').textContent = `آماده‌سازی ${engine.name} برای ${language} آغاز شد. اگر بسته نصب نباشد، ابتدا نصب می‌شود؛ سپس فقط مدل همین زبان دانلود می‌شود.`;
+  renderModels();
+  try {
+    const result = await api(`/api/engines/${engine.id}/download`, jsonOptions('POST', { language }));
+    state.engines = result.engines;
+    $('modelTestResult').textContent = `مدل ${engine.name} برای ${language} آماده است. اکنون می‌توانید آزمایش روی تصویر را اجرا کنید.`;
+    updateEngineOptions();
+    toast('مدل آماده است');
+  } catch (error) {
+    $('modelTestResult').textContent = `آماده‌سازی ناموفق بود:\n${error.message}\n\nاتصال اینترنت و دسترسی به میزبان مدل را بررسی کنید و دوباره تلاش کنید.`;
+    toast(error.message, true);
+  } finally {
+    state.modelBusy = null;
+    renderModels();
+  }
+}
+
 async function testEngine(engineId) {
+  if (state.modelBusy) return;
   const item = selectedImages()[0] || sortedImages()[0];
   if (!item) { toast('ابتدا یک تصویر وارد کنید', true); return; }
   $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…';
@@ -599,6 +625,7 @@ function bindEvents() {
   $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {}));
   $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); });
+  $('testLanguage').addEventListener('change', renderModels);
   $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => showDialog('aiDialog')).catch((error) => toast(error.message, true)); });
   $('aiProvider').addEventListener('change', updateAiFields);
   $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => toast(error.message, true)));
