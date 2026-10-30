@@ -42,11 +42,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.16"
+    assert health.json()["version"] == "3.17"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۱۶ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۱۷ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
 
 
@@ -135,12 +135,15 @@ def test_duplicate_group_reorder_and_delete(client):
     project["images"][0]["groupId"] = "گروه ۱"
     project["images"][1]["groupId"] = "گروه ۱"
     project["images"][0]["selected"] = False
+    project["images"][0]["blocks"] = [{"id": 1, "text": "ONE", "tr": "یک", "textMode": "ocr", "enabled": True}]
     project["settings"]["overlayMode"] = "ocr"
     project["images"].reverse()
     response = client.put(f"/api/projects/{project_id}/state", json={"state": project})
     assert response.status_code == 200
     assert response.json()["images"][0]["groupId"] == "گروه ۱"
     assert response.json()["settings"]["overlayMode"] == "ocr"
+    saved_original = next(image for image in response.json()["images"] if image["id"] == item["id"])
+    assert saved_original["blocks"][0]["textMode"] == "ocr"
     assert client.get(f"/api/projects/{project_id}").json()["settings"]["overlayMode"] == "ocr"
     ids = [entry["id"] for entry in response.json()["images"]]
     response = client.post(f"/api/projects/{project_id}/delete", json=ids[:1])

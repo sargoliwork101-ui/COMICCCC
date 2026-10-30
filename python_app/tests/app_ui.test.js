@@ -30,6 +30,7 @@ let translationGate = null;
 let activityFeed = { entries: [], next: 0 };
 let renderedBlocks = null;
 let renderedUploads = 0;
+const exportRequests = [];
 const jsonResponse = (payload, status = 200) => ({
   ok: status >= 200 && status < 300, status,
   headers: { get: () => 'application/json' },
@@ -51,6 +52,10 @@ window.fetch = async (url, options = {}) => {
   if (pathname === `/api/projects/${project.id}/translate`) { if (translationGate) await translationGate; return jsonResponse(overlayProject('NEW OCR', 'ترجمهٔ تازه')); }
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/rendered`) { renderedUploads += 1; return jsonResponse({ ok: true }); }
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/revert`) { revertCalls += 1; return jsonResponse({ ok: true }); }
+  if (pathname === `/api/projects/${project.id}/export` && options.method === 'POST') {
+    exportRequests.push(JSON.parse(options.body));
+    return { ok: true, status: 200, headers: { get: () => 'attachment; filename="mixed.zip"' }, blob: async () => new window.Blob(['zip']) };
+  }
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/content`) return { ok: true, blob: async () => new window.Blob() };
   throw new Error(`Unmocked request: ${options.method || 'GET'} ${url}`);
 };
@@ -64,6 +69,7 @@ window.HTMLDialogElement.prototype.close = function () { this.open = false; };
 window.document.execCommand = () => true;
 window.URL.createObjectURL = () => 'blob:ui-test';
 window.URL.revokeObjectURL = () => {};
+window.HTMLAnchorElement.prototype.click = function () {};
 window.createImageBitmap = async () => ({ width: 320, height: 200, close() {} });
 window.HTMLCanvasElement.prototype.getContext = () => ({});
 window.HTMLElement.prototype.setPointerCapture = function (pointerId) { this._capturedPointerId = pointerId; };
@@ -234,6 +240,26 @@ function check(name, condition) {
   $('editorStage').dispatchEvent(pointer('pointermove', 70, 60));
   $('editorStage').dispatchEvent(pointer('pointerup', 70, 60));
   check('dragging empty canvas pans the zoomed image', editorPreview.scrollLeft === 40 && editorPreview.scrollTop === 60 && vm.runInContext('state.editorPan', context) === null);
+
+  check('each line has its own on-image and sidebar language controls', $('editorBoxes').querySelectorAll('.box-language').length === 2 && $('blockList').querySelectorAll('[data-text-mode]').length === 2);
+  const languageSelectors = $('blockList').querySelectorAll('[data-text-mode]');
+  languageSelectors[0].value = 'ocr';
+  languageSelectors[0].dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('sidebar language selector changes only its own line to English', $('editorBoxes').querySelector('.editor-box[data-id="1"] .editor-box-text')?.textContent === 'CORRECTED OCR' && $('editorBoxes').querySelector('.editor-box[data-id="2"] .editor-box-text')?.textContent === 'متن دوم' && vm.runInContext("state.project.images[0].blocks[0].textMode === 'ocr' && !state.project.images[0].blocks[1].textMode", context));
+  check('changing one line language preserves both eye choices and the global mode', vm.runInContext("state.project.images[0].blocks.every((block) => block.enabled) && state.project.settings.overlayMode === 'translation'", context));
+  await vm.runInContext('renderAndUpload(state.project.images[0])', context);
+  check('mixed English and Persian choices reach the preview and export renderer', renderedBlocks[0].tr === 'CORRECTED OCR' && renderedBlocks[0]._plainText === true && renderedBlocks[1].tr === 'متن دوم' && !renderedBlocks[1]._plainText);
+  await vm.runInContext("exportResult('images')", context);
+  check('actual ZIP export preserves the same mixed per-line languages', exportRequests.at(-1)?.kind === 'images' && renderedBlocks[0].tr === 'CORRECTED OCR' && renderedBlocks[0]._plainText === true && renderedBlocks[1].tr === 'متن دوم' && !renderedBlocks[1]._plainText);
+  $('editorBoxes').querySelector('.editor-box[data-id="1"] .box-language').click();
+  check('on-image language button switches only that text back to Persian', $('editorBoxes').querySelector('.editor-box[data-id="1"] .editor-box-text')?.textContent === 'سلام دنیا' && $('editorBoxes').querySelector('.editor-box[data-id="2"] .editor-box-text')?.textContent === 'متن دوم' && languageSelectors[0].value === 'translation');
+  $('overlayMode').value = 'ocr';
+  $('overlayMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+  vm.runInContext('renderEditorBoxes()', context);
+  check('a per-line Persian choice survives the global OCR default', $('editorBoxes').querySelector('.editor-box[data-id="1"] .editor-box-text')?.textContent === 'سلام دنیا' && $('editorBoxes').querySelector('.editor-box[data-id="2"] .editor-box-text')?.textContent === 'SECOND OCR');
+  $('overlayMode').value = 'translation';
+  $('overlayMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+  vm.runInContext('renderEditorBoxes()', context);
 
   check('each line has its own on-image and sidebar visibility controls', $('editorBoxes').querySelectorAll('.box-visibility').length === 2 && $('blockList').querySelectorAll('[data-visibility]').length === 2 && $('blockList').textContent.includes('نمایش متن 1 روی تصویر'));
   const lineToggles = $('blockList').querySelectorAll('[data-visibility]');
