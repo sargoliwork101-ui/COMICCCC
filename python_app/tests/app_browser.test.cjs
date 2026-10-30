@@ -500,6 +500,88 @@ function nextDownload(cdp, directory) {
     assert.equal(await editorRenderDifference(page), 0);
     await page.evaluate(() => { const block = state.project.images[0].blocks[0]; block.align='right'; block.size=null; drawEditor(); });
     console.log('PASS: one editor retains caret; typography affects output rather than editor size');
+
+    // The exact preview uses the same renderer as Apply, without storing a draft.
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('preview without saving');
+    await page.select('#inlineVerticalAlign', 'bottom');
+    const originalDraftBlock = await page.evaluate(() => JSON.stringify(inlineDraft.block));
+    await page.click('#inlinePreview');
+    const draftPixels = await page.$eval('#editorCanvas', el => el.toDataURL());
+    assert.equal(await page.evaluate(() => JSON.stringify(inlineDraft.block)), originalDraftBlock, 'preview must not mutate the project');
+    assert.equal(await page.$eval('#inlinePreview', el => el.getAttribute('aria-pressed')), 'true');
+    assert.equal(await page.$eval('#inlineEditorField', el => getComputedStyle(el).opacity), '0');
+    await page.click('#inlineEditorApply');
+    assert.equal(await page.$eval('#editorCanvas', el => el.toDataURL()), draftPixels, 'draft preview must be pixel-identical to applied output');
+    assert.equal(await editorRenderDifference(page), 0);
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('cancel this preview');
+    await page.click('#inlinePreview'); await page.click('#inlinePreview');
+    assert.equal(await page.$eval('#inlineEditorField', el => el.innerText), 'cancel this preview');
+    await page.click('#inlinePreview'); page.once('dialog', dialog => dialog.accept()); await page.click('#inlineEditorCancel');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr), 'preview without saving');
+    assert.equal(await editorRenderDifference(page), 0, 'cancel must restore the committed canvas');
+    await page.select('#blockList .block-card[data-id="1"] [data-text-mode]', 'ocr');
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('OCR preview');
+    await page.click('#inlinePreview'); const ocrPreview = await page.$eval('#editorCanvas', el => el.toDataURL());
+    await page.click('#inlineEditorApply'); assert.equal(await page.$eval('#editorCanvas', el => el.toDataURL()), ocrPreview);
+    await page.select('#blockList .block-card[data-id="1"] [data-text-mode]', 'translation');
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.click('#inlineEditor .classic-tabs button:nth-child(2)');
+    await page.$eval('.classic-source', el => {el.value='<p><b>HTML draft</b></p><p>second line</p>';el.dispatchEvent(new Event('input',{bubbles:true}));});
+    await page.click('#inlinePreview'); const htmlPreview = await page.$eval('#editorCanvas', el => el.toDataURL());
+    await page.click('#inlineEditorApply'); assert.equal(await page.$eval('#editorCanvas', el => el.toDataURL()), htmlPreview, 'HTML source preview equals applied pixels');
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('conflicting draft');
+    await page.click('#inlinePreview');
+    await page.evaluate(() => {inlineDraft.block.tr = 'external change';});
+    await page.click('#inlineEditorApply');
+    assert.equal(await page.evaluate(() => inlineDraft.block.tr), 'external change', 'preview must not bypass conflict detection');
+    assert.equal(await page.$eval('#inlinePreview', el => el.getAttribute('aria-pressed')), 'true');
+    page.once('dialog', dialog => dialog.accept()); await page.click('#inlineEditorCancel');
+    assert.equal(await editorRenderDifference(page), 0);
+    console.log('PASS: exact translation and OCR draft previews equal applied pixels; toggling and cancel preserve drafts');
+
+    // A denied native fullscreen still fits even a very tall image and preserves
+    // the editable draft, selected box and previous zoom on exit.
+    await page.evaluate(() => {
+      const item = editorItem(); window.__overviewHeight = item.height; item.height = 50000;
+      window.__requestFullscreen = document.getElementById('editorDialog').requestFullscreen;
+      document.getElementById('editorDialog').requestFullscreen = () => Promise.reject(new Error('permission denied'));
+      setEditorZoom(0.75); openInlineEditor(item.blocks[0]);
+    });
+    await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('overview draft');
+    const overviewBefore = await page.evaluate(() => ({scale:state.editorScale,id:state.activeBlockId,block:JSON.stringify(inlineDraft.block)}));
+    await page.evaluate(() => document.getElementById('editorImageFullscreen').click());
+    await page.waitForFunction(() => document.getElementById('editorDialog').classList.contains('image-fullscreen'));
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const overview = await page.evaluate(() => {const p=document.querySelector('.editor-preview'), stage=document.getElementById('editorStage'); return {scale:state.editorScale,w:stage.getBoundingClientRect().width,h:stage.getBoundingClientRect().height,pw:p.clientWidth,ph:p.clientHeight,draft:imageOverview.draft.tr,block:JSON.stringify(inlineDraft.block)};});
+    assert.ok(overview.scale < 0.1 && overview.w <= overview.pw && overview.h <= overview.ph, JSON.stringify(overview));
+    assert.equal(overview.draft, 'overview draft'); assert.equal(overview.block, overviewBefore.block);
+    await page.mouse.click(3, 3);
+    assert.equal(await page.$eval('#inlineEditorField', el => el.textContent), 'overview draft', 'clicking the overview must not discard the hidden draft');
+    await page.click('#editorZoomIn');
+    assert.ok(await page.evaluate(() => state.editorScale > imageOverview.fitScale), 'manual zoom remains available');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.getElementById('editorDialog').classList.contains('image-fullscreen'));
+    assert.equal(await page.evaluate(() => state.editorScale), overviewBefore.scale);
+    assert.equal(await page.evaluate(() => state.activeBlockId), overviewBefore.id);
+    assert.equal(await page.$eval('#inlineEditorField', el => el.innerText), 'overview draft');
+    page.once('dialog', dialog => dialog.accept()); await page.click('#inlineEditorCancel');
+    await page.evaluate(() => {editorItem().height = window.__overviewHeight; document.getElementById('editorDialog').requestFullscreen = window.__requestFullscreen; fitEditor(); drawEditor();});
+    await page.evaluate(() => setEditorZoom(0.73));
+    await page.click('#editorImageFullscreen');
+    await page.waitForFunction(() => document.getElementById('editorDialog').classList.contains('image-fullscreen'));
+    if (await page.evaluate(() => document.fullscreenElement === document.getElementById('editorDialog'))) {
+      await page.evaluate(() => document.exitFullscreen());
+      await page.waitForFunction(() => !document.getElementById('editorDialog').classList.contains('image-fullscreen'));
+    } else { await page.click('#editorImageFullscreen'); }
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => imageOverview === null), true, 'native fullscreen exit must restore normal editor');
+    assert.equal(await page.evaluate(() => state.editorScale), 0.73, 'native fullscreen exit restores previous zoom');
+    console.log('PASS: fullscreen fallback fits tall images and restores zoom, selection and unsaved draft');
+
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
     await page.focus('#inlineEditorField'); await page.evaluate(() => document.execCommand('selectAll')); await page.keyboard.type('ویرایش تازه ۳٫۲۱');
     await page.select('#inlineVerticalAlign', 'top'); await page.click('#inlineEditorApply');
