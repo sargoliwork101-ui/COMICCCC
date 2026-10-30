@@ -43,7 +43,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.29"
+    assert health.json()["version"] == "3.30"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -232,6 +232,36 @@ def test_translation_preview_shows_exact_free_payload_without_sending(client, mo
     assert [block["tr"] for block in stored["images"][0]["blocks"]] == ["old one", "old two", "old three"]
 
 
+def test_paragraph_translation_uses_one_continuous_payload_and_one_box(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    project, item = make_project(client)
+    sources = ["WHY ARE YOU", "RUNNING AROUND", "SO FRIVOLOUSLY,", "MY CHILD?"]
+    project["images"][0]["blocks"] = [
+        {"id": 1, "text": sources[0], "tr": "old", "enabled": True, "x0": 10, "y0": 10, "x1": 110, "y1": 30, "lineH": 20},
+        {"id": 2, "text": sources[1], "tr": "old", "enabled": True, "x0": 12, "y0": 34, "x1": 115, "y1": 54, "lineH": 20},
+        {"id": 3, "text": sources[2], "tr": "old", "enabled": True, "x0": 8, "y0": 58, "x1": 120, "y1": 78, "lineH": 20},
+        {"id": 4, "text": sources[3], "tr": "old", "enabled": True, "x0": 20, "y0": 82, "x1": 100, "y1": 102, "lineH": 20},
+    ]
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    calls = []
+    monkeypatch.setattr(TranslationService, "_free", lambda self, text, source_language: calls.append(text) or "ترجمهٔ یک‌تکه")
+    preview_response = client.post(f"/api/projects/{project['id']}/translation-preview", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"})
+    preview = preview_response.json()
+    expected = "WHY ARE YOU RUNNING AROUND SO FRIVOLOUSLY, MY CHILD?"
+    assert preview["blockCount"] == 1
+    assert preview["requests"][0]["text"] == expected
+    assert calls == []
+    response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng", "confirmation": preview["signature"]})
+    assert response.status_code == 200, response.text
+    blocks = response.json()["images"][0]["blocks"]
+    assert calls == [expected]
+    assert len(blocks) == 1
+    assert blocks[0]["text"] == expected
+    assert blocks[0]["tr"] == "ترجمهٔ یک‌تکه"
+    assert blocks[0]["richHtml"] == ""
+    assert [blocks[0][key] for key in ("x0", "y0", "x1", "y1", "tx0", "ty0", "tx1", "ty1")] == [8, 10, 120, 102, 8, 10, 120, 102]
+
+
 def test_translation_preview_expands_real_500_character_queries(client):
     project, item = make_project(client)
     source = "x" * 600
@@ -335,15 +365,18 @@ def test_free_translation_combines_ocr_blocks_when_payload_fits_500(client, monk
 
     def fake_free(self, text, source_language):
         calls.append(text)
-        return "سلام&#10در دو خط\nدنیا\nحباب دیگر"
+        return "سلام در دو خط\nحباب دیگر"
 
     monkeypatch.setattr(TranslationService, "_free", fake_free)
     preview = client.post(f"/api/projects/{project['id']}/translation-preview", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"}).json()
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng", "confirmation": preview["signature"]})
     assert response.status_code == 200, response.text
-    assert calls == ["Hello\nin two lines\nworld\nAnother bubble"]
+    assert calls == ["Hello in two lines world\nAnother bubble"]
     blocks = response.json()["images"][0]["blocks"]
-    assert [block["tr"] for block in blocks] == ["سلام\nدر دو خط", "دنیا", "حباب دیگر"]
+    assert len(blocks) == 2
+    assert [block["text"] for block in blocks] == ["Hello in two lines world", "Another bubble"]
+    assert [block["tr"] for block in blocks] == ["سلام در دو خط", "حباب دیگر"]
+    assert [blocks[0][key] for key in ("x0", "y0", "x1", "y1")] == [10, 10, 180, 67]
     assert all(block["richHtml"] == "" for block in blocks)
     assert all(TRANSLATION_SEPARATOR not in block["tr"] and "&#10" not in block["tr"] and "[[[" not in block["tr"] for block in blocks)
     feed = client.get("/api/activity?after=0").json()["entries"]
@@ -407,7 +440,7 @@ def test_ai_translation_uses_one_request_across_images_and_reports_stages(client
 
     def fake_translate(self, text, source_language, provider=None):
         calls.append(text)
-        return "یک\nادامه\nدو\nسه\nچهار"
+        return "یک\nدو\nسه\nچهار"
 
     monkeypatch.setattr(TranslationService, "translate", fake_translate)
     ids = [image["id"] for image in project["images"]]
@@ -416,10 +449,10 @@ def test_ai_translation_uses_one_request_across_images_and_reports_stages(client
     assert preview.json()["requests"][0]["text"].startswith("Source language: English\n\nPage 0 first")
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": ids, "provider": "openai", "source_language": "eng", "confirmation": preview.json()["signature"]})
     assert response.status_code == 200, response.text
-    assert calls == ["Page 0 first\ncontinued\nPage 0 distant\nPage 1 first\nPage 1 distant"]
-    assert [[block["tr"] for block in image["blocks"]] for image in response.json()["images"]] == [["یک\nادامه", "دو"], ["سه", "چهار"]]
+    assert calls == ["Page 0 first continued\nPage 0 distant\nPage 1 first\nPage 1 distant"]
+    assert [[block["tr"] for block in image["blocks"]] for image in response.json()["images"]] == [["یک", "دو"], ["سه", "چهار"]]
     feed = client.get("/api/activity?after=0").json()["entries"]
-    assert any("تقسیم" in entry["message"] and entry["progress"] == pytest.approx(0.5) for entry in feed)
+    assert any("یک کادر" in entry["message"] and entry["progress"] == pytest.approx(0.5) for entry in feed)
     assert any("یک درخواست" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
 
 

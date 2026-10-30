@@ -26,7 +26,8 @@ from .translation import (
     distribute_translation,
 )
 from .translation_plan import (
-    build_project_plan, build_single_plan, plan_preview, plan_signature,
+    apply_paragraph_translations, build_project_plan, build_single_plan,
+    plan_preview, plan_signature,
 )
 
 
@@ -308,11 +309,11 @@ def create_app() -> FastAPI:
         combined_free = plan["combined_free"]
         combined_source = combine_translation_texts(source_texts)
         if combined_free:
-            activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همهٔ متن OCR در یک query جمعی {len(combined_source)} نویسه‌ای ارسال می‌شود")
+            activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} پاراگراف آغاز شد؛ همهٔ متن OCR در یک query جمعی {len(combined_source)} نویسه‌ای ارسال می‌شود")
         elif values.provider == "free":
-            activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ متن جمعی بیش از ۵۰۰ نویسه است و برای جلوگیری از خطای سقف، کادرها جدا و جمله‌ای ارسال می‌شوند")
+            activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} پاراگراف آغاز شد؛ متن جمعی بیش از ۵۰۰ نویسه است و برای جلوگیری از خطای سقف، پاراگراف‌ها جدا و جمله‌ای ارسال می‌شوند")
         else:
-            activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همه در یک درخواست خط‌به‌خط می‌روند")
+            activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} پاراگراف آغاز شد؛ هر پاراگراف پیوسته در یک خط از یک درخواست جمعی می‌رود")
         try:
             translated_blocks = [""] * len(blocks)
             if combined_free:
@@ -320,40 +321,38 @@ def create_app() -> FastAPI:
                     translations.translate, combined_source, values.source_language, values.provider,
                     pulse_label="ترجمهٔ جمعی free همهٔ متن‌های OCR انتخاب‌شده",
                 )
-                activity.add("پاسخ مشترک free رسید؛ در حال تقسیم دقیق بین کادرهای OCR", progress=0.5)
+                activity.add("پاسخ مشترک free رسید؛ در حال تقسیم بین پاراگراف‌ها و ساخت کادرهای یکپارچه", progress=0.5)
                 translated_blocks = distribute_translation(source_texts, translated)
             elif values.provider == "free":
                 for index, call in enumerate(plan["calls"], start=1):
-                    activity.add(f"ترجمهٔ رایگان متن {index} از {len(blocks)}", progress=(index - 1) / len(blocks))
+                    activity.add(f"ترجمهٔ رایگان پاراگراف {index} از {len(blocks)}", progress=(index - 1) / len(blocks))
                     translated = await run_reported(
                         translations.translate, call["text"], values.source_language, values.provider,
-                        pulse_label=f"ترجمهٔ رایگان متن {index} از {len(blocks)}",
+                        pulse_label=f"ترجمهٔ رایگان پاراگراف {index} از {len(blocks)}",
                     )
                     translated = translated.strip()
                     if not translated:
                         raise TranslationError(f"مترجم برای متن {index} پاسخ خالی برگرداند؛ ترجمه‌ها در کادرها قرار نگرفتند.")
                     translated_blocks[call["indices"][0]] = translated
-                    activity.add(f"متن {index} از {len(blocks)} ترجمه و آمادهٔ نشستن در کادر خودش شد", progress=index / len(blocks))
+                    activity.add(f"پاراگراف {index} از {len(blocks)} ترجمه و آمادهٔ نشستن در کادر یکپارچهٔ خودش شد", progress=index / len(blocks))
             else:
                 translated = await run_reported(
                     translations.translate, combined_source, values.source_language, values.provider,
                     pulse_label="ترجمهٔ مشترک همهٔ متن‌های انتخاب‌شده",
                 )
-                activity.add("پاسخ مشترک AI رسید؛ در حال تقسیم خطوط بر اساس تعداد خطوط هر کادر", progress=0.5)
+                activity.add("پاسخ مشترک AI رسید؛ در حال توزیع بین پاراگراف‌ها و ساخت یک کادر برای هر پاراگراف", progress=0.5)
                 translated_blocks = distribute_translation(source_texts, translated)
-            for block, text in zip(blocks, translated_blocks):
-                block["tr"] = text
-                block["richHtml"] = ""
+            apply_paragraph_translations(plan, translated_blocks)
             store.save(state)
         except Exception as exc:
             activity.add(f"ترجمه ناموفق بود: {exc}", "error")
             raise
         if combined_free:
-            activity.add(f"همهٔ {len(blocks)} متن OCR با هم و در یک درخواست free ترجمه و در کادرهای خودشان قرار گرفتند", "success", 1.0)
+            activity.add(f"همهٔ {len(blocks)} پاراگراف OCR با هم و در یک درخواست free ترجمه و در کادرهای یکپارچهٔ خودشان قرار گرفتند", "success", 1.0)
         elif values.provider == "free":
-            activity.add(f"هر {len(blocks)} متن جدا ترجمه و در کادرهای خودشان قرار گرفتند", "success", 1.0)
+            activity.add(f"هر {len(blocks)} پاراگراف جدا ترجمه و در کادرهای یکپارچهٔ خودشان قرار گرفتند", "success", 1.0)
         else:
-            activity.add(f"همهٔ {len(blocks)} متن با هم و در یک درخواست AI ترجمه و در کادرها قرار گرفتند", "success", 1.0)
+            activity.add(f"همهٔ {len(blocks)} پاراگراف با هم و در یک درخواست AI ترجمه و در کادرهای یکپارچه قرار گرفتند", "success", 1.0)
         return state
 
     @app.post("/api/translate-text/preview")

@@ -281,8 +281,8 @@ def _ai_prompt(source_language: str) -> tuple[str, str]:
     source = LANGUAGES.get(source_language, LANGUAGES["eng"])["name"]
     return (
         "Translate the entire input to natural Persian using all paragraphs and comic bubbles together as shared context. "
-        "Use every line as context while preserving the original order, names, numbers and sound effects. "
-        "Return exactly one output line for every input line, with the same number of lines. "
+        "Each input line is one complete paragraph or comic bubble; use all lines as shared context while preserving their order, names, numbers and sound effects. "
+        "Return exactly one continuous output line for every input paragraph, with the same number of lines. "
         "Never merge, split, add, remove, or reorder lines; keep each translated line on one ordinary text line. "
         "Return only the translation without adding labels, numbers, markers, code fences, or explanations."
     ), source

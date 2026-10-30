@@ -40,7 +40,8 @@ def test_openai_payload_and_response(tmp_path, monkeypatch):
     assert captured["json"]["model"] == "demo"
     prompt = captured["json"]["messages"][0]["content"]
     assert "entire input" in prompt
-    assert "one output line for every input line" in prompt
+    assert "one complete paragraph or comic bubble" in prompt
+    assert "one continuous output line for every input paragraph" in prompt
     assert "without adding labels" in prompt
     assert TRANSLATION_SEPARATOR not in prompt
     assert "same number of lines" in prompt

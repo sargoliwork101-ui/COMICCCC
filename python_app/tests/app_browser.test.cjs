@@ -384,6 +384,22 @@ with pymupdf.open(pdf_path) as document:
     assert.deepEqual(browserErrors, [], 'the real render/export path must not produce browser errors');
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');
+
+    await page.click('#grid .item .act button:nth-child(2)');
+    await page.waitForSelector('#editorDialog[open] #editorMergeBlocks');
+    await page.click('#editorSelectAll'); await page.click('#editorMergeBlocks');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks.length), 1, 'manual merge must leave one real project block');
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].text), 'SOURCE ONE SOURCE TWO SOURCE THREE', 'manual merge must join OCR in reading order with ordinary spaces');
+    assert.deepEqual(await page.evaluate(() => { const block = state.project.images[0].blocks[0]; return [block.x0, block.y0, block.x1, block.y1]; }), [5, 5, 310, 185], 'the merged source geometry must cover all original OCR lines');
+    assert.equal(await page.$$eval('#editorBoxes .editor-box', (boxes) => boxes.length), 1, 'the editor must show one paragraph box');
+    assert.equal(await page.$$eval('#blockList .block-card', (cards) => cards.length), 1, 'the sidebar must keep one editable OCR/translation pair');
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await editorRenderDifference(page), 0, 'the manually merged paragraph must use the final renderer');
+    const mergedUpload = page.waitForResponse((response) => response.url().endsWith('/rendered') && response.request().method() === 'POST');
+    await page.click('#editorApply'); await mergedUpload;
+    const mergedSaved = await api(base, `/api/projects/${projectId}`);
+    assert.equal(mergedSaved.images[0].blocks.length, 1, 'manual paragraph merge must persist through the real save path');
+    console.log('PASS: manual merge creates and saves one continuous editable paragraph box');
   } catch (error) {
     if (serverLog) console.error(serverLog.slice(-5000));
     throw error;

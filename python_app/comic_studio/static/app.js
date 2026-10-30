@@ -962,6 +962,34 @@ function selectAllEditorBlocks() {
   updateEditorSelection();
 }
 function clearEditorSelection() { state.selectedBlockIds = []; state.activeBlockId = null; updateEditorSelection(); }
+function continuousParagraphText(value) { return String(value || '').trim().split(/\s+/).filter(Boolean).join(' '); }
+function mergeSelectedBlocks() {
+  const item = editorItem(); const selected = new Set(selectedEditorBlocks().map((block) => String(block.id)));
+  if (!item || selected.size < 2) { toast('حداقل دو کادر را برای ادغام در یک پاراگراف انتخاب کنید', true); return; }
+  const blocks = (item.blocks || []).filter((block) => selected.has(String(block.id)));
+  const anchor = blocks[0]; const merged = { ...anchor };
+  merged.text = blocks.map((block) => continuousParagraphText(block.text)).filter(Boolean).join(' ');
+  merged.tr = blocks.map((block) => continuousParagraphText(block.tr)).filter(Boolean).join(' ');
+  merged.richHtml = blocks.map((block) => continuousParagraphText(block.tr) ? (block.richHtml || plainToHtml(continuousParagraphText(block.tr))) : '').filter(Boolean).join(' ');
+  merged.enabled = blocks.some((block) => block.enabled !== false);
+  const sourceBoxes = blocks.map((block) => ({ x0: Number(block.x0), y0: Number(block.y0), x1: Number(block.x1), y1: Number(block.y1) })).filter((box) => Object.values(box).every(Number.isFinite) && box.x1 > box.x0 && box.y1 > box.y0);
+  const layoutBoxes = blocks.map((block) => boxOf(block));
+  const union = (boxes) => ({ x0: Math.min(...boxes.map((box) => box.x0)), y0: Math.min(...boxes.map((box) => box.y0)), x1: Math.max(...boxes.map((box) => box.x1)), y1: Math.max(...boxes.map((box) => box.y1)) });
+  if (sourceBoxes.length) {
+    const box = union(sourceBoxes); Object.assign(merged, box);
+    merged.polygon = [[box.x0, box.y0], [box.x1, box.y0], [box.x1, box.y1], [box.x0, box.y1]];
+  }
+  if (layoutBoxes.length) { const box = union(layoutBoxes); merged.tx0 = box.x0; merged.ty0 = box.y0; merged.tx1 = box.x1; merged.ty1 = box.y1; }
+  merged.lineH = Math.max(...blocks.map((block) => Number(block.lineH) || 0), 8);
+  const weights = blocks.map((block) => Math.max(1, continuousParagraphText(block.text).length));
+  merged.conf = Math.round(blocks.reduce((sum, block, index) => sum + (Number(block.conf) || 0) * weights[index], 0) / weights.reduce((sum, weight) => sum + weight, 0) * 100) / 100;
+  const modes = new Set(blocks.map((block) => block.textMode).filter((mode) => mode === 'ocr' || mode === 'translation'));
+  if (modes.size === 1) merged.textMode = [...modes][0]; else delete merged.textMode;
+  item.blocks = item.blocks.flatMap((block) => block === anchor ? [merged] : selected.has(String(block.id)) ? [] : [block]);
+  state.selectedBlockIds = [String(merged.id)]; state.activeBlockId = String(merged.id); state.richEditor = null; state.richRange = null;
+  buildBlockList(); drawEditor(); scheduleSave();
+  toast(`${blocks.length} کادر در یک پاراگراف ادغام شد`);
+}
 function sameSizeSelectedBoxes() {
   const item = editorItem(); const blocks = selectedEditorBlocks();
   if (!item || blocks.length < 2) { toast('اول یک کادر مرجع و سپس حداقل یک کادر دیگر را انتخاب کنید', true); return; }
@@ -1192,7 +1220,7 @@ function bindEvents() {
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => { $('aiStatus').textContent = error.message; toast(error.message, true); }));
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
-  $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
+  $('editorMergeBlocks').addEventListener('click', mergeSelectedBlocks); $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
   [['editorAlignLeft', 'left'], ['editorAlignCenter', 'center'], ['editorAlignRight', 'right'], ['editorAlignTop', 'top'], ['editorAlignMiddle', 'middle'], ['editorAlignBottom', 'bottom']].forEach(([id, direction]) => $(id).addEventListener('click', () => alignSelectedBoxes(direction)));
   $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); closeEditor().catch((error) => toast(error.message, true)); });
   $('editorZoomOut').addEventListener('click', () => setEditorZoom(state.editorScale / 1.25)); $('editorZoomIn').addEventListener('click', () => setEditorZoom(state.editorScale * 1.25)); $('editorZoomActual').addEventListener('click', () => setEditorZoom(1)); $('editorZoomFit').addEventListener('click', fitEditor);
