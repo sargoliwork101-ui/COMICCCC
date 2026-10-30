@@ -30,13 +30,16 @@
   }
 
   function wrapWords(ctx, text, maxW) {
-    const words = text.split(/\s+/).filter(Boolean);
-    const lines = []; let cur = '';
-    for (const w of words) {
-      const t = cur ? cur + ' ' + w : w;
-      if (!cur || ctx.measureText(t).width <= maxW) cur = t; else { lines.push(cur); cur = w; }
+    const lines = [];
+    // Explicit newlines are paragraph boundaries, including intentionally blank lines.
+    for (const paragraph of String(text || '').replace(/\r\n?/g, '\n').split('\n')) {
+      const words = paragraph.split(/\s+/).filter(Boolean); let cur = '';
+      for (const w of words) {
+        const t = cur ? cur + ' ' + w : w;
+        if (!cur || ctx.measureText(t).width <= maxW) cur = t; else { lines.push(cur); cur = w; }
+      }
+      lines.push(cur);
     }
-    if (cur) lines.push(cur);
     return lines;
   }
 
@@ -85,8 +88,14 @@
     runs.forEach((run) => {
       run.t.split(/(\s+)/).filter(Boolean).forEach((part) => {
         if (/^\s+$/.test(part)) {
-          if (part.includes('\n')) { pendingLineBreak = true; pendingSpace = false; }
-          else if (!pendingLineBreak) pendingSpace = true;
+          if (part.includes('\n')) {
+            const breaks = (part.match(/\n/g) || []).length;
+            for (let index = 0; index < breaks; index++) {
+              if (pendingLineBreak) words.push({ t: '', spaceBefore: false, lineBreakBefore: true });
+              pendingLineBreak = true;
+            }
+            pendingSpace = false;
+          } else if (!pendingLineBreak) pendingSpace = true;
           return;
         }
         words.push({

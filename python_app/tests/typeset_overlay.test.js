@@ -90,6 +90,11 @@ function lineExtents(points) {
   return [Math.min(...points.map((point) => point.x)), Math.max(...points.map((point) => point.x + point.text.length * 6))];
 }
 assert.equal(Typeset.blockStyle({ align: 'justify' }).align, 'justify');
+for (const align of ['left', 'justify']) {
+  const multiline = captureLayout({ text: 'one\n\ntwo', align, plain: true });
+  assert.deepStrictEqual(multiline.map((point) => point.text), ['one', '', 'two'], `plain ${align} text must preserve blank lines`);
+  assert(multiline[2].y > multiline[1].y && multiline[1].y > multiline[0].y);
+}
 for (const dir of ['ltr', 'rtl']) {
   const points = captureLayout({ text: 'one two three four five six', dir });
   const lines = [...new Set(points.map((point) => point.y))].map((y) => points.filter((point) => point.y === y));
