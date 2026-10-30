@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +96,53 @@ def distribute_translation(source_texts: list[str], translated: str) -> list[str
     return result
 
 
+_GROUP_MARKER = re.compile(r"\[\s*\[\s*\[\s*(\d+)\s*\]\s*\]\s*\]")
+
+
+def serialize_translation_groups(groups: list[list[dict[str, Any]]]) -> str:
+    """Put every bubble/paragraph of one image in a single marked request."""
+    sections = []
+    for index, group in enumerate(groups, start=1):
+        source = "\n".join(str(block.get("text", "")).strip() for block in group).strip()
+        sections.append(f"[[[{index}]]]\n{source}")
+    return "\n".join(sections)
+
+
+def parse_translation_groups(translated: str, count: int) -> list[str] | None:
+    """Read marked sections only when every marker is present exactly once and in order."""
+    text = str(translated or "").strip()
+    matches = list(_GROUP_MARKER.finditer(text))
+    if len(matches) != count or [int(match.group(1)) for match in matches] != list(range(1, count + 1)):
+        return None
+    if matches and text[:matches[0].start()].strip():
+        return None
+    sections = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        section = text[match.end():end].strip()
+        if not section:
+            return None
+        sections.append(section)
+    return sections
+
+
+def distribute_grouped_translation(groups: list[list[dict[str, Any]]], translated: str) -> list[str]:
+    """Map a shared page translation back to existing boxes without another request or text loss."""
+    blocks = [block for group in groups for block in group]
+    sections = parse_translation_groups(translated, len(groups))
+    if sections is not None:
+        result = []
+        for group, section in zip(groups, sections):
+            source_texts = [str(block.get("text", "")).strip() for block in group]
+            result.extend(distribute_translation(source_texts, section))
+        return result
+    # Free translators can occasionally remove markers. Keep their complete response rather than
+    # silently dropping text or falling back to separate line-by-line requests.
+    source_texts = [str(block.get("text", "")).strip() for block in blocks]
+    unmarked = _GROUP_MARKER.sub("", str(translated or "")).strip()
+    return distribute_translation(source_texts, unmarked)
+
+
 class TranslationService:
     def __init__(self) -> None:
         self.path = data_dir() / "ai-settings.json"
@@ -165,7 +213,7 @@ class TranslationService:
             try:
                 response = client.get(
                     "https://api.mymemory.translated.net/get",
-                    params={"q": text[:480], "langpair": f"{source.split('-')[0]}|fa"},
+                    params={"q": text, "langpair": f"{source.split('-')[0]}|fa"},
                 )
                 response.raise_for_status()
                 translated = str(response.json().get("responseData", {}).get("translatedText", "")).strip()
@@ -183,8 +231,10 @@ class TranslationService:
             "model": settings["model"],
             "messages": [
                 {"role": "system", "content": (
-                    "Translate each complete comic bubble or paragraph to natural Persian as one contextual unit. "
-                    "Preserve every physical line break, indentation, name, number and sound effect. Return only the translation; no explanations."
+                    "Translate comic dialogue and document paragraphs to natural Persian using the whole input as shared context. "
+                    "Translate each bubble or paragraph as one continuous unit, not as isolated lines. "
+                    "If [[[number]]] markers are present, keep every marker exactly unchanged, on its own line, and in the original order. "
+                    "Preserve names, numbers and sound effects. Return only the translation; no explanations."
                 )},
                 {"role": "user", "content": f"Source language: {source}\n\n{text}"},
             ],

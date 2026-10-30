@@ -245,15 +245,26 @@ function check(name, condition) {
   const translationTask = vm.runInContext('runTranslation()', context);
   await sleep(20);
   check('translation shows a live progress dialog and activity while pending', $('translationDialog').open && $('translationStatus').textContent.includes('ترجمه') && $('translationActivityLog').textContent.includes('ترجمه') && $('translationProgress').style.width !== '0%');
-  activityFeed = { entries: [{ id: 500, message: 'بخش 1 از 2 در حال ترجمه است', kind: 'info', progress: 0.5, time: new Date().toISOString() }], next: 500 };
+  activityFeed = { entries: [{ id: 500, message: 'ترجمهٔ مشترک تصویر 1 از 2 در حال انجام است', kind: 'info', progress: 0.5, time: new Date().toISOString() }], next: 500 };
   await vm.runInContext('pollActivity()', context);
-  check('server translation progress updates the visible dialog percentage', $('translationStatus').textContent.includes('بخش 1 از 2') && $('translationProgress').style.width === '50%' && $('translationActivityLog').textContent.includes('بخش 1 از 2'));
+  check('server translation progress updates the visible dialog percentage', $('translationStatus').textContent.includes('تصویر 1 از 2') && $('translationProgress').style.width === '50%' && $('translationActivityLog').textContent.includes('تصویر 1 از 2'));
   activityFeed = { entries: [], next: 500 };
   translationGate = null; releaseTranslation();
   await translationTask;
   check('translation progress dialog closes after success', !$('translationDialog').open);
   check('finishing translation automatically selects translation display mode', $('overlayMode').value === 'translation' && $('exportOverlayMode').value === 'translation');
   check('finishing translation places translated text on the image', renderedBlocks[0].tr === 'ترجمهٔ تازه' && !renderedBlocks[0]._plainText);
+
+  const revertsBeforeSelector = revertCalls;
+  $('exportOverlayMode').value = 'none';
+  $('exportOverlayMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(500);
+  check('the real export selector immediately restores original thumbnails in no-text mode', revertCalls === revertsBeforeSelector + 1 && vm.runInContext('state.project.images[0].edited', context) === false && !$('grid').querySelector('img').src.includes('edited=true'));
+  check('the real no-text selector keeps saved OCR and translation', vm.runInContext("state.project.images[0].blocks[0].text === 'NEW OCR' && state.project.images[0].blocks[0].tr === 'ترجمهٔ تازه'", context));
+  $('overlayMode').value = 'ocr';
+  $('overlayMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(500);
+  check('the real editor selector rebuilds OCR previews when no editor is open', renderedBlocks[0].tr === 'NEW OCR' && renderedBlocks[0]._plainText === true && vm.runInContext('state.project.images[0].edited', context) === true);
 
   vm.runInContext("appendLocalActivity('در حال دانلود آزمایشی')", context);
   check('live activity is visible on the page', $('activityLog').textContent.includes('در حال دانلود آزمایشی'));

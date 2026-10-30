@@ -23,6 +23,7 @@ let localActivityId = 0;
 let editorCloseTask = null;
 let jobBusy = false;
 let translationRunning = false;
+let overlayPreviewTask = Promise.resolve();
 
 function browserTabId() {
   try {
@@ -242,14 +243,24 @@ function adoptProject(project) {
 }
 function normalizeOverlayMode(mode) { return mode === 'ocr' || mode === 'none' ? mode : 'translation'; }
 function currentOverlayMode() { return normalizeOverlayMode(state.project?.settings?.overlayMode); }
+function queueOverlayPreviewRefresh() {
+  // Serialize rapid selector changes so an older render can never replace the final choice.
+  overlayPreviewTask = overlayPreviewTask.catch(() => {}).then(async () => {
+    await saveProject();
+    await renderImagesText();
+  });
+  overlayPreviewTask.catch((error) => toast(`به‌روزرسانی متن روی تصویر ممکن نبود: ${error.message || error}`, true));
+  return overlayPreviewTask;
+}
 function setOverlayMode(mode, redraw = true) {
-  if (!state.project) return;
+  if (!state.project) return overlayPreviewTask;
   state.project.settings = state.project.settings || {};
   state.project.settings.overlayMode = normalizeOverlayMode(mode);
   $('overlayMode').value = state.project.settings.overlayMode;
   $('exportOverlayMode').value = state.project.settings.overlayMode;
-  if (redraw && state.editorId) drawEditor();
-  if (redraw) scheduleSave();
+  if (redraw && state.editorId) { drawEditor(); scheduleSave(); }
+  else if (redraw) queueOverlayPreviewRefresh();
+  return overlayPreviewTask;
 }
 function overlayBlock(block, mode = currentOverlayMode()) {
   if (mode === 'none') return { ...block, tr: '', richHtml: '' };
@@ -524,6 +535,7 @@ function updateExportFields() { const kind = $('exportKind').value; $('pdfExport
 async function exportResult(kind = null) {
   if (kind) $('exportKind').value = kind;
   if (!selectedImages().length) throw new Error('حداقل یک تصویر را برای خروجی انتخاب کنید');
+  await overlayPreviewTask;
   collectOutputSettings(); await saveProject(); const exportKind = $('exportKind').value;
   if (exportKind !== 'txt') { for (const item of selectedImages()) if (hasOverlayText(item) || item.edited) await renderAndUpload(item); renderGrid(); }
   const response = await fetch(`/api/projects/${state.project.id}/export`, jsonOptions('POST', { kind: exportKind, image_ids: selectedImages().map((item) => item.id), name: safeName($('exportName').value), seamless: $('exportSeamless').checked, uniform_size: $('exportUniform').checked, two_per_page: $('exportTwo').checked, image_format: $('exportFormat').value, folder_name: $('exportFolder').value }));
@@ -769,7 +781,7 @@ function buildBlockList() {
     card.append(head, source, translation, tools, actions); list.appendChild(card);
   });
 }
-async function applyEditor() { const item = editorItem(); if (!item) return; await saveProject(); await renderAndUpload(item); renderGrid(); }
+async function applyEditor() { const item = editorItem(); if (!item) return; await overlayPreviewTask; await saveProject(); await renderAndUpload(item); renderGrid(); }
 async function closeEditor() {
   if (editorCloseTask) return editorCloseTask;
   editorCloseTask = (async () => {

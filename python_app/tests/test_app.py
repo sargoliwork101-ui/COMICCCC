@@ -42,11 +42,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.13"
+    assert health.json()["version"] == "3.14"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۱۳ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۱۴ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
 
 
@@ -107,6 +107,24 @@ def test_untouched_original_bytes_are_preserved(client):
         assert archive.read(archive.namelist()[0]) == png_bytes()
 
 
+def test_reverting_rendered_image_restores_original_export_bytes(client):
+    project, item = make_project(client)
+    response = client.post(
+        f"/api/projects/{project['id']}/images/{item['id']}/rendered",
+        content=png_bytes((320, 200), "red"), headers={"Content-Type": "image/png"},
+    )
+    assert response.status_code == 200
+    assert response.json()["images"][0]["edited"] is True
+    response = client.post(f"/api/projects/{project['id']}/images/{item['id']}/revert")
+    assert response.status_code == 200
+    response = client.post(f"/api/projects/{project['id']}/export", json={
+        "kind": "images", "image_ids": [item["id"]], "name": "without-overlay",
+    })
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.read(archive.namelist()[0]) == png_bytes()
+
+
 def test_duplicate_group_reorder_and_delete(client):
     project, item = make_project(client)
     project_id = project["id"]
@@ -149,7 +167,7 @@ def test_ocr_endpoint_stores_geometry_without_network(client, monkeypatch):
     assert any(entry["kind"] == "success" and "OCR تمام شد" in entry["message"] for entry in feed["entries"])
 
 
-def test_translation_sends_each_bubble_together_and_reports_group_progress(client, monkeypatch):
+def test_translation_sends_every_bubble_in_one_image_request(client, monkeypatch):
     from comic_studio.translation import TranslationService
     project, item = make_project(client)
     project["images"][0]["blocks"] = [
@@ -163,18 +181,53 @@ def test_translation_sends_each_bubble_together_and_reports_group_progress(clien
 
     def fake_translate(self, text, source_language, provider=None):
         calls.append(text)
-        return {"Hello\nworld": "سلام\nدنیا", "Another bubble": "حباب دیگر"}[text]
+        assert "Hello\nworld" in text
+        assert "Another bubble" in text
+        return "[[[1]]]\nسلام دنیا\n[[[2]]]\nحباب دیگر"
 
     monkeypatch.setattr(TranslationService, "translate", fake_translate)
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"})
     assert response.status_code == 200, response.text
-    assert calls == ["Hello\nworld", "Another bubble"]
+    assert len(calls) == 1
+    assert calls[0].count("Hello") == 1
     blocks = response.json()["images"][0]["blocks"]
-    assert [block["tr"] for block in blocks] == ["سلام", "دنیا", "حباب دیگر"]
+    assert " ".join(block["tr"] for block in blocks[:2]) == "سلام دنیا"
+    assert blocks[2]["tr"] == "حباب دیگر"
     assert all(block["richHtml"] == "" for block in blocks)
+    assert all("[[[" not in block["tr"] for block in blocks)
     feed = client.get("/api/activity?after=0").json()["entries"]
-    assert any("بخش 1 از 2" in entry["message"] and entry["progress"] == pytest.approx(0.5) for entry in feed)
-    assert any("بخش 2 از 2" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
+    assert any("یک درخواست" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
+
+
+def test_shared_translation_progress_is_per_image_not_per_line(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    project, _ = make_project(client)
+    response = client.post(
+        f"/api/projects/{project['id']}/files",
+        files=[("files", ("second.png", png_bytes(), "image/png"))],
+    )
+    project = response.json()
+    for image_index, image in enumerate(project["images"]):
+        image["blocks"] = [
+            {"id": 1, "text": f"Page {image_index} first", "enabled": True, "x0": 10, "y0": 10, "x1": 180, "y1": 35, "lineH": 25},
+            {"id": 2, "text": f"Page {image_index} distant", "enabled": True, "x0": 10, "y0": 150, "x1": 180, "y1": 175, "lineH": 25},
+        ]
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    calls = []
+
+    def fake_translate(self, text, source_language, provider=None):
+        calls.append(text)
+        return "[[[1]]]\nترجمهٔ اول\n[[[2]]]\nترجمهٔ دوم"
+
+    monkeypatch.setattr(TranslationService, "translate", fake_translate)
+    ids = [image["id"] for image in project["images"]]
+    response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": ids, "provider": "free", "source_language": "eng"})
+    assert response.status_code == 200, response.text
+    assert len(calls) == 2
+    assert all("[[[1]]]" in call and "[[[2]]]" in call and "first" in call and "distant" in call for call in calls)
+    feed = client.get("/api/activity?after=0").json()["entries"]
+    completed = [entry for entry in feed if "با هم و در یک درخواست ترجمه شدند" in entry["message"]]
+    assert [entry["progress"] for entry in completed] == [pytest.approx(0.5), pytest.approx(1.0)]
 
 
 def test_model_download_receives_only_selected_language(client, monkeypatch):
@@ -317,6 +370,23 @@ def test_group_members_become_one_pdf_page_and_pairs_skip_groups(client):
     assert response.status_code == 200, response.text
     with pymupdf.open(stream=response.content, filetype="pdf") as document:
         assert len(document) == 2  # the group stays whole; only the other two are paired
+
+
+def test_group_composition_preserves_mixed_width_image_geometry():
+    from comic_studio.exporter import compose_images
+
+    def solid(width, height, color):
+        output = io.BytesIO()
+        Image.new("RGB", (width, height), color).save(output, "PNG")
+        return {"data": output.getvalue(), "w": width, "h": height, "order": 0}
+
+    composed = compose_images([solid(100, 100, "red"), solid(200, 100, "blue")])
+    assert (composed["w"], composed["h"]) == (200, 300)
+    with Image.open(io.BytesIO(composed["data"])) as image:
+        assert image.getpixel((0, 0)) == (255, 0, 0)
+        assert image.getpixel((199, 199)) == (255, 0, 0)
+        assert image.getpixel((0, 200)) == (0, 0, 255)
+        assert image.getpixel((199, 299)) == (0, 0, 255)
 
 
 def test_cropped_preview_revert_and_project_delete(client):

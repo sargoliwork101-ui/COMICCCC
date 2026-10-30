@@ -83,7 +83,9 @@ def compose_images(entries: list[dict[str, Any]]) -> dict[str, Any]:
         16000.0 / max(raw_height, 1),
         math.sqrt(180_000_000.0 / max(common_width * raw_height, 1)),
     )
-    widths = [max(1, round(entry["w"] * scale)) for entry in entries]
+    # Every member is normalized to the composed page width. Keeping a narrower source width
+    # while scaling its height to common_width would stretch it and leave unintended side bars.
+    widths = [max(1, round(common_width * scale)) for _ in entries]
     heights = [max(1, round(entry["h"] * (common_width / entry["w"]) * scale)) for entry in entries]
     canvas = Image.new("RGB", (max(1, round(common_width * scale)), sum(heights)), "white")
     y = 0
