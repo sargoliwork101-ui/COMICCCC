@@ -20,6 +20,8 @@ class OcrRequest(BaseModel):
 
 
 class TranslateRequest(BaseModel):
+    batch_index: int | None = Field(default=None, ge=1)
+    batch_total: int | None = Field(default=None, ge=1)
     image_ids: list[str] = Field(default_factory=list)
     provider: str = "free"
     source_language: str = "eng"

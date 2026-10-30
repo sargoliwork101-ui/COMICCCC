@@ -43,11 +43,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.38"
+    assert health.json()["version"] == "3.39"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۳۴ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۳۹ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -389,7 +389,7 @@ def test_free_combined_response_requires_exact_line_count(client, monkeypatch):
     assert [block["richHtml"] for block in stored["images"][0]["blocks"]] == ["قبلی یک", "قبلی دو"]
 
 
-def test_ai_translation_uses_one_request_across_images_and_reports_stages(client, monkeypatch):
+def test_ai_translation_uses_one_request_per_page_and_reports_stages(client, monkeypatch):
     from comic_studio.translation import TranslationService
     project, _ = make_project(client)
     response = client.post(
@@ -406,8 +406,8 @@ def test_ai_translation_uses_one_request_across_images_and_reports_stages(client
     calls = []
 
     def fake_translate(self, text, source_language, provider=None, source_texts=None):
-        calls.append(text)
-        return "یک\nادامه\nدو\nسه\nچهار"
+        calls.append((text, source_texts))
+        return "یک\nادامه\nدو" if len(calls) == 1 else "سه\nچهار"
 
     monkeypatch.setattr(TranslationService, "translate", fake_translate)
     ids = [image["id"] for image in project["images"]]
@@ -416,11 +416,14 @@ def test_ai_translation_uses_one_request_across_images_and_reports_stages(client
     assert preview.json()["requests"][0]["text"].startswith("Source language: English\n\nPage 0 first")
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": ids, "provider": "openai", "source_language": "eng", "confirmation": preview.json()["signature"]})
     assert response.status_code == 200, response.text
-    assert calls == ["Page 0 first\ncontinued\nPage 0 distant\nPage 1 first\nPage 1 distant"]
+    assert preview.json()["requestCount"] == 2
+    assert [request["imageId"] for request in preview.json()["requests"]] == ids
+    assert "Page 1" not in preview.json()["requests"][0]["text"]
+    assert calls == [("Page 0 first\ncontinued\nPage 0 distant", ["Page 0 first\ncontinued", "Page 0 distant"]), ("Page 1 first\nPage 1 distant", ["Page 1 first", "Page 1 distant"])]
     assert [[block["tr"] for block in image["blocks"]] for image in response.json()["images"]] == [["یک\nادامه", "دو"], ["سه", "چهار"]]
     feed = client.get("/api/activity?after=0").json()["entries"]
-    assert any("تقسیم" in entry["message"] and entry["progress"] == pytest.approx(0.5) for entry in feed)
-    assert any("یک درخواست" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
+    assert any("صفحهٔ 1 از 2" in entry["message"] and entry["progress"] == pytest.approx(0.5) for entry in feed)
+    assert any("صفحهٔ 2 از 2" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
 
 
 def test_translation_rejects_wrong_line_count_without_false_success(client, monkeypatch):
@@ -886,3 +889,64 @@ def test_import_does_not_overwrite_edits_made_during_request(client, monkeypatch
     assert saved['name'] == 'edited during import'
     assert [entry['id'] for entry in saved['images']] == [item['id']]
     assert {p.name for p in image_dir.iterdir()} == before
+
+
+def test_ai_page_failure_keeps_completed_pages_and_never_sends_later_pages(client, monkeypatch):
+    from comic_studio.translation import TranslationError, TranslationService
+    project, _ = make_project(client)
+    response = client.post(f"/api/projects/{project['id']}/files", files=[
+        ("files", ("second.png", png_bytes(), "image/png")),
+        ("files", ("third.png", png_bytes(), "image/png")),
+    ])
+    project = response.json()
+    for index, image in enumerate(project['images']):
+        image['blocks'] = [{'id': 1, 'text': f'page-{index}', 'tr': f'old-{index}', 'richHtml': '<b>old</b>', 'enabled': True}]
+    route = f"/api/projects/{project['id']}"
+    assert client.put(f'{route}/state', json={'state': project}).status_code == 200
+    calls = []
+    def translate(self, text, language, provider=None, source_texts=None):
+        calls.append(text)
+        if text == 'page-1':
+            raise TranslationError('timeout')
+        return 'first saved'
+    monkeypatch.setattr(TranslationService, 'translate', translate)
+    ids = [image['id'] for image in project['images']]
+    request = {'image_ids': ids, 'provider': 'openai', 'source_language': 'eng'}
+    preview = client.post(f'{route}/translation-preview', json=request).json()
+    assert len(preview['pages']) == 3
+    for page in preview['pages']:
+        single = client.post(f'{route}/translation-preview', json={**request, 'image_ids': [page['imageId']]}).json()
+        assert page['signature'] == single['signature']
+    response = client.post(f'{route}/translate', json={**request, 'confirmation': preview['signature']})
+    assert response.status_code == 502
+    assert calls == ['page-0', 'page-1']
+    stored = client.get(route).json()['images']
+    assert [image['blocks'][0]['tr'] for image in stored] == ['first saved', 'old-1', 'old-2']
+    assert [image['blocks'][0]['richHtml'] for image in stored] == ['', '<b>old</b>', '<b>old</b>']
+    assert any('صفحهٔ 1 از 3' in entry['message'] and 'ذخیره شد' in entry['message'] for entry in client.get('/api/activity').json()['entries'])
+
+
+def test_ai_page_confirmations_reject_stale_text_without_resending_completed_page(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    project, _ = make_project(client)
+    project = client.post(f"/api/projects/{project['id']}/files", files=[('files', ('second.png', png_bytes(), 'image/png'))]).json()
+    for index, image in enumerate(project['images']):
+        # Blocks without IDs still receive stable per-page signatures.
+        image['blocks'] = [{'text': f'original {index}', 'tr': 'old', 'enabled': True}]
+    route = f"/api/projects/{project['id']}"
+    assert client.put(f'{route}/state', json={'state': project}).status_code == 200
+    ids = [image['id'] for image in project['images']]
+    preview = client.post(f'{route}/translation-preview', json={'image_ids': ids, 'provider': 'openai'}).json()
+    calls = []
+    monkeypatch.setattr(TranslationService, 'translate', lambda self, text, language, provider=None, source_texts=None: calls.append(text) or 'saved')
+    first = client.post(f'{route}/translate', json={'image_ids': [ids[0]], 'provider': 'openai', 'confirmation': preview['pages'][0]['signature']})
+    assert first.status_code == 200, first.text
+    changed = first.json()
+    changed['images'][1]['blocks'][0]['tr'] = 'manual translation before page 2'
+    assert client.put(f'{route}/state', json={'state': changed}).status_code == 200
+    second = client.post(f'{route}/translate', json={'image_ids': [ids[1]], 'provider': 'openai', 'confirmation': preview['pages'][1]['signature']})
+    assert second.status_code == 409
+    assert calls == ['original 0']
+    stored = client.get(route).json()
+    assert stored['images'][0]['blocks'][0]['tr'] == 'saved'
+    assert stored['images'][1]['blocks'][0]['tr'] == 'manual translation before page 2'

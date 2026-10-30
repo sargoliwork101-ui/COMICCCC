@@ -319,3 +319,20 @@ def test_blank_source_lines_are_not_mistaken_for_missing_translation():
     assert distribute_translation(["first\n\nsecond", "third"], "یک\n\nدو\nسه") == ["یک\n\nدو", "سه"]
     with pytest.raises(TranslationError):
         distribute_translation(["first\n\nsecond", "third"], "یک\nچیز\nدو\nسه")
+
+
+def test_ai_timeout_never_automatically_resends_page_with_another_key(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    service.save_settings({'provider': 'openai', 'providers': {'openai': {'profiles': [
+        {'id': 'first', 'api_key': 'one'}, {'id': 'second', 'api_key': 'two'},
+    ]}}})
+    calls = []
+    def timeout(url, **kwargs):
+        calls.append(kwargs['headers']['Authorization'])
+        raise httpx.ReadTimeout('private detail')
+    monkeypatch.setattr(httpx, 'post', timeout)
+    with pytest.raises(TranslationError, match='کلید بعدی خودکار امتحان نشد') as error:
+        service.translate('one page', 'eng', 'openai', ['one page'])
+    assert calls == ['Bearer one']
+    assert 'private detail' not in str(error.value)

@@ -133,10 +133,19 @@ function nextDownload(cdp, directory) {
   const downloads = path.join(temporary, 'downloads'); fs.mkdirSync(downloads);
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
-  const aiRequests = [];
+  const aiRequests = []; const aiGenerations = [];
   const aiServer = http.createServer((request, response) => {
     aiRequests.push({ method: request.method, url: request.url, authorization: request.headers.authorization || '' });
     response.setHeader('Content-Type', 'application/json');
+    if (request.method === 'POST' && request.url === '/v1/chat/completions') {
+      let body = ''; request.on('data', chunk => { body += chunk; }); request.on('end', () => {
+        const data = JSON.parse(body); const text = data.messages.find(message => message.role === 'user').content;
+        aiGenerations.push(text);
+        if (text.includes('BROWSER PAGE TWO')) { response.statusCode = 503; response.end(JSON.stringify({ error: 'test failure' })); }
+        else setTimeout(() => response.end(JSON.stringify({ choices: [{ message: { content: 'ترجمه صفحه یک' } }] })), 450);
+      });
+      return;
+    }
     if (request.method === 'GET' && request.url === '/v1/models' && request.headers.authorization === 'Bearer browser-local-secret') {
       response.end(JSON.stringify({ data: [{ id: 'local-browser-model' }] }));
       return;
@@ -740,6 +749,32 @@ with pymupdf.open(pdf_path) as document:
     assert.equal((await api(base, `/api/projects/${paragraph.id}`)).images[0].blocks.length, 2);
     console.log('PASS: manual paragraph merge, translation preview, saved source lines and split work in Chromium');
     assert.deepEqual(browserErrors, [], 'the real render/export path must not produce browser errors');
+
+    // Real browser and Python server: three selected pages, one AI request at a
+    // time, and a failure on page two must retain page one without sending page three.
+    let pageProject = await api(base, '/api/projects', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'Page by page AI'}) });
+    const threePages = new FormData();
+    for (let n=1; n<=3; n++) threePages.append('files', new Blob([fs.readFileSync(source)], {type:'image/png'}), `batch-${n}.png`);
+    pageProject = await api(base, `/api/projects/${pageProject.id}/files`, {method:'POST',body:threePages});
+    for (const [index, image] of pageProject.images.entries()) image.blocks = [{id:1,text:`BROWSER PAGE ${['ONE','TWO','THREE'][index]}`,tr:'old',richHtml:'',enabled:true,bg:'white',x0:5,y0:5,x1:200,y1:45,lineH:40,dir:'rtl',align:'right'}];
+    await api(base, `/api/projects/${pageProject.id}/state`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:pageProject})});
+    await api(base, '/api/ai-settings', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'openai',base_url:aiBase,model:'local-browser-model'})});
+    await page.evaluate(async id => { await loadAiSettings(); await refreshProjectList(); const select=document.getElementById('projectSelect'); select.value=id; select.dispatchEvent(new Event('change',{bubbles:true})); }, pageProject.id);
+    await page.waitForFunction(id => state.project.id === id, {}, pageProject.id);
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    const pagePayloads = await page.$$eval('#translationPreviewRequests pre', entries => entries.map(entry => entry.textContent));
+    assert.equal(pagePayloads.length,3); assert.ok(pagePayloads[0].includes('PAGE ONE') && !pagePayloads[0].includes('PAGE TWO'));
+    await page.click('#translationPreviewConfirm');
+    const aiStart = Date.now(); while (!aiGenerations.length && Date.now() - aiStart < 5000) await sleep(20);
+    assert.equal(aiGenerations.length, 1); await sleep(150); assert.equal(aiGenerations.length, 1, 'page two must wait for page one response');
+    await page.waitForFunction(() => !translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'), {timeout:15000});
+    assert.deepEqual(aiGenerations.map(text => text.split('\n').at(-1)), ['BROWSER PAGE ONE', 'BROWSER PAGE TWO']);
+    const storedPages = await api(base, `/api/projects/${pageProject.id}`);
+    assert.deepEqual(storedPages.images.map(image => image.blocks[0].tr), ['ترجمه صفحه یک','old','old']);
+    assert.ok(await page.$eval('#translationStatus', el => el.textContent.includes('1 صفحه با موفقیت ذخیره شد')));
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr), 'ترجمه صفحه یک');
+    console.log('PASS: real AI sends pages sequentially and retains completed pages when the next one fails');
+    assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');
   } catch (error) {

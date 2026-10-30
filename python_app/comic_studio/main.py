@@ -321,7 +321,8 @@ def create_app() -> FastAPI:
         elif values.provider == "free":
             activity.add(f"ترجمهٔ رایگان {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ متن جمعی بیش از ۵۰۰ نویسه است و برای جلوگیری از خطای سقف، کادرها جدا و جمله‌ای ارسال می‌شوند")
         else:
-            activity.add(f"ترجمهٔ AI برای {len(items)} تصویر و {len(blocks)} متن آغاز شد؛ همه با خط جدید در یک درخواست می‌روند")
+            activity.add(f"ترجمهٔ AI برای {len(plan['calls'])} صفحه و {len(blocks)} متن آغاز شد؛ هر صفحه جداگانه ارسال و ذخیره می‌شود")
+        completed_ai = 0
         try:
             translated_blocks = [""] * len(blocks)
             if combined_free:
@@ -344,25 +345,51 @@ def create_app() -> FastAPI:
                     translated_blocks[call["indices"][0]] = translated
                     activity.add(f"متن {index} از {len(blocks)} ترجمه و آمادهٔ نشستن در کادر خودش شد", progress=index / len(blocks))
             else:
-                translated = await run_reported(
-                    translations.translate, combined_source, values.source_language, values.provider, source_texts,
-                    pulse_label="ترجمهٔ مشترک همهٔ متن‌های انتخاب‌شده",
-                )
-                activity.add("پاسخ مشترک AI رسید؛ در حال تقسیم خطوط بر اساس هر کادر", progress=0.5)
-                translated_blocks = distribute_translation(source_texts, translated)
-            for block, text in zip(blocks, translated_blocks):
-                block["tr"] = text
-                block["richHtml"] = ""
-            store.save_if_unchanged(state, expected_updated_at)
+                # Direct API clients can submit several pages too. Save each
+                # validated page atomically before sending the next one.
+                for index, call in enumerate(plan["calls"], start=1):
+                    current = project(project_id)
+                    if current.get("updatedAt", "") != expected_updated_at:
+                        raise ProjectChangedError("پروژه در حین ترجمه تغییر کرد؛ صفحهٔ بعد ارسال نشد. صفحه‌های ذخیره‌شده حفظ شده‌اند.")
+                    if values.confirmation and values.confirmation != plan_signature(plan, values.provider, values.source_language, translations.public_settings()):
+                        raise HTTPException(409, "تنظیمات ترجمه تغییر کرده است؛ صفحهٔ بعد ارسال نشد. صفحه‌های ذخیره‌شده حفظ شده‌اند.")
+                    page_sources = [source_texts[i] for i in call["indices"]]
+                    label = call.get("image_name") or call["image_id"]
+                    page_index = values.batch_index if len(plan["calls"]) == 1 and values.batch_index and values.batch_total and values.batch_index <= values.batch_total else index
+                    page_total = values.batch_total if len(plan["calls"]) == 1 and values.batch_index and values.batch_total and values.batch_index <= values.batch_total else len(plan["calls"])
+                    activity.add(f"در حال ترجمهٔ صفحهٔ {page_index} از {page_total}: {label}", progress=(page_index - 1) / page_total)
+                    translated = await run_reported(
+                        translations.translate, call["text"], values.source_language, values.provider, page_sources,
+                        pulse_label=f"ترجمهٔ صفحهٔ {page_index} از {page_total}",
+                    )
+                    page_result = distribute_translation(page_sources, translated)
+                    for block_index, text in zip(call["indices"], page_result):
+                        blocks[block_index]["tr"] = text
+                        blocks[block_index]["richHtml"] = ""
+                    store.save_if_unchanged(state, expected_updated_at)
+                    expected_updated_at = state.get("updatedAt", "")
+                    completed_ai += 1
+                    activity.add(f"صفحهٔ {page_index} از {page_total} ترجمه و ذخیره شد: {label}", "success", page_index / page_total)
+            if values.provider == "free":
+                for block, text in zip(blocks, translated_blocks):
+                    block["tr"] = text
+                    block["richHtml"] = ""
+                store.save_if_unchanged(state, expected_updated_at)
         except Exception as exc:
+            if completed_ai:
+                message = f"{completed_ai} صفحه ذخیره شد؛ صفحهٔ ناموفق ذخیره نشد و صفحه‌های پس از آن ارسال نشدند. "
+                if isinstance(exc, HTTPException):
+                    exc.detail = message + str(exc.detail)
+                else:
+                    exc.args = (message + str(exc),)
             activity.add(f"ترجمه ناموفق بود: {exc}", "error")
             raise
         if combined_free:
             activity.add(f"همهٔ {len(blocks)} متن OCR با هم و در یک درخواست free ترجمه و در کادرهای خودشان قرار گرفتند", "success", 1.0)
         elif values.provider == "free":
             activity.add(f"هر {len(blocks)} متن جدا ترجمه و در کادرهای خودشان قرار گرفتند", "success", 1.0)
-        else:
-            activity.add(f"همهٔ {len(blocks)} متن با هم و در یک درخواست AI ترجمه و در کادرها قرار گرفتند", "success", 1.0)
+        elif not values.batch_total or values.batch_index == values.batch_total:
+            activity.add(f"ترجمهٔ صفحه‌های درخواست‌شده پایان یافت؛ هر صفحه جداگانه ذخیره شد", "success", 1.0)
         return state
 
     @app.post("/api/translate-text/preview")

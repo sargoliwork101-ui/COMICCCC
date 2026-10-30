@@ -18,25 +18,37 @@ def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: st
         if item["id"] in ids
     ]
     entries = [
-        (item, block)
-        for item in items for block in item.get("blocks", [])
+        (item, block, block_index)
+        for item in items for block_index, block in enumerate(item.get("blocks", []))
         if block.get("enabled", True) and str(block.get("text", "")).strip()
     ]
-    blocks = [block for _, block in entries]
+    blocks = [block for _, block, _ in entries]
     source_texts = [str(block.get("text", "")).strip() for block in blocks]
     combined_source = combine_translation_texts(source_texts)
     combined_free = provider == "free" and len(combined_source) <= MAX_FREE_QUERY_CHARS
     if not blocks:
         calls: list[dict[str, Any]] = []
-    elif combined_free or provider != "free":
+    elif provider != "free":
+        # One request per image, in page order; never mix separate pages.
+        calls = []
+        for item in items:
+            indices = [index for index, (owner, _, _) in enumerate(entries) if owner is item]
+            if indices:
+                calls.append({"text": combine_translation_texts([source_texts[index] for index in indices]),
+                              "indices": indices, "combined": True,
+                              "image_id": item["id"], "image_name": item.get("name", "")})
+    elif combined_free:
         calls = [{"text": combined_source, "indices": list(range(len(blocks))), "combined": True}]
     else:
         calls = [{"text": text, "indices": [index], "combined": False} for index, text in enumerate(source_texts)]
     return {
         "items": items,
         "blocks": blocks,
-        "keys": [f"{item['id']}:{block.get('id', index + 1)}" for index, (item, block) in enumerate(entries)],
+        "keys": [f"{item['id']}:{block.get('id', block_index + 1)}" for item, block, block_index in entries],
         "source_texts": source_texts,
+        # Bind confirmation to the exact target blocks too, so edits to a later
+        # page after preview are not silently overwritten by its translation.
+        "target_snapshots": [hashlib.sha256(json.dumps(block, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest() for block in blocks],
         "calls": calls,
         "combined_free": combined_free,
     }
@@ -65,6 +77,7 @@ def plan_signature(
         "keys": plan["keys"],
         # Equal joined payloads can have different per-box line boundaries.
         "source_texts": plan["source_texts"],
+        "target_snapshots": plan.get("target_snapshots", []),
         "texts": [call["text"] for call in plan["calls"]],
     }
     encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -84,6 +97,7 @@ def plan_preview(
             requests.append({
                 "index": len(requests) + 1, "call": call_index,
                 "text": text, "characters": len(text),
+                **({"imageId": call["image_id"], "imageName": call["image_name"]} if "image_id" in call else {}),
             })
     config = public_settings.get("providers", {}).get(provider, {})
     if provider == "free":
@@ -91,8 +105,23 @@ def plan_preview(
         note = "هر query ابتدا به Google Translate می‌رود؛ فقط اگر خطا بدهد، همان query به MyMemory فرستاده می‌شود."
     else:
         label = AI_PROVIDERS.get(provider, {}).get("label", provider)
-        note = "اگر کلیدی خطا بدهد، همین متن با کلید بعدی همان سرویس تکرار می‌شود؛ متن به سرویس دیگری نمی‌رود."
+        note = "هر درخواست فقط متن یک صفحه است؛ پاسخ هر صفحه بررسی و ذخیره می‌شود و سپس صفحهٔ بعد ارسال می‌شود. در برخی خطاهای سرویس یا پاسخ نامعتبر، کلید بعدی همان صفحه را تکرار می‌کند؛ در قطع ارتباط یا timeout تکرار خودکار متوقف می‌شود."
+    # The browser sends one page per HTTP request; each signature binds exactly
+    # the page payload and current destination shown in the full preview.
+    pages = []
+    if provider != "free":
+        for call in plan["calls"]:
+            if "image_id" not in call:
+                continue
+            indices = call["indices"]
+            page_plan = {"keys": [plan["keys"][i] for i in indices],
+                         "source_texts": [plan["source_texts"][i] for i in indices],
+                         "target_snapshots": [plan["target_snapshots"][i] for i in indices],
+                         "calls": [{"text": call["text"]}]}
+            pages.append({"imageId": call["image_id"], "imageName": call["image_name"],
+                          "signature": plan_signature(page_plan, provider, source_language, public_settings)})
     return {
+        "pages": pages,
         "provider": provider,
         "providerLabel": label,
         "model": config.get("model", "") if provider != "free" else "",

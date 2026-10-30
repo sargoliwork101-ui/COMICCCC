@@ -454,6 +454,12 @@ class TranslationService:
                     emit(f"پاسخ ترجمه با {name} دریافت شد.", "success")
                     return normalized
                 except Exception as exc:
+                    if isinstance(exc, httpx.TransportError):
+                        # The remote service may have accepted and billed the
+                        # request even if its response was lost. Never send the
+                        # same page with the next key automatically in this case.
+                        emit(f"پاسخ {name} به‌علت خطای ارتباطی دریافت نشد؛ تلاش خودکار با کلید بعدی متوقف شد.", "error")
+                        raise TranslationError("ارتباط یا زمان انتظار پاسخ قطع شد؛ ممکن است سرویس درخواست را پردازش یا هزینه را حساب کرده باشد. برای جلوگیری از درخواست تکراری، کلید بعدی خودکار امتحان نشد.") from exc
                     message = _safe_error(exc, selected)
                     failures.append(f"{name}: {message}")
                     emit(f"تلاش با {name} ناموفق بود: {message}", "error")
