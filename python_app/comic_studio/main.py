@@ -601,7 +601,7 @@ def create_app() -> FastAPI:
         active = [profile for profile in policy['profiles'] if profile['hasApiKey']]
         mode_label = 'حالت JSON سرویس' if context_uses_json(provider, policy['base_url'], policy.get('response_mode', 'auto')) else 'متن معمولی'
         policies = '؛ '.join(f"API {index}: زمان انتظار {p['timeout_seconds']}، تکرار {p['retry_count']}، فاصله {p['retry_wait_seconds']} ثانیه، سقف {p['source_limit']}" for index, p in enumerate(active, 1))
-        trim_notice = ' برای جا دادن جملهٔ بعدی در سقف، انتهای خلاصهٔ قبلی کوتاه شده است.' if run.get('contextAutoShortened') else ''
+        trim_notice = ' پس از تأیید، خلاصهٔ قبلی در یک درخواست جداگانه به AI داده می‌شود تا فقط آن را کوتاه کند و سپس در زمینهٔ نوبت قرار گیرد؛ این درخواست ممکن است هزینه داشته باشد.' if run.get('contextAutoShortened') else ''
         return {'provider': provider, 'skill': '', 'defaultSkill': '', 'blockCount': len(run['jobs']),
                 'requestCount': 1 if chosen else 0, 'systemPrompt': request.system,
                 'requests': [{'index': 1, 'text': request.user_message(text), 'characters': request.character_count(text),
@@ -661,7 +661,26 @@ def create_app() -> FastAPI:
             verify_run(state, run, values.skill, policy)
             request, chosen = next_request(run, values.skill)
             if run.pop('contextAutoShortened', False):
-                activity.add(f"خلاصهٔ قبلی برای جا دادن متن در سقف کوتاه شد؛ اکنون {len(run['context'])} نویسه است.", 'warning')
+                context_to_condense = run.pop('contextToCondense', '')
+                target_context_length = len(run['context'])
+                if context_to_condense and target_context_length > 0:
+                    condensed = ''
+                    try:
+                        condensed = await run_reported(
+                            translations.condense_context, context_to_condense, target_context_length,
+                            run['provider'], policy, pulse_label='در حال فشرده‌سازی خلاصهٔ قبلی',
+                        )
+                    except Exception as exc:
+                        activity.add(f"فشرده‌سازی AI انجام نشد؛ برای جلوگیری از توقف از نسخهٔ کوتاه‌شده استفاده می‌شود. {exc}", 'warning')
+                    if condensed:
+                        run['context'] = condensed
+                        state[RUN_KEY] = run; state[SUMMARY_KEY] = condensed
+                        state = store.save_if_unchanged(state, expected)
+                        expected = state.get('updatedAt', '')
+                        activity.add(f"خلاصهٔ قبلی با درخواست جداگانه از AI فشرده شد؛ {len(condensed)} نویسه باقی ماند.", 'success')
+                else:
+                    activity.add('خلاصهٔ قبلی برای جا دادن جملهٔ بعدی خالی شد؛ درخواست جداگانهٔ فشرده‌سازی لازم نبود.', 'warning')
+                request, chosen = next_request(run, values.skill)
             if not chosen:
                 return {'project': state, 'done': True, 'affectedImageIds': []}
             source_texts = [entry['text'] for entry in chosen]

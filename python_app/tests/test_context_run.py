@@ -224,6 +224,40 @@ def test_rolling_summary_auto_shortens_to_fit_next_safe_request():
     assert chosen and request.fits(chosen[0]['text'])
 
 
+def test_long_rolling_context_is_sent_to_ai_for_condensing_before_next_translation(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    seen = []; condense_calls = []
+    def fake_translate(self, request, text, sources, provider, policy):
+        seen.append((text, request.user_prefix))
+        return 'ترجمه', ('x' * 90 if len(seen) == 1 else 'خلاصهٔ جدید')
+    def fake_condense(self, context, max_chars, provider, policy):
+        condense_calls.append((context, max_chars, provider))
+        return 'خلاصهٔ فشرده'
+    monkeypatch.setattr(TranslationService, 'translate_context', fake_translate)
+    monkeypatch.setattr(TranslationService, 'condense_context', fake_condense)
+    with scoped_client(create_app()) as client:
+        route, project = make_project(client)
+        project['images'][0]['blocks'] = [{'id':1,'text':'A'*399+'.\n'+'B'*499+'.','tr':'old','enabled':True}]
+        project['images'][1]['blocks'] = []
+        client.put(route+'/state',json={'state':project})
+        client.put('/api/ai-settings',json={'provider':'openai','context_percent':15,'skill_percent':0,
+            'providers':{'openai':{'profiles':[{'id':'a','api_key':'key','source_limit':1000}]}}})
+        req={'image_ids':[i['id'] for i in project['images']],'provider':'openai','skill':'','summary':''}
+        preview=client.post(route+'/context-preview',json=req)
+        assert preview.status_code==200,preview.text
+        started=client.post(route+'/context-start',json={**req,'confirmation':preview.json()['signature']})
+        assert started.status_code==200,started.text
+        first=client.post(route+'/context-step',json={'run_id':started.json()['runId'],'completed':0,'skill':''})
+        assert first.status_code==200,first.text
+        second=client.post(route+'/context-step',json={'run_id':started.json()['runId'],'completed':1,'skill':''})
+        assert second.status_code==200,second.text
+        assert len(condense_calls)==1 and condense_calls[0][0]=='x'*90
+        assert condense_calls[0][1] < 90 and condense_calls[0][2]=='openai'
+        assert len(seen)==2 and 'Context: خلاصهٔ فشرده' in seen[1][1]
+        messages=[entry['message'] for entry in client.get('/api/activity').json()['entries']]
+        assert any('درخواست جداگانه از AI فشرده شد' in message for message in messages)
+
+
 def test_preflight_checks_later_unbreakable_line_before_any_send(tmp_path, monkeypatch):
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
     seen = []

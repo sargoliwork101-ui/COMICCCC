@@ -61,6 +61,21 @@ def test_invalid_ai_output_uses_configured_retries_and_logs_each_retry(tmp_path,
     assert calls[0]['json']['response_format']=={'type':'json_object'}
 
 
+def test_context_condensing_sends_only_context_and_applies_target_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA',str(tmp_path)); service=TranslationService(); calls=[]
+    settings=service.save_settings({'provider':'openai','providers':{'openai':{'profiles':[{'id':'a','api_key':'secret','retry_count':0}]}}})
+    def post(url,**kwargs):
+        calls.append(kwargs)
+        body=json.dumps({'translation':'فشرده‌شده','summary':''},ensure_ascii=False)
+        return httpx.Response(200,json={'choices':[{'message':{'content':body}}]},request=httpx.Request('POST',url))
+    monkeypatch.setattr(httpx,'post',post)
+    result=service.condense_context('نام‌ها و رویدادهای داستان',30,'openai',provider_policy(settings,'openai'))
+    system,user=[message['content'] for message in calls[0]['json']['messages']]
+    assert result=='فشرده‌شده' and 'Summarize ONLY' in system and 'at most 30 characters' in system
+    assert 'نام‌ها و رویدادهای داستان' in user and 'Source has 1 line; output exactly 1 line.' in user
+    assert calls[0]['json']['response_format']=={'type':'json_object'}
+
+
 def test_provider_modes_preserve_compatibility_and_policy(tmp_path, monkeypatch):
     monkeypatch.setenv('COMIC_STUDIO_DATA',str(tmp_path)); service=TranslationService(); calls=[]
     def post(url, **kwargs):

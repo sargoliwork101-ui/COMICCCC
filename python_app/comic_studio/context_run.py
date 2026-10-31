@@ -235,6 +235,7 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
                 else:
                     continue
                 request = trial_request
+                run['contextToCondense'] = original_context
                 run['context'] = candidate
                 run['contextAutoShortened'] = True
                 fitted = True

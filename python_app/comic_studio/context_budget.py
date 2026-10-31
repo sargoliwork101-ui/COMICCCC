@@ -107,6 +107,18 @@ def build_context_request(budget: ContextBudget, language: str, skill: str, prev
     return ContextRequest(system, prefix, available, budget.context_limit, budget.skill_limit, budget.total_limit)
 
 
+def shorten_context(text: str, limit: int) -> str:
+    """Normalize a one-line context and cap it on a nearby word boundary."""
+    text = " ".join(str(text or "").split()).strip()
+    if len(text) <= limit:
+        return text
+    text = text[:limit]
+    word_boundary = text.rfind(" ")
+    if word_boundary >= limit * 0.7:
+        text = text[:word_boundary]
+    return text.rstrip()
+
+
 def parse_context_response(response: str, source_texts: list[str], context_limit: int) -> tuple[str, str]:
     """Accept both pieces together only after validating structure and boundaries."""
     def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -154,13 +166,7 @@ def parse_context_response(response: str, source_texts: list[str], context_limit
     # output is not guaranteed. Normalize it locally so an overlong summary
     # cannot discard an otherwise valid translation or consume the next request's
     # budget. Prefer a whole-word boundary when one is close to the cap.
-    summary = " ".join(value["summary"].split()).strip()
-    if len(summary) > context_limit:
-        summary = summary[:context_limit]
-        word_boundary = summary.rfind(" ")
-        if word_boundary >= context_limit * 0.7:
-            summary = summary[:word_boundary]
-        summary = summary.rstrip()
+    summary = shorten_context(value["summary"], context_limit)
     # Verify line-to-block mapping before callers commit either result.
     distribute_translation(source_texts, translation)
     return translation, summary

@@ -732,6 +732,89 @@ class TranslationService:
                     time.sleep(profile['retry_wait_seconds'])
         raise TranslationError("هیچ‌یک از کلیدها پاسخ قابل‌استفاده‌ای ندادند. " + "؛ ".join(failures))
 
+    def condense_context(self, context: str, max_chars: int, provider: str, expected_policy: dict[str, Any]) -> str:
+        """Ask the selected AI API to compact only the rolling story context."""
+        from .context_budget import ContextRequest, parse_context_response, shorten_context
+        from .context_run import provider_policy
+        from .store import ProjectChangedError
+        if provider not in AI_PROVIDERS:
+            raise TranslationError("سرویس AI معتبر نیست.")
+        context = str(context or '').strip()
+        if not context or max_chars <= 0:
+            return ''
+        settings = self._secret()
+        if provider_policy(settings, provider) != expected_policy:
+            raise ProjectChangedError("تنظیمات API پس از تأیید تغییر کرده است؛ درخواست فشرده‌سازی ارسال نشد.")
+        profiles = self._profiles(settings, provider)
+        if not profiles:
+            raise TranslationError(f"برای {AI_PROVIDERS[provider]['label']} حداقل یک کلید API معتبر وارد کنید.")
+        secrets = [p["api_key"] for c in settings["providers"].values() for p in c["profiles"] if p["api_key"]]
+        failures: list[str] = []
+        for profile_index, profile in enumerate(profiles):
+            name = _redact_diagnostic(profile["profile_name"], secrets)
+            system = ("Summarize ONLY the supplied Persian story context. Keep essential names, events and relationships; "
+                      "do not translate, answer questions or invent facts. Return JSON keys \"translation\" and \"summary\". "
+                      f"Put the condensed context in translation as one Persian line of at most {max_chars} characters; "
+                      "set summary to an empty string.")
+            prefix = "Context to condense only:\n"
+            limit = profile['source_limit']
+            request = ContextRequest(system, prefix, limit - len(system) - len(prefix), 0, 0, limit)
+            user = request.user_message(context)
+            if len(system) + len(user) > limit:
+                raise TranslationError("متن خلاصه برای مرحلهٔ فشرده‌سازی از سقف API بیشتر است؛ فشرده‌سازی ارسال نشد.")
+
+            def action() -> str:
+                base = _normalize_base_url(profile['base_url'], provider)
+                model = _normalize_model(profile['model'], provider)
+                mode = profile['response_mode']
+                use_json = context_uses_json(provider, base, mode)
+                if provider == 'gemini':
+                    response = httpx.post(f"{base}/models/{quote(model, safe='')}:generateContent",
+                        headers={'x-goog-api-key': profile['api_key']},
+                        json={'systemInstruction': {'parts': [{'text': system}]},
+                              'contents': [{'role': 'user', 'parts': [{'text': user}]}],
+                              'generationConfig': {'temperature': 0.2, **({'responseMimeType': 'application/json'} if use_json else {})}},
+                        timeout=profile['timeout_seconds'], follow_redirects=True)
+                else:
+                    response = httpx.post(base + '/chat/completions',
+                        headers={'Authorization': f"Bearer {profile['api_key']}"},
+                        json={'model': model, 'messages': [{'role': 'system', 'content': system},
+                              {'role': 'user', 'content': user}], 'temperature': 0.2,
+                              **({'response_format': {'type': 'json_object'}} if use_json else {})},
+                        timeout=profile['timeout_seconds'], follow_redirects=True)
+                response.raise_for_status()
+                try:
+                    payload = response.json()
+                except (ValueError, TypeError) as exc:
+                    raise InvalidContextResponse('پاسخ فشرده‌سازی JSON معتبر نیست.', response.text) from exc
+                raw = _response_text(payload, provider) if isinstance(payload, dict) else ''
+                try:
+                    condensed, _ = parse_context_response(raw, [context], 0)
+                except TranslationError as exc:
+                    raise InvalidContextResponse(f"پاسخ فشرده‌سازی معتبر نیست: {exc}", raw) from exc
+                condensed = shorten_context(condensed, max_chars)
+                if not condensed:
+                    raise InvalidContextResponse('خلاصهٔ فشرده‌شده خالی است.', raw)
+                return condensed
+
+            try:
+                emit(f"خلاصهٔ قبلی برای جا دادن درخواست فشرده می‌شود؛ {AI_PROVIDERS[provider]['label']}، {name}، سقف {max_chars} نویسه…", "warning")
+                condensed = _run_with_retries(action, profile, provider, secrets)
+                emit(f"فشرده‌سازی خلاصه انجام شد؛ {len(condensed)} نویسه باقی ماند.", "success")
+                return condensed
+            except InvalidContextResponse:
+                raise
+            except Exception as exc:
+                message = _safe_error(exc, provider, secrets)
+                if isinstance(exc, httpx.TransportError):
+                    raise TranslationError(f"ارتباط هنگام فشرده‌سازی خلاصه قطع شد؛ درخواست ترجمه ارسال نشد. {message}") from exc
+                failures.append(f"{name}: {message}")
+                if profile_index + 1 < len(profiles):
+                    wait = profile['retry_wait_seconds']
+                    emit(f"فشرده‌سازی با {name} ناموفق بود؛ پس از {wait} ثانیه کلید بعدی امتحان می‌شود.", "warning")
+                    time.sleep(wait)
+        raise TranslationError("خلاصه فشرده نشد: " + "؛ ".join(failures))
+
     def translate_free_batch(self, request: Any, text: str, source_texts: list[str], source_language: str, expected_policy: dict[str, Any]) -> str:
         """Translate one bounded page-local request, with independent retries."""
         from .context_run import provider_policy
