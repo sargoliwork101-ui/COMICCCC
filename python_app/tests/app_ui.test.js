@@ -70,7 +70,7 @@ const makeTranslationPreview = (body, single = false) => {
     blockCount: texts.length, requestCount: requests.length,
     requests: requests.map((text, index) => ({ index: index + 1, characters: text.length, text })),
     systemPrompt: provider === 'free' ? '' : 'entire input', signature: 'ui-confirmation-signature',
-    note: 'فقط بعد از تأیید شما ارسال می‌شود.',
+    note: 'فقط بعد از تأیید شما ارسال می‌شود.', rollingMode: true, contextMode: false, skill:'', summary:'', resume:!!body.resume, singleContext:single,
   };
 };
 window.fetch = async (url, options = {}) => {
@@ -101,7 +101,7 @@ window.fetch = async (url, options = {}) => {
       };
     });
     const active = providers[request.provider];
-    aiSettings = { provider: request.provider, reuse_repeated: request.reuse_repeated, providers, model: active?.model || '', base_url: active?.base_url || '', hasApiKey: !!active?.profiles.some((profile) => profile.hasApiKey) };
+    aiSettings = { provider: request.provider, reuse_repeated: request.reuse_repeated, free_services: request.free_services, providers, model: active?.model || '', base_url: active?.base_url || '', hasApiKey: !!active?.profiles.some((profile) => profile.hasApiKey) };
     return jsonResponse(aiSettings);
   }
   if (pathname === '/api/ai-settings') return jsonResponse(aiSettings);
@@ -115,6 +115,26 @@ window.fetch = async (url, options = {}) => {
     return jsonResponse(saved);
   }
   if (pathname === `/api/projects/${project.id}/ocr`) { ocrRequests.push(JSON.parse(options.body)); return jsonResponse(overlayProject('NEW OCR', '')); }
+  if (pathname === `/api/projects/${project.id}/context-preview`) {
+    const request = JSON.parse(options.body); translationPreviewCalls.push(request);
+    return jsonResponse(makeTranslationPreview(request));
+  }
+  if (pathname === `/api/projects/${project.id}/context-start`) {
+    translationCalls.push(JSON.parse(options.body));
+    return jsonResponse({project: vm.runInContext('state.project', context), runId:'mock-run', completed:0});
+  }
+  if (pathname === `/api/projects/${project.id}/context-step`) {
+    if (translationGate) await translationGate;
+    return jsonResponse({project:overlayProject('NEW OCR', 'ترجمهٔ تازه'), done:true, completed:1, affectedImageIds:[project.images[0].id]});
+  }
+  if (pathname === '/api/translate-text/context-preview') {
+    const request = JSON.parse(options.body); translationPreviewCalls.push(request);
+    return jsonResponse(makeTranslationPreview(request, true));
+  }
+  if (pathname === '/api/translate-text/context') {
+    singleTranslationCalls.push(JSON.parse(options.body));
+    return jsonResponse({text:'ترجمهٔ تکی تازه'});
+  }
   if (pathname === `/api/projects/${project.id}/translation-preview`) {
     const request = JSON.parse(options.body); translationPreviewCalls.push(request);
     return jsonResponse(makeTranslationPreview(request));

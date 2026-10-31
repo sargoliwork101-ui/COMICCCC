@@ -43,11 +43,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.48"
+    assert health.json()["version"] == "3.49"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۴۶ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۴۹ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -240,10 +240,8 @@ def test_translation_preview_expands_real_500_character_queries(client):
     response = client.post(f"/api/projects/{project['id']}/translation-preview", json={
         "image_ids": [item["id"]], "provider": "free", "source_language": "eng",
     })
-    assert response.status_code == 200, response.text
-    requests = response.json()["requests"]
-    assert [len(request["text"]) for request in requests] == [500, 100]
-    assert "".join(request["text"] for request in requests) == source
+    # A single unbroken 600-character line must never be cut mid-line.
+    assert response.status_code == 502
 
 
 def test_translation_confirmation_rejects_changed_project_text(client, monkeypatch):
@@ -288,7 +286,7 @@ def test_ai_and_single_text_previews_show_full_user_message(client):
 def test_single_text_confirmation_previews_then_sends_the_same_text(client, monkeypatch):
     from comic_studio.translation import TranslationService
     calls = []
-    monkeypatch.setattr(TranslationService, "_free", lambda self, text, source_language: calls.append(text) or "پاسخ تکی")
+    monkeypatch.setattr(TranslationService, "translate_free_batch", lambda self, request, text, sources, source_language, policy: calls.append(text) or "پاسخ تکی")
     preview = client.post("/api/translate-text/preview", json={"text": "Exact single text", "provider": "free", "source_language": "eng"})
     assert preview.status_code == 200, preview.text
     assert calls == []
@@ -333,11 +331,11 @@ def test_free_translation_combines_ocr_blocks_when_payload_fits_500(client, monk
     assert response.status_code == 200
     calls = []
 
-    def fake_free(self, text, source_language):
+    def fake_free(self, request, text, sources, source_language, policy):
         calls.append(text)
-        return "سلام&#10در دو خط\nدنیا\nحباب دیگر"
+        return "سلام\nدر دو خط\nدنیا\nحباب دیگر"
 
-    monkeypatch.setattr(TranslationService, "_free", fake_free)
+    monkeypatch.setattr(TranslationService, "translate_free_batch", fake_free)
     preview = client.post(f"/api/projects/{project['id']}/translation-preview", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"}).json()
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng", "confirmation": preview["signature"]})
     assert response.status_code == 200, response.text
@@ -347,7 +345,7 @@ def test_free_translation_combines_ocr_blocks_when_payload_fits_500(client, monk
     assert all(block["richHtml"] == "" for block in blocks)
     assert all(TRANSLATION_SEPARATOR not in block["tr"] and "&#10" not in block["tr"] and "[[[" not in block["tr"] for block in blocks)
     feed = client.get("/api/activity?after=0").json()["entries"]
-    assert any("یک درخواست" in entry["message"] and entry["progress"] == pytest.approx(1.0) for entry in feed)
+    assert any("ذخیره شد" in entry["message"] for entry in feed)
     assert not any("جدا ترجمه" in entry["message"] for entry in feed)
 
 
@@ -362,11 +360,11 @@ def test_free_translation_over_500_keeps_safe_block_requests(client, monkeypatch
     assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
     calls = []
 
-    def fake_free(self, text, source_language):
+    def fake_free(self, request, text, source_texts, source_language, policy):
         calls.append(text)
         return "اول" if text == sources[0] else "دوم"
 
-    monkeypatch.setattr(TranslationService, "_free", fake_free)
+    monkeypatch.setattr(TranslationService, "translate_free_batch", fake_free)
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"})
     assert response.status_code == 200, response.text
     assert calls == sources
@@ -381,7 +379,7 @@ def test_free_combined_response_requires_exact_line_count(client, monkeypatch):
         {"id": 2, "text": "World", "tr": "قبلی دو", "richHtml": "قبلی دو", "enabled": True},
     ]
     assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
-    monkeypatch.setattr(TranslationService, "translate", lambda self, text, source_language, provider=None, source_texts=None, skill=None: "یک دو")
+    monkeypatch.setattr(TranslationService, "translate_free_batch", lambda self, request, text, sources, source_language, policy: "یک دو")
     response = client.post(f"/api/projects/{project['id']}/translate", json={"image_ids": [item["id"]], "provider": "free", "source_language": "eng"})
     assert response.status_code == 502
     stored = client.get(f"/api/projects/{project['id']}").json()
@@ -786,7 +784,7 @@ def test_one_paragraph_accepts_multiline_free_translation(client, monkeypatch):
     project['images'][0]['blocks'] = [{'id': 1, 'text': 'One full paragraph', 'tr': '', 'enabled': True}]
     route = f"/api/projects/{project['id']}"
     assert client.put(f'{route}/state', json={'state': project}).status_code == 200
-    monkeypatch.setattr(TranslationService, '_free', lambda self, text, source: 'بند اول\nادامهٔ ترجمه')
+    monkeypatch.setattr(TranslationService, 'translate_free_batch', lambda self, request, text, sources, source, policy: 'بند اول\nادامهٔ ترجمه')
     result = client.post(f'{route}/translate', json={'image_ids': [item['id']], 'provider': 'free'})
     assert result.status_code == 200, result.text
     assert result.json()['images'][0]['blocks'][0]['tr'] == 'بند اول\nادامهٔ ترجمه'
@@ -800,14 +798,14 @@ def test_translation_does_not_overwrite_edits_made_during_request(client, monkey
     route = f"/api/projects/{project['id']}"
     assert client.put(f'{route}/state', json={'state': project}).status_code == 200
 
-    def translate_while_editing(self, text, language, provider=None):
+    def translate_while_editing(self, request, text, sources, language, policy):
         other_store = ProjectStore()
         current = other_store.get(project['id'])
         current['images'][0]['blocks'][0]['text'] = 'edited during translation'
         other_store.save(current)
         return 'ترجمه'
 
-    monkeypatch.setattr(TranslationService, 'translate', translate_while_editing)
+    monkeypatch.setattr(TranslationService, 'translate_free_batch', translate_while_editing)
     response = client.post(f'{route}/translate', json={'image_ids': [item['id']], 'provider': 'free'})
     assert response.status_code == 409
     block = client.get(route).json()['images'][0]['blocks'][0]

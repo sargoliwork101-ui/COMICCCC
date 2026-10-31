@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
-from .context_budget import ContextBudget, ContextRequest, build_context_request
+from .context_budget import ContextBudget, ContextRequest, FreeRequest, build_context_request
 from .ocr import LANGUAGES
 from .store import ProjectChangedError
 from .translation import TranslationError, combine_translation_texts, distribute_translation
@@ -20,6 +21,8 @@ def digest(value: Any) -> str:
 
 
 def provider_policy(settings: dict[str, Any], provider: str) -> dict[str, Any]:
+    if provider == 'free':
+        return {'services': settings.get('free_services', {})}
     config = settings.get('providers', {}).get(provider, {})
     return {'model': config.get('model', ''), 'base_url': config.get('base_url', ''),
             'profiles': [{'id': p.get('id', ''), 'hasApiKey': bool(p.get('hasApiKey', p.get('api_key', ''))),
@@ -36,12 +39,53 @@ def source_layout(state: dict[str, Any], image_ids: list[str]) -> str:
                    for block in item.get('blocks', [])]} for item in items])
 
 
+def build_run_request(run: dict[str, Any], skill: str) -> ContextRequest | FreeRequest:
+    if run['provider'] == 'free':
+        return FreeRequest(run['limit'])
+    budget = ContextBudget(run['limit'], run['contextPercent'], run['skillPercent'])
+    return build_context_request(budget, LANGUAGES.get(run['language'], LANGUAGES['eng'])['name'], skill, run['context'])
+
+
+def safe_prefix(text: str, fits: Any, source_lines: Any = None) -> tuple[str, str, str] | None:
+    """Find the latest whole-sentence or paragraph line boundary that fits.
+
+    Return the first part, remainder and intervening whitespace. The remainder
+    need not fit the current space: it will be planned again next request.
+    """
+    sentence_end = re.compile(r"[.!?…。！？؟][\"'”’»）)\]]*\s*$")
+    candidates: list[tuple[int, int]] = []
+    for match in re.finditer(r"\n(?:[ \t]*\n)*", text):
+        prefix = text[:match.start()].rstrip()
+        if prefix and ("\n" in match.group(0)[1:] or sentence_end.search(prefix)):
+            candidates.append((len(prefix), match.end()))
+    if isinstance(source_lines, list) and all(isinstance(line, dict) for line in source_lines):
+        lines = [' '.join(str(line.get('text') or '').split()) for line in source_lines]
+        lines = [line for line in lines if line]
+        if len(lines) > 1 and ' '.join(lines) == text:
+            position = 0
+            for line in lines[:-1]:
+                position += len(line)
+                if sentence_end.search(line): candidates.append((position, position + 1))
+                position += 1
+    valid = [(cut, end) for cut, end in candidates if cut > 0 and end < len(text) and fits(text[:cut])]
+    if not valid:
+        return None
+    cut, end = max(valid)
+    return text[:cut], text[end:], text[cut:end]
+
+
 def create_run(state: dict[str, Any], image_ids: list[str], provider: str, language: str,
                skill: str, context: str, limit: int, context_percent: int,
                skill_percent: int, reuse: bool, policy: dict[str, Any]) -> dict[str, Any]:
     """Snapshot source and target references; no secret or skill is persisted."""
-    budget = ContextBudget(limit, context_percent, skill_percent)
-    build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, context)
+    if provider == 'free':
+        if skill or context:
+            raise TranslationError('مترجم رایگان از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
+        maximum_request = FreeRequest(limit)
+    else:
+        budget = ContextBudget(limit, context_percent, skill_percent)
+        build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, context)
+        maximum_request = build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, '')
     selected = set(image_ids)
     items = [i for i in sorted(state.get('images', []), key=lambda i: i.get('order', 0)) if i['id'] in selected]
     jobs: list[dict[str, Any]] = []
@@ -70,10 +114,14 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
     # Reject a line that cannot fit even with an empty summary before sending
     # any text. Later requests are recalculated with their actual summary; if
     # that makes a line too large, stop and let the user shorten the summary.
-    maximum = build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, '').source_capacity
     for job in jobs:
-        if len(job['source']) > maximum:
-            split_ai_paragraph(job['source'], maximum, job.get('sourceLines'))
+        remaining = job['source']; lines = job.get('sourceLines')
+        while not maximum_request.fits(remaining):
+            chunk = safe_prefix(remaining, maximum_request.fits, lines)
+            if not chunk:
+                raise TranslationError('یک خط یا جمله در سقف مؤثر درخواست جا نمی‌شود؛ سقف یا متن OCR را در مرز مناسب اصلاح کنید. در حالت رایگان محدودیت ۵۰۰ بایت MyMemory نیز برقرار است. هیچ متنی ارسال نشد.')
+            _, remaining, _ = chunk
+            lines = matching_source_lines(lines, remaining)
     return {'provider': provider, 'language': language, 'skillHash': digest(skill), 'context': context,
             'limit': limit, 'contextPercent': context_percent, 'skillPercent': skill_percent,
             'reuse': reuse, 'policyHash': digest(policy), 'imageIds': [i['id'] for i in items], 'sourceLayout': source_layout(state, [i['id'] for i in items]), 'jobs': jobs,
@@ -104,9 +152,17 @@ def verify_run(state: dict[str, Any], run: dict[str, Any], skill: str, policy: d
                 raise ProjectChangedError('متن یا ترجمهٔ پروژه از زمان تأیید تغییر کرده است؛ برای جلوگیری از بازنویسی، ترجمه متوقف شد.')
 
 
-def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest, list[dict[str, Any]]]:
-    budget = ContextBudget(run['limit'], run['contextPercent'], run['skillPercent'])
-    request = build_context_request(budget, LANGUAGES.get(run['language'], LANGUAGES['eng'])['name'], skill, run['context'])
+def matching_source_lines(lines: Any, remaining: str) -> Any:
+    if isinstance(lines, list) and all(isinstance(line, dict) for line in lines):
+        for index in range(len(lines)):
+            suffix = ' '.join(' '.join(str(line.get('text') or '').split()) for line in lines[index:] if str(line.get('text') or '').strip())
+            if suffix == remaining:
+                return lines[index:]
+    return None
+
+
+def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | FreeRequest, list[dict[str, Any]]]:
+    request = build_run_request(run, skill)
     pending = [(i, job) for i, job in enumerate(run['jobs']) if job['remaining']]
     if not pending:
         return request, []
@@ -116,20 +172,21 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest, list[
         if job['imageId'] != image_id:
             break
         remaining = job['remaining']
-        proposed = combine_translation_texts([c['text'] for c in chosen] + [remaining])
-        if len(proposed) <= request.source_capacity:
+        prefix = combine_translation_texts([c['text'] for c in chosen])
+        def fits_next(part: str) -> bool:
+            return request.fits((prefix + '\n' if prefix else '') + part)
+        if fits_next(remaining):
             chosen.append({'job': index, 'text': remaining, 'rest': '', 'join': ''})
             continue
-        if chosen:
-            break
-        try:
-            parts, joins = split_ai_paragraph(remaining, request.source_capacity, job.get('sourceLines'))
-        except TranslationError as exc:
-            message = str(exc).replace('هیچ متنی ارسال نشد.', 'این درخواست ارسال نشد.')
-            raise TranslationError(message + ' می‌توانید خلاصهٔ قبلی را کوتاه‌تر کنید و با پیش‌نمایش تازه ادامه دهید.') from exc
-        first = parts[0]
-        rest = ''.join((joins[i - 1] if i > 1 else '') + part for i, part in enumerate(parts[1:], start=1))
-        chosen.append({'job': index, 'text': first, 'rest': rest, 'join': joins[0]})
+        # If the next bubble has a safe sentence/line boundary, fill the
+        # current request with that whole prefix rather than sending a tiny
+        # previous bubble alone. Never cross a page or cut a line.
+        split = safe_prefix(remaining, fits_next, job.get('sourceLines'))
+        if split:
+            first, rest, join = split
+            chosen.append({'job': index, 'text': first, 'rest': rest, 'join': join})
+        elif not chosen:
+            raise TranslationError('خط یا جمله در فضای باقی‌مانده جا نمی‌شود؛ سقف را افزایش دهید یا خلاصه/متن OCR را اصلاح کنید. این درخواست ارسال نشد.')
         break
     return request, chosen
 
@@ -146,13 +203,7 @@ def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict
         if job['remaining']:
             # Preserve the still-valid original OCR line boundaries after a
             # split of a merged, space-joined OCR block.
-            lines = job.get('sourceLines')
-            if isinstance(lines, list) and all(isinstance(line, dict) for line in lines):
-                for index in range(len(lines)):
-                    suffix = ' '.join(' '.join(str(line.get('text') or '').split()) for line in lines[index:] if str(line.get('text') or '').strip())
-                    if suffix == job['remaining']:
-                        job['sourceLines'] = lines[index:]
-                        break
+            job['sourceLines'] = matching_source_lines(job.get('sourceLines'), job['remaining'])
             continue
         for ref in job['refs']:
             block = lookup[(str(ref['imageId']), str(ref['blockId']))]
@@ -163,5 +214,6 @@ def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict
             affected.add(ref['imageId'])
     run['context'] = summary
     run['completed'] += 1
-    state[SUMMARY_KEY] = summary
+    if run['provider'] != 'free':
+        state[SUMMARY_KEY] = summary
     return sorted(affected)

@@ -134,9 +134,17 @@ function nextDownload(cdp, directory) {
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const aiRequests = []; const aiGenerations = []; const aiSystems = []; let dedupFailuresRemaining = 0;
+  const freeGenerations = []; let freeFailure = true;
   const aiServer = http.createServer((request, response) => {
     aiRequests.push({ method: request.method, url: request.url, authorization: request.headers.authorization || '' });
     response.setHeader('Content-Type', 'application/json');
+    if (request.method === 'POST' && request.url === '/free/translate') {
+      let body=''; request.on('data',chunk=>body+=chunk); request.on('end',()=>{
+        const data=JSON.parse(body); freeGenerations.push(data.text);
+        if (data.text === 'SECOND PAGE' && freeFailure) { freeFailure=false; response.statusCode=503; response.end(JSON.stringify({error:'free simulated outage'})); return; }
+        response.end(JSON.stringify({translation:data.text.split('\n').map(()=> 'ترجمه').join('\n')}));
+      }); return;
+    }
     if (request.method === 'POST' && request.url === '/v1/chat/completions') {
       let body = ''; request.on('data', chunk => { body += chunk; }); request.on('end', () => {
         const data = JSON.parse(body); const text = data.messages.find(message => message.role === 'user').content;
@@ -159,7 +167,21 @@ function nextDownload(cdp, directory) {
   });
   await new Promise((resolve, reject) => aiServer.listen(0, '127.0.0.1', resolve).once('error', reject));
   const aiBase = `http://127.0.0.1:${aiServer.address().port}/v1`;
-  const server = spawn(python, ['-m', 'comic_studio', '--host', '127.0.0.1', '--port', String(port), '--no-browser'], {
+  // Test-only stub: browser exercises real Python planning/checkpoints while
+  // no external free translation service is contacted.
+  const bootstrap = `
+import httpx
+from comic_studio.translation import TranslationService, TranslationError
+def free_stub(self, request, text, sources, language, policy):
+    request.user_message(text)
+    r = httpx.post('${aiBase.replace('/v1','')}/free/translate', json={'text': text}, timeout=10)
+    if r.status_code != 200: raise TranslationError(r.json().get('error', 'mock free failure'))
+    return r.json()['translation']
+TranslationService.translate_free_batch = free_stub
+from comic_studio.__main__ import main
+main()
+`;
+  const server = spawn(python, ['-c', bootstrap, '--host', '127.0.0.1', '--port', String(port), '--no-browser'], {
     cwd: pythonApp,
     env: { ...process.env, COMIC_STUDIO_DATA: path.join(temporary, 'data') },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -250,7 +272,11 @@ function nextDownload(cdp, directory) {
     assert.ok(!JSON.stringify(browserAiSettings).includes('browser-local-secret'), 'public settings must not return the browser-entered secret');
     assert.equal(await page.$eval('.ai-profile-key', (input) => input.value), '', 'the saved secret must be cleared from the real password field');
     await page.$eval('#aiContextPercent', el => { el.value = '15'; }); await page.$eval('#aiSkillPercent', el => { el.value = '15'; });
-    await page.select('#aiProvider', 'free'); await page.click('#saveAiBtn');
+    await page.select('#aiProvider', 'free');
+    assert.equal(await page.$eval('#free-google-source_limit', el => el.value), '1000');
+    assert.equal(await page.$eval('#free-mymemory-source_limit', el => el.value), '500');
+    for (const [selector,value] of [['#free-google-timeout_seconds','75'],['#free-google-retry_count','2'],['#free-google-retry_wait_seconds','0'],['#free-mymemory-timeout_seconds','65'],['#free-mymemory-retry_count','1'],['#free-mymemory-retry_wait_seconds','0']]) await page.$eval(selector, (el,v)=>{el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}));}, value);
+    await page.click('#saveAiBtn');
     await page.waitForFunction(() => state.ai.provider === 'free'); await page.keyboard.press('Escape');
     console.log('PASS: real AI dialog tests the selected model through Python without exposing its API key');
 
@@ -271,9 +297,13 @@ function nextDownload(cdp, directory) {
     const secondUpload = new Promise((resolve) => { secondDone = resolve; });
     const onRequest = (request) => {
       const url = new URL(request.url());
-      if (url.pathname === `/api/projects/${projectId}/translate`) {
+      if (url.pathname === `/api/projects/${projectId}/context-start`) {
         translationRequests.push(JSON.parse(request.postData() || '{}'));
-        request.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(translated) }).catch(() => {});
+        request.respond({ status:200, contentType:'application/json', body:JSON.stringify({project,runId:'browser-mock',completed:0}) }).catch(()=>{});
+        return;
+      }
+      if (url.pathname === `/api/projects/${projectId}/context-step`) {
+        request.respond({ status:200, contentType:'application/json', body:JSON.stringify({project:translated,done:true,completed:1,affectedImageIds:[imageId]}) }).catch(()=>{});
         return;
       }
       if (url.pathname.endsWith('/rendered')) {
@@ -768,6 +798,35 @@ with pymupdf.open(pdf_path) as document:
     console.log('PASS: manual paragraph merge, translation preview, saved source lines and split work in Chromium');
     assert.deepEqual(browserErrors, [], 'the real render/export path must not produce browser errors');
 
+    // Exercise the free planner and saved checkpoint through the real browser
+    // and Python routes, with a local deterministic translation stub.
+    const freeCfg = await api(base,'/api/ai-settings');
+    assert.equal(freeCfg.free_services.google.timeout_seconds,75); assert.equal(freeCfg.free_services.google.retry_count,2);
+    assert.equal(freeCfg.free_services.mymemory.timeout_seconds,65); assert.equal(freeCfg.free_services.mymemory.retry_count,1);
+    let freeProject = await api(base,'/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Free packing and resume'})});
+    const freePages=new FormData(); for(let i=0;i<2;i++) freePages.append('files',new Blob([fs.readFileSync(source)],{type:'image/png'}),`free-${i}.png`);
+    freeProject=await api(base,`/api/projects/${freeProject.id}/files`,{method:'POST',body:freePages});
+    const makeBlock=(id,text)=>({id,text,tr:'old',richHtml:'',enabled:true,bg:'white',x0:5,y0:5,x1:200,y1:45,lineH:40,dir:'rtl',align:'right'});
+    freeProject.images[0].blocks=['A'.repeat(300),'ABCD','B'.repeat(100),'C'.repeat(120)].map((text,i)=>makeBlock(i+1,text));
+    freeProject.images[1].blocks=[makeBlock(1,'SECOND PAGE')];
+    await api(base,`/api/projects/${freeProject.id}/state`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:freeProject})});
+    await page.evaluate(async id=>{await refreshProjectList();const el=document.getElementById('projectSelect');el.value=id;el.dispatchEvent(new Event('change',{bubbles:true}));},freeProject.id);
+    await page.waitForFunction(id=>state.project.id===id,{},freeProject.id);
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    const firstFree=await page.$eval('#translationPreviewRequests pre',el=>el.textContent);
+    assert.ok(firstFree.includes('ABCD') && firstFree.length>4 && !firstFree.includes('SECOND PAGE'));
+    assert.equal(await page.$eval('#translationSkillWrap',el=>el.classList.contains('hidden')),true);
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(()=>!translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'),{timeout:15000});
+    assert.deepEqual(freeGenerations.map(q=>q.includes('SECOND PAGE')?'SECOND PAGE':q),[firstFree,'C'.repeat(120),'SECOND PAGE']);
+    let freeSaved=await api(base,`/api/projects/${freeProject.id}`);
+    assert.equal(freeSaved.images[0].blocks[1].tr,'ترجمه'); assert.equal(freeSaved.images[1].blocks[0].tr,'old');
+    await page.click('#retryTranslation'); await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
+    assert.equal(freeGenerations.length,4); assert.equal(freeGenerations[3],'SECOND PAGE');
+    freeSaved=await api(base,`/api/projects/${freeProject.id}`); assert.equal(freeSaved.images[1].blocks[0].tr,'ترجمه');
+    console.log('PASS: free settings, four-character packing, page boundaries, saved progress and retry in Chromium with a local stub');
+
+
     // Real browser and Python server: three selected pages, one AI request at a
     // time, and a failure on page two must retain page one without sending page three.
     let pageProject = await api(base, '/api/projects', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'Page by page AI'}) });
@@ -968,7 +1027,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert not any(b'browser-local-secret' in archive.read(name) for name in archive.namelist())
 `, backupPath]);
     console.log('PASS: browser downloads and restores a new project ZIP with image, text and local draft without API keys');
-    assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
+    assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');
   } catch (error) {

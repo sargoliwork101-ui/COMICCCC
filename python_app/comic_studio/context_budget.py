@@ -49,6 +49,9 @@ class ContextRequest:
     skill_limit: int
     total_limit: int
 
+    def fits(self, text: str) -> bool:
+        return len(text) <= self.source_capacity
+
     def user_message(self, text: str) -> str:
         # Reject instead of silently changing text or cutting a line.
         if not isinstance(text, str) or not text.strip():
@@ -110,3 +113,24 @@ def parse_context_response(response: str, source_texts: list[str], context_limit
     # Verify line-to-block mapping before callers commit either result.
     distribute_translation(source_texts, translation)
     return translation, summary
+
+
+@dataclass(frozen=True)
+class FreeRequest:
+    """Plain source-only request, bounded by characters and fallback UTF-8 bytes."""
+    source_capacity: int
+    byte_limit: int = 500
+    system: str = ''
+    context_limit: int = 0
+    skill_limit: int = 0
+
+    def fits(self, text: str) -> bool:
+        return len(text) <= self.source_capacity and len(text.encode('utf-8')) <= self.byte_limit
+
+    def user_message(self, text: str) -> str:
+        if not isinstance(text, str) or not text.strip() or not self.fits(text):
+            raise TranslationError('متن از سقف مترجم رایگان یا ۵۰۰ بایت MyMemory بیشتر است.')
+        return text
+
+    def character_count(self, text: str) -> int:
+        return len(self.user_message(text))

@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.48">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.48">
+  <link rel="stylesheet" href="/style.css?v=3.49">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.49">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۴۶ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۴۹ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
     <button id="menuBtn" class="bt">☰ پروژه و تنظیمات</button>
   </header>
 
@@ -127,14 +127,18 @@
   <dialog id="aiDialog" class="dlg ai-dialog">
     <form method="dialog" class="dialog-head"><h2>ترجمه و AI</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
     <label>روش ترجمه<select id="aiProvider"><option value="free">سرویس رایگان فعلی</option><option value="gemini">Google Gemini</option><option value="openai">OpenAI / سرویس سازگار</option><option value="openrouter">OpenRouter</option><option value="avalai">AvalAI</option></select></label>
+    <div id="freeFields" class="hidden">
+      <div id="freeServices"></div>
+      <p class="hint">ابتدا Google Translate و پس از شکست تلاش‌های آن MyMemory امتحان می‌شود. سقف مؤثر کمترین سقف دو سرویس است و هر درخواست علاوه بر آن حداکثر ۵۰۰ بایت UTF-8 دارد. بدون کلید، سرویس‌ها ممکن است سهمیه یا محدودیت‌های دیگری داشته باشند. تکرار یا تغییر سرویس پس از خطای شبکه ممکن است متن را دوباره ارسال کند.</p>
+    </div>
+    <label class="reuse-setting"><input id="aiReuseRepeated" type="checkbox" checked> استفادهٔ مجدد از ترجمهٔ کادرهای دقیقاً یکسان در صفحات انتخاب‌شده</label>
+    <p class="hint">بافت متفاوت ممکن است ترجمهٔ متفاوت بخواهد؛ برای ترجمهٔ مستقل این گزینه را خاموش کنید.</p>
     <div id="aiFields" class="hidden">
       <div class="form-grid"><label id="aiBaseUrlField">نشانی پایهٔ API<input id="aiBaseUrl" dir="ltr" spellcheck="false"></label><label>نام دقیق مدل<input id="aiModel" dir="ltr" spellcheck="false"></label></div>
       <div class="ai-profile-heading"><span>کلیدهای API و نام دلخواه هرکدام</span><button id="aiAddProfile" class="bt" type="button">افزودن API</button></div>
       <div id="aiProfiles" class="ai-profile-list"></div>
       <div class="form-grid"><label>سقف خلاصهٔ قبلی (درصد)<input id="aiContextPercent" type="number" min="0" max="100" value="15"></label><label>سقف اسکیل (درصد)<input id="aiSkillPercent" type="number" min="0" max="100" value="15"></label></div>
       <p class="hint">پیش‌فرض هرکدام ۱۵٪ سقف کل هر درخواست است؛ فضای مصرف‌نشده به متن اصلی می‌رسد. دستور سیستم، خلاصه، اسکیل و متن همگی در سقف شمرده می‌شوند.</p>
-      <label class="reuse-setting"><input id="aiReuseRepeated" type="checkbox" checked> استفادهٔ مجدد از ترجمهٔ کادرهای دقیقاً یکسان در صفحات انتخاب‌شده</label>
-      <p class="hint">متن مشابه ولی متفاوت یا کادرهایی که فقط بخشی از آن‌ها یکسان است تطبیق داده نمی‌شوند. ترجمهٔ یکسان ممکن است با توجه به بافت صفحه مناسب نباشد؛ برای ترجمهٔ مستقل این گزینه را خاموش کنید.</p>
       <p class="hint"><a id="aiKeyHelp" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلیدها فقط در فایل تنظیمات همین کامپیوتر ذخیره می‌شوند و به مرورگر برگردانده نمی‌شوند.</p>
       <p class="hint">«تست» متن کمیک نمی‌فرستد. زمان انتظار، تعداد تکرار و فاصلهٔ بین تلاش‌ها برای هر کلید جداست؛ صفر یعنی بدون تکرار همان کلید. در خطاهای موقت یا پاسخ نامعتبر تکرار انجام می‌شود؛ خطای اتصال پس از پایان تکرارها کار را متوقف می‌کند. خطاهای دیگر ممکن است کلید بعدی را امتحان کنند. این زمان سقف هر مرحلهٔ اتصال/خواندن است، نه الزاماً کل زمان درخواست. فاصله، پیش از تکرار همان کلید یا امتحان کلید بعدی اعمال می‌شود. تکرار ممکن است هزینهٔ دوباره داشته باشد.</p>
     </div>
@@ -190,7 +194,7 @@
     <p class="hint">هنوز هیچ متنی برای ترجمه ارسال نشده است. درخواست اول را بررسی کنید؛ در حالت حافظه، متن درخواست‌های بعدی بر اساس خلاصهٔ پاسخ قبلی ساخته می‌شود.</p>
     <div id="translationPreviewRequests" class="payload-requests"></div>
     <div id="translationContextWrap" class="hidden">
-      <label for="translationContext">خلاصهٔ داستان برای درخواست اول</label>
+      <label id="translationContextLabel" for="translationContext">خلاصهٔ داستان برای درخواست اول</label>
       <input id="translationContext" type="text" dir="auto">
       <p id="translationContextHelp" class="hint"></p>
       <label><input id="translationContextResume" type="checkbox"> ادامهٔ نوبت ناتمام قبلی</label>
@@ -207,10 +211,10 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.48"></script>
-  <script src="/groups.js?v=3.48"></script>
-  <script src="/rich-sanitize.js?v=3.48"></script>
-  <script src="/rich-editor.js?v=3.48"></script>
-  <script src="/app.js?v=3.48"></script>
+  <script src="/typeset.js?v=3.49"></script>
+  <script src="/groups.js?v=3.49"></script>
+  <script src="/rich-sanitize.js?v=3.49"></script>
+  <script src="/rich-editor.js?v=3.49"></script>
+  <script src="/app.js?v=3.49"></script>
 </body>
 </html>

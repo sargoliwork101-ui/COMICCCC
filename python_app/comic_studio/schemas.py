@@ -47,6 +47,7 @@ class TextTranslateRequest(BaseModel):
 
 
 class AiSettings(BaseModel):
+    free_services: dict[str, dict[str, Any]] | None = None
     context_percent: int | None = Field(default=None, ge=0, le=100)
     skill_percent: int | None = Field(default=None, ge=0, le=100)
     reuse_repeated: bool | None = None
@@ -97,6 +98,7 @@ class StateUpdate(BaseModel):
 class ContextPreviewRequest(BaseModel):
     resume: bool = False
     restart_legacy: bool = False
+    restart_existing: bool = False
     image_ids: list[str] = Field(default_factory=list)
     provider: str
     source_language: str = "eng"

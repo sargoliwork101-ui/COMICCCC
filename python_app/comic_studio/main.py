@@ -328,8 +328,10 @@ def create_app() -> FastAPI:
         return {**translations.public_settings(), "_translation_skill": normalize_ai_skill(skill) if provider != "free" else ""}
 
     def context_preparation(state: dict[str, Any], values: ContextPreviewRequest) -> tuple[dict[str, Any], Any, list[dict[str, Any]]]:
-        if values.provider not in {'openai', 'gemini', 'openrouter', 'avalai'}:
-            raise HTTPException(400, "حافظهٔ داستان فقط برای سرویس‌های AI پشتیبانی می‌شود.")
+        if values.provider not in {'free', 'openai', 'gemini', 'openrouter', 'avalai'}:
+            raise HTTPException(400, "سرویس ترجمه معتبر نیست.")
+        if values.provider == 'free' and (values.skill or values.summary):
+            raise TranslationError('مترجم رایگان از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
         selected_ids = set(image_ids(state, values.image_ids))
         ids = [item['id'] for item in sorted(state['images'], key=lambda item: item.get('order', 0)) if item['id'] in selected_ids]
         if not ids:
@@ -347,15 +349,19 @@ def create_app() -> FastAPI:
             # A fresh preview explicitly authorizes a revised summary, budget or API policy.
             run = copy.deepcopy(run)
             run['context'] = values.summary; run['policyHash'] = digest(policy)
-            run['limit'] = effective_ai_limit(values.provider, settings)
-            run['contextPercent'] = settings['context_percent']; run['skillPercent'] = settings['skill_percent']
+            run['limit'] = min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings)
+            run['contextPercent'] = 0 if values.provider == 'free' else settings['context_percent']; run['skillPercent'] = 0 if values.provider == 'free' else settings['skill_percent']
         else:
+            previous = state.get(RUN_KEY)
+            if isinstance(previous, dict) and any(job.get('remaining') for job in previous.get('jobs', []) if isinstance(job, dict)) and not values.restart_existing:
+                raise ProjectChangedError('نوبت ناتمام وجود دارد؛ شروع نوبت تازه را صریحاً تأیید کنید.')
             selected = [item for item in state['images'] if item['id'] in ids]
             legacy = any(item.get(AI_PAGE_PROGRESS_KEY) or any(block.get(AI_PARTS_KEY) for block in item.get('blocks', [])) for item in selected)
             if legacy and not values.restart_legacy:
                 raise HTTPException(409, 'پیشرفت ناتمام نسخهٔ قبلی وجود دارد. برای جلوگیری از ارسال تکراری، ادامه را با نسخهٔ قبلی انجام دهید یا صریحاً شروع دوباره را تأیید کنید.')
             run = create_run(state, ids, values.provider, values.source_language, values.skill, values.summary,
-                             effective_ai_limit(values.provider, settings), settings['context_percent'], settings['skill_percent'],
+                             min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings),
+                             0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
                              values.reuse_repeated, policy)
             run['legacyRestart'] = values.restart_legacy
             run['legacyHash'] = digest([{'imageId': item['id'], 'page': item.get(AI_PAGE_PROGRESS_KEY),
@@ -364,6 +370,7 @@ def create_app() -> FastAPI:
         # A summary changed by another request after preview must not be
         # silently replaced by the stale summary accepted in this tab.
         run['baseSummaryHash'] = digest(state.get(SUMMARY_KEY, ''))
+        if not values.resume: run['basePreviousRunHash'] = digest(state.get(RUN_KEY))
         request, chosen = next_request(run, values.skill)
         return run, request, chosen
 
@@ -373,6 +380,16 @@ def create_app() -> FastAPI:
         policy = provider_policy(translations.public_settings(), provider)
         if digest(policy) != run['policyHash']:
             raise ProjectChangedError('تنظیمات API تغییر کرده است؛ پیش‌نمایش تازه بگیرید.')
+        if provider == 'free':
+            config = policy['services']
+            limits = '؛ '.join(f"{name}: انتظار {p['timeout_seconds']}، تکرار {p['retry_count']}، فاصله {p['retry_wait_seconds']} ثانیه، سقف {p['source_limit']} نویسه" for name, p in config.items())
+            return {'provider':'free', 'rollingMode':True, 'contextMode':False, 'skill':'', 'summary':'', 'defaultSkill':'',
+                    'blockCount':len(run['jobs']), 'requestCount':1 if chosen else 0, 'systemPrompt':'',
+                    'requests':[{'index':1, 'text':text, 'characters':request.character_count(text), 'imageName':first.get('imageName','')}] if chosen else [],
+                    'providerLabel':'Google Translate؛ در صورت خطا MyMemory', 'base_url':'https://translate.googleapis.com/translate_a/single',
+                    'fallback_url':'https://api.mymemory.translated.net/get', 'model':'',
+                    'note':f"متن صفحه‌ها جداگانه و ترتیبی ارسال و ذخیره می‌شود؛ تأیید یک‌بار برای کل نوبت است. سقف مؤثر {run['limit']} نویسه و برای MyMemory حداکثر ۵۰۰ بایت UTF-8 است. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری. خلاصه و اسکیل AI در حالت رایگان استفاده نمی‌شوند. تنظیمات: {limits}.",
+                    'signature':digest(run), 'totalLimit':run['limit'], 'resume':bool(run.get('id'))}
         active = [profile for profile in policy['profiles'] if profile['hasApiKey']]
         policies = '؛ '.join(f"API {index}: زمان انتظار {p['timeout_seconds']}، تکرار {p['retry_count']}، فاصله {p['retry_wait_seconds']} ثانیه، سقف {p['source_limit']}" for index, p in enumerate(active, 1))
         return {'provider': provider, 'skill': '', 'defaultSkill': '', 'blockCount': len(run['jobs']),
@@ -381,7 +398,7 @@ def create_app() -> FastAPI:
                               'imageName': first.get('imageName', '')}] if chosen else [],
                 'providerLabel': provider, 'model': policy['model'], 'base_url': policy['base_url'],
                 'note': f"درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.",
-                'signature': digest(run), 'contextMode': True, 'summary': run['context'], 'skillLimit': request.skill_limit,
+                'signature': digest(run), 'rollingMode': True, 'contextMode': True, 'summary': run['context'], 'skillLimit': request.skill_limit,
                 'contextLimit': request.context_limit, 'totalLimit': run['limit'], 'resume': bool(run.get('id'))}
 
     @app.post("/api/projects/{project_id}/context-preview")
@@ -408,7 +425,8 @@ def create_app() -> FastAPI:
                     if item['id'] in run['imageIds']:
                         item.pop(AI_PAGE_PROGRESS_KEY, None)
                         for block in item.get('blocks', []): block.pop(AI_PARTS_KEY, None)
-        state[RUN_KEY] = run; state[SUMMARY_KEY] = run['context']
+        state[RUN_KEY] = run
+        if run['provider'] != 'free': state[SUMMARY_KEY] = run['context']
         store.save_if_unchanged(state, expected)
         return {'project': state, 'runId': run['id'], 'completed': run['completed']}
 
@@ -421,7 +439,7 @@ def create_app() -> FastAPI:
             if not isinstance(run, dict) or run.get('id') != values.run_id or run.get('completed') != values.completed:
                 raise HTTPException(409, "وضعیت این نوبت عوض شده است؛ پیش از ادامه پروژه را دوباره بررسی کنید.")
             settings = translations.public_settings()
-            if settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']:
+            if run['provider'] != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
                 raise ProjectChangedError('درصدهای خلاصه یا اسکیل تغییر کرده‌اند؛ نوبت متوقف شد.')
             policy = provider_policy(settings, run['provider'])
             verify_run(state, run, values.skill, policy)
@@ -430,24 +448,31 @@ def create_app() -> FastAPI:
                 return {'project': state, 'done': True, 'affectedImageIds': []}
             source_texts = [entry['text'] for entry in chosen]
             text = combine_translation_texts(source_texts)
-            activity.add(f"درخواست {run['completed'] + 1} برای «{run['jobs'][chosen[0]['job']]['imageName']}»؛ {request.character_count(text)} از {run['limit']} نویسه، خلاصه {len(run['context'])} از {request.context_limit} نویسه.")
+            label = f"درخواست {run['completed'] + 1} برای «{run['jobs'][chosen[0]['job']]['imageName']}»؛ {request.character_count(text)} از {run['limit']} نویسه"
+            label += f"؛ {len(text.encode('utf-8'))} از ۵۰۰ بایت" if run['provider'] == 'free' else f"؛ خلاصه {len(run['context'])} از {request.context_limit} نویسه"
+            activity.add(label + '.')
             activity.add(f"متن دقیق درخواست {run['completed'] + 1} (بدون هدر احراز هویت):\nدستور سیستم:\n{request.system}\nپیام کاربر:\n{request.user_message(text)}")
-            translated, summary = await run_reported(translations.translate_context, request, text, source_texts, run['provider'], policy, pulse_label='ترجمه و خلاصه')
+            if run['provider'] == 'free':
+                translated = await run_reported(translations.translate_free_batch, request, text, source_texts, run['language'], policy, pulse_label='ترجمهٔ رایگان')
+                summary = ''
+            else:
+                translated, summary = await run_reported(translations.translate_context, request, text, source_texts, run['provider'], policy, pulse_label='ترجمه و خلاصه')
             affected = apply_response(state, run, chosen, translated, summary)
             store.save_if_unchanged(state, expected)
             done = not any(job['remaining'] for job in run['jobs'])
-            activity.add(f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success')
+            activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] == 'free' else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success')
             return {'project': state, 'done': done, 'affectedImageIds': affected, 'completed': run['completed'],
                     'sent': {'system': request.system, 'user': request.user_message(text), 'characters': request.character_count(text)}}
 
     def prepare_context_text(values: ContextTextRequest) -> tuple[dict[str, Any], dict[str, Any], Any, list[dict[str, Any]]]:
-        if values.provider not in {'openai', 'gemini', 'openrouter', 'avalai'}:
-            raise HTTPException(400, 'سرویس AI معتبر نیست.')
+        if values.provider not in {'free', 'openai', 'gemini', 'openrouter', 'avalai'}:
+            raise HTTPException(400, 'سرویس ترجمه معتبر نیست.')
         state = {'images': [{'id': 'single', 'name': 'بازترجمهٔ یک کادر', 'order': 0,
                             'blocks': [{'id': 1, 'text': values.text, 'enabled': True, 'sourceLines': values.source_lines}]}]}
         settings = translations.public_settings()
         run = create_run(state, ['single'], values.provider, values.source_language, values.skill, values.summary,
-                         effective_ai_limit(values.provider, settings), settings['context_percent'], settings['skill_percent'],
+                         min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings),
+                         0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
                          False, provider_policy(settings, values.provider))
         request, chosen = next_request(run, values.skill)
         return state, run, request, chosen
@@ -459,7 +484,8 @@ def create_app() -> FastAPI:
         result['skill'] = values.skill; result['singleContext'] = True
         from .translation import DEFAULT_AI_SKILL
         result['defaultSkill'] = DEFAULT_AI_SKILL
-        result['note'] += ' خلاصهٔ بازترجمهٔ تکی در حافظهٔ اصلی داستان ذخیره نمی‌شود.'
+        if values.provider != 'free': result['note'] += ' خلاصهٔ بازترجمهٔ تکی در حافظهٔ اصلی داستان ذخیره نمی‌شود.'
+        else: result['note'] += ' بازترجمهٔ تکی پس از پایان همهٔ بخش‌ها ذخیره می‌شود؛ تکرار پس از خطا از ابتداست.'
         return result
 
     @app.post('/api/translate-text/context')
@@ -473,18 +499,28 @@ def create_app() -> FastAPI:
             settings = translations.public_settings()
             policy = provider_policy(settings, values.provider)
             verify_run(state, run, values.skill, policy)
-            if settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']:
+            if values.provider != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
                 raise ProjectChangedError('درصدها پس از تأیید تغییر کرده‌اند.')
             sources = [entry['text'] for entry in chosen]
             text = combine_translation_texts(sources)
             activity.add(f"متن دقیق بازترجمه (بدون هدر احراز هویت):\nدستور سیستم:\n{request.system}\nپیام کاربر:\n{request.user_message(text)}")
-            translated, summary = await run_reported(translations.translate_context, request, text, sources, values.provider, policy, pulse_label='بازترجمه و خلاصه')
+            if values.provider == 'free':
+                translated = await run_reported(translations.translate_free_batch, request, text, sources, values.source_language, policy, pulse_label='بازترجمهٔ رایگان')
+                summary = ''
+            else:
+                translated, summary = await run_reported(translations.translate_context, request, text, sources, values.provider, policy, pulse_label='بازترجمه و خلاصه')
             apply_response(state, run, chosen, translated, summary)
             request, chosen = next_request(run, values.skill)
         return {'text': run['jobs'][0]['accumulated'], 'summary': run['context']}
 
+    def legacy_free_context(values: TranslateRequest) -> ContextPreviewRequest:
+        return ContextPreviewRequest(image_ids=values.image_ids, provider='free', source_language=values.source_language,
+                                     reuse_repeated=values.reuse_repeated if values.reuse_repeated is not None else translations.public_settings()['reuse_repeated'])
+
     @app.post("/api/projects/{project_id}/translation-preview")
     def translation_preview(project_id: str, values: TranslateRequest) -> dict[str, Any]:
+        if values.provider == 'free':
+            return context_preview(project_id, legacy_free_context(values))
         state = project(project_id)
         ids = image_ids(state, values.image_ids)
         settings = translation_settings(values.provider, values.skill)
@@ -494,6 +530,21 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/translate")
     async def run_translation(project_id: str, values: TranslateRequest) -> dict[str, Any]:
+        if values.provider == 'free':
+            options = legacy_free_context(values)
+            run, request, chosen = context_preparation(project(project_id), options)
+            if not chosen:
+                return project(project_id)
+            signature = digest(run)
+            if values.confirmation and values.confirmation != signature:
+                raise HTTPException(409, 'متن یا تنظیمات پس از پیش‌نمایش تغییر کرده است.')
+            started = context_start(project_id, ContextStartRequest(**options.model_dump(), confirmation=signature))
+            completed = started['completed']
+            while True:
+                result = await context_step(project_id, ContextStepRequest(run_id=started['runId'], completed=completed, skill=''))
+                completed = result['completed']
+                if result['done']:
+                    return result['project']
         state = project(project_id)
         expected_updated_at = state.get("updatedAt", "")
         ids = image_ids(state, values.image_ids)
@@ -625,11 +676,20 @@ def create_app() -> FastAPI:
 
     @app.post("/api/translate-text/preview")
     def translate_text_preview(values: TextTranslateRequest) -> dict[str, Any]:
+        if values.provider == 'free':
+            return context_text_preview(ContextTextRequest(text=values.text, source_lines=values.source_lines, source_language=values.source_language, provider='free'))
         plan = build_single_plan(values.text, values.provider, translation_settings(values.provider, values.skill), values.source_lines)
         return plan_preview(plan, values.provider, values.source_language, translation_settings(values.provider, values.skill))
 
     @app.post("/api/translate-text")
     async def translate_text(values: TextTranslateRequest) -> dict[str, str]:
+        if values.provider == 'free':
+            request = ContextTextRequest(text=values.text, source_lines=values.source_lines, source_language=values.source_language, provider='free')
+            preview = context_text_preview(request)
+            if values.confirmation and values.confirmation != preview['signature']:
+                raise HTTPException(409, 'متن یا تنظیمات پس از پیش‌نمایش تغییر کرده است.')
+            result = await context_text_translate(request.model_copy(update={'confirmation': preview['signature']}))
+            return {'text': result['text']}
         if values.confirmation:
             plan = build_single_plan(values.text, values.provider, translation_settings(values.provider, values.skill), values.source_lines)
             expected = plan_signature(plan, values.provider, values.source_language, translation_settings(values.provider, values.skill))

@@ -79,6 +79,27 @@ def _profile_policy(profile: dict[str, Any], *, strict: bool = False) -> dict[st
     }
 
 
+FREE_SERVICES = {
+    "google": {"label": "Google Translate", "source_limit": 1000},
+    "mymemory": {"label": "MyMemory", "source_limit": 500},
+}
+
+
+def _free_policy(name: str, raw: dict[str, Any], *, strict: bool = False) -> dict[str, int]:
+    return {
+        "timeout_seconds": _setting_int(raw.get("timeout_seconds"), 90, 5, 600, strict=strict),
+        "retry_count": _setting_int(raw.get("retry_count"), 0, 0, 5, strict=strict),
+        "retry_wait_seconds": _setting_int(raw.get("retry_wait_seconds"), 20, 0, 300, strict=strict),
+        "source_limit": _setting_int(raw.get("source_limit"), FREE_SERVICES[name]['source_limit'], 1, 100_000, strict=strict),
+    }
+
+
+def _free_settings(raw: Any, *, strict: bool = False) -> dict[str, dict[str, int]]:
+    data = raw if isinstance(raw, dict) else {}
+    return {name: _free_policy(name, data.get(name) if isinstance(data.get(name), dict) else {}, strict=strict)
+            for name in FREE_SERVICES}
+
+
 def split_free_query(text: str, limit: int = MAX_FREE_QUERY_CHARS) -> list[str]:
     """Close at the last sentence end within the limit; never fill it with a partial next sentence."""
     remaining = str(text or "").strip()
@@ -217,7 +238,7 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         # Old AvalAI-default settings were labelled openai even though they used
         # AvalAI's endpoint. Preserve their working destination and credentials.
         provider = _legacy_provider(raw)
-    return {"provider": provider, "providers": providers, "reuse_repeated": raw.get("reuse_repeated", True) if isinstance(raw.get("reuse_repeated", True), bool) else True, "context_percent": _setting_int(raw.get("context_percent"), 15, 0, 100), "skill_percent": _setting_int(raw.get("skill_percent"), 15, 0, 100)}
+    return {"provider": provider, "providers": providers, "reuse_repeated": raw.get("reuse_repeated", True) if isinstance(raw.get("reuse_repeated", True), bool) else True, "context_percent": _setting_int(raw.get("context_percent"), 15, 0, 100), "skill_percent": _setting_int(raw.get("skill_percent"), 15, 0, 100), "free_services": _free_settings(raw.get("free_services"))}
 
 
 def _normalize_model(value: Any, provider: str) -> str:
@@ -256,7 +277,7 @@ def _redact_diagnostic(value: Any, secrets: list[str]) -> str:
 def _safe_error(error: Exception, provider: str, secrets: list[str] | None = None) -> str:
     """Include HTTP status/provider message or transport exception, not request headers."""
     secrets = secrets or []
-    label = AI_PROVIDERS.get(provider, {}).get("label", "سرویس هوش مصنوعی")
+    label = AI_PROVIDERS.get(provider, FREE_SERVICES.get(provider, {})).get("label", "سرویس هوش مصنوعی")
     response = getattr(error, "response", None)
     status = int(getattr(response, "status_code", 0) or 0)
     if status:
@@ -447,7 +468,7 @@ class TranslationService:
         return {
             "provider": provider,
             "reuse_repeated": secret["reuse_repeated"],
-            "context_percent": secret["context_percent"], "skill_percent": secret["skill_percent"],
+            "context_percent": secret["context_percent"], "skill_percent": secret["skill_percent"], "free_services": secret["free_services"],
             "base_url": active["base_url"],
             "model": active["model"],
             "hasApiKey": any(profile["api_key"] for profile in active["profiles"]),
@@ -463,6 +484,8 @@ class TranslationService:
         skill_percent = _setting_int(values.get("skill_percent", current["skill_percent"]), 15, 0, 100, strict=True)
         if context_percent + skill_percent > 100:
             raise ValueError("جمع درصد خلاصه و اسکیل نمی‌تواند از ۱۰۰ بیشتر باشد.")
+        raw_free = values.get("free_services") if isinstance(values.get("free_services"), dict) else {}
+        free_services = _free_settings({name: {**current['free_services'][name], **(raw_free.get(name) if isinstance(raw_free.get(name), dict) else {})} for name in FREE_SERVICES}, strict=True)
         incoming = values.get("providers")
         incoming = incoming if isinstance(incoming, dict) else {}
         providers = _default_providers()
@@ -528,7 +551,7 @@ class TranslationService:
         active = providers[active_name]
         active_key = next((profile["api_key"] for profile in active["profiles"] if profile["api_key"]), "")
         next_value = {
-            "provider": provider, "providers": providers, "reuse_repeated": values.get("reuse_repeated", current["reuse_repeated"]), "context_percent": context_percent, "skill_percent": skill_percent,
+            "provider": provider, "providers": providers, "reuse_repeated": values.get("reuse_repeated", current["reuse_repeated"]), "context_percent": context_percent, "skill_percent": skill_percent, "free_services": free_services,
             # Legacy top-level fields keep older local API clients and backups readable.
             "base_url": active["base_url"], "model": active["model"], "api_key": active_key,
         }
@@ -652,6 +675,56 @@ class TranslationService:
                 if profile_index + 1 < len(profiles):
                     time.sleep(profile['retry_wait_seconds'])
         raise TranslationError("هیچ‌یک از کلیدها پاسخ قابل‌استفاده‌ای ندادند. " + "؛ ".join(failures))
+
+    def translate_free_batch(self, request: Any, text: str, source_texts: list[str], source_language: str, expected_policy: dict[str, Any]) -> str:
+        """Translate one bounded page-local request, with independent retries."""
+        from .context_run import provider_policy
+        from .store import ProjectChangedError
+        request.user_message(text)  # enforce both character and UTF-8 limits
+        settings = self._secret()
+        if provider_policy(settings, 'free') != expected_policy:
+            raise ProjectChangedError('تنظیمات مترجم رایگان پس از تأیید تغییر کرده است؛ درخواست ارسال نشد.')
+        source = LANGUAGES.get(source_language, LANGUAGES['eng'])['source']
+        failures = []
+        services = settings['free_services']
+        for index, (name, info) in enumerate(FREE_SERVICES.items()):
+            profile = services[name]
+            if len(text) > profile['source_limit'] or (name == 'mymemory' and len(text.encode('utf-8')) > 500):
+                raise TranslationError(f"سقف {info['label']} برای این متن رعایت نشده است؛ درخواست ارسال نشد.")
+            def action() -> str:
+                with httpx.Client(timeout=profile['timeout_seconds'], follow_redirects=True) as client:
+                    if name == 'google':
+                        response = client.get('https://translate.googleapis.com/translate_a/single', params={'client':'gtx','sl':source,'tl':'fa','dt':'t','q':text})
+                        response.raise_for_status(); payload = response.json()
+                        try:
+                            translated = ''.join(str(part[0] or '') for part in (payload[0] or [])).strip()
+                        except (IndexError, TypeError, KeyError) as exc:
+                            raise TranslationError('Google Translate پاسخ نامعتبر برگرداند.') from exc
+                    else:
+                        response = client.get('https://api.mymemory.translated.net/get', params={'q':text,'langpair':f"{source.split('-')[0]}|fa"})
+                        response.raise_for_status(); payload = response.json()
+                        if not isinstance(payload, dict) or not isinstance(payload.get('responseData', {}), dict):
+                            raise TranslationError('MyMemory پاسخ نامعتبر برگرداند.')
+                        if payload.get('responseStatus', 200) != 200 or payload.get('quotaFinished'):
+                            raise TranslationError(f"MyMemory: {_redact_diagnostic(payload.get('responseDetails') or payload.get('responseStatus'), [])}")
+                        translated = str((payload.get('responseData') or {}).get('translatedText') or '').strip()
+                        if 'MYMEMORY WARNING' in translated.upper():
+                            raise TranslationError(f'MyMemory: {_redact_diagnostic(translated, [])}')
+                    translated = normalize_translation_text(translated)
+                    distribute_translation(source_texts, translated)
+                    return translated
+            try:
+                emit(f"ترجمه با {info['label']} (انتظار {profile['timeout_seconds']} ثانیه، {profile['retry_count']} تکرار)…")
+                return _run_with_retries(action, profile, name, [])
+            except Exception as exc:
+                detail = _safe_error(exc, name, [])
+                failures.append(f"{info['label']}: {detail}")
+                emit(f"{info['label']} ناموفق بود: {detail}", 'error')
+                if index + 1 < len(FREE_SERVICES):
+                    wait = profile['retry_wait_seconds']
+                    emit(f"همان متن پس از {wait} ثانیه به MyMemory فرستاده می‌شود؛ درخواست قبلی ممکن است پردازش شده باشد.", 'warning')
+                    time.sleep(wait)
+        raise TranslationError('ترجمهٔ رایگان ناموفق بود: ' + '؛ '.join(failures))
 
     def _free(self, text: str, source_language: str) -> str:
         source = LANGUAGES.get(source_language, LANGUAGES["eng"])["source"]
