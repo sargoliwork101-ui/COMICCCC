@@ -766,8 +766,25 @@ def create_app() -> FastAPI:
                 view = pending_results.inspect(store, project_id, entry)
                 if not view['canApply'] or any(row['conflict'] for row in view['rows']):
                     raise PendingResultConflict(entry['id'], 'translation')
-                merged = pending_results.resolve(store, project_id, entry['id'], view['revision'], {})
-                state = merged['project']; run = state[RUN_KEY]; affected = merged['affectedImageIds']; done = merged['done']
+                try:
+                    merged = pending_results.resolve(store, project_id, entry['id'], view['revision'], {})
+                except OSError as exc:
+                    # The AI response is already durable in .pending-results.
+                    # If project.json could not be replaced, surface the pending
+                    # result instead of making the user resend (and pay for) it.
+                    current = store.get(project_id)
+                    current_run = current.get(RUN_KEY)
+                    if isinstance(current_run, dict) and current_run.get('lastPendingResult') == entry['id']:
+                        # The project commit succeeded; only pending-file cleanup
+                        # failed. Treat it as committed and let load() clean up later.
+                        state = current; run = state[RUN_KEY]
+                        affected = sorted({str(ref['imageId']) for part in entry['chosen']
+                                           for ref in run['jobs'][part['job']].get('refs', [])})
+                        done = not any(job.get('remaining') for job in run.get('jobs', []))
+                    else:
+                        raise PendingResultConflict(entry['id'], 'translation') from exc
+                else:
+                    state = merged['project']; run = state[RUN_KEY]; affected = merged['affectedImageIds']; done = merged['done']
             if values.recovery_token: recoveries.pop(values.recovery_token, None)
             activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] == 'free' else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success')
             return {'project': state, 'done': done, 'affectedImageIds': affected, 'completed': run['completed'],
@@ -994,7 +1011,13 @@ def create_app() -> FastAPI:
                                 if target_index != block_index:
                                     mark_reused_translation(block, source_texts[target_index], values.provider, values.source_language, settings)
                     mark_completed_call(call, plan, values.provider, values.source_language, settings, completed_block)
-                    store.save_if_unchanged(state, expected_updated_at)
+                    try:
+                        store.save_if_unchanged(state, expected_updated_at)
+                    except OSError as exc:
+                        # Unlike context-step, this legacy direct route has no
+                        # pending-result record. Return the validated output so
+                        # a transient disk lock cannot silently discard it.
+                        raise ResultStorageError("\n".join(page_result), "") from exc
                     expected_updated_at = state.get("updatedAt", "")
                     completed_ai += 1
                     activity.add(f"درخواست {page_index} از {page_total} ترجمه و ذخیره شد: {label}", "success", page_index / page_total)
@@ -1002,7 +1025,10 @@ def create_app() -> FastAPI:
                 for block, text in zip(blocks, translated_blocks):
                     block["tr"] = text
                     block["richHtml"] = ""
-                store.save_if_unchanged(state, expected_updated_at)
+                try:
+                    store.save_if_unchanged(state, expected_updated_at)
+                except OSError as exc:
+                    raise ResultStorageError("\n".join(translated_blocks), "") from exc
         except Exception as exc:
             if completed_ai:
                 message = f"{completed_ai} درخواست ذخیره شد؛ درخواست ناموفق ذخیره نشد و درخواست‌های پس از آن ارسال نشدند. "

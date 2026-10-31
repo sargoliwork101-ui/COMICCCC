@@ -791,6 +791,29 @@ def test_one_paragraph_accepts_multiline_free_translation(client, monkeypatch):
     assert result.json()['images'][0]['blocks'][0]['tr'] == 'بند اول\nادامهٔ ترجمه'
 
 
+def test_translation_output_is_returned_if_project_save_hits_a_file_lock(client, monkeypatch):
+    import comic_studio.store as store_module
+    from comic_studio.translation import TranslationService
+    project, item = make_project(client)
+    project['images'][0]['blocks'] = [{'id': 1, 'text': 'original', 'tr': 'old translation', 'enabled': True}]
+    route = f"/api/projects/{project['id']}"
+    assert client.put(f'{route}/state', json={'state': project}).status_code == 200
+    assert client.put('/api/ai-settings', json={'provider': 'openai', 'api_key': 'test-key'}).status_code == 200
+    monkeypatch.setattr(TranslationService, 'translate', lambda *args, **kwargs: 'new translation')
+    real_atomic_json = store_module.atomic_json
+
+    def deny_project_replace(path, value):
+        if path.name == 'project.json':
+            raise PermissionError(5, 'Access is denied')
+        return real_atomic_json(path, value)
+
+    monkeypatch.setattr(store_module, 'atomic_json', deny_project_replace)
+    response = client.post(f'{route}/translate', json={'image_ids': [item['id']], 'provider': 'openai'})
+    assert response.status_code == 507
+    assert response.json()['translation'] == 'new translation'
+    assert client.get(route).json()['images'][0]['blocks'][0]['tr'] == 'old translation'
+
+
 def test_translation_does_not_overwrite_edits_made_during_request(client, monkeypatch):
     from comic_studio.store import ProjectStore
     from comic_studio.translation import TranslationService

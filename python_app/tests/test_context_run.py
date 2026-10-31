@@ -457,6 +457,35 @@ def test_context_unrelated_edit_is_merged_without_second_call(tmp_path, monkeypa
         assert len(calls) == 1 and client.get(route+'/pending').json() == []
 
 
+def test_project_file_lock_keeps_ai_translation_pending_for_retry(tmp_path, monkeypatch):
+    import comic_studio.store as store_module
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    with scoped_client(create_app()) as client:
+        route, project, step = _pending_setup(client)
+        monkeypatch.setattr(TranslationService, 'translate_context',
+                            lambda self, request, text, sources, provider, policy: ('\n'.join('новый перевод' for _ in sources), 'новая сводка'))
+        real_atomic_json = store_module.atomic_json
+
+        def deny_project_replace(path, value):
+            if path.name == 'project.json':
+                raise PermissionError(5, 'Access is denied')
+            return real_atomic_json(path, value)
+
+        monkeypatch.setattr(store_module, 'atomic_json', deny_project_replace)
+        response = client.post(route + '/context-step', json=step)
+        assert response.status_code == 409, response.text
+        token = response.json()['pending_id']
+        view = client.get(f'{route}/pending/{token}')
+        assert view.status_code == 200 and view.json()['canApply']
+        assert all(row['result'] == 'новый перевод' for row in view.json()['rows'])
+        assert client.get(route).json()['images'][0]['blocks'][0]['tr'] == 'old'
+
+        monkeypatch.setattr(store_module, 'atomic_json', real_atomic_json)
+        applied = client.post(f'{route}/pending/{token}/resolve', json={'revision': view.json()['revision'], 'choices': {}})
+        assert applied.status_code == 200, applied.text
+        assert applied.json()['project']['images'][0]['blocks'][0]['tr'] == 'новый перевод'
+
+
 def test_context_conflicts_persist_restart_select_keep_and_apply(tmp_path, monkeypatch):
     import os
     from comic_studio.store import ProjectStore
@@ -527,7 +556,8 @@ def test_commit_before_cleanup_never_reapplies_or_resends(tmp_path, monkeypatch)
         original_remove = pending_results.remove
         monkeypatch.setattr(pending_results, 'remove', lambda *a: (_ for _ in ()).throw(OSError('crash after commit')))
         import pytest
-        with pytest.raises(OSError): client.post(route+'/context-step', json=step)
+        committed = client.post(route+'/context-step', json=step)
+        assert committed.status_code == 200, committed.text
         monkeypatch.setattr(pending_results, 'remove', original_remove)
         assert client.get(route).json()['_aiContextRun']['completed'] == 1
         files = list((tmp_path/'projects'/project['id']/'.pending-results').glob('*.json'))

@@ -929,16 +929,16 @@ with pymupdf.open(pdf_path) as document:
     await page.waitForFunction(id=>state.project.id===id,{},recoveryProject.id);
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]'); await page.click('#translationPreviewConfirm');
     await page.waitForFunction(()=>!translationRunning && !document.getElementById('responseRepair').classList.contains('hidden'),{timeout:15000});
-    assert.equal(aiGenerations.length,2,'malformed response is not retried despite configured retries');
+    assert.equal(aiGenerations.length,3,'the malformed response retries according to the configured policy');
     assert.ok((await page.$eval('#responseRepairText',el=>el.value)).includes('خصوصی پاسخ'));
     assert.ok(!(await page.$eval('#translationStatus',el=>el.textContent)).includes('خصوصی پاسخ'));
     assert.equal((await api(base,`/api/projects/${recoveryProject.id}`)).images[0].blocks[0].tr,'صفحه حصار');
     await page.$eval('#responseRepairText',el=>{el.closest('details').open=true;el.value='{}';}); await page.click('#applyResponseRepair');
     await page.waitForFunction(()=>document.getElementById('responseRepairStatus').textContent.includes('معتبر'));
-    assert.equal(aiGenerations.length,2);
+    assert.equal(aiGenerations.length,3);
     await page.$eval('#repairTranslation',el=>{el.value='اصلاح شد';}); await page.$eval('#repairSummary',el=>{el.value='خلاصه';});
     await page.click('#applyResponseFields'); await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
-    assert.equal(aiGenerations.length,2); assert.equal((await api(base,`/api/projects/${recoveryProject.id}`)).images[1].blocks[0].tr,'اصلاح شد');
+    assert.equal(aiGenerations.length,3); assert.equal((await api(base,`/api/projects/${recoveryProject.id}`)).images[1].blocks[0].tr,'اصلاح شد');
     await page.waitForFunction(() => !translationDecisionBusy);
     // Single-block editing exercises the separate continuation path.
     await page.click('#grid .item:nth-child(2) .act button:nth-child(2)'); await page.waitForSelector('#editorDialog[open] #blockList .block-card');
@@ -948,10 +948,10 @@ with pymupdf.open(pdf_path) as document:
     assert.ok(await page.$eval('#translationPreviewRequests', el => el.textContent.includes('BROKEN RESPONSE')), 'unexpected preview: ' + await page.$eval('#translationPreviewRequests', el => el.textContent));
     await page.click('#translationPreviewConfirm');
     await page.waitForFunction(()=>document.getElementById('translationDialog').open && !document.getElementById('responseRepair').classList.contains('hidden'),{timeout:15000});
-    assert.equal(aiGenerations.length,3);
+    assert.equal(aiGenerations.length,5);
     await page.$eval('#repairTranslation',el=>{el.value='تکی اصلاح شد';}); await page.$eval('#repairSummary',el=>{el.value='خلاصه';});
     await page.click('#applyResponseFields'); await page.waitForFunction(()=>!document.getElementById('translationDialog').open,{timeout:15000});
-    assert.equal(aiGenerations.length,3); assert.equal(await page.evaluate(()=>state.project.images[1].blocks[0].tr),'تکی اصلاح شد');
+    assert.equal(aiGenerations.length,5); assert.equal(await page.evaluate(()=>state.project.images[1].blocks[0].tr),'تکی اصلاح شد');
     await page.click('#editorClose'); await page.waitForFunction(()=>!state.editorId);
     console.log('PASS: fenced AI output and manually repaired project/single responses require no extra AI request');
     aiGenerations.length=0; aiSystems.length=0;
