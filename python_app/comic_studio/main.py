@@ -29,6 +29,7 @@ from .exporter import build_images_zip, build_pdf, build_txt, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
 from .ocr_grouping import group_ocr_lines
 from .paths import STATIC_DIR
+from . import pending_results
 from .schemas import (
     AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, ExportRequest, OcrRequest, ProjectCreate,
     SessionRequest, StateUpdate, TextTranslateRequest, TranslateRequest,
@@ -45,6 +46,19 @@ from .translation_plan import (
 )
 
 from .context_run import RUN_KEY, SUMMARY_KEY, apply_response, create_run, digest, next_request, provider_policy, verify_run
+
+
+class ResultStorageError(Exception):
+    def __init__(self, translated: str, summary: str):
+        super().__init__('ذخیرهٔ محلی نتیجه ناموفق بود؛ پیش از بستن برنامه متن دریافتی را کپی کنید. ارسال دوباره ممکن است هزینه داشته باشد.')
+        self.translated, self.summary = translated, summary
+
+
+class PendingResultConflict(Exception):
+    def __init__(self, token: str, kind: str):
+        super().__init__('نتیجه آماده است اما با تغییرات پروژه تعارض دارد؛ نتیجه حفظ شد و به انتخاب شما نیاز دارد.')
+        self.token = token
+        self.kind = kind
 
 
 def create_app() -> FastAPI:
@@ -197,6 +211,16 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": str(exc), "kind": "invalid_context_response", "response_text": exc.response_text,
                              "recovery_token": exc.recovery_token, "response_truncated": exc.response_truncated}, status_code=422, headers={"Cache-Control": "no-store"})
 
+    @app.exception_handler(ResultStorageError)
+    async def result_storage_error(_: Request, exc: ResultStorageError) -> JSONResponse:
+        return JSONResponse({'detail':str(exc), 'kind':'unstored_result', 'translation':exc.translated, 'summary':exc.summary},
+                            status_code=507, headers={'Cache-Control':'no-store'})
+
+    @app.exception_handler(PendingResultConflict)
+    async def pending_conflict(_: Request, exc: PendingResultConflict) -> JSONResponse:
+        return JSONResponse({'detail': str(exc), 'kind':'pending_result', 'pending_id':exc.token, 'pending_kind':exc.kind},
+                            status_code=409, headers={'Cache-Control':'no-store'})
+
     @app.exception_handler(TranslationError)
     async def translation_error(_: Request, exc: TranslationError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=502)
@@ -291,6 +315,40 @@ def create_app() -> FastAPI:
     def update_state(project_id: str, update: StateUpdate) -> dict[str, Any]:
         project(project_id)
         return store.update_state(project_id, update.state)
+
+    @app.get("/api/projects/{project_id}/pending")
+    def pending_list(project_id: str) -> list[dict[str, Any]]:
+        project(project_id)
+        return pending_results.list_pending(store, project_id)
+
+    @app.get("/api/projects/{project_id}/pending/{token}")
+    def pending_view(project_id: str, token: str) -> Response:
+        try:
+            with store._lock:
+                result = pending_results.inspect(store, project_id, pending_results.load(store, project_id, token))
+            return JSONResponse(result, headers={'Cache-Control':'no-store'})
+        except KeyError as exc:
+            raise HTTPException(404, 'نتیجهٔ منتظر پیدا نشد.') from exc
+
+    @app.post("/api/projects/{project_id}/pending/{token}/resolve")
+    def pending_resolve(project_id: str, token: str, values: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        revision = values.get('revision'); choices = values.get('choices')
+        if not isinstance(revision, str) or not isinstance(choices, dict) or any(not isinstance(k, str) or v not in ('keep', 'apply') for k,v in choices.items()):
+            raise HTTPException(400, 'انتخاب‌های رفع تعارض معتبر نیستند.')
+        try:
+            return pending_results.resolve(store, project_id, token, revision, choices)
+        except KeyError as exc:
+            raise HTTPException(404, 'نتیجهٔ منتظر پیدا نشد.') from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.delete("/api/projects/{project_id}/pending/{token}", status_code=204)
+    def pending_delete(project_id: str, token: str) -> Response:
+        try:
+            with store._lock: pending_results.remove(store, project_id, token)
+        except KeyError as exc:
+            raise HTTPException(404, 'نتیجهٔ منتظر پیدا نشد.') from exc
+        return Response(status_code=204)
 
     @app.post("/api/projects/{project_id}/files")
     async def import_files(project_id: str, files: list[UploadFile] = File(...)) -> dict[str, Any]:
@@ -400,8 +458,11 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/ocr")
     async def run_ocr(project_id: str, values: OcrRequest) -> dict[str, Any]:
-        state = project(project_id)
-        expected_updated_at = state.get("updatedAt", "")
+        with store._lock:
+            state = project(project_id)
+            expected_updated_at = state.get("updatedAt", "")
+            baseline = {item['id']: pending_results.ocr_signature(store, state, item['id']) for item in state['images']}
+            original_ocr = {item['id']: '\n'.join(str(b.get('text') or '') for b in item.get('blocks', [])) for item in state['images']}
         engine = registry.get(values.engine)
         if not ENGINE_INFO[values.engine].get("selectable", False):
             raise HTTPException(400, "This model requires its official external runtime and is not a direct comic OCR engine")
@@ -410,6 +471,11 @@ def create_app() -> FastAPI:
         ids = image_ids(state, values.image_ids)
         if not ids:
             raise HTTPException(400, "No images selected")
+        for pending in pending_results.list_pending(store, project_id):
+            if pending['kind'] == 'ocr':
+                entry = pending_results.load(store, project_id, pending['id'])
+                if set(ids).intersection(output['id'] for output in entry['outputs']):
+                    raise PendingResultConflict(pending['id'], 'ocr')
         activity.add(f"خواندن متن در {len(ids)} تصویر آغاز شد")
         completed = 0
         try:
@@ -440,8 +506,17 @@ def create_app() -> FastAPI:
                     activity.add(f"متن خوانده‌شده در «{item['name']}»:\n" + "\n".join(recognized_lines))
                 else:
                     activity.add(f"در «{item['name']}» متنی پیدا نشد", "warning")
-            # Preserve both concurrent edits and old previews if processing or saving fails.
-            store.save_ocr_result(state, expected_updated_at, ids)
+            with store._lock:
+                entry = pending_results.stage(store, project_id, 'ocr', {
+                    'baseline': {i: baseline[i] for i in ids}, 'originals': {i: original_ocr[i] for i in ids},
+                    'overlayMode': state.get('settings', {}).get('overlayMode'),
+                    'outputs': [{'id':item['id'], 'name':item.get('name', ''), 'blocks':item['blocks']} for item in state['images'] if item['id'] in ids],
+                })
+                view = pending_results.inspect(store, project_id, entry)
+                if any(row['conflict'] for row in view['rows']):
+                    raise PendingResultConflict(entry['id'], 'ocr')
+                merged = pending_results.resolve(store, project_id, entry['id'], view['revision'], {})
+                state = merged['project']
         except Exception as exc:
             activity.add(f"خواندن متن ناموفق بود: {exc}", "error")
             raise
@@ -537,6 +612,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/context-start")
     def context_start(project_id: str, values: ContextStartRequest) -> dict[str, Any]:
+        for pending in pending_results.list_pending(store, project_id):
+            if pending['kind'] == 'translation':
+                raise PendingResultConflict(pending['id'], 'translation')
         state = project(project_id); expected = state.get('updatedAt', '')
         run, request, chosen = context_preparation(state, values)
         if values.confirmation != digest(run):
@@ -563,6 +641,9 @@ def create_app() -> FastAPI:
             run = state.get(RUN_KEY)
             if not isinstance(run, dict) or run.get('id') != values.run_id or run.get('completed') != values.completed:
                 raise HTTPException(409, "وضعیت این نوبت عوض شده است؛ پیش از ادامه پروژه را دوباره بررسی کنید.")
+            for pending in pending_results.list_pending(store, project_id):
+                if pending['kind'] == 'translation':
+                    raise PendingResultConflict(pending['id'], 'translation')
             settings = translations.public_settings()
             if run['provider'] != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
                 raise ProjectChangedError('درصدهای خلاصه یا اسکیل تغییر کرده‌اند؛ نوبت متوقف شد.')
@@ -602,10 +683,24 @@ def create_app() -> FastAPI:
                 except InvalidContextResponse as exc:
                     exc.recovery_token = recovery_store({'kind':'project', 'project_id': project_id, 'run_id': values.run_id, 'completed': values.completed, 'updated_at': expected})
                     raise
-            affected = apply_response(state, run, chosen, translated, summary)
-            store.save_if_unchanged(state, expected)
+            with store._lock:
+                wanted = {(str(ref['imageId']), str(ref['blockId'])) for part in chosen for ref in run['jobs'][part['job']]['refs']}
+                originals = {f"{item['id']}:{block.get('id')}": {'text':str(block.get('text') or ''), 'tr':str(block.get('tr') or '')}
+                             for item in state['images'] for block in item.get('blocks', []) if (str(item['id']), str(block.get('id'))) in wanted}
+                try:
+                    entry = pending_results.stage(store, project_id, 'translation', {
+                        'run':copy.deepcopy(run), 'runDigest':digest(run), 'chosen':copy.deepcopy(chosen),
+                        'translated':translated, 'summary':summary, 'originals':originals,
+                        'overlayMode':state.get('settings', {}).get('overlayMode'),
+                    })
+                except (OSError, KeyError) as exc:
+                    raise ResultStorageError(translated, summary) from exc
+                view = pending_results.inspect(store, project_id, entry)
+                if not view['canApply'] or any(row['conflict'] for row in view['rows']):
+                    raise PendingResultConflict(entry['id'], 'translation')
+                merged = pending_results.resolve(store, project_id, entry['id'], view['revision'], {})
+                state = merged['project']; run = state[RUN_KEY]; affected = merged['affectedImageIds']; done = merged['done']
             if values.recovery_token: recoveries.pop(values.recovery_token, None)
-            done = not any(job['remaining'] for job in run['jobs'])
             activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] == 'free' else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success')
             return {'project': state, 'done': done, 'affectedImageIds': affected, 'completed': run['completed'],
                     'sent': {'system': request.system, 'user': request.user_message(text), 'characters': request.character_count(text)}}

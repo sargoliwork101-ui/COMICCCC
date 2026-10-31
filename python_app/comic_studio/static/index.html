@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.52">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.52">
+  <link rel="stylesheet" href="/style.css?v=3.53">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.53">
 </head>
 <body>
   <header class="topbar">
@@ -64,7 +64,7 @@
       <p>ترجمهٔ رایگان یا AI فقط با انتخاب شما به سرویس آنلاین متصل می‌شود.</p>
     </section>
     <section id="result" class="panel result-panel">
-      <div class="row"><strong>وضعیت</strong><span id="jobStatus" role="status">آماده</span><a id="downloadLink" class="bt success hidden" href="#" download>دانلود فایل آماده</a><span class="grow"></span><button id="clearActivityBtn" class="bt clear-activity">پاک‌کردن گزارش</button><span class="muted">PDF · ZIP · TXT</span></div>
+      <div class="row"><strong>وضعیت</strong><span id="jobStatus" role="status">آماده</span><a id="downloadLink" class="bt success hidden" href="#" download>دانلود فایل آماده</a><span class="grow"></span><button id="pendingResultsBtn" class="bt">نتایج منتظر بررسی</button><button id="clearActivityBtn" class="bt clear-activity">پاک‌کردن گزارش</button><span class="muted">PDF · ZIP · TXT</span></div>
       <div class="bar"><div id="jobProgress" class="fill"></div></div>
       <details id="activityDetails" class="activity-details" open>
         <summary>گزارش زندهٔ کارها</summary>
@@ -80,6 +80,14 @@
     <button id="exportTxtBtn" class="bt">TXT</button>
     <button id="exportBtn" class="bt">تنظیمات خروجی</button>
   </footer>
+
+  <dialog id="pendingDialog" class="dlg wide-dialog">
+    <form method="dialog" class="dialog-head"><h2>نتیجه‌های منتظر بررسی</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <p class="hint">نتیجه‌های موقت روی همین دستگاه نگهداری می‌شوند و ممکن است محرمانه باشند؛ در بک‌آپ پروژه نیستند. هر تعارض را مقایسه کنید. انتخاب «حفظ ویرایش» کادر یا صفحهٔ فعلی را دست‌نخورده می‌گذارد؛ در صورت حفظ هر کادر، خلاصهٔ تازه نیز جایگزین خلاصهٔ قبلی نمی‌شود.</p>
+    <div id="pendingList"></div><div id="pendingDetail" class="hidden"></div>
+    <p id="pendingStatus" class="hint diagnostic-message" role="status"></p>
+    <div class="dialog-actions"><button id="pendingCopy" class="bt hidden" type="button">کپی نتیجه</button><button id="pendingDiscard" class="bt danger hidden" type="button">حذف نتیجهٔ منتظر</button><button id="pendingApply" class="bt primary hidden" type="button">ثبت انتخاب‌ها</button></div>
+  </dialog>
 
   <dialog id="ocrDialog" class="dlg small-dialog">
     <form method="dialog" class="dialog-head"><h2>OCR آفلاین</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
@@ -110,7 +118,7 @@
     <p id="translationStatus" class="hint diagnostic-message" role="status">آماده</p>
     <div id="translationErrorChoice" class="hidden">
       <p class="hint">تلاش‌های خودکار تمام شد یا خطایی رخ داد. دوباره تلاش شود یا خطا کپی و کار تمام شود؟ ارسال دوباره ممکن است هزینه داشته باشد؛ در خطای شبکه ممکن است درخواست قبلی هنوز در حال پردازش باشد.</p>
-      <div class="dialog-actions"><button id="retryTranslation" class="bt primary hidden" type="button">تلاش دوباره</button><button id="copyTranslationError" class="bt hidden" type="button">کپی خطا و پایان</button></div>
+      <div class="dialog-actions"><button id="retryTranslation" class="bt primary hidden" type="button">تلاش دوباره</button><button id="copyTranslationError" class="bt hidden" type="button">کپی خطا و پایان</button><button id="copyUnstoredResult" class="bt hidden" type="button">کپی نتیجهٔ ذخیره‌نشده</button></div>
     </div>
     <div id="responseRepair" class="hidden">
       <p class="hint">پاسخ AI دریافت شده ولی قابل ذخیره نبود. می‌توانید ترجمه و خلاصه را در کادرهای زیر اصلاح کنید یا پاسخ خام را ویرایش کنید. ثبت اصلاح‌شده به این درخواست دوباره به AI ارسال نمی‌کند؛ پس از ثبت، درخواست‌های بعدیِ تأییدشده ادامه پیدا می‌کنند. پاسخ و فرصت اصلاح با بستن پنجره، بازنشانی برنامه یا پس از ۳۰ دقیقه از دست می‌رود.</p>
@@ -231,10 +239,10 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.52"></script>
-  <script src="/groups.js?v=3.52"></script>
-  <script src="/rich-sanitize.js?v=3.52"></script>
-  <script src="/rich-editor.js?v=3.52"></script>
-  <script src="/app.js?v=3.52"></script>
+  <script src="/typeset.js?v=3.53"></script>
+  <script src="/groups.js?v=3.53"></script>
+  <script src="/rich-sanitize.js?v=3.53"></script>
+  <script src="/rich-editor.js?v=3.53"></script>
+  <script src="/app.js?v=3.53"></script>
 </body>
 </html>

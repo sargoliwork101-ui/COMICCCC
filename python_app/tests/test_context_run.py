@@ -335,3 +335,130 @@ def test_old_preview_does_not_replace_newer_story_summary(tmp_path, monkeypatch)
         stale = client.post(route+'/context-start',json={**req,'confirmation':old['signature']})
         assert stale.status_code == 409
         assert client.get(route).json()['_aiStorySummary'] == 'خلاصهٔ جدید'
+
+
+def _pending_setup(client):
+    route, project = make_project(client)
+    client.put('/api/ai-settings', json={'provider':'openai','api_key':'key'})
+    req = {'image_ids':[i['id'] for i in project['images']], 'provider':'openai', 'skill':'ok', 'summary':'before', 'reuse_repeated':True}
+    preview = client.post(route + '/context-preview', json=req).json()
+    started = client.post(route + '/context-start', json={**req, 'confirmation':preview['signature']}).json()
+    return route, project, {'run_id':started['runId'], 'completed':0, 'skill':'ok'}
+
+
+def test_context_unrelated_edit_is_merged_without_second_call(tmp_path, monkeypatch):
+    from comic_studio.store import ProjectStore
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    calls = []
+    with scoped_client(create_app()) as client:
+        route, project, step = _pending_setup(client)
+        def fake(self, request, text, sources, provider, policy):
+            calls.append(text); other = ProjectStore(); state = other.get(project['id']); state['name'] = 'new name'; other.save(state)
+            return '\n'.join('translated' for _ in sources), 'new summary'
+        monkeypatch.setattr(TranslationService, 'translate_context', fake)
+        response = client.post(route + '/context-step', json=step)
+        assert response.status_code == 200, response.text
+        assert response.json()['project']['name'] == 'new name'
+        assert response.json()['project']['images'][0]['blocks'][0]['tr'] == 'translated'
+        assert len(calls) == 1 and client.get(route+'/pending').json() == []
+
+
+def test_context_conflicts_persist_restart_select_keep_and_apply(tmp_path, monkeypatch):
+    import os
+    from comic_studio.store import ProjectStore
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    calls = []
+    with scoped_client(create_app()) as client:
+        route, project, step = _pending_setup(client)
+        def fake(self, request, text, sources, provider, policy):
+            calls.append(text); other = ProjectStore(); state = other.get(project['id'])
+            state['images'][0]['blocks'][0]['tr'] = 'edited 1'
+            state['images'][1]['blocks'][0]['tr'] = 'edited 2'
+            other.save(state); return '\n'.join('generated' for _ in sources), 'new summary'
+        monkeypatch.setattr(TranslationService, 'translate_context', fake)
+        response = client.post(route + '/context-step', json=step)
+        assert response.status_code == 409, response.text
+        token = response.json()['pending_id']
+        assert client.post(route + '/context-step', json=step).json()['pending_id'] == token
+        assert len(calls) == 1
+        path = tmp_path/'projects'/project['id']/'.pending-results'/f'{token}.json'
+        assert path.exists()
+        if os.name == 'posix':
+            assert path.stat().st_mode & 0o777 == 0o600
+            assert path.parent.stat().st_mode & 0o777 == 0o700
+    with scoped_client(create_app()) as restarted:
+        assert restarted.get(route+'/pending').json()[0]['id'] == token
+        view = restarted.get(route+'/pending/'+token).json()
+        conflicts = [r for r in view['rows'] if r['conflict']]
+        assert len(conflicts) == 2
+        choices = {conflicts[0]['key']:'keep', conflicts[1]['key']:'apply'}
+        old_revision = view['revision']
+        state = restarted.get(route).json(); state['name'] = 'more recent edit'
+        assert restarted.put(route+'/state', json={'state':state}).status_code == 200
+        assert restarted.post(route+'/pending/'+token+'/resolve', json={'revision':old_revision,'choices':choices}).status_code == 409
+        view = restarted.get(route+'/pending/'+token).json()
+        result = restarted.post(route+'/pending/'+token+'/resolve', json={'revision':view['revision'],'choices':choices})
+        assert result.status_code == 200, result.text
+        state = result.json()['project']
+        assert state['name'] == 'more recent edit'
+        assert state['images'][0]['blocks'][0]['tr'] == 'edited 1'
+        assert state['images'][1]['blocks'][0]['tr'] == 'generated'
+        assert state['_aiStorySummary'] == 'before'
+        assert restarted.get(route+'/pending').json() == [] and not path.exists()
+        assert restarted.post(route+'/pending/'+token+'/resolve', json={'revision':view['revision'],'choices':choices}).status_code == 404
+        assert len(calls) == 1
+
+
+def test_paid_response_storage_failure_is_exposed_without_retry(tmp_path, monkeypatch):
+    from comic_studio import pending_results
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    calls = []
+    monkeypatch.setattr(TranslationService, 'translate_context', lambda *a: calls.append(1) or ('result to copy', 'summary'))
+    with scoped_client(create_app()) as client:
+        route, project, step = _pending_setup(client)
+        monkeypatch.setattr(pending_results, 'stage', lambda *a, **kw: (_ for _ in ()).throw(OSError('disk full')))
+        response = client.post(route+'/context-step', json=step)
+        assert response.status_code == 507 and response.json()['translation'] == 'result to copy'
+        assert response.headers['cache-control'] == 'no-store' and calls == [1]
+        assert client.get(route).json()['_aiContextRun']['completed'] == 0
+
+
+def test_commit_before_cleanup_never_reapplies_or_resends(tmp_path, monkeypatch):
+    from comic_studio import pending_results
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    calls = []
+    monkeypatch.setattr(TranslationService, 'translate_context', lambda self, request, text, sources, *a: calls.append(1) or ('\n'.join('done' for _ in sources), 'summary'))
+    with scoped_client(create_app()) as client:
+        route, project, step = _pending_setup(client)
+        original_remove = pending_results.remove
+        monkeypatch.setattr(pending_results, 'remove', lambda *a: (_ for _ in ()).throw(OSError('crash after commit')))
+        import pytest
+        with pytest.raises(OSError): client.post(route+'/context-step', json=step)
+        monkeypatch.setattr(pending_results, 'remove', original_remove)
+        assert client.get(route).json()['_aiContextRun']['completed'] == 1
+        files = list((tmp_path/'projects'/project['id']/'.pending-results').glob('*.json'))
+        assert len(files) == 1
+        assert client.get(route+'/pending/'+files[0].stem).status_code == 404
+        assert client.get(route+'/pending').json() == []
+        assert client.post(route+'/context-step', json=step).status_code == 409
+        assert calls == [1]
+
+
+def test_simultaneous_same_context_step_only_calls_provider_once(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    entered = threading.Event(); release = threading.Event(); calls = []
+    def fake(self, request, text, sources, *args):
+        calls.append(1); entered.set(); assert release.wait(10)
+        return '\n'.join('done' for _ in sources), 'summary'
+    monkeypatch.setattr(TranslationService, 'translate_context', fake)
+    with scoped_client(create_app()) as client, ThreadPoolExecutor(max_workers=2) as pool:
+        route, project, step = _pending_setup(client)
+        first = pool.submit(client.post, route+'/context-step', json=step)
+        assert entered.wait(10)
+        second = pool.submit(client.post, route+'/context-step', json=step)
+        release.set()
+        assert first.result(timeout=10).status_code == 200
+        assert second.result(timeout=10).status_code == 409
+        assert calls == [1]

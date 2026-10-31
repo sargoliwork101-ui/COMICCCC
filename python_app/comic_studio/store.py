@@ -214,7 +214,6 @@ class ProjectStore:
 
     def import_files(self, project_id: str, files: list[tuple[str, bytes]], pdf_scale: float = 2.0) -> dict[str, Any]:
         state = self.get(project_id)
-        expected_updated_at = state.get("updatedAt", "")
         original_count = len(state["images"])
         try:
             for filename, content in files:
@@ -225,7 +224,22 @@ class ProjectStore:
                     self._import_image(state, filename, content)
                 else:
                     raise ValueError(f"Unsupported file: {filename}")
-            return self.save_if_unchanged(state, expected_updated_at)
+            # Import adds fresh IDs and never changes existing images. Merge
+            # those additions into the latest project under the same lock so
+            # unrelated edits do not discard a long PDF import.
+            with self._lock:
+                try:
+                    current = self.get(project_id)
+                except KeyError as exc:
+                    raise ProjectChangedError("پروژه هنگام ورود فایل حذف شد؛ نتیجه ذخیره نشد.") from exc
+                existing = {item['id'] for item in current['images']}
+                additions = state['images'][original_count:]
+                if any(item['id'] in existing for item in additions):
+                    raise ProjectChangedError("شناسهٔ تصویر واردشده تکراری است؛ فایل‌ها افزوده نشدند.")
+                for item in additions:
+                    item['order'] = self._next_order(current)
+                    current['images'].append(item)
+                return self.save(current)
         except Exception:
             # A failed batch must not leave orphan images (including PDF pages).
             for item in state["images"][original_count:]:
@@ -268,10 +282,17 @@ class ProjectStore:
                 im.load()
         except (OSError, Image.DecompressionBombError) as exc:
             raise ValueError(f"Invalid or unsupported image: {filename}") from exc
-        image_id = new_id()
         extension = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "BMP": ".bmp", "GIF": ".gif"}.get(image_format, ".png")
-        file_name = f"{image_id}{extension}"
-        image_path = project_root(state["id"]) / "images" / file_name
+        # Never overwrite an existing page even if ID generation collides.
+        known = {item['id'] for item in state['images']}
+        for _ in range(100):
+            image_id = new_id()
+            file_name = f"{image_id}{extension}"
+            image_path = project_root(state["id"]) / "images" / file_name
+            if image_id not in known and not any(image_path.parent.glob(f"{image_id}.*")):
+                break
+        else:
+            raise ValueError("Could not allocate a unique image ID")
         try:
             image_path.write_bytes(content)
         except OSError:

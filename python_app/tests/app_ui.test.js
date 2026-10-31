@@ -681,6 +681,22 @@ function check(name, condition) {
   vm.runInContext("appendLocalActivity('NEW JOB')", context);
   check('new activity remains after a manual clear', [...window.document.querySelectorAll('.activity-log')].every((log) => log.textContent.includes('NEW JOB') && !log.textContent.includes('در حال دانلود آزمایشی')));
 
+  const oldFetch = window.fetch; let pendingChoices = null;
+  const pendingId = '12345678901234567890123456789012';
+  window.fetch = async (url, options = {}) => {
+    if (String(url).includes('/pending/')) {
+      if (options.method === 'POST') { pendingChoices = JSON.parse(options.body).choices; return jsonResponse({project: JSON.parse(JSON.stringify(vm.runInContext('state.project', context))), kind:'translation', done:true, affectedImageIds:[]}); }
+      return jsonResponse({id:pendingId, kind:'translation', revision:'rev', canApply:true, rows:[{key:'image-ui:1', name:'page', conflict:true, current:'edited', original:'old', result:'<img src=x onerror=bad()>', source:'source'}], summary:'summary'});
+    }
+    return oldFetch(url, options);
+  };
+  await vm.runInContext(`openPendingResults('${pendingId}')`, context);
+  check('pending conflict shows previous, current and generated text safely', $('pendingDialog').open && $('pendingDetail').textContent.includes('edited') && $('pendingDetail').textContent.includes('old') && $('pendingDetail').textContent.includes('<img') && !$('pendingDetail').querySelector('img'));
+  $('pendingDetail').querySelector('select').value = 'apply';
+  await vm.runInContext('applyPendingResult()', context);
+  check('pending conflict submits explicit selection and closes after success', pendingChoices['image-ui:1'] === 'apply' && !$('pendingDialog').open);
+  window.fetch = oldFetch;
+
   window.dispatchEvent(new window.Event('pagehide'));
   check('closing a tab sends a close beacon', beacons.some((entry) => entry.url === '/api/session/close'));
   window.close();

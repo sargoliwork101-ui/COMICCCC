@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.52"
+    assert health.json()["version"] == "3.53"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -829,10 +829,10 @@ def test_ocr_does_not_overwrite_edits_made_during_request(client, monkeypatch):
 
     monkeypatch.setattr('comic_studio.main.recognize_image', ocr_while_editing)
     response = client.post(f'{route}/ocr', json={'image_ids': [item['id']]})
-    assert response.status_code == 409
+    assert response.status_code == 200, response.text
     saved = client.get(route).json()
-    assert saved['name'] == 'edited during OCR' and saved['images'][0]['blocks'] == []
-    assert client.get(preview).content == png_bytes((320, 200), 'red')
+    assert saved['name'] == 'edited during OCR' and saved['images'][0]['blocks'][0]['text'] == 'new OCR'
+    assert client.get(preview).status_code == 404
 
 
 def test_failed_delete_save_keeps_original_and_rendered_files(client, monkeypatch):
@@ -883,11 +883,12 @@ def test_import_does_not_overwrite_edits_made_during_request(client, monkeypatch
         other_store.save(current)
     monkeypatch.setattr(ProjectStore, '_import_image', import_while_editing)
     result = client.post(f'{route}/files', files=[('files', ('new.png', png_bytes(), 'image/png'))])
-    assert result.status_code == 409, result.text
+    assert result.status_code == 200, result.text
     saved = client.get(route).json()
     assert saved['name'] == 'edited during import'
-    assert [entry['id'] for entry in saved['images']] == [item['id']]
-    assert {p.name for p in image_dir.iterdir()} == before
+    assert len(saved['images']) == 2 and saved['images'][0]['id'] == item['id']
+    assert saved['images'][1]['order'] == 1
+    assert len({p.name for p in image_dir.iterdir()} - before) == 1
 
 
 def test_ai_page_failure_keeps_completed_pages_and_never_sends_later_pages(client, monkeypatch):
@@ -1615,3 +1616,55 @@ def test_unexpected_error_reports_stage_type_and_location_without_keys(tmp_path,
         assert 'RuntimeError' in result.text and 'diagnostic provider broke' in result.text and 'test_app.py' in result.text
         assert 'test-private-key-xyz' not in result.text and '[REDACTED]' in result.text
         assert result.json()['error_id']
+
+
+def test_ocr_real_conflict_persists_and_offers_choice(client, monkeypatch):
+    from comic_studio.store import ProjectStore
+    project, item = make_project(client); route = f"/api/projects/{project['id']}"
+    calls = []
+    def fake(*args):
+        calls.append(1); other = ProjectStore(); state = other.get(project['id'])
+        state['images'][0]['blocks'] = [{'id':7, 'text':'user edit', 'tr':'', 'enabled':True}]
+        other.save(state); return [{'id':1, 'text':'generated OCR', 'enabled':True}]
+    monkeypatch.setattr('comic_studio.main.recognize_image', fake)
+    response = client.post(route+'/ocr', json={'image_ids':[item['id']]})
+    assert response.status_code == 409, response.text
+    token = response.json()['pending_id']
+    assert client.post(route+'/ocr', json={'image_ids':[item['id']]}).json()['pending_id'] == token
+    assert len(calls) == 1
+    view = client.get(route+'/pending/'+token).json()
+    assert view['rows'][0]['conflict'] and view['rows'][0]['current'] == 'user edit'
+    result = client.post(route+'/pending/'+token+'/resolve', json={'revision':view['revision'],'choices':{item['id']:'apply'}})
+    assert result.status_code == 200, result.text
+    assert result.json()['project']['images'][0]['blocks'][0]['text'] == 'generated OCR'
+    assert client.get(route+'/pending').json() == []
+
+
+def test_ocr_crash_cleanup_does_not_delete_later_preview(client, monkeypatch):
+    from comic_studio import pending_results
+    project, item = make_project(client); route = f"/api/projects/{project['id']}"
+    monkeypatch.setattr('comic_studio.main.recognize_image', lambda *a: [{'id':1, 'text':'ocr', 'enabled':True}])
+    original = pending_results.remove
+    monkeypatch.setattr(pending_results, 'remove', lambda *a: (_ for _ in ()).throw(OSError('crash')))
+    with pytest.raises(OSError): client.post(route+'/ocr', json={'image_ids':[item['id']]})
+    monkeypatch.setattr(pending_results, 'remove', original)
+    red = png_bytes((320, 200), 'red')
+    assert client.post(f"{route}/images/{item['id']}/rendered", content=red).status_code == 200
+    assert client.get(route+'/pending').json() == []
+    assert client.get(f"{route}/images/{item['id']}/content?edited=true").content == red
+
+
+def test_pending_result_is_not_in_backup(client, monkeypatch):
+    from comic_studio.store import ProjectStore
+    project, item = make_project(client); route = f"/api/projects/{project['id']}"
+    def fake(*a):
+        s = ProjectStore(); current = s.get(project['id'])
+        current['images'][0]['blocks'] = [{'id':7, 'text':'private user edit'}]; s.save(current)
+        return [{'id':1, 'text':'private staged text', 'enabled':True}]
+    monkeypatch.setattr('comic_studio.main.recognize_image', fake)
+    assert client.post(route+'/ocr', json={'image_ids':[item['id']]}).status_code == 409
+    response = client.post(route+'/backup', json={'drafts':[]})
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert all('.pending-results' not in name for name in archive.namelist())
+        assert b'private staged text' not in archive.read('project.json')
