@@ -5,10 +5,10 @@ import hashlib
 import json
 from typing import Any
 
-from .context_budget import ContextBudget, ContextRequest, FreeRequest, build_context_request
+from .context_budget import ContextBudget, ContextRequest, FreeRequest, build_context_request, request_budget
 from .ocr import LANGUAGES
 from .store import ProjectChangedError
-from .translation import TranslationError, combine_translation_texts, distribute_translation
+from .translation import ContextCapacityError, TranslationError, combine_translation_texts, distribute_translation
 from .translation_plan import safe_line_boundaries, target_snapshot
 
 RUN_KEY = '_aiContextRun'
@@ -68,10 +68,10 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
     if provider == 'free':
         if skill or context:
             raise TranslationError('مترجم رایگان از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
-        maximum_request = FreeRequest(limit)
+        current_request = maximum_request = FreeRequest(limit)
     else:
         budget = ContextBudget(limit, context_percent, skill_percent)
-        build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, context)
+        current_request = build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, context)
         maximum_request = build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, '')
     selected = set(image_ids)
     items = [i for i in sorted(state.get('images', []), key=lambda i: i.get('order', 0)) if i['id'] in selected]
@@ -116,8 +116,17 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
                 else:
                     detail = (f"بخش کامل بعدی {len(first)} نویسه است؛ فضای متن با دستور و اسکیل و بدون خلاصه "
                               f"{maximum_request.source_capacity} نویسه از سقف کل {limit} است.")
-                raise TranslationError(f"در صفحهٔ «{image_name}»، کادر {block_id}: {detail} "
-                                       'مرز امن در سقف پیدا نشد؛ سقف را تغییر دهید یا متن را بررسی کنید. هیچ متنی ارسال نشد.')
+                counts = ({'totalLimit':limit, 'textCapacity':maximum_request.source_capacity, 'byteLimit':500}
+                          if provider == 'free' else request_budget(current_request, skill, context))
+                counts['emptySummaryCapacity'] = maximum_request.source_capacity
+                counts['requiredSourceChars'] = len(first)
+                if provider != 'free':
+                    counts['estimatedTotalForCurrent'] = limit + max(0, len(first) - current_request.source_capacity)
+                    detail += (f" خلاصهٔ فعلی {counts['summaryChars']}، اسکیل {counts['skillChars']}، "
+                               f"دستور ثابت {counts['systemChars']} و برچسب‌ها {counts['labelChars']} نویسه‌اند. "
+                               f"سقف تقریبی لازم با مقادیر فعلی {counts['estimatedTotalForCurrent']} نویسه است؛ بعد از تغییر دوباره بررسی کنید.")
+                raise ContextCapacityError(f"در صفحهٔ «{image_name}»، کادر {block_id}: {detail} "
+                                           'مرز امن در سقف پیدا نشد؛ سقف را تغییر دهید یا متن را بررسی کنید. هیچ متنی ارسال نشد.', counts, getattr(current_request, 'system', ''))
             _, remaining, _ = chunk
             lines = matching_source_lines(lines, remaining)
     return {'provider': provider, 'language': language, 'planningRevision': PLANNING_REVISION, **({'promptVersion': 2} if provider != 'free' else {}),
@@ -190,8 +199,10 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
             block_id = str(job['refs'][0]['blockId'])[:80] if job['refs'] else '—'
             capacity = (f"{request.source_capacity} نویسه و ۵۰۰ بایت" if run['provider'] == 'free'
                         else f"{request.source_capacity} نویسه")
-            raise TranslationError(f"در صفحهٔ «{image_name}»، کادر {block_id}: خط یا جمله در فضای فعلی {capacity} جا نمی‌شود؛ "
-                                   'خلاصه، سقف یا متن OCR را بررسی کنید. این درخواست ارسال نشد.')
+            counts = ({'totalLimit':run['limit'], 'textCapacity':request.source_capacity, 'byteLimit':500}
+                      if run['provider'] == 'free' else request_budget(request, skill, run['context']))
+            raise ContextCapacityError(f"در صفحهٔ «{image_name}»، کادر {block_id}: خط یا جمله در فضای فعلی {capacity} جا نمی‌شود؛ "
+                                       'خلاصه، سقف یا متن OCR را بررسی کنید. این درخواست ارسال نشد.', counts, getattr(request, 'system', ''))
         break
     return request, chosen
 

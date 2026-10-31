@@ -110,6 +110,18 @@ def build_context_request(budget: ContextBudget, language: str, skill: str, prev
     return ContextRequest(system, prefix, available, budget.context_limit, budget.skill_limit, budget.total_limit)
 
 
+def request_budget(request: ContextRequest, skill: str, summary: str) -> dict[str, int]:
+    """Exact code-point accounting of the message text (not protocol overhead)."""
+    skill_length, summary_length = len(skill), len(summary)
+    return {
+        'totalLimit': request.total_limit, 'systemChars': len(request.system) - skill_length,
+        'skillChars': skill_length, 'summaryChars': summary_length,
+        'labelChars': len(request.user_prefix) - summary_length,
+        'textCapacity': request.source_capacity,
+        'skillLimit': request.skill_limit, 'summaryLimit': request.context_limit,
+    }
+
+
 def parse_context_response(response: str, source_texts: list[str], context_limit: int) -> tuple[str, str]:
     """Accept both pieces together only after validating structure and boundaries."""
     def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

@@ -46,6 +46,14 @@ class TranslationError(RuntimeError):
     pass
 
 
+class ContextCapacityError(TranslationError):
+    """Local planning failed before a provider request; counts contain no text."""
+    def __init__(self, message: str, budget: dict[str, Any], system_prompt: str = ''):
+        super().__init__(message)
+        self.budget = budget
+        self.system_prompt = system_prompt
+
+
 class InvalidContextResponse(TranslationError):
     """Received output failed validation; raw text is never included in logs."""
     def __init__(self, message: str, response_text: str):

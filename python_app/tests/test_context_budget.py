@@ -61,3 +61,16 @@ def test_result_requires_both_fields_summary_cap_and_correct_line_mapping():
                  json.dumps({'translation': 'only one line', 'summary': 'valid'})):
         with pytest.raises(TranslationError):
             parse_context_response(data, ['one', 'two'], 150)
+
+
+def test_budget_counts_each_part_exactly_with_and_without_summary():
+    from comic_studio.context_budget import request_budget
+    budget = ContextBudget(900)
+    for summary in ('', 'شخصیت به خانه رسید'):
+        request = build_context_request(budget, 'English', 'ترجمه روان', summary)
+        info = request_budget(request, 'ترجمه روان', summary)
+        assert info['summaryChars'] == len(summary)
+        assert info['skillChars'] == len('ترجمه روان')
+        assert sum(info[key] for key in ('systemChars','skillChars','summaryChars','labelChars','textCapacity')) == 900
+        assert info['textCapacity'] == request.source_capacity
+        assert request.character_count('x'*info['textCapacity']) == 900

@@ -37,7 +37,7 @@ from .schemas import (
 from .sessions import SessionManager
 from .store import ProjectChangedError, ProjectStore
 from .translation import (
-    TranslationError, InvalidContextResponse, TranslationService, combine_translation_texts,
+    TranslationError, ContextCapacityError, InvalidContextResponse, TranslationService, combine_translation_texts,
     distribute_translation, normalize_ai_skill, context_uses_json, _redact_diagnostic,
 )
 from .translation_plan import (
@@ -223,6 +223,8 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(TranslationError)
     async def translation_error(_: Request, exc: TranslationError) -> JSONResponse:
+        if isinstance(exc, ContextCapacityError):
+            return JSONResponse({'detail':str(exc), 'kind':'translation_capacity', 'budget':exc.budget, 'system_prompt':exc.system_prompt}, status_code=502, headers={'Cache-Control':'no-store'})
         return JSONResponse({"detail": str(exc)}, status_code=502)
 
     @app.exception_handler(ProjectChangedError)
@@ -608,6 +610,9 @@ def create_app() -> FastAPI:
         run, request, chosen = context_preparation(project(project_id), values)
         result = context_view(run, request, chosen, values.provider)
         result['skill'] = values.skill
+        if values.provider != 'free':
+            from .context_budget import request_budget
+            result['budget'] = request_budget(request, values.skill, run['context'])
         from .translation import DEFAULT_AI_SKILL
         result['defaultSkill'] = DEFAULT_AI_SKILL
         return result
@@ -727,6 +732,9 @@ def create_app() -> FastAPI:
         state, run, request, chosen = prepare_context_text(values)
         result = context_view(run, request, chosen, values.provider)
         result['skill'] = values.skill; result['singleContext'] = True
+        if values.provider != 'free':
+            from .context_budget import request_budget
+            result['budget'] = request_budget(request, values.skill, run['context'])
         from .translation import DEFAULT_AI_SKILL
         result['defaultSkill'] = DEFAULT_AI_SKILL
         if values.provider != 'free': result['note'] += ' خلاصهٔ بازترجمهٔ تکی در حافظهٔ اصلی داستان ذخیره نمی‌شود.'

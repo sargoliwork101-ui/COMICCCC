@@ -909,12 +909,13 @@ with pymupdf.open(pdf_path) as document:
     await api(base,`/api/projects/${badProject.id}/state`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:badProject})});
     await page.evaluate(async id=>{await refreshProjectList();const el=document.getElementById('projectSelect');el.value=id;el.dispatchEvent(new Event('change',{bubbles:true}));},badProject.id);
     await page.waitForFunction(id=>state.project.id===id,{},badProject.id);
-    await page.click('#translateBtn'); await page.waitForSelector('#translationDialog[open]');
-    const preparationError=await page.$eval('#translationStatus',el=>el.textContent);
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    const preparationError=await page.$eval('#translationPreviewError',el=>el.textContent);
     assert.ok(preparationError.includes('context-preview') && preparationError.includes('HTTP 502') && preparationError.includes('ارسال نشد'));
-    assert.equal(await page.$eval('#copyTranslationError',el=>el.classList.contains('hidden')),false);
-    await page.keyboard.press('Escape');
-    console.log('PASS: preflight translation errors show a persistent, copyable stage and HTTP diagnostic');
+    assert.equal(await page.$eval('#copyTranslationPreviewError',el=>el.classList.contains('hidden')),false);
+    assert.ok(await page.$eval('#translationBudget',el=>el.textContent.includes('۵۰۰') || el.textContent.includes('500')));
+    await page.click('#translationPreviewCancel');
+    console.log('PASS: free preflight errors stay copyable in the preview without sending');
 
 
 
@@ -1099,6 +1100,33 @@ with pymupdf.open(pdf_path) as document:
     await page.click('#translationPreviewCancel');
     await page.evaluate(value => localStorage.setItem(`comic-studio-ai-skill:${state.project.id}`, value), defaultSkill);
     console.log('PASS: overlong saved skill is shown as an error and new typing obeys its percentage cap');
+
+    // User's 715-character line case: capacity errors must not hide the skill
+    // or suggest that an empty first summary consumed the available space.
+    let capacityProject = await api(base, '/api/projects', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Capacity diagnostic'})});
+    const capacityFiles=new FormData(); capacityFiles.append('files',new Blob([fs.readFileSync(source)],{type:'image/png'}),'capacity.png');
+    capacityProject=await api(base,`/api/projects/${capacityProject.id}/files`,{method:'POST',body:capacityFiles});
+    capacityProject.images[0].blocks=[makeBlock(34,'X'.repeat(715))];
+    await api(base,`/api/projects/${capacityProject.id}/state`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:capacityProject})});
+    const settings=await api(base,'/api/ai-settings');
+    settings.providers.openai.profiles[0].source_limit=900;
+    await api(base,'/api/ai-settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(settings)});
+    await page.evaluate(async id=>{await loadAiSettings(); await refreshProjectList();const el=document.getElementById('projectSelect');el.value=id;el.dispatchEvent(new Event('change',{bubbles:true}));},capacityProject.id);
+    await page.waitForFunction(id=>state.project.id===id,{},capacityProject.id);
+    await page.evaluate(()=>waitForProjectLoads());
+    const beforeCapacity=aiGenerations.length;
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    assert.equal(await page.$eval('#translationContext',el=>el.value),'');
+    assert.ok(await page.$eval('#translationSkill',el=>el.value.includes('ترجمه')));
+    const capacityDisplay=await page.$eval('#translationBudget',el=>el.textContent);
+    assert.ok(capacityDisplay.includes('900') && capacityDisplay.includes('خلاصه: 0') && capacityDisplay.includes('اسکیل:'));
+    assert.ok(await page.$eval('#translationPreviewError',el=>el.textContent.includes('715') && el.textContent.includes('34')));
+    assert.ok(await page.$eval('#translationPreviewSystem',el=>el.textContent.includes('Guidance:')));
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(()=>!document.getElementById('translationPreviewConfirm').disabled);
+    assert.equal(aiGenerations.length,beforeCapacity);
+    await page.click('#translationPreviewCancel');
+    console.log('PASS: real AI preflight capacity error shows skill, zero initial summary and a copyable exact breakdown without sending');
 
     // A cancelled refresh may fail after a different preview has opened.
     await page.evaluate(() => {

@@ -188,3 +188,85 @@ def test_single_box_retranslation_uses_same_safe_ocr_boundaries(provider, tmp_pa
         assert result.status_code == 200, result.text
         assert len(seen) >= 2 and ' '.join(' '.join(seen).split()) == ' '.join(text.split())
         assert result.json()['text'].count('ترجمه') == len(seen)
+
+
+def test_capacity_error_reports_actual_budget_and_first_summary_zero(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path)); calls = []
+    monkeypatch.setattr(TranslationService, 'translate_context', lambda *a: calls.append(1))
+    with scoped_client(create_app()) as client:
+        route, project = make_project(client)
+        project['images'][0]['blocks'] = [{'id':34, 'text':'A'*715, 'tr':'old', 'enabled':True}]
+        client.put(route+'/state', json={'state':project})
+        client.put('/api/ai-settings', json={'provider':'openai', 'providers':{'openai':{'profiles':[{'id':'key','api_key':'key','source_limit':900}]}}})
+        req = {'image_ids':[project['images'][0]['id']], 'provider':'openai', 'skill':'راهنمای نمونه', 'summary':''}
+        result = client.post(route+'/context-preview', json=req)
+        assert result.status_code == 502 and not calls
+        data = result.json(); counts = data['budget']
+        assert data['kind'] == 'translation_capacity' and result.headers['cache-control'] == 'no-store'
+        assert counts['summaryChars'] == 0 and counts['skillChars'] == len(req['skill'])
+        assert sum(counts[key] for key in ('systemChars','skillChars','summaryChars','labelChars','textCapacity')) == 900
+        assert counts['emptySummaryCapacity'] == counts['textCapacity'] and counts['requiredSourceChars'] == 715
+        assert counts['estimatedTotalForCurrent'] == 900 + 715 - counts['textCapacity']
+        assert 'راهنمای نمونه' in data['system_prompt'] and 'خلاصهٔ فعلی 0' in data['detail']
+        with_summary = client.post(route+'/context-preview', json={**req,'summary':'یک خلاصه'})
+        assert with_summary.status_code == 502 and not calls
+        newer = with_summary.json()['budget']
+        assert newer['summaryChars'] == len('یک خلاصه')
+        assert newer['textCapacity'] < counts['textCapacity']
+        assert newer['emptySummaryCapacity'] == counts['textCapacity']
+
+
+def test_successful_first_preview_shows_no_context_then_generated_summary_is_used(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path)); sent=[]
+    def fake(self, request, text, sources, provider, policy):
+        sent.append(request.user_prefix)
+        return '\n'.join('متن' for _ in sources), 'خلاصهٔ تولیدشده'
+    monkeypatch.setattr(TranslationService, 'translate_context', fake)
+    with scoped_client(create_app()) as client:
+        route, project = make_project(client)
+        client.put('/api/ai-settings', json={'provider':'openai','api_key':'key'})
+        req={'image_ids':[i['id'] for i in project['images']], 'provider':'openai', 'skill':'راهنما', 'summary':'', 'reuse_repeated':False}
+        preview=client.post(route+'/context-preview', json=req)
+        assert preview.status_code == 200, preview.text
+        assert preview.json()['budget']['summaryChars'] == 0
+        assert 'Context:' not in preview.json()['requests'][0]['text'] and not sent
+        start=client.post(route+'/context-start', json={**req,'confirmation':preview.json()['signature']}).json()
+        for n in range(2):
+            response=client.post(route+'/context-step', json={'run_id':start['runId'],'completed':n,'skill':req['skill']})
+            assert response.status_code==200, response.text
+        assert len(sent)==2 and 'Context:' not in sent[0] and 'خلاصهٔ تولیدشده' in sent[1]
+
+
+def test_later_summary_capacity_failure_is_visible_and_resume_does_not_repeat_paid_step(tmp_path, monkeypatch):
+    from comic_studio.context_budget import ContextBudget, build_context_request
+    from comic_studio.translation import DEFAULT_AI_SKILL
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path)); calls=[]
+    def fake(self, request, text, sources, provider, policy):
+        calls.append(text)
+        return 'ترجمه', 's'*135
+    monkeypatch.setattr(TranslationService, 'translate_context', fake)
+    with scoped_client(create_app()) as client:
+        route, project = make_project(client)
+        empty = build_context_request(ContextBudget(900), 'English', DEFAULT_AI_SKILL, '')
+        project['images'][0]['blocks']=[{'id':1,'text':'first page','tr':'old','enabled':True}]
+        project['images'][1]['blocks']=[{'id':2,'text':'Z'*(empty.source_capacity-1),'tr':'old','enabled':True}]
+        client.put(route+'/state',json={'state':project})
+        client.put('/api/ai-settings',json={'provider':'openai','providers':{'openai':{'profiles':[{'id':'a','api_key':'key','source_limit':900}]}}})
+        req={'image_ids':[i['id'] for i in project['images']],'provider':'openai','skill':DEFAULT_AI_SKILL,'summary':'','reuse_repeated':False}
+        preview=client.post(route+'/context-preview',json=req).json()
+        start=client.post(route+'/context-start',json={**req,'confirmation':preview['signature']}).json()
+        step={'run_id':start['runId'],'completed':0,'skill':DEFAULT_AI_SKILL}
+        first=client.post(route+'/context-step',json=step)
+        assert first.status_code==200 and not first.json()['done'] and calls==['first page']
+        blocked=client.post(route+'/context-step',json={**step,'completed':1})
+        assert blocked.status_code==502 and blocked.json()['kind']=='translation_capacity'
+        assert blocked.json()['budget']['summaryChars']==135 and calls==['first page']
+        assert client.get(route).json()['_aiContextRun']['completed']==1
+        resume={**req,'resume':True,'summary':''}
+        preview=client.post(route+'/context-preview',json=resume)
+        assert preview.status_code==200 and preview.json()['budget']['summaryChars']==0
+        resumed=client.post(route+'/context-start',json={**resume,'confirmation':preview.json()['signature']})
+        assert resumed.status_code==200 and resumed.json()['completed']==1
+        final=client.post(route+'/context-step',json={**step,'completed':1})
+        assert final.status_code==200 and final.json()['done']
+        assert calls==['first page','Z'*(empty.source_capacity-1)]

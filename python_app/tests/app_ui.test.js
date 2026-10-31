@@ -125,6 +125,8 @@ window.fetch = async (url, options = {}) => {
     if (previewFailure === 'network') throw new TypeError('simulated connection failure');
     if (previewFailure === 'server') return jsonResponse({detail:'simulated preview outage'},503);
     if (previewFailure === 'validation') return jsonResponse({detail:[{loc:['body','response'],msg:'too long',input:'private-response-data'}]},422);
+    if (previewFailure === 'capacity') return jsonResponse({detail:'page.png کادر 34 طولانی است', kind:'translation_capacity', budget:{totalLimit:900,systemChars:350,skillChars:93,summaryChars:0,labelChars:20,textCapacity:437,skillLimit:135,summaryLimit:135,emptySummaryCapacity:437,requiredSourceChars:715}, system_prompt:'دستور و اسکیل'},502);
+    if (previewFailure === 'capacity-success') return jsonResponse({...makeTranslationPreview(request),contextMode:true,skill:request.skill,summary:request.summary,skillLimit:135,contextLimit:135,budget:{totalLimit:900,systemChars:350,skillChars:request.skill.length,summaryChars:request.summary.length,labelChars:20,textCapacity:900-350-request.skill.length-request.summary.length-20}});
     return jsonResponse(makeTranslationPreview(request));
   }
   if (pathname === `/api/projects/${project.id}/context-start`) {
@@ -680,6 +682,26 @@ function check(name, condition) {
   check('clear button empties every activity view and the server feed', activityClears === clearsBeforeButton + 1 && [...window.document.querySelectorAll('.activity-log')].every((log) => log.textContent === ''));
   vm.runInContext("appendLocalActivity('NEW JOB')", context);
   check('new activity remains after a manual clear', [...window.document.querySelectorAll('.activity-log')].every((log) => log.textContent.includes('NEW JOB') && !log.textContent.includes('در حال دانلود آزمایشی')));
+
+  vm.runInContext("state.ai.provider = 'openrouter'; state.project._aiStorySummary = 'old optional summary'; delete state.project._aiContextRun", context);
+  previewFailure = 'capacity'; const beforeCapacityCalls = translationCalls.length;
+  await vm.runInContext('runTranslation()', context);
+  check('capacity errors still show AI skill and an initially empty summary before any send', $('translationPreviewDialog').open && !$('translationSkillWrap').classList.contains('hidden') && $('translationSkill').value.length > 0 && $('translationContext').value === '' && $('translationPreviewError').textContent.includes('کادر 34') && translationCalls.length === beforeCapacityCalls);
+  check('capacity breakdown explicitly shows zero summary and real budget', $('translationBudget').textContent.includes('خلاصه: 0') && $('translationBudget').textContent.includes('اسکیل: 93') && $('translationBudget').textContent.includes('437') && !$('translationPreviewConfirm').disabled);
+  $('translationPreviewConfirm').click(); await sleep(20);
+  check('rechecking a blocked preview cannot send to AI', $('translationPreviewDialog').open && translationCalls.length === beforeCapacityCalls && $('translationPreviewError').textContent.includes('کادر 34'));
+  $('translationContextRestore').click();
+  check('previous story context is only used explicitly in a project with no completed run', $('translationContext').value === 'old optional summary');
+  $('translationContext').value = ''; $('translationContext').dispatchEvent(new window.Event('input', {bubbles:true}));
+  $('translationSkill').value = 'short'; $('translationSkill').dispatchEvent(new window.Event('input', {bubbles:true}));
+  previewFailure = 'capacity-success'; $('translationPreviewConfirm').click(); await sleep(20);
+  check('editing skill rebuilds the preview but still does not send', $('translationPreviewDialog').open && $('translationSkill').value === 'short' && $('translationPreviewRequests').textContent.length > 0 && $('translationPreviewConfirm').textContent.includes('تأیید') && translationCalls.length === beforeCapacityCalls);
+  $('translationPreviewCancel').click();
+  vm.runInContext("state.project._aiContextRun = {completed:0, context:'approved earlier', provider:'openrouter', imageIds:['image-ui'], jobs:[{remaining:'yes'}]}", context);
+  previewFailure = 'capacity-success'; await vm.runInContext('runTranslation()', context);
+  check('resuming an uncompleted run keeps its previously approved summary', $('translationContext').value === 'approved earlier' && $('translationContextResume').checked && translationCalls.length === beforeCapacityCalls);
+  $('translationPreviewCancel').click(); previewFailure = null;
+  vm.runInContext("delete state.project._aiStorySummary; delete state.project._aiContextRun; state.ai.provider = 'free'", context);
 
   const oldFetch = window.fetch; let pendingChoices = null;
   const pendingId = '12345678901234567890123456789012';
