@@ -50,6 +50,8 @@ TRANSLATION_SEPARATOR = "\u241e"
 MAX_FREE_QUERY_CHARS = 500
 DEFAULT_AI_TIMEOUT = 90
 DEFAULT_AI_RETRIES = 0
+DEFAULT_AI_RETRY_WAIT = 20
+MAX_AI_RETRY_WAIT = 300
 MIN_AI_TIMEOUT, MAX_AI_TIMEOUT = 5, 600
 MAX_AI_RETRIES = 5
 
@@ -68,6 +70,7 @@ def _profile_policy(profile: dict[str, Any], *, strict: bool = False) -> dict[st
     return {
         "timeout_seconds": _setting_int(profile.get("timeout_seconds"), DEFAULT_AI_TIMEOUT, MIN_AI_TIMEOUT, MAX_AI_TIMEOUT, strict=strict),
         "retry_count": _setting_int(profile.get("retry_count"), DEFAULT_AI_RETRIES, 0, MAX_AI_RETRIES, strict=strict),
+        "retry_wait_seconds": _setting_int(profile.get("retry_wait_seconds"), DEFAULT_AI_RETRY_WAIT, 0, MAX_AI_RETRY_WAIT, strict=strict),
     }
 
 
@@ -209,7 +212,7 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         # Old AvalAI-default settings were labelled openai even though they used
         # AvalAI's endpoint. Preserve their working destination and credentials.
         provider = _legacy_provider(raw)
-    return {"provider": provider, "providers": providers}
+    return {"provider": provider, "providers": providers, "reuse_repeated": raw.get("reuse_repeated", True) if isinstance(raw.get("reuse_repeated", True), bool) else True}
 
 
 def _normalize_model(value: Any, provider: str) -> str:
@@ -303,8 +306,9 @@ def _run_with_retries(action: Any, profile: dict[str, Any], provider: str, secre
         except Exception as exc:
             if not _retryable(exc) or attempt >= retries:
                 raise
-            emit(f"تلاش {attempt + 1} ناموفق بود: {_safe_error(exc, provider, secrets)}؛ تکرار {attempt + 1} از {retries} برای همین API (ممکن است هزینه تکرار شود).", "warning")
-            time.sleep(min(2 ** attempt, 8))
+            wait = profile.get("retry_wait_seconds", DEFAULT_AI_RETRY_WAIT)
+            emit(f"تلاش {attempt + 1} ناموفق بود: {_safe_error(exc, provider, secrets)}؛ پس از {wait} ثانیه، تکرار {attempt + 1} از {retries} برای همین API (ممکن است هزینه تکرار شود).", "warning")
+            time.sleep(wait)
     raise AssertionError("unreachable")
 
 
@@ -428,6 +432,7 @@ class TranslationService:
             }
         return {
             "provider": provider,
+            "reuse_repeated": secret["reuse_repeated"],
             "base_url": active["base_url"],
             "model": active["model"],
             "hasApiKey": any(profile["api_key"] for profile in active["profiles"]),
@@ -481,7 +486,7 @@ class TranslationService:
                             "id": profile_id,
                             "name": str(item.get("name") or previous.get("name") or "").strip()[:160],
                             "api_key": key,
-                            **_profile_policy({**_profile_policy(previous), **{k: item[k] for k in ("timeout_seconds", "retry_count") if k in item}}, strict=True),
+                            **_profile_policy({**_profile_policy(previous), **{k: item[k] for k in ("timeout_seconds", "retry_count", "retry_wait_seconds") if k in item}}, strict=True),
                         })
                     config["profiles"] = profiles
                 elif name == provider and "api_key" in values:
@@ -504,7 +509,7 @@ class TranslationService:
         active = providers[active_name]
         active_key = next((profile["api_key"] for profile in active["profiles"] if profile["api_key"]), "")
         next_value = {
-            "provider": provider, "providers": providers,
+            "provider": provider, "providers": providers, "reuse_repeated": values.get("reuse_repeated", current["reuse_repeated"]),
             # Legacy top-level fields keep older local API clients and backups readable.
             "base_url": active["base_url"], "model": active["model"], "api_key": active_key,
         }
@@ -540,7 +545,7 @@ class TranslationService:
                 raise TranslationError(f"برای {AI_PROVIDERS[selected]['label']} حداقل یک کلید API معتبر وارد کنید.")
             failures: list[str] = []
             secrets = [p["api_key"] for c in settings["providers"].values() for p in c["profiles"] if p["api_key"]]
-            for profile in profiles:
+            for profile_index, profile in enumerate(profiles):
                 name = _redact_diagnostic(profile["profile_name"], secrets)
                 emit(f"ترجمه با {AI_PROVIDERS[selected]['label']} و {name} (انتظار {profile['timeout_seconds']} ثانیه، {profile['retry_count']} تکرار)…")
                 def request_translation() -> str:
@@ -563,6 +568,10 @@ class TranslationService:
                         raise TranslationError(f"ارتباط {name} قطع شد (سقف انتظار هر مرحله {profile['timeout_seconds']} ثانیه، حداکثر {profile['retry_count']} تکرار)؛ ممکن است سرویس درخواست را پردازش یا هزینه را حساب کرده باشد. کلید بعدی خودکار امتحان نشد. جزئیات واقعی: {message}{previous}") from exc
                     failures.append(f"{name}: {message}")
                     emit(f"تلاش با {name} ناموفق بود: {message}", "error")
+                    if profile_index + 1 < len(profiles):
+                        wait = profile["retry_wait_seconds"]
+                        emit(f"تلاش با کلید بعدی پس از {wait} ثانیه انجام می‌شود؛ ممکن است هزینه تکرار شود.", "warning")
+                        time.sleep(wait)
             raise TranslationError("هیچ‌یک از کلیدهای این سرویس پاسخ قابل‌استفاده‌ای ندادند. " + "؛ ".join(failures))
         else:
             raise TranslationError("Unknown translation provider")

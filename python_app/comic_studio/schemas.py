@@ -26,6 +26,8 @@ class OcrRequest(BaseModel):
 
 class TranslateRequest(BaseModel):
     call_id: str | None = None
+    call_image_id: str | None = None
+    reuse_repeated: bool | None = None
     batch_index: int | None = Field(default=None, ge=1)
     batch_total: int | None = Field(default=None, ge=1)
     image_ids: list[str] = Field(default_factory=list)
@@ -42,6 +44,7 @@ class TextTranslateRequest(BaseModel):
 
 
 class AiSettings(BaseModel):
+    reuse_repeated: bool | None = None
     provider: str = "free"
     base_url: str | None = None
     model: str | None = None

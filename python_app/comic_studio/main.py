@@ -29,7 +29,7 @@ from .translation import (
     distribute_translation,
 )
 from .translation_plan import (
-    AI_PARTS_KEY, build_project_plan, build_single_plan, call_plan, mark_completed_call, part_fingerprint,
+    AI_PARTS_KEY, AI_REUSE_KEY, build_project_plan, build_single_plan, call_plan, mark_completed_call, mark_reused_translation, part_fingerprint,
     plan_preview, plan_signature, saved_call,
 )
 
@@ -322,15 +322,19 @@ def create_app() -> FastAPI:
     def translation_preview(project_id: str, values: TranslateRequest) -> dict[str, Any]:
         state = project(project_id)
         ids = image_ids(state, values.image_ids)
-        plan = build_project_plan(state, ids, values.provider)
-        return plan_preview(plan, values.provider, values.source_language, translations.public_settings())
+        settings = translations.public_settings()
+        reuse = values.reuse_repeated if values.reuse_repeated is not None else settings.get("reuse_repeated", True)
+        plan = build_project_plan(state, ids, values.provider, reuse, values.source_language, settings)
+        return plan_preview(plan, values.provider, values.source_language, settings)
 
     @app.post("/api/projects/{project_id}/translate")
     async def run_translation(project_id: str, values: TranslateRequest) -> dict[str, Any]:
         state = project(project_id)
         expected_updated_at = state.get("updatedAt", "")
         ids = image_ids(state, values.image_ids)
-        plan = build_project_plan(state, ids, values.provider)
+        settings = translations.public_settings()
+        reuse = values.reuse_repeated if values.reuse_repeated is not None else settings.get("reuse_repeated", True)
+        plan = build_project_plan(state, ids, values.provider, reuse, values.source_language, settings)
         items, blocks = plan["items"], plan["blocks"]
         if not blocks:
             activity.add("در تصاویر انتخاب‌شده متن فعالی برای ترجمه نیست", "warning")
@@ -338,9 +342,10 @@ def create_app() -> FastAPI:
         calls_to_run = plan["calls"]
         signed_plan = plan
         if values.call_id is not None:
-            if values.provider == "free" or len(ids) != 1:
-                raise HTTPException(400, "A task requires one AI page")
-            calls_to_run = [call for call in plan["calls"] if call.get("call_id") == values.call_id]
+            if values.provider == "free" or (len(ids) != 1 and not values.call_image_id):
+                raise HTTPException(400, "An AI task needs its page ID")
+            task_image_id = values.call_image_id or ids[0]
+            calls_to_run = [call for call in plan["calls"] if call.get("call_id") == values.call_id and call.get("image_id") == task_image_id]
             if len(calls_to_run) != 1:
                 raise HTTPException(409, "بخش انتخاب‌شده تغییر کرده است؛ پیش‌نمایش تازه بگیرید.")
             signed_plan = call_plan(plan, calls_to_run[0])
@@ -415,13 +420,17 @@ def create_app() -> FastAPI:
                             output = saved["parts"]["0"]
                             for i, join in enumerate(call["joins"], start=1):
                                 output += join + saved["parts"][str(i)]
-                            block["tr"] = output; block["richHtml"] = ""; block.pop(AI_PARTS_KEY, None)
+                            block["tr"] = output; block["richHtml"] = ""; block.pop(AI_PARTS_KEY, None); block.pop(AI_REUSE_KEY, None)
+                            page_result = [output]
                             completed_block = True
-                    else:
-                        for block_index, text in zip(call["indices"], page_result):
-                            blocks[block_index]["tr"] = text
-                            blocks[block_index]["richHtml"] = ""
-                            blocks[block_index].pop(AI_PARTS_KEY, None)
+                    if completed_block:
+                        for block_index, target_indices, text in zip(call["indices"], call.get("targets", [[i] for i in call["indices"]]), page_result):
+                            for target_index in target_indices:
+                                block = blocks[target_index]
+                                block["tr"] = text; block["richHtml"] = ""
+                                block.pop(AI_PARTS_KEY, None); block.pop(AI_REUSE_KEY, None)
+                                if target_index != block_index:
+                                    mark_reused_translation(block, source_texts[target_index], values.provider, values.source_language, settings)
                     mark_completed_call(call, plan, values.provider, values.source_language, settings, completed_block)
                     store.save_if_unchanged(state, expected_updated_at)
                     expected_updated_at = state.get("updatedAt", "")

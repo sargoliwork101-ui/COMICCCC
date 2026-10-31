@@ -629,7 +629,7 @@ async function runTranslation() {
   try {
     await saveProject();
     const provider = state.ai?.provider || 'free';
-    const preview = await api(`/api/projects/${state.project.id}/translation-preview`, jsonOptions('POST', { image_ids: ids, provider, source_language: $('ocrLanguage').value }));
+    const preview = await api(`/api/projects/${state.project.id}/translation-preview`, jsonOptions('POST', { image_ids: ids, provider, source_language: $('ocrLanguage').value, reuse_repeated: state.ai?.reuse_repeated !== false }));
     showTranslationRequestPreview(preview, () => performTranslation(ids, provider, preview));
   } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
 }
@@ -648,12 +648,12 @@ async function performTranslation(ids, provider, preview) {
           $('translationStatus').textContent = `درخواست ${index + 1} از ${preview.tasks.length}: ${currentPage}${page.paragraph ? ` · بند ${page.paragraph}` : ''}`;
           phase = 'translation';
           const result = await api(`/api/projects/${projectId}/translate`, jsonOptions('POST', {
-            image_ids: [page.imageId], provider, source_language: language, confirmation: page.signature, call_id: page.callId,
+            image_ids: ids, provider, source_language: language, reuse_repeated: preview.reuseRepeated ?? true, confirmation: page.signature, call_id: page.callId, call_image_id: page.imageId,
             batch_index: index + 1, batch_total: preview.tasks.length,
           }));
           // A successful response means the page has already been persisted.
           adoptProject(result); completed += 1; setOverlayMode('translation', false);
-          phase = 'preview'; await renderImagesText([page.imageId]);
+          phase = 'preview'; await renderImagesText(page.affectedImageIds || [page.imageId]);
         }
         phase = 'save'; await saveProject();
       }
@@ -793,7 +793,7 @@ function makeAiProfile(profile = {}, index = 0) {
   return {
     id: String(profile.id || `api-${Date.now().toString(36)}-${aiProfileSerial}`),
     name: String(profile.name || ''), hasApiKey: profile.hasApiKey === true,
-    apiKey: String(profile.apiKey || ''), timeout_seconds: String(profile.timeout_seconds ?? 90), retry_count: String(profile.retry_count ?? 0),
+    apiKey: String(profile.apiKey || ''), timeout_seconds: String(profile.timeout_seconds ?? 90), retry_count: String(profile.retry_count ?? 0), retry_wait_seconds: String(profile.retry_wait_seconds ?? 20),
   };
 }
 function captureAiProvider() {
@@ -878,6 +878,7 @@ function renderAiProfiles() {
     };
     addSetting('زمان انتظار (ثانیه، ۵ تا ۶۰۰)', 'timeout_seconds', 5, 600);
     addSetting('تکرار اضافی (۰ تا ۵)', 'retry_count', 0, 5);
+    addSetting('فاصلهٔ تلاش مجدد (ثانیه، ۰ تا ۳۰۰)', 'retry_wait_seconds', 0, 300);
     row.append(name, key, test, remove, options, status); container.appendChild(row);
   });
 }
@@ -898,7 +899,7 @@ function showAiProvider(provider, capture = true) {
 }
 async function loadAiSettings() {
   state.ai = await api('/api/ai-settings');
-  aiEditorDrafts.clear(); showAiProvider(state.ai.provider || 'free', false);
+  aiEditorDrafts.clear(); $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false; showAiProvider(state.ai.provider || 'free', false);
 }
 function aiSettingsPayload() {
   captureAiProvider();
@@ -908,9 +909,9 @@ function aiSettingsPayload() {
     const draft = aiEditorDrafts.get(provider);
     const profiles = draft?.profiles || info.profiles || [];
     const intSetting = (profile, key, min, max) => {
-      const raw = String(profile[key] ?? (key === 'timeout_seconds' ? 90 : 0));
+      const raw = String(profile[key] ?? (key === 'timeout_seconds' ? 90 : key === 'retry_wait_seconds' ? 20 : 0));
       const value = Number(raw);
-      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) throw new Error(`تنظیم ${profile.name || 'API'}: ${key === 'timeout_seconds' ? 'زمان انتظار باید بین ۵ تا ۶۰۰' : 'تکرار باید بین ۰ تا ۵'} و عدد صحیح باشد.`);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) throw new Error(`تنظیم ${profile.name || 'API'}: ${key === 'timeout_seconds' ? 'زمان انتظار باید بین ۵ تا ۶۰۰' : key === 'retry_wait_seconds' ? 'فاصلهٔ تکرار باید بین ۰ تا ۳۰۰' : 'تکرار باید بین ۰ تا ۵'} و عدد صحیح باشد.`);
       return value;
     };
     providers[provider] = {
@@ -918,17 +919,17 @@ function aiSettingsPayload() {
       base_url: draft?.base_url || info.base_url,
       profiles: profiles.map((profile) => ({
         id: profile.id, name: profile.name || '',
-        timeout_seconds: intSetting(profile, 'timeout_seconds', 5, 600), retry_count: intSetting(profile, 'retry_count', 0, 5),
+        timeout_seconds: intSetting(profile, 'timeout_seconds', 5, 600), retry_count: intSetting(profile, 'retry_count', 0, 5), retry_wait_seconds: intSetting(profile, 'retry_wait_seconds', 0, 300),
         ...(profile.apiKey?.trim() ? { api_key: profile.apiKey.trim() } : {}),
       })),
     };
   });
   const active = providers[aiEditorProvider];
-  return { provider: aiEditorProvider, model: active?.model || null, base_url: active?.base_url || null, providers };
+  return { provider: aiEditorProvider, reuse_repeated: $('aiReuseRepeated').checked, model: active?.model || null, base_url: active?.base_url || null, providers };
 }
 async function saveAiSettings(options = {}) {
   state.ai = await api('/api/ai-settings', jsonOptions('PUT', aiSettingsPayload()));
-  aiEditorDrafts.clear(); showAiProvider(state.ai.provider || 'free', false);
+  aiEditorDrafts.clear(); $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false; showAiProvider(state.ai.provider || 'free', false);
   if (!options.quiet) toast('تنظیمات ترجمه ذخیره شد');
   return state.ai;
 }

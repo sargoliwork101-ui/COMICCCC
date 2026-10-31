@@ -165,7 +165,7 @@ def test_provider_settings_keep_models_and_keys_separate_without_exposing_secret
     })
     assert public["providers"]["openai"]["model"] == "gpt-custom"
     assert public["providers"]["gemini"]["model"] == "gemini-custom"
-    assert public["providers"]["openai"]["profiles"] == [{"id": "open-1", "name": "OpenAI من", "hasApiKey": True, "timeout_seconds": 90, "retry_count": 0}]
+    assert public["providers"]["openai"]["profiles"] == [{"id": "open-1", "name": "OpenAI من", "hasApiKey": True, "timeout_seconds": 90, "retry_count": 0, "retry_wait_seconds": 20}]
     assert "open-secret" not in json.dumps(public) and "gem-secret" not in json.dumps(public)
 
     public = service.save_settings({"provider": "gemini", "providers": public["providers"]})
@@ -202,7 +202,7 @@ def test_openrouter_content_parts_and_named_key_failover(tmp_path, monkeypatch):
         "providers": {"openrouter": {
             "model": "anthropic/claude-test",
             "profiles": [
-                {"id": "quota", "name": "سهمیه تمام", "api_key": "first-secret"},
+                {"id": "quota", "name": "سهمیه تمام", "api_key": "first-secret", "retry_wait_seconds": 0},
                 {"id": "working", "name": "کلید سالم", "api_key": "second-secret"},
             ],
         }},
@@ -242,7 +242,7 @@ def test_all_failed_keys_stop_once_and_errors_hide_secrets(tmp_path, monkeypatch
     service.save_settings({
         "provider": "avalai",
         "providers": {"avalai": {"profiles": [
-            {"id": "a", "name": "حساب اول", "api_key": "private-one"},
+            {"id": "a", "name": "حساب اول", "api_key": "private-one", "retry_wait_seconds": 0},
             {"id": "b", "name": "حساب دوم", "api_key": "private-two"},
         ]}},
     })
@@ -267,7 +267,7 @@ def test_malformed_collective_response_uses_next_key(tmp_path, monkeypatch):
     service.save_settings({
         "provider": "openai", "base_url": "http://local.test/v1", "model": "demo",
         "providers": {"openai": {"base_url": "http://local.test/v1", "model": "demo", "profiles": [
-            {"id": "bad", "name": "پاسخ ناقص", "api_key": "bad-key"},
+            {"id": "bad", "name": "پاسخ ناقص", "api_key": "bad-key", "retry_wait_seconds": 0},
             {"id": "good", "name": "پاسخ کامل", "api_key": "good-key"},
         ]}},
     })
@@ -468,3 +468,51 @@ def test_200_error_payload_and_html_title_preserve_diagnostics_without_secrets(t
         service.translate('hello', 'eng')
     assert 'HTTP 502' in str(caught.value) and 'Gateway failed' in str(caught.value)
     assert 'private-key' not in str(caught.value) and 'do not include body' not in str(caught.value)
+
+
+def test_retry_wait_settings_apply_to_retries_and_next_key(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    saved = service.save_settings({'provider': 'openai', 'providers': {'openai': {'profiles': [
+        {'id': 'a', 'api_key': 'first-key', 'retry_count': 1, 'retry_wait_seconds': 17},
+        {'id': 'b', 'api_key': 'second-key', 'retry_count': 0, 'retry_wait_seconds': 3},
+    ]}}})
+    assert [p['retry_wait_seconds'] for p in saved['providers']['openai']['profiles']] == [17, 3]
+    waits = []; monkeypatch.setattr('comic_studio.translation.time.sleep', waits.append)
+    calls = []
+    def post(url, **kwargs):
+        key = kwargs['headers']['Authorization']; calls.append(key)
+        if key == 'Bearer first-key':
+            return httpx.Response(503, json={'error': 'busy'}, request=httpx.Request('POST', url))
+        return httpx.Response(200, json={'choices': [{'message': {'content': 'ok'}}]}, request=httpx.Request('POST', url))
+    monkeypatch.setattr(httpx, 'post', post)
+    assert service.translate('hello', 'eng', 'openai') == 'ok'
+    assert calls == ['Bearer first-key', 'Bearer first-key', 'Bearer second-key']
+    assert waits == [17, 17]
+
+
+@pytest.mark.parametrize('value', [-1, 301, True, 2.5, '20'])
+def test_invalid_retry_wait_rejected(tmp_path, monkeypatch, value):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    with pytest.raises(ValueError):
+        service.save_settings({'provider': 'openai', 'providers': {'openai': {'profiles': [{'id': 'a', 'retry_wait_seconds': value}]}}})
+
+
+def test_default_retry_wait_and_connection_test_respect_per_key_delay(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    saved = service.save_settings({'provider': 'openai', 'providers': {'openai': {'profiles': [
+        {'id': 'a', 'api_key': 'secret', 'retry_count': 1}
+    ]}}})
+    assert saved['providers']['openai']['profiles'][0]['retry_wait_seconds'] == 20
+    waits = []; monkeypatch.setattr('comic_studio.translation.time.sleep', waits.append)
+    calls = []
+    def get(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            return httpx.Response(429, json={'error': 'rate limited'}, request=httpx.Request('GET', url))
+        return httpx.Response(200, json={'data': [{'id': 'gpt-4o-mini'}]}, request=httpx.Request('GET', url))
+    monkeypatch.setattr(httpx, 'get', get)
+    assert service.test_connection({'provider': 'openai', 'profile_id': 'a'})['ok']
+    assert len(calls) == 2 and waits == [20]

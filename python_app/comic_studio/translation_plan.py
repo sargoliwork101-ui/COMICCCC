@@ -15,22 +15,27 @@ from .translation import (
 MAX_AI_SOURCE_CHARS = 1000
 AI_PARTS_KEY = "_aiTranslationParts"
 AI_PAGE_PROGRESS_KEY = "_aiPageProgress"
+AI_REUSE_KEY = "_aiReusedTranslation"
 
 
 def split_ai_paragraph(text: str, limit: int = MAX_AI_SOURCE_CHARS) -> tuple[list[str], list[str]]:
     """Split oversized paragraphs at sentence/whitespace boundaries, preserving joins."""
     remaining = str(text).strip(); parts: list[str] = []; joins: list[str] = []
     while len(remaining) > limit:
-        window = remaining[:limit]
+        # Avoid producing an almost-empty final chunk when a long block is
+        # only slightly over the limit. Keep sentence/space boundaries where possible.
+        count = (len(remaining) + limit - 1) // limit
+        target = (len(remaining) + count - 1) // count
+        window = remaining[:target]
         ends = list(re.finditer(r"[.!?…。！？][\"'”’»)]*(?=\s|$)", window))
         cut = ends[-1].end() if ends else 0
-        if cut < limit // 3:
+        if cut < target // 3:
             cut = max(window.rfind("\n"), window.rfind(" "), window.rfind("\t"))
         if cut <= 0:
-            cut = limit
+            cut = target
         part = remaining[:cut].rstrip()
         if not part:
-            cut = limit; part = remaining[:cut]
+            cut = target; part = remaining[:cut]
         rest = remaining[len(part):]
         whitespace = re.match(r"\s*", rest).group(0)
         parts.append(part); joins.append("\n" if "\n" in whitespace else (" " if whitespace else ""))
@@ -41,8 +46,23 @@ def split_ai_paragraph(text: str, limit: int = MAX_AI_SOURCE_CHARS) -> tuple[lis
 
 
 def target_snapshot(block: dict[str, Any]) -> str:
-    target = {k: v for k, v in block.items() if k != AI_PARTS_KEY}
+    target = {k: v for k, v in block.items() if k not in {AI_PARTS_KEY, AI_REUSE_KEY}}
     return hashlib.sha256(json.dumps(target, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def reuse_fingerprint(block: dict[str, Any], source: str, provider: str, language: str, settings: dict[str, Any]) -> str:
+    config = settings.get("providers", {}).get(provider, {})
+    value = [provider, language, config.get("model", ""), config.get("base_url", ""), source, target_snapshot(block)]
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def has_reused_translation(block: dict[str, Any], source: str, provider: str, language: str, settings: dict[str, Any]) -> bool:
+    marker = block.get(AI_REUSE_KEY)
+    return bool(block.get("tr")) and isinstance(marker, dict) and marker.get("fingerprint") == reuse_fingerprint(block, source, provider, language, settings)
+
+
+def mark_reused_translation(block: dict[str, Any], source: str, provider: str, language: str, settings: dict[str, Any]) -> None:
+    block[AI_REUSE_KEY] = {"fingerprint": reuse_fingerprint(block, source, provider, language, settings)}
 
 
 def part_fingerprint(call: dict[str, Any], plan: dict[str, Any], provider: str, language: str, settings: dict[str, Any]) -> str:
@@ -99,61 +119,89 @@ def mark_completed_call(call: dict[str, Any], plan: dict[str, Any], provider: st
 
 
 def call_plan(plan: dict[str, Any], call: dict[str, Any]) -> dict[str, Any]:
-    indices = call["indices"]
+    # All duplicate destinations are confirmed too, so a concurrent edit cannot
+    # silently be overwritten by propagation of a reused translation.
+    indices = list(dict.fromkeys(i for group in call.get("targets", [[i] for i in call["indices"]]) for i in group))
     return {"keys": [plan["keys"][i] for i in indices], "source_texts": [plan["source_texts"][i] for i in indices],
-            "target_snapshots": [plan["target_snapshots"][i] for i in indices],
+            "target_snapshots": [plan["target_snapshots"][i] for i in indices], "reuse_repeated": plan.get("reuse_repeated", False),
             "calls": [{"text": call["text"], "call_id": call.get("call_id", "")}]}
 
 
-def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: str) -> dict[str, Any]:
-    ids = set(image_ids)
-    items = [
-        item for item in sorted(state["images"], key=lambda entry: entry.get("order", 0))
-        if item["id"] in ids
-    ]
-    entries = [
-        (item, block, block_index)
-        for item in items for block_index, block in enumerate(item.get("blocks", []))
-        if block.get("enabled", True) and str(block.get("text", "")).strip()
-    ]
+def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: str,
+                       reuse_repeated: bool = False, source_language: str = "eng",
+                       settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    ids = set(image_ids); settings = settings or {}
+    items = [item for item in sorted(state["images"], key=lambda entry: entry.get("order", 0)) if item["id"] in ids]
+    entries = [(item, block, block_index) for item in items for block_index, block in enumerate(item.get("blocks", []))
+               if block.get("enabled", True) and str(block.get("text", "")).strip()]
     blocks = [block for _, block, _ in entries]
     source_texts = [str(block.get("text", "")).strip() for block in blocks]
+    owners = [item["id"] for item, _, _ in entries]
     combined_source = combine_translation_texts(source_texts)
     combined_free = provider == "free" and len(combined_source) <= MAX_FREE_QUERY_CHARS
+    reuse = bool(reuse_repeated and provider != "free")
+    groups: dict[int, list[int]] = {}
+    already_reused = 0
+    if reuse:
+        occurrences: dict[str, list[int]] = {}
+        for i, source in enumerate(source_texts):
+            occurrences.setdefault(source, []).append(i)
+        for source, targets in occurrences.items():
+            pending = [i for i in targets if not has_reused_translation(blocks[i], source, provider, source_language, settings)]
+            if pending:
+                # Re-send when an original/edited occurrence is selected, and
+                # propagate the new result to *all* selected copies, even if
+                # some were marked as reused by an earlier translation.
+                groups[pending[0]] = targets
+            else:
+                already_reused += len(targets)
+    else:
+        groups = {i: [i] for i in range(len(source_texts))}
+
     if not blocks:
         calls: list[dict[str, Any]] = []
     elif provider != "free":
         calls = []
         for item in items:
-            indices = [index for index, (owner, _, _) in enumerate(entries) if owner is item]
+            indices = [i for i in sorted(groups) if owners[i] == item["id"]]
             if not indices:
                 continue
-            page_text = combine_translation_texts([source_texts[index] for index in indices])
             common = {"image_id": item["id"], "image_name": item.get("name", "")}
+            page_text = combine_translation_texts([source_texts[i] for i in indices])
             if len(page_text) <= MAX_AI_SOURCE_CHARS:
-                calls.append({**common, "text": page_text, "indices": indices, "combined": True, "call_id": "page"})
+                calls.append({**common, "text": page_text, "indices": indices, "targets": [groups[i] for i in indices], "combined": True, "call_id": "page"})
                 continue
-            for paragraph, index in enumerate(indices):
-                parts, joins = split_ai_paragraph(source_texts[index])
-                for part_index, part in enumerate(parts):
-                    calls.append({**common, "text": part, "indices": [index], "combined": False,
-                                  "call_id": f"p{paragraph}.{part_index}", "paragraph": paragraph + 1,
-                                  "part_index": part_index, "part_count": len(parts), "joins": joins})
+            pending: list[int] = []
+            def flush() -> None:
+                if not pending:
+                    return
+                chunk = list(pending); pending.clear()
+                calls.append({**common, "text": combine_translation_texts([source_texts[i] for i in chunk]),
+                              "indices": chunk, "targets": [groups[i] for i in chunk], "combined": True,
+                              "call_id": f"b{entries[chunk[0]][2]}", "paragraph": entries[chunk[0]][2] + 1})
+            for index in indices:
+                source = source_texts[index]
+                if len(source) > MAX_AI_SOURCE_CHARS:
+                    flush()
+                    parts, joins = split_ai_paragraph(source)
+                    for part_index, part in enumerate(parts):
+                        calls.append({**common, "text": part, "indices": [index], "targets": [groups[index]], "combined": False,
+                                      "call_id": f"p{entries[index][2]}.{part_index}", "paragraph": entries[index][2] + 1,
+                                      "part_index": part_index, "part_count": len(parts), "joins": joins})
+                elif pending and len(combine_translation_texts([source_texts[i] for i in pending] + [source])) > MAX_AI_SOURCE_CHARS:
+                    flush(); pending.append(index)
+                else:
+                    pending.append(index)
+            flush()
     elif combined_free:
         calls = [{"text": combined_source, "indices": list(range(len(blocks))), "combined": True}]
     else:
         calls = [{"text": text, "indices": [index], "combined": False} for index, text in enumerate(source_texts)]
-    return {
-        "items": items,
-        "blocks": blocks,
-        "keys": [f"{item['id']}:{block.get('id', block_index + 1)}" for item, block, block_index in entries],
-        "source_texts": source_texts,
-        # Bind confirmation to the exact target blocks too, so edits to a later
-        # page after preview are not silently overwritten by its translation.
-        "target_snapshots": [target_snapshot(block) for block in blocks],
-        "calls": calls,
-        "combined_free": combined_free,
-    }
+    return {"items": items, "blocks": blocks, "owner_ids": owners,
+            "keys": [f"{item['id']}:{block.get('id', block_index + 1)}" for item, block, block_index in entries],
+            "source_texts": source_texts, "target_snapshots": [target_snapshot(block) for block in blocks],
+            "calls": calls, "combined_free": combined_free, "reuse_repeated": reuse,
+            "duplicate_count": sum(len(v) - 1 for v in groups.values()), "already_reused": already_reused}
 
 
 def build_single_plan(text: str, provider: str) -> dict[str, Any]:
@@ -179,7 +227,8 @@ def plan_signature(
         "model": config.get("model", "") if provider != "free" else "",
         "base_url": config.get("base_url", "") if provider != "free" else "",
         # Confirm retry/cost and timeout policy as well as the text and destination.
-        "profile_policy": [{"id": p.get("id", ""), "timeout_seconds": p.get("timeout_seconds", 90), "retry_count": p.get("retry_count", 0), "hasApiKey": p.get("hasApiKey", False)} for p in config.get("profiles", [])] if provider != "free" else [],
+        "profile_policy": [{"id": p.get("id", ""), "timeout_seconds": p.get("timeout_seconds", 90), "retry_count": p.get("retry_count", 0), "retry_wait_seconds": p.get("retry_wait_seconds", 20), "hasApiKey": p.get("hasApiKey", False)} for p in config.get("profiles", [])] if provider != "free" else [],
+        "reuse_repeated": plan.get("reuse_repeated", False),
         "keys": plan["keys"],
         # Equal joined payloads can have different per-box line boundaries.
         "source_texts": plan["source_texts"],
@@ -215,12 +264,16 @@ def plan_preview(
         note = "هر query ابتدا به Google Translate می‌رود؛ فقط اگر خطا بدهد، همان query به MyMemory فرستاده می‌شود."
     else:
         label = AI_PROVIDERS.get(provider, {}).get("label", provider)
-        note = ("صفحه‌های بیش از ۱۰۰۰ نویسه کادر به کادر فرستاده می‌شوند؛ کادر بلندتر نیز به بخش‌های حداکثر ۱۰۰۰ نویسه تقسیم می‌شود. "
+        note = ("کادرهای همان صفحه تا سقف ۱۰۰۰ نویسه در هر درخواست تجمیع می‌شوند؛ کادر بلندتر نیز تقسیم می‌شود. "
                 + ("هر پاسخ پیش از درخواست بعد بررسی و ذخیره می‌شود. " if plan["items"] else "بازترجمهٔ یک کادر پس از دریافت همهٔ بخش‌ها ثبت می‌شود. ")
                 + "تعداد نمایش‌داده‌شده بدون تکرارهاست؛ تکرار ممکن است هزینه داشته باشد. در برخی خطاها کلید بعدی همان متن را امتحان می‌کند. پس از پایان تکرار خطای ارتباطی، کلید بعدی خودکار امتحان نمی‌شود.")
+        if plan.get("reuse_repeated"):
+            note += f" تطبیق دقیق فعال است: {plan.get('duplicate_count', 0)} کادر تکراری همراه نخستین نتیجه به‌روزرسانی می‌شود؛ {plan.get('already_reused', 0)} کادر قبلاً به‌روزرسانی شده است. نام فایل‌ها جداگانه به AI ارسال نمی‌شود."
+        else:
+            note += " استفادهٔ مجدد از متن تکراری خاموش است."
         profiles = [profile for profile in config.get("profiles", []) if profile.get("hasApiKey")]
         if profiles:
-            policies = [f"{profile.get('name') or f'API {index}'}: انتظار {profile.get('timeout_seconds', 90)} ثانیه، {profile.get('retry_count', 0)} تکرار" for index, profile in enumerate(profiles, start=1)]
+            policies = [f"{profile.get('name') or f'API {index}'}: انتظار {profile.get('timeout_seconds', 90)} ثانیه، {profile.get('retry_count', 0)} تکرار با فاصلهٔ {profile.get('retry_wait_seconds', 20)} ثانیه" for index, profile in enumerate(profiles, start=1)]
             note += " تنظیمات: " + "؛ ".join(policies) + "."
     pages = []
     tasks = []
@@ -229,21 +282,25 @@ def plan_preview(
             page_calls = [call for call in plan["calls"] if call.get("image_id") == item["id"]]
             if not page_calls:
                 continue
-            indices = sorted({index for call in page_calls for index in call["indices"]})
-            page_plan = {"keys": [plan["keys"][i] for i in indices], "source_texts": [plan["source_texts"][i] for i in indices],
-                         "target_snapshots": [plan["target_snapshots"][i] for i in indices], "calls": page_calls}
+            # A standalone page signature must describe that page on its own,
+            # not the cross-page duplicate map used by the multi-page tasks.
+            page_plan = build_project_plan({"images": [item]}, [item["id"]], provider,
+                                           plan.get("reuse_repeated", False), source_language, public_settings)
             pages.append({"imageId": item["id"], "imageName": item.get("name", ""),
                           "signature": plan_signature(page_plan, provider, source_language, public_settings)})
         for call in plan["calls"]:
             if "image_id" not in call or saved_call(call, plan, provider, source_language, public_settings):
                 continue
-            tasks.append({"imageId": call["image_id"], "imageName": call["image_name"], "callId": call["call_id"],
+            affected = list(dict.fromkeys(plan["owner_ids"][i] for group in call.get("targets", [[i] for i in call["indices"]]) for i in group))
+            tasks.append({"imageId": call["image_id"], "imageName": call["image_name"], "callId": call["call_id"], "affectedImageIds": affected,
                           "paragraph": call.get("paragraph"), "part": call.get("part_index", 0) + 1,
                           "partCount": call.get("part_count", 1),
                           "signature": plan_signature(call_plan(plan, call), provider, source_language, public_settings)})
     return {
         "pages": pages,
         "tasks": tasks,
+        "reuseRepeated": plan.get("reuse_repeated", False),
+        "duplicateCount": plan.get("duplicate_count", 0),
         "provider": provider,
         "providerLabel": label,
         "model": config.get("model", "") if provider != "free" else "",

@@ -141,7 +141,9 @@ function nextDownload(cdp, directory) {
       let body = ''; request.on('data', chunk => { body += chunk; }); request.on('end', () => {
         const data = JSON.parse(body); const text = data.messages.find(message => message.role === 'user').content;
         aiGenerations.push(text);
-        if (text.includes('BROWSER PAGE TWO')) { response.statusCode = 503; response.end(JSON.stringify({ error: { message: 'test failure browser-local-secret', code: 'real-code' } })); }
+        if (text.includes('HEADER SAME')) { response.end(JSON.stringify({choices:[{message:{content:'عنوان مشترک\nمحتوای اول'}}]})); }
+        else if (text.includes('DEDUP SECOND')) { response.end(JSON.stringify({choices:[{message:{content:'محتوای دوم'}}]})); }
+        else if (text.includes('BROWSER PAGE TWO')) { response.statusCode = 503; response.end(JSON.stringify({ error: { message: 'test failure browser-local-secret', code: 'real-code' } })); }
         else setTimeout(() => response.end(JSON.stringify({ choices: [{ message: { content: 'ترجمه صفحه یک' } }] })), 450);
       });
       return;
@@ -220,6 +222,7 @@ function nextDownload(cdp, directory) {
     }
     await page.type('.ai-profile-key', 'browser-local-secret');
     await page.$eval('.ai-profile-timeout_seconds', el => { el.value = '120'; el.dispatchEvent(new Event('input', {bubbles:true})); });
+    await page.$eval('.ai-profile-retry_wait_seconds', el => { el.value = '0'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.$eval('.ai-profile-retry_count', el => { el.value = '1'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.click('.ai-profile-test');
     await page.waitForFunction(() => document.getElementById('aiStatus').textContent.includes('local-browser-model'), { timeout: 10000 }).catch(async (error) => {
@@ -234,6 +237,7 @@ function nextDownload(cdp, directory) {
     assert.equal(browserAiSettings.providers.openai.profiles[0].hasApiKey, true);
     assert.equal(browserAiSettings.providers.openai.profiles[0].timeout_seconds, 120);
     assert.equal(browserAiSettings.providers.openai.profiles[0].retry_count, 1);
+    assert.equal(browserAiSettings.providers.openai.profiles[0].retry_wait_seconds, 0);
     assert.ok(!JSON.stringify(browserAiSettings).includes('browser-local-secret'), 'public settings must not return the browser-entered secret');
     assert.equal(await page.$eval('.ai-profile-key', (input) => input.value), '', 'the saved secret must be cleared from the real password field');
     await page.select('#aiProvider', 'free'); await page.click('#saveAiBtn');
@@ -790,6 +794,39 @@ with pymupdf.open(pdf_path) as document:
     console.log('PASS: real AI sends pages sequentially, applies per-key retry, reports safe details, and retains completed pages');
 
     await page.keyboard.press('Escape');
+    aiGenerations.length = 0;
+    let dedupProject = await api(base, '/api/projects', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'Repeated titles'})});
+    const dedupForm = new FormData();
+    for (let n=1; n<=2; n++) dedupForm.append('files', new Blob([fs.readFileSync(source)], {type:'image/png'}), `repeat-${n}.png`);
+    dedupProject = await api(base, `/api/projects/${dedupProject.id}/files`, {method:'POST',body:dedupForm});
+    for (const [index, image] of dedupProject.images.entries()) image.blocks = [
+      {id:1,text:'HEADER SAME',tr:'old',enabled:true,bg:'white',x0:5,y0:5,x1:200,y1:45,lineH:40,dir:'rtl',align:'right'},
+      {id:2,text:index ? 'DEDUP SECOND' : 'DEDUP FIRST',tr:'old',enabled:true,bg:'white',x0:5,y0:70,x1:200,y1:110,lineH:40,dir:'rtl',align:'right'},
+    ];
+    await api(base, `/api/projects/${dedupProject.id}/state`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:dedupProject})});
+    await page.evaluate(async id => { await refreshProjectList(); const select=document.getElementById('projectSelect'); select.value=id; select.dispatchEvent(new Event('change',{bubbles:true})); }, dedupProject.id);
+    await page.waitForFunction(id => state.project.id === id && state.project.images.length === 2 && state.project.images.every(image => image.edited), {}, dedupProject.id);
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    const dedupPayloads = await page.$$eval('#translationPreviewRequests pre', entries => entries.map(el=>el.textContent));
+    assert.equal(dedupPayloads.length, 2);
+    assert.equal(dedupPayloads.filter(text=>text.includes('HEADER SAME')).length, 1);
+    assert.ok(await page.$eval('#translationPreviewNote', el=>el.textContent.includes('1 کادر تکراری')));
+    await page.click('#translationPreviewConfirm');
+    try { await page.waitForFunction(() => !translationRunning && !document.getElementById('translationDialog').open, {timeout:15000}); }
+    catch (error) { console.error('Dedup translation status:', await page.$eval('#translationDialog', el => el.textContent), 'requests:', aiGenerations); throw error; }
+    const dedupStored = await api(base, `/api/projects/${dedupProject.id}`);
+    assert.deepEqual(dedupStored.images.map(image=>image.blocks[0].tr), ['عنوان مشترک', 'عنوان مشترک']);
+    assert.equal(aiGenerations.length, 2);
+    assert.ok(dedupStored.images.every(image=>image.edited));
+    await page.click('#menuBtn'); await page.click('#aiBtn'); await page.waitForSelector('#aiDialog[open]');
+    await page.$eval('#aiReuseRepeated', el=>{el.checked=false; el.dispatchEvent(new Event('change',{bubbles:true}));});
+    await page.click('#saveAiBtn'); await page.waitForFunction(()=>state.ai.reuse_repeated===false); await page.keyboard.press('Escape');
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    const independent = await page.$$eval('#translationPreviewRequests pre', entries => entries.map(el=>el.textContent));
+    assert.equal(independent.filter(text=>text.includes('HEADER SAME')).length, 2);
+    await page.click('#translationPreviewCancel');
+    console.log('PASS: repeated title is sent once and applied to both pages; opt-out sends it per page');
+
     let backupProject = await api(base, '/api/projects', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'Portable project'})});
     const backupForm = new FormData(); backupForm.append('files', new Blob([fs.readFileSync(source)], {type:'image/png'}), 'portable.png');
     backupProject = await api(base, `/api/projects/${backupProject.id}/files`, {method:'POST',body:backupForm});

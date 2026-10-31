@@ -95,13 +95,13 @@ window.fetch = async (url, options = {}) => {
         ...previous, model: incoming.model || previous.model || defaultModel,
         base_url: incoming.base_url || previous.base_url || defaultBase,
         profiles: (incoming.profiles || oldProfiles).map((profile) => ({
-          id: profile.id, name: profile.name || '', timeout_seconds: profile.timeout_seconds ?? 90, retry_count: profile.retry_count ?? 0,
+          id: profile.id, name: profile.name || '', timeout_seconds: profile.timeout_seconds ?? 90, retry_count: profile.retry_count ?? 0, retry_wait_seconds: profile.retry_wait_seconds ?? 20,
           hasApiKey: !!profile.api_key || oldProfiles.some((old) => old.id === profile.id && old.hasApiKey),
         })),
       };
     });
     const active = providers[request.provider];
-    aiSettings = { provider: request.provider, providers, model: active?.model || '', base_url: active?.base_url || '', hasApiKey: !!active?.profiles.some((profile) => profile.hasApiKey) };
+    aiSettings = { provider: request.provider, reuse_repeated: request.reuse_repeated, providers, model: active?.model || '', base_url: active?.base_url || '', hasApiKey: !!active?.profiles.some((profile) => profile.hasApiKey) };
     return jsonResponse(aiSettings);
   }
   if (pathname === '/api/ai-settings') return jsonResponse(aiSettings);
@@ -271,16 +271,18 @@ function check(name, condition) {
   rows[1].querySelector('.ai-profile-name').dispatchEvent(new window.Event('input', { bubbles: true }));
   rows[1].querySelector('.ai-profile-key').value = 'openrouter-second-secret';
   rows[1].querySelector('.ai-profile-key').dispatchEvent(new window.Event('input', { bubbles: true }));
-  check('each API starts with 90 second timeout and no retry', rows[0].querySelector('.ai-profile-timeout_seconds').value === '90' && rows[0].querySelector('.ai-profile-retry_count').value === '0');
+  check('each API starts with 90 second timeout and no retry', rows[0].querySelector('.ai-profile-timeout_seconds').value === '90' && rows[0].querySelector('.ai-profile-retry_count').value === '0' && rows[0].querySelector('.ai-profile-retry_wait_seconds').value === '20');
   rows[0].querySelector('.ai-profile-timeout_seconds').value = '120'; rows[0].querySelector('.ai-profile-timeout_seconds').dispatchEvent(new window.Event('input', { bubbles: true }));
   rows[0].querySelector('.ai-profile-retry_count').value = '2'; rows[0].querySelector('.ai-profile-retry_count').dispatchEvent(new window.Event('input', { bubbles: true }));
+  rows[0].querySelector('.ai-profile-retry_wait_seconds').value = '11'; rows[0].querySelector('.ai-profile-retry_wait_seconds').dispatchEvent(new window.Event('input', { bubbles: true }));
+  rows[1].querySelector('.ai-profile-retry_wait_seconds').value = '27'; rows[1].querySelector('.ai-profile-retry_wait_seconds').dispatchEvent(new window.Event('input', { bubbles: true }));
   rows[1].querySelector('.ai-profile-timeout_seconds').value = '45'; rows[1].querySelector('.ai-profile-timeout_seconds').dispatchEvent(new window.Event('input', { bubbles: true }));
   rows[1].querySelector('.ai-profile-retry_count').value = '1'; rows[1].querySelector('.ai-profile-retry_count').dispatchEvent(new window.Event('input', { bubbles: true }));
   $('aiModel').value = 'anthropic/claude-ui-test';
   rows[0].querySelector('.ai-profile-test').click(); await sleep(30);
   const savedAi = aiSaveRequests.at(-1);
   check('row test first saves both named keys with the selected provider and model', savedAi.provider === 'openrouter' && savedAi.model === 'anthropic/claude-ui-test' && savedAi.providers.openrouter.profiles.length === 2 && savedAi.providers.openrouter.profiles[0].api_key === 'openrouter-first-secret' && savedAi.providers.openrouter.profiles[1].api_key === 'openrouter-second-secret');
-  check('per-key timeout and retries are saved independently', savedAi.providers.openrouter.profiles[0].timeout_seconds === 120 && savedAi.providers.openrouter.profiles[0].retry_count === 2 && savedAi.providers.openrouter.profiles[1].timeout_seconds === 45 && savedAi.providers.openrouter.profiles[1].retry_count === 1);
+  check('per-key timeout and retries are saved independently', savedAi.providers.openrouter.profiles[0].timeout_seconds === 120 && savedAi.providers.openrouter.profiles[0].retry_count === 2 && savedAi.providers.openrouter.profiles[1].timeout_seconds === 45 && savedAi.providers.openrouter.profiles[1].retry_count === 1 && savedAi.providers.openrouter.profiles[0].retry_wait_seconds === 11 && savedAi.providers.openrouter.profiles[1].retry_wait_seconds === 27);
   check('row test uses the stored selected profile without resending its secret', aiTestRequests.length === 1 && aiTestRequests[0].profile_id === savedAi.providers.openrouter.profiles[0].id && aiTestRequests[0].model === 'anthropic/claude-ui-test' && !('api_key' in aiTestRequests[0]));
   check('successful row test is visible in the real dialog', $('aiStatus').textContent.includes('اتصال برقرار است') && $('aiProfiles').querySelector('.ai-profile-status').textContent.includes('✓'));
   check('saved secrets are cleared from password fields and absent from the DOM', [...$('aiProfiles').querySelectorAll('.ai-profile-key')].every((input) => input.value === '' && input.placeholder.includes('ذخیره شده')) && !$('aiDialog').innerHTML.includes('openrouter-first-secret'));
@@ -289,6 +291,9 @@ function check(name, condition) {
   $('aiProvider').value = 'openrouter'; $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
   check('switching back restores each saved API policy', $('aiProfiles').querySelector('.ai-profile-timeout_seconds').value === '120' && $('aiProfiles').querySelector('.ai-profile-retry_count').value === '2');
   check('switching back restores only OpenRouter settings and named profiles', $('aiModel').value === 'anthropic/claude-ui-test' && $('aiProfiles').querySelectorAll('.ai-profile-row').length === 2 && $('aiProfiles').querySelector('.ai-profile-name').value === 'کلید اول OpenRouter');
+  check('repeated text reuse is enabled by default', $('aiReuseRepeated').checked);
+  $('aiReuseRepeated').checked = false; $('saveAiBtn').click(); await sleep(20);
+  check('repeated text reuse can be disabled and saved', aiSaveRequests.at(-1).reuse_repeated === false && !$('aiReuseRepeated').checked);
   const beforeInvalidSave = aiSaveRequests.length;
   const timeoutInput = $('aiProfiles').querySelector('.ai-profile-timeout_seconds'); timeoutInput.value = '4'; timeoutInput.dispatchEvent(new window.Event('input', {bubbles:true}));
   $('saveAiBtn').click(); await sleep(10);
