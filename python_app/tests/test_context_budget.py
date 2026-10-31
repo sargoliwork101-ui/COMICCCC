@@ -13,6 +13,8 @@ def test_default_percentages_are_independent_caps_and_actual_space_is_reused():
     empty = build_context_request(budget, 'English', '', '')
     partial = build_context_request(budget, 'English', 'a' * 10, 'b' * 20)
     full = build_context_request(budget, 'English', 'a' * 150, 'b' * 150)
+    assert 'max 150 characters incl. spaces' in full.system
+    assert 'count and shorten to fit' in full.system
     assert empty.source_capacity > partial.source_capacity > full.source_capacity
     assert full.character_count('x' * full.source_capacity) == 1000
     assert full.character_count('x') <= 1000
