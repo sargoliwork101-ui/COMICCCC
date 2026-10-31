@@ -217,7 +217,7 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         # Old AvalAI-default settings were labelled openai even though they used
         # AvalAI's endpoint. Preserve their working destination and credentials.
         provider = _legacy_provider(raw)
-    return {"provider": provider, "providers": providers, "reuse_repeated": raw.get("reuse_repeated", True) if isinstance(raw.get("reuse_repeated", True), bool) else True}
+    return {"provider": provider, "providers": providers, "reuse_repeated": raw.get("reuse_repeated", True) if isinstance(raw.get("reuse_repeated", True), bool) else True, "context_percent": _setting_int(raw.get("context_percent"), 15, 0, 100), "skill_percent": _setting_int(raw.get("skill_percent"), 15, 0, 100)}
 
 
 def _normalize_model(value: Any, provider: str) -> str:
@@ -447,6 +447,7 @@ class TranslationService:
         return {
             "provider": provider,
             "reuse_repeated": secret["reuse_repeated"],
+            "context_percent": secret["context_percent"], "skill_percent": secret["skill_percent"],
             "base_url": active["base_url"],
             "model": active["model"],
             "hasApiKey": any(profile["api_key"] for profile in active["profiles"]),
@@ -458,6 +459,10 @@ class TranslationService:
         provider = str(values.get("provider", current["provider"]) or "free").strip().lower()
         if provider not in {"free", *AI_PROVIDERS}:
             raise ValueError("Unknown translation provider")
+        context_percent = _setting_int(values.get("context_percent", current["context_percent"]), 15, 0, 100, strict=True)
+        skill_percent = _setting_int(values.get("skill_percent", current["skill_percent"]), 15, 0, 100, strict=True)
+        if context_percent + skill_percent > 100:
+            raise ValueError("جمع درصد خلاصه و اسکیل نمی‌تواند از ۱۰۰ بیشتر باشد.")
         incoming = values.get("providers")
         incoming = incoming if isinstance(incoming, dict) else {}
         providers = _default_providers()
@@ -523,7 +528,7 @@ class TranslationService:
         active = providers[active_name]
         active_key = next((profile["api_key"] for profile in active["profiles"] if profile["api_key"]), "")
         next_value = {
-            "provider": provider, "providers": providers, "reuse_repeated": values.get("reuse_repeated", current["reuse_repeated"]),
+            "provider": provider, "providers": providers, "reuse_repeated": values.get("reuse_repeated", current["reuse_repeated"]), "context_percent": context_percent, "skill_percent": skill_percent,
             # Legacy top-level fields keep older local API clients and backups readable.
             "base_url": active["base_url"], "model": active["model"], "api_key": active_key,
         }
@@ -593,6 +598,60 @@ class TranslationService:
         else:
             raise TranslationError("Unknown translation provider")
         return normalize_translation_text(translated)
+
+    def translate_context(self, request: Any, text: str, source_texts: list[str], provider: str, expected_policy: dict[str, Any]) -> tuple[str, str]:
+        """Send one exact budgeted request and accept translation/summary together."""
+        from .context_budget import parse_context_response
+        from .context_run import provider_policy
+        from .store import ProjectChangedError
+        if provider not in AI_PROVIDERS:
+            raise TranslationError("سرویس AI معتبر نیست.")
+        user = request.user_message(text)
+        settings = self._secret()
+        if provider_policy(settings, provider) != expected_policy:
+            raise ProjectChangedError("تنظیمات API پس از تأیید تغییر کرده است؛ درخواست ارسال نشد.")
+        profiles = self._profiles(settings, provider)
+        if not profiles:
+            raise TranslationError(f"برای {AI_PROVIDERS[provider]['label']} حداقل یک کلید API معتبر وارد کنید.")
+        secrets = [p["api_key"] for c in settings["providers"].values() for p in c["profiles"] if p["api_key"]]
+        failures: list[str] = []
+        for profile_index, profile in enumerate(profiles):
+            name = _redact_diagnostic(profile["profile_name"], secrets)
+            if len(request.system) + len(user) > profile['source_limit']:
+                raise TranslationError("سقف API پس از پیش‌نمایش تغییر کرده است؛ درخواست ارسال نشد.")
+            def action() -> tuple[str, str]:
+                base = _normalize_base_url(profile['base_url'], provider)
+                model = _normalize_model(profile['model'], provider)
+                if provider == 'gemini':
+                    response = httpx.post(f"{base}/models/{quote(model, safe='')}:generateContent",
+                        headers={'x-goog-api-key': profile['api_key']},
+                        json={'systemInstruction': {'parts': [{'text': request.system}]},
+                              'contents': [{'role': 'user', 'parts': [{'text': user}]}],
+                              'generationConfig': {'temperature': 0.2}},
+                        timeout=profile['timeout_seconds'], follow_redirects=True)
+                else:
+                    response = httpx.post(base + '/chat/completions',
+                        headers={'Authorization': f"Bearer {profile['api_key']}"},
+                        json={'model': model, 'messages': [{'role': 'system', 'content': request.system},
+                              {'role': 'user', 'content': user}], 'temperature': 0.2},
+                        timeout=profile['timeout_seconds'], follow_redirects=True)
+                response.raise_for_status()
+                text_response = _response_text(response.json(), provider)
+                return parse_context_response(text_response, source_texts, request.context_limit)
+            try:
+                emit(f"ترجمه با {AI_PROVIDERS[provider]['label']} و {name}…")
+                result = _run_with_retries(action, profile, provider, secrets)
+                emit(f"پاسخ ترجمه و خلاصه با {name} دریافت شد.", "success")
+                return result
+            except Exception as exc:
+                message = _safe_error(exc, provider, secrets)
+                if isinstance(exc, httpx.TransportError):
+                    raise TranslationError(f"ارتباط {name} قطع شد؛ ممکن است درخواست پردازش یا هزینه حساب شده باشد. کلید بعدی خودکار امتحان نشد. جزئیات: {message}") from exc
+                failures.append(f"{name}: {message}")
+                emit(f"تلاش با {name} ناموفق بود: {message}", "error")
+                if profile_index + 1 < len(profiles):
+                    time.sleep(profile['retry_wait_seconds'])
+        raise TranslationError("هیچ‌یک از کلیدها پاسخ قابل‌استفاده‌ای ندادند. " + "؛ ".join(failures))
 
     def _free(self, text: str, source_language: str) -> str:
         source = LANGUAGES.get(source_language, LANGUAGES["eng"])["source"]

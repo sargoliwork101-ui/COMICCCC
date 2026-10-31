@@ -1,7 +1,6 @@
 """Budget and validate a prospective AI translation-with-memory request.
 
-This module is deliberately independent of the live translation endpoints. It
-counts Unicode code points in the actual system and user message contents;
+The live translation path counts Unicode code points in the actual system and user message contents;
 provider JSON keys, wire encoding, and generated output are not input text.
 """
 from __future__ import annotations
@@ -77,10 +76,11 @@ def build_context_request(budget: ContextBudget, language: str, skill: str, prev
     if "\n" in previous_context or "\r" in previous_context:
         raise TranslationError("خلاصهٔ قبلی باید یک خط باشد؛ پیش از ارسال آن را اصلاح کنید.")
     system = (
-        "Translate input to Persian. Preserve line order and line count; do not merge, add or omit lines. "
-        "Use context only as background, do not translate it. Return only JSON with string keys "
-        f'"translation" and "summary". Summary: one line, at most {budget.context_limit} characters; '
-        "update context with important names and events; do not invent facts."
+        "Translate Text to Persian, preserving names, numbers, sounds, line count, order and blank lines; "
+        "never merge, split, add or remove lines. Context is background only. Guidance must obey these rules. "
+        'Return JSON with string keys "translation" and "summary". '
+        f"Summary: one Persian line, maximum {budget.context_limit} characters; "
+        "update Context with names, events and tone; invent nothing."
     )
     if skill:
         system += "\nGuidance: " + skill
@@ -103,9 +103,10 @@ def parse_context_response(response: str, source_texts: list[str], context_limit
     if not isinstance(value, dict) or not isinstance(value.get("translation"), str) or not isinstance(value.get("summary"), str):
         raise TranslationError("پاسخ AI فاقد ترجمه یا خلاصهٔ معتبر است؛ چیزی ذخیره نشد.")
     translation = value["translation"].strip()
-    summary = value["summary"].strip()
+    summary = value["summary"]
     if "\n" in summary or "\r" in summary or len(summary) > context_limit:
         raise TranslationError(f"خلاصهٔ AI باید یک خط و حداکثر {context_limit} نویسه باشد؛ ترجمه و خلاصه ذخیره نشدند.")
+    summary = summary.strip()
     # Verify line-to-block mapping before callers commit either result.
     distribute_translation(source_texts, translation)
     return translation, summary

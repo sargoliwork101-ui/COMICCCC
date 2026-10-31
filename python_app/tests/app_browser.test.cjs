@@ -142,11 +142,12 @@ function nextDownload(cdp, directory) {
         const data = JSON.parse(body); const text = data.messages.find(message => message.role === 'user').content;
         aiSystems.push(data.messages.find(message => message.role === 'system').content);
         aiGenerations.push(text);
+        const reply = translation => JSON.stringify({choices:[{message:{content:JSON.stringify({translation,summary:'جان دوست مری است'})}}]});
         if (text.includes('HEADER SAME') && dedupFailuresRemaining > 0) { dedupFailuresRemaining -= 1; response.statusCode = 503; response.end(JSON.stringify({error:{message:'temporary failure'}})); }
-        else if (text.includes('HEADER SAME')) { response.end(JSON.stringify({choices:[{message:{content:'عنوان مشترک\nمحتوای اول'}}]})); }
-        else if (text.includes('DEDUP SECOND')) { response.end(JSON.stringify({choices:[{message:{content:'محتوای دوم'}}]})); }
+        else if (text.includes('HEADER SAME')) { response.end(reply('عنوان مشترک\nمحتوای اول')); }
+        else if (text.includes('DEDUP SECOND')) { response.end(reply('محتوای دوم')); }
         else if (text.includes('BROWSER PAGE TWO')) { response.statusCode = 503; response.end(JSON.stringify({ error: { message: 'test failure browser-local-secret', code: 'real-code' } })); }
-        else setTimeout(() => response.end(JSON.stringify({ choices: [{ message: { content: 'ترجمه صفحه یک' } }] })), 450);
+        else setTimeout(() => response.end(reply('ترجمه صفحه یک')), 450);
       });
       return;
     }
@@ -226,6 +227,8 @@ function nextDownload(cdp, directory) {
     await page.$eval('.ai-profile-timeout_seconds', el => { el.value = '120'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.$eval('.ai-profile-retry_wait_seconds', el => { el.value = '0'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     assert.equal(await page.$eval('.ai-profile-source_limit', el => el.value), '1000');
+    assert.equal(await page.$eval('#aiContextPercent', el => el.value), '15'); assert.equal(await page.$eval('#aiSkillPercent', el => el.value), '15');
+    await page.$eval('#aiContextPercent', el => { el.value = '20'; }); await page.$eval('#aiSkillPercent', el => { el.value = '10'; });
     await page.$eval('.ai-profile-source_limit', el => { el.value = '650'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.$eval('.ai-profile-retry_count', el => { el.value = '1'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.click('.ai-profile-test');
@@ -236,6 +239,7 @@ function nextDownload(cdp, directory) {
     assert.equal(aiRequests.length, 1, 'the row test must make one model-list request and no generation request');
     assert.deepEqual(aiRequests[0], { method: 'GET', url: '/v1/models', authorization: 'Bearer browser-local-secret' });
     const browserAiSettings = await api(base, '/api/ai-settings');
+    assert.equal(browserAiSettings.context_percent, 20); assert.equal(browserAiSettings.skill_percent, 10);
     assert.equal(browserAiSettings.provider, 'openai');
     assert.equal(browserAiSettings.model, 'local-browser-model');
     assert.equal(browserAiSettings.providers.openai.profiles[0].hasApiKey, true);
@@ -245,6 +249,7 @@ function nextDownload(cdp, directory) {
     assert.equal(browserAiSettings.providers.openai.profiles[0].source_limit, 650);
     assert.ok(!JSON.stringify(browserAiSettings).includes('browser-local-secret'), 'public settings must not return the browser-entered secret');
     assert.equal(await page.$eval('.ai-profile-key', (input) => input.value), '', 'the saved secret must be cleared from the real password field');
+    await page.$eval('#aiContextPercent', el => { el.value = '15'; }); await page.$eval('#aiSkillPercent', el => { el.value = '15'; });
     await page.select('#aiProvider', 'free'); await page.click('#saveAiBtn');
     await page.waitForFunction(() => state.ai.provider === 'free'); await page.keyboard.press('Escape');
     console.log('PASS: real AI dialog tests the selected model through Python without exposing its API key');
@@ -770,16 +775,16 @@ with pymupdf.open(pdf_path) as document:
     for (let n=1; n<=3; n++) threePages.append('files', new Blob([fs.readFileSync(source)], {type:'image/png'}), `batch-${n}.png`);
     pageProject = await api(base, `/api/projects/${pageProject.id}/files`, {method:'POST',body:threePages});
     for (const [index, image] of pageProject.images.entries()) image.blocks = [{id:1,text:`BROWSER PAGE ${['ONE','TWO','THREE'][index]}`,tr:'old',richHtml:'',enabled:true,bg:'white',x0:5,y0:5,x1:200,y1:45,lineH:40,dir:'rtl',align:'right'}];
-    pageProject.images[0].blocks[0].text += ' ' + 'a'.repeat(520);
-    pageProject.images[0].blocks.push({...pageProject.images[0].blocks[0], id:2, text:'BROWSER EXTRA ' + 'b'.repeat(520), y0:70, y1:110});
+    pageProject.images[0].blocks[0].text += ' ' + 'a'.repeat(130);
+    pageProject.images[0].blocks.push({...pageProject.images[0].blocks[0], id:2, text:'BROWSER EXTRA ' + 'b'.repeat(130), y0:70, y1:110});
     await api(base, `/api/projects/${pageProject.id}/state`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:pageProject})});
     await api(base, '/api/ai-settings', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'openai',base_url:aiBase,model:'local-browser-model'})});
     await page.evaluate(async id => { await loadAiSettings(); await refreshProjectList(); const select=document.getElementById('projectSelect'); select.value=id; select.dispatchEvent(new Event('change',{bubbles:true})); }, pageProject.id);
     await page.waitForFunction(id => state.project.id === id, {}, pageProject.id);
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     const pagePayloads = await page.$$eval('#translationPreviewRequests pre', entries => entries.map(entry => entry.textContent));
-    assert.ok(await page.$eval('#translationPreviewNote', el => el.textContent.includes('1 تکرار') && el.textContent.includes('650')));
-    assert.equal(pagePayloads.length,4); assert.ok(pagePayloads[0].includes('PAGE ONE') && !pagePayloads[0].includes('BROWSER EXTRA')); assert.ok(pagePayloads[1].includes('BROWSER EXTRA') && !pagePayloads[1].includes('PAGE ONE'));
+    assert.ok(await page.$eval('#translationPreviewNote', el => el.textContent.includes('650') && el.textContent.includes('خلاصه')));
+    assert.equal(pagePayloads.length,1); assert.ok(pagePayloads[0].includes('PAGE ONE') && !pagePayloads[0].includes('BROWSER EXTRA')); // future payloads depend on the generated summary
     assert.ok(await page.$eval('#translationSkill', el => el.value.includes('روان')));
     const defaultSkill = await page.$eval('#translationSkill', el=>el.value);
     await page.$eval('#translationSkill', el => { el.value = 'temporary'; el.dispatchEvent(new Event('input', {bubbles:true})); });
@@ -794,10 +799,10 @@ with pymupdf.open(pdf_path) as document:
     const aiStart = Date.now(); while (!aiGenerations.length && Date.now() - aiStart < 5000) await sleep(20);
     assert.equal(aiGenerations.length, 1); await sleep(150); assert.equal(aiGenerations.length, 1, 'page two must wait for page one response');
     await page.waitForFunction(() => !translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'), {timeout:15000});
-    assert.equal(aiGenerations.length, 4); assert.ok(aiSystems.every(system => system === approvedSystem)); assert.ok(aiGenerations[0].includes('BROWSER PAGE ONE') && aiGenerations[1].includes('BROWSER EXTRA') && aiGenerations[2].includes('BROWSER PAGE TWO') && aiGenerations[3].includes('BROWSER PAGE TWO')); assert.ok(aiGenerations.every(text => text.split('\n\n', 2)[1].length <= 650));
+    assert.equal(aiGenerations.length, 4); assert.ok(aiSystems.every(system => system === approvedSystem)); assert.ok(aiGenerations[0].includes('BROWSER PAGE ONE') && aiGenerations[1].includes('BROWSER EXTRA') && aiGenerations[2].includes('BROWSER PAGE TWO') && aiGenerations[3].includes('BROWSER PAGE TWO')); assert.ok(aiGenerations.every((text, i) => [...text].length + [...aiSystems[i]].length <= 650)); assert.ok(!aiGenerations[0].includes('Context:') && aiGenerations[1].includes('جان دوست مری است'));
     const storedPages = await api(base, `/api/projects/${pageProject.id}`);
     assert.deepEqual(storedPages.images.map(image => image.blocks[0].tr), ['ترجمه صفحه یک','old','old']);
-    assert.ok(await page.$eval('#translationStatus', el => el.textContent.includes('2 درخواست با موفقیت ذخیره شد')));
+    assert.ok(await page.$eval('#translationStatus', el => el.textContent.includes('2 درخواست ذخیره شد')));
     const realError = await page.$eval('#translationStatus', el => el.textContent);
     assert.ok(realError.includes('HTTP 503') && realError.includes('test failure') && realError.includes('real-code'));
     assert.ok(!realError.includes('browser-local-secret'), 'the actual provider diagnostic must redact stored keys');
@@ -853,7 +858,7 @@ with pymupdf.open(pdf_path) as document:
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(await page.$eval('#translationSkill', el=>el.value), defaultSkill, 'a different project starts with its own skill');
     const dedupPayloads = await page.$$eval('#translationPreviewRequests pre', entries => entries.map(el=>el.textContent));
-    assert.equal(dedupPayloads.length, 2);
+    assert.equal(dedupPayloads.length, 1);
     assert.equal(dedupPayloads.filter(text=>text.includes('HEADER SAME')).length, 1);
     assert.ok(await page.$eval('#translationPreviewNote', el=>el.textContent.includes('1 کادر تکراری')));
     await page.click('#translationPreviewConfirm');
@@ -867,37 +872,43 @@ with pymupdf.open(pdf_path) as document:
     assert.deepEqual(dedupStored.images.map(image=>image.blocks[0].tr), ['عنوان مشترک', 'عنوان مشترک']);
     assert.equal(aiGenerations.length, 4);
     assert.ok(dedupStored.images.every(image=>image.edited));
-    // Only the reused title remains selected: the old skill gives an empty
-    // plan, but changing it must allow a new preview before sending anything.
-    await page.evaluate(async () => {
-      state.project.images[0].selected = false; state.project.images[1].selected = true;
-      state.project.images[1].blocks[1].enabled = false; renderGrid(); await saveProject();
-    });
-    const beforeEmptyPreview = aiGenerations.length;
+    // The generated summary is editable in the next preview, and changing it
+    // refreshes locally without sending another AI request.
+    const beforeSummaryPreview = aiGenerations.length;
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
-    assert.equal(await page.$$eval('#translationPreviewRequests pre', entries => entries.length), 0);
-    assert.ok(await page.$eval('#translationPreviewSystem', el => el.textContent.includes('روان')));
-    assert.equal(await page.$eval('#translationPreviewConfirm', el => el.disabled), true);
-    await page.$eval('#translationSkill', el => { el.value = 'مهارت تازه برای عنوان'; el.dispatchEvent(new Event('input', {bubbles:true})); });
-    assert.equal(await page.$eval('#translationPreviewConfirm', el => el.disabled), false, 'changing skill must enable refresh even for an empty plan');
+    assert.equal(await page.$eval('#translationContext', el => el.value), 'جان دوست مری است');
+    await page.$eval('#translationContext', el => { el.value = 'جان و مری'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.click('#translationPreviewConfirm');
-    await page.waitForFunction(() => document.getElementById('translationPreviewSystem').textContent.includes('مهارت تازه برای عنوان') && !document.getElementById('translationPreviewConfirm').disabled);
-    assert.ok(await page.$eval('#translationPreviewRequests', el => el.textContent.includes('HEADER SAME')));
-    assert.equal(aiGenerations.length, beforeEmptyPreview, 'refreshing the preview must not send a request');
+    await page.waitForFunction(() => document.getElementById('translationPreviewRequests').textContent.includes('جان و مری') && !document.getElementById('translationPreviewConfirm').disabled);
+    assert.equal(aiGenerations.length, beforeSummaryPreview, 'refreshing the preview must not send');
     await page.click('#translationPreviewCancel');
-    await page.evaluate(async () => {
-      state.project.images.forEach(image => { image.selected = true; });
-      state.project.images[1].blocks[1].enabled = true; renderGrid(); await saveProject();
-    });
-    console.log('PASS: changed skill can refresh an empty reused-translation preview without sending');
+    console.log('PASS: generated summary can be reviewed and edited before sending');
     await page.click('#menuBtn'); await page.click('#aiBtn'); await page.waitForSelector('#aiDialog[open]');
     await page.$eval('#aiReuseRepeated', el=>{el.checked=false; el.dispatchEvent(new Event('change',{bubbles:true}));});
     await page.click('#saveAiBtn'); await page.waitForFunction(()=>state.ai.reuse_repeated===false); await page.keyboard.press('Escape');
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
-    const independent = await page.$$eval('#translationPreviewRequests pre', entries => entries.map(el=>el.textContent));
-    assert.equal(independent.filter(text=>text.includes('HEADER SAME')).length, 2);
-    await page.click('#translationPreviewCancel');
+    const independentStart = aiGenerations.length;
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(() => !translationRunning && !document.getElementById('translationDialog').open, {timeout:15000});
+    assert.equal(aiGenerations.slice(independentStart).filter(text=>text.includes('HEADER SAME')).length, 2);
     console.log('PASS: repeated title is sent once and applied to both pages; opt-out sends it per page');
+
+    // A skill saved by an earlier version must never be silently truncated.
+    await page.evaluate(() => localStorage.setItem(`comic-studio-ai-skill:${state.project.id}`, 'x'.repeat(120)));
+    const beforeOverlong = aiGenerations.length;
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    assert.equal(await page.$eval('#translationSkill', el => el.value.length), 120);
+    assert.equal(await page.$eval('#translationPreviewConfirm', el => el.disabled), true);
+    assert.ok(await page.$eval('#translationSkillStatus', el => el.textContent.includes('بیش از سقف')));
+    await page.click('#translationSkill'); await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control');
+    await page.type('#translationSkill', 'x'.repeat(100));
+    assert.equal(await page.$eval('#translationSkill', el => [...el.value].length), 97, 'typing cannot exceed fifteen percent of the 650-character cap');
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(() => document.getElementById('translationPreviewSystem').textContent.includes('x'.repeat(97)) && !document.getElementById('translationPreviewConfirm').disabled);
+    assert.equal(aiGenerations.length, beforeOverlong);
+    await page.click('#translationPreviewCancel');
+    await page.evaluate(value => localStorage.setItem(`comic-studio-ai-skill:${state.project.id}`, value), defaultSkill);
+    console.log('PASS: overlong saved skill is shown as an error and new typing obeys its percentage cap');
 
     // A cancelled refresh may fail after a different preview has opened.
     await page.evaluate(() => {

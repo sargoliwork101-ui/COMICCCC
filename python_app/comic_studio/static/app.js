@@ -617,20 +617,32 @@ function rememberTranslationSkill(projectId, preview) {
 }
 function updateTranslationSkillStatus() {
   const preview = translationPreviewData;
-  const changed = preview && preview.provider !== 'free' && $('translationSkill').value.trim() !== (preview.skill ?? '');
-  $('translationSkillStatus').textContent = changed ? 'راهنما تغییر کرد؛ ابتدا پیش‌نمایش تازه را بازبینی کنید.' : '';
+  const skill = $('translationSkill').value.trim();
+  const context = $('translationContext').value.trim();
+  const skillTooLong = preview?.contextMode && Array.from(skill).length > preview.skillLimit;
+  const contextTooLong = preview?.contextMode && Array.from(context).length > preview.contextLimit;
+  const changed = preview && preview.provider !== 'free' && (skill !== (preview.skill ?? '') ||
+    (preview.contextMode && (context !== (preview.summary ?? '') || $('translationContextResume').checked !== !!preview.resume)));
+  const message = skillTooLong ? `اسکیل ذخیره‌شده بیش از سقف ${preview.skillLimit} نویسه است؛ پیش از ارسال کوتاه کنید.` :
+    contextTooLong ? `خلاصه بیش از سقف ${preview.contextLimit} نویسه است؛ پیش از ارسال کوتاه کنید.` :
+    changed ? 'اطلاعات تغییر کرد؛ ابتدا پیش‌نمایش تازه را بازبینی کنید.' : '';
+  $('translationSkillStatus').textContent = message;
   $('translationPreviewConfirm').textContent = changed ? 'به‌روزرسانی پیش‌نمایش' : 'تأیید و ارسال برای ترجمه';
-  // A changed skill can invalidate all reuse receipts and create requests even
-  // when the currently displayed preview has no pending work.
-  $('translationPreviewConfirm').disabled = !preview || (changed ? !translationPreviewRefresh : !preview.requests?.length);
+  $('translationPreviewConfirm').disabled = !preview || skillTooLong || contextTooLong || (changed ? !translationPreviewRefresh : !preview.requests?.length);
 }
 function showTranslationRequestPreview(preview, action, refresh = null) {
   translationPreviewAction = action; translationPreviewRefresh = refresh; translationPreviewData = preview;
   $('translationSkillWrap').classList.toggle('hidden', preview.provider === 'free');
-  $('translationSkill').disabled = false; $('translationSkillReset').disabled = false;
-  $('translationSkill').value = preview.skill ?? '';
+  $('translationContextWrap').classList.toggle('hidden', !preview.contextMode);
+  $('translationContext').value = preview.displaySummary ?? preview.summary ?? '';
+  $('translationContext').maxLength = preview.contextMode ? preview.contextLimit * 2 : 200000;
+  $('translationContextResume').checked = !!preview.resume; $('translationContextResume').parentElement.classList.toggle('hidden', !!preview.singleContext);
+  $('translationContextHelp').textContent = preview.contextMode ? `سقف خلاصه ${preview.contextLimit} نویسه و سقف اسکیل ${preview.skillLimit} نویسه؛ فضای استفاده‌نشده به متن می‌رسد.` : '';
+  $('translationSkill').maxLength = preview.contextMode ? preview.skillLimit * 2 : 4000;
+  $('translationSkill').disabled = false; $('translationSkillReset').disabled = false; $('translationContext').disabled = false; $('translationContextResume').disabled = false;
+  $('translationSkill').value = preview.displaySkill ?? preview.skill ?? '';
   updateTranslationSkillStatus();
-  $('translationPreviewSummary').textContent = `${preview.blockCount} متن · ${preview.requestCount} درخواست پایه برای بررسی (بدون تکرار)`;
+  $('translationPreviewSummary').textContent = preview.contextMode ? `${preview.blockCount} متن · پیش‌نمایش درخواست اول (تعداد درخواست‌های بعدی وابسته به خلاصه است)` : `${preview.blockCount} متن · ${preview.requestCount} درخواست پایه برای بررسی (بدون تکرار)`;
   const destination = [preview.providerLabel, preview.model && `مدل: ${preview.model}`, preview.base_url && `نشانی: ${preview.base_url}`, preview.fallback_url && `فقط هنگام خطا: ${preview.fallback_url}`].filter(Boolean).join(' · ');
   $('translationPreviewDestination').textContent = destination;
   $('translationPreviewNote').textContent = preview.note || '';
@@ -660,18 +672,19 @@ async function confirmTranslationRequestPreview() {
   const action = translationPreviewAction; const preview = translationPreviewData; const refresh = translationPreviewRefresh;
   if (!action || !preview) return;
   $('translationPreviewConfirm').disabled = true;
-  if (preview.provider !== 'free' && $('translationSkill').value.trim() !== (preview.skill ?? '')) {
-    $('translationSkill').disabled = true; $('translationSkillReset').disabled = true;
+  const changed = preview.provider !== 'free' && ($('translationSkill').value.trim() !== (preview.skill ?? '') || (preview.contextMode && ($('translationContext').value.trim() !== (preview.summary ?? '') || $('translationContextResume').checked !== !!preview.resume)));
+  if (changed) {
+    $('translationSkill').disabled = true; $('translationSkillReset').disabled = true; $('translationContext').disabled = true; $('translationContextResume').disabled = true;
     try {
       if (!refresh) throw new Error('به‌روزرسانی پیش‌نمایش ممکن نیست؛ دوباره ترجمه را شروع کنید.');
-      const updated = await refresh($('translationSkill').value.trim());
+      const updated = await refresh($('translationSkill').value.trim(), $('translationContext').value.trim(), $('translationContextResume').checked);
       // Cancel/close during the local preview request must not reopen it or send.
       if ($('translationPreviewDialog').open && translationPreviewAction === action) showTranslationRequestPreview(updated, action, refresh);
     } catch (error) {
       if ($('translationPreviewDialog').open && translationPreviewAction === action) { $('translationSkillStatus').textContent = `به‌روزرسانی ممکن نبود: ${error.message || error}`; toast(error.message || 'پیش‌نمایش ناموفق بود', true); }
     } finally {
       if ($('translationPreviewDialog').open && translationPreviewAction === action) {
-        $('translationSkill').disabled = false; $('translationSkillReset').disabled = false;
+        $('translationSkill').disabled = false; $('translationSkillReset').disabled = false; $('translationContext').disabled = false; $('translationContextResume').disabled = false;
         const message = $('translationSkillStatus').textContent; updateTranslationSkillStatus();
         if (message.startsWith('به‌روزرسانی ممکن نبود:')) $('translationSkillStatus').textContent = message;
       }
@@ -694,11 +707,69 @@ async function runTranslation() {
     await saveProject();
     const provider = state.ai?.provider || 'free'; const projectId = state.project.id;
     const request = { image_ids: ids, provider, source_language: $('ocrLanguage').value, reuse_repeated: state.ai?.reuse_repeated !== false };
-    const refresh = skill => api(`/api/projects/${projectId}/translation-preview`, jsonOptions('POST', { ...request, skill }));
-    const preview = await refresh(provider === 'free' ? null : savedTranslationSkill(projectId));
-    showTranslationRequestPreview(preview, accepted => { rememberTranslationSkill(projectId, accepted); return performTranslation(ids, provider, accepted); }, refresh);
+    if (provider !== 'free' && state.project.images.some(item => ids.includes(item.id) && (item._aiPageProgress || item.blocks?.some(block => block._aiTranslationParts)))) {
+      if (!confirm('پیشرفت ناتمام ترجمه از نسخهٔ قبلی وجود دارد و با حافظهٔ جدید سازگار نیست. برای جلوگیری از ارسال دوباره می‌توانید در نسخهٔ قبلی ادامه دهید. آیا با حذف پیشرفت ناتمام و شروع ترجمهٔ تازه موافقید؟')) return;
+      request.restart_legacy = true;
+    }
+    if (provider === 'free') {
+      const refresh = skill => api(`/api/projects/${projectId}/translation-preview`, jsonOptions('POST', { ...request, skill }));
+      const preview = await refresh(null);
+      showTranslationRequestPreview(preview, accepted => performTranslation(ids, provider, accepted), refresh);
+      return;
+    }
+    const profiles = state.ai?.providers?.[provider]?.profiles?.filter(p => p.hasApiKey) || [];
+    const limit = profiles.length ? Math.min(...profiles.map(p => p.source_limit ?? 1000)) : 1000;
+    const skillLimit = Math.floor(limit * (state.ai?.skill_percent ?? 15) / 100);
+    const contextLimit = Math.floor(limit * (state.ai?.context_percent ?? 15) / 100);
+    const oldSkill = savedTranslationSkill(projectId);
+    const skill = oldSkill ?? 'ترجمه را روان و طبیعی و متناسب با لحن شخصیت‌ها بنویس؛ نام‌ها، اعداد و آواها را با دقت حفظ کن.';
+    const summary = state.project._aiStorySummary || '';
+    const previous = state.project._aiContextRun;
+    const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
+    const refresh = (nextSkill, nextSummary, nextResume) => api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: nextSkill, summary: nextSummary, resume: nextResume }));
+    const safeSkill = Array.from(skill).length <= skillLimit ? skill : '';
+    const safeSummary = Array.from(summary).length <= contextLimit ? summary : '';
+    let preview;
+    try { preview = await refresh(safeSkill, safeSummary, resume && safeSkill === skill); }
+    catch (error) {
+      if (!resume || error.status !== 409) throw error;
+      preview = await refresh(safeSkill, safeSummary, false);
+      preview.note += ' نوبت ناتمام با تنظیمات فعلی سازگار نیست؛ تأیید، نوبت تازه‌ای شروع می‌کند.';
+    }
+    if (safeSkill !== skill) preview.displaySkill = skill;
+    if (safeSummary !== summary) preview.displaySummary = summary;
+    showTranslationRequestPreview(preview, accepted => { rememberTranslationSkill(projectId, accepted); return performContextTranslation(request, accepted); }, refresh);
   } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
 }
+async function performContextTranslation(request, preview, ongoing = null) {
+  translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
+  translationRunning = true; $('translationDialog').querySelector('.dialog-head button').disabled = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden');
+  const projectId = state.project.id; let run = ongoing; let phase = 'start';
+  try {
+    await runJob('در حال ترجمه با حافظهٔ داستان…', async () => {
+      if (!run) {
+        const started = await api(`/api/projects/${projectId}/context-start`, jsonOptions('POST', { ...request, skill: preview.skill, summary: preview.summary, resume: preview.resume, confirmation: preview.signature }));
+        adoptProject(started.project); run = {id: started.runId, completed: started.completed};
+      }
+      while (true) {
+        phase = 'translation'; $('translationStatus').textContent = `در حال ترجمهٔ درخواست ${run.completed + 1} با خلاصهٔ قبلی…`;
+        const result = await api(`/api/projects/${projectId}/context-step`, jsonOptions('POST', {run_id: run.id, completed: run.completed, skill: preview.skill}));
+        adoptProject(result.project); run.completed = result.completed ?? run.completed;
+        phase = 'preview'; setOverlayMode('translation', false); if (result.affectedImageIds?.length) await renderImagesText(result.affectedImageIds);
+        if (result.done) break;
+      }
+      phase = 'save'; setOverlayMode('translation', false); await saveProject();
+    });
+    closeDialog('translationDialog'); toast('ترجمه و خلاصه ذخیره شد');
+  } catch (error) {
+    const uncertainty = phase === 'translation' ? 'وضعیت درخواست جاری در قطع ارتباط ممکن است نامشخص باشد و تکرار هزینه داشته باشد.' : 'درخواست‌های موفق ذخیره شده‌اند؛ پروژه را بررسی کنید.';
+    error.message = `${run?.completed || 0} درخواست ذخیره شد؛ ترجمه متوقف شد. ${uncertainty} ${error.message || ''}`;
+    $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message}`;
+    translationRetryAction = phase === 'translation' && error.status !== 409 && run ? () => performContextTranslation(request, preview, run) : null;
+    $('retryTranslation').classList.toggle('hidden', !translationRetryAction); $('translationErrorChoice').classList.remove('hidden'); $('copyTranslationError').classList.remove('hidden'); throw error;
+  } finally { translationRunning = false; $('translationDialog').querySelector('.dialog-head button').disabled = false; }
+}
+
 async function performTranslation(ids, provider, preview, startIndex = 0, previouslyCompleted = 0) {
   translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
   translationRunning = true; $('translationDialog').querySelector('.dialog-head button').disabled = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; $('translationProgress').style.width = '0';
@@ -950,7 +1021,7 @@ function renderAiProfiles() {
     addSetting('زمان انتظار (ثانیه، ۵ تا ۶۰۰)', 'timeout_seconds', 5, 600);
     addSetting('تکرار اضافی (۰ تا ۵)', 'retry_count', 0, 5);
     addSetting('فاصلهٔ تلاش مجدد (ثانیه، ۰ تا ۳۰۰)', 'retry_wait_seconds', 0, 300);
-    addSetting('سقف نویسهٔ متن OCR (۱ تا ۱۰۰۰۰۰)', 'source_limit', 1, 100000);
+    addSetting('سقف نویسهٔ کل درخواست AI (۱ تا ۱۰۰۰۰۰)', 'source_limit', 1, 100000);
     row.append(name, key, test, remove, options, status); container.appendChild(row);
   });
 }
@@ -971,7 +1042,7 @@ function showAiProvider(provider, capture = true) {
 }
 async function loadAiSettings() {
   state.ai = await api('/api/ai-settings');
-  aiEditorDrafts.clear(); $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false; showAiProvider(state.ai.provider || 'free', false);
+  aiEditorDrafts.clear(); $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false; $('aiContextPercent').value = state.ai.context_percent ?? 15; $('aiSkillPercent').value = state.ai.skill_percent ?? 15; showAiProvider(state.ai.provider || 'free', false);
 }
 function aiSettingsPayload() {
   captureAiProvider();
@@ -997,7 +1068,9 @@ function aiSettingsPayload() {
     };
   });
   const active = providers[aiEditorProvider];
-  return { provider: aiEditorProvider, reuse_repeated: $('aiReuseRepeated').checked, model: active?.model || null, base_url: active?.base_url || null, providers };
+  const contextPercent = Number($('aiContextPercent').value), skillPercent = Number($('aiSkillPercent').value);
+  if ($('aiContextPercent').value.trim() === '' || $('aiSkillPercent').value.trim() === '' || !Number.isInteger(contextPercent) || !Number.isInteger(skillPercent) || contextPercent < 0 || skillPercent < 0 || contextPercent + skillPercent > 100) throw new Error('درصدهای خلاصه و اسکیل باید عدد صحیح غیرمنفی و جمع آن‌ها حداکثر ۱۰۰ باشد.');
+  return { provider: aiEditorProvider, reuse_repeated: $('aiReuseRepeated').checked, context_percent: contextPercent, skill_percent: skillPercent, model: active?.model || null, base_url: active?.base_url || null, providers };
 }
 async function saveAiSettings(options = {}) {
   state.ai = await api('/api/ai-settings', jsonOptions('PUT', aiSettingsPayload()));
@@ -1617,15 +1690,35 @@ async function retranslateBlock(block) {
   try {
     const projectId = state.project.id;
     const request = { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, provider };
-    const refresh = skill => api('/api/translate-text/preview', jsonOptions('POST', { ...request, skill }));
-    const preview = await refresh(provider === 'free' ? null : savedTranslationSkill(projectId));
+    if (provider === 'free') {
+      const refresh = skill => api('/api/translate-text/preview', jsonOptions('POST', { ...request, skill }));
+      const preview = await refresh(null);
+      showTranslationRequestPreview(preview, async accepted => {
+        if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
+        const result = await api('/api/translate-text', jsonOptions('POST', { ...request, confirmation: accepted.signature }));
+        if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
+        block.tr = result.text; block.richHtml = plainToHtml(result.text); buildBlockList(); drawEditor(); scheduleSave();
+      }, refresh);
+      return;
+    }
+    const profiles = state.ai?.providers?.[provider]?.profiles?.filter(p => p.hasApiKey) || [];
+    const limit = profiles.length ? Math.min(...profiles.map(p => p.source_limit ?? 1000)) : 1000;
+    const skillLimit = Math.floor(limit * (state.ai?.skill_percent ?? 15) / 100);
+    const contextLimit = Math.floor(limit * (state.ai?.context_percent ?? 15) / 100);
+    const skill = savedTranslationSkill(projectId) ?? 'ترجمه را روان و طبیعی و متناسب با لحن شخصیت‌ها بنویس؛ نام‌ها، اعداد و آواها را با دقت حفظ کن.';
+    const summary = state.project._aiStorySummary || '';
+    const safeSkill = Array.from(skill).length <= skillLimit ? skill : '';
+    const safeSummary = Array.from(summary).length <= contextLimit ? summary : '';
+    const refresh = (nextSkill, nextSummary) => api('/api/translate-text/context-preview', jsonOptions('POST', { ...request, skill: nextSkill, summary: nextSummary }));
+    const preview = await refresh(safeSkill, safeSummary);
+    if (safeSkill !== skill) preview.displaySkill = skill;
+    if (safeSummary !== summary) preview.displaySummary = summary;
     showTranslationRequestPreview(preview, async accepted => {
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
       rememberTranslationSkill(projectId, accepted);
-      const result = await api('/api/translate-text', jsonOptions('POST', { ...request, skill: accepted.skill, confirmation: accepted.signature }));
+      const result = await api('/api/translate-text/context', jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature }));
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-      block.tr = result.text; block.richHtml = plainToHtml(result.text);
-      buildBlockList(); drawEditor(); scheduleSave();
+      block.tr = result.text; block.richHtml = plainToHtml(result.text); buildBlockList(); drawEditor(); scheduleSave();
     }, refresh);
   } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
 }
@@ -1738,7 +1831,23 @@ function bindEvents() {
   $('translationDialog').addEventListener('cancel', (event) => { if (translationRunning) event.preventDefault(); });
   $('translationDialog').addEventListener('close', () => { if (!translationRunning) translationRetryAction = null; });
   $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
-  $('translationSkill').addEventListener('input', updateTranslationSkillStatus);
+  for (const [element, field] of [[$('translationSkill'), 'skillLimit'], [$('translationContext'), 'contextLimit']]) {
+    element.addEventListener('beforeinput', event => {
+      const limit = translationPreviewData?.contextMode ? translationPreviewData[field] : null;
+      if (limit == null || !event.inputType?.startsWith('insert')) return;
+      const inserted = event.data ?? event.dataTransfer?.getData('text/plain');
+      if (inserted == null) return;
+      const next = element.value.slice(0, element.selectionStart) + inserted + element.value.slice(element.selectionEnd);
+      if (Array.from(next).length > limit) event.preventDefault();
+    });
+    element.addEventListener('paste', event => {
+      const limit = translationPreviewData?.contextMode ? translationPreviewData[field] : null;
+      if (limit == null) return;
+      const next = element.value.slice(0, element.selectionStart) + event.clipboardData.getData('text/plain') + element.value.slice(element.selectionEnd);
+      if (Array.from(next).length > limit) { event.preventDefault(); toast(`سقف ${limit} نویسه است.`, true); }
+    });
+  }
+  $('translationSkill').addEventListener('input', updateTranslationSkillStatus); $('translationContext').addEventListener('input', updateTranslationSkillStatus); $('translationContextResume').addEventListener('change', updateTranslationSkillStatus);
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; } });
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => { $('aiStatus').textContent = error.message; toast(error.message, true); }));

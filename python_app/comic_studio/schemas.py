@@ -47,6 +47,8 @@ class TextTranslateRequest(BaseModel):
 
 
 class AiSettings(BaseModel):
+    context_percent: int | None = Field(default=None, ge=0, le=100)
+    skill_percent: int | None = Field(default=None, ge=0, le=100)
     reuse_repeated: bool | None = None
     provider: str = "free"
     base_url: str | None = None
@@ -90,3 +92,34 @@ class ExportRequest(BaseModel):
 
 class StateUpdate(BaseModel):
     state: dict[str, Any]
+
+
+class ContextPreviewRequest(BaseModel):
+    resume: bool = False
+    restart_legacy: bool = False
+    image_ids: list[str] = Field(default_factory=list)
+    provider: str
+    source_language: str = "eng"
+    skill: str = Field(default="", max_length=100000)
+    summary: str = Field(default="", max_length=100000)
+    reuse_repeated: bool = True
+
+
+class ContextStartRequest(ContextPreviewRequest):
+    confirmation: str
+
+
+class ContextStepRequest(BaseModel):
+    run_id: str
+    completed: int = Field(ge=0)
+    skill: str = Field(default="", max_length=100000)
+
+
+class ContextTextRequest(BaseModel):
+    text: str
+    source_lines: list[dict[str, Any]] | None = None
+    source_language: str = 'eng'
+    provider: str
+    skill: str = Field(default='', max_length=100000)
+    summary: str = Field(default='', max_length=100000)
+    confirmation: str | None = None

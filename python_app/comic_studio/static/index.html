@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.46">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.46">
+  <link rel="stylesheet" href="/style.css?v=3.48">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.48">
 </head>
 <body>
   <header class="topbar">
@@ -111,7 +111,7 @@
     <p class="hint">پیش از ارسال خطا، مطمئن شوید اطلاعات شخصی یا محرمانه داخل آن نیست.</p>
     <div class="bar"><div id="translationProgress" class="fill"></div></div>
     <div id="translationActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
-    <p class="hint">پیش از ارسال، متن و مقصد همهٔ درخواست‌ها نمایش داده می‌شوند. کادرها با خط جدید معمولی ترکیب می‌شوند؛ در پاسخ چندکادری تعداد خط‌ها باید با متن مبدأ یکسان باشد تا هر خط در کادر درست قرار گیرد. برای سرویس رایگان، متن جمعی تا ۵۰۰ نویسه در یک query می‌رود و متن طولانی‌تر جدا و تا حد ممکن در مرز جمله تقسیم می‌شود. برای AI، متن‌های همان صفحه تا سقف قابل‌تنظیم هر API جمع می‌شوند؛ تقسیم فقط در انتهای خط و پایان جمله یا بند است. اگر تقسیم امن ممکن نباشد، سقف را افزایش دهید یا متن OCR را اصلاح کنید. در صورت فعال‌بودن گزینهٔ متن تکراری، ترجمهٔ کادرهای دقیقاً یکسان روی دیگر کادرهای انتخاب‌شده نیز اعمال می‌شود. هر پاسخ پیش از ارسال بعدی بررسی و ذخیره می‌شود. دستور سیستم و توضیح زبان جزو سقف متن OCR نیستند. برای ادامه پس از خطا، صفحهٔ ناتمام و صفحه‌های بعدی را انتخاب کنید؛ بندهای ذخیره‌شدهٔ صفحهٔ ناتمام دوباره ارسال نمی‌شوند.</p>
+    <p class="hint">پیش از ارسال، متن دقیق درخواست اول و مقصد نمایش داده می‌شود؛ درخواست‌های بعدی بر اساس خلاصهٔ پاسخ قبلی با همان تأیید ساخته می‌شوند. کادرها با خط جدید معمولی ترکیب می‌شوند؛ در پاسخ چندکادری تعداد خط‌ها باید با متن مبدأ یکسان باشد تا هر خط در کادر درست قرار گیرد. برای سرویس رایگان، متن جمعی تا ۵۰۰ نویسه در یک query می‌رود و متن طولانی‌تر جدا و تا حد ممکن در مرز جمله تقسیم می‌شود. برای AI، متن‌های همان صفحه تا سقف قابل‌تنظیم هر API جمع می‌شوند؛ تقسیم فقط در انتهای خط و پایان جمله یا بند است. اگر تقسیم امن ممکن نباشد، سقف را افزایش دهید یا متن OCR را اصلاح کنید. در صورت فعال‌بودن گزینهٔ متن تکراری، ترجمهٔ کادرهای دقیقاً یکسان روی دیگر کادرهای انتخاب‌شده نیز اعمال می‌شود. هر پاسخ پیش از ارسال بعدی بررسی و ذخیره می‌شود. در حالت حافظه دستور، خلاصه، اسکیل و متن اصلی همگی در سقف کل هستند. برای ادامه پس از خطا، همان تصاویر انتخابی نوبت را نگه دارید و «ادامهٔ نوبت ناتمام قبلی» را تأیید کنید؛ درخواست‌های موفق دوباره ارسال نمی‌شوند.</p>
   </dialog>
 
   <dialog id="modelsDialog" class="dlg wide-dialog">
@@ -131,12 +131,14 @@
       <div class="form-grid"><label id="aiBaseUrlField">نشانی پایهٔ API<input id="aiBaseUrl" dir="ltr" spellcheck="false"></label><label>نام دقیق مدل<input id="aiModel" dir="ltr" spellcheck="false"></label></div>
       <div class="ai-profile-heading"><span>کلیدهای API و نام دلخواه هرکدام</span><button id="aiAddProfile" class="bt" type="button">افزودن API</button></div>
       <div id="aiProfiles" class="ai-profile-list"></div>
+      <div class="form-grid"><label>سقف خلاصهٔ قبلی (درصد)<input id="aiContextPercent" type="number" min="0" max="100" value="15"></label><label>سقف اسکیل (درصد)<input id="aiSkillPercent" type="number" min="0" max="100" value="15"></label></div>
+      <p class="hint">پیش‌فرض هرکدام ۱۵٪ سقف کل هر درخواست است؛ فضای مصرف‌نشده به متن اصلی می‌رسد. دستور سیستم، خلاصه، اسکیل و متن همگی در سقف شمرده می‌شوند.</p>
       <label class="reuse-setting"><input id="aiReuseRepeated" type="checkbox" checked> استفادهٔ مجدد از ترجمهٔ کادرهای دقیقاً یکسان در صفحات انتخاب‌شده</label>
       <p class="hint">متن مشابه ولی متفاوت یا کادرهایی که فقط بخشی از آن‌ها یکسان است تطبیق داده نمی‌شوند. ترجمهٔ یکسان ممکن است با توجه به بافت صفحه مناسب نباشد؛ برای ترجمهٔ مستقل این گزینه را خاموش کنید.</p>
       <p class="hint"><a id="aiKeyHelp" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلیدها فقط در فایل تنظیمات همین کامپیوتر ذخیره می‌شوند و به مرورگر برگردانده نمی‌شوند.</p>
       <p class="hint">«تست» متن کمیک نمی‌فرستد. زمان انتظار، تعداد تکرار و فاصلهٔ بین تلاش‌ها برای هر کلید جداست؛ صفر یعنی بدون تکرار همان کلید. در خطاهای موقت یا پاسخ نامعتبر تکرار انجام می‌شود؛ خطای اتصال پس از پایان تکرارها کار را متوقف می‌کند. خطاهای دیگر ممکن است کلید بعدی را امتحان کنند. این زمان سقف هر مرحلهٔ اتصال/خواندن است، نه الزاماً کل زمان درخواست. فاصله، پیش از تکرار همان کلید یا امتحان کلید بعدی اعمال می‌شود. تکرار ممکن است هزینهٔ دوباره داشته باشد.</p>
     </div>
-    <p class="hint">تصویر برای ترجمه ارسال نمی‌شود؛ فقط متن OCR به سرویس انتخابی داده می‌شود. برای AI آفلاین می‌توانید نشانی یک سرویس محلی سازگار با OpenAI بدهید. انتخاب رایگان هیچ درخواست AI انجام نمی‌دهد.</p>
+    <p class="hint">تصویر برای ترجمه ارسال نمی‌شود؛ متن OCR، دستور، اسکیل و خلاصه به سرویس AI انتخابی فرستاده می‌شوند. برای AI آفلاین می‌توانید نشانی یک سرویس محلی سازگار با OpenAI بدهید. انتخاب رایگان هیچ درخواست AI انجام نمی‌دهد.</p>
     <div id="aiStatus" class="hint diagnostic-message" role="status" aria-live="polite"></div>
     <button id="copyAiError" class="bt hidden" type="button">کپی پیام خطا</button>
     <div class="dialog-actions"><button id="saveAiBtn" class="bt primary" type="button">ذخیره</button></div>
@@ -185,8 +187,14 @@
     <form method="dialog" class="dialog-head"><h2>بررسی متن قبل از ترجمه</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
     <p id="translationPreviewSummary" class="payload-summary"></p>
     <p id="translationPreviewDestination" class="hint" dir="auto"></p>
-    <p class="hint">هنوز هیچ متنی برای ترجمه ارسال نشده است. متن کامل هر درخواست را باز کنید و دقیقاً بررسی کنید؛ برای چند کادر، پاسخ باید ترتیب و تعداد خطوط مبدأ را حفظ کند.</p>
+    <p class="hint">هنوز هیچ متنی برای ترجمه ارسال نشده است. درخواست اول را بررسی کنید؛ در حالت حافظه، متن درخواست‌های بعدی بر اساس خلاصهٔ پاسخ قبلی ساخته می‌شود.</p>
     <div id="translationPreviewRequests" class="payload-requests"></div>
+    <div id="translationContextWrap" class="hidden">
+      <label for="translationContext">خلاصهٔ داستان برای درخواست اول</label>
+      <input id="translationContext" type="text" dir="auto">
+      <p id="translationContextHelp" class="hint"></p>
+      <label><input id="translationContextResume" type="checkbox"> ادامهٔ نوبت ناتمام قبلی</label>
+    </div>
     <div id="translationSkillWrap" class="hidden">
       <label for="translationSkill">راهنمای ترجمهٔ AI برای این نوبت</label>
       <textarea id="translationSkill" rows="4" maxlength="4000" dir="auto" aria-describedby="translationSkillHelp"></textarea>
@@ -199,10 +207,10 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.46"></script>
-  <script src="/groups.js?v=3.46"></script>
-  <script src="/rich-sanitize.js?v=3.46"></script>
-  <script src="/rich-editor.js?v=3.46"></script>
-  <script src="/app.js?v=3.46"></script>
+  <script src="/typeset.js?v=3.48"></script>
+  <script src="/groups.js?v=3.48"></script>
+  <script src="/rich-sanitize.js?v=3.48"></script>
+  <script src="/rich-editor.js?v=3.48"></script>
+  <script src="/app.js?v=3.48"></script>
 </body>
 </html>
