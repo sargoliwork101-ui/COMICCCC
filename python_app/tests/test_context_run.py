@@ -345,7 +345,7 @@ def test_dynamic_exact_payloads_are_visible_in_activity_without_headers(tmp_path
         for count in range(2):
             assert client.post(route+'/context-step',json={'run_id':start['runId'],'completed':count,'skill':'دستور'}).status_code == 200
         entries = [e['message'] for e in client.get('/api/activity').json()['entries'] if 'متن دقیق درخواست' in e['message']]
-        assert len(entries) == 2 and 'Context:' not in entries[0] and 'خلاصهٔ قبلی' in entries[1]
+        assert len(entries) == 2 and '\nContext:' not in entries[0] and 'خلاصهٔ قبلی' in entries[1]
         assert all('private-key' not in entry for entry in entries)
 
 
