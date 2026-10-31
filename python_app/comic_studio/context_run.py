@@ -5,7 +5,7 @@ import hashlib
 import json
 from typing import Any
 
-from .context_budget import ContextBudget, ContextRequest, FreeRequest, build_context_request, request_budget
+from .context_budget import ContextBudget, ContextRequest, FreeRequest, build_context_request, minimum_total_for_source, request_budget
 from .ocr import LANGUAGES
 from .store import ProjectChangedError
 from .translation import ContextCapacityError, TranslationError, combine_translation_texts, distribute_translation
@@ -122,10 +122,13 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
                 counts.update({'requiredSourceChars':len(first), 'requiredSourceBytes':len(first.encode('utf-8')),
                                'imageId':job['imageId'], 'imageName':image_name, 'blockId':block_id})
                 if provider != 'free':
-                    counts['estimatedTotalForCurrent'] = limit + max(0, len(first) - current_request.source_capacity)
+                    counts['estimatedTotalForCurrent'] = minimum_total_for_source(
+                        LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, context, len(first), context_percent, skill_percent)
+                    minimum = counts['estimatedTotalForCurrent']
+                    advice = (f"حداقل سقف لازم با مقادیر فعلی {minimum} نویسه است؛ پس از تغییر تنظیمات دوباره بررسی کنید."
+                              if minimum is not None else 'با سقف مجاز تنظیمات فعلی فضای کافی وجود ندارد.')
                     detail += (f" خلاصهٔ فعلی {counts['summaryChars']}، اسکیل {counts['skillChars']}، "
-                               f"دستور ثابت {counts['systemChars']} و برچسب‌ها {counts['labelChars']} نویسه‌اند. "
-                               f"سقف تقریبی لازم با مقادیر فعلی {counts['estimatedTotalForCurrent']} نویسه است؛ بعد از تغییر دوباره بررسی کنید.")
+                               f"دستور ثابت {counts['systemChars']} و برچسب‌ها {counts['labelChars']} نویسه‌اند. {advice}")
                 raise ContextCapacityError(f"در صفحهٔ «{image_name}»، کادر {block_id}: {detail} "
                                            'مرز امن در سقف پیدا نشد؛ سقف را تغییر دهید یا متن را بررسی کنید. هیچ متنی ارسال نشد.', counts, getattr(current_request, 'system', ''))
             _, remaining, _ = chunk
@@ -206,6 +209,10 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
             first = remaining[:boundaries[0][0]] if boundaries else remaining
             counts.update({'requiredSourceChars':len(first), 'requiredSourceBytes':len(first.encode('utf-8')),
                            'imageId':job['imageId'], 'imageName':image_name, 'blockId':block_id})
+            if run['provider'] != 'free':
+                counts['estimatedTotalForCurrent'] = minimum_total_for_source(
+                    LANGUAGES.get(run['language'], LANGUAGES['eng'])['name'], skill, run['context'], len(first),
+                    run['contextPercent'], run['skillPercent'], prompt_version=run.get('promptVersion', 1))
             raise ContextCapacityError(f"در صفحهٔ «{image_name}»، کادر {block_id}: خط یا جمله در فضای فعلی {capacity} جا نمی‌شود؛ "
                                        'خلاصه، سقف یا متن OCR را بررسی کنید. این درخواست ارسال نشد.', counts, getattr(request, 'system', ''))
         break

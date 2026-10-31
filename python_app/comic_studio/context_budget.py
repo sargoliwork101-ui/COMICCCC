@@ -122,6 +122,33 @@ def request_budget(request: ContextRequest, skill: str, summary: str) -> dict[st
     }
 
 
+def minimum_total_for_source(language: str, skill: str, summary: str, source_chars: int,
+                             context_percent: int, skill_percent: int, *, prompt_version: int = 2) -> int | None:
+    """Smallest allowed total that fits, rebuilding the *actual* prompt at each cap.
+
+    The printed summary limit can gain digits when the total changes, so simply
+    adding a shortfall to the old total is not always enough.
+    """
+    def fits(total: int) -> bool:
+        try:
+            request = build_context_request(ContextBudget(total, context_percent, skill_percent), language, skill, summary, prompt_version=prompt_version)
+            return request.source_capacity >= source_chars
+        except TranslationError:
+            return False
+
+    high = 100_000
+    if not fits(high):
+        return None
+    low = 1
+    while low < high:
+        middle = (low + high) // 2
+        if fits(middle):
+            high = middle
+        else:
+            low = middle + 1
+    return low
+
+
 def parse_context_response(response: str, source_texts: list[str], context_limit: int) -> tuple[str, str]:
     """Accept both pieces together only after validating structure and boundaries."""
     def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

@@ -1109,17 +1109,25 @@ with pymupdf.open(pdf_path) as document:
     capacityProject.images[0].blocks=[makeBlock(34,'X'.repeat(715))];
     await api(base,`/api/projects/${capacityProject.id}/state`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:capacityProject})});
     const settings=await api(base,'/api/ai-settings');
-    settings.providers.openai.profiles[0].source_limit=900;
+    settings.providers.openai.profiles[0].source_limit=900; settings.context_percent=10; settings.skill_percent=15;
     await api(base,'/api/ai-settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(settings)});
     await page.evaluate(async id=>{await loadAiSettings(); await refreshProjectList();const el=document.getElementById('projectSelect');el.value=id;el.dispatchEvent(new Event('change',{bubbles:true}));},capacityProject.id);
     await page.waitForFunction(id=>state.project.id===id,{},capacityProject.id);
     await page.evaluate(()=>waitForProjectLoads());
+    // Simulate a second tab changing server settings after this tab loaded.
+    // The first preview's capacity failure must use the server's real limits.
+    await page.evaluate(()=>{ state.ai.providers.openai.profiles[0].source_limit=650; localStorage.setItem(`comic-studio-ai-skill:${state.project.id}`, 'ترجمه'+'x'.repeat(79)); });
     const beforeCapacity=aiGenerations.length;
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(await page.$eval('#translationContext',el=>el.value),'');
     assert.ok(await page.$eval('#translationSkill',el=>el.value.includes('ترجمه')));
     const capacityDisplay=await page.$eval('#translationBudget',el=>el.textContent);
-    assert.ok(capacityDisplay.includes('900') && capacityDisplay.includes('خلاصه: 0') && capacityDisplay.includes('اسکیل:'));
+    assert.ok(capacityDisplay.includes('900') && capacityDisplay.includes('خلاصه: 0') && capacityDisplay.includes('اسکیل: 84'));
+    assert.ok(capacityDisplay.includes('دستور ثابت: 331') && capacityDisplay.includes('فضای متن: 461') && capacityDisplay.includes('1155'));
+    assert.ok(await page.$eval('#translationSkillCount',el=>el.textContent.includes('84 از 135') && el.textContent.includes('62.222٪ از سقف اسکیل') && el.textContent.includes('9.333٪ از سقف کل')));
+    assert.ok(await page.$eval('#translationSourceLimit',el=>el.textContent.includes('155.098٪ از ظرفیت متن') && el.textContent.includes('79.444٪ از سقف کل')));
+    assert.equal(await page.evaluate(()=>translationPreviewData.skillLimit),135);
+    assert.equal(await page.evaluate(()=>state.ai.providers.openai.profiles[0].source_limit),900, 'latest stored settings are reloaded before planning');
     assert.ok(await page.$eval('#translationPreviewError',el=>el.textContent.includes('715') && el.textContent.includes('34')));
     assert.ok(await page.$eval('#translationPreviewSystem',el=>el.textContent.includes('Guidance:')));
     assert.ok(await page.$eval('#translationSourceLimit',el=>el.classList.contains('over-limit') && el.textContent.includes('715 از') && el.textContent.includes('34')));

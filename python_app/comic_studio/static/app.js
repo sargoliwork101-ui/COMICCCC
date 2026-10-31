@@ -732,8 +732,9 @@ function rememberTranslationSkill(projectId, preview) {
   if (preview.provider === 'free') return;
   try { localStorage.setItem(`comic-studio-ai-skill:${projectId}`, preview.skill ?? ''); } catch { /* the next preview can still use the default */ }
 }
-function limitPercent(count, limit) {
-  return limit > 0 ? ` (${Math.round(count * 100 / limit)}٪)` : '';
+function limitPercent(count, limit, label) {
+  if (!Number.isFinite(limit) || limit < 0) return '';
+  return limit > 0 ? ` · ${Number((count * 100 / limit).toFixed(3))}٪ از ${label}` : ` · ${label} صفر است`;
 }
 function renderTranslationBudget(budget) {
   const el = $('translationBudget'); const source = $('translationSourceLimit');
@@ -751,7 +752,8 @@ function renderTranslationBudget(budget) {
     const labels = budget.labelChars + (summary > 0 ? 10 : 0) - (budget.summaryChars > 0 ? 10 : 0);
     capacity = budget.totalLimit - fixed - skill - summary - labels;
     const required = budget.requiredSourceChars;
-    const estimate = Number.isInteger(required) && required > capacity ? ` سقف کل تقریبی لازم: ${budget.totalLimit + required - capacity} نویسه؛ پس از تغییر دوباره بررسی کنید.` : '';
+    const unchanged = skill === budget.skillChars && summary === budget.summaryChars;
+    const estimate = Number.isInteger(required) && required > capacity ? (unchanged && Number.isInteger(budget.estimatedTotalForCurrent) ? ` حداقل سقف مؤثر لازم با این مقادیر: ${budget.estimatedTotalForCurrent} نویسه؛ پس از تغییر دوباره بررسی کنید.` : unchanged && budget.estimatedTotalForCurrent === null ? ' حتی حداکثر سقف قابل تنظیم نیز برای این مقادیر کافی نیست.' : ' برای محاسبهٔ دقیق سقف لازم، دوباره بررسی کنید.') : '';
     el.textContent = `سقف کل: ${budget.totalLimit} · دستور ثابت: ${fixed} · اسکیل: ${skill} · خلاصه: ${summary} · برچسب‌ها: ${labels} · فضای متن: ${capacity} نویسه. ${summary === 0 ? 'خلاصه در این درخواست خالی است.' : ''}${estimate}`;
   }
   const count = budget.requiredSourceChars ?? budget.sourceChars;
@@ -763,17 +765,17 @@ function renderTranslationBudget(budget) {
   const blockId = target?.blockId ?? budget.blockId;
   const where = name ? ` · صفحهٔ «${name}» · کادر ${blockId}` : '';
   const label = budget.requiredSourceChars != null ? 'بخش کامل مشکل‌دار' : 'متن درخواست اول';
-  const byteText = budget.byteLimit && Number.isInteger(bytes) ? ` · ${bytes} از ${budget.byteLimit} بایت${limitPercent(bytes, budget.byteLimit)}` : '';
-  source.textContent = `${label}${where}: ${count} از ${capacity} نویسه${limitPercent(count, capacity)}${byteText}${tooLong ? (budget.requiredSourceChars != null ? ' — بخش کامل در ظرفیت فعلی جا نمی‌شود.' : ' — ترکیب قبلی در ظرفیت فعلی جا نمی‌شود؛ در بازبینی ممکن است دوباره تقسیم شود.') : ''}\n${budget.byteLimit ? 'ترجمهٔ رایگان علاوه بر سقف نویسه، محدودیت بایت دارد.' : 'سقف متن درصد ثابت ندارد؛ فضای باقی‌مانده پس از دستور، اسکیل و خلاصه است.'} محاسبهٔ فعلی محلی است؛ پس از تغییر، پیش‌نمایش را دوباره بررسی کنید.`;
+  const byteText = budget.byteLimit && Number.isInteger(bytes) ? ` · ${bytes} از ${budget.byteLimit} بایت${limitPercent(bytes, budget.byteLimit, 'سقف بایت')}` : '';
+  source.textContent = `${label}${where}: ${count} از ${capacity} نویسه${limitPercent(count, capacity, 'ظرفیت متن')}${limitPercent(count, budget.totalLimit, 'سقف کل')}${byteText}${tooLong ? (budget.requiredSourceChars != null ? ' — بخش کامل در ظرفیت فعلی جا نمی‌شود.' : ' — ترکیب قبلی در ظرفیت فعلی جا نمی‌شود؛ در بازبینی ممکن است دوباره تقسیم شود.') : ''}\n${budget.byteLimit ? 'ترجمهٔ رایگان علاوه بر سقف نویسه، محدودیت بایت دارد.' : 'سقف متن درصد ثابت ندارد؛ فضای باقی‌مانده پس از دستور، اسکیل و خلاصه است.'} محاسبهٔ فعلی محلی است؛ پس از تغییر، پیش‌نمایش را دوباره بررسی کنید.`;
   source.classList.remove('hidden'); source.classList.toggle('over-limit', tooLong);
 }
-function countBudgetField(field, counter, value, limit) {
+function countBudgetField(field, counter, value, limit, total, label) {
   const count = Array.from(value).length;
   const blocked = field.dataset.limitBlocked === '1';
   const over = count > limit || blocked;
   field.classList.toggle('over-limit', over); field.setAttribute('aria-invalid', over ? 'true' : 'false');
   counter.classList.toggle('over-limit', over);
-  counter.textContent = `${count} از ${limit} نویسه${limitPercent(count, limit)}${blocked ? ' — سقف پر است؛ نویسهٔ اضافه پذیرفته نشد.' : count > limit ? ' — از سقف مجاز بیشتر است.' : ''}`;
+  counter.textContent = `${count} از ${limit} نویسه${limitPercent(count, limit, `سقف ${label}`)}${limitPercent(count, total, 'سقف کل')}${blocked ? ' — سقف پر است؛ نویسهٔ اضافه پذیرفته نشد.' : count > limit ? ' — از سقف مجاز بیشتر است.' : ''}`;
 }
 function sourceIssueMatches(item, block) {
   return !!translationSourceIssue && state.project?.id === translationSourceIssue.projectId && item?.id === translationSourceIssue.imageId && String(block.id) === translationSourceIssue.blockId;
@@ -787,8 +789,10 @@ function rememberSourceIssue(budget, sourceTarget = null) {
 }
 
 function showCapacityPreview(error, {provider, skill, summary, safeSkill, safeSummary, resume, limit, skillLimit, contextLimit, action, refresh, single = false, sourceTarget = null}) {
+  const actual = error.capacityBudget || {};
   const draft = {provider, rollingMode:true, contextMode:provider !== 'free', singleContext:single, resume,
-    skill:safeSkill, summary:safeSummary, displaySkill:skill, displaySummary:summary, skillLimit, contextLimit, totalLimit:limit,
+    skill:safeSkill, summary:safeSummary, displaySkill:skill, displaySummary:summary,
+    skillLimit:actual.skillLimit ?? skillLimit, contextLimit:actual.summaryLimit ?? contextLimit, totalLimit:actual.totalLimit ?? limit,
     defaultSkill:'ترجمه را روان و طبیعی و متناسب با لحن شخصیت‌ها بنویس؛ نام‌ها، اعداد و آواها را با دقت حفظ کن.',
     providerLabel:provider === 'free' ? 'ترجمهٔ رایگان' : provider, requests:[], blockCount:0,
     preflightFailed:true, budget:error.capacityBudget, systemPrompt:error.capacitySystem, sourceTarget,
@@ -806,8 +810,9 @@ function updateTranslationSkillStatus() {
   const skillTooLong = preview?.contextMode && Array.from($('translationSkill').value).length > preview.skillLimit;
   const contextTooLong = preview?.contextMode && Array.from($('translationContext').value).length > preview.contextLimit;
   if (preview?.contextMode) {
-    countBudgetField($('translationSkill'), $('translationSkillCount'), $('translationSkill').value, preview.skillLimit);
-    countBudgetField($('translationContext'), $('translationContextCount'), $('translationContext').value, preview.contextLimit);
+    const total = preview.budget?.totalLimit ?? preview.totalLimit;
+    countBudgetField($('translationSkill'), $('translationSkillCount'), $('translationSkill').value, preview.skillLimit, total, 'اسکیل');
+    countBudgetField($('translationContext'), $('translationContextCount'), $('translationContext').value, preview.contextLimit, total, 'خلاصه');
   }
   renderTranslationBudget(preview?.budget || (preview?.provider === 'free' && preview.totalLimit ? {totalLimit:preview.totalLimit, byteLimit:500} : null));
   const changed = preview && ((preview.provider !== 'free' && (skill !== (preview.skill ?? '') || (preview.contextMode && context !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume));
@@ -896,7 +901,7 @@ async function confirmTranslationRequestPreview() {
       // Cancel/close during the local preview request must not reopen it or send.
       if ($('translationPreviewDialog').open && translationPreviewAction === action) showTranslationRequestPreview(updated, action, refresh);
     } catch (error) {
-      if ($('translationPreviewDialog').open && translationPreviewAction === action) { if (error.capacityBudget) { preview.budget = error.capacityBudget; preview.systemPrompt = error.capacitySystem; preview.preflightFailed = true; rememberSourceIssue(error.capacityBudget, preview.sourceTarget); renderTranslationBudget(error.capacityBudget); $('translationPreviewSystemWrap').classList.toggle('hidden', !error.capacitySystem); $('translationPreviewSystem').textContent = error.capacitySystem || ''; } $('translationSkillStatus').textContent = `به‌روزرسانی ممکن نبود: ${error.message || error}`; $('translationPreviewError').textContent = `${$('translationSkillStatus').textContent}\nپیش از ارسال گزارش، اطلاعات محرمانه را بررسی کنید.`; $('translationPreviewError').classList.remove('hidden'); $('copyTranslationPreviewError').classList.remove('hidden'); toast(error.message || 'پیش‌نمایش ناموفق بود', true); }
+      if ($('translationPreviewDialog').open && translationPreviewAction === action) { if (error.capacityBudget) { preview.budget = error.capacityBudget; preview.skillLimit = error.capacityBudget.skillLimit ?? preview.skillLimit; preview.contextLimit = error.capacityBudget.summaryLimit ?? preview.contextLimit; preview.totalLimit = error.capacityBudget.totalLimit ?? preview.totalLimit; if (preview.contextMode) { $('translationSkill').maxLength = preview.skillLimit * 2; $('translationContext').maxLength = preview.contextLimit * 2; } preview.systemPrompt = error.capacitySystem; preview.preflightFailed = true; rememberSourceIssue(error.capacityBudget, preview.sourceTarget); renderTranslationBudget(error.capacityBudget); $('translationPreviewSystemWrap').classList.toggle('hidden', !error.capacitySystem); $('translationPreviewSystem').textContent = error.capacitySystem || ''; } $('translationSkillStatus').textContent = `به‌روزرسانی ممکن نبود: ${error.message || error}`; $('translationPreviewError').textContent = `${$('translationSkillStatus').textContent}\nپیش از ارسال گزارش، اطلاعات محرمانه را بررسی کنید.`; $('translationPreviewError').classList.remove('hidden'); $('copyTranslationPreviewError').classList.remove('hidden'); toast(error.message || 'پیش‌نمایش ناموفق بود', true); }
     } finally {
       if ($('translationPreviewDialog').open && translationPreviewAction === action) {
         $('translationSkill').disabled = false; $('translationSkillReset').disabled = false; $('translationContext').disabled = false; $('translationContextResume').disabled = false;
@@ -933,7 +938,13 @@ async function runTranslation() {
       throw new Error('هیچ کادر فعال دارای متن در تصاویر انتخاب‌شده نیست. اگر OCR متنی پیدا نکرده، تنظیمات یا تصویر را بررسی و OCR را دوباره اجرا کنید.');
     }
     await saveProject();
-    const provider = state.ai?.provider || 'free'; const projectId = state.project.id;
+    const projectId = state.project.id;
+    // Another tab may have changed the provider or budget since this tab loaded.
+    // Re-read the authoritative settings before choosing safe skill/summary values.
+    const latestSettings = await api('/api/ai-settings');
+    if (state.project?.id !== projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(ids)) throw new Error('پروژه یا انتخاب تصویر تغییر کرد؛ دوباره پیش‌نمایش بگیرید.');
+    state.ai = latestSettings;
+    const provider = state.ai?.provider || 'free';
     const request = { image_ids: ids, provider, source_language: $('ocrLanguage').value, reuse_repeated: state.ai?.reuse_repeated !== false };
     if (state.project.images.some(item => ids.includes(item.id) && (item._aiPageProgress || item.blocks?.some(block => block._aiTranslationParts)))) {
       if (!confirm('پیشرفت ناتمام ترجمه از نسخهٔ قبلی وجود دارد و با حافظهٔ جدید سازگار نیست. برای جلوگیری از ارسال دوباره می‌توانید در نسخهٔ قبلی ادامه دهید. آیا با حذف پیشرفت ناتمام و شروع ترجمهٔ تازه موافقید؟')) return;
@@ -1991,9 +2002,12 @@ function startBoxDrag(event, block, el) {
 async function retranslateBlock(block) {
   if (inlineDraft?.block === block && !closeInlineEditor()) return;
   const text = block.text || ''; const snapshot = inlineBlockSnapshot(block);
-  const provider = state.ai?.provider || 'free'; const sourceLanguage = $('ocrLanguage').value;
+  const sourceLanguage = $('ocrLanguage').value;
   try {
-    const projectId = state.project.id;
+    const projectId = state.project.id; const imageId = editorItem()?.id;
+    const latestSettings = await api('/api/ai-settings');
+    if (state.project?.id !== projectId || editorItem()?.id !== imageId || inlineBlockSnapshot(block) !== snapshot) throw new Error('پروژه یا کادر تغییر کرد؛ دوباره پیش‌نمایش بگیرید.');
+    state.ai = latestSettings; const provider = state.ai?.provider || 'free';
     const request = { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, provider };
     if (provider === 'free') {
       const refresh = () => api('/api/translate-text/context-preview', jsonOptions('POST', { ...request, skill: '', summary: '' }));

@@ -688,9 +688,11 @@ function check(name, condition) {
   await vm.runInContext('runTranslation()', context);
   check('capacity errors still show AI skill and an initially empty summary before any send', $('translationPreviewDialog').open && !$('translationSkillWrap').classList.contains('hidden') && $('translationSkill').value.length > 0 && $('translationContext').value === '' && $('translationPreviewError').textContent.includes('کادر 34') && translationCalls.length === beforeCapacityCalls);
   check('capacity breakdown explicitly shows zero summary and real budget', $('translationBudget').textContent.includes('خلاصه: 0') && $('translationBudget').textContent.includes('اسکیل: 93') && $('translationBudget').textContent.includes('437') && !$('translationPreviewConfirm').disabled);
-  check('source budget displays the exact complete segment, percentage, and red warning', $('translationSourceLimit').textContent.includes('715 از 437') && $('translationSourceLimit').textContent.includes('164٪') && $('translationSourceLimit').classList.contains('over-limit'));
+  check('source budget displays the exact complete segment, percentage, and red warning', $('translationSourceLimit').textContent.includes('715 از 437') && $('translationSourceLimit').textContent.includes('163.616٪ از ظرفیت متن') && $('translationSourceLimit').textContent.includes('79.444٪ از سقف کل') && $('translationSourceLimit').classList.contains('over-limit'));
   const capacityLimit = vm.runInContext('translationPreviewData.skillLimit', context);
-  check('skill and summary show live limits', $('translationSkillCount').textContent.includes(`93 از ${capacityLimit}`) && $('translationContextCount').textContent.includes(`0 از ${capacityLimit}`));
+  check('capacity error uses authoritative server limits even when browser settings are stale', capacityLimit === 135 && vm.runInContext('translationPreviewData.totalLimit', context) === 900);
+  check('near-full percentage does not round up to a misleading 100 percent', vm.runInContext("limitPercent(99999, 100000, 'سقف کل')", context).includes('99.999٪'));
+  check('skill and summary show live limits', $('translationSkillCount').textContent.includes(`93 از ${capacityLimit}`) && $('translationContextCount').textContent.includes(`0 از ${capacityLimit}`) && $('translationSkillCount').textContent.includes('68.889٪ از سقف اسکیل') && $('translationSkillCount').textContent.includes('10.333٪ از سقف کل'));
   $('translationSkill').value = 'x'.repeat(capacityLimit); $('translationSkill').setSelectionRange(capacityLimit,capacityLimit);
   const attempt = new window.InputEvent('beforeinput', {bubbles:true,cancelable:true,inputType:'insertText',data:'y'});
   $('translationSkill').dispatchEvent(attempt);
@@ -706,7 +708,9 @@ function check(name, condition) {
   $('translationContext').value = 'z'.repeat(136); $('translationContext').dispatchEvent(new window.Event('input', {bubbles:true}));
   check('pre-existing oversized summary is red and prevents confirmation without truncating it', $('translationContext').getAttribute('aria-invalid') === 'true' && $('translationContext').value.length === 136 && $('translationPreviewConfirm').disabled);
   $('translationContext').value = ''; $('translationContext').dispatchEvent(new window.Event('input', {bubbles:true}));
+  vm.runInContext('translationPreviewData.skillLimit = 200; translationPreviewData.contextLimit = 200', context);
   $('translationPreviewConfirm').click(); await sleep(20);
+  check('a second capacity failure also replaces stale limits with server limits', vm.runInContext('translationPreviewData.skillLimit === 135 && translationPreviewData.contextLimit === 135', context));
   check('rechecking a blocked preview cannot send to AI', $('translationPreviewDialog').open && translationCalls.length === beforeCapacityCalls && $('translationPreviewError').textContent.includes('کادر 34'));
   $('translationContextRestore').click();
   check('previous story context is only used explicitly in a project with no completed run', $('translationContext').value === 'old optional summary');

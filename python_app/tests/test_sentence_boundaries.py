@@ -218,6 +218,23 @@ def test_capacity_error_reports_actual_budget_and_first_summary_zero(tmp_path, m
         assert newer['emptySummaryCapacity'] == counts['textCapacity']
 
 
+
+def test_exact_capacity_diagnostic_recalculates_summary_percent_at_new_total(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    with scoped_client(create_app()) as client:
+        route, project = make_project(client)
+        project['images'][0]['blocks'] = [{'id':34, 'text':'A'*715, 'enabled':True}]
+        client.put(route+'/state', json={'state':project})
+        client.put('/api/ai-settings', json={'provider':'openai', 'context_percent':10, 'skill_percent':15, 'providers':{'openai':{'profiles':[{'id':'key','api_key':'key','source_limit':900}]}}})
+        req = {'image_ids':[project['images'][0]['id']], 'provider':'openai', 'skill':'x'*84, 'summary':''}
+        response = client.post(route+'/context-preview', json=req)
+        assert response.status_code == 502
+        b = response.json()['budget']
+        assert (b['systemChars'], b['skillChars'], b['labelChars'], b['summaryChars'], b['textCapacity']) == (331, 84, 24, 0, 461)
+        assert (b['skillLimit'], b['summaryLimit'], b['estimatedTotalForCurrent']) == (135, 90, 1155)
+        assert '1155' in response.json()['detail']
+
+
 def test_successful_first_preview_shows_no_context_then_generated_summary_is_used(tmp_path, monkeypatch):
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path)); sent=[]
     def fake(self, request, text, sources, provider, policy):

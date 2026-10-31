@@ -74,3 +74,33 @@ def test_budget_counts_each_part_exactly_with_and_without_summary():
         assert sum(info[key] for key in ('systemChars','skillChars','summaryChars','labelChars','textCapacity')) == 900
         assert info['textCapacity'] == request.source_capacity
         assert request.character_count('x'*info['textCapacity']) == 900
+
+
+def test_minimum_total_rebuilds_prompt_when_summary_cap_changes_digits():
+    from comic_studio.context_budget import minimum_total_for_source, request_budget
+    skill = 'x' * 84
+    original = build_context_request(ContextBudget(900, 10, 15), 'English', skill, '')
+    counts = request_budget(original, skill, '')
+    assert (counts['systemChars'], counts['skillChars'], counts['labelChars'], counts['textCapacity']) == (331, 84, 24, 461)
+    minimum = minimum_total_for_source('English', skill, '', 715, 10, 15)
+    assert minimum == 1155
+    assert build_context_request(ContextBudget(1154, 10, 15), 'English', skill, '').source_capacity == 714
+    assert build_context_request(ContextBudget(1155, 10, 15), 'English', skill, '').source_capacity == 715
+    assert minimum_total_for_source('English', skill, '', 100_000, 10, 15) is None
+
+
+def test_minimum_total_matches_exhaustive_search_across_percentages_and_old_prompt():
+    from comic_studio.context_budget import minimum_total_for_source
+    for version in (1, 2):
+        for context_percent, skill_percent in ((0, 0), (10, 15), (15, 15), (50, 40), (99, 1)):
+            skill = 'x' * 3 if skill_percent else ''
+            summary = 'y' * 3 if context_percent else ''
+            valid = []
+            for total in range(1, 1100):
+                try:
+                    request = build_context_request(ContextBudget(total, context_percent, skill_percent), 'English', skill, summary, prompt_version=version)
+                    if request.source_capacity >= 500:
+                        valid.append(total)
+                except TranslationError:
+                    pass
+            assert minimum_total_for_source('English', skill, summary, 500, context_percent, skill_percent, prompt_version=version) == (valid[0] if valid else None)
