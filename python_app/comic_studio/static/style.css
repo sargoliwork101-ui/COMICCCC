@@ -70,3 +70,13 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 .reuse-setting{display:flex;align-items:flex-start;gap:8px;margin:12px 0 4px}.reuse-setting input{width:auto;flex:none;margin-top:4px}
 
 #translationSkill{display:block;width:100%;min-height:90px;resize:vertical;margin-top:6px}#translationSkillWrap{margin:14px 0}
+
+/* Capacity warnings are outlines only: they do not move text or the caret. */
+.budget-count{margin:2px 0 6px;color:var(--muted);font-size:11px;direction:rtl}
+.budget-count.over-limit{color:#ef4444;font-weight:700}
+#translationSkill.over-limit,#translationContext.over-limit,#translationSkill.over-limit:focus,#translationContext.over-limit:focus{border-color:#ef4444;box-shadow:0 0 0 2px #ef444455}
+.budget-source{border:1px solid var(--line-2);border-radius:9px;padding:8px 10px;margin:6px 0;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+.budget-source.over-limit{border-color:#ef4444;box-shadow:0 0 0 2px #ef444433;color:#ef4444;font-weight:700}
+.editor-box.capacity-warning{outline:2px solid #ef4444;outline-offset:2px}
+.block-card.capacity-warning{border-color:#ef4444;box-shadow:0 0 0 2px #ef444433}
+.capacity-warning-label{color:#ef4444;font-weight:700;font-size:11px}

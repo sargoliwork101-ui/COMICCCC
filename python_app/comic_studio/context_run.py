@@ -119,7 +119,8 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
                 counts = ({'totalLimit':limit, 'textCapacity':maximum_request.source_capacity, 'byteLimit':500}
                           if provider == 'free' else request_budget(current_request, skill, context))
                 counts['emptySummaryCapacity'] = maximum_request.source_capacity
-                counts['requiredSourceChars'] = len(first)
+                counts.update({'requiredSourceChars':len(first), 'requiredSourceBytes':len(first.encode('utf-8')),
+                               'imageId':job['imageId'], 'imageName':image_name, 'blockId':block_id})
                 if provider != 'free':
                     counts['estimatedTotalForCurrent'] = limit + max(0, len(first) - current_request.source_capacity)
                     detail += (f" خلاصهٔ فعلی {counts['summaryChars']}، اسکیل {counts['skillChars']}، "
@@ -201,6 +202,10 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
                         else f"{request.source_capacity} نویسه")
             counts = ({'totalLimit':run['limit'], 'textCapacity':request.source_capacity, 'byteLimit':500}
                       if run['provider'] == 'free' else request_budget(request, skill, run['context']))
+            boundaries = safe_line_boundaries(remaining, job.get('sourceLines'))
+            first = remaining[:boundaries[0][0]] if boundaries else remaining
+            counts.update({'requiredSourceChars':len(first), 'requiredSourceBytes':len(first.encode('utf-8')),
+                           'imageId':job['imageId'], 'imageName':image_name, 'blockId':block_id})
             raise ContextCapacityError(f"در صفحهٔ «{image_name}»، کادر {block_id}: خط یا جمله در فضای فعلی {capacity} جا نمی‌شود؛ "
                                        'خلاصه، سقف یا متن OCR را بررسی کنید. این درخواست ارسال نشد.', counts, getattr(request, 'system', ''))
         break

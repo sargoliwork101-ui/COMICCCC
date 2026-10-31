@@ -125,8 +125,8 @@ window.fetch = async (url, options = {}) => {
     if (previewFailure === 'network') throw new TypeError('simulated connection failure');
     if (previewFailure === 'server') return jsonResponse({detail:'simulated preview outage'},503);
     if (previewFailure === 'validation') return jsonResponse({detail:[{loc:['body','response'],msg:'too long',input:'private-response-data'}]},422);
-    if (previewFailure === 'capacity') return jsonResponse({detail:'page.png کادر 34 طولانی است', kind:'translation_capacity', budget:{totalLimit:900,systemChars:350,skillChars:93,summaryChars:0,labelChars:20,textCapacity:437,skillLimit:135,summaryLimit:135,emptySummaryCapacity:437,requiredSourceChars:715}, system_prompt:'دستور و اسکیل'},502);
-    if (previewFailure === 'capacity-success') return jsonResponse({...makeTranslationPreview(request),contextMode:true,skill:request.skill,summary:request.summary,skillLimit:135,contextLimit:135,budget:{totalLimit:900,systemChars:350,skillChars:request.skill.length,summaryChars:request.summary.length,labelChars:20,textCapacity:900-350-request.skill.length-request.summary.length-20}});
+    if (previewFailure === 'capacity') return jsonResponse({detail:'page.png کادر 34 طولانی است', kind:'translation_capacity', budget:{totalLimit:900,systemChars:350,skillChars:93,summaryChars:0,labelChars:20,textCapacity:437,skillLimit:135,summaryLimit:135,emptySummaryCapacity:437,requiredSourceChars:715,requiredSourceBytes:715,imageId:'image-ui',imageName:'page.png',blockId:1}, system_prompt:'دستور و اسکیل'},502);
+    if (previewFailure === 'capacity-success') return jsonResponse({...makeTranslationPreview(request),contextMode:true,skill:request.skill,summary:request.summary,skillLimit:135,contextLimit:135,budget:{totalLimit:900,systemChars:350,skillChars:request.skill.length,summaryChars:request.summary.length,labelChars:20,textCapacity:900-350-request.skill.length-request.summary.length-20,sourceChars:22,sourceBytes:22}});
     return jsonResponse(makeTranslationPreview(request));
   }
   if (pathname === `/api/projects/${project.id}/context-start`) {
@@ -688,6 +688,24 @@ function check(name, condition) {
   await vm.runInContext('runTranslation()', context);
   check('capacity errors still show AI skill and an initially empty summary before any send', $('translationPreviewDialog').open && !$('translationSkillWrap').classList.contains('hidden') && $('translationSkill').value.length > 0 && $('translationContext').value === '' && $('translationPreviewError').textContent.includes('کادر 34') && translationCalls.length === beforeCapacityCalls);
   check('capacity breakdown explicitly shows zero summary and real budget', $('translationBudget').textContent.includes('خلاصه: 0') && $('translationBudget').textContent.includes('اسکیل: 93') && $('translationBudget').textContent.includes('437') && !$('translationPreviewConfirm').disabled);
+  check('source budget displays the exact complete segment, percentage, and red warning', $('translationSourceLimit').textContent.includes('715 از 437') && $('translationSourceLimit').textContent.includes('164٪') && $('translationSourceLimit').classList.contains('over-limit'));
+  const capacityLimit = vm.runInContext('translationPreviewData.skillLimit', context);
+  check('skill and summary show live limits', $('translationSkillCount').textContent.includes(`93 از ${capacityLimit}`) && $('translationContextCount').textContent.includes(`0 از ${capacityLimit}`));
+  $('translationSkill').value = 'x'.repeat(capacityLimit); $('translationSkill').setSelectionRange(capacityLimit,capacityLimit);
+  const attempt = new window.InputEvent('beforeinput', {bubbles:true,cancelable:true,inputType:'insertText',data:'y'});
+  $('translationSkill').dispatchEvent(attempt);
+  check('attempted overflow is blocked, marked red and never removes existing skill', attempt.defaultPrevented && $('translationSkill').value.length === capacityLimit && $('translationSkill').getAttribute('aria-invalid') === 'true' && $('translationSkillCount').textContent.includes('پذیرفته نشد'));
+  $('translationSkill').value = 'short'; $('translationSkill').dispatchEvent(new window.Event('input', {bubbles:true}));
+  check('editing again removes the blocked warning and updates remaining text capacity', $('translationSkill').getAttribute('aria-invalid') === 'false' && $('translationSourceLimit').textContent.includes('715 از 525'));
+  $('translationContext').value = 'abc'; $('translationContext').dispatchEvent(new window.Event('input', {bubbles:true}));
+  check('adding summary includes its label in the local remaining capacity', $('translationSourceLimit').textContent.includes('715 از 512'));
+  $('translationContext').value = ''; $('translationContext').dispatchEvent(new window.Event('input', {bubbles:true}));
+  $('translationSkill').value = ''; $('translationSkill').dispatchEvent(new window.Event('input', {bubbles:true}));
+  check('removing skill returns the guidance prefix space to text', $('translationSourceLimit').textContent.includes('715 از 541'));
+  $('translationSkill').value = 'short'; $('translationSkill').dispatchEvent(new window.Event('input', {bubbles:true}));
+  $('translationContext').value = 'z'.repeat(136); $('translationContext').dispatchEvent(new window.Event('input', {bubbles:true}));
+  check('pre-existing oversized summary is red and prevents confirmation without truncating it', $('translationContext').getAttribute('aria-invalid') === 'true' && $('translationContext').value.length === 136 && $('translationPreviewConfirm').disabled);
+  $('translationContext').value = ''; $('translationContext').dispatchEvent(new window.Event('input', {bubbles:true}));
   $('translationPreviewConfirm').click(); await sleep(20);
   check('rechecking a blocked preview cannot send to AI', $('translationPreviewDialog').open && translationCalls.length === beforeCapacityCalls && $('translationPreviewError').textContent.includes('کادر 34'));
   $('translationContextRestore').click();
@@ -695,12 +713,15 @@ function check(name, condition) {
   $('translationContext').value = ''; $('translationContext').dispatchEvent(new window.Event('input', {bubbles:true}));
   $('translationSkill').value = 'short'; $('translationSkill').dispatchEvent(new window.Event('input', {bubbles:true}));
   previewFailure = 'capacity-success'; $('translationPreviewConfirm').click(); await sleep(20);
+  check('successful new preview clears old source warning', !vm.runInContext('translationSourceIssue', context) && !$('translationSourceLimit').classList.contains('over-limit'));
   check('editing skill rebuilds the preview but still does not send', $('translationPreviewDialog').open && $('translationSkill').value === 'short' && $('translationPreviewRequests').textContent.length > 0 && $('translationPreviewConfirm').textContent.includes('تأیید') && translationCalls.length === beforeCapacityCalls);
   $('translationPreviewCancel').click();
   vm.runInContext("state.project._aiContextRun = {completed:0, context:'approved earlier', provider:'openrouter', imageIds:['image-ui'], jobs:[{remaining:'yes'}]}", context);
   previewFailure = 'capacity-success'; await vm.runInContext('runTranslation()', context);
   check('resuming an uncompleted run keeps its previously approved summary', $('translationContext').value === 'approved earlier' && $('translationContextResume').checked && translationCalls.length === beforeCapacityCalls);
   $('translationPreviewCancel').click(); previewFailure = null;
+  vm.runInContext("renderTranslationBudget({totalLimit:900,textCapacity:900,byteLimit:500,requiredSourceChars:300,requiredSourceBytes:600})", context);
+  check('free capacity warns on UTF-8 bytes even when characters fit', $('translationSourceLimit').textContent.includes('600 از 500 بایت') && $('translationSourceLimit').classList.contains('over-limit'));
   vm.runInContext("delete state.project._aiStorySummary; delete state.project._aiContextRun; state.ai.provider = 'free'", context);
 
   const oldFetch = window.fetch; let pendingChoices = null;

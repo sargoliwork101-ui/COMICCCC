@@ -206,6 +206,8 @@ def test_capacity_error_reports_actual_budget_and_first_summary_zero(tmp_path, m
         assert counts['summaryChars'] == 0 and counts['skillChars'] == len(req['skill'])
         assert sum(counts[key] for key in ('systemChars','skillChars','summaryChars','labelChars','textCapacity')) == 900
         assert counts['emptySummaryCapacity'] == counts['textCapacity'] and counts['requiredSourceChars'] == 715
+        assert counts['requiredSourceBytes'] == 715 and counts['imageId'] == project['images'][0]['id']
+        assert counts['imageName'] == 'a.png' and counts['blockId'] == '34'
         assert counts['estimatedTotalForCurrent'] == 900 + 715 - counts['textCapacity']
         assert 'راهنمای نمونه' in data['system_prompt'] and 'خلاصهٔ فعلی 0' in data['detail']
         with_summary = client.post(route+'/context-preview', json={**req,'summary':'یک خلاصه'})
@@ -229,6 +231,8 @@ def test_successful_first_preview_shows_no_context_then_generated_summary_is_use
         preview=client.post(route+'/context-preview', json=req)
         assert preview.status_code == 200, preview.text
         assert preview.json()['budget']['summaryChars'] == 0
+        assert preview.json()['budget']['sourceChars'] == len('repeated title\npage 0')
+        assert preview.json()['budget']['sourceBytes'] == len('repeated title\npage 0'.encode())
         assert 'Context:' not in preview.json()['requests'][0]['text'] and not sent
         start=client.post(route+'/context-start', json={**req,'confirmation':preview.json()['signature']}).json()
         for n in range(2):
@@ -261,6 +265,8 @@ def test_later_summary_capacity_failure_is_visible_and_resume_does_not_repeat_pa
         blocked=client.post(route+'/context-step',json={**step,'completed':1})
         assert blocked.status_code==502 and blocked.json()['kind']=='translation_capacity'
         assert blocked.json()['budget']['summaryChars']==135 and calls==['first page']
+        assert blocked.json()['budget']['requiredSourceChars'] == empty.source_capacity - 1
+        assert blocked.json()['budget']['imageId'] == project['images'][1]['id'] and blocked.json()['budget']['blockId'] == '2'
         assert client.get(route).json()['_aiContextRun']['completed']==1
         resume={**req,'resume':True,'summary':''}
         preview=client.post(route+'/context-preview',json=resume)

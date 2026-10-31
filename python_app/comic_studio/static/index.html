@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.55">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.55">
+  <link rel="stylesheet" href="/style.css?v=3.56">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.56">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۵۵ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۵۶ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
     <button id="menuBtn" class="bt">☰ پروژه و تنظیمات</button>
   </header>
 
@@ -219,16 +219,19 @@
     <p id="translationPreviewDestination" class="hint" dir="auto"></p>
     <p class="hint">در این پیش‌نمایش هیچ درخواست تازه‌ای ارسال نمی‌شود. متن را بررسی کنید؛ در حالت حافظه، درخواست‌های بعدی براساس خلاصهٔ پاسخ قبلی ساخته می‌شوند.</p>
     <p id="translationBudget" class="hint diagnostic-message hidden" role="status"></p>
+    <div id="translationSourceLimit" class="budget-source hidden" role="status"></div>
     <div id="translationContextWrap" class="hidden">
       <label id="translationContextLabel" for="translationContext">خلاصهٔ داستان برای درخواست اول</label>
-      <input id="translationContext" type="text" dir="auto">
+      <input id="translationContext" type="text" dir="auto" aria-describedby="translationContextCount translationContextHelp">
+      <p id="translationContextCount" class="budget-count" aria-live="polite"></p>
       <p id="translationContextHelp" class="hint"></p>
       <button id="translationContextRestore" type="button" class="bt hidden">استفاده از خلاصهٔ قبلی پروژه</button>
       <label><input id="translationContextResume" type="checkbox"> ادامهٔ نوبت ناتمام قبلی</label>
     </div>
     <div id="translationSkillWrap" class="hidden">
       <label for="translationSkill">اسکیل / راهنمای ترجمهٔ AI برای این نوبت</label>
-      <textarea id="translationSkill" rows="4" maxlength="4000" dir="auto" aria-describedby="translationSkillHelp"></textarea>
+      <textarea id="translationSkill" aria-describedby="translationSkillCount translationSkillHelp" rows="4" maxlength="4000" dir="auto"></textarea>
+      <p id="translationSkillCount" class="budget-count" aria-live="polite"></p>
       <p id="translationSkillHelp" class="hint">این راهنما همراه تمام درخواست‌های AI همین نوبت ارسال می‌شود. بعد از تغییر، ابتدا پیش‌نمایش به‌روز می‌شود و برای ارسال باید دوباره تأیید کنید. دستور اصلیِ حفظ ترتیب جداگانه نمایش داده می‌شود؛ راهنمای متناقض ممکن است کیفیت پاسخ را خراب کند. اطلاعات محرمانه وارد نکنید؛ راهنمای تأییدشده در مرورگر همین پروژه ذخیره می‌شود.</p>
       <button id="translationSkillReset" type="button" class="bt">بازگرداندن راهنمای پیش‌فرض</button>
       <p id="translationSkillStatus" class="hint" role="status"></p>
@@ -241,10 +244,10 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.55"></script>
-  <script src="/groups.js?v=3.55"></script>
-  <script src="/rich-sanitize.js?v=3.55"></script>
-  <script src="/rich-editor.js?v=3.55"></script>
-  <script src="/app.js?v=3.55"></script>
+  <script src="/typeset.js?v=3.56"></script>
+  <script src="/groups.js?v=3.56"></script>
+  <script src="/rich-sanitize.js?v=3.56"></script>
+  <script src="/rich-editor.js?v=3.56"></script>
+  <script src="/app.js?v=3.56"></script>
 </body>
 </html>

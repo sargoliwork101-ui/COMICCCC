@@ -610,9 +610,13 @@ def create_app() -> FastAPI:
         run, request, chosen = context_preparation(project(project_id), values)
         result = context_view(run, request, chosen, values.provider)
         result['skill'] = values.skill
+        text = combine_translation_texts([entry['text'] for entry in chosen])
         if values.provider != 'free':
             from .context_budget import request_budget
             result['budget'] = request_budget(request, values.skill, run['context'])
+        else:
+            result['budget'] = {'totalLimit':run['limit'], 'textCapacity':request.source_capacity, 'byteLimit':500}
+        result['budget'].update({'sourceChars':len(text), 'sourceBytes':len(text.encode('utf-8'))})
         from .translation import DEFAULT_AI_SKILL
         result['defaultSkill'] = DEFAULT_AI_SKILL
         return result
@@ -732,9 +736,13 @@ def create_app() -> FastAPI:
         state, run, request, chosen = prepare_context_text(values)
         result = context_view(run, request, chosen, values.provider)
         result['skill'] = values.skill; result['singleContext'] = True
+        text = combine_translation_texts([entry['text'] for entry in chosen])
         if values.provider != 'free':
             from .context_budget import request_budget
             result['budget'] = request_budget(request, values.skill, run['context'])
+        else:
+            result['budget'] = {'totalLimit':run['limit'], 'textCapacity':request.source_capacity, 'byteLimit':500}
+        result['budget'].update({'sourceChars':len(text), 'sourceBytes':len(text.encode('utf-8'))})
         from .translation import DEFAULT_AI_SKILL
         result['defaultSkill'] = DEFAULT_AI_SKILL
         if values.provider != 'free': result['note'] += ' خلاصهٔ بازترجمهٔ تکی در حافظهٔ اصلی داستان ذخیره نمی‌شود.'

@@ -1122,10 +1122,27 @@ with pymupdf.open(pdf_path) as document:
     assert.ok(capacityDisplay.includes('900') && capacityDisplay.includes('خلاصه: 0') && capacityDisplay.includes('اسکیل:'));
     assert.ok(await page.$eval('#translationPreviewError',el=>el.textContent.includes('715') && el.textContent.includes('34')));
     assert.ok(await page.$eval('#translationPreviewSystem',el=>el.textContent.includes('Guidance:')));
+    assert.ok(await page.$eval('#translationSourceLimit',el=>el.classList.contains('over-limit') && el.textContent.includes('715 از') && el.textContent.includes('34')));
+    const skillLimit=await page.evaluate(()=>translationPreviewData.skillLimit);
+    assert.ok(await page.$eval('#translationSkillCount',el=>el.textContent.includes('از')));
+    assert.ok(await page.$eval('#translationContextCount',el=>el.textContent.includes('0 از')));
+    await page.$eval('#translationSkill',(el,n)=>{el.value='x'.repeat(n);el.dispatchEvent(new Event('input',{bubbles:true}));},skillLimit);
+    await page.focus('#translationSkill'); await page.keyboard.press('End'); await page.keyboard.type('x');
+    assert.equal(await page.$eval('#translationSkill',el=>el.value.length),skillLimit);
+    assert.equal(await page.$eval('#translationSkill',el=>el.getAttribute('aria-invalid')),'true');
+    await page.keyboard.press('Backspace');
+    assert.equal(await page.$eval('#translationSkill',el=>el.getAttribute('aria-invalid')),'false');
+    assert.equal(aiGenerations.length,beforeCapacity);
+
     await page.click('#translationPreviewConfirm');
     await page.waitForFunction(()=>!document.getElementById('translationPreviewConfirm').disabled);
     assert.equal(aiGenerations.length,beforeCapacity);
     await page.click('#translationPreviewCancel');
+
+    await page.click('#grid .item .act button:nth-child(2)');
+    await page.waitForSelector('#editorDialog[open] .editor-box.capacity-warning[data-id="34"]');
+    assert.ok(await page.$eval('#blockList .block-card[data-id="34"]',el=>el.classList.contains('capacity-warning') && el.textContent.includes('آخرین پیش')));
+    await page.click('#editorClose'); await page.waitForFunction(()=>!state.editorId);
     console.log('PASS: real AI preflight capacity error shows skill, zero initial summary and a copyable exact breakdown without sending');
 
     // A cancelled refresh may fail after a different preview has opened.

@@ -21,6 +21,9 @@ def test_free_page_packs_small_blocks_without_crossing_page(tmp_path, monkeypatc
         req = {'image_ids':[i['id'] for i in project['images']], 'provider':'free','skill':'','summary':'','reuse_repeated':False}
         p = client.post(route+'/context-preview', json=req); assert p.status_code == 200, p.text
         assert 'ABCD' in p.json()['requests'][0]['text'] and len(p.json()['requests'][0]['text']) > 4
+        shown = p.json()['requests'][0]['text']
+        assert p.json()['budget']['sourceChars'] == len(shown)
+        assert p.json()['budget']['sourceBytes'] == len(shown.encode('utf-8')) and p.json()['budget']['byteLimit'] == 500
         start = client.post(route+'/context-start',json={**req,'confirmation':p.json()['signature']}).json()
         done = False; n = 0
         while not done:
@@ -187,3 +190,17 @@ def test_free_invalid_line_mapping_retries_before_fallback(tmp_path, monkeypatch
     assert [c[1] for c in calls] == [25,25,40]
     assert all(c[2]=='one\ntwo' for c in calls)
     assert waits == [3,3]
+
+
+def test_free_capacity_error_reports_multibyte_segment_and_location(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    with scoped_client(create_app()) as client:
+        route, project = make_project(client)
+        project['images'][0]['blocks'] = [{'id':34, 'text':'آ'*251, 'enabled':True}]
+        client.put(route+'/state', json={'state':project})
+        result = client.post(route+'/context-preview', json={'image_ids':[project['images'][0]['id']], 'provider':'free', 'skill':'', 'summary':''})
+        assert result.status_code == 502
+        budget = result.json()['budget']
+        assert budget['requiredSourceChars'] == 251 and budget['requiredSourceBytes'] == 502
+        assert budget['byteLimit'] == 500 and budget['imageName'] == 'a.png' and budget['blockId'] == '34'
+        assert budget['imageId'] == project['images'][0]['id']
