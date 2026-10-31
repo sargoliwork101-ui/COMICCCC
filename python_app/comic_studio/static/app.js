@@ -620,10 +620,14 @@ function updateTranslationSkillStatus() {
   const changed = preview && preview.provider !== 'free' && $('translationSkill').value.trim() !== (preview.skill ?? '');
   $('translationSkillStatus').textContent = changed ? 'راهنما تغییر کرد؛ ابتدا پیش‌نمایش تازه را بازبینی کنید.' : '';
   $('translationPreviewConfirm').textContent = changed ? 'به‌روزرسانی پیش‌نمایش' : 'تأیید و ارسال برای ترجمه';
+  // A changed skill can invalidate all reuse receipts and create requests even
+  // when the currently displayed preview has no pending work.
+  $('translationPreviewConfirm').disabled = !preview || (changed ? !translationPreviewRefresh : !preview.requests?.length);
 }
 function showTranslationRequestPreview(preview, action, refresh = null) {
   translationPreviewAction = action; translationPreviewRefresh = refresh; translationPreviewData = preview;
   $('translationSkillWrap').classList.toggle('hidden', preview.provider === 'free');
+  $('translationSkill').disabled = false; $('translationSkillReset').disabled = false;
   $('translationSkill').value = preview.skill ?? '';
   updateTranslationSkillStatus();
   $('translationPreviewSummary').textContent = `${preview.blockCount} متن · ${preview.requestCount} درخواست پایه برای بررسی (بدون تکرار)`;
@@ -640,7 +644,6 @@ function showTranslationRequestPreview(preview, action, refresh = null) {
   const hasSystemPrompt = !!preview.systemPrompt;
   $('translationPreviewSystemWrap').classList.toggle('hidden', !hasSystemPrompt);
   $('translationPreviewSystem').textContent = preview.systemPrompt || '';
-  $('translationPreviewConfirm').disabled = !preview.requests?.length;
   showDialog('translationPreviewDialog');
 }
 function cancelTranslationRequestPreview() { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; closeDialog('translationPreviewDialog'); }
@@ -664,8 +667,15 @@ async function confirmTranslationRequestPreview() {
       const updated = await refresh($('translationSkill').value.trim());
       // Cancel/close during the local preview request must not reopen it or send.
       if ($('translationPreviewDialog').open && translationPreviewAction === action) showTranslationRequestPreview(updated, action, refresh);
-    } catch (error) { $('translationSkillStatus').textContent = `به‌روزرسانی ممکن نبود: ${error.message || error}`; toast(error.message || 'پیش‌نمایش ناموفق بود', true); }
-    finally { $('translationSkill').disabled = false; $('translationSkillReset').disabled = false; $('translationPreviewConfirm').disabled = !translationPreviewData?.requests?.length; }
+    } catch (error) {
+      if ($('translationPreviewDialog').open && translationPreviewAction === action) { $('translationSkillStatus').textContent = `به‌روزرسانی ممکن نبود: ${error.message || error}`; toast(error.message || 'پیش‌نمایش ناموفق بود', true); }
+    } finally {
+      if ($('translationPreviewDialog').open && translationPreviewAction === action) {
+        $('translationSkill').disabled = false; $('translationSkillReset').disabled = false;
+        const message = $('translationSkillStatus').textContent; updateTranslationSkillStatus();
+        if (message.startsWith('به‌روزرسانی ممکن نبود:')) $('translationSkillStatus').textContent = message;
+      }
+    }
     return;
   }
   translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null;
@@ -1730,7 +1740,7 @@ function bindEvents() {
   $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
   $('translationSkill').addEventListener('input', updateTranslationSkillStatus);
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
-  $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; });
+  $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; } });
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => { $('aiStatus').textContent = error.message; toast(error.message, true); }));
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);

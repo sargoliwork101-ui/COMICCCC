@@ -43,7 +43,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.46"
+    assert health.json()["version"] == "3.47"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -1546,6 +1546,16 @@ def test_skill_preview_confirmation_applies_to_every_page_and_reused_translation
     changed = client.post(f'{route}/translation-preview', json={**remaining, 'skill': 'لحن محاوره‌ای'}).json()
     assert same['duplicateCount'] == 0 and 'same title' not in ' '.join(r['text'] for r in same['requests'])
     assert 'same title' in ' '.join(r['text'] for r in changed['requests'])
+    # A page containing only a reused translation has no pending calls, but
+    # still needs to expose the instructions that produced that empty plan.
+    state = client.get(route).json()
+    state['images'][1]['blocks'][1]['enabled'] = False
+    assert client.put(f'{route}/state', json={'state': state}).status_code == 200
+    empty = client.post(f'{route}/translation-preview', json=remaining).json()
+    assert empty['requests'] == [] and empty['tasks'] == []
+    assert 'لحن رسمی' in empty['systemPrompt']
+    different = client.post(f'{route}/translation-preview', json={**remaining, 'skill': 'لحن محاوره‌ای'}).json()
+    assert len(different['requests']) == 1 and 'same title' in different['requests'][0]['text']
 
 
 def test_skill_change_invalidates_partial_checkpoint_and_single_text_confirmation(client, monkeypatch):

@@ -269,7 +269,9 @@ def plan_preview(
     public_settings: dict[str, Any],
 ) -> dict[str, Any]:
     requests: list[dict[str, Any]] = []
-    system_prompt = ""
+    # Even an empty plan must show the AI instructions: changing the skill can
+    # invalidate reused translations and turn it into a nonempty plan.
+    system_prompt = translation_request_view("", source_language, provider, public_settings.get("_translation_skill"))["systemPrompt"]
     for call_index, call in enumerate(plan["calls"], start=1):
         if "image_id" in call and saved_call(call, plan, provider, source_language, public_settings):
             continue

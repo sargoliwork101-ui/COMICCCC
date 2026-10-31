@@ -867,6 +867,29 @@ with pymupdf.open(pdf_path) as document:
     assert.deepEqual(dedupStored.images.map(image=>image.blocks[0].tr), ['عنوان مشترک', 'عنوان مشترک']);
     assert.equal(aiGenerations.length, 4);
     assert.ok(dedupStored.images.every(image=>image.edited));
+    // Only the reused title remains selected: the old skill gives an empty
+    // plan, but changing it must allow a new preview before sending anything.
+    await page.evaluate(async () => {
+      state.project.images[0].selected = false; state.project.images[1].selected = true;
+      state.project.images[1].blocks[1].enabled = false; renderGrid(); await saveProject();
+    });
+    const beforeEmptyPreview = aiGenerations.length;
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    assert.equal(await page.$$eval('#translationPreviewRequests pre', entries => entries.length), 0);
+    assert.ok(await page.$eval('#translationPreviewSystem', el => el.textContent.includes('روان')));
+    assert.equal(await page.$eval('#translationPreviewConfirm', el => el.disabled), true);
+    await page.$eval('#translationSkill', el => { el.value = 'مهارت تازه برای عنوان'; el.dispatchEvent(new Event('input', {bubbles:true})); });
+    assert.equal(await page.$eval('#translationPreviewConfirm', el => el.disabled), false, 'changing skill must enable refresh even for an empty plan');
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(() => document.getElementById('translationPreviewSystem').textContent.includes('مهارت تازه برای عنوان') && !document.getElementById('translationPreviewConfirm').disabled);
+    assert.ok(await page.$eval('#translationPreviewRequests', el => el.textContent.includes('HEADER SAME')));
+    assert.equal(aiGenerations.length, beforeEmptyPreview, 'refreshing the preview must not send a request');
+    await page.click('#translationPreviewCancel');
+    await page.evaluate(async () => {
+      state.project.images.forEach(image => { image.selected = true; });
+      state.project.images[1].blocks[1].enabled = true; renderGrid(); await saveProject();
+    });
+    console.log('PASS: changed skill can refresh an empty reused-translation preview without sending');
     await page.click('#menuBtn'); await page.click('#aiBtn'); await page.waitForSelector('#aiDialog[open]');
     await page.$eval('#aiReuseRepeated', el=>{el.checked=false; el.dispatchEvent(new Event('change',{bubbles:true}));});
     await page.click('#saveAiBtn'); await page.waitForFunction(()=>state.ai.reuse_repeated===false); await page.keyboard.press('Escape');
@@ -875,6 +898,29 @@ with pymupdf.open(pdf_path) as document:
     assert.equal(independent.filter(text=>text.includes('HEADER SAME')).length, 2);
     await page.click('#translationPreviewCancel');
     console.log('PASS: repeated title is sent once and applied to both pages; opt-out sends it per page');
+
+    // A cancelled refresh may fail after a different preview has opened.
+    await page.evaluate(() => {
+      window.rejectOldPreview = null;
+      const preview = {provider:'openai', skill:'old', defaultSkill:'old', blockCount:1, requestCount:1, requests:[{index:1,text:'old',characters:3}], systemPrompt:'old'};
+      showTranslationRequestPreview(preview, () => {}, () => new Promise((resolve, reject) => { window.rejectOldPreview = reject; }));
+    });
+    await page.$eval('#translationSkill', el => {el.value='changed'; el.dispatchEvent(new Event('input', {bubbles:true}));});
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(() => typeof window.rejectOldPreview === 'function');
+    await page.click('#translationPreviewCancel');
+    await page.evaluate(() => {
+      const preview = {provider:'openai', skill:'new', defaultSkill:'new', blockCount:1, requestCount:1, requests:[{index:1,text:'new',characters:3}], systemPrompt:'new'};
+      showTranslationRequestPreview(preview, () => {}, async () => preview);
+      window.rejectOldPreview(new Error('old preview failed'));
+    });
+    await sleep(50);
+    assert.equal(await page.$eval('#translationSkill', el => el.value), 'new');
+    assert.equal(await page.$eval('#translationSkill', el => el.disabled), false);
+    assert.equal(await page.$eval('#translationSkillStatus', el => el.textContent), '');
+    assert.equal(await page.$eval('#translationPreviewConfirm', el => el.disabled), false);
+    await page.click('#translationPreviewCancel');
+    console.log('PASS: cancelled preview errors cannot contaminate a newer preview');
 
     let backupProject = await api(base, '/api/projects', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'Portable project'})});
     const backupForm = new FormData(); backupForm.append('files', new Blob([fs.readFileSync(source)], {type:'image/png'}), 'portable.png');
