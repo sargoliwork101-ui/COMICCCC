@@ -18,10 +18,12 @@ def test_default_percentages_are_independent_caps_and_actual_space_is_reused():
     assert 'one output line per input line' in full.system
     assert 'Add no lines, breaks, headings or commentary' in full.system
     assert empty.source_capacity > partial.source_capacity > full.source_capacity
-    assert full.character_count('x' * full.source_capacity) == 1000
+    payload_capacity = full.source_capacity - len(full.line_count_instruction('x'))
+    assert full.fits('x' * payload_capacity)
+    assert full.character_count('x' * payload_capacity) == 1000
     assert full.character_count('x') <= 1000
     with pytest.raises(TranslationError):
-        full.user_message('x' * (full.source_capacity + 1))
+        full.user_message('x' * (payload_capacity + 1))
 
 
 def test_missing_summary_does_not_consume_its_budget():
@@ -47,7 +49,8 @@ def test_percentages_and_counts_use_unicode_codepoints_and_validate_input():
     budget = ContextBudget(1000, context_percent=20, skill_percent=5)
     assert (budget.context_limit, budget.skill_limit) == (200, 50)
     result = build_context_request(budget, 'English', 'ا' * 50, '🙂' * 200)
-    assert result.character_count('سلام🙂') == len(result.system) + len(result.user_prefix + 'سلام🙂')
+    assert result.character_count('سلام🙂') == len(result.system) + len(result.user_message('سلام🙂'))
+    assert 'Source has 1 line; output exactly 1 line.' in result.user_message('سلام🙂')
     with pytest.raises(TranslationError):
         build_context_request(budget, 'English', 'ا' * 51, '')
     with pytest.raises(ValueError):

@@ -49,16 +49,26 @@ class ContextRequest:
     skill_limit: int
     total_limit: int
 
+    @staticmethod
+    def line_count_instruction(text: str) -> str:
+        line_count = len(text.split("\n"))
+        unit = "line" if line_count == 1 else "lines"
+        return f"Source has {line_count} {unit}; output exactly {line_count} {unit}.\n"
+
     def fits(self, text: str) -> bool:
-        return len(text) <= self.source_capacity
+        return isinstance(text, str) and len(text) + len(self.line_count_instruction(text)) <= self.source_capacity
 
     def user_message(self, text: str) -> str:
-        # Reject instead of silently changing text or cutting a line.
+        # State the exact count for this chunk in every request; model-level
+        # system instructions alone are often ignored. Count this directive
+        # against the same API character budget as all other message text.
         if not isinstance(text, str) or not text.strip():
             raise TranslationError("متن مبدأ خالی است.")
-        if len(text) > self.source_capacity:
-            raise TranslationError(f"متن مبدأ از فضای باقی‌ماندهٔ {self.source_capacity} نویسه بیشتر است؛ متن را در مرز امن تقسیم کنید.")
-        return self.user_prefix + text
+        if not self.fits(text):
+            raise TranslationError(f"متن مبدأ و دستور تعداد خطوط از فضای باقی‌ماندهٔ {self.source_capacity} نویسه بیشتر است؛ متن را در مرز امن تقسیم کنید.")
+        marker = "Text:\n"
+        base = self.user_prefix[:-len(marker)] if self.user_prefix.endswith(marker) else self.user_prefix
+        return base + self.line_count_instruction(text) + marker + text
 
     def character_count(self, text: str) -> int:
         return len(self.system) + len(self.user_message(text))
@@ -83,7 +93,7 @@ def build_context_request(budget: ContextBudget, language: str, skill: str, prev
         "CRITICAL: translation line count/order must exactly match Text, one output line per input line. "
         "Add no lines, breaks, headings or commentary; verify count. "
         f"Summary: one Persian line, max {budget.context_limit} chars incl spaces; shorten to fit. "
-        "Context: names/events/tone only; invent nothing."
+        "Context: names/events/tone only."
     )
     if skill:
         system += "\nGuidance: " + skill

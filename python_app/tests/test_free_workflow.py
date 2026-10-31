@@ -37,7 +37,7 @@ def test_ai_short_bubble_combines_with_safe_prefix_of_next_bubble():
     from comic_studio.context_budget import ContextBudget, build_context_request
     import copy
     base = build_context_request(ContextBudget(1000), 'English', '', '')
-    line = 'A' * (base.source_capacity - 20) + '.'
+    line = 'A' * (base.source_capacity - len(base.line_count_instruction('x')) - 20) + '.'
     state = {'images':[{'id':'p','order':0,'blocks':[{'id':1,'text':'Hey!'}, {'id':2,'text':line+'\n'+'B'*50+'.'}]}]}
     run = create_run(copy.deepcopy(state), ['p'], 'openai','eng','','',1000,15,15,False,{})
     request, chosen = next_request(run, '')

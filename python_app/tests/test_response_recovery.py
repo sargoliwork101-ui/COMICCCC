@@ -126,7 +126,7 @@ def test_single_block_split_recovers_failed_part_without_resending_previous(tmp_
     monkeypatch.setattr(httpx,'post',post)
     with scoped_client(create_app()) as client:
         client.put('/api/ai-settings',json={'provider':'openai','providers':{'openai':{'profiles':[{'id':'a','api_key':'key','source_limit':500,'retry_count':2,'retry_wait_seconds':0}]}}})
-        req={'text':'First '+ 'a'*75 + '.\nSecond '+ 'b'*75 + '.', 'provider':'openai','skill':'','summary':''}
+        req={'text':'First '+ 'a'*53 + '.\nSecond '+ 'b'*53 + '.', 'provider':'openai','skill':'','summary':''}
         preview=client.post('/api/translate-text/context-preview',json=req)
         assert preview.status_code==200, preview.text
         payload={**req,'confirmation':preview.json()['signature']}
