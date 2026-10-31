@@ -392,6 +392,8 @@ def create_app() -> FastAPI:
             return await run_in_threadpool(store.save_rendered, project_id, image_id, content)
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(404, "Image not found") from exc
+        except PermissionError as exc:
+            raise HTTPException(503, "The project file is temporarily locked while saving the rendered preview; retry the request.") from exc
         except Exception as exc:
             raise HTTPException(400, f"Invalid PNG: {exc}") from exc
 

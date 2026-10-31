@@ -939,7 +939,11 @@ async function performContextTranslation(request, preview, ongoing = null, corre
         const result = await api(`/api/projects/${projectId}/context-step`, jsonOptions('POST', {run_id: run.id, completed: run.completed, skill: preview.skill, ...(correction || {})}));
         if (correction) { correction = null; clearResponseRepair(); }
         adoptProject(result.project); run.completed = result.completed ?? run.completed;
-        phase = 'preview'; setOverlayMode('translation', false); if (result.affectedImageIds?.length) await renderImagesText(result.affectedImageIds);
+        phase = 'preview'; setOverlayMode('translation', false);
+        if (result.affectedImageIds?.length) {
+          try { await renderImagesText(result.affectedImageIds); }
+          catch (error) { toast(`ترجمه ذخیره شد، اما همگام‌سازی پیش‌نمایش ناموفق بود: ${error.message || error}`, true); }
+        }
         if (result.done) break;
       }
       phase = 'save'; setOverlayMode('translation', false);
@@ -980,7 +984,9 @@ async function performTranslation(ids, provider, preview, startIndex = 0, previo
           }));
           // A successful response means the page has already been persisted.
           adoptProject(result); completed += 1; setOverlayMode('translation', false);
-          phase = 'preview'; await renderImagesText(page.affectedImageIds || [page.imageId]);
+          phase = 'preview';
+          try { await renderImagesText(page.affectedImageIds || [page.imageId]); }
+          catch (error) { toast(`درخواست ترجمه ذخیره شد، اما همگام‌سازی پیش‌نمایش ناموفق بود: ${error.message || error}`, true); }
         }
         phase = 'save'; await saveProject();
       }

@@ -10,6 +10,7 @@ import pytest
 from support_client import scoped_client
 
 from comic_studio.main import create_app
+from comic_studio import store as store_module
 from comic_studio.store import atomic_json
 
 
@@ -74,6 +75,28 @@ def test_atomic_file_is_private_during_write_and_after_replacement(tmp_path, mon
     assert stat.S_IMODE(path.stat().st_mode)==0o600
     assert json.loads(path.read_text()) == {'api_key':'secret'}
     assert list(tmp_path.glob('*.tmp')) == []
+
+
+def test_windows_replace_retries_transient_access_denied(tmp_path, monkeypatch):
+    source = tmp_path / '.project.json.test.tmp'
+    destination = tmp_path / 'project.json'
+    source.write_text('{"updated": true}')
+    real_replace = os.replace
+    attempts = 0
+
+    def intermittently_locked(src, dst):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(5, 'Access is denied')
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, 'replace', intermittently_locked)
+    monkeypatch.setattr(store_module.time, 'sleep', lambda _delay: None)
+    store_module._replace_with_retry(source, destination, windows=True)
+    assert attempts == 3
+    assert json.loads(destination.read_text()) == {'updated': True}
+    assert not source.exists()
 
 
 def test_atomic_json_failure_and_concurrent_writes_never_leave_temp_files(tmp_path, monkeypatch):

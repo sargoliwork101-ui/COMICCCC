@@ -7,6 +7,7 @@ import os
 import shutil
 import threading
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,20 @@ def new_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+def _replace_with_retry(source: Path, destination: Path, windows: bool | None = None) -> None:
+    """Retry transient Windows sharing/AV locks during atomic file replacement."""
+    windows = os.name == "nt" if windows is None else windows
+    attempts = 7 if windows else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(min(0.05 * (2 ** attempt), 0.8))
+
+
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # mkstemp creates a unique file with mode 0600 on POSIX before any
@@ -45,7 +60,7 @@ def atomic_json(path: Path, value: Any) -> None:
         descriptor = -1
         with handle:
             handle.write(json.dumps(value, ensure_ascii=False, indent=2))
-        os.replace(temp, path)
+        _replace_with_retry(temp, path)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
