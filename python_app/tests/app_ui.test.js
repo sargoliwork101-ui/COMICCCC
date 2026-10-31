@@ -27,6 +27,9 @@ const scrollIntoViewCalls = [];
 let activityClears = 0;
 let revertCalls = 0;
 let translationGate = null;
+let previewFailure = null;
+let ocrGate = null;
+let aiSaveFailure = false;
 let activityFeed = { entries: [], next: 0 };
 let renderedBlocks = null;
 let canvasRenderCount = 0;
@@ -86,6 +89,7 @@ window.fetch = async (url, options = {}) => {
   }
   if (pathname === '/api/ai-settings' && options.method === 'PUT') {
     const request = JSON.parse(options.body); aiSaveRequests.push(request);
+    if (aiSaveFailure) return jsonResponse({detail:'settings simulated failure'},503);
     const providers = {};
     Object.entries(aiProviderDefaults).forEach(([id, [defaultModel, defaultBase]]) => {
       const previous = aiSettings.providers[id] || {};
@@ -114,9 +118,11 @@ window.fetch = async (url, options = {}) => {
     if (saveGate) await saveGate;
     return jsonResponse(saved);
   }
-  if (pathname === `/api/projects/${project.id}/ocr`) { ocrRequests.push(JSON.parse(options.body)); return jsonResponse(overlayProject('NEW OCR', '')); }
+  if (pathname === `/api/projects/${project.id}/ocr`) { ocrRequests.push(JSON.parse(options.body)); if (ocrGate) await ocrGate; return jsonResponse(overlayProject('NEW OCR', '')); }
   if (pathname === `/api/projects/${project.id}/context-preview`) {
     const request = JSON.parse(options.body); translationPreviewCalls.push(request);
+    if (previewFailure === 'network') throw new TypeError('simulated connection failure');
+    if (previewFailure === 'server') return jsonResponse({detail:'simulated preview outage'},503);
     return jsonResponse(makeTranslationPreview(request));
   }
   if (pathname === `/api/projects/${project.id}/context-start`) {
@@ -306,7 +312,7 @@ function check(name, condition) {
   check('row test first saves both named keys with the selected provider and model', savedAi.provider === 'openrouter' && savedAi.model === 'anthropic/claude-ui-test' && savedAi.providers.openrouter.profiles.length === 2 && savedAi.providers.openrouter.profiles[0].api_key === 'openrouter-first-secret' && savedAi.providers.openrouter.profiles[1].api_key === 'openrouter-second-secret');
   check('per-key timeout and retries are saved independently', savedAi.providers.openrouter.profiles[0].timeout_seconds === 120 && savedAi.providers.openrouter.profiles[0].retry_count === 2 && savedAi.providers.openrouter.profiles[1].timeout_seconds === 45 && savedAi.providers.openrouter.profiles[1].retry_count === 1 && savedAi.providers.openrouter.profiles[0].retry_wait_seconds === 11 && savedAi.providers.openrouter.profiles[1].retry_wait_seconds === 27 && savedAi.providers.openrouter.profiles[0].source_limit === 750 && savedAi.providers.openrouter.profiles[1].source_limit === 2500);
   check('row test uses the stored selected profile without resending its secret', aiTestRequests.length === 1 && aiTestRequests[0].profile_id === savedAi.providers.openrouter.profiles[0].id && aiTestRequests[0].model === 'anthropic/claude-ui-test' && !('api_key' in aiTestRequests[0]));
-  check('successful row test is visible in the real dialog', $('aiStatus').textContent.includes('اتصال برقرار است') && $('aiProfiles').querySelector('.ai-profile-status').textContent.includes('✓'));
+  check('successful row test is visible and keeps settings open', $('aiDialog').open && $('aiStatus').textContent.includes('اتصال برقرار است') && $('aiProfiles').querySelector('.ai-profile-status').textContent.includes('✓'));
   check('saved secrets are cleared from password fields and absent from the DOM', [...$('aiProfiles').querySelectorAll('.ai-profile-key')].every((input) => input.value === '' && input.placeholder.includes('ذخیره شده')) && !$('aiDialog').innerHTML.includes('openrouter-first-secret'));
   $('aiProvider').value = 'gemini'; $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
   check('switching providers does not reuse OpenRouter model or keys', $('aiModel').value === 'gemini-2.5-flash' && $('aiProfiles').querySelectorAll('.ai-profile-row').length === 1 && $('aiProfiles').querySelector('.ai-profile-key').value === '' && !$('aiProfiles').querySelector('.ai-profile-key').placeholder.includes('ذخیره شده') && $('aiBaseUrlField').classList.contains('hidden'));
@@ -316,6 +322,10 @@ function check(name, condition) {
   check('repeated text reuse is enabled by default', $('aiReuseRepeated').checked);
   $('aiReuseRepeated').checked = false; $('saveAiBtn').click(); await sleep(20);
   check('repeated text reuse can be disabled and saved', aiSaveRequests.at(-1).reuse_repeated === false && !$('aiReuseRepeated').checked);
+  check('successful settings save closes the dialog', !$('aiDialog').open);
+  $('aiBtn').click(); await sleep(20); aiSaveFailure = true; $('saveAiBtn').click(); await sleep(20);
+  check('settings server failure keeps the dialog open and offers a copyable HTTP error', $('aiDialog').open && $('aiStatus').textContent.includes('HTTP 503') && !$('copyAiError').classList.contains('hidden') && !$('saveAiBtn').disabled);
+  aiSaveFailure = false;
   const beforeInvalidSave = aiSaveRequests.length;
   const timeoutInput = $('aiProfiles').querySelector('.ai-profile-timeout_seconds'); timeoutInput.value = '4'; timeoutInput.dispatchEvent(new window.Event('input', {bubbles:true}));
   $('saveAiBtn').click(); await sleep(10);
@@ -616,6 +626,27 @@ function check(name, condition) {
   check('per-block confirmation sends the same previewed text and signature', singleTranslationCalls.length === 1 && singleTranslationCalls[0].text === 'NEW OCR' && singleTranslationCalls[0].confirmation === 'ui-confirmation-signature');
   check('confirmed per-block translation appears on its read-only card', $('blockList').querySelector('.block-card').textContent.includes('ترجمهٔ تکی تازه'));
   await vm.runInContext('closeEditor()', context);
+
+  const sendsBeforePreparationFailure = translationCalls.length;
+  previewFailure = 'network'; await vm.runInContext('runTranslation()', context);
+  check('network preparation error remains copyable with stage and endpoint', $('translationDialog').open && $('translationStatus').textContent.includes('TypeError') && $('translationStatus').textContent.includes('context-preview') && !$('copyTranslationError').classList.contains('hidden') && translationCalls.length === sendsBeforePreparationFailure);
+  vm.runInContext("closeDialog('translationDialog')", context); previewFailure = null;
+  vm.runInContext("state.ai.provider = 'openrouter'", context);
+  await vm.runInContext('runTranslation()', context);
+  previewFailure = 'server';
+  $('translationSkill').value = 'new guidance'; $('translationSkill').dispatchEvent(new window.Event('input', {bubbles:true}));
+  $('translationPreviewConfirm').click(); await sleep(20);
+  check('preview refresh errors remain visible and copyable with HTTP details', $('translationPreviewDialog').open && $('translationPreviewError').textContent.includes('HTTP 503') && $('translationPreviewError').textContent.includes('simulated preview outage') && !$('copyTranslationPreviewError').classList.contains('hidden') && $('translationPreviewConfirm').textContent.includes('به‌روزرسانی') && translationCalls.length === sendsBeforePreparationFailure);
+  $('translationPreviewCancel').click(); previewFailure = null; vm.runInContext("state.ai.provider = 'free'", context);
+
+  vm.runInContext("window._projectBeforeOcrRace = JSON.parse(JSON.stringify(state.project)); state.project.images[0].blocks = []; delete state.project.images[0].ocrCompleted", context);
+  await vm.runInContext('runTranslation()', context);
+  let releaseOcr; ocrGate = new Promise(resolve => { releaseOcr = resolve; });
+  const raceOcr = vm.runInContext('runOcr().catch(() => {})', context);
+  await sleep(20); vm.runInContext('state.project.images[0].selected = false', context);
+  ocrGate = null; releaseOcr(); await raceOcr;
+  check('changed selection after OCR response cannot start translation or replace the current project', $('ocrDialog').open && $('ocrStatus').textContent.includes('OCR در سرور ذخیره شد') && !$('translationPreviewDialog').open && translationCalls.length === sendsBeforePreparationFailure && vm.runInContext('state.project.images[0].selected === false && state.project.images[0].blocks.length === 0', context));
+  vm.runInContext("closeDialog('ocrDialog'); clearPendingTranslationOcr(); state.project = window._projectBeforeOcrRace; renderAll()", context);
 
   const revertsBeforeSelector = revertCalls;
   $('exportOverlayMode').value = 'none';

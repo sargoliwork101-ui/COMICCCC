@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.50">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.50">
+  <link rel="stylesheet" href="/style.css?v=3.51">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.51">
 </head>
 <body>
   <header class="topbar">
@@ -96,6 +96,10 @@
       <label><input id="ocrErase" type="checkbox" checked> پاک‌کردن متن قبلی زیر متن نمایش‌داده‌شده</label>
     </div>
     <p id="ocrEngineStatus" class="hint"></p>
+    <p id="ocrTranslationNotice" class="hint hidden" role="status"></p>
+    <p id="ocrStatus" class="hint diagnostic-message" role="status" aria-live="polite"></p>
+    <button id="copyOcrError" class="bt hidden" type="button">کپی خطای OCR</button>
+    <p class="hint">پیش از ارسال خطا، آن را از نظر اطلاعات شخصی یا محرمانه بررسی کنید.</p>
     <p class="hint">بعد از OCR، متن خوانده‌شده در گزارش و روی تصویر می‌آید تا پیش از ترجمه بررسی و ویرایش شود.</p>
     <div id="ocrActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <div class="dialog-actions"><button id="startOcrBtn" class="bt primary">شروع OCR</button></div>
@@ -208,13 +212,15 @@
     </div>
     <details id="translationPreviewSystemWrap" class="payload-system"><summary>دستور سیستم همراه درخواست AI</summary><pre id="translationPreviewSystem" dir="auto"></pre></details>
     <p id="translationPreviewNote" class="hint"></p>
+    <p id="translationPreviewError" class="hint diagnostic-message hidden" role="status"></p>
+    <button id="copyTranslationPreviewError" class="bt hidden" type="button">کپی خطای پیش‌نمایش</button>
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.50"></script>
-  <script src="/groups.js?v=3.50"></script>
-  <script src="/rich-sanitize.js?v=3.50"></script>
-  <script src="/rich-editor.js?v=3.50"></script>
-  <script src="/app.js?v=3.50"></script>
+  <script src="/typeset.js?v=3.51"></script>
+  <script src="/groups.js?v=3.51"></script>
+  <script src="/rich-sanitize.js?v=3.51"></script>
+  <script src="/rich-editor.js?v=3.51"></script>
+  <script src="/app.js?v=3.51"></script>
 </body>
 </html>

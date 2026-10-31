@@ -6,6 +6,8 @@ import binascii
 import hmac
 import ipaddress
 import os
+import re
+import traceback
 import copy
 import threading
 import uuid
@@ -35,7 +37,7 @@ from .sessions import SessionManager
 from .store import ProjectChangedError, ProjectStore
 from .translation import (
     TranslationError, TranslationService, combine_translation_texts,
-    distribute_translation, normalize_ai_skill,
+    distribute_translation, normalize_ai_skill, _redact_diagnostic,
 )
 from .translation_plan import (
     AI_PAGE_PROGRESS_KEY, AI_PARTS_KEY, AI_REUSE_KEY, build_project_plan, build_single_plan, call_plan, mark_completed_call, mark_reused_translation, part_fingerprint,
@@ -174,6 +176,24 @@ def create_app() -> FastAPI:
     @app.exception_handler(ProjectChangedError)
     async def project_changed(_: Request, exc: ProjectChangedError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=409)
+
+    @app.exception_handler(Exception)
+    async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        """Redact known credentials; exception messages can still contain private data."""
+        reference = uuid.uuid4().hex[:12]
+        secrets = [os.environ.get('COMIC_STUDIO_ACCESS_PASSWORD', '')]
+        try:
+            settings = translations._secret()
+            secrets.extend(p['api_key'] for config in settings['providers'].values() for p in config['profiles'] if p.get('api_key'))
+        except Exception:
+            pass
+        detail = _redact_diagnostic(str(exc), secrets)
+        detail = re.sub(r'(https?://[^\s?]+)\?[^\s]+', r'\1?[REDACTED]', detail)
+        frames = traceback.extract_tb(exc.__traceback__)
+        location = f"{Path(frames[-1].filename).name}:{frames[-1].lineno} ({frames[-1].name})" if frames else 'unknown'
+        message = f"خطای داخلی {type(exc).__name__}؛ {detail or 'بدون جزئیات'}؛ محل {location}؛ شناسه {reference}."
+        activity.add(f"{request.method} {request.url.path}: {message}", 'error')
+        return JSONResponse({"detail": message, "error_id": reference}, status_code=500)
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -384,6 +404,7 @@ def create_app() -> FastAPI:
                 if values.group_lines:
                     blocks = group_ocr_lines(blocks)
                 item["blocks"] = blocks
+                item["ocrCompleted"] = True
                 item["edited"] = False
                 activity.add(f"در «{item['name']}» {len(blocks)} تکه متن پیدا شد", progress=completed / len(ids))
                 recognized_lines = [block.get("text", "").strip() for block in blocks if block.get("text", "").strip()]

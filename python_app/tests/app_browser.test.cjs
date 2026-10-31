@@ -135,9 +135,17 @@ function nextDownload(cdp, directory) {
   const base = `http://127.0.0.1:${port}`;
   const aiRequests = []; const aiGenerations = []; const aiSystems = []; let dedupFailuresRemaining = 0;
   const freeGenerations = []; let freeFailure = true;
+  const ocrCalls = []; let ocrFailure = true; let ocrEmpty = false;
   const aiServer = http.createServer((request, response) => {
     aiRequests.push({ method: request.method, url: request.url, authorization: request.headers.authorization || '' });
     response.setHeader('Content-Type', 'application/json');
+    if (request.method === 'POST' && request.url === '/ocr/recognize') {
+      let body=''; request.on('data',chunk=>body+=chunk); request.on('end',()=>{
+        ocrCalls.push(JSON.parse(body));
+        if (ocrFailure) { ocrFailure=false; response.statusCode=503; response.end(JSON.stringify({error:'ocr simulated failure'})); return; }
+        response.end(JSON.stringify({ok:true, empty:ocrEmpty}));
+      }); return;
+    }
     if (request.method === 'POST' && request.url === '/free/translate') {
       let body=''; request.on('data',chunk=>body+=chunk); request.on('end',()=>{
         const data=JSON.parse(body); freeGenerations.push(data.text);
@@ -178,6 +186,13 @@ def free_stub(self, request, text, sources, language, policy):
     if r.status_code != 200: raise TranslationError(r.json().get('error', 'mock free failure'))
     return r.json()['translation']
 TranslationService.translate_free_batch = free_stub
+import comic_studio.main as studio_main
+def ocr_stub(engine, image, language, contrast, precise, confidence):
+    r = httpx.post('${aiBase.replace('/v1','')}/ocr/recognize', json={'language':language}, timeout=10)
+    if r.status_code != 200: raise RuntimeError(r.json()['error'])
+    if r.json()['empty']: return []
+    return [{'id':1,'text':'NEWLY READ OCR','tr':'','richHtml':'','enabled':True,'x0':5,'y0':5,'x1':180,'y1':45,'lineH':40,'conf':90}]
+studio_main.recognize_image = ocr_stub
 from comic_studio.__main__ import main
 main()
 `;
@@ -276,8 +291,13 @@ main()
     assert.equal(await page.$eval('#free-google-source_limit', el => el.value), '1000');
     assert.equal(await page.$eval('#free-mymemory-source_limit', el => el.value), '500');
     for (const [selector,value] of [['#free-google-timeout_seconds','75'],['#free-google-retry_count','2'],['#free-google-retry_wait_seconds','0'],['#free-mymemory-timeout_seconds','65'],['#free-mymemory-retry_count','1'],['#free-mymemory-retry_wait_seconds','0']]) await page.$eval(selector, (el,v)=>{el.value=v;el.dispatchEvent(new Event('input',{bubbles:true}));}, value);
+    await page.$eval('#free-google-timeout_seconds',el=>{el.value='4'; el.dispatchEvent(new Event('input',{bubbles:true}));});
     await page.click('#saveAiBtn');
-    await page.waitForFunction(() => state.ai.provider === 'free'); await page.keyboard.press('Escape');
+    await page.waitForFunction(()=>document.getElementById('aiStatus').textContent.includes('زمان انتظار'));
+    assert.equal(await page.$eval('#aiDialog', el => el.open), true, 'invalid settings keep the dialog open');
+    await page.$eval('#free-google-timeout_seconds',el=>{el.value='75'; el.dispatchEvent(new Event('input',{bubbles:true}));});
+    await page.click('#saveAiBtn');
+    await page.waitForFunction(() => state.ai.provider === 'free'); assert.equal(await page.$eval('#aiDialog', el => el.open), false, 'successful settings save closes the dialog'); await page.keyboard.press('Escape');
     console.log('PASS: real AI dialog tests the selected model through Python without exposing its API key');
 
     project = await api(base, `/api/projects/${projectId}`);
@@ -826,6 +846,75 @@ with pymupdf.open(pdf_path) as document:
     freeSaved=await api(base,`/api/projects/${freeProject.id}`); assert.equal(freeSaved.images[1].blocks[0].tr,'ترجمه');
     console.log('PASS: free settings, four-character packing, page boundaries, saved progress and retry in Chromium with a local stub');
 
+    // A mixed selection reads only the page without OCR, preserves existing
+    // translated blocks, reports OCR failures and resumes at the preview.
+    let autoProject=await api(base,'/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'OCR before translation'})});
+    const autoFiles=new FormData(); for(let i=0;i<2;i++) autoFiles.append('files',new Blob([fs.readFileSync(source)],{type:'image/png'}),`auto-${i}.png`);
+    autoProject=await api(base,`/api/projects/${autoProject.id}/files`,{method:'POST',body:autoFiles});
+    autoProject.images[0].blocks=[makeBlock(1,'EXISTING OCR')]; autoProject.images[0].blocks[0].tr='existing translation';
+    autoProject.images[1].blocks=[];
+    await api(base,`/api/projects/${autoProject.id}/state`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:autoProject})});
+    await page.evaluate(async id=>{await refreshProjectList();const el=document.getElementById('projectSelect');el.value=id;el.dispatchEvent(new Event('change',{bubbles:true}));},autoProject.id);
+    await page.waitForFunction(id=>state.project.id===id,{},autoProject.id);
+    const callsBeforeAuto=freeGenerations.length;
+    await page.click('#translateBtn'); await page.waitForSelector('#ocrDialog[open]');
+    assert.ok(await page.$eval('#ocrTranslationNotice',el=>el.textContent.includes('1 تصویر')));
+    assert.equal(await page.$eval('#ocrOnlySelected',el=>el.disabled),true);
+    assert.equal(await page.$eval('#translationPreviewDialog',el=>el.open),false);
+    assert.equal(freeGenerations.length,callsBeforeAuto);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.$eval('#ocrDialog',el=>el.open),false); assert.equal(ocrCalls.length,0);
+    await page.click('#translateBtn'); await page.waitForSelector('#ocrDialog[open]');
+    await page.click('#startOcrBtn');
+    await page.waitForFunction(()=>document.getElementById('ocrStatus').textContent.includes('ocr simulated failure'),{timeout:15000});
+    assert.equal(await page.$eval('#ocrDialog',el=>el.open),true);
+    assert.ok(await page.$eval('#ocrStatus',el=>el.textContent.includes('HTTP 500') && el.textContent.includes('/ocr') && el.textContent.includes('RuntimeError')));
+    assert.equal(await page.$eval('#copyOcrError',el=>el.classList.contains('hidden')),false);
+    assert.equal(freeGenerations.length,callsBeforeAuto);
+    await page.click('#startOcrBtn'); await page.waitForSelector('#translationPreviewDialog[open]',{timeout:15000});
+    assert.equal(ocrCalls.length,2); assert.equal(await page.$eval('#ocrDialog',el=>el.open),false);
+    const ocrSaved=await api(base,`/api/projects/${autoProject.id}`);
+    assert.equal(ocrSaved.images[0].blocks[0].tr,'existing translation');
+    assert.equal(ocrSaved.images[1].blocks[0].text,'NEWLY READ OCR'); assert.equal(ocrSaved.images[1].ocrCompleted,true);
+    assert.ok(await page.$eval('#translationPreviewRequests',el=>el.textContent.includes('EXISTING OCR')));
+    await page.click('#translationPreviewConfirm'); await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
+    assert.deepEqual(freeGenerations.slice(callsBeforeAuto),['EXISTING OCR','NEWLY READ OCR']);
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    assert.equal(ocrCalls.length,2,'already read pages skip OCR'); await page.click('#translationPreviewCancel');
+    console.log('PASS: OCR before translation reads only missing pages, preserves existing text and reports errors');
+
+    ocrEmpty=true;
+    let emptyProject=await api(base,'/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'No OCR text'})});
+    const emptyFile=new FormData(); emptyFile.append('files',new Blob([fs.readFileSync(source)],{type:'image/png'}),'empty.png');
+    emptyProject=await api(base,`/api/projects/${emptyProject.id}/files`,{method:'POST',body:emptyFile});
+    await page.evaluate(async id=>{await refreshProjectList();const el=document.getElementById('projectSelect');el.value=id;el.dispatchEvent(new Event('change',{bubbles:true}));},emptyProject.id);
+    await page.waitForFunction(id=>state.project.id===id,{},emptyProject.id);
+    const beforeEmpty=freeGenerations.length;
+    await page.click('#translateBtn'); await page.waitForSelector('#ocrDialog[open]'); await page.click('#startOcrBtn');
+    await page.waitForSelector('#translationDialog[open]',{timeout:15000});
+    assert.ok(await page.$eval('#translationStatus',el=>el.textContent.includes('هیچ کادر فعال') && el.textContent.includes('OCR')));
+    assert.equal(freeGenerations.length,beforeEmpty); await page.keyboard.press('Escape');
+    await page.click('#translateBtn'); await page.waitForSelector('#translationDialog[open]');
+    assert.equal(ocrCalls.length,3,'empty OCR is not retried automatically');
+    assert.equal(await page.$eval('#ocrDialog',el=>el.open),false); await page.keyboard.press('Escape');
+    ocrEmpty=false;
+    console.log('PASS: empty OCR stops without sending and does not loop');
+
+    let badProject=await api(base,'/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Translation diagnostic'})});
+    const badFile=new FormData(); badFile.append('files',new Blob([fs.readFileSync(source)],{type:'image/png'}),'bad.png');
+    badProject=await api(base,`/api/projects/${badProject.id}/files`,{method:'POST',body:badFile});
+    badProject.images[0].blocks=[makeBlock(1,'X'.repeat(501))];
+    await api(base,`/api/projects/${badProject.id}/state`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:badProject})});
+    await page.evaluate(async id=>{await refreshProjectList();const el=document.getElementById('projectSelect');el.value=id;el.dispatchEvent(new Event('change',{bubbles:true}));},badProject.id);
+    await page.waitForFunction(id=>state.project.id===id,{},badProject.id);
+    await page.click('#translateBtn'); await page.waitForSelector('#translationDialog[open]');
+    const preparationError=await page.$eval('#translationStatus',el=>el.textContent);
+    assert.ok(preparationError.includes('context-preview') && preparationError.includes('HTTP 502') && preparationError.includes('ارسال نشد'));
+    assert.equal(await page.$eval('#copyTranslationError',el=>el.classList.contains('hidden')),false);
+    await page.keyboard.press('Escape');
+    console.log('PASS: preflight translation errors show a persistent, copyable stage and HTTP diagnostic');
+
+
 
     // Real browser and Python server: three selected pages, one AI request at a
     // time, and a failure on page two must retain page one without sending page three.
@@ -1027,7 +1116,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert not any(b'browser-local-secret' in archive.read(name) for name in archive.namelist())
 `, backupPath]);
     console.log('PASS: browser downloads and restores a new project ZIP with image, text and local draft without API keys');
-    assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
+    assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');
   } catch (error) {

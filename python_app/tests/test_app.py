@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.50"
+    assert health.json()["version"] == "3.51"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -1577,3 +1577,41 @@ def test_skill_change_invalidates_partial_checkpoint_and_single_text_confirmatio
     assert client.post('/api/translate-text', json={**single, 'confirmation': one['signature']}).status_code == 200
     assert seen == ['first', 'first']
     assert client.post('/api/translate-text/preview', json={**single, 'skill': 'x' * 4001}).status_code == 422
+
+
+def test_ocr_records_completed_even_when_no_text_and_leaves_other_images(client, monkeypatch):
+    project, item = make_project(client)
+    more = client.post(f"/api/projects/{project['id']}/files", files=[('files', ('second.png', png_bytes(), 'image/png'))]).json()
+    more['images'][0]['blocks'] = [{'id':1,'text':'manual text','tr':'existing','enabled':True}]
+    route=f"/api/projects/{more['id']}"
+    client.put(route+'/state',json={'state':more})
+    monkeypatch.setattr('comic_studio.main.recognize_image', lambda *args: [])
+    result=client.post(route+'/ocr',json={'image_ids':[more['images'][1]['id']], 'engine':'rapidocr-v6', 'language':'eng'})
+    assert result.status_code==200, result.text
+    assert result.json()['images'][1]['ocrCompleted'] is True
+    assert result.json()['images'][1]['blocks'] == []
+    assert result.json()['images'][0]['blocks'][0]['tr'] == 'existing'
+    # UI snapshots cannot accidentally delete or forge the server-owned marker.
+    incoming=result.json(); incoming['images'][1].pop('ocrCompleted')
+    client.put(route+'/state',json={'state':incoming})
+    assert client.get(route).json()['images'][1]['ocrCompleted'] is True
+
+
+def test_unexpected_error_reports_stage_type_and_location_without_keys(tmp_path, monkeypatch):
+    from comic_studio.translation import TranslationService
+    monkeypatch.setenv('COMIC_STUDIO_DATA',str(tmp_path))
+    with scoped_client(create_app(), raise_server_exceptions=False) as client:
+        settings=client.put('/api/ai-settings',json={'provider':'openai','api_key':'test-private-key-xyz'})
+        assert settings.status_code==200
+        project,item=make_project(client)
+        project['images'][0]['blocks']=[{'id':1,'text':'hello','tr':'','enabled':True}]
+        route=f"/api/projects/{project['id']}"
+        client.put(route+'/state',json={'state':project})
+        def broken(self):
+            raise RuntimeError('diagnostic provider broke: test-private-key-xyz https://example.test/path?api_key=test-private-key-xyz')
+        monkeypatch.setattr(TranslationService,'public_settings',broken)
+        result=client.post(route+'/context-preview',json={'image_ids':[item['id']],'provider':'openai','skill':'','summary':''})
+        assert result.status_code==500, result.text
+        assert 'RuntimeError' in result.text and 'diagnostic provider broke' in result.text and 'test_app.py' in result.text
+        assert 'test-private-key-xyz' not in result.text and '[REDACTED]' in result.text
+        assert result.json()['error_id']
