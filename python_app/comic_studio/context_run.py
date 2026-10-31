@@ -3,17 +3,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any
 
 from .context_budget import ContextBudget, ContextRequest, FreeRequest, build_context_request
 from .ocr import LANGUAGES
 from .store import ProjectChangedError
 from .translation import TranslationError, combine_translation_texts, distribute_translation
-from .translation_plan import split_ai_paragraph, target_snapshot
+from .translation_plan import safe_line_boundaries, target_snapshot
 
 RUN_KEY = '_aiContextRun'
 SUMMARY_KEY = '_aiStorySummary'
+PLANNING_REVISION = 2
 
 
 def digest(value: Any) -> str:
@@ -44,7 +44,7 @@ def build_run_request(run: dict[str, Any], skill: str) -> ContextRequest | FreeR
     if run['provider'] == 'free':
         return FreeRequest(run['limit'])
     budget = ContextBudget(run['limit'], run['contextPercent'], run['skillPercent'])
-    return build_context_request(budget, LANGUAGES.get(run['language'], LANGUAGES['eng'])['name'], skill, run['context'])
+    return build_context_request(budget, LANGUAGES.get(run['language'], LANGUAGES['eng'])['name'], skill, run['context'], prompt_version=run.get('promptVersion', 1))
 
 
 def safe_prefix(text: str, fits: Any, source_lines: Any = None) -> tuple[str, str, str] | None:
@@ -53,21 +53,7 @@ def safe_prefix(text: str, fits: Any, source_lines: Any = None) -> tuple[str, st
     Return the first part, remainder and intervening whitespace. The remainder
     need not fit the current space: it will be planned again next request.
     """
-    sentence_end = re.compile(r"[.!?…。！？؟][\"'”’»）)\]]*\s*$")
-    candidates: list[tuple[int, int]] = []
-    for match in re.finditer(r"\n(?:[ \t]*\n)*", text):
-        prefix = text[:match.start()].rstrip()
-        if prefix and ("\n" in match.group(0)[1:] or sentence_end.search(prefix)):
-            candidates.append((len(prefix), match.end()))
-    if isinstance(source_lines, list) and all(isinstance(line, dict) for line in source_lines):
-        lines = [' '.join(str(line.get('text') or '').split()) for line in source_lines]
-        lines = [line for line in lines if line]
-        if len(lines) > 1 and ' '.join(lines) == text:
-            position = 0
-            for line in lines[:-1]:
-                position += len(line)
-                if sentence_end.search(line): candidates.append((position, position + 1))
-                position += 1
+    candidates = safe_line_boundaries(text, source_lines)
     valid = [(cut, end) for cut, end in candidates if cut > 0 and end < len(text) and fits(text[:cut])]
     if not valid:
         return None
@@ -120,10 +106,22 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
         while not maximum_request.fits(remaining):
             chunk = safe_prefix(remaining, maximum_request.fits, lines)
             if not chunk:
-                raise TranslationError('یک خط یا جمله در سقف مؤثر درخواست جا نمی‌شود؛ سقف یا متن OCR را در مرز مناسب اصلاح کنید. در حالت رایگان محدودیت ۵۰۰ بایت MyMemory نیز برقرار است. هیچ متنی ارسال نشد.')
+                candidates = safe_line_boundaries(remaining, lines)
+                first = remaining[:candidates[0][0]] if candidates else remaining
+                image_name = str(job['imageName'] or job['imageId'])[:120]
+                block_id = str(job['refs'][0]['blockId'])[:80]
+                if provider == 'free':
+                    detail = (f"بخش کامل بعدی {len(first)} نویسه و {len(first.encode('utf-8'))} بایت است؛ "
+                              f"سقف مؤثر {maximum_request.source_capacity} نویسه و ۵۰۰ بایت است.")
+                else:
+                    detail = (f"بخش کامل بعدی {len(first)} نویسه است؛ فضای متن با دستور و اسکیل و بدون خلاصه "
+                              f"{maximum_request.source_capacity} نویسه از سقف کل {limit} است.")
+                raise TranslationError(f"در صفحهٔ «{image_name}»، کادر {block_id}: {detail} "
+                                       'مرز امن در سقف پیدا نشد؛ سقف را تغییر دهید یا متن را بررسی کنید. هیچ متنی ارسال نشد.')
             _, remaining, _ = chunk
             lines = matching_source_lines(lines, remaining)
-    return {'provider': provider, 'language': language, 'skillHash': digest(skill), 'context': context,
+    return {'provider': provider, 'language': language, 'planningRevision': PLANNING_REVISION, **({'promptVersion': 2} if provider != 'free' else {}),
+            'skillHash': digest(skill), 'context': context,
             'limit': limit, 'contextPercent': context_percent, 'skillPercent': skill_percent,
             'reuse': reuse, 'policyHash': digest(policy), 'imageIds': [i['id'] for i in items], 'sourceLayout': source_layout(state, [i['id'] for i in items]), 'jobs': jobs,
             'completed': 0}
@@ -157,7 +155,7 @@ def matching_source_lines(lines: Any, remaining: str) -> Any:
     if isinstance(lines, list) and all(isinstance(line, dict) for line in lines):
         for index in range(len(lines)):
             suffix = ' '.join(' '.join(str(line.get('text') or '').split()) for line in lines[index:] if str(line.get('text') or '').strip())
-            if suffix == remaining:
+            if suffix == ' '.join(remaining.split()):
                 return lines[index:]
     return None
 
@@ -187,7 +185,13 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
             first, rest, join = split
             chosen.append({'job': index, 'text': first, 'rest': rest, 'join': join})
         elif not chosen:
-            raise TranslationError('خط یا جمله در فضای باقی‌مانده جا نمی‌شود؛ سقف را افزایش دهید یا خلاصه/متن OCR را اصلاح کنید. این درخواست ارسال نشد.')
+            job = run['jobs'][pending[0][0]]
+            image_name = str(job.get('imageName') or job['imageId'])[:120]
+            block_id = str(job['refs'][0]['blockId'])[:80] if job['refs'] else '—'
+            capacity = (f"{request.source_capacity} نویسه و ۵۰۰ بایت" if run['provider'] == 'free'
+                        else f"{request.source_capacity} نویسه")
+            raise TranslationError(f"در صفحهٔ «{image_name}»، کادر {block_id}: خط یا جمله در فضای فعلی {capacity} جا نمی‌شود؛ "
+                                   'خلاصه، سقف یا متن OCR را بررسی کنید. این درخواست ارسال نشد.')
         break
     return request, chosen
 

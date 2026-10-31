@@ -24,33 +24,43 @@ def effective_ai_limit(provider: str, settings: dict[str, Any]) -> int:
     return min(limits) if limits else MAX_AI_SOURCE_CHARS
 
 
-def split_ai_paragraph(text: str, limit: int = MAX_AI_SOURCE_CHARS,
-                       source_lines: list[dict[str, Any]] | None = None) -> tuple[list[str], list[str]]:
-    """Split at a line boundary that also ends a sentence or paragraph.
+# Sentence punctuation followed by any common closing quotation or bracket.
+# Japanese and Chinese OCR often includes these closers at the line end.
+_SENTENCE_END = re.compile(r"[.!?…。！？؟｡．][\"'”’»）)\]」』】）》〉］｝}]*\s*$")
 
-    Merged OCR blocks retain original lines in sourceLines. Their boundaries
-    are trusted only when their normalized join exactly matches the current
-    editable text; edited or missing metadata must never guess a split.
+
+def safe_line_boundaries(text: str, source_lines: Any = None) -> list[tuple[int, int]]:
+    """Locate whole-line sentence/paragraph breaks without changing source text.
+
+    OCR grouping stores original physical lines. Whitespace-only edits do not
+    invalidate them, but text, punctuation, or ordering changes do. The
+    returned positions point into the *actual* text and preserve separators.
     """
-    clean = str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
-    if limit < 1:
-        raise ValueError("Source limit must be positive")
-    sentence_end = re.compile(r"[.!?…。！？؟][\"'”’»）)\]]*\s*$")
     boundaries: list[tuple[int, int]] = []
-    for match in re.finditer(r"\n(?:[ \t]*\n)*", clean):
-        prefix = clean[:match.start()].rstrip()
-        if prefix and ("\n" in match.group(0)[1:] or sentence_end.search(prefix)):
+    for match in re.finditer(r"\n(?:[ \t]*\n)*", text):
+        prefix = text[:match.start()].rstrip()
+        if prefix and ("\n" in match.group(0)[1:] or _SENTENCE_END.search(prefix)):
             boundaries.append((len(prefix), match.end()))
     if isinstance(source_lines, list) and all(isinstance(line, dict) for line in source_lines):
-        lines = [" ".join(str(line.get("text") or "").split()) for line in source_lines]
+        lines = [str(line.get('text') or '').split() for line in source_lines]
         lines = [line for line in lines if line]
-        if len(lines) > 1 and " ".join(lines) == clean:
+        tokens = list(re.finditer(r'\S+', text))
+        if len(lines) > 1 and [match.group(0) for match in tokens] == [word for line in lines for word in line]:
             position = 0
             for line in lines[:-1]:
                 position += len(line)
-                if sentence_end.search(line):
-                    boundaries.append((position, position + 1))
-                position += 1
+                if _SENTENCE_END.search(' '.join(line)):
+                    boundaries.append((tokens[position - 1].end(), tokens[position].start()))
+    return sorted(set(boundaries))
+
+
+def split_ai_paragraph(text: str, limit: int = MAX_AI_SOURCE_CHARS,
+                       source_lines: list[dict[str, Any]] | None = None) -> tuple[list[str], list[str]]:
+    """Split at a line boundary that also ends a sentence or paragraph."""
+    clean = str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if limit < 1:
+        raise ValueError("Source limit must be positive")
+    boundaries = safe_line_boundaries(clean, source_lines)
     parts: list[str] = []; joins: list[str] = []; start = 0
     while len(clean) - start > limit:
         candidates = [(cut, end) for cut, end in boundaries if start < cut <= start + limit and end > start]

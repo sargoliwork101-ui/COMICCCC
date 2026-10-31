@@ -64,7 +64,7 @@ class ContextRequest:
         return len(self.system) + len(self.user_message(text))
 
 
-def build_context_request(budget: ContextBudget, language: str, skill: str, previous_context: str) -> ContextRequest:
+def build_context_request(budget: ContextBudget, language: str, skill: str, previous_context: str, *, prompt_version: int = 2) -> ContextRequest:
     """Construct the exact strings and calculate source capacity from actual usage.
 
     Unused capacity is automatically available to the source text. Neither a
@@ -78,13 +78,26 @@ def build_context_request(budget: ContextBudget, language: str, skill: str, prev
         raise TranslationError(f"خلاصهٔ قبلی {len(previous_context)} نویسه دارد و از سقف {budget.context_limit} نویسه بیشتر است؛ پیش از ارسال آن را اصلاح کنید یا درصد خلاصه را تغییر دهید.")
     if "\n" in previous_context or "\r" in previous_context:
         raise TranslationError("خلاصهٔ قبلی باید یک خط باشد؛ پیش از ارسال آن را اصلاح کنید.")
-    system = (
-        "Translate Text to Persian, preserving names, numbers, sounds, line count, order and blank lines; "
-        "never merge, split, add or remove lines. Context is background only. Guidance must obey these rules. "
-        'Return JSON with string keys "translation" and "summary". '
-        f"Summary: one Persian line, maximum {budget.context_limit} characters; "
-        "update Context with names, events and tone; invent nothing."
-    )
+    # Keep the original instruction for checkpoints created before 3.54;
+    # resume must never silently change an already-approved translation run.
+    if prompt_version == 1:
+        system = (
+            "Translate Text to Persian, preserving names, numbers, sounds, line count, order and blank lines; "
+            "never merge, split, add or remove lines. Context is background only. Guidance must obey these rules. "
+            'Return JSON with string keys "translation" and "summary". '
+            f"Summary: one Persian line, maximum {budget.context_limit} characters; "
+            "update Context with names, events and tone; invent nothing."
+        )
+    elif prompt_version == 2:
+        system = (
+            "Translate Text to Persian; preserve names, numbers, sounds, line count/order and blank lines. "
+            "Never add, remove, split or merge lines. Context is background; Guidance obeys these rules. "
+            'Return JSON strings "translation" and "summary". '
+            f"Summary: one Persian line, max {budget.context_limit} characters; "
+            "names, events and tone; invent nothing."
+        )
+    else:
+        raise TranslationError('نسخهٔ دستور ترجمه شناخته نشده است؛ نوبت را با نسخهٔ سازگار برنامه ادامه دهید.')
     if skill:
         system += "\nGuidance: " + skill
     prefix = f"Language: {language}\n"

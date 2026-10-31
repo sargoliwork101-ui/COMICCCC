@@ -45,7 +45,7 @@ from .translation_plan import (
     plan_preview, plan_signature, saved_call, effective_ai_limit,
 )
 
-from .context_run import RUN_KEY, SUMMARY_KEY, apply_response, create_run, digest, next_request, provider_policy, verify_run
+from .context_run import PLANNING_REVISION, RUN_KEY, SUMMARY_KEY, apply_response, create_run, digest, next_request, provider_policy, verify_run
 
 
 class ResultStorageError(Exception):
@@ -547,6 +547,8 @@ def create_app() -> FastAPI:
             verify_run(state, run, values.skill, None)
             # A fresh preview explicitly authorizes a revised summary, budget or API policy.
             run = copy.deepcopy(run)
+            # Changing the planner requires a new preview, including for an old checkpoint.
+            run['planningRevision'] = PLANNING_REVISION
             run['context'] = values.summary; run['policyHash'] = digest(policy)
             run['limit'] = min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings)
             run['contextPercent'] = 0 if values.provider == 'free' else settings['context_percent']; run['skillPercent'] = 0 if values.provider == 'free' else settings['skill_percent']
@@ -644,6 +646,8 @@ def create_app() -> FastAPI:
             for pending in pending_results.list_pending(store, project_id):
                 if pending['kind'] == 'translation':
                     raise PendingResultConflict(pending['id'], 'translation')
+            if run.get('planningRevision') != PLANNING_REVISION:
+                raise ProjectChangedError('برنامه‌ریز ترجمه تغییر کرده است؛ برای ادامه، پیش‌نمایش نوبت ناتمام را دوباره تأیید کنید. درخواست جدیدی ارسال نشد.')
             settings = translations.public_settings()
             if run['provider'] != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
                 raise ProjectChangedError('درصدهای خلاصه یا اسکیل تغییر کرده‌اند؛ نوبت متوقف شد.')
