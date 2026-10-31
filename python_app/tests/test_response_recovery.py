@@ -42,19 +42,22 @@ def configured(service, provider='openai', **extra):
         {'id':'b','api_key':'key-b','retry_count':2,'retry_wait_seconds':0}], **extra}}})
 
 
-def test_invalid_ai_output_is_not_retried_or_sent_to_second_key(tmp_path, monkeypatch):
+def test_invalid_ai_output_uses_configured_retries_and_logs_each_retry(tmp_path, monkeypatch):
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
     service=TranslationService(); settings=configured(service)
-    calls=[]
+    calls=[]; logs=[]; responses=['unusable private output', encoded('سلام','خلاصه')]
     def post(url, **kwargs):
         calls.append(kwargs)
-        return httpx.Response(200,json={'choices':[{'message':{'content':'unusable private output'}}]},request=httpx.Request('POST',url))
+        content=responses.pop(0)
+        return httpx.Response(200,json={'choices':[{'message':{'content':content}}]},request=httpx.Request('POST',url))
     monkeypatch.setattr(httpx,'post',post)
+    monkeypatch.setattr('comic_studio.translation.emit',lambda message,kind='info':logs.append((message,kind)))
     plan=build_context_request(ContextBudget(1000),'English','','')
-    with pytest.raises(InvalidContextResponse) as error:
-        service.translate_context(plan,'hello',['hello'],'openai',provider_policy(settings,'openai'))
-    assert len(calls)==1 and error.value.response_text=='unusable private output'
-    assert 'unusable private output' not in str(error.value)
+    assert service.translate_context(plan,'hello',['hello'],'openai',provider_policy(settings,'openai')) == ('سلام','خلاصه')
+    assert len(calls)==2
+    assert all(call['headers']['Authorization']=='Bearer key-a' for call in calls)
+    assert 'همان API دوباره امتحان می‌شود (1 از 2)' in logs[1][0] and 'ممکن است هزینه داشته باشد' in logs[1][0]
+    assert all('unusable private output' not in message for message,_ in logs)
     assert calls[0]['json']['response_format']=={'type':'json_object'}
 
 
@@ -97,7 +100,7 @@ def test_project_response_can_be_repaired_locally_once(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx,'post',post)
     with scoped_client(create_app()) as client:
         route,project=make_project(client)
-        client.put('/api/ai-settings',json={'provider':'openai','providers':{'openai':{'profiles':[{'id':'a','api_key':'key','retry_count':2,'retry_wait_seconds':0},{'id':'b','api_key':'key2','retry_wait_seconds':0}]}}})
+        client.put('/api/ai-settings',json={'provider':'openai','providers':{'openai':{'profiles':[{'id':'a','api_key':'key','retry_count':0,'retry_wait_seconds':0},{'id':'b','api_key':'key2','retry_count':0,'retry_wait_seconds':0}]}}})
         req={'image_ids':[i['id'] for i in project['images']],'provider':'openai','skill':'','summary':''}
         preview=client.post(route+'/context-preview',json=req).json()
         start=client.post(route+'/context-start',json={**req,'confirmation':preview['signature']}).json()
@@ -125,7 +128,7 @@ def test_single_block_split_recovers_failed_part_without_resending_previous(tmp_
         return httpx.Response(200,json={'choices':[{'message':{'content':value}}]},request=httpx.Request('POST',url))
     monkeypatch.setattr(httpx,'post',post)
     with scoped_client(create_app()) as client:
-        client.put('/api/ai-settings',json={'provider':'openai','providers':{'openai':{'profiles':[{'id':'a','api_key':'key','source_limit':500,'retry_count':2,'retry_wait_seconds':0}]}}})
+        client.put('/api/ai-settings',json={'provider':'openai','providers':{'openai':{'profiles':[{'id':'a','api_key':'key','source_limit':500,'retry_count':0,'retry_wait_seconds':0}]}}})
         req={'text':'First '+ 'a'*53 + '.\nSecond '+ 'b'*53 + '.', 'provider':'openai','skill':'','summary':''}
         preview=client.post('/api/translate-text/context-preview',json=req)
         assert preview.status_code==200, preview.text
@@ -163,7 +166,8 @@ def test_project_repair_cannot_overwrite_edits_made_after_response(tmp_path, mon
 
 
 def test_invalid_http_200_envelope_is_not_retried(tmp_path, monkeypatch):
-    monkeypatch.setenv('COMIC_STUDIO_DATA',str(tmp_path)); service=TranslationService(); settings=configured(service); calls=[]
+    monkeypatch.setenv('COMIC_STUDIO_DATA',str(tmp_path)); service=TranslationService(); calls=[]
+    settings=service.save_settings({'provider':'openai','providers':{'openai':{'profiles':[{'id':'a','api_key':'key','retry_count':0,'retry_wait_seconds':0}]}}})
     def post(url,**kwargs):
         calls.append(1)
         return httpx.Response(200,text='unparseable upstream result',request=httpx.Request('POST',url))

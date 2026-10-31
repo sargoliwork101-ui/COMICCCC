@@ -332,8 +332,6 @@ def context_uses_json(provider: str, base: str, mode: str) -> bool:
 
 
 def _retryable(error: Exception) -> bool:
-    if isinstance(error, InvalidContextResponse):
-        return False
     if isinstance(error, (httpx.TransportError, TranslationError, json.JSONDecodeError)):
         return True
     if isinstance(error, httpx.HTTPStatusError):
@@ -349,9 +347,19 @@ def _run_with_retries(action: Any, profile: dict[str, Any], provider: str, secre
             return action()
         except Exception as exc:
             if not _retryable(exc) or attempt >= retries:
+                if isinstance(exc, InvalidContextResponse):
+                    if retries == 0:
+                        exc.args = (f"{exc} تکرار خودکار برای این API روی صفر تنظیم شده بود؛ پاسخ برای اصلاح محلی نگه داشته شد.",)
+                        emit("پاسخ AI نامعتبر بود؛ تکرار خودکار برای این API روی صفر تنظیم شده است. پاسخ برای اصلاح محلی نگه داشته شد؛ درخواست دیگری ارسال نشد.", "error")
+                    else:
+                        exc.args = (f"{exc} پاسخ پس از {attempt + 1} تلاش نامعتبر ماند؛ همهٔ تکرارهای تنظیم‌شده تمام شد. برای جلوگیری از هزینهٔ ناخواسته، دیگر خودکار ارسال نمی‌شود.",)
+                        emit(f"پاسخ AI پس از {attempt + 1} تلاش همچنان از نظر قالب/محتوا نامعتبر بود؛ تکرارهای تنظیم‌شده تمام شد. پاسخ نهایی برای اصلاح محلی نگه داشته شد؛ درخواست دیگری ارسال نمی‌شود.", "error")
                 raise
             wait = profile.get("retry_wait_seconds", DEFAULT_AI_RETRY_WAIT)
-            emit(f"تلاش {attempt + 1} ناموفق بود: {_safe_error(exc, provider, secrets)}؛ پس از {wait} ثانیه، تکرار {attempt + 1} از {retries} برای همین API (ممکن است هزینه تکرار شود).", "warning")
+            if isinstance(exc, InvalidContextResponse):
+                emit(f"پاسخ AI از نظر قالب/محتوا نامعتبر بود: {_safe_error(exc, provider, secrets)}؛ پس از {wait} ثانیه همان API دوباره امتحان می‌شود ({attempt + 1} از {retries}). هر بار ممکن است هزینه داشته باشد.", "warning")
+            else:
+                emit(f"تلاش {attempt + 1} ناموفق بود: {_safe_error(exc, provider, secrets)}؛ پس از {wait} ثانیه، تکرار {attempt + 1} از {retries} برای همین API (ممکن است هزینه تکرار شود).", "warning")
             time.sleep(wait)
     raise AssertionError("unreachable")
 
@@ -698,12 +706,12 @@ class TranslationService:
                 try:
                     payload = response.json()
                 except (ValueError, TypeError) as exc:
-                    raise InvalidContextResponse('پاسخ HTTP سرویس JSON معتبر نیست؛ ارسال دوباره بدون تأیید انجام نمی‌شود.', response.text) from exc
+                    raise InvalidContextResponse('پاسخ HTTP سرویس JSON معتبر نیست.', response.text) from exc
                 text_response = _response_text(payload, provider) if isinstance(payload, dict) else ''
                 try:
                     return parse_context_response(text_response, source_texts, request.context_limit)
                 except TranslationError as exc:
-                    raise InvalidContextResponse(str(exc) + ' ارسال دوباره بدون تأیید انجام نمی‌شود.', text_response) from exc
+                    raise InvalidContextResponse(str(exc), text_response) from exc
             try:
                 emit(f"ترجمه با {AI_PROVIDERS[provider]['label']} و {name}…")
                 result = _run_with_retries(action, profile, provider, secrets)
