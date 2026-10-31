@@ -733,8 +733,19 @@ function updateTranslationSkillStatus() {
   const preview = translationPreviewData;
   const skill = $('translationSkill').value.trim();
   const context = $('translationContext').value.trim();
-  const skillTooLong = preview?.contextMode && Array.from(skill).length > preview.skillLimit;
-  const contextTooLong = preview?.contextMode && Array.from(context).length > preview.contextLimit;
+  const skillCount = Array.from(skill).length;
+  const contextCount = Array.from(context).length;
+  const skillTooLong = preview?.contextMode && skillCount > preview.skillLimit;
+  const contextTooLong = preview?.contextMode && contextCount > preview.contextLimit;
+  const updateBudgetCounter = (inputId, counterId, count, limit, visible) => {
+    const input = $(inputId); const counter = $(counterId);
+    input.classList.toggle('budget-over-limit', !!visible && count > limit);
+    counter.classList.toggle('over-budget', !!visible && count > limit);
+    counter.classList.toggle('hidden', !visible);
+    counter.textContent = visible ? `${count} / ${limit} نویسه` : '';
+  };
+  updateBudgetCounter('translationSkill', 'translationSkillCounter', skillCount, preview?.skillLimit ?? 0, !!preview?.contextMode);
+  updateBudgetCounter('translationContext', 'translationContextCounter', contextCount, preview?.contextLimit ?? 0, !!preview?.contextMode);
   const changed = preview && ((preview.provider !== 'free' && (skill !== (preview.skill ?? '') || (preview.contextMode && context !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume));
   const message = skillTooLong ? `اسکیل ذخیره‌شده بیش از سقف ${preview.skillLimit} نویسه است؛ پیش از ارسال کوتاه کنید.` :
     contextTooLong ? `خلاصه بیش از سقف ${preview.contextLimit} نویسه است؛ پیش از ارسال کوتاه کنید.` :
@@ -751,7 +762,7 @@ function showTranslationRequestPreview(preview, action, refresh = null) {
   $('translationContext').value = preview.displaySummary ?? preview.summary ?? '';
   $('translationContext').maxLength = preview.contextMode ? preview.contextLimit * 2 : 200000;
   $('translationContextResume').checked = !!preview.resume; $('translationContextResume').parentElement.classList.toggle('hidden', !!preview.singleContext);
-  $('translationContextHelp').textContent = preview.contextMode ? `سقف خلاصه ${preview.contextLimit} نویسه و سقف اسکیل ${preview.skillLimit} نویسه؛ فضای استفاده‌نشده به متن می‌رسد.` : '';
+  $('translationContextHelp').textContent = preview.contextMode ? `سهم خلاصه ${preview.contextPercent ?? 15}٪ (حداکثر ${preview.contextLimit} نویسه) · سهم اسکیل ${preview.skillPercent ?? 15}٪ (حداکثر ${preview.skillLimit} نویسه) از سقف کل ${preview.totalLimit} نویسه؛ سهم استفاده‌نشده به متن می‌رسد.` : '';
   $('translationSkill').maxLength = preview.contextMode ? preview.skillLimit * 2 : 4000;
   $('translationSkill').disabled = false; $('translationSkillReset').disabled = false; $('translationContext').disabled = false; $('translationContextResume').disabled = false;
   $('translationSkill').value = preview.displaySkill ?? preview.skill ?? '';
@@ -759,7 +770,7 @@ function showTranslationRequestPreview(preview, action, refresh = null) {
   $('translationPreviewSummary').textContent = preview.rollingMode ? `${preview.blockCount} متن · پیش‌نمایش درخواست اول${preview.contextMode ? ' (تعداد درخواست‌های بعدی وابسته به خلاصه است)' : ''}` : `${preview.blockCount} متن · ${preview.requestCount} درخواست پایه برای بررسی (بدون تکرار)`;
   const destination = [preview.providerLabel, preview.model && `مدل: ${preview.model}`, preview.base_url && `نشانی: ${preview.base_url}`, preview.fallback_url && `فقط هنگام خطا: ${preview.fallback_url}`].filter(Boolean).join(' · ');
   $('translationPreviewDestination').textContent = destination;
-  $('translationPreviewNote').textContent = preview.note || ''; $('translationPreviewError').textContent = ''; $('translationPreviewError').classList.add('hidden'); $('copyTranslationPreviewError').classList.add('hidden');
+  $('translationPreviewNote').textContent = preview.note || ''; $('translationPreviewError').textContent = preview.previewError ? `${preview.previewError} هیچ متنی ارسال نشده است؛ سقف کل یا متن/راهنما را اصلاح و پیش‌نمایش را تازه کنید.` : ''; $('translationPreviewError').classList.toggle('hidden', !preview.previewError); $('copyTranslationPreviewError').classList.toggle('hidden', !preview.previewError);
   const container = $('translationPreviewRequests'); container.textContent = '';
   (preview.requests || []).forEach((request, index) => {
     const details = document.createElement('details'); details.className = 'payload-request'; details.open = (preview.requests.length === 1 || index === 0);
@@ -883,9 +894,11 @@ async function runTranslation() {
     const contextLimit = Math.floor(limit * (state.ai?.context_percent ?? 15) / 100);
     const oldSkill = savedTranslationSkill(projectId);
     const skill = oldSkill ?? 'ترجمه را روان و طبیعی و متناسب با لحن شخصیت‌ها بنویس؛ نام‌ها، اعداد و آواها را با دقت حفظ کن.';
-    const summary = state.project._aiStorySummary || '';
     const previous = previousRun;
     const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
+    // A new translation starts without stale story context; only an explicit
+    // resume carries the previous run's rolling summary into its first request.
+    const summary = resume ? (previous.context || '') : '';
     const refresh = (nextSkill, nextSummary, nextResume) => { confirmRestart(nextResume); return api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: nextSkill, summary: nextSummary, resume: nextResume })); };
     const safeSkill = Array.from(skill).length <= skillLimit ? skill : '';
     const safeSummary = Array.from(summary).length <= contextLimit ? summary : '';

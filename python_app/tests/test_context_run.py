@@ -3,6 +3,7 @@ import json
 from PIL import Image
 from support_client import scoped_client
 from comic_studio.main import create_app
+from comic_studio.context_run import safe_prefix
 from comic_studio.translation import TranslationService
 
 
@@ -18,6 +19,14 @@ def make_project(client):
         image['blocks'] = [{'id':1, 'text':'repeated title', 'tr':'old', 'enabled':True}, {'id':2, 'text':'page ' + str(n), 'tr':'old', 'enabled':True}]
     assert client.put(route + '/state', json={'state': project}).status_code == 200
     return route, project
+
+
+def test_safe_prefix_splits_sentence_boundaries_inside_one_ocr_line():
+    first = 'This is a complete first sentence.'
+    second = 'This is a complete second sentence.'
+    source = first + ' ' + second
+    part, rest, separator = safe_prefix(source, lambda value: len(value) <= len(first))
+    assert part == first and rest == second and separator == ' '
 
 
 def test_sequential_context_persists_and_reuses_with_one_approval(tmp_path, monkeypatch):
@@ -54,6 +63,23 @@ def test_sequential_context_persists_and_reuses_with_one_approval(tmp_path, monk
         assert all(n <= 1000 for _, _, n, _ in captured)
         assert 'Context:' not in captured[0][1] and 'نام: جان' in captured[1][1]
         assert captured[0][3] == ['repeated title', 'page 0'] and captured[1][3] == ['page 1']
+
+
+def test_oversized_source_still_returns_editable_budget_preview(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    with scoped_client(create_app()) as client:
+        route, project = make_project(client)
+        project['images'][0]['blocks'][0]['text'] = 'x' * 715
+        client.put(route + '/state', json={'state': project})
+        client.put('/api/ai-settings', json={'provider':'openai','context_percent':15,'skill_percent':15,
+                                             'providers':{'openai':{'profiles':[{'id':'main','api_key':'key','source_limit':900}]}}})
+        req = {'image_ids':[project['images'][0]['id']], 'provider':'openai', 'skill':'ترجمه روان', 'summary':''}
+        response = client.post(route + '/context-preview', json=req)
+        assert response.status_code == 200, response.text
+        preview = response.json()
+        assert preview['previewError'] and not preview['requests']
+        assert preview['skill'] == req['skill'] and preview['summary'] == ''
+        assert preview['totalLimit'] == 900 and preview['skillPercent'] == 15 and preview['contextPercent'] == 15
 
 
 def test_rejects_stale_skill_and_changed_blocks_before_send(tmp_path, monkeypatch):
@@ -197,7 +223,8 @@ def test_preflight_checks_later_unbreakable_line_before_any_send(tmp_path, monke
         client.put(route+'/state',json={'state':project})
         client.put('/api/ai-settings',json={'provider':'openai','api_key':'key'})
         result = client.post(route+'/context-preview',json={'image_ids':[i['id'] for i in project['images']], 'provider':'openai','skill':'', 'summary':''})
-        assert result.status_code == 502 and not seen
+        assert result.status_code == 200 and not seen
+        assert result.json()['previewError'] and not result.json()['requests']
 
 
 def test_merged_ocr_boundaries_survive_repeated_dynamic_splitting(tmp_path, monkeypatch):

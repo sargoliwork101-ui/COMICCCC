@@ -55,9 +55,18 @@ def safe_prefix(text: str, fits: Any, source_lines: Any = None) -> tuple[str, st
     """
     sentence_end = re.compile(r"[.!?…。！？؟][\"'”’»）)\]]*\s*$")
     candidates: list[tuple[int, int]] = []
+    # Sentence boundaries can occur inside a single OCR line. The previous
+    # implementation only inspected newline boundaries, so long OCR blocks
+    # containing several sentences were incorrectly treated as indivisible.
+    for match in re.finditer(r"[.!?…。！？؟][\"'”’»）)\]]*(?=[ \t\n])", text):
+        cut = match.end()
+        end = cut
+        while end < len(text) and text[end] in " \t\n":
+            end += 1
+        candidates.append((cut, end))
     for match in re.finditer(r"\n(?:[ \t]*\n)*", text):
         prefix = text[:match.start()].rstrip()
-        if prefix and ("\n" in match.group(0)[1:] or sentence_end.search(prefix)):
+        if prefix and "\n" in match.group(0)[1:]:
             candidates.append((len(prefix), match.end()))
     if isinstance(source_lines, list) and all(isinstance(line, dict) for line in source_lines):
         lines = [' '.join(str(line.get('text') or '').split()) for line in source_lines]
@@ -112,18 +121,32 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
             jobs.append(job)
             if reuse:
                 by_text[source] = job
-    # Reject a line that cannot fit even with an empty summary before sending
-    # any text. Later requests are recalculated with their actual summary; if
-    # that makes a line too large, stop and let the user shorten the summary.
-    for job in jobs:
-        remaining = job['source']; lines = job.get('sourceLines')
-        while not maximum_request.fits(remaining):
-            chunk = safe_prefix(remaining, maximum_request.fits, lines)
-            if not chunk:
-                raise TranslationError('یک خط یا جمله در سقف مؤثر درخواست جا نمی‌شود؛ سقف یا متن OCR را در مرز مناسب اصلاح کنید. در حالت رایگان محدودیت ۵۰۰ بایت MyMemory نیز برقرار است. هیچ متنی ارسال نشد.')
-            _, remaining, _ = chunk
-            lines = matching_source_lines(lines, remaining)
-    return {'provider': provider, 'language': language, 'skillHash': digest(skill), 'context': context,
+    # Keep the established rejection for free services. For AI, surface budget
+    # failures in the editable preview dialog so guidance and limits are visible.
+    if provider == 'free':
+        for job in jobs:
+            remaining = job['source']; lines = job.get('sourceLines')
+            while not maximum_request.fits(remaining):
+                chunk = safe_prefix(remaining, maximum_request.fits, lines)
+                if not chunk:
+                    raise TranslationError('یک خط یا جمله در سقف مؤثر درخواست جا نمی‌شود؛ سقف یا متن OCR را در مرز مناسب اصلاح کنید. در حالت رایگان محدودیت ۵۰۰ بایت MyMemory نیز برقرار است. هیچ متنی ارسال نشد.')
+                _, remaining, _ = chunk
+                lines = matching_source_lines(lines, remaining)
+    else:
+        preview_error = ''
+        for job in jobs:
+            remaining = job['source']; lines = job.get('sourceLines')
+            while not maximum_request.fits(remaining):
+                chunk = safe_prefix(remaining, maximum_request.fits, lines)
+                if not chunk:
+                    preview_error = (f"در صفحهٔ «{job['imageName']}»، متن کاملِ کادر جا نمی‌شود؛ فضای متن پس از دستور، اسکیل و خلاصهٔ مجاز "
+                                     f"{maximum_request.source_capacity} نویسه است. سقف را تغییر دهید یا متن OCR را بررسی کنید. هیچ متنی ارسال نشد.")
+                    break
+                _, remaining, _ = chunk
+                lines = matching_source_lines(lines, remaining)
+            if preview_error:
+                break
+    return {'provider': provider, 'language': language, 'skillHash': digest(skill), 'context': context, 'previewError': preview_error if provider != 'free' else '',
             'limit': limit, 'contextPercent': context_percent, 'skillPercent': skill_percent,
             'reuse': reuse, 'policyHash': digest(policy), 'imageIds': [i['id'] for i in items], 'sourceLayout': source_layout(state, [i['id'] for i in items]), 'jobs': jobs,
             'completed': 0}

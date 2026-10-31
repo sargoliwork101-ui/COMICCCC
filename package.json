@@ -14,5 +14,8 @@
     "jsdom": "^30.0.0",
     "puppeteer-core": "^25.16.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "overrides": {
+    "minimatch": "^11.0.1"
+  }
 }

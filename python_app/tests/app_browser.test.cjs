@@ -1066,7 +1066,7 @@ with pymupdf.open(pdf_path) as document:
     // refreshes locally without sending another AI request.
     const beforeSummaryPreview = aiGenerations.length;
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
-    assert.equal(await page.$eval('#translationContext', el => el.value), 'جان دوست مری است');
+    assert.equal(await page.$eval('#translationContext', el => el.value), '', 'a new translation starts with an empty summary');
     await page.$eval('#translationContext', el => { el.value = 'جان و مری'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.click('#translationPreviewConfirm');
     await page.waitForFunction(() => document.getElementById('translationPreviewRequests').textContent.includes('جان و مری') && !document.getElementById('translationPreviewConfirm').disabled);
@@ -1088,6 +1088,12 @@ with pymupdf.open(pdf_path) as document:
     const beforeOverlong = aiGenerations.length;
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(await page.$eval('#translationSkill', el => el.value.length), 120);
+    assert.equal(await page.$eval('#translationSkillCounter', el => el.classList.contains('over-budget')), true);
+    assert.equal(await page.$eval('#translationSkill', el => el.classList.contains('budget-over-limit')), true);
+    await page.$eval('#translationContext', el => {el.value='x'.repeat(98); el.dispatchEvent(new Event('input',{bubbles:true}));});
+    assert.equal(await page.$eval('#translationContextCounter', el => el.classList.contains('over-budget')), true);
+    assert.equal(await page.$eval('#translationContext', el => el.classList.contains('budget-over-limit')), true);
+    await page.$eval('#translationContext', el => {el.value=''; el.dispatchEvent(new Event('input',{bubbles:true}));});
     assert.equal(await page.$eval('#translationPreviewConfirm', el => el.disabled), true);
     assert.ok(await page.$eval('#translationSkillStatus', el => el.textContent.includes('بیش از سقف')));
     await page.click('#translationSkill'); await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control');

@@ -45,7 +45,7 @@ from .translation_plan import (
     plan_preview, plan_signature, saved_call, effective_ai_limit,
 )
 
-from .context_run import RUN_KEY, SUMMARY_KEY, apply_response, create_run, digest, next_request, provider_policy, verify_run
+from .context_run import RUN_KEY, SUMMARY_KEY, apply_response, build_run_request, create_run, digest, next_request, provider_policy, verify_run
 
 
 class ResultStorageError(Exception):
@@ -570,7 +570,15 @@ def create_app() -> FastAPI:
         # silently replaced by the stale summary accepted in this tab.
         run['baseSummaryHash'] = digest(state.get(SUMMARY_KEY, ''))
         if not values.resume: run['basePreviousRunHash'] = digest(state.get(RUN_KEY))
-        request, chosen = next_request(run, values.skill)
+        try:
+            if run.get('previewError'):
+                raise TranslationError(run['previewError'])
+            request, chosen = next_request(run, values.skill)
+        except TranslationError as exc:
+            # A non-fitting paragraph must not hide the preview controls. No
+            # request is confirmable until the user changes the budget/text.
+            request, chosen = build_run_request(run, values.skill), []
+            run['previewError'] = str(exc)
         return run, request, chosen
 
     def context_view(run: dict[str, Any], request: Any, chosen: list[dict[str, Any]], provider: str) -> dict[str, Any]:
@@ -599,7 +607,7 @@ def create_app() -> FastAPI:
                 'providerLabel': provider, 'model': policy['model'], 'base_url': policy['base_url'],
                 'note': f"درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.",
                 'signature': digest(run), 'rollingMode': True, 'contextMode': True, 'summary': run['context'], 'skillLimit': request.skill_limit,
-                'contextLimit': request.context_limit, 'totalLimit': run['limit'], 'resume': bool(run.get('id'))}
+                'contextLimit': request.context_limit, 'totalLimit': run['limit'], 'contextPercent': run['contextPercent'], 'skillPercent': run['skillPercent'], 'previewError': run.get('previewError', ''), 'resume': bool(run.get('id'))}
 
     @app.post("/api/projects/{project_id}/context-preview")
     def context_preview(project_id: str, values: ContextPreviewRequest) -> dict[str, Any]:
@@ -629,7 +637,7 @@ def create_app() -> FastAPI:
                         item.pop(AI_PAGE_PROGRESS_KEY, None)
                         for block in item.get('blocks', []): block.pop(AI_PARTS_KEY, None)
         state[RUN_KEY] = run
-        if run['provider'] != 'free': state[SUMMARY_KEY] = run['context']
+        if run['provider'] != 'free' and run['context']: state[SUMMARY_KEY] = run['context']
         store.save_if_unchanged(state, expected)
         return {'project': state, 'runId': run['id'], 'completed': run['completed']}
 

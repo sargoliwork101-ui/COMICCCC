@@ -221,13 +221,15 @@
     <div id="translationPreviewRequests" class="payload-requests"></div>
     <div id="translationContextWrap" class="hidden">
       <label id="translationContextLabel" for="translationContext">خلاصهٔ داستان برای درخواست اول</label>
-      <input id="translationContext" type="text" dir="auto">
+      <input id="translationContext" type="text" dir="auto" aria-describedby="translationContextHelp translationContextCounter">
+      <p id="translationContextCounter" class="budget-counter" aria-live="polite"></p>
       <p id="translationContextHelp" class="hint"></p>
       <label><input id="translationContextResume" type="checkbox"> ادامهٔ نوبت ناتمام قبلی</label>
     </div>
     <div id="translationSkillWrap" class="hidden">
       <label for="translationSkill">راهنمای ترجمهٔ AI برای این نوبت</label>
-      <textarea id="translationSkill" rows="4" maxlength="4000" dir="auto" aria-describedby="translationSkillHelp"></textarea>
+      <textarea id="translationSkill" rows="4" maxlength="4000" dir="auto" aria-describedby="translationSkillHelp translationSkillCounter"></textarea>
+      <p id="translationSkillCounter" class="budget-counter" aria-live="polite"></p>
       <p id="translationSkillHelp" class="hint">این راهنما همراه تمام درخواست‌های AI همین نوبت ارسال می‌شود. بعد از تغییر، ابتدا پیش‌نمایش به‌روز می‌شود و برای ارسال باید دوباره تأیید کنید. دستور اصلیِ حفظ ترتیب جداگانه نمایش داده می‌شود؛ راهنمای متناقض ممکن است کیفیت پاسخ را خراب کند. اطلاعات محرمانه وارد نکنید؛ راهنمای تأییدشده در مرورگر همین پروژه ذخیره می‌شود.</p>
       <button id="translationSkillReset" type="button" class="bt">بازگرداندن راهنمای پیش‌فرض</button>
       <p id="translationSkillStatus" class="hint" role="status"></p>
