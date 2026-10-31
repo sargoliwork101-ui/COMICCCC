@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hmac
+import ipaddress
+import os
 import copy
 import threading
 import uuid
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -50,6 +56,75 @@ def create_app() -> FastAPI:
     app.state.activity = activity
     app.state.sessions = sessions
     activity.add("برنامه آماده است")
+
+    @app.middleware("http")
+    async def protect_local_data(request: Request, call_next: Any) -> Response:
+        # Loopback is the default trusted use case. LAN clients are denied by
+        # default. If configured, Basic authentication protects *all* requests,
+        # including those arriving through a loopback reverse proxy.
+        password = os.environ.get("COMIC_STUDIO_ACCESS_PASSWORD", "")
+        if password:
+            if len(password) < 20:
+                return JSONResponse({"detail": "COMIC_STUDIO_ACCESS_PASSWORD must contain at least 20 characters."}, status_code=503)
+            header = request.headers.get("authorization", "")
+            valid = False
+            try:
+                scheme, encoded = header.split(" ", 1)
+                if scheme.lower() == "basic" and len(encoded) <= 8192:
+                    decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+                    username, supplied = decoded.split(":", 1)
+                    valid = hmac.compare_digest(username.encode("utf-8"), b"comic") and hmac.compare_digest(supplied.encode("utf-8"), password.encode("utf-8"))
+            except (ValueError, UnicodeError, binascii.Error):
+                pass
+            if not valid:
+                return JSONResponse({"detail": "Authentication required."}, status_code=401,
+                                    headers={"WWW-Authenticate": 'Basic realm="Comic OCR Studio", charset="UTF-8"', "Cache-Control": "no-store"})
+        else:
+            try:
+                peer = ipaddress.ip_address(request.client.host if request.client else "")
+                if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
+                    peer = peer.ipv4_mapped
+                local = peer.is_loopback
+            except ValueError:
+                local = False
+            if not local:
+                return JSONResponse({"detail": "Remote access is disabled. Configure COMIC_STUDIO_ACCESS_PASSWORD and HTTPS or a trusted VPN."}, status_code=403,
+                                    headers={"Cache-Control": "no-store"})
+            # Reject arbitrary DNS names on an unauthenticated loopback server;
+            # otherwise a malicious site can rebind its hostname to localhost.
+            try:
+                host = urlsplit("http://" + request.headers.get("host", ""))
+                hostname = host.hostname or ""
+                _ = host.port  # Validate even an unused explicit port.
+                if host.username is not None or host.password is not None or host.path or host.query or host.fragment:
+                    local_host = False
+                elif hostname.lower() == "localhost":
+                    local_host = True
+                else:
+                    address = ipaddress.ip_address(hostname)
+                    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+                        address = address.ipv4_mapped
+                    local_host = address.is_loopback
+            except ValueError:
+                local_host = False
+            if not local_host:
+                return JSONResponse({"detail": "Unauthenticated access requires a loopback hostname."}, status_code=403,
+                                    headers={"Cache-Control": "no-store"})
+        # Browsers normally send Origin on mutations. Reject a foreign origin;
+        # clients such as local command-line tools may legitimately omit it.
+        origin = request.headers.get("origin")
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
+            try:
+                parsed = urlsplit(origin)
+                same = (parsed.scheme in {"http", "https"} and parsed.scheme == request.url.scheme
+                        and parsed.netloc.lower() == request.headers.get("host", "").lower()
+                        and not parsed.path and not parsed.query and not parsed.fragment
+                        and parsed.username is None and parsed.password is None)
+            except ValueError:
+                same = False
+            if not same:
+                return JSONResponse({"detail": "Cross-origin requests are not allowed."}, status_code=403)
+        return await call_next(request)
 
     @app.middleware("http")
     async def prevent_stale_interface(request: Request, call_next: Any) -> Response:

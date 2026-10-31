@@ -1,7 +1,7 @@
 import io
 import json
 from PIL import Image
-from fastapi.testclient import TestClient
+from support_client import scoped_client
 from comic_studio.main import create_app
 from comic_studio.translation import TranslationService
 
@@ -27,7 +27,7 @@ def test_sequential_context_persists_and_reuses_with_one_approval(tmp_path, monk
         captured.append((request.system, request.user_message(text), request.character_count(text), list(sources)))
         return '\n'.join('ترجمه' for _ in text.split('\n')), 'نام: جان' if len(captured) == 1 else 'جان به خانه رفت'
     monkeypatch.setattr(TranslationService, 'translate_context', fake)
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         settings = client.put('/api/ai-settings', json={'provider':'openai','api_key':'key'}).json()
         assert settings['context_percent'] == settings['skill_percent'] == 15
@@ -60,7 +60,7 @@ def test_rejects_stale_skill_and_changed_blocks_before_send(tmp_path, monkeypatc
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
     called = []
     monkeypatch.setattr(TranslationService, 'translate_context', lambda *args: called.append(args) or ('ok','summary'))
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         client.put('/api/ai-settings', json={'provider':'openai','api_key':'key'})
         req = {'image_ids':[i['id'] for i in project['images']], 'provider':'openai', 'skill':'a'*151, 'summary':''}
@@ -113,7 +113,7 @@ def test_long_block_resume_recalculates_actual_capacity_and_retains_old_until_co
         captured.append((request.source_capacity, text, request.user_prefix))
         return 'ترجمه' + str(len(captured)), 'x' * (60 if len(captured) == 1 else 5)
     monkeypatch.setattr(TranslationService, 'translate_context', fake)
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         project['images'][0]['blocks'] = [{'id':1, 'text':('A'*400)+'.\n'+('B'*400)+'.\n'+('C'*400)+'.', 'tr':'old', 'enabled':True}]
         project['images'][1]['blocks'] = []
@@ -142,7 +142,7 @@ def test_bad_summary_does_not_commit_and_retry_resumes_same_payload(tmp_path, mo
         sent.append(kwargs['json']['messages'])
         return httpx.Response(200, json={'choices':[{'message':{'content':responses.pop(0)}}]}, request=httpx.Request('POST',url))
     monkeypatch.setattr(httpx, 'post', fake_post)
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         client.put('/api/ai-settings', json={'provider':'openai','api_key':'secret'})
         req = {'image_ids':[i['id'] for i in project['images']], 'provider':'openai', 'skill':'کوتاه', 'summary':''}
@@ -166,7 +166,7 @@ def test_resume_can_edit_summary_and_budget_without_resending_successes(tmp_path
         seen.append((text, request.user_prefix))
         return '\n'.join('متن' for _ in text.split('\n')), 'خلاصه'
     monkeypatch.setattr(TranslationService, 'translate_context', fake)
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         client.put('/api/ai-settings', json={'provider':'openai','api_key':'key'})
         req = {'image_ids':[i['id'] for i in project['images']], 'provider':'openai', 'skill':'x', 'summary':''}
@@ -191,7 +191,7 @@ def test_preflight_checks_later_unbreakable_line_before_any_send(tmp_path, monke
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
     seen = []
     monkeypatch.setattr(TranslationService, 'translate_context', lambda *a: seen.append(a))
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         project['images'][1]['blocks'][0]['text'] = 'x'*999
         client.put(route+'/state',json={'state':project})
@@ -207,7 +207,7 @@ def test_merged_ocr_boundaries_survive_repeated_dynamic_splitting(tmp_path, monk
         seen.append(text)
         return 'ترجمه', 'short'
     monkeypatch.setattr(TranslationService, 'translate_context', fake)
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         lines = [{'text':letter*400+'.'} for letter in 'ABC']
         project['images'][0]['blocks'] = [{'id':1,'text':' '.join(x['text'] for x in lines), 'sourceLines':lines,'tr':'old','enabled':True}]
@@ -230,7 +230,7 @@ def test_context_backup_excludes_api_key_and_endpoint_and_resume_works(tmp_path,
     def fake(self, request, text, sources, provider, policy):
         return '\n'.join('متن' for _ in text.split('\n')), 'خلاصهٔ محفوظ'
     monkeypatch.setattr(TranslationService, 'translate_context', fake)
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         client.put('/api/ai-settings',json={'provider':'openai','api_key':'private-secret','base_url':'https://user:pass@local.test/v1'})
         req = {'image_ids':[i['id'] for i in project['images']], 'provider':'openai','skill':'روان','summary':''}
@@ -261,7 +261,7 @@ def test_single_context_retranslation_does_not_mutate_project_memory(tmp_path, m
         seen.append(request.user_prefix)
         return 'سلام', 'خلاصهٔ موقت'
     monkeypatch.setattr(TranslationService, 'translate_context', fake)
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         client.put('/api/ai-settings',json={'provider':'openai','api_key':'key'})
         req = {'text':'hello','provider':'openai','skill':'روان','summary':'جان'}
@@ -274,7 +274,7 @@ def test_single_context_retranslation_does_not_mutate_project_memory(tmp_path, m
 
 def test_legacy_partial_progress_requires_explicit_restart_confirmation(tmp_path, monkeypatch):
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         project['images'][0]['blocks'][0]['_aiTranslationParts'] = {'fingerprint':'old', 'parts':{'0':'partial'}}
         client.put(route+'/state', json={'state':project})
@@ -292,7 +292,7 @@ def test_legacy_partial_progress_requires_explicit_restart_confirmation(tmp_path
 
 def test_percentage_settings_and_mixed_key_limits(tmp_path, monkeypatch):
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         settings = client.put('/api/ai-settings',json={'provider':'openai','context_percent':20,'skill_percent':10,'providers':{'openai':{'profiles':[{'id':'a','api_key':'one','source_limit':900},{'id':'b','api_key':'two','source_limit':800}]}}})
         assert settings.status_code == 200, settings.text
@@ -309,7 +309,7 @@ def test_percentage_settings_and_mixed_key_limits(tmp_path, monkeypatch):
 def test_dynamic_exact_payloads_are_visible_in_activity_without_headers(tmp_path, monkeypatch):
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
     monkeypatch.setattr(TranslationService, 'translate_context', lambda self, request, text, sources, provider, policy: ('\n'.join('متن' for _ in text.split('\n')), 'خلاصهٔ قبلی'))
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         client.put('/api/ai-settings',json={'provider':'openai','api_key':'private-key'})
         req = {'image_ids':[i['id'] for i in project['images']], 'provider':'openai','skill':'دستور','summary':''}
@@ -324,7 +324,7 @@ def test_dynamic_exact_payloads_are_visible_in_activity_without_headers(tmp_path
 
 def test_old_preview_does_not_replace_newer_story_summary(tmp_path, monkeypatch):
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         client.put('/api/ai-settings',json={'provider':'openai','api_key':'key'})
         req = {'image_ids':[i['id'] for i in project['images']], 'provider':'openai','skill':'x','summary':''}

@@ -1,6 +1,6 @@
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from support_client import scoped_client
 from comic_studio.main import create_app
 from comic_studio.translation import TranslationService, TranslationError
 from test_context_run import make_project
@@ -13,7 +13,7 @@ def test_free_page_packs_small_blocks_without_crossing_page(tmp_path, monkeypatc
         seen.append((text, sources))
         return '\n'.join('ترجمه' for _ in text.split('\n'))
     monkeypatch.setattr(TranslationService, 'translate_free_batch', fake)
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         for i, image in enumerate(project['images']):
             image['blocks'] = [{'id': n, 'text': text, 'tr':'old','enabled':True} for n, text in enumerate([str(i)*300,'ABCD','Z'*100,'Y'*120])]
@@ -96,7 +96,7 @@ def test_free_resume_preserves_success_and_requires_restart_consent(tmp_path, mo
             raise TranslationError('service failure')
         return 'ترجمه ' + text
     monkeypatch.setattr(TranslationService, 'translate_free_batch', fake)
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         for image, text in zip(project['images'], ['FIRST', 'SECOND']):
             image['blocks'] = [{'id':1,'text':text,'tr':'old','enabled':True}]
@@ -128,7 +128,7 @@ def test_utf8_limits_use_complete_lines_and_fail_before_sending(tmp_path, monkey
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
     calls = []
     monkeypatch.setattr(TranslationService,'translate_free_batch', lambda self, req, text, sources, lang, policy: calls.append(text) or 'ترجمه')
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route, project = make_project(client)
         project['images'][0]['blocks'] = [{'id':1,'text':'漢'*167,'tr':'old','enabled':True}]
         client.put(route+'/state',json={'state':project})
@@ -150,7 +150,7 @@ def test_free_settings_are_independent_and_change_invalidates_confirmation(tmp_p
     monkeypatch.setenv('COMIC_STUDIO_DATA',str(tmp_path))
     calls=[]
     monkeypatch.setattr(TranslationService,'translate_free_batch', lambda *args: calls.append(args) or 'سلام')
-    with TestClient(create_app()) as client:
+    with scoped_client(create_app()) as client:
         route,project=make_project(client)
         project['images'][0]['blocks']=[{'id':1,'text':'hello','tr':'old','enabled':True}]
         client.put(route+'/state',json={'state':project})

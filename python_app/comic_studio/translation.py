@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import stat
 import time
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -431,6 +432,19 @@ def translation_request_view(text: str, source_language: str, provider: str, ski
 class TranslationService:
     def __init__(self) -> None:
         self.path = data_dir() / "ai-settings.json"
+        # Harden pre-existing settings and the old fixed-name temporary file
+        # without deleting data or following a potentially unsafe symlink.
+        if os.name == "posix" and hasattr(os, "O_NOFOLLOW"):
+            for path in (self.path, self.path.with_suffix(self.path.suffix + ".tmp")):
+                try:
+                    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+                    try:
+                        if stat.S_ISREG(os.fstat(fd).st_mode):
+                            os.fchmod(fd, 0o600)
+                    finally:
+                        os.close(fd)
+                except OSError:
+                    pass
 
     def _secret(self) -> dict[str, Any]:
         normalized = _normalize_settings(read_json(self.path, {}))

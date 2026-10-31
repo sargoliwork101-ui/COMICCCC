@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
+import os
 import sys
 import threading
 
@@ -13,6 +15,15 @@ def run_server(host: str, port: int) -> None:
     """Run one server whose lifetime can follow the last open app tab."""
     from .main import app
 
+    try:
+        local_bind = host.lower() == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        local_bind = False
+    if not local_bind:
+        if os.environ.get("COMIC_STUDIO_ACCESS_PASSWORD"):
+            print("Network access requires HTTP Basic authentication. Use HTTPS or a trusted VPN; plain HTTP exposes the password.", file=sys.stderr, flush=True)
+        else:
+            print("Remote clients are denied by default. Set COMIC_STUDIO_ACCESS_PASSWORD (20+ characters) to enable authenticated access; use HTTPS or a trusted VPN.", file=sys.stderr, flush=True)
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, reload=False, access_log=False))
     app.state.sessions.on_empty = lambda: setattr(server, "should_exit", True)
     try:

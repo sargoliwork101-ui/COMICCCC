@@ -6,6 +6,7 @@ import math
 import os
 import shutil
 import threading
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,9 +35,21 @@ def new_id() -> str:
 
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temp, path)
+    # mkstemp creates a unique file with mode 0600 on POSIX before any
+    # sensitive content is written. Keeping it in the destination directory
+    # preserves atomic replacement and prevents concurrent writers colliding.
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp = Path(name)
+    try:
+        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with handle:
+            handle.write(json.dumps(value, ensure_ascii=False, indent=2))
+        os.replace(temp, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temp.unlink(missing_ok=True)
 
 
 def read_json(path: Path, default: Any) -> Any:

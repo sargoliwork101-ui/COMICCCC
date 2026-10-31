@@ -7,6 +7,7 @@ import httpx
 import pymupdf
 import pytest
 from fastapi.testclient import TestClient
+from support_client import scoped_client
 from PIL import Image, ImageDraw
 
 from comic_studio.main import create_app
@@ -15,7 +16,7 @@ from comic_studio.main import create_app
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path / "data"))
-    with TestClient(create_app()) as test_client:
+    with scoped_client(create_app()) as test_client:
         yield test_client
 
 
@@ -43,11 +44,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.49"
+    assert health.json()["version"] == "3.50"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۴۹ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۵۰ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -1090,7 +1091,7 @@ def test_portable_project_backup_restores_images_text_exports_and_browser_drafts
         assert z.read(f"images/{item['id']}-edited.png") == edited
     # A distinct data directory simulates the destination computer.
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path / 'destination'))
-    with TestClient(create_app()) as destination:
+    with scoped_client(create_app()) as destination:
         restored = destination.post('/api/projects/restore', files={'file':('backup.zip', zip_content, 'application/zip')})
         assert restored.status_code == 201, restored.text
         state = restored.json()['project']; assert state['id'] != project['id']
