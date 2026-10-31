@@ -7,41 +7,59 @@ import re
 from typing import Any
 
 from .translation import (
-    AI_PROVIDERS, MAX_FREE_QUERY_CHARS, combine_translation_texts,
+    AI_PROVIDERS, DEFAULT_AI_SOURCE_LIMIT, MAX_FREE_QUERY_CHARS, TranslationError, combine_translation_texts,
     translation_request_view,
 )
 
 
-MAX_AI_SOURCE_CHARS = 1000
+MAX_AI_SOURCE_CHARS = DEFAULT_AI_SOURCE_LIMIT
 AI_PARTS_KEY = "_aiTranslationParts"
 AI_PAGE_PROGRESS_KEY = "_aiPageProgress"
 AI_REUSE_KEY = "_aiReusedTranslation"
 
 
-def split_ai_paragraph(text: str, limit: int = MAX_AI_SOURCE_CHARS) -> tuple[list[str], list[str]]:
-    """Split oversized paragraphs at sentence/whitespace boundaries, preserving joins."""
-    remaining = str(text).strip(); parts: list[str] = []; joins: list[str] = []
-    while len(remaining) > limit:
-        # Avoid producing an almost-empty final chunk when a long block is
-        # only slightly over the limit. Keep sentence/space boundaries where possible.
-        count = (len(remaining) + limit - 1) // limit
-        target = (len(remaining) + count - 1) // count
-        window = remaining[:target]
-        ends = list(re.finditer(r"[.!?…。！？][\"'”’»)]*(?=\s|$)", window))
-        cut = ends[-1].end() if ends else 0
-        if cut < target // 3:
-            cut = max(window.rfind("\n"), window.rfind(" "), window.rfind("\t"))
-        if cut <= 0:
-            cut = target
-        part = remaining[:cut].rstrip()
-        if not part:
-            cut = target; part = remaining[:cut]
-        rest = remaining[len(part):]
-        whitespace = re.match(r"\s*", rest).group(0)
-        parts.append(part); joins.append("\n" if "\n" in whitespace else (" " if whitespace else ""))
-        remaining = rest[len(whitespace):]
-    if remaining:
-        parts.append(remaining)
+def effective_ai_limit(provider: str, settings: dict[str, Any]) -> int:
+    profiles = settings.get("providers", {}).get(provider, {}).get("profiles", [])
+    limits = [p.get("source_limit", MAX_AI_SOURCE_CHARS) for p in profiles if p.get("hasApiKey")]
+    return min(limits) if limits else MAX_AI_SOURCE_CHARS
+
+
+def split_ai_paragraph(text: str, limit: int = MAX_AI_SOURCE_CHARS,
+                       source_lines: list[dict[str, Any]] | None = None) -> tuple[list[str], list[str]]:
+    """Split at a line boundary that also ends a sentence or paragraph.
+
+    Merged OCR blocks retain original lines in sourceLines. Their boundaries
+    are trusted only when their normalized join exactly matches the current
+    editable text; edited or missing metadata must never guess a split.
+    """
+    clean = str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if limit < 1:
+        raise ValueError("Source limit must be positive")
+    sentence_end = re.compile(r"[.!?…。！？؟][\"'”’»）)\]]*\s*$")
+    boundaries: list[tuple[int, int]] = []
+    for match in re.finditer(r"\n(?:[ \t]*\n)*", clean):
+        prefix = clean[:match.start()].rstrip()
+        if prefix and ("\n" in match.group(0)[1:] or sentence_end.search(prefix)):
+            boundaries.append((len(prefix), match.end()))
+    if isinstance(source_lines, list) and all(isinstance(line, dict) for line in source_lines):
+        lines = [" ".join(str(line.get("text") or "").split()) for line in source_lines]
+        lines = [line for line in lines if line]
+        if len(lines) > 1 and " ".join(lines) == clean:
+            position = 0
+            for line in lines[:-1]:
+                position += len(line)
+                if sentence_end.search(line):
+                    boundaries.append((position, position + 1))
+                position += 1
+    parts: list[str] = []; joins: list[str] = []; start = 0
+    while len(clean) - start > limit:
+        candidates = [(cut, end) for cut, end in boundaries if start < cut <= start + limit and end > start]
+        if not candidates:
+            raise TranslationError(f"متن یک خط یا جملهٔ کامل از سقف {limit} نویسه بیشتر است؛ برای جلوگیری از بریدن خط یا جمله، سقف API را بیشتر کنید یا کادر OCR را اصلاح کنید. هیچ متنی ارسال نشد.")
+        cut, end = max(candidates)
+        parts.append(clean[start:cut]); joins.append(clean[cut:end]); start = end
+    if start < len(clean):
+        parts.append(clean[start:])
     return parts, joins
 
 
@@ -69,7 +87,8 @@ def part_fingerprint(call: dict[str, Any], plan: dict[str, Any], provider: str, 
     config = settings.get("providers", {}).get(provider, {})
     index = call["indices"][0]
     payload = [provider, language, config.get("model", ""), config.get("base_url", ""), plan["keys"][index],
-               plan["source_texts"][index], plan["target_snapshots"][index]]
+               plan["source_texts"][index], plan["target_snapshots"][index],
+               [c["text"] for c in plan["calls"] if c.get("image_id") == call.get("image_id") and c["indices"] == call["indices"]]]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -85,7 +104,8 @@ def page_fingerprint(call: dict[str, Any], plan: dict[str, Any], provider: str, 
     config = settings.get("providers", {}).get(provider, {})
     indices = sorted({i for c in plan["calls"] if c.get("image_id") == call["image_id"] for i in c["indices"]})
     payload = [provider, language, config.get("model", ""), config.get("base_url", ""), call["image_id"],
-               [plan["keys"][i] for i in indices], [plan["source_texts"][i] for i in indices]]
+               [plan["keys"][i] for i in indices], [plan["source_texts"][i] for i in indices],
+               [(c.get("call_id"), c["text"]) for c in plan["calls"] if c.get("image_id") == call["image_id"]]]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -131,6 +151,7 @@ def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: st
                        reuse_repeated: bool = False, source_language: str = "eng",
                        settings: dict[str, Any] | None = None) -> dict[str, Any]:
     ids = set(image_ids); settings = settings or {}
+    limit = effective_ai_limit(provider, settings)
     items = [item for item in sorted(state["images"], key=lambda entry: entry.get("order", 0)) if item["id"] in ids]
     entries = [(item, block, block_index) for item in items for block_index, block in enumerate(item.get("blocks", []))
                if block.get("enabled", True) and str(block.get("text", "")).strip()]
@@ -168,7 +189,7 @@ def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: st
                 continue
             common = {"image_id": item["id"], "image_name": item.get("name", "")}
             page_text = combine_translation_texts([source_texts[i] for i in indices])
-            if len(page_text) <= MAX_AI_SOURCE_CHARS:
+            if len(page_text) <= limit:
                 calls.append({**common, "text": page_text, "indices": indices, "targets": [groups[i] for i in indices], "combined": True, "call_id": "page"})
                 continue
             pending: list[int] = []
@@ -181,14 +202,14 @@ def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: st
                               "call_id": f"b{entries[chunk[0]][2]}", "paragraph": entries[chunk[0]][2] + 1})
             for index in indices:
                 source = source_texts[index]
-                if len(source) > MAX_AI_SOURCE_CHARS:
+                if len(source) > limit:
                     flush()
-                    parts, joins = split_ai_paragraph(source)
+                    parts, joins = split_ai_paragraph(source, limit, blocks[index].get("sourceLines"))
                     for part_index, part in enumerate(parts):
                         calls.append({**common, "text": part, "indices": [index], "targets": [groups[index]], "combined": False,
                                       "call_id": f"p{entries[index][2]}.{part_index}", "paragraph": entries[index][2] + 1,
                                       "part_index": part_index, "part_count": len(parts), "joins": joins})
-                elif pending and len(combine_translation_texts([source_texts[i] for i in pending] + [source])) > MAX_AI_SOURCE_CHARS:
+                elif pending and len(combine_translation_texts([source_texts[i] for i in pending] + [source])) > limit:
                     flush(); pending.append(index)
                 else:
                     pending.append(index)
@@ -201,14 +222,16 @@ def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: st
             "keys": [f"{item['id']}:{block.get('id', block_index + 1)}" for item, block, block_index in entries],
             "source_texts": source_texts, "target_snapshots": [target_snapshot(block) for block in blocks],
             "calls": calls, "combined_free": combined_free, "reuse_repeated": reuse,
-            "duplicate_count": sum(len(v) - 1 for v in groups.values()), "already_reused": already_reused}
+            "duplicate_count": sum(len(v) - 1 for v in groups.values()), "already_reused": already_reused, "source_limit": limit}
 
 
-def build_single_plan(text: str, provider: str) -> dict[str, Any]:
+def build_single_plan(text: str, provider: str, settings: dict[str, Any] | None = None,
+                      source_lines: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     clean = str(text or "").strip()
-    parts, joins = split_ai_paragraph(clean) if clean and provider != "free" else ([clean] if clean else [], [])
+    limit = effective_ai_limit(provider, settings or {})
+    parts, joins = split_ai_paragraph(clean, limit, source_lines) if clean and provider != "free" else ([clean] if clean else [], [])
     return {
-        "items": [], "blocks": [], "keys": ["single-text"] if clean else [],
+        "items": [], "blocks": [], "source_limit": limit, "keys": ["single-text"] if clean else [],
         "source_texts": [clean] if clean else [],
         "calls": [{"text": part, "indices": [0], "combined": False, "joins": joins,
                    "part_index": index, "part_count": len(parts)} for index, part in enumerate(parts)],
@@ -227,7 +250,7 @@ def plan_signature(
         "model": config.get("model", "") if provider != "free" else "",
         "base_url": config.get("base_url", "") if provider != "free" else "",
         # Confirm retry/cost and timeout policy as well as the text and destination.
-        "profile_policy": [{"id": p.get("id", ""), "timeout_seconds": p.get("timeout_seconds", 90), "retry_count": p.get("retry_count", 0), "retry_wait_seconds": p.get("retry_wait_seconds", 20), "hasApiKey": p.get("hasApiKey", False)} for p in config.get("profiles", [])] if provider != "free" else [],
+        "profile_policy": [{"id": p.get("id", ""), "timeout_seconds": p.get("timeout_seconds", 90), "retry_count": p.get("retry_count", 0), "retry_wait_seconds": p.get("retry_wait_seconds", 20), "source_limit": p.get("source_limit", 1000), "hasApiKey": p.get("hasApiKey", False)} for p in config.get("profiles", [])] if provider != "free" else [],
         "reuse_repeated": plan.get("reuse_repeated", False),
         "keys": plan["keys"],
         # Equal joined payloads can have different per-box line boundaries.
@@ -264,7 +287,7 @@ def plan_preview(
         note = "هر query ابتدا به Google Translate می‌رود؛ فقط اگر خطا بدهد، همان query به MyMemory فرستاده می‌شود."
     else:
         label = AI_PROVIDERS.get(provider, {}).get("label", provider)
-        note = ("کادرهای همان صفحه تا سقف ۱۰۰۰ نویسه در هر درخواست تجمیع می‌شوند؛ کادر بلندتر نیز تقسیم می‌شود. "
+        note = (f"کادرهای همان صفحه تا سقف {plan.get('source_limit', MAX_AI_SOURCE_CHARS)} نویسه در هر درخواست تجمیع می‌شوند؛ تقسیم کادر بلند فقط در پایان خط و جمله یا بند انجام می‌شود. "
                 + ("هر پاسخ پیش از درخواست بعد بررسی و ذخیره می‌شود. " if plan["items"] else "بازترجمهٔ یک کادر پس از دریافت همهٔ بخش‌ها ثبت می‌شود. ")
                 + "تعداد نمایش‌داده‌شده بدون تکرارهاست؛ تکرار ممکن است هزینه داشته باشد. در برخی خطاها کلید بعدی همان متن را امتحان می‌کند. پس از پایان تکرار خطای ارتباطی، کلید بعدی خودکار امتحان نمی‌شود.")
         if plan.get("reuse_repeated"):
@@ -301,6 +324,7 @@ def plan_preview(
         "tasks": tasks,
         "reuseRepeated": plan.get("reuse_repeated", False),
         "duplicateCount": plan.get("duplicate_count", 0),
+        "sourceLimit": plan.get("source_limit", MAX_AI_SOURCE_CHARS) if provider != "free" else None,
         "provider": provider,
         "providerLabel": label,
         "model": config.get("model", "") if provider != "free" else "",

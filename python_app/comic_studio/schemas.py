@@ -38,6 +38,7 @@ class TranslateRequest(BaseModel):
 
 class TextTranslateRequest(BaseModel):
     text: str
+    source_lines: list[dict[str, Any]] | None = None
     source_language: str = "eng"
     provider: str = "free"
     confirmation: str | None = None

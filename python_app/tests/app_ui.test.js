@@ -95,7 +95,7 @@ window.fetch = async (url, options = {}) => {
         ...previous, model: incoming.model || previous.model || defaultModel,
         base_url: incoming.base_url || previous.base_url || defaultBase,
         profiles: (incoming.profiles || oldProfiles).map((profile) => ({
-          id: profile.id, name: profile.name || '', timeout_seconds: profile.timeout_seconds ?? 90, retry_count: profile.retry_count ?? 0, retry_wait_seconds: profile.retry_wait_seconds ?? 20,
+          id: profile.id, name: profile.name || '', timeout_seconds: profile.timeout_seconds ?? 90, retry_count: profile.retry_count ?? 0, retry_wait_seconds: profile.retry_wait_seconds ?? 20, source_limit: profile.source_limit ?? 1000,
           hasApiKey: !!profile.api_key || oldProfiles.some((old) => old.id === profile.id && old.hasApiKey),
         })),
       };
@@ -271,18 +271,20 @@ function check(name, condition) {
   rows[1].querySelector('.ai-profile-name').dispatchEvent(new window.Event('input', { bubbles: true }));
   rows[1].querySelector('.ai-profile-key').value = 'openrouter-second-secret';
   rows[1].querySelector('.ai-profile-key').dispatchEvent(new window.Event('input', { bubbles: true }));
-  check('each API starts with 90 second timeout and no retry', rows[0].querySelector('.ai-profile-timeout_seconds').value === '90' && rows[0].querySelector('.ai-profile-retry_count').value === '0' && rows[0].querySelector('.ai-profile-retry_wait_seconds').value === '20');
+  check('each API starts with 90 second timeout and no retry', rows[0].querySelector('.ai-profile-timeout_seconds').value === '90' && rows[0].querySelector('.ai-profile-retry_count').value === '0' && rows[0].querySelector('.ai-profile-retry_wait_seconds').value === '20' && rows[0].querySelector('.ai-profile-source_limit').value === '1000');
   rows[0].querySelector('.ai-profile-timeout_seconds').value = '120'; rows[0].querySelector('.ai-profile-timeout_seconds').dispatchEvent(new window.Event('input', { bubbles: true }));
   rows[0].querySelector('.ai-profile-retry_count').value = '2'; rows[0].querySelector('.ai-profile-retry_count').dispatchEvent(new window.Event('input', { bubbles: true }));
   rows[0].querySelector('.ai-profile-retry_wait_seconds').value = '11'; rows[0].querySelector('.ai-profile-retry_wait_seconds').dispatchEvent(new window.Event('input', { bubbles: true }));
   rows[1].querySelector('.ai-profile-retry_wait_seconds').value = '27'; rows[1].querySelector('.ai-profile-retry_wait_seconds').dispatchEvent(new window.Event('input', { bubbles: true }));
+  rows[0].querySelector('.ai-profile-source_limit').value = '750'; rows[0].querySelector('.ai-profile-source_limit').dispatchEvent(new window.Event('input', { bubbles: true }));
+  rows[1].querySelector('.ai-profile-source_limit').value = '2500'; rows[1].querySelector('.ai-profile-source_limit').dispatchEvent(new window.Event('input', { bubbles: true }));
   rows[1].querySelector('.ai-profile-timeout_seconds').value = '45'; rows[1].querySelector('.ai-profile-timeout_seconds').dispatchEvent(new window.Event('input', { bubbles: true }));
   rows[1].querySelector('.ai-profile-retry_count').value = '1'; rows[1].querySelector('.ai-profile-retry_count').dispatchEvent(new window.Event('input', { bubbles: true }));
   $('aiModel').value = 'anthropic/claude-ui-test';
   rows[0].querySelector('.ai-profile-test').click(); await sleep(30);
   const savedAi = aiSaveRequests.at(-1);
   check('row test first saves both named keys with the selected provider and model', savedAi.provider === 'openrouter' && savedAi.model === 'anthropic/claude-ui-test' && savedAi.providers.openrouter.profiles.length === 2 && savedAi.providers.openrouter.profiles[0].api_key === 'openrouter-first-secret' && savedAi.providers.openrouter.profiles[1].api_key === 'openrouter-second-secret');
-  check('per-key timeout and retries are saved independently', savedAi.providers.openrouter.profiles[0].timeout_seconds === 120 && savedAi.providers.openrouter.profiles[0].retry_count === 2 && savedAi.providers.openrouter.profiles[1].timeout_seconds === 45 && savedAi.providers.openrouter.profiles[1].retry_count === 1 && savedAi.providers.openrouter.profiles[0].retry_wait_seconds === 11 && savedAi.providers.openrouter.profiles[1].retry_wait_seconds === 27);
+  check('per-key timeout and retries are saved independently', savedAi.providers.openrouter.profiles[0].timeout_seconds === 120 && savedAi.providers.openrouter.profiles[0].retry_count === 2 && savedAi.providers.openrouter.profiles[1].timeout_seconds === 45 && savedAi.providers.openrouter.profiles[1].retry_count === 1 && savedAi.providers.openrouter.profiles[0].retry_wait_seconds === 11 && savedAi.providers.openrouter.profiles[1].retry_wait_seconds === 27 && savedAi.providers.openrouter.profiles[0].source_limit === 750 && savedAi.providers.openrouter.profiles[1].source_limit === 2500);
   check('row test uses the stored selected profile without resending its secret', aiTestRequests.length === 1 && aiTestRequests[0].profile_id === savedAi.providers.openrouter.profiles[0].id && aiTestRequests[0].model === 'anthropic/claude-ui-test' && !('api_key' in aiTestRequests[0]));
   check('successful row test is visible in the real dialog', $('aiStatus').textContent.includes('اتصال برقرار است') && $('aiProfiles').querySelector('.ai-profile-status').textContent.includes('✓'));
   check('saved secrets are cleared from password fields and absent from the DOM', [...$('aiProfiles').querySelectorAll('.ai-profile-key')].every((input) => input.value === '' && input.placeholder.includes('ذخیره شده')) && !$('aiDialog').innerHTML.includes('openrouter-first-secret'));
@@ -299,6 +301,10 @@ function check(name, condition) {
   $('saveAiBtn').click(); await sleep(10);
   check('invalid timeout is rejected before saving', aiSaveRequests.length === beforeInvalidSave && $('aiStatus').textContent.includes('زمان انتظار'));
   timeoutInput.value = '120'; timeoutInput.dispatchEvent(new window.Event('input', {bubbles:true}));
+  const limitInput = $('aiProfiles').querySelector('.ai-profile-source_limit'); limitInput.value = '0'; limitInput.dispatchEvent(new window.Event('input', {bubbles:true}));
+  $('saveAiBtn').click(); await sleep(10);
+  check('invalid OCR character limit is rejected before saving', aiSaveRequests.length === beforeInvalidSave && $('aiStatus').textContent.includes('سقف نویسه'));
+  limitInput.value = '750'; limitInput.dispatchEvent(new window.Event('input', {bubbles:true}));
   $('aiProfiles').querySelectorAll('.ai-profile-remove')[1].click();
   check('removing a profile updates the actual rows', $('aiProfiles').querySelectorAll('.ai-profile-row').length === 1);
   $('saveAiBtn').click(); await sleep(20);

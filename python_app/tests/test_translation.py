@@ -165,7 +165,7 @@ def test_provider_settings_keep_models_and_keys_separate_without_exposing_secret
     })
     assert public["providers"]["openai"]["model"] == "gpt-custom"
     assert public["providers"]["gemini"]["model"] == "gemini-custom"
-    assert public["providers"]["openai"]["profiles"] == [{"id": "open-1", "name": "OpenAI من", "hasApiKey": True, "timeout_seconds": 90, "retry_count": 0, "retry_wait_seconds": 20}]
+    assert public["providers"]["openai"]["profiles"] == [{"id": "open-1", "name": "OpenAI من", "hasApiKey": True, "timeout_seconds": 90, "retry_count": 0, "retry_wait_seconds": 20, "source_limit": 1000}]
     assert "open-secret" not in json.dumps(public) and "gem-secret" not in json.dumps(public)
 
     public = service.save_settings({"provider": "gemini", "providers": public["providers"]})
@@ -516,3 +516,11 @@ def test_default_retry_wait_and_connection_test_respect_per_key_delay(tmp_path, 
     monkeypatch.setattr(httpx, 'get', get)
     assert service.test_connection({'provider': 'openai', 'profile_id': 'a'})['ok']
     assert len(calls) == 2 and waits == [20]
+
+
+@pytest.mark.parametrize('value', [0, 100001, -1, True, 1.5, '1000'])
+def test_invalid_ai_source_limit_rejected(tmp_path, monkeypatch, value):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    with pytest.raises(ValueError):
+        service.save_settings({'provider': 'openai', 'providers': {'openai': {'profiles': [{'id': 'a', 'source_limit': value}]}}})

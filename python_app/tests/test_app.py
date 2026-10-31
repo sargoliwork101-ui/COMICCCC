@@ -43,11 +43,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.44"
+    assert health.json()["version"] == "3.45"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۴۴ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۴۵ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -1007,15 +1007,15 @@ def test_ai_threshold_is_inclusive_and_disabled_text_does_not_count(client):
     assert len(exact['tasks']) == 1 and exact['tasks'][0]['callId'] == 'page'
     project['images'][0]['blocks'][0]['text'] = 'x' * 1001
     assert client.put(f'{route}/state', json={'state': project}).status_code == 200
-    above = client.post(f'{route}/translation-preview', json=req).json()
-    assert len(above['tasks']) == 2 and all(len(r['text'].split('\n\n', 1)[1]) <= 1000 for r in above['requests'])
+    above = client.post(f'{route}/translation-preview', json=req)
+    assert above.status_code == 502 and 'سقف' in above.json()['detail']
 
 
 def test_ai_long_paragraph_recovery_preserves_completed_chunks_and_old_translation(client, monkeypatch):
     from comic_studio.translation import TranslationService
     project, item = make_project(client)
     route = f"/api/projects/{project['id']}"
-    source = 'alpha ' * 170 + '\n' + 'beta ' * 170
+    source = 'alpha ' * 140 + '.\n' + 'beta ' * 140 + '.'
     project['images'][0]['blocks'] = [{'id': 1, 'text': source, 'tr': 'old', 'richHtml': '<b>old</b>', 'enabled': True}]
     assert client.put(f'{route}/state', json={'state': project}).status_code == 200
     req = {'image_ids': [item['id']], 'provider': 'openai', 'source_language': 'eng'}
@@ -1048,7 +1048,7 @@ def test_ai_long_paragraph_recovery_preserves_completed_chunks_and_old_translati
 
 def test_single_block_ai_retranslation_splits_large_source_and_matches_preview(client, monkeypatch):
     from comic_studio.translation import TranslationService
-    source = ('word ' * 450).strip()
+    source = '\n'.join([('word ' * 150).strip() + '.'] * 3)
     req = {'text': source, 'provider': 'openai', 'source_language': 'eng'}
     preview = client.post('/api/translate-text/preview', json=req).json()
     pieces = [r['text'].split('\n\n', 1)[1] for r in preview['requests']]
@@ -1061,7 +1061,7 @@ def test_single_block_ai_retranslation_splits_large_source_and_matches_preview(c
     result = client.post('/api/translate-text', json={**req, 'confirmation': preview['signature']})
     assert result.status_code == 200, result.text
     assert seen == pieces
-    assert result.json()['text'] == ' '.join(f'response{i + 1}' for i in range(len(pieces)))
+    assert result.json()['text'] == '\n'.join(f'response{i + 1}' for i in range(len(pieces)))
 
 
 def test_portable_project_backup_restores_images_text_exports_and_browser_drafts(client, monkeypatch, tmp_path):
@@ -1306,7 +1306,7 @@ def test_ai_duplicate_long_text_propagates_only_when_all_parts_finish(client, mo
     project, _ = make_project(client)
     project = client.post(f"/api/projects/{project['id']}/files", files=[('files', ('second.png', png_bytes(), 'image/png'))]).json()
     for image in project['images']:
-        image['blocks'] = [{'id': 1, 'text': 'x' * 1001, 'tr': 'old', 'enabled': True}]
+        image['blocks'] = [{'id': 1, 'text': 'x' * 500 + '.\n' + 'y' * 500 + '.', 'tr': 'old', 'enabled': True}]
     route = f"/api/projects/{project['id']}"; ids = [image['id'] for image in project['images']]
     assert client.put(f'{route}/state', json={'state': project}).status_code == 200
     req = {'image_ids': ids, 'provider': 'openai', 'reuse_repeated': True}
@@ -1323,7 +1323,7 @@ def test_ai_duplicate_long_text_propagates_only_when_all_parts_finish(client, mo
         if index == 0:
             assert values == ['old', 'old']
         else:
-            assert values == ['part1part2', 'part1part2']
+            assert values == ['part1\npart2', 'part1\npart2']
     assert len(sent) == 2
 
 
@@ -1417,3 +1417,102 @@ def test_preview_standalone_page_signature_handles_within_page_and_cross_page_du
     assert response.status_code == 200, response.text
     assert [block['tr'] for block in response.json()['images'][0]['blocks']] == ['ترجمه', 'ترجمه']
     assert response.json()['images'][1]['blocks'][0]['tr'] == ''
+
+
+def test_ai_per_key_limit_uses_smallest_active_key_and_complete_sentence_lines(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    saved = client.put('/api/ai-settings', json={'provider': 'openai', 'providers': {'openai': {'profiles': [
+        {'id': 'large', 'api_key': 'key1', 'source_limit': 130},
+        {'id': 'small', 'api_key': 'key2', 'source_limit': 100},
+        {'id': 'inactive', 'source_limit': 5},
+    ]}}})
+    assert saved.status_code == 200, saved.text
+    assert [p['source_limit'] for p in saved.json()['providers']['openai']['profiles']] == [130, 100, 5]
+    project, item = make_project(client); route = f"/api/projects/{project['id']}"
+    source = 'A' * 65 + '\n' + 'B' * 10 + '.\n' + 'C' * 60 + '.'
+    project['images'][0]['blocks'] = [{'id': 1, 'text': source, 'tr': '', 'enabled': True}]
+    assert client.put(f'{route}/state', json={'state': project}).status_code == 200
+    req = {'image_ids': [item['id']], 'provider': 'openai'}
+    preview = client.post(f'{route}/translation-preview', json=req).json()
+    assert preview['sourceLimit'] == 100
+    chunks = [r['text'].split('\n\n', 1)[1] for r in preview['requests']]
+    assert chunks == ['A' * 65 + '\n' + 'B' * 10 + '.', 'C' * 60 + '.']
+    assert all(len(chunk) <= 100 for chunk in chunks)
+    assert '\n'.join(chunks) == source
+    seen = []
+    monkeypatch.setattr(TranslationService, 'translate', lambda self, text, language, provider=None, source_texts=None: seen.append(text) or f'result{len(seen)}')
+    for task in preview['tasks']:
+        response = client.post(f'{route}/translate', json={**req, 'call_id': task['callId'], 'confirmation': task['signature']})
+        assert response.status_code == 200, response.text
+    assert seen == chunks and response.json()['images'][0]['blocks'][0]['tr'] == 'result1\nresult2'
+
+
+def test_ai_oversize_unbroken_line_or_sentence_is_rejected_before_any_send(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    assert client.put('/api/ai-settings', json={'provider': 'openai', 'providers': {'openai': {'profiles': [{'id': 'a', 'api_key': 'test-key', 'source_limit': 50}]}}}).status_code == 200
+    project, item = make_project(client); route = f"/api/projects/{project['id']}"
+    seen = []; monkeypatch.setattr(TranslationService, 'translate', lambda *a, **kw: seen.append(a) or 'result')
+    for source in ('x' * 51, 'first line is unfinished\n' + 'continued ' * 4 + '.'):
+        project['images'][0]['blocks'] = [{'id': 1, 'text': source, 'tr': 'old', 'enabled': True}]
+        assert client.put(f'{route}/state', json={'state': project}).status_code == 200
+        req = {'image_ids': [item['id']], 'provider': 'openai'}
+        for endpoint in ('translation-preview', 'translate'):
+            response = client.post(f'{route}/{endpoint}', json=req)
+            assert response.status_code == 502 and 'سقف 50' in response.json()['detail']
+        response = client.post('/api/translate-text/preview', json={'text': source, 'provider': 'openai'})
+        assert response.status_code == 502
+        assert client.get(route).json()['images'][0]['blocks'][0]['tr'] == 'old'
+    assert seen == []
+
+
+def test_changed_limit_invalidates_preview_and_prior_chunk_boundaries(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    def settings(limit):
+        return {'provider': 'openai', 'providers': {'openai': {'profiles': [{'id': 'a', 'api_key': 'test-key', 'source_limit': limit}]}}}
+    assert client.put('/api/ai-settings', json=settings(200)).status_code == 200
+    project, item = make_project(client); route = f"/api/projects/{project['id']}"
+    project['images'][0]['blocks'] = [{'id': 1, 'text': '\n'.join([('x' * 88) + '.'] * 3), 'tr': 'old', 'enabled': True}]
+    assert client.put(f'{route}/state', json={'state': project}).status_code == 200
+    req = {'image_ids': [item['id']], 'provider': 'openai'}
+    preview = client.post(f'{route}/translation-preview', json=req).json(); assert len(preview['tasks']) == 2
+    monkeypatch.setattr(TranslationService, 'translate', lambda *a, **kw: 'partial')
+    task = preview['tasks'][0]
+    result = client.post(f'{route}/translate', json={**req, 'call_id': task['callId'], 'confirmation': task['signature']})
+    assert result.status_code == 200 and result.json()['images'][0]['blocks'][0]['tr'] == 'old'
+    assert client.put('/api/ai-settings', json=settings(100)).status_code == 200
+    old_next = preview['tasks'][1]
+    result = client.post(f'{route}/translate', json={**req, 'call_id': old_next['callId'], 'confirmation': old_next['signature']})
+    assert result.status_code == 409
+    fresh = client.post(f'{route}/translation-preview', json=req).json()
+    assert len(fresh['tasks']) == 3 and fresh['sourceLimit'] == 100
+    task = fresh['tasks'][0]
+    result = client.post(f'{route}/translate', json={**req, 'call_id': task['callId'], 'confirmation': task['signature']})
+    assert result.status_code == 200
+    assert result.json()['images'][0]['blocks'][0]['_aiTranslationParts']['parts'] == {'0': 'partial'}
+
+
+def test_merged_ocr_uses_verified_original_line_endings_for_safe_boundaries(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    assert client.put('/api/ai-settings', json={'provider': 'openai', 'providers': {'openai': {'profiles': [{'id': 'a', 'api_key': 'test', 'source_limit': 80}]}}}).status_code == 200
+    project, item = make_project(client); route = f"/api/projects/{project['id']}"
+    lines = [{'text': 'A' * 59 + '.'}, {'text': 'B' * 59 + '.'}]
+    source = ' '.join(line['text'] for line in lines)
+    project['images'][0]['blocks'] = [{'id': 1, 'text': source, 'sourceLines': lines, 'tr': '', 'enabled': True}]
+    assert client.put(f'{route}/state', json={'state': project}).status_code == 200
+    req = {'image_ids': [item['id']], 'provider': 'openai'}
+    preview = client.post(f'{route}/translation-preview', json=req).json()
+    assert [r['text'].split('\n\n', 1)[1] for r in preview['requests']] == [line['text'] for line in lines]
+    monkeypatch.setattr(TranslationService, 'translate', lambda self, text, language, provider=None, source_texts=None: 'tr1' if text.startswith('A') else 'tr2')
+    for task in preview['tasks']:
+        response = client.post(f'{route}/translate', json={**req, 'call_id': task['callId'], 'confirmation': task['signature']})
+        assert response.status_code == 200, response.text
+    assert response.json()['images'][0]['blocks'][0]['tr'] == 'tr1 tr2'
+    single = {'text': source, 'source_lines': lines, 'provider': 'openai'}
+    single_preview = client.post('/api/translate-text/preview', json=single).json()
+    assert [r['text'].split('\n\n', 1)[1] for r in single_preview['requests']] == [line['text'] for line in lines]
+    result = client.post('/api/translate-text', json={**single, 'confirmation': single_preview['signature']})
+    assert result.status_code == 200 and result.json()['text'] == 'tr1 tr2'
+    # An edited text cannot rely on obsolete OCR line metadata.
+    assert client.post('/api/translate-text/preview', json={**single, 'text': source + ' edited'}).status_code == 502
+    changed = client.post('/api/translate-text', json={**single, 'source_lines': list(reversed(lines)), 'confirmation': single_preview['signature']})
+    assert changed.status_code == 502  # invalid metadata is never used to split an edited line

@@ -52,6 +52,8 @@ DEFAULT_AI_TIMEOUT = 90
 DEFAULT_AI_RETRIES = 0
 DEFAULT_AI_RETRY_WAIT = 20
 MAX_AI_RETRY_WAIT = 300
+DEFAULT_AI_SOURCE_LIMIT = 1000
+MAX_AI_SOURCE_LIMIT = 100_000
 MIN_AI_TIMEOUT, MAX_AI_TIMEOUT = 5, 600
 MAX_AI_RETRIES = 5
 
@@ -71,6 +73,7 @@ def _profile_policy(profile: dict[str, Any], *, strict: bool = False) -> dict[st
         "timeout_seconds": _setting_int(profile.get("timeout_seconds"), DEFAULT_AI_TIMEOUT, MIN_AI_TIMEOUT, MAX_AI_TIMEOUT, strict=strict),
         "retry_count": _setting_int(profile.get("retry_count"), DEFAULT_AI_RETRIES, 0, MAX_AI_RETRIES, strict=strict),
         "retry_wait_seconds": _setting_int(profile.get("retry_wait_seconds"), DEFAULT_AI_RETRY_WAIT, 0, MAX_AI_RETRY_WAIT, strict=strict),
+        "source_limit": _setting_int(profile.get("source_limit"), DEFAULT_AI_SOURCE_LIMIT, 1, MAX_AI_SOURCE_LIMIT, strict=strict),
     }
 
 
@@ -486,7 +489,7 @@ class TranslationService:
                             "id": profile_id,
                             "name": str(item.get("name") or previous.get("name") or "").strip()[:160],
                             "api_key": key,
-                            **_profile_policy({**_profile_policy(previous), **{k: item[k] for k in ("timeout_seconds", "retry_count", "retry_wait_seconds") if k in item}}, strict=True),
+                            **_profile_policy({**_profile_policy(previous), **{k: item[k] for k in ("timeout_seconds", "retry_count", "retry_wait_seconds", "source_limit") if k in item}}, strict=True),
                         })
                     config["profiles"] = profiles
                 elif name == provider and "api_key" in values:

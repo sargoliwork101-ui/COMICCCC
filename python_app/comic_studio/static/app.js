@@ -14,6 +14,7 @@ let saveTimer = null;
 let saveTask = Promise.resolve();
 let saveRevision = 0;
 let projectLoadRevision = 0;
+const projectLoadTasks = new Set();
 let toastTimer = null;
 let outlineFrame = null;
 let activityAfter = 0;
@@ -30,6 +31,7 @@ let classicEditor = null;
 let imageOverview = null;
 let jobBusy = false;
 let translationRunning = false;
+let translationRetryAction = null;
 let translationPreviewAction = null;
 let translationPreviewTask = Promise.resolve();
 let overlayPreviewTask = Promise.resolve();
@@ -165,6 +167,7 @@ function closeDialog(id) { if ($(id).open) $(id).close(); }
 function closeTopDialog() {
   const dialog = [...document.querySelectorAll('dialog[open]')].at(-1);
   if (!dialog) return false;
+  if (dialog.id === 'translationDialog' && translationRunning) return true;
   if (dialog.id === 'editorDialog') closeEditor().catch((error) => toast(error.message, true));
   else closeDialog(dialog.id);
   return true;
@@ -503,6 +506,15 @@ async function loadProject(id) {
     return;
   }
 }
+function requestProjectLoad(id) {
+  const task = loadProject(id);
+  projectLoadTasks.add(task);
+  task.finally(() => projectLoadTasks.delete(task)).catch(() => {});
+  return task;
+}
+async function waitForProjectLoads() {
+  while (projectLoadTasks.size) await Promise.all([...projectLoadTasks]);
+}
 function collectOutputSettings() {
   if (!state.project) return; state.project.settings = state.project.settings || {};
   state.project.settings.output = { name: $('exportName').value, seamless: $('exportSeamless').checked, uniformSize: $('exportUniform').checked, twoPerPage: $('exportTwo').checked, imageFormat: $('exportFormat').value, folderName: $('exportFolder').value };
@@ -614,28 +626,41 @@ function showTranslationRequestPreview(preview, action) {
   showDialog('translationPreviewDialog');
 }
 function cancelTranslationRequestPreview() { translationPreviewAction = null; closeDialog('translationPreviewDialog'); }
+function showSingleTranslationError(error, action) {
+  $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`;
+  translationRetryAction = error.status === 409 ? null : async () => {
+    try { await action(); closeDialog('translationDialog'); }
+    catch (nextError) { showSingleTranslationError(nextError, action); throw nextError; }
+  };
+  $('retryTranslation').classList.toggle('hidden', !translationRetryAction);
+  $('copyTranslationError').classList.remove('hidden'); $('translationErrorChoice').classList.remove('hidden'); showDialog('translationDialog');
+}
 async function confirmTranslationRequestPreview() {
   const action = translationPreviewAction;
   if (!action) return;
   translationPreviewAction = null; $('translationPreviewConfirm').disabled = true;
   closeDialog('translationPreviewDialog');
   try { translationPreviewTask = action(); await translationPreviewTask; }
-  catch (error) { if (!$('translationDialog').open) { $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`; $('copyTranslationError').classList.remove('hidden'); showDialog('translationDialog'); } toast(error.message || 'ترجمه ناموفق بود', true); }
+  catch (error) { if (!$('translationDialog').open) showSingleTranslationError(error, action); toast(error.message || 'ترجمه ناموفق بود', true); }
   finally { $('translationPreviewConfirm').disabled = false; }
 }
 async function runTranslation() {
-  const ids = selectedImages().map((item) => item.id); if (!ids.length) { toast('حداقل یک تصویر را انتخاب کنید', true); return; }
   if (translationRunning) return;
   try {
+    // Loading a project also uploads previews; do not race those writes against
+    // the translation's optimistic version check or snapshot the old selection.
+    await waitForProjectLoads();
+    const ids = selectedImages().map((item) => item.id); if (!ids.length) { toast('حداقل یک تصویر را انتخاب کنید', true); return; }
     await saveProject();
     const provider = state.ai?.provider || 'free';
     const preview = await api(`/api/projects/${state.project.id}/translation-preview`, jsonOptions('POST', { image_ids: ids, provider, source_language: $('ocrLanguage').value, reuse_repeated: state.ai?.reuse_repeated !== false }));
     showTranslationRequestPreview(preview, () => performTranslation(ids, provider, preview));
   } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
 }
-async function performTranslation(ids, provider, preview) {
-  translationRunning = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; $('translationProgress').style.width = '0';
-  const projectId = state.project.id; const language = $('ocrLanguage').value; let completed = 0; let currentPage = ''; let phase = 'translation';
+async function performTranslation(ids, provider, preview, startIndex = 0, previouslyCompleted = 0) {
+  translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
+  translationRunning = true; $('translationDialog').querySelector('.dialog-head button').disabled = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; $('translationProgress').style.width = '0';
+  const projectId = state.project.id; const language = $('ocrLanguage').value; let completed = previouslyCompleted; let currentPage = ''; let phase = 'translation'; let failedIndex = startIndex;
   try {
     await runJob('در حال ترجمهٔ متن‌ها…', async () => {
       if (provider === 'free') {
@@ -644,6 +669,8 @@ async function performTranslation(ids, provider, preview) {
       } else {
         if (!Array.isArray(preview.tasks) || !preview.tasks.length) throw new Error('فهرست درخواست‌های تأییدشده موجود نیست؛ دوباره پیش‌نمایش بگیرید.');
         for (const [index, page] of preview.tasks.entries()) {
+          if (index < startIndex) continue;
+          failedIndex = index;
           currentPage = page.imageName || String(index + 1);
           $('translationStatus').textContent = `درخواست ${index + 1} از ${preview.tasks.length}: ${currentPage}${page.paragraph ? ` · بند ${page.paragraph}` : ''}`;
           phase = 'translation';
@@ -664,9 +691,11 @@ async function performTranslation(ids, provider, preview) {
       const outcome = phase !== 'translation' ? 'پاسخ این درخواست ذخیره شده، اما به‌روزرسانی پیش‌نمایش یا تنظیمات کامل نشد.' : 'وضعیت درخواست جاری ممکن است نامشخص باشد؛ قبل از ارسال دوباره گزارش و پروژه را بررسی کنید.';
       error.message = `${completed} درخواست با موفقیت ذخیره شد؛ در صفحهٔ «${currentPage || 'اول'}» متوقف شد. ${outcome} ${error.message || ''} برای ادامه، فقط صفحه‌های باقی‌مانده و صفحهٔ ناتمام را انتخاب و پیش‌نمایش تازه را تأیید کنید؛ بخش‌های ذخیره‌شدهٔ صفحهٔ ناتمام دوباره فرستاده نمی‌شوند.`;
     }
-    $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`; $('copyTranslationError').classList.remove('hidden'); throw error;
+    $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`;
+    translationRetryAction = phase === 'translation' && error.status !== 409 ? () => performTranslation(ids, provider, preview, failedIndex, completed) : null;
+    $('retryTranslation').classList.toggle('hidden', !translationRetryAction); $('translationErrorChoice').classList.remove('hidden'); $('copyTranslationError').classList.remove('hidden'); throw error;
   } finally {
-    translationRunning = false;
+    translationRunning = false; $('translationDialog').querySelector('.dialog-head button').disabled = false;
   }
 }
 
@@ -793,7 +822,7 @@ function makeAiProfile(profile = {}, index = 0) {
   return {
     id: String(profile.id || `api-${Date.now().toString(36)}-${aiProfileSerial}`),
     name: String(profile.name || ''), hasApiKey: profile.hasApiKey === true,
-    apiKey: String(profile.apiKey || ''), timeout_seconds: String(profile.timeout_seconds ?? 90), retry_count: String(profile.retry_count ?? 0), retry_wait_seconds: String(profile.retry_wait_seconds ?? 20),
+    apiKey: String(profile.apiKey || ''), timeout_seconds: String(profile.timeout_seconds ?? 90), retry_count: String(profile.retry_count ?? 0), retry_wait_seconds: String(profile.retry_wait_seconds ?? 20), source_limit: String(profile.source_limit ?? 1000),
   };
 }
 function captureAiProvider() {
@@ -879,6 +908,7 @@ function renderAiProfiles() {
     addSetting('زمان انتظار (ثانیه، ۵ تا ۶۰۰)', 'timeout_seconds', 5, 600);
     addSetting('تکرار اضافی (۰ تا ۵)', 'retry_count', 0, 5);
     addSetting('فاصلهٔ تلاش مجدد (ثانیه، ۰ تا ۳۰۰)', 'retry_wait_seconds', 0, 300);
+    addSetting('سقف نویسهٔ متن OCR (۱ تا ۱۰۰۰۰۰)', 'source_limit', 1, 100000);
     row.append(name, key, test, remove, options, status); container.appendChild(row);
   });
 }
@@ -909,9 +939,9 @@ function aiSettingsPayload() {
     const draft = aiEditorDrafts.get(provider);
     const profiles = draft?.profiles || info.profiles || [];
     const intSetting = (profile, key, min, max) => {
-      const raw = String(profile[key] ?? (key === 'timeout_seconds' ? 90 : key === 'retry_wait_seconds' ? 20 : 0));
+      const raw = String(profile[key] ?? (key === 'timeout_seconds' ? 90 : key === 'retry_wait_seconds' ? 20 : key === 'source_limit' ? 1000 : 0));
       const value = Number(raw);
-      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) throw new Error(`تنظیم ${profile.name || 'API'}: ${key === 'timeout_seconds' ? 'زمان انتظار باید بین ۵ تا ۶۰۰' : key === 'retry_wait_seconds' ? 'فاصلهٔ تکرار باید بین ۰ تا ۳۰۰' : 'تکرار باید بین ۰ تا ۵'} و عدد صحیح باشد.`);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) throw new Error(`تنظیم ${profile.name || 'API'}: ${key === 'timeout_seconds' ? 'زمان انتظار باید بین ۵ تا ۶۰۰' : key === 'retry_wait_seconds' ? 'فاصلهٔ تکرار باید بین ۰ تا ۳۰۰' : key === 'source_limit' ? 'سقف نویسه باید بین ۱ تا ۱۰۰۰۰۰' : 'تکرار باید بین ۰ تا ۵'} و عدد صحیح باشد.`);
       return value;
     };
     providers[provider] = {
@@ -919,7 +949,7 @@ function aiSettingsPayload() {
       base_url: draft?.base_url || info.base_url,
       profiles: profiles.map((profile) => ({
         id: profile.id, name: profile.name || '',
-        timeout_seconds: intSetting(profile, 'timeout_seconds', 5, 600), retry_count: intSetting(profile, 'retry_count', 0, 5), retry_wait_seconds: intSetting(profile, 'retry_wait_seconds', 0, 300),
+        timeout_seconds: intSetting(profile, 'timeout_seconds', 5, 600), retry_count: intSetting(profile, 'retry_count', 0, 5), retry_wait_seconds: intSetting(profile, 'retry_wait_seconds', 0, 300), source_limit: intSetting(profile, 'source_limit', 1, 100000),
         ...(profile.apiKey?.trim() ? { api_key: profile.apiKey.trim() } : {}),
       })),
     };
@@ -1543,10 +1573,10 @@ async function retranslateBlock(block) {
   const text = block.text || ''; const snapshot = inlineBlockSnapshot(block);
   const provider = state.ai?.provider || 'free'; const sourceLanguage = $('ocrLanguage').value;
   try {
-    const preview = await api('/api/translate-text/preview', jsonOptions('POST', { text, source_language: sourceLanguage, provider }));
+    const preview = await api('/api/translate-text/preview', jsonOptions('POST', { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, provider }));
     showTranslationRequestPreview(preview, async () => {
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
-      const result = await api('/api/translate-text', jsonOptions('POST', { text, source_language: sourceLanguage, provider, confirmation: preview.signature }));
+      const result = await api('/api/translate-text', jsonOptions('POST', { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, provider, confirmation: preview.signature }));
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
       block.tr = result.text; block.richHtml = plainToHtml(result.text);
       buildBlockList(); drawEditor(); scheduleSave();
@@ -1555,7 +1585,7 @@ async function retranslateBlock(block) {
 }
 async function copyBlockText(text) {
   if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
-  else { const temp = document.createElement('textarea'); temp.value = text; temp.style.position = 'fixed'; temp.style.opacity = '0'; document.body.appendChild(temp); temp.select(); document.execCommand('copy'); temp.remove(); }
+  else { const temp = document.createElement('textarea'); temp.value = text; temp.style.position = 'fixed'; temp.style.opacity = '0'; document.body.appendChild(temp); try { temp.select(); if (!document.execCommand('copy')) throw new Error('مرورگر اجازهٔ کپی نداد'); } finally { temp.remove(); } }
   toast('کپی شد');
 }
 function buildBlockList() {
@@ -1638,7 +1668,7 @@ function bindEvents() {
   $('newProjectBtn').addEventListener('click', async () => { if (!confirm('پروژهٔ جدید ساخته شود؟ پروژهٔ فعلی ذخیره می‌ماند.')) return; await saveProject(); await clearActivity(false); adoptProject(await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }))); await refreshProjectList(); });
   $('clearActivityBtn').addEventListener('click', () => clearActivity());
   $('deleteProjectBtn').addEventListener('click', async () => { if (!state.project || !confirm('این پروژه و تصاویرش برای همیشه حذف شود؟')) return; await api(`/api/projects/${state.project.id}`, { method: 'DELETE' }); const projects = await api('/api/projects'); const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' })); adoptProject(project); await refreshProjectList(); $('menu').classList.add('hidden'); });
-  $('projectSelect').addEventListener('change', () => loadProject($('projectSelect').value).catch((error) => toast(error.message, true)));
+  $('projectSelect').addEventListener('change', () => requestProjectLoad($('projectSelect').value).catch((error) => toast(error.message, true)));
   $('projectName').addEventListener('change', () => { state.project.name = $('projectName').value; scheduleSave(); });
   $('fileInput').addEventListener('change', () => importFiles($('fileInput').files).catch(() => {}).finally(() => { $('fileInput').value = ''; }));
   $('selectAllBtn').addEventListener('click', () => { state.project.images.forEach((item) => { item.selected = true; }); renderGrid(); scheduleSave(); });
@@ -1650,7 +1680,17 @@ function bindEvents() {
   $('duplicateBtn').addEventListener('click', () => duplicateImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('ocrBtn').addEventListener('click', () => { updateEngineOptions(); showDialog('ocrDialog'); }); $('ocrEngine').addEventListener('change', updateOcrEngineStatus); $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
-  $('copyTranslationError').addEventListener('click', () => copyBlockText($('translationStatus').textContent).catch((error) => toast(error.message, true)));
+  $('retryTranslation').addEventListener('click', async () => {
+    const retry = translationRetryAction; if (!retry || translationRunning) return;
+    translationRetryAction = null; $('retryTranslation').classList.add('hidden');
+    try { await retry(); } catch (error) { toast(error.message || 'ترجمه ناموفق بود', true); }
+  });
+  $('copyTranslationError').addEventListener('click', async () => {
+    try { await copyBlockText($('translationStatus').textContent); translationRetryAction = null; closeDialog('translationDialog'); }
+    catch (error) { toast(`کپی ممکن نبود؛ متن خطا را دستی انتخاب و کپی کنید: ${error.message || error}`, true); }
+  });
+  $('translationDialog').addEventListener('cancel', (event) => { if (translationRunning) event.preventDefault(); });
+  $('translationDialog').addEventListener('close', () => { if (!translationRunning) translationRetryAction = null; });
   $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { translationPreviewAction = null; });
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => { $('aiStatus').textContent = error.message; toast(error.message, true); }));

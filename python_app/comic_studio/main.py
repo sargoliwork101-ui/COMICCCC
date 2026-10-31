@@ -460,18 +460,18 @@ def create_app() -> FastAPI:
 
     @app.post("/api/translate-text/preview")
     def translate_text_preview(values: TextTranslateRequest) -> dict[str, Any]:
-        plan = build_single_plan(values.text, values.provider)
+        plan = build_single_plan(values.text, values.provider, translations.public_settings(), values.source_lines)
         return plan_preview(plan, values.provider, values.source_language, translations.public_settings())
 
     @app.post("/api/translate-text")
     async def translate_text(values: TextTranslateRequest) -> dict[str, str]:
         if values.confirmation:
-            plan = build_single_plan(values.text, values.provider)
+            plan = build_single_plan(values.text, values.provider, translations.public_settings(), values.source_lines)
             expected = plan_signature(plan, values.provider, values.source_language, translations.public_settings())
             if values.confirmation != expected:
                 raise HTTPException(409, "متن یا تنظیمات بعد از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی و دوباره تأیید کنید.")
         activity.add("ترجمهٔ دوبارهٔ یک خط آغاز شد")
-        plan = build_single_plan(values.text, values.provider)
+        plan = build_single_plan(values.text, values.provider, translations.public_settings(), values.source_lines)
         try:
             responses = []
             for call in plan["calls"]:

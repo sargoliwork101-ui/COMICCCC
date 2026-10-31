@@ -133,7 +133,7 @@ function nextDownload(cdp, directory) {
   const downloads = path.join(temporary, 'downloads'); fs.mkdirSync(downloads);
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
-  const aiRequests = []; const aiGenerations = [];
+  const aiRequests = []; const aiGenerations = []; let dedupFailuresRemaining = 0;
   const aiServer = http.createServer((request, response) => {
     aiRequests.push({ method: request.method, url: request.url, authorization: request.headers.authorization || '' });
     response.setHeader('Content-Type', 'application/json');
@@ -141,7 +141,8 @@ function nextDownload(cdp, directory) {
       let body = ''; request.on('data', chunk => { body += chunk; }); request.on('end', () => {
         const data = JSON.parse(body); const text = data.messages.find(message => message.role === 'user').content;
         aiGenerations.push(text);
-        if (text.includes('HEADER SAME')) { response.end(JSON.stringify({choices:[{message:{content:'عنوان مشترک\nمحتوای اول'}}]})); }
+        if (text.includes('HEADER SAME') && dedupFailuresRemaining > 0) { dedupFailuresRemaining -= 1; response.statusCode = 503; response.end(JSON.stringify({error:{message:'temporary failure'}})); }
+        else if (text.includes('HEADER SAME')) { response.end(JSON.stringify({choices:[{message:{content:'عنوان مشترک\nمحتوای اول'}}]})); }
         else if (text.includes('DEDUP SECOND')) { response.end(JSON.stringify({choices:[{message:{content:'محتوای دوم'}}]})); }
         else if (text.includes('BROWSER PAGE TWO')) { response.statusCode = 503; response.end(JSON.stringify({ error: { message: 'test failure browser-local-secret', code: 'real-code' } })); }
         else setTimeout(() => response.end(JSON.stringify({ choices: [{ message: { content: 'ترجمه صفحه یک' } }] })), 450);
@@ -223,6 +224,8 @@ function nextDownload(cdp, directory) {
     await page.type('.ai-profile-key', 'browser-local-secret');
     await page.$eval('.ai-profile-timeout_seconds', el => { el.value = '120'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.$eval('.ai-profile-retry_wait_seconds', el => { el.value = '0'; el.dispatchEvent(new Event('input', {bubbles:true})); });
+    assert.equal(await page.$eval('.ai-profile-source_limit', el => el.value), '1000');
+    await page.$eval('.ai-profile-source_limit', el => { el.value = '650'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.$eval('.ai-profile-retry_count', el => { el.value = '1'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.click('.ai-profile-test');
     await page.waitForFunction(() => document.getElementById('aiStatus').textContent.includes('local-browser-model'), { timeout: 10000 }).catch(async (error) => {
@@ -238,6 +241,7 @@ function nextDownload(cdp, directory) {
     assert.equal(browserAiSettings.providers.openai.profiles[0].timeout_seconds, 120);
     assert.equal(browserAiSettings.providers.openai.profiles[0].retry_count, 1);
     assert.equal(browserAiSettings.providers.openai.profiles[0].retry_wait_seconds, 0);
+    assert.equal(browserAiSettings.providers.openai.profiles[0].source_limit, 650);
     assert.ok(!JSON.stringify(browserAiSettings).includes('browser-local-secret'), 'public settings must not return the browser-entered secret');
     assert.equal(await page.$eval('.ai-profile-key', (input) => input.value), '', 'the saved secret must be cleared from the real password field');
     await page.select('#aiProvider', 'free'); await page.click('#saveAiBtn');
@@ -773,13 +777,13 @@ with pymupdf.open(pdf_path) as document:
     await page.waitForFunction(id => state.project.id === id, {}, pageProject.id);
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     const pagePayloads = await page.$$eval('#translationPreviewRequests pre', entries => entries.map(entry => entry.textContent));
-    assert.ok(await page.$eval('#translationPreviewNote', el => el.textContent.includes('1 تکرار')));
+    assert.ok(await page.$eval('#translationPreviewNote', el => el.textContent.includes('1 تکرار') && el.textContent.includes('650')));
     assert.equal(pagePayloads.length,4); assert.ok(pagePayloads[0].includes('PAGE ONE') && !pagePayloads[0].includes('BROWSER EXTRA')); assert.ok(pagePayloads[1].includes('BROWSER EXTRA') && !pagePayloads[1].includes('PAGE ONE'));
     await page.click('#translationPreviewConfirm');
     const aiStart = Date.now(); while (!aiGenerations.length && Date.now() - aiStart < 5000) await sleep(20);
     assert.equal(aiGenerations.length, 1); await sleep(150); assert.equal(aiGenerations.length, 1, 'page two must wait for page one response');
     await page.waitForFunction(() => !translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'), {timeout:15000});
-    assert.equal(aiGenerations.length, 4); assert.ok(aiGenerations[0].includes('BROWSER PAGE ONE') && aiGenerations[1].includes('BROWSER EXTRA') && aiGenerations[2].includes('BROWSER PAGE TWO') && aiGenerations[3].includes('BROWSER PAGE TWO')); assert.ok(aiGenerations.every(text => text.split('\n\n', 2)[1].length <= 1000));
+    assert.equal(aiGenerations.length, 4); assert.ok(aiGenerations[0].includes('BROWSER PAGE ONE') && aiGenerations[1].includes('BROWSER EXTRA') && aiGenerations[2].includes('BROWSER PAGE TWO') && aiGenerations[3].includes('BROWSER PAGE TWO')); assert.ok(aiGenerations.every(text => text.split('\n\n', 2)[1].length <= 650));
     const storedPages = await api(base, `/api/projects/${pageProject.id}`);
     assert.deepEqual(storedPages.images.map(image => image.blocks[0].tr), ['ترجمه صفحه یک','old','old']);
     assert.ok(await page.$eval('#translationStatus', el => el.textContent.includes('2 درخواست با موفقیت ذخیره شد')));
@@ -787,14 +791,25 @@ with pymupdf.open(pdf_path) as document:
     assert.ok(realError.includes('HTTP 503') && realError.includes('test failure') && realError.includes('real-code'));
     assert.ok(!realError.includes('browser-local-secret'), 'the actual provider diagnostic must redact stored keys');
     assert.ok(await page.$eval('#copyTranslationError', el => !el.classList.contains('hidden')));
+    assert.ok(await page.$eval('#retryTranslation', el => !el.classList.contains('hidden')));
+    await sleep(250); assert.equal(aiGenerations.length, 4, 'no more attempts before the user chooses');
+    await page.click('#retryTranslation');
+    await page.waitForFunction(() => !translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'), {timeout:15000});
+    assert.equal(aiGenerations.length, 6);
+    assert.ok(aiGenerations.slice(4).every(text => text.includes('BROWSER PAGE TWO')));
+    const latestError = await page.$eval('#translationStatus', el => el.textContent);
+    await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable:true, value:{writeText:async () => {throw new Error('clipboard denied');}} }); });
+    await page.click('#copyTranslationError'); await page.waitForFunction(() => document.getElementById('toast').textContent.includes('clipboard denied'));
+    assert.equal(await page.$eval('#translationDialog', el => el.open), true, 'a denied copy must keep the error available');
     await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable:true, value:{writeText:async text => {window.copiedTranslationError = text;}} }); });
     await page.click('#copyTranslationError'); await page.waitForFunction(() => !!window.copiedTranslationError);
-    assert.equal(await page.evaluate(() => window.copiedTranslationError), realError);
+    assert.equal(await page.evaluate(() => window.copiedTranslationError), latestError);
+    assert.equal(await page.$eval('#translationDialog', el => el.open), false);
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr), 'ترجمه صفحه یک');
     console.log('PASS: real AI sends pages sequentially, applies per-key retry, reports safe details, and retains completed pages');
 
     await page.keyboard.press('Escape');
-    aiGenerations.length = 0;
+    aiGenerations.length = 0; dedupFailuresRemaining = 2;
     let dedupProject = await api(base, '/api/projects', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'Repeated titles'})});
     const dedupForm = new FormData();
     for (let n=1; n<=2; n++) dedupForm.append('files', new Blob([fs.readFileSync(source)], {type:'image/png'}), `repeat-${n}.png`);
@@ -812,11 +827,15 @@ with pymupdf.open(pdf_path) as document:
     assert.equal(dedupPayloads.filter(text=>text.includes('HEADER SAME')).length, 1);
     assert.ok(await page.$eval('#translationPreviewNote', el=>el.textContent.includes('1 کادر تکراری')));
     await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(() => !translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'), {timeout:15000});
+    assert.equal(aiGenerations.length, 2);
+    assert.ok(await page.$eval('#retryTranslation', el => !el.classList.contains('hidden')));
+    await page.click('#retryTranslation');
     try { await page.waitForFunction(() => !translationRunning && !document.getElementById('translationDialog').open, {timeout:15000}); }
     catch (error) { console.error('Dedup translation status:', await page.$eval('#translationDialog', el => el.textContent), 'requests:', aiGenerations); throw error; }
     const dedupStored = await api(base, `/api/projects/${dedupProject.id}`);
     assert.deepEqual(dedupStored.images.map(image=>image.blocks[0].tr), ['عنوان مشترک', 'عنوان مشترک']);
-    assert.equal(aiGenerations.length, 2);
+    assert.equal(aiGenerations.length, 4);
     assert.ok(dedupStored.images.every(image=>image.edited));
     await page.click('#menuBtn'); await page.click('#aiBtn'); await page.waitForSelector('#aiDialog[open]');
     await page.$eval('#aiReuseRepeated', el=>{el.checked=false; el.dispatchEvent(new Event('change',{bubbles:true}));});
