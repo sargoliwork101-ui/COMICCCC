@@ -963,8 +963,8 @@ with pymupdf.open(pdf_path) as document:
     for (let n=1; n<=3; n++) threePages.append('files', new Blob([fs.readFileSync(source)], {type:'image/png'}), `batch-${n}.png`);
     pageProject = await api(base, `/api/projects/${pageProject.id}/files`, {method:'POST',body:threePages});
     for (const [index, image] of pageProject.images.entries()) image.blocks = [{id:1,text:`BROWSER PAGE ${['ONE','TWO','THREE'][index]}`,tr:'old',richHtml:'',enabled:true,bg:'white',x0:5,y0:5,x1:200,y1:45,lineH:40,dir:'rtl',align:'right'}];
-    pageProject.images[0].blocks[0].text += ' ' + 'a'.repeat(130);
-    pageProject.images[0].blocks.push({...pageProject.images[0].blocks[0], id:2, text:'BROWSER EXTRA ' + 'b'.repeat(130), y0:70, y1:110});
+    pageProject.images[0].blocks[0].text += ' ' + 'a'.repeat(100);
+    pageProject.images[0].blocks.push({...pageProject.images[0].blocks[0], id:2, text:'BROWSER EXTRA ' + 'b'.repeat(100), y0:70, y1:110});
     await api(base, `/api/projects/${pageProject.id}/state`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:pageProject})});
     await api(base, '/api/ai-settings', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'openai',base_url:aiBase,model:'local-browser-model'})});
     await page.evaluate(async id => { await loadAiSettings(); await refreshProjectList(); const select=document.getElementById('projectSelect'); select.value=id; select.dispatchEvent(new Event('change',{bubbles:true})); }, pageProject.id);
