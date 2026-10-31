@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.45">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.45">
+  <link rel="stylesheet" href="/style.css?v=3.46">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.46">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۴۵ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۴۶ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
     <button id="menuBtn" class="bt">☰ پروژه و تنظیمات</button>
   </header>
 
@@ -187,15 +187,22 @@
     <p id="translationPreviewDestination" class="hint" dir="auto"></p>
     <p class="hint">هنوز هیچ متنی برای ترجمه ارسال نشده است. متن کامل هر درخواست را باز کنید و دقیقاً بررسی کنید؛ برای چند کادر، پاسخ باید ترتیب و تعداد خطوط مبدأ را حفظ کند.</p>
     <div id="translationPreviewRequests" class="payload-requests"></div>
+    <div id="translationSkillWrap" class="hidden">
+      <label for="translationSkill">راهنمای ترجمهٔ AI برای این نوبت</label>
+      <textarea id="translationSkill" rows="4" maxlength="4000" dir="auto" aria-describedby="translationSkillHelp"></textarea>
+      <p id="translationSkillHelp" class="hint">این راهنما همراه تمام درخواست‌های AI همین نوبت ارسال می‌شود. بعد از تغییر، ابتدا پیش‌نمایش به‌روز می‌شود و برای ارسال باید دوباره تأیید کنید. دستور اصلیِ حفظ ترتیب جداگانه نمایش داده می‌شود؛ راهنمای متناقض ممکن است کیفیت پاسخ را خراب کند. اطلاعات محرمانه وارد نکنید؛ راهنمای تأییدشده در مرورگر همین پروژه ذخیره می‌شود.</p>
+      <button id="translationSkillReset" type="button" class="bt">بازگرداندن راهنمای پیش‌فرض</button>
+      <p id="translationSkillStatus" class="hint" role="status"></p>
+    </div>
     <details id="translationPreviewSystemWrap" class="payload-system"><summary>دستور سیستم همراه درخواست AI</summary><pre id="translationPreviewSystem" dir="auto"></pre></details>
     <p id="translationPreviewNote" class="hint"></p>
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.45"></script>
-  <script src="/groups.js?v=3.45"></script>
-  <script src="/rich-sanitize.js?v=3.45"></script>
-  <script src="/rich-editor.js?v=3.45"></script>
-  <script src="/app.js?v=3.45"></script>
+  <script src="/typeset.js?v=3.46"></script>
+  <script src="/groups.js?v=3.46"></script>
+  <script src="/rich-sanitize.js?v=3.46"></script>
+  <script src="/rich-editor.js?v=3.46"></script>
+  <script src="/app.js?v=3.46"></script>
 </body>
 </html>

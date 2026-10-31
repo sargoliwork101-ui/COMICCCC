@@ -133,13 +133,14 @@ function nextDownload(cdp, directory) {
   const downloads = path.join(temporary, 'downloads'); fs.mkdirSync(downloads);
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
-  const aiRequests = []; const aiGenerations = []; let dedupFailuresRemaining = 0;
+  const aiRequests = []; const aiGenerations = []; const aiSystems = []; let dedupFailuresRemaining = 0;
   const aiServer = http.createServer((request, response) => {
     aiRequests.push({ method: request.method, url: request.url, authorization: request.headers.authorization || '' });
     response.setHeader('Content-Type', 'application/json');
     if (request.method === 'POST' && request.url === '/v1/chat/completions') {
       let body = ''; request.on('data', chunk => { body += chunk; }); request.on('end', () => {
         const data = JSON.parse(body); const text = data.messages.find(message => message.role === 'user').content;
+        aiSystems.push(data.messages.find(message => message.role === 'system').content);
         aiGenerations.push(text);
         if (text.includes('HEADER SAME') && dedupFailuresRemaining > 0) { dedupFailuresRemaining -= 1; response.statusCode = 503; response.end(JSON.stringify({error:{message:'temporary failure'}})); }
         else if (text.includes('HEADER SAME')) { response.end(JSON.stringify({choices:[{message:{content:'عنوان مشترک\nمحتوای اول'}}]})); }
@@ -779,11 +780,21 @@ with pymupdf.open(pdf_path) as document:
     const pagePayloads = await page.$$eval('#translationPreviewRequests pre', entries => entries.map(entry => entry.textContent));
     assert.ok(await page.$eval('#translationPreviewNote', el => el.textContent.includes('1 تکرار') && el.textContent.includes('650')));
     assert.equal(pagePayloads.length,4); assert.ok(pagePayloads[0].includes('PAGE ONE') && !pagePayloads[0].includes('BROWSER EXTRA')); assert.ok(pagePayloads[1].includes('BROWSER EXTRA') && !pagePayloads[1].includes('PAGE ONE'));
+    assert.ok(await page.$eval('#translationSkill', el => el.value.includes('روان')));
+    const defaultSkill = await page.$eval('#translationSkill', el=>el.value);
+    await page.$eval('#translationSkill', el => { el.value = 'temporary'; el.dispatchEvent(new Event('input', {bubbles:true})); });
+    await page.click('#translationSkillReset'); assert.equal(await page.$eval('#translationSkill', el=>el.value), defaultSkill);
+    await page.$eval('#translationSkill', el => { el.value = 'لحن داستان رسمی و نام‌ها ثابت باشد'; el.dispatchEvent(new Event('input', {bubbles:true})); });
+    assert.ok(await page.$eval('#translationPreviewConfirm', el => el.textContent.includes('به‌روزرسانی')));
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(() => document.getElementById('translationPreviewSystem').textContent.includes('لحن داستان رسمی') && !document.getElementById('translationPreviewConfirm').disabled);
+    assert.ok(await page.$eval('#translationPreviewDialog', el=>el.open)); assert.equal(aiGenerations.length, 0, 'editing the skill only refreshes locally');
+    const approvedSystem = await page.$eval('#translationPreviewSystem', el=>el.textContent);
     await page.click('#translationPreviewConfirm');
     const aiStart = Date.now(); while (!aiGenerations.length && Date.now() - aiStart < 5000) await sleep(20);
     assert.equal(aiGenerations.length, 1); await sleep(150); assert.equal(aiGenerations.length, 1, 'page two must wait for page one response');
     await page.waitForFunction(() => !translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'), {timeout:15000});
-    assert.equal(aiGenerations.length, 4); assert.ok(aiGenerations[0].includes('BROWSER PAGE ONE') && aiGenerations[1].includes('BROWSER EXTRA') && aiGenerations[2].includes('BROWSER PAGE TWO') && aiGenerations[3].includes('BROWSER PAGE TWO')); assert.ok(aiGenerations.every(text => text.split('\n\n', 2)[1].length <= 650));
+    assert.equal(aiGenerations.length, 4); assert.ok(aiSystems.every(system => system === approvedSystem)); assert.ok(aiGenerations[0].includes('BROWSER PAGE ONE') && aiGenerations[1].includes('BROWSER EXTRA') && aiGenerations[2].includes('BROWSER PAGE TWO') && aiGenerations[3].includes('BROWSER PAGE TWO')); assert.ok(aiGenerations.every(text => text.split('\n\n', 2)[1].length <= 650));
     const storedPages = await api(base, `/api/projects/${pageProject.id}`);
     assert.deepEqual(storedPages.images.map(image => image.blocks[0].tr), ['ترجمه صفحه یک','old','old']);
     assert.ok(await page.$eval('#translationStatus', el => el.textContent.includes('2 درخواست با موفقیت ذخیره شد')));
@@ -795,7 +806,7 @@ with pymupdf.open(pdf_path) as document:
     await sleep(250); assert.equal(aiGenerations.length, 4, 'no more attempts before the user chooses');
     await page.click('#retryTranslation');
     await page.waitForFunction(() => !translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'), {timeout:15000});
-    assert.equal(aiGenerations.length, 6);
+    assert.equal(aiGenerations.length, 6); assert.ok(aiSystems.every(system => system === approvedSystem));
     assert.ok(aiGenerations.slice(4).every(text => text.includes('BROWSER PAGE TWO')));
     const latestError = await page.$eval('#translationStatus', el => el.textContent);
     await page.evaluate(() => { Object.defineProperty(navigator, 'clipboard', { configurable:true, value:{writeText:async () => {throw new Error('clipboard denied');}} }); });
@@ -807,6 +818,24 @@ with pymupdf.open(pdf_path) as document:
     assert.equal(await page.$eval('#translationDialog', el => el.open), false);
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr), 'ترجمه صفحه یک');
     console.log('PASS: real AI sends pages sequentially, applies per-key retry, reports safe details, and retains completed pages');
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    assert.equal(await page.$eval('#translationSkill', el=>el.value), 'لحن داستان رسمی و نام‌ها ثابت باشد');
+    await page.click('#translationPreviewCancel');
+    await page.click('#grid .item .act button:nth-child(2)'); await page.waitForSelector('#editorDialog[open] #blockList .block-card');
+    await page.evaluate(() => [...document.querySelectorAll('#blockList .block-card button')].find(el => el.textContent === 'ترجمهٔ دوباره').click());
+    await page.waitForSelector('#translationPreviewDialog[open]');
+    assert.equal(await page.$eval('#translationSkill', el=>el.value), 'لحن داستان رسمی و نام‌ها ثابت باشد');
+    await page.$eval('#translationSkill', el=>{el.value='لحن صمیمی در بازترجمه';el.dispatchEvent(new Event('input',{bubbles:true}));});
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(()=>document.getElementById('translationPreviewSystem').textContent.includes('لحن صمیمی در بازترجمه'));
+    const singleSystem = await page.$eval('#translationPreviewSystem', el=>el.textContent);
+    const beforeSingle = aiGenerations.length;
+    await page.click('#translationPreviewConfirm'); await page.waitForFunction(()=>!document.getElementById('translationPreviewDialog').open);
+    const singleStart = Date.now(); while (aiGenerations.length === beforeSingle && Date.now() - singleStart < 5000) await sleep(30);
+    assert.equal(aiGenerations.length, beforeSingle + 1); assert.equal(aiSystems.at(-1), singleSystem);
+    await page.waitForFunction(()=>!document.querySelector('#translationPreviewConfirm').disabled);
+    await page.click('#editorClose'); await page.waitForFunction(()=>!state.editorId);
+    console.log('PASS: editable skill is confirmed and sent on every AI call, persists per project, and applies to a single-box retry');
 
     await page.keyboard.press('Escape');
     aiGenerations.length = 0; dedupFailuresRemaining = 2;
@@ -822,6 +851,7 @@ with pymupdf.open(pdf_path) as document:
     await page.evaluate(async id => { await refreshProjectList(); const select=document.getElementById('projectSelect'); select.value=id; select.dispatchEvent(new Event('change',{bubbles:true})); }, dedupProject.id);
     await page.waitForFunction(id => state.project.id === id && state.project.images.length === 2 && state.project.images.every(image => image.edited), {}, dedupProject.id);
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
+    assert.equal(await page.$eval('#translationSkill', el=>el.value), defaultSkill, 'a different project starts with its own skill');
     const dedupPayloads = await page.$$eval('#translationPreviewRequests pre', entries => entries.map(el=>el.textContent));
     assert.equal(dedupPayloads.length, 2);
     assert.equal(dedupPayloads.filter(text=>text.includes('HEADER SAME')).length, 1);

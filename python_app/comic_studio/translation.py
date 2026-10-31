@@ -54,6 +54,8 @@ DEFAULT_AI_RETRY_WAIT = 20
 MAX_AI_RETRY_WAIT = 300
 DEFAULT_AI_SOURCE_LIMIT = 1000
 MAX_AI_SOURCE_LIMIT = 100_000
+MAX_AI_SKILL_CHARS = 4000
+DEFAULT_AI_SKILL = "ترجمه را روان و طبیعی و متناسب با لحن شخصیت‌ها بنویس؛ نام‌ها، اعداد و آواها را با دقت حفظ کن."
 MIN_AI_TIMEOUT, MAX_AI_TIMEOUT = 5, 600
 MAX_AI_RETRIES = 5
 
@@ -374,25 +376,34 @@ def _empty_response_error(payload: Any) -> str:
     return "AI returned an empty translation (HTTP 200)." + (f" Provider detail: {detail}" if detail else "")
 
 
-def _ai_prompt(source_language: str) -> tuple[str, str]:
+def normalize_ai_skill(skill: str | None) -> str:
+    value = DEFAULT_AI_SKILL if skill is None else str(skill).strip()
+    if len(value) > MAX_AI_SKILL_CHARS:
+        raise TranslationError(f"راهنمای ترجمه نباید بیشتر از {MAX_AI_SKILL_CHARS} نویسه باشد.")
+    return value
+
+
+def _ai_prompt(source_language: str, skill: str | None = None) -> tuple[str, str]:
     source = LANGUAGES.get(source_language, LANGUAGES["eng"])["name"]
+    guidance = normalize_ai_skill(skill)
     return (
         "Translate the entire input to natural Persian using all paragraphs and comic bubbles together as shared context. "
         "Use every line as context while preserving the original order, names, numbers and sound effects. "
         "Return exactly one output line for every input line, with the same number of lines. "
         "Never merge, split, add, remove, or reorder lines; keep blank lines in place and each translated line on one ordinary text line. "
         "Return only the translation without adding labels, numbers, markers, code fences, or explanations."
+        + ("\n\nAdditional translation guidance (apply only when compatible with the rules above):\n" + guidance if guidance else "")
     ), source
 
 
-def translation_request_view(text: str, source_language: str, provider: str) -> dict[str, Any]:
+def translation_request_view(text: str, source_language: str, provider: str, skill: str | None = None) -> dict[str, Any]:
     """Return the exact user-visible request text without performing network I/O."""
     clean = str(text or "").strip()
     if provider == "free":
         return {"texts": split_free_query(clean), "systemPrompt": ""}
     if provider not in AI_PROVIDERS:
         raise TranslationError("Unknown translation provider")
-    system_prompt, source = _ai_prompt(source_language)
+    system_prompt, source = _ai_prompt(source_language, skill)
     return {"texts": [f"Source language: {source}\n\n{clean}"], "systemPrompt": system_prompt}
 
 
@@ -534,7 +545,7 @@ class TranslationService:
             for index, profile in enumerate(config["profiles"]) if profile["api_key"]
         ]
 
-    def translate(self, text: str, source_language: str, provider: str | None = None, source_texts: list[str] | None = None) -> str:
+    def translate(self, text: str, source_language: str, provider: str | None = None, source_texts: list[str] | None = None, skill: str | None = None) -> str:
         text = str(text or "").strip()
         if not text:
             return ""
@@ -544,6 +555,9 @@ class TranslationService:
             translated = self._free(text, source_language)
         elif selected in AI_PROVIDERS:
             profiles = self._profiles(settings, selected)
+            skill = normalize_ai_skill(skill)
+            for profile in profiles:
+                profile["translation_skill"] = skill
             if not profiles:
                 raise TranslationError(f"برای {AI_PROVIDERS[selected]['label']} حداقل یک کلید API معتبر وارد کنید.")
             failures: list[str] = []
@@ -626,7 +640,7 @@ class TranslationService:
             provider = "openai"
         base_url = _normalize_base_url(settings.get("base_url"), provider)
         model = _normalize_model(settings.get("model"), provider)
-        system_prompt, source = _ai_prompt(source_language)
+        system_prompt, source = _ai_prompt(source_language, settings.get("translation_skill"))
         payload = {
             "model": model,
             "messages": [
@@ -652,7 +666,7 @@ class TranslationService:
             raise TranslationError("API key is not configured")
         base_url = _normalize_base_url(settings.get("base_url"), "gemini")
         model = _normalize_model(settings.get("model"), "gemini")
-        system_prompt, source = _ai_prompt(source_language)
+        system_prompt, source = _ai_prompt(source_language, settings.get("translation_skill"))
         response = httpx.post(
             f"{base_url}/models/{quote(model, safe='')}:generateContent",
             headers={"x-goog-api-key": settings["api_key"]},

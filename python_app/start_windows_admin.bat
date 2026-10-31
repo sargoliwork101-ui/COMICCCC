@@ -3,7 +3,7 @@ setlocal EnableExtensions
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem Comic OCR Studio 3.45 - optional administrator launcher.
+rem Comic OCR Studio 3.46 - optional administrator launcher.
 rem Use this when Windows denies permission during OCR package installation.
 rem Optional OCR models are still downloaded only after an explicit click in the app.
 

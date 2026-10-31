@@ -3,14 +3,14 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem Comic OCR Studio 3.45 - Windows setup and launcher.
+rem Comic OCR Studio 3.46 - Windows setup and launcher.
 rem Required packages and pip are checked/updated in the isolated .venv on each run.
 rem Existing supported system Python installations are never modified or removed.
 
 set "APP_DIR=%CD%"
 set "VENV_DIR=%APP_DIR%\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
-set "READY=%VENV_DIR%\.comic-ocr-studio-3.45.ready"
+set "READY=%VENV_DIR%\.comic-ocr-studio-3.46.ready"
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 set "PYTHONNOUSERSITE=1"
 rem Detection must not cause the new Python Install Manager to auto-install runtimes.

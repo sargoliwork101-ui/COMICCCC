@@ -25,6 +25,7 @@ class OcrRequest(BaseModel):
 
 
 class TranslateRequest(BaseModel):
+    skill: str | None = Field(default=None, max_length=4000)
     call_id: str | None = None
     call_image_id: str | None = None
     reuse_repeated: bool | None = None
@@ -37,6 +38,7 @@ class TranslateRequest(BaseModel):
 
 
 class TextTranslateRequest(BaseModel):
+    skill: str | None = Field(default=None, max_length=4000)
     text: str
     source_lines: list[dict[str, Any]] | None = None
     source_language: str = "eng"

@@ -33,6 +33,8 @@ let jobBusy = false;
 let translationRunning = false;
 let translationRetryAction = null;
 let translationPreviewAction = null;
+let translationPreviewRefresh = null;
+let translationPreviewData = null;
 let translationPreviewTask = Promise.resolve();
 let overlayPreviewTask = Promise.resolve();
 let downloadUrl = null;
@@ -606,8 +608,24 @@ async function runOcr() {
     adoptProject(result); setOverlayMode('ocr', false); await saveProject(); await renderImagesText(); closeDialog('ocrDialog'); toast('متن OCR روی تصویر آمد؛ برای بررسی و ویرایش، دکمهٔ ✎ را بزنید');
   });
 }
-function showTranslationRequestPreview(preview, action) {
-  translationPreviewAction = action;
+function savedTranslationSkill(projectId) {
+  try { return localStorage.getItem(`comic-studio-ai-skill:${projectId}`); } catch { return null; }
+}
+function rememberTranslationSkill(projectId, preview) {
+  if (preview.provider === 'free') return;
+  try { localStorage.setItem(`comic-studio-ai-skill:${projectId}`, preview.skill ?? ''); } catch { /* the next preview can still use the default */ }
+}
+function updateTranslationSkillStatus() {
+  const preview = translationPreviewData;
+  const changed = preview && preview.provider !== 'free' && $('translationSkill').value.trim() !== (preview.skill ?? '');
+  $('translationSkillStatus').textContent = changed ? 'راهنما تغییر کرد؛ ابتدا پیش‌نمایش تازه را بازبینی کنید.' : '';
+  $('translationPreviewConfirm').textContent = changed ? 'به‌روزرسانی پیش‌نمایش' : 'تأیید و ارسال برای ترجمه';
+}
+function showTranslationRequestPreview(preview, action, refresh = null) {
+  translationPreviewAction = action; translationPreviewRefresh = refresh; translationPreviewData = preview;
+  $('translationSkillWrap').classList.toggle('hidden', preview.provider === 'free');
+  $('translationSkill').value = preview.skill ?? '';
+  updateTranslationSkillStatus();
   $('translationPreviewSummary').textContent = `${preview.blockCount} متن · ${preview.requestCount} درخواست پایه برای بررسی (بدون تکرار)`;
   const destination = [preview.providerLabel, preview.model && `مدل: ${preview.model}`, preview.base_url && `نشانی: ${preview.base_url}`, preview.fallback_url && `فقط هنگام خطا: ${preview.fallback_url}`].filter(Boolean).join(' · ');
   $('translationPreviewDestination').textContent = destination;
@@ -625,7 +643,7 @@ function showTranslationRequestPreview(preview, action) {
   $('translationPreviewConfirm').disabled = !preview.requests?.length;
   showDialog('translationPreviewDialog');
 }
-function cancelTranslationRequestPreview() { translationPreviewAction = null; closeDialog('translationPreviewDialog'); }
+function cancelTranslationRequestPreview() { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; closeDialog('translationPreviewDialog'); }
 function showSingleTranslationError(error, action) {
   $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`;
   translationRetryAction = error.status === 409 ? null : async () => {
@@ -636,12 +654,24 @@ function showSingleTranslationError(error, action) {
   $('copyTranslationError').classList.remove('hidden'); $('translationErrorChoice').classList.remove('hidden'); showDialog('translationDialog');
 }
 async function confirmTranslationRequestPreview() {
-  const action = translationPreviewAction;
-  if (!action) return;
-  translationPreviewAction = null; $('translationPreviewConfirm').disabled = true;
+  const action = translationPreviewAction; const preview = translationPreviewData; const refresh = translationPreviewRefresh;
+  if (!action || !preview) return;
+  $('translationPreviewConfirm').disabled = true;
+  if (preview.provider !== 'free' && $('translationSkill').value.trim() !== (preview.skill ?? '')) {
+    $('translationSkill').disabled = true; $('translationSkillReset').disabled = true;
+    try {
+      if (!refresh) throw new Error('به‌روزرسانی پیش‌نمایش ممکن نیست؛ دوباره ترجمه را شروع کنید.');
+      const updated = await refresh($('translationSkill').value.trim());
+      // Cancel/close during the local preview request must not reopen it or send.
+      if ($('translationPreviewDialog').open && translationPreviewAction === action) showTranslationRequestPreview(updated, action, refresh);
+    } catch (error) { $('translationSkillStatus').textContent = `به‌روزرسانی ممکن نبود: ${error.message || error}`; toast(error.message || 'پیش‌نمایش ناموفق بود', true); }
+    finally { $('translationSkill').disabled = false; $('translationSkillReset').disabled = false; $('translationPreviewConfirm').disabled = !translationPreviewData?.requests?.length; }
+    return;
+  }
+  translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null;
   closeDialog('translationPreviewDialog');
-  try { translationPreviewTask = action(); await translationPreviewTask; }
-  catch (error) { if (!$('translationDialog').open) showSingleTranslationError(error, action); toast(error.message || 'ترجمه ناموفق بود', true); }
+  try { translationPreviewTask = action(preview); await translationPreviewTask; }
+  catch (error) { if (!$('translationDialog').open) showSingleTranslationError(error, () => action(preview)); toast(error.message || 'ترجمه ناموفق بود', true); }
   finally { $('translationPreviewConfirm').disabled = false; }
 }
 async function runTranslation() {
@@ -652,9 +682,11 @@ async function runTranslation() {
     await waitForProjectLoads();
     const ids = selectedImages().map((item) => item.id); if (!ids.length) { toast('حداقل یک تصویر را انتخاب کنید', true); return; }
     await saveProject();
-    const provider = state.ai?.provider || 'free';
-    const preview = await api(`/api/projects/${state.project.id}/translation-preview`, jsonOptions('POST', { image_ids: ids, provider, source_language: $('ocrLanguage').value, reuse_repeated: state.ai?.reuse_repeated !== false }));
-    showTranslationRequestPreview(preview, () => performTranslation(ids, provider, preview));
+    const provider = state.ai?.provider || 'free'; const projectId = state.project.id;
+    const request = { image_ids: ids, provider, source_language: $('ocrLanguage').value, reuse_repeated: state.ai?.reuse_repeated !== false };
+    const refresh = skill => api(`/api/projects/${projectId}/translation-preview`, jsonOptions('POST', { ...request, skill }));
+    const preview = await refresh(provider === 'free' ? null : savedTranslationSkill(projectId));
+    showTranslationRequestPreview(preview, accepted => { rememberTranslationSkill(projectId, accepted); return performTranslation(ids, provider, accepted); }, refresh);
   } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
 }
 async function performTranslation(ids, provider, preview, startIndex = 0, previouslyCompleted = 0) {
@@ -675,7 +707,7 @@ async function performTranslation(ids, provider, preview, startIndex = 0, previo
           $('translationStatus').textContent = `درخواست ${index + 1} از ${preview.tasks.length}: ${currentPage}${page.paragraph ? ` · بند ${page.paragraph}` : ''}`;
           phase = 'translation';
           const result = await api(`/api/projects/${projectId}/translate`, jsonOptions('POST', {
-            image_ids: ids, provider, source_language: language, reuse_repeated: preview.reuseRepeated ?? true, confirmation: page.signature, call_id: page.callId, call_image_id: page.imageId,
+            image_ids: ids, provider, source_language: language, skill: preview.skill, reuse_repeated: preview.reuseRepeated ?? true, confirmation: page.signature, call_id: page.callId, call_image_id: page.imageId,
             batch_index: index + 1, batch_total: preview.tasks.length,
           }));
           // A successful response means the page has already been persisted.
@@ -1573,14 +1605,18 @@ async function retranslateBlock(block) {
   const text = block.text || ''; const snapshot = inlineBlockSnapshot(block);
   const provider = state.ai?.provider || 'free'; const sourceLanguage = $('ocrLanguage').value;
   try {
-    const preview = await api('/api/translate-text/preview', jsonOptions('POST', { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, provider }));
-    showTranslationRequestPreview(preview, async () => {
+    const projectId = state.project.id;
+    const request = { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, provider };
+    const refresh = skill => api('/api/translate-text/preview', jsonOptions('POST', { ...request, skill }));
+    const preview = await refresh(provider === 'free' ? null : savedTranslationSkill(projectId));
+    showTranslationRequestPreview(preview, async accepted => {
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
-      const result = await api('/api/translate-text', jsonOptions('POST', { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, provider, confirmation: preview.signature }));
+      rememberTranslationSkill(projectId, accepted);
+      const result = await api('/api/translate-text', jsonOptions('POST', { ...request, skill: accepted.skill, confirmation: accepted.signature }));
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
       block.tr = result.text; block.richHtml = plainToHtml(result.text);
       buildBlockList(); drawEditor(); scheduleSave();
-    });
+    }, refresh);
   } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
 }
 async function copyBlockText(text) {
@@ -1692,7 +1728,9 @@ function bindEvents() {
   $('translationDialog').addEventListener('cancel', (event) => { if (translationRunning) event.preventDefault(); });
   $('translationDialog').addEventListener('close', () => { if (!translationRunning) translationRetryAction = null; });
   $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
-  $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { translationPreviewAction = null; });
+  $('translationSkill').addEventListener('input', updateTranslationSkillStatus);
+  $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
+  $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; });
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => { $('aiStatus').textContent = error.message; toast(error.message, true); }));
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);

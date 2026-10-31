@@ -524,3 +524,28 @@ def test_invalid_ai_source_limit_rejected(tmp_path, monkeypatch, value):
     service = TranslationService()
     with pytest.raises(ValueError):
         service.save_settings({'provider': 'openai', 'providers': {'openai': {'profiles': [{'id': 'a', 'source_limit': value}]}}})
+
+
+@pytest.mark.parametrize('provider', ['openai', 'gemini'])
+def test_custom_translation_skill_is_sent_in_exact_system_instruction(tmp_path, monkeypatch, provider):
+    from comic_studio.translation import translation_request_view
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    service.save_settings({'provider': provider, 'api_key': 'test-secret'})
+    captured = []
+    def post(url, **kwargs):
+        captured.append(kwargs['json'])
+        if provider == 'gemini':
+            return httpx.Response(200, json={'candidates': [{'content': {'parts': [{'text': 'سلام'}]}}]}, request=httpx.Request('POST', url))
+        return httpx.Response(200, json={'choices': [{'message': {'content': 'سلام'}}]}, request=httpx.Request('POST', url))
+    monkeypatch.setattr(httpx, 'post', post)
+    skill = '  لحن محاوره‌ای؛ نام‌ها را دقیق حفظ کن.  '
+    assert service.translate('Hello', 'eng', provider, ['Hello'], skill) == 'سلام'
+    view = translation_request_view('Hello', 'eng', provider, skill)
+    actual = captured[0]['systemInstruction']['parts'][0]['text'] if provider == 'gemini' else captured[0]['messages'][0]['content']
+    assert actual == view['systemPrompt']
+    assert 'لحن محاوره‌ای' in actual and 'Never merge, split' in actual
+    assert 'Source language:' in view['texts'][0] and skill.strip() not in view['texts'][0]
+    assert service.translate('Hello', 'eng', provider, ['Hello'], '') == 'سلام'
+    no_skill = captured[1]['systemInstruction']['parts'][0]['text'] if provider == 'gemini' else captured[1]['messages'][0]['content']
+    assert 'Additional translation guidance' not in no_skill and 'Never merge, split' in no_skill

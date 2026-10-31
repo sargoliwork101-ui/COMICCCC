@@ -68,3 +68,5 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 .ai-profile-options{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:10px}.ai-profile-options label{flex:1 1 190px}.ai-profile-options input{display:block;width:100%;margin-top:3px}.diagnostic-message{white-space:pre-wrap;overflow-wrap:anywhere;user-select:text}.ai-profile-status{white-space:pre-wrap}
 
 .reuse-setting{display:flex;align-items:flex-start;gap:8px;margin:12px 0 4px}.reuse-setting input{width:auto;flex:none;margin-top:4px}
+
+#translationSkill{display:block;width:100%;min-height:90px;resize:vertical;margin-top:6px}#translationSkillWrap{margin:14px 0}

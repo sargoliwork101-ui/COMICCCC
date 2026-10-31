@@ -567,6 +567,7 @@ function check(name, condition) {
   check('finishing OCR places the new recognized text on the image', renderedBlocks[0].tr === 'NEW OCR' && renderedBlocks[0]._plainText === true);
   await vm.runInContext('runTranslation()', context);
   check('translation first shows every exact outgoing request without sending', $('translationPreviewDialog').open && translationCalls.length === 0 && $('translationPreviewRequests').textContent.includes('NEW OCR') && $('translationPreviewDestination').textContent.includes('Google Translate'));
+  check('free translation hides AI-only guidance', $('translationSkillWrap').classList.contains('hidden'));
   $('translationPreviewCancel').click();
   check('cancelling translation preview sends nothing', !$('translationPreviewDialog').open && translationCalls.length === 0);
   let releaseTranslation;
