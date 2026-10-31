@@ -544,10 +544,11 @@ def create_app() -> FastAPI:
             if (run['imageIds'] != ids or run['provider'] != values.provider or run['language'] != values.source_language
                     or run['reuse'] != values.reuse_repeated):
                 raise HTTPException(409, "انتخاب یا روش نوبت ناتمام تغییر کرده است؛ تنظیمات قبلی را برگردانید یا نوبت تازه شروع کنید.")
-            verify_run(state, run, values.skill, None)
-            # A fresh preview explicitly authorizes a revised summary, budget or API policy.
+            # Resume previews may explicitly revise guidance, summary, budget,
+            # or API policy; source and target snapshots must still match.
+            verify_run(state, run, values.skill, None, check_skill=False)
             run = copy.deepcopy(run)
-            run['context'] = values.summary; run['policyHash'] = digest(policy)
+            run['context'] = values.summary; run['skillHash'] = digest(values.skill); run['policyHash'] = digest(policy)
             run['limit'] = min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings)
             run['contextPercent'] = 0 if values.provider == 'free' else settings['context_percent']; run['skillPercent'] = 0 if values.provider == 'free' else settings['skill_percent']
         else:

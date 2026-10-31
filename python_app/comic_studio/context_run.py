@@ -163,8 +163,9 @@ def _block_lookup(state: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]
     return result
 
 
-def verify_run(state: dict[str, Any], run: dict[str, Any], skill: str, policy: dict[str, Any] | None) -> None:
-    if run['skillHash'] != digest(skill) or (policy is not None and run['policyHash'] != digest(policy)):
+def verify_run(state: dict[str, Any], run: dict[str, Any], skill: str, policy: dict[str, Any] | None,
+               check_skill: bool = True) -> None:
+    if (check_skill and run['skillHash'] != digest(skill)) or (policy is not None and run['policyHash'] != digest(policy)):
         raise ProjectChangedError('راهنما یا تنظیمات API تغییر کرده است؛ پیش‌نمایش تازه را بررسی کنید.')
     if source_layout(state, run['imageIds']) != run['sourceLayout']:
         raise ProjectChangedError('متن یا ترتیب صفحه‌ها تغییر کرده است؛ پیش‌نمایش تازه لازم است.')

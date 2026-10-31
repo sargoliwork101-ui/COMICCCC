@@ -189,7 +189,7 @@ def test_resume_can_edit_summary_and_budget_without_resending_successes(tmp_path
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
     seen = []
     def fake(self, request, text, sources, provider, policy):
-        seen.append((text, request.user_prefix))
+        seen.append((text, request.user_prefix, request.system))
         return '\n'.join('متن' for _ in text.split('\n')), 'خلاصه'
     monkeypatch.setattr(TranslationService, 'translate_context', fake)
     with scoped_client(create_app()) as client:
@@ -201,16 +201,16 @@ def test_resume_can_edit_summary_and_budget_without_resending_successes(tmp_path
         first = client.post(route+'/context-step',json={'run_id':start['runId'],'completed':0,'skill':'x'})
         assert first.status_code == 200
         client.put('/api/ai-settings', json={'provider':'openai','context_percent':20,'skill_percent':10})
-        resumed = {**req,'resume':True,'summary':'خلاصهٔ اصلاح‌شده'}
+        resumed = {**req,'resume':True,'skill':'راهنمای تازه','summary':'خلاصهٔ اصلاح‌شده'}
         second_preview = client.post(route+'/context-preview',json=resumed)
         assert second_preview.status_code == 200, second_preview.text
         assert 'خلاصهٔ اصلاح‌شده' in second_preview.json()['requests'][0]['text']
         restarted = client.post(route+'/context-start',json={**resumed,'confirmation':second_preview.json()['signature']})
         assert restarted.status_code == 200, restarted.text
-        result = client.post(route+'/context-step',json={'run_id':start['runId'],'completed':1,'skill':'x'})
+        result = client.post(route+'/context-step',json={'run_id':start['runId'],'completed':1,'skill':'راهنمای تازه'})
         assert result.status_code == 200 and result.json()['done']
         assert len(seen) == 2 and 'page 0' in seen[0][0] and 'page 1' in seen[1][0]
-        assert 'خلاصهٔ اصلاح‌شده' in seen[1][1]
+        assert 'خلاصهٔ اصلاح‌شده' in seen[1][1] and 'راهنمای تازه' in seen[1][2]
 
 
 def test_preflight_checks_later_unbreakable_line_before_any_send(tmp_path, monkeypatch):
