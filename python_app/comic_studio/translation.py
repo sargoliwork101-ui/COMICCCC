@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import time
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -47,6 +48,27 @@ class TranslationError(RuntimeError):
 # Legacy symbol, retained only to decode literal HTML entities; no longer a boundary.
 TRANSLATION_SEPARATOR = "\u241e"
 MAX_FREE_QUERY_CHARS = 500
+DEFAULT_AI_TIMEOUT = 90
+DEFAULT_AI_RETRIES = 0
+MIN_AI_TIMEOUT, MAX_AI_TIMEOUT = 5, 600
+MAX_AI_RETRIES = 5
+
+
+def _setting_int(value: Any, default: int, minimum: int, maximum: int, *, strict: bool = False) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        if strict:
+            raise ValueError(f"مقدار تنظیم باید عدد صحیح بین {minimum} و {maximum} باشد.")
+        return default
+    return value
+
+
+def _profile_policy(profile: dict[str, Any], *, strict: bool = False) -> dict[str, int]:
+    return {
+        "timeout_seconds": _setting_int(profile.get("timeout_seconds"), DEFAULT_AI_TIMEOUT, MIN_AI_TIMEOUT, MAX_AI_TIMEOUT, strict=strict),
+        "retry_count": _setting_int(profile.get("retry_count"), DEFAULT_AI_RETRIES, 0, MAX_AI_RETRIES, strict=strict),
+    }
 
 
 def split_free_query(text: str, limit: int = MAX_FREE_QUERY_CHARS) -> list[str]:
@@ -166,6 +188,7 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
                         "id": _profile_id(item.get("id"), index),
                         "name": str(item.get("name") or "").strip()[:160],
                         "api_key": str(item.get("api_key") or "").strip(),
+                        **_profile_policy(item),
                     }
                     for index, item in enumerate(profiles) if isinstance(item, dict)
                 ]
@@ -177,7 +200,7 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         target["base_url"] = str(raw.get("base_url") or target["base_url"]).strip().rstrip("/")
         key = str(raw.get("api_key") or "").strip()
         if key:
-            target["profiles"] = [{"id": "legacy", "name": "کلید اصلی", "api_key": key}]
+            target["profiles"] = [{"id": "legacy", "name": "کلید اصلی", "api_key": key, **_profile_policy({})}]
 
     provider = str(raw.get("provider") or "free").strip().lower()
     if provider not in {"free", *AI_PROVIDERS}:
@@ -210,23 +233,79 @@ def _normalize_base_url(value: Any, provider: str) -> str:
     return base_url
 
 
-def _safe_error(error: Exception, provider: str) -> str:
+def _redact_diagnostic(value: Any, secrets: list[str]) -> str:
+    """Keep useful service diagnostics without printing known keys or credentials."""
+    text = str(value or "").replace("\x00", "")
+    for secret in sorted({str(key) for key in secrets if key}, key=len, reverse=True):
+        for variant in {secret, quote(secret, safe=""), html.escape(secret)}:
+            text = text.replace(variant, "[REDACTED]")
+    text = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1[REDACTED]@", text)
+    text = re.sub(r"(?i)\bBearer\s+[^\s,;\"']+", "Bearer [REDACTED]", text)
+    text = re.sub(r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|authorization|password|secret)[\"']?\s*[:=]\s*[\"']?)([^\s,;\"'&}]+)", r"\1[REDACTED]", text)
+    return text.strip()[:1200]
+
+
+def _safe_error(error: Exception, provider: str, secrets: list[str] | None = None) -> str:
+    """Include HTTP status/provider message or transport exception, not request headers."""
+    secrets = secrets or []
     label = AI_PROVIDERS.get(provider, {}).get("label", "سرویس هوش مصنوعی")
     response = getattr(error, "response", None)
     status = int(getattr(response, "status_code", 0) or 0)
-    if status == 400:
-        return f"درخواست یا نام مدل انتخاب‌شده برای {label} معتبر نیست."
-    if status in {401, 403}:
-        return "کلید API معتبر نیست یا اجازهٔ استفاده از این سرویس/مدل را ندارد."
-    if status == 404:
-        return "مدل یا مسیر انتخاب‌شده پیدا نشد؛ نام مدل و نشانی API را بررسی کنید."
-    if status == 429:
-        return "سقف استفاده یا سرعت درخواست‌های این سرویس پر شده است."
-    if status >= 500:
-        return f"سرویس {label} فعلاً پاسخ نمی‌دهد."
+    if status:
+        detail: Any = ""
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                detail = body.get("error", body.get("detail", body.get("message", "")))
+                if isinstance(detail, dict):
+                    detail = " | ".join(str(detail[k]) for k in ("message", "code", "type", "status") if detail.get(k) is not None)
+                elif not isinstance(detail, (str, int, float)):
+                    detail = ""
+            elif isinstance(body, str):
+                detail = body
+        except (ValueError, UnicodeError):
+            # HTML error pages can contain arbitrary data and are not useful to paste.
+            content_type = response.headers.get("content-type", "").lower()
+            if "text/plain" in content_type:
+                detail = response.text
+            elif "text/html" in content_type:
+                title = re.search(r"<title[^>]*>(.*?)</title\s*>", response.text, re.IGNORECASE | re.DOTALL)
+                if title:
+                    detail = html.unescape(re.sub(r"<[^>]*>", "", title.group(1)))
+        message = f"{label}: HTTP {status}"
+        if detail:
+            message += f"؛ پیام سرویس: {_redact_diagnostic(detail, secrets)}"
+        for header in ("x-request-id", "request-id", "cf-ray", "retry-after"):
+            if response.headers.get(header):
+                message += f"؛ {header}: {_redact_diagnostic(response.headers[header], secrets)[:160]}"
+        return message
     if isinstance(error, TranslationError):
-        return str(error)
-    return f"ارتباط با {label} برقرار نشد؛ اینترنت، نشانی API یا دسترسی به سرویس را بررسی کنید."
+        return _redact_diagnostic(str(error), secrets)
+    detail = _redact_diagnostic(str(error), secrets)
+    kind = type(error).__name__
+    return f"{label}: {kind}" + (f"؛ جزئیات: {detail}" if detail else "؛ سرویس جزئیات بیشتری برنگرداند.")
+
+
+def _retryable(error: Exception) -> bool:
+    if isinstance(error, (httpx.TransportError, TranslationError, json.JSONDecodeError)):
+        return True
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return status in {408, 429} or status >= 500
+    return False
+
+
+def _run_with_retries(action: Any, profile: dict[str, Any], provider: str, secrets: list[str]) -> Any:
+    retries = profile.get("retry_count", DEFAULT_AI_RETRIES)
+    for attempt in range(retries + 1):
+        try:
+            return action()
+        except Exception as exc:
+            if not _retryable(exc) or attempt >= retries:
+                raise
+            emit(f"تلاش {attempt + 1} ناموفق بود: {_safe_error(exc, provider, secrets)}؛ تکرار {attempt + 1} از {retries} برای همین API (ممکن است هزینه تکرار شود).", "warning")
+            time.sleep(min(2 ** attempt, 8))
+    raise AssertionError("unreachable")
 
 
 def _content_text(content: Any) -> str:
@@ -266,6 +345,26 @@ def _response_text(payload: dict[str, Any], provider: str) -> str:
         if text:
             return text
     return _content_text(choice.get("text"))
+
+
+def _empty_response_error(payload: Any) -> str:
+    """Explain a provider error carried in an otherwise successful HTTP response."""
+    if not isinstance(payload, dict):
+        return "AI returned an empty translation (HTTP 200)."
+    error = payload.get("error")
+    if isinstance(error, dict):
+        detail = " | ".join(str(error[k]) for k in ("message", "code", "type", "status") if error.get(k) is not None)
+    elif isinstance(error, str):
+        detail = error
+    else:
+        detail = ""
+    feedback = payload.get("promptFeedback")
+    if isinstance(feedback, dict) and feedback.get("blockReason"):
+        detail = f"{detail} blockReason={feedback['blockReason']}".strip()
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict) and candidates[0].get("finishReason"):
+        detail = f"{detail} finishReason={candidates[0]['finishReason']}".strip()
+    return "AI returned an empty translation (HTTP 200)." + (f" Provider detail: {detail}" if detail else "")
 
 
 def _ai_prompt(source_language: str) -> tuple[str, str]:
@@ -323,7 +422,7 @@ class TranslationService:
                 "keyUrl": info["key_url"],
                 "keyLabel": info["key_label"],
                 "profiles": [
-                    {"id": profile["id"], "name": profile["name"], "hasApiKey": bool(profile["api_key"])}
+                    {"id": profile["id"], "name": profile["name"], "hasApiKey": bool(profile["api_key"]), **_profile_policy(profile)}
                     for profile in config["profiles"]
                 ],
             }
@@ -382,11 +481,12 @@ class TranslationService:
                             "id": profile_id,
                             "name": str(item.get("name") or previous.get("name") or "").strip()[:160],
                             "api_key": key,
+                            **_profile_policy({**_profile_policy(previous), **{k: item[k] for k in ("timeout_seconds", "retry_count") if k in item}}, strict=True),
                         })
                     config["profiles"] = profiles
                 elif name == provider and "api_key" in values:
                     # Backward-compatible single-key update used by older API clients.
-                    previous = config["profiles"][0] if config["profiles"] else {"id": "legacy", "name": "کلید اصلی", "api_key": ""}
+                    previous = config["profiles"][0] if config["profiles"] else {"id": "legacy", "name": "کلید اصلی", "api_key": "", **_profile_policy({})}
                     supplied_key = values.get("api_key")
                     if supplied_key is None or not str(supplied_key).strip():
                         key = previous["api_key"]
@@ -421,7 +521,7 @@ class TranslationService:
             {
                 "provider": provider, "model": config["model"], "base_url": config["base_url"],
                 "api_key": profile["api_key"], "profile_id": profile["id"],
-                "profile_name": profile["name"] or f"API {index + 1}",
+                "profile_name": profile["name"] or f"API {index + 1}", **_profile_policy(profile),
             }
             for index, profile in enumerate(config["profiles"]) if profile["api_key"]
         ]
@@ -439,28 +539,28 @@ class TranslationService:
             if not profiles:
                 raise TranslationError(f"برای {AI_PROVIDERS[selected]['label']} حداقل یک کلید API معتبر وارد کنید.")
             failures: list[str] = []
+            secrets = [p["api_key"] for c in settings["providers"].values() for p in c["profiles"] if p["api_key"]]
             for profile in profiles:
-                name = profile["profile_name"]
-                emit(f"ترجمه با {AI_PROVIDERS[selected]['label']} و {name}…")
-                try:
+                name = _redact_diagnostic(profile["profile_name"], secrets)
+                emit(f"ترجمه با {AI_PROVIDERS[selected]['label']} و {name} (انتظار {profile['timeout_seconds']} ثانیه، {profile['retry_count']} تکرار)…")
+                def request_translation() -> str:
                     translated = self._gemini(text, source_language, profile) if selected == "gemini" else self._openai(text, source_language, profile)
                     if not translated.strip():
                         raise TranslationError("این کلید پاسخ قابل‌استفاده‌ای نداشت.")
                     normalized = normalize_translation_text(translated)
-                    # Validate against actual source blocks before accepting a key.
-                    # Single-block translations need no line-count constraint.
                     if source_texts is not None:
                         distribute_translation(source_texts, normalized)
+                    return normalized
+                try:
+                    normalized = _run_with_retries(request_translation, profile, selected, secrets)
                     emit(f"پاسخ ترجمه با {name} دریافت شد.", "success")
                     return normalized
                 except Exception as exc:
+                    message = _safe_error(exc, selected, secrets)
                     if isinstance(exc, httpx.TransportError):
-                        # The remote service may have accepted and billed the
-                        # request even if its response was lost. Never send the
-                        # same page with the next key automatically in this case.
-                        emit(f"پاسخ {name} به‌علت خطای ارتباطی دریافت نشد؛ تلاش خودکار با کلید بعدی متوقف شد.", "error")
-                        raise TranslationError("ارتباط یا زمان انتظار پاسخ قطع شد؛ ممکن است سرویس درخواست را پردازش یا هزینه را حساب کرده باشد. برای جلوگیری از درخواست تکراری، کلید بعدی خودکار امتحان نشد.") from exc
-                    message = _safe_error(exc, selected)
+                        emit(f"پاسخ {name} به‌علت خطای ارتباطی دریافت نشد: {message}؛ کلید بعدی خودکار امتحان نشد.", "error")
+                        previous = (" خطاهای کلیدهای قبلی: " + "؛ ".join(failures)) if failures else ""
+                        raise TranslationError(f"ارتباط {name} قطع شد (سقف انتظار هر مرحله {profile['timeout_seconds']} ثانیه، حداکثر {profile['retry_count']} تکرار)؛ ممکن است سرویس درخواست را پردازش یا هزینه را حساب کرده باشد. کلید بعدی خودکار امتحان نشد. جزئیات واقعی: {message}{previous}") from exc
                     failures.append(f"{name}: {message}")
                     emit(f"تلاش با {name} ناموفق بود: {message}", "error")
             raise TranslationError("هیچ‌یک از کلیدهای این سرویس پاسخ قابل‌استفاده‌ای ندادند. " + "؛ ".join(failures))
@@ -526,12 +626,13 @@ class TranslationService:
         response = httpx.post(
             base_url + "/chat/completions",
             headers={"Authorization": f"Bearer {settings['api_key']}"},
-            json=payload, timeout=90, follow_redirects=True,
+            json=payload, timeout=settings.get("timeout_seconds", DEFAULT_AI_TIMEOUT), follow_redirects=True,
         )
         response.raise_for_status()
-        translated = _response_text(response.json(), provider).strip()
+        payload_result = response.json()
+        translated = _response_text(payload_result, provider).strip()
         if not translated:
-            raise TranslationError("AI returned an empty translation")
+            raise TranslationError(_empty_response_error(payload_result))
         return translated
 
     def _gemini(self, text: str, source_language: str, settings: dict[str, Any]) -> str:
@@ -548,12 +649,13 @@ class TranslationService:
                 "contents": [{"role": "user", "parts": [{"text": f"Source language: {source}\n\n{text}"}]}],
                 "generationConfig": {"temperature": 0.2},
             },
-            timeout=90, follow_redirects=True,
+            timeout=settings.get("timeout_seconds", DEFAULT_AI_TIMEOUT), follow_redirects=True,
         )
         response.raise_for_status()
-        translated = _response_text(response.json(), "gemini").strip()
+        payload_result = response.json()
+        translated = _response_text(payload_result, "gemini").strip()
         if not translated:
-            raise TranslationError("AI returned an empty translation")
+            raise TranslationError(_empty_response_error(payload_result))
         return translated
 
     def test_connection(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -588,12 +690,16 @@ class TranslationService:
 
         headers = {"x-goog-api-key": key} if provider == "gemini" else {"Authorization": f"Bearer {key}"}
         url = f"{base_url}/models/{quote(model, safe='')}" if provider == "gemini" else f"{base_url}/models"
-        try:
-            response = httpx.get(url, headers=headers, timeout=30, follow_redirects=True)
+        policy = _profile_policy(selected_profile or {})
+        secrets = [p["api_key"] for c in settings["providers"].values() for p in c["profiles"] if p["api_key"]] + [key]
+        def request_models() -> Any:
+            response = httpx.get(url, headers=headers, timeout=policy["timeout_seconds"], follow_redirects=True)
             response.raise_for_status()
-            payload = response.json()
+            return response.json()
+        try:
+            payload = _run_with_retries(request_models, policy, provider, secrets)
         except (httpx.HTTPError, ValueError) as exc:
-            raise TranslationError(_safe_error(exc, provider)) from exc
+            raise TranslationError(_safe_error(exc, provider, secrets)) from exc
 
         if provider == "gemini":
             if not isinstance(payload, dict) or payload.get("name") != f"models/{model}":

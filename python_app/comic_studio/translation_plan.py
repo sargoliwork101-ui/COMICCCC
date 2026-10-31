@@ -178,6 +178,8 @@ def plan_signature(
         "source_language": source_language,
         "model": config.get("model", "") if provider != "free" else "",
         "base_url": config.get("base_url", "") if provider != "free" else "",
+        # Confirm retry/cost and timeout policy as well as the text and destination.
+        "profile_policy": [{"id": p.get("id", ""), "timeout_seconds": p.get("timeout_seconds", 90), "retry_count": p.get("retry_count", 0), "hasApiKey": p.get("hasApiKey", False)} for p in config.get("profiles", [])] if provider != "free" else [],
         "keys": plan["keys"],
         # Equal joined payloads can have different per-box line boundaries.
         "source_texts": plan["source_texts"],
@@ -215,7 +217,11 @@ def plan_preview(
         label = AI_PROVIDERS.get(provider, {}).get("label", provider)
         note = ("صفحه‌های بیش از ۱۰۰۰ نویسه کادر به کادر فرستاده می‌شوند؛ کادر بلندتر نیز به بخش‌های حداکثر ۱۰۰۰ نویسه تقسیم می‌شود. "
                 + ("هر پاسخ پیش از درخواست بعد بررسی و ذخیره می‌شود. " if plan["items"] else "بازترجمهٔ یک کادر پس از دریافت همهٔ بخش‌ها ثبت می‌شود. ")
-                + "در برخی خطاهای سرویس یا پاسخ نامعتبر، کلید بعدی همان متن را تکرار می‌کند؛ در قطع ارتباط یا timeout تکرار خودکار متوقف می‌شود.")
+                + "تعداد نمایش‌داده‌شده بدون تکرارهاست؛ تکرار ممکن است هزینه داشته باشد. در برخی خطاها کلید بعدی همان متن را امتحان می‌کند. پس از پایان تکرار خطای ارتباطی، کلید بعدی خودکار امتحان نمی‌شود.")
+        profiles = [profile for profile in config.get("profiles", []) if profile.get("hasApiKey")]
+        if profiles:
+            policies = [f"{profile.get('name') or f'API {index}'}: انتظار {profile.get('timeout_seconds', 90)} ثانیه، {profile.get('retry_count', 0)} تکرار" for index, profile in enumerate(profiles, start=1)]
+            note += " تنظیمات: " + "؛ ".join(policies) + "."
     pages = []
     tasks = []
     if provider != "free":

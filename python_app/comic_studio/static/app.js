@@ -596,7 +596,7 @@ async function runOcr() {
 }
 function showTranslationRequestPreview(preview, action) {
   translationPreviewAction = action;
-  $('translationPreviewSummary').textContent = `${preview.blockCount} متن · ${preview.requestCount} درخواست واقعی برای بررسی`;
+  $('translationPreviewSummary').textContent = `${preview.blockCount} متن · ${preview.requestCount} درخواست پایه برای بررسی (بدون تکرار)`;
   const destination = [preview.providerLabel, preview.model && `مدل: ${preview.model}`, preview.base_url && `نشانی: ${preview.base_url}`, preview.fallback_url && `فقط هنگام خطا: ${preview.fallback_url}`].filter(Boolean).join(' · ');
   $('translationPreviewDestination').textContent = destination;
   $('translationPreviewNote').textContent = preview.note || '';
@@ -620,7 +620,7 @@ async function confirmTranslationRequestPreview() {
   translationPreviewAction = null; $('translationPreviewConfirm').disabled = true;
   closeDialog('translationPreviewDialog');
   try { translationPreviewTask = action(); await translationPreviewTask; }
-  catch (error) { toast(error.message || 'ترجمه ناموفق بود', true); }
+  catch (error) { if (!$('translationDialog').open) { $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`; $('copyTranslationError').classList.remove('hidden'); showDialog('translationDialog'); } toast(error.message || 'ترجمه ناموفق بود', true); }
   finally { $('translationPreviewConfirm').disabled = false; }
 }
 async function runTranslation() {
@@ -634,7 +634,7 @@ async function runTranslation() {
   } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
 }
 async function performTranslation(ids, provider, preview) {
-  translationRunning = true; showDialog('translationDialog'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; $('translationProgress').style.width = '0';
+  translationRunning = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; $('translationProgress').style.width = '0';
   const projectId = state.project.id; const language = $('ocrLanguage').value; let completed = 0; let currentPage = ''; let phase = 'translation';
   try {
     await runJob('در حال ترجمهٔ متن‌ها…', async () => {
@@ -661,10 +661,10 @@ async function performTranslation(ids, provider, preview) {
     closeDialog('translationDialog'); toast('ترجمه روی تصویر آمد و پیش‌نمایش آماده شد');
   } catch (error) {
     if (provider !== 'free') {
-      const outcome = phase !== 'translation' ? 'پاسخ این درخواست ذخیره شده، اما به‌روزرسانی پیش‌نمایش یا تنظیمات کامل نشد.' : (error.status ? 'پاسخ درخواست ناموفق ذخیره نشده است.' : 'وضعیت صفحهٔ جاری نامشخص است؛ قبل از ارسال دوباره گزارش و پروژه را بررسی کنید.');
+      const outcome = phase !== 'translation' ? 'پاسخ این درخواست ذخیره شده، اما به‌روزرسانی پیش‌نمایش یا تنظیمات کامل نشد.' : 'وضعیت درخواست جاری ممکن است نامشخص باشد؛ قبل از ارسال دوباره گزارش و پروژه را بررسی کنید.';
       error.message = `${completed} درخواست با موفقیت ذخیره شد؛ در صفحهٔ «${currentPage || 'اول'}» متوقف شد. ${outcome} ${error.message || ''} برای ادامه، فقط صفحه‌های باقی‌مانده و صفحهٔ ناتمام را انتخاب و پیش‌نمایش تازه را تأیید کنید؛ بخش‌های ذخیره‌شدهٔ صفحهٔ ناتمام دوباره فرستاده نمی‌شوند.`;
     }
-    $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`; throw error;
+    $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`; $('copyTranslationError').classList.remove('hidden'); throw error;
   } finally {
     translationRunning = false;
   }
@@ -793,7 +793,7 @@ function makeAiProfile(profile = {}, index = 0) {
   return {
     id: String(profile.id || `api-${Date.now().toString(36)}-${aiProfileSerial}`),
     name: String(profile.name || ''), hasApiKey: profile.hasApiKey === true,
-    apiKey: String(profile.apiKey || ''),
+    apiKey: String(profile.apiKey || ''), timeout_seconds: String(profile.timeout_seconds ?? 90), retry_count: String(profile.retry_count ?? 0),
   };
 }
 function captureAiProvider() {
@@ -849,7 +849,7 @@ function renderAiProfiles() {
       if (!profile.apiKey.trim() && !profile.hasApiKey) {
         status.textContent = 'ابتدا کلید API را وارد کنید.'; key.focus(); return;
       }
-      test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی…';
+      test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی…'; $('copyAiError').classList.add('hidden');
       try {
         await saveAiSettings({ quiet: true });
         const result = await api('/api/ai-settings/test', jsonOptions('POST', {
@@ -859,7 +859,7 @@ function renderAiProfiles() {
         const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
         if (currentRow) currentRow.querySelector('.ai-profile-status').textContent = 'اتصال برقرار است ✓';
       } catch (error) {
-        $('aiStatus').textContent = error.message;
+        $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden');
         const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
         (currentRow?.querySelector('.ai-profile-status') || status).textContent = error.message;
       } finally {
@@ -868,7 +868,17 @@ function renderAiProfiles() {
         currentTest.disabled = false; currentTest.textContent = 'تست';
       }
     });
-    row.append(name, key, test, remove, status); container.appendChild(row);
+    const options = document.createElement('div'); options.className = 'ai-profile-options';
+    const addSetting = (labelText, field, min, max) => {
+      const label = document.createElement('label'); label.textContent = labelText;
+      const input = document.createElement('input'); input.type = 'number'; input.dir = 'ltr';
+      input.className = `ai-profile-${field}`; input.min = String(min); input.max = String(max); input.step = '1';
+      input.value = profile[field]; input.setAttribute('aria-label', `${labelText} API ${index + 1}`);
+      input.addEventListener('input', () => { profile[field] = input.value; }); label.appendChild(input); options.appendChild(label);
+    };
+    addSetting('زمان انتظار (ثانیه، ۵ تا ۶۰۰)', 'timeout_seconds', 5, 600);
+    addSetting('تکرار اضافی (۰ تا ۵)', 'retry_count', 0, 5);
+    row.append(name, key, test, remove, options, status); container.appendChild(row);
   });
 }
 function showAiProvider(provider, capture = true) {
@@ -876,7 +886,7 @@ function showAiProvider(provider, capture = true) {
   aiEditorProvider = AI_PROVIDER_IDS.includes(provider) ? provider : 'free';
   $('aiProvider').value = aiEditorProvider;
   $('aiFields').classList.toggle('hidden', aiEditorProvider === 'free');
-  if (aiEditorProvider === 'free') { $('aiStatus').textContent = ''; return; }
+  if (aiEditorProvider === 'free') { $('aiStatus').textContent = ''; $('copyAiError').classList.add('hidden'); return; }
   const info = aiInfo();
   const draft = aiEditorDrafts.get(aiEditorProvider);
   const sourceProfiles = draft?.profiles || info.profiles || [];
@@ -884,7 +894,7 @@ function showAiProvider(provider, capture = true) {
   if (!aiEditorProfiles.length) aiEditorProfiles.push(makeAiProfile({ name: 'کلید اول' }));
   $('aiModel').value = draft?.model || info.model || info.defaultModel || '';
   $('aiBaseUrl').value = draft?.base_url || info.base_url || '';
-  updateAiProviderUi(); renderAiProfiles(); $('aiStatus').textContent = '';
+  updateAiProviderUi(); renderAiProfiles(); $('aiStatus').textContent = ''; $('copyAiError').classList.add('hidden');
 }
 async function loadAiSettings() {
   state.ai = await api('/api/ai-settings');
@@ -897,11 +907,18 @@ function aiSettingsPayload() {
     const info = aiInfo(provider);
     const draft = aiEditorDrafts.get(provider);
     const profiles = draft?.profiles || info.profiles || [];
+    const intSetting = (profile, key, min, max) => {
+      const raw = String(profile[key] ?? (key === 'timeout_seconds' ? 90 : 0));
+      const value = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) throw new Error(`تنظیم ${profile.name || 'API'}: ${key === 'timeout_seconds' ? 'زمان انتظار باید بین ۵ تا ۶۰۰' : 'تکرار باید بین ۰ تا ۵'} و عدد صحیح باشد.`);
+      return value;
+    };
     providers[provider] = {
       model: draft?.model || info.model || info.defaultModel,
       base_url: draft?.base_url || info.base_url,
       profiles: profiles.map((profile) => ({
         id: profile.id, name: profile.name || '',
+        timeout_seconds: intSetting(profile, 'timeout_seconds', 5, 600), retry_count: intSetting(profile, 'retry_count', 0, 5),
         ...(profile.apiKey?.trim() ? { api_key: profile.apiKey.trim() } : {}),
       })),
     };
@@ -1632,6 +1649,8 @@ function bindEvents() {
   $('duplicateBtn').addEventListener('click', () => duplicateImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('ocrBtn').addEventListener('click', () => { updateEngineOptions(); showDialog('ocrDialog'); }); $('ocrEngine').addEventListener('change', updateOcrEngineStatus); $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
+  $('copyTranslationError').addEventListener('click', () => copyBlockText($('translationStatus').textContent).catch((error) => toast(error.message, true)));
+  $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { translationPreviewAction = null; });
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', () => saveAiSettings().catch((error) => { $('aiStatus').textContent = error.message; toast(error.message, true); }));
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));

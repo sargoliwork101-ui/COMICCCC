@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.41">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.41">
+  <link rel="stylesheet" href="/style.css?v=3.43">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.43">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۴۱ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۴۳ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
     <button id="menuBtn" class="bt">☰ پروژه و تنظیمات</button>
   </header>
 
@@ -103,7 +103,9 @@
 
   <dialog id="translationDialog" class="dlg small-dialog">
     <form method="dialog" class="dialog-head"><h2>ترجمهٔ متن‌ها</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
-    <p id="translationStatus" class="hint" role="status">آماده</p>
+    <p id="translationStatus" class="hint diagnostic-message" role="status">آماده</p>
+    <button id="copyTranslationError" class="bt hidden" type="button">کپی پیام خطا</button>
+    <p class="hint">پیش از ارسال خطا، مطمئن شوید اطلاعات شخصی یا محرمانه داخل آن نیست.</p>
     <div class="bar"><div id="translationProgress" class="fill"></div></div>
     <div id="translationActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <p class="hint">پیش از ارسال، متن و مقصد همهٔ درخواست‌ها نمایش داده می‌شوند. کادرها با خط جدید معمولی ترکیب می‌شوند؛ در پاسخ چندکادری تعداد خط‌ها باید با متن مبدأ یکسان باشد تا هر خط در کادر درست قرار گیرد. برای سرویس رایگان، متن جمعی تا ۵۰۰ نویسه در یک query می‌رود و متن طولانی‌تر جدا و تا حد ممکن در مرز جمله تقسیم می‌شود. برای AI، صفحه تا ۱۰۰۰ نویسهٔ متن OCR یکجا فرستاده می‌شود؛ صفحهٔ بلندتر کادر به کادر و کادر بیش از ۱۰۰۰ نویسه بخش‌بخش ارسال می‌شود. هر پاسخ پیش از ارسال بعدی بررسی و ذخیره می‌شود. دستور سیستم و توضیح زبان جزو سقف متن OCR نیستند. برای ادامه پس از خطا، صفحهٔ ناتمام و صفحه‌های بعدی را انتخاب کنید؛ بندهای ذخیره‌شدهٔ صفحهٔ ناتمام دوباره ارسال نمی‌شوند.</p>
@@ -127,10 +129,11 @@
       <div class="ai-profile-heading"><span>کلیدهای API و نام دلخواه هرکدام</span><button id="aiAddProfile" class="bt" type="button">افزودن API</button></div>
       <div id="aiProfiles" class="ai-profile-list"></div>
       <p class="hint"><a id="aiKeyHelp" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلیدها فقط در فایل تنظیمات همین کامپیوتر ذخیره می‌شوند و به مرورگر برگردانده نمی‌شوند.</p>
-      <p class="hint">«تست» هر ردیف فقط اتصال همان کلید و وجود مدل انتخاب‌شده را بررسی می‌کند و متن کمیک ارسال نمی‌کند. هنگام ترجمه، کلیدها از بالا به پایین و هرکدام فقط یک بار امتحان می‌شوند.</p>
+      <p class="hint">«تست» متن کمیک نمی‌فرستد. زمان انتظار و تعداد تکرار اضافی برای هر کلید جداست؛ صفر یعنی بدون تکرار همان کلید. در خطاهای موقت یا پاسخ نامعتبر تکرار انجام می‌شود؛ خطای اتصال پس از پایان تکرارها کار را متوقف می‌کند. خطاهای دیگر ممکن است کلید بعدی را امتحان کنند. این زمان سقف هر مرحلهٔ اتصال/خواندن است، نه الزاماً کل زمان درخواست. تکرار ممکن است هزینهٔ دوباره داشته باشد.</p>
     </div>
     <p class="hint">تصویر برای ترجمه ارسال نمی‌شود؛ فقط متن OCR به سرویس انتخابی داده می‌شود. برای AI آفلاین می‌توانید نشانی یک سرویس محلی سازگار با OpenAI بدهید. انتخاب رایگان هیچ درخواست AI انجام نمی‌دهد.</p>
-    <div id="aiStatus" class="hint" role="status" aria-live="polite"></div>
+    <div id="aiStatus" class="hint diagnostic-message" role="status" aria-live="polite"></div>
+    <button id="copyAiError" class="bt hidden" type="button">کپی پیام خطا</button>
     <div class="dialog-actions"><button id="saveAiBtn" class="bt primary" type="button">ذخیره</button></div>
   </dialog>
 
@@ -184,10 +187,10 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.41"></script>
-  <script src="/groups.js?v=3.41"></script>
-  <script src="/rich-sanitize.js?v=3.41"></script>
-  <script src="/rich-editor.js?v=3.41"></script>
-  <script src="/app.js?v=3.41"></script>
+  <script src="/typeset.js?v=3.43"></script>
+  <script src="/groups.js?v=3.43"></script>
+  <script src="/rich-sanitize.js?v=3.43"></script>
+  <script src="/rich-editor.js?v=3.43"></script>
+  <script src="/app.js?v=3.43"></script>
 </body>
 </html>

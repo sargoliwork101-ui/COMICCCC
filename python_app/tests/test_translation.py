@@ -165,7 +165,7 @@ def test_provider_settings_keep_models_and_keys_separate_without_exposing_secret
     })
     assert public["providers"]["openai"]["model"] == "gpt-custom"
     assert public["providers"]["gemini"]["model"] == "gemini-custom"
-    assert public["providers"]["openai"]["profiles"] == [{"id": "open-1", "name": "OpenAI من", "hasApiKey": True}]
+    assert public["providers"]["openai"]["profiles"] == [{"id": "open-1", "name": "OpenAI من", "hasApiKey": True, "timeout_seconds": 90, "retry_count": 0}]
     assert "open-secret" not in json.dumps(public) and "gem-secret" not in json.dumps(public)
 
     public = service.save_settings({"provider": "gemini", "providers": public["providers"]})
@@ -335,4 +335,136 @@ def test_ai_timeout_never_automatically_resends_page_with_another_key(tmp_path, 
     with pytest.raises(TranslationError, match='کلید بعدی خودکار امتحان نشد') as error:
         service.translate('one page', 'eng', 'openai', ['one page'])
     assert calls == ['Bearer one']
-    assert 'private detail' not in str(error.value)
+    assert 'ReadTimeout' in str(error.value) and 'private detail' in str(error.value)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("timeout_seconds", 4), ("timeout_seconds", 601), ("timeout_seconds", True),
+    ("timeout_seconds", "90"), ("retry_count", -1), ("retry_count", 6), ("retry_count", 1.5),
+])
+def test_invalid_profile_policy_is_rejected_without_losing_settings(tmp_path, monkeypatch, field, value):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({"provider": "avalai", "api_key": "secret"})
+    with pytest.raises(ValueError, match="عدد صحیح"):
+        service.save_settings({"provider": "avalai", "providers": {"avalai": {"profiles": [{"id": "legacy", field: value}]}}})
+    assert service._secret()["api_key"] == "secret"
+
+
+def test_profile_policies_are_independent_and_preserved_without_resending_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    public = service.save_settings({"provider": "avalai", "providers": {"avalai": {"profiles": [
+        {"id": "a", "api_key": "secret-a", "timeout_seconds": 125, "retry_count": 2},
+        {"id": "b", "api_key": "secret-b", "timeout_seconds": 20, "retry_count": 1},
+    ]}}})
+    assert [p["timeout_seconds"] for p in public["providers"]["avalai"]["profiles"]] == [125, 20]
+    assert [p["retry_count"] for p in public["providers"]["avalai"]["profiles"]] == [2, 1]
+    assert "secret-a" not in json.dumps(public)
+    service.save_settings({"provider": "avalai", "providers": public["providers"]})
+    assert [p["api_key"] for p in service._secret()["providers"]["avalai"]["profiles"]] == ["secret-a", "secret-b"]
+    assert service.public_settings()["providers"]["avalai"]["profiles"][0]["retry_count"] == 2
+
+
+def test_retry_timeout_exhaustion_shows_safe_actual_error_and_stops_before_next_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({"provider": "avalai", "providers": {"avalai": {"profiles": [
+        {"id": "a", "name": "first", "api_key": "real-private-key", "timeout_seconds": 135, "retry_count": 2},
+        {"id": "b", "api_key": "other-private-key", "timeout_seconds": 12, "retry_count": 1},
+    ]}}})
+    monkeypatch.setattr("comic_studio.translation.time.sleep", lambda _: None)
+    calls = []
+    def post(url, **kwargs):
+        calls.append((kwargs["headers"]["Authorization"], kwargs["timeout"]))
+        raise httpx.ReadTimeout("socket timed out; key=real-private-key and other-private-key")
+    monkeypatch.setattr(httpx, "post", post)
+    with pytest.raises(TranslationError) as caught:
+        service.translate("hello", "eng", "avalai")
+    message = str(caught.value)
+    assert calls == [("Bearer real-private-key", 135)] * 3
+    assert "ReadTimeout" in message and "socket timed out" in message
+    assert "real-private-key" not in message and "other-private-key" not in message
+    assert "کلید بعدی خودکار امتحان نشد" in message
+
+
+def test_http_status_and_provider_message_redacted_and_retry_then_success(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({"provider": "openai", "providers": {"openai": {"profiles": [
+        {"id": "a", "api_key": "sensitive-secret", "timeout_seconds": 44, "retry_count": 1}
+    ]}}})
+    monkeypatch.setattr("comic_studio.translation.time.sleep", lambda _: None)
+    calls = []
+    def post(url, **kwargs):
+        calls.append(kwargs["timeout"])
+        if len(calls) == 1:
+            return httpx.Response(429, json={"error": {"message": "Rate limit sensitive-secret", "code": "quota_exceeded"}}, request=httpx.Request("POST", url))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ترجمه"}}]}, request=httpx.Request("POST", url))
+    monkeypatch.setattr(httpx, "post", post)
+    assert service.translate("hello", "eng", "openai") == "ترجمه"
+    assert calls == [44, 44]
+    def reject(url, **kwargs):
+        return httpx.Response(401, json={"error": {"message": "wrong key sensitive-secret", "code": "invalid_api_key"}}, request=httpx.Request("POST", url))
+    monkeypatch.setattr(httpx, "post", reject)
+    with pytest.raises(TranslationError) as caught:
+        service.translate("hello", "eng", "openai")
+    assert "HTTP 401" in str(caught.value) and "wrong key" in str(caught.value)
+    assert "invalid_api_key" in str(caught.value) and "sensitive-secret" not in str(caught.value)
+
+
+def test_connection_test_uses_profile_policy_and_reports_real_redacted_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({"provider": "gemini", "providers": {"gemini": {"profiles": [
+        {"id": "g", "api_key": "gemini-secret", "timeout_seconds": 22, "retry_count": 1}
+    ]}}})
+    monkeypatch.setattr("comic_studio.translation.time.sleep", lambda _: None)
+    calls = []
+    def get(url, **kwargs):
+        calls.append(kwargs["timeout"])
+        return httpx.Response(503, json={"error": {"message": "temporarily unavailable", "status": "UNAVAILABLE"}}, request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx, "get", get)
+    with pytest.raises(TranslationError) as caught:
+        service.test_connection({"provider": "gemini", "profile_id": "g"})
+    assert calls == [22, 22]
+    assert "HTTP 503" in str(caught.value) and "temporarily unavailable" in str(caught.value)
+    assert "gemini-secret" not in str(caught.value)
+
+
+def test_bad_ai_response_is_retried_only_when_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    service = TranslationService()
+    service.save_settings({"provider": "openai", "providers": {"openai": {"profiles": [
+        {"id": "a", "api_key": "secret", "retry_count": 1}
+    ]}}})
+    monkeypatch.setattr("comic_studio.translation.time.sleep", lambda _: None)
+    calls = []
+    def post(url, **kwargs):
+        calls.append(1)
+        text = "one line" if len(calls) == 1 else "یک\nدو"
+        return httpx.Response(200, json={"choices": [{"message": {"content": text}}]}, request=httpx.Request("POST", url))
+    monkeypatch.setattr(httpx, "post", post)
+    assert service.translate("first\nsecond", "eng", "openai", ["first", "second"]) == "یک\nدو"
+    assert len(calls) == 2
+
+
+def test_200_error_payload_and_html_title_preserve_diagnostics_without_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    service = TranslationService()
+    service.save_settings({'provider': 'openai', 'api_key': 'private-key'})
+    def payload_error(url, **kwargs):
+        return httpx.Response(200, json={'error': {'message': 'credits exhausted private-key', 'code': 'quota'}}, request=httpx.Request('POST', url))
+    monkeypatch.setattr(httpx, 'post', payload_error)
+    with pytest.raises(TranslationError) as caught:
+        service.translate('hello', 'eng')
+    assert 'HTTP 200' in str(caught.value) and 'credits exhausted' in str(caught.value) and 'quota' in str(caught.value)
+    assert 'private-key' not in str(caught.value)
+    def html_error(url, **kwargs):
+        return httpx.Response(502, text='<html><title>Gateway failed private-key</title><body>do not include body</body></html>',
+                              headers={'content-type': 'text/html'}, request=httpx.Request('POST', url))
+    monkeypatch.setattr(httpx, 'post', html_error)
+    with pytest.raises(TranslationError) as caught:
+        service.translate('hello', 'eng')
+    assert 'HTTP 502' in str(caught.value) and 'Gateway failed' in str(caught.value)
+    assert 'private-key' not in str(caught.value) and 'do not include body' not in str(caught.value)

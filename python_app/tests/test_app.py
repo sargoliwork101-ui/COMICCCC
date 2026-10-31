@@ -43,11 +43,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.42"
+    assert health.json()["version"] == "3.43"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۴۱ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۴۳ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -1187,3 +1187,52 @@ def test_backup_includes_unselected_pages_and_rejects_stale_revision(client):
     assert result.status_code == 201
     assert len(result.json()['project']['images']) == 2
     assert result.json()['project']['images'][1]['selected'] is False
+
+
+def test_ai_policy_change_invalidates_confirmed_preview(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+    project, item = make_project(client)
+    project['images'][0]['blocks'] = [{'id': 1, 'text': 'hello', 'tr': 'old', 'enabled': True}]
+    route = f"/api/projects/{project['id']}"
+    assert client.put(f'{route}/state', json={'state': project}).status_code == 200
+    profile = {'id': 'a', 'api_key': 'secret', 'timeout_seconds': 90, 'retry_count': 0}
+    assert client.put('/api/ai-settings', json={'provider': 'openai', 'providers': {'openai': {'profiles': [profile]}}}).status_code == 200
+    req = {'image_ids': [item['id']], 'provider': 'openai'}
+    preview = client.post(f'{route}/translation-preview', json=req).json()
+    profile['retry_count'] = 2
+    assert client.put('/api/ai-settings', json={'provider': 'openai', 'providers': {'openai': {'profiles': [profile]}}}).status_code == 200
+    monkeypatch.setattr(TranslationService, 'translate', lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not send')))
+    task = preview['tasks'][0]
+    response = client.post(f'{route}/translate', json={**req, 'call_id': task['callId'], 'confirmation': task['signature']})
+    assert response.status_code == 409
+
+
+def test_ai_real_error_and_retries_reach_response_and_activity_without_secret(client, monkeypatch):
+    secret = 'a-very-sensitive-api-key'
+    settings = {'provider': 'avalai', 'providers': {'avalai': {'profiles': [
+        {'id': 'first', 'name': 'حساب من', 'api_key': secret, 'timeout_seconds': 25, 'retry_count': 1}
+    ]}}}
+    assert client.put('/api/ai-settings', json=settings).status_code == 200
+    monkeypatch.setattr('comic_studio.translation.time.sleep', lambda _: None)
+    calls = []
+    def post(url, **kwargs):
+        calls.append(kwargs['timeout'])
+        return httpx.Response(503, json={'error': {'message': f'maintenance: {secret}', 'code': 'service_busy'}},
+                              headers={'x-request-id': 'req-123'}, request=httpx.Request('POST', url))
+    monkeypatch.setattr(httpx, 'post', post)
+    project, item = make_project(client)
+    project['images'][0]['blocks'] = [{'id': 1, 'text': 'hello', 'tr': 'old', 'enabled': True}]
+    route = f"/api/projects/{project['id']}"
+    assert client.put(f'{route}/state', json={'state': project}).status_code == 200
+    req = {'image_ids': [item['id']], 'provider': 'avalai'}
+    preview = client.post(f'{route}/translation-preview', json=req).json()
+    task = preview['tasks'][0]
+    response = client.post(f'{route}/translate', json={**req, 'call_id': task['callId'], 'confirmation': task['signature']})
+    assert response.status_code == 502
+    assert calls == [25, 25]
+    assert 'HTTP 503' in response.text and 'maintenance' in response.text and 'service_busy' in response.text and 'req-123' in response.text
+    assert secret not in response.text
+    feed = str(client.get('/api/activity').json())
+    assert 'تکرار 1 از 1' in feed and 'HTTP 503' in feed
+    assert secret not in feed
+    assert client.get(route).json()['images'][0]['blocks'][0]['tr'] == 'old'
