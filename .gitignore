@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 python_app/.venv/
+python_app/.venv.previous-*/
 python_app/.data/
 python_app/static/assets/models/
 python_app/exports/
