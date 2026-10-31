@@ -209,6 +209,21 @@ def test_resume_can_edit_summary_and_budget_without_resending_successes(tmp_path
         assert 'خلاصهٔ اصلاح‌شده' in seen[1][1] and 'راهنمای تازه' in seen[1][2]
 
 
+def test_rolling_summary_auto_shortens_to_fit_next_safe_request():
+    from comic_studio.context_budget import ContextBudget, build_context_request
+    from comic_studio.context_run import create_run, next_request
+    import copy
+    budget = ContextBudget(1000, 15, 0)
+    empty = build_context_request(budget, 'English', '', '')
+    source = 'A' * 499 + '.'
+    state = {'images':[{'id':'p','name':'page','order':0,'blocks':[{'id':1,'text':source,'enabled':True}]}]}
+    run = create_run(copy.deepcopy(state), ['p'], 'openai', 'eng', '', 'x' * 90, 1000, 15, 0, False, {})
+    request, chosen = next_request(run, '')
+    assert run.get('contextAutoShortened') is True
+    assert 0 < len(run['context']) < 90
+    assert chosen and request.fits(chosen[0]['text'])
+
+
 def test_preflight_checks_later_unbreakable_line_before_any_send(tmp_path, monkeypatch):
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
     seen = []

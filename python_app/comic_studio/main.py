@@ -601,12 +601,13 @@ def create_app() -> FastAPI:
         active = [profile for profile in policy['profiles'] if profile['hasApiKey']]
         mode_label = 'حالت JSON سرویس' if context_uses_json(provider, policy['base_url'], policy.get('response_mode', 'auto')) else 'متن معمولی'
         policies = '؛ '.join(f"API {index}: زمان انتظار {p['timeout_seconds']}، تکرار {p['retry_count']}، فاصله {p['retry_wait_seconds']} ثانیه، سقف {p['source_limit']}" for index, p in enumerate(active, 1))
+        trim_notice = ' برای جا دادن جملهٔ بعدی در سقف، انتهای خلاصهٔ قبلی کوتاه شده است.' if run.get('contextAutoShortened') else ''
         return {'provider': provider, 'skill': '', 'defaultSkill': '', 'blockCount': len(run['jobs']),
                 'requestCount': 1 if chosen else 0, 'systemPrompt': request.system,
                 'requests': [{'index': 1, 'text': request.user_message(text), 'characters': request.character_count(text),
                               'imageName': first.get('imageName', '')}] if chosen else [],
                 'providerLabel': provider, 'model': policy['model'], 'base_url': policy['base_url'],
-                'note': f"درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.",
+                'note': f"درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.{trim_notice}",
                 'signature': digest(run), 'rollingMode': True, 'contextMode': True, 'summary': run['context'], 'skillLimit': request.skill_limit,
                 'contextLimit': request.context_limit, 'totalLimit': run['limit'], 'contextPercent': run['contextPercent'], 'skillPercent': run['skillPercent'], 'previewError': run.get('previewError', ''), 'resume': bool(run.get('id'))}
 
@@ -659,6 +660,8 @@ def create_app() -> FastAPI:
             policy = provider_policy(settings, run['provider'])
             verify_run(state, run, values.skill, policy)
             request, chosen = next_request(run, values.skill)
+            if run.pop('contextAutoShortened', False):
+                activity.add(f"خلاصهٔ قبلی برای جا دادن متن در سقف کوتاه شد؛ اکنون {len(run['context'])} نویسه است.", 'warning')
             if not chosen:
                 return {'project': state, 'done': True, 'affectedImageIds': []}
             source_texts = [entry['text'] for entry in chosen]

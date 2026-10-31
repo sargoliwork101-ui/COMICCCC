@@ -211,7 +211,36 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
             first, rest, join = split
             chosen.append({'job': index, 'text': first, 'rest': rest, 'join': join})
         elif not chosen:
-            raise TranslationError('خط یا جمله در فضای باقی‌مانده جا نمی‌شود؛ سقف را افزایش دهید یا خلاصه/متن OCR را اصلاح کنید. این درخواست ارسال نشد.')
+            # A rolling summary can grow after many successful requests and
+            # crowd out the next whole sentence. Reduce only its tail, keeping
+            # as much context as possible, until a safe source boundary fits.
+            original_context = run.get('context', '')
+            tried: set[str] = set()
+            fitted = False
+            for keep in range(len(original_context) - 1, -1, -1):
+                candidate = original_context[:keep].rstrip()
+                if keep < len(original_context) and candidate:
+                    boundary = candidate.rfind(' ')
+                    if boundary >= max(0, keep * 0.7): candidate = candidate[:boundary].rstrip()
+                if candidate in tried: continue
+                tried.add(candidate)
+                trial_run = {**run, 'context': candidate}
+                trial_request = build_run_request(trial_run, skill)
+                trial_split = safe_prefix(remaining, trial_request.fits, job.get('sourceLines'))
+                if trial_request.fits(remaining):
+                    chosen.append({'job': index, 'text': remaining, 'rest': '', 'join': ''})
+                elif trial_split:
+                    first, rest, join = trial_split
+                    chosen.append({'job': index, 'text': first, 'rest': rest, 'join': join})
+                else:
+                    continue
+                request = trial_request
+                run['context'] = candidate
+                run['contextAutoShortened'] = True
+                fitted = True
+                break
+            if not fitted:
+                raise TranslationError('خط یا جمله حتی با خلاصهٔ خالی در سقف جا نمی‌شود؛ سقف را افزایش دهید یا متن OCR را در مرز جمله اصلاح کنید. این درخواست ارسال نشد.')
         break
     return request, chosen
 
