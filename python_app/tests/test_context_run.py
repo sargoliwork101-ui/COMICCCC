@@ -3,7 +3,7 @@ import json
 from PIL import Image
 from support_client import scoped_client
 from comic_studio.main import create_app
-from comic_studio.context_run import safe_prefix
+from comic_studio.context_run import RUN_KEY, safe_prefix
 from comic_studio.translation import TranslationService
 
 
@@ -27,6 +27,28 @@ def test_safe_prefix_splits_sentence_boundaries_inside_one_ocr_line():
     source = first + ' ' + second
     part, rest, separator = safe_prefix(source, lambda value: len(value) <= len(first))
     assert part == first and rest == second and separator == ' '
+
+
+def test_context_start_merges_safe_concurrent_project_update(tmp_path, monkeypatch):
+    from comic_studio.store import ProjectStore
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    with scoped_client(create_app()) as client:
+        route, project = make_project(client)
+        client.put('/api/ai-settings',json={'provider':'openai','api_key':'key'})
+        req={'image_ids':[item['id'] for item in project['images']],'provider':'openai','skill':'x','summary':''}
+        preview=client.post(route+'/context-preview',json=req).json()
+        real_save_if_unchanged=ProjectStore.save_if_unchanged
+        injected={'done':False}
+        def race_once(self, state, expected_updated_at):
+            if RUN_KEY in state and not injected['done']:
+                latest=self.get(state['id']); latest['images'][0]['name']='renamed during preview'
+                self.save(latest); injected['done']=True
+            return real_save_if_unchanged(self,state,expected_updated_at)
+        monkeypatch.setattr(ProjectStore,'save_if_unchanged',race_once)
+        started=client.post(route+'/context-start',json={**req,'confirmation':preview['signature']})
+        assert started.status_code==200,started.text
+        assert started.json()['project']['images'][0]['name']=='renamed during preview'
+        assert started.json()['project'][RUN_KEY]['id']==started.json()['runId']
 
 
 def test_sequential_context_persists_and_reuses_with_one_approval(tmp_path, monkeypatch):

@@ -548,6 +548,7 @@ def create_app() -> FastAPI:
             # or API policy; source and target snapshots must still match.
             verify_run(state, run, values.skill, None, check_skill=False)
             run = copy.deepcopy(run)
+            run['baseResumeRunHash'] = digest(state.get(RUN_KEY))
             run['context'] = values.summary; run['skillHash'] = digest(values.skill); run['policyHash'] = digest(policy)
             run['limit'] = min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings)
             run['contextPercent'] = 0 if values.provider == 'free' else settings['context_percent']; run['skillPercent'] = 0 if values.provider == 'free' else settings['skill_percent']
@@ -631,6 +632,27 @@ def create_app() -> FastAPI:
             raise HTTPException(409, "اطلاعات یا تنظیمات پس از پیش‌نمایش تغییر کرده است؛ دوباره بررسی و تأیید کنید.")
         if not chosen:
             raise HTTPException(400, "متنی برای ترجمه وجود ندارد.")
+        def merge_latest_if_safe(latest: dict[str, Any]) -> None:
+            nonlocal state, expected
+            if latest.get('updatedAt', '') == expected:
+                return
+            policy_now = provider_policy(translations.public_settings(), values.provider)
+            verify_run(latest, run, values.skill, policy_now)
+            if digest(latest.get(SUMMARY_KEY, '')) != run.get('baseSummaryHash'):
+                raise ProjectChangedError('خلاصهٔ پروژه پس از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی کنید.')
+            expected_run_hash = run.get('baseResumeRunHash') if values.resume else run.get('basePreviousRunHash')
+            if digest(latest.get(RUN_KEY)) != expected_run_hash:
+                raise ProjectChangedError('وضعیت ترجمه پس از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی کنید.')
+            selected_ids = set(run['imageIds'])
+            current_legacy_hash = digest([{'imageId': item['id'], 'page': item.get(AI_PAGE_PROGRESS_KEY),
+                                           'parts': [block.get(AI_PARTS_KEY) for block in item.get('blocks', [])]}
+                                          for item in latest['images'] if item['id'] in selected_ids])
+            if current_legacy_hash != run.get('legacyHash'):
+                raise ProjectChangedError('پیشرفت ترجمهٔ قدیمی پس از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی کنید.')
+            state = latest; expected = latest.get('updatedAt', '')
+            activity.add('پروژه هنگام آماده‌سازی تغییر کرد؛ پس از بررسی امن، تغییرات هم‌زمان حفظ شدند.', 'warning')
+
+        merge_latest_if_safe(project(project_id))
         if not values.resume:
             run['id'] = uuid.uuid4().hex
             if values.restart_legacy:
@@ -640,7 +662,20 @@ def create_app() -> FastAPI:
                         for block in item.get('blocks', []): block.pop(AI_PARTS_KEY, None)
         state[RUN_KEY] = run
         if run['provider'] != 'free' and run['context']: state[SUMMARY_KEY] = run['context']
-        store.save_if_unchanged(state, expected)
+        try:
+            store.save_if_unchanged(state, expected)
+        except ProjectChangedError:
+            # A benign autosave may race the final start write. Re-read and
+            # merge only if source, targets, summary and run snapshot still match.
+            merge_latest_if_safe(project(project_id))
+            if not values.resume and values.restart_legacy:
+                for item in state['images']:
+                    if item['id'] in run['imageIds']:
+                        item.pop(AI_PAGE_PROGRESS_KEY, None)
+                        for block in item.get('blocks', []): block.pop(AI_PARTS_KEY, None)
+            state[RUN_KEY] = run
+            if run['provider'] != 'free' and run['context']: state[SUMMARY_KEY] = run['context']
+            store.save_if_unchanged(state, expected)
         return {'project': state, 'runId': run['id'], 'completed': run['completed']}
 
     @app.post("/api/projects/{project_id}/context-step")
