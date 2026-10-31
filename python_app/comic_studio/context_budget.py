@@ -140,10 +140,17 @@ def parse_context_response(response: str, source_texts: list[str], context_limit
     if not isinstance(value, dict) or not isinstance(value.get("translation"), str) or not isinstance(value.get("summary"), str):
         raise TranslationError("پاسخ AI فاقد ترجمه یا خلاصهٔ معتبر است؛ چیزی ذخیره نشد.")
     translation = value["translation"].strip()
-    summary = value["summary"]
-    if "\n" in summary or "\r" in summary or len(summary) > context_limit:
-        raise TranslationError(f"خلاصهٔ AI باید یک خط و حداکثر {context_limit} نویسه باشد؛ ترجمه و خلاصه ذخیره نشدند.")
-    summary = summary.strip()
+    # The prompt asks the model to obey this exact dynamic budget, but model
+    # output is not guaranteed. Normalize it locally so an overlong summary
+    # cannot discard an otherwise valid translation or consume the next request's
+    # budget. Prefer a whole-word boundary when one is close to the cap.
+    summary = " ".join(value["summary"].split()).strip()
+    if len(summary) > context_limit:
+        summary = summary[:context_limit]
+        word_boundary = summary.rfind(" ")
+        if word_boundary >= context_limit * 0.7:
+            summary = summary[:word_boundary]
+        summary = summary.rstrip()
     # Verify line-to-block mapping before callers commit either result.
     distribute_translation(source_texts, translation)
     return translation, summary

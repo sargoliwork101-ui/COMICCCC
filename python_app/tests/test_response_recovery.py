@@ -28,7 +28,7 @@ def test_parse_common_envelopes_without_model_request(text):
     encoded() + '\n{"translation":"partial"',
     '{"translation":"اول","translation":"دوم","summary":"خلاصه"}',
     'begin {"translation":"اول","translation":"دوم","summary":"خلاصه"} end',
-    encoded(translation=''), encoded(summary='\n'),
+    encoded(translation=''),
     '{' * 257, 'x' * 200001,
 ])
 def test_reject_ambiguous_duplicate_or_invalid_response(text):
@@ -90,7 +90,7 @@ def test_rejected_json_mode_does_not_switch_keys(tmp_path, monkeypatch):
 
 def test_project_response_can_be_repaired_locally_once(tmp_path, monkeypatch):
     monkeypatch.setenv('COMIC_STUDIO_DATA',str(tmp_path)); calls=[]
-    raw=encoded('خصوصی یک\nخصوصی دو','x'*151)
+    raw=encoded('خصوصی یک\nخصوصی دو\nخط اضافی','x'*151)
     def post(url,**kwargs):
         calls.append(1)
         return httpx.Response(200,json={'choices':[{'message':{'content':raw}}]},request=httpx.Request('POST',url))
@@ -121,7 +121,7 @@ def test_single_block_split_recovers_failed_part_without_resending_previous(tmp_
     monkeypatch.setenv('COMIC_STUDIO_DATA',str(tmp_path)); calls=[]
     def post(url,**kwargs):
         calls.append(kwargs['json']['messages'][-1]['content'])
-        value = encoded('اول', 'خلاصه') if len(calls)==1 else encoded('دوم', 'x'*100)
+        value = encoded('اول', 'خلاصه') if len(calls)==1 else 'not JSON'
         return httpx.Response(200,json={'choices':[{'message':{'content':value}}]},request=httpx.Request('POST',url))
     monkeypatch.setattr(httpx,'post',post)
     with scoped_client(create_app()) as client:

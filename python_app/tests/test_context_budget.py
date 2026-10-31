@@ -56,12 +56,19 @@ def test_percentages_and_counts_use_unicode_codepoints_and_validate_input():
         ContextBudget(1000, True, 15)
 
 
-def test_result_requires_both_fields_summary_cap_and_correct_line_mapping():
+def test_result_requires_both_fields_caps_summary_and_checks_line_mapping():
     good = json.dumps({'translation': 'اول\nدوم', 'summary': 'جان دوست مری است'}, ensure_ascii=False)
     assert parse_context_response(good, ['one', 'two'], 150) == ('اول\nدوم', 'جان دوست مری است')
+    clipped_translation, clipped_summary = parse_context_response(
+        json.dumps({'translation': 'اول\nدوم', 'summary': 'واژه ' * 40}, ensure_ascii=False),
+        ['one', 'two'], 90)
+    assert clipped_translation == 'اول\nدوم' and len(clipped_summary) <= 90
+    folded_translation, folded_summary = parse_context_response(
+        json.dumps({'translation': 'اول\nدوم', 'summary': 'خلاصهٔ اول\nخلاصهٔ دوم'}, ensure_ascii=False),
+        ['one', 'two'], 90)
+    assert folded_translation == 'اول\nدوم' and '\\n' not in folded_summary
     for data in ('not json', '{}', '{"translation":"ok","summary":1}',
-                 json.dumps({'translation': 'first\nsecond', 'summary': 'x' * 151}),
-                 json.dumps({'translation': 'first\nsecond', 'summary': 'first\nsecond'}),
+                 json.dumps({'translation': 'first\\nsecond', 'summary': 'first\\nsecond'}),
                  json.dumps({'translation': 'only one line', 'summary': 'valid'})):
         with pytest.raises(TranslationError):
             parse_context_response(data, ['one', 'two'], 150)

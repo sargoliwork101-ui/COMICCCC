@@ -127,9 +127,8 @@ def test_actual_openai_and_gemini_payload_are_bounded_and_summary_is_validated(t
         assert system == plan.system and user == plan.user_message('hello') and len(system) + len(user) <= 1000
         assert 'before' in user
     response_summary[0] = 'x' * 151
-    import pytest
-    with pytest.raises(TranslationError, match='خلاصه'):
-        service.translate_context(plan, 'hello', ['hello'], 'gemini', provider_policy(public, 'gemini'))
+    clipped = service.translate_context(plan, 'hello', ['hello'], 'gemini', provider_policy(public, 'gemini'))
+    assert clipped[0] == 'سلام' and len(clipped[1]) <= plan.context_limit
 
 
 def test_long_block_resume_recalculates_actual_capacity_and_retains_old_until_complete(tmp_path, monkeypatch):
@@ -159,10 +158,10 @@ def test_long_block_resume_recalculates_actual_capacity_and_retains_old_until_co
         assert all(len(text) <= capacity for capacity, text, _ in captured)
 
 
-def test_bad_summary_does_not_commit_and_retry_resumes_same_payload(tmp_path, monkeypatch):
+def test_overlong_ai_summary_is_capped_and_translation_still_commits(tmp_path, monkeypatch):
     import httpx
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
-    responses = [json.dumps({'translation':'اول\nدوم', 'summary':'x'*151}), json.dumps({'translation':'اول\nدوم', 'summary':'کوتاه'})]
+    responses = [json.dumps({'translation':'اول\nدوم', 'summary':'x'*151})]
     sent = []
     def fake_post(url, **kwargs):
         sent.append(kwargs['json']['messages'])
@@ -175,14 +174,11 @@ def test_bad_summary_does_not_commit_and_retry_resumes_same_payload(tmp_path, mo
         preview = client.post(route + '/context-preview',json=req).json()
         start = client.post(route + '/context-start',json={**req,'confirmation':preview['signature']}).json()
         step = {'run_id':start['runId'],'completed':0,'skill':req['skill']}
-        before = client.get(route).json()
-        failed = client.post(route + '/context-step',json=step)
-        assert failed.status_code == 422 and 'خلاصه' in failed.text
-        assert client.get(route).json() == before
         good = client.post(route + '/context-step',json=step)
         assert good.status_code == 200, good.text
-        assert len(sent) == 2 and sent[0] == sent[1]
-        assert good.json()['project']['_aiStorySummary'] == 'کوتاه'
+        assert len(sent) == 1
+        summary = good.json()['project']['_aiStorySummary']
+        assert len(summary) <= 150 and summary == 'x' * 150
 
 
 def test_resume_can_edit_summary_and_budget_without_resending_successes(tmp_path, monkeypatch):
