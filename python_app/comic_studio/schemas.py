@@ -112,12 +112,16 @@ class ContextStartRequest(ContextPreviewRequest):
 
 
 class ContextStepRequest(BaseModel):
+    recovery_token: str | None = Field(default=None, max_length=100)
+    corrected_response: str | None = Field(default=None, max_length=200000)
     run_id: str
     completed: int = Field(ge=0)
     skill: str = Field(default="", max_length=100000)
 
 
 class ContextTextRequest(BaseModel):
+    recovery_token: str | None = Field(default=None, max_length=100)
+    corrected_response: str | None = Field(default=None, max_length=200000)
     text: str
     source_lines: list[dict[str, Any]] | None = None
     source_language: str = 'eng'

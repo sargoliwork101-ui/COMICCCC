@@ -159,7 +159,9 @@ function nextDownload(cdp, directory) {
         aiSystems.push(data.messages.find(message => message.role === 'system').content);
         aiGenerations.push(text);
         const reply = translation => JSON.stringify({choices:[{message:{content:JSON.stringify({translation,summary:'جان دوست مری است'})}}]});
-        if (text.includes('HEADER SAME') && dedupFailuresRemaining > 0) { dedupFailuresRemaining -= 1; response.statusCode = 503; response.end(JSON.stringify({error:{message:'temporary failure'}})); }
+        if (text.includes('FENCED PAGE')) response.end(JSON.stringify({choices:[{message:{content:'Here is the result:\n```json\n'+JSON.stringify({translation:'صفحه حصار',summary:'خلاصه'})+'\n```'}}]}));
+        else if (text.includes('BROKEN RESPONSE')) response.end(JSON.stringify({choices:[{message:{content:JSON.stringify({translation:'خصوصی پاسخ'})}}]}));
+        else if (text.includes('HEADER SAME') && dedupFailuresRemaining > 0) { dedupFailuresRemaining -= 1; response.statusCode = 503; response.end(JSON.stringify({error:{message:'temporary failure'}})); }
         else if (text.includes('HEADER SAME')) { response.end(reply('عنوان مشترک\nمحتوای اول')); }
         else if (text.includes('DEDUP SECOND')) { response.end(reply('محتوای دوم')); }
         else if (text.includes('BROWSER PAGE TWO')) { response.statusCode = 503; response.end(JSON.stringify({ error: { message: 'test failure browser-local-secret', code: 'real-code' } })); }
@@ -916,6 +918,44 @@ with pymupdf.open(pdf_path) as document:
 
 
 
+    // Recover malformed paid output locally, both for a project and one block.
+    let recoveryProject = await api(base, '/api/projects', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Response recovery'})});
+    const recoveryFiles=new FormData(); for(let i=0;i<2;i++) recoveryFiles.append('files',new Blob([fs.readFileSync(source)],{type:'image/png'}),`recovery-${i}.png`);
+    recoveryProject=await api(base,`/api/projects/${recoveryProject.id}/files`,{method:'POST',body:recoveryFiles});
+    recoveryProject.images[0].blocks=[makeBlock(1,'FENCED PAGE')]; recoveryProject.images[1].blocks=[makeBlock(1,'BROKEN RESPONSE')];
+    await api(base,`/api/projects/${recoveryProject.id}/state`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:recoveryProject})});
+    await api(base,'/api/ai-settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'openai',base_url:aiBase,model:'local-browser-model'})});
+    await page.evaluate(async id=>{await loadAiSettings();await refreshProjectList();const el=document.getElementById('projectSelect');el.value=id;el.dispatchEvent(new Event('change',{bubbles:true}));},recoveryProject.id);
+    await page.waitForFunction(id=>state.project.id===id,{},recoveryProject.id);
+    await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]'); await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(()=>!translationRunning && !document.getElementById('responseRepair').classList.contains('hidden'),{timeout:15000});
+    assert.equal(aiGenerations.length,2,'malformed response is not retried despite configured retries');
+    assert.ok((await page.$eval('#responseRepairText',el=>el.value)).includes('خصوصی پاسخ'));
+    assert.ok(!(await page.$eval('#translationStatus',el=>el.textContent)).includes('خصوصی پاسخ'));
+    assert.equal((await api(base,`/api/projects/${recoveryProject.id}`)).images[0].blocks[0].tr,'صفحه حصار');
+    await page.$eval('#responseRepairText',el=>{el.closest('details').open=true;el.value='{}';}); await page.click('#applyResponseRepair');
+    await page.waitForFunction(()=>document.getElementById('responseRepairStatus').textContent.includes('معتبر'));
+    assert.equal(aiGenerations.length,2);
+    await page.$eval('#repairTranslation',el=>{el.value='اصلاح شد';}); await page.$eval('#repairSummary',el=>{el.value='خلاصه';});
+    await page.click('#applyResponseFields'); await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
+    assert.equal(aiGenerations.length,2); assert.equal((await api(base,`/api/projects/${recoveryProject.id}`)).images[1].blocks[0].tr,'اصلاح شد');
+    await page.waitForFunction(() => !translationDecisionBusy);
+    // Single-block editing exercises the separate continuation path.
+    await page.click('#grid .item:nth-child(2) .act button:nth-child(2)'); await page.waitForSelector('#editorDialog[open] #blockList .block-card');
+    await page.waitForFunction(() => state.editorId === state.project.images[1].id && document.getElementById('blockList').textContent.includes('BROKEN RESPONSE'));
+    await page.evaluate(()=>[...document.querySelectorAll('#blockList .block-card button')].find(el=>el.textContent==='ترجمهٔ دوباره').click());
+    await page.waitForSelector('#translationPreviewDialog[open]');
+    assert.ok(await page.$eval('#translationPreviewRequests', el => el.textContent.includes('BROKEN RESPONSE')), 'unexpected preview: ' + await page.$eval('#translationPreviewRequests', el => el.textContent));
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(()=>document.getElementById('translationDialog').open && !document.getElementById('responseRepair').classList.contains('hidden'),{timeout:15000});
+    assert.equal(aiGenerations.length,3);
+    await page.$eval('#repairTranslation',el=>{el.value='تکی اصلاح شد';}); await page.$eval('#repairSummary',el=>{el.value='خلاصه';});
+    await page.click('#applyResponseFields'); await page.waitForFunction(()=>!document.getElementById('translationDialog').open,{timeout:15000});
+    assert.equal(aiGenerations.length,3); assert.equal(await page.evaluate(()=>state.project.images[1].blocks[0].tr),'تکی اصلاح شد');
+    await page.click('#editorClose'); await page.waitForFunction(()=>!state.editorId);
+    console.log('PASS: fenced AI output and manually repaired project/single responses require no extra AI request');
+    aiGenerations.length=0; aiSystems.length=0;
+
     // Real browser and Python server: three selected pages, one AI request at a
     // time, and a failure on page two must retain page one without sending page three.
     let pageProject = await api(base, '/api/projects', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'Page by page AI'}) });
@@ -929,6 +969,7 @@ with pymupdf.open(pdf_path) as document:
     await api(base, '/api/ai-settings', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'openai',base_url:aiBase,model:'local-browser-model'})});
     await page.evaluate(async id => { await loadAiSettings(); await refreshProjectList(); const select=document.getElementById('projectSelect'); select.value=id; select.dispatchEvent(new Event('change',{bubbles:true})); }, pageProject.id);
     await page.waitForFunction(id => state.project.id === id, {}, pageProject.id);
+    await page.evaluate(() => waitForProjectLoads());
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     const pagePayloads = await page.$$eval('#translationPreviewRequests pre', entries => entries.map(entry => entry.textContent));
     assert.ok(await page.$eval('#translationPreviewNote', el => el.textContent.includes('650') && el.textContent.includes('خلاصه')));
@@ -975,18 +1016,19 @@ with pymupdf.open(pdf_path) as document:
     assert.equal(await page.$eval('#translationSkill', el=>el.value), 'لحن داستان رسمی و نام‌ها ثابت باشد');
     await page.click('#translationPreviewCancel');
     await page.click('#grid .item .act button:nth-child(2)'); await page.waitForSelector('#editorDialog[open] #blockList .block-card');
+    await page.waitForFunction(() => document.getElementById('blockList').textContent.includes('BROWSER PAGE ONE'));
     await page.evaluate(() => [...document.querySelectorAll('#blockList .block-card button')].find(el => el.textContent === 'ترجمهٔ دوباره').click());
     await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(await page.$eval('#translationSkill', el=>el.value), 'لحن داستان رسمی و نام‌ها ثابت باشد');
     await page.$eval('#translationSkill', el=>{el.value='لحن صمیمی در بازترجمه';el.dispatchEvent(new Event('input',{bubbles:true}));});
     await page.click('#translationPreviewConfirm');
-    await page.waitForFunction(()=>document.getElementById('translationPreviewSystem').textContent.includes('لحن صمیمی در بازترجمه'));
+    await page.waitForFunction(()=>document.getElementById('translationPreviewSystem').textContent.includes('لحن صمیمی در بازترجمه') && !document.getElementById('translationPreviewConfirm').disabled);
     const singleSystem = await page.$eval('#translationPreviewSystem', el=>el.textContent);
     const beforeSingle = aiGenerations.length;
     await page.click('#translationPreviewConfirm'); await page.waitForFunction(()=>!document.getElementById('translationPreviewDialog').open);
     const singleStart = Date.now(); while (aiGenerations.length === beforeSingle && Date.now() - singleStart < 5000) await sleep(30);
     assert.equal(aiGenerations.length, beforeSingle + 1); assert.equal(aiSystems.at(-1), singleSystem);
-    await page.waitForFunction(()=>!document.querySelector('#translationPreviewConfirm').disabled);
+    await page.evaluate(async () => { await translationPreviewTask; });
     await page.click('#editorClose'); await page.waitForFunction(()=>!state.editorId);
     console.log('PASS: editable skill is confirmed and sent on every AI call, persists per project, and applies to a single-box retry');
 
@@ -1088,6 +1130,7 @@ with pymupdf.open(pdf_path) as document:
     await api(base, `/api/projects/${backupProject.id}/state`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:backupProject})});
     await page.evaluate(async id => {await refreshProjectList(); const select=document.getElementById('projectSelect'); select.value=id; select.dispatchEvent(new Event('change',{bubbles:true}));}, backupProject.id);
     await page.waitForFunction(id => state.project.id === id, {}, backupProject.id);
+    await page.evaluate(() => waitForProjectLoads());
     await page.evaluate(() => {
       const item=state.project.images[0], block=item.blocks[0];
       const key=`comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(item.id)}:${encodeURIComponent(block.id)}:translation`;
@@ -1116,7 +1159,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert not any(b'browser-local-secret' in archive.read(name) for name in archive.namelist())
 `, backupPath]);
     console.log('PASS: browser downloads and restores a new project ZIP with image, text and local draft without API keys');
-    assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
+    assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');
   } catch (error) {

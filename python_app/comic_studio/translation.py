@@ -46,6 +46,15 @@ class TranslationError(RuntimeError):
     pass
 
 
+class InvalidContextResponse(TranslationError):
+    """Received output failed validation; raw text is never included in logs."""
+    def __init__(self, message: str, response_text: str):
+        super().__init__(message)
+        self.response_truncated = len(response_text) > 200_000
+        self.response_text = response_text[:200_000]
+        self.recovery_token: str | None = None
+
+
 # Legacy symbol, retained only to decode literal HTML entities; no longer a boundary.
 TRANSLATION_SEPARATOR = "\u241e"
 MAX_FREE_QUERY_CHARS = 500
@@ -179,7 +188,7 @@ def normalize_translation_text(value: Any) -> str:
 
 def _default_providers() -> dict[str, dict[str, Any]]:
     return {
-        provider: {"model": info["model"], "base_url": info["base_url"], "profiles": []}
+        provider: {"model": info["model"], "base_url": info["base_url"], "response_mode": "auto", "profiles": []}
         for provider, info in AI_PROVIDERS.items()
     }
 
@@ -209,6 +218,8 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(source, dict):
                 continue
             target = providers[provider]
+            mode = source.get("response_mode", "auto")
+            target["response_mode"] = mode if isinstance(mode, str) and mode in {"auto", "json", "text"} else "auto"
             target["model"] = str(source.get("model") or target["model"]).strip()
             target["base_url"] = str(source.get("base_url") or target["base_url"]).strip().rstrip("/")
             profiles = source.get("profiles")
@@ -316,7 +327,13 @@ def _safe_error(error: Exception, provider: str, secrets: list[str] | None = Non
     return f"{label}: {kind}" + (f"؛ جزئیات: {detail}" if detail else "؛ سرویس جزئیات بیشتری برنگرداند.")
 
 
+def context_uses_json(provider: str, base: str, mode: str) -> bool:
+    return mode == 'json' or (mode == 'auto' and provider in {'openai', 'gemini'} and base == AI_PROVIDERS[provider]['base_url'])
+
+
 def _retryable(error: Exception) -> bool:
+    if isinstance(error, InvalidContextResponse):
+        return False
     if isinstance(error, (httpx.TransportError, TranslationError, json.JSONDecodeError)):
         return True
     if isinstance(error, httpx.HTTPStatusError):
@@ -471,7 +488,7 @@ class TranslationService:
                 "label": info["label"],
                 "defaultModel": info["model"],
                 "model": config["model"],
-                "base_url": config["base_url"],
+                "base_url": config["base_url"], "response_mode": config["response_mode"],
                 "keyUrl": info["key_url"],
                 "keyLabel": info["key_label"],
                 "profiles": [
@@ -507,13 +524,16 @@ class TranslationService:
         for name in AI_PROVIDERS:
             old = current["providers"][name]
             config: dict[str, Any] = {
-                "model": old["model"], "base_url": old["base_url"],
+                "model": old["model"], "base_url": old["base_url"], "response_mode": old["response_mode"],
                 "profiles": [dict(profile) for profile in old["profiles"]],
             }
             raw = incoming.get(name)
             if not isinstance(raw, dict) and name == provider and any(key in values for key in ("model", "base_url", "api_key", "profiles")):
                 raw = values
             if isinstance(raw, dict):
+                mode = raw.get("response_mode", config["response_mode"])
+                if not isinstance(mode, str) or mode not in {"auto", "json", "text"}: raise ValueError("حالت پاسخ AI معتبر نیست.")
+                config["response_mode"] = mode
                 config["model"] = str(raw.get("model", config["model"]) or AI_PROVIDERS[name]["model"]).strip()
                 config["base_url"] = str(raw.get("base_url", config["base_url"]) or AI_PROVIDERS[name]["base_url"]).strip().rstrip("/")
                 if name == provider:
@@ -580,7 +600,7 @@ class TranslationService:
         config = settings["providers"][provider]
         return [
             {
-                "provider": provider, "model": config["model"], "base_url": config["base_url"],
+                "provider": provider, "model": config["model"], "base_url": config["base_url"], "response_mode": config["response_mode"],
                 "api_key": profile["api_key"], "profile_id": profile["id"],
                 "profile_name": profile["name"] or f"API {index + 1}", **_profile_policy(profile),
             }
@@ -659,31 +679,45 @@ class TranslationService:
             def action() -> tuple[str, str]:
                 base = _normalize_base_url(profile['base_url'], provider)
                 model = _normalize_model(profile['model'], provider)
+                mode = profile['response_mode']
+                use_json = context_uses_json(provider, base, mode)
                 if provider == 'gemini':
                     response = httpx.post(f"{base}/models/{quote(model, safe='')}:generateContent",
                         headers={'x-goog-api-key': profile['api_key']},
                         json={'systemInstruction': {'parts': [{'text': request.system}]},
                               'contents': [{'role': 'user', 'parts': [{'text': user}]}],
-                              'generationConfig': {'temperature': 0.2}},
+                              'generationConfig': {'temperature': 0.2, **({'responseMimeType': 'application/json'} if use_json else {})}},
                         timeout=profile['timeout_seconds'], follow_redirects=True)
                 else:
                     response = httpx.post(base + '/chat/completions',
                         headers={'Authorization': f"Bearer {profile['api_key']}"},
                         json={'model': model, 'messages': [{'role': 'system', 'content': request.system},
-                              {'role': 'user', 'content': user}], 'temperature': 0.2},
+                              {'role': 'user', 'content': user}], 'temperature': 0.2, **({'response_format': {'type': 'json_object'}} if use_json else {})},
                         timeout=profile['timeout_seconds'], follow_redirects=True)
                 response.raise_for_status()
-                text_response = _response_text(response.json(), provider)
-                return parse_context_response(text_response, source_texts, request.context_limit)
+                try:
+                    payload = response.json()
+                except (ValueError, TypeError) as exc:
+                    raise InvalidContextResponse('پاسخ HTTP سرویس JSON معتبر نیست؛ ارسال دوباره بدون تأیید انجام نمی‌شود.', response.text) from exc
+                text_response = _response_text(payload, provider) if isinstance(payload, dict) else ''
+                try:
+                    return parse_context_response(text_response, source_texts, request.context_limit)
+                except TranslationError as exc:
+                    raise InvalidContextResponse(str(exc) + ' ارسال دوباره بدون تأیید انجام نمی‌شود.', text_response) from exc
             try:
                 emit(f"ترجمه با {AI_PROVIDERS[provider]['label']} و {name}…")
                 result = _run_with_retries(action, profile, provider, secrets)
                 emit(f"پاسخ ترجمه و خلاصه با {name} دریافت شد.", "success")
                 return result
+            except InvalidContextResponse:
+                # A paid response arrived: don't resend it to this or another key.
+                raise
             except Exception as exc:
                 message = _safe_error(exc, provider, secrets)
                 if isinstance(exc, httpx.TransportError):
                     raise TranslationError(f"ارتباط {name} قطع شد؛ ممکن است درخواست پردازش یا هزینه حساب شده باشد. کلید بعدی خودکار امتحان نشد. جزئیات: {message}") from exc
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {400, 422} and context_uses_json(provider, profile['base_url'], profile['response_mode']):
+                    raise TranslationError(f"درخواست JSON رد شد؛ شاید مدل از این حالت پشتیبانی نکند. حالت پاسخ را در تنظیمات به «متن معمولی» تغییر دهید و دوباره بررسی کنید. کلید بعدی امتحان نشد. {message}") from exc
                 failures.append(f"{name}: {message}")
                 emit(f"تلاش با {name} ناموفق بود: {message}", "error")
                 if profile_index + 1 < len(profiles):

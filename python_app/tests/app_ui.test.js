@@ -29,6 +29,7 @@ let revertCalls = 0;
 let translationGate = null;
 let previewFailure = null;
 let ocrGate = null;
+let imageGate = null;
 let aiSaveFailure = false;
 let activityFeed = { entries: [], next: 0 };
 let renderedBlocks = null;
@@ -97,7 +98,7 @@ window.fetch = async (url, options = {}) => {
       const oldProfiles = previous.profiles || [];
       providers[id] = {
         ...previous, model: incoming.model || previous.model || defaultModel,
-        base_url: incoming.base_url || previous.base_url || defaultBase,
+        base_url: incoming.base_url || previous.base_url || defaultBase, response_mode: incoming.response_mode || previous.response_mode || 'auto',
         profiles: (incoming.profiles || oldProfiles).map((profile) => ({
           id: profile.id, name: profile.name || '', timeout_seconds: profile.timeout_seconds ?? 90, retry_count: profile.retry_count ?? 0, retry_wait_seconds: profile.retry_wait_seconds ?? 20, source_limit: profile.source_limit ?? 1000,
           hasApiKey: !!profile.api_key || oldProfiles.some((old) => old.id === profile.id && old.hasApiKey),
@@ -123,6 +124,7 @@ window.fetch = async (url, options = {}) => {
     const request = JSON.parse(options.body); translationPreviewCalls.push(request);
     if (previewFailure === 'network') throw new TypeError('simulated connection failure');
     if (previewFailure === 'server') return jsonResponse({detail:'simulated preview outage'},503);
+    if (previewFailure === 'validation') return jsonResponse({detail:[{loc:['body','response'],msg:'too long',input:'private-response-data'}]},422);
     return jsonResponse(makeTranslationPreview(request));
   }
   if (pathname === `/api/projects/${project.id}/context-start`) {
@@ -164,7 +166,7 @@ window.fetch = async (url, options = {}) => {
     exportRequests.push(JSON.parse(options.body));
     return { ok: true, status: 200, headers: { get: () => 'attachment; filename="mixed.zip"' }, blob: async () => new window.Blob(['zip']) };
   }
-  if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/content`) return { ok: true, blob: async () => new window.Blob() };
+  if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/content`) { if (imageGate) await imageGate; return { ok: true, blob: async () => new window.Blob() }; }
   throw new Error(`Unmocked request: ${options.method || 'GET'} ${url}`);
 };
 window.navigator.sendBeacon = (url, body) => { beacons.push({ url, body }); return true; };
@@ -285,6 +287,7 @@ function check(name, condition) {
   check('AI dialog offers free, Gemini, OpenAI, OpenRouter, and AvalAI', $('aiDialog').open && ['free', 'gemini', 'openai', 'openrouter', 'avalai'].every((id) => $('aiProvider').querySelector(`option[value="${id}"]`)));
   $('aiProvider').value = 'openrouter'; $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
   check('provider selection loads its own endpoint and exact default model', $('aiBaseUrl').value === 'https://openrouter.ai/api/v1' && $('aiModel').value === 'openai/gpt-4o-mini' && !$('aiFields').classList.contains('hidden'));
+  $('aiResponseMode').value = 'json';
   check('an AI provider starts with one editable API row', $('aiProfiles').querySelectorAll('.ai-profile-row').length === 1);
   let rows = $('aiProfiles').querySelectorAll('.ai-profile-row');
   rows[0].querySelector('.ai-profile-name').value = 'کلید اول OpenRouter';
@@ -309,6 +312,7 @@ function check(name, condition) {
   $('aiModel').value = 'anthropic/claude-ui-test';
   rows[0].querySelector('.ai-profile-test').click(); await sleep(30);
   const savedAi = aiSaveRequests.at(-1);
+  check('per-provider response mode is saved', savedAi.providers.openrouter.response_mode === 'json');
   check('row test first saves both named keys with the selected provider and model', savedAi.provider === 'openrouter' && savedAi.model === 'anthropic/claude-ui-test' && savedAi.providers.openrouter.profiles.length === 2 && savedAi.providers.openrouter.profiles[0].api_key === 'openrouter-first-secret' && savedAi.providers.openrouter.profiles[1].api_key === 'openrouter-second-secret');
   check('per-key timeout and retries are saved independently', savedAi.providers.openrouter.profiles[0].timeout_seconds === 120 && savedAi.providers.openrouter.profiles[0].retry_count === 2 && savedAi.providers.openrouter.profiles[1].timeout_seconds === 45 && savedAi.providers.openrouter.profiles[1].retry_count === 1 && savedAi.providers.openrouter.profiles[0].retry_wait_seconds === 11 && savedAi.providers.openrouter.profiles[1].retry_wait_seconds === 27 && savedAi.providers.openrouter.profiles[0].source_limit === 750 && savedAi.providers.openrouter.profiles[1].source_limit === 2500);
   check('row test uses the stored selected profile without resending its secret', aiTestRequests.length === 1 && aiTestRequests[0].profile_id === savedAi.providers.openrouter.profiles[0].id && aiTestRequests[0].model === 'anthropic/claude-ui-test' && !('api_key' in aiTestRequests[0]));
@@ -317,6 +321,7 @@ function check(name, condition) {
   $('aiProvider').value = 'gemini'; $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
   check('switching providers does not reuse OpenRouter model or keys', $('aiModel').value === 'gemini-2.5-flash' && $('aiProfiles').querySelectorAll('.ai-profile-row').length === 1 && $('aiProfiles').querySelector('.ai-profile-key').value === '' && !$('aiProfiles').querySelector('.ai-profile-key').placeholder.includes('ذخیره شده') && $('aiBaseUrlField').classList.contains('hidden'));
   $('aiProvider').value = 'openrouter'; $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('switching back restores the saved response mode', $('aiResponseMode').value === 'json');
   check('switching back restores each saved API policy', $('aiProfiles').querySelector('.ai-profile-timeout_seconds').value === '120' && $('aiProfiles').querySelector('.ai-profile-retry_count').value === '2');
   check('switching back restores only OpenRouter settings and named profiles', $('aiModel').value === 'anthropic/claude-ui-test' && $('aiProfiles').querySelectorAll('.ai-profile-row').length === 2 && $('aiProfiles').querySelector('.ai-profile-name').value === 'کلید اول OpenRouter');
   check('repeated text reuse is enabled by default', $('aiReuseRepeated').checked);
@@ -626,10 +631,17 @@ function check(name, condition) {
   check('per-block confirmation sends the same previewed text and signature', singleTranslationCalls.length === 1 && singleTranslationCalls[0].text === 'NEW OCR' && singleTranslationCalls[0].confirmation === 'ui-confirmation-signature');
   check('confirmed per-block translation appears on its read-only card', $('blockList').querySelector('.block-card').textContent.includes('ترجمهٔ تکی تازه'));
   await vm.runInContext('closeEditor()', context);
+  let releaseImage; imageGate = new Promise(resolve => { releaseImage = resolve; });
+  const delayedEditor = vm.runInContext('openEditor(state.project.images[0].id)', context); await sleep(10);
+  check('old editor cards are cleared while the next image loads', $('editorDialog').open && $('blockList').querySelectorAll('.block-card').length === 0);
+  imageGate = null; releaseImage(); await delayedEditor; await vm.runInContext('closeEditor()', context);
 
   const sendsBeforePreparationFailure = translationCalls.length;
   previewFailure = 'network'; await vm.runInContext('runTranslation()', context);
   check('network preparation error remains copyable with stage and endpoint', $('translationDialog').open && $('translationStatus').textContent.includes('TypeError') && $('translationStatus').textContent.includes('context-preview') && !$('copyTranslationError').classList.contains('hidden') && translationCalls.length === sendsBeforePreparationFailure);
+  vm.runInContext("closeDialog('translationDialog')", context);
+  previewFailure = 'validation'; await vm.runInContext('runTranslation()', context);
+  check('validation diagnostics omit private input values', $('translationStatus').textContent.includes('too long') && !$('translationStatus').textContent.includes('private-response-data'));
   vm.runInContext("closeDialog('translationDialog')", context); previewFailure = null;
   vm.runInContext("state.ai.provider = 'openrouter'", context);
   await vm.runInContext('runTranslation()', context);

@@ -34,6 +34,8 @@ let translationRunning = false;
 let ocrRunning = false;
 let pendingTranslationAfterOcr = null;
 let translationRetryAction = null;
+let translationRepairAction = null;
+let translationDecisionBusy = false;
 let translationPreviewAction = null;
 let translationPreviewRefresh = null;
 let translationPreviewData = null;
@@ -173,9 +175,11 @@ async function api(url, options = {}) {
   }
   if (!response.ok || parseError) {
     const raw = payload && (payload.detail || payload.message);
-    const detail = typeof raw === 'string' ? raw : raw ? JSON.stringify(raw) : parseError || 'سرور جزئیاتی برنگرداند.';
+    const detail = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.map(item => `${(item.loc || []).join('.')}: ${item.msg || item.type || 'خطای اعتبارسنجی'}`).join('؛ ') : raw ? JSON.stringify(raw) : parseError || 'سرور جزئیاتی برنگرداند.';
     const error = new Error(`${method} ${path} — HTTP ${response.status}: ${detail}`);
-    error.status = response.status; error.errorId = payload?.error_id; throw error;
+    error.status = response.status; error.errorId = payload?.error_id;
+    if (payload?.kind === 'invalid_context_response') { error.responseText = payload.response_text; error.recoveryToken = payload.recovery_token; error.responseTruncated = payload.response_truncated; }
+    throw error;
   }
   return payload;
 }
@@ -185,7 +189,7 @@ function closeDialog(id) { if ($(id).open) $(id).close(); }
 function closeTopDialog() {
   const dialog = [...document.querySelectorAll('dialog[open]')].at(-1);
   if (!dialog) return false;
-  if ((dialog.id === 'translationDialog' && translationRunning) || (dialog.id === 'ocrDialog' && ocrRunning)) return true;
+  if ((dialog.id === 'translationDialog' && (translationRunning || translationDecisionBusy)) || (dialog.id === 'ocrDialog' && ocrRunning)) return true;
   if (dialog.id === 'editorDialog') closeEditor().catch((error) => toast(error.message, true));
   else closeDialog(dialog.id);
   return true;
@@ -709,6 +713,17 @@ function showTranslationRequestPreview(preview, action, refresh = null) {
   showDialog('translationPreviewDialog');
 }
 function cancelTranslationRequestPreview() { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; closeDialog('translationPreviewDialog'); }
+function clearResponseRepair() {
+  translationRepairAction = null; $('responseRepair').classList.add('hidden'); $('responseRepairText').value = ''; $('repairTranslation').value = ''; $('repairSummary').value = ''; $('responseRepairStatus').textContent = '';
+}
+function offerResponseRepair(error, action) {
+  if (!error.recoveryToken || typeof error.responseText !== 'string') return;
+  $('responseRepairText').value = error.responseText;
+  try { const parsed = JSON.parse(error.responseText); $('repairTranslation').value = typeof parsed.translation === 'string' ? parsed.translation : ''; $('repairSummary').value = typeof parsed.summary === 'string' ? parsed.summary : ''; } catch { $('repairTranslation').value = ''; $('repairSummary').value = ''; }
+  $('responseRepairStatus').textContent = error.responseTruncated ? 'پاسخ بزرگ‌تر از حد مجاز بود و فقط ۲۰۰٬۰۰۰ نویسهٔ اول نمایش داده شده است.' : '';
+  $('responseRepair').classList.remove('hidden');
+  translationRepairAction = value => action({recovery_token: error.recoveryToken, corrected_response: value});
+}
 function showSingleTranslationError(error, action) {
   $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`;
   translationRetryAction = error.status === 409 ? null : async () => {
@@ -716,6 +731,10 @@ function showSingleTranslationError(error, action) {
     catch (nextError) { showSingleTranslationError(nextError, action); throw nextError; }
   };
   $('retryTranslation').classList.toggle('hidden', !translationRetryAction);
+  offerResponseRepair(error, async repair => {
+    try { await action(repair); clearResponseRepair(); closeDialog('translationDialog'); }
+    catch (nextError) { showSingleTranslationError(nextError, action); throw nextError; }
+  });
   $('copyTranslationError').classList.remove('hidden'); $('translationErrorChoice').classList.remove('hidden'); showDialog('translationDialog');
 }
 async function confirmTranslationRequestPreview() {
@@ -744,7 +763,7 @@ async function confirmTranslationRequestPreview() {
   translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null;
   closeDialog('translationPreviewDialog');
   try { translationPreviewTask = action(preview); await translationPreviewTask; }
-  catch (error) { if (!$('translationDialog').open) showSingleTranslationError(error, () => action(preview)); toast(error.message || 'ترجمه ناموفق بود', true); }
+  catch (error) { if (!$('translationDialog').open) showSingleTranslationError(error, repair => action(preview, repair)); toast(error.message || 'ترجمه ناموفق بود', true); }
   finally { $('translationPreviewConfirm').disabled = false; }
 }
 async function runTranslation() {
@@ -831,7 +850,7 @@ async function runTranslation() {
     showDialog('translationDialog'); toast(message, true);
   }
 }
-async function performContextTranslation(request, preview, ongoing = null) {
+async function performContextTranslation(request, preview, ongoing = null, correction = null) {
   translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
   translationRunning = true; $('translationDialog').querySelector('.dialog-head button').disabled = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden');
   const projectId = state.project.id; let run = ongoing; let phase = 'start';
@@ -843,7 +862,8 @@ async function performContextTranslation(request, preview, ongoing = null) {
       }
       while (true) {
         phase = 'translation'; $('translationStatus').textContent = request.provider === 'free' ? `در حال ترجمهٔ درخواست ${run.completed + 1}…` : `در حال ترجمهٔ درخواست ${run.completed + 1} با خلاصهٔ قبلی…`;
-        const result = await api(`/api/projects/${projectId}/context-step`, jsonOptions('POST', {run_id: run.id, completed: run.completed, skill: preview.skill}));
+        const result = await api(`/api/projects/${projectId}/context-step`, jsonOptions('POST', {run_id: run.id, completed: run.completed, skill: preview.skill, ...(correction || {})}));
+        if (correction) { correction = null; clearResponseRepair(); }
         adoptProject(result.project); run.completed = result.completed ?? run.completed;
         phase = 'preview'; setOverlayMode('translation', false); if (result.affectedImageIds?.length) await renderImagesText(result.affectedImageIds);
         if (result.done) break;
@@ -855,6 +875,7 @@ async function performContextTranslation(request, preview, ongoing = null) {
     const uncertainty = phase === 'translation' ? 'وضعیت درخواست جاری در قطع ارتباط ممکن است نامشخص باشد و تکرار هزینه داشته باشد.' : 'درخواست‌های موفق ذخیره شده‌اند؛ پروژه را بررسی کنید.';
     error.message = `${run?.completed || 0} درخواست ذخیره شد؛ ترجمه متوقف شد. ${uncertainty} ${error.message || ''}`;
     $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message}`;
+    if (run) offerResponseRepair(error, repair => performContextTranslation(request, preview, run, repair));
     translationRetryAction = phase === 'translation' && error.status !== 409 && run ? () => performContextTranslation(request, preview, run) : null;
     $('retryTranslation').classList.toggle('hidden', !translationRetryAction); $('translationErrorChoice').classList.remove('hidden'); $('copyTranslationError').classList.remove('hidden'); throw error;
   } finally { translationRunning = false; $('translationDialog').querySelector('.dialog-head button').disabled = false; }
@@ -1031,7 +1052,7 @@ function makeAiProfile(profile = {}, index = 0) {
 function captureAiProvider() {
   if (!AI_PROVIDER_IDS.includes(aiEditorProvider)) return;
   aiEditorDrafts.set(aiEditorProvider, {
-    model: $('aiModel').value.trim(), base_url: $('aiBaseUrl').value.trim(),
+    model: $('aiModel').value.trim(), base_url: $('aiBaseUrl').value.trim(), response_mode: $('aiResponseMode').value,
     profiles: aiEditorProfiles.map((profile) => ({ ...profile })),
   });
 }
@@ -1128,7 +1149,7 @@ function showAiProvider(provider, capture = true) {
   aiEditorProfiles = sourceProfiles.map((profile, index) => makeAiProfile(profile, index));
   if (!aiEditorProfiles.length) aiEditorProfiles.push(makeAiProfile({ name: 'کلید اول' }));
   $('aiModel').value = draft?.model || info.model || info.defaultModel || '';
-  $('aiBaseUrl').value = draft?.base_url || info.base_url || '';
+  $('aiBaseUrl').value = draft?.base_url || info.base_url || ''; $('aiResponseMode').value = draft?.response_mode || info.response_mode || 'auto';
   updateAiProviderUi(); renderAiProfiles(); $('aiStatus').textContent = ''; $('copyAiError').classList.add('hidden');
 }
 const FREE_FIELDS = [['timeout_seconds','زمان انتظار (ثانیه، ۵ تا ۶۰۰)',5,600,90], ['retry_count','تکرار اضافی (۰ تا ۵)',0,5,0], ['retry_wait_seconds','فاصلهٔ تکرار (ثانیه، ۰ تا ۳۰۰)',0,300,20], ['source_limit','سقف نویسه (۱ تا ۱۰۰۰۰۰)',1,100000,1000]];
@@ -1178,6 +1199,7 @@ function aiSettingsPayload() {
     providers[provider] = {
       model: draft?.model || info.model || info.defaultModel,
       base_url: draft?.base_url || info.base_url,
+      response_mode: draft?.response_mode || info.response_mode || 'auto',
       profiles: profiles.map((profile) => ({
         id: profile.id, name: profile.name || '',
         timeout_seconds: intSetting(profile, 'timeout_seconds', 5, 600), retry_count: intSetting(profile, 'retry_count', 0, 5), retry_wait_seconds: intSetting(profile, 'retry_wait_seconds', 0, 300), source_limit: intSetting(profile, 'source_limit', 1, 100000),
@@ -1201,7 +1223,7 @@ async function saveAiSettings(options = {}) {
 function editorItem() { return state.project?.images.find((item) => item.id === state.editorId); }
 function boxOf(block) { return { x0: Number.isFinite(block.tx0) ? block.tx0 : block.x0, y0: Number.isFinite(block.ty0) ? block.ty0 : block.y0, x1: Number.isFinite(block.tx1) ? block.tx1 : block.x1, y1: Number.isFinite(block.ty1) ? block.ty1 : block.y1 }; }
 async function openEditor(imageId) {
-  await ensureFont(); state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null; $('editorStage').classList.remove('panning'); const item = state.project.images.find((entry) => entry.id === imageId); $('editorTitle').textContent = `ویرایش — ${item.name}`; showDialog('editorDialog');
+  await ensureFont(); state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null; $('editorStage').classList.remove('panning'); const item = state.project.images.find((entry) => entry.id === imageId); $('editorTitle').textContent = `ویرایش — ${item.name}`; $('blockList').textContent = ''; showDialog('editorDialog');
   const response = await fetch(imageUrl(item)); state.editorBitmap?.close?.(); state.editorBitmap = await createImageBitmap(await response.blob()); $('editorCanvas').width = state.editorBitmap.width; $('editorCanvas').height = state.editorBitmap.height; buildBlockList(); fitEditor(); drawEditor();
 }
 function resizeEditorStage() {
@@ -1831,10 +1853,10 @@ async function retranslateBlock(block) {
     const preview = await refresh(safeSkill, safeSummary);
     if (safeSkill !== skill) preview.displaySkill = skill;
     if (safeSummary !== summary) preview.displaySummary = summary;
-    showTranslationRequestPreview(preview, async accepted => {
+    showTranslationRequestPreview(preview, async (accepted, repair = null) => {
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
       rememberTranslationSkill(projectId, accepted);
-      const result = await api('/api/translate-text/context', jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature }));
+      const result = await api('/api/translate-text/context', jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) }));
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
       block.tr = result.text; block.richHtml = plainToHtml(result.text); buildBlockList(); drawEditor(); scheduleSave();
     }, refresh);
@@ -1942,16 +1964,29 @@ function bindEvents() {
   $('copyOcrError').addEventListener('click', () => copyBlockText($('ocrStatus').textContent).catch(error => toast(`کپی ممکن نبود: ${error.message || error}`, true)));
   $('copyTranslationPreviewError').addEventListener('click', () => copyBlockText($('translationPreviewError').textContent).catch(error => toast(`کپی ممکن نبود: ${error.message || error}`, true)));
   $('retryTranslation').addEventListener('click', async () => {
-    const retry = translationRetryAction; if (!retry || translationRunning) return;
+    const retry = translationRetryAction; if (!retry || translationRunning || translationDecisionBusy) return;
+    translationDecisionBusy = true; $('applyResponseRepair').disabled = true; $('applyResponseFields').disabled = true;
+    $('translationDialog').querySelector('.dialog-head button').disabled = true;
     translationRetryAction = null; $('retryTranslation').classList.add('hidden');
     try { await retry(); } catch (error) { toast(error.message || 'ترجمه ناموفق بود', true); }
+    finally { translationDecisionBusy = false; $('applyResponseRepair').disabled = false; $('applyResponseFields').disabled = false; if (!translationRunning) $('translationDialog').querySelector('.dialog-head button').disabled = false; if (!$('translationDialog').open) clearResponseRepair(); }
   });
+  async function submitResponseRepair(value) {
+    const action = translationRepairAction; if (!action || translationRunning || translationDecisionBusy) return;
+    translationDecisionBusy = true; $('retryTranslation').disabled = true; $('translationDialog').querySelector('.dialog-head button').disabled = true;
+    $('applyResponseRepair').disabled = true; $('applyResponseFields').disabled = true; $('responseRepairStatus').textContent = 'در حال بررسی پاسخ اصلاح‌شده…';
+    try { await action(value); }
+    catch (error) { $('responseRepairStatus').textContent = error.message || String(error); }
+    finally { translationDecisionBusy = false; $('retryTranslation').disabled = false; $('applyResponseRepair').disabled = false; $('applyResponseFields').disabled = false; if (!translationRunning) $('translationDialog').querySelector('.dialog-head button').disabled = false; if (!$('translationDialog').open) clearResponseRepair(); }
+  }
+  $('applyResponseRepair').addEventListener('click', () => submitResponseRepair($('responseRepairText').value));
+  $('applyResponseFields').addEventListener('click', () => submitResponseRepair(JSON.stringify({translation: $('repairTranslation').value, summary: $('repairSummary').value})));
   $('copyTranslationError').addEventListener('click', async () => {
     try { await copyBlockText($('translationStatus').textContent); translationRetryAction = null; closeDialog('translationDialog'); }
     catch (error) { toast(`کپی ممکن نبود؛ متن خطا را دستی انتخاب و کپی کنید: ${error.message || error}`, true); }
   });
-  $('translationDialog').addEventListener('cancel', (event) => { if (translationRunning) event.preventDefault(); });
-  $('translationDialog').addEventListener('close', () => { if (!translationRunning) translationRetryAction = null; });
+  $('translationDialog').addEventListener('cancel', (event) => { if (translationRunning || translationDecisionBusy) event.preventDefault(); });
+  $('translationDialog').addEventListener('close', () => { if (!translationRunning && !translationDecisionBusy && !$('translationDialog').open) { translationRetryAction = null; clearResponseRepair(); } });
   $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
   for (const [element, field] of [[$('translationSkill'), 'skillLimit'], [$('translationContext'), 'contextLimit']]) {
     element.addEventListener('beforeinput', event => {

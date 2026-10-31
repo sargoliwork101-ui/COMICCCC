@@ -24,7 +24,8 @@ def provider_policy(settings: dict[str, Any], provider: str) -> dict[str, Any]:
     if provider == 'free':
         return {'services': settings.get('free_services', {})}
     config = settings.get('providers', {}).get(provider, {})
-    return {'model': config.get('model', ''), 'base_url': config.get('base_url', ''),
+    mode = config.get('response_mode', 'auto')
+    return {**({'response_mode': mode} if mode != 'auto' else {}), 'model': config.get('model', ''), 'base_url': config.get('base_url', ''),
             'profiles': [{'id': p.get('id', ''), 'hasApiKey': bool(p.get('hasApiKey', p.get('api_key', ''))),
                           'timeout_seconds': p.get('timeout_seconds', 90), 'retry_count': p.get('retry_count', 0),
                           'retry_wait_seconds': p.get('retry_wait_seconds', 20), 'source_limit': p.get('source_limit', 1000)}

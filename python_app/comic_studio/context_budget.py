@@ -99,10 +99,44 @@ def build_context_request(budget: ContextBudget, language: str, skill: str, prev
 
 def parse_context_response(response: str, source_texts: list[str], context_limit: int) -> tuple[str, str]:
     """Accept both pieces together only after validating structure and boundaries."""
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = item
+        return result
+
+    if not isinstance(response, str) or len(response) > 200_000:
+        raise TranslationError("پاسخ AI خالی یا بیش از حد بزرگ است؛ ترجمه و خلاصه ذخیره نشدند.")
+    text = response.strip()
+    decoder = json.JSONDecoder(object_pairs_hook=unique_object)
     try:
-        value = json.loads(response)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise TranslationError("پاسخ AI در قالب JSON مورد انتظار نیست؛ ترجمه و خلاصه ذخیره نشدند.") from exc
+        value = decoder.decode(text)
+    except (ValueError, RecursionError) as exc:
+        if isinstance(exc, ValueError) and not isinstance(exc, json.JSONDecodeError):
+            raise TranslationError("پاسخ AI کلیدهای تکراری دارد؛ ترجمه ذخیره نشد.") from exc
+        # Search bounded, non-overlapping top-level objects. Never guess if
+        # there are two JSON objects, even when one looks more plausible.
+        if text.count('{') > 256:
+            raise TranslationError("پاسخ AI بیش از حد پیچیده است؛ ترجمه و خلاصه ذخیره نشدند.") from exc
+        objects = []
+        unparsed_object = False
+        pos = 0
+        while (start := text.find('{', pos)) != -1:
+            try:
+                candidate, end = decoder.raw_decode(text, start)
+            except json.JSONDecodeError:
+                unparsed_object = True
+                pos = start + 1
+                continue
+            except (ValueError, RecursionError) as invalid:
+                raise TranslationError("پاسخ AI معتبر و بدون ابهام نیست؛ ترجمه ذخیره نشد.") from invalid
+            if isinstance(candidate, dict): objects.append(candidate)
+            pos = end
+        if len(objects) != 1 or unparsed_object:
+            raise TranslationError("پاسخ AI در قالب JSON معتبر و بدون ابهام نیست؛ ترجمه و خلاصه ذخیره نشدند.") from exc
+        value = objects[0]
     if not isinstance(value, dict) or not isinstance(value.get("translation"), str) or not isinstance(value.get("summary"), str):
         raise TranslationError("پاسخ AI فاقد ترجمه یا خلاصهٔ معتبر است؛ چیزی ذخیره نشد.")
     translation = value["translation"].strip()

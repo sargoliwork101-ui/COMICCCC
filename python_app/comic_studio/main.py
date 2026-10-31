@@ -36,8 +36,8 @@ from .schemas import (
 from .sessions import SessionManager
 from .store import ProjectChangedError, ProjectStore
 from .translation import (
-    TranslationError, TranslationService, combine_translation_texts,
-    distribute_translation, normalize_ai_skill, _redact_diagnostic,
+    TranslationError, InvalidContextResponse, TranslationService, combine_translation_texts,
+    distribute_translation, normalize_ai_skill, context_uses_json, _redact_diagnostic,
 )
 from .translation_plan import (
     AI_PAGE_PROGRESS_KEY, AI_PARTS_KEY, AI_REUSE_KEY, build_project_plan, build_single_plan, call_plan, mark_completed_call, mark_reused_translation, part_fingerprint,
@@ -55,6 +55,29 @@ def create_app() -> FastAPI:
     activity = ActivityLog()
     sessions = SessionManager()
     context_locks: dict[str, asyncio.Lock] = {}
+    # Recovery state is short-lived, process-local and never contains the raw response.
+    recoveries: dict[str, dict[str, Any]] = {}
+    recovery_locks: dict[str, asyncio.Lock] = {}
+
+    def recovery_store(entry: dict[str, Any]) -> str:
+        now = time.monotonic()
+        for key, value in list(recoveries.items()):
+            if now - value['created'] > 1800:
+                recoveries.pop(key, None)
+                if key in recovery_locks and not recovery_locks[key].locked(): recovery_locks.pop(key, None)
+        while len(recoveries) >= 100:
+            key = next(iter(recoveries))
+            recoveries.pop(key)
+            if key in recovery_locks and not recovery_locks[key].locked(): recovery_locks.pop(key, None)
+        token = uuid.uuid4().hex
+        recoveries[token] = {**entry, 'created': now}
+        return token
+
+    def recovery_get(token: str | None, kind: str) -> dict[str, Any]:
+        entry = recoveries.get(token or '')
+        if not entry or entry['kind'] != kind or time.monotonic() - entry['created'] > 1800:
+            raise HTTPException(409, 'فرصت اصلاح پاسخ پایان یافته یا برنامه بازنشانی شده است؛ ترجمه را دوباره شروع کنید.')
+        return entry
     app.state.activity = activity
     app.state.sessions = sessions
     activity.add("برنامه آماده است")
@@ -168,6 +191,11 @@ def create_app() -> FastAPI:
     @app.exception_handler(OcrError)
     async def ocr_error(_: Request, exc: OcrError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=503)
+
+    @app.exception_handler(InvalidContextResponse)
+    async def invalid_context_response(_: Request, exc: InvalidContextResponse) -> JSONResponse:
+        return JSONResponse({"detail": str(exc), "kind": "invalid_context_response", "response_text": exc.response_text,
+                             "recovery_token": exc.recovery_token, "response_truncated": exc.response_truncated}, status_code=422, headers={"Cache-Control": "no-store"})
 
     @app.exception_handler(TranslationError)
     async def translation_error(_: Request, exc: TranslationError) -> JSONResponse:
@@ -487,13 +515,14 @@ def create_app() -> FastAPI:
                     'note':f"متن صفحه‌ها جداگانه و ترتیبی ارسال و ذخیره می‌شود؛ تأیید یک‌بار برای کل نوبت است. سقف مؤثر {run['limit']} نویسه و برای MyMemory حداکثر ۵۰۰ بایت UTF-8 است. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری. خلاصه و اسکیل AI در حالت رایگان استفاده نمی‌شوند. تنظیمات: {limits}.",
                     'signature':digest(run), 'totalLimit':run['limit'], 'resume':bool(run.get('id'))}
         active = [profile for profile in policy['profiles'] if profile['hasApiKey']]
+        mode_label = 'حالت JSON سرویس' if context_uses_json(provider, policy['base_url'], policy.get('response_mode', 'auto')) else 'متن معمولی'
         policies = '؛ '.join(f"API {index}: زمان انتظار {p['timeout_seconds']}، تکرار {p['retry_count']}، فاصله {p['retry_wait_seconds']} ثانیه، سقف {p['source_limit']}" for index, p in enumerate(active, 1))
         return {'provider': provider, 'skill': '', 'defaultSkill': '', 'blockCount': len(run['jobs']),
                 'requestCount': 1 if chosen else 0, 'systemPrompt': request.system,
                 'requests': [{'index': 1, 'text': request.user_message(text), 'characters': request.character_count(text),
                               'imageName': first.get('imageName', '')}] if chosen else [],
                 'providerLabel': provider, 'model': policy['model'], 'base_url': policy['base_url'],
-                'note': f"درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.",
+                'note': f"درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.",
                 'signature': digest(run), 'rollingMode': True, 'contextMode': True, 'summary': run['context'], 'skillLimit': request.skill_limit,
                 'contextLimit': request.context_limit, 'totalLimit': run['limit'], 'resume': bool(run.get('id'))}
 
@@ -546,15 +575,36 @@ def create_app() -> FastAPI:
             text = combine_translation_texts(source_texts)
             label = f"درخواست {run['completed'] + 1} برای «{run['jobs'][chosen[0]['job']]['imageName']}»؛ {request.character_count(text)} از {run['limit']} نویسه"
             label += f"؛ {len(text.encode('utf-8'))} از ۵۰۰ بایت" if run['provider'] == 'free' else f"؛ خلاصه {len(run['context'])} از {request.context_limit} نویسه"
-            activity.add(label + '.')
-            activity.add(f"متن دقیق درخواست {run['completed'] + 1} (بدون هدر احراز هویت):\nدستور سیستم:\n{request.system}\nپیام کاربر:\n{request.user_message(text)}")
-            if run['provider'] == 'free':
+            if values.recovery_token is not None:
+                activity.add(f"بررسی محلی پاسخ اصلاح‌شده برای درخواست {run['completed'] + 1}، بدون ارسال مجدد به AI.")
+            else:
+                activity.add(label + '.')
+                activity.add(f"متن دقیق درخواست {run['completed'] + 1} (بدون هدر احراز هویت):\nدستور سیستم:\n{request.system}\nپیام کاربر:\n{request.user_message(text)}")
+            if (values.recovery_token is None) != (values.corrected_response is None):
+                raise HTTPException(400, 'نشانه و متن پاسخ اصلاح‌شده باید همراه هم ارسال شوند.')
+            if values.recovery_token is not None:
+                entry = recovery_get(values.recovery_token, 'project')
+                if run['provider'] == 'free' or (entry['project_id'], entry['run_id'], entry['completed'], entry['updated_at']) != (project_id, values.run_id, values.completed, expected):
+                    raise ProjectChangedError('پروژه یا نوبت پس از دریافت پاسخ تغییر کرده است؛ اصلاح اعمال نشد.')
+                from .context_budget import parse_context_response
+                try:
+                    translated, summary = parse_context_response(values.corrected_response, source_texts, request.context_limit)
+                except TranslationError as exc:
+                    error = InvalidContextResponse(str(exc), values.corrected_response)
+                    error.recovery_token = values.recovery_token
+                    raise error from exc
+            elif run['provider'] == 'free':
                 translated = await run_reported(translations.translate_free_batch, request, text, source_texts, run['language'], policy, pulse_label='ترجمهٔ رایگان')
                 summary = ''
             else:
-                translated, summary = await run_reported(translations.translate_context, request, text, source_texts, run['provider'], policy, pulse_label='ترجمه و خلاصه')
+                try:
+                    translated, summary = await run_reported(translations.translate_context, request, text, source_texts, run['provider'], policy, pulse_label='ترجمه و خلاصه')
+                except InvalidContextResponse as exc:
+                    exc.recovery_token = recovery_store({'kind':'project', 'project_id': project_id, 'run_id': values.run_id, 'completed': values.completed, 'updated_at': expected})
+                    raise
             affected = apply_response(state, run, chosen, translated, summary)
             store.save_if_unchanged(state, expected)
+            if values.recovery_token: recoveries.pop(values.recovery_token, None)
             done = not any(job['remaining'] for job in run['jobs'])
             activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] == 'free' else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success')
             return {'project': state, 'done': done, 'affectedImageIds': affected, 'completed': run['completed'],
@@ -586,28 +636,65 @@ def create_app() -> FastAPI:
 
     @app.post('/api/translate-text/context')
     async def context_text_translate(values: ContextTextRequest) -> dict[str, str]:
-        state, run, request, chosen = prepare_context_text(values)
-        if not values.confirmation or values.confirmation != digest(run):
-            raise HTTPException(409, 'متن یا تنظیمات پس از پیش‌نمایش تغییر کرده است.')
-        if not chosen:
-            raise HTTPException(400, 'متنی برای ترجمه وجود ندارد.')
-        while chosen:
-            settings = translations.public_settings()
-            policy = provider_policy(settings, values.provider)
-            verify_run(state, run, values.skill, policy)
-            if values.provider != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
-                raise ProjectChangedError('درصدها پس از تأیید تغییر کرده‌اند.')
-            sources = [entry['text'] for entry in chosen]
-            text = combine_translation_texts(sources)
-            activity.add(f"متن دقیق بازترجمه (بدون هدر احراز هویت):\nدستور سیستم:\n{request.system}\nپیام کاربر:\n{request.user_message(text)}")
-            if values.provider == 'free':
-                translated = await run_reported(translations.translate_free_batch, request, text, sources, values.source_language, policy, pulse_label='بازترجمهٔ رایگان')
-                summary = ''
+        if (values.recovery_token is None) != (values.corrected_response is None):
+            raise HTTPException(400, 'نشانه و متن پاسخ اصلاح‌شده باید همراه هم ارسال شوند.')
+        signature = digest(values.model_dump(exclude={'recovery_token', 'corrected_response'}))
+
+        async def execute(entry: dict[str, Any] | None = None) -> dict[str, str]:
+            if entry is None:
+                state, run, request, chosen = prepare_context_text(values)
+                if not values.confirmation or values.confirmation != digest(run):
+                    raise HTTPException(409, 'متن یا تنظیمات پس از پیش‌نمایش تغییر کرده است.')
+                if not chosen:
+                    raise HTTPException(400, 'متنی برای ترجمه وجود ندارد.')
             else:
-                translated, summary = await run_reported(translations.translate_context, request, text, sources, values.provider, policy, pulse_label='بازترجمه و خلاصه')
-            apply_response(state, run, chosen, translated, summary)
-            request, chosen = next_request(run, values.skill)
-        return {'text': run['jobs'][0]['accumulated'], 'summary': run['context']}
+                if entry['signature'] != signature:
+                    raise HTTPException(409, 'متن یا تنظیمات پاسخ اصلاح‌شده تغییر کرده است.')
+                state, run = entry['state'], entry['run']
+                request, chosen = next_request(run, values.skill)
+            use_repair = entry is not None
+            while chosen:
+                settings = translations.public_settings()
+                policy = provider_policy(settings, values.provider)
+                verify_run(state, run, values.skill, policy)
+                if values.provider != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
+                    raise ProjectChangedError('درصدها پس از تأیید تغییر کرده‌اند.')
+                sources = [item['text'] for item in chosen]
+                text = combine_translation_texts(sources)
+                if use_repair:
+                    from .context_budget import parse_context_response
+                    try:
+                        translated, summary = parse_context_response(values.corrected_response, sources, request.context_limit)
+                    except TranslationError as exc:
+                        error = InvalidContextResponse(str(exc), values.corrected_response)
+                        error.recovery_token = values.recovery_token
+                        raise error from exc
+                else:
+                    activity.add(f"متن دقیق بازترجمه (بدون هدر احراز هویت):\nدستور سیستم:\n{request.system}\nپیام کاربر:\n{request.user_message(text)}")
+                    if values.provider == 'free':
+                        translated = await run_reported(translations.translate_free_batch, request, text, sources, values.source_language, policy, pulse_label='بازترجمهٔ رایگان')
+                        summary = ''
+                    else:
+                        try:
+                            translated, summary = await run_reported(translations.translate_context, request, text, sources, values.provider, policy, pulse_label='بازترجمه و خلاصه')
+                        except InvalidContextResponse as exc:
+                            exc.recovery_token = recovery_store({'kind':'single', 'state':state, 'run':run, 'signature':signature})
+                            raise
+                apply_response(state, run, chosen, translated, summary)
+                if use_repair:
+                    recoveries.pop(values.recovery_token, None)
+                    use_repair = False
+                request, chosen = next_request(run, values.skill)
+            return {'text': run['jobs'][0]['accumulated'], 'summary': run['context']}
+
+        if values.recovery_token:
+            lock = recovery_locks.setdefault(values.recovery_token, asyncio.Lock())
+            async with lock:
+                try:
+                    return await execute(recovery_get(values.recovery_token, 'single'))
+                finally:
+                    if values.recovery_token not in recoveries: recovery_locks.pop(values.recovery_token, None)
+        return await execute()
 
     def legacy_free_context(values: TranslateRequest) -> ContextPreviewRequest:
         return ContextPreviewRequest(image_ids=values.image_ids, provider='free', source_language=values.source_language,

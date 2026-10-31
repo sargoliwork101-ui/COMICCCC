@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.51">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.51">
+  <link rel="stylesheet" href="/style.css?v=3.52">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.52">
 </head>
 <body>
   <header class="topbar">
@@ -112,6 +112,18 @@
       <p class="hint">تلاش‌های خودکار تمام شد یا خطایی رخ داد. دوباره تلاش شود یا خطا کپی و کار تمام شود؟ ارسال دوباره ممکن است هزینه داشته باشد؛ در خطای شبکه ممکن است درخواست قبلی هنوز در حال پردازش باشد.</p>
       <div class="dialog-actions"><button id="retryTranslation" class="bt primary hidden" type="button">تلاش دوباره</button><button id="copyTranslationError" class="bt hidden" type="button">کپی خطا و پایان</button></div>
     </div>
+    <div id="responseRepair" class="hidden">
+      <p class="hint">پاسخ AI دریافت شده ولی قابل ذخیره نبود. می‌توانید ترجمه و خلاصه را در کادرهای زیر اصلاح کنید یا پاسخ خام را ویرایش کنید. ثبت اصلاح‌شده به این درخواست دوباره به AI ارسال نمی‌کند؛ پس از ثبت، درخواست‌های بعدیِ تأییدشده ادامه پیدا می‌کنند. پاسخ و فرصت اصلاح با بستن پنجره، بازنشانی برنامه یا پس از ۳۰ دقیقه از دست می‌رود.</p>
+      <label>متن ترجمه‌شده<textarea id="repairTranslation" dir="auto" rows="4" maxlength="190000" placeholder="ترجمه را اینجا وارد یا اصلاح کنید"></textarea></label>
+      <label>خلاصهٔ کوتاه داستان<input id="repairSummary" dir="auto" maxlength="100000" placeholder="خلاصهٔ یک‌خطی را وارد یا اصلاح کنید"></label>
+      <p class="hint">برای چند کادر، هر ترجمه را در خط جدا و به همان ترتیب بنویسید؛ خطوط مبدأ را ادغام یا حذف نکنید.</p>
+      <button id="applyResponseFields" class="bt primary" type="button">بررسی و ثبت ترجمه و خلاصه</button>
+      <details><summary>پاسخ خام AI و ویرایش مستقیم JSON</summary>
+        <textarea id="responseRepairText" dir="auto" rows="9" maxlength="200000" aria-label="پاسخ دریافتی AI برای اصلاح"></textarea>
+        <button id="applyResponseRepair" class="bt" type="button">بررسی و ثبت JSON اصلاح‌شده</button>
+      </details>
+      <p id="responseRepairStatus" class="hint diagnostic-message" role="status"></p>
+    </div>
     <p class="hint">پیش از ارسال خطا، مطمئن شوید اطلاعات شخصی یا محرمانه داخل آن نیست.</p>
     <div class="bar"><div id="translationProgress" class="fill"></div></div>
     <div id="translationActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
@@ -139,12 +151,14 @@
     <p class="hint">بافت متفاوت ممکن است ترجمهٔ متفاوت بخواهد؛ برای ترجمهٔ مستقل این گزینه را خاموش کنید.</p>
     <div id="aiFields" class="hidden">
       <div class="form-grid"><label id="aiBaseUrlField">نشانی پایهٔ API<input id="aiBaseUrl" dir="ltr" spellcheck="false"></label><label>نام دقیق مدل<input id="aiModel" dir="ltr" spellcheck="false"></label></div>
+      <label>قالب پاسخ AI<select id="aiResponseMode"><option value="auto">خودکار (JSON برای نشانی رسمی OpenAI و Gemini)</option><option value="json">درخواست حالت JSON از سرویس</option><option value="text">متن معمولی (بدون اجبار حالت JSON)</option></select></label>
+      <p class="hint">اگر مدل حالت JSON را پشتیبانی نمی‌کند، متن معمولی را انتخاب کنید. تغییر قالب پس از تأیید ممکن است ادامهٔ نوبت را نیازمند پیش‌نمایش تازه کند.</p>
       <div class="ai-profile-heading"><span>کلیدهای API و نام دلخواه هرکدام</span><button id="aiAddProfile" class="bt" type="button">افزودن API</button></div>
       <div id="aiProfiles" class="ai-profile-list"></div>
       <div class="form-grid"><label>سقف خلاصهٔ قبلی (درصد)<input id="aiContextPercent" type="number" min="0" max="100" value="15"></label><label>سقف اسکیل (درصد)<input id="aiSkillPercent" type="number" min="0" max="100" value="15"></label></div>
       <p class="hint">پیش‌فرض هرکدام ۱۵٪ سقف کل هر درخواست است؛ فضای مصرف‌نشده به متن اصلی می‌رسد. دستور سیستم، خلاصه، اسکیل و متن همگی در سقف شمرده می‌شوند.</p>
       <p class="hint"><a id="aiKeyHelp" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلیدها فقط در فایل تنظیمات همین کامپیوتر ذخیره می‌شوند و به مرورگر برگردانده نمی‌شوند.</p>
-      <p class="hint">«تست» متن کمیک نمی‌فرستد. زمان انتظار، تعداد تکرار و فاصلهٔ بین تلاش‌ها برای هر کلید جداست؛ صفر یعنی بدون تکرار همان کلید. در خطاهای موقت یا پاسخ نامعتبر تکرار انجام می‌شود؛ خطای اتصال پس از پایان تکرارها کار را متوقف می‌کند. خطاهای دیگر ممکن است کلید بعدی را امتحان کنند. این زمان سقف هر مرحلهٔ اتصال/خواندن است، نه الزاماً کل زمان درخواست. فاصله، پیش از تکرار همان کلید یا امتحان کلید بعدی اعمال می‌شود. تکرار ممکن است هزینهٔ دوباره داشته باشد.</p>
+      <p class="hint">«تست» متن کمیک نمی‌فرستد. زمان انتظار، تعداد تکرار و فاصلهٔ بین تلاش‌ها برای هر کلید جداست؛ صفر یعنی بدون تکرار همان کلید. در خطاهای موقت تکرار انجام می‌شود؛ پاسخ AI نامعتبر بدون اجازه دوباره ارسال نمی‌شود. خطای اتصال پس از پایان تکرارها کار را متوقف می‌کند. خطاهای دیگر ممکن است کلید بعدی را امتحان کنند. این زمان سقف هر مرحلهٔ اتصال/خواندن است، نه الزاماً کل زمان درخواست. فاصله، پیش از تکرار همان کلید یا امتحان کلید بعدی اعمال می‌شود. تکرار ممکن است هزینهٔ دوباره داشته باشد.</p>
     </div>
     <p class="hint">تصویر برای ترجمه ارسال نمی‌شود؛ متن OCR، دستور، اسکیل و خلاصه به سرویس AI انتخابی فرستاده می‌شوند. برای AI آفلاین می‌توانید نشانی یک سرویس محلی سازگار با OpenAI بدهید. انتخاب رایگان هیچ درخواست AI انجام نمی‌دهد.</p>
     <div id="aiStatus" class="hint diagnostic-message" role="status" aria-live="polite"></div>
@@ -217,10 +231,10 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.51"></script>
-  <script src="/groups.js?v=3.51"></script>
-  <script src="/rich-sanitize.js?v=3.51"></script>
-  <script src="/rich-editor.js?v=3.51"></script>
-  <script src="/app.js?v=3.51"></script>
+  <script src="/typeset.js?v=3.52"></script>
+  <script src="/groups.js?v=3.52"></script>
+  <script src="/rich-sanitize.js?v=3.52"></script>
+  <script src="/rich-editor.js?v=3.52"></script>
+  <script src="/app.js?v=3.52"></script>
 </body>
 </html>

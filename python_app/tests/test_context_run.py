@@ -151,7 +151,7 @@ def test_bad_summary_does_not_commit_and_retry_resumes_same_payload(tmp_path, mo
         step = {'run_id':start['runId'],'completed':0,'skill':req['skill']}
         before = client.get(route).json()
         failed = client.post(route + '/context-step',json=step)
-        assert failed.status_code == 502 and 'خلاصه' in failed.text
+        assert failed.status_code == 422 and 'خلاصه' in failed.text
         assert client.get(route).json() == before
         good = client.post(route + '/context-step',json=step)
         assert good.status_code == 200, good.text
