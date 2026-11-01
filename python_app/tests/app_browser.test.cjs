@@ -383,6 +383,9 @@ main()
     await page.evaluate(() => { window.__inlineOriginal = JSON.parse(JSON.stringify(state.project.images[0].blocks[0])); window.__beforeInlineCanvas = document.getElementById('editorCanvas').toDataURL(); });
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text', { offset: { x: 75, y: 30 } });
     await page.waitForSelector('#inlineEditor:not(.hidden)');
+    const initialSettings = await page.evaluate(() => { const block=state.project.images[0].blocks[0];return {size:document.getElementById('inlineEditorSize').value,expectedSize:String(effectiveInlineSize(block)),color:document.getElementById('inlineEditorColor').value,expectedColor:effectiveInlineColor(block)}; });
+    assert.equal(initialSettings.size, initialSettings.expectedSize, 'entering direct edit initializes size to the exact rendered font size');
+    assert.equal(initialSettings.color, initialSettings.expectedColor, 'entering direct edit initializes the picker to the visible rendered text color');
     const inPlace = await page.evaluate(() => {
       const box = document.querySelector('#editorBoxes .editor-box[data-id="1"]'); const field = document.getElementById('inlineEditorField'); const a = box.getBoundingClientRect(); const b = field.getBoundingClientRect(); const bar = document.getElementById('inlineEditor').getBoundingClientRect(); const title = document.querySelector('#editorDialog>.dialog-head').getBoundingClientRect(); const body = document.querySelector('#editorDialog>.editor-body').getBoundingClientRect();
       return { direct: field.parentElement === box, transparentCaretLayer: getComputedStyle(field).color === 'rgba(0, 0, 0, 0)' && getComputedStyle(field).caretColor !== 'rgba(0, 0, 0, 0)', docked: bar.top >= title.bottom - 2 && bar.bottom <= body.top + 2, above: bar.bottom <= a.top + 2, oneEditingSurface: document.querySelectorAll('#editorBoxes [contenteditable="true"]').length === 1 };
@@ -423,7 +426,8 @@ main()
     await page.click('#inlineEditor .classic-toolbar button[aria-label="پررنگ"]');
     await page.select('#inlineEditorAlign', 'justify');
     await page.$eval('#inlineEditorSize', (field) => { field.value = '24'; field.dispatchEvent(new Event('input', { bubbles: true })); });
-    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr === 'new inline text' && state.project.images[0].blocks[0].verticalAlign === 'top' && state.project.images[0].blocks[0].align === 'justify' && state.project.images[0].blocks[0].size === 24), true, 'text and formatting are applied to the project while typing, without waiting for a registration button');
+    await page.$eval('#inlineEditorColor', (field) => { field.value = '#ff0000'; field.dispatchEvent(new Event('input', { bubbles: true })); });
+    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr === 'new inline text' && state.project.images[0].blocks[0].verticalAlign === 'top' && state.project.images[0].blocks[0].align === 'justify' && state.project.images[0].blocks[0].size === 24 && state.project.images[0].blocks[0].color === '#ff0000'), true, 'text and settings are auto-applied to the project while typing, without a registration action');
     assert.notEqual(await page.$eval('#editorCanvas', canvas => canvas.toDataURL()), await page.evaluate(() => window.__beforeInlineCanvas), 'the image canvas must update to show the live draft');
     assert.equal(await editorRenderDifference(page), 0, 'while editing, the canvas must exactly match the final renderer for the live draft');
     assert.equal(await page.$eval('#inlineEditorField', field => getComputedStyle(field).color === 'rgba(0, 0, 0, 0)' && getComputedStyle(field).caretColor !== 'rgba(0, 0, 0, 0)'), true, 'the caret remains visible while the exact rendered text is shown underneath');
@@ -432,14 +436,17 @@ main()
     assert.equal(await page.$$eval('#editorBoxes [contenteditable="true"], #editorBoxes [contenteditable="plaintext-only"]', els => els.length), 0, 'Apply removes the editable surface from the image box');
     const appliedInline = await page.evaluate(() => {
       const block = state.project.images[0].blocks[0];
-      return {tr:block.tr,richHtml:block.richHtml,align:block.align,verticalAlign:block.verticalAlign,size:block.size,sidebar:document.querySelectorAll('#blockList .block-card[data-id="1"] .block-readonly')[1]?.textContent};
+      return {tr:block.tr,richHtml:block.richHtml,align:block.align,verticalAlign:block.verticalAlign,size:block.size,color:block.color,sidebar:document.querySelectorAll('#blockList .block-card[data-id="1"] .block-readonly')[1]?.textContent};
     });
-    assert.ok(appliedInline.tr === 'new inline text' && /font-weight:\s*normal/i.test(appliedInline.richHtml) && appliedInline.align === 'justify' && appliedInline.verticalAlign === 'top' && appliedInline.size === 24 && appliedInline.sidebar.includes(appliedInline.tr), `Apply must update only the selected block and synchronize its sidebar: ${JSON.stringify(appliedInline)}`);
+    assert.ok(appliedInline.tr === 'new inline text' && /font-weight:\s*normal/i.test(appliedInline.richHtml) && appliedInline.align === 'justify' && appliedInline.verticalAlign === 'top' && appliedInline.size === 24 && appliedInline.color === '#ff0000' && appliedInline.sidebar.includes(appliedInline.tr), `Apply must update only the selected block and synchronize its sidebar: ${JSON.stringify(appliedInline)}`);
     assert.equal(await editorRenderDifference(page), 0, 'Apply must show the final output renderer immediately in the same editor');
     assert.notEqual(await page.$eval('#editorCanvas', (canvas) => canvas.toDataURL()), await page.evaluate(() => window.__beforeInlineCanvas));
     await page.waitForFunction(async () => { const response = await fetch(`/api/projects/${state.project.id}`); if (!response.ok) return false; const project = await response.json(); return project.images[0].blocks[0].tr === 'new inline text'; }, { timeout: 8000 });
     assert.equal(await page.evaluate(async () => (await (await fetch(`/api/projects/${state.project.id}`)).json()).images[0].blocks[0].tr), 'new inline text', 'auto-applied edits must be saved without an explicit Apply action');
     assert.equal(await page.evaluate(async () => (await (await fetch(`/api/projects/${state.project.id}`)).json()).images[0].blocks[0].verticalAlign), 'top', 'vertical placement must persist with the project');
+    await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text'); await page.waitForSelector('#inlineEditor:not(.hidden)');
+    assert.equal(await page.evaluate(() => JSON.stringify({size:document.getElementById('inlineEditorSize').value,color:document.getElementById('inlineEditorColor').value,align:document.getElementById('inlineEditorAlign').value,vertical:document.getElementById('inlineVerticalAlign').value})), JSON.stringify({size:'24',color:'#ff0000',align:'justify',vertical:'top'}), 'reopening the same box restores the latest saved formatting settings');
+    await page.click('#inlineEditorApply');
     await page.click('#editorBoxes .editor-box[data-id="2"] .editor-box-text');
     await page.waitForSelector('#inlineEditor:not(.hidden)');
     assert.equal(await page.evaluate(() => String(inlineDraft.block.id)), '2', 'clicking a different on-image text opens that exact text in the docked editor');

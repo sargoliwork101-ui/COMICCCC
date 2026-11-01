@@ -1633,6 +1633,23 @@ function resetInlineLineStyle() {
   ['textAlign', 'direction', 'fontSize', 'color'].forEach((key) => { line.style[key] = ''; });
   rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
 }
+function effectiveInlineSize(block) {
+  const output = overlayBlock(block); const bounds = boxOf(output);
+  return Number(block.size) || (hasRenderableText(output) ? overlaySize(output, bounds.x1 - bounds.x0, bounds.y1 - bounds.y0) : 24);
+}
+function effectiveInlineColor(block) {
+  const output = overlayBlock(block); const style = Typeset.blockStyle(output);
+  if (style.color) return style.color.toLowerCase();
+  if (block.bg === 'none') return '#ffffff';
+  if (block.bg === 'white') return '#0b0b0b';
+  if (block.bg === 'black') return '#fafafa';
+  try {
+    const bitmap = state.editorBitmap; const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+    const context = canvas.getContext('2d'); context.drawImage(bitmap, 0, 0);
+    const bounds = boxOf(output); const bg = Typeset.sampleBg(context, bounds, bitmap.width, bitmap.height);
+    return 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b > 150 ? '#0b0b0b' : '#fafafa';
+  } catch { return '#ffffff'; }
+}
 function placeInlineCaret(field, event) {
   if (!event || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
   let position = document.caretPositionFromPoint?.(event.clientX, event.clientY);
@@ -1665,8 +1682,8 @@ function openInlineEditor(block, clickEvent = null) {
   $('inlineEditorDirection').value = direction; $('inlineEditorDirection').disabled = mode === 'ocr';
   $('inlineEditorAlign').value = mode === 'ocr' ? overlayBlock(block).align : (block.align || 'right');
   $('inlineVerticalAlign').value = ['top', 'bottom'].includes(block.verticalAlign) ? block.verticalAlign : 'middle';
-  $('inlineEditorSize').value = block.size || '';
-  $('inlineEditorColor').value = block.color || '#ffffff';
+  $('inlineEditorSize').value = String(effectiveInlineSize(block));
+  $('inlineEditorColor').value = effectiveInlineColor(block);
   inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: mode === 'ocr' ? plainToHtml(block.text || '') : sanitizeHtml(originalHtml),
     dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: $('inlineEditorSize').value,
     color: block.color || null, originalColor: block.color || null, range: null, history: [], historyIndex: -1, muteHistory: false };
@@ -2185,7 +2202,7 @@ function bindEvents() {
     },
     onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); autoApplyInlineDraft(); } },
     getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: $('inlineEditorSize').value, color: inlineDraft.color } : null,
-    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) $('inlineVerticalAlign').value = meta.verticalAlign; if (meta.size === '' || (+meta.size >= 8 && +meta.size <= 160)) $('inlineEditorSize').value = meta.size; if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || '#ffffff'; } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; },
+    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) $('inlineVerticalAlign').value = meta.verticalAlign; if (meta.size === '') $('inlineEditorSize').value = String(effectiveInlineSize(inlineDraft.block)); else if (+meta.size >= 8 && +meta.size <= 160) $('inlineEditorSize').value = meta.size; if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; },
   });
   const inlineField = $('inlineEditorField');
   ['keyup', 'mouseup', 'focus'].forEach((name) => inlineField.addEventListener(name, () => { rememberInlineRange(); syncInlineLineControls(); }));
@@ -2205,7 +2222,7 @@ function bindEvents() {
   $('inlineEditorAlign').addEventListener('change', () => { inlineField.style.textAlign = $('inlineEditorAlign').value; classicEditor.notifyChange(); });
   $('inlineVerticalAlign').addEventListener('change', () => { if (inlineDraft) classicEditor.notifyChange(); });
   $('inlineEditorColor').addEventListener('input', () => { if (inlineDraft) { inlineDraft.color = $('inlineEditorColor').value; classicEditor.notifyChange(); } });
-  $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) { inlineDraft.color = null; classicEditor.notifyChange(); } });
+  $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) { inlineDraft.color = null; $('inlineEditorColor').value = effectiveInlineColor({ ...inlineDraft.block, color: null }); classicEditor.notifyChange(); } });
   $('inlineEditorSize').addEventListener('input', () => { if (inlineDraft) classicEditor.notifyChange(); });
   const imagePreview = document.querySelector('.editor-preview'); let blankPointer = null;
   imagePreview.addEventListener('pointerdown', (event) => { blankPointer = !event.target.closest('.editor-box') && event.button === 0 ? { x: event.clientX, y: event.clientY } : null; });
