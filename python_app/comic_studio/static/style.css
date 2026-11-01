@@ -41,27 +41,36 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 /* Contextual toolbar layout and controls. */
 .inline-editor{position:absolute;z-index:30;background:var(--surface-2);color:var(--text);border:1px solid var(--line-2);border-radius:11px;box-shadow:0 12px 34px #0009;direction:rtl;display:flex;flex-direction:column}
 .inline-editor-field *{font-size:inherit!important}.inline-editor-field p,.inline-editor-field div,.inline-editor-field h1,.inline-editor-field h2,.inline-editor-field h3,.inline-editor-field h4,.inline-editor-field h5,.inline-editor-field h6,.inline-editor-field blockquote,.inline-editor-field pre{margin:0;padding:0}
+#inlineEditorField::selection,#inlineEditorField *::selection{background:#5e9dff66;color:transparent;-webkit-text-fill-color:transparent}
 .editor-box.empty .editor-box-text::after{content:'+ افزودن متن';position:absolute;inset:0;display:grid;place-items:center;color:#2768ac!important;-webkit-text-fill-color:#2768ac!important;font-size:11px;background:#ffffff99!important;pointer-events:none}
 
-/* Permanently docked top text-editor ribbon; the only editable text surface is
+/* Permanently docked Word-style top text-editor ribbon; the only editable text surface is
    the on-image box itself while the canvas underneath renders live output. */
 .inline-editor-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
-.inline-editor-status{display:flex;align-items:center;gap:7px;min-width:0}
+.inline-editor-status{display:flex;align-items:center;gap:7px;min-width:0;flex-wrap:wrap}
 .inline-status-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint);transition:background .18s,box-shadow .18s}
 .inline-editor:not(.is-idle) .inline-status-dot{background:#34d399;box-shadow:0 0 0 3px #34d3992e}
 .inline-editor-head strong{font-size:11px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .inline-editor.is-idle .inline-editor-head strong{color:var(--muted);font-weight:500}
+.inline-target-badge{font-size:10px;font-weight:700;padding:1px 8px;border-radius:999px;background:color-mix(in srgb,var(--line-2) 55%,transparent);color:var(--muted);white-space:nowrap}
+.inline-target-badge.is-word{background:color-mix(in srgb,var(--a2) 22%,transparent);color:var(--a2);border:1px solid color-mix(in srgb,var(--a2) 45%,transparent)}
 .inline-editor-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
 .inline-editor-actions button{font-size:10px;line-height:1.4;padding:3px 9px;border-radius:7px}
 .inline-editor-workbench{display:flex;align-items:stretch;flex-wrap:wrap;gap:6px;transition:opacity .16s}
 .inline-editor.is-idle .inline-editor-workbench{opacity:.56}
-.inline-tool-group{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:4px 8px;background:var(--surface);border:1px solid var(--line);border-radius:8px;min-height:36px}
-.inline-group-tag{font-size:10px;font-weight:700;color:var(--a2);background:color-mix(in srgb,var(--a2) 13%,transparent);border-radius:5px;padding:1px 6px;white-space:nowrap}
+.inline-tool-group{display:flex;align-items:center;flex-wrap:wrap;gap:5px;padding:4px 8px;background:var(--surface);border:1px solid var(--line);border-radius:8px;min-height:36px}
 .inline-tool-group label{flex-direction:row;align-items:center;gap:4px;font-size:10px;color:var(--muted);white-space:nowrap}
 .inline-tool-group button,.inline-tool-group select,.inline-tool-group input{font-size:10px;padding:3px 6px;width:auto;min-height:26px;border-radius:6px}
+.inline-step-btn{font-weight:700;direction:ltr;min-width:28px;padding:3px 5px!important}
 .inline-tool-group input[type=number]{width:58px;direction:ltr;text-align:center}
 .inline-tool-group input[type=color]{width:30px;height:26px;min-height:26px;padding:2px}
-.inline-rich-slot{flex:1 1 310px;min-width:min(100%,250px);min-height:36px;display:flex;align-items:center}
+.inline-box-settings{position:relative;font-size:10px}
+.inline-box-settings summary{list-style:none;cursor:pointer;user-select:none;padding:4px 8px;border-radius:6px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--text);white-space:nowrap}
+.inline-box-settings summary::-webkit-details-marker{display:none}
+.inline-box-settings[open] summary{border-color:var(--a1);color:var(--a2)}
+.inline-box-popover{position:absolute;top:calc(100% + 6px);inset-inline-end:0;z-index:45;min-width:250px;display:grid;gap:7px;padding:10px;background:var(--surface);border:1px solid var(--line-2);border-radius:10px;box-shadow:var(--shadow)}
+.inline-box-popover label{justify-content:space-between}
+.inline-rich-slot{flex:1 1 340px;min-width:min(100%,260px);min-height:36px;display:flex;align-items:center}
 .inline-rich-slot>.classic-editor:not(.classic-fullscreen){flex:1;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;border:1px solid var(--line);border-radius:8px;background:var(--surface);min-height:36px}
 .inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-toolbar{flex:1 1 auto;border:0;background:transparent;padding:3px 5px}
 .inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-tabs{order:2;padding:3px 5px;background:transparent;border-inline-start:1px solid var(--line);align-items:center}

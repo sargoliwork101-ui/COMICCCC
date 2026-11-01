@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.56">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.56">
+  <link rel="stylesheet" href="/style.css?v=3.57">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.57">
 </head>
 <body>
   <header class="topbar">
@@ -193,7 +193,7 @@
     <div class="dialog-head"><h2 id="editorTitle">ویرایش متن</h2><div><label class="overlay-mode-control">متن روی تصویر<select id="overlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label><button id="editorRevert" class="bt danger">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt">به‌روزرسانی پیش‌نمایش</button><button id="editorClose" class="bt primary">ذخیره و بستن</button></div></div>
       <section id="inlineEditor" class="inline-editor is-idle" role="region" aria-label="ویرایش متن انتخاب‌شده">
         <div class="inline-editor-head">
-          <div class="inline-editor-status"><span class="inline-status-dot" aria-hidden="true"></span><strong id="inlineEditorTitle">ویرایشگر متن آماده است · برای ویرایش، روی هر کادر متن در تصویر کلیک کنید</strong></div>
+          <div class="inline-editor-status"><span class="inline-status-dot" aria-hidden="true"></span><strong id="inlineEditorTitle">ویرایشگر متن آماده است · برای ویرایش، روی هر کادر متن در تصویر کلیک کنید</strong><span id="inlineTargetBadge" class="inline-target-badge hidden" aria-live="polite"></span></div>
           <div class="inline-editor-actions">
             <button id="inlinePreview" type="button" aria-label="نمایش دقیق متن روی تصویر" aria-pressed="false" title="پیش‌نمایش تمیز بدون نشانگر کادر">پیش‌نمایش دقیق</button>
             <button id="inlineEditorCancel" type="button" class="hidden" aria-label="بستن بدون ذخیره" title="بستن و صرف‌نظر از ویرایشِ ناسازگار">بستن بدون ذخیره</button>
@@ -201,22 +201,27 @@
           </div>
         </div>
         <div class="inline-editor-workbench">
-          <div class="inline-tool-group inline-group-box" role="group" aria-label="تنظیمات کل کادر">
-            <span class="inline-group-tag">کل کادر</span>
-            <label title="اندازهٔ قلم کل کادر روی تصویر"><span>اندازه</span><input id="inlineEditorSize" type="number" min="8" max="160" placeholder="خودکار" aria-label="اندازهٔ متن روی تصویر"></label>
-            <label title="رنگ متن کل کادر"><span>رنگ</span><input id="inlineEditorColor" type="color" aria-label="رنگ متن روی تصویر"></label>
-            <button id="inlineEditorAutoColor" type="button" title="تشخیص خودکار رنگ مناسب بر اساس پس‌زمینهٔ حباب">رنگ خودکار</button>
-            <label title="تراز افقی متن داخل کادر"><span>تراز</span><select id="inlineEditorAlign" aria-label="تراز متن"><option value="right">راست</option><option value="center">وسط</option><option value="left">چپ</option><option value="justify">جاستیفای</option></select></label>
-            <label title="جای عمودی متن در کادر"><span>عمودی</span><select id="inlineVerticalAlign" aria-label="جای عمودی متن در کادر"><option value="top">بالا</option><option value="middle">وسط</option><option value="bottom">پایین</option></select></label>
-            <label title="جهت نوشتار کادر"><span>جهت</span><select id="inlineEditorDirection" aria-label="جهت متن"><option value="rtl">راست‌به‌چپ</option><option value="ltr">چپ‌به‌راست</option></select></label>
-          </div>
           <div id="inlineLineTools" class="inline-tool-group inline-line-tools" role="group" aria-label="تنظیم خط انتخاب‌شده">
-            <span class="inline-group-tag">خط فعلی</span>
-            <label title="اندازهٔ اختصاصی فقط برای خط فعلی"><span>اندازهٔ خط</span><input id="inlineLineSize" type="number" min="8" max="160" placeholder="پیش‌فرض" aria-label="اندازهٔ خط انتخاب‌شده روی تصویر"></label>
-            <button id="inlineLineReset" type="button" title="حذف تنظیمات اختصاصی این خط">پیش‌فرض خط</button>
+            <label title="اندازهٔ کلمهٔ انتخاب‌شده (یا خط فعلی در صورت انتخاب‌نبودن کلمه)"><span>اندازه</span><input id="inlineLineSize" type="number" min="8" max="160" placeholder="خودکار" aria-label="اندازهٔ خط انتخاب‌شده روی تصویر"></label>
+            <button id="inlineSizeUp" type="button" class="inline-step-btn" title="بزرگ‌تر کردن کلمهٔ انتخابی یا خط فعلی" aria-label="افزایش اندازهٔ متن">A+</button>
+            <button id="inlineSizeDown" type="button" class="inline-step-btn" title="کوچک‌تر کردن کلمهٔ انتخابی یا خط فعلی" aria-label="کاهش اندازهٔ متن">A−</button>
+            <button id="inlineLineReset" type="button" title="برگرداندن کلمهٔ انتخابی یا خط فعلی به حالت پیش‌فرض">پاک‌کردن استایل</button>
           </div>
           <div class="inline-rich-slot">
             <div id="inlineEditorField" class="inline-editor-field" contenteditable="true" role="textbox" aria-multiline="true" aria-label="متن انتخاب‌شده"></div>
+          </div>
+          <div class="inline-tool-group inline-group-layout" role="group" aria-label="جایگیری و پیش‌فرض کادر">
+            <label title="جای عمودی متن در کادر"><span>عمودی</span><select id="inlineVerticalAlign" aria-label="جای عمودی متن در کادر"><option value="top">بالا</option><option value="middle">وسط</option><option value="bottom">پایین</option></select></label>
+            <details class="inline-box-settings">
+              <summary title="تغییر پیش‌فرض یک‌جای کل حباب">پیش‌فرض کل کادر ▾</summary>
+              <div class="inline-box-popover" role="group" aria-label="تنظیمات کل کادر">
+                <label title="اندازهٔ پایهٔ کل کادر روی تصویر"><span>اندازهٔ کل کادر</span><input id="inlineEditorSize" type="number" min="8" max="160" placeholder="خودکار" aria-label="اندازهٔ متن روی تصویر"></label>
+                <label title="رنگ پایهٔ کل کادر"><span>رنگ کل کادر</span><input id="inlineEditorColor" type="color" aria-label="رنگ متن روی تصویر"></label>
+                <button id="inlineEditorAutoColor" type="button" title="تشخیص خودکار رنگ مناسب بر اساس پس‌زمینهٔ حباب">رنگ خودکار</button>
+                <label title="تراز پیش‌فرض کل کادر"><span>تراز کادر</span><select id="inlineEditorAlign" aria-label="تراز متن"><option value="right">راست</option><option value="center">وسط</option><option value="left">چپ</option><option value="justify">جاستیفای</option></select></label>
+                <label title="جهت پیش‌فرض کل کادر"><span>جهت کادر</span><select id="inlineEditorDirection" aria-label="جهت متن"><option value="rtl">راست‌به‌چپ</option><option value="ltr">چپ‌به‌راست</option></select></label>
+              </div>
+            </details>
           </div>
         </div>
       </section>
@@ -261,11 +266,11 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.56"></script>
-  <script src="/groups.js?v=3.56"></script>
-  <script src="/rich-sanitize.js?v=3.56"></script>
-  <script src="/rich-editor.js?v=3.56"></script>
-  <script src="/inline-edit-session.js?v=3.56"></script>
-  <script src="/app.js?v=3.56"></script>
+  <script src="/typeset.js?v=3.57"></script>
+  <script src="/groups.js?v=3.57"></script>
+  <script src="/rich-sanitize.js?v=3.57"></script>
+  <script src="/rich-editor.js?v=3.57"></script>
+  <script src="/inline-edit-session.js?v=3.57"></script>
+  <script src="/app.js?v=3.57"></script>
 </body>
 </html>

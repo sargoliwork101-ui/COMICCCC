@@ -535,6 +535,43 @@ main()
     await page.evaluate(() => { state.project.images[0].blocks[0] = window.__inlineOriginal; buildBlockList(); drawEditor(); const preview = document.querySelector('.editor-preview'); preview.scrollTop = 0; preview.scrollLeft = 0; });
     console.log('PASS: per-line formatting stays isolated, reaches the output, and persists');
 
+    // Word-level formatting: selecting one word on a multi-word line styles ONLY that word (like Word).
+    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
+    await page.focus('#inlineEditorField');
+    await page.evaluate(() => {
+      const field = document.getElementById('inlineEditorField');
+      field.innerHTML = 'سلام رفیق چطوری';
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      const node = field.firstChild;
+      const start = node.nodeValue.indexOf('رفیق');
+      const range = document.createRange();
+      range.setStart(node, start); range.setEnd(node, start + 4);
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+      field.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+    assert.ok((await page.$eval('#inlineTargetBadge', el => el.textContent)).includes('رفیق'), 'target badge shows the selected word');
+    await page.$eval('#inlineLineSize', el => { el.value = '30'; el.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.click('#inlineSizeUp');
+    await page.$eval('#inlineEditor .classic-color', el => { el.value = '#00aa55'; el.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="زیرخط"]');
+    const singleWordCheck = await page.evaluate(() => {
+      const words = Typeset.richHtmlWords(state.project.images[0].blocks[0].richHtml).filter(w => w.t);
+      return words.map(w => ({ t: w.t, size: w.size || null, color: w.color || null, underline: !!w.underline }));
+    });
+    assert.equal(singleWordCheck.length, 3);
+    assert.deepEqual({ size: singleWordCheck[0].size, color: singleWordCheck[0].color, underline: singleWordCheck[0].underline }, { size: null, color: null, underline: false }, 'first word on the same line stays untouched');
+    assert.equal(singleWordCheck[1].t, 'رفیق');
+    assert.equal(singleWordCheck[1].size, 32, 'only the selected word gets size 30 + A+ (32)');
+    assert.ok(singleWordCheck[1].color && singleWordCheck[1].underline, 'only the selected word gets color and underline');
+    assert.deepEqual({ size: singleWordCheck[2].size, color: singleWordCheck[2].color, underline: singleWordCheck[2].underline }, { size: null, color: null, underline: false }, 'third word on the same line stays untouched');
+    assert.equal(await editorRenderDifference(page), 0, 'single-word formatting matches live canvas output');
+    await page.click('#inlineLineReset');
+    const afterWordReset = await page.evaluate(() => Typeset.richHtmlWords(state.project.images[0].blocks[0].richHtml).filter(w => w.t));
+    assert.equal(afterWordReset[1].size || null, null, 'clearing style on a selected word resets only that word');
+    await page.click('#inlineEditorApply');
+    await page.evaluate(() => { state.project.images[0].blocks[0] = window.__inlineOriginal; buildBlockList(); drawEditor(); });
+    console.log('PASS: Word-like single-word formatting styles and resets only the selected word on the same line');
+
     // Classic source/visual synchronization, sanitization, dialogs and draft recovery.
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
     await page.click('#inlineEditor .classic-tabs button:nth-child(2)');
