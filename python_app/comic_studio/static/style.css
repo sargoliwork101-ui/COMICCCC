@@ -40,8 +40,9 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 
 /* Contextual toolbar layout and controls. */
 .inline-editor{position:absolute;z-index:30;background:var(--surface-2);color:var(--text);border:1px solid var(--line-2);border-radius:11px;box-shadow:0 12px 34px #0009;direction:rtl;display:flex;flex-direction:column}
-.inline-editor-field *{font-size:inherit!important}.inline-editor-field p,.inline-editor-field div,.inline-editor-field h1,.inline-editor-field h2,.inline-editor-field h3,.inline-editor-field h4,.inline-editor-field h5,.inline-editor-field h6,.inline-editor-field blockquote,.inline-editor-field pre{margin:0;padding:0}
+.inline-editor-field p,.inline-editor-field div,.inline-editor-field h1,.inline-editor-field h2,.inline-editor-field h3,.inline-editor-field h4,.inline-editor-field h5,.inline-editor-field h6,.inline-editor-field blockquote,.inline-editor-field pre{margin:0;padding:0;font-size:inherit}
 #inlineEditorField::selection,#inlineEditorField *::selection{background:#5e9dff66;color:transparent;-webkit-text-fill-color:transparent}
+#inlineEditorField::highlight(comic-inline-selection){background-color:#5e9dff66;color:transparent}
 .editor-box.empty .editor-box-text::after{content:'+ افزودن متن';position:absolute;inset:0;display:grid;place-items:center;color:#2768ac!important;-webkit-text-fill-color:#2768ac!important;font-size:11px;background:#ffffff99!important;pointer-events:none}
 
 /* Permanently docked Word-style top text-editor ribbon; the only editable text surface is
@@ -81,6 +82,8 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 .inline-editor.plain-mode .inline-rich-slot>.classic-editor:not(.classic-fullscreen)::after{content:'حالت متن ساده (OCR) — قالب‌بندی پیشرفته غیرفعال است';font-size:10px;color:var(--muted)}
 .editor-box.editing{z-index:20}.editor-box.editing>.editor-box-text{visibility:hidden}.editor-box.editing>.box-move,.editor-box.editing>.box-visibility,.editor-box.editing>.box-language{display:none}
 .editor-box.editing>#inlineEditorField,.editor-box.editing>.classic-source{position:absolute;inset:0;z-index:3;display:block;width:100%;height:100%;min-width:0;min-height:0;max-width:none;max-height:none;margin:0;padding:3px;resize:none;overflow:auto;border:0!important;border-radius:0!important;background:var(--editing-bg,var(--surface));color:var(--editing-fg,var(--text));font:15px/1.55 Vazirmatn,Tahoma,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;box-shadow:inset 0 0 0 2px var(--a1);outline:none}
+.editor-box.editing>#inlineEditorField{overflow:hidden}
+.editor-box.editing>#inlineEditorField *{color:transparent!important;-webkit-text-fill-color:transparent!important;text-decoration-color:transparent!important}
 .editor-box.editing>.classic-source{direction:ltr;text-align:left;font:12px/1.4 monospace}.editor-box.editing>[hidden]{display:none!important}
 
 #inlineLineTools{margin:0}

@@ -28,8 +28,9 @@
     let mode = 'visual', savedRange = null, plainPaste = false, plainMode = false, currentKey = options.autosaveKey || '', base = '', dirty = false, timer = null;
     const listeners = new Set(); if (typeof options.onChange === 'function') listeners.add(options.onChange);
     function remember() { const sel = window.getSelection(); if (sel?.rangeCount && field.contains(sel.anchorNode) && field.contains(sel.focusNode)) savedRange = sel.getRangeAt(0).cloneRange(); }
-    function restore() { field.focus(); if (savedRange && field.contains(savedRange.startContainer) && field.contains(savedRange.endContainer)) { const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(savedRange); } }
-    function html() { return sanitize(mode === 'text' ? source.value : field.innerHTML); }
+    function restore() { field.focus({ preventScroll: true }); if (savedRange && field.contains(savedRange.startContainer) && field.contains(savedRange.endContainer)) { const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(savedRange); } }
+    const rawHtml = () => typeof options.serializeHTML === 'function' ? options.serializeHTML(field) : field.innerHTML;
+    function html() { return sanitize(mode === 'text' ? source.value : rawHtml()); }
     function text() {
       const hidden = field.hidden; if (hidden) { field.innerHTML = html(); field.hidden = false; }
       const value = (field.innerText ?? field.textContent ?? '').replace(/\u00a0/g, ' '); if (hidden) field.hidden = true; return value;
@@ -39,7 +40,7 @@
     function changed() { dirty = true; if (mode === 'text') { field.innerHTML = html(); } updateStatus(); const value = html(); listeners.forEach((fn) => fn(value)); }
     function setMode(next) {
       if (next === mode) return;
-      if (next === 'text') { remember(); source.value = sanitize(field.innerHTML); field.hidden = true; source.hidden = false; mode = 'text'; source.focus(); }
+      if (next === 'text') { remember(); source.value = sanitize(rawHtml()); field.hidden = true; source.hidden = false; mode = 'text'; source.focus(); }
       else { field.innerHTML = sanitize(source.value); source.hidden = true; field.hidden = false; mode = 'visual'; field.dispatchEvent(new Event('input', { bubbles: true })); field.focus(); }
       visualTab.setAttribute('aria-selected', String(mode === 'visual')); textTab.setAttribute('aria-selected', String(mode === 'text'));
       toolbar.querySelectorAll('button,select,input').forEach((control) => { control.disabled = mode === 'text' && !control.dataset.allowText; }); updateStatus();
@@ -90,12 +91,14 @@
     function saveDraft(){if(!currentKey||!dirty)return;try{const at=new Date();localStorage.setItem(currentKey,JSON.stringify({html:html(),base,time:at.toISOString(),meta:options.getDraftMetadata?.() ?? null}));savedAt=at.toLocaleTimeString('fa-IR');dirty=false;updateStatus();}catch{updateStatus('ذخیرهٔ محلی در دسترس نیست');}}
     timer = setInterval(saveDraft, Math.max(1000, options.autosaveInterval || 3000));
     const api = {
-      getHTML: html, getText: text, focus(){(mode==='visual'?field:source).focus();},
+      getHTML: html, getText: text, focus(){(mode==='visual'?field:source).focus({ preventScroll: true });},
       setHTML(value){field.innerHTML=sanitize(value);source.value=field.innerHTML;savedRange=null;changed();},
       onChange(fn){listeners.add(fn);return()=>listeners.delete(fn);},
       setContext(key,value,revision=''){ row2.hidden=true;toggle.setAttribute('aria-expanded','false');currentKey=key||'';base=revision; savedAt=''; dirty=false; savedRange=null; mode='visual';source.hidden=true;field.hidden=false;field.innerHTML=sanitize(value);source.value=field.innerHTML;visualTab.setAttribute('aria-selected','true');textTab.setAttribute('aria-selected','false');toolbar.querySelectorAll('button,select,input').forEach((el)=>{el.disabled=false;});let recovered=false;try{const saved=currentKey?JSON.parse(localStorage.getItem(currentKey)||'null'):null;if(typeof saved?.html === 'string'){const differs=saved.html!==field.innerHTML || JSON.stringify(saved.meta ?? null)!==JSON.stringify(options.getDraftMetadata?.() ?? null);if(differs && confirm(saved.base===base ? 'پیش‌نویس ذخیره‌شده‌ای پیدا شد. بازیابی شود؟' : 'این پیش‌نویس متعلق به نسخهٔ قدیمی‌تری از کادر است. بازیابی آن متن فعلی را در ویرایشگر جایگزین می‌کند. بازیابی شود؟')){field.innerHTML=sanitize(saved.html);source.value=field.innerHTML;options.onRestore?.(saved.meta);dirty=true;recovered=true;}else if(currentKey){localStorage.removeItem(currentKey);}}}catch{}updateStatus();return recovered;},
       saveDraft, clearDraft(){try{if(currentKey)localStorage.removeItem(currentKey);}catch{}dirty=false;},
       setPlainMode(enabled){ plainMode=!!enabled; toolbar.hidden=plainMode; tabs.hidden=plainMode; if(enabled&&mode==='text')setMode('visual'); field.contentEditable=enabled?'plaintext-only':'true'; },
+      resetToolbar(){ row2.hidden=true; toggle.setAttribute('aria-expanded','false'); mode='visual'; source.hidden=true; field.hidden=false; visualTab.setAttribute('aria-selected','true'); textTab.setAttribute('aria-selected','false'); currentKey=''; dirty=false; },
+      syncRange(range){ if(range&&field.contains(range.startContainer)&&field.contains(range.endContainer)) savedRange=range.cloneRange(); },
       notifyChange(){ remember(); changed(); },
       attachField(container){ container.append(field, source); },
       detachField(){ shell.insertBefore(field, status); shell.insertBefore(source, status); },

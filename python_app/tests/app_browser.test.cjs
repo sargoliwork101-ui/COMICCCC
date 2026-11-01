@@ -535,42 +535,99 @@ main()
     await page.evaluate(() => { state.project.images[0].blocks[0] = window.__inlineOriginal; buildBlockList(); drawEditor(); const preview = document.querySelector('.editor-preview'); preview.scrollTop = 0; preview.scrollLeft = 0; });
     console.log('PASS: per-line formatting stays isolated, reaches the output, and persists');
 
-    // Word-level formatting: selecting one word on a multi-word line styles ONLY that word (like Word).
-    await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
-    await page.focus('#inlineEditorField');
-    await page.evaluate(() => {
-      const field = document.getElementById('inlineEditorField');
-      field.innerHTML = 'سلام رفیق چطوری';
-      field.dispatchEvent(new Event('input', { bubbles: true }));
-      const node = field.firstChild;
-      const start = node.nodeValue.indexOf('رفیق');
-      const range = document.createRange();
-      range.setStart(node, start); range.setEnd(node, start + 4);
-      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
-      field.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    // Word-level formatting with REAL mouse drag & double-click over rendered canvas ink in a tall zoomed bubble.
+    const canvasWordInk = await page.evaluate(() => {
+      window.__savedBeforeWordTest = JSON.parse(JSON.stringify(state.project.images[0].blocks[0]));
+      const b = { ...JSON.parse(JSON.stringify(window.__savedBeforeWordTest)), x0: 8, y0: 5, x1: 156, y1: 125, lineH: 22, bg: 'white', dir: 'rtl', align: 'center', verticalAlign: 'middle', size: null, color: null, tr: 'سلام رفیق چطوری', richHtml: '' };
+      state.project.images[0].blocks[0] = b;
+      setEditorZoom(0.75);
+      buildBlockList(); drawEditor();
+      const probeBlock = { ...JSON.parse(JSON.stringify(b)), richHtml: 'سلام <span style="color:#ff00aa;">رفیق</span> چطوری' };
+      const probe = Typeset.render(state.editorBitmap, [probeBlock]);
+      const data = probe.getContext('2d').getImageData(0, 0, probe.width, probe.height).data;
+      let minX = 1e9, minY = 1e9, maxX = -1, maxY = -1;
+      for (let y = b.y0; y < b.y1; y += 1) {
+        for (let x = b.x0; x < b.x1; x += 1) {
+          const i = (y * probe.width + x) * 4;
+          if (data[i] > 200 && data[i + 1] < 50 && data[i + 2] > 120) {
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+          }
+        }
+      }
+      const cvRect = document.getElementById('editorCanvas').getBoundingClientRect();
+      const s = state.editorScale;
+      return {
+        x0: cvRect.left + minX * s, x1: cvRect.left + (maxX + 1) * s,
+        y0: cvRect.top + minY * s, y1: cvRect.top + (maxY + 1) * s,
+        cy: cvRect.top + ((minY + maxY) / 2) * s,
+      };
     });
-    assert.ok((await page.$eval('#inlineTargetBadge', el => el.textContent)).includes('رفیق'), 'target badge shows the selected word');
-    await page.$eval('#inlineLineSize', el => { el.value = '30'; el.dispatchEvent(new Event('input', { bubbles: true })); });
+    // First-drag directly on the CLOSED speech bubble over the exact visible canvas ink of «رفیق».
+    await page.mouse.move(canvasWordInk.x1 + 1, canvasWordInk.cy);
+    await page.mouse.down();
+    await page.mouse.move(canvasWordInk.x0 - 1, canvasWordInk.cy, { steps: 6 });
+    await page.mouse.up();
+    const mouseDragCheck = await page.evaluate(() => {
+      const sel = window.getSelection();
+      const rect = sel.rangeCount ? sel.getRangeAt(0).getBoundingClientRect() : null;
+      return {
+        selected: sel.toString().trim(),
+        badge: document.getElementById('inlineTargetBadge').textContent,
+        rect: rect ? { x0: rect.left, x1: rect.right, cy: (rect.top + rect.bottom) / 2 } : null,
+      };
+    });
+    assert.equal(mouseDragCheck.selected, 'رفیق', `real mouse drag over canvas ink must select exact word: ${JSON.stringify(mouseDragCheck)}`);
+    assert.ok(mouseDragCheck.badge.includes('رفیق'), 'target badge shows the mouse-selected word');
+    assert.ok(Math.abs(mouseDragCheck.rect.cy - canvasWordInk.cy) < 8 && Math.abs(mouseDragCheck.rect.x0 - canvasWordInk.x0) < 8, `selection highlight must overlap visible canvas ink, not top of bubble: ${JSON.stringify({ mouseDragCheck, canvasWordInk })}`);
+    // Real keyboard typing into #inlineLineSize must NOT steal focus or overwrite selected text.
+    await page.click('#inlineLineSize', { clickCount: 3 });
+    await page.keyboard.press('Backspace');
+    await page.keyboard.type('30');
     await page.click('#inlineSizeUp');
     await page.$eval('#inlineEditor .classic-color', el => { el.value = '#00aa55'; el.dispatchEvent(new Event('input', { bubbles: true })); });
     await page.click('#inlineEditor .classic-toolbar button[aria-label="زیرخط"]');
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="پررنگ"]');
     const singleWordCheck = await page.evaluate(() => {
       const words = Typeset.richHtmlWords(state.project.images[0].blocks[0].richHtml).filter(w => w.t);
-      return words.map(w => ({ t: w.t, size: w.size || null, color: w.color || null, underline: !!w.underline }));
+      return words.map(w => ({ t: w.t, size: w.size || null, color: w.color || null, underline: !!w.underline, bold: w.bold }));
     });
-    assert.equal(singleWordCheck.length, 3);
+    assert.equal(singleWordCheck.length, 3, `typing size must never overwrite the word: ${JSON.stringify(singleWordCheck)}`);
     assert.deepEqual({ size: singleWordCheck[0].size, color: singleWordCheck[0].color, underline: singleWordCheck[0].underline }, { size: null, color: null, underline: false }, 'first word on the same line stays untouched');
     assert.equal(singleWordCheck[1].t, 'رفیق');
-    assert.equal(singleWordCheck[1].size, 32, 'only the selected word gets size 30 + A+ (32)');
-    assert.ok(singleWordCheck[1].color && singleWordCheck[1].underline, 'only the selected word gets color and underline');
+    assert.equal(singleWordCheck[1].size, 32, 'only the selected word gets size 30 + A+ (32) in logical unzoomed px');
+    assert.ok(singleWordCheck[1].color && singleWordCheck[1].underline && singleWordCheck[1].bold === false, 'only the selected word gets color, underline, and toggled bold');
     assert.deepEqual({ size: singleWordCheck[2].size, color: singleWordCheck[2].color, underline: singleWordCheck[2].underline }, { size: null, color: null, underline: false }, 'third word on the same line stays untouched');
     assert.equal(await editorRenderDifference(page), 0, 'single-word formatting matches live canvas output');
+    await page.click('#inlineEditorApply');
+    // Double-clicking a word on a closed speech bubble also selects that exact word immediately.
+    const resizedInk = await page.evaluate(() => {
+      const b = state.project.images[0].blocks[0];
+      const rendered = Typeset.render(state.editorBitmap, [b]);
+      const data = rendered.getContext('2d').getImageData(0, 0, rendered.width, rendered.height).data;
+      let minX = 1e9, minY = 1e9, maxX = -1, maxY = -1;
+      for (let y = b.y0; y < b.y1; y += 1) {
+        for (let x = b.x0; x < b.x1; x += 1) {
+          const i = (y * rendered.width + x) * 4;
+          if (data[i] < 40 && data[i + 1] > 120 && data[i + 2] > 50) {
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+          }
+        }
+      }
+      const cvRect = document.getElementById('editorCanvas').getBoundingClientRect();
+      const s = state.editorScale;
+      return { cx: cvRect.left + ((minX + maxX) / 2) * s, cy: cvRect.top + ((minY + maxY) / 2) * s };
+    });
+    await page.mouse.click(resizedInk.cx, resizedInk.cy, { clickCount: 1 });
+    await page.mouse.click(resizedInk.cx, resizedInk.cy, { clickCount: 2 });
+    assert.equal(await page.evaluate(() => window.getSelection().toString().trim()), 'رفیق', 'double-clicking a word on a closed speech bubble selects that word');
     await page.click('#inlineLineReset');
     const afterWordReset = await page.evaluate(() => Typeset.richHtmlWords(state.project.images[0].blocks[0].richHtml).filter(w => w.t));
     assert.equal(afterWordReset[1].size || null, null, 'clearing style on a selected word resets only that word');
     await page.click('#inlineEditorApply');
-    await page.evaluate(() => { state.project.images[0].blocks[0] = window.__inlineOriginal; buildBlockList(); drawEditor(); });
-    console.log('PASS: Word-like single-word formatting styles and resets only the selected word on the same line');
+    await page.evaluate(() => { state.project.images[0].blocks[0] = window.__savedBeforeWordTest; fitEditor(); buildBlockList(); drawEditor(); });
+    console.log('PASS: real mouse drag & double-click over canvas ink select and style only the exact word');
 
     // Classic source/visual synchronization, sanitization, dialogs and draft recovery.
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
