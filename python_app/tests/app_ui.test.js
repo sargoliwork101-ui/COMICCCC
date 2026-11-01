@@ -498,7 +498,7 @@ function check(name, condition) {
   const editorPreview = window.document.querySelector('.editor-preview');
   Object.defineProperties(editorPreview, { clientWidth: { value: 400, configurable: true }, clientHeight: { value: 300, configurable: true } });
   const beforeZoom = JSON.stringify(geometry());
-  check('zoom controls float directly over the translation editing image', window.document.querySelector('.editor-view > .editor-zoom-floating')?.contains($('editorZoomIn')) && /\.editor-zoom-floating\{[^}]*position:absolute/.test(css));
+  check('zoom controls live cleanly inside the docked inline editor toolbar', window.document.querySelector('#inlineEditor .editor-zoom-controls')?.contains($('editorZoomIn')) && window.document.querySelector('#inlineEditor .editor-zoom-controls')?.contains($('editorImageFullscreen')) && !$('editorZoomIn').disabled);
   $('editorZoomIn').click();
   check('zoom control scales image and overlays without changing saved geometry', vm.runInContext('state.editorScale', context) === 1.25 && $('editorStage').style.width === '400px' && $('editorZoomLabel').textContent === '125٪' && JSON.stringify(geometry()) === beforeZoom);
   const beforeWheelZoom = vm.runInContext('state.editorScale', context);

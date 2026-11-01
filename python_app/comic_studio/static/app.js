@@ -1465,25 +1465,36 @@ function scheduleEditorCanvasDraw() {
   editorCanvasFrame = requestAnimationFrame(() => { editorCanvasFrame = 0; drawEditorCanvas(); });
 }
 function drawEditor() { drawEditorCanvas(); renderEditorBoxes(); positionInlineEditor(); }
+function clampedBoxOf(block) {
+  const raw = boxOf(block);
+  const item = editorItem();
+  const maxW = state.editorBitmap?.width || item?.width;
+  const maxH = state.editorBitmap?.height || item?.height;
+  if (!(maxW > 0 && maxH > 0)) return raw;
+  return { x0: Math.max(0, raw.x0), y0: Math.max(0, raw.y0), x1: Math.min(maxW, raw.x1), y1: Math.min(maxH, raw.y1) };
+}
 function overlaySize(block, width, height) {
   try {
     const style = Typeset.blockStyle(block);
     if (style.size) return style.size;
-    const maxSize = Math.max(12, Math.min(64, Math.round((block.lineH || height) * 1.1)));
+    const sourceText = String(block.tr || '').trim();
+    const richWords = !block._plainText && block.richHtml ? Typeset.richHtmlWords(block.richHtml) : null;
+    const maxSize = Math.max(12, Math.min(64, Math.round(block.lineH * 1.1)));
     overlayMeasureCtx = overlayMeasureCtx || document.createElement('canvas').getContext('2d');
     const ctx = overlayMeasureCtx;
-    if (!block._plainText && (block.richHtml || Typeset.hasInlineMarks(block.tr || ''))) {
-      const words = block.richHtml ? Typeset.richHtmlWords(block.richHtml) : Typeset.inlineWords(block.tr || '');
+    const inline = style.align === 'justify' || (!block._plainText && (!!block.richHtml || Typeset.hasInlineMarks(sourceText)));
+    if (inline) {
+      const words = block._plainText ? Typeset.richHtmlWords(plainToHtml(sourceText)) : (richWords || Typeset.inlineWords(sourceText));
       return Typeset.fitInline(ctx, words, width * .96, height * .96, maxSize, 8, style).size;
     }
     const prefix = `${style.italic ? 'italic ' : ''}${style.bold ? '700' : '400'} `;
-    return Typeset.fit(ctx, block.tr || '', width * .96, height * .96, maxSize, 8, prefix).size;
+    return Typeset.fit(ctx, sourceText, width * .96, height * .96, maxSize, 8, prefix).size;
   } catch {
     return Math.max(8, Math.min(160, Number(block.size) || Math.min(42, Math.max(10, height / Math.max(1.8, String(block.tr || '').split('\n').length * 1.65)))));
   }
 }
 function styleRichElement(element, block, scale = 1, preview = false) {
-  const box = boxOf(block); const style = Typeset.blockStyle(block);
+  const box = clampedBoxOf(block); const style = Typeset.blockStyle(block);
   element.dir = style.dir; element.style.direction = style.dir; element.style.textAlign = style.align;
   // The sidebar is an editing surface, not the output: output size and colour affect only the image.
   element.style.fontSize = preview ? `${overlaySize(block, box.x1 - box.x0, box.y1 - box.y0) * scale}px` : '';
@@ -1544,7 +1555,7 @@ function refreshInlineTypography() {
     scheduleEditorCanvasDraw();
     return;
   }
-  const box = boxOf(draft); const scale = state.editorScale || 1;
+  const box = clampedBoxOf(draft); const scale = state.editorScale || 1;
   const baseSize = overlaySize(draft, box.x1 - box.x0, box.y1 - box.y0);
   field.style.fontSize = `${baseSize * scale}px`;
   field.style.lineHeight = '1.55'; field.style.fontWeight = style.bold ? '700' : '400';
@@ -1594,6 +1605,7 @@ function syncInlineDockIdleState() {
   $('inlineEditorTitle').textContent = 'ویرایشگر متن آماده است · برای ویرایش، روی هر کادر متن در تصویر کلیک کنید';
   const badge = $('inlineTargetBadge');
   if (badge) { badge.textContent = ''; badge.classList.add('hidden'); badge.classList.remove('is-word'); }
+  if ($('inlineLineSize')) $('inlineLineSize').value = '';
   $('inlinePreview').textContent = 'پیش‌نمایش دقیق';
   $('inlinePreview').setAttribute('aria-pressed', 'false');
   $('inlineEditorCancel').classList.add('hidden');
@@ -1623,6 +1635,7 @@ function inlineBlockSnapshot(block) {
 function inlineDraftChanged() { return !!inlineEditSession?.isDirty(); }
 function closeInlineEditor(force = false) {
   if (!inlineDraft) return true;
+  if (!force && document.activeElement === $('inlineLineSize')) $('inlineLineSize').blur();
   const committed = inlineEditSession?.close({ discardConflict: force }) ?? false;
   if (!committed && !force) return false;
   if (committed) classicEditor.clearDraft(); else classicEditor.saveDraft();
@@ -1902,7 +1915,8 @@ function setSelectionOrLineSize(value, options = {}) {
 function stepSelectionOrLineSize(delta) {
   if (!inlineDraft || inlineDraft.mode === 'ocr') return;
   const currentInput = Number($('inlineLineSize').value);
-  const base = Number.isFinite(currentInput) && currentInput >= 8 ? currentInput : effectiveInlineSize(inlineDraft.block);
+  const inherited = inlineInheritedLogicalSize(inlineSelectionSpan(inlineDraft.range) || inlineDraft.range?.startContainer);
+  const base = Number.isFinite(currentInput) && currentInput >= 8 ? currentInput : (inherited ?? effectiveInlineSize(inlineDraft.block));
   const next = Math.max(8, Math.min(160, Math.round(base + delta)));
   $('inlineLineSize').value = String(next);
   setSelectionOrLineSize(`${next}px`);
@@ -1973,8 +1987,18 @@ function resetInlineLineStyle() {
   rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
 }
 function effectiveInlineSize(block) {
-  const output = overlayBlock(block); const bounds = boxOf(output);
-  return Number(block.size) || (hasRenderableText(output) ? overlaySize(output, bounds.x1 - bounds.x0, bounds.y1 - bounds.y0) : 24);
+  const output = overlayBlock(block);
+  if (Number(block.size) > 0) return Number(block.size);
+  const bounds = clampedBoxOf(output);
+  if (!hasRenderableText(output)) return 24;
+  const base = overlaySize(output, bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+  if (!output._plainText && output.richHtml) {
+    const words = Typeset.richHtmlWords(output.richHtml).filter((w) => String(w.t || '').trim());
+    if (words.length && words.every((w) => Number.isFinite(w.size) && w.size === words[0].size)) {
+      return Math.round(words[0].size);
+    }
+  }
+  return base;
 }
 function effectiveInlineColor(block) {
   const output = overlayBlock(block); const style = Typeset.blockStyle(output);
@@ -2047,6 +2071,7 @@ function placeInlineCaret(field, event) {
 function openInlineEditor(block, clickEvent = null) {
   if (!block || !editorItem()) return;
   if (inlineDraft?.block === block && inlineDraft.mode === blockOverlayMode(block)) { classicEditor.focus(); return; }
+  if (document.activeElement === $('inlineLineSize')) $('inlineLineSize').blur();
   if (!closeInlineEditor()) return;
   const mode = blockOverlayMode(block);
   if (mode === 'none') return;
@@ -2063,16 +2088,20 @@ function openInlineEditor(block, clickEvent = null) {
   $('inlineEditorTitle').textContent = `کادر ${block.id} · ویرایش مستقیم ${mode === 'ocr' ? 'متن اصلی' : 'ترجمه'} · ذخیرهٔ خودکار`;
   $('inlineEditorCancel').classList.add('hidden');
   $('inlineLineTools').classList.remove('hidden');
+  if ($('inlineLineSize')) $('inlineLineSize').value = '';
   ['inlineLineSize', 'inlineSizeUp', 'inlineSizeDown', 'inlineLineReset'].forEach((id) => { const el = $(id); if (el) el.disabled = mode === 'ocr'; });
   $('inlineEditorDirection').value = direction; $('inlineEditorDirection').disabled = mode === 'ocr';
   $('inlineEditorAlign').value = mode === 'ocr' ? overlayBlock(block).align : (block.align || 'right');
   $('inlineVerticalAlign').value = ['top', 'bottom'].includes(block.verticalAlign) ? block.verticalAlign : 'middle';
-  $('inlineEditorSize').value = String(effectiveInlineSize(block));
+  const initialAutoSize = !(Number.isFinite(+block.size) && +block.size > 0);
+  const initialSizeValue = String(effectiveInlineSize(block));
+  $('inlineEditorSize').value = initialSizeValue;
   $('inlineEditorColor').value = effectiveInlineColor(block);
 
   inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: originalHtml,
     dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
-    verticalAlign: $('inlineVerticalAlign').value, size: $('inlineEditorSize').value,
+    verticalAlign: $('inlineVerticalAlign').value, size: initialSizeValue,
+    initialAutoSize, initialSizeValue, sizeTouched: false,
     color: block.color || null, originalColor: block.color || null,
     range: null, history: [], historyIndex: -1, muteHistory: false, conflictReported: false };
   classicEditor.setContext(draftKey, originalHtml, inlineDraft.snapshot);
@@ -2084,16 +2113,27 @@ function openInlineEditor(block, clickEvent = null) {
   inlineEditSession = window.createInlineEditSession({
     block, mode, snapshot: inlineBlockSnapshot, getBaseline: () => inlineDraft?.snapshot,
     read: () => {
+      const textVal = classicEditor.getText();
+      const htmlVal = mode === 'ocr' ? '' : classicEditor.getHTML();
+      const plainEquiv = mode !== 'ocr' && !block.richHtml && htmlVal === sanitizeHtml(plainToHtml(textVal));
       const rawSize = $('inlineEditorSize').value.trim();
-      return { text: classicEditor.getText(), richHtml: mode === 'ocr' ? '' : classicEditor.getHTML(),
+      const keepAuto = !!(inlineDraft?.initialAutoSize && !inlineDraft?.sizeTouched && rawSize === inlineDraft?.initialSizeValue);
+      return { text: textVal, richHtml: plainEquiv ? '' : htmlVal,
         dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
-        verticalAlign: $('inlineVerticalAlign').value, size: rawSize ? Number(rawSize) : null, color: inlineDraft?.color ?? null };
+        verticalAlign: $('inlineVerticalAlign').value, size: keepAuto ? null : (rawSize ? Number(rawSize) : null), color: inlineDraft?.color ?? null };
     },
     onCommit: (savedBlock, revision) => {
       inlineDraft.snapshot = revision;
       inlineDraft.html = mode === 'ocr' ? plainToHtml(savedBlock.text || '') : (savedBlock.richHtml || plainToHtml(savedBlock.tr || ''));
       inlineDraft.dir = $('inlineEditorDirection').value; inlineDraft.align = $('inlineEditorAlign').value;
-      inlineDraft.verticalAlign = $('inlineVerticalAlign').value; inlineDraft.size = $('inlineEditorSize').value;
+      inlineDraft.verticalAlign = $('inlineVerticalAlign').value;
+      inlineDraft.initialAutoSize = !(Number.isFinite(+savedBlock.size) && +savedBlock.size > 0);
+      if (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && document.activeElement !== $('inlineEditorSize')) {
+        const nextShown = String(effectiveInlineSize(savedBlock));
+        $('inlineEditorSize').value = nextShown;
+        inlineDraft.initialSizeValue = nextShown;
+      }
+      inlineDraft.size = $('inlineEditorSize').value;
       inlineDraft.originalColor = inlineDraft.color = savedBlock.color || null; inlineDraft.conflictReported = false;
       $('inlineEditorCancel').classList.add('hidden');
       buildBlockList(); scheduleEditorCanvasDraw(); scheduleSave();
@@ -2292,7 +2332,9 @@ function renderEditorBoxes() {
       ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
       el.addEventListener('pointerdown', (event) => {
         const activeBlock = el._block; const additive = event.ctrlKey || event.metaKey; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
-        if (inlineDraft && inlineDraft.block !== activeBlock && !additive) return;
+        if (inlineDraft && inlineDraft.block !== activeBlock && !additive) {
+          if (!dragTarget || !closeInlineEditor()) return;
+        }
         if (!(dragTarget && !additive && editorSelectedKeys().includes(String(activeBlock.id)))) selectEditorBlock(activeBlock.id, true, additive);
         startBoxDrag(event, activeBlock, el);
       });
@@ -2649,8 +2691,8 @@ function bindEvents() {
       else if (box) { classicEditor.attachField(box); refreshInlineTypography(); }
     },
     onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); autoApplyInlineDraft(); } },
-    getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: $('inlineEditorSize').value, color: inlineDraft.color } : null,
-    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) $('inlineVerticalAlign').value = meta.verticalAlign; if (meta.size === '') $('inlineEditorSize').value = String(effectiveInlineSize(inlineDraft.block)); else if (+meta.size >= 8 && +meta.size <= 160) $('inlineEditorSize').value = meta.size; if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; },
+    getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && $('inlineEditorSize').value.trim() === inlineDraft.initialSizeValue) ? '' : $('inlineEditorSize').value, color: inlineDraft.color } : null,
+    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) $('inlineVerticalAlign').value = meta.verticalAlign; if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; } else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; } if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; },
   });
   const inlineField = $('inlineEditorField');
   ['keyup', 'mouseup', 'focus'].forEach((name) => inlineField.addEventListener(name, () => { rememberInlineRange(); syncInlineLineControls(); }));
@@ -2675,7 +2717,7 @@ function bindEvents() {
   });
   inlineField.addEventListener('click', (event) => event.stopPropagation());
   $('inlineEditor').addEventListener('pointerdown', (event) => {
-    if (inlineDraft?.showOutput && !event.target.closest('#inlinePreview, #inlineEditorApply, #inlineEditorCancel')) setInlineOutputPreview(false);
+    if (inlineDraft?.showOutput && !event.target.closest('#inlinePreview, #inlineEditorApply, #inlineEditorCancel, .editor-zoom-controls')) setInlineOutputPreview(false);
     const boxDetails = $('inlineEditor').querySelector('.inline-box-settings');
     if (boxDetails?.open && !event.target.closest('.inline-box-settings')) boxDetails.removeAttribute('open');
   }, true);
@@ -2707,7 +2749,13 @@ function bindEvents() {
   $('inlineVerticalAlign').addEventListener('change', () => { if (inlineDraft) classicEditor.notifyChange(); });
   $('inlineEditorColor').addEventListener('input', () => { if (inlineDraft) { inlineDraft.color = $('inlineEditorColor').value; classicEditor.notifyChange(); } });
   $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) { inlineDraft.color = null; $('inlineEditorColor').value = effectiveInlineColor({ ...inlineDraft.block, color: null }); classicEditor.notifyChange(); } });
-  $('inlineEditorSize').addEventListener('input', () => { if (inlineDraft) classicEditor.notifyChange(); });
+  $('inlineEditorSize').addEventListener('input', () => {
+    if (!inlineDraft) return;
+    inlineDraft.sizeTouched = $('inlineEditorSize').value.trim() !== '';
+    inlineDraft.initialAutoSize = !inlineDraft.sizeTouched;
+    classicEditor.notifyChange();
+  });
+  document.querySelectorAll('.editor-zoom-controls button').forEach((btn) => btn.addEventListener('mousedown', (event) => event.preventDefault()));
   const imagePreview = document.querySelector('.editor-preview'); let blankPointer = null;
   imagePreview.addEventListener('pointerdown', (event) => { blankPointer = !event.target.closest('.editor-box') && event.button === 0 ? { x: event.clientX, y: event.clientY } : null; });
   imagePreview.addEventListener('click', (event) => {

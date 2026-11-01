@@ -47,23 +47,26 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 
 /* Permanently docked Word-style top text-editor ribbon; the only editable text surface is
    the on-image box itself while the canvas underneath renders live output. */
-.inline-editor-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
-.inline-editor-status{display:flex;align-items:center;gap:7px;min-width:0;flex-wrap:wrap}
+.inline-editor-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:nowrap}
+.inline-editor-status{display:flex;align-items:center;gap:7px;flex:1 1 180px;min-width:0;overflow:hidden}
 .inline-status-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint);transition:background .18s,box-shadow .18s}
 .inline-editor:not(.is-idle) .inline-status-dot{background:#34d399;box-shadow:0 0 0 3px #34d3992e}
-.inline-editor-head strong{font-size:11px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.inline-editor-head strong{font-size:11px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .inline-editor.is-idle .inline-editor-head strong{color:var(--muted);font-weight:500}
-.inline-target-badge{font-size:10px;font-weight:700;padding:1px 8px;border-radius:999px;background:color-mix(in srgb,var(--line-2) 55%,transparent);color:var(--muted);white-space:nowrap}
+.inline-target-badge{font-size:10px;font-weight:700;padding:1px 8px;border-radius:999px;background:color-mix(in srgb,var(--line-2) 55%,transparent);color:var(--muted);white-space:nowrap;flex:none}
 .inline-target-badge.is-word{background:color-mix(in srgb,var(--a2) 22%,transparent);color:var(--a2);border:1px solid color-mix(in srgb,var(--a2) 45%,transparent)}
-.inline-editor-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+#inlineEditor .editor-zoom-controls{display:flex;align-items:center;gap:4px;flex-wrap:wrap;flex:none;padding:2px 6px;background:var(--surface);border:1px solid var(--line);border-radius:8px;margin-inline-start:auto}
+#inlineEditor .editor-zoom-controls button{font-size:10px;line-height:1.4;padding:3px 8px;min-width:26px;min-height:24px;border-radius:6px}
+#inlineEditor #editorZoomLabel{min-width:44px;text-align:center;direction:ltr;font-size:10px;font-weight:700;color:var(--a2)}
+.inline-editor-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap;flex:none}
 .inline-editor-actions button{font-size:10px;line-height:1.4;padding:3px 9px;border-radius:7px}
 .inline-editor-workbench{display:flex;align-items:stretch;flex-wrap:wrap;gap:6px;transition:opacity .16s}
 .inline-editor.is-idle .inline-editor-workbench{opacity:.56}
-.inline-tool-group{display:flex;align-items:center;flex-wrap:wrap;gap:5px;padding:4px 8px;background:var(--surface);border:1px solid var(--line);border-radius:8px;min-height:36px}
+.inline-tool-group{display:flex;align-items:center;flex-wrap:wrap;gap:4px;padding:3px 6px;background:var(--surface);border:1px solid var(--line);border-radius:8px;min-height:34px}
 .inline-tool-group label{flex-direction:row;align-items:center;gap:4px;font-size:10px;color:var(--muted);white-space:nowrap}
-.inline-tool-group button,.inline-tool-group select,.inline-tool-group input{font-size:10px;padding:3px 6px;width:auto;min-height:26px;border-radius:6px}
-.inline-step-btn{font-weight:700;direction:ltr;min-width:28px;padding:3px 5px!important}
-.inline-tool-group input[type=number]{width:58px;direction:ltr;text-align:center}
+.inline-tool-group button,.inline-tool-group select,.inline-tool-group input{font-size:10px;padding:2px 5px;width:auto;min-height:25px;border-radius:6px}
+.inline-step-btn{font-weight:700;direction:ltr;min-width:26px;padding:2px 4px!important}
+.inline-tool-group input[type=number]{width:52px;direction:ltr;text-align:center}
 .inline-tool-group input[type=color]{width:30px;height:26px;min-height:26px;padding:2px}
 .inline-box-settings{position:relative;font-size:10px}
 .inline-box-settings summary{list-style:none;cursor:pointer;user-select:none;padding:4px 8px;border-radius:6px;border:1px solid var(--line-2);background:var(--surface-2);color:var(--text);white-space:nowrap}
@@ -73,9 +76,13 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 .inline-box-popover label{justify-content:space-between}
 .inline-rich-slot{flex:1 1 340px;min-width:min(100%,260px);min-height:36px;display:flex;align-items:center}
 .inline-rich-slot>.classic-editor:not(.classic-fullscreen){flex:1;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;border:1px solid var(--line);border-radius:8px;background:var(--surface);min-height:36px}
-.inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-toolbar{flex:1 1 auto;border:0;background:transparent;padding:3px 5px}
-.inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-tabs{order:2;padding:3px 5px;background:transparent;border-inline-start:1px solid var(--line);align-items:center}
-.inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-tabs button{border-radius:5px;padding:2px 8px;font-size:10px}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-toolbar{flex:1 1 0;min-width:0;border:0;background:transparent;padding:3px 4px}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen) .classic-row{gap:1.5px}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen) .classic-row .classic-button{width:23px;height:24px;padding:2px;font-size:12px}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen) .classic-row select{max-width:78px;height:24px;padding:1px 3px;font-size:10px}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen) .classic-color{width:23px!important;height:24px!important}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-tabs{order:2;padding:3px 4px;background:transparent;border-inline-start:1px solid var(--line);align-items:center}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-tabs button{border-radius:5px;padding:2px 6px;font-size:10px}
 #inlineEditor .classic-editor:not(.classic-fullscreen)>.classic-content,#inlineEditor .classic-editor:not(.classic-fullscreen)>.classic-source,#inlineEditor .classic-editor:not(.classic-fullscreen)>.classic-status{display:none!important}
 .inline-editor.plain-mode .inline-line-tools{opacity:.42;pointer-events:none}
 .inline-editor.plain-mode .inline-rich-slot>.classic-editor:not(.classic-fullscreen){padding:0 10px}
@@ -94,8 +101,10 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 /* Full-image overview expands just the image view. Native fullscreen is used
    when permitted; this layout also works in embedded previews that deny it. */
 .editor-dialog.image-fullscreen{position:fixed;inset:0;margin:0;padding:0;width:100vw;height:100vh;height:100dvh;max-width:none;max-height:none;border:0;border-radius:0;overflow:hidden}
-.editor-dialog.image-fullscreen>.dialog-head,.editor-dialog.image-fullscreen .editor-side,.editor-dialog.image-fullscreen #editorBoxes,.editor-dialog.image-fullscreen #inlineEditor{display:none!important}
-.editor-dialog.image-fullscreen .editor-body{display:block;height:100%;width:100%}.editor-dialog.image-fullscreen .editor-view{height:100%;width:100%}.editor-dialog.image-fullscreen .editor-preview{width:100%;height:100%;max-height:none;border-radius:0;padding:15px!important;align-items:center;justify-content:center}.editor-dialog.image-fullscreen .editor-preview.oversized{align-items:flex-start;justify-content:flex-start}.editor-dialog.image-fullscreen .editor-zoom-floating{top:12px;right:12px}
+.editor-dialog.image-fullscreen>.dialog-head,.editor-dialog.image-fullscreen .editor-side,.editor-dialog.image-fullscreen #editorBoxes,.editor-dialog.image-fullscreen #inlineEditor .inline-editor-status,.editor-dialog.image-fullscreen #inlineEditor .inline-editor-actions,.editor-dialog.image-fullscreen #inlineEditor .inline-editor-workbench{display:none!important}
+.editor-dialog.image-fullscreen>#inlineEditor{position:absolute;top:12px;right:12px;left:auto;z-index:40;width:auto;max-height:none;margin:0;padding:0;border:0;background:transparent;box-shadow:none}
+.editor-dialog.image-fullscreen #inlineEditor .editor-zoom-controls{padding:5px;border:1px solid var(--line-2);border-radius:10px;background:#10131ae6;color:#e8eaf2;box-shadow:var(--shadow);backdrop-filter:blur(12px)}
+.editor-dialog.image-fullscreen .editor-body{display:block;height:100%;width:100%}.editor-dialog.image-fullscreen .editor-view{height:100%;width:100%}.editor-dialog.image-fullscreen .editor-preview{width:100%;height:100%;max-height:none;border-radius:0;padding:15px!important;align-items:center;justify-content:center}.editor-dialog.image-fullscreen .editor-preview.oversized{align-items:flex-start;justify-content:flex-start}
 
 /* Per-key network policy and copyable diagnostics. */
 .ai-profile-options{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:10px}.ai-profile-options label{flex:1 1 190px}.ai-profile-options input{display:block;width:100%;margin-top:3px}.diagnostic-message{white-space:pre-wrap;overflow-wrap:anywhere;user-select:text}.ai-profile-status{white-space:pre-wrap}
@@ -112,6 +121,7 @@ dialog.editor-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
 .editor-dialog>.inline-editor:not(.is-idle){border-color:color-mix(in srgb,var(--a1) 65%,var(--line-2))}
 .editor-dialog>.editor-body{flex:1;min-height:0;height:auto}
 .editor-dialog .editor-view,.editor-dialog .editor-side{min-height:0}
+@media(max-width:860px){.inline-editor-head{flex-wrap:wrap}#inlineEditor .editor-zoom-controls{margin-inline-start:0}}
 @media(max-width:760px){.editor-dialog>.inline-editor{max-height:34vh;overflow-y:auto}.inline-rich-slot{flex-basis:100%;min-width:0}}
 .block-source-edit{cursor:text;border-radius:5px;padding:3px 5px;transition:background .15s,color .15s}.block-source-edit:hover,.block-source-edit:focus-visible{background:var(--surface);color:var(--text);outline:1px solid var(--a1)}
 .inline-editor.show-output .classic-editor,.inline-editor.show-output .inline-tool-group{opacity:0;pointer-events:none}

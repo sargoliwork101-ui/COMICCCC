@@ -87,7 +87,10 @@ async function overlapPixelEvidence(page) {
 }
 
 async function editorRenderDifference(page) {
-  return page.evaluate(() => {
+  return page.evaluate(async () => {
+    if (typeof editorCanvasFrame !== 'undefined' && editorCanvasFrame) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
     const item = state.project.images[0];
     const draft = inlineDraft ? draftBlockForPreview() : null;
     const blocks = item.blocks.map(block => overlayBlock(draft && block === inlineDraft.block ? draft : block));
@@ -515,7 +518,7 @@ main()
     await page.keyboard.down('Control'); await page.keyboard.down('Shift'); await page.keyboard.press('z'); await page.keyboard.up('Shift'); await page.keyboard.up('Control');
     assert.ok((await page.$eval('#inlineEditorField', (field) => field.innerHTML)).includes('text-align: center'), 'Ctrl+Shift+Z must redo the line style');
     await page.$eval('#inlineLineSize', (field) => { field.value = '20'; field.dispatchEvent(new Event('change', { bubbles: true })); });
-    await page.click('#inlineEditor .classic-toolbar button[aria-label="نمایش ابزارهای پیشرفته"]');
+    assert.equal(await page.$('#inlineEditor .classic-toolbar button[aria-label="نمایش ابزارهای پیشرفته"]'), null, 'more-tools toggle is removed so all tools stay visible');
     await page.click('#inlineEditor .classic-toolbar button[aria-label="چپ‌به‌راست"]');
     await page.$eval('#inlineEditor .classic-color', (field) => { field.value = '#ff0000'; field.dispatchEvent(new Event('input', { bubbles: true })); });
     await page.click('#inlineEditorApply');
@@ -626,8 +629,100 @@ main()
     const afterWordReset = await page.evaluate(() => Typeset.richHtmlWords(state.project.images[0].blocks[0].richHtml).filter(w => w.t));
     assert.equal(afterWordReset[1].size || null, null, 'clearing style on a selected word resets only that word');
     await page.click('#inlineEditorApply');
-    await page.evaluate(() => { state.project.images[0].blocks[0] = window.__savedBeforeWordTest; fitEditor(); buildBlockList(); drawEditor(); });
+    await page.evaluate(() => { state.project.images[0].blocks[0] = JSON.parse(JSON.stringify(window.__savedBeforeWordTest)); fitEditor(); buildBlockList(); drawEditor(); });
     console.log('PASS: real mouse drag & double-click over canvas ink select and style only the exact word');
+
+    // v3.59 regressions: zoom docked inside #inlineEditor, all tools shown directly, and clicking size-8 boxes never jumps to 20.
+    const toolbarLayoutCheck = await page.evaluate(() => {
+      const dock = document.getElementById('inlineEditor');
+      const zoom = dock.querySelector('.editor-zoom-controls');
+      const dockRect = dock.getBoundingClientRect();
+      const zoomRect = zoom?.getBoundingClientRect();
+      const tools = [...dock.querySelectorAll('.classic-toolbar button, .classic-toolbar select, .classic-toolbar input')];
+      return {
+        zoomInDock: !!zoom && dock.contains(document.getElementById('editorZoomIn')) && dock.contains(document.getElementById('editorImageFullscreen')),
+        zoomEnabledIdle: !document.getElementById('editorZoomIn').disabled && getComputedStyle(zoom).opacity === '1',
+        zoomInsideBounds: !!zoomRect && zoomRect.top >= dockRect.top - 1 && zoomRect.bottom <= dockRect.bottom + 1 && zoomRect.left >= dockRect.left - 1 && zoomRect.right <= dockRect.right + 1,
+        noMoreToggle: !dock.querySelector('button[aria-label="نمایش ابزارهای پیشرفته"]'),
+        allToolsVisible: tools.length >= 22 && tools.every((el) => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0),
+      };
+    });
+    assert.deepEqual(toolbarLayoutCheck, {
+      zoomInDock: true, zoomEnabledIdle: true, zoomInsideBounds: true, noMoreToggle: true, allToolsVisible: true,
+    }, `zoom and all tools must sit cleanly inside #inlineEditor: ${JSON.stringify(toolbarLayoutCheck)}`);
+
+    await page.evaluate(() => {
+      window.__savedBeforeSize8Test = JSON.parse(JSON.stringify(state.project.images[0].blocks));
+      const base0 = JSON.parse(JSON.stringify(window.__savedBeforeSize8Test[0]));
+      const base1 = JSON.parse(JSON.stringify(window.__savedBeforeSize8Test[1]));
+      const base2 = JSON.parse(JSON.stringify(window.__savedBeforeSize8Test[2]));
+      // Box 1: normal box where user types 20 into #inlineLineSize (leaving #inlineLineSize focused)
+      const box20 = { ...base0, id: 1, x0: 5, y0: 5, x1: 155, y1: 45, lineH: 30, size: null, bg: 'white', tr: 'کادر اول', richHtml: '' };
+      // Box 2: auto-fit box that fits at 8px (tight bubble) AND missing lineH legacy box (height 18 -> 18*1.1 = 20 if buggy!)
+      const boxNoLineH8 = { ...base1, id: 2, x0: 165, y0: 75, x1: 305, y1: 93, size: null, bg: 'white', tr: 'متن آزمایشی با اندازه هشت', richHtml: '' };
+      delete boxNoLineH8.lineH;
+      // Box 3: box whose text was explicitly styled to 8px via #inlineLineSize while block.size remained null
+      const boxRich8 = { ...base2, id: 3, x0: 10, y0: 140, x1: 150, y1: 185, lineH: 18, size: null, bg: 'white', tr: 'متن هشت پیکسلی', richHtml: '<div style="font-size:8px;">متن هشت پیکسلی</div>' };
+      state.project.images[0].blocks = [box20, boxNoLineH8, boxRich8];
+      fitEditor(); buildBlockList(); drawEditor();
+    });
+    // Type 20 into #inlineLineSize on Box 1 and leave #inlineLineSize focused, then click Box 2 (font 8) directly!
+    await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text');
+    await page.click('#inlineLineSize', { clickCount: 3 });
+    await page.keyboard.type('20');
+    const beforeClickBox2Canvas = await page.evaluate(() => {
+      // Snapshot Box 2 region on canvas before clicking Box 2
+      const cv = document.getElementById('editorCanvas');
+      const sub = document.createElement('canvas'); sub.width = 145; sub.height = 24;
+      sub.getContext('2d').drawImage(cv, 163, 73, 145, 24, 0, 0, 145, 24);
+      return sub.toDataURL();
+    });
+    await page.click('#editorBoxes .editor-box[data-id="2"] .editor-box-text');
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const box2AfterClick = await page.evaluate(() => {
+      const cv = document.getElementById('editorCanvas');
+      const sub = document.createElement('canvas'); sub.width = 145; sub.height = 24;
+      sub.getContext('2d').drawImage(cv, 163, 73, 145, 24, 0, 0, 145, 24);
+      return {
+        subUrl: sub.toDataURL(),
+        shownSize: document.getElementById('inlineEditorSize').value,
+        lineSize: document.getElementById('inlineLineSize').value,
+        draftSize: draftBlockForPreview().size,
+      };
+    });
+    assert.equal(box2AfterClick.shownSize, '8', `clicking a size-8 box must show 8, never 20: ${JSON.stringify(box2AfterClick)}`);
+    assert.equal(box2AfterClick.lineSize, '', 'stale #inlineLineSize value 20 from previous box must never carry over');
+    assert.equal(box2AfterClick.draftSize, null, 'clicking an auto-fit box must keep block.size null instead of locking a fixed size');
+    assert.equal(box2AfterClick.subUrl, beforeClickBox2Canvas, 'clicking Box 2 must not alter a single rendered canvas pixel of Box 2');
+
+    // Now click Box 3 (<div style="font-size:8px"> with lineH=18 -> maxSize=20) and verify it also stays at 8, never 20!
+    const beforeClickBox3Canvas = await page.evaluate(() => {
+      const cv = document.getElementById('editorCanvas');
+      const sub = document.createElement('canvas'); sub.width = 145; sub.height = 50;
+      sub.getContext('2d').drawImage(cv, 8, 138, 145, 50, 0, 0, 145, 50);
+      return sub.toDataURL();
+    });
+    await page.click('#editorBoxes .editor-box[data-id="3"] .editor-box-text');
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const box3AfterClick = await page.evaluate(() => {
+      const cv = document.getElementById('editorCanvas');
+      const sub = document.createElement('canvas'); sub.width = 145; sub.height = 50;
+      sub.getContext('2d').drawImage(cv, 8, 138, 145, 50, 0, 0, 145, 50);
+      return {
+        subUrl: sub.toDataURL(),
+        shownSize: document.getElementById('inlineEditorSize').value,
+        draftSize: draftBlockForPreview().size,
+      };
+    });
+    assert.equal(box3AfterClick.shownSize, '8', `clicking an 8px rich-HTML box must show 8, not 20: ${JSON.stringify(box3AfterClick)}`);
+    assert.equal(box3AfterClick.draftSize, null, 'auto-sized rich-HTML box keeps size null on click');
+    assert.equal(box3AfterClick.subUrl, beforeClickBox3Canvas, 'clicking Box 3 must keep its exact rendered 8px canvas text');
+    await page.click('#inlineEditorApply');
+    await page.evaluate(() => {
+      state.project.images[0].blocks = JSON.parse(JSON.stringify(window.__savedBeforeSize8Test));
+      fitEditor(); buildBlockList(); drawEditor();
+    });
+    console.log('PASS: zoom docked cleanly, all tools visible directly, and clicking size-8 boxes keeps font at 8 without jumping to 20');
 
     // Classic source/visual synchronization, sanitization, dialogs and draft recovery.
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
@@ -644,8 +739,8 @@ main()
     await page.$eval('.classic-modal input[type=checkbox]', el => {el.checked=true;});
     await page.evaluate(() => document.querySelector('.classic-modal .classic-primary').click());
     assert.equal(await page.$eval('#inlineEditorField a', el => el.href === 'https://example.com/path' && el.target === '_blank' && el.rel.includes('noopener')), true);
-    await page.click('#inlineEditor .classic-toolbar button[aria-label="نمایش ابزارهای پیشرفته"]');
-    assert.equal(await page.$eval('#inlineEditor .classic-row:nth-child(2)', el => el.hidden), false);
+    assert.equal(await page.$('#inlineEditor .classic-toolbar button[aria-label="نمایش ابزارهای پیشرفته"]'), null, 'no hidden second row toggle exists');
+    assert.equal(await page.$eval('#inlineEditor .classic-toolbar button[aria-label="درج جدول"]', el => el.getBoundingClientRect().width > 0 && !el.closest('[hidden]')), true, 'advanced tools are directly visible at all times');
     await page.evaluate(() => { const f=document.getElementById('inlineEditorField');const r=document.createRange();r.selectNodeContents(f);r.collapse(false);const sel=getSelection();sel.removeAllRanges();sel.addRange(r);f.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); document.querySelector('#inlineEditor .classic-toolbar button[aria-label="درج جدول"]').click(); });
     await page.evaluate(() => document.querySelector('.classic-modal .classic-primary').click());
     assert.equal(await page.$$eval('#inlineEditorField table td', els => els.length), 4);

@@ -16,6 +16,8 @@ assert(sanitize('<table><tbody><tr><td>one</td><td>two</td></tr></tbody></table>
 let changes = 0;
 const editor = window.createEditor('#one', { autosaveKey: 'test-draft', initialHTML: '<p>initial</p>', onChange: () => changes++ });
 assert.equal(editor.getHTML(), '<p>initial</p>');
+assert.equal(editor.element.querySelector('button[aria-label="نمایش ابزارهای پیشرفته"]'), null, 'more-tools toggle button is removed');
+assert.ok(editor.element.querySelector('button[aria-label="درج جدول"]') && editor.element.querySelector('select[aria-label="قالب بند"]'), 'all toolbar tools are shown directly');
 const unsub = editor.onChange(() => changes++);
 editor.setHTML('<p>hello <b>world</b></p>');
 assert.equal(changes, 2); assert(editor.getText().includes('hello world')); unsub();
