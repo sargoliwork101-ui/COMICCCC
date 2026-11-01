@@ -698,8 +698,11 @@ function check(name, condition) {
   check('pending conflict submits explicit selection and closes after success', pendingChoices['image-ui:1'] === 'apply' && !$('pendingDialog').open);
   window.fetch = oldFetch;
 
+  const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
+  window.dispatchEvent(new window.Event('beforeunload'));
   window.dispatchEvent(new window.Event('pagehide'));
-  check('closing a tab sends a close beacon', beacons.some((entry) => entry.url === '/api/session/close'));
+  check('browser close sends exactly one close beacon', beacons.filter((entry) => entry.url === '/api/session/close').length === closeBeaconsBefore + 1);
+  check('closing the tab stops its heartbeat timer', await vm.runInContext('sessionTimer === null && sessionCloseSent', context));
   window.close();
   if (failures) process.exitCode = 1;
 })().catch((error) => { console.error(error); window.close(); process.exitCode = 1; });

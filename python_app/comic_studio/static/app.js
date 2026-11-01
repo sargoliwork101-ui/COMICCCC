@@ -24,6 +24,9 @@ let activityPollInFlight = false;
 let activityGeneration = 0;
 let activeProgressId = null;
 let sessionTimer = null;
+let sessionCloseSent = false;
+let heartbeatInFlight = false;
+let sessionVisibilityBound = false;
 let localActivityId = 0;
 let editorCloseTask = null;
 let editorCanvasFrame = 0;
@@ -145,19 +148,29 @@ async function clearActivity(notify = true) {
   if (notify && succeeded) toast('گزارش کارها پاک شد');
 }
 async function heartbeat() {
+  if (sessionCloseSent || heartbeatInFlight) return;
+  heartbeatInFlight = true;
   try {
     await fetch('/api/session/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: TAB_ID }), cache: 'no-store' });
   } catch { /* a closed server needs no further browser-side error */ }
+  finally { heartbeatInFlight = false; }
 }
 function startSession() {
+  sessionCloseSent = false;
   heartbeat();
   if (!sessionTimer) {
     sessionTimer = setInterval(heartbeat, 15000);
     sessionTimer.unref?.();
   }
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) heartbeat(); });
+  if (!sessionVisibilityBound) {
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) heartbeat(); });
+    sessionVisibilityBound = true;
+  }
 }
 function closeSession() {
+  if (sessionCloseSent) return;
+  sessionCloseSent = true;
+  if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
   if (downloadUrl) { URL.revokeObjectURL(downloadUrl); downloadUrl = null; }
   if (backupDownloadUrl) { URL.revokeObjectURL(backupDownloadUrl); backupDownloadUrl = null; }
   const body = JSON.stringify({ client_id: TAB_ID });
@@ -2040,7 +2053,10 @@ async function copyPreview() {
 
 // ---------- Events and startup ----------
 function bindEvents() {
-  window.addEventListener('pagehide', () => { if (inlineDraft) classicEditor.saveDraft(); closeSession(); });
+  const finishBrowserSession = () => { if (inlineDraft && !sessionCloseSent) classicEditor.saveDraft(); closeSession(); };
+  window.addEventListener('pagehide', finishBrowserSession);
+  window.addEventListener('beforeunload', finishBrowserSession);
+  window.addEventListener('pageshow', (event) => { if (event.persisted) startSession(); });
   bindGridDrop();
   $('menuBtn').addEventListener('click', () => $('menu').classList.toggle('hidden'));
   $('themeBtn').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('comic-studio-theme', document.body.classList.contains('light') ? 'light' : 'dark'); });
