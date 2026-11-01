@@ -1,6 +1,6 @@
 // جای‌گذاری متن فارسی روی تصویر (پاک کردن متن قدیمی + نوشتن ترجمه)
 (function (root) {
-  const FONT = 'Vazirmatn';
+  const FONT = 'Vazirmatn, Tahoma, sans-serif';
 
   function median(arr) { arr.sort((a, b) => a - b); return arr[Math.floor(arr.length / 2)]; }
   const lum = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -89,6 +89,24 @@
     }
     if (last < text.length) push(text.slice(last), {});
     return runs;
+  }
+
+  function escapeInlineHtml(value) {
+    return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function inlineMarksToHtml(text) {
+    return tokenizeInline(String(text || '')).map((run) => {
+      let html = escapeInlineHtml(run.t).replace(/\n/g, '<br>');
+      if (run.bold) html = `<b>${html}</b>`;
+      if (run.italic) html = `<i>${html}</i>`;
+      if (run.underline) html = `<u>${html}</u>`;
+      const styles = [];
+      if (run.size) styles.push(`font-size:${Math.max(8, Math.min(160, Math.round(run.size)))}px`);
+      if (run.color) styles.push(`color:${run.color}`);
+      if (styles.length) html = `<span style="${styles.join(';')}">${html}</span>`;
+      return html;
+    }).join('');
   }
 
   // برای خروجی متنی ساده: فقط نشانگرها حذف می‌شوند و خود کلمه‌ها می‌مانند
@@ -231,6 +249,66 @@
     if (curFont !== baseFont) ctx.font = baseFont;
     const width = widths.reduce((sum, v, i) => sum + v + (i && line[i].spaceBefore !== false ? spaceW : 0), 0);
     return { widths, spaceW, width };
+  }
+
+  const RTL_CHAR_RE = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/;
+  const LTR_CHAR_RE = /[A-Za-z\u00c0-\u02af\u0370-\u052f]/;
+  function visualLineOrder(line, lineDir) {
+    const n = line.length;
+    if (!n) return [];
+    if (lineDir !== 'rtl') {
+      const runs = [];
+      for (let i = 0; i < n;) {
+        if (RTL_CHAR_RE.test(line[i].t) && !LTR_CHAR_RE.test(line[i].t)) {
+          let j = i + 1;
+          while (j < n && RTL_CHAR_RE.test(line[j].t) && !LTR_CHAR_RE.test(line[j].t)) j += 1;
+          runs.push({ start: i, end: j - 1, rev: true });
+          i = j;
+        } else {
+          runs.push({ start: i, end: i, rev: false });
+          i += 1;
+        }
+      }
+      const out = [];
+      runs.forEach((run, ri) => {
+        const indices = [];
+        for (let k = run.start; k <= run.end; k += 1) indices.push(k);
+        if (run.rev) indices.reverse();
+        indices.forEach((idx, pos) => {
+          const hasGapAfter = pos + 1 < indices.length
+            ? (run.rev ? line[idx].spaceBefore !== false : line[idx + 1].spaceBefore !== false)
+            : (ri + 1 < runs.length && line[runs[ri + 1].start].spaceBefore !== false);
+          out.push({ idx, hasGapAfter });
+        });
+      });
+      return out;
+    }
+    const runs = [];
+    for (let i = 0; i < n;) {
+      if (LTR_CHAR_RE.test(line[i].t) && !RTL_CHAR_RE.test(line[i].t)) {
+        let j = i + 1;
+        while (j < n && !RTL_CHAR_RE.test(line[j].t) && (LTR_CHAR_RE.test(line[j].t) || /\d/.test(line[j].t))) j += 1;
+        runs.push({ start: i, end: j - 1, ltr: true });
+        i = j;
+      } else {
+        runs.push({ start: i, end: i, ltr: false });
+        i += 1;
+      }
+    }
+    const out = [];
+    for (let ri = runs.length - 1; ri >= 0; ri -= 1) {
+      const run = runs[ri];
+      const indices = [];
+      for (let k = run.start; k <= run.end; k += 1) indices.push(k);
+      if (!run.ltr) indices.reverse();
+      indices.forEach((idx, pos) => {
+        const hasGapAfter = pos + 1 < indices.length
+          ? (run.ltr ? line[idx + 1].spaceBefore !== false : line[idx].spaceBefore !== false)
+          : (ri > 0 && line[run.start].spaceBefore !== false);
+        out.push({ idx, hasGapAfter });
+      });
+    }
+    return out;
   }
 
   function wrapInlineMeasured(ctx, words, maxW, st, size) {
@@ -410,9 +488,9 @@
           let x = leftAligned ? lineAnchor
             : lineAlign === 'center' ? lineAnchor - paintedWidth / 2
             : lineAnchor - paintedWidth;
-          // در پاراگراف RTL اولین کلمهٔ منطقی سمت راست است؛ پس ترتیب دیداری برعکس می‌شود
-          const visual = lineDir === 'rtl' ? line.map((_, i) => line.length - 1 - i) : line.map((_, i) => i);
-          visual.forEach((idx) => {
+          // در پاراگراف RTL ترتیب دیداری کلمه‌ها با حفظ عبارت‌های LTR متوالی محاسبه می‌شود
+          const visual = visualLineOrder(line, lineDir);
+          visual.forEach(({ idx, hasGapAfter }) => {
             const w = line[idx];
             const wSize = effWordSize(w, f.size, st);
             ctx.font = `${inlineFontPrefix(st, w)}${wSize}px ${FONT}`;
@@ -436,9 +514,6 @@
               ctx.lineTo(x + m.widths[idx], y - wSize * 0.2);
               ctx.stroke();
             }
-            const hasGapAfter = lineDir === 'rtl'
-              ? (idx > 0 && line[idx].spaceBefore !== false)
-              : (idx + 1 < line.length && line[idx + 1].spaceBefore !== false);
             const gapAfter = hasGapAfter ? m.spaceW + extraGap : 0;
             x += m.widths[idx] + gapAfter;
           });
@@ -480,8 +555,8 @@
   }
 
   const api = {
-    render, sampleBg, fit, wrapWords, blockStyle,
-    hasInlineMarks, tokenizeInline, stripInlineMarkers, inlineWords, richHtmlWords, fitInline
+    FONT, render, sampleBg, fit, wrapWords, blockStyle,
+    hasInlineMarks, tokenizeInline, inlineMarksToHtml, stripInlineMarkers, inlineWords, richHtmlWords, fitInline, visualLineOrder
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Typeset = api;
 })(typeof window !== 'undefined' ? window : globalThis);

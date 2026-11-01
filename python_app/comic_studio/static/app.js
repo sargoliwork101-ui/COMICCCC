@@ -1082,7 +1082,7 @@ async function performTranslation(ids, provider, preview, startIndex = 0, previo
 }
 
 // ---------- Typeset preview and export ----------
-async function ensureFont() { if (document.fonts?.load) { try { await document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'); } catch { /* fallback */ } } }
+async function ensureFont() { if (document.fonts?.load) { try { await Promise.all([document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'), document.fonts.load('400 16px Vazirmatn', 'ابپتثجچ')]); } catch { /* fallback */ } } }
 async function renderAndUploadNow(item, projectId, mode) {
   const blocks = overlayBlocks(item, mode); const active = blocks.some((block) => block.enabled && hasRenderableText(block));
   if (!active) {
@@ -1628,15 +1628,17 @@ function refreshInlineTypography() {
   const box = clampedBoxOf(draft); const scale = state.editorScale || 1;
   const bw = Math.max(1, box.x1 - box.x0); const bh = Math.max(1, box.y1 - box.y0);
   const baseSize = overlaySize(draft, bw, bh);
-  // Lay out in unscaled image coordinates (boosted >=24px when small so browser
-  // integer line-box rounding and minimum-font-size settings never distort line
-  // heights or wrap points), then scale visually via CSS transform to match Canvas.
-  const layoutZoom = baseSize < 24 ? Math.ceil(24 / Math.max(1, baseSize)) : 1;
-  field.dataset.layoutZoom = String(layoutZoom);
+  // Lay out at the exact unscaled logical font size used by Typeset.render so
+  // per-glyph hinting advances and line-wrap break points match Canvas 1:1, then
+  // scale visually via CSS transform to match the zoomed image stage.
+  const layoutZoom = 1;
+  field.dataset.layoutZoom = '1';
   field.dataset.visualFontSize = String(baseSize * scale);
-  field.style.fontSize = `${baseSize * layoutZoom}px`;
+  field.style.fontSize = `${baseSize}px`;
   field.style.lineHeight = '1.55'; field.style.fontWeight = style.bold ? '700' : '400';
   field.style.fontStyle = style.italic ? 'italic' : 'normal'; field.style.textDecoration = style.underline ? 'underline' : '';
+  field.style.whiteSpace = 'pre-line'; field.style.textJustify = 'inter-word';
+  field.style.letterSpacing = '0px'; field.style.wordSpacing = '0px'; field.style.fontKerning = 'auto';
   field.style.background = 'transparent'; field.style.color = 'transparent'; field.style.webkitTextFillColor = 'transparent'; field.style.caretColor = 'var(--a1)';
   field.dir = style.dir; field.style.direction = style.dir; field.style.textAlign = style.align;
   field.querySelectorAll?.('[style],[data-logical-size]').forEach((el) => {
@@ -1648,7 +1650,7 @@ function refreshInlineTypography() {
     const eff = Math.max(8, Math.min(160, Math.round(baseSize * logical / ref)));
     el.style.fontSize = `${eff * layoutZoom}px`;
   });
-  const insetX = bw * 0.02 * layoutZoom;
+  const insetX = Math.max(4, Math.round(bw * 0.02)) * layoutZoom;
   field.style.right = 'auto'; field.style.bottom = 'auto';
   field.style.width = `${bw * layoutZoom}px`;
   field.style.paddingLeft = `${insetX}px`; field.style.paddingRight = `${insetX}px`;
@@ -1658,7 +1660,7 @@ function refreshInlineTypography() {
   field.style.transform = `scale(${scale / layoutZoom})`;
   const rawScrollH = field.scrollHeight;
   const contentH = (rawScrollH > 0 ? rawScrollH : baseSize * layoutZoom * 1.55) / layoutZoom;
-  const insetY = bh * 0.02;
+  const insetY = Math.max(2, Math.round(bh * 0.02));
   const topUnscaled = style.verticalAlign === 'top' ? insetY : style.verticalAlign === 'bottom' ? bh - insetY - contentH : (bh - contentH) / 2;
   field.style.left = `${-(host.clientLeft || 0)}px`;
   field.style.top = `${-(host.clientTop || 0) + topUnscaled * scale}px`;
@@ -2200,8 +2202,59 @@ function effectiveInlineColor(block) {
   } catch { return '#ffffff'; }
 }
 let lastInlineOpenClick = null;
+function resolveVisualInlineCaret(field, clientX, clientY) {
+  if (!field || typeof document.createTreeWalker !== 'function' || typeof document.createRange !== 'function') return null;
+  const walker = document.createTreeWalker(field, NodeFilter.SHOW_TEXT);
+  const r = document.createRange();
+  const lines = [];
+  let tn;
+  while ((tn = walker.nextNode())) {
+    const value = tn.nodeValue || '';
+    if (!value.length) continue;
+    const parent = tn.parentElement || field;
+    const defaultRtl = (window.getComputedStyle?.(parent)?.direction || field.dir || 'rtl') === 'rtl';
+    for (let k = 0; k < value.length; k += 1) {
+      const ch = value[k];
+      if (ch === '\n' || ch === '\r' || ch === '\u200c') continue;
+      r.setStart(tn, k); r.setEnd(tn, k + 1);
+      const rr = r.getBoundingClientRect?.();
+      if (!rr || !(rr.width > 0 && rr.height > 0)) continue;
+      const isRtlChar = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(ch) && !/[\u0660-\u0669\u06f0-\u06f9]/.test(ch) ? true
+        : /[A-Za-z0-9\u0660-\u0669\u06f0-\u06f9\u00c0-\u02af\u0370-\u052f]/.test(ch) ? false : defaultRtl;
+      const item = {
+        node: tn, k, endK: (k + 1 < value.length && value[k + 1] === '\u200c') ? k + 2 : k + 1,
+        left: rr.left, right: rr.right, top: rr.top, bottom: rr.bottom,
+        startEdge: isRtlChar ? rr.right : rr.left,
+        endEdge: isRtlChar ? rr.left : rr.right,
+      };
+      let line = lines.find((ln) => item.top < ln.bottom - 2 && item.bottom > ln.top + 2);
+      if (!line) { line = { top: item.top, bottom: item.bottom, items: [] }; lines.push(line); }
+      line.top = Math.min(line.top, item.top);
+      line.bottom = Math.max(line.bottom, item.bottom);
+      line.items.push(item);
+    }
+  }
+  if (!lines.length) return null;
+  let bestLine = lines[0], bestYDist = Infinity;
+  for (const ln of lines) {
+    const yDist = clientY < ln.top ? ln.top - clientY : clientY > ln.bottom ? clientY - ln.bottom : 0;
+    if (yDist < bestYDist) { bestYDist = yDist; bestLine = ln; }
+  }
+  const direct = bestLine.items.filter((it) => clientX >= it.left - 0.5 && clientX <= it.right + 0.5);
+  const pool = direct.length ? direct : bestLine.items;
+  let bestHit = null, bestXDist = Infinity;
+  for (const it of pool) {
+    const dStart = Math.abs(clientX - it.startEdge);
+    if (dStart < bestXDist) { bestXDist = dStart; bestHit = { node: it.node, offset: it.k }; }
+    const dEnd = Math.abs(clientX - it.endEdge);
+    if (dEnd < bestXDist) { bestXDist = dEnd; bestHit = { node: it.node, offset: it.endK }; }
+  }
+  return bestHit;
+}
 function inlineCaretPoint(field, clientX, clientY) {
   if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  const visual = resolveVisualInlineCaret(field, clientX, clientY);
+  if (visual) return visual;
   const position = document.caretPositionFromPoint?.(clientX, clientY);
   if (position && field.contains(position.offsetNode)) return { node: position.offsetNode, offset: position.offset };
   const range = document.caretRangeFromPoint?.(clientX, clientY) || null;
@@ -2256,7 +2309,8 @@ function openInlineEditor(block, clickEvent = null) {
   if (!box) { toast('ابتدا نمایش این کادر را فعال کنید.', true); return; }
 
   const field = $('inlineEditorField'); const direction = mode === 'ocr' ? 'ltr' : (block.dir === 'ltr' ? 'ltr' : 'rtl');
-  const originalHtml = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || plainToHtml(block.tr || ''));
+  const hasMarks = mode !== 'ocr' && !block.richHtml && !!Typeset.hasInlineMarks?.(block.tr || '') && typeof Typeset.inlineMarksToHtml === 'function';
+  const originalHtml = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || (hasMarks ? sanitizeHtml(Typeset.inlineMarksToHtml(block.tr || '')) : plainToHtml(block.tr || '')));
   const draftKey = `comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(block.id)}:${mode}`;
   setInlineDockDisabled(false);
   classicEditor.setPlainMode(mode === 'ocr');
@@ -2293,7 +2347,8 @@ function openInlineEditor(block, clickEvent = null) {
     read: () => {
       const textVal = classicEditor.getText();
       const htmlVal = mode === 'ocr' ? '' : classicEditor.getHTML();
-      const plainEquiv = mode !== 'ocr' && !block.richHtml && htmlVal === sanitizeHtml(plainToHtml(textVal));
+      const normNbsp = (s) => String(s || '').replace(/&nbsp;|\u00a0/g, ' ');
+      const plainEquiv = mode !== 'ocr' && !block.richHtml && !hasMarks && normNbsp(htmlVal) === normNbsp(sanitizeHtml(plainToHtml(textVal)));
       const rawSize = $('inlineEditorSize').value.trim();
       const keepAuto = !!(inlineDraft?.initialAutoSize && !inlineDraft?.sizeTouched && rawSize === inlineDraft?.initialSizeValue);
       const keepLegacyVertical = !inlineDraft?.verticalAlignTouched && !['top', 'middle', 'bottom'].includes(block.verticalAlign);
@@ -2346,6 +2401,22 @@ function selectedEditorBlocks() {
   const byId = new Map((item.blocks || []).map((block) => [String(block.id), block]));
   return editorSelectedKeys().map((key) => byId.get(key)).filter(Boolean);
 }
+function nonEmptyLines(value) {
+  return String(value || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+function isBlockSplittable(block) {
+  if (!block) return false;
+  const liveText = inlineDraft?.block === block && inlineDraft.mode === 'ocr' ? (classicEditor?.getText?.() ?? block.text) : block.text;
+  const liveTr = inlineDraft?.block === block && inlineDraft.mode !== 'ocr' ? (classicEditor?.getText?.() ?? block.tr) : block.tr;
+  const hasSource = Array.isArray(block.sourceLines) && block.sourceLines.length >= 2;
+  const hasTr = Boolean(String(liveTr || '').trim() || String(block.richHtml || '').trim());
+  if (!hasTr) {
+    return (hasSource && String(liveText || '') === joinedOcrText(block.sourceLines)) || nonEmptyLines(liveText).length >= 2;
+  }
+  if (nonEmptyLines(liveTr).length >= 2) return true;
+  return hasSource && block.sourceLines.every((s) => String(s.tr || '').trim())
+    && String(liveTr || '').trim() === block.sourceLines.map((s) => String(s.tr || '').trim()).join(' ');
+}
 function updateEditorSelection() {
   const selected = new Set(editorSelectedKeys()); state.selectedBlockIds = [...selected];
   if (!selected.has(String(state.activeBlockId))) state.activeBlockId = [...selected].at(-1) || null;
@@ -2355,6 +2426,9 @@ function updateEditorSelection() {
   document.querySelectorAll('#blockList .block-card').forEach((card) => {
     card.classList.toggle('selected', selected.has(card.dataset.id)); card.classList.toggle('active', card.dataset.id === String(state.activeBlockId));
   });
+  const selectedBlocks = selectedEditorBlocks();
+  $('editorMergeText')?.classList.toggle('is-ready', selectedBlocks.length >= 2);
+  $('editorSplitText')?.classList.toggle('is-ready', selectedBlocks.some((block) => isBlockSplittable(block)));
   if ($('editorSelectionStatus')) $('editorSelectionStatus').textContent = selected.size ? `${selected.size.toLocaleString('fa-IR')} متن انتخاب شده · مرجع: متن ${state.selectedBlockIds[0]}` : 'متنی انتخاب نشده';
   syncVerticalAlignButtons();
 }
@@ -2378,52 +2452,129 @@ function selectEditorBlock(blockId, scroll = true, additive = false) {
   }
 }
 function selectAllEditorBlocks() {
+  if (inlineDraft && !closeInlineEditor()) return;
   const item = editorItem(); if (!item) return;
   state.selectedBlockIds = (item.blocks || []).map((block) => String(block.id));
   if (!state.selectedBlockIds.includes(String(state.activeBlockId))) state.activeBlockId = state.selectedBlockIds.at(-1) || null;
   updateEditorSelection();
 }
-function clearEditorSelection() { state.selectedBlockIds = []; state.activeBlockId = null; updateEditorSelection(); }
+function clearEditorSelection() { if (inlineDraft && !closeInlineEditor()) return; state.selectedBlockIds = []; state.activeBlockId = null; updateEditorSelection(); }
 function joinedOcrText(blocks) {
   return blocks.map((block) => String(block.text || '').trim().replace(/\s+/g, ' ')).filter(Boolean).join(' ');
 }
 function mergeSelectedText() {
   if (inlineDraft && !closeInlineEditor()) return;
   const item = editorItem(); const blocks = selectedEditorBlocks();
-  if (!item || blocks.length < 2) { toast('برای ادغام، حداقل دو متن را انتخاب کنید', true); return; }
-  if (blocks.some((block) => String(block.tr || '').trim() || String(block.richHtml || '').trim())) {
-    toast('برای حفظ ترجمه و قالب‌بندی، ادغام فقط پیش از ترجمه انجام می‌شود', true); return;
-  }
-  const ordered = [...blocks].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+  if (!item || blocks.length < 2) { toast('برای ادغام، حداقل دو کادر را انتخاب کنید (با Ctrl+کلیک روی کادرها)', true); return; }
+  const ordered = [...blocks].sort((a, b) => boxOf(a).y0 - boxOf(b).y0 || boxOf(a).x0 - boxOf(b).x0);
   const x0 = Math.min(...ordered.map((b) => b.x0)); const y0 = Math.min(...ordered.map((b) => b.y0));
   const x1 = Math.max(...ordered.map((b) => b.x1)); const y1 = Math.max(...ordered.map((b) => b.y1));
   const snapshots = JSON.parse(JSON.stringify(ordered));
-  const merged = { ...snapshots[0], text: joinedOcrText(snapshots), tr: '', richHtml: '', x0, y0, x1, y1,
+  const hasTr = snapshots.some((b) => String(b.tr || '').trim() || String(b.richHtml || '').trim());
+  const mergedTr = hasTr ? snapshots.map((b) => String(b.tr || '').trim()).filter(Boolean).join('\n') : '';
+  const mergedRichHtml = hasTr && snapshots.some((b) => String(b.richHtml || '').trim())
+    ? sanitizeHtml(snapshots.filter((b) => String(b.tr || '').trim() || String(b.richHtml || '').trim())
+      .map((b) => String(b.richHtml || '').trim() || plainToHtml(String(b.tr || '').trim())).join('<br>'))
+    : '';
+  const merged = { ...snapshots[0], text: joinedOcrText(snapshots), tr: mergedTr, richHtml: mergedRichHtml, x0, y0, x1, y1,
     polygon: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], sourceLines: snapshots };
-  // The merged box has its own layout; original geometries remain intact in sourceLines.
-  delete merged.tx0; delete merged.ty0; delete merged.tx1; delete merged.ty1;
+  if (ordered.some((b) => Number.isFinite(b.tx0) || Number.isFinite(b.ty0) || Number.isFinite(b.tx1) || Number.isFinite(b.ty1))) {
+    merged.tx0 = Math.min(...ordered.map((b) => boxOf(b).x0));
+    merged.ty0 = Math.min(...ordered.map((b) => boxOf(b).y0));
+    merged.tx1 = Math.max(...ordered.map((b) => boxOf(b).x1));
+    merged.ty1 = Math.max(...ordered.map((b) => boxOf(b).y1));
+  } else {
+    delete merged.tx0; delete merged.ty0; delete merged.tx1; delete merged.ty1;
+  }
   const selected = new Set(blocks.map((block) => String(block.id)));
   const firstIndex = item.blocks.findIndex((block) => selected.has(String(block.id)));
   item.blocks = item.blocks.filter((block) => !selected.has(String(block.id)));
   item.blocks.splice(firstIndex, 0, merged);
   state.selectedBlockIds = [String(merged.id)]; state.activeBlockId = String(merged.id);
   buildBlockList(); drawEditor(); scheduleSave();
+  toast('کادرهای انتخابی ادغام شدند');
+}
+function buildProportionalSplitBlocks(block, item, ocrLines, trLines, nextIdRef) {
+  const count = trLines.length >= 2 ? trLines.length : ocrLines.length;
+  const b = boxOf(block);
+  const totalH = Math.max(count * 16, b.y1 - b.y0);
+  const gap = totalH >= count * 26 ? 2 : 0;
+  return Array.from({ length: count }, (_, idx) => {
+    const sy0 = Math.round(b.y0 + (totalH * idx) / count + (idx > 0 ? gap / 2 : 0));
+    const sy1 = Math.max(sy0 + 12, Math.round(b.y0 + (totalH * (idx + 1)) / count - (idx + 1 < count ? gap / 2 : 0)));
+    const clone = JSON.parse(JSON.stringify(block));
+    clone.id = idx === 0 ? block.id : ++nextIdRef.maxId;
+    clone.text = ocrLines.length === count ? ocrLines[idx] : (idx === 0 ? String(block.text || '') : '');
+    clone.tr = trLines.length === count ? trLines[idx] : '';
+    clone.richHtml = '';
+    clone.x0 = b.x0; clone.y0 = sy0; clone.x1 = b.x1; clone.y1 = sy1;
+    clone.polygon = [[b.x0, sy0], [b.x1, sy0], [b.x1, sy1], [b.x0, sy1]];
+    clone.lineH = Math.max(14, Math.min(block.lineH || 24, Math.round((sy1 - sy0) * 0.8)));
+    delete clone.tx0; delete clone.ty0; delete clone.tx1; delete clone.ty1; delete clone.sourceLines;
+    return clone;
+  });
+}
+function splitSingleEditorBlock(block, item, nextIdRef) {
+  const hasSource = Array.isArray(block.sourceLines) && block.sourceLines.length >= 2;
+  const hasTr = Boolean(String(block.tr || '').trim() || String(block.richHtml || '').trim());
+  const trLines = nonEmptyLines(block.tr);
+  const ocrLines = nonEmptyLines(block.text);
+  if (!hasTr) {
+    if (hasSource && String(block.text || '') === joinedOcrText(block.sourceLines)) {
+      return JSON.parse(JSON.stringify(block.sourceLines));
+    }
+    if (hasSource && ocrLines.length === block.sourceLines.length) {
+      const originals = JSON.parse(JSON.stringify(block.sourceLines));
+      originals.forEach((entry, idx) => { entry.text = ocrLines[idx]; entry.tr = ''; entry.richHtml = ''; });
+      return originals;
+    }
+    if (ocrLines.length >= 2) return buildProportionalSplitBlocks(block, item, ocrLines, [], nextIdRef);
+    return null;
+  }
+  if (hasSource && trLines.length === block.sourceLines.length) {
+    const originals = JSON.parse(JSON.stringify(block.sourceLines));
+    originals.forEach((entry, idx) => {
+      ['dir', 'align', 'size', 'verticalAlign', 'color', 'bg'].forEach((k) => { if (entry[k] === undefined && block[k] !== undefined) entry[k] = block[k]; });
+      const prevTr = String(entry.tr || '').trim();
+      entry.tr = trLines[idx];
+      if (prevTr !== trLines[idx]) entry.richHtml = '';
+      if (ocrLines.length === originals.length) entry.text = ocrLines[idx];
+    });
+    return originals;
+  }
+  if (hasSource && trLines.length === 1 && block.sourceLines.every((s) => String(s.tr || '').trim())
+    && trLines[0] === block.sourceLines.map((s) => String(s.tr || '').trim()).join(' ')) {
+    return JSON.parse(JSON.stringify(block.sourceLines));
+  }
+  if (trLines.length >= 2) return buildProportionalSplitBlocks(block, item, ocrLines, trLines, nextIdRef);
+  return null;
 }
 function splitSelectedText() {
   if (inlineDraft && !closeInlineEditor()) return;
   const item = editorItem(); const blocks = selectedEditorBlocks();
-  if (!item || blocks.length !== 1 || !Array.isArray(blocks[0].sourceLines) || blocks[0].sourceLines.length < 2) {
-    toast('یک کادر ادغام‌شده را برای جداکردن انتخاب کنید', true); return;
+  if (!item || !blocks.length) { toast('ابتدا کادر موردنظر برای جداکردن را انتخاب کنید', true); return; }
+  const nextIdRef = { maxId: Math.max(0, ...(item.blocks || []).map((entry) => Number(entry.id) || 0)) };
+  const newSelection = [];
+  let splitCount = 0;
+  blocks.forEach((block) => {
+    const replacements = splitSingleEditorBlock(block, item, nextIdRef);
+    if (!replacements) { newSelection.push(String(block.id)); return; }
+    const index = item.blocks.indexOf(block);
+    if (index < 0) return;
+    item.blocks.splice(index, 1, ...replacements);
+    replacements.forEach((entry) => newSelection.push(String(entry.id)));
+    splitCount += 1;
+  });
+  if (!splitCount) {
+    const hasOneLineTr = blocks.some((b) => String(b.tr || '').trim() && nonEmptyLines(b.tr).length < 2);
+    toast(hasOneLineTr
+      ? 'متن ترجمه یک‌خطی است؛ ابتدا در جای موردنظر با کلید Enter خط را بشکنید و سپس «جداکردن خط‌ها» را بزنید'
+      : 'این کادر خط جداشدنی ندارد؛ برای جداکردن، ابتدا با Enter خط‌ها را جدا کنید', true);
+    return;
   }
-  const block = blocks[0];
-  if (String(block.tr || '').trim() || String(block.richHtml || '').trim() || String(block.text || '') !== joinedOcrText(block.sourceLines)) {
-    toast('برای جلوگیری از حذف ویرایش‌ها، جداکردن فقط پیش از ترجمه و تغییر متن ادغام‌شده ممکن است', true); return;
-  }
-  const index = item.blocks.indexOf(block);
-  const originals = JSON.parse(JSON.stringify(block.sourceLines));
-  item.blocks.splice(index, 1, ...originals);
-  state.selectedBlockIds = originals.map((entry) => String(entry.id)); state.activeBlockId = state.selectedBlockIds[0] || null;
+  state.selectedBlockIds = newSelection; state.activeBlockId = newSelection[0] || null;
   buildBlockList(); drawEditor(); scheduleSave();
+  toast('خط‌های کادر با موفقیت به کادرهای جداگانه تبدیل شدند');
 }
 function sameSizeSelectedBoxes() {
   const item = editorItem(); const blocks = selectedEditorBlocks();
@@ -2514,7 +2665,9 @@ function renderEditorBoxes() {
       ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
       el.addEventListener('pointerdown', (event) => {
         const activeBlock = el._block; const additive = event.ctrlKey || event.metaKey; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
-        if (inlineDraft && inlineDraft.block !== activeBlock && !additive) {
+        if (inlineDraft && additive) {
+          if (!closeInlineEditor()) return;
+        } else if (inlineDraft && inlineDraft.block !== activeBlock && !additive) {
           if (!dragTarget || !closeInlineEditor()) return;
         }
         if (!(dragTarget && !additive && editorSelectedKeys().includes(String(activeBlock.id)))) selectEditorBlock(activeBlock.id, true, additive);
@@ -2705,7 +2858,7 @@ async function copyBlockText(text) {
 function buildBlockList() {
   const item = editorItem(); const list = $('blockList'); list.textContent = ''; const selected = new Set(editorSelectedKeys()); if (!item?.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; updateEditorSelection(); return; }
   item.blocks.forEach((block) => {
-    const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', (event) => selectEditorBlock(block.id, false, event.ctrlKey || event.metaKey));
+    const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', (event) => { const additive = event.ctrlKey || event.metaKey; if (additive && inlineDraft && !closeInlineEditor()) return; selectEditorBlock(block.id, false, additive); });
     const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabled.dataset.visibility = 'sidebar'; enabled.setAttribute('aria-label', `نمایش متن ${block.id} روی تصویر`); enabledLabel.append(enabled, document.createTextNode(` نمایش متن ${block.id} روی تصویر · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
     const bg = document.createElement('select'); [['auto', 'پس‌زمینه خودکار'], ['white', 'سفید'], ['black', 'مشکی'], ['none', 'بدون پاک‌کردن']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; bg.appendChild(option); }); bg.value = block.bg || 'auto'; head.appendChild(bg);
     const languageRow = document.createElement('div'); languageRow.className = 'block-tools block-language-tools';
@@ -2898,7 +3051,7 @@ function bindEvents() {
       if (enabled) { classicEditor.field.style.padding = ''; classicEditor.detachField(); refreshInlineTypography(); }
       else if (box) { classicEditor.attachField(box); refreshInlineTypography(); }
     },
-    onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); autoApplyInlineDraft(); } },
+    onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); autoApplyInlineDraft(); updateEditorSelection(); } },
     getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && $('inlineEditorSize').value.trim() === inlineDraft.initialSizeValue) ? '' : $('inlineEditorSize').value, color: inlineDraft.color } : null,
     onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) { inlineDraft.verticalAlignTouched = true; $('inlineVerticalAlign').value = meta.verticalAlign; } if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; } else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; } if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; syncVerticalAlignButtons(); },
   });
@@ -2913,21 +3066,40 @@ function bindEvents() {
     if (inlineDraft && document.activeElement === inlineField) { rememberInlineRange(); syncInlineLineControls(); }
   });
   inlineField.addEventListener('input', () => { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); });
+  let inlineDownPt = null;
   inlineField.addEventListener('pointerdown', (event) => {
+    if (event.ctrlKey || event.metaKey) {
+      const blk = inlineDraft?.block;
+      inlineDownPt = null;
+      event.preventDefault(); event.stopPropagation();
+      if (blk && closeInlineEditor()) selectEditorBlock(blk.id, true, true);
+      return;
+    }
     event.stopPropagation();
+    inlineDownPt = event.button === 0 && !event.shiftKey ? { x: event.clientX, y: event.clientY } : null;
     if (event.button === 0 && lastInlineOpenClick && performance.now() - lastInlineOpenClick.time < 360
       && Math.hypot(event.clientX - lastInlineOpenClick.x, event.clientY - lastInlineOpenClick.y) <= 6) {
-      lastInlineOpenClick = null;
+      lastInlineOpenClick = null; inlineDownPt = null;
       if (expandInlineWordAtPoint(inlineField, event.clientX, event.clientY)) event.preventDefault();
     } else {
       lastInlineOpenClick = null;
     }
   });
   inlineField.addEventListener('dblclick', (event) => {
+    inlineDownPt = null;
     event.stopPropagation();
     expandInlineWordAtPoint(inlineField, event.clientX, event.clientY);
   });
-  inlineField.addEventListener('click', (event) => event.stopPropagation());
+  inlineField.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const down = inlineDownPt; inlineDownPt = null;
+    if (!down || event.detail !== 1 || event.shiftKey || !inlineField.parentElement?.classList.contains('editor-box')) return;
+    if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > 3) return;
+    const sel = window.getSelection?.();
+    if (!sel || !sel.isCollapsed) return;
+    placeInlineCaret(inlineField, event);
+    rememberInlineRange(); syncInlineLineControls();
+  });
   $('inlineEditor').addEventListener('pointerdown', (event) => {
     if (inlineDraft?.showOutput && !event.target.closest('#inlinePreview, #inlineEditorApply, #inlineEditorCancel, .editor-zoom-controls')) setInlineOutputPreview(false);
     const boxDetails = $('inlineEditor').querySelector('.inline-box-settings');
@@ -2953,7 +3125,7 @@ function bindEvents() {
     setSelectionOrLineSize(value ? `${Math.round(size)}px` : '', { restoreFocus: true });
   });
   ['inlineSizeUp', 'inlineSizeDown'].forEach((id) => $(id)?.addEventListener('mousedown', (event) => event.preventDefault()));
-  document.querySelectorAll('.inline-box-layout-tools button').forEach((btn) => btn.addEventListener('mousedown', (event) => event.preventDefault()));
+  document.querySelectorAll('.inline-box-layout-tools button, .inline-merge-split-tools button').forEach((btn) => btn.addEventListener('mousedown', (event) => event.preventDefault()));
   $('inlineSizeUp')?.addEventListener('click', () => stepSelectionOrLineSize(2));
   $('inlineSizeDown')?.addEventListener('click', () => stepSelectionOrLineSize(-2));
   $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; classicEditor.notifyChange(); });

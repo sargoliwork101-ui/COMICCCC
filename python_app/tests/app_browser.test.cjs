@@ -943,6 +943,163 @@ main()
         fitEditor(); buildBlockList(); drawEditor();
       });
       console.log('PASS: v3.61 root-cause selection alignment (zoomed-out font-12 top Line 1 + overflowing middle box) and unified divided toolbar');
+
+      // v3.63: Separated Merge/Split toolbar, post-translation Merge & Split, and pixel/character caret alignment across zooms, inline markers, multi-spaces, and mixed Bidi.
+      const v363Toolbar = await page.evaluate(() => {
+        const alignRect = document.querySelector('.inline-box-layout-tools').getBoundingClientRect();
+        const msRect = document.getElementById('inlineMergeSplitTools').getBoundingClientRect();
+        return {
+          sameRow: Math.abs(alignRect.top - msRect.top) < 6,
+          gapPx: Math.round(Math.max(alignRect.left - msRect.right, msRect.left - alignRect.right)),
+          insideAlignGroup: Boolean(document.querySelector('.inline-box-layout-tools #editorMergeText')),
+          sidebarDuplicates: document.querySelectorAll('.editor-side .editor-multi-tools').length,
+        };
+      });
+      assert.equal(v363Toolbar.sameRow, true, `Merge/Split and Align groups must sit on one row: ${JSON.stringify(v363Toolbar)}`);
+      assert.ok(v363Toolbar.gapPx >= 6, `Merge/Split must be visually separated from Align tools: ${JSON.stringify(v363Toolbar)}`);
+      assert.equal(v363Toolbar.insideAlignGroup, false);
+      assert.equal(v363Toolbar.sidebarDuplicates, 0);
+
+      await page.evaluate(() => {
+        state.project.images[0].blocks = [
+          {
+            id: 1, x0: 12, y0: 15, x1: 135, y1: 120,
+            polygon: [[12, 15], [135, 15], [135, 120], [12, 120]],
+            text: 'NARROW BUBBLE',
+            tr: 'ما باید همین الان از این ساختمان خارج بشویم وگرنه دیر می‌شود',
+            richHtml: '', enabled: true, lineH: 22, bg: 'white', color: '#111111',
+            dir: 'rtl', align: 'justify', size: 12, verticalAlign: 'top',
+          },
+          {
+            id: 2, x0: 145, y0: 15, x1: 315, y1: 90,
+            polygon: [[145, 15], [315, 15], [315, 90], [145, 90]],
+            text: 'BIDI AND MARKS',
+            tr: 'سلام World 2026 خوبی',
+            richHtml: '', enabled: true, lineH: 22, bg: 'white', color: '#111111',
+            dir: 'rtl', align: 'right', size: 12, verticalAlign: 'top',
+          },
+          {
+            id: 3, x0: 12, y0: 130, x1: 165, y1: 162,
+            polygon: [[12, 130], [165, 130], [165, 162], [12, 162]],
+            text: 'MERGE A', tr: 'پارهٔ نخست', richHtml: '', enabled: true, lineH: 20, bg: 'white',
+            dir: 'rtl', align: 'justify', size: 12, verticalAlign: 'top',
+          },
+          {
+            id: 4, x0: 12, y0: 165, x1: 165, y1: 196,
+            polygon: [[12, 165], [165, 165], [165, 196], [12, 196]],
+            text: 'MERGE B', tr: 'پارهٔ دوم', richHtml: '', enabled: true, lineH: 20, bg: 'white',
+            dir: 'rtl', align: 'justify', size: 12, verticalAlign: 'top',
+          },
+        ];
+        buildBlockList(); drawEditor();
+      });
+
+      const v363CaretAudit = await page.evaluate(() => {
+        function audit(id, zoom) {
+          setEditorZoom(zoom);
+          const blk = editorItem().blocks.find((b) => b.id === id);
+          openInlineEditor(blk);
+          const field = document.getElementById('inlineEditorField');
+          const canvas = document.getElementById('editorCanvas');
+          const cRect = canvas.getBoundingClientRect();
+          const scale = state.editorScale || 1;
+          const bx0 = blk.x0, by0 = blk.y0, bw = blk.x1 - blk.x0, bh = blk.y1 - blk.y0;
+          const img = canvas.getContext('2d').getImageData(bx0, by0, bw, bh).data;
+          const walker = document.createTreeWalker(field, NodeFilter.SHOW_TEXT);
+          const chars = [];
+          let tn;
+          while ((tn = walker.nextNode())) {
+            const val = tn.nodeValue || '';
+            for (let i = 0; i < val.length; i++) {
+              if (val[i] === '\n' || val[i] === '\u200c') continue;
+              const r = document.createRange();
+              r.setStart(tn, i); r.setEnd(tn, i + 1);
+              const rr = r.getBoundingClientRect();
+              if (rr.width > 0 && rr.height > 0) {
+                const expEnd = (i + 1 < val.length && val[i + 1] === '\u200c') ? i + 2 : i + 1;
+                chars.push({
+                  ch: val[i], node: tn, idx: i, expEnd,
+                  x0: (rr.left - cRect.left) / scale, x1: (rr.right - cRect.left) / scale,
+                  y0: (rr.top - cRect.top) / scale, y1: (rr.bottom - cRect.top) / scale,
+                  rrLeft: rr.left, rrRight: rr.right, rrTop: rr.top, rrBottom: rr.bottom,
+                });
+              }
+            }
+          }
+          const lines = [];
+          for (const dc of chars) {
+            if (!dc.ch.trim()) continue;
+            let ln = lines.find((l) => dc.y0 < l.y1 - 2 && dc.y1 > l.y0 + 2);
+            if (!ln) { ln = { y0: dc.y0, y1: dc.y1, x0: dc.x0, x1: dc.x1 }; lines.push(ln); }
+            ln.x0 = Math.min(ln.x0, dc.x0); ln.x1 = Math.max(ln.x1, dc.x1);
+            ln.y0 = Math.min(ln.y0, dc.y0); ln.y1 = Math.max(ln.y1, dc.y1);
+          }
+          const maxLineDiff = Math.max(...lines.map((ln) => {
+            const sy0 = Math.max(0, Math.floor(ln.y0 - by0)), sy1 = Math.min(bh - 1, Math.ceil(ln.y1 - by0));
+            let inkMin = Infinity, inkMax = -Infinity;
+            for (let y = sy0; y <= sy1; y++) {
+              for (let x = 0; x < bw; x++) {
+                const p = (y * bw + x) * 4;
+                if (img[p] < 210) { inkMin = Math.min(inkMin, bx0 + x); inkMax = Math.max(inkMax, bx0 + x + 1); }
+              }
+            }
+            return Math.max(Math.abs(ln.x0 - inkMin), Math.abs(ln.x1 - inkMax));
+          }));
+          let exact = 0, total = 0;
+          for (const dc of chars) {
+            if (!dc.ch.trim()) continue;
+            const isRtl = /[\u0590-\u08ff]/.test(dc.ch) && !/[\u0660-\u0669\u06f0-\u06f9]/.test(dc.ch);
+            const w = dc.rrRight - dc.rrLeft, midY = (dc.rrTop + dc.rrBottom) / 2;
+            const ps = inlineCaretPoint(field, isRtl ? dc.rrRight - w * 0.2 : dc.rrLeft + w * 0.2, midY);
+            const pe = inlineCaretPoint(field, isRtl ? dc.rrLeft + w * 0.2 : dc.rrRight - w * 0.2, midY);
+            total += 2;
+            if (ps && ps.node === dc.node && ps.offset === dc.idx) exact += 1;
+            if (pe && pe.node === dc.node && pe.offset === dc.expEnd) exact += 1;
+          }
+          const lz = field.dataset.layoutZoom;
+          closeInlineEditor();
+          return { lz, exact, total, maxLineDiff: Math.round(maxLineDiff * 10) / 10 };
+        }
+        return { b1_065: audit(1, 0.65), b1_100: audit(1, 1.0), b1_140: audit(1, 1.4), b2_bidi: audit(2, 1.0) };
+      });
+      for (const [k, res] of Object.entries(v363CaretAudit)) {
+        assert.equal(res.lz, '1', `${k} must use layoutZoom=1`);
+        assert.equal(res.exact, res.total, `${k} must achieve 100% character-edge caret accuracy: ${JSON.stringify(res)}`);
+        assert.ok(res.maxLineDiff <= 2.2, `${k} DOM vs Canvas ink horizontal alignment must stay within glyph sidebearing: ${JSON.stringify(res)}`);
+      }
+
+      // Real Ctrl+Click while inline editor is open -> Merge -> Split restore!
+      const [b3Pt, b4Pt] = await page.evaluate(() => {
+        setEditorZoom(1.0);
+        return [3, 4].map((id) => {
+          const r = document.querySelector(`#editorBoxes .editor-box[data-id="${id}"] .editor-box-text`).getBoundingClientRect();
+          return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        });
+      });
+      await page.mouse.click(b3Pt.x, b3Pt.y);
+      await page.keyboard.down('Control');
+      await page.mouse.click(b4Pt.x, b4Pt.y);
+      await page.keyboard.up('Control');
+      await page.click('#editorMergeText');
+      const v363Merged = await page.evaluate(() => ({
+        len: state.project.images[0].blocks.length,
+        tr: state.project.images[0].blocks.find((b) => b.id === 3)?.tr,
+      }));
+      assert.equal(v363Merged.len, 3);
+      assert.equal(v363Merged.tr, 'پارهٔ نخست\nپارهٔ دوم');
+      await page.click('#editorSplitText');
+      const v363Restored = await page.evaluate(() => ({
+        len: state.project.images[0].blocks.length,
+        b4: state.project.images[0].blocks.find((b) => b.id === 4)?.tr,
+      }));
+      assert.equal(v363Restored.len, 4);
+      assert.equal(v363Restored.b4, 'پارهٔ دوم');
+
+      await page.evaluate(() => {
+        state.project.images[0].blocks = JSON.parse(JSON.stringify(window.__savedV361Blocks));
+        fitEditor(); buildBlockList(); drawEditor();
+      });
+      console.log('PASS: v3.63 separated Merge/Split tools, post-translation Merge & Split, and 100% pixel/caret alignment across zooms & Bidi');
     }
 
     // Classic source/visual synchronization, sanitization, dialogs and draft recovery.

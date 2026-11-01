@@ -176,5 +176,29 @@ assert(hrOnly.some((point) => point.text.includes('─')), 'separator-only block
   const sampled = Typeset.sampleBg(twoColorCtx, { x0: 10, y0: 10, x1: 50, y1: 50 }, 60, 60);
   assert.equal(sampled.uniform, false, 'high-contrast red/green border must not look uniform due to sorted channels');
 }
+{
+  assert.match(Typeset.FONT, /^Vazirmatn\b/, 'Typeset.FONT must match CSS @font-face family name');
+  const markHtml = Typeset.inlineMarksToHtml('*سرفه* سلام **قهرمان** و __تأکید__ [size=18]درشت[/size] [color=#c0392b]سرخ[/color]\nخط <دوم>');
+  assert.equal(
+    markHtml,
+    '<i>سرفه</i> سلام <b>قهرمان</b> و <u>تأکید</u> <span style="font-size:18px">درشت</span> <span style="color:#c0392b">سرخ</span><br>خط &lt;دوم&gt;',
+    'inlineMarksToHtml must convert inline markers and escape HTML entities cleanly',
+  );
+  const rtlMixed = [{ t: 'سلام' }, { t: 'World' }, { t: '2026' }, { t: 'خوبی' }];
+  const vRtl = Typeset.visualLineOrder(rtlMixed, 'rtl');
+  assert.deepStrictEqual(vRtl.map((x) => rtlMixed[x.idx].t), ['خوبی', 'World', '2026', 'سلام'], 'RTL visualLineOrder must return left-to-right visual order keeping LTR + trailing digits left-to-right');
+  assert.equal(vRtl.filter((x) => x.hasGapAfter).length, rtlMixed.length - 1, 'RTL visualLineOrder must preserve exact gap bijection');
+
+  const rtlNumThenLtr = [{ t: 'سرعت' }, { t: '120' }, { t: 'km/h' }, { t: 'است' }];
+  const vNum = Typeset.visualLineOrder(rtlNumThenLtr, 'rtl');
+  assert.deepStrictEqual(vNum.map((x) => rtlNumThenLtr[x.idx].t), ['است', 'km/h', '120', 'سرعت'], 'pure numeric token immediately after RTL stays on RTL side right of LTR unit');
+  assert.equal(vNum.filter((x) => x.hasGapAfter).length, rtlNumThenLtr.length - 1);
+
+  const ltrMixed = [{ t: 'Hello' }, { t: 'سلام' }, { t: 'دنیا' }, { t: 'World' }];
+  const vLtr = Typeset.visualLineOrder(ltrMixed, 'ltr');
+  assert.deepStrictEqual(vLtr.map((x) => ltrMixed[x.idx].t), ['Hello', 'دنیا', 'سلام', 'World'], 'LTR visualLineOrder must reverse embedded RTL run');
+  assert.equal(vLtr.filter((x) => x.hasGapAfter).length, ltrMixed.length - 1);
+  console.log('PASS: v3.63 inlineMarksToHtml and bidirectional visualLineOrder');
+}
 delete global.document;
 console.log('PASS: rich text justifies and list markers survive output rendering');

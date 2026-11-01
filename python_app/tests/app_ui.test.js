@@ -188,9 +188,11 @@ window.HTMLCanvasElement.prototype.getContext = () => ({ clearRect() {}, drawIma
 window.HTMLElement.prototype.setPointerCapture = function (pointerId) { this._capturedPointerId = pointerId; };
 window.HTMLElement.prototype.hasPointerCapture = function (pointerId) { return this._capturedPointerId === pointerId; };
 window.HTMLElement.prototype.releasePointerCapture = function (pointerId) { if (this._capturedPointerId === pointerId) delete this._capturedPointerId; };
+const realTypeset = require(path.join(root, 'typeset.js'));
 window.Typeset = {
   blockStyle(block) { return { dir: block.dir === 'ltr' ? 'ltr' : 'rtl', align: block.align || 'right', bold: true, italic: false, underline: false, size: 12, color: null }; },
-  hasInlineMarks() { return false; },
+  hasInlineMarks: realTypeset.hasInlineMarks,
+  inlineMarksToHtml: realTypeset.inlineMarksToHtml,
   richHtmlWords(html) { return String(html || '').includes('<hr>') ? [{ t: '────────' }] : []; },
   render(bitmap, blocks) {
     canvasRenderCount += 1;
@@ -783,6 +785,35 @@ function check(name, condition) {
     check('selecting a box activates the docked inline editor in place', !$('inlineEditor').classList.contains('hidden') && !$('inlineEditor').classList.contains('is-idle') && $('inlineEditorSize').disabled === false);
     $('inlineEditorApply').click();
     check('finishing box edit keeps the inline editor docked in idle state instead of hiding it', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && !$('editorBoxes').querySelector('.editor-box.editing'));
+    check('merge and split tools live in their own separated group outside align/layout tools', !!$('inlineEditor').querySelector('.inline-box-ops-row > #inlineMergeSplitTools #editorMergeText') && !!$('inlineEditor').querySelector('.inline-box-ops-row > #inlineMergeSplitTools #editorSplitText') && !$('inlineEditor').querySelector('.inline-box-layout-tools #editorMergeText') && !$('inlineEditor').querySelector('.inline-box-layout-tools #editorSplitText'));
+    await vm.runInContext(`(async () => {
+      window.__savedUiBlocksV363 = JSON.parse(JSON.stringify(state.project.images[0].blocks));
+      state.project.settings.overlayMode = 'translation';
+      state.project.images[0].blocks = [
+        { id: 101, x0: 20, y0: 20, x1: 180, y1: 60, polygon: [[20,20],[180,20],[180,60],[20,60]], text: 'PART ONE', tr: '*سرفه* بخش اول', richHtml: '', enabled: true, lineH: 22, bg: 'white', dir: 'rtl', align: 'justify', size: 12, verticalAlign: 'top' },
+        { id: 102, x0: 20, y0: 66, x1: 180, y1: 106, polygon: [[20,66],[180,66],[180,106],[20,106]], text: 'PART TWO', tr: 'بخش دوم', richHtml: '', enabled: true, lineH: 22, bg: 'white', dir: 'rtl', align: 'justify', size: 12, verticalAlign: 'top' },
+      ];
+      buildBlockList(); drawEditor();
+      openInlineEditor(state.project.images[0].blocks[0]);
+    })()`, context);
+    check('inline editor uses layoutZoom=1, pre-line whitespace, and converts plain inline markers to HTML', $('inlineEditorField').dataset.layoutZoom === '1' && $('inlineEditorField').style.whiteSpace === 'pre-line' && $('inlineEditorField').innerHTML.includes('<i>سرفه</i>'));
+    const box102Text = $('editorBoxes').querySelector('.editor-box[data-id="102"] .editor-box-text');
+    box102Text.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, ctrlKey: true }));
+    check('Ctrl+Click while inline editor is open closes draft and selects both boxes with merge ready', $('inlineEditor').classList.contains('is-idle') && $('editorMergeText').classList.contains('is-ready') && $('editorBoxes').querySelectorAll('.editor-box.selected').length === 2);
+    $('editorMergeText').click();
+    check('post-translation merge combines translated boxes without losing translations and marks split ready', await vm.runInContext(`state.project.images[0].blocks.length === 1 && state.project.images[0].blocks[0].tr.includes('بخش اول') && state.project.images[0].blocks[0].tr.includes('بخش دوم')`, context) && $('editorSplitText').classList.contains('is-ready'));
+    $('editorSplitText').click();
+    check('post-translation split restores merged boxes and their translations', await vm.runInContext(`state.project.images[0].blocks.length === 2 && state.project.images[0].blocks[0].id === 101 && state.project.images[0].blocks[1].id === 102 && state.project.images[0].blocks[1].tr === 'بخش دوم'`, context));
+    await vm.runInContext(`(async () => {
+      selectEditorBlock(102, false, false);
+      state.project.images[0].blocks[1].tr = 'نیمه اول\\nنیمه دوم';
+      updateEditorSelection();
+    })()`, context);
+    check('multiline single translated box marks split ready and splits proportionally into two boxes', $('editorSplitText').classList.contains('is-ready') && ($('editorSplitText').click(), true) && await vm.runInContext(`state.project.images[0].blocks.length === 3 && state.project.images[0].blocks[1].tr === 'نیمه اول' && state.project.images[0].blocks[2].tr === 'نیمه دوم' && state.project.images[0].blocks[2].y0 >= state.project.images[0].blocks[1].y1 - 1`, context));
+    await vm.runInContext(`(async () => {
+      state.project.images[0].blocks = window.__savedUiBlocksV363;
+      buildBlockList(); drawEditor();
+    })()`, context);
     await vm.runInContext('closeEditor()', context);
   }
 
