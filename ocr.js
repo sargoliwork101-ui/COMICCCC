@@ -110,8 +110,8 @@
       const windowSize = radius * 2 + 1;
       const ring = new Array(windowSize);
       const vertical = new Uint32Array(w);
+      const gray = new Uint8Array(w);
       const horizontalRow = (y) => {
-        const gray = new Uint8Array(w);
         const sums = new Uint16Array(w);
         const row = y * w * 4;
         for (let x = 0; x < w; x++) {

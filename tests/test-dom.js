@@ -124,8 +124,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.55', manifest.version === '2.55' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۵۵'));
+  check('manifest and viewer version badge are synchronized at 2.56', manifest.version === '2.56' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۵۶'));
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(fs.readFileSync(path.join(ROOT, 'viewer.css'), 'utf8')));
   check('PDF-to-image import opens the dedicated converter tab',

@@ -245,10 +245,11 @@ class RapidEngine:
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         engine = self._get(language)
+        arr = np.asarray(image)
         try:
-            result = engine(np.asarray(image), use_cls=False)
+            result = engine(arr, use_cls=False)
         except TypeError:
-            result = engine(np.asarray(image))
+            result = engine(arr)
         except Exception as exc:
             raise OcrError(f"OCR failed: {exc}") from exc
         return _lines_from_rapid(result)
@@ -643,11 +644,12 @@ class EngineRegistry:
         result = []
         for engine_id, info in ENGINE_INFO.items():
             engine = self.get(engine_id)
+            ready_languages = engine.ready_languages
             result.append({
                 "id": engine_id, **info,
                 "runtimeInstalled": engine.runtime_installed,
-                "modelReady": engine.model_ready,
-                "readyLanguages": engine.ready_languages,
+                "modelReady": bool(ready_languages),
+                "readyLanguages": ready_languages,
             })
         return result
 
@@ -715,7 +717,7 @@ def _recognize_image_primary(
         end = min(height, start + slice_height)
         read_y0 = max(0, start - overlap)
         read_y1 = min(height, end + overlap)
-        crop = prepared.crop((0, read_y0, width, read_y1))
+        crop = prepared if (read_y0 == 0 and read_y1 == height) else prepared.crop((0, read_y0, width, read_y1))
         for line in engine.recognize(crop, language):
             polygon = [[x, y + read_y0] for x, y in line.polygon]
             adjusted = OcrLine(line.text, line.confidence, polygon)

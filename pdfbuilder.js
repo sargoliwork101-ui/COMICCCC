@@ -19,8 +19,8 @@
     const seamless = !!o.seamless;
     const uniformSize = !!o.uniformSize && !seamless;
     const W = seamless ? pickWidth(o.items) : 0;
-    const maxW = o.items.length ? Math.max(...o.items.map((it) => it.w)) : 0;
-    const maxH = o.items.length ? Math.max(...o.items.map((it) => it.h)) : 0;
+    let maxW = 0, maxH = 0;
+    for (const it of o.items) { if (it.w > maxW) maxW = it.w; if (it.h > maxH) maxH = it.h; }
     const targetPageW = uniformSize ? maxW : seamless ? W : maxW;
     const targetPageH = uniformSize ? maxH : 0;
     let s = Math.min(0.75, HARD_PT / Math.max(targetPageW, 1), targetPageH ? SAFE_PT / targetPageH : 0.75); // پوینت به‌ازای هر پیکسل

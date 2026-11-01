@@ -651,7 +651,18 @@ main()
     assert.equal(await page.evaluate(() => inlineDraft.block.tr), 'external change', 'concurrent edits are not overwritten');
     await page.evaluate(() => Object.assign(inlineDraft.block, window.__beforeConflict));
     await page.click('#inlineEditorCancel');
-    await page.evaluate(() => { Object.assign(state.project.images[0].blocks[0], window.__beforeConflict); buildBlockList(); drawEditor(); });
+    let conflictRecoveryPrompt = '';
+    page.once('dialog', (dialog) => { conflictRecoveryPrompt = dialog.message(); dialog.dismiss(); });
+    const clearedOnDecline = await page.evaluate(() => {
+      Object.assign(state.project.images[0].blocks[0], window.__beforeConflict);
+      buildBlockList(); drawEditor();
+      openInlineEditor(state.project.images[0].blocks[0]);
+      const hasDraft = Object.keys(localStorage).some((key) => key.startsWith('comic-studio-draft:'));
+      closeInlineEditor();
+      return !hasDraft;
+    });
+    assert.ok(conflictRecoveryPrompt.includes('پیش‌نویس'), 'forced conflict close keeps local draft for recovery');
+    assert.equal(clearedOnDecline, true, 'declined recovery draft is cleaned up immediately');
     assert.equal(await editorRenderDifference(page), 0);
     console.log('PASS: text, OCR and HTML changes stay live and auto-saved; concurrent edits are protected');
 

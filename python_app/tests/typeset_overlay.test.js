@@ -154,5 +154,22 @@ const imageOnly = captureLayout({ text: '', html: '<img src="https://example.com
 assert(imageOnly.some((point) => point.text === '[sample]'), 'image-only blocks must show their placeholder even without plain text');
 const hrOnly = captureLayout({ text: '', html: '<hr>', align: 'left' });
 assert(hrOnly.some((point) => point.text.includes('─')), 'separator-only blocks must not disappear');
+{
+  const twoColorCtx = {
+    getImageData: (_x, _y, w, h) => {
+      const data = new Uint8ClampedArray(w * h * 4);
+      for (let p = 0; p < w * h; p++) {
+        const red = p % 2 === 0;
+        data[p * 4] = red ? 255 : 0;
+        data[p * 4 + 1] = red ? 0 : 255;
+        data[p * 4 + 2] = 0;
+        data[p * 4 + 3] = 255;
+      }
+      return { data };
+    }
+  };
+  const sampled = Typeset.sampleBg(twoColorCtx, { x0: 10, y0: 10, x1: 50, y1: 50 }, 60, 60);
+  assert.equal(sampled.uniform, false, 'high-contrast red/green border must not look uniform due to sorted channels');
+}
 delete global.document;
 console.log('PASS: rich text justifies and list markers survive output rendering');

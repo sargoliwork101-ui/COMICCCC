@@ -29,6 +29,17 @@ assert(second.getHTML().includes('<h2>title</h2>'), 'a new editor restores the s
 second.setHTML(''); second.saveDraft(); second.destroy();
 const recoveredEmpty = window.createEditor('#two', { autosaveKey: 'test-draft', initialHTML: '<p>initial</p>' });
 assert.equal(recoveredEmpty.getHTML(), '', 'a deliberately empty draft can be recovered');
+recoveredEmpty.setHTML('<p>unwanted draft</p>'); recoveredEmpty.saveDraft();
+assert(window.localStorage.getItem('test-draft'));
+let confirmCount = 0;
+window.confirm = () => { confirmCount += 1; return false; };
+assert.equal(recoveredEmpty.setContext('test-draft', '<p>initial</p>', 'rev-1'), false);
+assert.equal(confirmCount, 1);
+assert.equal(recoveredEmpty.getHTML(), '<p>initial</p>', 'declined draft keeps current HTML');
+assert.equal(window.localStorage.getItem('test-draft'), null, 'declined draft is removed from localStorage');
+assert.equal(recoveredEmpty.setContext('test-draft', '<p>initial</p>', 'rev-1'), false);
+assert.equal(confirmCount, 1, 'declined draft does not prompt again on next open');
+window.confirm = () => true;
 recoveredEmpty.clearDraft(); assert.equal(window.localStorage.getItem('test-draft'), null);
 editor.destroy(); recoveredEmpty.destroy(); dom.window.close();
 console.log('rich editor: safe HTML, API, tabs, autosave and empty-draft recovery passed');

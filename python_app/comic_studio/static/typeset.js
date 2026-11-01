@@ -23,24 +23,44 @@
       for (let i = 0; i < d.length; i += 4) { R.push(d[i]); G.push(d[i + 1]); B.push(d[i + 2]); }
     });
     if (!R.length) return { r: 255, g: 255, b: 255, uniform: true };
+    const Ls = [];
+    for (let i = 0; i < R.length; i += 3) Ls.push(lum(R[i], G[i], B[i]));
     const r = median(R), g = median(G), b = median(B);
     let s = 0; const L = lum(r, g, b);
-    for (let i = 0; i < R.length; i += 3) { const d = lum(R[i], G[i], B[i]) - L; s += d * d; }
-    return { r, g, b, uniform: Math.sqrt(s / Math.ceil(R.length / 3)) < 28 };
+    for (let i = 0; i < Ls.length; i++) { const d = Ls[i] - L; s += d * d; }
+    return { r, g, b, uniform: Math.sqrt(s / Ls.length) < 28 };
+  }
+
+  function splitParagraphWords(text) {
+    return String(text || '').replace(/\r\n?/g, '\n').split('\n').map((p) => p.split(/\s+/).filter(Boolean));
+  }
+
+  function wrapParagraphWords(ctx, paragraphs, maxW) {
+    const lines = [];
+    let widest = 0;
+    // Explicit newlines are paragraph boundaries, including intentionally blank lines.
+    for (const words of paragraphs) {
+      let cur = '', curW = -1;
+      for (const w of words) {
+        if (!cur) { cur = w; curW = -1; continue; }
+        const t = cur + ' ' + w;
+        const tw = ctx.measureText(t).width;
+        if (tw <= maxW) { cur = t; curW = tw; }
+        else {
+          const lw = curW >= 0 ? curW : ctx.measureText(cur).width;
+          if (lw > widest) widest = lw;
+          lines.push(cur); cur = w; curW = -1;
+        }
+      }
+      const lw = cur ? (curW >= 0 ? curW : ctx.measureText(cur).width) : 0;
+      if (lw > widest) widest = lw;
+      lines.push(cur);
+    }
+    return { lines, widest };
   }
 
   function wrapWords(ctx, text, maxW) {
-    const lines = [];
-    // Explicit newlines are paragraph boundaries, including intentionally blank lines.
-    for (const paragraph of String(text || '').replace(/\r\n?/g, '\n').split('\n')) {
-      const words = paragraph.split(/\s+/).filter(Boolean); let cur = '';
-      for (const w of words) {
-        const t = cur ? cur + ' ' + w : w;
-        if (!cur || ctx.measureText(t).width <= maxW) cur = t; else { lines.push(cur); cur = w; }
-      }
-      lines.push(cur);
-    }
-    return lines;
+    return wrapParagraphWords(ctx, splitParagraphWords(text), maxW).lines;
   }
 
   // ---------- قالب‌بندی درون‌متنی: استایل یک کلمه/عبارت داخل متن یک بلوک ----------
@@ -200,41 +220,49 @@
   // عرض هر کلمه با فونت خودش + عرض فاصله با فونت پایهٔ بلوک
   function measureLine(ctx, line, st, size) {
     const baseFont = `${baseFontPrefix(st)}${size}px ${FONT}`;
+    let curFont = baseFont;
     ctx.font = baseFont;
     const spaceW = ctx.measureText(' ').width;
     const widths = line.map((w) => {
-      ctx.font = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${FONT}`;
+      const nextFont = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${FONT}`;
+      if (nextFont !== curFont) { curFont = nextFont; ctx.font = nextFont; }
       return ctx.measureText(w.t).width;
     });
-    ctx.font = baseFont;
+    if (curFont !== baseFont) ctx.font = baseFont;
     const width = widths.reduce((sum, v, i) => sum + v + (i && line[i].spaceBefore !== false ? spaceW : 0), 0);
     return { widths, spaceW, width };
   }
 
-  // شکستن خط با اندازهٔ مشخص؛ هر کلمه با فونت خودش اندازه می‌شود
-  function wrapInlineAt(ctx, words, maxW, st, size) {
+  function wrapInlineMeasured(ctx, words, maxW, st, size) {
     const baseFont = `${baseFontPrefix(st)}${size}px ${FONT}`;
+    let curFont = baseFont;
     ctx.font = baseFont;
     const spaceW = ctx.measureText(' ').width;
     const widthOf = (w) => {
-      ctx.font = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${FONT}`;
+      const nextFont = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${FONT}`;
+      if (nextFont !== curFont) { curFont = nextFont; ctx.font = nextFont; }
       return ctx.measureText(w.t).width;
     };
     const lines = [];
-    let cur = [], curW = 0;
+    let cur = [], curW = 0, widest = -Infinity;
     for (const w of words) {
-      if (w.lineBreakBefore && cur.length) { lines.push(cur); cur = []; curW = 0; }
+      if (w.lineBreakBefore && cur.length) { if (curW > widest) widest = curW; lines.push(cur); cur = []; curW = 0; }
       const ww = widthOf(w);
       if (!cur.length) { cur = [w]; curW = ww; }
       else {
         const gap = w.spaceBefore === false ? 0 : spaceW;
-        if (curW + gap + ww <= maxW) { cur.push(w); curW += gap + ww; }
-        else { lines.push(cur); cur = [w]; curW = ww; }
+        if (curW + gap + ww <= maxW) { cur.push(w); curW = curW + ww + gap; }
+        else { if (curW > widest) widest = curW; lines.push(cur); cur = [w]; curW = ww; }
       }
     }
-    if (cur.length) lines.push(cur);
-    ctx.font = baseFont;
-    return lines;
+    if (cur.length) { if (curW > widest) widest = curW; lines.push(cur); }
+    if (curFont !== baseFont) ctx.font = baseFont;
+    return { lines, widest };
+  }
+
+  // شکستن خط با اندازهٔ مشخص؛ هر کلمه با فونت خودش اندازه می‌شود
+  function wrapInlineAt(ctx, words, maxW, st, size) {
+    return wrapInlineMeasured(ctx, words, maxW, st, size).lines;
   }
 
   // ارتفاع خط بر اساس بلندترین کلمهٔ همان خط (اندازه‌های درون‌متنی متفاوت)
@@ -246,8 +274,7 @@
   function fitInline(ctx, text, boxW, boxH, maxSize, minSize, st) {
     const words = Array.isArray(text) ? text : inlineWords(text);
     for (let s = maxSize; s >= minSize; s--) {
-      const lines = wrapInlineAt(ctx, words, boxW, st, s);
-      const widest = Math.max(...lines.map((ln) => measureLine(ctx, ln, st, s).width));
+      const { lines, widest } = wrapInlineMeasured(ctx, words, boxW, st, s);
       const lhList = lineHeightsFor(lines, st, s);
       const totalH = lhList.reduce((sum, v) => sum + v, 0);
       if (totalH <= boxH && widest <= boxW * 1.04) {
@@ -259,15 +286,15 @@
   }
 
   function fit(ctx, text, boxW, boxH, maxSize, minSize, fontPrefix = '700 ') {
+    const paragraphs = splitParagraphWords(text);
     for (let s = maxSize; s >= minSize; s--) {
       ctx.font = `${fontPrefix}${s}px ${FONT}`;
-      const lines = wrapWords(ctx, text, boxW);
-      const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
+      const { lines, widest } = wrapParagraphWords(ctx, paragraphs, boxW);
       const lh = s * 1.55;
       if (lines.length * lh <= boxH && widest <= boxW * 1.04) return { size: s, lines, lh };
     }
     ctx.font = `${fontPrefix}${minSize}px ${FONT}`;
-    return { size: minSize, lines: wrapWords(ctx, text, boxW), lh: minSize * 1.55 };
+    return { size: minSize, lines: wrapParagraphWords(ctx, paragraphs, boxW).lines, lh: minSize * 1.55 };
   }
 
   // قالب‌بندی هر بلوک با پیش‌فرض‌های ایمن برای بلوک‌های قدیمی (ذخیره‌شده قبل از نسخهٔ ۲.۲۸)

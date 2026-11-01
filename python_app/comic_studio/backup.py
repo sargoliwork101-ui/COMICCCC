@@ -30,6 +30,7 @@ MAX_EDITED = 100 * 1024**2
 MAX_EXPORT = 2 * 1024**3
 ID_RE = re.compile(r'^[A-Za-z0-9]{1,64}$')
 EXPORT_SUFFIXES = {'.pdf', '.zip', '.txt'}
+STORED_ARCHIVE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.zip', '.pdf'}
 
 
 class BackupError(ValueError):
@@ -136,7 +137,8 @@ def make_backup(store: ProjectStore, project_id: str, drafts: Any, expected_upda
                 archive.writestr('browser-drafts.json', draft_data)
                 for path, name, _ in files:
                     before = path.stat()
-                    archive.write(path, name)
+                    compress_type = zipfile.ZIP_STORED if path.suffix.lower() in STORED_ARCHIVE_SUFFIXES else zipfile.ZIP_DEFLATED
+                    archive.write(path, name, compress_type=compress_type)
                     after = path.stat()
                     if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
                         raise BackupError(f'فایل {path.name} هنگام ساخت بک‌آپ تغییر کرد؛ دوباره تلاش کنید.')
@@ -148,12 +150,29 @@ def make_backup(store: ProjectStore, project_id: str, drafts: Any, expected_upda
         raise
 
 
-def _read_json(archive: zipfile.ZipFile, name: str, limit: int) -> Any:
-    info = archive.getinfo(name)
-    if info.file_size > limit:
+def _read_bounded_bytes(archive: zipfile.ZipFile, info: zipfile.ZipInfo, limit: int, remaining_total: int) -> bytes:
+    if info.file_size > limit or info.file_size > remaining_total:
         raise BackupError('اطلاعات بک‌آپ بیش از حد بزرگ است.')
+    cap = min(limit, remaining_total)
+    chunks: list[bytes] = []
+    total = 0
+    with archive.open(info) as source:
+        while True:
+            chunk = source.read(min(1024 * 1024, cap - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > cap:
+                raise BackupError('اطلاعات بک‌آپ بیش از حد بزرگ است.')
+            chunks.append(chunk)
+    return b''.join(chunks)
+
+
+def _read_json(archive: zipfile.ZipFile, name: str, limit: int, remaining_total: int = MAX_TOTAL) -> tuple[Any, int]:
+    info = archive.getinfo(name)
+    raw = _read_bounded_bytes(archive, info, limit, remaining_total)
     try:
-        return json.loads(archive.read(info).decode('utf-8'), parse_constant=lambda _: (_ for _ in ()).throw(ValueError('invalid number')))
+        return json.loads(raw.decode('utf-8'), parse_constant=lambda _: (_ for _ in ()).throw(ValueError('invalid number'))), len(raw)
     except (UnicodeError, ValueError, RecursionError) as exc:
         raise BackupError('فایل اطلاعات بک‌آپ خراب است.') from exc
 
@@ -195,11 +214,17 @@ def restore_backup(store: ProjectStore, upload: BinaryIO) -> tuple[dict[str, Any
                 folded_names.add(folded); names.add(name)
             if not {'manifest.json', 'project.json', 'browser-drafts.json'}.issubset(names):
                 raise BackupError('این فایل بک‌آپ پروژهٔ Comic OCR Studio نیست.')
-            manifest = _read_json(archive, 'manifest.json', 4096)
+            total_extracted = 0
+            manifest, used = _read_json(archive, 'manifest.json', 4096, MAX_TOTAL - total_extracted)
+            total_extracted += used
             if not isinstance(manifest, dict) or manifest.get('format') != FORMAT or manifest.get('version') != VERSION:
                 raise BackupError('نسخه یا نوع فایل بک‌آپ پشتیبانی نمی‌شود.')
-            state = _validate_state(_read_json(archive, 'project.json', MAX_JSON))
-            drafts = _drafts(_read_json(archive, 'browser-drafts.json', MAX_DRAFTS), state)
+            raw_state, used = _read_json(archive, 'project.json', MAX_JSON, MAX_TOTAL - total_extracted)
+            total_extracted += used
+            state = _validate_state(raw_state)
+            raw_drafts, used = _read_json(archive, 'browser-drafts.json', MAX_DRAFTS, MAX_TOTAL - total_extracted)
+            total_extracted += used
+            drafts = _drafts(raw_drafts, state)
             wanted = {'manifest.json', 'project.json', 'browser-drafts.json'}
             for item in state['images']:
                 original = f"images/{item['file']}"; edited = f"images/{item['id']}-edited.png"
@@ -216,10 +241,20 @@ def restore_backup(store: ProjectStore, upload: BinaryIO) -> tuple[dict[str, Any
             for name in names - {'manifest.json', 'project.json', 'browser-drafts.json'}:
                 info = archive.getinfo(name)
                 limit = MAX_EXPORT if name.startswith('exports/') else (MAX_EDITED if name.endswith('-edited.png') else MAX_IMAGE)
-                if info.file_size > limit:
+                if info.file_size > limit or info.file_size > MAX_TOTAL - total_extracted:
                     raise BackupError('یکی از فایل‌های بک‌آپ بیش از حد بزرگ است.')
+                cap = min(limit, MAX_TOTAL - total_extracted)
+                written = 0
                 with archive.open(info) as source, (stage / name).open('xb') as destination:
-                    shutil.copyfileobj(source, destination, 1024 * 1024)
+                    while True:
+                        chunk = source.read(min(1024 * 1024, cap - written + 1))
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > cap:
+                            raise BackupError('یکی از فایل‌های بک‌آپ بیش از حد بزرگ است.')
+                        destination.write(chunk)
+                total_extracted += written
             for item in state['images']:
                 _verify_image(stage / 'images' / item['file'], item, False)
                 edited = stage / 'images' / f"{item['id']}-edited.png"

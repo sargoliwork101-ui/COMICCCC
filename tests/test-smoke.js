@@ -424,6 +424,23 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     const r = await TranslateTools.translate('hi', 'en', fetchFn);
     check('translate all fail -> ok false', r.ok === false && r.text === '', r);
   }
+  {
+    const twoColorCtx = {
+      getImageData: (_x, _y, w, h) => {
+        const data = new Uint8ClampedArray(w * h * 4);
+        for (let p = 0; p < w * h; p++) {
+          const red = p % 2 === 0;
+          data[p * 4] = red ? 255 : 0;
+          data[p * 4 + 1] = red ? 0 : 255;
+          data[p * 4 + 2] = 0;
+          data[p * 4 + 3] = 255;
+        }
+        return { data };
+      }
+    };
+    const sampled = Typeset.sampleBg(twoColorCtx, { x0: 10, y0: 10, x1: 50, y1: 50 }, 60, 60);
+    check('sampleBg detects two-color red/green border as non-uniform', sampled.uniform === false, sampled);
+  }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL TESTS PASSED');
   process.exit(failures ? 1 : 0);

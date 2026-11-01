@@ -48,6 +48,22 @@ def _replace_with_retry(source: Path, destination: Path, windows: bool | None = 
             time.sleep(min(0.05 * (2 ** attempt), 0.8))
 
 
+def atomic_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temp = Path(name)
+    try:
+        handle = os.fdopen(descriptor, "wb")
+        descriptor = -1
+        with handle:
+            handle.write(content)
+        _replace_with_retry(temp, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temp.unlink(missing_ok=True)
+
+
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # mkstemp creates a unique file with mode 0600 on POSIX before any
@@ -210,7 +226,7 @@ class ProjectStore:
                     raise ValueError("Rendered image dimensions do not match the source")
                 im.verify()
             path = project_root(project_id) / "images" / f"{image_id}-edited.png"
-            path.write_bytes(content)
+            atomic_bytes(path, content)
             state = self.get(project_id)
             for item in state["images"]:
                 if item["id"] == image_id:

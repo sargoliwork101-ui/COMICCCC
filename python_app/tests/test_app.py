@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.54"
+    assert health.json()["version"] == "3.55"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -1691,3 +1691,60 @@ def test_pending_result_is_not_in_backup(client, monkeypatch):
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         assert all('.pending-results' not in name for name in archive.namelist())
         assert b'private staged text' not in archive.read('project.json')
+
+
+def test_exports_recreate_missing_dir_and_avoid_recompressing_uncropped_renders(client):
+    import shutil
+    from comic_studio.exporter import build_images_zip, build_txt, image_payload
+    from comic_studio.paths import project_root
+    from comic_studio.store import ProjectStore
+
+    project, item = make_project(client)
+    route = f"/api/projects/{project['id']}"
+    rendered_png = png_bytes((320, 200), 'blue')
+    assert client.post(f"{route}/images/{item['id']}/rendered", content=rendered_png).status_code == 200
+
+    store = ProjectStore()
+    state = store.get(project['id'])
+    payload_bytes, ext, w, h = image_payload(store, project['id'], state['images'][0], 'orig')
+    assert (ext, w, h) == ('png', 320, 200)
+    assert payload_bytes == rendered_png
+
+    exports_dir = project_root(project['id']) / 'exports'
+    shutil.rmtree(exports_dir, ignore_errors=True)
+    txt_path = build_txt(store, state, {'name': 'check-txt', 'image_ids': [item['id']]})
+    assert txt_path.is_file()
+    shutil.rmtree(exports_dir, ignore_errors=True)
+    zip_path = build_images_zip(store, state, {'name': 'check-zip', 'image_ids': [item['id']]})
+    assert zip_path.is_file()
+
+
+def test_restore_backup_enforces_actual_decompressed_byte_cap(client, monkeypatch):
+    from comic_studio import backup
+    from comic_studio.store import ProjectStore
+
+    project, _ = make_project(client)
+    response = client.post(f"/api/projects/{project['id']}/backup", json={'drafts': []})
+    assert response.status_code == 200
+    orig_getinfo = zipfile.ZipFile.getinfo
+    orig_infolist = zipfile.ZipFile.infolist
+
+    def spoofed_infolist(self):
+        infos = orig_infolist(self)
+        for info in infos:
+            if info.filename.startswith('images/'):
+                info.file_size = 1
+        return infos
+
+    def spoofed_getinfo(self, name):
+        info = orig_getinfo(self, name)
+        if info.filename.startswith('images/'):
+            info.file_size = 1
+        return info
+
+    monkeypatch.setattr(zipfile.ZipFile, 'infolist', spoofed_infolist)
+    monkeypatch.setattr(zipfile.ZipFile, 'getinfo', spoofed_getinfo)
+    monkeypatch.setattr(backup, 'MAX_IMAGE', 32)
+    with pytest.raises(backup.BackupError):
+        backup.restore_backup(ProjectStore(), io.BytesIO(response.content))
+

@@ -49,15 +49,23 @@ def crop_box(item: dict[str, Any]) -> tuple[int, int, int, int] | None:
 
 
 def image_payload(store: ProjectStore, project_id: str, item: dict[str, Any], image_format: str = "orig") -> tuple[bytes, str, int, int]:
-    """Return final bytes without recompressing an untouched original image."""
+    """Return final bytes without recompressing an untouched original or uncropped PNG render."""
     edited_path = project_root(project_id) / "images" / f"{item['id']}-edited.png"
-    source_path = edited_path if edited_path.exists() else project_root(project_id) / "images" / item["file"]
+    has_edited = edited_path.exists()
+    source_path = edited_path if has_edited else project_root(project_id) / "images" / item["file"]
     content = source_path.read_bytes()
     crop = crop_box(item)
     target = image_format if image_format in {"png", "jpg"} else "orig"
-    original_format = "png" if edited_path.exists() else ("jpg" if item["format"] == "JPEG" else "png")
-    if not crop and target == "orig" and not edited_path.exists() and item["format"] in {"JPEG", "PNG"}:
-        return content, original_format, item["width"], item["height"]
+    original_format = "png" if has_edited else ("jpg" if item["format"] == "JPEG" else "png")
+    if not crop:
+        if has_edited and target in {"orig", "png"}:
+            with Image.open(io.BytesIO(content)) as opened:
+                return content, "png", opened.width, opened.height
+        if not has_edited and (
+            (item["format"] == "PNG" and target in {"orig", "png"})
+            or (item["format"] == "JPEG" and target in {"orig", "jpg"})
+        ):
+            return content, original_format, item["width"], item["height"]
     with Image.open(io.BytesIO(content)) as opened:
         image = opened.convert("RGB") if target == "jpg" or original_format == "jpg" else opened.convert("RGBA")
         if crop:
@@ -115,21 +123,21 @@ def prepare_pdf_entries(
             "data": data, "w": width, "h": height, "order": int(item.get("order", 0)),
             "groupId": item.get("groupId"), "grouped": False,
         })
-    counts: Counter[str] = Counter(
-        str(entry["groupId"]) for entry in source
-        if entry["groupId"] is not None and str(entry["groupId"]).strip()
-    )
+    by_group: dict[str, list[dict[str, Any]]] = {}
+    for entry in source:
+        if entry["groupId"] is not None and str(entry["groupId"]).strip():
+            by_group.setdefault(str(entry["groupId"]), []).append(entry)
     grouped: list[dict[str, Any]] = []
     consumed: set[str] = set()
     for entry in source:
         key = str(entry["groupId"]) if entry["groupId"] is not None else ""
-        if not key or counts[key] < 2:
+        members = by_group.get(key)
+        if not key or not members or len(members) < 2:
             grouped.append(entry)
             continue
         if key in consumed:
             continue
         consumed.add(key)
-        members = [candidate for candidate in source if str(candidate["groupId"]) == key]
         grouped.append(compose_images(members))
     if not two_per_page:
         return grouped
@@ -185,37 +193,39 @@ def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
     two_per_page = bool(request.get("two_per_page")) and not seamless
     entries = prepare_pdf_entries(store, state, images, two_per_page)
     document = fitz.open()
-    if seamless:
-        common_width = Counter(entry["w"] for entry in entries).most_common(1)[0][0]
-        scaled = []
-        for entry in entries:
-            ratio = common_width / entry["w"]
-            scaled.append({**entry, "w": common_width, "h": entry["h"] * ratio})
-        total_height = sum(entry["h"] for entry in scaled)
-        scale = _page_scale(common_width, total_height)
-        # One long page whenever possible; split only at image boundaries above PDF's safe limit.
-        pending: list[dict[str, Any]] = []
-        pending_height = 0.0
-        for entry in scaled:
-            if pending and (pending_height + entry["h"]) * scale > SAFE_PT:
+    try:
+        if seamless:
+            common_width = Counter(entry["w"] for entry in entries).most_common(1)[0][0]
+            scaled = []
+            for entry in entries:
+                ratio = common_width / entry["w"]
+                scaled.append({**entry, "w": common_width, "h": entry["h"] * ratio})
+            total_height = sum(entry["h"] for entry in scaled)
+            scale = _page_scale(common_width, total_height)
+            # One long page whenever possible; split only at image boundaries above PDF's safe limit.
+            pending: list[dict[str, Any]] = []
+            pending_height = 0.0
+            for entry in scaled:
+                if pending and (pending_height + entry["h"]) * scale > SAFE_PT:
+                    _insert(document, common_width, pending_height, pending, stacked=True)
+                    pending, pending_height = [], 0.0
+                pending.append(entry)
+                pending_height += entry["h"]
+            if pending:
                 _insert(document, common_width, pending_height, pending, stacked=True)
-                pending, pending_height = [], 0.0
-            pending.append(entry)
-            pending_height += entry["h"]
-        if pending:
-            _insert(document, common_width, pending_height, pending, stacked=True)
-    elif uniform:
-        page_width = max(entry["w"] for entry in entries)
-        page_height = max(entry["h"] for entry in entries)
-        for entry in entries:
-            _insert(document, page_width, page_height, [entry])
-    else:
-        for entry in entries:
-            _insert(document, entry["w"], entry["h"], [entry])
-    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.pdf"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    document.save(output, garbage=4, deflate=True)
-    document.close()
+        elif uniform:
+            page_width = max(entry["w"] for entry in entries)
+            page_height = max(entry["h"] for entry in entries)
+            for entry in entries:
+                _insert(document, page_width, page_height, [entry])
+        else:
+            for entry in entries:
+                _insert(document, entry["w"], entry["h"], [entry])
+        output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.pdf"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        document.save(output, garbage=4, deflate=True)
+    finally:
+        document.close()
     return output
 
 
@@ -224,6 +234,7 @@ def build_images_zip(store: ProjectStore, state: dict[str, Any], request: dict[s
     if not images:
         raise ValueError("No images selected")
     output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}-images.zip"
+    output.parent.mkdir(parents=True, exist_ok=True)
     folder = clean_name(request.get("folder_name", ""), "") if request.get("folder_name") else ""
     prefix = f"{folder}/" if folder else ""
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
@@ -248,5 +259,6 @@ def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
             chunks.append(f"[{block.get('id', '-')}] {indent}{block.get('text', '')}")
             chunks.append(f"    ← {block.get('tr') or '(بدون ترجمه)'}\n")
     output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.txt"
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\ufeff" + "\n".join(chunks), encoding="utf-8")
     return output

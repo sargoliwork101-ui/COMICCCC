@@ -188,7 +188,7 @@ window.HTMLElement.prototype.releasePointerCapture = function (pointerId) { if (
 window.Typeset = {
   blockStyle(block) { return { dir: block.dir === 'ltr' ? 'ltr' : 'rtl', align: block.align || 'right', bold: true, italic: false, underline: false, size: 12, color: null }; },
   hasInlineMarks() { return false; },
-  richHtmlWords() { return []; },
+  richHtmlWords(html) { return String(html || '').includes('<hr>') ? [{ t: '────────' }] : []; },
   render(bitmap, blocks) {
     canvasRenderCount += 1;
     renderedBlocks = blocks;
@@ -696,6 +696,41 @@ function check(name, condition) {
   await vm.runInContext('applyPendingResult()', context);
   check('pending conflict submits explicit selection and closes after success', pendingChoices['image-ui:1'] === 'apply' && !$('pendingDialog').open);
   window.fetch = oldFetch;
+
+  {
+    const uploadsBefore = renderedUploads;
+    const revertsBefore = revertCalls;
+    vm.runInContext("state.project.settings.overlayMode = 'translation'; state.project.images[0].blocks = [{ id: 1, text: 'src', tr: '', richHtml: '<hr>', enabled: true, bg: 'white', x0: 5, y0: 5, x1: 150, y1: 45, lineH: 40, dir: 'rtl', align: 'right' }];", context);
+    await vm.runInContext('renderAndUpload(state.project.images[0])', context);
+    check('rich-HTML-only block (<hr>) uploads rendered image instead of reverting', renderedUploads === uploadsBefore + 1 && revertCalls === revertsBefore);
+  }
+  {
+    let staleClosed = 0;
+    const origCreateBitmap = window.createImageBitmap;
+    let releaseSlow; const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+    const prevFetch = window.fetch;
+    let gatedFirst = false;
+    window.fetch = async (url, options = {}) => {
+      if (!gatedFirst && String(url).includes('/content')) {
+        gatedFirst = true;
+        await slowGate;
+        return { ok: true, blob: async () => ({ __staleOpen: true }) };
+      }
+      return prevFetch(url, options);
+    };
+    window.createImageBitmap = async (blob) => ({
+      width: 320, height: 200,
+      close() { if (blob && blob.__staleOpen) staleClosed += 1; },
+    });
+    const pendingOpen = vm.runInContext('openEditor(state.project.images[0].id)', context);
+    await sleep(10);
+    await vm.runInContext('closeEditor()', context);
+    releaseSlow();
+    await pendingOpen;
+    window.fetch = prevFetch;
+    window.createImageBitmap = origCreateBitmap;
+    check('closing editor before image finishes loading discards and closes stale bitmap', staleClosed === 1 && vm.runInContext('state.editorBitmap === null && state.editorId === null', context));
+  }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));

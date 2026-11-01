@@ -30,6 +30,9 @@ let sessionVisibilityBound = false;
 let localActivityId = 0;
 let editorCloseTask = null;
 let editorCanvasFrame = 0;
+let editorLoadSeq = 0;
+let overlayMeasureCtx = null;
+let sampleScratchCanvas = null;
 let inlineDraft = null;
 let inlineEditSession = null;
 let classicEditor = null;
@@ -1055,7 +1058,7 @@ async function performTranslation(ids, provider, preview, startIndex = 0, previo
 // ---------- Typeset preview and export ----------
 async function ensureFont() { if (document.fonts?.load) { try { await document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'); } catch { /* fallback */ } } }
 async function renderAndUploadNow(item, projectId, mode) {
-  const blocks = overlayBlocks(item, mode); const active = blocks.some((block) => block.enabled && block.tr?.trim());
+  const blocks = overlayBlocks(item, mode); const active = blocks.some((block) => block.enabled && hasRenderableText(block));
   if (!active) {
     await api(`/api/projects/${projectId}/images/${item.id}/revert`, { method: 'POST' });
     imagePreviewVersions.set(`${projectId}:${item.id}`, ++previewRevision);
@@ -1353,8 +1356,17 @@ async function saveAiSettings(options = {}) {
 function editorItem() { return state.project?.images.find((item) => item.id === state.editorId); }
 function boxOf(block) { return { x0: Number.isFinite(block.tx0) ? block.tx0 : block.x0, y0: Number.isFinite(block.ty0) ? block.ty0 : block.y0, x1: Number.isFinite(block.tx1) ? block.tx1 : block.x1, y1: Number.isFinite(block.ty1) ? block.ty1 : block.y1 }; }
 async function openEditor(imageId) {
-  await ensureFont(); state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null; $('editorStage').classList.remove('panning'); const item = state.project.images.find((entry) => entry.id === imageId); $('editorTitle').textContent = `ویرایش — ${item.name}`; $('blockList').textContent = ''; showDialog('editorDialog');
-  const response = await fetch(imageUrl(item)); state.editorBitmap?.close?.(); state.editorBitmap = await createImageBitmap(await response.blob()); $('editorCanvas').width = state.editorBitmap.width; $('editorCanvas').height = state.editorBitmap.height; buildBlockList(); fitEditor(); drawEditor();
+  const loadSeq = ++editorLoadSeq;
+  await ensureFont();
+  if (loadSeq !== editorLoadSeq) return;
+  const item = state.project?.images.find((entry) => entry.id === imageId);
+  if (!item) return;
+  state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null; $('editorStage').classList.remove('panning'); $('editorTitle').textContent = `ویرایش — ${item.name}`; $('blockList').textContent = ''; showDialog('editorDialog');
+  const response = await fetch(imageUrl(item));
+  if (response.ok === false) throw new Error('تصویر اصلی باز نشد');
+  const bitmap = await createImageBitmap(await response.blob());
+  if (loadSeq !== editorLoadSeq || state.editorId !== imageId) { bitmap.close?.(); return; }
+  state.editorBitmap?.close?.(); state.editorBitmap = bitmap; $('editorCanvas').width = state.editorBitmap.width; $('editorCanvas').height = state.editorBitmap.height; buildBlockList(); fitEditor(); drawEditor();
 }
 function resizeEditorStage() {
   const item = editorItem(); if (!item) return;
@@ -1445,6 +1457,7 @@ function drawEditorCanvas() {
   const blocks = item.blocks.map((block) => overlayBlock(draft && block === inlineDraft?.block ? draft : block));
   const rendered = Typeset.render(state.editorBitmap, blocks); const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(rendered, 0, 0);
+  if (rendered && rendered !== canvas) { rendered.width = 0; rendered.height = 0; }
 }
 function scheduleEditorCanvasDraw() {
   if (editorCanvasFrame) return;
@@ -1453,9 +1466,11 @@ function scheduleEditorCanvasDraw() {
 function drawEditor() { drawEditorCanvas(); renderEditorBoxes(); positionInlineEditor(); }
 function overlaySize(block, width, height) {
   try {
-    const style = Typeset.blockStyle(block); const maxSize = Math.max(12, Math.min(64, Math.round((block.lineH || height) * 1.1)));
-    const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d');
+    const style = Typeset.blockStyle(block);
     if (style.size) return style.size;
+    const maxSize = Math.max(12, Math.min(64, Math.round((block.lineH || height) * 1.1)));
+    overlayMeasureCtx = overlayMeasureCtx || document.createElement('canvas').getContext('2d');
+    const ctx = overlayMeasureCtx;
     if (!block._plainText && (block.richHtml || Typeset.hasInlineMarks(block.tr || ''))) {
       const words = block.richHtml ? Typeset.richHtmlWords(block.richHtml) : Typeset.inlineWords(block.tr || '');
       return Typeset.fitInline(ctx, words, width * .96, height * .96, maxSize, 8, style).size;
@@ -1634,9 +1649,19 @@ function effectiveInlineColor(block) {
   if (block.bg === 'white') return '#0b0b0b';
   if (block.bg === 'black') return '#fafafa';
   try {
-    const bitmap = state.editorBitmap; const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
-    const context = canvas.getContext('2d'); context.drawImage(bitmap, 0, 0);
-    const bounds = boxOf(output); const bg = Typeset.sampleBg(context, bounds, bitmap.width, bitmap.height);
+    const bitmap = state.editorBitmap;
+    if (!bitmap?.width || !bitmap?.height) return '#ffffff';
+    const bounds = boxOf(output);
+    const sx = Math.max(0, Math.floor(bounds.x0) - 8); const sy = Math.max(0, Math.floor(bounds.y0) - 8);
+    const ex = Math.min(bitmap.width, Math.ceil(bounds.x1) + 8); const ey = Math.min(bitmap.height, Math.ceil(bounds.y1) + 8);
+    if (ex <= sx || ey <= sy) return '#0b0b0b';
+    const sw = ex - sx; const sh = ey - sy;
+    sampleScratchCanvas = sampleScratchCanvas || document.createElement('canvas');
+    sampleScratchCanvas.width = sw; sampleScratchCanvas.height = sh;
+    const context = sampleScratchCanvas.getContext('2d', { willReadFrequently: true }) || sampleScratchCanvas.getContext('2d');
+    context.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+    const localBounds = { x0: bounds.x0 - sx, y0: bounds.y0 - sy, x1: bounds.x1 - sx, y1: bounds.y1 - sy };
+    const bg = Typeset.sampleBg(context, localBounds, sw, sh);
     return 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b > 150 ? '#0b0b0b' : '#fafafa';
   } catch { return '#ffffff'; }
 }
@@ -2052,8 +2077,12 @@ async function closeEditor() {
   if (imageOverview) await exitImageOverview();
   if (editorCloseTask) return editorCloseTask;
   editorCloseTask = (async () => {
-    if (!await applyEditor()) return;
-    closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
+    const item = editorItem();
+    if (item ? !applyInlineEditor() : !!inlineDraft) return;
+    editorLoadSeq += 1;
+    if (item) { await overlayPreviewTask; await saveProject(); await renderAndUpload(item); renderGrid(); }
+    if (editorCanvasFrame) { cancelAnimationFrame(editorCanvasFrame); editorCanvasFrame = 0; }
+    closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; $('editorCanvas').width = $('editorCanvas').height = 0; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
   })();
   try { await editorCloseTask; } finally { editorCloseTask = null; }
 }
@@ -2094,7 +2123,7 @@ function cropPointerMove(event) {
 function openPreview(item) { state.previewId = item.id; $('previewImage').src = imageUrl(item, !!item.edited, true); showDialog('previewDialog'); }
 async function copyPreview() {
   const item = state.project.images.find((entry) => entry.id === state.previewId); if (!item) return;
-  try { const response = await fetch(imageUrl(item, !!item.edited, true)); const bitmap = await createImageBitmap(await response.blob()); const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height; canvas.getContext('2d').drawImage(bitmap, 0, 0); bitmap.close(); const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png')); if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') throw new Error('مرورگر اجازهٔ کپی تصویر نمی‌دهد'); await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); toast('تصویر کپی شد'); } catch (error) { toast(error.message || 'کپی تصویر ممکن نبود', true); }
+  try { const response = await fetch(imageUrl(item, !!item.edited, true)); const bitmap = await createImageBitmap(await response.blob()); const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height; canvas.getContext('2d').drawImage(bitmap, 0, 0); bitmap.close(); const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png')); canvas.width = canvas.height = 0; if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') throw new Error('مرورگر اجازهٔ کپی تصویر نمی‌دهد'); await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); toast('تصویر کپی شد'); } catch (error) { toast(error.message || 'کپی تصویر ممکن نبود', true); }
 }
 
 // ---------- Events and startup ----------
