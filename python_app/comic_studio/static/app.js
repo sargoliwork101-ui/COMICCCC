@@ -31,6 +31,7 @@ let localActivityId = 0;
 let editorCloseTask = null;
 let editorCanvasFrame = 0;
 let inlineDraft = null;
+let inlineEditSession = null;
 let classicEditor = null;
 let imageOverview = null;
 let jobBusy = false;
@@ -1432,18 +1433,9 @@ function handleEditorWheel(event) {
   event.preventDefault(); const rect = document.querySelector('.editor-preview').getBoundingClientRect();
   setEditorZoom(state.editorScale * (event.deltaY < 0 ? 1.15 : 1 / 1.15), { x: event.clientX - rect.left, y: event.clientY - rect.top });
 }
-// Make a temporary rendering snapshot without writing drafts into the project.
+// The session is the single source of truth for both live output and persistence.
 function draftBlockForPreview() {
-  if (!inlineDraft) return null;
-  const draft = inlineDraft; const block = { ...draft.block }; const text = classicEditor.getText();
-  if (draft.mode === 'ocr') block.text = text;
-  else { block.tr = text; block.richHtml = classicEditor.getHTML(); if ($('inlineEditorDirection').value !== draft.dir) block.dir = $('inlineEditorDirection').value; }
-  if ($('inlineEditorAlign').value !== draft.align) block.align = $('inlineEditorAlign').value;
-  if ($('inlineVerticalAlign').value !== draft.verticalAlign) block.verticalAlign = $('inlineVerticalAlign').value;
-  const rawSize = $('inlineEditorSize').value.trim(); const size = Number(rawSize);
-  if (rawSize !== draft.size && (!rawSize || (Number.isFinite(size) && size >= 8 && size <= 160))) block.size = rawSize ? Math.round(size) : null;
-  if (draft.color !== draft.originalColor) block.color = draft.color;
-  return block;
+  return inlineEditSession?.previewBlock() || null;
 }
 function drawEditorCanvas() {
   const item = editorItem(); if (!item || !state.editorBitmap) return;
@@ -1487,7 +1479,8 @@ function styleRichElement(element, block, scale = 1, preview = false) {
 // Keep the transparent caret layer aligned over the exact live canvas output.
 function refreshInlineTypography() {
   if (!inlineDraft || !classicEditor) return;
-  const field = classicEditor.field; const draft = overlayBlock(draftBlockForPreview()); const style = Typeset.blockStyle(draft);
+  const field = classicEditor.field; const previewBlock = draftBlockForPreview(); if (!previewBlock) return;
+  const draft = overlayBlock(previewBlock); const style = Typeset.blockStyle(draft);
   const box = boxOf(draft); const scale = state.editorScale || 1;
   field.style.fontSize = `${overlaySize(draft, box.x1 - box.x0, box.y1 - box.y0) * scale}px`;
   field.style.lineHeight = '1.55'; field.style.fontWeight = style.bold ? '700' : '400';
@@ -1523,26 +1516,23 @@ function setInlineOutputPreview(enabled) {
 function inlineBlockSnapshot(block) {
   return JSON.stringify([block.text || '', block.tr || '', block.richHtml || '', block.dir || '', block.align || '', block.size ?? null, block.color || null, block.verticalAlign || '']);
 }
-function inlineDraftChanged() {
-  if (!inlineDraft) return false;
-  return (inlineDraft.mode === 'ocr' ? $('inlineEditorField').innerHTML : classicEditor.getHTML()) !== inlineDraft.html || $('inlineEditorDirection').value !== inlineDraft.dir ||
-    $('inlineEditorAlign').value !== inlineDraft.align || $('inlineVerticalAlign').value !== inlineDraft.verticalAlign || $('inlineEditorSize').value !== inlineDraft.size || inlineDraft.color !== inlineDraft.originalColor;
-}
+function inlineDraftChanged() { return !!inlineEditSession?.isDirty(); }
 function closeInlineEditor(force = false) {
   if (!inlineDraft) return true;
-  if (!autoApplyInlineDraft()) {
-    if (!force) return false;
-    toast('ویرایش محلی با تغییر هم‌زمان سازگار نبود؛ متن پروژه حفظ شد و کادر بسته شد.', true);
-  }
-  classicEditor.clearDraft(); classicEditor.exitFullscreen(); classicEditor.detachField();
+  const committed = inlineEditSession?.close({ discardConflict: force }) ?? false;
+  if (!committed && !force) return false;
+  if (committed) classicEditor.clearDraft(); else classicEditor.saveDraft();
+  classicEditor.exitFullscreen(); classicEditor.detachField();
   const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id)); const preview = document.querySelector('.editor-preview');
   const oldTop = box?.getBoundingClientRect().top;
   box?.classList.remove('editing'); $('inlineEditor').classList.remove('show-output');
-  $('inlineEditor').classList.add('hidden'); inlineDraft = null;
+  $('inlineEditor').classList.add('hidden'); inlineDraft = null; inlineEditSession = null;
   $('inlinePreview').textContent = 'پیش‌نمایش دقیق'; $('inlinePreview').setAttribute('aria-pressed', 'false');
+  $('inlineEditorCancel').classList.add('hidden');
   if (!imageOverview) drawEditorCanvas();
   preview.style.paddingTop = '';
   if (box && Number.isFinite(oldTop)) preview.scrollTop += box.getBoundingClientRect().top - oldTop;
+  if (!committed && force) toast('تغییر هم‌زمان بود؛ متن پروژه حفظ شد و نسخهٔ محلی برای بازیابی نگه داشته شد.', true);
   return true;
 }
 function positionInlineEditor() {
@@ -1664,17 +1654,18 @@ function placeInlineCaret(field, event) {
 }
 function openInlineEditor(block, clickEvent = null) {
   if (!block || !editorItem()) return;
-  if (inlineDraft?.block === block) { classicEditor.focus(); return; }
+  if (inlineDraft?.block === block && inlineDraft.mode === blockOverlayMode(block)) { classicEditor.focus(); return; }
   if (!closeInlineEditor()) return;
   const mode = blockOverlayMode(block);
   if (mode === 'none') return;
   selectEditorBlock(block.id, true);
   const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((entry) => entry.dataset.id === String(block.id));
   if (!box) { toast('ابتدا نمایش این کادر را فعال کنید.', true); return; }
+
   const field = $('inlineEditorField'); const direction = mode === 'ocr' ? 'ltr' : (block.dir === 'ltr' ? 'ltr' : 'rtl');
   const originalHtml = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || plainToHtml(block.tr || ''));
-  classicEditor.setPlainMode(mode === 'ocr');
   const draftKey = `comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(block.id)}:${mode}`;
+  classicEditor.setPlainMode(mode === 'ocr');
   field.removeAttribute('style'); field.dir = direction; field.style.direction = direction;
   $('inlineEditorTitle').textContent = `ویرایش مستقیم ${mode === 'ocr' ? 'متن اصلی' : 'ترجمه'} · ذخیرهٔ خودکار`;
   $('inlineEditorCancel').classList.add('hidden');
@@ -1684,42 +1675,50 @@ function openInlineEditor(block, clickEvent = null) {
   $('inlineVerticalAlign').value = ['top', 'bottom'].includes(block.verticalAlign) ? block.verticalAlign : 'middle';
   $('inlineEditorSize').value = String(effectiveInlineSize(block));
   $('inlineEditorColor').value = effectiveInlineColor(block);
-  inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: mode === 'ocr' ? plainToHtml(block.text || '') : sanitizeHtml(originalHtml),
-    dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: $('inlineEditorSize').value,
-    color: block.color || null, originalColor: block.color || null, range: null, history: [], historyIndex: -1, muteHistory: false };
-  classicEditor.setContext(draftKey, originalHtml, inlineBlockSnapshot(block));
+
+  inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: originalHtml,
+    dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
+    verticalAlign: $('inlineVerticalAlign').value, size: $('inlineEditorSize').value,
+    color: block.color || null, originalColor: block.color || null,
+    range: null, history: [], historyIndex: -1, muteHistory: false, conflictReported: false };
+  classicEditor.setContext(draftKey, originalHtml, inlineDraft.snapshot);
   const background = block.bg || 'auto';
   box.style.setProperty('--editing-bg', background === 'white' ? '#fff' : background === 'black' ? '#101010' : 'var(--surface)');
   box.style.setProperty('--editing-fg', background === 'white' ? '#202020' : background === 'black' ? '#fff' : 'var(--text)');
-  box.classList.add('editing'); classicEditor.attachField(box); refreshInlineTypography();
-  $('inlineEditor').classList.remove('hidden'); positionInlineEditor(); classicEditor.focus(); placeInlineCaret(field, clickEvent); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+  box.classList.add('editing'); classicEditor.attachField(box);
+
+  inlineEditSession = window.createInlineEditSession({
+    block, mode, snapshot: inlineBlockSnapshot, getBaseline: () => inlineDraft?.snapshot,
+    read: () => {
+      const rawSize = $('inlineEditorSize').value.trim();
+      return { text: classicEditor.getText(), richHtml: mode === 'ocr' ? '' : classicEditor.getHTML(),
+        dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
+        verticalAlign: $('inlineVerticalAlign').value, size: rawSize ? Number(rawSize) : null, color: inlineDraft?.color ?? null };
+    },
+    onCommit: (savedBlock, revision) => {
+      inlineDraft.snapshot = revision;
+      inlineDraft.html = mode === 'ocr' ? plainToHtml(savedBlock.text || '') : (savedBlock.richHtml || plainToHtml(savedBlock.tr || ''));
+      inlineDraft.dir = $('inlineEditorDirection').value; inlineDraft.align = $('inlineEditorAlign').value;
+      inlineDraft.verticalAlign = $('inlineVerticalAlign').value; inlineDraft.size = $('inlineEditorSize').value;
+      inlineDraft.originalColor = inlineDraft.color = savedBlock.color || null; inlineDraft.conflictReported = false;
+      $('inlineEditorCancel').classList.add('hidden');
+      buildBlockList(); scheduleEditorCanvasDraw(); scheduleSave();
+    },
+    onConflict: () => {
+      if (!inlineDraft.conflictReported) toast('این کادر هم‌زمان در جای دیگری تغییر کرده؛ نسخهٔ پروژه حفظ شد.', true);
+      inlineDraft.conflictReported = true; $('inlineEditorCancel').classList.remove('hidden');
+    },
+  });
+  $('inlineEditor').classList.remove('hidden'); positionInlineEditor(); classicEditor.focus();
+  placeInlineCaret(field, clickEvent); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
 }
 function autoApplyInlineDraft() {
-  if (!inlineDraft) return true;
-  const draft = inlineDraft; const block = draft.block;
-  if (!editorItem()?.blocks?.includes(block) || inlineBlockSnapshot(block) !== draft.snapshot) {
-    if (!draft.conflictReported) toast('این کادر هم‌زمان در جای دیگری تغییر کرده؛ برای جلوگیری از بازنویسی، ویرایش متوقف شد.', true);
-    draft.conflictReported = true; $('inlineEditorCancel').classList.remove('hidden'); return false;
-  }
-  $('inlineEditorCancel').classList.add('hidden');
-  const output = draftBlockForPreview(); const rawSize = $('inlineEditorSize').value.trim();
-  const size = rawSize ? Number(rawSize) : null;
-  if (rawSize && (!Number.isFinite(size) || size < 8 || size > 160)) return false;
-  if (draft.mode === 'ocr') block.text = output.text;
-  else { block.tr = output.tr; block.richHtml = output.richHtml; block.dir = output.dir; }
-  block.align = output.align; block.verticalAlign = output.verticalAlign; block.size = size ? Math.round(size) : null; block.color = output.color || null;
-  const snapshot = inlineBlockSnapshot(block); const changed = snapshot !== draft.snapshot;
-  draft.snapshot = snapshot; draft.html = draft.mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || plainToHtml(block.tr || ''));
-  draft.dir = $('inlineEditorDirection').value; draft.align = $('inlineEditorAlign').value;
-  draft.verticalAlign = $('inlineVerticalAlign').value; draft.size = $('inlineEditorSize').value;
-  draft.originalColor = draft.color = block.color || null; draft.conflictReported = false;
-  if (changed) { buildBlockList(); scheduleEditorCanvasDraw(); scheduleSave(); }
-  return true;
+  if (!inlineDraft || !inlineEditSession) return true;
+  const committed = inlineEditSession.commit();
+  if (!committed) $('inlineEditorCancel').classList.remove('hidden');
+  return committed;
 }
-function applyInlineEditor() {
-  if (!autoApplyInlineDraft()) return false;
-  return closeInlineEditor();
-}
+function applyInlineEditor() { return closeInlineEditor(); }
 
 function editorSelectedKeys() {
   const item = editorItem(); const valid = new Set((item?.blocks || []).map((block) => String(block.id)));

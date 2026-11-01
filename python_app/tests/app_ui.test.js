@@ -196,7 +196,7 @@ window.Typeset = {
   },
 };
 
-for (const file of ['groups.js', 'rich-sanitize.js', 'rich-editor.js', 'app.js']) {
+for (const file of ['groups.js', 'rich-sanitize.js', 'rich-editor.js', 'inline-edit-session.js', 'app.js']) {
   vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
