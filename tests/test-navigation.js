@@ -1,5 +1,7 @@
 // Tests for the paged-navigation modes of scrapeAndSend(): auto page-turning and manual pickup.
 const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -41,7 +43,7 @@ function makeHarness() {
   // snappy timings for the navigation state machine
   window.__wtpdfTimings = { poll: 1, clickTimeout: 40, settle: 1, stuckLimit: 2, maxPages: 10, manualRescan: 1 };
 
-  const code = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+  const code = fs.readFileSync(ROOT + '/popup.js', 'utf8');
   const fnCode = code.slice(code.indexOf('async function scrapeAndSend'));
   vm.runInContext(fnCode, ctx, { filename: 'popup.js' });
 

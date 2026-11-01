@@ -2,6 +2,8 @@
 // - in-frame reader (books.google.*): same-origin click3 fetch (walk + manual)
 // - top-frame edition/embedded pages: service-worker message transport
 const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -117,7 +119,7 @@ function makeHarness(pageUrl, fetchImpl) {
     gbookPause: 1, gbookBackoff: [1, 1, 1], gbookRounds: 3, gbookTimeout: 1000
   };
 
-  const code = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+  const code = fs.readFileSync(ROOT + '/popup.js', 'utf8');
   const start = code.indexOf('async function probeBookFrame');
   vm.runInContext(code.slice(start), ctx, { filename: 'popup.js' });
 

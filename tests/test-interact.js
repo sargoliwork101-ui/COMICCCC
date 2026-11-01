@@ -1,5 +1,7 @@
 // Interaction tests: cropper pointer math, drag/drop reorder, helpers, keyboard handling.
 const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -9,7 +11,7 @@ const PNG = Buffer.from(
 );
 
 function boot() {
-  const html = fs.readFileSync(__dirname + '/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
+  const html = fs.readFileSync(ROOT + '/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
   const dom = new JSDOM(html, { url: 'https://example.com/viewer.html?job=testjob', pretendToBeVisual: true, runScripts: 'dangerously' });
   const { window } = dom;
   const ctx = dom.getInternalVMContext();
@@ -71,7 +73,7 @@ function boot() {
     constructor(type, init = {}) { super(type, init); this.dataTransfer = init.dataTransfer; }
   };
   for (const f of ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'pdf-import-store.js', 'viewer.js', 'trans.js']) {
-    vm.runInContext(fs.readFileSync(__dirname + '/' + f, 'utf8'), ctx, { filename: f });
+    vm.runInContext(fs.readFileSync(ROOT + '/' + f, 'utf8'), ctx, { filename: f });
   }
   return { dom, window, ctx, ev, $: (id) => window.document.getElementById(id) };
 }
@@ -420,7 +422,7 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     check('live text layout keeps the renderer’s 2% inner margin', imageOverlay.style.left === '2%' && imageOverlay.style.width === '192%',
       { left: imageOverlay.style.left, width: imageOverlay.style.width });
     check('live overlay is vertically centered like the saved canvas text',
-      /\.ed-box-text\s*\{[^}]*display:\s*flex;[^}]*justify-content:\s*center;/s.test(fs.readFileSync(__dirname + '/viewer.css', 'utf8')));
+      /\.ed-box-text\s*\{[^}]*display:\s*flex;[^}]*justify-content:\s*center;/s.test(fs.readFileSync(ROOT + '/viewer.css', 'utf8')));
 
     field.focus();
     const text = field.firstChild;

@@ -1,5 +1,7 @@
 // Tests for the in-extension GitHub update check (update.js)
 const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -25,7 +27,7 @@ function boot(fetchImpl, downloadsImpl, currentVersion = '2.46', confirmImpl = (
   window.confirm = (message) => { confirmCalls.push(message); return confirmImpl(message); };
   window.fetch = fetchImpl;
   window.PIC_TO_PDF_UPDATE_BRANCH = 'arena/test-updater';
-  vm.runInContext(fs.readFileSync(__dirname + '/update.js', 'utf8'), ctx, { filename: 'update.js' });
+  vm.runInContext(fs.readFileSync(ROOT + '/update.js', 'utf8'), ctx, { filename: 'update.js' });
   return {
     window, downloads, confirmCalls,
     btn: window.document.getElementById('updateBtn'),

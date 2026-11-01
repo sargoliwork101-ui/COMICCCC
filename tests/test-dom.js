@@ -1,10 +1,11 @@
 // DOM-level integration test: loads viewer.html scripts in jsdom with mocked extension APIs.
 const fs = require('fs');
 const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
-const html = fs.readFileSync(path.join(__dirname, 'viewer.html'), 'utf8')
+const html = fs.readFileSync(path.join(ROOT, 'viewer.html'), 'utf8')
   .replace(/<script[\s\S]*?<\/script>/g, ''); // scripts evaluated manually in the window realm
 
 const dom = new JSDOM(html, {
@@ -91,7 +92,7 @@ window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
 
 const scripts = ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'pdf-import-store.js', 'viewer.js', 'trans.js'];
 for (const f of scripts) {
-  const code = fs.readFileSync(path.join(__dirname, f), 'utf8');
+  const code = fs.readFileSync(path.join(ROOT, f), 'utf8');
   try {
     vm.runInContext(code, ctx, { filename: f });
   } catch (e) {
@@ -119,14 +120,14 @@ const $ = (id) => window.document.getElementById(id);
   // 2.24: rebranded to PIC TO PDF
   check('viewer title uses PIC TO PDF', /PIC TO PDF/.test(window.document.title), window.document.title);
   check('viewer brand h1 uses PIC TO PDF', window.document.querySelector('.brand-text h1').textContent.trim() === 'PIC TO PDF');
-  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'manifest.json'), 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
   check('manifest and viewer version badge are synchronized at 2.55', manifest.version === '2.55' &&
     window.document.querySelector('.version-pill').textContent.includes('۲.۵۵'));
   check('topbar keeps the hamburger visible while the page scrolls',
-    /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(fs.readFileSync(path.join(__dirname, 'viewer.css'), 'utf8')));
+    /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(fs.readFileSync(path.join(ROOT, 'viewer.css'), 'utf8')));
   check('PDF-to-image import opens the dedicated converter tab',
     !!window.document.getElementById('btnImportPdf') &&
     /زبانهٔ جدا/.test(window.document.getElementById('btnImportPdf').title));

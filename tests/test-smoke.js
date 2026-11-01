@@ -1,8 +1,8 @@
 // Smoke tests (node) for pure logic of the extension
-const PdfBuilder = require('./pdfbuilder.js');
-const OcrTools = require('./ocr.js');
-const Typeset = require('./typeset.js');
-const TranslateTools = require('./translate.js');
+const PdfBuilder = require('../pdfbuilder.js');
+const OcrTools = require('../ocr.js');
+const Typeset = require('../typeset.js');
+const TranslateTools = require('../translate.js');
 
 let failures = 0;
 function check(name, cond, extra) {

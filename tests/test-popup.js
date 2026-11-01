@@ -1,5 +1,7 @@
 // Test for popup.js scrapeAndSend() running inside a simulated web page.
 const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -68,7 +70,7 @@ Object.defineProperty(window.document.body, 'scrollHeight', { value: 1600, confi
 // run timers immediately so the scroll settle loop finishes fast
 window.setTimeout = (cb) => global.setTimeout(cb, 0);
 
-const code = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+const code = fs.readFileSync(ROOT + '/popup.js', 'utf8');
 // extract only scrapeAndSend (the top-level click listener needs extension chrome.tabs which is absent here)
 const fnCode = code.slice(code.indexOf('async function scrapeAndSend'));
 vm.runInContext(fnCode, ctx, { filename: 'popup.js' });
@@ -78,11 +80,11 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
 
 // popup.html shell: chips removed, modern brand kept, single start button
 {
-  const popupDom = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'));
+  const popupDom = new JSDOM(fs.readFileSync(ROOT + '/popup.html', 'utf8'));
   const pdoc = popupDom.window.document;
   check('chips block removed from popup', !pdoc.querySelector('.chips, .chip'));
   check('modern brand logo in popup', !!pdoc.querySelector('.brand .brand-logo img'));
-  check('version pill present and matches extension version', pdoc.querySelector('.version-pill') && pdoc.querySelector('.version-pill').textContent === `v${require('./manifest.json').version}`);
+  check('version pill present and matches extension version', pdoc.querySelector('.version-pill') && pdoc.querySelector('.version-pill').textContent === `v${require('../manifest.json').version}`);
   check('start button present', !!pdoc.getElementById('startBtn'));
   check('PDF-to-image action is clearly visible in popup',
     !!pdoc.getElementById('pdfConvertBtn') && /تبدیل PDF به تصویر/.test(pdoc.getElementById('pdfConvertBtn').textContent));
@@ -108,7 +110,7 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     pdoc.getElementById('statusText').textContent.trim() === '');
 }
 // popup.js keeps the status box hidden unless an error/warning actually happens
-const popupCode = fs.readFileSync(__dirname + '/popup.js', 'utf8');
+const popupCode = fs.readFileSync(ROOT + '/popup.js', 'utf8');
 check('popup has setStatus helper (text only)', /const setStatus = \(text\)/.test(popupCode));
 check('popup reveals the box only via showError', /const showError = \(text\)/.test(popupCode) &&
   /statusBox\.classList\.remove\('hidden'\)/.test(popupCode));
@@ -138,7 +140,7 @@ check('popup reveals the box only via showError', /const showError = \(text\)/.t
 
 // interactive behavior: run the real popup.html + popup.js with a mocked chrome API
 async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
-  const dom2 = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
+  const dom2 = new JSDOM(fs.readFileSync(ROOT + '/popup.html', 'utf8'), {
     url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
   });
   const w = dom2.window;
@@ -180,7 +182,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
 (async () => {
   // The popup shortcut opens a fresh preview workspace; that workspace then opens the PDF picker tab.
   {
-    const pdfDom = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
+    const pdfDom = new JSDOM(fs.readFileSync(ROOT + '/popup.html', 'utf8'), {
       url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
     });
     const pdfWindow = pdfDom.window;
@@ -297,7 +299,7 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
   // two-stage injection: a reader frame reported by the probe must become the scrape target
   {
     const calls = [];
-    const dom3 = new JSDOM(fs.readFileSync(__dirname + '/popup.html', 'utf8'), {
+    const dom3 = new JSDOM(fs.readFileSync(ROOT + '/popup.html', 'utf8'), {
       url: 'chrome-extension://ext/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
     });
     const w3 = dom3.window;

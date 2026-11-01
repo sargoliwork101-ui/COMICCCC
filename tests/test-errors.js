@@ -1,5 +1,7 @@
 // Adversarial / edge-case tests for viewer flows.
 const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -9,7 +11,7 @@ const PNG = Buffer.from(
 );
 
 function makeHarness({ fetchImpl, jobUrls } = {}) {
-  const html = fs.readFileSync(__dirname + '/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
+  const html = fs.readFileSync(ROOT + '/viewer.html', 'utf8').replace(/<script[\s\S]*?<\/script>/g, '');
   const dom = new JSDOM(html, { url: 'https://example.com/viewer.html?job=testjob', pretendToBeVisual: true, runScripts: 'dangerously' });
   const { window } = dom;
   const ctx = dom.getInternalVMContext();
@@ -57,7 +59,7 @@ function makeHarness({ fetchImpl, jobUrls } = {}) {
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   for (const f of ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'viewer.js', 'trans.js']) {
-    vm.runInContext(fs.readFileSync(__dirname + '/' + f, 'utf8'), ctx, { filename: f });
+    vm.runInContext(fs.readFileSync(ROOT + '/' + f, 'utf8'), ctx, { filename: f });
   }
   return { dom, window, ctx, ev, storageMap, get scriptingCalls() { return scriptingCalls; }, $: (id) => window.document.getElementById(id) };
 }
