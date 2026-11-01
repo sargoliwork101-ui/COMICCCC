@@ -733,9 +733,9 @@ def create_app() -> FastAPI:
             label = f"درخواست {run['completed'] + 1} برای «{run['jobs'][chosen[0]['job']]['imageName']}»؛ {request.character_count(text)} از {run['limit']} نویسه"
             label += f"؛ {len(text.encode('utf-8'))} از ۵۰۰ بایت" if run['provider'] == 'free' else f"؛ خلاصه {len(run['context'])} از {request.context_limit} نویسه"
             if values.recovery_token is not None:
-                activity.add(f"بررسی محلی پاسخ اصلاح‌شده برای درخواست {run['completed'] + 1}، بدون ارسال مجدد به AI.")
+                activity.add(f"بررسی محلی پاسخ اصلاح‌شده برای درخواست {run['completed'] + 1}، بدون ارسال مجدد به AI.", progress=context_progress(run))
             else:
-                activity.add(label + '.')
+                activity.add(label + '.', progress=context_progress(run))
                 activity.add(f"متن دقیق درخواست {run['completed'] + 1} (بدون هدر احراز هویت):\nدستور سیستم:\n{request.system}\nپیام کاربر:\n{request.user_message(text)}")
             if (values.recovery_token is None) != (values.corrected_response is None):
                 raise HTTPException(400, 'نشانه و متن پاسخ اصلاح‌شده باید همراه هم ارسال شوند.')
@@ -808,7 +808,16 @@ def create_app() -> FastAPI:
                          min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings),
                          0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
                          False, provider_policy(settings, values.provider))
-        request, chosen = next_request(run, values.skill)
+        if values.provider != 'free':
+            try:
+                if run.get('previewError'):
+                    raise TranslationError(run['previewError'])
+                request, chosen = next_request(run, values.skill)
+            except TranslationError as exc:
+                request, chosen = build_run_request(run, values.skill), []
+                run['previewError'] = str(exc)
+        else:
+            request, chosen = next_request(run, values.skill)
         return state, run, request, chosen
 
     @app.post('/api/translate-text/context-preview')

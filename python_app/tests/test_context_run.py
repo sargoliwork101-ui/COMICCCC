@@ -619,3 +619,39 @@ def test_completed_translations_default_to_justify_font_12_and_top_placement(tmp
             assert block.get('size') == 12
             assert block.get('verticalAlign') == 'top'
 
+
+def test_ai_long_unpunctuated_comic_bubble_splits_cleanly_without_preview_error(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    seen: list[str] = []
+    def fake(self, request, text, sources, *a):
+        seen.append(text)
+        return '\n'.join(f'بخش {len(seen)}' for _ in sources), 'خلاصه'
+    monkeypatch.setattr(TranslationService, 'translate_context', fake)
+    with scoped_client(create_app()) as client:
+        route, project = make_project(client)
+        long_bubble = ' '.join(f'WORD{i:03d}' for i in range(110))
+        assert len(long_bubble) > 750 and '.' not in long_bubble
+        project['images'][0]['blocks'] = [{'id': 1, 'text': long_bubble, 'tr': '', 'enabled': True}]
+        project['images'][1]['blocks'] = []
+        client.put(route + '/state', json={'state': project})
+        client.put('/api/ai-settings', json={'provider': 'openai', 'api_key': 'key'})
+        req = {'image_ids': [i['id'] for i in project['images']], 'provider': 'openai', 'skill': 'روان', 'summary': ''}
+        preview = client.post(route + '/context-preview', json=req)
+        assert preview.status_code == 200, preview.text
+        pdata = preview.json()
+        assert not pdata.get('previewError'), pdata
+        assert len(pdata['requests']) == 1 and 'Text:\nWORD000' in pdata['requests'][0]['text']
+        start = client.post(route + '/context-start', json={**req, 'confirmation': pdata['signature']}).json()
+        completed = start['completed']
+        while True:
+            step = client.post(route + '/context-step', json={'run_id': start['runId'], 'completed': completed, 'skill': 'روان'})
+            assert step.status_code == 200, step.text
+            sdata = step.json()
+            completed = sdata['completed']
+            if sdata['done']:
+                assert len(seen) >= 2
+                assert ' '.join(seen) == long_bubble
+                assert sdata['project']['images'][0]['blocks'][0]['tr'] == ' '.join(f'بخش {i}' for i in range(1, len(seen) + 1))
+                break
+
+

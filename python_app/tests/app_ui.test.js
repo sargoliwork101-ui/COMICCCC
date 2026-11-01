@@ -749,8 +749,30 @@ function check(name, condition) {
     const uploadsBefore = renderedUploads;
     $('exportName').value = 'word-check';
     $('exportDocxBtn').click();
-    await sleep(30);
-    check('Word export button sends docx kind without unnecessary image re-renders', exportRequests.at(-1)?.kind === 'docx' && renderedUploads === uploadsBefore && $('downloadLink').download === 'word-check.docx');
+    check('clicking Word export opens pre-export language choice dialog before generating docx', $('docxExportDialog').open === true && exportRequests.at(-1)?.kind !== 'docx');
+    $('docxChoiceTranslation').click();
+    await sleep(35);
+    check('choosing Translated in Word prompt sends docx_mode=translation without unnecessary image re-renders', exportRequests.at(-1)?.kind === 'docx' && exportRequests.at(-1)?.docx_mode === 'translation' && renderedUploads === uploadsBefore && $('downloadLink').download === 'word-check.docx' && $('docxExportDialog').open === false);
+    $('exportDocxBtn').click();
+    $('docxChoiceOcr').click();
+    await sleep(35);
+    check('choosing English/OCR in Word prompt sends docx_mode=ocr', exportRequests.at(-1)?.kind === 'docx' && exportRequests.at(-1)?.docx_mode === 'ocr');
+    check('dock, Word, preview, AI and editor progress bars all carry accessible progressbar roles and percentage labels', ['dockProgress', 'docxProgress', 'previewPrepProgress', 'aiProgress', 'editorProgress'].every((id) => $(id) && $(id).closest('[role="progressbar"]')) && !!$('dockProgressPercent'));
+    await vm.runInContext(`(async () => {
+      state.ai = { ...state.ai, provider: 'openai', providers: { ...state.ai.providers, openai: { ...state.ai.providers.openai, profiles: [{ id: 'p1', name: 'k', hasApiKey: true, source_limit: 200 }] } } };
+    })()`, context);
+    const origFetchForPreviewErr = window.fetch;
+    window.fetch = async (url, opts) => {
+      if (String(url).endsWith('/context-preview')) {
+        return jsonResponse({ provider: 'openai', providerLabel: 'OpenAI', model: 'gpt-4o-mini', base_url: 'https://api.openai.com/v1', rollingMode: true, contextMode: true, totalLimit: 200, contextLimit: 30, skillLimit: 30, blockCount: 1, requestCount: 0, requests: [], previewError: 'متن کامل کادر در سقف ۲۰۰ نویسه جا نمی‌شود.', skill: '', summary: '', signature: 'sig' });
+      }
+      return origFetchForPreviewErr(url, opts);
+    };
+    await vm.runInContext('runTranslation()', context);
+    window.fetch = origFetchForPreviewErr;
+    await vm.runInContext(`(async () => { state.ai.provider = 'free'; })()`, context);
+    check('AI previewError opens translationPreviewDialog with clear error and AI settings shortcut instead of throwing empty-requests failure', $('translationPreviewDialog').open === true && !$('translationDialog').open && !$('translationPreviewError').classList.contains('hidden') && !$('openAiLimitFromPreview').classList.contains('hidden') && $('translationPreviewConfirm').disabled === true);
+    $('translationPreviewCancel').click();
     await vm.runInContext('openEditor(state.project.images[0].id)', context);
     check('inline editor stays permanently visible in idle state on openEditor', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && $('inlineEditorSize').disabled === true);
     check('box alignment and same-size controls live inside inlineEditor below a divider with zero duplicate controls', !!$('inlineEditor').querySelector('.inline-section-divider') && !!$('inlineEditor').querySelector('.inline-box-layout-tools #editorSameSize') && !!$('inlineEditor').querySelector('.inline-box-layout-tools #editorAlignLeft') && !window.document.querySelector('.editor-side .editor-multi-tools') && !window.document.querySelector('.inline-box-settings') && window.document.querySelectorAll('#inlineLineReset').length === 1 && ![...$('blockList').querySelectorAll('button')].some((b) => b.textContent === 'ویرایش همین متن'));

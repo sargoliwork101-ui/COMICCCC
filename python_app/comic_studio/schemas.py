@@ -89,6 +89,7 @@ class ExportRequest(BaseModel):
     two_per_page: bool = False
     image_format: Literal["orig", "png", "jpg"] = "orig"
     folder_name: str = ""
+    docx_mode: Literal["translation", "ocr"] = "translation"
 
 
 class StateUpdate(BaseModel):

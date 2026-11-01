@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.61">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.61">
+  <link rel="stylesheet" href="/style.css?v=3.62">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.62">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۶۰ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۶۲ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
     <button id="menuBtn" class="bt">☰ پروژه و تنظیمات</button>
   </header>
 
@@ -65,7 +65,7 @@
     </section>
     <section id="result" class="panel result-panel">
       <div class="row"><strong>وضعیت</strong><span id="jobStatus" role="status">آماده</span><a id="downloadLink" class="bt success hidden" href="#" download>دانلود فایل آماده</a><span class="grow"></span><button id="pendingResultsBtn" class="bt">نتایج منتظر بررسی</button><button id="clearActivityBtn" class="bt clear-activity">پاک‌کردن گزارش</button><span class="muted">PDF · ZIP · TXT · Word</span></div>
-      <div class="bar" role="progressbar" aria-label="پیشرفت کار" aria-valuemin="0" aria-valuemax="100"><div id="jobProgress" class="fill"></div></div>
+      <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت کار" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="jobProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
       <details id="activityDetails" class="activity-details" open>
         <summary>گزارش زندهٔ کارها</summary>
         <div id="activityLog" class="activity-log" role="log" aria-live="polite"></div>
@@ -74,6 +74,10 @@
   </main>
 
   <footer id="dock">
+    <div id="dockProgressWrap" class="dock-progress hidden" aria-live="polite">
+      <div class="dock-progress-head"><span id="dockProgressStatus">آماده</span><strong id="dockProgressPercent">0%</strong></div>
+      <div class="bar" role="progressbar" aria-label="پیشرفت عملیات جاری" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="dockProgress" class="fill"></div></div>
+    </div>
     <span class="muted">نام خروجی</span><input id="exportName" value="comic-translated" aria-label="نام فایل خروجی">
     <button id="exportPdfBtn" class="bt success">PDF</button>
     <button id="exportImagesBtn" class="bt">ZIP تصاویر</button>
@@ -110,7 +114,7 @@
     <button id="copyOcrError" class="bt hidden" type="button">کپی خطای OCR</button>
     <p class="hint">پیش از ارسال خطا، آن را از نظر اطلاعات شخصی یا محرمانه بررسی کنید.</p>
     <p class="hint">بعد از OCR، متن خوانده‌شده در گزارش و روی تصویر می‌آید تا پیش از ترجمه بررسی و ویرایش شود.</p>
-    <div class="bar" role="progressbar" aria-label="پیشرفت OCR" aria-valuemin="0" aria-valuemax="100"><div id="ocrProgress" class="fill"></div></div>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت OCR" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="ocrProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
     <div id="ocrActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <div class="dialog-actions"><button id="startOcrBtn" class="bt primary">شروع OCR</button></div>
   </dialog>
@@ -135,7 +139,7 @@
       <p id="responseRepairStatus" class="hint diagnostic-message" role="status"></p>
     </div>
     <p class="hint">پیش از ارسال خطا، مطمئن شوید اطلاعات شخصی یا محرمانه داخل آن نیست.</p>
-    <div class="bar" role="progressbar" aria-label="پیشرفت ترجمه" aria-valuemin="0" aria-valuemax="100"><div id="translationProgress" class="fill"></div></div>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت ترجمه" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="translationProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
     <div id="translationActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <p class="hint">پیش از ارسال، متن دقیق درخواست اول و مقصد نمایش داده می‌شود؛ درخواست‌های بعدی بر اساس خلاصهٔ پاسخ قبلی با همان تأیید ساخته می‌شوند. کادرها با خط جدید معمولی ترکیب می‌شوند؛ در پاسخ چندکادری تعداد خط‌ها باید با متن مبدأ یکسان باشد تا هر خط در کادر درست قرار گیرد. برای سرویس رایگان، متن جمعی تا ۵۰۰ نویسه در یک query می‌رود و متن طولانی‌تر جدا و تا حد ممکن در مرز جمله تقسیم می‌شود. برای AI، متن‌های همان صفحه تا سقف قابل‌تنظیم هر API جمع می‌شوند؛ تقسیم فقط در انتهای خط و پایان جمله یا بند است. اگر تقسیم امن ممکن نباشد، سقف را افزایش دهید یا متن OCR را اصلاح کنید. در صورت فعال‌بودن گزینهٔ متن تکراری، ترجمهٔ کادرهای دقیقاً یکسان روی دیگر کادرهای انتخاب‌شده نیز اعمال می‌شود. هر پاسخ پیش از ارسال بعدی بررسی و ذخیره می‌شود. در حالت حافظه دستور، خلاصه، اسکیل و متن اصلی همگی در سقف کل هستند. برای ادامه پس از خطا، همان تصاویر انتخابی نوبت را نگه دارید و «ادامهٔ نوبت ناتمام قبلی» را تأیید کنید؛ درخواست‌های موفق دوباره ارسال نمی‌شوند.</p>
   </dialog>
@@ -147,7 +151,7 @@
     <div id="engineCards" class="engine-cards"></div>
     <div class="test-panel"><label>زبان مدل و آزمایش<select id="testLanguage"><option value="eng">English</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label><span>آماده‌سازی فقط همین زبان را نصب/دانلود می‌کند. آزمایش روی نخستین تصویر انتخاب‌شده انجام می‌شود و پروژه را تغییر نمی‌دهد.</span></div>
     <pre id="modelTestResult" class="test-result" dir="auto"></pre>
-    <div class="bar" role="progressbar" aria-label="پیشرفت آماده‌سازی و آزمایش موتور" aria-valuemin="0" aria-valuemax="100"><div id="modelProgress" class="fill"></div></div>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت آماده‌سازی و آزمایش موتور" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="modelProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
     <div id="modelActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
   </dialog>
 
@@ -173,6 +177,7 @@
     </div>
     <p class="hint">تصویر برای ترجمه ارسال نمی‌شود؛ متن OCR، دستور، اسکیل و خلاصه به سرویس AI انتخابی فرستاده می‌شوند. برای AI آفلاین می‌توانید نشانی یک سرویس محلی سازگار با OpenAI بدهید. انتخاب رایگان هیچ درخواست AI انجام نمی‌دهد.</p>
     <div id="aiStatus" class="hint diagnostic-message" role="status" aria-live="polite"></div>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت بررسی و ذخیرهٔ تنظیمات AI" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="aiProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
     <button id="copyAiError" class="bt hidden" type="button">کپی پیام خطا</button>
     <div class="dialog-actions"><button id="saveAiBtn" class="bt primary" type="button">ذخیره</button></div>
   </dialog>
@@ -180,17 +185,37 @@
   <dialog id="exportDialog" class="dlg small-dialog">
     <form method="dialog" class="dialog-head"><h2>تنظیمات خروجی</h2><button class="icon" value="cancel">×</button></form>
     <label>نوع خروجی<select id="exportKind"><option value="pdf">PDF</option><option value="images">تصاویر جداگانه (ZIP)</option><option value="txt">متن OCR و ترجمه (TXT)</option><option value="docx">فایل Word (DOCX)</option></select></label>
-    <label>متن روی تصاویر<select id="exportOverlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label>
+    <label id="exportOverlayModeWrap">متن روی تصاویر<select id="exportOverlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label>
+    <div id="docxExportFields" class="checks hidden"><label>متن داخل حباب‌های فایل Word<select id="exportDocxMode"><option value="translation">متن ترجمه‌شده (فارسی)</option><option value="ocr">متن انگلیسی / اصلی (OCR)</option></select></label></div>
     <div id="pdfExportFields" class="checks"><label><input id="exportSeamless" type="checkbox"> همهٔ تصاویر پشت سر هم در یک صفحهٔ بلند</label><label><input id="exportUniform" type="checkbox"> قاب‌های هم‌اندازه</label><label><input id="exportTwo" type="checkbox"> دو تصویر در هر صفحه (گروه‌ها جدا می‌مانند)</label></div>
     <div id="imageExportFields" class="form-grid hidden"><label>فرمت<select id="exportFormat"><option value="orig">اصلی / PNG برای ویرایش‌شده</option><option value="png">PNG</option><option value="jpg">JPEG کیفیت ۱۰۰٪</option></select></label><label>زیرپوشه داخل ZIP<input id="exportFolder" placeholder="اختیاری"></label></div>
-    <p class="hint">در PDF و ZIP، انتخاب فارسی/انگلیسیِ هر کادر همان‌طور اعمال می‌شود؛ بنابراین یک صفحه می‌تواند بعضی متن‌ها را فارسی و بعضی را انگلیسی داشته باشد. انتخاب کلی پیش‌فرض متن‌های بدون انتخاب جداگانه است و «بدون متن» تصویر اصلی را خروجی می‌دهد. فقط تصاویر انتخاب‌شده خروجی می‌گیرند و اعضای هر گروه در یک صفحهٔ عمودی PDF می‌مانند.</p>
-    <div class="bar" role="progressbar" aria-label="پیشرفت ساخت خروجی" aria-valuemin="0" aria-valuemax="100"><div id="exportProgress" class="fill"></div></div>
+    <p class="hint">در PDF و ZIP، انتخاب فارسی/انگلیسیِ هر کادر همان‌طور اعمال می‌شود؛ بنابراین یک صفحه می‌تواند بعضی متن‌ها را فارسی و بعضی را انگلیسی داشته باشد. در فایل Word، صفحه‌های کمیک با حباب‌های پاک‌شده در پس‌زمینه و کادرهای متن قابل‌ویرایش در همان موقعیت حباب‌ها ساخته می‌شوند.</p>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت ساخت خروجی" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="exportProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
     <div id="exportActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <div class="dialog-actions"><button id="startExportBtn" class="bt success">ساخت و دانلود</button></div>
   </dialog>
 
+  <dialog id="docxExportDialog" class="dlg small-dialog">
+    <form method="dialog" class="dialog-head"><h2>انتخاب متن خروجی Word</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <p class="hint">فایل Word شبیه همان پیش‌نمایش ساخته می‌شود: تصویر صفحه با پاک‌شدن نوشته‌های قبلی زیر کادرها در پس‌زمینه قرار می‌گیرد و کادرهای قابل‌ویرایش Word دقیقاً روی همان جای حباب‌ها می‌نشینند. می‌خواهید کدام متن داخل کادرها قرار بگیرد؟</p>
+    <div class="docx-choice-grid">
+      <button id="docxChoiceTranslation" class="bt primary docx-choice-btn" type="button">
+        <strong>متن ترجمه‌شده</strong>
+        <span>قرار دادن متن فارسی / ترجمه‌شده با قالب‌بندی راست‌به‌چپ داخل حباب‌ها</span>
+      </button>
+      <button id="docxChoiceOcr" class="bt docx-choice-btn" type="button">
+        <strong>متن انگلیسی / اصلی (OCR)</strong>
+        <span>قرار دادن متن اصلی خوانده‌شده از تصویر داخل حباب‌ها</span>
+      </button>
+    </div>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت ساخت فایل Word" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="docxProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+    <div id="docxActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
+    <div class="dialog-actions"><button id="docxExportCancel" class="bt" type="button">انصراف</button></div>
+  </dialog>
+
   <dialog id="editorDialog" class="dlg editor-dialog">
     <div class="dialog-head"><h2 id="editorTitle">ویرایش متن</h2><div><label class="overlay-mode-control">متن روی تصویر<select id="overlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label><button id="editorRevert" class="bt danger">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt">به‌روزرسانی پیش‌نمایش</button><button id="editorClose" class="bt primary">ذخیره و بستن</button></div></div>
+    <div id="editorProgressWrap" class="editor-progress-wrap hidden"><div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت عملیات ویرایشگر" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="editorProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div></div>
       <section id="inlineEditor" class="inline-editor is-idle" role="region" aria-label="ویرایش متن انتخاب‌شده">
         <div class="inline-editor-head">
           <div class="inline-editor-status"><span class="inline-status-dot" aria-hidden="true"></span><strong id="inlineEditorTitle">ویرایشگر متن آماده است · برای ویرایش، روی هر کادر متن در تصویر کلیک کنید</strong><span id="inlineTargetBadge" class="inline-target-badge hidden" aria-live="polite"></span></div>
@@ -282,15 +307,19 @@
     <details id="translationPreviewSystemWrap" class="payload-system"><summary>دستور سیستم همراه درخواست AI</summary><pre id="translationPreviewSystem" dir="auto"></pre></details>
     <p id="translationPreviewNote" class="hint"></p>
     <p id="translationPreviewError" class="hint diagnostic-message hidden" role="status"></p>
-    <button id="copyTranslationPreviewError" class="bt hidden" type="button">کپی خطای پیش‌نمایش</button>
+    <div class="preview-error-actions">
+      <button id="copyTranslationPreviewError" class="bt hidden" type="button">کپی خطای پیش‌نمایش</button>
+      <button id="openAiLimitFromPreview" class="bt hidden" type="button">تغییر سقف نویسه در تنظیمات AI</button>
+    </div>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت آماده‌سازی پیش‌نمایش ترجمه" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="previewPrepProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.61"></script>
-  <script src="/groups.js?v=3.61"></script>
-  <script src="/rich-sanitize.js?v=3.61"></script>
-  <script src="/rich-editor.js?v=3.61"></script>
-  <script src="/inline-edit-session.js?v=3.61"></script>
-  <script src="/app.js?v=3.61"></script>
+  <script src="/typeset.js?v=3.62"></script>
+  <script src="/groups.js?v=3.62"></script>
+  <script src="/rich-sanitize.js?v=3.62"></script>
+  <script src="/rich-editor.js?v=3.62"></script>
+  <script src="/inline-edit-session.js?v=3.62"></script>
+  <script src="/app.js?v=3.62"></script>
 </body>
 </html>

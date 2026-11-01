@@ -47,11 +47,14 @@ def build_run_request(run: dict[str, Any], skill: str) -> ContextRequest | FreeR
     return build_context_request(budget, LANGUAGES.get(run['language'], LANGUAGES['eng'])['name'], skill, run['context'])
 
 
-def safe_prefix(text: str, fits: Any, source_lines: Any = None) -> tuple[str, str, str] | None:
+def safe_prefix(text: str, fits: Any, source_lines: Any = None, *, allow_fallback: bool = False) -> tuple[str, str, str] | None:
     """Find the latest whole-sentence or paragraph line boundary that fits.
 
     Return the first part, remainder and intervening whitespace. The remainder
     need not fit the current space: it will be planned again next request.
+    When allow_fallback is True (used for AI bubbles without sentence-ending
+    punctuation), fall back cleanly to line breaks, clause punctuation, or
+    word boundaries rather than failing preflight.
     """
     sentence_end = re.compile(r"[.!?…。！？؟][\"'”’»）)\]]*\s*$")
     candidates: list[tuple[int, int]] = []
@@ -68,20 +71,59 @@ def safe_prefix(text: str, fits: Any, source_lines: Any = None) -> tuple[str, st
         prefix = text[:match.start()].rstrip()
         if prefix and "\n" in match.group(0)[1:]:
             candidates.append((len(prefix), match.end()))
+    normalized_lines: list[str] | None = None
     if isinstance(source_lines, list) and all(isinstance(line, dict) for line in source_lines):
         lines = [' '.join(str(line.get('text') or '').split()) for line in source_lines]
         lines = [line for line in lines if line]
         if len(lines) > 1 and ' '.join(lines) == text:
+            normalized_lines = lines
             position = 0
             for line in lines[:-1]:
                 position += len(line)
                 if sentence_end.search(line): candidates.append((position, position + 1))
                 position += 1
     valid = [(cut, end) for cut, end in candidates if cut > 0 and end < len(text) and fits(text[:cut])]
-    if not valid:
+    if valid:
+        cut, end = max(valid)
+        return text[:cut], text[end:], text[cut:end]
+    if not allow_fallback:
         return None
-    cut, end = max(valid)
-    return text[:cut], text[end:], text[cut:end]
+    # Tier 2: single OCR line breaks or merged source_lines boundaries.
+    line_candidates: list[tuple[int, int]] = []
+    for match in re.finditer(r"[ \t]*\n[ \t]*", text):
+        cut = match.start()
+        end = match.end()
+        if cut > 0 and end < len(text):
+            line_candidates.append((cut, end))
+    if normalized_lines:
+        position = 0
+        for line in normalized_lines[:-1]:
+            position += len(line)
+            line_candidates.append((position, position + 1))
+            position += 1
+    valid_lines = [(cut, end) for cut, end in line_candidates if cut > 0 and end < len(text) and fits(text[:cut])]
+    if valid_lines:
+        cut, end = max(valid_lines)
+        return text[:cut], text[end:], text[cut:end]
+    # Tier 3: clause punctuation followed by whitespace.
+    clause_candidates: list[tuple[int, int]] = []
+    for match in re.finditer(r"[,;:،؛—–-]+[\"'”’»）)\]]*(?=[ \t\n])", text):
+        cut = match.end()
+        end = cut
+        while end < len(text) and text[end] in " \t\n":
+            end += 1
+        if cut > 0 and end < len(text):
+            clause_candidates.append((cut, end))
+    valid_clauses = [(cut, end) for cut, end in clause_candidates if fits(text[:cut])]
+    if valid_clauses:
+        cut, end = max(valid_clauses)
+        return text[:cut], text[end:], text[cut:end]
+    # Tier 4: whitespace word boundaries (unspaced single tokens still return None).
+    word_candidates = [(match.start(), match.end()) for match in re.finditer(r"[ \t]+", text) if match.start() > 0 and match.end() < len(text) and fits(text[:match.start()])]
+    if word_candidates:
+        cut, end = max(word_candidates)
+        return text[:cut], text[end:], text[cut:end]
+    return None
 
 
 def create_run(state: dict[str, Any], image_ids: list[str], provider: str, language: str,
@@ -137,7 +179,7 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
         for job in jobs:
             remaining = job['source']; lines = job.get('sourceLines')
             while not maximum_request.fits(remaining):
-                chunk = safe_prefix(remaining, maximum_request.fits, lines)
+                chunk = safe_prefix(remaining, maximum_request.fits, lines, allow_fallback=True)
                 if not chunk:
                     preview_error = (f"در صفحهٔ «{job['imageName']}»، متن کاملِ کادر جا نمی‌شود؛ فضای متن پس از دستور، اسکیل و خلاصهٔ مجاز "
                                      f"{maximum_request.source_capacity} نویسه است. سقف را تغییر دهید یا متن OCR را بررسی کنید. هیچ متنی ارسال نشد.")
@@ -240,6 +282,34 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
                 run['contextAutoShortened'] = True
                 fitted = True
                 break
+            if not fitted and run['provider'] != 'free':
+                fallback_split = safe_prefix(remaining, fits_next, job.get('sourceLines'), allow_fallback=True)
+                if fallback_split:
+                    first, rest, join = fallback_split
+                    chosen.append({'job': index, 'text': first, 'rest': rest, 'join': join})
+                    fitted = True
+                else:
+                    tried_fb: set[str] = set()
+                    for keep in range(len(original_context) - 1, -1, -1):
+                        candidate = original_context[:keep].rstrip()
+                        if keep < len(original_context) and candidate:
+                            boundary = candidate.rfind(' ')
+                            if boundary >= max(0, keep * 0.7): candidate = candidate[:boundary].rstrip()
+                        if candidate in tried_fb: continue
+                        tried_fb.add(candidate)
+                        trial_run = {**run, 'context': candidate}
+                        trial_request = build_run_request(trial_run, skill)
+                        trial_fb = safe_prefix(remaining, trial_request.fits, job.get('sourceLines'), allow_fallback=True)
+                        if not trial_fb:
+                            continue
+                        first, rest, join = trial_fb
+                        chosen.append({'job': index, 'text': first, 'rest': rest, 'join': join})
+                        request = trial_request
+                        run['contextToCondense'] = original_context
+                        run['context'] = candidate
+                        run['contextAutoShortened'] = True
+                        fitted = True
+                        break
             if not fitted:
                 raise TranslationError('خط یا جمله حتی با خلاصهٔ خالی در سقف جا نمی‌شود؛ سقف را افزایش دهید یا متن OCR را در مرز جمله اصلاح کنید. این درخواست ارسال نشد.')
         break

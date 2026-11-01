@@ -1201,7 +1201,7 @@ main()
     assert.equal(await previewDifference(page), 0, 'saved edits must survive reload in the visible preview');
 
     const files = {};
-    for (const [button, key, extension] of [['#exportImagesBtn', 'zip', '.zip'], ['#exportPdfBtn', 'pdf', '.pdf'], ['#exportTxtBtn', 'txt', '.txt'], ['#exportDocxBtn', 'docx', '.docx']]) {
+    for (const [button, key, extension] of [['#exportImagesBtn', 'zip', '.zip'], ['#exportPdfBtn', 'pdf', '.pdf'], ['#exportTxtBtn', 'txt', '.txt']]) {
       const downloaded = nextDownload(cdp, downloads); await page.click(button); files[key] = await downloaded;
       assert.ok(files[key].endsWith(extension) && fs.statSync(files[key]).size > 0, `${key.toUpperCase()} must be a real nonempty download`);
       await page.waitForFunction(() => {
@@ -1209,6 +1209,23 @@ main()
         return link && !link.classList.contains('hidden') && link.href.startsWith('blob:') && link.download;
       });
     }
+    // Word export asks first whether to place Translated or English/OCR text on the bubbles:
+    await page.click('#exportDocxBtn');
+    await page.waitForSelector('#docxExportDialog[open]');
+    const docxTrDownload = nextDownload(cdp, downloads);
+    await page.click('#docxChoiceTranslation');
+    files.docx = await docxTrDownload;
+    assert.ok(files.docx.endsWith('.docx') && fs.statSync(files.docx).size > 0, 'DOCX (translation) must be a real nonempty download');
+    await page.waitForFunction(() => !document.getElementById('docxExportDialog').open);
+
+    await page.click('#exportDocxBtn');
+    await page.waitForSelector('#docxExportDialog[open]');
+    const docxOcrDownload = nextDownload(cdp, downloads);
+    await page.click('#docxChoiceOcr');
+    files.docxOcr = await docxOcrDownload;
+    assert.ok(files.docxOcr.endsWith('.docx') && fs.statSync(files.docxOcr).size > 0, 'DOCX (OCR) must be a real nonempty download');
+    await page.waitForFunction(() => !document.getElementById('docxExportDialog').open);
+
     const latestEdit = Buffer.from(await (await fetch(`${base}/api/projects/${projectId}/images/${imageId}/content?edited=true`)).arrayBuffer());
     const editedPath = path.join(temporary, 'latest-edited.png'); fs.writeFileSync(editedPath, latestEdit);
     const text = fs.readFileSync(files.txt, 'utf8');
@@ -1217,7 +1234,7 @@ main()
 import io, sys, xml.etree.ElementTree as ET, zipfile
 import pymupdf
 from PIL import Image, ImageChops
-zip_path, pdf_path, docx_path, edited_path = sys.argv[1:]
+zip_path, pdf_path, docx_path, docx_ocr_path, edited_path = sys.argv[1:]
 with Image.open(edited_path) as opened: expected = opened.convert('RGBA')
 with zipfile.ZipFile(zip_path) as archive:
     with Image.open(io.BytesIO(archive.read(archive.namelist()[0]))) as opened:
@@ -1227,10 +1244,16 @@ with pymupdf.open(pdf_path) as document:
     with Image.open(io.BytesIO(info['image'])) as opened:
         assert ImageChops.difference(opened.convert('RGBA'), expected).getbbox() is None
 with zipfile.ZipFile(docx_path) as archive:
+    assert 'word/media/page_001.png' in archive.namelist()
     root = ET.fromstring(archive.read('word/document.xml'))
     docx_text = ''.join(el.text or '' for el in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
-    assert 'ویرایش تازه ۳٫۲۱' in docx_text and 'SOURCE TWO' in docx_text and 'ترجمهٔ سوم' in docx_text
-`, files.zip, files.pdf, files.docx, editedPath]);
+    assert 'ویرایش تازه ۳٫۲۱' in docx_text and 'ترجمهٔ سوم' in docx_text and 'SOURCE THREE' not in docx_text
+with zipfile.ZipFile(docx_ocr_path) as archive:
+    assert 'word/media/page_001.png' in archive.namelist()
+    root_ocr = ET.fromstring(archive.read('word/document.xml'))
+    ocr_text = ''.join(el.text or '' for el in root_ocr.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+    assert 'SOURCE TWO' in ocr_text and 'SOURCE THREE' in ocr_text and 'ترجمهٔ سوم' not in ocr_text
+`, files.zip, files.pdf, files.docx, files.docxOcr, editedPath]);
     const other = await api(base, '/api/projects', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Project switch test' }),
     });

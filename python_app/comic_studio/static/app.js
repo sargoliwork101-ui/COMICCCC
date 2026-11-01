@@ -94,6 +94,11 @@ function setProgress(id, progress = null, active = false) {
     if (active) bar.setAttribute('aria-valuetext', 'در حال انجام');
     else bar.removeAttribute('aria-valuetext');
   }
+  const pctEl = bar.parentElement?.querySelector?.('.bar-percent');
+  if (pctEl) pctEl.textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
+  if (id === 'dockProgress' && $('dockProgressPercent')) {
+    $('dockProgressPercent').textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
+  }
 }
 function appendLocalActivity(message, kind = 'info') {
   if (!message) return;
@@ -117,10 +122,15 @@ async function pollActivity() {
     const latest = payload.entries?.at(-1);
     if (jobBusy && latest) {
       $('jobStatus').textContent = latest.message;
+      if ($('dockProgressStatus')) $('dockProgressStatus').textContent = latest.message;
       if (translationRunning) $('translationStatus').textContent = latest.message;
     }
     if (latest && typeof latest.progress === 'number' && Number.isFinite(latest.progress)) {
-      if (jobBusy) setProgress('jobProgress', latest.progress, true);
+      if (jobBusy) {
+        setProgress('jobProgress', latest.progress, true);
+        setProgress('dockProgress', latest.progress, true);
+        if ($('editorDialog')?.open) setProgress('editorProgress', latest.progress, true);
+      }
       if (activeProgressId) setProgress(activeProgressId, latest.progress, true);
       if (translationRunning) setProgress('translationProgress', latest.progress, true);
       if (state.modelBusy) setProgress('modelProgress', latest.progress, true);
@@ -253,6 +263,16 @@ function setBusy(message) {
   jobBusy = !!message;
   $('jobStatus').textContent = message || 'آماده';
   setProgress('jobProgress', null, !!message);
+  if ($('dockProgressWrap')) {
+    $('dockProgressWrap').classList.toggle('hidden', !message);
+    if ($('dockProgressStatus')) $('dockProgressStatus').textContent = message || 'آماده';
+    setProgress('dockProgress', null, !!message);
+  }
+  if ($('editorProgressWrap')) {
+    const showEditorBar = !!message && !!$('editorDialog')?.open;
+    $('editorProgressWrap').classList.toggle('hidden', !showEditorBar);
+    setProgress('editorProgress', null, showEditorBar);
+  }
   if (translationRunning) {
     $('translationStatus').textContent = message || 'آماده';
     setProgress('translationProgress', null, !!message);
@@ -269,7 +289,10 @@ async function runJob(message, task, progressId = null) {
   catch (error) { console.error(error); appendLocalActivity(`خطا: ${error.message || error}`, 'error'); toast(error.message || error, true); throw error; }
   finally {
     if (progressId) setProgress(progressId, completed ? 1 : 0, false);
+    setProgress('dockProgress', completed ? 1 : 0, false);
+    if ($('editorDialog')?.open) setProgress('editorProgress', completed ? 1 : 0, false);
     activeProgressId = null; setBusy('');
+    setProgress('jobProgress', completed ? 1 : 0, false);
   }
 }
 function scheduleSave() {
@@ -820,7 +843,8 @@ function showTranslationRequestPreview(preview, action, refresh = null) {
   $('translationPreviewSummary').textContent = preview.rollingMode ? `${preview.blockCount} متن · پیش‌نمایش درخواست اول${preview.contextMode ? ' (تعداد درخواست‌های بعدی وابسته به خلاصه است)' : ''}` : `${preview.blockCount} متن · ${preview.requestCount} درخواست پایه برای بررسی (بدون تکرار)`;
   const destination = [preview.providerLabel, preview.model && `مدل: ${preview.model}`, preview.base_url && `نشانی: ${preview.base_url}`, preview.fallback_url && `فقط هنگام خطا: ${preview.fallback_url}`].filter(Boolean).join(' · ');
   $('translationPreviewDestination').textContent = destination;
-  $('translationPreviewNote').textContent = preview.note || ''; $('translationPreviewError').textContent = preview.previewError ? `${preview.previewError} هیچ متنی ارسال نشده است؛ سقف کل یا متن/راهنما را اصلاح و پیش‌نمایش را تازه کنید.` : ''; $('translationPreviewError').classList.toggle('hidden', !preview.previewError); $('copyTranslationPreviewError').classList.toggle('hidden', !preview.previewError);
+  $('translationPreviewNote').textContent = preview.note || ''; $('translationPreviewError').textContent = preview.previewError ? `${preview.previewError} هیچ متنی ارسال نشده است؛ سقف کل یا متن/راهنما را اصلاح و پیش‌نمایش را تازه کنید.` : ''; $('translationPreviewError').classList.toggle('hidden', !preview.previewError); $('copyTranslationPreviewError').classList.toggle('hidden', !preview.previewError); $('openAiLimitFromPreview')?.classList.toggle('hidden', !(preview.previewError && preview.provider !== 'free'));
+  setProgress('previewPrepProgress', preview.previewError ? 0 : 1, false);
   const container = $('translationPreviewRequests'); container.textContent = '';
   (preview.requests || []).forEach((request, index) => {
     const details = document.createElement('details'); details.className = 'payload-request'; details.open = (preview.requests.length === 1 || index === 0);
@@ -865,12 +889,14 @@ async function confirmTranslationRequestPreview() {
   const changed = (preview.provider !== 'free' && ($('translationSkill').value.trim() !== (preview.skill ?? '') || (preview.contextMode && $('translationContext').value.trim() !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume);
   if (changed) {
     $('translationSkill').disabled = true; $('translationSkillReset').disabled = true; $('translationContext').disabled = true; $('translationContextResume').disabled = true;
+    setProgress('previewPrepProgress', null, true);
     try {
       if (!refresh) throw new Error('به‌روزرسانی پیش‌نمایش ممکن نیست؛ دوباره ترجمه را شروع کنید.');
       const updated = await refresh($('translationSkill').value.trim(), $('translationContext').value.trim(), $('translationContextResume').checked);
       // Cancel/close during the local preview request must not reopen it or send.
       if ($('translationPreviewDialog').open && translationPreviewAction === action) showTranslationRequestPreview(updated, action, refresh);
     } catch (error) {
+      setProgress('previewPrepProgress', 0, false);
       if ($('translationPreviewDialog').open && translationPreviewAction === action) { $('translationSkillStatus').textContent = `به‌روزرسانی ممکن نبود: ${error.message || error}`; $('translationPreviewError').textContent = `${$('translationSkillStatus').textContent}\nپیش از ارسال گزارش، اطلاعات محرمانه را بررسی کنید.`; $('translationPreviewError').classList.remove('hidden'); $('copyTranslationPreviewError').classList.remove('hidden'); toast(error.message || 'پیش‌نمایش ناموفق بود', true); }
     } finally {
       if ($('translationPreviewDialog').open && translationPreviewAction === action) {
@@ -959,7 +985,7 @@ async function runTranslation() {
       preview = await refresh(safeSkill, safeSummary, false);
       preview.note += ' نوبت ناتمام با تنظیمات فعلی سازگار نیست؛ تأیید، نوبت تازه‌ای شروع می‌کند.';
     }
-    if (!preview.requests?.length) throw new Error('هیچ درخواست ترجمه‌ای ساخته نشد؛ کادرهای فعال و انتخاب تصاویر را بررسی کنید.');
+    if (!preview.requests?.length && !preview.previewError) throw new Error('هیچ درخواست ترجمه‌ای ساخته نشد؛ کادرهای فعال و انتخاب تصاویر را بررسی کنید.');
     const emptyPages = selected.filter(item => !(item.blocks || []).some(block => block.enabled !== false && String(block.text || '').trim()));
     if (emptyPages.length) preview.note += ` ${emptyPages.length} تصویر بدون متن فعال از ترجمه کنار گذاشته می‌شوند.`;
     if (safeSkill !== skill) preview.displaySkill = skill;
@@ -1086,28 +1112,67 @@ function renderAndUpload(item) {
   task.finally(() => { if (imageRenderTasks.get(key) === task) imageRenderTasks.delete(key); }).catch(() => {});
   return task;
 }
-async function renderImagesText(ids = null) {
+async function renderImagesText(ids = null, onStep = null) {
   const wanted = ids ? new Set(ids) : null;
-  for (const item of sortedImages()) if ((!wanted || wanted.has(item.id)) && (hasOverlayText(item) || item.edited)) await renderAndUpload(item);
+  const targets = sortedImages().filter((item) => (!wanted || wanted.has(item.id)) && (hasOverlayText(item) || item.edited));
+  for (let idx = 0; idx < targets.length; idx += 1) {
+    await renderAndUpload(targets[idx]);
+    if (onStep) onStep(idx + 1, targets.length);
+  }
   renderGrid();
 }
-function updateExportFields() { const kind = $('exportKind').value; $('pdfExportFields').classList.toggle('hidden', kind !== 'pdf'); $('imageExportFields').classList.toggle('hidden', kind !== 'images'); }
-async function exportResult(kind = null) {
-  if (kind) $('exportKind').value = kind;
+function updateExportFields() {
+  const kind = $('exportKind').value;
+  $('pdfExportFields').classList.toggle('hidden', kind !== 'pdf');
+  $('imageExportFields').classList.toggle('hidden', kind !== 'images');
+  $('docxExportFields')?.classList.toggle('hidden', kind !== 'docx');
+  $('exportOverlayModeWrap')?.classList.toggle('hidden', kind === 'txt' || kind === 'docx');
+}
+async function exportResult(kind = null, docxModeOverride = null) {
+  if (kind) { $('exportKind').value = kind; updateExportFields(); }
   if (!selectedImages().length) throw new Error('حداقل یک تصویر را برای خروجی انتخاب کنید');
   await overlayPreviewTask;
   collectOutputSettings(); await saveProject(); const exportKind = $('exportKind').value;
-  if (exportKind !== 'txt' && exportKind !== 'docx') { for (const item of selectedImages()) if (hasOverlayText(item) || item.edited) await renderAndUpload(item); renderGrid(); }
-  const response = await fetch(`/api/projects/${state.project.id}/export`, jsonOptions('POST', { kind: exportKind, image_ids: selectedImages().map((item) => item.id), name: safeName($('exportName').value), seamless: $('exportSeamless').checked, uniform_size: $('exportUniform').checked, two_per_page: $('exportTwo').checked, image_format: $('exportFormat').value, folder_name: $('exportFolder').value }));
+  const docxMode = docxModeOverride || $('exportDocxMode')?.value || 'translation';
+  if (exportKind !== 'txt' && exportKind !== 'docx') {
+    const targets = selectedImages().filter((item) => hasOverlayText(item) || item.edited);
+    for (let idx = 0; idx < targets.length; idx += 1) {
+      await renderAndUpload(targets[idx]);
+      const p = ((idx + 1) / Math.max(1, targets.length)) * 0.5;
+      if (activeProgressId) setProgress(activeProgressId, p, true);
+      setProgress('jobProgress', p, true); setProgress('dockProgress', p, true);
+    }
+    renderGrid();
+  } else {
+    if (activeProgressId) setProgress(activeProgressId, 0.18, true);
+    setProgress('jobProgress', 0.18, true); setProgress('dockProgress', 0.18, true);
+  }
+  const baseExportName = safeName($('exportName').value);
+  const finalExportName = exportKind === 'docx' && docxMode === 'ocr' && !/-(?:en|ocr)$/i.test(baseExportName) ? `${baseExportName}-en` : baseExportName;
+  const response = await fetch(`/api/projects/${state.project.id}/export`, jsonOptions('POST', { kind: exportKind, image_ids: selectedImages().map((item) => item.id), name: finalExportName, seamless: $('exportSeamless').checked, uniform_size: $('exportUniform').checked, two_per_page: $('exportTwo').checked, image_format: $('exportFormat').value, folder_name: $('exportFolder').value, docx_mode: docxMode }));
   if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `خروجی ساخته نشد (HTTP ${response.status})`); }
   const blob = await response.blob();
   if (!blob.size) throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
+  if (activeProgressId) setProgress(activeProgressId, 1, false);
   const disposition = response.headers.get('content-disposition') || ''; const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
   if (downloadUrl) URL.revokeObjectURL(downloadUrl);
   downloadUrl = URL.createObjectURL(blob);
-  const link = $('downloadLink'); link.href = downloadUrl; link.download = match ? decodeURIComponent(match[1]) : `${safeName($('exportName').value)}.${exportKind === 'images' ? 'zip' : exportKind}`;
+  const link = $('downloadLink'); link.href = downloadUrl; link.download = match ? decodeURIComponent(match[1]) : `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`;
   link.textContent = `دانلود ${link.download}`; link.classList.remove('hidden'); link.click();
-  closeDialog('exportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
+  closeDialog('exportDialog'); closeDialog('docxExportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
+}
+function openDocxExportPrompt() {
+  if (!selectedImages().length) { toast('حداقل یک تصویر را برای خروجی انتخاب کنید', true); return; }
+  setProgress('docxProgress', 0, false);
+  showDialog('docxExportDialog');
+}
+async function runDocxChoiceExport(mode) {
+  const buttons = ['docxChoiceTranslation', 'docxChoiceOcr', 'docxExportCancel'].map((id) => $(id)).filter(Boolean);
+  buttons.forEach((btn) => { btn.disabled = true; });
+  if ($('exportDocxMode')) $('exportDocxMode').value = mode;
+  const label = mode === 'ocr' ? 'در حال ساخت فایل Word (متن انگلیسی / OCR)…' : 'در حال ساخت فایل Word (متن ترجمه‌شده)…';
+  try { await runJob(label, () => exportResult('docx', mode), 'docxProgress'); }
+  finally { buttons.forEach((btn) => { btn.disabled = false; }); }
 }
 
 // ---------- Models and AI (explicit downloads remain user initiated) ----------
@@ -1235,16 +1300,19 @@ function renderAiProfiles() {
       if (!profile.apiKey.trim() && !profile.hasApiKey) {
         status.textContent = 'ابتدا کلید API را وارد کنید.'; key.focus(); return;
       }
-      test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی…'; $('copyAiError').classList.add('hidden');
+      test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی…'; $('copyAiError').classList.add('hidden'); setProgress('aiProgress', null, true);
       try {
         await saveAiSettings({ quiet: true });
+        setProgress('aiProgress', 0.45, true);
         const result = await api('/api/ai-settings/test', jsonOptions('POST', {
           provider, profile_id: profileId, model, base_url: baseUrl,
         }));
+        setProgress('aiProgress', 1, false);
         $('aiStatus').textContent = result.message;
         const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
         if (currentRow) currentRow.querySelector('.ai-profile-status').textContent = 'اتصال برقرار است ✓';
       } catch (error) {
+        setProgress('aiProgress', 0, false);
         $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden');
         const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
         (currentRow?.querySelector('.ai-profile-status') || status).textContent = error.message;
@@ -2657,7 +2725,12 @@ function buildBlockList() {
   });
   updateEditorSelection();
 }
-async function applyEditor() { const item = editorItem(); if (!item) return !inlineDraft; if (!applyInlineEditor()) return false; await overlayPreviewTask; await saveProject(); await renderAndUpload(item); renderGrid(); return true; }
+async function applyEditor() {
+  const item = editorItem(); if (!item) return !inlineDraft; if (!applyInlineEditor()) return false;
+  $('editorProgressWrap')?.classList.remove('hidden'); setProgress('editorProgress', 0.25, true);
+  try { await overlayPreviewTask; setProgress('editorProgress', 0.55, true); await saveProject(); await renderAndUpload(item); renderGrid(); setProgress('editorProgress', 1, false); return true; }
+  finally { $('editorProgressWrap')?.classList.add('hidden'); }
+}
 async function closeEditor() {
   if (imageOverview) await exitImageOverview();
   if (editorCloseTask) return editorCloseTask;
@@ -2747,6 +2820,10 @@ function bindEvents() {
   $('ocrDialog').addEventListener('close', () => { if (!ocrRunning && !$('ocrDialog').open) clearPendingTranslationOcr(); });
   $('copyOcrError').addEventListener('click', () => copyBlockText($('ocrStatus').textContent).catch(error => toast(`کپی ممکن نبود: ${error.message || error}`, true)));
   $('copyTranslationPreviewError').addEventListener('click', () => copyBlockText($('translationPreviewError').textContent).catch(error => toast(`کپی ممکن نبود: ${error.message || error}`, true)));
+  $('openAiLimitFromPreview')?.addEventListener('click', () => {
+    cancelTranslationRequestPreview();
+    loadAiSettings().then(() => showDialog('aiDialog')).catch((error) => toast(error.message, true));
+  });
   $('retryTranslation').addEventListener('click', async () => {
     const retry = translationRetryAction; if (!retry || translationRunning || translationDecisionBusy) return;
     translationDecisionBusy = true; $('applyResponseRepair').disabled = true; $('applyResponseFields').disabled = true;
@@ -2791,8 +2868,8 @@ function bindEvents() {
   $('translationSkill').addEventListener('input', updateTranslationSkillStatus); $('translationContext').addEventListener('input', updateTranslationSkillStatus); $('translationContextResume').addEventListener('change', updateTranslationSkillStatus);
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; } });
-  $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; try { await saveAiSettings(); closeDialog('aiDialog'); } catch (error) { $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
-  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => runJob('در حال ساخت فایل Word…', () => exportResult('docx'), 'exportProgress').catch(() => {}));
+  $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
+  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => closeDialog('docxExportDialog'));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
