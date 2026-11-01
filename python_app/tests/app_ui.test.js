@@ -642,6 +642,7 @@ function check(name, condition) {
   await vm.runInContext('translationPreviewTask', context);
   check('per-block confirmation sends the same previewed text and signature', singleTranslationCalls.length === 1 && singleTranslationCalls[0].text === 'NEW OCR' && singleTranslationCalls[0].confirmation === 'ui-confirmation-signature');
   check('confirmed per-block translation appears on its read-only card', $('blockList').querySelector('.block-card').textContent.includes('ترجمهٔ تکی تازه'));
+  check('confirmed per-block translation defaults to justify, font 12 and top placement', vm.runInContext("state.project.images[0].blocks[0].align === 'justify' && state.project.images[0].blocks[0].size === 12 && state.project.images[0].blocks[0].verticalAlign === 'top'", context));
   await vm.runInContext('closeEditor()', context);
   let releaseImage; imageGate = new Promise(resolve => { releaseImage = resolve; });
   const delayedEditor = vm.runInContext('openEditor(state.project.images[0].id)', context); await sleep(10);
@@ -752,6 +753,10 @@ function check(name, condition) {
     check('Word export button sends docx kind without unnecessary image re-renders', exportRequests.at(-1)?.kind === 'docx' && renderedUploads === uploadsBefore && $('downloadLink').download === 'word-check.docx');
     await vm.runInContext('openEditor(state.project.images[0].id)', context);
     check('inline editor stays permanently visible in idle state on openEditor', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && $('inlineEditorSize').disabled === true);
+    check('box alignment and same-size controls live inside inlineEditor below a divider with zero duplicate controls', !!$('inlineEditor').querySelector('.inline-section-divider') && !!$('inlineEditor').querySelector('.inline-box-layout-tools #editorSameSize') && !!$('inlineEditor').querySelector('.inline-box-layout-tools #editorAlignLeft') && !window.document.querySelector('.editor-side .editor-multi-tools') && !window.document.querySelector('.inline-box-settings') && window.document.querySelectorAll('#inlineLineReset').length === 1 && ![...$('blockList').querySelectorAll('button')].some((b) => b.textContent === 'ویرایش همین متن'));
+    $('blockList').querySelector('.block-tr-edit').click();
+    check('clicking sidebar translation line opens on-image inline editor directly', !$('inlineEditor').classList.contains('is-idle') && !!$('editorBoxes').querySelector('.editor-box.editing'));
+    $('inlineEditorApply').click();
     $('editorBoxes').querySelector('.editor-box-text').click();
     check('selecting a box activates the docked inline editor in place', !$('inlineEditor').classList.contains('hidden') && !$('inlineEditor').classList.contains('is-idle') && $('inlineEditorSize').disabled === false);
     $('inlineEditorApply').click();

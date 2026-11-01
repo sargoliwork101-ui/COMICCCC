@@ -246,6 +246,12 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
     return request, chosen
 
 
+def apply_translated_block_defaults(block: dict[str, Any]) -> None:
+    block['align'] = 'justify'
+    block['size'] = 12
+    block['verticalAlign'] = 'top'
+
+
 def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict[str, Any]],
                    translated: str, summary: str) -> list[str]:
     results = distribute_translation([entry['text'] for entry in chosen], translated)
@@ -263,6 +269,7 @@ def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict
         for ref in job['refs']:
             block = lookup[(str(ref['imageId']), str(ref['blockId']))]
             block['tr'] = job['accumulated']; block['richHtml'] = ''
+            apply_translated_block_defaults(block)
             # Old checkpoints describe different payloads, not this context run.
             block.pop('_aiTranslationParts', None); block.pop('_aiReusedTranslation', None)
             ref['snapshot'] = target_snapshot(block)

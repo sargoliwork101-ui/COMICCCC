@@ -447,7 +447,7 @@ main()
     assert.ok(appliedInline.tr === 'new inline text' && /font-weight:\s*normal/i.test(appliedInline.richHtml) && appliedInline.align === 'justify' && appliedInline.verticalAlign === 'top' && appliedInline.size === 24 && appliedInline.color === '#ff0000' && appliedInline.sidebar.includes(appliedInline.tr), `Apply must update only the selected block and synchronize its sidebar: ${JSON.stringify(appliedInline)}`);
     assert.equal(await editorRenderDifference(page), 0, 'Apply must show the final output renderer immediately in the same editor');
     assert.notEqual(await page.$eval('#editorCanvas', (canvas) => canvas.toDataURL()), await page.evaluate(() => window.__beforeInlineCanvas));
-    await page.waitForFunction(async () => { const response = await fetch(`/api/projects/${state.project.id}`); if (!response.ok) return false; const project = await response.json(); return project.images[0].blocks[0].tr === 'new inline text'; }, { timeout: 8000 });
+    await page.waitForFunction(async () => { const response = await fetch(`/api/projects/${state.project.id}`); if (!response.ok) return false; const project = await response.json(); return project.images[0].blocks[0].tr === 'new inline text'; }, { timeout: 8000, polling: 100 });
     assert.equal(await page.evaluate(async () => (await (await fetch(`/api/projects/${state.project.id}`)).json()).images[0].blocks[0].tr), 'new inline text', 'auto-applied edits must be saved without an explicit Apply action');
     assert.equal(await page.evaluate(async () => (await (await fetch(`/api/projects/${state.project.id}`)).json()).images[0].blocks[0].verticalAlign), 'top', 'vertical placement must persist with the project');
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text'); await page.waitForSelector('#inlineEditor:not(.hidden)');
@@ -818,6 +818,133 @@ main()
       console.log('PASS: box background follows moved box only, wheel scrolls while Ctrl+wheel zooms, and Excel-style top/middle/bottom placement works');
     }
 
+    // v3.61: unified non-duplicated toolbar with divided box-layout row + root-cause selection parity
+    // on zoomed-out font-12 top-aligned Line 1 AND overflowing middle-aligned multi-line bubbles.
+    {
+      await page.evaluate(() => { window.__savedV361Blocks = JSON.parse(JSON.stringify(state.project.images[0].blocks)); });
+      const layoutInfo = await page.evaluate(() => {
+        const inline = document.getElementById('inlineEditor');
+        const wb = inline.querySelector('.inline-editor-workbench');
+        const div = inline.querySelector('.inline-section-divider');
+        const boxTools = inline.querySelector('.inline-box-layout-tools');
+        const ir = inline.getBoundingClientRect();
+        const wr = wb.getBoundingClientRect();
+        const dr = div.getBoundingClientRect();
+        const br = boxTools.getBoundingClientRect();
+        return {
+          inInline: inline.contains(div) && inline.contains(boxTools) && !!boxTools.querySelector('#editorSameSize') && !!boxTools.querySelector('#editorAlignTop'),
+          ordered: wr.bottom <= dr.top + 3 && dr.bottom <= br.top + 3 && br.bottom <= ir.bottom + 2,
+          dividerHeight: dr.height,
+          idleBoxToolsOpacity: getComputedStyle(boxTools).opacity,
+          sideMultiCount: document.querySelectorAll('.editor-side .editor-multi-tools').length,
+          dupSettingsCount: document.querySelectorAll('.inline-box-settings, #inlineBoxPopover').length,
+          resetCount: document.querySelectorAll('#inlineLineReset').length,
+          dupEditBtnCount: [...document.querySelectorAll('#blockList button')].filter((b) => b.textContent.trim() === 'ویرایش همین متن').length,
+        };
+      });
+      assert.equal(layoutInfo.inInline, true, `box layout tools must be inside #inlineEditor: ${JSON.stringify(layoutInfo)}`);
+      assert.equal(layoutInfo.ordered, true, `divider must separate text workbench above and box tools below: ${JSON.stringify(layoutInfo)}`);
+      assert.ok(layoutInfo.dividerHeight >= 1, 'divider must be visible');
+      assert.equal(layoutInfo.idleBoxToolsOpacity, '1', 'box-alignment tools stay crisp while text editor is idle');
+      assert.equal(layoutInfo.sideMultiCount, 0, 'duplicate box-layout bar in sidebar must be removed');
+      assert.equal(layoutInfo.dupSettingsCount, 0, 'duplicate box settings popover must be removed');
+      assert.equal(layoutInfo.resetCount, 1, 'there must be only one clear-format button');
+      assert.equal(layoutInfo.dupEditBtnCount, 0, 'duplicate sidebar edit button must be removed');
+
+      // Clicking translation line in sidebar opens on-image editor without shifting viewport height between OCR and Translation modes.
+      const previewHeightBefore = await page.$eval('.editor-preview', (el) => el.getBoundingClientRect().height);
+      await page.click('#blockList .block-card[data-id="1"] .block-tr-edit');
+      const previewHeightTr = await page.$eval('.editor-preview', (el) => el.getBoundingClientRect().height);
+      await page.click('#inlineEditorApply');
+      await page.click('#blockList .block-card[data-id="1"] .block-source-edit');
+      const previewHeightOcr = await page.$eval('.editor-preview', (el) => el.getBoundingClientRect().height);
+      await page.click('#inlineEditorApply');
+      assert.ok(Math.abs(previewHeightBefore - previewHeightTr) <= 1 && Math.abs(previewHeightTr - previewHeightOcr) <= 1,
+        `dock height must stay constant across idle/translation/OCR modes: ${JSON.stringify({ previewHeightBefore, previewHeightTr, previewHeightOcr })}`);
+
+      // Helper: find exact Canvas pixel bounds of a specific word in block[0] by rendering ONLY that word in #0055ff on an offscreen canvas using Typeset.render!
+      const dragSelectWordOnCanvas = async (blockSetup, targetWord) => {
+        const coords = await page.evaluate(({ setup, word }) => {
+          state.project.images[0].blocks[0] = Object.assign(JSON.parse(JSON.stringify(window.__savedV361Blocks[0])), setup);
+          if (setup._zoom) setEditorZoom(setup._zoom); else fitEditor();
+          buildBlockList(); drawEditor();
+          const b = state.project.images[0].blocks[0];
+          const escaped = b.tr.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          const markedHtml = escaped.replace(word, `<span style="color:#0055ff">${word}</span>`).replace(/\n/g, '<br>');
+          const off = Typeset.render(state.editorBitmap, [overlayBlock({ ...b, bg: 'white', color: '#111111', richHtml: markedHtml })]);
+          const octx = off.getContext('2d');
+          const box = clampedBoxOf(b);
+          const x0 = Math.floor(box.x0), y0 = Math.floor(box.y0), w = Math.ceil(box.x1 - box.x0), h = Math.ceil(box.y1 - box.y0);
+          const data = octx.getImageData(x0, y0, w, h).data;
+          let minX = Infinity, maxX = -1, minY = Infinity, maxY = -1;
+          for (let y = 0; y < h; y += 1) {
+            for (let x = 0; x < w; x += 1) {
+              const idx = (y * w + x) * 4;
+              if (data[idx + 2] > 170 && data[idx] < 90) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+              }
+            }
+          }
+          const cRect = document.getElementById('editorCanvas').getBoundingClientRect();
+          const scale = state.editorScale || 1;
+          return {
+            inkLeft: cRect.left + (x0 + minX) * scale,
+            inkRight: cRect.left + (x0 + maxX + 1) * scale,
+            inkTop: cRect.top + (y0 + minY) * scale,
+            inkBottom: cRect.top + (y0 + maxY + 1) * scale,
+          };
+        }, { setup: blockSetup, word: targetWord });
+        const midY = (coords.inkTop + coords.inkBottom) / 2;
+        // Drag RTL from right edge of word ink to left edge of word ink!
+        await page.mouse.move(coords.inkRight + 1, midY);
+        await page.mouse.down();
+        await page.mouse.move(coords.inkLeft - 1, midY, { steps: 6 });
+        await page.mouse.up();
+        return page.evaluate((ink) => {
+          const sel = getSelection();
+          const rr = sel.rangeCount ? sel.getRangeAt(0).getBoundingClientRect() : null;
+          const field = document.getElementById('inlineEditorField');
+          return {
+            selected: (sel?.toString() || '').trim(),
+            scrollTop: field.scrollTop,
+            dyTop: rr ? Math.abs(rr.top - ink.inkTop) : 999,
+            dxRight: rr ? Math.abs(rr.right - ink.inkRight) : 999,
+            ink,
+            rangeRect: rr ? { left: rr.left, right: rr.right, top: rr.top, bottom: rr.bottom } : null,
+          };
+        }, coords);
+      };
+
+      // Case A: Post-translation default (size 12, justify, verticalAlign 'top') zoomed out to 0.45x — selecting a word on Line 1 right under the top edge!
+      const selTop = await dragSelectWordOnCanvas({
+        tx0: 15, ty0: 25, tx1: 235, ty1: 145, bg: 'white', color: '#111111',
+        tr: 'امروز صبح زود به مدرسه رفتیم و کتاب داستان جدیدی خواندیم که بسیار جذاب بود.',
+        richHtml: '', textMode: 'translation', align: 'justify', dir: 'rtl', size: 12, verticalAlign: 'top', _zoom: 0.45,
+      }, 'مدرسه');
+      assert.equal(selTop.selected, 'مدرسه', `Zoomed-out top-aligned font-12 Line-1 drag must select exact Canvas word: ${JSON.stringify(selTop)}`);
+      assert.equal(selTop.scrollTop, 0);
+      await page.click('#inlineEditorApply');
+
+      // Case B: Overflowing middle-aligned multi-line box (content taller than 58px box at fractional 0.75x zoom)!
+      const selOverflow = await dragSelectWordOnCanvas({
+        tx0: 15, ty0: 40, tx1: 235, ty1: 98, bg: 'white', color: '#111111',
+        tr: 'وقتی باران پاییزی شروع شد همه به سمت خانه دویدیم تا خیس نشویم و چای داغ بنوشیم و استراحت کنیم.',
+        richHtml: '', textMode: 'translation', align: 'justify', dir: 'rtl', size: 14, verticalAlign: 'middle', _zoom: 0.75,
+      }, 'پاییزی');
+      assert.equal(selOverflow.selected, 'پاییزی', `Overflowing middle-aligned box drag must select exact Canvas word without vertical shift: ${JSON.stringify(selOverflow)}`);
+      assert.equal(selOverflow.scrollTop, 0);
+      await page.click('#inlineEditorApply');
+
+      await page.evaluate(() => {
+        state.project.images[0].blocks = JSON.parse(JSON.stringify(window.__savedV361Blocks));
+        fitEditor(); buildBlockList(); drawEditor();
+      });
+      console.log('PASS: v3.61 root-cause selection alignment (zoomed-out font-12 top Line 1 + overflowing middle box) and unified divided toolbar');
+    }
+
     // Classic source/visual synchronization, sanitization, dialogs and draft recovery.
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
     await page.click('#inlineEditor .classic-tabs button:nth-child(2)');
@@ -890,7 +1017,7 @@ main()
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
     await page.$eval('#inlineEditorSize', el => { el.value='30'; el.dispatchEvent(new Event('input', {bubbles:true})); });
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('inlineEditorField')).fontSize), await page.evaluate(() => { const draft=overlayBlock(draftBlockForPreview());const box=boxOf(draft);return `${overlaySize(draft,box.x1-box.x0,box.y1-box.y0)*(state.editorScale||1)}px`; }), 'the transparent caret layer tracks final output typography and zoom exactly');
+    assert.equal(await page.evaluate(() => { const el=document.getElementById('inlineEditorField'); const cs=getComputedStyle(el); const m=new DOMMatrix(cs.transform==='none'?undefined:cs.transform); return (parseFloat(cs.fontSize)*(m.a||1)).toFixed(3); }), await page.evaluate(() => { const draft=overlayBlock(draftBlockForPreview());const box=clampedBoxOf(draft);return (overlaySize(draft,box.x1-box.x0,box.y1-box.y0)*(state.editorScale||1)).toFixed(3); }), 'the transparent caret layer tracks final output typography and zoom exactly');
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await editorRenderDifference(page), 0, 'the canvas tracks the chosen output size exactly while the dock remains readable');
     await page.click('#inlineEditorApply');
@@ -1189,9 +1316,11 @@ with zipfile.ZipFile(docx_path) as archive:
     assert.deepEqual(freeGenerations.map(q=>q.includes('SECOND PAGE')?'SECOND PAGE':q),[firstFree,'C'.repeat(120),'SECOND PAGE']);
     let freeSaved=await api(base,`/api/projects/${freeProject.id}`);
     assert.equal(freeSaved.images[0].blocks[1].tr,'ترجمه'); assert.equal(freeSaved.images[1].blocks[0].tr,'old');
+    assert.equal(freeSaved.images[0].blocks[1].align,'justify'); assert.equal(freeSaved.images[0].blocks[1].size,12); assert.equal(freeSaved.images[0].blocks[1].verticalAlign,'top');
     await page.click('#retryTranslation'); await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
     assert.equal(freeGenerations.length,4); assert.equal(freeGenerations[3],'SECOND PAGE');
     freeSaved=await api(base,`/api/projects/${freeProject.id}`); assert.equal(freeSaved.images[1].blocks[0].tr,'ترجمه');
+    assert.equal(freeSaved.images[1].blocks[0].align,'justify'); assert.equal(freeSaved.images[1].blocks[0].size,12); assert.equal(freeSaved.images[1].blocks[0].verticalAlign,'top');
     console.log('PASS: free settings, four-character packing, page boundaries, saved progress and retry in Chromium with a local stub');
 
     // A mixed selection reads only the page without OCR, preserves existing

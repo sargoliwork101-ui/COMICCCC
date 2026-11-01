@@ -599,3 +599,23 @@ def test_simultaneous_same_context_step_only_calls_provider_once(tmp_path, monke
         assert first.result(timeout=10).status_code == 200
         assert second.result(timeout=10).status_code == 409
         assert calls == [1]
+
+
+def test_completed_translations_default_to_justify_font_12_and_top_placement(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    monkeypatch.setattr(
+        TranslationService,
+        'translate_context',
+        lambda self, request, text, sources, *a: ('\n'.join(f'ترجمه {i}' for i, _ in enumerate(sources, 1)), 'summary'),
+    )
+    with scoped_client(create_app()) as client:
+        route, _, step = _pending_setup(client)
+        res = client.post(route + '/context-step', json=step)
+        assert res.status_code == 200, res.text
+        blocks = [b for img in res.json()['project']['images'] for b in img.get('blocks', []) if b.get('tr') and b.get('tr') != 'old']
+        assert blocks, 'at least one block must be newly translated'
+        for block in blocks:
+            assert block.get('align') == 'justify'
+            assert block.get('size') == 12
+            assert block.get('verticalAlign') == 'top'
+

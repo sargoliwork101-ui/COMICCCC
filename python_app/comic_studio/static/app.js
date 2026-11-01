@@ -1551,14 +1551,22 @@ function refreshInlineTypography() {
   const host = field.parentElement?.classList.contains('editor-box') ? field.parentElement : null;
   if (!host) {
     field.removeAttribute('style');
+    delete field.dataset.layoutZoom; delete field.dataset.visualFontSize;
     field.dir = style.dir; field.style.direction = style.dir; field.style.textAlign = style.align;
     field.querySelectorAll?.('[data-logical-size]').forEach((el) => { el.style.fontSize = `${el.dataset.logicalSize}px`; });
     scheduleEditorCanvasDraw();
     return;
   }
   const box = clampedBoxOf(draft); const scale = state.editorScale || 1;
-  const baseSize = overlaySize(draft, box.x1 - box.x0, box.y1 - box.y0);
-  field.style.fontSize = `${baseSize * scale}px`;
+  const bw = Math.max(1, box.x1 - box.x0); const bh = Math.max(1, box.y1 - box.y0);
+  const baseSize = overlaySize(draft, bw, bh);
+  // Lay out in unscaled image coordinates (boosted >=24px when small so browser
+  // integer line-box rounding and minimum-font-size settings never distort line
+  // heights or wrap points), then scale visually via CSS transform to match Canvas.
+  const layoutZoom = baseSize < 24 ? Math.ceil(24 / Math.max(1, baseSize)) : 1;
+  field.dataset.layoutZoom = String(layoutZoom);
+  field.dataset.visualFontSize = String(baseSize * scale);
+  field.style.fontSize = `${baseSize * layoutZoom}px`;
   field.style.lineHeight = '1.55'; field.style.fontWeight = style.bold ? '700' : '400';
   field.style.fontStyle = style.italic ? 'italic' : 'normal'; field.style.textDecoration = style.underline ? 'underline' : '';
   field.style.background = 'transparent'; field.style.color = 'transparent'; field.style.webkitTextFillColor = 'transparent'; field.style.caretColor = 'var(--a1)';
@@ -1570,23 +1578,29 @@ function refreshInlineTypography() {
     el.dataset.logicalSize = String(Math.round(logical));
     const ref = style.size || baseSize;
     const eff = Math.max(8, Math.min(160, Math.round(baseSize * logical / ref)));
-    el.style.fontSize = `${eff * scale}px`;
+    el.style.fontSize = `${eff * layoutZoom}px`;
   });
-  const rect = host.getBoundingClientRect();
-  field.style.left = `${-(host.clientLeft || 0)}px`;
-  field.style.top = `${-(host.clientTop || 0)}px`;
-  field.style.right = 'auto';
-  field.style.width = `${rect.width}px`;
-  const horizontalInset = rect.width * 0.02;
-  field.style.paddingLeft = `${horizontalInset}px`; field.style.paddingRight = `${horizontalInset}px`;
-  field.style.bottom = 'auto'; field.style.height = 'auto'; field.style.minHeight = '0px';
+  const insetX = bw * 0.02 * layoutZoom;
+  field.style.right = 'auto'; field.style.bottom = 'auto';
+  field.style.width = `${bw * layoutZoom}px`;
+  field.style.paddingLeft = `${insetX}px`; field.style.paddingRight = `${insetX}px`;
   field.style.paddingTop = '0px'; field.style.paddingBottom = '0px';
-  const contentHeight = field.scrollHeight;
-  const effectiveContentHeight = contentHeight > 0 ? contentHeight : baseSize * scale * 1.55;
-  field.style.height = `${rect.height}px`;
-  const verticalInset = rect.height * 0.02;
-  const top = style.verticalAlign === 'top' ? verticalInset : style.verticalAlign === 'bottom' ? rect.height - verticalInset - effectiveContentHeight : (rect.height - effectiveContentHeight) / 2;
-  field.style.paddingTop = `${Math.max(0, top)}px`; field.style.paddingBottom = `${Math.max(0, verticalInset)}px`;
+  field.style.minHeight = '0px'; field.style.height = 'auto';
+  field.style.transformOrigin = '0 0';
+  field.style.transform = `scale(${scale / layoutZoom})`;
+  const rawScrollH = field.scrollHeight;
+  const contentH = (rawScrollH > 0 ? rawScrollH : baseSize * layoutZoom * 1.55) / layoutZoom;
+  const insetY = bh * 0.02;
+  const topUnscaled = style.verticalAlign === 'top' ? insetY : style.verticalAlign === 'bottom' ? bh - insetY - contentH : (bh - contentH) / 2;
+  field.style.left = `${-(host.clientLeft || 0)}px`;
+  field.style.top = `${-(host.clientTop || 0) + topUnscaled * scale}px`;
+  const fieldHLayout = Math.max(Math.max(1, bh - topUnscaled) * layoutZoom, rawScrollH + 4);
+  field.style.height = `${fieldHLayout}px`;
+  const clipTop = Math.max(0, -topUnscaled) * layoutZoom;
+  const clipBottom = Math.max(0, topUnscaled + fieldHLayout / layoutZoom - bh) * layoutZoom;
+  field.style.clipPath = (clipTop > 0.5 || clipBottom > 0.5) ? `inset(${clipTop}px 0px ${clipBottom}px 0px)` : 'none';
+  if (field.scrollTop) field.scrollTop = 0;
+  if (field.scrollLeft) field.scrollLeft = 0;
   scheduleEditorCanvasDraw();
 }
 function syncVerticalAlignButtons() {
@@ -1626,6 +1640,7 @@ function setVerticalPlacement(value) {
     if (block !== inlineDraft?.block) { block.verticalAlign = value; updatedOther = true; }
   });
   if (inlineDraft) {
+    inlineDraft.verticalAlignTouched = true;
     $('inlineVerticalAlign').value = value;
     syncVerticalAlignButtons();
     classicEditor.notifyChange();
@@ -1833,6 +1848,9 @@ function syncInlineLineControls() {
       badge.classList.toggle('hidden', !inlineDraft);
       badge.classList.remove('is-word');
     }
+    if (inlineDraft?.mode === 'ocr' && !typingSize && sizeInput) {
+      sizeInput.value = inlineDraft.initialAutoSize && !inlineDraft.sizeTouched ? '' : $('inlineEditorSize').value;
+    }
     return;
   }
   if (hasInlineWordSelection()) {
@@ -1955,9 +1973,20 @@ function ensureInlineParagraph(options = {}) {
 }
 function setInlineLineStyle(property, value, options = {}) {
   const field = $('inlineEditorField');
-  if (inlineDraft && inlineDraft.mode !== 'ocr' && !field.textContent && !field.querySelector('div,p')) {
-    if (property === 'textAlign') { $('inlineEditorAlign').value = value; field.style.textAlign = value; syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange(); return; }
-    if (property === 'direction') { $('inlineEditorDirection').value = value; field.dir = value; field.style.direction = value; syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange(); return; }
+  const fullBoxSelected = hasInlineWordSelection()
+    && inlineDraft.range.toString().trim() === field.textContent.trim()
+    && field.textContent.trim().length > 0;
+  if (inlineDraft && inlineDraft.mode !== 'ocr' && (fullBoxSelected || (!field.textContent && !field.querySelector('div,p')))) {
+    if (property === 'textAlign') {
+      $('inlineEditorAlign').value = value; field.style.textAlign = value;
+      field.querySelectorAll('div,p').forEach((el) => { el.style.textAlign = ''; });
+      recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange(); return;
+    }
+    if (property === 'direction') {
+      $('inlineEditorDirection').value = value; field.dir = value; field.style.direction = value;
+      field.querySelectorAll('div,p').forEach((el) => { el.style.direction = ''; });
+      recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange(); return;
+    }
   }
   const line = ensureInlineParagraph(options); if (!line) return;
   if (property === 'fontSize') applyLogicalFontSize(line, value);
@@ -1966,11 +1995,33 @@ function setInlineLineStyle(property, value, options = {}) {
   recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
 }
 function setSelectionOrLineSize(value, options = {}) {
+  if (!inlineDraft) return;
+  if (inlineDraft.mode === 'ocr') {
+    const parsed = Number.parseFloat(value || '');
+    if (value && Number.isFinite(parsed) && parsed >= 8) {
+      $('inlineEditorSize').value = String(Math.round(parsed));
+      inlineDraft.sizeTouched = true;
+      inlineDraft.initialAutoSize = false;
+    } else {
+      inlineDraft.sizeTouched = false;
+      inlineDraft.initialAutoSize = true;
+      $('inlineEditorSize').value = String(effectiveInlineSize({ ...inlineDraft.block, size: null }));
+    }
+    syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+    return;
+  }
   if (hasInlineWordSelection()) { applyInlineWordStyle({ fontSize: value }, options); return; }
   setInlineLineStyle('fontSize', value, options);
 }
 function stepSelectionOrLineSize(delta) {
-  if (!inlineDraft || inlineDraft.mode === 'ocr') return;
+  if (!inlineDraft) return;
+  if (inlineDraft.mode === 'ocr') {
+    const cur = Number($('inlineEditorSize').value) || effectiveInlineSize(inlineDraft.block);
+    const next = Math.max(8, Math.min(160, Math.round(cur + delta)));
+    $('inlineLineSize').value = String(next);
+    setSelectionOrLineSize(`${next}px`);
+    return;
+  }
   const currentInput = Number($('inlineLineSize').value);
   const inherited = inlineInheritedLogicalSize(inlineSelectionSpan(inlineDraft.range) || inlineDraft.range?.startContainer);
   const base = Number.isFinite(currentInput) && currentInput >= 8 ? currentInput : (inherited ?? effectiveInlineSize(inlineDraft.block));
@@ -2146,9 +2197,11 @@ function openInlineEditor(block, clickEvent = null) {
   $('inlineEditorCancel').classList.add('hidden');
   $('inlineLineTools').classList.remove('hidden');
   if ($('inlineLineSize')) $('inlineLineSize').value = '';
-  ['inlineLineSize', 'inlineSizeUp', 'inlineSizeDown', 'inlineLineReset'].forEach((id) => { const el = $(id); if (el) el.disabled = mode === 'ocr'; });
+  ['inlineLineSize', 'inlineSizeUp', 'inlineSizeDown'].forEach((id) => { const el = $(id); if (el) el.disabled = false; });
+  if ($('inlineLineReset')) $('inlineLineReset').disabled = mode === 'ocr';
   $('inlineEditorDirection').value = direction; $('inlineEditorDirection').disabled = mode === 'ocr';
   $('inlineEditorAlign').value = mode === 'ocr' ? overlayBlock(block).align : (block.align || 'right');
+  const verticalAlignTouched = ['top', 'middle', 'bottom'].includes(block.verticalAlign);
   $('inlineVerticalAlign').value = ['top', 'bottom'].includes(block.verticalAlign) ? block.verticalAlign : 'middle';
   const initialAutoSize = !(Number.isFinite(+block.size) && +block.size > 0);
   const initialSizeValue = String(effectiveInlineSize(block));
@@ -2157,7 +2210,7 @@ function openInlineEditor(block, clickEvent = null) {
 
   inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: originalHtml,
     dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
-    verticalAlign: $('inlineVerticalAlign').value, size: initialSizeValue,
+    verticalAlign: $('inlineVerticalAlign').value, verticalAlignTouched, size: initialSizeValue,
     initialAutoSize, initialSizeValue, sizeTouched: false,
     color: block.color || null, originalColor: block.color || null,
     range: null, history: [], historyIndex: -1, muteHistory: false, conflictReported: false };
@@ -2175,9 +2228,11 @@ function openInlineEditor(block, clickEvent = null) {
       const plainEquiv = mode !== 'ocr' && !block.richHtml && htmlVal === sanitizeHtml(plainToHtml(textVal));
       const rawSize = $('inlineEditorSize').value.trim();
       const keepAuto = !!(inlineDraft?.initialAutoSize && !inlineDraft?.sizeTouched && rawSize === inlineDraft?.initialSizeValue);
+      const keepLegacyVertical = !inlineDraft?.verticalAlignTouched && !['top', 'middle', 'bottom'].includes(block.verticalAlign);
       return { text: textVal, richHtml: plainEquiv ? '' : htmlVal,
         dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
-        verticalAlign: $('inlineVerticalAlign').value, size: keepAuto ? null : (rawSize ? Number(rawSize) : null), color: inlineDraft?.color ?? null };
+        verticalAlign: keepLegacyVertical ? undefined : $('inlineVerticalAlign').value,
+        size: keepAuto ? null : (rawSize ? Number(rawSize) : null), color: inlineDraft?.color ?? null };
     },
     onCommit: (savedBlock, revision) => {
       inlineDraft.snapshot = revision;
@@ -2380,7 +2435,7 @@ function renderEditorBoxes() {
     const key = String(block.id);
     if (!display.enabled || displayMode === 'none') return;
     visible.add(key);
-    const box = boxOf(display); const scale = state.editorScale;
+    const box = clampedBoxOf(display); const scale = state.editorScale;
     let el = existing.get(key);
     if (!el) {
       el = document.createElement('div'); el.className = 'editor-box'; el.dataset.id = key;
@@ -2412,16 +2467,22 @@ function renderEditorBoxes() {
       text.addEventListener('pointerdown', (event) => {
         if (event.button !== 0 || event.ctrlKey || event.metaKey) return;
         event.preventDefault(); event.stopPropagation();
-        openInlineEditor(el._block, event);
+        const beforeBox = el.getBoundingClientRect();
+        openInlineEditor(el._block, null);
         const field = $('inlineEditorField');
         if (!inlineDraft || inlineDraft.block !== el._block || !el.contains(field)) return;
+        const afterBox = el.getBoundingClientRect();
+        const adjX = event.clientX + (afterBox.left - beforeBox.left);
+        const adjY = event.clientY + (afterBox.top - beforeBox.top);
+        placeInlineCaret(field, { clientX: adjX, clientY: adjY });
+        rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
         if (event.detail >= 2) {
           lastInlineOpenClick = null;
-          expandInlineWordAtPoint(field, event.clientX, event.clientY);
+          expandInlineWordAtPoint(field, adjX, adjY);
           return;
         }
-        lastInlineOpenClick = { time: performance.now(), x: event.clientX, y: event.clientY };
-        const originX = event.clientX, originY = event.clientY;
+        lastInlineOpenClick = { time: performance.now(), x: adjX, y: adjY };
+        const originX = adjX, originY = adjY;
         const start = inlineCaretPoint(field, originX, originY);
         if (!start || !window.addEventListener) return;
         const onMove = (moveEvent) => {
@@ -2522,6 +2583,13 @@ async function runSingleBlockTranslation(task) {
     if ($('translationDialog').open) closeDialog('translationDialog');
   }
 }
+function applyTranslatedBlockDefaults(block, text) {
+  block.tr = text;
+  block.richHtml = '';
+  block.align = 'justify';
+  block.size = 12;
+  block.verticalAlign = 'top';
+}
 async function retranslateBlock(block) {
   if (inlineDraft?.block === block && !closeInlineEditor()) return;
   const text = block.text || ''; const snapshot = inlineBlockSnapshot(block);
@@ -2536,7 +2604,7 @@ async function retranslateBlock(block) {
         if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
         const result = await runSingleBlockTranslation(() => api('/api/translate-text/context', jsonOptions('POST', { ...request, skill:'', summary:'', confirmation: accepted.signature })));
         if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-        block.tr = result.text; block.richHtml = plainToHtml(result.text); buildBlockList(); drawEditor(); scheduleSave();
+        applyTranslatedBlockDefaults(block, result.text); buildBlockList(); drawEditor(); scheduleSave();
       }, refresh);
       return;
     }
@@ -2557,7 +2625,7 @@ async function retranslateBlock(block) {
       rememberTranslationSkill(projectId, accepted);
       const result = await runSingleBlockTranslation(() => api('/api/translate-text/context', jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) })));
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-      block.tr = result.text; block.richHtml = plainToHtml(result.text); buildBlockList(); drawEditor(); scheduleSave();
+      applyTranslatedBlockDefaults(block, result.text); buildBlockList(); drawEditor(); scheduleSave();
     }, refresh);
   } catch (error) { toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true); }
 }
@@ -2578,9 +2646,12 @@ function buildBlockList() {
     const source = document.createElement('p'); source.className = 'block-readonly block-source-edit'; source.dir = 'auto'; source.textContent = `متن اصلی: ${block.text || '—'}`; source.tabIndex = 0; source.setAttribute('role', 'button'); source.setAttribute('aria-label', `ویرایش متن انگلیسی/OCR کادر ${block.id}`); source.title = 'برای ویرایش متن اصلی کلیک کنید';
     source.addEventListener('click', () => editOcrText(block));
     source.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); editOcrText(block); } });
-    const translation = document.createElement('p'); translation.className = 'block-readonly'; translation.dir = 'auto'; translation.textContent = `ترجمه: ${block.tr || '—'}`;
+    const translation = document.createElement('p'); translation.className = 'block-readonly block-tr-edit'; translation.dir = 'auto'; translation.textContent = `ترجمه: ${block.tr || '—'}`; translation.tabIndex = 0; translation.setAttribute('role', 'button'); translation.setAttribute('aria-label', `ویرایش ترجمهٔ کادر ${block.id} روی تصویر`); translation.title = 'برای ویرایش ترجمه روی تصویر کلیک کنید';
+    const openBlockTranslation = () => { if (!block.enabled || blockOverlayMode(block) === 'none') { toast('ابتدا نمایش متن روی تصویر را فعال کنید.', true); return; } if (blockTextMode(block) === 'ocr') setBlockTextMode(block, 'translation'); openInlineEditor(block); };
+    translation.addEventListener('click', openBlockTranslation);
+    translation.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openBlockTranslation(); } });
     const actions = document.createElement('div'); actions.className = 'block-tools';
-    actions.append(makeButton('ویرایش همین متن', () => { if (!block.enabled || blockOverlayMode(block) === 'none') { toast('ابتدا نمایش متن روی تصویر را فعال کنید.', true); return; } openInlineEditor(block); }), makeButton('کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block)), makeButton('پاک‌کردن ترجمه', () => { if (inlineDraft?.block === block && !closeInlineEditor()) return; if (!confirm('ترجمهٔ این کادر پاک شود؟')) return; block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave(); }));
+    actions.append(makeButton('کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block)), makeButton('پاک‌کردن ترجمه', () => { if (inlineDraft?.block === block && !closeInlineEditor()) return; if (!confirm('ترجمهٔ این کادر پاک شود؟')) return; block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave(); }));
     enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; drawEditor(); scheduleSave(); });
     card.append(head, languageRow, source, translation, actions); list.appendChild(card);
   });
@@ -2732,6 +2803,7 @@ function bindEvents() {
   $('inlinePreview').addEventListener('click', () => setInlineOutputPreview(!inlineDraft?.showOutput));
   $('inlineEditorCancel').addEventListener('click', () => closeInlineEditor(true));
   classicEditor = window.createEditor('#inlineEditorField', {
+    clearFormatId: 'inlineLineReset',
     serializeHTML: serializeInlineFieldHtml,
     undo: () => restoreInlineHistory(-1), redo: () => restoreInlineHistory(1),
     inlineCommand: (cmd) => toggleInlineCommand(cmd),
@@ -2751,9 +2823,13 @@ function bindEvents() {
     },
     onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); autoApplyInlineDraft(); } },
     getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && $('inlineEditorSize').value.trim() === inlineDraft.initialSizeValue) ? '' : $('inlineEditorSize').value, color: inlineDraft.color } : null,
-    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) $('inlineVerticalAlign').value = meta.verticalAlign; if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; } else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; } if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; syncVerticalAlignButtons(); },
+    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) { inlineDraft.verticalAlignTouched = true; $('inlineVerticalAlign').value = meta.verticalAlign; } if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; } else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; } if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; syncVerticalAlignButtons(); },
   });
   const inlineField = $('inlineEditorField');
+  inlineField.addEventListener('scroll', () => {
+    if (inlineField.scrollTop) inlineField.scrollTop = 0;
+    if (inlineField.scrollLeft) inlineField.scrollLeft = 0;
+  });
   ['keyup', 'mouseup', 'focus'].forEach((name) => inlineField.addEventListener(name, () => { rememberInlineRange(); syncInlineLineControls(); }));
   inlineField.addEventListener('blur', () => updateInlineSelectionHighlight());
   document.addEventListener('selectionchange', () => {
@@ -2799,13 +2875,13 @@ function bindEvents() {
     if (value && (!Number.isFinite(size) || size < 8 || size > 160)) { toast('اندازه باید بین ۸ و ۱۶۰ باشد.', true); return; }
     setSelectionOrLineSize(value ? `${Math.round(size)}px` : '', { restoreFocus: true });
   });
-  ['inlineSizeUp', 'inlineSizeDown', 'inlineLineReset'].forEach((id) => $(id)?.addEventListener('mousedown', (event) => event.preventDefault()));
+  ['inlineSizeUp', 'inlineSizeDown'].forEach((id) => $(id)?.addEventListener('mousedown', (event) => event.preventDefault()));
+  document.querySelectorAll('.inline-box-layout-tools button').forEach((btn) => btn.addEventListener('mousedown', (event) => event.preventDefault()));
   $('inlineSizeUp')?.addEventListener('click', () => stepSelectionOrLineSize(2));
   $('inlineSizeDown')?.addEventListener('click', () => stepSelectionOrLineSize(-2));
-  $('inlineLineReset').addEventListener('click', resetInlineLineStyle);
   $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; classicEditor.notifyChange(); });
   $('inlineEditorAlign').addEventListener('change', () => { inlineField.style.textAlign = $('inlineEditorAlign').value; classicEditor.notifyChange(); });
-  $('inlineVerticalAlign').addEventListener('change', () => { syncVerticalAlignButtons(); if (inlineDraft) classicEditor.notifyChange(); });
+  $('inlineVerticalAlign').addEventListener('change', () => { if (inlineDraft) inlineDraft.verticalAlignTouched = true; syncVerticalAlignButtons(); if (inlineDraft) classicEditor.notifyChange(); });
   document.querySelectorAll('.inline-valign-btn').forEach((btn) => {
     btn.addEventListener('mousedown', (event) => event.preventDefault());
     btn.addEventListener('click', () => setVerticalPlacement(btn.dataset.valign));

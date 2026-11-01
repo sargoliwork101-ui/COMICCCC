@@ -1008,7 +1008,9 @@ def create_app() -> FastAPI:
                             output = saved["parts"]["0"]
                             for i, join in enumerate(call["joins"], start=1):
                                 output += join + saved["parts"][str(i)]
-                            block["tr"] = output; block["richHtml"] = ""; block.pop(AI_PARTS_KEY, None); block.pop(AI_REUSE_KEY, None)
+                            block["tr"] = output; block["richHtml"] = ""
+                            block["align"] = "justify"; block["size"] = 12; block["verticalAlign"] = "top"
+                            block.pop(AI_PARTS_KEY, None); block.pop(AI_REUSE_KEY, None)
                             page_result = [output]
                             completed_block = True
                     if completed_block:
@@ -1016,6 +1018,7 @@ def create_app() -> FastAPI:
                             for target_index in target_indices:
                                 block = blocks[target_index]
                                 block["tr"] = text; block["richHtml"] = ""
+                                block["align"] = "justify"; block["size"] = 12; block["verticalAlign"] = "top"
                                 block.pop(AI_PARTS_KEY, None); block.pop(AI_REUSE_KEY, None)
                                 if target_index != block_index:
                                     mark_reused_translation(block, source_texts[target_index], values.provider, values.source_language, settings)
@@ -1034,6 +1037,9 @@ def create_app() -> FastAPI:
                 for block, text in zip(blocks, translated_blocks):
                     block["tr"] = text
                     block["richHtml"] = ""
+                    block["align"] = "justify"
+                    block["size"] = 12
+                    block["verticalAlign"] = "top"
                 try:
                     store.save_if_unchanged(state, expected_updated_at)
                 except OSError as exc:
