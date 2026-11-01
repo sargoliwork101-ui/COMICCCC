@@ -319,8 +319,8 @@
     const cv = mk(W, H);
     const ctx = cv.getContext('2d');
     ctx.drawImage(bmp, 0, 0);
-    // Paint in three phases so no later erasure/background can hide an earlier translation.
-    const sourceFills = [], targetFills = [], textJobs = [];
+    // Paint box backgrounds first so no later box fill can cover an earlier translation's text.
+    const targetFills = [], textJobs = [];
 
     blocks.forEach((b) => {
       if (!b.enabled) return;
@@ -329,12 +329,6 @@
       if (!sourceText && !richWords?.some((word) => String(word.t || '').trim())) return;
       const st = blockStyle(b);
       const fontPrefix = `${st.italic ? 'italic ' : ''}${st.bold ? '700' : '400'} `;
-      const pad = Math.max(4, Math.round(b.lineH * 0.3));
-      // محدودهٔ پاک‌کردن متن اصلی و محدودهٔ چیدمان ترجمه جدا هستند تا تغییر اندازهٔ کادر، تصویر اطراف را پاک نکند.
-      const box = {
-        x0: Math.max(0, b.x0 - pad), y0: Math.max(0, b.y0 - pad),
-        x1: Math.min(W, b.x1 + pad), y1: Math.min(H, b.y1 + pad)
-      };
       const layoutBox = {
         x0: Math.max(0, Number.isFinite(b.tx0) ? b.tx0 : b.x0),
         y0: Math.max(0, Number.isFinite(b.ty0) ? b.ty0 : b.y0),
@@ -342,23 +336,20 @@
         y1: Math.min(H, Number.isFinite(b.ty1) ? b.ty1 : b.y1)
       };
       const bw = layoutBox.x1 - layoutBox.x0, bh = layoutBox.y1 - layoutBox.y0;
+      if (bw <= 0 || bh <= 0) return;
 
-      let sourceFill = null, targetFill = null, txt = '#0b0b0b', stroke = null;
+      let targetFill = null, txt = '#0b0b0b', stroke = null;
       if (b.bg === 'none') {
         txt = '#ffffff'; stroke = '#000000';
-      } else if (b.bg === 'white') { sourceFill = targetFill = '#ffffff'; }
-      else if (b.bg === 'black') { sourceFill = targetFill = '#000000'; txt = '#fafafa'; }
+      } else if (b.bg === 'white') { targetFill = '#ffffff'; }
+      else if (b.bg === 'black') { targetFill = '#000000'; txt = '#fafafa'; }
       else {
-        // هر دو محل را قبل از هرگونه پاک‌کردن نمونه‌برداری کن: محل OCR و کل سطح زیر کادر نهایی.
-        const sourceBg = sampleBg(ctx, box, W, H);
         const targetBg = sampleBg(ctx, layoutBox, W, H);
-        sourceFill = `rgb(${sourceBg.r},${sourceBg.g},${sourceBg.b})`;
         targetFill = `rgb(${targetBg.r},${targetBg.g},${targetBg.b})`;
         txt = lum(targetBg.r, targetBg.g, targetBg.b) > 150 ? '#0b0b0b' : '#fafafa';
       }
       // رنگ دستی کاربر بر انتخاب خودکار اولویت دارد (زیرخط هم با همین رنگ رسم می‌شود)
       if (st.color) txt = st.color;
-      if (sourceFill) sourceFills.push([sourceFill, box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0]);
       if (targetFill) targetFills.push([targetFill, layoutBox.x0, layoutBox.y0, bw, bh]);
 
       const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
@@ -483,7 +474,6 @@
       });
     });
     const paintRect = ([style, x, y, width, height]) => { ctx.fillStyle = style; ctx.fillRect(x, y, width, height); };
-    sourceFills.forEach(paintRect);
     targetFills.forEach(paintRect);
     textJobs.forEach((paintText) => paintText());
     return cv;

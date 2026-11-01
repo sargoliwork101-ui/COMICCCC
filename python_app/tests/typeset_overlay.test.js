@@ -45,10 +45,15 @@ Typeset.render({ width: 500, height: 120 }, [{
   enabled: true, tr: 'ترجمه', richHtml: '', x0: 10, y0: 10, x1: 110, y1: 40,
   tx0: 200, ty0: 50, tx1: 350, ty1: 90, lineH: 30, bg: 'white', dir: 'rtl', align: 'right',
 }], { createCanvas: (width, height) => ({ width, height, getContext: () => eraseCtx }) });
-assert(eraseOperations.rects.some((rect) => JSON.stringify(rect) === JSON.stringify([1, 1, 118, 48])));
-assert(eraseOperations.rects.some((rect) => JSON.stringify(rect) === JSON.stringify([200, 50, 150, 40])));
+assert.deepStrictEqual(eraseOperations.rects, [[200, 50, 150, 40]]);
 assert(eraseOperations.texts.includes('ترجمه'));
-console.log('PASS: translated output erases the original OCR area even when the translation box moves');
+eraseOperations.rects.length = 0;
+Typeset.render({ width: 500, height: 120 }, [{
+  enabled: true, tr: 'ترجمه', richHtml: '', x0: 10, y0: 10, x1: 110, y1: 40,
+  lineH: 30, bg: 'white', dir: 'rtl', align: 'right',
+}], { createCanvas: (width, height) => ({ width, height, getContext: () => eraseCtx }) });
+assert.deepStrictEqual(eraseOperations.rects, [[10, 10, 100, 30]]);
+console.log('PASS: background fill strictly matches the box position and dimensions without erasing outside or at old coordinates');
 
 const paintOrder = [];
 const overlapCtx = new Proxy({

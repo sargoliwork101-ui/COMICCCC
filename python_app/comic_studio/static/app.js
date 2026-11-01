@@ -1442,7 +1442,7 @@ function stopEditorPan(event) {
   const stage = $('editorStage'); state.editorPan = null; stage.classList.remove('panning'); if (stage.hasPointerCapture?.(pan.pointerId)) stage.releasePointerCapture(pan.pointerId);
 }
 function handleEditorWheel(event) {
-  if (!state.editorId) return;
+  if (!state.editorId || !event.ctrlKey) return;
   event.preventDefault(); const rect = document.querySelector('.editor-preview').getBoundingClientRect();
   setEditorZoom(state.editorScale * (event.deltaY < 0 ? 1.15 : 1 / 1.15), { x: event.clientX - rect.left, y: event.clientY - rect.top });
 }
@@ -1496,6 +1496,7 @@ function overlaySize(block, width, height) {
 function styleRichElement(element, block, scale = 1, preview = false) {
   const box = clampedBoxOf(block); const style = Typeset.blockStyle(block);
   element.dir = style.dir; element.style.direction = style.dir; element.style.textAlign = style.align;
+  element.style.justifyContent = style.verticalAlign === 'top' ? 'flex-start' : style.verticalAlign === 'bottom' ? 'flex-end' : 'center';
   // The sidebar is an editing surface, not the output: output size and colour affect only the image.
   element.style.fontSize = preview ? `${overlaySize(block, box.x1 - box.x0, box.y1 - box.y0) * scale}px` : '';
   element.style.fontWeight = style.bold ? '700' : '400'; element.style.fontStyle = style.italic ? 'italic' : 'normal';
@@ -1581,11 +1582,61 @@ function refreshInlineTypography() {
   field.style.bottom = 'auto'; field.style.height = 'auto'; field.style.minHeight = '0px';
   field.style.paddingTop = '0px'; field.style.paddingBottom = '0px';
   const contentHeight = field.scrollHeight;
+  const effectiveContentHeight = contentHeight > 0 ? contentHeight : baseSize * scale * 1.55;
   field.style.height = `${rect.height}px`;
   const verticalInset = rect.height * 0.02;
-  const top = style.verticalAlign === 'top' ? verticalInset : style.verticalAlign === 'bottom' ? rect.height - verticalInset - contentHeight : (rect.height - contentHeight) / 2;
+  const top = style.verticalAlign === 'top' ? verticalInset : style.verticalAlign === 'bottom' ? rect.height - verticalInset - effectiveContentHeight : (rect.height - effectiveContentHeight) / 2;
   field.style.paddingTop = `${Math.max(0, top)}px`; field.style.paddingBottom = `${Math.max(0, verticalInset)}px`;
   scheduleEditorCanvasDraw();
+}
+function syncVerticalAlignButtons() {
+  const dock = $('inlineEditor');
+  const buttons = document.querySelectorAll('.inline-valign-btn');
+  if (!buttons.length) return;
+  const selected = selectedEditorBlocks();
+  const multiSelected = selected.length > 1 || (selected.length === 1 && (!inlineDraft || selected[0] !== inlineDraft.block));
+  let activeValue = null;
+  let enabled = false;
+  if (inlineDraft && !multiSelected) {
+    enabled = true;
+    activeValue = ['top', 'bottom'].includes($('inlineVerticalAlign')?.value) ? $('inlineVerticalAlign').value : 'middle';
+    dock?.classList.remove('has-selection');
+  } else {
+    enabled = selected.length > 0 || !!inlineDraft;
+    if (!inlineDraft) dock?.classList.toggle('has-selection', selected.length > 0);
+    else dock?.classList.remove('has-selection');
+    if (selected.length > 0) {
+      const values = new Set(selected.map((b) => (b === inlineDraft?.block
+        ? (['top', 'bottom'].includes($('inlineVerticalAlign')?.value) ? $('inlineVerticalAlign').value : 'middle')
+        : (['top', 'bottom'].includes(b.verticalAlign) ? b.verticalAlign : 'middle'))));
+      activeValue = values.size === 1 ? [...values][0] : null;
+      if (!inlineDraft && $('inlineVerticalAlign') && activeValue) $('inlineVerticalAlign').value = activeValue;
+    }
+  }
+  buttons.forEach((btn) => {
+    btn.disabled = !enabled;
+    btn.setAttribute('aria-pressed', String(enabled && btn.dataset.valign === activeValue));
+  });
+}
+function setVerticalPlacement(value) {
+  if (!['top', 'middle', 'bottom'].includes(value)) return;
+  const selected = selectedEditorBlocks();
+  let updatedOther = false;
+  selected.forEach((block) => {
+    if (block !== inlineDraft?.block) { block.verticalAlign = value; updatedOther = true; }
+  });
+  if (inlineDraft) {
+    $('inlineVerticalAlign').value = value;
+    syncVerticalAlignButtons();
+    classicEditor.notifyChange();
+    if (updatedOther) { drawEditor(); scheduleSave(); }
+    return;
+  }
+  if (!selected.length) return;
+  if ($('inlineVerticalAlign')) $('inlineVerticalAlign').value = value;
+  syncVerticalAlignButtons();
+  drawEditor();
+  scheduleSave();
 }
 function setInlineDockDisabled(disabled) {
   ['inlinePreview', 'inlineEditorApply', 'inlineVerticalAlign', 'inlineLineSize', 'inlineSizeUp', 'inlineSizeDown', 'inlineLineReset',
@@ -1593,6 +1644,7 @@ function setInlineDockDisabled(disabled) {
     .forEach((id) => { const el = $(id); if (el) el.disabled = disabled; });
   document.querySelectorAll('#inlineEditor .classic-toolbar button, #inlineEditor .classic-toolbar select, #inlineEditor .classic-toolbar input, #inlineEditor .classic-tabs button')
     .forEach((el) => { el.disabled = disabled; });
+  syncVerticalAlignButtons();
 }
 function syncInlineDockIdleState() {
   const dock = $('inlineEditor');
@@ -1902,6 +1954,11 @@ function ensureInlineParagraph(options = {}) {
   return line;
 }
 function setInlineLineStyle(property, value, options = {}) {
+  const field = $('inlineEditorField');
+  if (inlineDraft && inlineDraft.mode !== 'ocr' && !field.textContent && !field.querySelector('div,p')) {
+    if (property === 'textAlign') { $('inlineEditorAlign').value = value; field.style.textAlign = value; syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange(); return; }
+    if (property === 'direction') { $('inlineEditorDirection').value = value; field.dir = value; field.style.direction = value; syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange(); return; }
+  }
   const line = ensureInlineParagraph(options); if (!line) return;
   if (property === 'fontSize') applyLogicalFontSize(line, value);
   else line.style[property] = value;
@@ -2145,6 +2202,7 @@ function openInlineEditor(block, clickEvent = null) {
   });
   $('inlineEditor').classList.remove('hidden', 'is-idle');
   $('inlineEditor').classList.toggle('plain-mode', mode === 'ocr');
+  syncVerticalAlignButtons();
   positionInlineEditor(); classicEditor.focus();
   placeInlineCaret(field, clickEvent); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
 }
@@ -2175,6 +2233,7 @@ function updateEditorSelection() {
     card.classList.toggle('selected', selected.has(card.dataset.id)); card.classList.toggle('active', card.dataset.id === String(state.activeBlockId));
   });
   if ($('editorSelectionStatus')) $('editorSelectionStatus').textContent = selected.size ? `${selected.size.toLocaleString('fa-IR')} متن انتخاب شده · مرجع: متن ${state.selectedBlockIds[0]}` : 'متنی انتخاب نشده';
+  syncVerticalAlignButtons();
 }
 function selectEditorBlock(blockId, scroll = true, additive = false) {
   const key = String(blockId); const selected = new Set(editorSelectedKeys());
@@ -2692,7 +2751,7 @@ function bindEvents() {
     },
     onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); autoApplyInlineDraft(); } },
     getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && $('inlineEditorSize').value.trim() === inlineDraft.initialSizeValue) ? '' : $('inlineEditorSize').value, color: inlineDraft.color } : null,
-    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) $('inlineVerticalAlign').value = meta.verticalAlign; if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; } else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; } if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; },
+    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) $('inlineVerticalAlign').value = meta.verticalAlign; if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; } else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; } if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; syncVerticalAlignButtons(); },
   });
   const inlineField = $('inlineEditorField');
   ['keyup', 'mouseup', 'focus'].forEach((name) => inlineField.addEventListener(name, () => { rememberInlineRange(); syncInlineLineControls(); }));
@@ -2746,7 +2805,11 @@ function bindEvents() {
   $('inlineLineReset').addEventListener('click', resetInlineLineStyle);
   $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; classicEditor.notifyChange(); });
   $('inlineEditorAlign').addEventListener('change', () => { inlineField.style.textAlign = $('inlineEditorAlign').value; classicEditor.notifyChange(); });
-  $('inlineVerticalAlign').addEventListener('change', () => { if (inlineDraft) classicEditor.notifyChange(); });
+  $('inlineVerticalAlign').addEventListener('change', () => { syncVerticalAlignButtons(); if (inlineDraft) classicEditor.notifyChange(); });
+  document.querySelectorAll('.inline-valign-btn').forEach((btn) => {
+    btn.addEventListener('mousedown', (event) => event.preventDefault());
+    btn.addEventListener('click', () => setVerticalPlacement(btn.dataset.valign));
+  });
   $('inlineEditorColor').addEventListener('input', () => { if (inlineDraft) { inlineDraft.color = $('inlineEditorColor').value; classicEditor.notifyChange(); } });
   $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) { inlineDraft.color = null; $('inlineEditorColor').value = effectiveInlineColor({ ...inlineDraft.block, color: null }); classicEditor.notifyChange(); } });
   $('inlineEditorSize').addEventListener('input', () => {

@@ -108,7 +108,7 @@ async function editorRenderDifference(page) {
 async function secondSourceDarkPixels(page) {
   return page.evaluate(() => {
     const canvas = document.getElementById('editorCanvas');
-    const pixels = canvas.getContext('2d').getImageData(165, 75, 145, 45).data;
+    const pixels = canvas.getContext('2d').getImageData(170, 82, 70, 15).data;
     let dark = 0;
     for (let index = 0; index < pixels.length; index += 4) {
       if (pixels[index] < 80 && pixels[index + 1] < 80 && pixels[index + 2] < 80) dark += 1;
@@ -724,6 +724,100 @@ main()
     });
     console.log('PASS: zoom docked cleanly, all tools visible directly, and clicking size-8 boxes keeps font at 8 without jumping to 20');
 
+    // v3.60 regressions: (1) background matches moved box only, (2) wheel scrolls & Ctrl+wheel zooms, (3) Excel-style top/middle/bottom placement.
+    {
+      await page.evaluate(() => {
+        window.__savedBeforeV360Test = JSON.parse(JSON.stringify(state.project.images[0].blocks));
+        const tall = {
+          ...JSON.parse(JSON.stringify(window.__savedBeforeV360Test[0])),
+          id: 1, x0: 12, y0: 15, x1: 110, y1: 35,
+          tx0: 180, ty0: 20, tx1: 305, ty1: 170,
+          lineH: 16, size: 14, bg: 'white', color: '#0000aa',
+          tr: 'خط اول', richHtml: '', verticalAlign: 'middle', align: 'right', dir: 'rtl',
+        };
+        state.project.images[0].blocks = [tall];
+        setEditorZoom(5);
+        const preview = document.querySelector('.editor-preview');
+        preview.scrollTop = 0; preview.scrollLeft = 0;
+        buildBlockList(); drawEditor();
+      });
+      // (1) Old OCR region (12,15..110,35) has 'SOURCE ONE' in black on original bitmap — must NOT be erased when box moved to tx0=180!
+      const oldAreaDark = await page.evaluate(() => {
+        const d = document.getElementById('editorCanvas').getContext('2d').getImageData(10, 12, 95, 22).data;
+        let dark = 0;
+        for (let i = 0; i < d.length; i += 4) if (d[i] < 80 && d[i + 1] < 80 && d[i + 2] < 80) dark += 1;
+        return dark;
+      });
+      assert.ok(oldAreaDark > 50, `moving a box must not erase the old OCR region (${oldAreaDark} dark pixels)`);
+
+      // (2) Mouse wheel alone scrolls vertically without changing zoom; Ctrl + wheel zooms!
+      const previewCenter = await page.evaluate(() => {
+        const r = document.querySelector('.editor-preview').getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2, scale: state.editorScale };
+      });
+      await page.mouse.move(previewCenter.x, previewCenter.y);
+      await page.mouse.wheel({ deltaY: 90 });
+      await sleep(30);
+      const afterPlainWheel = await page.evaluate(() => ({
+        scrollTop: document.querySelector('.editor-preview').scrollTop,
+        scale: state.editorScale,
+      }));
+      assert.equal(afterPlainWheel.scale, previewCenter.scale, 'plain mouse wheel must not change zoom');
+      assert.ok(afterPlainWheel.scrollTop > 0, `plain mouse wheel must scroll the page vertically (scrollTop=${afterPlainWheel.scrollTop})`);
+      await page.keyboard.down('Control');
+      await page.mouse.wheel({ deltaY: 100 });
+      await sleep(30);
+      const afterCtrlWheelOut = await page.evaluate(() => state.editorScale);
+      assert.ok(afterCtrlWheelOut < previewCenter.scale, `Ctrl + mouse wheel down must zoom out (${previewCenter.scale} -> ${afterCtrlWheelOut})`);
+      await page.mouse.wheel({ deltaY: -100 });
+      await page.keyboard.up('Control');
+      await sleep(30);
+      const afterCtrlWheelIn = await page.evaluate(() => state.editorScale);
+      assert.ok(afterCtrlWheelIn > afterCtrlWheelOut, `Ctrl + mouse wheel up must zoom in (${afterCtrlWheelOut} -> ${afterCtrlWheelIn})`);
+
+      // (3) Excel-style Top / Middle / Bottom placement inside the tall box (ty0=20..ty1=170)
+      await page.evaluate(() => { fitEditor(); document.querySelector('.editor-preview').scrollTop = 0; openInlineEditor(state.project.images[0].blocks[0]); });
+      const measureBlueMinMaxY = () => page.evaluate(async () => {
+        if (editorCanvasFrame) await new Promise((r) => requestAnimationFrame(r));
+        const d = document.getElementById('editorCanvas').getContext('2d').getImageData(180, 20, 125, 150).data;
+        let minY = 999, maxY = -1;
+        for (let y = 0; y < 150; y += 1) {
+          for (let x = 0; x < 125; x += 1) {
+            const idx = (y * 125 + x) * 4;
+            if (d[idx] < 50 && d[idx + 1] < 50 && d[idx + 2] > 120) {
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        return { minY, maxY, pressedTop: document.getElementById('inlineValignTop').getAttribute('aria-pressed'), pressedMid: document.getElementById('inlineValignMiddle').getAttribute('aria-pressed'), pressedBot: document.getElementById('inlineValignBottom').getAttribute('aria-pressed') };
+      });
+      const midBand = await measureBlueMinMaxY();
+      assert.equal(midBand.pressedMid, 'true');
+      await page.click('#inlineValignTop');
+      const topBand1 = await measureBlueMinMaxY();
+      assert.equal(topBand1.pressedTop, 'true');
+      assert.ok(topBand1.minY < 25 && topBand1.minY < midBand.minY - 35, `Top placement must start near top of box: top=${JSON.stringify(topBand1)} mid=${JSON.stringify(midBand)}`);
+      // Pressing Enter and typing line 2 while in Top mode must keep line 1 anchored at the top and fill downward!
+      await page.focus('#inlineEditorField');
+      await page.keyboard.press('End');
+      await page.keyboard.press('Enter');
+      await page.keyboard.type('خط دوم');
+      const topBand2 = await measureBlueMinMaxY();
+      assert.ok(Math.abs(topBand2.minY - topBand1.minY) <= 2 && topBand2.maxY > topBand1.maxY + 12, `Top placement must keep line 1 at top and fill downward: ${JSON.stringify({ topBand1, topBand2 })}`);
+      await page.click('#inlineValignBottom');
+      const botBand = await measureBlueMinMaxY();
+      assert.equal(botBand.pressedBot, 'true');
+      assert.ok(botBand.maxY > 125 && botBand.minY > topBand2.minY + 60, `Bottom placement must anchor lines to bottom of box: ${JSON.stringify(botBand)}`);
+
+      await page.click('#inlineEditorApply');
+      await page.evaluate(() => {
+        state.project.images[0].blocks = JSON.parse(JSON.stringify(window.__savedBeforeV360Test));
+        fitEditor(); buildBlockList(); drawEditor();
+      });
+      console.log('PASS: box background follows moved box only, wheel scrolls while Ctrl+wheel zooms, and Excel-style top/middle/bottom placement works');
+    }
+
     // Classic source/visual synchronization, sanitization, dialogs and draft recovery.
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
     await page.click('#inlineEditor .classic-tabs button:nth-child(2)');
@@ -941,6 +1035,15 @@ main()
     console.log('PASS: editor canvas matches final rendering with overlapping boxes');
     await page.mouse.move(overlapDrag.x + overlapDrag.dx, overlapDrag.y + overlapDrag.dy); await page.mouse.down();
     await page.mouse.move(overlapDrag.x, overlapDrag.y, { steps: 12 }); await page.mouse.up();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const unmovedOriginalSourceDarkPixels = await secondSourceDarkPixels(page);
+    assert.ok(unmovedOriginalSourceDarkPixels > 50, `while block 2 is moved to tx0=5, original area (165,75) must stay unerased (${unmovedOriginalSourceDarkPixels} dark pixels)`);
+    await page.evaluate(async () => {
+      const b2 = state.project.images[0].blocks[1];
+      b2.tx0 = 165; b2.ty0 = 75; b2.tx1 = 310; b2.ty1 = 145;
+      drawEditor();
+      if (editorCanvasFrame) await new Promise((resolve) => requestAnimationFrame(resolve));
+    });
     const coveredSourceDarkPixels = await secondSourceDarkPixels(page);
     await sleep(400);
     await page.$eval('#editorBoxes .editor-box[data-id="2"] .box-visibility', (eye) => eye.scrollIntoView({ block: 'center', inline: 'center' }));

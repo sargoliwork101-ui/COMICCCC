@@ -61,10 +61,16 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 .inline-editor-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap;flex:none}
 .inline-editor-actions button{font-size:10px;line-height:1.4;padding:3px 9px;border-radius:7px}
 .inline-editor-workbench{display:flex;align-items:stretch;flex-wrap:wrap;gap:6px;transition:opacity .16s}
-.inline-editor.is-idle .inline-editor-workbench{opacity:.56}
+.inline-editor.is-idle:not(.has-selection) .inline-editor-workbench{opacity:.56}
+.inline-editor.is-idle.has-selection .inline-line-tools,.inline-editor.is-idle.has-selection .inline-rich-slot,.inline-editor.is-idle.has-selection .inline-box-settings{opacity:.56}
 .inline-tool-group{display:flex;align-items:center;flex-wrap:wrap;gap:4px;padding:3px 6px;background:var(--surface);border:1px solid var(--line);border-radius:8px;min-height:34px}
 .inline-tool-group label{flex-direction:row;align-items:center;gap:4px;font-size:10px;color:var(--muted);white-space:nowrap}
 .inline-tool-group button,.inline-tool-group select,.inline-tool-group input{font-size:10px;padding:2px 5px;width:auto;min-height:25px;border-radius:6px}
+.inline-valign-group{display:inline-flex;align-items:center;gap:2px;padding:1px;border-radius:7px;background:var(--surface-2);border:1px solid var(--line)}
+.inline-valign-btn{display:inline-flex;align-items:center;gap:3px;padding:2px 6px!important;min-height:24px!important;border:1px solid transparent!important;border-radius:5px!important;background:transparent;color:var(--muted);font-size:10px;line-height:1.2;white-space:nowrap}
+.inline-valign-btn svg{flex:none}
+.inline-valign-btn:not(:disabled):hover{color:var(--text);background:color-mix(in srgb,var(--surface) 75%,transparent)}
+.inline-valign-btn[aria-pressed=true]:not(:disabled){color:var(--text);font-weight:700;background:color-mix(in srgb,var(--a1) 24%,var(--surface));border-color:var(--a1)!important;box-shadow:0 0 0 1px color-mix(in srgb,var(--a1) 35%,transparent)}
 .inline-step-btn{font-weight:700;direction:ltr;min-width:26px;padding:2px 4px!important}
 .inline-tool-group input[type=number]{width:52px;direction:ltr;text-align:center}
 .inline-tool-group input[type=color]{width:30px;height:26px;min-height:26px;padding:2px}
