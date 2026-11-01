@@ -29,8 +29,8 @@ MAX_IMAGE = 150 * 1024**2
 MAX_EDITED = 100 * 1024**2
 MAX_EXPORT = 2 * 1024**3
 ID_RE = re.compile(r'^[A-Za-z0-9]{1,64}$')
-EXPORT_SUFFIXES = {'.pdf', '.zip', '.txt'}
-STORED_ARCHIVE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.zip', '.pdf'}
+EXPORT_SUFFIXES = {'.pdf', '.zip', '.txt', '.docx'}
+STORED_ARCHIVE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.zip', '.pdf', '.docx'}
 
 
 class BackupError(ValueError):

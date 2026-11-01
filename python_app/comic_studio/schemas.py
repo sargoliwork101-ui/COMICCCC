@@ -81,7 +81,7 @@ class SessionRequest(BaseModel):
 
 
 class ExportRequest(BaseModel):
-    kind: Literal["pdf", "images", "txt"]
+    kind: Literal["pdf", "images", "txt", "docx"]
     image_ids: list[str] = Field(default_factory=list)
     name: str = "comic-translated"
     seamless: bool = False

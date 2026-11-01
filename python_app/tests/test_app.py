@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.55"
+    assert health.json()["version"] == "3.56"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
@@ -1747,4 +1747,49 @@ def test_restore_backup_enforces_actual_decompressed_byte_cap(client, monkeypatc
     monkeypatch.setattr(backup, 'MAX_IMAGE', 32)
     with pytest.raises(backup.BackupError):
         backup.restore_backup(ProjectStore(), io.BytesIO(response.content))
+
+
+def test_docx_export_produces_valid_rtl_ooxml_and_survives_backup(client):
+    import xml.etree.ElementTree as ET
+    from comic_studio import backup
+    from comic_studio.store import ProjectStore, project_root
+
+    project, item = make_project(client)
+    project["name"] = "آزمون خروجی Word"
+    project["images"][0]["blocks"] = [
+        {"id": 2, "text": "SECOND\x07 LINE\nWITH <TAGS> & \"QUOTES\"", "tr": "خط دوم\nترجمه‌شده", "x0": 10, "y0": 80, "x1": 140, "y1": 120},
+        {"id": 1, "text": "FIRST LINE", "tr": "سلام کمیک!", "x0": 10, "y0": 10, "x1": 140, "y1": 50},
+    ]
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+
+    res = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={"kind": "docx", "image_ids": [item["id"]], "name": "comic-word-out"},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    assert "comic-word-out.docx" in res.headers.get("content-disposition", "")
+
+    with zipfile.ZipFile(io.BytesIO(res.content)) as archive:
+        names = set(archive.namelist())
+        assert {"[Content_Types].xml", "_rels/.rels", "word/_rels/document.xml.rels", "word/styles.xml", "word/document.xml"} <= names
+        for xml_member in names:
+            ET.fromstring(archive.read(xml_member))
+        doc_root = ET.fromstring(archive.read("word/document.xml"))
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        full_text = "".join(t.text or "" for t in doc_root.findall(".//w:t", ns))
+        assert "آزمون خروجی Word" in full_text
+        assert "تصویر 001" in full_text
+        assert full_text.index("FIRST LINE") < full_text.index("SECOND LINE")
+        assert "سلام کمیک!" in full_text
+        assert 'WITH <TAGS> & "QUOTES"' in full_text
+        assert "\x07" not in full_text
+        assert doc_root.find(".//w:bidiVisual", ns) is not None
+        assert doc_root.find(".//w:bidi", ns) is not None
+
+    backup_res = client.post(f"/api/projects/{project['id']}/backup", json={"drafts": []})
+    assert backup_res.status_code == 200
+    restored, _ = backup.restore_backup(ProjectStore(), io.BytesIO(backup_res.content))
+    assert (project_root(restored["id"]) / "exports" / "comic-word-out.docx").is_file()
+
 

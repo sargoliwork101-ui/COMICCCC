@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.55">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.55">
+  <link rel="stylesheet" href="/style.css?v=3.56">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.56">
 </head>
 <body>
   <header class="topbar">
@@ -64,7 +64,7 @@
       <p>ترجمهٔ رایگان یا AI فقط با انتخاب شما به سرویس آنلاین متصل می‌شود.</p>
     </section>
     <section id="result" class="panel result-panel">
-      <div class="row"><strong>وضعیت</strong><span id="jobStatus" role="status">آماده</span><a id="downloadLink" class="bt success hidden" href="#" download>دانلود فایل آماده</a><span class="grow"></span><button id="pendingResultsBtn" class="bt">نتایج منتظر بررسی</button><button id="clearActivityBtn" class="bt clear-activity">پاک‌کردن گزارش</button><span class="muted">PDF · ZIP · TXT</span></div>
+      <div class="row"><strong>وضعیت</strong><span id="jobStatus" role="status">آماده</span><a id="downloadLink" class="bt success hidden" href="#" download>دانلود فایل آماده</a><span class="grow"></span><button id="pendingResultsBtn" class="bt">نتایج منتظر بررسی</button><button id="clearActivityBtn" class="bt clear-activity">پاک‌کردن گزارش</button><span class="muted">PDF · ZIP · TXT · Word</span></div>
       <div class="bar" role="progressbar" aria-label="پیشرفت کار" aria-valuemin="0" aria-valuemax="100"><div id="jobProgress" class="fill"></div></div>
       <details id="activityDetails" class="activity-details" open>
         <summary>گزارش زندهٔ کارها</summary>
@@ -78,6 +78,7 @@
     <button id="exportPdfBtn" class="bt success">PDF</button>
     <button id="exportImagesBtn" class="bt">ZIP تصاویر</button>
     <button id="exportTxtBtn" class="bt">TXT</button>
+    <button id="exportDocxBtn" class="bt">Word</button>
     <button id="exportBtn" class="bt">تنظیمات خروجی</button>
   </footer>
 
@@ -178,7 +179,7 @@
 
   <dialog id="exportDialog" class="dlg small-dialog">
     <form method="dialog" class="dialog-head"><h2>تنظیمات خروجی</h2><button class="icon" value="cancel">×</button></form>
-    <label>نوع خروجی<select id="exportKind"><option value="pdf">PDF</option><option value="images">تصاویر جداگانه (ZIP)</option><option value="txt">متن OCR و ترجمه (TXT)</option></select></label>
+    <label>نوع خروجی<select id="exportKind"><option value="pdf">PDF</option><option value="images">تصاویر جداگانه (ZIP)</option><option value="txt">متن OCR و ترجمه (TXT)</option><option value="docx">فایل Word (DOCX)</option></select></label>
     <label>متن روی تصاویر<select id="exportOverlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label>
     <div id="pdfExportFields" class="checks"><label><input id="exportSeamless" type="checkbox"> همهٔ تصاویر پشت سر هم در یک صفحهٔ بلند</label><label><input id="exportUniform" type="checkbox"> قاب‌های هم‌اندازه</label><label><input id="exportTwo" type="checkbox"> دو تصویر در هر صفحه (گروه‌ها جدا می‌مانند)</label></div>
     <div id="imageExportFields" class="form-grid hidden"><label>فرمت<select id="exportFormat"><option value="orig">اصلی / PNG برای ویرایش‌شده</option><option value="png">PNG</option><option value="jpg">JPEG کیفیت ۱۰۰٪</option></select></label><label>زیرپوشه داخل ZIP<input id="exportFolder" placeholder="اختیاری"></label></div>
@@ -190,19 +191,34 @@
 
   <dialog id="editorDialog" class="dlg editor-dialog">
     <div class="dialog-head"><h2 id="editorTitle">ویرایش متن</h2><div><label class="overlay-mode-control">متن روی تصویر<select id="overlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label><button id="editorRevert" class="bt danger">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt">به‌روزرسانی پیش‌نمایش</button><button id="editorClose" class="bt primary">ذخیره و بستن</button></div></div>
-      <section id="inlineEditor" class="inline-editor hidden" role="region" aria-label="ویرایش متن انتخاب‌شده">
-        <div class="inline-editor-head"><strong id="inlineEditorTitle">ویرایش مستقیم · ذخیرهٔ خودکار</strong><div><button id="inlinePreview" type="button" aria-label="نمایش دقیق متن روی تصویر" aria-pressed="false" title="پیش‌نمایش نهایی همیشه زنده است">نمایش روی تصویر</button><button id="inlineEditorCancel" type="button" class="hidden" aria-label="بستن بدون ذخیره" title="بستن و صرف‌نظر از ویرایشِ ناسازگار">بستن بدون ذخیره</button><button id="inlineEditorApply" type="button" class="primary" title="تغییرها هنگام تایپ ذخیره می‌شوند">بستن</button></div></div>
-        <div id="inlineEditorField" class="inline-editor-field" contenteditable="true" role="textbox" aria-multiline="true" aria-label="متن انتخاب‌شده"></div>
-        <div class="inline-editor-tools inline-line-tools">
-          <label>جای عمودی متن در کادر<select id="inlineVerticalAlign" aria-label="جای عمودی متن در کادر"><option value="top">بالا</option><option value="middle">وسط</option><option value="bottom">پایین</option></select></label>
-          <div id="inlineLineTools" class="inline-editor-tools" aria-label="تنظیم خط انتخاب‌شده"><label>اندازهٔ خط روی تصویر<input id="inlineLineSize" type="number" min="8" max="160" placeholder="پیش‌فرض" aria-label="اندازهٔ خط انتخاب‌شده روی تصویر"></label><button id="inlineLineReset" type="button" title="حذف تنظیمات اختصاصی این خط">پیش‌فرض خط</button></div>
+      <section id="inlineEditor" class="inline-editor is-idle" role="region" aria-label="ویرایش متن انتخاب‌شده">
+        <div class="inline-editor-head">
+          <div class="inline-editor-status"><span class="inline-status-dot" aria-hidden="true"></span><strong id="inlineEditorTitle">ویرایشگر متن آماده است · برای ویرایش، روی هر کادر متن در تصویر کلیک کنید</strong></div>
+          <div class="inline-editor-actions">
+            <button id="inlinePreview" type="button" aria-label="نمایش دقیق متن روی تصویر" aria-pressed="false" title="پیش‌نمایش تمیز بدون نشانگر کادر">پیش‌نمایش دقیق</button>
+            <button id="inlineEditorCancel" type="button" class="hidden" aria-label="بستن بدون ذخیره" title="بستن و صرف‌نظر از ویرایشِ ناسازگار">بستن بدون ذخیره</button>
+            <button id="inlineEditorApply" type="button" class="primary" title="پایان ویرایش کادر فعلی (تغییرها خودکار ذخیره می‌شوند)">پایان ویرایش کادر</button>
+          </div>
         </div>
-        <details class="inline-box-settings"><summary>تنظیمات پیش‌فرض کل کادر</summary><div class="inline-editor-tools">
-          <label>جهت<select id="inlineEditorDirection" aria-label="جهت متن"><option value="rtl">راست‌به‌چپ</option><option value="ltr">چپ‌به‌راست</option></select></label>
-          <label>تراز<select id="inlineEditorAlign" aria-label="تراز متن"><option value="right">راست</option><option value="center">وسط</option><option value="left">چپ</option><option value="justify">جاستیفای</option></select></label>
-          <label>اندازه روی تصویر<input id="inlineEditorSize" type="number" min="8" max="160" placeholder="خودکار" aria-label="اندازهٔ متن روی تصویر"></label>
-          <label>رنگ<input id="inlineEditorColor" type="color" aria-label="رنگ متن روی تصویر"></label><button id="inlineEditorAutoColor" type="button">رنگ خودکار</button>
-        </div></details>
+        <div class="inline-editor-workbench">
+          <div class="inline-tool-group inline-group-box" role="group" aria-label="تنظیمات کل کادر">
+            <span class="inline-group-tag">کل کادر</span>
+            <label title="اندازهٔ قلم کل کادر روی تصویر"><span>اندازه</span><input id="inlineEditorSize" type="number" min="8" max="160" placeholder="خودکار" aria-label="اندازهٔ متن روی تصویر"></label>
+            <label title="رنگ متن کل کادر"><span>رنگ</span><input id="inlineEditorColor" type="color" aria-label="رنگ متن روی تصویر"></label>
+            <button id="inlineEditorAutoColor" type="button" title="تشخیص خودکار رنگ مناسب بر اساس پس‌زمینهٔ حباب">رنگ خودکار</button>
+            <label title="تراز افقی متن داخل کادر"><span>تراز</span><select id="inlineEditorAlign" aria-label="تراز متن"><option value="right">راست</option><option value="center">وسط</option><option value="left">چپ</option><option value="justify">جاستیفای</option></select></label>
+            <label title="جای عمودی متن در کادر"><span>عمودی</span><select id="inlineVerticalAlign" aria-label="جای عمودی متن در کادر"><option value="top">بالا</option><option value="middle">وسط</option><option value="bottom">پایین</option></select></label>
+            <label title="جهت نوشتار کادر"><span>جهت</span><select id="inlineEditorDirection" aria-label="جهت متن"><option value="rtl">راست‌به‌چپ</option><option value="ltr">چپ‌به‌راست</option></select></label>
+          </div>
+          <div id="inlineLineTools" class="inline-tool-group inline-line-tools" role="group" aria-label="تنظیم خط انتخاب‌شده">
+            <span class="inline-group-tag">خط فعلی</span>
+            <label title="اندازهٔ اختصاصی فقط برای خط فعلی"><span>اندازهٔ خط</span><input id="inlineLineSize" type="number" min="8" max="160" placeholder="پیش‌فرض" aria-label="اندازهٔ خط انتخاب‌شده روی تصویر"></label>
+            <button id="inlineLineReset" type="button" title="حذف تنظیمات اختصاصی این خط">پیش‌فرض خط</button>
+          </div>
+          <div class="inline-rich-slot">
+            <div id="inlineEditorField" class="inline-editor-field" contenteditable="true" role="textbox" aria-multiline="true" aria-label="متن انتخاب‌شده"></div>
+          </div>
+        </div>
       </section>
     <div class="editor-body"><div class="editor-view"><div class="editor-zoom-controls editor-zoom-floating" aria-label="زوم تصویر"><button id="editorZoomOut" type="button" aria-label="کوچک‌نمایی">−</button><output id="editorZoomLabel" aria-live="polite">100٪</output><button id="editorZoomIn" type="button" aria-label="بزرگ‌نمایی">+</button><button id="editorZoomActual" type="button">۱۰۰٪</button><button id="editorZoomFit" type="button">عرض صفحه</button><button id="editorImageFullscreen" type="button" aria-label="تمام‌صفحهٔ تصویر" aria-pressed="false" title="نمایش تمام تصویر">تمام‌صفحه تصویر</button></div><div class="editor-preview"><div id="editorStage" title="فضای خالی تصویر را بکشید تا جابه‌جا شود"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div>
 
@@ -245,11 +261,11 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.55"></script>
-  <script src="/groups.js?v=3.55"></script>
-  <script src="/rich-sanitize.js?v=3.55"></script>
-  <script src="/rich-editor.js?v=3.55"></script>
-  <script src="/inline-edit-session.js?v=3.55"></script>
-  <script src="/app.js?v=3.55"></script>
+  <script src="/typeset.js?v=3.56"></script>
+  <script src="/groups.js?v=3.56"></script>
+  <script src="/rich-sanitize.js?v=3.56"></script>
+  <script src="/rich-editor.js?v=3.56"></script>
+  <script src="/inline-edit-session.js?v=3.56"></script>
+  <script src="/app.js?v=3.56"></script>
 </body>
 </html>

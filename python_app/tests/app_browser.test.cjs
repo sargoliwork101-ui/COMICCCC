@@ -378,11 +378,13 @@ main()
 
     await page.click('#grid .item .act button:nth-child(2)');
     await page.waitForSelector('#editorDialog[open] #blockList .block-card[data-id="1"]');
-    assert.equal(await page.$eval('#inlineEditor', el => el.classList.contains('hidden')), true, 'toolbar is hidden before selecting a box');
-    // Clicking a text edits the real output box directly; only formatting controls stay in a narrow dock.
+    assert.deepEqual(await page.$eval('#inlineEditor', el => ({ hidden: el.classList.contains('hidden'), idle: el.classList.contains('is-idle') })), { hidden: false, idle: true }, 'toolbar stays permanently docked in idle state before selecting a box');
+    const previewTopIdle = await page.$eval('.editor-preview', el => el.getBoundingClientRect().top);
+    // Clicking a text edits the real output box directly; formatting controls stay permanently in the top dock without vertical shift.
     await page.evaluate(() => { window.__inlineOriginal = JSON.parse(JSON.stringify(state.project.images[0].blocks[0])); window.__beforeInlineCanvas = document.getElementById('editorCanvas').toDataURL(); });
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text', { offset: { x: 75, y: 30 } });
-    await page.waitForSelector('#inlineEditor:not(.hidden)');
+    await page.waitForSelector('#inlineEditor:not(.is-idle)');
+    assert.ok(Math.abs((await page.$eval('.editor-preview', el => el.getBoundingClientRect().top)) - previewTopIdle) <= 2, 'activating a box must not shift the image preview vertically');
     const initialSettings = await page.evaluate(() => { const block=state.project.images[0].blocks[0];return {size:document.getElementById('inlineEditorSize').value,expectedSize:String(effectiveInlineSize(block)),color:document.getElementById('inlineEditorColor').value,expectedColor:effectiveInlineColor(block)}; });
     assert.equal(initialSettings.size, initialSettings.expectedSize, 'entering direct edit initializes size to the exact rendered font size');
     assert.equal(initialSettings.color, initialSettings.expectedColor, 'entering direct edit initializes the picker to the visible rendered text color');
@@ -400,9 +402,9 @@ main()
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const blank = await page.evaluate(() => { const r=document.getElementById('editorBoxes').getBoundingClientRect(); return {x:r.left+160*state.editorScale,y:r.top+60*state.editorScale}; });
     await page.mouse.click(blank.x, blank.y);
-    assert.equal(await page.$eval('#inlineEditor', el => el.classList.contains('hidden')), true, 'clicking blank image hides the contextual tools');
+    assert.deepEqual(await page.$eval('#inlineEditor', el => ({ hidden: el.classList.contains('hidden'), idle: el.classList.contains('is-idle') })), { hidden: false, idle: true }, 'clicking blank image finishes box editing while keeping the top toolbar open');
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
-    await page.waitForSelector('#inlineEditor:not(.hidden)');
+    await page.waitForSelector('#inlineEditor:not(.is-idle)');
     const popupPosition = await page.evaluate(() => {
       const head = document.querySelector('#editorDialog>.dialog-head').getBoundingClientRect(); const panel = document.getElementById('inlineEditor').getBoundingClientRect(); const body = document.querySelector('#editorDialog>.editor-body').getBoundingClientRect();
       return panel.top >= head.bottom - 1 && panel.bottom <= body.top + 1;
@@ -432,7 +434,8 @@ main()
     assert.equal(await editorRenderDifference(page), 0, 'while editing, the canvas must exactly match the final renderer for the live draft');
     assert.equal(await page.$eval('#inlineEditorField', field => getComputedStyle(field).color === 'rgba(0, 0, 0, 0)' && getComputedStyle(field).caretColor !== 'rgba(0, 0, 0, 0)'), true, 'the caret remains visible while the exact rendered text is shown underneath');
     await page.click('#inlineEditorApply');
-    assert.equal(await page.$eval('#inlineEditor', (panel) => panel.classList.contains('hidden')), true);
+    assert.deepEqual(await page.$eval('#inlineEditor', (panel) => ({ hidden: panel.classList.contains('hidden'), idle: panel.classList.contains('is-idle') })), { hidden: false, idle: true });
+    assert.ok(Math.abs((await page.$eval('.editor-preview', el => el.getBoundingClientRect().top)) - previewTopIdle) <= 2, 'finishing box edit must keep the canvas vertically stable');
     assert.equal(await page.$$eval('#editorBoxes [contenteditable="true"], #editorBoxes [contenteditable="plaintext-only"]', els => els.length), 0, 'Apply removes the editable surface from the image box');
     const appliedInline = await page.evaluate(() => {
       const block = state.project.images[0].blocks[0];
@@ -471,7 +474,7 @@ main()
     assert.equal(await page.$eval('#inlineEditor', el => el.classList.contains('hidden')), false, 'panning must not dismiss the toolbar');
     const blankAfterPan = await page.evaluate(() => { const r=document.getElementById('editorBoxes').getBoundingClientRect(); return {x:r.left+160*state.editorScale,y:r.top+60*state.editorScale}; });
     await page.mouse.click(blankAfterPan.x, blankAfterPan.y);
-    assert.equal(await page.$eval('#inlineEditor', el => el.classList.contains('hidden')), true, 'clicking blank image closes editing after its changes have already auto-saved');
+    assert.deepEqual(await page.$eval('#inlineEditor', el => ({ hidden: el.classList.contains('hidden'), idle: el.classList.contains('is-idle') })), { hidden: false, idle: true }, 'clicking blank image finishes box editing while keeping the toolbar docked');
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr), 'discard this draft', 'leaving the box preserves the live edit');
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[1]));
     assert.equal(await page.evaluate(() => String(inlineDraft.block.id)), '2', 'switching boxes activates the newly selected image text without a discard prompt');
@@ -779,7 +782,7 @@ main()
     assert.equal(await previewDifference(page), 0, 'saved edits must survive reload in the visible preview');
 
     const files = {};
-    for (const [button, key, extension] of [['#exportImagesBtn', 'zip', '.zip'], ['#exportPdfBtn', 'pdf', '.pdf'], ['#exportTxtBtn', 'txt', '.txt']]) {
+    for (const [button, key, extension] of [['#exportImagesBtn', 'zip', '.zip'], ['#exportPdfBtn', 'pdf', '.pdf'], ['#exportTxtBtn', 'txt', '.txt'], ['#exportDocxBtn', 'docx', '.docx']]) {
       const downloaded = nextDownload(cdp, downloads); await page.click(button); files[key] = await downloaded;
       assert.ok(files[key].endsWith(extension) && fs.statSync(files[key]).size > 0, `${key.toUpperCase()} must be a real nonempty download`);
       await page.waitForFunction(() => {
@@ -792,10 +795,10 @@ main()
     const text = fs.readFileSync(files.txt, 'utf8');
     assert.ok(text.includes('ویرایش تازه ۳٫۲۱') && text.includes('SOURCE TWO') && text.includes('ترجمهٔ دوم') && text.includes('SOURCE THREE') && text.includes('ترجمهٔ سوم'));
     execFileSync(python, ['-c', `
-import io, sys, zipfile
+import io, sys, xml.etree.ElementTree as ET, zipfile
 import pymupdf
 from PIL import Image, ImageChops
-zip_path, pdf_path, edited_path = sys.argv[1:]
+zip_path, pdf_path, docx_path, edited_path = sys.argv[1:]
 with Image.open(edited_path) as opened: expected = opened.convert('RGBA')
 with zipfile.ZipFile(zip_path) as archive:
     with Image.open(io.BytesIO(archive.read(archive.namelist()[0]))) as opened:
@@ -804,7 +807,11 @@ with pymupdf.open(pdf_path) as document:
     info = document.extract_image(document[0].get_images(full=True)[0][0])
     with Image.open(io.BytesIO(info['image'])) as opened:
         assert ImageChops.difference(opened.convert('RGBA'), expected).getbbox() is None
-`, files.zip, files.pdf, editedPath]);
+with zipfile.ZipFile(docx_path) as archive:
+    root = ET.fromstring(archive.read('word/document.xml'))
+    docx_text = ''.join(el.text or '' for el in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+    assert 'ویرایش تازه ۳٫۲۱' in docx_text and 'SOURCE TWO' in docx_text and 'ترجمهٔ سوم' in docx_text
+`, files.zip, files.pdf, files.docx, editedPath]);
     const other = await api(base, '/api/projects', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Project switch test' }),
     });

@@ -7,6 +7,7 @@ import zipfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 
 import pymupdf as fitz
 from PIL import Image
@@ -261,4 +262,184 @@ def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
     output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.txt"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\ufeff" + "\n".join(chunks), encoding="utf-8")
+    return output
+
+
+_INVALID_XML_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+_DOCX_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"""
+
+_DOCX_ROOT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+
+_DOCX_DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"""
+
+_DOCX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts w:ascii="Segoe UI" w:hAnsi="Segoe UI" w:cs="Vazirmatn" w:eastAsia="Segoe UI"/>
+        <w:sz w:val="22"/>
+        <w:szCs w:val="22"/>
+        <w:lang w:val="en-US" w:bidi="fa-IR"/>
+      </w:rPr>
+    </w:rPrDefault>
+    <w:pPrDefault>
+      <w:pPr>
+        <w:spacing w:after="100" w:line="300" w:lineRule="auto"/>
+      </w:pPr>
+    </w:pPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+  </w:style>
+</w:styles>"""
+
+
+def _xml_text(value: Any) -> str:
+    return xml_escape(_INVALID_XML_RE.sub("", str(value or "")).replace("\r\n", "\n").replace("\r", "\n"))
+
+
+def _docx_runs(text: Any, *, bold: bool = False, rtl: bool = True, size_half_pt: int = 22, color: str | None = None) -> str:
+    rpr = [f'<w:sz w:val="{size_half_pt}"/><w:szCs w:val="{size_half_pt}"/>']
+    if bold:
+        rpr.append("<w:b/><w:bCs/>")
+    if rtl:
+        rpr.append("<w:rtl/>")
+    if color:
+        rpr.append(f'<w:color w:val="{color}"/>')
+    rpr_xml = f"<w:rPr>{''.join(rpr)}</w:rPr>"
+    lines = _INVALID_XML_RE.sub("", str(text or "")).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    parts: list[str] = []
+    for idx, line in enumerate(lines):
+        if idx > 0:
+            parts.append("<w:br/>")
+        parts.append(f'<w:t xml:space="preserve">{xml_escape(line)}</w:t>')
+    return f"<w:r>{rpr_xml}{''.join(parts)}</w:r>"
+
+
+def _docx_paragraph(
+    text: Any, *, rtl: bool = True, align: str = "right", bold: bool = False,
+    size_half_pt: int = 22, color: str | None = None, space_before: int = 0, space_after: int = 100,
+    bottom_border: bool = False,
+) -> str:
+    ppr = [
+        f'<w:bidi w:val="{"1" if rtl else "0"}"/>',
+        f'<w:jc w:val="{align}"/>',
+        f'<w:spacing w:before="{space_before}" w:after="{space_after}" w:line="300" w:lineRule="auto"/>',
+    ]
+    if bottom_border:
+        ppr.append('<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="4" w:color="CBD5E1"/></w:pBdr>')
+    run = _docx_runs(text, bold=bold, rtl=rtl, size_half_pt=size_half_pt, color=color) if str(text or "") != "" else ""
+    return f"<w:p><w:pPr>{''.join(ppr)}</w:pPr>{run}</w:p>"
+
+
+def _docx_cell(
+    text: Any, *, width_dxa: int, rtl: bool = True, align: str = "right",
+    bold: bool = False, fill: str | None = None, color: str | None = None,
+) -> str:
+    tc_pr = [
+        f'<w:tcW w:w="{width_dxa}" w:type="dxa"/>',
+        '<w:vAlign w:val="top"/>',
+    ]
+    if fill:
+        tc_pr.append(f'<w:shd w:val="clear" w:color="auto" w:fill="{fill}"/>')
+    p = _docx_paragraph(text, rtl=rtl, align=align, bold=bold, size_half_pt=21, color=color, space_before=40, space_after=40)
+    return f"<w:tc><w:tcPr>{''.join(tc_pr)}</w:tcPr>{p}</w:tc>"
+
+
+def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, Any]) -> Path:
+    images = selected_images(state, request.get("image_ids", []))
+    if not images:
+        raise ValueError("No images selected")
+    doc_title = (state.get("name") or request.get("name") or "پروژهٔ کمیک").strip()
+    body_parts: list[str] = [
+        _docx_paragraph(doc_title, rtl=True, align="right", bold=True, size_half_pt=30, color="1E293B", space_before=0, space_after=200),
+    ]
+    tbl_borders = (
+        '<w:tblBorders>'
+        '<w:top w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
+        '<w:left w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
+        '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
+        '<w:right w:val="single" w:sz="4" w:space="0" w:color="CBD5E1"/>'
+        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="E2E8F0"/>'
+        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="E2E8F0"/>'
+        '</w:tblBorders>'
+    )
+    tbl_cell_mar = (
+        '<w:tblCellMar>'
+        '<w:top w:w="80" w:type="dxa"/><w:left w:w="120" w:type="dxa"/>'
+        '<w:bottom w:w="80" w:type="dxa"/><w:right w:w="120" w:type="dxa"/>'
+        '</w:tblCellMar>'
+    )
+    for index, item in enumerate(images, start=1):
+        body_parts.append(
+            _docx_paragraph(
+                f"تصویر {index:03d} — {item['name']}",
+                rtl=True, align="right", bold=True, size_half_pt=24, color="334155",
+                space_before=220, space_after=100, bottom_border=True,
+            )
+        )
+        blocks = sorted(item.get("blocks", []), key=lambda block: (block.get("y0", 0), block.get("x0", 0)))
+        if not blocks:
+            body_parts.append(_docx_paragraph("(متنی تشخیص داده نشده است)", rtl=True, color="64748B", space_after=140))
+            continue
+        rows_xml = [
+            "<w:tr><w:trPr><w:tblHeader/></w:trPr>"
+            + _docx_cell("کادر", width_dxa=900, rtl=True, align="center", bold=True, fill="EEF2FF", color="1E293B")
+            + _docx_cell("ترجمهٔ فارسی", width_dxa=4350, rtl=True, align="right", bold=True, fill="EEF2FF", color="1E293B")
+            + _docx_cell("متن اصلی (OCR)", width_dxa=4350, rtl=False, align="left", bold=True, fill="EEF2FF", color="1E293B")
+            + "</w:tr>"
+        ]
+        for row_idx, block in enumerate(blocks):
+            indent = " " * max(0, min(40, int(block.get("sourceIndent", 0) or 0)))
+            src_text = f"{indent}{block.get('text', '')}".rstrip() or "—"
+            tr_text = (block.get("tr") or "").strip() or "(بدون ترجمه)"
+            zebra = "F8FAFC" if row_idx % 2 == 1 else None
+            rows_xml.append(
+                "<w:tr>"
+                + _docx_cell(f"[{block.get('id', '-')}]", width_dxa=900, rtl=False, align="center", fill=zebra, color="475569")
+                + _docx_cell(tr_text, width_dxa=4350, rtl=True, align="right", fill=zebra, color="0F172A")
+                + _docx_cell(src_text, width_dxa=4350, rtl=False, align="left", fill=zebra, color="334155")
+                + "</w:tr>"
+            )
+        body_parts.append(
+            "<w:tbl>"
+            f"<w:tblPr><w:bidiVisual/><w:tblW w:w=\"9600\" w:type=\"dxa\"/>{tbl_borders}{tbl_cell_mar}</w:tblPr>"
+            '<w:tblGrid><w:gridCol w:w="900"/><w:gridCol w:w="4350"/><w:gridCol w:w="4350"/></w:tblGrid>'
+            + "".join(rows_xml)
+            + "</w:tbl>"
+        )
+        body_parts.append(_docx_paragraph("", rtl=True, space_before=0, space_after=80))
+
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body>"
+        + "".join(body_parts)
+        + '<w:sectPr><w:bidi/><w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/>'
+        "</w:sectPr>"
+        "</w:body></w:document>"
+    )
+    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.docx"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", _DOCX_CONTENT_TYPES.encode("utf-8"))
+        archive.writestr("_rels/.rels", _DOCX_ROOT_RELS.encode("utf-8"))
+        archive.writestr("word/_rels/document.xml.rels", _DOCX_DOC_RELS.encode("utf-8"))
+        archive.writestr("word/styles.xml", _DOCX_STYLES.encode("utf-8"))
+        archive.writestr("word/document.xml", document_xml.encode("utf-8"))
     return output

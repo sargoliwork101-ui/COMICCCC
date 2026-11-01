@@ -39,25 +39,46 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 @media(max-width:560px){.ai-profile-row{grid-template-columns:1fr auto auto}.ai-profile-name{grid-column:1/-1}.ai-profile-key{grid-column:1}.ai-profile-status{grid-column:1/-1}#mainwrap{padding:9px 9px 18px}.topbar{padding:9px}.topbar>.bt{font-size:10px;padding:6px}.logo{width:30px;height:30px}.grid{grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:14px 9px}.toolbar .bt{flex:1 1 42%}.row2 .bt{flex:1 1 auto}.project-controls{grid-template-columns:1fr}.crop-inputs{grid-template-columns:1fr 1fr}#dock{gap:5px;padding:7px}#dock input{width:100%;order:-1}#dock .bt{flex:1;min-width:0;padding:6px 5px;font-size:10px}.group-panel-head{align-items:flex-start;flex-direction:column}}
 
 /* Contextual toolbar layout and controls. */
-.inline-editor{position:absolute;z-index:30;background:var(--surface);color:var(--text);border:1px solid var(--a1);border-radius:10px;box-shadow:0 12px 34px #0009;direction:rtl;display:flex;flex-direction:column}
-.inline-editor-tools{display:flex;flex-wrap:wrap;align-items:end;gap:4px;margin-top:7px}.inline-editor-tools button,.inline-editor-tools select,.inline-editor-tools input{font-size:10px;padding:4px 6px;width:auto}.inline-editor-tools label{font-size:10px;gap:1px}.inline-editor-tools input[type=number]{width:66px}.inline-editor-tools input[type=color]{width:38px;height:30px}
+.inline-editor{position:absolute;z-index:30;background:var(--surface-2);color:var(--text);border:1px solid var(--line-2);border-radius:11px;box-shadow:0 12px 34px #0009;direction:rtl;display:flex;flex-direction:column}
 .inline-editor-field *{font-size:inherit!important}.inline-editor-field p,.inline-editor-field div,.inline-editor-field h1,.inline-editor-field h2,.inline-editor-field h3,.inline-editor-field h4,.inline-editor-field h5,.inline-editor-field h6,.inline-editor-field blockquote,.inline-editor-field pre{margin:0;padding:0}
-.inline-line-tools{padding-top:6px;border-top:1px solid var(--line);align-items:center}.editor-box.empty .editor-box-text::after{content:'+ افزودن متن';position:absolute;inset:0;display:grid;place-items:center;color:#2768ac!important;-webkit-text-fill-color:#2768ac!important;font-size:11px;background:#ffffff99!important;pointer-events:none}
+.editor-box.empty .editor-box-text::after{content:'+ افزودن متن';position:absolute;inset:0;display:grid;place-items:center;color:#2768ac!important;-webkit-text-fill-color:#2768ac!important;font-size:11px;background:#ffffff99!important;pointer-events:none}
 
-/* Contextual tools float above the selected box; the only editable surface is
-   the box itself. The canvas underneath remains the committed output preview. */
-.inline-editor{width:min(640px,calc(100% - 16px));max-height:min(45vh,300px);padding:5px;overflow:auto}
-.inline-editor-head{order:0;margin:0 0 3px;display:flex;align-items:center;justify-content:space-between;gap:8px}.inline-editor-head strong{font-size:11px}.inline-editor-head>div{display:flex;gap:4px}.inline-editor-head button{font-size:10px;line-height:1.4;padding:3px 8px}
-.inline-editor>.classic-editor{order:1;border:0;border-radius:5px}.inline-editor>.inline-line-tools{order:2;margin-top:3px;padding-top:3px}.inline-box-settings{order:3;font-size:10px}.inline-box-settings summary{cursor:pointer;color:var(--muted)}
+/* Permanently docked top text-editor ribbon; the only editable text surface is
+   the on-image box itself while the canvas underneath renders live output. */
+.inline-editor-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.inline-editor-status{display:flex;align-items:center;gap:7px;min-width:0}
+.inline-status-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint);transition:background .18s,box-shadow .18s}
+.inline-editor:not(.is-idle) .inline-status-dot{background:#34d399;box-shadow:0 0 0 3px #34d3992e}
+.inline-editor-head strong{font-size:11px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.inline-editor.is-idle .inline-editor-head strong{color:var(--muted);font-weight:500}
+.inline-editor-actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.inline-editor-actions button{font-size:10px;line-height:1.4;padding:3px 9px;border-radius:7px}
+.inline-editor-workbench{display:flex;align-items:stretch;flex-wrap:wrap;gap:6px;transition:opacity .16s}
+.inline-editor.is-idle .inline-editor-workbench{opacity:.56}
+.inline-tool-group{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:4px 8px;background:var(--surface);border:1px solid var(--line);border-radius:8px;min-height:36px}
+.inline-group-tag{font-size:10px;font-weight:700;color:var(--a2);background:color-mix(in srgb,var(--a2) 13%,transparent);border-radius:5px;padding:1px 6px;white-space:nowrap}
+.inline-tool-group label{flex-direction:row;align-items:center;gap:4px;font-size:10px;color:var(--muted);white-space:nowrap}
+.inline-tool-group button,.inline-tool-group select,.inline-tool-group input{font-size:10px;padding:3px 6px;width:auto;min-height:26px;border-radius:6px}
+.inline-tool-group input[type=number]{width:58px;direction:ltr;text-align:center}
+.inline-tool-group input[type=color]{width:30px;height:26px;min-height:26px;padding:2px}
+.inline-rich-slot{flex:1 1 310px;min-width:min(100%,250px);min-height:36px;display:flex;align-items:center}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen){flex:1;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;border:1px solid var(--line);border-radius:8px;background:var(--surface);min-height:36px}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-toolbar{flex:1 1 auto;border:0;background:transparent;padding:3px 5px}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-tabs{order:2;padding:3px 5px;background:transparent;border-inline-start:1px solid var(--line);align-items:center}
+.inline-rich-slot>.classic-editor:not(.classic-fullscreen)>.classic-tabs button{border-radius:5px;padding:2px 8px;font-size:10px}
+#inlineEditor .classic-editor:not(.classic-fullscreen)>.classic-content,#inlineEditor .classic-editor:not(.classic-fullscreen)>.classic-source,#inlineEditor .classic-editor:not(.classic-fullscreen)>.classic-status{display:none!important}
+.inline-editor.plain-mode .inline-line-tools{opacity:.42;pointer-events:none}
+.inline-editor.plain-mode .inline-rich-slot>.classic-editor:not(.classic-fullscreen){padding:0 10px}
+.inline-editor.plain-mode .inline-rich-slot>.classic-editor:not(.classic-fullscreen)::after{content:'حالت متن ساده (OCR) — قالب‌بندی پیشرفته غیرفعال است';font-size:10px;color:var(--muted)}
 .editor-box.editing{z-index:20}.editor-box.editing>.editor-box-text{visibility:hidden}.editor-box.editing>.box-move,.editor-box.editing>.box-visibility,.editor-box.editing>.box-language{display:none}
 .editor-box.editing>#inlineEditorField,.editor-box.editing>.classic-source{position:absolute;inset:0;z-index:3;display:block;width:100%;height:100%;min-width:0;min-height:0;max-width:none;max-height:none;margin:0;padding:3px;resize:none;overflow:auto;border:0!important;border-radius:0!important;background:var(--editing-bg,var(--surface));color:var(--editing-fg,var(--text));font:15px/1.55 Vazirmatn,Tahoma,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere;box-shadow:inset 0 0 0 2px var(--a1);outline:none}
 .editor-box.editing>.classic-source{direction:ltr;text-align:left;font:12px/1.4 monospace}.editor-box.editing>[hidden]{display:none!important}
 
-#inlineLineTools{margin:0;align-items:end}
+#inlineLineTools{margin:0}
 
 /* Exact draft preview is the real output renderer, not a DOM imitation. */
 .editor-box.editing.show-output>#inlineEditorField,.editor-box.editing.show-output>.classic-source{opacity:0;pointer-events:none}
-.inline-editor-head button[aria-pressed=true]{background:var(--a1);color:#fff}
+.inline-editor-head button[aria-pressed=true]{background:var(--a1);color:#fff;border-color:transparent}
 /* Full-image overview expands just the image view. Native fullscreen is used
    when permitted; this layout also works in embedded previews that deny it. */
 .editor-dialog.image-fullscreen{position:fixed;inset:0;margin:0;padding:0;width:100vw;height:100vh;height:100dvh;max-width:none;max-height:none;border:0;border-radius:0;overflow:hidden}
@@ -71,17 +92,14 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 
 #translationSkill{display:block;width:100%;min-height:90px;resize:vertical;margin-top:6px}#translationSkillWrap{margin:14px 0}.budget-counter{margin:3px 0;color:var(--muted);font-size:11px;direction:rtl;text-align:left}.budget-counter.over-budget{color:#ff5b65;font-weight:800}.budget-over-limit{border-color:#ff5b65!important;box-shadow:0 0 0 2px #ff5b6533!important}
 
-/* Dock the contextual text editor beneath the file title, outside the canvas. */
+/* Dock the text editor permanently beneath the file title, outside the canvas. */
 dialog.editor-dialog:not([open]){display:none}
 dialog.editor-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
 .editor-dialog>.dialog-head{flex:none}
-.editor-dialog>.inline-editor{position:relative;inset:auto;z-index:2;width:100%;max-height:none;overflow:visible;box-sizing:border-box;flex:none;flex-flow:row wrap;align-items:center;gap:8px;margin:0 0 10px;padding:7px 9px;box-shadow:none}
-.editor-dialog>.inline-editor>.inline-editor-head{flex:0 0 auto;margin:0}
-.editor-dialog>.inline-editor>.classic-editor{order:1;flex:1 1 360px;min-width:min(100%,280px);width:auto}
-.editor-dialog>.inline-editor>.inline-line-tools{order:2;margin:0;padding:0;border:0}
-.editor-dialog>.inline-editor>.inline-box-settings{order:3;flex:0 0 auto}
+.editor-dialog>.inline-editor{position:relative;inset:auto;z-index:2;width:100%;max-height:none;overflow:visible;box-sizing:border-box;flex:none;display:flex;flex-direction:column;align-items:stretch;gap:6px;margin:0 0 10px;padding:7px 10px;box-shadow:none;transition:border-color .16s}
+.editor-dialog>.inline-editor:not(.is-idle){border-color:color-mix(in srgb,var(--a1) 65%,var(--line-2))}
 .editor-dialog>.editor-body{flex:1;min-height:0;height:auto}
 .editor-dialog .editor-view,.editor-dialog .editor-side{min-height:0}
-@media(max-width:700px){.editor-dialog>.inline-editor>.classic-editor{flex-basis:100%;min-width:0}.editor-dialog>.inline-editor>.inline-editor-head{flex:1 1 100%}}
+@media(max-width:760px){.editor-dialog>.inline-editor{max-height:34vh;overflow-y:auto}.inline-rich-slot{flex-basis:100%;min-width:0}}
 .block-source-edit{cursor:text;border-radius:5px;padding:3px 5px;transition:background .15s,color .15s}.block-source-edit:hover,.block-source-edit:focus-visible{background:var(--surface);color:var(--text);outline:1px solid var(--a1)}
-.inline-editor.show-output>.classic-editor{opacity:0;pointer-events:none}
+.inline-editor.show-output .classic-editor,.inline-editor.show-output .inline-tool-group{opacity:0;pointer-events:none}

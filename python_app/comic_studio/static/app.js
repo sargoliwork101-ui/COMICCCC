@@ -1097,7 +1097,7 @@ async function exportResult(kind = null) {
   if (!selectedImages().length) throw new Error('حداقل یک تصویر را برای خروجی انتخاب کنید');
   await overlayPreviewTask;
   collectOutputSettings(); await saveProject(); const exportKind = $('exportKind').value;
-  if (exportKind !== 'txt') { for (const item of selectedImages()) if (hasOverlayText(item) || item.edited) await renderAndUpload(item); renderGrid(); }
+  if (exportKind !== 'txt' && exportKind !== 'docx') { for (const item of selectedImages()) if (hasOverlayText(item) || item.edited) await renderAndUpload(item); renderGrid(); }
   const response = await fetch(`/api/projects/${state.project.id}/export`, jsonOptions('POST', { kind: exportKind, image_ids: selectedImages().map((item) => item.id), name: safeName($('exportName').value), seamless: $('exportSeamless').checked, uniform_size: $('exportUniform').checked, two_per_page: $('exportTwo').checked, image_format: $('exportFormat').value, folder_name: $('exportFolder').value }));
   if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `خروجی ساخته نشد (HTTP ${response.status})`); }
   const blob = await response.blob();
@@ -1361,6 +1361,7 @@ async function openEditor(imageId) {
   if (loadSeq !== editorLoadSeq) return;
   const item = state.project?.images.find((entry) => entry.id === imageId);
   if (!item) return;
+  if (inlineDraft) closeInlineEditor(true); else syncInlineDockIdleState();
   state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null; $('editorStage').classList.remove('panning'); $('editorTitle').textContent = `ویرایش — ${item.name}`; $('blockList').textContent = ''; showDialog('editorDialog');
   const response = await fetch(imageUrl(item));
   if (response.ok === false) throw new Error('تصویر اصلی باز نشد');
@@ -1513,10 +1514,32 @@ function refreshInlineTypography() {
   }
   scheduleEditorCanvasDraw();
 }
+function setInlineDockDisabled(disabled) {
+  ['inlinePreview', 'inlineEditorApply', 'inlineVerticalAlign', 'inlineLineSize', 'inlineLineReset',
+    'inlineEditorDirection', 'inlineEditorAlign', 'inlineEditorSize', 'inlineEditorColor', 'inlineEditorAutoColor']
+    .forEach((id) => { const el = $(id); if (el) el.disabled = disabled; });
+  document.querySelectorAll('#inlineEditor .classic-toolbar button, #inlineEditor .classic-toolbar select, #inlineEditor .classic-toolbar input, #inlineEditor .classic-tabs button')
+    .forEach((el) => { el.disabled = disabled; });
+}
+function syncInlineDockIdleState() {
+  const dock = $('inlineEditor');
+  if (!dock) return;
+  classicEditor?.setPlainMode(false);
+  dock.classList.remove('hidden', 'show-output', 'plain-mode');
+  dock.classList.add('is-idle');
+  $('inlineEditorTitle').textContent = 'ویرایشگر متن آماده است · برای ویرایش، روی هر کادر متن در تصویر کلیک کنید';
+  $('inlinePreview').textContent = 'پیش‌نمایش دقیق';
+  $('inlinePreview').setAttribute('aria-pressed', 'false');
+  $('inlineEditorCancel').classList.add('hidden');
+  $('inlineLineTools').classList.remove('hidden');
+  setInlineDockDisabled(true);
+}
 function setInlineOutputPreview(enabled) {
   if (!inlineDraft) return;
   inlineDraft.showOutput = !!enabled;
   $('inlineEditor').classList.toggle('show-output', inlineDraft.showOutput);
+  const activeBox = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
+  activeBox?.classList.toggle('show-output', inlineDraft.showOutput);
   const button = $('inlinePreview'); button.setAttribute('aria-pressed', String(inlineDraft.showOutput));
   button.textContent = inlineDraft.showOutput ? 'ادامهٔ ویرایش' : 'پیش‌نمایش دقیق';
   drawEditorCanvas();
@@ -1527,7 +1550,7 @@ function setInlineOutputPreview(enabled) {
     }
   } else classicEditor.field.blur();
 }
-// A draft belongs to one image box. Nothing reaches the project or canvas until Apply.
+// A draft belongs to one image box; the docked toolbar stays permanently open at the top.
 function inlineBlockSnapshot(block) {
   return JSON.stringify([block.text || '', block.tr || '', block.richHtml || '', block.dir || '', block.align || '', block.size ?? null, block.color || null, block.verticalAlign || '']);
 }
@@ -1538,15 +1561,12 @@ function closeInlineEditor(force = false) {
   if (!committed && !force) return false;
   if (committed) classicEditor.clearDraft(); else classicEditor.saveDraft();
   classicEditor.exitFullscreen(); classicEditor.detachField();
-  const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id)); const preview = document.querySelector('.editor-preview');
-  const oldTop = box?.getBoundingClientRect().top;
-  box?.classList.remove('editing'); $('inlineEditor').classList.remove('show-output');
-  $('inlineEditor').classList.add('hidden'); inlineDraft = null; inlineEditSession = null;
-  $('inlinePreview').textContent = 'پیش‌نمایش دقیق'; $('inlinePreview').setAttribute('aria-pressed', 'false');
-  $('inlineEditorCancel').classList.add('hidden');
+  const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
+  box?.classList.remove('editing', 'show-output');
+  inlineDraft = null; inlineEditSession = null;
+  syncInlineDockIdleState();
   if (!imageOverview) drawEditorCanvas();
-  preview.style.paddingTop = '';
-  if (box && Number.isFinite(oldTop)) preview.scrollTop += box.getBoundingClientRect().top - oldTop;
+  document.querySelector('.editor-preview').style.paddingTop = '';
   if (!committed && force) toast('تغییر هم‌زمان بود؛ متن پروژه حفظ شد و نسخهٔ محلی برای بازیابی نگه داشته شد.', true);
   return true;
 }
@@ -1690,11 +1710,13 @@ function openInlineEditor(block, clickEvent = null) {
   const field = $('inlineEditorField'); const direction = mode === 'ocr' ? 'ltr' : (block.dir === 'ltr' ? 'ltr' : 'rtl');
   const originalHtml = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || plainToHtml(block.tr || ''));
   const draftKey = `comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(block.id)}:${mode}`;
+  setInlineDockDisabled(false);
   classicEditor.setPlainMode(mode === 'ocr');
   field.removeAttribute('style'); field.dir = direction; field.style.direction = direction;
-  $('inlineEditorTitle').textContent = `ویرایش مستقیم ${mode === 'ocr' ? 'متن اصلی' : 'ترجمه'} · ذخیرهٔ خودکار`;
+  $('inlineEditorTitle').textContent = `کادر ${block.id} · ویرایش مستقیم ${mode === 'ocr' ? 'متن اصلی' : 'ترجمه'} · ذخیرهٔ خودکار`;
   $('inlineEditorCancel').classList.add('hidden');
-  $('inlineLineTools').classList.toggle('hidden', mode === 'ocr');
+  $('inlineLineTools').classList.remove('hidden');
+  $('inlineLineSize').disabled = mode === 'ocr'; $('inlineLineReset').disabled = mode === 'ocr';
   $('inlineEditorDirection').value = direction; $('inlineEditorDirection').disabled = mode === 'ocr';
   $('inlineEditorAlign').value = mode === 'ocr' ? overlayBlock(block).align : (block.align || 'right');
   $('inlineVerticalAlign').value = ['top', 'bottom'].includes(block.verticalAlign) ? block.verticalAlign : 'middle';
@@ -1734,7 +1756,9 @@ function openInlineEditor(block, clickEvent = null) {
       inlineDraft.conflictReported = true; $('inlineEditorCancel').classList.remove('hidden');
     },
   });
-  $('inlineEditor').classList.remove('hidden'); positionInlineEditor(); classicEditor.focus();
+  $('inlineEditor').classList.remove('hidden', 'is-idle');
+  $('inlineEditor').classList.toggle('plain-mode', mode === 'ocr');
+  positionInlineEditor(); classicEditor.focus();
   placeInlineCaret(field, clickEvent); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
 }
 function autoApplyInlineDraft() {
@@ -2207,7 +2231,7 @@ function bindEvents() {
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; } });
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; try { await saveAiSettings(); closeDialog('aiDialog'); } catch (error) { $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
-  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {}));
+  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => runJob('در حال ساخت فایل Word…', () => exportResult('docx'), 'exportProgress').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
@@ -2238,7 +2262,8 @@ function bindEvents() {
   ['pointerdown', 'click'].forEach((name) => inlineField.addEventListener(name, (event) => event.stopPropagation()));
   $('inlineEditor').addEventListener('pointerdown', (event) => { if (inlineDraft?.showOutput && !event.target.closest('#inlinePreview, #inlineEditorApply, #inlineEditorCancel')) setInlineOutputPreview(false); }, true);
   $('inlineEditor').addEventListener('click', () => requestAnimationFrame(positionInlineEditor));
-  $('inlineEditor').querySelector('details').addEventListener('toggle', () => requestAnimationFrame(positionInlineEditor));
+  $('inlineEditor').querySelector('details')?.addEventListener('toggle', () => requestAnimationFrame(positionInlineEditor));
+  syncInlineDockIdleState();
   $('inlineLineSize').addEventListener('change', () => {
     const value = $('inlineLineSize').value.trim(); const size = Number(value);
     if (value && (!Number.isFinite(size) || size < 8 || size > 160)) { toast('اندازهٔ خط باید بین ۸ و ۱۶۰ باشد.', true); return; }

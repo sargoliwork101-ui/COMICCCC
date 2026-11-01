@@ -163,8 +163,11 @@ window.fetch = async (url, options = {}) => {
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/rendered`) { renderedUploads += 1; return jsonResponse({ ok: true }); }
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/revert`) { revertCalls += 1; return jsonResponse({ ok: true }); }
   if (pathname === `/api/projects/${project.id}/export` && options.method === 'POST') {
-    exportRequests.push(JSON.parse(options.body));
-    return { ok: true, status: 200, headers: { get: () => 'attachment; filename="mixed.zip"' }, blob: async () => new window.Blob(['zip']) };
+    const req = JSON.parse(options.body);
+    exportRequests.push(req);
+    const ext = req.kind === 'images' ? 'zip' : req.kind;
+    const fname = req.kind === 'images' ? 'mixed.zip' : `${req.name || 'mixed'}.${ext}`;
+    return { ok: true, status: 200, headers: { get: () => `attachment; filename="${fname}"` }, blob: async () => new window.Blob([ext]) };
   }
   if (pathname === `/api/projects/${project.id}/images/${project.images[0].id}/content`) { if (imageGate) await imageGate; return { ok: true, blob: async () => new window.Blob() }; }
   throw new Error(`Unmocked request: ${options.method || 'GET'} ${url}`);
@@ -730,6 +733,21 @@ function check(name, condition) {
     window.fetch = prevFetch;
     window.createImageBitmap = origCreateBitmap;
     check('closing editor before image finishes loading discards and closes stale bitmap', staleClosed === 1 && vm.runInContext('state.editorBitmap === null && state.editorId === null', context));
+  }
+  {
+    vm.runInContext('state.project.images[0].selected = true', context);
+    const uploadsBefore = renderedUploads;
+    $('exportName').value = 'word-check';
+    $('exportDocxBtn').click();
+    await sleep(30);
+    check('Word export button sends docx kind without unnecessary image re-renders', exportRequests.at(-1)?.kind === 'docx' && renderedUploads === uploadsBefore && $('downloadLink').download === 'word-check.docx');
+    await vm.runInContext('openEditor(state.project.images[0].id)', context);
+    check('inline editor stays permanently visible in idle state on openEditor', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && $('inlineEditorSize').disabled === true);
+    $('editorBoxes').querySelector('.editor-box-text').click();
+    check('selecting a box activates the docked inline editor in place', !$('inlineEditor').classList.contains('hidden') && !$('inlineEditor').classList.contains('is-idle') && $('inlineEditorSize').disabled === false);
+    $('inlineEditorApply').click();
+    check('finishing box edit keeps the inline editor docked in idle state instead of hiding it', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && !$('editorBoxes').querySelector('.editor-box.editing'));
+    await vm.runInContext('closeEditor()', context);
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
