@@ -1434,7 +1434,9 @@ function draftBlockForPreview() {
 }
 function drawEditorCanvas() {
   const item = editorItem(); if (!item || !state.editorBitmap) return;
-  const draft = imageOverview ? imageOverview.draft : (inlineDraft?.showOutput ? draftBlockForPreview() : null);
+  // Keep the committed renderer live while typing: the editable DOM is only an
+  // interaction layer; the canvas beneath it always shows the exact draft output.
+  const draft = imageOverview ? imageOverview.draft : (inlineDraft ? draftBlockForPreview() : null);
   const blocks = item.blocks.map((block) => overlayBlock(draft && block === inlineDraft?.block ? draft : block));
   const rendered = Typeset.render(state.editorBitmap, blocks); const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(rendered, 0, 0);
@@ -1470,20 +1472,20 @@ function styleRichElement(element, block, scale = 1, preview = false) {
   element.style.textDecoration = style.underline ? 'underline' : '';
 }
 // Keep the edit font size fixed so typing and output-size changes do not move
-// the caret. The exact canvas preview is authoritative for size and wrapping.
+// Keep text editing in a readable dock; the canvas is the WYSIWYG output preview.
 function refreshInlineTypography() {
   if (!inlineDraft || !classicEditor) return;
-  const field = classicEditor.field; if (!field.closest('.editor-box.editing')) return;
-  const style = Typeset.blockStyle(overlayBlock(draftBlockForPreview()));
-  field.style.fontWeight = style.bold ? '700' : '400'; field.style.fontStyle = style.italic ? 'italic' : 'normal';
-  field.style.textDecoration = style.underline ? 'underline' : ''; field.dir = style.dir;
+  const field = classicEditor.field;
+  const draft = overlayBlock(draftBlockForPreview()); const style = Typeset.blockStyle(draft);
+  field.style.fontSize = ''; field.style.lineHeight = ''; field.style.fontWeight = ''; field.style.fontStyle = '';
+  field.style.textDecoration = ''; field.dir = style.dir;
   field.style.direction = style.dir; field.style.textAlign = style.align;
-  positionEditingText();
+  scheduleEditorCanvasDraw();
 }
 function setInlineOutputPreview(enabled) {
   if (!inlineDraft) return;
   inlineDraft.showOutput = !!enabled;
-  const box = classicEditor.field.closest('.editor-box'); box?.classList.toggle('show-output', inlineDraft.showOutput);
+  $('inlineEditor').classList.toggle('show-output', inlineDraft.showOutput);
   const button = $('inlinePreview'); button.setAttribute('aria-pressed', String(inlineDraft.showOutput));
   button.textContent = inlineDraft.showOutput ? 'ادامهٔ ویرایش' : 'پیش‌نمایش دقیق';
   drawEditorCanvas();
@@ -1492,7 +1494,7 @@ function setInlineOutputPreview(enabled) {
     if (range && classicEditor.field.contains(range.startContainer) && classicEditor.field.contains(range.endContainer)) {
       const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
     }
-  }
+  } else classicEditor.field.blur();
 }
 // A draft belongs to one image box. Nothing reaches the project or canvas until Apply.
 function inlineBlockSnapshot(block) {
@@ -1506,14 +1508,13 @@ function inlineDraftChanged() {
 function closeInlineEditor(force = false) {
   if (!inlineDraft) return true;
   if (!force && inlineDraftChanged() && !confirm('تغییرهای این متن ثبت نشده‌اند. از آن‌ها صرف‌نظر شود؟')) return false;
-  const hadOutputPreview = !!inlineDraft.showOutput;
   classicEditor.clearDraft(); classicEditor.exitFullscreen();
-  const box = classicEditor.field.closest('.editor-box'); const preview = document.querySelector('.editor-preview');
+  const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id)); const preview = document.querySelector('.editor-preview');
   const oldTop = box?.getBoundingClientRect().top;
-  classicEditor.field.style.paddingTop = ''; classicEditor.detachField(); box?.classList.remove('editing', 'show-output');
+  box?.classList.remove('editing'); $('inlineEditor').classList.remove('show-output');
   $('inlineEditor').classList.add('hidden'); inlineDraft = null;
   $('inlinePreview').textContent = 'پیش‌نمایش دقیق'; $('inlinePreview').setAttribute('aria-pressed', 'false');
-  if (hadOutputPreview && !imageOverview) drawEditorCanvas();
+  if (!imageOverview) drawEditorCanvas();
   preview.style.paddingTop = '';
   if (box && Number.isFinite(oldTop)) preview.scrollTop += box.getBoundingClientRect().top - oldTop;
   return true;
@@ -1523,18 +1524,6 @@ function positionInlineEditor() {
   // over the page. Keep this hook for resize/scroll calls that refresh preview typography.
   if (!inlineDraft || imageOverview) return;
   refreshInlineTypography();
-}
-// Position the editable text without changing its font size or the saved HTML.
-function positionEditingText() {
-  const field = $('inlineEditorField');
-  if (!inlineDraft || field.hidden || !field.closest('.editor-box.editing') || !field.clientHeight) return;
-  field.style.paddingTop = '3px';
-  const range = document.createRange(); range.selectNodeContents(field);
-  const contentHeight = range.getBoundingClientRect?.().height || 0;
-  const lineHeight = parseFloat(getComputedStyle(field).lineHeight) || 22.5;
-  const remaining = Math.max(0, field.clientHeight - Math.max(lineHeight, contentHeight) - 6);
-  const align = $('inlineVerticalAlign').value;
-  field.style.paddingTop = `${3 + (align === 'bottom' ? remaining : align === 'middle' ? remaining / 2 : 0)}px`;
 }
 function rememberInlineRange() {
   if (!inlineDraft) return;
@@ -1631,7 +1620,7 @@ function openInlineEditor(block) {
   const originalHtml = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || plainToHtml(block.tr || ''));
   classicEditor.setPlainMode(mode === 'ocr');
   const draftKey = `comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(block.id)}:${mode}`;
-  styleRichElement(field, overlayBlock(block)); field.dir = direction; field.style.direction = direction;
+  field.removeAttribute('style'); field.dir = direction; field.style.direction = direction;
   $('inlineEditorTitle').textContent = `ویرایش ${mode === 'ocr' ? 'متن اصلی' : 'ترجمه'} · کادر ${block.id}`;
   $('inlineLineTools').classList.toggle('hidden', mode === 'ocr');
   $('inlineEditorDirection').value = direction; $('inlineEditorDirection').disabled = mode === 'ocr';
@@ -1646,7 +1635,7 @@ function openInlineEditor(block) {
   const background = block.bg || 'auto';
   box.style.setProperty('--editing-bg', background === 'white' ? '#fff' : background === 'black' ? '#101010' : 'var(--surface)');
   box.style.setProperty('--editing-fg', background === 'white' ? '#202020' : background === 'black' ? '#fff' : 'var(--text)');
-  box.classList.add('editing'); classicEditor.attachField(box); refreshInlineTypography();
+  box.classList.add('editing'); refreshInlineTypography();
   $('inlineEditor').classList.remove('hidden'); positionInlineEditor(); classicEditor.focus(); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
 }
 function applyInlineEditor() {
@@ -2142,7 +2131,7 @@ function bindEvents() {
     align: (value) => setInlineLineStyle('textAlign', value),
     direction: (value) => setInlineLineStyle('direction', value),
     color: (value) => { if (inlineDraft?.range?.collapsed) { setInlineLineStyle('color', value); return true; } return false; },
-    onFullscreen: (enabled) => { if (enabled) { $('inlineEditorField').style.paddingTop = ''; classicEditor.detachField(); } else { const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft?.block.id)); if (box) { classicEditor.attachField(box); positionEditingText(); } } },
+    onFullscreen: () => {},
     onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); } },
     getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: $('inlineEditorSize').value, color: inlineDraft.color } : null,
     onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) $('inlineVerticalAlign').value = meta.verticalAlign; if (meta.size === '' || (+meta.size >= 8 && +meta.size <= 160)) $('inlineEditorSize').value = meta.size; if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || '#ffffff'; } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; },
@@ -2163,7 +2152,7 @@ function bindEvents() {
   $('inlineLineReset').addEventListener('click', resetInlineLineStyle);
   $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; classicEditor.notifyChange(); });
   $('inlineEditorAlign').addEventListener('change', () => { inlineField.style.textAlign = $('inlineEditorAlign').value; classicEditor.notifyChange(); });
-  $('inlineVerticalAlign').addEventListener('change', () => { if (inlineDraft) { positionEditingText(); classicEditor.notifyChange(); } });
+  $('inlineVerticalAlign').addEventListener('change', () => { if (inlineDraft) classicEditor.notifyChange(); });
   $('inlineEditorColor').addEventListener('input', () => { if (inlineDraft) { inlineDraft.color = $('inlineEditorColor').value; classicEditor.notifyChange(); } });
   $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) { inlineDraft.color = null; classicEditor.notifyChange(); } });
   $('inlineEditorSize').addEventListener('input', () => { if (inlineDraft) classicEditor.notifyChange(); });

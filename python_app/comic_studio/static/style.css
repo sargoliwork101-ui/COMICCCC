@@ -84,3 +84,4 @@ dialog.editor-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
 .editor-dialog .editor-view,.editor-dialog .editor-side{min-height:0}
 @media(max-width:700px){.editor-dialog>.inline-editor>.classic-editor{flex-basis:100%;min-width:0}.editor-dialog>.inline-editor>.inline-editor-head{flex:1 1 100%}}
 .block-source-edit{cursor:text;border-radius:5px;padding:3px 5px;transition:background .15s,color .15s}.block-source-edit:hover,.block-source-edit:focus-visible{background:var(--surface);color:var(--text);outline:1px solid var(--a1)}
+.inline-editor.show-output>.classic-editor{opacity:0;pointer-events:none}

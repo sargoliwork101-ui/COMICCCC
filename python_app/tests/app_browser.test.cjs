@@ -89,7 +89,9 @@ async function overlapPixelEvidence(page) {
 async function editorRenderDifference(page) {
   return page.evaluate(() => {
     const item = state.project.images[0];
-    const expected = Typeset.render(state.editorBitmap, overlayBlocks(item));
+    const draft = inlineDraft ? draftBlockForPreview() : null;
+    const blocks = item.blocks.map(block => overlayBlock(draft && block === inlineDraft.block ? draft : block));
+    const expected = Typeset.render(state.editorBitmap, blocks);
     const actual = document.getElementById('editorCanvas');
     if (actual.width !== expected.width || actual.height !== expected.height) return -1;
     const a = actual.getContext('2d').getImageData(0, 0, actual.width, actual.height).data;
@@ -382,15 +384,15 @@ main()
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text', { offset: { x: 75, y: 30 } });
     await page.waitForSelector('#inlineEditor:not(.hidden)');
     const inPlace = await page.evaluate(() => {
-      const box = document.querySelector('#editorBoxes .editor-box[data-id="1"]'); const field = document.getElementById('inlineEditorField'); const a = box.getBoundingClientRect(); const b = field.getBoundingClientRect(); const bar = document.getElementById('inlineEditor').getBoundingClientRect(); const title = document.querySelector('#editorDialog>.dialog-head').getBoundingClientRect(); const body = document.querySelector('#editorDialog>.editor-body').getBoundingClientRect();
-      return { attached: field.parentElement === box, aligned: Math.abs(a.left-b.left) < 3 && Math.abs(a.top-b.top) < 3 && Math.abs(a.width-b.width) <= 5 && Math.abs(a.height-b.height) <= 5, docked: bar.top >= title.bottom - 2 && bar.bottom <= body.top + 2, above: bar.bottom <= a.top + 2, single: document.querySelectorAll('#editorBoxes [contenteditable="true"]').length === 1 };
+      const box = document.querySelector('#editorBoxes .editor-box[data-id="1"]'); const field = document.getElementById('inlineEditorField'); const a = box.getBoundingClientRect(); const bar = document.getElementById('inlineEditor').getBoundingClientRect(); const title = document.querySelector('#editorDialog>.dialog-head').getBoundingClientRect(); const body = document.querySelector('#editorDialog>.editor-body').getBoundingClientRect();
+      return { detached: field.parentElement.classList.contains('classic-editor') && !field.closest('.editor-box'), readable: getComputedStyle(field).color !== 'rgba(0, 0, 0, 0)', docked: bar.top >= title.bottom - 2 && bar.bottom <= body.top + 2, above: bar.bottom <= a.top + 2, canvasOnly: document.querySelectorAll('#editorBoxes [contenteditable="true"]').length === 0 };
     });
-    assert.deepEqual(inPlace, {attached:true, aligned:true, docked:true, above:true, single:true}, 'the clicked box must be the sole editable text while tools stay in a dock below the filename and above the canvas');
+    assert.deepEqual(inPlace, {detached:true, readable:true, docked:true, above:true, canvasOnly:true}, 'text is edited in a readable dock while the image canvas shows the exact output');
     assert.equal(await page.$$eval('#inlineEditor [data-line-align], #inlineEditor #inlineLineDirection, #inlineEditor #inlineLineColor', els => els.length), 0, 'duplicate line controls are removed');
     const originalViewport = page.viewport();
     await page.setViewport({ width: 600, height: 700, deviceScaleFactor: 1 });
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    assert.equal(await page.evaluate(() => { const b=document.querySelector('#editorBoxes .editor-box[data-id="1"]');const f=document.getElementById('inlineEditorField');const bar=document.getElementById('inlineEditor').getBoundingClientRect();const head=document.querySelector('#editorDialog>.dialog-head').getBoundingClientRect();const body=document.querySelector('#editorDialog>.editor-body').getBoundingClientRect();return f.parentElement===b && bar.top>=head.bottom-2 && bar.bottom<=body.top+2; }), true, 'on a narrow viewport the toolbar stays docked under the title and the clicked box remains editable');
+    assert.equal(await page.evaluate(() => { const f=document.getElementById('inlineEditorField');const bar=document.getElementById('inlineEditor').getBoundingClientRect();const head=document.querySelector('#editorDialog>.dialog-head').getBoundingClientRect();const body=document.querySelector('#editorDialog>.editor-body').getBoundingClientRect();return f.closest('#inlineEditor')===document.getElementById('inlineEditor') && !f.closest('.editor-box') && bar.top>=head.bottom-2 && bar.bottom<=body.top+2; }), true, 'on a narrow viewport the readable editor stays docked under the title and outside the canvas');
     await page.setViewport(originalViewport);
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const blank = await page.evaluate(() => { const r=document.getElementById('editorBoxes').getBoundingClientRect(); return {x:r.left+160*state.editorScale,y:r.top+60*state.editorScale}; });
@@ -408,11 +410,11 @@ main()
     await page.keyboard.type('new inline text');
     assert.equal(await page.$eval('#inlineVerticalAlign', el => el.value), 'middle', 'legacy blocks retain the previous centred default');
     await page.select('#inlineVerticalAlign', 'bottom');
-    const bottomPadding = await page.$eval('#inlineEditorField', el => parseFloat(el.style.paddingTop));
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await editorRenderDifference(page), 0, 'the live canvas applies the selected bottom placement exactly');
     await page.select('#inlineVerticalAlign', 'top');
-    const topPadding = await page.$eval('#inlineEditorField', el => parseFloat(el.style.paddingTop));
-    assert.equal(topPadding, 3, 'editable text starts at the top');
-    assert.ok(bottomPadding > topPadding, 'the editable text moves when bottom is selected');
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await editorRenderDifference(page), 0, 'the live canvas applies the selected top placement exactly');
     await page.evaluate(() => {
       const field = document.getElementById('inlineEditorField'); const range = document.createRange();
       range.setStart(field.firstChild, 0); range.setEnd(field.firstChild, 3);
@@ -421,14 +423,18 @@ main()
     await page.click('#inlineEditor .classic-toolbar button[aria-label="پررنگ"]');
     await page.select('#inlineEditorAlign', 'justify');
     await page.$eval('#inlineEditorSize', (field) => { field.value = '24'; field.dispatchEvent(new Event('input', { bubbles: true })); });
-    assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].tr === window.__inlineOriginal.tr && document.getElementById('editorCanvas').toDataURL() === window.__beforeInlineCanvas), true, 'draft text must not change the project or final preview before Apply');
+    assert.equal(await page.evaluate(() => JSON.stringify(state.project.images[0].blocks[0]) === JSON.stringify(window.__inlineOriginal)), true, 'draft text and formatting must not change the project before Apply');
+    assert.notEqual(await page.$eval('#editorCanvas', canvas => canvas.toDataURL()), await page.evaluate(() => window.__beforeInlineCanvas), 'the image canvas must update to show the live draft');
+    assert.equal(await editorRenderDifference(page), 0, 'while editing, the canvas must exactly match the final renderer for the live draft');
+    assert.equal(await page.$eval('#inlineEditorField', field => getComputedStyle(field).color !== 'rgba(0, 0, 0, 0)' && getComputedStyle(field).backgroundColor !== 'rgba(6, 8, 14, 0.24)'), true, 'the docked editing surface keeps text readable while the canvas displays the exact live output');
     await page.click('#inlineEditorApply');
     assert.equal(await page.$eval('#inlineEditor', (panel) => panel.classList.contains('hidden')), true);
     assert.equal(await page.$$eval('#editorBoxes [contenteditable="true"], #editorBoxes [contenteditable="plaintext-only"]', els => els.length), 0, 'Apply removes the editable surface from the image box');
-    assert.equal(await page.evaluate(() => {
+    const appliedInline = await page.evaluate(() => {
       const block = state.project.images[0].blocks[0];
-      return block.tr === 'new inline text' && /font-weight:\s*normal/i.test(block.richHtml) && block.align === 'justify' && block.verticalAlign === 'top' && block.size === 24 && document.querySelectorAll('#blockList .block-card[data-id="1"] .block-readonly')[1].textContent.includes(block.tr);
-    }), true, 'Apply must update only the selected block and synchronize its sidebar');
+      return {tr:block.tr,richHtml:block.richHtml,align:block.align,verticalAlign:block.verticalAlign,size:block.size,sidebar:document.querySelectorAll('#blockList .block-card[data-id="1"] .block-readonly')[1]?.textContent};
+    });
+    assert.ok(appliedInline.tr === 'new inline text' && /font-weight:\s*bold/i.test(appliedInline.richHtml) && appliedInline.align === 'justify' && appliedInline.verticalAlign === 'top' && appliedInline.size === 24 && appliedInline.sidebar.includes(appliedInline.tr), `Apply must update only the selected block and synchronize its sidebar: ${JSON.stringify(appliedInline)}`);
     assert.equal(await editorRenderDifference(page), 0, 'Apply must show the final output renderer immediately in the same editor');
     assert.notEqual(await page.$eval('#editorCanvas', (canvas) => canvas.toDataURL()), await page.evaluate(() => window.__beforeInlineCanvas));
     await page.evaluate(() => saveProject());
@@ -525,8 +531,8 @@ main()
     // Classic source/visual synchronization, sanitization, dialogs and draft recovery.
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
     await page.click('#inlineEditor .classic-tabs button:nth-child(2)');
-    assert.equal(await page.$eval('#editorBoxes .editor-box.editing .classic-source', el => el.parentElement === document.querySelector('#editorBoxes .editor-box[data-id="1"]')), true, 'Text mode also uses the clicked box');
-    await page.$eval('#editorBoxes .editor-box.editing .classic-source', el => { el.value='<h2>Hello</h2><p>linked text<script>alert(1)</script><a href="javascript:alert(2)" onclick="alert(3)">unsafe</a></p>'; el.dispatchEvent(new Event('input',{bubbles:true})); });
+    assert.equal(await page.$eval('#inlineEditor .classic-source', el => el.closest('#inlineEditor') === document.getElementById('inlineEditor') && !el.closest('.editor-box')), true, 'HTML source stays in the readable dock, outside the image canvas');
+    await page.$eval('#inlineEditor .classic-source', el => { el.value='<h2>Hello</h2><p>linked text<script>alert(1)</script><a href="javascript:alert(2)" onclick="alert(3)">unsafe</a></p>'; el.dispatchEvent(new Event('input',{bubbles:true})); });
     const safe = await page.evaluate(() => classicEditor.getHTML());
     assert.ok(safe.includes('<h2>Hello</h2>') && safe.includes('unsafe') && !/script|javascript|onclick/.test(safe));
     await page.click('#inlineEditor .classic-tabs button:nth-child(1)');
@@ -557,7 +563,7 @@ main()
     await page.evaluate(() => document.querySelector('#inlineEditor .classic-toolbar button[aria-label="تمام‌صفحه"]').click());
     assert.equal(await page.evaluate(() => !!document.getElementById('inlineEditorField').closest('.classic-fullscreen')), true);
     await page.keyboard.press('Escape');
-    assert.equal(await page.evaluate(() => document.getElementById('inlineEditorField').parentElement === document.querySelector('#editorBoxes .editor-box[data-id="1"]') && !document.getElementById('inlineEditor').classList.contains('hidden')), true, 'Escape exits fullscreen back into the same box');
+    assert.equal(await page.evaluate(() => document.getElementById('inlineEditorField').closest('#inlineEditor') === document.getElementById('inlineEditor') && !document.getElementById('inlineEditor').classList.contains('hidden')), true, 'Escape exits fullscreen back to the readable docked editor');
     await page.select('#inlineVerticalAlign', 'bottom');
     await page.$eval('#inlineEditorSize', el => {el.value='33';el.dispatchEvent(new Event('input',{bubbles:true}));});
     await page.waitForFunction(() => Object.keys(localStorage).some(key => key.startsWith('comic-studio-draft:') && JSON.parse(localStorage.getItem(key)).meta?.size === '33'), {timeout:6000});
@@ -593,8 +599,11 @@ main()
     await page.$eval('#inlineEditorSize', el => { el.value='12'; }); await page.click('#inlineEditorApply');
     const small = await page.$eval('#editorCanvas', el => el.toDataURL());
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
-    await page.$eval('#inlineEditorSize', el => { el.value='30'; });
-    assert.equal(await page.$eval('#inlineEditorField', el => getComputedStyle(el).fontSize), beforeSize);
+    await page.$eval('#inlineEditorSize', el => { el.value='30'; el.dispatchEvent(new Event('input', {bubbles:true})); });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.$eval('#inlineEditorField', el => getComputedStyle(el).fontSize), '15px', 'the docked input stays comfortably readable regardless of image zoom or output size');
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await editorRenderDifference(page), 0, 'the canvas tracks the chosen output size exactly while the dock remains readable');
     await page.click('#inlineEditorApply');
     assert.notEqual(await page.$eval('#editorCanvas', el => el.toDataURL()), small, 'output size must affect image pixels');
     assert.equal(await editorRenderDifference(page), 0);
@@ -610,7 +619,8 @@ main()
     const draftPixels = await page.$eval('#editorCanvas', el => el.toDataURL());
     assert.equal(await page.evaluate(() => JSON.stringify(inlineDraft.block)), originalDraftBlock, 'preview must not mutate the project');
     assert.equal(await page.$eval('#inlinePreview', el => el.getAttribute('aria-pressed')), 'true');
-    assert.equal(await page.$eval('#inlineEditorField', el => getComputedStyle(el).opacity), '0');
+    assert.equal(await page.evaluate(() => document.activeElement !== document.getElementById('inlineEditorField')), true, 'preview mode leaves the editing field so typing cannot accidentally alter the draft');
+    assert.equal(await page.$eval('#inlineEditor .classic-editor', el => getComputedStyle(el).opacity), '0');
     await page.click('#inlineEditorApply');
     assert.equal(await page.$eval('#editorCanvas', el => el.toDataURL()), draftPixels, 'draft preview must be pixel-identical to applied output');
     assert.equal(await editorRenderDifference(page), 0);
