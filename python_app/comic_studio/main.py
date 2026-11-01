@@ -190,6 +190,14 @@ def create_app() -> FastAPI:
             if pulse:
                 pulse.join(timeout=0.1)
 
+    def context_progress(run: dict[str, Any]) -> float:
+        jobs = run.get('jobs', [])
+        total = sum(len(str(job.get('source') or '')) for job in jobs)
+        remaining = sum(len(str(job.get('remaining') or '')) for job in jobs)
+        if total <= 0:
+            return 1.0
+        return max(0.0, min(1.0, (total - remaining) / total))
+
     def project(project_id: str) -> dict[str, Any]:
         try:
             return store.get(project_id)
@@ -485,7 +493,7 @@ def create_app() -> FastAPI:
                 if item["id"] not in ids:
                     continue
                 completed += 1
-                activity.add(f"در حال خواندن تصویر {completed} از {len(ids)}: {item['name']}", progress=(completed - 1) / len(ids))
+                activity.add(f"در حال خواندن تصویر {completed} از {len(ids)}: {item['name']}")
                 path = store.image_path(project_id, item["id"])
                 from PIL import Image
                 with Image.open(path) as im:
@@ -786,7 +794,7 @@ def create_app() -> FastAPI:
                 else:
                     state = merged['project']; run = state[RUN_KEY]; affected = merged['affectedImageIds']; done = merged['done']
             if values.recovery_token: recoveries.pop(values.recovery_token, None)
-            activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] == 'free' else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success')
+            activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] == 'free' else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success', context_progress(run))
             return {'project': state, 'done': done, 'affectedImageIds': affected, 'completed': run['completed'],
                     'sent': {'system': request.system, 'user': request.user_message(text), 'characters': request.character_count(text)}}
 
@@ -974,12 +982,13 @@ def create_app() -> FastAPI:
                         raise HTTPException(409, "تنظیمات ترجمه تغییر کرده است؛ صفحهٔ بعد ارسال نشد. صفحه‌های ذخیره‌شده حفظ شده‌اند.")
                     settings = translation_settings(values.provider, values.skill)
                     if saved_call(call, plan, values.provider, values.source_language, settings):
+                        activity.add(f"درخواست {index} از {len(calls_to_run)} قبلاً ذخیره شده بود", progress=index / len(calls_to_run))
                         continue
                     page_sources = [source_texts[i] for i in call["indices"]] if call.get("combined") else [call["text"]]
                     label = call.get("image_name") or call["image_id"]
                     page_index = values.batch_index if len(calls_to_run) == 1 and values.batch_index and values.batch_total and values.batch_index <= values.batch_total else index
                     page_total = values.batch_total if len(calls_to_run) == 1 and values.batch_index and values.batch_total and values.batch_index <= values.batch_total else len(calls_to_run)
-                    activity.add(f"در حال ترجمهٔ درخواست {page_index} از {page_total}: {label}" + (f" · بند {call['paragraph']}، بخش {call.get('part_index', 0) + 1} از {call.get('part_count', 1)}" if call.get("paragraph") else ""), progress=(page_index - 1) / page_total)
+                    activity.add(f"در حال ترجمهٔ درخواست {page_index} از {page_total}: {label}" + (f" · بند {call['paragraph']}، بخش {call.get('part_index', 0) + 1} از {call.get('part_count', 1)}" if call.get("paragraph") else ""))
                     translated = await run_reported(
                         translations.translate, call["text"], values.source_language, values.provider, page_sources, settings["_translation_skill"],
                         pulse_label=f"ترجمهٔ درخواست {page_index} از {page_total}",

@@ -22,6 +22,7 @@ let activityEntries = [];
 let activityPollTimer = null;
 let activityPollInFlight = false;
 let activityGeneration = 0;
+let activeProgressId = null;
 let sessionTimer = null;
 let localActivityId = 0;
 let editorCloseTask = null;
@@ -71,6 +72,22 @@ function renderActivity() {
     target.scrollTop = target.scrollHeight;
   });
 }
+function setProgress(id, progress = null, active = false) {
+  const fill = $(id); if (!fill) return;
+  const bar = fill.closest('.bar'); if (!bar) return;
+  const determinate = typeof progress === 'number' && Number.isFinite(progress);
+  const percentage = determinate ? Math.round(Math.max(0, Math.min(1, progress)) * 100) : (active ? 30 : 0);
+  fill.style.width = `${percentage}%`;
+  bar.classList.toggle('indeterminate', active && !determinate);
+  if (determinate) {
+    bar.setAttribute('aria-valuenow', String(percentage));
+    bar.removeAttribute('aria-valuetext');
+  } else {
+    bar.removeAttribute('aria-valuenow');
+    if (active) bar.setAttribute('aria-valuetext', 'در حال انجام');
+    else bar.removeAttribute('aria-valuetext');
+  }
+}
 function appendLocalActivity(message, kind = 'info') {
   if (!message) return;
   activityEntries.push({ id: --localActivityId, message: String(message), kind, time: new Date().toISOString() });
@@ -93,11 +110,13 @@ async function pollActivity() {
     const latest = payload.entries?.at(-1);
     if (jobBusy && latest) {
       $('jobStatus').textContent = latest.message;
-      if (latest.progress !== null && latest.progress !== undefined) $('jobProgress').style.width = `${Math.round(latest.progress * 100)}%`;
-      if (translationRunning) {
-        $('translationStatus').textContent = latest.message;
-        if (latest.progress !== null && latest.progress !== undefined) $('translationProgress').style.width = `${Math.round(latest.progress * 100)}%`;
-      }
+      if (translationRunning) $('translationStatus').textContent = latest.message;
+    }
+    if (latest && typeof latest.progress === 'number' && Number.isFinite(latest.progress)) {
+      if (jobBusy) setProgress('jobProgress', latest.progress, true);
+      if (activeProgressId) setProgress(activeProgressId, latest.progress, true);
+      if (translationRunning) setProgress('translationProgress', latest.progress, true);
+      if (state.modelBusy) setProgress('modelProgress', latest.progress, true);
     }
     if (payload.entries?.length) renderActivity();
   } catch { /* the server may be shutting down; do not create a toast loop */ }
@@ -121,7 +140,7 @@ async function clearActivity(notify = true) {
   } finally {
     // Invalidate polls that began before or during the clear so old entries cannot reappear.
     ++activityGeneration; activityEntries = []; renderActivity();
-    if (!jobBusy) { $('jobStatus').textContent = 'آماده'; $('jobProgress').style.width = '0'; }
+    if (!jobBusy) { $('jobStatus').textContent = 'آماده'; setProgress('jobProgress', 0, false); }
   }
   if (notify && succeeded) toast('گزارش کارها پاک شد');
 }
@@ -216,16 +235,25 @@ function sanitizeHtml(html) { return window.ComicSanitize.sanitize(html); }
 function setBusy(message) {
   jobBusy = !!message;
   $('jobStatus').textContent = message || 'آماده';
-  $('jobProgress').style.width = message ? '65%' : '0';
-  if (translationRunning) { $('translationStatus').textContent = message || 'آماده'; $('translationProgress').style.width = message ? '65%' : '0'; }
+  setProgress('jobProgress', null, !!message);
+  if (translationRunning) {
+    $('translationStatus').textContent = message || 'آماده';
+    setProgress('translationProgress', null, !!message);
+  }
   document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button, #backupProjectBtn, #restoreProjectBtn, #restoreProjectInput, #newProjectBtn, #deleteProjectBtn, #projectSelect, #projectName').forEach((el) => { el.disabled = !!message; });
 }
-async function runJob(message, task) {
+async function runJob(message, task, progressId = null) {
   await clearActivity(false);
-  setBusy(message); appendLocalActivity(message); $('activityDetails').open = true;
-  try { return await task(); }
+  setBusy(message); activeProgressId = progressId;
+  if (progressId) setProgress(progressId, null, true);
+  appendLocalActivity(message); $('activityDetails').open = true;
+  let completed = false;
+  try { const result = await task(); completed = true; return result; }
   catch (error) { console.error(error); appendLocalActivity(`خطا: ${error.message || error}`, 'error'); toast(error.message || error, true); throw error; }
-  finally { setBusy(''); }
+  finally {
+    if (progressId) setProgress(progressId, completed ? 1 : 0, false);
+    activeProgressId = null; setBusy('');
+  }
 }
 function scheduleSave() {
   clearTimeout(saveTimer); ++saveRevision; $('saveState').textContent = 'در حال ذخیره…';
@@ -691,8 +719,9 @@ function reportOcrError(error) {
 async function runOcr() {
   if (ocrRunning) return;
   const pending = pendingTranslationAfterOcr;
-  ocrRunning = true; $('startOcrBtn').disabled = true; $('ocrDialog').querySelector('.dialog-head button').disabled = true;
+  ocrRunning = true; setProgress('ocrProgress', null, true); $('startOcrBtn').disabled = true; $('ocrDialog').querySelector('.dialog-head button').disabled = true;
   $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden');
+  let ocrSucceeded = false;
   try {
     if (pending && (state.project?.id !== pending.projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(pending.imageIds))) {
       throw new Error('پروژه یا تصاویر انتخاب‌شده تغییر کردند؛ پنجره را ببندید و دوباره ترجمه را شروع کنید.');
@@ -714,12 +743,16 @@ async function runOcr() {
         throw new Error('OCR در سرور ذخیره شد، اما پروژه یا انتخاب تغییر کرد؛ ترجمه ادامه نیافت. برای دیدن نتیجه پروژه را دوباره باز کنید.');
       }
       adoptProject(result); setOverlayMode('ocr', false); await renderImagesText(ids);
-    });
+    }, 'ocrProgress');
+    ocrSucceeded = true;
     clearPendingTranslationOcr(); closeDialog('ocrDialog');
     toast('متن OCR روی تصویر آمد؛ برای بررسی و ویرایش، دکمهٔ ✎ را بزنید');
     if (pending) await runTranslation();
   } catch (error) { reportOcrError(error); if (error.pendingId) openPendingResults(error.pendingId); throw error; }
-  finally { ocrRunning = false; $('startOcrBtn').disabled = false; $('ocrDialog').querySelector('.dialog-head button').disabled = false; }
+  finally {
+    if (!ocrSucceeded) setProgress('ocrProgress', 0, false);
+    ocrRunning = false; $('startOcrBtn').disabled = false; $('ocrDialog').querySelector('.dialog-head button').disabled = false;
+  }
 }
 
 function savedTranslationSkill(projectId) {
@@ -947,7 +980,7 @@ async function performContextTranslation(request, preview, ongoing = null, corre
         if (result.done) break;
       }
       phase = 'save'; setOverlayMode('translation', false);
-    });
+    }, 'translationProgress');
     closeDialog('translationDialog'); toast(request.provider === 'free' ? 'ترجمه ذخیره شد' : 'ترجمه و خلاصه ذخیره شد');
   } catch (error) {
     const uncertainty = phase === 'translation' ? 'وضعیت درخواست جاری در قطع ارتباط ممکن است نامشخص باشد و تکرار هزینه داشته باشد.' : 'درخواست‌های موفق ذخیره شده‌اند؛ پروژه را بررسی کنید.';
@@ -963,7 +996,7 @@ async function performContextTranslation(request, preview, ongoing = null, corre
 
 async function performTranslation(ids, provider, preview, startIndex = 0, previouslyCompleted = 0) {
   translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
-  translationRunning = true; $('translationDialog').querySelector('.dialog-head button').disabled = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; $('translationProgress').style.width = '0';
+  translationRunning = true; $('translationDialog').querySelector('.dialog-head button').disabled = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; setProgress('translationProgress', null, true);
   const projectId = state.project.id; const language = $('ocrLanguage').value; let completed = previouslyCompleted; let currentPage = ''; let phase = 'translation'; let failedIndex = startIndex;
   try {
     await runJob('در حال ترجمهٔ متن‌ها…', async () => {
@@ -990,7 +1023,7 @@ async function performTranslation(ids, provider, preview, startIndex = 0, previo
         }
         phase = 'save'; await saveProject();
       }
-    });
+    }, 'translationProgress');
     closeDialog('translationDialog'); toast('ترجمه روی تصویر آمد و پیش‌نمایش آماده شد');
   } catch (error) {
     if (provider !== 'free') {
@@ -1100,16 +1133,17 @@ function renderModels() {
 }
 async function downloadEngine(engine) {
   if (state.modelBusy) return; const language = $('testLanguage').value; if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return; }
-  state.modelBusy = engine.id; $('modelTestResult').textContent = `آماده‌سازی ${engine.name} برای ${language} آغاز شد؛ فقط مدل همین زبان دانلود می‌شود.`; appendLocalActivity(`آماده‌سازی ${engine.name} برای ${language} آغاز شد`); renderModels();
-  try { const result = await api(`/api/engines/${engine.id}/download`, jsonOptions('POST', { language })); state.engines = result.engines; $('modelTestResult').textContent = `مدل ${engine.name} برای ${language} آماده است.`; appendLocalActivity(`مدل ${engine.name} آماده شد`, 'success'); updateEngineOptions(); toast('مدل آماده است'); }
-  catch (error) { $('modelTestResult').textContent = `آماده‌سازی ناموفق بود:\n${error.message}\n\nاتصال اینترنت و دسترسی به میزبان مدل را بررسی کنید.`; appendLocalActivity(`آماده‌سازی ناموفق بود: ${error.message}`, 'error'); toast(error.message, true); }
+  state.modelBusy = engine.id; setProgress('modelProgress', null, true); $('modelTestResult').textContent = `آماده‌سازی ${engine.name} برای ${language} آغاز شد؛ فقط مدل همین زبان دانلود می‌شود.`; appendLocalActivity(`آماده‌سازی ${engine.name} برای ${language} آغاز شد`); renderModels();
+  try { const result = await api(`/api/engines/${engine.id}/download`, jsonOptions('POST', { language })); state.engines = result.engines; setProgress('modelProgress', 1, false); $('modelTestResult').textContent = `مدل ${engine.name} برای ${language} آماده است.`; appendLocalActivity(`مدل ${engine.name} آماده شد`, 'success'); updateEngineOptions(); toast('مدل آماده است'); }
+  catch (error) { setProgress('modelProgress', 0, false); $('modelTestResult').textContent = `آماده‌سازی ناموفق بود:\n${error.message}\n\nاتصال اینترنت و دسترسی به میزبان مدل را بررسی کنید.`; appendLocalActivity(`آماده‌سازی ناموفق بود: ${error.message}`, 'error'); toast(error.message, true); }
   finally { state.modelBusy = null; renderModels(); }
 }
 async function testEngine(engineId) {
   if (state.modelBusy) return; const item = selectedImages()[0] || sortedImages()[0]; if (!item) { toast('ابتدا یک تصویر وارد کنید', true); return; }
-  $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
-  try { const result = await api(`/api/engines/${engineId}/test`, jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value })); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
-  catch (error) { $('modelTestResult').textContent = error.message; appendLocalActivity(`آزمایش موتور ناموفق بود: ${error.message}`, 'error'); }
+  state.modelBusy = engineId; setProgress('modelProgress', null, true); renderModels(); $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
+  try { const result = await api(`/api/engines/${engineId}/test`, jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value })); setProgress('modelProgress', 1, false); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
+  catch (error) { setProgress('modelProgress', 0, false); $('modelTestResult').textContent = error.message; appendLocalActivity(`آزمایش موتور ناموفق بود: ${error.message}`, 'error'); }
+  finally { state.modelBusy = null; renderModels(); }
 }
 const AI_PROVIDER_IDS = ['gemini', 'openai', 'openrouter', 'avalai'];
 const AI_FALLBACKS = {
@@ -1485,30 +1519,9 @@ function closeInlineEditor(force = false) {
   return true;
 }
 function positionInlineEditor() {
+  // The editor toolbar is docked under the filename/title now, not positioned
+  // over the page. Keep this hook for resize/scroll calls that refresh preview typography.
   if (!inlineDraft || imageOverview) return;
-  const view = document.querySelector('.editor-view'); const panel = $('inlineEditor'); const preview = document.querySelector('.editor-preview');
-  const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
-  if (!box || !view || panel.classList.contains('hidden')) return;
-  // Add room only when needed, keeping the box stationary where scrolling
-  // allows it. Ordinary scrolling must not pull the image back to the editor.
-  let bounds = view.getBoundingClientRect(); let target = box.getBoundingClientRect();
-  const height = panel.offsetHeight; const needed = height + 8;
-  if (inlineDraft.toolbarHeight !== height) {
-    inlineDraft.toolbarHeight = height;
-    const shortfall = Math.max(0, bounds.top + needed - target.top);
-    if (shortfall > 0) {
-      const oldTop = target.top; const previousPadding = parseFloat(preview.style.paddingTop) || 15;
-      preview.style.paddingTop = `${Math.ceil(previousPadding + shortfall)}px`;
-      preview.scrollTop += box.getBoundingClientRect().top - oldTop;
-      target = box.getBoundingClientRect();
-      if (target.top < bounds.top + needed && preview.scrollTop > 0) preview.scrollTop -= bounds.top + needed - target.top;
-      target = box.getBoundingClientRect();
-    }
-  }
-  const width = panel.offsetWidth;
-  const x = Math.max(8, Math.min(Math.max(8, bounds.width - width - 8), target.right - bounds.left - width));
-  const y = Math.max(8, Math.min(Math.max(8, bounds.height - height - 8), target.top - bounds.top - height - 4));
-  panel.style.left = `${x}px`; panel.style.top = `${y}px`;
   refreshInlineTypography();
 }
 // Position the editable text without changing its font size or the saved HTML.
@@ -1797,6 +1810,12 @@ function setBlockVisibility(block, visible) {
   const toggle = card?.querySelector('[data-visibility]'); if (toggle) toggle.checked = block.enabled;
   renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
 }
+function editOcrText(block) {
+  if (!block?.enabled) { toast('برای ویرایش متن انگلیسی، ابتدا نمایش همان کادر را فعال کنید.', true); return; }
+  if (currentOverlayMode() === 'none') setOverlayMode('ocr');
+  if (blockTextMode(block) !== 'ocr') setBlockTextMode(block, 'ocr');
+  openInlineEditor(block);
+}
 function setBlockTextMode(block, mode) {
   if (inlineDraft?.block === block && !closeInlineEditor()) {
     const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
@@ -1905,6 +1924,17 @@ function startBoxDrag(event, block, el) {
   };
   el.addEventListener('pointermove', move); el.addEventListener('pointerup', stop); el.addEventListener('pointercancel', stop); el.addEventListener('lostpointercapture', stop);
 }
+async function runSingleBlockTranslation(task) {
+  translationRunning = true;
+  $('translationStatus').textContent = 'در حال ترجمهٔ دوبارهٔ یک کادر…';
+  $('copyTranslationError').classList.add('hidden');
+  showDialog('translationDialog');
+  try { return await runJob('در حال ترجمهٔ دوبارهٔ یک کادر…', task, 'translationProgress'); }
+  finally {
+    translationRunning = false;
+    if ($('translationDialog').open) closeDialog('translationDialog');
+  }
+}
 async function retranslateBlock(block) {
   if (inlineDraft?.block === block && !closeInlineEditor()) return;
   const text = block.text || ''; const snapshot = inlineBlockSnapshot(block);
@@ -1917,7 +1947,7 @@ async function retranslateBlock(block) {
       const preview = await refresh();
       showTranslationRequestPreview(preview, async accepted => {
         if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
-        const result = await api('/api/translate-text/context', jsonOptions('POST', { ...request, skill:'', summary:'', confirmation: accepted.signature }));
+        const result = await runSingleBlockTranslation(() => api('/api/translate-text/context', jsonOptions('POST', { ...request, skill:'', summary:'', confirmation: accepted.signature })));
         if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
         block.tr = result.text; block.richHtml = plainToHtml(result.text); buildBlockList(); drawEditor(); scheduleSave();
       }, refresh);
@@ -1938,7 +1968,7 @@ async function retranslateBlock(block) {
     showTranslationRequestPreview(preview, async (accepted, repair = null) => {
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
       rememberTranslationSkill(projectId, accepted);
-      const result = await api('/api/translate-text/context', jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) }));
+      const result = await runSingleBlockTranslation(() => api('/api/translate-text/context', jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) })));
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
       block.tr = result.text; block.richHtml = plainToHtml(result.text); buildBlockList(); drawEditor(); scheduleSave();
     }, refresh);
@@ -1958,7 +1988,9 @@ function buildBlockList() {
     const languageRow = document.createElement('div'); languageRow.className = 'block-tools block-language-tools';
     const languageLabel = document.createElement('label'); languageLabel.className = 'block-language-label'; languageLabel.appendChild(document.createTextNode('نمایش همین متن:'));
     const language = document.createElement('select'); language.dataset.textMode = 'sidebar'; language.setAttribute('aria-label', `زبان نمایش متن ${block.id} روی تصویر`); [['translation', 'فارسی / ترجمه'], ['ocr', 'انگلیسی / OCR']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; language.appendChild(option); }); language.value = blockTextMode(block); languageLabel.appendChild(language); languageRow.appendChild(languageLabel);
-    const source = document.createElement('p'); source.className = 'block-readonly'; source.dir = 'auto'; source.textContent = `متن اصلی: ${block.text || '—'}`;
+    const source = document.createElement('p'); source.className = 'block-readonly block-source-edit'; source.dir = 'auto'; source.textContent = `متن اصلی: ${block.text || '—'}`; source.tabIndex = 0; source.setAttribute('role', 'button'); source.setAttribute('aria-label', `ویرایش متن انگلیسی/OCR کادر ${block.id}`); source.title = 'برای ویرایش متن اصلی کلیک کنید';
+    source.addEventListener('click', () => editOcrText(block));
+    source.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); editOcrText(block); } });
     const translation = document.createElement('p'); translation.className = 'block-readonly'; translation.dir = 'auto'; translation.textContent = `ترجمه: ${block.tr || '—'}`;
     const actions = document.createElement('div'); actions.className = 'block-tools';
     actions.append(makeButton('ویرایش همین متن', () => { if (!block.enabled || blockOverlayMode(block) === 'none') { toast('ابتدا نمایش متن روی تصویر را فعال کنید.', true); return; } openInlineEditor(block); }), makeButton('کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block)), makeButton('پاک‌کردن ترجمه', () => { if (inlineDraft?.block === block && !closeInlineEditor()) return; if (!confirm('ترجمهٔ این کادر پاک شود؟')) return; block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave(); }));
@@ -2095,7 +2127,7 @@ function bindEvents() {
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; } });
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; try { await saveAiSettings(); closeDialog('aiDialog'); } catch (error) { $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
-  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult()).catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf')).catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images')).catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt')).catch(() => {}));
+  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);

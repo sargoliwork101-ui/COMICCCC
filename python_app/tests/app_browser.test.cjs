@@ -247,6 +247,18 @@ main()
     await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads, eventsEnabled: true });
 
     await page.goto(base, { waitUntil: 'networkidle0' }); await page.waitForSelector('#grid .item img');
+    const progressVisual = await page.evaluate(() => {
+      setProgress('jobProgress', null, true);
+      const bar = document.getElementById('jobProgress').closest('.bar');
+      const active = { animation: getComputedStyle(document.getElementById('jobProgress')).animationName, height: getComputedStyle(bar).height, indeterminate: bar.classList.contains('indeterminate') };
+      setProgress('jobProgress', 0.5, true);
+      const determinate = { width: document.getElementById('jobProgress').style.width, value: bar.getAttribute('aria-valuenow'), indeterminate: bar.classList.contains('indeterminate') };
+      setProgress('jobProgress', 0, false);
+      return { active, determinate };
+    });
+    assert.deepEqual(progressVisual.active, { animation: 'progress-sweep', height: '8px', indeterminate: true });
+    assert.deepEqual(progressVisual.determinate, { width: '50%', value: '50', indeterminate: false });
+    console.log('PASS: progress bars visibly animate while unknown and show the exact reported percentage');
     await page.waitForFunction(() => state.project.images[0].edited === true, { timeout: 5000 });
     assert.equal(await previewDifference(page), 0, 'reopening saved translations must render them on the main page');
     console.log('PASS: real browser renders saved translations when a project opens');
@@ -365,20 +377,20 @@ main()
     await page.click('#grid .item .act button:nth-child(2)');
     await page.waitForSelector('#editorDialog[open] #blockList .block-card[data-id="1"]');
     assert.equal(await page.$eval('#inlineEditor', el => el.classList.contains('hidden')), true, 'toolbar is hidden before selecting a box');
-    // The focused box opens an isolated draft directly above it; no mutation until explicit Apply.
+    // Clicking a text opens an isolated draft; its tools stay docked below the filename, not over the canvas.
     await page.evaluate(() => { window.__inlineOriginal = JSON.parse(JSON.stringify(state.project.images[0].blocks[0])); window.__beforeInlineCanvas = document.getElementById('editorCanvas').toDataURL(); });
     await page.click('#editorBoxes .editor-box[data-id="1"] .editor-box-text', { offset: { x: 75, y: 30 } });
     await page.waitForSelector('#inlineEditor:not(.hidden)');
     const inPlace = await page.evaluate(() => {
-      const box = document.querySelector('#editorBoxes .editor-box[data-id="1"]'); const field = document.getElementById('inlineEditorField'); const a = box.getBoundingClientRect(); const b = field.getBoundingClientRect(); const bar = document.getElementById('inlineEditor').getBoundingClientRect();
-      return { attached: field.parentElement === box, aligned: Math.abs(a.left-b.left) < 3 && Math.abs(a.top-b.top) < 3 && Math.abs(a.width-b.width) <= 5 && Math.abs(a.height-b.height) <= 5, above: bar.bottom <= a.top + 2, single: document.querySelectorAll('#editorBoxes [contenteditable="true"]').length === 1 };
+      const box = document.querySelector('#editorBoxes .editor-box[data-id="1"]'); const field = document.getElementById('inlineEditorField'); const a = box.getBoundingClientRect(); const b = field.getBoundingClientRect(); const bar = document.getElementById('inlineEditor').getBoundingClientRect(); const title = document.querySelector('#editorDialog>.dialog-head').getBoundingClientRect(); const body = document.querySelector('#editorDialog>.editor-body').getBoundingClientRect();
+      return { attached: field.parentElement === box, aligned: Math.abs(a.left-b.left) < 3 && Math.abs(a.top-b.top) < 3 && Math.abs(a.width-b.width) <= 5 && Math.abs(a.height-b.height) <= 5, docked: bar.top >= title.bottom - 2 && bar.bottom <= body.top + 2, above: bar.bottom <= a.top + 2, single: document.querySelectorAll('#editorBoxes [contenteditable="true"]').length === 1 };
     });
-    assert.deepEqual(inPlace, {attached:true, aligned:true, above:true, single:true}, 'the actual clicked box must be the sole editor, with tools immediately above it');
+    assert.deepEqual(inPlace, {attached:true, aligned:true, docked:true, above:true, single:true}, 'the clicked box must be the sole editable text while tools stay in a dock below the filename and above the canvas');
     assert.equal(await page.$$eval('#inlineEditor [data-line-align], #inlineEditor #inlineLineDirection, #inlineEditor #inlineLineColor', els => els.length), 0, 'duplicate line controls are removed');
     const originalViewport = page.viewport();
     await page.setViewport({ width: 600, height: 700, deviceScaleFactor: 1 });
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    assert.equal(await page.evaluate(() => { const b=document.querySelector('#editorBoxes .editor-box[data-id="1"]');const f=document.getElementById('inlineEditorField');const bar=document.getElementById('inlineEditor');return f.parentElement===b && bar.getBoundingClientRect().bottom <= b.getBoundingClientRect().top+2; }), true, 'on a narrow viewport tools remain above the same editable box');
+    assert.equal(await page.evaluate(() => { const b=document.querySelector('#editorBoxes .editor-box[data-id="1"]');const f=document.getElementById('inlineEditorField');const bar=document.getElementById('inlineEditor').getBoundingClientRect();const head=document.querySelector('#editorDialog>.dialog-head').getBoundingClientRect();const body=document.querySelector('#editorDialog>.editor-body').getBoundingClientRect();return f.parentElement===b && bar.top>=head.bottom-2 && bar.bottom<=body.top+2; }), true, 'on a narrow viewport the toolbar stays docked under the title and the clicked box remains editable');
     await page.setViewport(originalViewport);
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const blank = await page.evaluate(() => { const r=document.getElementById('editorBoxes').getBoundingClientRect(); return {x:r.left+160*state.editorScale,y:r.top+60*state.editorScale}; });
@@ -387,10 +399,10 @@ main()
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
     await page.waitForSelector('#inlineEditor:not(.hidden)');
     const popupPosition = await page.evaluate(() => {
-      const view = document.querySelector('.editor-view').getBoundingClientRect(); const panel = document.getElementById('inlineEditor').getBoundingClientRect();
-      return panel.left >= view.left - 1 && panel.right <= view.right + 1 && panel.top >= view.top - 1 && panel.bottom <= view.bottom + 1;
+      const head = document.querySelector('#editorDialog>.dialog-head').getBoundingClientRect(); const panel = document.getElementById('inlineEditor').getBoundingClientRect(); const body = document.querySelector('#editorDialog>.editor-body').getBoundingClientRect();
+      return panel.top >= head.bottom - 1 && panel.bottom <= body.top + 1;
     });
-    assert.equal(popupPosition, true, 'the floating editor must stay within the visible preview');
+    assert.equal(popupPosition, true, 'the editing toolbar remains docked between the filename and image, outside the preview canvas');
     await page.focus('#inlineEditorField');
     await page.evaluate(() => document.execCommand('selectAll'));
     await page.keyboard.type('new inline text');
@@ -422,6 +434,15 @@ main()
     await page.evaluate(() => saveProject());
     assert.equal(await page.evaluate(async () => (await (await fetch(`/api/projects/${state.project.id}`)).json()).images[0].blocks[0].tr), 'new inline text', 'applied edits must be saved');
     assert.equal(await page.evaluate(async () => (await (await fetch(`/api/projects/${state.project.id}`)).json()).images[0].blocks[0].verticalAlign), 'top', 'vertical placement must persist with the project');
+    await page.click('#editorBoxes .editor-box[data-id="2"] .editor-box-text');
+    await page.waitForSelector('#inlineEditor:not(.hidden)');
+    assert.equal(await page.$eval('#inlineEditorField', field => field.parentElement.dataset.id), '2', 'clicking a different on-image text opens that exact text for editing');
+    await page.click('#inlineEditorCancel');
+    await page.click('#blockList .block-card[data-id="1"] .block-source-edit');
+    await page.waitForSelector('#inlineEditor:not(.hidden)');
+    assert.equal(await page.evaluate(() => { const block=state.project.images[0].blocks[0];return document.getElementById('inlineEditorField').textContent === block.text && document.getElementById('inlineEditorTitle').textContent.includes('متن اصلی'); }), true, 'clicking English source text opens the same docked editor in OCR mode');
+    await page.click('#inlineEditorCancel');
+    await page.evaluate(() => setBlockTextMode(state.project.images[0].blocks[0], 'translation'));
     const topCanvas = await page.$eval('#editorCanvas', el => el.toDataURL());
     await page.evaluate(() => openInlineEditor(state.project.images[0].blocks[0]));
     await page.select('#inlineVerticalAlign', 'bottom'); await page.click('#inlineEditorApply');

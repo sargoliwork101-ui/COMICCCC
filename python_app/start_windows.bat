@@ -4,7 +4,7 @@ chcp 65001 >nul
 cd /d "%~dp0"
 
 rem Comic OCR Studio 3.46 - Windows setup and launcher.
-rem Required packages and pip are checked/updated in the isolated .venv on each run.
+rem Dependencies are installed in .venv during setup; later launches reuse that local environment.
 rem Existing supported system Python installations are never modified or removed.
 
 set "APP_DIR=%CD%"
@@ -22,7 +22,12 @@ set "COMIC_MANAGED_PYTHON=%LocalAppData%\Programs\ComicOCRStudio\Python313\pytho
 rem A broken or unsupported existing environment is preserved before rebuilding.
 if not exist "%VENV_PYTHON%" goto prepare_python
 "%VENV_PYTHON%" -c "import sys,struct; sys.exit(0 if sys.version_info >= (3,11) and struct.calcsize('P') == 8 else 1)" >nul 2>&1
-if not errorlevel 1 goto have_venv
+if errorlevel 1 goto unsupported_venv
+if not exist "%READY%" goto have_venv
+echo [Comic OCR Studio] Using the installed packages in this folder's .venv.
+goto run_app
+
+:unsupported_venv
 echo [Comic OCR Studio] The existing environment is broken or uses an unsupported Python.
 echo [Comic OCR Studio] It will be kept as a .venv.previous-* folder, not deleted.
 

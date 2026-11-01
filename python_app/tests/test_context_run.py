@@ -457,6 +457,19 @@ def test_context_unrelated_edit_is_merged_without_second_call(tmp_path, monkeypa
         assert len(calls) == 1 and client.get(route+'/pending').json() == []
 
 
+def test_context_translation_reports_completed_source_fraction(tmp_path, monkeypatch):
+    monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
+    monkeypatch.setattr(TranslationService, 'translate_context',
+                        lambda self, request, text, sources, provider, policy: ('\n'.join('translated' for _ in sources), 'summary'))
+    with scoped_client(create_app()) as client:
+        route, _project, step = _pending_setup(client)
+        response = client.post(route + '/context-step', json=step)
+        assert response.status_code == 200, response.text
+        entries = client.get('/api/activity').json()['entries']
+        saved = next(entry for entry in reversed(entries) if 'ذخیره شد' in entry['message'])
+        assert 0 < saved['progress'] <= 1
+
+
 def test_project_file_lock_keeps_ai_translation_pending_for_retry(tmp_path, monkeypatch):
     import comic_studio.store as store_module
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))

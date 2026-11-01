@@ -210,6 +210,7 @@ function check(name, condition) {
   await sleep(60);
   const $ = (id) => window.document.getElementById(id);
   check('one image card is rendered', window.document.querySelectorAll('#grid .item').length === 1);
+  check('job, OCR, translation, model and export progress bars exist with accessible progress roles', ['jobProgress', 'ocrProgress', 'translationProgress', 'modelProgress', 'exportProgress'].every((id) => $(id) && $(id).closest('[role="progressbar"]')));
   check('image starts selected', $('grid').querySelector('.item').classList.contains('selected'));
 
   $('grid').querySelector('img').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
@@ -611,10 +612,10 @@ function check(name, condition) {
   check('a fresh translation preview is required after cancellation', $('translationPreviewDialog').open && translationPreviewCalls.length === 2 && translationCalls.length === 0);
   $('translationPreviewConfirm').click();
   await sleep(20);
-  check('translation shows a live progress dialog and activity while pending', $('translationDialog').open && $('translationStatus').textContent.includes('ترجمه') && $('translationActivityLog').textContent.includes('ترجمه') && $('translationProgress').style.width !== '0%');
+  check('translation shows a live indeterminate progress bar while its first request is pending', $('translationDialog').open && $('translationStatus').textContent.includes('ترجمه') && $('translationActivityLog').textContent.includes('ترجمه') && $('translationProgress').closest('.bar').classList.contains('indeterminate') && $('translationProgress').style.width === '30%');
   activityFeed = { entries: [{ id: 500, message: 'ترجمهٔ مشترک تصویر 1 از 2 در حال انجام است', kind: 'info', progress: 0.5, time: new Date().toISOString() }], next: 500 };
   await vm.runInContext('pollActivity()', context);
-  check('server translation progress updates the visible dialog percentage', $('translationStatus').textContent.includes('تصویر 1 از 2') && $('translationProgress').style.width === '50%' && $('translationActivityLog').textContent.includes('تصویر 1 از 2'));
+  check('server progress replaces the animation with the correct percentage', $('translationStatus').textContent.includes('تصویر 1 از 2') && $('translationProgress').style.width === '50%' && $('translationProgress').closest('.bar').getAttribute('aria-valuenow') === '50' && !$('translationProgress').closest('.bar').classList.contains('indeterminate') && $('translationActivityLog').textContent.includes('تصویر 1 از 2'));
   activityFeed = { entries: [], next: 500 };
   translationGate = null; releaseTranslation();
   await vm.runInContext('translationPreviewTask', context);
