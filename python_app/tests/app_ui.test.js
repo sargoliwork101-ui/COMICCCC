@@ -822,7 +822,7 @@ function check(name, condition) {
     })()`, context);
     await vm.runInContext('closeEditor()', context);
 
-    // v3.64: Hamburger menu closes on any outside click; OCR and Translation dialogs close immediately via × or Escape even while running.
+    // v3.64 + v3.65: Hamburger menu closes on any outside click; cancelling a running job asks Persian confirmation in themed #appModalDialog first.
     $('menu').classList.add('hidden');
     $('menuBtn').click();
     check('hamburger menu opens on button click with aria-expanded=true', !$('menu').classList.contains('hidden') && $('menuBtn').getAttribute('aria-expanded') === 'true');
@@ -841,20 +841,25 @@ function check(name, condition) {
     $('ocrBtn').click();
     $('startOcrBtn').click();
     await new Promise((r) => setTimeout(r, 20));
-    check('in-flight OCR keeps × close button enabled', $('ocrDialog').open === true && vm.runInContext('ocrRunning === true', context) && $('ocrDialog').querySelector('.dialog-head button').disabled === false);
+    check('in-flight OCR keeps × close button and dock cancel button enabled', $('ocrDialog').open === true && vm.runInContext('ocrRunning === true', context) && $('ocrDialog').querySelector('.dialog-head button').disabled === false && $('dockCancelJobBtn').disabled === false);
     $('ocrDialog').querySelector('.dialog-head button').click();
     await new Promise((r) => setTimeout(r, 20));
-    check('clicking × during OCR immediately closes ocrDialog and cancels busy state', $('ocrDialog').open === false && vm.runInContext('ocrRunning === false && jobBusy === false', context) && $('ocrBtn').disabled === false);
-    releaseOcr1(); ocrGate = null;
-
-    let releaseOcr2; ocrGate = new Promise((r) => { releaseOcr2 = r; });
-    $('ocrBtn').click();
-    $('startOcrBtn').click();
+    check('clicking × during OCR opens Persian confirmation modal while keeping OCR running', $('appModalDialog').open === true && $('ocrDialog').open === true && vm.runInContext('ocrRunning === true && jobBusy === true', context) && $('appModalMessage').textContent.includes('آیا مطمئن هستید') && $('appModalConfirm').textContent.includes('بله') && $('appModalCancel').textContent.includes('خیر'));
+    $('appModalCancel').click();
     await new Promise((r) => setTimeout(r, 20));
+    check('declining cancel confirmation keeps OCR running and ocrDialog open', $('appModalDialog').open === false && $('ocrDialog').open === true && vm.runInContext('ocrRunning === true && jobBusy === true', context));
     window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     await new Promise((r) => setTimeout(r, 20));
-    check('pressing Escape during OCR immediately closes ocrDialog and cancels busy state', $('ocrDialog').open === false && vm.runInContext('ocrRunning === false && jobBusy === false', context));
-    releaseOcr2(); ocrGate = null;
+    check('pressing Escape during OCR opens confirmation modal instead of immediately killing OCR', $('appModalDialog').open === true && $('ocrDialog').open === true && vm.runInContext('ocrRunning === true', context));
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    check('pressing Escape on confirmation modal dismisses only confirmation modal and keeps OCR running', $('appModalDialog').open === false && $('ocrDialog').open === true && vm.runInContext('ocrRunning === true && jobBusy === true', context));
+    $('ocrDialog').querySelector('.dialog-head button').click();
+    await new Promise((r) => setTimeout(r, 20));
+    $('appModalConfirm').click();
+    await new Promise((r) => setTimeout(r, 25));
+    check('confirming cancel stops OCR, closes ocrDialog, and resets busy state', $('appModalDialog').open === false && $('ocrDialog').open === false && vm.runInContext('ocrRunning === false && jobBusy === false', context) && $('ocrBtn').disabled === false);
+    releaseOcr1(); ocrGate = null;
 
     let releaseTr1; translationGate = new Promise((r) => { releaseTr1 = r; });
     await vm.runInContext('runTranslation()', context);
@@ -862,18 +867,33 @@ function check(name, condition) {
     await new Promise((r) => setTimeout(r, 25));
     check('in-flight translation keeps × close button enabled', $('translationDialog').open === true && vm.runInContext('translationRunning === true', context) && $('translationDialog').querySelector('.dialog-head button').disabled === false);
     $('translationDialog').querySelector('.dialog-head button').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('clicking × during translation asks Persian confirmation before stopping', $('appModalDialog').open === true && $('translationDialog').open === true && vm.runInContext('translationRunning === true', context) && $('appModalMessage').textContent.includes('آیا مطمئن هستید'));
+    $('appModalCancel').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('declining translation cancel keeps translation running', $('appModalDialog').open === false && $('translationDialog').open === true && vm.runInContext('translationRunning === true && jobBusy === true', context));
+    $('dockCancelJobBtn').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('dock cancel button opens Persian confirmation modal for active job', $('appModalDialog').open === true && $('translationDialog').open === true && $('appModalDialog').dataset.variant === 'warning');
+    $('appModalConfirm').click();
     await new Promise((r) => setTimeout(r, 25));
-    check('clicking × during translation immediately closes translationDialog without reopening and cancels busy state', $('translationDialog').open === false && vm.runInContext('translationRunning === false && jobBusy === false', context) && $('translateBtn').disabled === false);
+    check('confirming translation cancel closes translationDialog without reopening and resets busy state', $('appModalDialog').open === false && $('translationDialog').open === false && vm.runInContext('translationRunning === false && jobBusy === false', context) && $('translateBtn').disabled === false);
     releaseTr1(); translationGate = null;
 
-    let releaseTr2; translationGate = new Promise((r) => { releaseTr2 = r; });
-    await vm.runInContext('runTranslation()', context);
-    $('translationPreviewConfirm').click();
-    await new Promise((r) => setTimeout(r, 25));
-    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 25));
-    check('pressing Escape during translation immediately closes translationDialog and cancels busy state', $('translationDialog').open === false && vm.runInContext('translationRunning === false && jobBusy === false', context));
-    releaseTr2(); translationGate = null;
+    // Alert & delete confirmation use themed #appModalDialog with Persian text (no native confirm/alert).
+    let nativeConfirmCalled = 0;
+    window.confirm = () => { nativeConfirmCalled += 1; return true; };
+    const alertTask = vm.runInContext(`window.alert('NetworkError when attempting to fetch resource')`, context);
+    await new Promise((r) => setTimeout(r, 20));
+    check('window.alert opens themed Persian appModalDialog without cancel button', $('appModalDialog').open === true && $('appModalCancel').classList.contains('hidden') && $('appModalMessage').textContent.includes('خطای شبکه هنگام ارتباط با سرور') && $('appModalConfirm').textContent === 'متوجه شدم');
+    $('appModalConfirm').click();
+    await alertTask;
+    $('deleteBtn').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('deleting images opens destructive Persian appModalDialog instead of native confirm', nativeConfirmCalled === 0 && $('appModalDialog').open === true && $('appModalDialog').dataset.variant === 'danger' && $('appModalConfirm').classList.contains('danger-solid') && $('appModalMessage').textContent.includes('تصویر انتخاب‌شده'));
+    $('appModalCancel').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('cancelling delete confirmation keeps project image intact', $('appModalDialog').open === false && vm.runInContext('state.project.images.length === 1', context));
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

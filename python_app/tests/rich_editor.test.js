@@ -43,5 +43,18 @@ assert.equal(recoveredEmpty.setContext('test-draft', '<p>initial</p>', 'rev-1'),
 assert.equal(confirmCount, 1, 'declined draft does not prompt again on next open');
 window.confirm = () => true;
 recoveredEmpty.clearDraft(); assert.equal(window.localStorage.getItem('test-draft'), null);
-editor.destroy(); recoveredEmpty.destroy(); dom.window.close();
-console.log('rich editor: safe HTML, API, tabs, autosave and empty-draft recovery passed');
+(async () => {
+  let asyncPromptMsg = '';
+  const asyncEditor = window.createEditor('#two', {
+    confirmDraft: (msg) => { asyncPromptMsg = msg; return Promise.resolve(true); },
+  });
+  window.localStorage.setItem('async-draft', JSON.stringify({ html: '<p>از پیش‌نویس</p>', base: 'r1', time: 'now', meta: null }));
+  const restored = await asyncEditor.setContext('async-draft', '<p>initial</p>', 'r1');
+  assert.equal(restored, true, 'async confirmDraft resolves true when accepted');
+  assert.ok(asyncPromptMsg.includes('پیش‌نویس'), 'confirmDraft receives Persian message');
+  assert.equal(asyncEditor.getHTML(), '<p>از پیش‌نویس</p>', 'async confirmDraft restores saved HTML');
+  asyncEditor.clearDraft();
+  asyncEditor.destroy();
+  editor.destroy(); recoveredEmpty.destroy(); dom.window.close();
+  console.log('rich editor: safe HTML, API, tabs, autosave, async confirmDraft and empty-draft recovery passed');
+})().catch((err) => { console.error(err); process.exitCode = 1; });

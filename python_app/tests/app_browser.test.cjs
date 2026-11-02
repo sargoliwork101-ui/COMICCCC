@@ -246,6 +246,8 @@ main()
     });
     const page = await browser.newPage(); await page.setCacheEnabled(false);
     const browserErrors = [];
+    const nativeBrowserDialogs = [];
+    page.on('dialog', (dialog) => { nativeBrowserDialogs.push(dialog.message()); dialog.dismiss().catch(() => {}); });
     page.on('pageerror', (error) => browserErrors.push(String(error)));
     page.on('console', (message) => { if (message.type() === 'error') browserErrors.push(message.text()); });
     const cdp = await page.createCDPSession();
@@ -1143,8 +1145,14 @@ main()
     await page.waitForFunction(() => Object.keys(localStorage).some(key => key.startsWith('comic-studio-draft:') && JSON.parse(localStorage.getItem(key)).meta?.size === '33'), {timeout:6000});
     await page.$eval('#inlineEditorSize', el => {el.value='44';});
     await page.select('#inlineVerticalAlign', 'top');
-    page.once('dialog', dialog => dialog.accept());
-    assert.equal(await page.evaluate(() => { const b=inlineDraft.block; return classicEditor.setContext(`comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(b.id)}:translation`, b.richHtml || plainToHtml(b.tr || ''), inlineBlockSnapshot(b)); }), true);
+    await page.evaluate(() => {
+      const b = inlineDraft.block;
+      window.__draftRecoverTask = classicEditor.setContext(`comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(b.id)}:translation`, b.richHtml || plainToHtml(b.tr || ''), inlineBlockSnapshot(b));
+    });
+    await page.waitForSelector('#appModalDialog[open]');
+    assert.ok((await page.$eval('#appModalMessage', el => el.textContent)).includes('پیش‌نویس'));
+    await page.click('#appModalConfirm');
+    assert.equal(await page.evaluate(() => window.__draftRecoverTask), true);
     assert.equal(await page.$$eval('#inlineEditorField table td', els => els.length), 4, 'autosaved HTML recovers in the correct context');
     assert.equal(await page.$eval('#inlineEditorSize', el => el.value), '33', 'autosave restores output settings as well as text');
     assert.equal(await page.$eval('#inlineVerticalAlign', el => el.value), 'bottom', 'autosave restores vertical alignment');
@@ -1221,12 +1229,16 @@ main()
     assert.equal(await page.evaluate(() => inlineDraft.block.tr), 'external change', 'concurrent edits are not overwritten');
     await page.evaluate(() => Object.assign(inlineDraft.block, window.__beforeConflict));
     await page.click('#inlineEditorCancel');
-    let conflictRecoveryPrompt = '';
-    page.once('dialog', (dialog) => { conflictRecoveryPrompt = dialog.message(); dialog.dismiss(); });
-    const clearedOnDecline = await page.evaluate(() => {
+    await page.evaluate(() => {
       Object.assign(state.project.images[0].blocks[0], window.__beforeConflict);
       buildBlockList(); drawEditor();
       openInlineEditor(state.project.images[0].blocks[0]);
+    });
+    await page.waitForSelector('#appModalDialog[open]');
+    const conflictRecoveryPrompt = await page.$eval('#appModalMessage', (el) => el.textContent);
+    await page.click('#appModalCancel');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open);
+    const clearedOnDecline = await page.evaluate(() => {
       const hasDraft = Object.keys(localStorage).some((key) => key.startsWith('comic-studio-draft:'));
       closeInlineEditor();
       return !hasDraft;
@@ -1801,9 +1813,11 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     const backupPath = await backupDownload; assert.ok(backupPath.endsWith('.zip') && fs.statSync(backupPath).size > 0);
     await page.waitForFunction(() => !document.getElementById('backupDownloadLink').classList.contains('hidden'));
     assert.equal(await page.$eval('#backupDownloadLink', el => el.download.endsWith('-backup.zip')), true);
-    page.once('dialog', dialog => dialog.accept());
     await page.$eval('#restoreProjectInput', el => el.value = '');
     const fileInput = await page.$('#restoreProjectInput'); await fileInput.uploadFile(backupPath);
+    await page.waitForSelector('#appModalDialog[open]');
+    assert.ok((await page.$eval('#appModalMessage', el => el.textContent)).includes('بازیابی شود'));
+    await page.click('#appModalConfirm');
     await page.waitForFunction(id => state.project.id !== id && state.project.name === 'Portable project', {timeout:15000}, backupProject.id);
     const restoredId = await page.evaluate(() => state.project.id);
     assert.notEqual(restoredId, backupProject.id);
@@ -1838,7 +1852,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       window.__origFetchV364 = window.fetch;
       window.fetch = (url, opts = {}) => {
         const u = String(url);
-        if (u.endsWith('/ocr') || u.endsWith('/context-step') || u.endsWith('/translate-text/context') || u.endsWith('/translate-text')) {
+        if (u.endsWith('/ocr') || u.endsWith('/context-step') || u.endsWith('/translate-text/context') || u.endsWith('/translate-text') || u.endsWith('/export')) {
           return new Promise((_resolve, reject) => {
             if (opts.signal?.aborted) { const e = new DOMException('Aborted', 'AbortError'); reject(e); return; }
             opts.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
@@ -1847,37 +1861,89 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         return window.__origFetchV364(url, opts);
       };
     });
-    // 1. OCR × and Escape while running
+    // 1. OCR × and Escape while running ask Persian confirmation in themed #appModalDialog first
     await page.click('#ocrBtn');
     await page.waitForSelector('#ocrDialog[open]');
     await page.click('#startOcrBtn');
     await page.waitForFunction(() => ocrRunning === true);
     await page.click('#ocrDialog .dialog-head button.icon');
-    await page.waitForFunction(() => !document.getElementById('ocrDialog').open && ocrRunning === false && jobBusy === false);
+    await page.waitForSelector('#appModalDialog[open]');
+    const darkModalTheme = await page.evaluate(() => {
+      const dlg = document.getElementById('appModalDialog');
+      const cs = getComputedStyle(dlg);
+      const surface = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim();
+      const probe = document.createElement('div'); probe.style.backgroundColor = surface; document.body.appendChild(probe);
+      const expectedBg = getComputedStyle(probe).backgroundColor; probe.remove();
+      return {
+        bg: cs.backgroundColor, expectedBg, dir: cs.direction,
+        msg: document.getElementById('appModalMessage').textContent,
+        confirmText: document.getElementById('appModalConfirm').textContent,
+        cancelText: document.getElementById('appModalCancel').textContent,
+      };
+    });
+    assert.equal(darkModalTheme.bg, darkModalTheme.expectedBg, 'appModalDialog uses Studio dark --surface color');
+    assert.equal(darkModalTheme.dir, 'rtl', 'appModalDialog renders in RTL');
+    assert.ok(darkModalTheme.msg.includes('آیا مطمئن هستید'), 'cancel modal asks Persian confirmation');
+    assert.ok(darkModalTheme.confirmText.includes('بله') && darkModalTheme.cancelText.includes('خیر'), 'cancel modal buttons are in Persian');
 
-    await page.click('#ocrBtn');
-    await page.waitForSelector('#ocrDialog[open]');
-    await page.click('#startOcrBtn');
-    await page.waitForFunction(() => ocrRunning === true);
+    // Switch temporarily to light theme and verify modal follows light theme palette automatically
+    const lightModalTheme = await page.evaluate(() => {
+      document.body.classList.add('light');
+      const dlg = document.getElementById('appModalDialog');
+      const bg = getComputedStyle(dlg).backgroundColor;
+      const probe = document.createElement('div'); probe.style.backgroundColor = 'var(--surface)'; document.body.appendChild(probe);
+      const expectedBg = getComputedStyle(probe).backgroundColor; probe.remove();
+      document.body.classList.remove('light');
+      return { bg, expectedBg };
+    });
+    assert.equal(lightModalTheme.bg, lightModalTheme.expectedBg, 'appModalDialog uses Studio light --surface color in light mode');
+    assert.notEqual(lightModalTheme.bg, darkModalTheme.bg, 'light and dark modal palettes match their respective themes');
+
+    // Declining keeps OCR running and ocrDialog open
+    await page.click('#appModalCancel');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open);
+    assert.equal(await page.evaluate(() => document.getElementById('ocrDialog').open && ocrRunning === true && jobBusy === true), true, 'declining cancel keeps OCR running');
+
+    // Pressing Escape during OCR opens confirmation modal; pressing Escape again dismisses only confirmation modal
     await page.keyboard.press('Escape');
-    await page.waitForFunction(() => !document.getElementById('ocrDialog').open && ocrRunning === false && jobBusy === false);
+    await page.waitForSelector('#appModalDialog[open]');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open);
+    assert.equal(await page.evaluate(() => document.getElementById('ocrDialog').open && ocrRunning === true && jobBusy === true), true, 'Escape on confirmation modal keeps OCR running');
 
-    // 2. Translation × and Escape while running
+    // Confirming cancel aborts OCR and closes ocrDialog
+    await page.click('#ocrDialog .dialog-head button.icon');
+    await page.waitForSelector('#appModalDialog[open]');
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open && !document.getElementById('ocrDialog').open && ocrRunning === false && jobBusy === false);
+
+    // 2. Translation ×, cancel button, and dock cancel button ask confirmation first
     await page.click('#translateBtn');
     await page.waitForSelector('#translationPreviewDialog[open]');
     await page.click('#translationPreviewConfirm');
     await page.waitForFunction(() => document.getElementById('translationDialog').open && translationRunning === true);
     await page.click('#translationDialog .dialog-head button.icon');
-    await page.waitForFunction(() => !document.getElementById('translationDialog').open && translationRunning === false && jobBusy === false);
+    await page.waitForSelector('#appModalDialog[open]');
+    await page.click('#appModalCancel');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open && document.getElementById('translationDialog').open && translationRunning === true);
+    await page.click('#cancelTranslationBtn');
+    await page.waitForSelector('#appModalDialog[open]');
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open && !document.getElementById('translationDialog').open && translationRunning === false && jobBusy === false);
 
-    await page.click('#translateBtn');
-    await page.waitForSelector('#translationPreviewDialog[open]');
-    await page.click('#translationPreviewConfirm');
-    await page.waitForFunction(() => document.getElementById('translationDialog').open && translationRunning === true);
-    await page.keyboard.press('Escape');
-    await page.waitForFunction(() => !document.getElementById('translationDialog').open && translationRunning === false && jobBusy === false);
+    // 2b. Dock-level job (#exportPdfBtn with no dialog open): #dockCancelJobBtn asks confirmation first
+    await page.click('#exportPdfBtn');
+    await page.waitForFunction(() => exportRunning === true && jobBusy === true && !document.getElementById('dockProgressWrap').classList.contains('hidden'));
+    await page.click('#dockCancelJobBtn');
+    await page.waitForSelector('#appModalDialog[open]');
+    await page.click('#appModalCancel');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open && exportRunning === true && jobBusy === true);
+    await page.click('#dockCancelJobBtn');
+    await page.waitForSelector('#appModalDialog[open]');
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open && exportRunning === false && jobBusy === false);
 
-    // 3. Stacked translationDialog over editorDialog: Escape closes translationDialog first and keeps editorDialog open
+    // 3. Stacked translationDialog over editorDialog: Escape asks confirmation, decline keeps both open, confirm closes only translationDialog
     await page.evaluate(() => openEditor(state.project.images[0].id));
     await page.waitForSelector('#editorDialog[open]');
     await page.evaluate(() => retranslateBlock(state.project.images[0].blocks[0]));
@@ -1885,11 +1951,18 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     await page.click('#translationPreviewConfirm');
     await page.waitForFunction(() => document.getElementById('translationDialog').open && translationRunning === true);
     await page.keyboard.press('Escape');
-    await page.waitForFunction(() => !document.getElementById('translationDialog').open && document.getElementById('editorDialog').open && translationRunning === false && jobBusy === false);
+    await page.waitForSelector('#appModalDialog[open]');
+    await page.click('#appModalCancel');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open && document.getElementById('translationDialog').open && document.getElementById('editorDialog').open && translationRunning === true);
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('#appModalDialog[open]');
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open && !document.getElementById('translationDialog').open && document.getElementById('editorDialog').open && translationRunning === false && jobBusy === false);
     await page.evaluate(() => closeEditor());
 
     await page.evaluate(() => { window.fetch = window.__origFetchV364; delete window.__origFetchV364; });
-    console.log('PASS: v3.64 hamburger menu closes on outside click and OCR/Translation dialogs close & abort on × or Escape');
+    assert.deepEqual(nativeBrowserDialogs, [], `expected zero native browser confirm/alert popups, got: ${nativeBrowserDialogs.join(' | ')}`);
+    console.log('PASS: v3.65 hamburger outside-click, Persian cancel-job confirmation modal, dark/light theme parity, and zero native dialogs');
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');

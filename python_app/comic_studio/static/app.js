@@ -40,6 +40,7 @@ let imageOverview = null;
 let jobBusy = false;
 let translationRunning = false;
 let ocrRunning = false;
+let exportRunning = false;
 const openDialogStack = [];
 let ocrAbortController = null;
 let ocrCancelledByUser = false;
@@ -47,6 +48,13 @@ let ocrClosingNormally = false;
 let translationAbortController = null;
 let translationCancelledByUser = false;
 let translationClosingNormally = false;
+let exportAbortController = null;
+let exportCancelledByUser = false;
+let modelAbortController = null;
+let modelCancelledByUser = false;
+let currentJobAbortController = null;
+let activeModalState = null;
+let modalQueue = Promise.resolve();
 let pendingTranslationAfterOcr = null;
 let translationRetryAction = null;
 let translationRepairAction = null;
@@ -201,13 +209,23 @@ function closeSession() {
   fetch('/api/session/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
 }
 
+function localizeToastMessage(raw) {
+  return String(raw || '')
+    .replace(/\bFailed to fetch\b/gi, 'عدم برقراری ارتباط با سرور')
+    .replace(/\bNetworkError when attempting to fetch resource\.?\b/gi, 'خطای شبکه هنگام ارتباط با سرور')
+    .replace(/\bLoad failed\b/gi, 'دریافت اطلاعات از سرور ناموفق بود');
+}
 function toast(message, error = false) {
   const el = $('toast');
-  el.textContent = String(message || '');
-  el.style.borderColor = error ? 'var(--danger)' : 'var(--line-2)';
+  if (!el) return;
+  const text = localizeToastMessage(message);
+  el.textContent = text;
+  el.classList.toggle('toast-error', !!error);
+  el.classList.toggle('toast-warn', !error && /متوقف|لغو/.test(text));
+  el.style.borderColor = error ? 'var(--danger)' : '';
   el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), error ? 7000 : 3200);
+  toastTimer = setTimeout(() => el.classList.remove('show'), error ? 7000 : 3400);
 }
 async function api(url, options = {}) {
   const method = String(options.method || 'GET').toUpperCase();
@@ -250,6 +268,103 @@ function setMenuOpen(open) {
   menu.classList.toggle('hidden', !open);
   $('menuBtn')?.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
+const pendingCancelModals = new Map();
+function resolveActiveModal(result) {
+  if (!activeModalState) return;
+  const current = activeModalState;
+  activeModalState = null;
+  if (current.cancelJobKind) pendingCancelModals.delete(current.cancelJobKind);
+  closeDialog('appModalDialog');
+  try { current.returnFocus?.focus?.({ preventScroll: true }); } catch { /* ignore */ }
+  current.resolve(Boolean(result));
+}
+function dismissJobCancelModal(kind) {
+  if (activeModalState && (!kind || activeModalState.cancelJobKind === kind)) resolveActiveModal(false);
+}
+function showAppModal(options = {}) {
+  const {
+    title = 'تأیید عملیات',
+    message = '',
+    hint = '',
+    confirmText = 'تأیید',
+    cancelText = 'انصراف',
+    variant = 'confirm',
+    destructive = false,
+    alertOnly = false,
+    cancelJobKind = null,
+  } = options;
+  if (cancelJobKind && pendingCancelModals.has(cancelJobKind)) return pendingCancelModals.get(cancelJobKind);
+  const dlg = $('appModalDialog');
+  if (!dlg) return Promise.resolve(!alertOnly);
+  let queued = null;
+  const run = () => new Promise((resolve) => {
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dlg.dataset.variant = variant;
+    const badgeMap = { confirm: '؟', warning: '!', danger: '!', info: 'ℹ' };
+    if ($('appModalBadge')) $('appModalBadge').textContent = badgeMap[variant] || '؟';
+    if ($('appModalTitle')) $('appModalTitle').textContent = title;
+    if ($('appModalMessage')) $('appModalMessage').textContent = localizeToastMessage(message);
+    const hintEl = $('appModalHint');
+    if (hintEl) {
+      hintEl.textContent = hint || '';
+      hintEl.classList.toggle('hidden', !hint);
+    }
+    const cancelBtn = $('appModalCancel');
+    const confirmBtn = $('appModalConfirm');
+    if (cancelBtn) {
+      cancelBtn.textContent = cancelText;
+      cancelBtn.classList.toggle('hidden', !!alertOnly);
+    }
+    if (confirmBtn) {
+      confirmBtn.textContent = confirmText;
+      confirmBtn.classList.toggle('danger-solid', !!destructive);
+      confirmBtn.classList.toggle('primary', !destructive);
+    }
+    activeModalState = { resolve, returnFocus, cancelJobKind, alertOnly, promise: queued };
+    showDialog('appModalDialog');
+    queueMicrotask(() => {
+      const target = (destructive && !alertOnly ? cancelBtn : confirmBtn) || confirmBtn;
+      try { target?.focus?.({ preventScroll: true }); } catch { /* ignore */ }
+    });
+  });
+  queued = modalQueue.then(run, run);
+  if (cancelJobKind) {
+    pendingCancelModals.set(cancelJobKind, queued);
+    queued.finally(() => {
+      if (pendingCancelModals.get(cancelJobKind) === queued) pendingCancelModals.delete(cancelJobKind);
+    });
+  }
+  modalQueue = queued.then(() => {}, () => {});
+  return queued;
+}
+function appConfirm(message, options = {}) {
+  return showAppModal({
+    title: options.title || 'تأیید عملیات',
+    message,
+    hint: options.hint || '',
+    confirmText: options.confirmText || 'بله، انجام شود',
+    cancelText: options.cancelText || 'انصراف',
+    variant: options.variant || 'confirm',
+    destructive: !!options.destructive,
+    alertOnly: false,
+    cancelJobKind: options.cancelJobKind || null,
+  });
+}
+function appAlert(message, options = {}) {
+  return showAppModal({
+    title: options.title || 'اعلان برنامه',
+    message,
+    hint: options.hint || '',
+    confirmText: options.confirmText || 'متوجه شدم',
+    variant: options.variant || 'warning',
+    destructive: false,
+    alertOnly: true,
+  });
+}
+window.appConfirm = appConfirm;
+window.appAlert = appAlert;
+window.alert = (msg) => { appAlert(String(msg ?? ''), { title: 'اعلان برنامه', variant: 'warning' }); };
+
 function abortRunningOcr() {
   if (!ocrRunning) return;
   ocrCancelledByUser = true;
@@ -260,6 +375,16 @@ function abortRunningTranslation() {
   if (!translationRunning && !translationDecisionBusy) return;
   translationCancelledByUser = true;
   try { translationAbortController?.abort(); } catch { /* ignore */ }
+}
+function abortRunningExport() {
+  if (!exportRunning) return;
+  exportCancelledByUser = true;
+  try { exportAbortController?.abort(); } catch { /* ignore */ }
+}
+function abortRunningModelJob() {
+  if (!state.modelBusy) return;
+  modelCancelledByUser = true;
+  try { modelAbortController?.abort(); } catch { /* ignore */ }
 }
 function showDialog(id) {
   setMenuOpen(false);
@@ -275,21 +400,99 @@ function closeDialog(id) {
   if (idx >= 0) openDialogStack.splice(idx, 1);
   if ($(id)?.open) $(id).close();
 }
-function dismissOcrDialog() {
+async function requestCancelOcrDialog() {
+  if (!ocrRunning || ocrClosingNormally) { closeDialog('ocrDialog'); return true; }
+  const ok = await appConfirm('عملیات خواندن متن (OCR) در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف عملیات در حال اجرا',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    cancelJobKind: 'ocr',
+  });
+  if (!ok) return false;
   if (ocrRunning && !ocrClosingNormally) abortRunningOcr();
   closeDialog('ocrDialog');
+  return true;
 }
-function dismissTranslationDialog() {
+async function requestCancelTranslationDialog() {
+  if ((!translationRunning && !translationDecisionBusy) || translationClosingNormally) { closeDialog('translationDialog'); return true; }
+  const ok = await appConfirm('عملیات ترجمه در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف عملیات در حال اجرا',
+    hint: 'بخش‌هایی که تا این لحظه ذخیره شده‌اند در پروژه حفظ می‌شوند و ادامهٔ ارسال متوقف خواهد شد.',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    cancelJobKind: 'translation',
+  });
+  if (!ok) return false;
   if ((translationRunning || translationDecisionBusy) && !translationClosingNormally) abortRunningTranslation();
   closeDialog('translationDialog');
+  return true;
+}
+async function requestCancelExport(dialogId = null) {
+  if (!exportRunning) { if (dialogId) closeDialog(dialogId); return true; }
+  const ok = await appConfirm('ساخت فایل خروجی در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف ساخت خروجی',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    cancelJobKind: 'export',
+  });
+  if (!ok) return false;
+  if (exportRunning) abortRunningExport();
+  if (dialogId) closeDialog(dialogId);
+  return true;
+}
+async function requestCancelModelJob() {
+  if (!state.modelBusy) { closeDialog('modelsDialog'); return true; }
+  const ok = await appConfirm('عملیات آماده‌سازی یا آزمایش مدل OCR در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف عملیات مدل OCR',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    cancelJobKind: 'model',
+  });
+  if (!ok) return false;
+  if (state.modelBusy) abortRunningModelJob();
+  closeDialog('modelsDialog');
+  return true;
+}
+async function requestCancelActiveJob() {
+  if (ocrRunning) return requestCancelOcrDialog();
+  if (translationRunning || translationDecisionBusy) return requestCancelTranslationDialog();
+  if (exportRunning) return requestCancelExport($('docxExportDialog')?.open ? 'docxExportDialog' : ($('exportDialog')?.open ? 'exportDialog' : null));
+  if (state.modelBusy) return requestCancelModelJob();
+  if (!jobBusy) return false;
+  const ok = await appConfirm('عملیات در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف عملیات در حال اجرا',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    cancelJobKind: 'job',
+  });
+  if (!ok) return false;
+  try { currentJobAbortController?.abort(); } catch { /* ignore */ }
+  return true;
 }
 function closeTopDialog() {
+  if ($('appModalDialog')?.open) { resolveActiveModal(false); return true; }
   const stackedId = [...openDialogStack].reverse().find((id) => $(id)?.open);
   const dialog = stackedId ? $(stackedId) : [...document.querySelectorAll('dialog[open]')].at(-1);
-  if (!dialog) return false;
+  if (!dialog) {
+    if (jobBusy || state.modelBusy) { requestCancelActiveJob().catch(() => {}); return true; }
+    return false;
+  }
   if (dialog.id === 'editorDialog') closeEditor().catch((error) => toast(error.message, true));
-  else if (dialog.id === 'ocrDialog') dismissOcrDialog();
-  else if (dialog.id === 'translationDialog') dismissTranslationDialog();
+  else if (dialog.id === 'ocrDialog') requestCancelOcrDialog().catch(() => {});
+  else if (dialog.id === 'translationDialog') requestCancelTranslationDialog().catch(() => {});
+  else if (dialog.id === 'exportDialog') requestCancelExport('exportDialog').catch(() => {});
+  else if (dialog.id === 'docxExportDialog') requestCancelExport('docxExportDialog').catch(() => {});
+  else if (dialog.id === 'modelsDialog') requestCancelModelJob().catch(() => {});
   else if (dialog.id === 'translationPreviewDialog') cancelTranslationRequestPreview();
   else closeDialog(dialog.id);
   return true;
@@ -329,23 +532,28 @@ function setBusy(message) {
     $('translationStatus').textContent = message || 'آماده';
     setProgress('translationProgress', null, !!message);
   }
-  document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button, #backupProjectBtn, #restoreProjectBtn, #restoreProjectInput, #newProjectBtn, #deleteProjectBtn, #projectSelect, #projectName').forEach((el) => { el.disabled = !!message; });
+  document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button:not(#dockCancelJobBtn), #backupProjectBtn, #restoreProjectBtn, #restoreProjectInput, #newProjectBtn, #deleteProjectBtn, #projectSelect, #projectName').forEach((el) => { el.disabled = !!message; });
 }
 async function runJob(message, task, progressId = null) {
   await clearActivity(false);
+  const jobController = new AbortController();
+  currentJobAbortController = jobController;
   setBusy(message); activeProgressId = progressId;
   if (progressId) setProgress(progressId, null, true);
   appendLocalActivity(message); $('activityDetails').open = true;
   let completed = false;
-  try { const result = await task(); completed = true; return result; }
+  try { const result = await task(jobController.signal); completed = true; return result; }
   catch (error) {
-    if (error?.cancelled || error?.name === 'AbortError') {
-      appendLocalActivity('عملیات با بستن پنجره متوقف شد.', 'warning');
-      throw error;
+    if (error?.cancelled || error?.name === 'AbortError' || jobController.signal.aborted) {
+      appendLocalActivity('عملیات به درخواست شما لغو و متوقف شد.', 'warning');
+      const abortErr = error?.cancelled ? error : Object.assign(new Error('عملیات به درخواست شما لغو شد.'), { name: 'AbortError', cancelled: true });
+      throw abortErr;
     }
     console.error(error); appendLocalActivity(`خطا: ${error.message || error}`, 'error'); toast(error.message || error, true); throw error;
   }
   finally {
+    if (currentJobAbortController === jobController) currentJobAbortController = null;
+    dismissJobCancelModal('job');
     if (progressId) setProgress(progressId, completed ? 1 : 0, false);
     setProgress('dockProgress', completed ? 1 : 0, false);
     if ($('editorDialog')?.open) setProgress('editorProgress', completed ? 1 : 0, false);
@@ -536,7 +744,19 @@ function renderGrid() {
 }
 function moveImageBy(imageId, delta) { G.moveUnit(state.project.images, imageId, delta); renderGrid(); scheduleSave(); }
 async function duplicateImages(ids) { if (!ids.length) return; await saveProject(); adoptProject(await api(`/api/projects/${state.project.id}/duplicate`, jsonOptions('POST', ids))); }
-async function deleteImages(ids) { if (!ids.length || !confirm(`${ids.length} تصویر از پروژه حذف شود؟`)) return; await saveProject(); adoptProject(await api(`/api/projects/${state.project.id}/delete`, jsonOptions('POST', ids))); }
+async function deleteImages(ids) {
+  if (!ids.length) return;
+  const ok = await appConfirm(`آیا مطمئن هستید که می‌خواهید ${ids.length} تصویر انتخاب‌شده را از پروژه حذف کنید؟`, {
+    title: 'حذف تصاویر',
+    confirmText: 'بله، حذف شود',
+    cancelText: 'انصراف',
+    variant: 'danger',
+    destructive: true,
+  });
+  if (!ok) return;
+  await saveProject();
+  adoptProject(await api(`/api/projects/${state.project.id}/delete`, jsonOptions('POST', ids)));
+}
 function renderGroupPanel() {
   const infos = G.info(state.project?.images || []); const panel = $('groupPanel');
   panel.classList.toggle('hidden', !infos.length && !state.groupEditId);
@@ -703,13 +923,13 @@ function projectBrowserDrafts(project) {
 }
 async function backupCurrentProject() {
   if (!state.project) return;
-  await runJob('در حال ساخت بک‌آپ پروژه…', async () => {
+  await runJob('در حال ساخت بک‌آپ پروژه…', async (signal) => {
     await overlayPreviewTask;
     const project = state.project; let revision;
     do { const saving = saveProject(); revision = saveRevision; await saving; } while (state.project === project && revision !== saveRevision);
     if (state.project !== project) throw new Error('پروژه تغییر کرد؛ دوباره بک‌آپ بگیرید.');
     const drafts = projectBrowserDrafts(project);
-    const response = await fetch(`/api/projects/${project.id}/backup`, jsonOptions('POST', { drafts, expected_updated_at: project.updatedAt }));
+    const response = await fetch(`/api/projects/${project.id}/backup`, { ...jsonOptions('POST', { drafts, expected_updated_at: project.updatedAt }), signal });
     if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `ساخت بک‌آپ ممکن نشد (HTTP ${response.status})`); }
     const blob = await response.blob(); if (!blob.size) throw new Error('فایل بک‌آپ خالی است');
     if (state.project !== project || revision !== saveRevision) throw new Error('پروژه هنگام ساخت بک‌آپ تغییر کرد؛ برای ثبت آخرین تغییرها دوباره بک‌آپ بگیرید.');
@@ -721,11 +941,18 @@ async function backupCurrentProject() {
   });
 }
 async function restoreProjectBackup(file) {
-  if (!file || !confirm('بک‌آپ به‌صورت یک پروژهٔ جدید بازیابی شود؟ پروژه‌های فعلی حذف یا جایگزین نمی‌شوند.')) return;
-  await runJob('در حال بازیابی بک‌آپ…', async () => {
+  if (!file) return;
+  const ok = await appConfirm('بک‌آپ به‌صورت یک پروژهٔ جدید بازیابی شود؟ پروژه‌های فعلی شما حذف یا جایگزین نمی‌شوند.', {
+    title: 'بازیابی بک‌آپ پروژه',
+    confirmText: 'بله، بازیابی شود',
+    cancelText: 'انصراف',
+    variant: 'confirm',
+  });
+  if (!ok) return;
+  await runJob('در حال بازیابی بک‌آپ…', async (signal) => {
     await saveProject(); const previous = state.project;
     const form = new FormData(); form.append('file', file);
-    const result = await api('/api/projects/restore', { method: 'POST', body: form });
+    const result = await api('/api/projects/restore', { method: 'POST', body: form, signal });
     let failedDrafts = 0;
     for (const draft of result.drafts || []) {
       const key = `comic-studio-draft:${encodeURIComponent(result.project.id)}:${encodeURIComponent(draft.imageId)}:${encodeURIComponent(draft.blockId)}:${draft.mode}`;
@@ -737,14 +964,14 @@ async function restoreProjectBackup(file) {
       const saving = saveProject(); const revision = saveRevision; await saving;
       if (state.project === previous && revision === saveRevision) { adoptProject(result.project); opened = true; break; }
     }
-    await refreshProjectList(); $('menu').classList.add('hidden');
+    await refreshProjectList(); setMenuOpen(false);
     if (failedDrafts) toast(`پروژه بازیابی شد، ولی ${failedDrafts} پیش‌نویس در حافظهٔ مرورگر ذخیره نشد؛ فایل ZIP را نگه دارید.`, true);
     else toast(opened ? 'بک‌آپ به‌صورت پروژهٔ جدید بازیابی شد.' : 'بک‌آپ بازیابی شد؛ پروژهٔ جدید را از فهرست پروژه‌ها باز کنید.');
   });
 }
 async function importFiles(files) {
   if (!files.length) return;
-  await runJob('در حال خواندن فایل‌ها…', async () => { await saveProject(); const form = new FormData(); [...files].forEach((file) => form.append('files', file)); const result = await api(`/api/projects/${state.project.id}/files`, { method: 'POST', body: form }); adoptProject(result); toast(`${files.length} فایل وارد شد`); });
+  await runJob('در حال خواندن فایل‌ها…', async (signal) => { await saveProject(); const form = new FormData(); [...files].forEach((file) => form.append('files', file)); const result = await api(`/api/projects/${state.project.id}/files`, { method: 'POST', body: form, signal }); adoptProject(result); toast(`${files.length} فایل وارد شد`); });
 }
 let pendingReview = null;
 async function openPendingResults(token = null) {
@@ -819,7 +1046,7 @@ async function runOcr() {
   const pending = pendingTranslationAfterOcr;
   const controller = new AbortController();
   ocrAbortController = controller; ocrCancelledByUser = false; ocrClosingNormally = false;
-  ocrRunning = true; setProgress('ocrProgress', null, true); $('startOcrBtn').disabled = true;
+  ocrRunning = true; setProgress('ocrProgress', null, true); $('startOcrBtn').disabled = true; $('cancelOcrBtn')?.classList.remove('hidden');
   $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden');
   let ocrSucceeded = false;
   try {
@@ -863,7 +1090,8 @@ async function runOcr() {
   } finally {
     if (!ocrSucceeded) setProgress('ocrProgress', 0, false);
     if (ocrAbortController === controller) ocrAbortController = null;
-    ocrClosingNormally = false; ocrRunning = false; $('startOcrBtn').disabled = false;
+    ocrClosingNormally = false; ocrRunning = false; $('startOcrBtn').disabled = false; $('cancelOcrBtn')?.classList.add('hidden');
+    dismissJobCancelModal('ocr');
   }
 }
 
@@ -1000,7 +1228,15 @@ async function runTranslation() {
     const missing = selected.filter(item => !item.ocrCompleted && !(item.blocks || []).length);
     if (missing.length) {
       const old = state.project._aiContextRun;
-      if (old?.jobs?.some(job => job.remaining) && !confirm('نوبت ترجمهٔ ناتمام وجود دارد. OCR تصاویر جدید می‌تواند ادامهٔ آن را نامعتبر کند؛ ممکن است برای نوبت تازه تأیید و ارسال دوباره لازم شود. ادامه می‌دهید؟')) return;
+      if (old?.jobs?.some(job => job.remaining)) {
+        const proceed = await appConfirm('نوبت ترجمهٔ ناتمام وجود دارد. اجرای OCR روی تصاویر جدید می‌تواند ادامهٔ آن را نامعتبر کند و ممکن است برای نوبت تازه تأیید و ارسال دوباره لازم شود. آیا ادامه می‌دهید؟', {
+          title: 'هشدار نوبت ترجمهٔ ناتمام',
+          confirmText: 'بله، ادامه بده',
+          cancelText: 'انصراف',
+          variant: 'warning',
+        });
+        if (!proceed) return;
+      }
       pendingTranslationAfterOcr = {projectId: state.project.id, imageIds: ids, missingIds: missing.map(item => item.id)};
       $('ocrTranslationNotice').textContent = `${missing.length} تصویر انتخاب‌شده هنوز OCR نشده‌اند. پس از تنظیم موتور و شروع OCR، فقط همین تصاویر خوانده می‌شوند و سپس پیش‌نمایش ترجمه باز خواهد شد؛ متن‌های موجود بازنویسی نمی‌شوند.`;
       $('ocrTranslationNotice').classList.remove('hidden'); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden');
@@ -1013,20 +1249,38 @@ async function runTranslation() {
     const provider = state.ai?.provider || 'free'; const projectId = state.project.id;
     const request = { image_ids: ids, provider, source_language: $('ocrLanguage').value, reuse_repeated: state.ai?.reuse_repeated !== false };
     if (state.project.images.some(item => ids.includes(item.id) && (item._aiPageProgress || item.blocks?.some(block => block._aiTranslationParts)))) {
-      if (!confirm('پیشرفت ناتمام ترجمه از نسخهٔ قبلی وجود دارد و با حافظهٔ جدید سازگار نیست. برای جلوگیری از ارسال دوباره می‌توانید در نسخهٔ قبلی ادامه دهید. آیا با حذف پیشرفت ناتمام و شروع ترجمهٔ تازه موافقید؟')) return;
+      const okLegacy = await appConfirm('پیشرفت ناتمام ترجمه از نسخهٔ قبلی وجود دارد و با حافظهٔ جدید سازگار نیست. برای جلوگیری از ارسال دوباره می‌توانید در نسخهٔ قبلی ادامه دهید. آیا با حذف پیشرفت ناتمام و شروع ترجمهٔ تازه موافقید؟', {
+        title: 'هشدار پیشرفت ناتمام قبلی',
+        confirmText: 'بله، شروع تازه',
+        cancelText: 'انصراف',
+        variant: 'warning',
+        destructive: true,
+      });
+      if (!okLegacy) return;
       request.restart_legacy = true;
     }
     const previousRun = state.project._aiContextRun;
-    const confirmRestart = nextResume => {
+    const confirmRestart = async (nextResume) => {
       if (!nextResume && previousRun?.jobs?.some(job => job.remaining) && !request.restart_existing) {
-        if (!confirm('نوبت ترجمهٔ ناتمام وجود دارد. آیا با شروع نوبت تازه و جایگزینی پیشرفت ناتمام موافقید؟ ممکن است متن دوباره ارسال شود.')) throw new Error('شروع نوبت تازه لغو شد.');
+        const okRestart = await appConfirm('نوبت ترجمهٔ ناتمام وجود دارد. آیا با شروع نوبت تازه و جایگزینی پیشرفت ناتمام موافقید؟ ممکن است متن دوباره ارسال شود.', {
+          title: 'شروع نوبت تازهٔ ترجمه',
+          confirmText: 'بله، نوبت تازه شروع شود',
+          cancelText: 'انصراف',
+          variant: 'warning',
+          destructive: true,
+        });
+        if (!okRestart) {
+          const cancelledErr = new Error('شروع نوبت تازه لغو شد.');
+          cancelledErr.cancelled = true;
+          throw cancelledErr;
+        }
         request.restart_existing = true;
       }
     };
     if (provider === 'free') {
       const previous = previousRun;
       const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
-      const refresh = (_skill, _summary, nextResume) => { confirmRestart(nextResume); return api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: '', summary: '', resume: nextResume })); };
+      const refresh = async (_skill, _summary, nextResume) => { await confirmRestart(nextResume); return api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: '', summary: '', resume: nextResume })); };
       let preview;
       try { preview = await refresh('', '', resume); }
       catch (error) {
@@ -1051,7 +1305,7 @@ async function runTranslation() {
     // A new translation starts without stale story context; only an explicit
     // resume carries the previous run's rolling summary into its first request.
     const summary = resume ? (previous.context || '') : '';
-    const refresh = (nextSkill, nextSummary, nextResume) => { confirmRestart(nextResume); return api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: nextSkill, summary: nextSummary, resume: nextResume })); };
+    const refresh = async (nextSkill, nextSummary, nextResume) => { await confirmRestart(nextResume); return api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: nextSkill, summary: nextSummary, resume: nextResume })); };
     const safeSkill = Array.from(skill).length <= skillLimit ? skill : '';
     const safeSummary = Array.from(summary).length <= contextLimit ? summary : '';
     let preview;
@@ -1068,6 +1322,7 @@ async function runTranslation() {
     if (safeSummary !== summary) preview.displaySummary = summary;
     showTranslationRequestPreview(preview, accepted => { rememberTranslationSkill(projectId, accepted); return performContextTranslation(request, accepted); }, refresh);
   } catch (error) {
+    if (error?.cancelled || error?.name === 'AbortError') return;
     const message = `مرحلهٔ آماده‌سازی یا پیش‌نمایش ترجمه ناموفق بود؛ هیچ درخواست ترجمه‌ای ارسال نشد. ${error.message || error}`;
     $('translationStatus').textContent = message; appendLocalActivity(message, 'error');
     translationRetryAction = async () => { closeDialog('translationDialog'); await runTranslation(); };
@@ -1080,7 +1335,7 @@ async function performContextTranslation(request, preview, ongoing = null, corre
   $('copyUnstoredResult').classList.add('hidden'); $('copyUnstoredResult').dataset.result = '';
   const controller = new AbortController();
   translationAbortController = controller; translationCancelledByUser = false; translationClosingNormally = false;
-  translationRunning = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden');
+  translationRunning = true; $('cancelTranslationBtn')?.classList.remove('hidden'); showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden');
   const projectId = state.project.id; let run = ongoing; let phase = 'start';
   const checkNotCancelled = () => {
     if (translationCancelledByUser || controller.signal.aborted) {
@@ -1134,7 +1389,8 @@ async function performContextTranslation(request, preview, ongoing = null, corre
     $('retryTranslation').classList.toggle('hidden', !translationRetryAction); $('translationErrorChoice').classList.remove('hidden'); $('copyTranslationError').classList.remove('hidden'); throw error;
   } finally {
     if (translationAbortController === controller) translationAbortController = null;
-    translationClosingNormally = false; translationRunning = false;
+    translationClosingNormally = false; translationRunning = false; $('cancelTranslationBtn')?.classList.add('hidden');
+    dismissJobCancelModal('translation');
   }
 }
 
@@ -1142,7 +1398,7 @@ async function performTranslation(ids, provider, preview, startIndex = 0, previo
   translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
   const controller = new AbortController();
   translationAbortController = controller; translationCancelledByUser = false; translationClosingNormally = false;
-  translationRunning = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; setProgress('translationProgress', null, true);
+  translationRunning = true; $('cancelTranslationBtn')?.classList.remove('hidden'); showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; setProgress('translationProgress', null, true);
   const projectId = state.project.id; const language = $('ocrLanguage').value; let completed = previouslyCompleted; let currentPage = ''; let phase = 'translation'; let failedIndex = startIndex;
   const checkNotCancelled = () => {
     if (translationCancelledByUser || controller.signal.aborted) {
@@ -1201,7 +1457,8 @@ async function performTranslation(ids, provider, preview, startIndex = 0, previo
     $('retryTranslation').classList.toggle('hidden', !translationRetryAction); $('translationErrorChoice').classList.remove('hidden'); $('copyTranslationError').classList.remove('hidden'); throw error;
   } finally {
     if (translationAbortController === controller) translationAbortController = null;
-    translationClosingNormally = false; translationRunning = false;
+    translationClosingNormally = false; translationRunning = false; $('cancelTranslationBtn')?.classList.add('hidden');
+    dismissJobCancelModal('translation');
   }
 }
 
@@ -1255,35 +1512,67 @@ function updateExportFields() {
 async function exportResult(kind = null, docxModeOverride = null) {
   if (kind) { $('exportKind').value = kind; updateExportFields(); }
   if (!selectedImages().length) throw new Error('حداقل یک تصویر را برای خروجی انتخاب کنید');
-  await overlayPreviewTask;
-  collectOutputSettings(); await saveProject(); const exportKind = $('exportKind').value;
-  const docxMode = docxModeOverride || $('exportDocxMode')?.value || 'translation';
-  if (exportKind !== 'txt' && exportKind !== 'docx') {
-    const targets = selectedImages().filter((item) => hasOverlayText(item) || item.edited);
-    for (let idx = 0; idx < targets.length; idx += 1) {
-      await renderAndUpload(targets[idx]);
-      const p = ((idx + 1) / Math.max(1, targets.length)) * 0.5;
-      if (activeProgressId) setProgress(activeProgressId, p, true);
-      setProgress('jobProgress', p, true); setProgress('dockProgress', p, true);
+  const controller = new AbortController();
+  exportAbortController = controller; exportCancelledByUser = false; exportRunning = true;
+  const checkNotCancelled = () => {
+    if (exportCancelledByUser || controller.signal.aborted) {
+      const err = new Error('ساخت خروجی لغو شد.'); err.name = 'AbortError'; err.cancelled = true; throw err;
     }
-    renderGrid();
-  } else {
-    if (activeProgressId) setProgress(activeProgressId, 0.18, true);
-    setProgress('jobProgress', 0.18, true); setProgress('dockProgress', 0.18, true);
+  };
+  try {
+    await overlayPreviewTask;
+    checkNotCancelled();
+    collectOutputSettings(); await saveProject(); const exportKind = $('exportKind').value;
+    const docxMode = docxModeOverride || $('exportDocxMode')?.value || 'translation';
+    if (exportKind !== 'txt' && exportKind !== 'docx') {
+      const targets = selectedImages().filter((item) => hasOverlayText(item) || item.edited);
+      for (let idx = 0; idx < targets.length; idx += 1) {
+        checkNotCancelled();
+        await renderAndUpload(targets[idx]);
+        const p = ((idx + 1) / Math.max(1, targets.length)) * 0.5;
+        if (activeProgressId) setProgress(activeProgressId, p, true);
+        setProgress('jobProgress', p, true); setProgress('dockProgress', p, true);
+      }
+      renderGrid();
+    } else {
+      if (activeProgressId) setProgress(activeProgressId, 0.18, true);
+      setProgress('jobProgress', 0.18, true); setProgress('dockProgress', 0.18, true);
+    }
+    checkNotCancelled();
+    const baseExportName = safeName($('exportName').value);
+    const finalExportName = exportKind === 'docx' && docxMode === 'ocr' && !/-(?:en|ocr)$/i.test(baseExportName) ? `${baseExportName}-en` : baseExportName;
+    let response;
+    try {
+      response = await fetch(`/api/projects/${state.project.id}/export`, {
+        ...jsonOptions('POST', { kind: exportKind, image_ids: selectedImages().map((item) => item.id), name: finalExportName, seamless: $('exportSeamless').checked, uniform_size: $('exportUniform').checked, two_per_page: $('exportTwo').checked, image_format: $('exportFormat').value, folder_name: $('exportFolder').value, docx_mode: docxMode }),
+        signal: controller.signal,
+      });
+    } catch (cause) {
+      if (cause?.name === 'AbortError' || controller.signal.aborted) checkNotCancelled();
+      throw cause;
+    }
+    if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `خروجی ساخته نشد (HTTP ${response.status})`); }
+    const blob = await response.blob();
+    checkNotCancelled();
+    if (!blob.size) throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
+    if (activeProgressId) setProgress(activeProgressId, 1, false);
+    const disposition = response.headers.get('content-disposition') || ''; const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    downloadUrl = URL.createObjectURL(blob);
+    const link = $('downloadLink'); link.href = downloadUrl; link.download = match ? decodeURIComponent(match[1]) : `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`;
+    link.textContent = `دانلود ${link.download}`; link.classList.remove('hidden'); link.click();
+    closeDialog('exportDialog'); closeDialog('docxExportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
+  } catch (error) {
+    if (exportCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      toast('ساخت خروجی به درخواست شما متوقف شد');
+      throw error;
+    }
+    throw error;
+  } finally {
+    if (exportAbortController === controller) exportAbortController = null;
+    exportRunning = false;
+    dismissJobCancelModal('export');
   }
-  const baseExportName = safeName($('exportName').value);
-  const finalExportName = exportKind === 'docx' && docxMode === 'ocr' && !/-(?:en|ocr)$/i.test(baseExportName) ? `${baseExportName}-en` : baseExportName;
-  const response = await fetch(`/api/projects/${state.project.id}/export`, jsonOptions('POST', { kind: exportKind, image_ids: selectedImages().map((item) => item.id), name: finalExportName, seamless: $('exportSeamless').checked, uniform_size: $('exportUniform').checked, two_per_page: $('exportTwo').checked, image_format: $('exportFormat').value, folder_name: $('exportFolder').value, docx_mode: docxMode }));
-  if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `خروجی ساخته نشد (HTTP ${response.status})`); }
-  const blob = await response.blob();
-  if (!blob.size) throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
-  if (activeProgressId) setProgress(activeProgressId, 1, false);
-  const disposition = response.headers.get('content-disposition') || ''; const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
-  if (downloadUrl) URL.revokeObjectURL(downloadUrl);
-  downloadUrl = URL.createObjectURL(blob);
-  const link = $('downloadLink'); link.href = downloadUrl; link.download = match ? decodeURIComponent(match[1]) : `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`;
-  link.textContent = `دانلود ${link.download}`; link.classList.remove('hidden'); link.click();
-  closeDialog('exportDialog'); closeDialog('docxExportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
 }
 function openDocxExportPrompt() {
   if (!selectedImages().length) { toast('حداقل یک تصویر را برای خروجی انتخاب کنید', true); return; }
@@ -1339,17 +1628,39 @@ function renderModels() {
 }
 async function downloadEngine(engine) {
   if (state.modelBusy) return; const language = $('testLanguage').value; if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return; }
+  const controller = new AbortController();
+  modelAbortController = controller; modelCancelledByUser = false;
   state.modelBusy = engine.id; setProgress('modelProgress', null, true); $('modelTestResult').textContent = `آماده‌سازی ${engine.name} برای ${language} آغاز شد؛ فقط مدل همین زبان دانلود می‌شود.`; appendLocalActivity(`آماده‌سازی ${engine.name} برای ${language} آغاز شد`); renderModels();
-  try { const result = await api(`/api/engines/${engine.id}/download`, jsonOptions('POST', { language })); state.engines = result.engines; setProgress('modelProgress', 1, false); $('modelTestResult').textContent = `مدل ${engine.name} برای ${language} آماده است.`; appendLocalActivity(`مدل ${engine.name} آماده شد`, 'success'); updateEngineOptions(); toast('مدل آماده است'); }
-  catch (error) { setProgress('modelProgress', 0, false); $('modelTestResult').textContent = `آماده‌سازی ناموفق بود:\n${error.message}\n\nاتصال اینترنت و دسترسی به میزبان مدل را بررسی کنید.`; appendLocalActivity(`آماده‌سازی ناموفق بود: ${error.message}`, 'error'); toast(error.message, true); }
-  finally { state.modelBusy = null; renderModels(); }
+  try { const result = await api(`/api/engines/${engine.id}/download`, { ...jsonOptions('POST', { language }), signal: controller.signal }); state.engines = result.engines; setProgress('modelProgress', 1, false); $('modelTestResult').textContent = `مدل ${engine.name} برای ${language} آماده است.`; appendLocalActivity(`مدل ${engine.name} آماده شد`, 'success'); updateEngineOptions(); toast('مدل آماده است'); }
+  catch (error) {
+    setProgress('modelProgress', 0, false);
+    if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      $('modelTestResult').textContent = 'عملیات آماده‌سازی مدل به درخواست شما لغو شد.';
+      appendLocalActivity('آماده‌سازی مدل لغو شد', 'warning');
+      toast('آماده‌سازی مدل متوقف شد');
+    } else {
+      $('modelTestResult').textContent = `آماده‌سازی ناموفق بود:\n${error.message}\n\nاتصال اینترنت و دسترسی به میزبان مدل را بررسی کنید.`;
+      appendLocalActivity(`آماده‌سازی ناموفق بود: ${error.message}`, 'error'); toast(error.message, true);
+    }
+  }
+  finally { if (modelAbortController === controller) modelAbortController = null; state.modelBusy = null; dismissJobCancelModal('model'); renderModels(); }
 }
 async function testEngine(engineId) {
   if (state.modelBusy) return; const item = selectedImages()[0] || sortedImages()[0]; if (!item) { toast('ابتدا یک تصویر وارد کنید', true); return; }
+  const controller = new AbortController();
+  modelAbortController = controller; modelCancelledByUser = false;
   state.modelBusy = engineId; setProgress('modelProgress', null, true); renderModels(); $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
-  try { const result = await api(`/api/engines/${engineId}/test`, jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value })); setProgress('modelProgress', 1, false); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
-  catch (error) { setProgress('modelProgress', 0, false); $('modelTestResult').textContent = error.message; appendLocalActivity(`آزمایش موتور ناموفق بود: ${error.message}`, 'error'); }
-  finally { state.modelBusy = null; renderModels(); }
+  try { const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value }), signal: controller.signal }); setProgress('modelProgress', 1, false); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
+  catch (error) {
+    setProgress('modelProgress', 0, false);
+    if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      $('modelTestResult').textContent = 'آزمایش موتور به درخواست شما لغو شد.';
+      appendLocalActivity('آزمایش موتور لغو شد', 'warning');
+    } else {
+      $('modelTestResult').textContent = error.message; appendLocalActivity(`آزمایش موتور ناموفق بود: ${error.message}`, 'error');
+    }
+  }
+  finally { if (modelAbortController === controller) modelAbortController = null; state.modelBusy = null; dismissJobCancelModal('model'); renderModels(); }
 }
 const AI_PROVIDER_IDS = ['gemini', 'openai', 'openrouter', 'avalai'];
 const AI_FALLBACKS = {
@@ -2460,7 +2771,14 @@ function openInlineEditor(block, clickEvent = null) {
     initialAutoSize, initialSizeValue, sizeTouched: false,
     color: block.color || null, originalColor: block.color || null,
     range: null, history: [], historyIndex: -1, muteHistory: false, conflictReported: false };
-  classicEditor.setContext(draftKey, originalHtml, inlineDraft.snapshot);
+  const draftRestore = classicEditor.setContext(draftKey, originalHtml, inlineDraft.snapshot);
+  if (draftRestore && typeof draftRestore.then === 'function') {
+    draftRestore.then((restored) => {
+      if (inlineDraft?.block !== block) return;
+      if (restored) { recordInlineHistory(); syncInlineLineControls(); }
+      classicEditor.focus();
+    }).catch(() => {});
+  }
   const background = block.bg || 'auto';
   box.style.setProperty('--editing-bg', background === 'white' ? '#fff' : background === 'black' ? '#101010' : 'var(--surface)');
   box.style.setProperty('--editing-fg', background === 'white' ? '#202020' : background === 'black' ? '#fff' : 'var(--text)');
@@ -2920,7 +3238,7 @@ function startBoxDrag(event, block, el) {
 async function runSingleBlockTranslation(task) {
   const controller = new AbortController();
   translationAbortController = controller; translationCancelledByUser = false; translationClosingNormally = false;
-  translationRunning = true;
+  translationRunning = true; $('cancelTranslationBtn')?.classList.remove('hidden');
   $('translationStatus').textContent = 'در حال ترجمهٔ دوبارهٔ یک کادر…';
   $('copyTranslationError').classList.add('hidden');
   showDialog('translationDialog');
@@ -2936,7 +3254,8 @@ async function runSingleBlockTranslation(task) {
     throw error;
   } finally {
     if (translationAbortController === controller) translationAbortController = null;
-    translationClosingNormally = false; translationRunning = false;
+    translationClosingNormally = false; translationRunning = false; $('cancelTranslationBtn')?.classList.add('hidden');
+    dismissJobCancelModal('translation');
     if ($('translationDialog').open) closeDialog('translationDialog');
   }
 }
@@ -3010,7 +3329,18 @@ function buildBlockList() {
     translation.addEventListener('click', openBlockTranslation);
     translation.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openBlockTranslation(); } });
     const actions = document.createElement('div'); actions.className = 'block-tools';
-    actions.append(makeButton('کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block)), makeButton('پاک‌کردن ترجمه', () => { if (inlineDraft?.block === block && !closeInlineEditor()) return; if (!confirm('ترجمهٔ این کادر پاک شود؟')) return; block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave(); }));
+    actions.append(makeButton('کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block)), makeButton('پاک‌کردن ترجمه', async () => {
+      if (inlineDraft?.block === block && !closeInlineEditor()) return;
+      const ok = await appConfirm('آیا مطمئن هستید که می‌خواهید ترجمهٔ این کادر را پاک کنید؟', {
+        title: 'پاک‌کردن ترجمهٔ کادر',
+        confirmText: 'بله، پاک شود',
+        cancelText: 'انصراف',
+        variant: 'danger',
+        destructive: true,
+      });
+      if (!ok) return;
+      block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave();
+    }));
     enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; drawEditor(); scheduleSave(); });
     card.append(head, languageRow, source, translation, actions); list.appendChild(card);
   });
@@ -3090,33 +3420,90 @@ function bindEvents() {
   };
   document.addEventListener('pointerdown', closeMenuOutside, true);
   document.addEventListener('click', closeMenuOutside, true);
+  let lastEscapeKeyAt = -1000;
+  document.addEventListener('keyup', (event) => {
+    if (event.key === 'Escape') lastEscapeKeyAt = performance.now();
+  }, true);
   document.querySelectorAll('dialog').forEach((dlg) => {
+    dlg.addEventListener('cancel', (event) => {
+      if (performance.now() - lastEscapeKeyAt < 400) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    }, true);
     dlg.addEventListener('close', () => {
+      if (dlg.open) return;
       const idx = openDialogStack.indexOf(dlg.id);
       if (idx >= 0) openDialogStack.splice(idx, 1);
     });
     dlg.querySelectorAll('form[method="dialog"] button.icon').forEach((closeBtn) => {
       closeBtn.addEventListener('click', (event) => {
         event.preventDefault();
-        if (dlg.id === 'ocrDialog') dismissOcrDialog();
-        else if (dlg.id === 'translationDialog') dismissTranslationDialog();
+        if (dlg.id === 'ocrDialog') requestCancelOcrDialog().catch(() => {});
+        else if (dlg.id === 'translationDialog') requestCancelTranslationDialog().catch(() => {});
+        else if (dlg.id === 'exportDialog') requestCancelExport('exportDialog').catch(() => {});
+        else if (dlg.id === 'docxExportDialog') requestCancelExport('docxExportDialog').catch(() => {});
+        else if (dlg.id === 'modelsDialog') requestCancelModelJob().catch(() => {});
         else if (dlg.id === 'translationPreviewDialog') cancelTranslationRequestPreview();
         else closeDialog(dlg.id);
       });
     });
   });
+  $('appModalConfirm')?.addEventListener('click', () => resolveActiveModal(true));
+  $('appModalCancel')?.addEventListener('click', () => resolveActiveModal(false));
+  $('appModalClose')?.addEventListener('click', () => resolveActiveModal(false));
+  $('appModalDialog')?.addEventListener('cancel', (event) => { event.preventDefault(); resolveActiveModal(false); });
+  $('appModalDialog')?.addEventListener('close', () => { if (activeModalState && !$('appModalDialog')?.open) resolveActiveModal(false); });
+  $('dockCancelJobBtn')?.addEventListener('click', () => requestCancelActiveJob().catch(() => {}));
   $('themeBtn').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('comic-studio-theme', document.body.classList.contains('light') ? 'light' : 'dark'); });
   $('backupProjectBtn').addEventListener('click', () => backupCurrentProject().catch(() => {}));
   $('restoreProjectBtn').addEventListener('click', () => $('restoreProjectInput').click());
   $('restoreProjectInput').addEventListener('change', () => restoreProjectBackup($('restoreProjectInput').files?.[0]).catch(() => {}).finally(() => { $('restoreProjectInput').value = ''; }));
-  $('newProjectBtn').addEventListener('click', async () => { if (!confirm('پروژهٔ جدید ساخته شود؟ پروژهٔ فعلی ذخیره می‌ماند.')) return; await saveProject(); await clearActivity(false); adoptProject(await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }))); await refreshProjectList(); });
+  $('newProjectBtn').addEventListener('click', async () => {
+    const ok = await appConfirm('پروژهٔ جدید ساخته شود؟ پروژهٔ فعلی شما ذخیره و محفوظ می‌ماند.', {
+      title: 'ساخت پروژهٔ جدید',
+      confirmText: 'بله، پروژهٔ جدید بساز',
+      cancelText: 'انصراف',
+      variant: 'confirm',
+    });
+    if (!ok) return;
+    await saveProject(); await clearActivity(false);
+    adoptProject(await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' })));
+    await refreshProjectList(); setMenuOpen(false);
+  });
   $('clearActivityBtn').addEventListener('click', () => clearActivity());
   $('copyUnstoredResult').addEventListener('click', () => copyBlockText($('copyUnstoredResult').dataset.result || '').catch(error => toast(error.message || String(error), true)));
   $('pendingResultsBtn').addEventListener('click', () => openPendingResults());
   $('pendingApply').addEventListener('click', () => applyPendingResult());
   $('pendingCopy').addEventListener('click', () => { if (pendingReview) copyBlockText(pendingReview.view.rows.map(row => `${row.name}: ${row.result}`).join('\n') + (pendingReview.view.summary ? `\nخلاصه: ${pendingReview.view.summary}` : '')).catch(error => toast(error.message || String(error), true)); });
-  $('pendingDiscard').addEventListener('click', async () => { const review = pendingReview; if (!review || !confirm('این نتیجهٔ ذخیره‌شده برای همیشه حذف شود؟')) return; try { await api(`/api/projects/${review.projectId}/pending/${review.view.id}`, {method:'DELETE'}); await openPendingResults(); } catch (error) { $('pendingStatus').textContent = error.message || String(error); } });
-  $('deleteProjectBtn').addEventListener('click', async () => { if (!state.project || !confirm('این پروژه و تصاویرش برای همیشه حذف شود؟')) return; await api(`/api/projects/${state.project.id}`, { method: 'DELETE' }); const projects = await api('/api/projects'); const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' })); adoptProject(project); await refreshProjectList(); $('menu').classList.add('hidden'); });
+  $('pendingDiscard').addEventListener('click', async () => {
+    const review = pendingReview; if (!review) return;
+    const ok = await appConfirm('آیا مطمئن هستید که این نتیجهٔ ذخیره‌شده برای همیشه حذف شود؟', {
+      title: 'حذف نتیجهٔ منتظر بررسی',
+      confirmText: 'بله، حذف شود',
+      cancelText: 'انصراف',
+      variant: 'danger',
+      destructive: true,
+    });
+    if (!ok) return;
+    try { await api(`/api/projects/${review.projectId}/pending/${review.view.id}`, {method:'DELETE'}); await openPendingResults(); }
+    catch (error) { $('pendingStatus').textContent = error.message || String(error); }
+  });
+  $('deleteProjectBtn').addEventListener('click', async () => {
+    if (!state.project) return;
+    const ok = await appConfirm('آیا مطمئن هستید که این پروژه و تمام تصاویر آن برای همیشه حذف شوند؟', {
+      title: 'حذف کامل پروژه',
+      confirmText: 'بله، حذف شود',
+      cancelText: 'انصراف',
+      variant: 'danger',
+      destructive: true,
+    });
+    if (!ok) return;
+    await api(`/api/projects/${state.project.id}`, { method: 'DELETE' });
+    const projects = await api('/api/projects');
+    const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
+    adoptProject(project); await refreshProjectList(); setMenuOpen(false);
+  });
   $('projectSelect').addEventListener('change', () => requestProjectLoad($('projectSelect').value).catch((error) => toast(error.message, true)));
   $('projectName').addEventListener('change', () => { state.project.name = $('projectName').value; scheduleSave(); });
   $('fileInput').addEventListener('change', () => importFiles($('fileInput').files).catch(() => {}).finally(() => { $('fileInput').value = ''; }));
@@ -3128,8 +3515,10 @@ function bindEvents() {
   $('cancelGroupEdit').addEventListener('click', () => finishGroupEdit(true));
   $('duplicateBtn').addEventListener('click', () => duplicateImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
-  $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); }); $('ocrEngine').addEventListener('change', updateOcrEngineStatus); $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
-  $('ocrDialog').addEventListener('cancel', () => { if (ocrRunning && !ocrClosingNormally) abortRunningOcr(); });
+  $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); }); $('ocrEngine').addEventListener('change', updateOcrEngineStatus); $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('cancelOcrBtn')?.addEventListener('click', () => requestCancelOcrDialog().catch(() => {})); $('cancelTranslationBtn')?.addEventListener('click', () => requestCancelTranslationDialog().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
+  $('ocrDialog').addEventListener('cancel', (event) => {
+    if (ocrRunning && !ocrClosingNormally) { event.preventDefault(); requestCancelOcrDialog().catch(() => {}); }
+  });
   $('ocrDialog').addEventListener('close', () => {
     if (ocrRunning && !ocrClosingNormally) abortRunningOcr();
     if (!$('ocrDialog').open) clearPendingTranslationOcr();
@@ -3161,10 +3550,21 @@ function bindEvents() {
     try { await copyBlockText($('translationStatus').textContent); translationRetryAction = null; closeDialog('translationDialog'); }
     catch (error) { toast(`کپی ممکن نبود؛ متن خطا را دستی انتخاب و کپی کنید: ${error.message || error}`, true); }
   });
-  $('translationDialog').addEventListener('cancel', () => { if ((translationRunning || translationDecisionBusy) && !translationClosingNormally) abortRunningTranslation(); });
+  $('translationDialog').addEventListener('cancel', (event) => {
+    if ((translationRunning || translationDecisionBusy) && !translationClosingNormally) { event.preventDefault(); requestCancelTranslationDialog().catch(() => {}); }
+  });
   $('translationDialog').addEventListener('close', () => {
     if ((translationRunning || translationDecisionBusy) && !translationClosingNormally) abortRunningTranslation();
     if (!$('translationDialog').open) { translationRetryAction = null; clearResponseRepair(); $('copyUnstoredResult').dataset.result = ''; $('copyUnstoredResult').classList.add('hidden'); }
+  });
+  $('exportDialog')?.addEventListener('cancel', (event) => {
+    if (exportRunning) { event.preventDefault(); requestCancelExport('exportDialog').catch(() => {}); }
+  });
+  $('docxExportDialog')?.addEventListener('cancel', (event) => {
+    if (exportRunning) { event.preventDefault(); requestCancelExport('docxExportDialog').catch(() => {}); }
+  });
+  $('modelsDialog')?.addEventListener('cancel', (event) => {
+    if (state.modelBusy) { event.preventDefault(); requestCancelModelJob().catch(() => {}); }
   });
   $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
   for (const [element, field] of [[$('translationSkill'), 'skillLimit'], [$('translationContext'), 'contextLimit']]) {
@@ -3187,7 +3587,7 @@ function bindEvents() {
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; } });
   $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
-  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => closeDialog('docxExportDialog'));
+  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
@@ -3199,6 +3599,12 @@ function bindEvents() {
   $('inlineEditorCancel').addEventListener('click', () => closeInlineEditor(true));
   classicEditor = window.createEditor('#inlineEditorField', {
     clearFormatId: 'inlineLineReset',
+    confirmDraft: (message) => appConfirm(message, {
+      title: 'بازیابی پیش‌نویس ذخیره‌شده',
+      confirmText: 'بله، بازیابی شود',
+      cancelText: 'خیر، حذف پیش‌نویس',
+      variant: 'warning',
+    }),
     serializeHTML: serializeInlineFieldHtml,
     undo: () => restoreInlineHistory(-1), redo: () => restoreInlineHistory(1),
     inlineCommand: (cmd) => toggleInlineCommand(cmd),
@@ -3329,6 +3735,14 @@ function bindEvents() {
   $('cropReset').addEventListener('click', () => { cropItem().crop = null; state.crop = null; closeDialog('cropDialog'); renderGrid(); scheduleSave(); }); $('cropApply').addEventListener('click', () => { readCropInputs(); cropItem().crop = state.crop; closeDialog('cropDialog'); renderGrid(); scheduleSave(); });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      lastEscapeKeyAt = performance.now();
+      if (event.repeat) { event.preventDefault(); event.stopPropagation(); return; }
+      if ($('appModalDialog')?.open) { resolveActiveModal(false); event.preventDefault(); event.stopPropagation(); return; }
+      const topStackedId = [...openDialogStack].reverse().find((id) => $(id)?.open);
+      if (topStackedId && topStackedId !== 'editorDialog') {
+        if (closeTopDialog()) { event.preventDefault(); event.stopPropagation(); }
+        return;
+      }
       if (imageOverview) { exitImageOverview().catch((error) => toast(error.message, true)); event.preventDefault(); event.stopPropagation(); return; }
       if (inlineDraft && classicEditor.element.classList.contains('classic-fullscreen')) { classicEditor.exitFullscreen(); classicEditor.focus(); event.preventDefault(); event.stopPropagation(); return; }
       if (inlineDraft) { closeInlineEditor(); event.preventDefault(); event.stopPropagation(); return; }

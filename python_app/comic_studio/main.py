@@ -202,7 +202,7 @@ def create_app() -> FastAPI:
         try:
             return store.get(project_id)
         except KeyError as exc:
-            raise HTTPException(404, "Project not found") from exc
+            raise HTTPException(404, "پروژهٔ موردنظر پیدا نشد.") from exc
 
     def image_ids(state: dict[str, Any], requested: list[str]) -> list[str]:
         if requested:
@@ -316,7 +316,7 @@ def create_app() -> FastAPI:
         try:
             store.delete_project(project_id)
         except KeyError as exc:
-            raise HTTPException(404, "Project not found") from exc
+            raise HTTPException(404, "پروژهٔ موردنظر پیدا نشد.") from exc
         return Response(status_code=204)
 
     @app.put("/api/projects/{project_id}/state")
@@ -366,7 +366,7 @@ def create_app() -> FastAPI:
             content = await upload.read()
             payloads.append((Path(upload.filename or "image.png").name, content))
         if not payloads:
-            raise HTTPException(400, "No files supplied")
+            raise HTTPException(400, "هیچ فایلی انتخاب نشده است.")
         activity.add(f"دریافت و آماده‌سازی {len(payloads)} فایل آغاز شد")
         try:
             result = await run_reported(store.import_files, project_id, payloads, pulse_label="ورود و آماده‌سازی فایل")
@@ -388,29 +388,29 @@ def create_app() -> FastAPI:
                 return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
             path = store.image_path(project_id, image_id, edited)
         except (KeyError, FileNotFoundError) as exc:
-            raise HTTPException(404, "Image not found") from exc
+            raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         return FileResponse(path, headers={"Cache-Control": "no-store"})
 
     @app.post("/api/projects/{project_id}/images/{image_id}/rendered")
     async def save_rendered(project_id: str, image_id: str, request: Request) -> dict[str, Any]:
         content = await request.body()
         if not content:
-            raise HTTPException(400, "Empty rendered image")
+            raise HTTPException(400, "تصویر رندرشده خالی است.")
         try:
             return await run_in_threadpool(store.save_rendered, project_id, image_id, content)
         except (KeyError, FileNotFoundError) as exc:
-            raise HTTPException(404, "Image not found") from exc
+            raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         except PermissionError as exc:
-            raise HTTPException(503, "The project file is temporarily locked while saving the rendered preview; retry the request.") from exc
+            raise HTTPException(503, "فایل پروژه موقتاً در حال ذخیره‌سازی است؛ چند لحظه بعد دوباره تلاش کنید.") from exc
         except Exception as exc:
-            raise HTTPException(400, f"Invalid PNG: {exc}") from exc
+            raise HTTPException(400, f"فایل PNG معتبر نیست: {exc}") from exc
 
     @app.post("/api/projects/{project_id}/images/{image_id}/revert")
     def revert_rendered(project_id: str, image_id: str) -> dict[str, Any]:
         try:
             return store.revert_rendered(project_id, image_id)
         except KeyError as exc:
-            raise HTTPException(404, "Image not found") from exc
+            raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
 
     @app.post("/api/projects/{project_id}/duplicate")
     def duplicate(project_id: str, ids: list[str] = Body(...)) -> dict[str, Any]:
@@ -432,7 +432,7 @@ def create_app() -> FastAPI:
             return {"ok": False, "guide": True, "engine": {"id": engine_id, **info}, "engines": registry.status()}
         language = values.language if values else "eng"
         if language not in info["languages"]:
-            raise HTTPException(400, "This engine does not support the selected language")
+            raise HTTPException(400, "این موتور از زبان انتخاب‌شده پشتیبانی نمی‌کند.")
         activity.add(f"آماده‌سازی {info['name']} برای زبان {language} آغاز شد؛ دانلود فقط با درخواست شما انجام می‌شود")
         try:
             await run_reported(registry.download, engine_id, language, pulse_label=f"آماده‌سازی {info['name']}")
@@ -446,14 +446,14 @@ def create_app() -> FastAPI:
     async def test_engine(engine_id: str, values: EngineTestRequest) -> dict[str, Any]:
         engine = registry.get(engine_id)
         if not ENGINE_INFO[engine_id].get("selectable", False):
-            raise HTTPException(400, "This model requires its official external runtime and is not a direct comic OCR engine")
+            raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR کمیک نیست.")
         if values.language not in ENGINE_INFO[engine_id]["languages"]:
-            raise HTTPException(400, "This engine does not support the selected language")
+            raise HTTPException(400, "این موتور از زبان انتخاب‌شده پشتیبانی نمی‌کند.")
         state = project(values.project_id)
         try:
             path = store.image_path(values.project_id, values.image_id)
         except (KeyError, FileNotFoundError) as exc:
-            raise HTTPException(404, "Image not found") from exc
+            raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         from PIL import Image
         with Image.open(path) as im:
             image = im.copy()
@@ -475,12 +475,12 @@ def create_app() -> FastAPI:
             original_ocr = {item['id']: '\n'.join(str(b.get('text') or '') for b in item.get('blocks', [])) for item in state['images']}
         engine = registry.get(values.engine)
         if not ENGINE_INFO[values.engine].get("selectable", False):
-            raise HTTPException(400, "This model requires its official external runtime and is not a direct comic OCR engine")
+            raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR کمیک نیست.")
         if values.language not in LANGUAGES or values.language not in ENGINE_INFO[values.engine]["languages"]:
-            raise HTTPException(400, "This engine does not support the selected language")
+            raise HTTPException(400, "این موتور از زبان انتخاب‌شده پشتیبانی نمی‌کند.")
         ids = image_ids(state, values.image_ids)
         if not ids:
-            raise HTTPException(400, "No images selected")
+            raise HTTPException(400, "حداقل یک تصویر را انتخاب کنید.")
         for pending in pending_results.list_pending(store, project_id):
             if pending['kind'] == 'ocr':
                 entry = pending_results.load(store, project_id, pending['id'])
@@ -1142,7 +1142,7 @@ def create_app() -> FastAPI:
     async def export(project_id: str, values: ExportRequest) -> FileResponse:
         state = project(project_id)
         if not values.image_ids:
-            raise HTTPException(400, "No images selected")
+            raise HTTPException(400, "حداقل یک تصویر را برای خروجی انتخاب کنید.")
         request = values.model_dump()
         activity.add(f"ساخت خروجی {values.kind.upper()} آغاز شد")
         try:
