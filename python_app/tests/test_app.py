@@ -44,11 +44,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.66"
+    assert health.json()["version"] == "3.67"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۶۶ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۶۷ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -1817,5 +1817,117 @@ def test_docx_export_produces_valid_rtl_ooxml_and_survives_backup(client):
     restored, _ = backup.restore_backup(ProjectStore(), io.BytesIO(backup_res.content))
     assert (project_root(restored["id"]) / "exports" / "comic-word-out.docx").is_file()
     assert (project_root(restored["id"]) / "exports" / "comic-word-ocr.docx").is_file()
+
+
+def test_docx_escapes_quotes_and_control_chars_in_page_names(client):
+    import xml.etree.ElementTree as ET
+    from comic_studio.store import ProjectStore
+
+    project, item = make_project(client)
+    store = ProjectStore()
+    current = store.get(project["id"])
+    current["images"][0]["name"] = 'ep "01"\x07 & <special>\'name.png'
+    current["images"][0]["blocks"] = [
+        {"id": 1, "text": "HELLO", "tr": "سلام", "x0": 10, "y0": 10, "x1": 120, "y1": 50, "bg": "white"},
+    ]
+    store.save(current)
+
+    res = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={"kind": "docx", "image_ids": [item["id"]], "name": "quoted-page-name", "docx_mode": "translation"},
+    )
+    assert res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(res.content)) as archive:
+        raw_doc = archive.read("word/document.xml")
+        assert b"\x07" not in raw_doc
+        doc_root = ET.fromstring(raw_doc)
+        ns = {
+            "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+            "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
+        }
+        doc_pr = doc_root.find(".//wp:docPr", ns)
+        cnv_pr = doc_root.find(".//pic:cNvPr", ns)
+        assert doc_pr is not None and cnv_pr is not None
+        assert doc_pr.attrib["name"] == 'ep "01" & <special>\'name.png'
+        assert cnv_pr.attrib["name"] == 'ep "01" & <special>\'name.png'
+
+
+def test_clean_name_windows_compatibility_and_backup_roundtrip(client):
+    from comic_studio import backup, exporter
+    from comic_studio.paths import project_root
+    from comic_studio.store import ProjectStore
+
+    assert exporter.clean_name("CON") == "_CON"
+    assert exporter.clean_name("aux.part1") == "_aux.part1"
+    assert exporter.clean_name("lpt9") == "_lpt9"
+    assert exporter.clean_name("a" * 119 + ".b") == "a" * 119
+    assert exporter.clean_name("a" * 119 + " b") == "a" * 119
+    assert exporter.clean_name("...", "") == ""
+
+    project, item = make_project(client)
+    for kind, raw_name in [
+        ("pdf", "CON"),
+        ("docx", "aux.v1"),
+        ("txt", "a" * 119 + ".trailing"),
+        ("images", "LPT1"),
+    ]:
+        res = client.post(
+            f"/api/projects/{project['id']}/export",
+            json={"kind": kind, "image_ids": [item["id"]], "name": raw_name, "folder_name": "NUL"},
+        )
+        assert res.status_code == 200, (kind, raw_name, res.text)
+
+    backup_res = client.post(f"/api/projects/{project['id']}/backup", json={"drafts": []})
+    assert backup_res.status_code == 200, backup_res.text
+    restored, _ = backup.restore_backup(ProjectStore(), io.BytesIO(backup_res.content))
+    exports_dir = project_root(restored["id"]) / "exports"
+    assert (exports_dir / "_CON.pdf").is_file()
+    assert (exports_dir / "_aux.v1.docx").is_file()
+    assert (exports_dir / f"{'a' * 119}.txt").is_file()
+    assert (exports_dir / "_LPT1-images.zip").is_file()
+    with zipfile.ZipFile(exports_dir / "_LPT1-images.zip") as zf:
+        assert all(name.startswith("_NUL/") for name in zf.namelist())
+
+
+def test_atomic_exports_leave_no_partial_or_tmp_files_on_failure(client, monkeypatch):
+    from comic_studio import exporter
+    from comic_studio.paths import project_root
+    from comic_studio.store import ProjectStore
+
+    project, item = make_project(client)
+    store = ProjectStore()
+    state = store.get(project["id"])
+    exports_dir = project_root(project["id"]) / "exports"
+
+    pdf_out = exporter.build_pdf(store, state, {"name": "atomic-check", "image_ids": [item["id"]]})
+    original_pdf_bytes = pdf_out.read_bytes()
+    assert original_pdf_bytes.startswith(b"%PDF")
+    assert list(exports_dir.glob("*.tmp")) == []
+
+    orig_payload = exporter.image_payload
+
+    def fail_payload(*args, **kwargs):
+        raise RuntimeError("disk error mid-zip")
+
+    monkeypatch.setattr(exporter, "image_payload", fail_payload)
+    with pytest.raises(RuntimeError, match="disk error mid-zip"):
+        exporter.build_images_zip(store, state, {"name": "broken-zip", "image_ids": [item["id"]]})
+    assert not (exports_dir / "broken-zip-images.zip").exists()
+    assert list(exports_dir.glob("*.tmp")) == []
+    monkeypatch.setattr(exporter, "image_payload", orig_payload)
+
+    def fail_replace(src, dst):
+        raise PermissionError("file locked in viewer")
+
+    monkeypatch.setattr(exporter.os, "replace", fail_replace)
+    for builder in (exporter.build_pdf, exporter.build_txt, exporter.build_docx, exporter.build_images_zip):
+        with pytest.raises(PermissionError, match="file locked in viewer"):
+            builder(store, state, {"name": "atomic-check", "image_ids": [item["id"]]})
+    assert pdf_out.read_bytes() == original_pdf_bytes
+    assert not (exports_dir / "atomic-check.txt").exists()
+    assert not (exports_dir / "atomic-check.docx").exists()
+    assert not (exports_dir / "atomic-check-images.zip").exists()
+    assert list(exports_dir.glob("*.tmp")) == []
+
 
 

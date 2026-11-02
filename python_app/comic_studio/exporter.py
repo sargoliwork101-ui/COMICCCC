@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import math
+import os
 import re
+import tempfile
 import zipfile
 from collections import Counter
+from collections.abc import Iterator
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -19,11 +23,34 @@ from .store import ProjectStore
 
 SAFE_PT = 14300.0
 HARD_PT = 14400.0
+_WINDOWS_RESERVED_NAME_RE = re.compile(r"(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])")
 
 
 def clean_name(value: str, fallback: str = "comic-translated") -> str:
-    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", str(value or "")).strip(" .")
-    return (value or fallback)[:120]
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", str(value or "")).strip(" .")[:120].rstrip(" .")
+    if cleaned and _WINDOWS_RESERVED_NAME_RE.fullmatch(cleaned.split(".")[0]):
+        cleaned = f"_{cleaned}"[:120].rstrip(" .")
+    if cleaned:
+        return cleaned
+    if not fallback:
+        return ""
+    safe_fallback = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", str(fallback)).strip(" .")[:120].rstrip(" .")
+    if safe_fallback and _WINDOWS_RESERVED_NAME_RE.fullmatch(safe_fallback.split(".")[0]):
+        safe_fallback = f"_{safe_fallback}"[:120].rstrip(" .")
+    return safe_fallback or "comic-translated"
+
+
+@contextlib.contextmanager
+def _atomic_export_path(output: Path) -> Iterator[Path]:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
+    os.close(fd)
+    tmp_path = Path(raw_tmp)
+    try:
+        yield tmp_path
+        os.replace(tmp_path, output)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def selected_images(state: dict[str, Any], image_ids: list[str]) -> list[dict[str, Any]]:
@@ -229,9 +256,9 @@ def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
                 _insert(document, entry["w"], entry["h"], [entry])
                 emit(f"چیدمان صفحهٔ {idx} از {len(entries)} در PDF", progress=0.55 + idx / max(1, len(entries)) * 0.4)
         output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.pdf"
-        output.parent.mkdir(parents=True, exist_ok=True)
         emit("در حال ذخیره‌سازی فایل PDF…", progress=0.97)
-        document.save(output, garbage=4, deflate=True)
+        with _atomic_export_path(output) as tmp_output:
+            document.save(tmp_output, garbage=4, deflate=True)
     finally:
         document.close()
     return output
@@ -242,15 +269,15 @@ def build_images_zip(store: ProjectStore, state: dict[str, Any], request: dict[s
     if not images:
         raise ValueError("No images selected")
     output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}-images.zip"
-    output.parent.mkdir(parents=True, exist_ok=True)
     folder = clean_name(request.get("folder_name", ""), "") if request.get("folder_name") else ""
     prefix = f"{folder}/" if folder else ""
     total = max(1, len(images))
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
-        for index, item in enumerate(images, start=1):
-            data, extension, _, _ = image_payload(store, state["id"], item, request.get("image_format", "orig"))
-            archive.writestr(f"{prefix}{index:03d}-{clean_name(Path(item['name']).stem)}.{extension}", data)
-            emit(f"افزودن تصویر {index} از {total} به بستهٔ ZIP", progress=index / total)
+    with _atomic_export_path(output) as tmp_output:
+        with zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_STORED) as archive:
+            for index, item in enumerate(images, start=1):
+                data, extension, _, _ = image_payload(store, state["id"], item, request.get("image_format", "orig"))
+                archive.writestr(f"{prefix}{index:03d}-{clean_name(Path(item['name']).stem)}.{extension}", data)
+                emit(f"افزودن تصویر {index} از {total} به بستهٔ ZIP", progress=index / total)
     return output
 
 
@@ -271,8 +298,8 @@ def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
             chunks.append(f"    ← {block.get('tr') or '(بدون ترجمه)'}\n")
         emit(f"نوشتن متن تصویر {index} از {total} در فایل TXT", progress=index / total)
     output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.txt"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("\ufeff" + "\n".join(chunks), encoding="utf-8")
+    with _atomic_export_path(output) as tmp_output:
+        tmp_output.write_text("\ufeff" + "\n".join(chunks), encoding="utf-8")
     return output
 
 
@@ -320,6 +347,10 @@ _DOCX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 def _clean_text(value: Any) -> str:
     return _INVALID_XML_RE.sub("", str(value or "")).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _xml_attr(value: Any) -> str:
+    return xml_escape(_clean_text(value).replace("\n", " "), {'"': "&quot;", "'": "&apos;"})
 
 
 def _parse_css_color(value: str | None) -> str | None:
@@ -766,6 +797,7 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
         if page_idx == len(pages):
             final_sect_pr = sect_pr
 
+        safe_page_name = _xml_attr(page.get("name") or f"page-{page_idx}")
         bg_drawing = (
             "<w:r><w:drawing>"
             '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" '
@@ -776,11 +808,11 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
             f'<wp:extent cx="{cx_emu}" cy="{cy_emu}"/>'
             '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
             "<wp:wrapNone/>"
-            f'<wp:docPr id="{page_idx}" name="{xml_escape(str(page["name"]))}"/>'
+            f'<wp:docPr id="{page_idx}" name="{safe_page_name}"/>'
             "<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect=\"1\"/></wp:cNvGraphicFramePr>"
             '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
             "<pic:pic>"
-            f'<pic:nvPicPr><pic:cNvPr id="{page_idx}" name="{xml_escape(str(page["name"]))}"/><pic:cNvPicPr/></pic:nvPicPr>'
+            f'<pic:nvPicPr><pic:cNvPr id="{page_idx}" name="{safe_page_name}"/><pic:cNvPicPr/></pic:nvPicPr>'
             f'<pic:blipFill><a:blip r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
             f'<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx_emu}" cy="{cy_emu}"/></a:xfrm>'
             '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
@@ -850,13 +882,13 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
     )
     emit("در حال بسته‌بندی فایل Word…", progress=0.95)
     output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.docx"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("[Content_Types].xml", _DOCX_CONTENT_TYPES.encode("utf-8"))
-        archive.writestr("_rels/.rels", _DOCX_ROOT_RELS.encode("utf-8"))
-        archive.writestr("word/_rels/document.xml.rels", doc_rels_xml.encode("utf-8"))
-        archive.writestr("word/styles.xml", _DOCX_STYLES.encode("utf-8"))
-        for page_idx, page in enumerate(pages, start=1):
-            archive.writestr(f"word/media/page_{page_idx:03d}.png", page["png"])
-        archive.writestr("word/document.xml", document_xml.encode("utf-8"))
+    with _atomic_export_path(output) as tmp_output:
+        with zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", _DOCX_CONTENT_TYPES.encode("utf-8"))
+            archive.writestr("_rels/.rels", _DOCX_ROOT_RELS.encode("utf-8"))
+            archive.writestr("word/_rels/document.xml.rels", doc_rels_xml.encode("utf-8"))
+            archive.writestr("word/styles.xml", _DOCX_STYLES.encode("utf-8"))
+            for page_idx, page in enumerate(pages, start=1):
+                archive.writestr(f"word/media/page_{page_idx:03d}.png", page["png"])
+            archive.writestr("word/document.xml", document_xml.encode("utf-8"))
     return output

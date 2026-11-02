@@ -54,7 +54,7 @@ async function runTranslate() {
   $('progressBar').style.width = '0';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
-  let totalBlocks = 0, doneImgs = 0, trFail = 0, noText = 0, rawTotal = 0, keptTotal = 0;
+  let totalBlocks = 0, attemptedBlocks = 0, doneImgs = 0, trFail = 0, noText = 0, rawTotal = 0, keptTotal = 0;
   const passes = ['gray', ...($('trContrast').checked ? ['adaptive'] : []), 'bubbles', ...($('trPrecise').checked ? ['wmask'] : [])];
   const errs = [];
   try {
@@ -68,6 +68,7 @@ async function runTranslate() {
     for (let k = 0; k < list.length; k++) {
       if (TR.cancel) break;
       const it = list[k];
+      const prevOcr = it.ocr, prevEdited = it.edited;
       const base = k / list.length, span = 1 / list.length;
       const prog = (f) => { $('progressBar').style.width = Math.round((base + span * f) * 100) + '%'; };
       prog(0);
@@ -77,13 +78,21 @@ async function runTranslate() {
         let lines;
         const stats = { raw: 0, kept: 0 };
         try {
-          lines = await OcrTools.ocrBitmap(bmp, TR.worker, { cjk: L.cjk, lang, passes, stats, onSlice: (f) => prog(f * 0.6) });
+          lines = await OcrTools.ocrBitmap(bmp, TR.worker, {
+            cjk: L.cjk,
+            lang,
+            passes,
+            stats,
+            isCancelled: () => TR.cancel || !$('ocrEnabled').checked,
+            onSlice: (f) => prog(f * 0.6)
+          });
         } finally { bmp.close(); }
         if (!$('ocrEnabled').checked) {
           it.ocr = null; it.edited = null;
           refreshCard(it); drawThumb(it);
           break;
         }
+        if (TR.cancel) break;
         rawTotal += stats.raw; keptTotal += stats.kept;
 
         const blocks = OcrTools.groupLines(lines, L.cjk);
@@ -93,13 +102,15 @@ async function runTranslate() {
         if (!blocks.length) { noText++; it.edited = null; }
         else {
           setStatus(`در حال ترجمهٔ ${blocks.length} متن در تصویر ${k + 1} از ${list.length}...`);
-          let next = 0, n = 0;
+          let next = 0, n = 0, translatedHere = 0;
           await Promise.all(Array.from({ length: Math.min(3, blocks.length) }, async () => {
             while (next < blocks.length && !TR.cancel) {
               const b = blocks[next++];
               const r = await TranslateTools.translate(b.text, L.sl);
+              if (TR.cancel) break;
               b.tr = r.text;
-              if (!r.ok) trFail++;
+              if (r.ok) translatedHere++;
+              else trFail++;
               n++;
               prog(0.6 + 0.35 * (n / blocks.length));
             }
@@ -109,14 +120,19 @@ async function runTranslate() {
             refreshCard(it); drawThumb(it);
             break;
           }
+          attemptedBlocks += n;
+          totalBlocks += translatedHere;
+          if (TR.cancel && translatedHere === 0) {
+            it.ocr = prevOcr; it.edited = prevEdited;
+            break;
+          }
           await renderEdited(it);
           if (!$('ocrEnabled').checked) {
             it.ocr = null; it.edited = null;
             refreshCard(it); drawThumb(it);
             break;
           }
-          totalBlocks += blocks.length;
-          doneImgs++;
+          if (translatedHere > 0) doneImgs++;
           $('sPages').innerText = totalBlocks;
         }
       } catch (e) {
@@ -125,16 +141,17 @@ async function runTranslate() {
       }
       refreshCard(it);
       drawThumb(it);
+      if (TR.cancel) break;
     }
 
     result.classList.add('done');
     $('progressBar').style.width = '100%';
-    if (errs.length && !doneImgs) {
+    if (errs.length && !doneImgs && !TR.cancel) {
       setStatus('ترجمه انجام نشد. اگر خطا مربوط به موتور OCR است، اکستنشن را Reload کنید.');
-    } else if (!totalBlocks && !TR.cancel) {
+    } else if (!attemptedBlocks && !TR.cancel) {
       setStatus(`متنی پیدا نشد. موتور OCR کار کرد (${rawTotal} خط خام، ${keptTotal} خط معتبر) ولی متن قابل‌قبولی نبود. ` +
         `مطمئن شوید زبان درست انتخاب شده (الان: ${L.name}) و گزینهٔ «دقت بالاتر» روشن است.`);
-    } else if (totalBlocks && trFail >= totalBlocks) {
+    } else if (!TR.cancel && attemptedBlocks && trFail >= attemptedBlocks) {
       setStatus('متن‌ها خوانده شد ولی ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید. (متن اصلی در ویرایشگر موجود است)');
     } else {
       setStatus(`${TR.cancel ? 'متوقف شد. ' : ''}${totalBlocks} متن در ${doneImgs} تصویر ترجمه شد` +

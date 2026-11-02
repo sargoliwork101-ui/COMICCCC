@@ -224,9 +224,11 @@
   // هر حباب جدا برش می‌خورد (بیرون حباب سفید می‌شود) و همان تکه خوانده می‌شود
   async function ocrBubbles(cv, w, h, worker, mk, o, yOffset) {
     const out = [];
+    const cancelled = () => typeof o.isCancelled === 'function' && !!o.isCancelled();
     const bubbles = findBubbles(cv, w, h, 14);
     const M = 14;
     for (const c of bubbles) {
+      if (cancelled()) break;
       const bw = c.maxx - c.minx + 1, bh = c.maxy - c.miny + 1;
       const crop = mk(bw + 2 * M, bh + 2 * M);
       const cx = crop.getContext('2d');
@@ -237,8 +239,9 @@
         cx.drawImage(cv, a, c.miny + r, b - a + 1, 1, a - c.minx + M, r + M, b - a + 1, 1);
       }
       const res = await worker.recognize(crop, {}, { blocks: true });
-      extractLines(res.data, yOffset + c.miny - M, o.cjk, o.minConf, o.lang, o.stats, c.minx - M).forEach((l) => out.push(l));
       crop.width = crop.height = 0;
+      if (cancelled()) break;
+      extractLines(res.data, yOffset + c.miny - M, o.cjk, o.minConf, o.lang, o.stats, c.minx - M).forEach((l) => out.push(l));
     }
     return out;
   }
@@ -253,10 +256,12 @@
   // تصویر بلند را تکه‌تکه می‌خواند (با هم‌پوشانی)؛ هر تکه با چند روش پیش‌پردازش خوانده و نتایج ادغام می‌شوند
   async function ocrBitmap(bmp, worker, opts) {
     const o = Object.assign({ sliceH: 2200, overlap: 160, minConf: 40, cjk: false, lang: 'eng',
-      passes: ['gray', 'bubbles', 'wmask'], createCanvas: null, onSlice: null, stats: null }, opts);
+      passes: ['gray', 'bubbles', 'wmask'], createCanvas: null, onSlice: null, stats: null, isCancelled: null }, opts);
+    const cancelled = () => typeof o.isCancelled === 'function' && !!o.isCancelled();
     const mk = o.createCanvas || ((w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; });
     const raw = [];
     for (let s = 0; s < bmp.height; s += o.sliceH) {
+      if (cancelled()) break;
       const e = Math.min(bmp.height, s + o.sliceH);
       const y0 = Math.max(0, s - o.overlap), y1 = Math.min(bmp.height, e + o.overlap), h = y1 - y0;
       const cv = mk(bmp.width, h);
@@ -264,12 +269,16 @@
 
       let cand = [];
       for (const mode of o.passes) {
+        if (cancelled()) break;
         if (mode === 'bubbles') { cand = cand.concat(await ocrBubbles(cv, bmp.width, h, worker, mk, o, y0)); continue; }
         const pc = makePass(cv, bmp.width, h, mode, mk);
         const r = await worker.recognize(pc, {}, { blocks: true });
-        cand = cand.concat(extractLines(r.data, y0, o.cjk, o.minConf, o.lang, o.stats));
         pc.width = pc.height = 0;
+        if (cancelled()) break;
+        cand = cand.concat(extractLines(r.data, y0, o.cjk, o.minConf, o.lang, o.stats));
       }
+      cv.width = cv.height = 0;
+      if (cancelled()) break;
       cand.sort((a, b) => b.conf - a.conf);
       const kept = [];
       cand.forEach((c) => {
@@ -278,10 +287,9 @@
         if (!kept.some((k) => overlapRatio(k, c) > 0.4)) kept.push(c);
       });
       kept.forEach((k) => raw.push(k));
-      cv.width = cv.height = 0;
       if (o.onSlice) o.onSlice(e / bmp.height);
     }
-    if (o.stats) o.stats.kept += raw.length;
+    if (o.stats && !cancelled()) o.stats.kept += raw.length;
     return raw;
   }
 
