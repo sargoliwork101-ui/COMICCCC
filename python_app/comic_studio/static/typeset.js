@@ -5,6 +5,14 @@
   function median(arr) { arr.sort((a, b) => a - b); return arr[Math.floor(arr.length / 2)]; }
   const lum = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
+  // حاشیهٔ هوشمند داخلی کادر: ۲ درصدِ بُعد کادر با سقف حداکثر ۴ پیکسل تا در پاراگراف‌های
+  // بزرگ و چندخطی فضای اضافی هدر نرود و در حباب‌های باریک نیز جای متن تنگ نشود.
+  function boxInset(dim) {
+    const n = Number(dim);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.min(4, n * 0.02);
+  }
+
   // رنگ پس‌زمینهٔ اطراف کادر متن را از نوار باریک بیرون آن می‌خواند
   function sampleBg(ctx, box, W, H) {
     const t = 3, off = 2;
@@ -389,6 +397,278 @@
     };
   }
 
+  let domMeasureState = null;
+  function getDomMeasureBox() {
+    if (typeof window === 'undefined' || typeof document === 'undefined' || !document.body || typeof document.createRange !== 'function') return null;
+    if (domMeasureState && domMeasureState.host.isConnected) return domMeasureState.supported ? domMeasureState.box : null;
+    const host = document.createElement('div');
+    host.setAttribute('aria-hidden', 'true');
+    host.dataset.typesetMeasure = '1';
+    host.style.cssText = 'position:fixed;left:-100000px;top:0;width:0;height:0;overflow:visible;visibility:hidden;pointer-events:none;z-index:-1;';
+    const styleEl = document.createElement('style');
+    styleEl.textContent = '[data-typeset-box] p,[data-typeset-box] div,[data-typeset-box] h1,[data-typeset-box] h2,[data-typeset-box] h3,[data-typeset-box] h4,[data-typeset-box] h5,[data-typeset-box] h6,[data-typeset-box] blockquote,[data-typeset-box] pre{margin:0;padding:0;font-size:inherit}';
+    const box = document.createElement('div');
+    box.dataset.typesetBox = '1';
+    host.append(styleEl, box);
+    document.body.appendChild(host);
+    box.style.cssText = `position:absolute;left:0;top:0;font:700 12px/1.55 ${FONT};white-space:nowrap;`;
+    box.textContent = 'ا';
+    const probeRange = document.createRange();
+    probeRange.selectNodeContents(box);
+    const supported = (probeRange.getBoundingClientRect?.()?.width || 0) > 0;
+    box.textContent = '';
+    domMeasureState = { host, box, supported };
+    return supported ? box : null;
+  }
+
+  function hasSpecialRichElements(html) {
+    return !!html && /<(img|hr|table|ul|ol|li)\b/i.test(String(html));
+  }
+
+  function blockRawLayoutHtml(b) {
+    if (b._plainText) return escapeInlineHtml(String(b.tr || '')).replace(/\r\n?/g, '\n').replace(/\n/g, '<br>');
+    if (typeof b._liveHtml === 'string') return b._liveHtml;
+    if (b.richHtml) return String(b.richHtml);
+    const src = String(b.tr || '');
+    if (hasInlineMarks(src)) return inlineMarksToHtml(src);
+    return escapeInlineHtml(src).replace(/\r\n?/g, '\n').replace(/\n/g, '<br>');
+  }
+
+  function buildSafeDomTemplate(rawHtml) {
+    const clean = root.ComicSanitize?.sanitize ? root.ComicSanitize.sanitize(rawHtml) : rawHtml;
+    const tpl = document.createElement('template');
+    tpl.innerHTML = clean;
+    tpl.content.querySelectorAll('script,style,iframe,object,embed,svg,math,img,video,audio,link,meta').forEach((el) => el.remove());
+    tpl.content.querySelectorAll('*').forEach((el) => {
+      [...el.attributes].forEach((attr) => {
+        const name = attr.name.toLowerCase();
+        if (name === 'style') return;
+        if (name === 'dir' && (attr.value === 'ltr' || attr.value === 'rtl')) return;
+        el.removeAttribute(attr.name);
+      });
+      const fs = Number.parseFloat(el.style?.fontSize || '');
+      if (Number.isFinite(fs) && fs > 0) el.dataset.logicalSize = String(Math.max(8, Math.min(160, Math.round(fs))));
+    });
+    return tpl;
+  }
+
+  function applyDomLayoutStyles(box, tpl, st, bw, padX, size) {
+    box.replaceChildren(tpl.content.cloneNode(true));
+    box.dir = st.dir;
+    box.style.cssText = [
+      'position:absolute', 'left:0', 'top:0', 'box-sizing:border-box',
+      `width:${bw}px`, `padding:0px ${padX}px`, 'margin:0', 'border:0',
+      `font-family:${FONT}`, `font-size:${size}px`, 'line-height:1.55',
+      `font-weight:${st.bold ? '700' : '400'}`, `font-style:${st.italic ? 'italic' : 'normal'}`,
+      'white-space:pre-line', 'text-justify:inter-word',
+      'overflow-wrap:normal', 'word-break:normal',
+      'letter-spacing:0px', 'word-spacing:0px', 'font-kerning:auto',
+      `direction:${st.dir}`, `text-align:${st.align}`
+    ].join(';');
+    const ref = st.size || size;
+    box.querySelectorAll('[data-logical-size]').forEach((el) => {
+      const logical = Number.parseFloat(el.dataset.logicalSize || '');
+      if (!Number.isFinite(logical) || logical <= 0) return;
+      el.style.fontSize = `${Math.max(8, Math.min(160, Math.round(size * logical / ref)))}px`;
+    });
+  }
+
+  function computeJsFit(ctx, b, st, bw, bh, richWordsOpt = null) {
+    const padX = boxInset(bw), padY = boxInset(bh);
+    const usableW = Math.max(1, bw - 2 * padX), usableH = Math.max(1, bh - 2 * padY);
+    const sourceText = String(b.tr || '').trim();
+    const richWords = richWordsOpt !== null ? richWordsOpt : (!b._plainText && b.richHtml ? richHtmlWords(b.richHtml) : null);
+    const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
+    const inline = st.align === 'justify' || (!b._plainText && (!!b.richHtml || hasInlineMarks(sourceText)));
+    const fontPrefix = `${st.italic ? 'italic ' : ''}${st.bold ? '700' : '400'} `;
+    if (inline) {
+      const inWords = b._plainText ? plainWords(sourceText) : (richWords || inlineWords(sourceText));
+      if (st.size) {
+        const lines = wrapInlineAt(ctx, inWords, usableW, st, st.size);
+        return { inline: true, size: st.size, lines, lh: st.size * 1.55, lineLh: lineHeightsFor(lines, st, st.size) };
+      }
+      return Object.assign({ inline: true }, fitInline(ctx, inWords, usableW, usableH, maxSize, 8, st));
+    }
+    if (st.size) {
+      ctx.font = `${fontPrefix}${st.size}px ${FONT}`;
+      return { inline: false, size: st.size, lines: wrapWords(ctx, sourceText, usableW), lh: st.size * 1.55 };
+    }
+    return Object.assign({ inline: false }, fit(ctx, sourceText, usableW, usableH, maxSize, 8, fontPrefix));
+  }
+
+  function resolveDomNodeStyle(node, rootBox, st, baseSize) {
+    let bold = st.bold !== false, italic = !!st.italic, underline = !!st.underline, strike = false;
+    let size = baseSize, color = null, dir = st.dir;
+    const chain = [];
+    let cur = node?.parentElement;
+    while (cur && cur !== rootBox) { chain.unshift(cur); cur = cur.parentElement; }
+    chain.forEach((el) => {
+      const tag = el.tagName;
+      if (['B', 'STRONG', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'TH'].includes(tag)) bold = true;
+      if (tag === 'I' || tag === 'EM') italic = true;
+      if (tag === 'U') underline = true;
+      if (['S', 'STRIKE', 'DEL'].includes(tag)) strike = true;
+      const fw = el.style?.fontWeight || '';
+      if (fw === 'bold' || Number(fw) >= 600) bold = true;
+      else if (fw === 'normal' || fw === '400') bold = false;
+      if (el.style?.fontStyle === 'italic') italic = true;
+      else if (el.style?.fontStyle === 'normal') italic = false;
+      const deco = el.style?.textDecorationLine || el.style?.textDecoration || '';
+      if (deco.includes('underline')) underline = true;
+      if (deco.includes('line-through')) strike = true;
+      const fs = Number.parseFloat(el.style?.fontSize || '');
+      if (Number.isFinite(fs) && fs > 0) size = fs;
+      if (el.style?.color) color = el.style.color;
+      const d = el.style?.direction || el.getAttribute('dir');
+      if (d === 'ltr' || d === 'rtl') dir = d;
+    });
+    return { bold, italic, underline, strike, size, color, dir };
+  }
+
+  function domLayoutBlock(ctx, b, st, bw, bh, richWordsOpt = null) {
+    const rawHtml = blockRawLayoutHtml(b);
+    if (hasSpecialRichElements(rawHtml)) return null;
+    const box = getDomMeasureBox();
+    if (!box) return null;
+    const padX = boxInset(bw), padY = boxInset(bh);
+    const usableW = Math.max(1, bw - 2 * padX), usableH = Math.max(1, bh - 2 * padY);
+    const tpl = buildSafeDomTemplate(rawHtml);
+    let size = st.size;
+    if (!size) {
+      const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
+      if (!Number.isFinite(maxSize)) {
+        size = 8;
+        applyDomLayoutStyles(box, tpl, st, bw, padX, size);
+      } else {
+        const jsEst = computeJsFit(ctx, b, st, bw, bh, richWordsOpt).size;
+        const startSize = Math.min(maxSize, jsEst + 2);
+        size = 8;
+        for (let s = startSize; s >= 8; s -= 1) {
+          applyDomLayoutStyles(box, tpl, st, bw, padX, s);
+          if (box.scrollHeight <= usableH + 0.75 && box.scrollWidth <= bw + usableW * 0.04 + 0.5) {
+            size = s;
+            break;
+          }
+        }
+        if (Number.parseFloat(box.style.fontSize) !== size) applyDomLayoutStyles(box, tpl, st, bw, padX, size);
+      }
+    } else {
+      applyDomLayoutStyles(box, tpl, st, bw, padX, size);
+    }
+
+    const rawScrollH = box.scrollHeight;
+    const contentH = rawScrollH > 0 ? rawScrollH : size * 1.55;
+    const topUnscaled = st.verticalAlign === 'top' ? padY
+      : st.verticalAlign === 'bottom' ? bh - padY - contentH
+      : (bh - contentH) / 2;
+
+    const boxRect = box.getBoundingClientRect();
+    const walker = document.createTreeWalker(box, 4);
+    const r = document.createRange();
+    const fragments = [];
+    const styleCache = new Map();
+    let tn;
+    while ((tn = walker.nextNode())) {
+      const val = tn.nodeValue || '';
+      if (!val.trim()) continue;
+      const parentEl = tn.parentElement || box;
+      let ns = styleCache.get(parentEl);
+      if (!ns) { ns = resolveDomNodeStyle(tn, box, st, size); styleCache.set(parentEl, ns); }
+      const re = /\S+/g;
+      let m;
+      while ((m = re.exec(val))) {
+        const s = m.index, e = m.index + m[0].length;
+        r.setStart(tn, s); r.setEnd(tn, e);
+        const rects = r.getClientRects();
+        if (!rects.length) continue;
+        if (rects.length === 1) {
+          const rb = rects[0];
+          if (!(rb.width > 0 && rb.height > 0)) continue;
+          let dir = ns.dir;
+          if (e - s > 1) {
+            r.setStart(tn, s); r.setEnd(tn, s + 1); const b0 = r.getBoundingClientRect();
+            r.setStart(tn, e - 1); r.setEnd(tn, e); const b1 = r.getBoundingClientRect();
+            if (b0.width > 0 && b1.width > 0 && Math.abs(b0.left - b1.left) > 0.1) dir = b0.left < b1.left ? 'ltr' : 'rtl';
+          }
+          fragments.push({
+            text: val.slice(s, e),
+            left: rb.left - boxRect.left, right: rb.right - boxRect.left,
+            top: rb.top - boxRect.top, bottom: rb.bottom - boxRect.top,
+            dir, bold: ns.bold, italic: ns.italic, underline: ns.underline, strike: ns.strike, size: ns.size, color: ns.color
+          });
+          continue;
+        }
+        const chs = [];
+        for (let k = s; k < e;) {
+          let kEnd = k + 1;
+          while (kEnd < e && (val[kEnd] === '\u200c' || val[kEnd] === '\u200d' || /[\u064b-\u065f\u0670]/.test(val[kEnd]))) kEnd += 1;
+          r.setStart(tn, k); r.setEnd(tn, kEnd);
+          const cb = r.getBoundingClientRect();
+          if (cb.width > 0 || cb.height > 0) chs.push({ k, kEnd, left: cb.left, right: cb.right, top: cb.top, bottom: cb.bottom });
+          else if (chs.length) chs[chs.length - 1].kEnd = kEnd;
+          k = kEnd;
+        }
+        let i = 0;
+        while (i < chs.length) {
+          let j = i + 1, runDir = null;
+          while (j < chs.length && Math.abs(chs[j].top - chs[i].top) < 3) {
+            const prev = chs[j - 1], cur = chs[j];
+            const stepLtr = Math.abs(cur.left - prev.right) < 1.5;
+            const stepRtl = Math.abs(prev.left - cur.right) < 1.5;
+            if (!runDir) {
+              if (stepLtr && !stepRtl) runDir = 'ltr';
+              else if (stepRtl && !stepLtr) runDir = 'rtl';
+              else break;
+            } else if ((runDir === 'ltr' && !stepLtr) || (runDir === 'rtl' && !stepRtl)) break;
+            j += 1;
+          }
+          const dir = runDir || (/^[A-Za-z0-9]/.test(val[chs[i].k]) ? 'ltr' : ns.dir);
+          const group = chs.slice(i, j);
+          fragments.push({
+            text: val.slice(chs[i].k, chs[j - 1].kEnd),
+            left: Math.min(...group.map((x) => x.left)) - boxRect.left,
+            right: Math.max(...group.map((x) => x.right)) - boxRect.left,
+            top: Math.min(...group.map((x) => x.top)) - boxRect.top,
+            bottom: Math.max(...group.map((x) => x.bottom)) - boxRect.top,
+            dir, bold: ns.bold, italic: ns.italic, underline: ns.underline, strike: ns.strike, size: ns.size, color: ns.color
+          });
+          i = j;
+        }
+      }
+    }
+    box.textContent = '';
+    return { size, topUnscaled, fragments };
+  }
+
+  function fitBlockSize(ctx, b, bw, bh) {
+    const st = blockStyle(b);
+    if (st.size) return st.size;
+    const rawHtml = blockRawLayoutHtml(b);
+    if (!hasSpecialRichElements(rawHtml)) {
+      const box = getDomMeasureBox();
+      if (box) {
+        const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
+        if (!Number.isFinite(maxSize)) return 8;
+        const padX = boxInset(bw), padY = boxInset(bh);
+        const usableW = Math.max(1, bw - 2 * padX), usableH = Math.max(1, bh - 2 * padY);
+        const tpl = buildSafeDomTemplate(rawHtml);
+        const jsEst = computeJsFit(ctx, b, st, bw, bh).size;
+        const startSize = Math.min(maxSize, jsEst + 2);
+        let chosen = 8;
+        for (let s = startSize; s >= 8; s -= 1) {
+          applyDomLayoutStyles(box, tpl, st, bw, padX, s);
+          if (box.scrollHeight <= usableH + 0.75 && box.scrollWidth <= bw + usableW * 0.04 + 0.5) {
+            chosen = s;
+            break;
+          }
+        }
+        box.textContent = '';
+        return chosen;
+      }
+    }
+    return computeJsFit(ctx, b, st, bw, bh).size;
+  }
+
   // bmp: تصویر اصلی؛ blocks: بلوک‌ها؛ برمی‌گرداند canvas نهایی
   function render(bmp, blocks, opts) {
     const o = Object.assign({ createCanvas: null }, opts);
@@ -399,14 +679,14 @@
     ctx.drawImage(bmp, 0, 0);
     // Paint box backgrounds first so no later box fill can cover an earlier translation's text.
     const targetFills = [], textJobs = [];
+    const ascentCache = new Map();
 
     blocks.forEach((b) => {
       if (!b.enabled) return;
       const sourceText = String(b.tr || '').trim();
       const richWords = !b._plainText && b.richHtml ? richHtmlWords(b.richHtml) : null;
-      if (!sourceText && !richWords?.some((word) => String(word.t || '').trim())) return;
+      if (!sourceText && !richWords?.some((word) => String(word.t || '').trim()) && !(typeof b._liveHtml === 'string' && b._liveHtml.trim())) return;
       const st = blockStyle(b);
-      const fontPrefix = `${st.italic ? 'italic ' : ''}${st.bold ? '700' : '400'} `;
       const layoutBox = {
         x0: Math.max(0, Number.isFinite(b.tx0) ? b.tx0 : b.x0),
         y0: Math.max(0, Number.isFinite(b.ty0) ? b.ty0 : b.y0),
@@ -430,25 +710,61 @@
       if (st.color) txt = st.color;
       if (targetFill) targetFills.push([targetFill, layoutBox.x0, layoutBox.y0, bw, bh]);
 
-      const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
-      // Justified text uses word runs too, even for plain OCR; literal OCR markers remain literal.
-      const inline = st.align === 'justify' || (!b._plainText && (!!b.richHtml || hasInlineMarks(sourceText)));
-      // سایز دستی کاربر جای حالت خودکار می‌نشیند؛ در غیر این صورت بهترین سایز برای جاشدن در کادر
-      let f;
-      if (inline) {
-        const inWords = b._plainText ? plainWords(sourceText) : (richWords || inlineWords(sourceText));
-        if (st.size) {
-          const lines = wrapInlineAt(ctx, inWords, bw * 0.96, st, st.size);
-          f = { size: st.size, lines, lh: st.size * 1.55, lineLh: lineHeightsFor(lines, st, st.size) };
-        } else {
-          f = fitInline(ctx, inWords, bw * 0.96, bh * 0.96, maxSize, 8, st);
-        }
-      } else if (st.size) {
-        ctx.font = `${fontPrefix}${st.size}px ${FONT}`;
-        f = { size: st.size, lines: wrapWords(ctx, sourceText, bw * 0.96), lh: st.size * 1.55 };
-      } else {
-        f = fit(ctx, sourceText, bw * 0.96, bh * 0.96, maxSize, 8, fontPrefix);
+      // در مرورگر واقعی، جایگاه دقیق کلمه‌ها مستقیماً از همان جعبهٔ چیدمان DOM خوانده می‌شود
+      // تا متنِ زمان تایپ، مکان‌نما و خروجی نهایی روی عکس از یک موتور واحد و بدون حتی ۱ پیکسل اختلاف بیایند.
+      const domLayout = !o.createCanvas ? domLayoutBlock(ctx, b, st, bw, bh, richWords) : null;
+      if (domLayout) {
+        textJobs.push(() => {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(layoutBox.x0, layoutBox.y0, bw, bh);
+          ctx.clip();
+          ctx.textAlign = 'left';
+          domLayout.fragments.forEach((frag) => {
+            const fontSpec = `${frag.italic ? 'italic ' : ''}${frag.bold ? '700' : '400'} ${frag.size}px ${FONT}`;
+            ctx.font = fontSpec;
+            let ascent = ascentCache.get(fontSpec);
+            if (ascent === undefined) {
+              const m = ctx.measureText('سلام');
+              ascent = Number.isFinite(m?.fontBoundingBoxAscent) ? m.fontBoundingBoxAscent : null;
+              ascentCache.set(fontSpec, ascent);
+            }
+            if ('direction' in ctx) ctx.direction = frag.dir;
+            const drawX = layoutBox.x0 + frag.left;
+            const midY = layoutBox.y0 + domLayout.topUnscaled + (frag.top + frag.bottom) / 2;
+            const drawY = ascent !== null ? (layoutBox.y0 + domLayout.topUnscaled + frag.top + ascent) : midY;
+            ctx.textBaseline = ascent !== null ? 'alphabetic' : 'middle';
+            const wColor = frag.color || txt;
+            if (stroke) { ctx.lineWidth = Math.max(3, frag.size / 5); ctx.strokeStyle = stroke; ctx.lineJoin = 'round'; ctx.strokeText(frag.text, drawX, drawY); }
+            ctx.fillStyle = wColor;
+            ctx.fillText(frag.text, drawX, drawY);
+            const fragW = Math.max(0, frag.right - frag.left);
+            if (frag.underline) {
+              ctx.strokeStyle = wColor;
+              ctx.lineWidth = Math.max(1, frag.size / 14);
+              ctx.beginPath();
+              ctx.moveTo(drawX, midY + frag.size * 0.55);
+              ctx.lineTo(drawX + fragW, midY + frag.size * 0.55);
+              ctx.stroke();
+            }
+            if (frag.strike) {
+              ctx.strokeStyle = wColor;
+              ctx.lineWidth = Math.max(1, frag.size / 14);
+              ctx.beginPath();
+              ctx.moveTo(drawX, midY - frag.size * 0.2);
+              ctx.lineTo(drawX + fragW, midY - frag.size * 0.2);
+              ctx.stroke();
+            }
+          });
+          ctx.restore();
+        });
+        return;
       }
+
+      const padX = boxInset(bw), padY = boxInset(bh);
+      const usableW = Math.max(1, bw - 2 * padX);
+      const f = computeJsFit(ctx, b, st, bw, bh, richWords);
+      const inline = f.inline;
       textJobs.push(() => {
       // Keep the actual output inside the editable translation box, even for manually enlarged text.
       ctx.save();
@@ -458,7 +774,7 @@
       if ('direction' in ctx) ctx.direction = st.dir;
       ctx.textBaseline = 'middle';
       const totalH = inline ? f.lineLh.reduce((sum, v) => sum + v, 0) : f.lines.length * f.lh;
-      const insetY = Math.max(0, bh * 0.02);
+      const insetY = padY;
       // Top/bottom anchor the entire text block, including wrapped and blank lines.
       // Preserve the previous centred placement for projects without this option.
       const textTop = st.verticalAlign === 'top' ? layoutBox.y0 + insetY
@@ -466,9 +782,9 @@
         : (layoutBox.y0 + layoutBox.y1 - totalH) / 2;
       let y = textTop + (inline ? f.lineLh[0] : f.lh) / 2;
       // لنگر هر خط بر اساس چیدمان انتخابی، با حاشیهٔ کوچک از لبهٔ کادر
-      const anchorX = st.align === 'left' || (st.align === 'justify' && st.dir === 'ltr') ? layoutBox.x0 + bw * 0.02
+      const anchorX = st.align === 'left' || (st.align === 'justify' && st.dir === 'ltr') ? layoutBox.x0 + padX
         : st.align === 'center' ? (layoutBox.x0 + layoutBox.x1) / 2
-        : layoutBox.x1 - bw * 0.02;
+        : layoutBox.x1 - padX;
       if (inline) {
         // مسیر درون‌متنی: هر کلمه با فونت، اندازه و رنگ خودش و در موقعیت فیزیکی محاسبه‌شده رسم می‌شود
         ctx.textAlign = 'left';
@@ -476,14 +792,14 @@
           const m = measureLine(ctx, line, st, f.size);
           const lineAlign = line[0]?.lineAlign || st.align; const lineDir = line[0]?.lineDir || st.dir;
           if ('direction' in ctx) ctx.direction = lineDir;
-          const lineAnchor = lineAlign === 'left' || (lineAlign === 'justify' && lineDir === 'ltr') ? layoutBox.x0 + bw * 0.02
-            : lineAlign === 'center' ? (layoutBox.x0 + layoutBox.x1) / 2 : layoutBox.x1 - bw * 0.02;
+          const lineAnchor = lineAlign === 'left' || (lineAlign === 'justify' && lineDir === 'ltr') ? layoutBox.x0 + padX
+            : lineAlign === 'center' ? lineAnchorCenter(layoutBox) : layoutBox.x1 - padX;
           const leftAligned = lineAlign === 'left' || (lineAlign === 'justify' && lineDir === 'ltr');
           const gapCount = line.slice(1).filter((word) => word.spaceBefore !== false).length;
           // Do not stretch the last line of a paragraph, explicit line breaks, or single-word lines.
           const nextLine = f.lines[li + 1];
           const justify = lineAlign === 'justify' && nextLine && !nextLine[0].lineBreakBefore && gapCount > 0;
-          const extraGap = justify ? Math.max(0, bw * 0.96 - m.width) / gapCount : 0;
+          const extraGap = justify ? Math.max(0, usableW - m.width) / gapCount : 0;
           const paintedWidth = m.width + extraGap * gapCount;
           let x = leftAligned ? lineAnchor
             : lineAlign === 'center' ? lineAnchor - paintedWidth / 2
@@ -554,8 +870,12 @@
     return cv;
   }
 
+  function lineAnchorCenter(layoutBox) {
+    return (layoutBox.x0 + layoutBox.x1) / 2;
+  }
+
   const api = {
-    FONT, render, sampleBg, fit, wrapWords, blockStyle,
+    FONT, render, sampleBg, fit, wrapWords, blockStyle, boxInset, fitBlockSize,
     hasInlineMarks, tokenizeInline, inlineMarksToHtml, stripInlineMarkers, inlineWords, richHtmlWords, fitInline, visualLineOrder
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Typeset = api;

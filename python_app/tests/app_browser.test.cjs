@@ -1097,6 +1097,102 @@ main()
       assert.equal(v363Restored.len, 4);
       assert.equal(v363Restored.b4, 'پارهٔ دوم');
 
+      const v366Audit = await page.evaluate(() => {
+        closeInlineEditor();
+        setEditorZoom(1);
+        const canvas = document.getElementById('editorCanvas');
+        const origFillText = CanvasRenderingContext2D.prototype.fillText;
+        let painted = [];
+        CanvasRenderingContext2D.prototype.fillText = function patchedFillText(text, x, y, ...rest) {
+          const w = this.measureText(text).width;
+          painted.push({ text, x0: +(x - 10).toFixed(3), x1: +(x - 10 + w).toFixed(3), y: +(y - 5).toFixed(3) });
+          return origFillText.call(this, text, x, y, ...rest);
+        };
+        try {
+          let maxWordEdgeErr = 0;
+          let pixelDiffEditVsClosed = 0;
+          const testCases = [
+            { bw: 95, bh: 195, tr: 'چی می‌گی؟! من اصلاً خبر نداشتم که اون اینجاست...' },
+            { bw: 105, bh: 195, tr: 'صبر کن! الان باید سریع از اینجا بریم بیرون وگرنه گیر می‌افتیم.' },
+            { bw: 135, bh: 195, tr: 'این مسیر رفت‌وآمد یا شب-روز خیلی طولانی است و باید ادامه بدهیم!' },
+            { bw: 185, bh: 195, tr: 'گفتم Hello! World بریم و OK! تمام شد (100%) واقعاً؟!' },
+          ];
+          editorItem().blocks = [{
+            id: 999, x0: 10, y0: 5, x1: 105, y1: 200,
+            text: 'TEST', tr: '', richHtml: '', enabled: true, lineH: 22, bg: 'white',
+            color: '#111111', dir: 'rtl', align: 'justify', size: 12, verticalAlign: 'top',
+          }];
+          const b = editorItem().blocks[0];
+          for (const tc of testCases) {
+            closeInlineEditor();
+            b.x0 = 10; b.y0 = 5; b.x1 = 10 + tc.bw; b.y1 = 5 + tc.bh;
+            b.tr = tc.tr; b.richHtml = ''; b.align = 'justify'; b.size = 12; b.verticalAlign = 'top';
+            buildBlockList(); drawEditor();
+            openInlineEditor(b);
+            painted = [];
+            drawEditorCanvas();
+            const field = document.getElementById('inlineEditorField');
+            const cRect = canvas.getBoundingClientRect();
+            const tn = field.firstChild;
+            const re = /\S+/g;
+            let m;
+            while ((m = re.exec(tn.nodeValue))) {
+              const rr = document.createRange();
+              rr.setStart(tn, m.index); rr.setEnd(tn, m.index + m[0].length);
+              const rects = rr.getClientRects();
+              if (rects.length === 1) {
+                const rb = rects[0];
+                const dx0 = rb.left - cRect.left - b.x0;
+                const dx1 = rb.right - cRect.left - b.x0;
+                const hit = painted.find((c) => c.text === m[0] && Math.abs(c.x0 - dx0) < 1.5);
+                if (!hit) throw new Error(`missing painted word ${m[0]} at bw=${tc.bw}`);
+                maxWordEdgeErr = Math.max(maxWordEdgeErr, Math.abs(hit.x0 - dx0), Math.abs(hit.x1 - dx1));
+              }
+            }
+            const ctx = canvas.getContext('2d');
+            const duringData = ctx.getImageData(10, 5, tc.bw, tc.bh).data;
+            closeInlineEditor();
+            const closedData = ctx.getImageData(10, 5, tc.bw, tc.bh).data;
+            for (let i = 0; i < duringData.length; i += 1) {
+              if (duringData[i] !== closedData[i]) { pixelDiffEditVsClosed += 1; break; }
+            }
+          }
+          closeInlineEditor();
+          b.x0 = 10; b.y0 = 0; b.x1 = 290; b.y1 = 200;
+          b.tr = Array.from({ length: 10 }, (_, i) => `خط شمارهٔ ${i + 1} از پاراگراف ده‌خطی`).join('\n');
+          b.richHtml = ''; b.align = 'justify'; b.size = 10; b.verticalAlign = 'top';
+          buildBlockList(); drawEditor();
+          openInlineEditor(b);
+          const f10 = document.getElementById('inlineEditorField');
+          const padLeft10 = f10.style.paddingLeft;
+          const topStyle10 = f10.style.top;
+          f10.innerHTML = 'سلام دنیا<div><br></div>';
+          refreshInlineTypography();
+          const div2 = f10.querySelector('div');
+          const r2 = div2.getBoundingClientRect();
+          const caretHit = resolveVisualInlineCaret(f10, r2.right - 15, (r2.top + r2.bottom) / 2);
+          closeInlineEditor();
+          return {
+            maxWordEdgeErr: +maxWordEdgeErr.toFixed(4),
+            pixelDiffEditVsClosed,
+            padLeft10,
+            topStyle10,
+            inset500: Typeset.boxInset(500),
+            emptyEnterLineStaysLower: caretHit?.node === div2 && caretHit?.offset === 0,
+          };
+        } finally {
+          CanvasRenderingContext2D.prototype.fillText = origFillText;
+          closeInlineEditor();
+        }
+      });
+      assert.ok(v366Audit.maxWordEdgeErr < 0.5, `expected <0.5px word-edge alignment across all lines, got ${v366Audit.maxWordEdgeErr}px`);
+      assert.equal(v366Audit.pixelDiffEditVsClosed, 0, 'canvas pixels during editing and after closing editor must be 100% identical (zero jump)');
+      assert.equal(v366Audit.padLeft10, '4px', 'wide/10-line box horizontal inset must be capped at 4px');
+      assert.equal(v366Audit.topStyle10, '2px', 'tall/10-line box vertical inset must be capped at 4px (-2px border + 4px = 2px)');
+      assert.equal(v366Audit.inset500, 4, '500px tall 10-line box caps inset at 4px');
+      assert.equal(v366Audit.emptyEnterLineStaysLower, true, 'clicking empty new line after Enter must keep caret on lower line');
+      console.log('PASS: v3.66 unified single-engine layout, 0px exit jump, 4px inset cap on 10-line boxes, and empty-Enter-line caret accuracy');
+
       await page.evaluate(() => {
         state.project.images[0].blocks = JSON.parse(JSON.stringify(window.__savedV361Blocks));
         fitEditor(); buildBlockList(); drawEditor();

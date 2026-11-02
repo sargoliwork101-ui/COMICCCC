@@ -44,14 +44,18 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.65"
+    assert health.json()["version"] == "3.66"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۶۵ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۶۶ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
+    from comic_studio.exporter import _box_inset_px
+    assert abs(_box_inset_px(85) - 1.7) < 1e-6
+    assert abs(_box_inset_px(200) - 4.0) < 1e-6
+    assert abs(_box_inset_px(500) - 4.0) < 1e-6
 
 
 def test_ai_connection_endpoint_tests_the_selected_saved_profile(client, monkeypatch):

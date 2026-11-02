@@ -480,10 +480,16 @@ def _sample_box_bg(image: Image.Image, x0: int, y0: int, x1: int, y1: int) -> tu
     return (rs[mid], gs[mid], bs[mid])
 
 
+def _box_inset_px(dim: float) -> float:
+    return min(4.0, max(0.0, float(dim) * 0.02))
+
+
 def _estimate_fit_px(text: str, bw: float, bh: float) -> float:
     """Estimate auto-fit pixel font size inside (bw, bh) when block['size'] is unset."""
-    usable_w = max(16.0, bw * 0.96)
-    usable_h = max(14.0, bh * 0.96)
+    ix = _box_inset_px(bw)
+    iy = _box_inset_px(bh)
+    usable_w = max(16.0, bw - 2.0 * ix)
+    usable_h = max(14.0, bh - 2.0 * iy)
     raw_lines = [ln for ln in _clean_text(text).split("\n")] or [""]
     for sz in range(min(44, max(8, int(usable_h * 0.72))), 7, -1):
         char_w = sz * 0.54
@@ -791,8 +797,8 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
             top_pt = spec["y0"] * scale_pt
             bw_pt = max(8.0, bw_px * scale_pt)
             bh_pt = max(8.0, bh_px * scale_pt)
-            inset_x = bw_pt * 0.02
-            inset_y = bh_pt * 0.02
+            inset_x = _box_inset_px(bw_px) * scale_pt
+            inset_y = _box_inset_px(bh_px) * scale_pt
             valign = str(blk.get("verticalAlign") or ("middle" if docx_mode == "ocr" else "top"))
             v_anchor = valign if valign in ("top", "middle", "bottom") else ("middle" if docx_mode == "ocr" else "top")
             txbx_p = _build_textbox_paragraphs_xml(

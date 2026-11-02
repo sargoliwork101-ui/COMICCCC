@@ -1958,7 +1958,14 @@ function drawEditorCanvas() {
   // Keep the committed renderer live while typing: the editable DOM is only an
   // interaction layer; the canvas beneath it always shows the exact draft output.
   const draft = imageOverview ? imageOverview.draft : (inlineDraft ? draftBlockForPreview() : null);
-  const blocks = item.blocks.map((block) => overlayBlock(draft && block === inlineDraft?.block ? draft : block));
+  const liveHtml = inlineDraft && !imageOverview && inlineDraft.mode !== 'ocr' && classicEditor?.field ? classicEditor.getHTML() : null;
+  const blocks = item.blocks.map((block) => {
+    if (draft && block === inlineDraft?.block) {
+      const ov = overlayBlock(draft);
+      return liveHtml !== null ? { ...ov, _liveHtml: liveHtml } : ov;
+    }
+    return overlayBlock(block);
+  });
   const rendered = Typeset.render(state.editorBitmap, blocks); const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(rendered, 0, 0);
   if (rendered && rendered !== canvas) { rendered.width = 0; rendered.height = 0; }
@@ -1978,20 +1985,26 @@ function clampedBoxOf(block) {
 }
 function overlaySize(block, width, height) {
   try {
+    overlayMeasureCtx = overlayMeasureCtx || document.createElement('canvas').getContext('2d');
+    if (typeof Typeset.fitBlockSize === 'function') {
+      return Typeset.fitBlockSize(overlayMeasureCtx, block, width, height);
+    }
     const style = Typeset.blockStyle(block);
     if (style.size) return style.size;
     const sourceText = String(block.tr || '').trim();
     const richWords = !block._plainText && block.richHtml ? Typeset.richHtmlWords(block.richHtml) : null;
     const maxSize = Math.max(12, Math.min(64, Math.round(block.lineH * 1.1)));
-    overlayMeasureCtx = overlayMeasureCtx || document.createElement('canvas').getContext('2d');
     const ctx = overlayMeasureCtx;
+    const padX = Typeset.boxInset ? Typeset.boxInset(width) : Math.min(4, Math.max(0, width * 0.02));
+    const padY = Typeset.boxInset ? Typeset.boxInset(height) : Math.min(4, Math.max(0, height * 0.02));
+    const usableW = Math.max(1, width - 2 * padX), usableH = Math.max(1, height - 2 * padY);
     const inline = style.align === 'justify' || (!block._plainText && (!!block.richHtml || Typeset.hasInlineMarks(sourceText)));
     if (inline) {
       const words = block._plainText ? Typeset.richHtmlWords(plainToHtml(sourceText)) : (richWords || Typeset.inlineWords(sourceText));
-      return Typeset.fitInline(ctx, words, width * .96, height * .96, maxSize, 8, style).size;
+      return Typeset.fitInline(ctx, words, usableW, usableH, maxSize, 8, style).size;
     }
     const prefix = `${style.italic ? 'italic ' : ''}${style.bold ? '700' : '400'} `;
-    return Typeset.fit(ctx, sourceText, width * .96, height * .96, maxSize, 8, prefix).size;
+    return Typeset.fit(ctx, sourceText, usableW, usableH, maxSize, 8, prefix).size;
   } catch {
     return Math.max(8, Math.min(160, Number(block.size) || Math.min(42, Math.max(10, height / Math.max(1.8, String(block.tr || '').split('\n').length * 1.65)))));
   }
@@ -2085,7 +2098,7 @@ function refreshInlineTypography() {
     const eff = Math.max(8, Math.min(160, Math.round(baseSize * logical / ref)));
     el.style.fontSize = `${eff * layoutZoom}px`;
   });
-  const insetX = Math.max(4, Math.round(bw * 0.02)) * layoutZoom;
+  const insetX = (Typeset.boxInset ? Typeset.boxInset(bw) : Math.min(4, Math.max(0, bw * 0.02))) * layoutZoom;
   field.style.right = 'auto'; field.style.bottom = 'auto';
   field.style.width = `${bw * layoutZoom}px`;
   field.style.paddingLeft = `${insetX}px`; field.style.paddingRight = `${insetX}px`;
@@ -2095,7 +2108,7 @@ function refreshInlineTypography() {
   field.style.transform = `scale(${scale / layoutZoom})`;
   const rawScrollH = field.scrollHeight;
   const contentH = (rawScrollH > 0 ? rawScrollH : baseSize * layoutZoom * 1.55) / layoutZoom;
-  const insetY = Math.max(2, Math.round(bh * 0.02));
+  const insetY = Typeset.boxInset ? Typeset.boxInset(bh) : Math.min(4, Math.max(0, bh * 0.02));
   const topUnscaled = style.verticalAlign === 'top' ? insetY : style.verticalAlign === 'bottom' ? bh - insetY - contentH : (bh - contentH) / 2;
   field.style.left = `${-(host.clientLeft || 0)}px`;
   field.style.top = `${-(host.clientTop || 0) + topUnscaled * scale}px`;
@@ -2642,6 +2655,13 @@ function resolveVisualInlineCaret(field, clientX, clientY) {
   const walker = document.createTreeWalker(field, NodeFilter.SHOW_TEXT);
   const r = document.createRange();
   const lines = [];
+  const addLineItem = (item) => {
+    let line = lines.find((ln) => item.top < ln.bottom - 2 && item.bottom > ln.top + 2);
+    if (!line) { line = { top: item.top, bottom: item.bottom, items: [] }; lines.push(line); }
+    line.top = Math.min(line.top, item.top);
+    line.bottom = Math.max(line.bottom, item.bottom);
+    line.items.push(item);
+  };
   let tn;
   while ((tn = walker.nextNode())) {
     const value = tn.nodeValue || '';
@@ -2650,25 +2670,48 @@ function resolveVisualInlineCaret(field, clientX, clientY) {
     const defaultRtl = (window.getComputedStyle?.(parent)?.direction || field.dir || 'rtl') === 'rtl';
     for (let k = 0; k < value.length; k += 1) {
       const ch = value[k];
-      if (ch === '\n' || ch === '\r' || ch === '\u200c') continue;
+      if (ch === '\r' || ch === '\u200c') continue;
+      if (ch === '\n') {
+        if (k === 0 || value[k - 1] === '\n') {
+          r.setStart(tn, k); r.collapse(true);
+          const cr = r.getClientRects?.()?.[0];
+          if (cr && cr.height > 0 && !lines.some((ln) => cr.top < ln.bottom - 2 && cr.bottom > ln.top + 2)) {
+            addLineItem({ node: tn, k, endK: k, left: cr.left, right: cr.right, top: cr.top, bottom: cr.bottom, startEdge: cr.left, endEdge: cr.right });
+          }
+        }
+        continue;
+      }
       r.setStart(tn, k); r.setEnd(tn, k + 1);
       const rr = r.getBoundingClientRect?.();
       if (!rr || !(rr.width > 0 && rr.height > 0)) continue;
       const isRtlChar = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(ch) && !/[\u0660-\u0669\u06f0-\u06f9]/.test(ch) ? true
         : /[A-Za-z0-9\u0660-\u0669\u06f0-\u06f9\u00c0-\u02af\u0370-\u052f]/.test(ch) ? false : defaultRtl;
-      const item = {
+      addLineItem({
         node: tn, k, endK: (k + 1 < value.length && value[k + 1] === '\u200c') ? k + 2 : k + 1,
         left: rr.left, right: rr.right, top: rr.top, bottom: rr.bottom,
         startEdge: isRtlChar ? rr.right : rr.left,
         endEdge: isRtlChar ? rr.left : rr.right,
-      };
-      let line = lines.find((ln) => item.top < ln.bottom - 2 && item.bottom > ln.top + 2);
-      if (!line) { line = { top: item.top, bottom: item.bottom, items: [] }; lines.push(line); }
-      line.top = Math.min(line.top, item.top);
-      line.bottom = Math.max(line.bottom, item.bottom);
-      line.items.push(item);
+      });
+    }
+    if (value.endsWith('\n')) {
+      r.setStart(tn, value.length); r.collapse(true);
+      const cr = r.getClientRects?.()?.[0];
+      if (cr && cr.height > 0 && !lines.some((ln) => cr.top < ln.bottom - 2 && cr.bottom > ln.top + 2)) {
+        addLineItem({ node: tn, k: value.length, endK: value.length, left: cr.left, right: cr.right, top: cr.top, bottom: cr.bottom, startEdge: cr.left, endEdge: cr.right });
+      }
     }
   }
+  (field.querySelectorAll ? [...field.querySelectorAll('br')] : []).forEach((br) => {
+    const parent = br.parentNode;
+    if (!parent) return;
+    const idx = [...parent.childNodes].indexOf(br);
+    if (idx < 0) return;
+    r.setStart(parent, idx); r.collapse(true);
+    const cr = r.getClientRects?.()?.[0] || br.getBoundingClientRect?.();
+    if (cr && cr.height > 0 && !lines.some((ln) => cr.top < ln.bottom - 2 && cr.bottom > ln.top + 2)) {
+      addLineItem({ node: parent, k: idx, endK: idx, left: cr.left, right: cr.right, top: cr.top, bottom: cr.bottom, startEdge: cr.left, endEdge: cr.right });
+    }
+  });
   if (!lines.length) return null;
   let bestLine = lines[0], bestYDist = Infinity;
   for (const ln of lines) {
@@ -2790,7 +2833,8 @@ function openInlineEditor(block, clickEvent = null) {
       const textVal = classicEditor.getText();
       const htmlVal = mode === 'ocr' ? '' : classicEditor.getHTML();
       const normNbsp = (s) => String(s || '').replace(/&nbsp;|\u00a0/g, ' ');
-      const plainEquiv = mode !== 'ocr' && !block.richHtml && !hasMarks && normNbsp(htmlVal) === normNbsp(sanitizeHtml(plainToHtml(textVal)));
+      const hasMultiSpace = /(?: |&nbsp;|\u00a0){2,}/.test(htmlVal);
+      const plainEquiv = mode !== 'ocr' && !block.richHtml && !hasMarks && !hasMultiSpace && normNbsp(htmlVal) === normNbsp(sanitizeHtml(plainToHtml(textVal)));
       const rawSize = $('inlineEditorSize').value.trim();
       const keepAuto = !!(inlineDraft?.initialAutoSize && !inlineDraft?.sizeTouched && rawSize === inlineDraft?.initialSizeValue);
       const keepLegacyVertical = !inlineDraft?.verticalAlignTouched && !['top', 'middle', 'bottom'].includes(block.verticalAlign);

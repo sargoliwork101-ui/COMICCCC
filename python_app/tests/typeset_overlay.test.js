@@ -198,6 +198,9 @@ assert(hrOnly.some((point) => point.text.includes('─')), 'separator-only block
   const vLtr = Typeset.visualLineOrder(ltrMixed, 'ltr');
   assert.deepStrictEqual(vLtr.map((x) => ltrMixed[x.idx].t), ['Hello', 'دنیا', 'سلام', 'World'], 'LTR visualLineOrder must reverse embedded RTL run');
   assert.equal(vLtr.filter((x) => x.hasGapAfter).length, ltrMixed.length - 1);
+  assert.equal(Typeset.boxInset(85), 1.7, 'narrow bubbles keep proportional 2% inset');
+  assert.equal(Typeset.boxInset(200), 4, '200px dimension reaches 4px inset cap');
+  assert.equal(Typeset.boxInset(500), 4, '10-line tall/wide boxes cap inset at 4px');
   console.log('PASS: v3.63 inlineMarksToHtml and bidirectional visualLineOrder');
 }
 delete global.document;
