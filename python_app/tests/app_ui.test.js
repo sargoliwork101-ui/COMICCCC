@@ -119,7 +119,13 @@ window.fetch = async (url, options = {}) => {
     if (saveGate) await saveGate;
     return jsonResponse(saved);
   }
-  if (pathname === `/api/projects/${project.id}/ocr`) { ocrRequests.push(JSON.parse(options.body)); if (ocrGate) await ocrGate; return jsonResponse(overlayProject('NEW OCR', '')); }
+  const waitAbortable = (gate, signal) => new Promise((resolve, reject) => {
+    if (signal?.aborted) { const e = new Error('Aborted'); e.name = 'AbortError'; reject(e); return; }
+    const onAbort = () => { const e = new Error('Aborted'); e.name = 'AbortError'; reject(e); };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    Promise.resolve(gate).then((v) => { signal?.removeEventListener?.('abort', onAbort); resolve(v); }, reject);
+  });
+  if (pathname === `/api/projects/${project.id}/ocr`) { ocrRequests.push(JSON.parse(options.body)); if (ocrGate) await waitAbortable(ocrGate, options.signal); return jsonResponse(overlayProject('NEW OCR', '')); }
   if (pathname === `/api/projects/${project.id}/context-preview`) {
     const request = JSON.parse(options.body); translationPreviewCalls.push(request);
     if (previewFailure === 'network') throw new TypeError('simulated connection failure');
@@ -132,7 +138,7 @@ window.fetch = async (url, options = {}) => {
     return jsonResponse({project: vm.runInContext('state.project', context), runId:'mock-run', completed:0});
   }
   if (pathname === `/api/projects/${project.id}/context-step`) {
-    if (translationGate) await translationGate;
+    if (translationGate) await waitAbortable(translationGate, options.signal);
     return jsonResponse({project:overlayProject('NEW OCR', 'ترجمهٔ تازه'), done:true, completed:1, affectedImageIds:[project.images[0].id]});
   }
   if (pathname === '/api/translate-text/context-preview') {
@@ -815,6 +821,59 @@ function check(name, condition) {
       buildBlockList(); drawEditor();
     })()`, context);
     await vm.runInContext('closeEditor()', context);
+
+    // v3.64: Hamburger menu closes on any outside click; OCR and Translation dialogs close immediately via × or Escape even while running.
+    $('menu').classList.add('hidden');
+    $('menuBtn').click();
+    check('hamburger menu opens on button click with aria-expanded=true', !$('menu').classList.contains('hidden') && $('menuBtn').getAttribute('aria-expanded') === 'true');
+    $('projectName').click();
+    check('clicking inside hamburger menu keeps it open', !$('menu').classList.contains('hidden'));
+    $('mainwrap').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    check('clicking anywhere outside hamburger menu closes it without clicking menuBtn again', $('menu').classList.contains('hidden') && $('menuBtn').getAttribute('aria-expanded') === 'false');
+
+    await vm.runInContext(`(async () => {
+      state.project.images[0].selected = true;
+      state.project.images[0].blocks = [{ id: 1, text: 'HELLO WORLD', tr: '', richHtml: '', enabled: true, x0: 10, y0: 10, x1: 120, y1: 50, lineH: 24 }];
+      renderAll();
+    })()`, context);
+
+    let releaseOcr1; ocrGate = new Promise((r) => { releaseOcr1 = r; });
+    $('ocrBtn').click();
+    $('startOcrBtn').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('in-flight OCR keeps × close button enabled', $('ocrDialog').open === true && vm.runInContext('ocrRunning === true', context) && $('ocrDialog').querySelector('.dialog-head button').disabled === false);
+    $('ocrDialog').querySelector('.dialog-head button').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('clicking × during OCR immediately closes ocrDialog and cancels busy state', $('ocrDialog').open === false && vm.runInContext('ocrRunning === false && jobBusy === false', context) && $('ocrBtn').disabled === false);
+    releaseOcr1(); ocrGate = null;
+
+    let releaseOcr2; ocrGate = new Promise((r) => { releaseOcr2 = r; });
+    $('ocrBtn').click();
+    $('startOcrBtn').click();
+    await new Promise((r) => setTimeout(r, 20));
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    check('pressing Escape during OCR immediately closes ocrDialog and cancels busy state', $('ocrDialog').open === false && vm.runInContext('ocrRunning === false && jobBusy === false', context));
+    releaseOcr2(); ocrGate = null;
+
+    let releaseTr1; translationGate = new Promise((r) => { releaseTr1 = r; });
+    await vm.runInContext('runTranslation()', context);
+    $('translationPreviewConfirm').click();
+    await new Promise((r) => setTimeout(r, 25));
+    check('in-flight translation keeps × close button enabled', $('translationDialog').open === true && vm.runInContext('translationRunning === true', context) && $('translationDialog').querySelector('.dialog-head button').disabled === false);
+    $('translationDialog').querySelector('.dialog-head button').click();
+    await new Promise((r) => setTimeout(r, 25));
+    check('clicking × during translation immediately closes translationDialog without reopening and cancels busy state', $('translationDialog').open === false && vm.runInContext('translationRunning === false && jobBusy === false', context) && $('translateBtn').disabled === false);
+    releaseTr1(); translationGate = null;
+
+    let releaseTr2; translationGate = new Promise((r) => { releaseTr2 = r; });
+    await vm.runInContext('runTranslation()', context);
+    $('translationPreviewConfirm').click();
+    await new Promise((r) => setTimeout(r, 25));
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 25));
+    check('pressing Escape during translation immediately closes translationDialog and cancels busy state', $('translationDialog').open === false && vm.runInContext('translationRunning === false && jobBusy === false', context));
+    releaseTr2(); translationGate = null;
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

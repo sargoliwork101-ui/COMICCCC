@@ -1820,6 +1820,77 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert not any(b'browser-local-secret' in archive.read(name) for name in archive.namelist())
 `, backupPath]);
     console.log('PASS: browser downloads and restores a new project ZIP with image, text and local draft without API keys');
+
+    // v3.64: Hamburger menu outside-click dismissal + closing OCR & Translation dialogs via × and Escape while running.
+    await page.evaluate(() => setMenuOpen(false));
+    await page.click('#menuBtn');
+    assert.equal(await page.$eval('#menu', (el) => el.classList.contains('hidden')), false);
+    await page.click('#projectName');
+    assert.equal(await page.$eval('#menu', (el) => el.classList.contains('hidden')), false, 'clicking inside #menu must keep it open');
+    await page.click('#mainwrap');
+    assert.equal(await page.$eval('#menu', (el) => el.classList.contains('hidden')), true, 'clicking outside #menu must close it immediately');
+
+    await page.evaluate(async () => {
+      state.ai.provider = 'free';
+      state.project.images[0].selected = true;
+      renderAll();
+      await saveProject();
+      window.__origFetchV364 = window.fetch;
+      window.fetch = (url, opts = {}) => {
+        const u = String(url);
+        if (u.endsWith('/ocr') || u.endsWith('/context-step') || u.endsWith('/translate-text/context') || u.endsWith('/translate-text')) {
+          return new Promise((_resolve, reject) => {
+            if (opts.signal?.aborted) { const e = new DOMException('Aborted', 'AbortError'); reject(e); return; }
+            opts.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+          });
+        }
+        return window.__origFetchV364(url, opts);
+      };
+    });
+    // 1. OCR × and Escape while running
+    await page.click('#ocrBtn');
+    await page.waitForSelector('#ocrDialog[open]');
+    await page.click('#startOcrBtn');
+    await page.waitForFunction(() => ocrRunning === true);
+    await page.click('#ocrDialog .dialog-head button.icon');
+    await page.waitForFunction(() => !document.getElementById('ocrDialog').open && ocrRunning === false && jobBusy === false);
+
+    await page.click('#ocrBtn');
+    await page.waitForSelector('#ocrDialog[open]');
+    await page.click('#startOcrBtn');
+    await page.waitForFunction(() => ocrRunning === true);
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.getElementById('ocrDialog').open && ocrRunning === false && jobBusy === false);
+
+    // 2. Translation × and Escape while running
+    await page.click('#translateBtn');
+    await page.waitForSelector('#translationPreviewDialog[open]');
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(() => document.getElementById('translationDialog').open && translationRunning === true);
+    await page.click('#translationDialog .dialog-head button.icon');
+    await page.waitForFunction(() => !document.getElementById('translationDialog').open && translationRunning === false && jobBusy === false);
+
+    await page.click('#translateBtn');
+    await page.waitForSelector('#translationPreviewDialog[open]');
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(() => document.getElementById('translationDialog').open && translationRunning === true);
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.getElementById('translationDialog').open && translationRunning === false && jobBusy === false);
+
+    // 3. Stacked translationDialog over editorDialog: Escape closes translationDialog first and keeps editorDialog open
+    await page.evaluate(() => openEditor(state.project.images[0].id));
+    await page.waitForSelector('#editorDialog[open]');
+    await page.evaluate(() => retranslateBlock(state.project.images[0].blocks[0]));
+    await page.waitForSelector('#translationPreviewDialog[open]');
+    await page.click('#translationPreviewConfirm');
+    await page.waitForFunction(() => document.getElementById('translationDialog').open && translationRunning === true);
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.getElementById('translationDialog').open && document.getElementById('editorDialog').open && translationRunning === false && jobBusy === false);
+    await page.evaluate(() => closeEditor());
+
+    await page.evaluate(() => { window.fetch = window.__origFetchV364; delete window.__origFetchV364; });
+    console.log('PASS: v3.64 hamburger menu closes on outside click and OCR/Translation dialogs close & abort on × or Escape');
+
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');

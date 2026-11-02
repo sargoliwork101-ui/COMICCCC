@@ -1,4 +1,4 @@
-# Comic OCR Studio 3.63
+# Comic OCR Studio 3.64
 
 برنامهٔ مستقل Python برای کار روی خروجی افزونه: **PDF یا تصویر ورودی → OCR → ترجمه/AI → ویرایش → PDF، ZIP تصویر، TXT یا Word (DOCX)**.
 

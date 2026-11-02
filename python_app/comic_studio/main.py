@@ -467,7 +467,7 @@ def create_app() -> FastAPI:
         return {"engine": engine_id, "imageId": values.image_id, "blocks": blocks}
 
     @app.post("/api/projects/{project_id}/ocr")
-    async def run_ocr(project_id: str, values: OcrRequest) -> dict[str, Any]:
+    async def run_ocr(project_id: str, values: OcrRequest, http_request: Request) -> dict[str, Any]:
         with store._lock:
             state = project(project_id)
             expected_updated_at = state.get("updatedAt", "")
@@ -492,6 +492,9 @@ def create_app() -> FastAPI:
             for item in state["images"]:
                 if item["id"] not in ids:
                     continue
+                if await http_request.is_disconnected():
+                    activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
+                    return store.get(project_id)
                 completed += 1
                 activity.add(f"در حال خواندن تصویر {completed} از {len(ids)}: {item['name']}")
                 path = store.image_path(project_id, item["id"])
@@ -516,6 +519,9 @@ def create_app() -> FastAPI:
                     activity.add(f"متن خوانده‌شده در «{item['name']}»:\n" + "\n".join(recognized_lines))
                 else:
                     activity.add(f"در «{item['name']}» متنی پیدا نشد", "warning")
+            if await http_request.is_disconnected():
+                activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
+                return store.get(project_id)
             with store._lock:
                 entry = pending_results.stage(store, project_id, 'ocr', {
                     'baseline': {i: baseline[i] for i in ids}, 'originals': {i: original_ocr[i] for i in ids},
@@ -689,7 +695,7 @@ def create_app() -> FastAPI:
         return {'project': state, 'runId': run['id'], 'completed': run['completed']}
 
     @app.post("/api/projects/{project_id}/context-step")
-    async def context_step(project_id: str, values: ContextStepRequest) -> dict[str, Any]:
+    async def context_step(project_id: str, values: ContextStepRequest, http_request: Request) -> dict[str, Any]:
         lock = context_locks.setdefault(project_id, asyncio.Lock())
         async with lock:
             state = project(project_id); expected = state.get('updatedAt', '')
@@ -750,6 +756,9 @@ def create_app() -> FastAPI:
                     error = InvalidContextResponse(str(exc), values.corrected_response)
                     error.recovery_token = values.recovery_token
                     raise error from exc
+            elif await http_request.is_disconnected():
+                activity.add("ادامهٔ ترجمه با بستن پنجره متوقف شد.", "warning")
+                return {'project': state, 'done': False, 'affectedImageIds': [], 'completed': run['completed']}
             elif run['provider'] == 'free':
                 translated = await run_reported(translations.translate_free_batch, request, text, source_texts, run['language'], policy, pulse_label='ترجمهٔ رایگان')
                 summary = ''
@@ -909,7 +918,9 @@ def create_app() -> FastAPI:
         return plan_preview(plan, values.provider, values.source_language, settings)
 
     @app.post("/api/projects/{project_id}/translate")
-    async def run_translation(project_id: str, values: TranslateRequest) -> dict[str, Any]:
+    async def run_translation(project_id: str, values: TranslateRequest, http_request: Request) -> dict[str, Any]:
+        if await http_request.is_disconnected():
+            raise HTTPException(499, "عملیات ترجمه توسط کاربر لغو شد.")
         if values.provider == 'free':
             options = legacy_free_context(values)
             run, request, chosen = context_preparation(project(project_id), options)
@@ -921,7 +932,7 @@ def create_app() -> FastAPI:
             started = context_start(project_id, ContextStartRequest(**options.model_dump(), confirmation=signature))
             completed = started['completed']
             while True:
-                result = await context_step(project_id, ContextStepRequest(run_id=started['runId'], completed=completed, skill=''))
+                result = await context_step(project_id, ContextStepRequest(run_id=started['runId'], completed=completed, skill=''), http_request)
                 completed = result['completed']
                 if result['done']:
                     return result['project']

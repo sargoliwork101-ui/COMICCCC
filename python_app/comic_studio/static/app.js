@@ -40,6 +40,13 @@ let imageOverview = null;
 let jobBusy = false;
 let translationRunning = false;
 let ocrRunning = false;
+const openDialogStack = [];
+let ocrAbortController = null;
+let ocrCancelledByUser = false;
+let ocrClosingNormally = false;
+let translationAbortController = null;
+let translationCancelledByUser = false;
+let translationClosingNormally = false;
 let pendingTranslationAfterOcr = null;
 let translationRetryAction = null;
 let translationRepairAction = null;
@@ -209,6 +216,11 @@ async function api(url, options = {}) {
   let response;
   try { response = await fetch(url, options); }
   catch (cause) {
+    if (cause?.name === 'AbortError' || options.signal?.aborted) {
+      const abortErr = new Error('عملیات توسط کاربر لغو شد.');
+      abortErr.name = 'AbortError'; abortErr.cancelled = true;
+      throw abortErr;
+    }
     const error = new Error(`خطای ارتباط با برنامه (${method} ${path})؛ ${cause?.name || 'Error'}: ${cause?.message || cause}. سرور و اتصال را بررسی کنید.`);
     error.status = 0; throw error;
   }
@@ -232,13 +244,53 @@ async function api(url, options = {}) {
   return payload;
 }
 function jsonOptions(method, value) { return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }; }
-function showDialog(id) { if (!$(id).open) $(id).showModal(); }
-function closeDialog(id) { if ($(id).open) $(id).close(); }
+function setMenuOpen(open) {
+  const menu = $('menu');
+  if (!menu) return;
+  menu.classList.toggle('hidden', !open);
+  $('menuBtn')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+function abortRunningOcr() {
+  if (!ocrRunning) return;
+  ocrCancelledByUser = true;
+  clearPendingTranslationOcr();
+  try { ocrAbortController?.abort(); } catch { /* ignore */ }
+}
+function abortRunningTranslation() {
+  if (!translationRunning && !translationDecisionBusy) return;
+  translationCancelledByUser = true;
+  try { translationAbortController?.abort(); } catch { /* ignore */ }
+}
+function showDialog(id) {
+  setMenuOpen(false);
+  const dlg = $(id);
+  if (!dlg) return;
+  const idx = openDialogStack.indexOf(id);
+  if (idx >= 0) openDialogStack.splice(idx, 1);
+  openDialogStack.push(id);
+  if (!dlg.open) dlg.showModal();
+}
+function closeDialog(id) {
+  const idx = openDialogStack.indexOf(id);
+  if (idx >= 0) openDialogStack.splice(idx, 1);
+  if ($(id)?.open) $(id).close();
+}
+function dismissOcrDialog() {
+  if (ocrRunning && !ocrClosingNormally) abortRunningOcr();
+  closeDialog('ocrDialog');
+}
+function dismissTranslationDialog() {
+  if ((translationRunning || translationDecisionBusy) && !translationClosingNormally) abortRunningTranslation();
+  closeDialog('translationDialog');
+}
 function closeTopDialog() {
-  const dialog = [...document.querySelectorAll('dialog[open]')].at(-1);
+  const stackedId = [...openDialogStack].reverse().find((id) => $(id)?.open);
+  const dialog = stackedId ? $(stackedId) : [...document.querySelectorAll('dialog[open]')].at(-1);
   if (!dialog) return false;
-  if ((dialog.id === 'translationDialog' && (translationRunning || translationDecisionBusy)) || (dialog.id === 'ocrDialog' && ocrRunning)) return true;
   if (dialog.id === 'editorDialog') closeEditor().catch((error) => toast(error.message, true));
+  else if (dialog.id === 'ocrDialog') dismissOcrDialog();
+  else if (dialog.id === 'translationDialog') dismissTranslationDialog();
+  else if (dialog.id === 'translationPreviewDialog') cancelTranslationRequestPreview();
   else closeDialog(dialog.id);
   return true;
 }
@@ -286,7 +338,13 @@ async function runJob(message, task, progressId = null) {
   appendLocalActivity(message); $('activityDetails').open = true;
   let completed = false;
   try { const result = await task(); completed = true; return result; }
-  catch (error) { console.error(error); appendLocalActivity(`خطا: ${error.message || error}`, 'error'); toast(error.message || error, true); throw error; }
+  catch (error) {
+    if (error?.cancelled || error?.name === 'AbortError') {
+      appendLocalActivity('عملیات با بستن پنجره متوقف شد.', 'warning');
+      throw error;
+    }
+    console.error(error); appendLocalActivity(`خطا: ${error.message || error}`, 'error'); toast(error.message || error, true); throw error;
+  }
   finally {
     if (progressId) setProgress(progressId, completed ? 1 : 0, false);
     setProgress('dockProgress', completed ? 1 : 0, false);
@@ -759,7 +817,9 @@ function reportOcrError(error) {
 async function runOcr() {
   if (ocrRunning) return;
   const pending = pendingTranslationAfterOcr;
-  ocrRunning = true; setProgress('ocrProgress', null, true); $('startOcrBtn').disabled = true; $('ocrDialog').querySelector('.dialog-head button').disabled = true;
+  const controller = new AbortController();
+  ocrAbortController = controller; ocrCancelledByUser = false; ocrClosingNormally = false;
+  ocrRunning = true; setProgress('ocrProgress', null, true); $('startOcrBtn').disabled = true;
   $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden');
   let ocrSucceeded = false;
   try {
@@ -767,6 +827,7 @@ async function runOcr() {
       throw new Error('پروژه یا تصاویر انتخاب‌شده تغییر کردند؛ پنجره را ببندید و دوباره ترجمه را شروع کنید.');
     }
     collectOcrSettings(); await saveProject();
+    if (ocrCancelledByUser || controller.signal.aborted) { const e = new Error('لغو شد'); e.cancelled = true; throw e; }
     if (pending && (state.project?.id !== pending.projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(pending.imageIds))) {
       throw new Error('پروژه یا تصاویر انتخاب‌شده تغییر کردند؛ پنجره را ببندید و دوباره ترجمه را شروع کنید.');
     }
@@ -778,20 +839,31 @@ async function runOcr() {
     })) throw new Error('متن یا وضعیت یکی از تصاویر تغییر کرده است؛ برای جلوگیری از بازنویسی OCR انجام نشد.');
     await runJob('OCR محلی در حال اجراست…', async () => {
       const confidence = $('ocrConfidence').value.trim();
-      const result = await api(`/api/projects/${state.project.id}/ocr`, jsonOptions('POST', { image_ids: ids, engine: $('ocrEngine').value, language: $('ocrLanguage').value, contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, group_lines: $('ocrGroupLines').checked, min_confidence: confidence === '' ? .35 : Number(confidence) }));
+      const result = await api(`/api/projects/${state.project.id}/ocr`, {
+        ...jsonOptions('POST', { image_ids: ids, engine: $('ocrEngine').value, language: $('ocrLanguage').value, contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, group_lines: $('ocrGroupLines').checked, min_confidence: confidence === '' ? .35 : Number(confidence) }),
+        signal: controller.signal,
+      });
+      if (ocrCancelledByUser || controller.signal.aborted) { const e = new Error('لغو شد'); e.cancelled = true; throw e; }
       if (pending && (state.project?.id !== pending.projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(pending.imageIds))) {
         throw new Error('OCR در سرور ذخیره شد، اما پروژه یا انتخاب تغییر کرد؛ ترجمه ادامه نیافت. برای دیدن نتیجه پروژه را دوباره باز کنید.');
       }
       adoptProject(result); setOverlayMode('ocr', false); await renderImagesText(ids);
     }, 'ocrProgress');
-    ocrSucceeded = true;
+    ocrSucceeded = true; ocrClosingNormally = true;
     clearPendingTranslationOcr(); closeDialog('ocrDialog');
     toast('متن OCR روی تصویر آمد؛ برای بررسی و ویرایش، دکمهٔ ✎ را بزنید');
     if (pending) await runTranslation();
-  } catch (error) { reportOcrError(error); if (error.pendingId) openPendingResults(error.pendingId); throw error; }
-  finally {
+  } catch (error) {
+    if (ocrCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      clearPendingTranslationOcr();
+      toast('پنجرهٔ OCR بسته شد و عملیات متوقف گردید');
+      return;
+    }
+    reportOcrError(error); if (error.pendingId) openPendingResults(error.pendingId); throw error;
+  } finally {
     if (!ocrSucceeded) setProgress('ocrProgress', 0, false);
-    ocrRunning = false; $('startOcrBtn').disabled = false; $('ocrDialog').querySelector('.dialog-head button').disabled = false;
+    if (ocrAbortController === controller) ocrAbortController = null;
+    ocrClosingNormally = false; ocrRunning = false; $('startOcrBtn').disabled = false;
   }
 }
 
@@ -910,7 +982,11 @@ async function confirmTranslationRequestPreview() {
   translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null;
   closeDialog('translationPreviewDialog');
   try { translationPreviewTask = action(preview); await translationPreviewTask; }
-  catch (error) { if (!$('translationDialog').open) showSingleTranslationError(error, repair => action(preview, repair)); toast(error.message || 'ترجمه ناموفق بود', true); }
+  catch (error) {
+    if (error?.cancelled || error?.name === 'AbortError' || translationCancelledByUser) return;
+    if (!$('translationDialog').open) showSingleTranslationError(error, repair => action(preview, repair));
+    toast(error.message || 'ترجمه ناموفق بود', true);
+  }
   finally { $('translationPreviewConfirm').disabled = false; }
 }
 async function runTranslation() {
@@ -1002,17 +1078,33 @@ async function runTranslation() {
 async function performContextTranslation(request, preview, ongoing = null, correction = null) {
   translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
   $('copyUnstoredResult').classList.add('hidden'); $('copyUnstoredResult').dataset.result = '';
-  translationRunning = true; $('translationDialog').querySelector('.dialog-head button').disabled = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden');
+  const controller = new AbortController();
+  translationAbortController = controller; translationCancelledByUser = false; translationClosingNormally = false;
+  translationRunning = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden');
   const projectId = state.project.id; let run = ongoing; let phase = 'start';
+  const checkNotCancelled = () => {
+    if (translationCancelledByUser || controller.signal.aborted) {
+      const err = new Error('عملیات توسط کاربر لغو شد.'); err.name = 'AbortError'; err.cancelled = true; throw err;
+    }
+  };
   try {
     await runJob(request.provider === 'free' ? 'در حال ترجمهٔ رایگان…' : 'در حال ترجمه با حافظهٔ داستان…', async () => {
       if (!run) {
-        const started = await api(`/api/projects/${projectId}/context-start`, jsonOptions('POST', { ...request, skill: preview.skill, summary: preview.summary, resume: preview.resume, confirmation: preview.signature }));
+        const started = await api(`/api/projects/${projectId}/context-start`, {
+          ...jsonOptions('POST', { ...request, skill: preview.skill, summary: preview.summary, resume: preview.resume, confirmation: preview.signature }),
+          signal: controller.signal,
+        });
+        checkNotCancelled();
         adoptProject(started.project); run = {id: started.runId, completed: started.completed};
       }
       while (true) {
+        checkNotCancelled();
         phase = 'translation'; $('translationStatus').textContent = request.provider === 'free' ? `در حال ترجمهٔ درخواست ${run.completed + 1}…` : `در حال ترجمهٔ درخواست ${run.completed + 1} با خلاصهٔ قبلی…`;
-        const result = await api(`/api/projects/${projectId}/context-step`, jsonOptions('POST', {run_id: run.id, completed: run.completed, skill: preview.skill, ...(correction || {})}));
+        const result = await api(`/api/projects/${projectId}/context-step`, {
+          ...jsonOptions('POST', {run_id: run.id, completed: run.completed, skill: preview.skill, ...(correction || {})}),
+          signal: controller.signal,
+        });
+        checkNotCancelled();
         if (correction) { correction = null; clearResponseRepair(); }
         adoptProject(result.project); run.completed = result.completed ?? run.completed;
         phase = 'preview'; setOverlayMode('translation', false);
@@ -1024,8 +1116,14 @@ async function performContextTranslation(request, preview, ongoing = null, corre
       }
       phase = 'save'; setOverlayMode('translation', false);
     }, 'translationProgress');
+    translationClosingNormally = true;
     closeDialog('translationDialog'); toast(request.provider === 'free' ? 'ترجمه ذخیره شد' : 'ترجمه و خلاصه ذخیره شد');
   } catch (error) {
+    if (translationCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      toast(run?.completed ? `پنجره بسته شد؛ ${run.completed} بخش ذخیره‌شده باقی ماند و ادامهٔ ترجمه متوقف شد` : 'پنجرهٔ ترجمه بسته شد و عملیات متوقف گردید');
+      api(`/api/projects/${projectId}`).then((fresh) => { if (state.project?.id === projectId && !inlineDraft) adoptProject(fresh); }).catch(() => {});
+      return;
+    }
     const uncertainty = phase === 'translation' ? 'وضعیت درخواست جاری در قطع ارتباط ممکن است نامشخص باشد و تکرار هزینه داشته باشد.' : 'درخواست‌های موفق ذخیره شده‌اند؛ پروژه را بررسی کنید.';
     error.message = `${run?.completed || 0} درخواست ذخیره شد؛ ترجمه متوقف شد. ${uncertainty} ${error.message || ''}`;
     $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message}`;
@@ -1034,30 +1132,49 @@ async function performContextTranslation(request, preview, ongoing = null, corre
     if (error.unstoredResult) { $('copyUnstoredResult').dataset.result = error.unstoredResult; $('copyUnstoredResult').classList.remove('hidden'); }
     translationRetryAction = phase === 'translation' && error.status !== 409 && !error.unstoredResult && run ? () => performContextTranslation(request, preview, run) : null;
     $('retryTranslation').classList.toggle('hidden', !translationRetryAction); $('translationErrorChoice').classList.remove('hidden'); $('copyTranslationError').classList.remove('hidden'); throw error;
-  } finally { translationRunning = false; $('translationDialog').querySelector('.dialog-head button').disabled = false; }
+  } finally {
+    if (translationAbortController === controller) translationAbortController = null;
+    translationClosingNormally = false; translationRunning = false;
+  }
 }
 
 async function performTranslation(ids, provider, preview, startIndex = 0, previouslyCompleted = 0) {
   translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
-  translationRunning = true; $('translationDialog').querySelector('.dialog-head button').disabled = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; setProgress('translationProgress', null, true);
+  const controller = new AbortController();
+  translationAbortController = controller; translationCancelledByUser = false; translationClosingNormally = false;
+  translationRunning = true; showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; setProgress('translationProgress', null, true);
   const projectId = state.project.id; const language = $('ocrLanguage').value; let completed = previouslyCompleted; let currentPage = ''; let phase = 'translation'; let failedIndex = startIndex;
+  const checkNotCancelled = () => {
+    if (translationCancelledByUser || controller.signal.aborted) {
+      const err = new Error('عملیات توسط کاربر لغو شد.'); err.name = 'AbortError'; err.cancelled = true; throw err;
+    }
+  };
   try {
     await runJob('در حال ترجمهٔ متن‌ها…', async () => {
       if (provider === 'free') {
-        const result = await api(`/api/projects/${projectId}/translate`, jsonOptions('POST', { image_ids: ids, provider, source_language: language, confirmation: preview.signature }));
+        const result = await api(`/api/projects/${projectId}/translate`, {
+          ...jsonOptions('POST', { image_ids: ids, provider, source_language: language, confirmation: preview.signature }),
+          signal: controller.signal,
+        });
+        checkNotCancelled();
         adoptProject(result); setOverlayMode('translation', false); await saveProject(); await renderImagesText();
       } else {
         if (!Array.isArray(preview.tasks) || !preview.tasks.length) throw new Error('فهرست درخواست‌های تأییدشده موجود نیست؛ دوباره پیش‌نمایش بگیرید.');
         for (const [index, page] of preview.tasks.entries()) {
           if (index < startIndex) continue;
+          checkNotCancelled();
           failedIndex = index;
           currentPage = page.imageName || String(index + 1);
           $('translationStatus').textContent = `درخواست ${index + 1} از ${preview.tasks.length}: ${currentPage}${page.paragraph ? ` · بند ${page.paragraph}` : ''}`;
           phase = 'translation';
-          const result = await api(`/api/projects/${projectId}/translate`, jsonOptions('POST', {
-            image_ids: ids, provider, source_language: language, skill: preview.skill, reuse_repeated: preview.reuseRepeated ?? true, confirmation: page.signature, call_id: page.callId, call_image_id: page.imageId,
-            batch_index: index + 1, batch_total: preview.tasks.length,
-          }));
+          const result = await api(`/api/projects/${projectId}/translate`, {
+            ...jsonOptions('POST', {
+              image_ids: ids, provider, source_language: language, skill: preview.skill, reuse_repeated: preview.reuseRepeated ?? true, confirmation: page.signature, call_id: page.callId, call_image_id: page.imageId,
+              batch_index: index + 1, batch_total: preview.tasks.length,
+            }),
+            signal: controller.signal,
+          });
+          checkNotCancelled();
           // A successful response means the page has already been persisted.
           adoptProject(result); completed += 1; setOverlayMode('translation', false);
           phase = 'preview';
@@ -1067,8 +1184,14 @@ async function performTranslation(ids, provider, preview, startIndex = 0, previo
         phase = 'save'; await saveProject();
       }
     }, 'translationProgress');
+    translationClosingNormally = true;
     closeDialog('translationDialog'); toast('ترجمه روی تصویر آمد و پیش‌نمایش آماده شد');
   } catch (error) {
+    if (translationCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      toast('پنجرهٔ ترجمه بسته شد و عملیات متوقف گردید');
+      api(`/api/projects/${projectId}`).then((fresh) => { if (state.project?.id === projectId && !inlineDraft) adoptProject(fresh); }).catch(() => {});
+      return;
+    }
     if (provider !== 'free') {
       const outcome = phase !== 'translation' ? 'پاسخ این درخواست ذخیره شده، اما به‌روزرسانی پیش‌نمایش یا تنظیمات کامل نشد.' : 'وضعیت درخواست جاری ممکن است نامشخص باشد؛ قبل از ارسال دوباره گزارش و پروژه را بررسی کنید.';
       error.message = `${completed} درخواست با موفقیت ذخیره شد؛ در صفحهٔ «${currentPage || 'اول'}» متوقف شد. ${outcome} ${error.message || ''} برای ادامه، فقط صفحه‌های باقی‌مانده و صفحهٔ ناتمام را انتخاب و پیش‌نمایش تازه را تأیید کنید؛ بخش‌های ذخیره‌شدهٔ صفحهٔ ناتمام دوباره فرستاده نمی‌شوند.`;
@@ -1077,7 +1200,8 @@ async function performTranslation(ids, provider, preview, startIndex = 0, previo
     translationRetryAction = phase === 'translation' && error.status !== 409 ? () => performTranslation(ids, provider, preview, failedIndex, completed) : null;
     $('retryTranslation').classList.toggle('hidden', !translationRetryAction); $('translationErrorChoice').classList.remove('hidden'); $('copyTranslationError').classList.remove('hidden'); throw error;
   } finally {
-    translationRunning = false; $('translationDialog').querySelector('.dialog-head button').disabled = false;
+    if (translationAbortController === controller) translationAbortController = null;
+    translationClosingNormally = false; translationRunning = false;
   }
 }
 
@@ -1167,7 +1291,7 @@ function openDocxExportPrompt() {
   showDialog('docxExportDialog');
 }
 async function runDocxChoiceExport(mode) {
-  const buttons = ['docxChoiceTranslation', 'docxChoiceOcr', 'docxExportCancel'].map((id) => $(id)).filter(Boolean);
+  const buttons = ['docxChoiceTranslation', 'docxChoiceOcr'].map((id) => $(id)).filter(Boolean);
   buttons.forEach((btn) => { btn.disabled = true; });
   if ($('exportDocxMode')) $('exportDocxMode').value = mode;
   const label = mode === 'ocr' ? 'در حال ساخت فایل Word (متن انگلیسی / OCR)…' : 'در حال ساخت فایل Word (متن ترجمه‌شده)…';
@@ -2794,13 +2918,25 @@ function startBoxDrag(event, block, el) {
   el.addEventListener('pointermove', move); el.addEventListener('pointerup', stop); el.addEventListener('pointercancel', stop); el.addEventListener('lostpointercapture', stop);
 }
 async function runSingleBlockTranslation(task) {
+  const controller = new AbortController();
+  translationAbortController = controller; translationCancelledByUser = false; translationClosingNormally = false;
   translationRunning = true;
   $('translationStatus').textContent = 'در حال ترجمهٔ دوبارهٔ یک کادر…';
   $('copyTranslationError').classList.add('hidden');
   showDialog('translationDialog');
-  try { return await runJob('در حال ترجمهٔ دوبارهٔ یک کادر…', task, 'translationProgress'); }
-  finally {
-    translationRunning = false;
+  try {
+    const out = await runJob('در حال ترجمهٔ دوبارهٔ یک کادر…', () => task(controller.signal), 'translationProgress');
+    translationClosingNormally = true;
+    return out;
+  } catch (error) {
+    if (translationCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      toast('پنجرهٔ ترجمه بسته شد و عملیات متوقف گردید');
+      return { cancelled: true };
+    }
+    throw error;
+  } finally {
+    if (translationAbortController === controller) translationAbortController = null;
+    translationClosingNormally = false; translationRunning = false;
     if ($('translationDialog').open) closeDialog('translationDialog');
   }
 }
@@ -2823,7 +2959,8 @@ async function retranslateBlock(block) {
       const preview = await refresh();
       showTranslationRequestPreview(preview, async accepted => {
         if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
-        const result = await runSingleBlockTranslation(() => api('/api/translate-text/context', jsonOptions('POST', { ...request, skill:'', summary:'', confirmation: accepted.signature })));
+        const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill:'', summary:'', confirmation: accepted.signature }), signal }));
+        if (!result || result.cancelled) return;
         if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
         applyTranslatedBlockDefaults(block, result.text); buildBlockList(); drawEditor(); scheduleSave();
       }, refresh);
@@ -2844,7 +2981,8 @@ async function retranslateBlock(block) {
     showTranslationRequestPreview(preview, async (accepted, repair = null) => {
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
       rememberTranslationSkill(projectId, accepted);
-      const result = await runSingleBlockTranslation(() => api('/api/translate-text/context', jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) })));
+      const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) }), signal }));
+      if (!result || result.cancelled) return;
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
       applyTranslatedBlockDefaults(block, result.text); buildBlockList(); drawEditor(); scheduleSave();
     }, refresh);
@@ -2944,7 +3082,29 @@ function bindEvents() {
   window.addEventListener('beforeunload', finishBrowserSession);
   window.addEventListener('pageshow', (event) => { if (event.persisted) startSession(); });
   bindGridDrop();
-  $('menuBtn').addEventListener('click', () => $('menu').classList.toggle('hidden'));
+  $('menuBtn').addEventListener('click', () => setMenuOpen($('menu').classList.contains('hidden')));
+  const closeMenuOutside = (event) => {
+    if ($('menu')?.classList.contains('hidden')) return;
+    if (event.target?.closest?.('#menu, #menuBtn')) return;
+    setMenuOpen(false);
+  };
+  document.addEventListener('pointerdown', closeMenuOutside, true);
+  document.addEventListener('click', closeMenuOutside, true);
+  document.querySelectorAll('dialog').forEach((dlg) => {
+    dlg.addEventListener('close', () => {
+      const idx = openDialogStack.indexOf(dlg.id);
+      if (idx >= 0) openDialogStack.splice(idx, 1);
+    });
+    dlg.querySelectorAll('form[method="dialog"] button.icon').forEach((closeBtn) => {
+      closeBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        if (dlg.id === 'ocrDialog') dismissOcrDialog();
+        else if (dlg.id === 'translationDialog') dismissTranslationDialog();
+        else if (dlg.id === 'translationPreviewDialog') cancelTranslationRequestPreview();
+        else closeDialog(dlg.id);
+      });
+    });
+  });
   $('themeBtn').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('comic-studio-theme', document.body.classList.contains('light') ? 'light' : 'dark'); });
   $('backupProjectBtn').addEventListener('click', () => backupCurrentProject().catch(() => {}));
   $('restoreProjectBtn').addEventListener('click', () => $('restoreProjectInput').click());
@@ -2969,8 +3129,11 @@ function bindEvents() {
   $('duplicateBtn').addEventListener('click', () => duplicateImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); }); $('ocrEngine').addEventListener('change', updateOcrEngineStatus); $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
-  $('ocrDialog').addEventListener('cancel', event => { if (ocrRunning) event.preventDefault(); });
-  $('ocrDialog').addEventListener('close', () => { if (!ocrRunning && !$('ocrDialog').open) clearPendingTranslationOcr(); });
+  $('ocrDialog').addEventListener('cancel', () => { if (ocrRunning && !ocrClosingNormally) abortRunningOcr(); });
+  $('ocrDialog').addEventListener('close', () => {
+    if (ocrRunning && !ocrClosingNormally) abortRunningOcr();
+    if (!$('ocrDialog').open) clearPendingTranslationOcr();
+  });
   $('copyOcrError').addEventListener('click', () => copyBlockText($('ocrStatus').textContent).catch(error => toast(`کپی ممکن نبود: ${error.message || error}`, true)));
   $('copyTranslationPreviewError').addEventListener('click', () => copyBlockText($('translationPreviewError').textContent).catch(error => toast(`کپی ممکن نبود: ${error.message || error}`, true)));
   $('openAiLimitFromPreview')?.addEventListener('click', () => {
@@ -2980,18 +3143,17 @@ function bindEvents() {
   $('retryTranslation').addEventListener('click', async () => {
     const retry = translationRetryAction; if (!retry || translationRunning || translationDecisionBusy) return;
     translationDecisionBusy = true; $('applyResponseRepair').disabled = true; $('applyResponseFields').disabled = true;
-    $('translationDialog').querySelector('.dialog-head button').disabled = true;
     translationRetryAction = null; $('retryTranslation').classList.add('hidden');
-    try { await retry(); } catch (error) { toast(error.message || 'ترجمه ناموفق بود', true); }
-    finally { translationDecisionBusy = false; $('applyResponseRepair').disabled = false; $('applyResponseFields').disabled = false; if (!translationRunning) $('translationDialog').querySelector('.dialog-head button').disabled = false; if (!$('translationDialog').open) clearResponseRepair(); }
+    try { await retry(); } catch (error) { if (!error?.cancelled && error?.name !== 'AbortError') toast(error.message || 'ترجمه ناموفق بود', true); }
+    finally { translationDecisionBusy = false; $('applyResponseRepair').disabled = false; $('applyResponseFields').disabled = false; if (!$('translationDialog').open) clearResponseRepair(); }
   });
   async function submitResponseRepair(value) {
     const action = translationRepairAction; if (!action || translationRunning || translationDecisionBusy) return;
-    translationDecisionBusy = true; $('retryTranslation').disabled = true; $('translationDialog').querySelector('.dialog-head button').disabled = true;
+    translationDecisionBusy = true; $('retryTranslation').disabled = true;
     $('applyResponseRepair').disabled = true; $('applyResponseFields').disabled = true; $('responseRepairStatus').textContent = 'در حال بررسی پاسخ اصلاح‌شده…';
     try { await action(value); }
-    catch (error) { $('responseRepairStatus').textContent = error.message || String(error); }
-    finally { translationDecisionBusy = false; $('retryTranslation').disabled = false; $('applyResponseRepair').disabled = false; $('applyResponseFields').disabled = false; if (!translationRunning) $('translationDialog').querySelector('.dialog-head button').disabled = false; if (!$('translationDialog').open) clearResponseRepair(); }
+    catch (error) { if (!error?.cancelled && error?.name !== 'AbortError') $('responseRepairStatus').textContent = error.message || String(error); }
+    finally { translationDecisionBusy = false; $('retryTranslation').disabled = false; $('applyResponseRepair').disabled = false; $('applyResponseFields').disabled = false; if (!$('translationDialog').open) clearResponseRepair(); }
   }
   $('applyResponseRepair').addEventListener('click', () => submitResponseRepair($('responseRepairText').value));
   $('applyResponseFields').addEventListener('click', () => submitResponseRepair(JSON.stringify({translation: $('repairTranslation').value, summary: $('repairSummary').value})));
@@ -2999,8 +3161,11 @@ function bindEvents() {
     try { await copyBlockText($('translationStatus').textContent); translationRetryAction = null; closeDialog('translationDialog'); }
     catch (error) { toast(`کپی ممکن نبود؛ متن خطا را دستی انتخاب و کپی کنید: ${error.message || error}`, true); }
   });
-  $('translationDialog').addEventListener('cancel', (event) => { if (translationRunning || translationDecisionBusy) event.preventDefault(); });
-  $('translationDialog').addEventListener('close', () => { if (!translationRunning && !translationDecisionBusy && !$('translationDialog').open) { translationRetryAction = null; clearResponseRepair(); $('copyUnstoredResult').dataset.result = ''; $('copyUnstoredResult').classList.add('hidden'); } });
+  $('translationDialog').addEventListener('cancel', () => { if ((translationRunning || translationDecisionBusy) && !translationClosingNormally) abortRunningTranslation(); });
+  $('translationDialog').addEventListener('close', () => {
+    if ((translationRunning || translationDecisionBusy) && !translationClosingNormally) abortRunningTranslation();
+    if (!$('translationDialog').open) { translationRetryAction = null; clearResponseRepair(); $('copyUnstoredResult').dataset.result = ''; $('copyUnstoredResult').classList.add('hidden'); }
+  });
   $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
   for (const [element, field] of [[$('translationSkill'), 'skillLimit'], [$('translationContext'), 'contextLimit']]) {
     element.addEventListener('beforeinput', event => {
@@ -3168,7 +3333,7 @@ function bindEvents() {
       if (inlineDraft && classicEditor.element.classList.contains('classic-fullscreen')) { classicEditor.exitFullscreen(); classicEditor.focus(); event.preventDefault(); event.stopPropagation(); return; }
       if (inlineDraft) { closeInlineEditor(); event.preventDefault(); event.stopPropagation(); return; }
       if (closeTopDialog()) { event.preventDefault(); event.stopPropagation(); }
-      else $('menu').classList.add('hidden');
+      else setMenuOpen(false);
       return;
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.editorId) { event.preventDefault(); applyEditor().catch((error) => toast(error.message, true)); }
