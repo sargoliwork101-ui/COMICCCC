@@ -92,7 +92,7 @@ class SessionRequest(BaseModel):
 
 
 class ExportRequest(BaseModel):
-    kind: Literal["pdf", "images", "txt", "docx"]
+    kind: Literal["pdf", "images", "txt", "docx", "pptx"]
     image_ids: list[str] = Field(default_factory=list)
     name: str = "comic-translated"
     seamless: bool = False
@@ -102,6 +102,8 @@ class ExportRequest(BaseModel):
     folder_name: str = ""
     docx_mode: Literal["translation", "ocr"] = "translation"
     docx_layout: Literal["visual", "flowing"] = "visual"
+    pptx_mode: Literal["translation", "ocr"] | None = None
+    pptx_layout: Literal["visual", "flowing"] | None = None
 
 
 class StateUpdate(BaseModel):

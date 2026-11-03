@@ -736,7 +736,12 @@ def _build_textbox_paragraphs_xml(
 
 
 def _prepare_docx_pages(
-    store: ProjectStore, project_id: str, images: list[dict[str, Any]], docx_mode: str,
+    store: ProjectStore,
+    project_id: str,
+    images: list[dict[str, Any]],
+    docx_mode: str,
+    *,
+    target_label: str = "فایل Word",
 ) -> list[dict[str, Any]]:
     """Build per-page cleaned background images and scaled block specs (supporting page groups)."""
     raw_entries: list[dict[str, Any]] = []
@@ -842,14 +847,18 @@ def _prepare_docx_pages(
 
         buf = io.BytesIO()
         canvas.save(buf, "PNG")
+        canvas_w_final, canvas_h_final = canvas.width, canvas.height
+        canvas.close()
+        for m in members:
+            m["image"].close()
         pages.append({
             "png": buf.getvalue(),
-            "w": canvas.width,
-            "h": canvas.height,
+            "w": canvas_w_final,
+            "h": canvas_h_final,
             "blocks": page_blocks,
             "name": members[0]["item"].get("name", f"page-{page_idx}"),
         })
-        emit(f"آماده‌سازی صفحهٔ {page_idx} از {total_units} برای فایل Word", progress=page_idx / total_units * 0.85)
+        emit(f"آماده‌سازی صفحهٔ {page_idx} از {total_units} برای {target_label}", progress=page_idx / total_units * 0.85)
     return pages
 
 
@@ -1195,3 +1204,726 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
                 archive.writestr(f"word/media/page_{page_idx:03d}.png", page["png"])
             archive.writestr("word/document.xml", document_xml.encode("utf-8"))
     return output
+
+
+# ==================== PowerPoint (PPTX / PresentationML) Export ====================
+
+_PPTX_ROOT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>"""
+
+_PPTX_PRES_PROPS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentationPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>"""
+
+_PPTX_VIEW_PROPS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:viewPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:normalViewPr><p:restoredLeft sz="15620"/><p:restoredTop sz="94660"/></p:normalViewPr>
+  <p:slideViewPr><p:cSldViewPr><p:cViewPr varScale="1"><p:scale><a:sx n="100" d="100"/><a:sy n="100" d="100"/></p:scale><p:origin x="0" y="0"/></p:cViewPr></p:cSldViewPr></p:slideViewPr>
+</p:viewPr>"""
+
+_PPTX_TABLE_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}"/>"""
+
+_PPTX_THEME = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Comic OCR Studio Theme">
+  <a:themeElements>
+    <a:clrScheme name="Studio">
+      <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+      <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+      <a:dk2><a:srgbClr val="1E293B"/></a:dk2>
+      <a:lt2><a:srgbClr val="F8FAFC"/></a:lt2>
+      <a:accent1><a:srgbClr val="4F46E5"/></a:accent1>
+      <a:accent2><a:srgbClr val="0EA5E9"/></a:accent2>
+      <a:accent3><a:srgbClr val="10B981"/></a:accent3>
+      <a:accent4><a:srgbClr val="F59E0B"/></a:accent4>
+      <a:accent5><a:srgbClr val="EC4899"/></a:accent5>
+      <a:accent6><a:srgbClr val="8B5CF6"/></a:accent6>
+      <a:hlink><a:srgbClr val="2563EB"/></a:hlink>
+      <a:folHlink><a:srgbClr val="7C3AED"/></a:folHlink>
+    </a:clrScheme>
+    <a:fontScheme name="StudioFonts">
+      <a:majorFont>
+        <a:latin typeface="Segoe UI"/>
+        <a:ea typeface="Segoe UI"/>
+        <a:cs typeface="Vazirmatn"/>
+      </a:majorFont>
+      <a:minorFont>
+        <a:latin typeface="Segoe UI"/>
+        <a:ea typeface="Segoe UI"/>
+        <a:cs typeface="Vazirmatn"/>
+      </a:minorFont>
+    </a:fontScheme>
+    <a:fmtScheme name="StudioFmt">
+      <a:fillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+      </a:fillStyleLst>
+      <a:lnStyleLst>
+        <a:ln w="9525" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        <a:ln w="19050" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        <a:ln w="28575" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+      </a:lnStyleLst>
+      <a:effectStyleLst>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+      </a:effectStyleLst>
+      <a:bgFillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+      </a:bgFillStyleLst>
+    </a:fmtScheme>
+  </a:themeElements>
+  <a:objectDefaults/>
+  <a:extraClrSchemeLst/>
+</a:theme>"""
+
+_PPTX_SLIDE_MASTER = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:bg><p:bgRef idx="1001"><a:schemeClr val="bg1"/></p:bgRef></p:bg>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rIdLayout1"/></p:sldLayoutIdLst>
+  <p:txStyles>
+    <p:titleStyle><a:lvl1pPr algn="r"><a:defRPr sz="3200"/></a:lvl1pPr></p:titleStyle>
+    <p:bodyStyle><a:lvl1pPr algn="r"><a:defRPr sz="1800"/></a:lvl1pPr></p:bodyStyle>
+    <p:otherStyle><a:lvl1pPr><a:defRPr sz="1400"/></a:lvl1pPr></p:otherStyle>
+  </p:txStyles>
+</p:sldMaster>"""
+
+_PPTX_SLIDE_MASTER_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdLayout1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rIdTheme1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+</Relationships>"""
+
+_PPTX_SLIDE_LAYOUT = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="blank" preserve="1">
+  <p:cSld name="Blank">
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+      <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sldLayout>"""
+
+_PPTX_SLIDE_LAYOUT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdMaster1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>"""
+
+
+def _pptx_algn(align: str, rtl: bool) -> str:
+    if align == "justify":
+        return "just"
+    if align == "center":
+        return "ctr"
+    if align == "left":
+        return "l"
+    if align == "right":
+        return "r"
+    return "r" if rtl else "l"
+
+
+def _pptx_anchor(valign: str) -> str:
+    if valign == "middle":
+        return "ctr"
+    if valign == "bottom":
+        return "b"
+    return "t"
+
+
+def _pptx_rpr_xml(run: dict[str, Any], pt_size: float) -> str:
+    hundredths_pt = max(500, min(9600, round(pt_size * 100)))
+    lang = "fa-IR" if run.get("rtl") else "en-US"
+    attrs = [f'lang="{lang}"', f'sz="{hundredths_pt}"', 'dirty="0"']
+    if run.get("bold"):
+        attrs.append('b="1"')
+    if run.get("italic"):
+        attrs.append('i="1"')
+    if run.get("underline"):
+        attrs.append('u="sng"')
+    if run.get("strike"):
+        attrs.append('strike="sngStrike"')
+    color = str(run.get("color") or "141414").upper()
+    if not re.fullmatch(r"[0-9A-F]{6}", color):
+        color = "141414"
+    # Strictly follow ECMA-376 CT_TextCharacterProperties sequence: fill BEFORE font elements!
+    return (
+        f'<a:rPr {" ".join(attrs)}>'
+        f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
+        '<a:latin typeface="Segoe UI"/>'
+        '<a:ea typeface="Segoe UI"/>'
+        '<a:cs typeface="Vazirmatn"/>'
+        "</a:rPr>"
+    )
+
+
+def _build_pptx_textbox_paragraphs_xml(
+    block: dict[str, Any],
+    *,
+    pptx_mode: str,
+    bw_px: float,
+    bh_px: float,
+    scale_pt: float,
+    bg_rgb: tuple[int, int, int] | None,
+) -> tuple[str, bool]:
+    """Return DrawingML `<a:p>...` XML and whether RTL column layout applies."""
+    if pptx_mode == "ocr":
+        indent = " " * max(0, min(40, int(block.get("sourceIndent", 0) or 0)))
+        plain = _strip_inline_markers(_clean_text(f"{indent}{block.get('text') or ''}")).strip("\n")
+        rich_html = ""
+        rtl_default = bool(_RTL_CHAR_RE.search(plain))
+        raw_align = str(block.get("align") or "")
+        if not rtl_default and raw_align == "right" and str(block.get("textMode") or "").lower() == "ocr":
+            align_default = "left"
+        else:
+            align_default = raw_align or ("right" if rtl_default else "left")
+        bold_default = block.get("bold") is not False
+    else:
+        plain = _block_translation_plain(block)
+        rich_html = _clean_text(block.get("richHtml") or "").strip()
+        dir_field = str(block.get("dir") or "").lower()
+        rtl_default = (dir_field == "rtl") if dir_field in ("rtl", "ltr") else (
+            True if not plain else bool(_RTL_CHAR_RE.search(plain) or not re.search(r"[A-Za-z]", plain))
+        )
+        align_default = str(block.get("align") or ("justify" if rtl_default else "left"))
+        bold_default = block.get("bold") is not False
+
+    raw_line_h = block.get("lineH")
+    line_h_val: float | None = None
+    try:
+        if raw_line_h is not None and float(raw_line_h) > 0:
+            line_h_val = float(raw_line_h)
+    except (TypeError, ValueError):
+        line_h_val = None
+
+    raw_size = block.get("size")
+    try:
+        base_px = float(raw_size) if raw_size is not None and float(raw_size) > 0 else _estimate_fit_px(plain, bw_px, bh_px, line_h=line_h_val)
+    except (TypeError, ValueError):
+        base_px = _estimate_fit_px(plain, bw_px, bh_px, line_h=line_h_val)
+
+    explicit_color = _parse_css_color(block.get("color"))
+    if explicit_color:
+        default_color = explicit_color
+    elif bg_rgb is not None and (0.299 * bg_rgb[0] + 0.587 * bg_rgb[1] + 0.114 * bg_rgb[2]) < 115:
+        default_color = "FFFFFF"
+    else:
+        default_color = "141414"
+
+    base_style = {
+        "bold": bold_default,
+        "italic": bool(block.get("italic")),
+        "underline": bool(block.get("underline")),
+        "strike": False,
+        "color": default_color,
+        "px_size": base_px,
+        "rtl": rtl_default,
+        "align": align_default,
+    }
+
+    if rich_html and pptx_mode != "ocr":
+        parser = _RichHtmlToDocxParser(base_style)
+        parser.feed(rich_html)
+        parser.close()
+        paragraphs = [p for p in parser.paragraphs if p["runs"]]
+    else:
+        paragraphs = []
+
+    if not paragraphs:
+        lines = plain.split("\n") if plain else [""]
+        paragraphs = [{
+            "align": align_default,
+            "rtl": rtl_default,
+            "runs": [
+                entry
+                for idx, line in enumerate(lines)
+                for entry in (([{"br": True, **base_style}] if idx > 0 else []) + ([{"text": line, **base_style}] if line else []))
+            ],
+        }]
+
+    p_xml_list: list[str] = []
+    any_rtl = rtl_default
+    for para in paragraphs:
+        p_rtl = bool(para["rtl"])
+        if p_rtl:
+            any_rtl = True
+        algn = _pptx_algn(str(para["align"]), p_rtl)
+        ppr = (
+            f'<a:pPr algn="{algn}" rtl="{"1" if p_rtl else "0"}">'
+            '<a:lnSpc><a:spcPct val="115000"/></a:lnSpc>'
+            '<a:spcAft><a:spcPts val="100"/></a:spcAft>'
+            "</a:pPr>"
+        )
+        r_xml_list: list[str] = []
+        for run in para["runs"]:
+            pt_size = max(5.5, min(72.0, float(run["px_size"]) * scale_pt * 0.78))
+            rpr_xml = _pptx_rpr_xml(run, pt_size)
+            if run.get("br"):
+                r_xml_list.append(f"<a:br>{rpr_xml}</a:br>")
+            else:
+                r_xml_list.append(f"<a:r>{rpr_xml}<a:t>{xml_escape(str(run.get('text') or ''))}</a:t></a:r>")
+        if not r_xml_list:
+            lang = "fa-IR" if p_rtl else "en-US"
+            r_xml_list.append(f'<a:endParaRPr lang="{lang}" sz="1100" dirty="0"/>')
+        p_xml_list.append(f"<a:p>{ppr}{''.join(r_xml_list)}</a:p>")
+    return "".join(p_xml_list), any_rtl
+
+
+def _write_pptx_package(
+    output: Path,
+    slide_cx_emu: int,
+    slide_cy_emu: int,
+    slides: list[dict[str, Any]],
+    deck_title: str,
+) -> Path:
+    """Write a complete, ECMA-376 valid `.pptx` archive atomically."""
+    content_type_overrides = [
+        '  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>',
+        '  <Override PartName="/ppt/presProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"/>',
+        '  <Override PartName="/ppt/viewProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml"/>',
+        '  <Override PartName="/ppt/tableStyles.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml"/>',
+        '  <Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>',
+        '  <Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>',
+        '  <Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>',
+        '  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>',
+        '  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>',
+    ]
+    pres_rels = [
+        '  <Relationship Id="rIdMaster1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>',
+        '  <Relationship Id="rIdPresProps" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/presProps" Target="presProps.xml"/>',
+        '  <Relationship Id="rIdViewProps" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/viewProps" Target="viewProps.xml"/>',
+        '  <Relationship Id="rIdTableStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/tableStyles" Target="tableStyles.xml"/>',
+        '  <Relationship Id="rIdTheme1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>',
+    ]
+    sld_ids = []
+    for idx in range(1, len(slides) + 1):
+        content_type_overrides.append(
+            f'  <Override PartName="/ppt/slides/slide{idx}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
+        )
+        pres_rels.append(
+            f'  <Relationship Id="rIdSlide{idx}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{idx}.xml"/>'
+        )
+        sld_ids.append(f'    <p:sldId id="{255 + idx}" r:id="rIdSlide{idx}"/>')
+
+    content_types_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'
+        '  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n'
+        '  <Default Extension="xml" ContentType="application/xml"/>\n'
+        '  <Default Extension="png" ContentType="image/png"/>\n'
+        + "\n".join(content_type_overrides)
+        + "\n</Types>"
+    )
+    pres_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
+        + "\n".join(pres_rels)
+        + "\n</Relationships>"
+    )
+    presentation_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+        'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" saveSubsetFonts="1">\n'
+        '  <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rIdMaster1"/></p:sldMasterIdLst>\n'
+        "  <p:sldIdLst>\n"
+        + "\n".join(sld_ids)
+        + "\n  </p:sldIdLst>\n"
+        f'  <p:sldSz cx="{slide_cx_emu}" cy="{slide_cy_emu}"/>\n'
+        '  <p:notesSz cx="6858000" cy="9144000"/>\n'
+        "  <p:defaultTextStyle>\n"
+        '    <a:defPPr><a:defRPr lang="fa-IR"/></a:defPPr>\n'
+        '    <a:lvl1pPr algn="r" rtl="1"><a:defRPr sz="1600"><a:latin typeface="Segoe UI"/><a:ea typeface="Segoe UI"/><a:cs typeface="Vazirmatn"/></a:defRPr></a:lvl1pPr>\n'
+        "  </p:defaultTextStyle>\n"
+        "</p:presentation>"
+    )
+    safe_title = xml_escape(_clean_text(deck_title or "Comic OCR Studio"))
+    core_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
+        f"  <dc:title>{safe_title}</dc:title>\n"
+        "  <dc:creator>Comic OCR Studio</dc:creator>\n"
+        "</cp:coreProperties>"
+    )
+    app_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+        'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">\n'
+        "  <Application>Comic OCR Studio</Application>\n"
+        f"  <Slides>{len(slides)}</Slides>\n"
+        "  <Notes>0</Notes>\n"
+        "  <HiddenSlides>0</HiddenSlides>\n"
+        "</Properties>"
+    )
+
+    with _atomic_export_path(output) as tmp_output:
+        with zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", content_types_xml.encode("utf-8"))
+            archive.writestr("_rels/.rels", _PPTX_ROOT_RELS.encode("utf-8"))
+            archive.writestr("docProps/core.xml", core_xml.encode("utf-8"))
+            archive.writestr("docProps/app.xml", app_xml.encode("utf-8"))
+            archive.writestr("ppt/presentation.xml", presentation_xml.encode("utf-8"))
+            archive.writestr("ppt/_rels/presentation.xml.rels", pres_rels_xml.encode("utf-8"))
+            archive.writestr("ppt/presProps.xml", _PPTX_PRES_PROPS.encode("utf-8"))
+            archive.writestr("ppt/viewProps.xml", _PPTX_VIEW_PROPS.encode("utf-8"))
+            archive.writestr("ppt/tableStyles.xml", _PPTX_TABLE_STYLES.encode("utf-8"))
+            archive.writestr("ppt/theme/theme1.xml", _PPTX_THEME.encode("utf-8"))
+            archive.writestr("ppt/slideMasters/slideMaster1.xml", _PPTX_SLIDE_MASTER.encode("utf-8"))
+            archive.writestr("ppt/slideMasters/_rels/slideMaster1.xml.rels", _PPTX_SLIDE_MASTER_RELS.encode("utf-8"))
+            archive.writestr("ppt/slideLayouts/slideLayout1.xml", _PPTX_SLIDE_LAYOUT.encode("utf-8"))
+            archive.writestr("ppt/slideLayouts/_rels/slideLayout1.xml.rels", _PPTX_SLIDE_LAYOUT_RELS.encode("utf-8"))
+            for idx, slide in enumerate(slides, start=1):
+                archive.writestr(f"ppt/slides/slide{idx}.xml", slide["xml"].encode("utf-8"))
+                archive.writestr(f"ppt/slides/_rels/slide{idx}.xml.rels", slide["rels"].encode("utf-8"))
+                if slide.get("media_name") and slide.get("media_bytes"):
+                    archive.writestr(f"ppt/media/{slide['media_name']}", slide["media_bytes"])
+    return output
+
+
+def _build_flowing_pptx(
+    state: dict[str, Any],
+    images: list[dict[str, Any]],
+    request: dict[str, Any],
+    pptx_mode: str,
+) -> Path:
+    """Build clean 16:9 Widescreen presentation slides without background images."""
+    slide_cx = 12_192_000  # 13.333 in (960 pt)
+    slide_cy = 6_858_000   # 7.500 in (540 pt)
+    margin_x = 685_800     # 0.75 in
+    top_y = 640_080        # 0.70 in
+    body_w = slide_cx - 2 * margin_x
+    body_h = slide_cy - top_y - 685_800
+
+    by_group: dict[str, list[dict[str, Any]]] = {}
+    for item in images:
+        gid = str(item.get("groupId") or "").strip()
+        if gid:
+            by_group.setdefault(gid, []).append(item)
+
+    units: list[list[dict[str, Any]]] = []
+    consumed: set[str] = set()
+    for item in images:
+        gid = str(item.get("groupId") or "").strip()
+        members = by_group.get(gid)
+        if not gid or not members or len(members) < 2:
+            units.append([item])
+            continue
+        if gid in consumed:
+            continue
+        consumed.add(gid)
+        units.append(members)
+
+    slides: list[dict[str, Any]] = []
+    slide_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
+        '  <Relationship Id="rIdLayout1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>\n'
+        "</Relationships>"
+    )
+    total_units = max(1, len(units))
+
+    for unit_idx, members in enumerate(units, start=1):
+        unit_title = _clean_text(members[0].get("name") or f"صفحهٔ {unit_idx}")
+        para_chunks: list[tuple[str, int, bool]] = []  # (p_xml, est_visual_lines, is_rtl)
+
+        for item in members:
+            crop = crop_box(item)
+            ordered_blocks = _ordered_export_blocks(item)
+            for blk in ordered_blocks:
+                if crop:
+                    cx0, cy0, cx1, cy1 = crop
+                    bx0 = float(blk.get("tx0", blk.get("x0", 0)) or 0)
+                    by0 = float(blk.get("ty0", blk.get("y0", 0)) or 0)
+                    bx1 = float(blk.get("tx1", blk.get("x1", bx0)) or bx0)
+                    by1 = float(blk.get("ty1", blk.get("y1", by0)) or by0)
+                    if min(bx1, cx1) - max(bx0, cx0) <= 1 or min(by1, cy1) - max(by0, cy0) <= 1:
+                        continue
+                eff_mode = _effective_docx_block_mode(blk, pptx_mode)
+                role = str(blk.get("pageRole") or "paragraph")
+                if eff_mode == "ocr":
+                    plain = _strip_inline_markers(_clean_text(blk.get("text") or "")).strip()
+                    rich_html = ""
+                    rtl_default = bool(_RTL_CHAR_RE.search(plain))
+                else:
+                    plain = _block_translation_plain(blk).strip()
+                    rich_html = _clean_text(blk.get("richHtml") or "").strip()
+                    dir_field = str(blk.get("dir") or "").lower()
+                    rtl_default = (dir_field == "rtl") if dir_field in ("rtl", "ltr") else (
+                        True if not plain else bool(_RTL_CHAR_RE.search(plain) or not re.search(r"[A-Za-z]", plain))
+                    )
+                if not plain:
+                    continue
+
+                base_pt = 22.0 if role == "heading" else 15.5
+                default_color = _parse_css_color(blk.get("color")) or ("1E1B4B" if role == "heading" else "1E293B")
+                raw_align = str(blk.get("align") or "")
+                align_default = raw_align if raw_align in ("left", "right", "center", "justify") else ("right" if rtl_default else "left")
+                bold_default = True if role == "heading" else (blk.get("bold") is True and blk.get("pageRole") is not None)
+                base_style = {
+                    "bold": bold_default,
+                    "italic": bool(blk.get("italic")),
+                    "underline": bool(blk.get("underline")),
+                    "strike": False,
+                    "color": default_color,
+                    "px_size": base_pt,
+                    "rtl": rtl_default,
+                    "align": align_default,
+                }
+                if rich_html and eff_mode != "ocr":
+                    parser = _RichHtmlToDocxParser(base_style)
+                    parser.feed(rich_html)
+                    parser.close()
+                    paragraphs = [p for p in parser.paragraphs if p["runs"]]
+                else:
+                    paragraphs = []
+                if not paragraphs:
+                    lines = plain.split("\n")
+                    paragraphs = [{
+                        "align": align_default,
+                        "rtl": rtl_default,
+                        "runs": [
+                            entry
+                            for idx, line in enumerate(lines)
+                            for entry in (([{"br": True, **base_style}] if idx > 0 else []) + ([{"text": line, **base_style}] if line else []))
+                        ],
+                    }]
+
+                for para in paragraphs:
+                    p_rtl = bool(para["rtl"])
+                    algn = _pptx_algn(str(para["align"]), p_rtl)
+                    mar_attr = ' marL="274320" marR="274320"' if role == "list" else ""
+                    spc_bef = "800" if role == "heading" else "200"
+                    spc_aft = "450" if role == "heading" else "450"
+                    bu_xml = '<a:buChar char="•"/>' if role == "list" else "<a:buNone/>"
+                    ppr = (
+                        f'<a:pPr algn="{algn}" rtl="{"1" if p_rtl else "0"}"{mar_attr}>'
+                        '<a:lnSpc><a:spcPct val="125000"/></a:lnSpc>'
+                        f'<a:spcBef><a:spcPts val="{spc_bef}"/></a:spcBef>'
+                        f'<a:spcAft><a:spcPts val="{spc_aft}"/></a:spcAft>'
+                        f"{bu_xml}"
+                        "</a:pPr>"
+                    )
+                    r_xml_list: list[str] = []
+                    char_count = 0
+                    line_breaks = 0
+                    for run in para["runs"]:
+                        pt_sz = max(10.0, min(40.0, float(run.get("px_size") or base_pt)))
+                        rpr_xml = _pptx_rpr_xml(run, pt_sz)
+                        if run.get("br"):
+                            r_xml_list.append(f"<a:br>{rpr_xml}</a:br>")
+                            line_breaks += 1
+                        else:
+                            txt = str(run.get("text") or "")
+                            char_count += len(txt)
+                            r_xml_list.append(f"<a:r>{rpr_xml}<a:t>{xml_escape(txt)}</a:t></a:r>")
+                    if not r_xml_list:
+                        continue
+                    est_lines = max(1, line_breaks + math.ceil(char_count / (62.0 if role == "heading" else 88.0))) + (1 if role == "heading" else 0)
+                    para_chunks.append((f"<a:p>{ppr}{''.join(r_xml_list)}</a:p>", est_lines, p_rtl))
+
+        # Paginate into comfortable 16:9 slides (up to ~14 estimated lines per slide)
+        batches: list[list[tuple[str, int, bool]]] = []
+        cur_batch: list[tuple[str, int, bool]] = []
+        cur_lines = 0
+        for chunk in para_chunks:
+            if cur_batch and cur_lines + chunk[1] > 14:
+                batches.append(cur_batch)
+                cur_batch = [chunk]
+                cur_lines = chunk[1]
+            else:
+                cur_batch.append(chunk)
+                cur_lines += chunk[1]
+        if cur_batch or not batches:
+            batches.append(cur_batch)
+
+        for part_idx, batch in enumerate(batches, start=1):
+            slide_rtl = any(c[2] for c in batch) or pptx_mode == "translation"
+            if batch:
+                body_p_xml = "".join(c[0] for c in batch)
+            else:
+                lang = "fa-IR" if slide_rtl else "en-US"
+                body_p_xml = f'<a:p><a:pPr algn="{"r" if slide_rtl else "l"}" rtl="{"1" if slide_rtl else "0"}"/><a:endParaRPr lang="{lang}" sz="1400" dirty="0"/></a:p>'
+            footer_label = (
+                f"{unit_title} — بخش {part_idx}" if len(batches) > 1 else unit_title
+            )
+            footer_rpr = _pptx_rpr_xml({"color": "64748B", "rtl": slide_rtl, "bold": False}, 10.5)
+            slide_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+                'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">\n'
+                "  <p:cSld>\n"
+                '    <p:bg><p:bgPr><a:solidFill><a:srgbClr val="F8FAFC"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>\n'
+                "    <p:spTree>\n"
+                '      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\n'
+                '      <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>\n'
+                "      <p:sp>\n"
+                '        <p:nvSpPr><p:cNvPr id="2" name="Slide Content"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>\n'
+                f'        <p:spPr><a:xfrm><a:off x="{margin_x}" y="{top_y}"/><a:ext cx="{body_w}" cy="{body_h}"/></a:xfrm>'
+                '<a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 3500"/></a:avLst></a:prstGeom>'
+                '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>'
+                '<a:ln w="9525"><a:solidFill><a:srgbClr val="E2E8F0"/></a:solidFill></a:ln></p:spPr>\n'
+                "        <p:txBody>\n"
+                f'          <a:bodyPr wrap="square" rtlCol="{"1" if slide_rtl else "0"}" lIns="320040" tIns="274320" rIns="320040" bIns="274320" anchor="t"><a:normAutofit/></a:bodyPr>\n'
+                "          <a:lstStyle/>\n"
+                f"          {body_p_xml}\n"
+                "        </p:txBody>\n"
+                "      </p:sp>\n"
+                "      <p:sp>\n"
+                '        <p:nvSpPr><p:cNvPr id="3" name="Slide Footer"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>\n'
+                f'        <p:spPr><a:xfrm><a:off x="{margin_x}" y="{slide_cy - 520000}"/><a:ext cx="{body_w}" cy="360000"/></a:xfrm>'
+                '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\n'
+                "        <p:txBody>\n"
+                f'          <a:bodyPr wrap="square" rtlCol="{"1" if slide_rtl else "0"}" lIns="45720" tIns="0" rIns="45720" bIns="0" anchor="ctr"/>\n'
+                "          <a:lstStyle/>\n"
+                f'          <a:p><a:pPr algn="{"r" if slide_rtl else "l"}" rtl="{"1" if slide_rtl else "0"}"/><a:r>{footer_rpr}<a:t>{xml_escape(footer_label)}</a:t></a:r></a:p>\n'
+                "        </p:txBody>\n"
+                "      </p:sp>\n"
+                "    </p:spTree>\n"
+                "  </p:cSld>\n"
+                "  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>\n"
+                "</p:sld>"
+            )
+            slides.append({"xml": slide_xml, "rels": slide_rels})
+        emit(
+            f"چیدمان اسلاید متنی {unit_idx} از {total_units} در PowerPoint",
+            progress=unit_idx / total_units * 0.9,
+        )
+
+    emit("در حال بسته‌بندی فایل PowerPoint…", progress=0.96)
+    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.pptx"
+    return _write_pptx_package(output, slide_cx, slide_cy, slides, state.get("name") or "Presentation")
+
+
+def build_pptx(store: ProjectStore, state: dict[str, Any], request: dict[str, Any]) -> Path:
+    """Build an editable PowerPoint (.pptx) presentation in either visual-comic or flowing-slide mode."""
+    images = selected_images(state, request.get("image_ids", []))
+    if not images:
+        raise ValueError("No images selected")
+    raw_mode = request.get("pptx_mode") or request.get("docx_mode") or "translation"
+    raw_layout = request.get("pptx_layout") or request.get("docx_layout") or "visual"
+    pptx_mode = "ocr" if raw_mode == "ocr" else "translation"
+    if raw_layout == "flowing":
+        return _build_flowing_pptx(state, images, request, pptx_mode)
+
+    pages = _prepare_docx_pages(store, state["id"], images, pptx_mode, target_label="فایل PowerPoint")
+    # Choose deck slide dimensions matching the median page aspect ratio within PowerPoint's 1"–56" limits
+    aspects = sorted(max(0.15, min(6.5, p["h"] / max(1, p["w"]))) for p in pages)
+    median_aspect = aspects[len(aspects) // 2]
+    base_w_pt = 720.0
+    base_h_pt = base_w_pt * median_aspect
+    if base_h_pt > 3600.0:
+        scale_down = 3600.0 / base_h_pt
+        base_w_pt *= scale_down
+        base_h_pt = 3600.0
+    slide_cx = max(914_400, min(51_206_400, round(base_w_pt * 12700)))
+    slide_cy = max(914_400, min(51_206_400, round(base_h_pt * 12700)))
+
+    slides: list[dict[str, Any]] = []
+    for page_idx, page in enumerate(pages, start=1):
+        img_w, img_h = max(1, page["w"]), max(1, page["h"])
+        fit_scale_emu = min(slide_cx / img_w, slide_cy / img_h)
+        draw_cx = max(12700, round(img_w * fit_scale_emu))
+        draw_cy = max(12700, round(img_h * fit_scale_emu))
+        off_x = max(0, (slide_cx - draw_cx) // 2)
+        off_y = max(0, (slide_cy - draw_cy) // 2)
+        font_scale_pt = fit_scale_emu / 12700.0
+
+        media_name = f"slide_bg_{page_idx:03d}.png"
+        safe_page_name = _xml_attr(page.get("name") or f"slide-{page_idx}")
+        shapes_xml = [
+            "      <p:pic>\n"
+            f'        <p:nvPicPr><p:cNvPr id="2" name="{safe_page_name}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr>\n'
+            '        <p:blipFill><a:blip r:embed="rIdImg1"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>\n'
+            f'        <p:spPr><a:xfrm><a:off x="{off_x}" y="{off_y}"/><a:ext cx="{draw_cx}" cy="{draw_cy}"/></a:xfrm>'
+            '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>\n'
+            "      </p:pic>"
+        ]
+
+        next_shape_id = 3
+        for spec in page["blocks"]:
+            blk = spec["block"]
+            eff_mode = _effective_docx_block_mode(blk, pptx_mode)
+            bw_px = max(2.0, spec["x1"] - spec["x0"])
+            bh_px = max(2.0, spec["y1"] - spec["y0"])
+            bx_emu = off_x + max(0, round(spec["x0"] * fit_scale_emu))
+            by_emu = off_y + max(0, round(spec["y0"] * fit_scale_emu))
+            bcx_emu = max(101_600, round(bw_px * fit_scale_emu))
+            bcy_emu = max(101_600, round(bh_px * fit_scale_emu))
+            eff_bw_px = max(2.0, (bcx_emu / 12700.0) / max(1e-6, font_scale_pt))
+            eff_bh_px = max(2.0, (bcy_emu / 12700.0) / max(1e-6, font_scale_pt))
+            ins_x = max(0, round(_box_inset_px(bw_px) * fit_scale_emu))
+            ins_y = max(0, round(_box_inset_px(bh_px) * fit_scale_emu))
+            valign = str(blk.get("verticalAlign") or ("middle" if eff_mode == "ocr" else "top"))
+            anchor = _pptx_anchor(valign if valign in ("top", "middle", "bottom") else ("middle" if eff_mode == "ocr" else "top"))
+            tx_p_xml, is_rtl = _build_pptx_textbox_paragraphs_xml(
+                blk,
+                pptx_mode=eff_mode,
+                bw_px=eff_bw_px,
+                bh_px=eff_bh_px,
+                scale_pt=font_scale_pt,
+                bg_rgb=spec.get("bg_rgb"),
+            )
+            shapes_xml.append(
+                "      <p:sp>\n"
+                f'        <p:nvSpPr><p:cNvPr id="{next_shape_id}" name="TextBox {next_shape_id - 2}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>\n'
+                f'        <p:spPr><a:xfrm><a:off x="{bx_emu}" y="{by_emu}"/><a:ext cx="{bcx_emu}" cy="{bcy_emu}"/></a:xfrm>'
+                '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\n'
+                "        <p:txBody>\n"
+                f'          <a:bodyPr wrap="square" rtlCol="{"1" if is_rtl else "0"}" lIns="{ins_x}" tIns="{ins_y}" rIns="{ins_x}" bIns="{ins_y}" anchor="{anchor}"><a:normAutofit/></a:bodyPr>\n'
+                "          <a:lstStyle/>\n"
+                f"          {tx_p_xml}\n"
+                "        </p:txBody>\n"
+                "      </p:sp>"
+            )
+            next_shape_id += 1
+
+        slide_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+            'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">\n'
+            "  <p:cSld>\n"
+            '    <p:bg><p:bgPr><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>\n'
+            "    <p:spTree>\n"
+            '      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>\n'
+            '      <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>\n'
+            + "\n".join(shapes_xml)
+            + "\n    </p:spTree>\n"
+            "  </p:cSld>\n"
+            "  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>\n"
+            "</p:sld>"
+        )
+        slide_rels = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
+            '  <Relationship Id="rIdLayout1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>\n'
+            f'  <Relationship Id="rIdImg1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/{media_name}"/>\n'
+            "</Relationships>"
+        )
+        slides.append({
+            "xml": slide_xml,
+            "rels": slide_rels,
+            "media_name": media_name,
+            "media_bytes": page["png"],
+        })
+
+    emit("در حال بسته‌بندی فایل PowerPoint…", progress=0.95)
+    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.pptx"
+    return _write_pptx_package(output, slide_cx, slide_cy, slides, state.get("name") or "Comic Presentation")
+

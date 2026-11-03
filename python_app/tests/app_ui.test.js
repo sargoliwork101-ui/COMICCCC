@@ -773,12 +773,33 @@ function check(name, condition) {
     $('docxChoiceFlowingOcr').click();
     await sleep(35);
     check('choosing Flowing Book OCR in Word prompt sends docx_mode=ocr and docx_layout=flowing', exportRequests.at(-1)?.kind === 'docx' && exportRequests.at(-1)?.docx_mode === 'ocr' && exportRequests.at(-1)?.docx_layout === 'flowing');
+
+    const pptxUploadsBefore = renderedUploads;
+    $('exportName').value = 'slides-check';
+    $('exportPptxBtn').click();
+    check('clicking PowerPoint export opens pre-export choice dialog before generating pptx', $('pptxExportDialog').open === true && exportRequests.at(-1)?.kind !== 'pptx');
+    $('pptxChoiceTranslation').click();
+    await sleep(35);
+    check('choosing Visual Translated in PowerPoint prompt sends kind=pptx, pptx_mode=translation, pptx_layout=visual without unnecessary image re-renders', exportRequests.at(-1)?.kind === 'pptx' && exportRequests.at(-1)?.pptx_mode === 'translation' && exportRequests.at(-1)?.pptx_layout === 'visual' && renderedUploads === pptxUploadsBefore && $('downloadLink').download === 'slides-check.pptx' && $('pptxExportDialog').open === false);
+    $('exportPptxBtn').click();
+    $('pptxChoiceOcr').click();
+    await sleep(35);
+    check('choosing Visual OCR in PowerPoint prompt sends pptx_mode=ocr and appends -en suffix', exportRequests.at(-1)?.kind === 'pptx' && exportRequests.at(-1)?.pptx_mode === 'ocr' && exportRequests.at(-1)?.pptx_layout === 'visual' && exportRequests.at(-1)?.name === 'slides-check-en');
+    $('exportPptxBtn').click();
+    $('pptxChoiceFlowingTranslation').click();
+    await sleep(35);
+    check('choosing Presentation Slides Translated sends pptx_mode=translation, pptx_layout=flowing, and -slides suffix', exportRequests.at(-1)?.kind === 'pptx' && exportRequests.at(-1)?.pptx_mode === 'translation' && exportRequests.at(-1)?.pptx_layout === 'flowing' && exportRequests.at(-1)?.name === 'slides-check-slides');
+    $('exportPptxBtn').click();
+    $('pptxChoiceFlowingOcr').click();
+    await sleep(35);
+    check('choosing Presentation Slides OCR sends pptx_mode=ocr, pptx_layout=flowing, and -slides-en suffix', exportRequests.at(-1)?.kind === 'pptx' && exportRequests.at(-1)?.pptx_mode === 'ocr' && exportRequests.at(-1)?.pptx_layout === 'flowing' && exportRequests.at(-1)?.name === 'slides-check-slides-en');
+
     $('ocrPageMode').value = 'document';
     vm.runInContext('collectOcrSettings()', context);
     check('ocrPageMode selector supports auto/comic/document and persists in project settings', vm.runInContext("state.project.settings.ocrPageMode === 'document'", context));
     $('ocrPageMode').value = 'auto';
     vm.runInContext('collectOcrSettings()', context);
-    check('dock, Word, preview, AI and editor progress bars all carry accessible progressbar roles and percentage labels', ['dockProgress', 'docxProgress', 'previewPrepProgress', 'aiProgress', 'editorProgress'].every((id) => $(id) && $(id).closest('[role="progressbar"]')) && !!$('dockProgressPercent'));
+    check('dock, Word, PowerPoint, preview, AI and editor progress bars all carry accessible progressbar roles and percentage labels', ['dockProgress', 'docxProgress', 'pptxProgress', 'previewPrepProgress', 'aiProgress', 'editorProgress'].every((id) => $(id) && $(id).closest('[role="progressbar"]')) && !!$('dockProgressPercent'));
     await vm.runInContext(`(async () => {
       state.ai = { ...state.ai, provider: 'openai', providers: { ...state.ai.providers, openai: { ...state.ai.providers.openai, profiles: [{ id: 'p1', name: 'k', hasApiKey: true, source_limit: 200 }] } } };
     })()`, context);

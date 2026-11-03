@@ -2301,6 +2301,21 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert.equal(liveProgressState.after.updateAvailableAfter, false);
     console.log('PASS: v3.73 live OCR download/update progress bars and update-loop suppression');
 
+    // v3.76: Real Chromium E2E verification of PowerPoint (PPTX) export (both Visual and Flowing 16:9 Presentation slides)
+    await page.evaluate(() => {
+      document.getElementById('exportName').value = 'e2e-deck';
+      state.project.images.forEach((im, idx) => { im.selected = idx === 0; });
+    });
+    await page.click('#exportPptxBtn');
+    await page.waitForSelector('#pptxExportDialog[open]');
+    await page.click('#pptxChoiceTranslation');
+    await page.waitForFunction(() => !document.getElementById('pptxExportDialog').open && document.getElementById('downloadLink').download === 'e2e-deck.pptx');
+    await page.click('#exportPptxBtn');
+    await page.waitForSelector('#pptxExportDialog[open]');
+    await page.click('#pptxChoiceFlowingTranslation');
+    await page.waitForFunction(() => !document.getElementById('pptxExportDialog').open && document.getElementById('downloadLink').download === 'e2e-deck-slides.pptx');
+    console.log('PASS: v3.76 PowerPoint (PPTX) export in both Visual and 16:9 Presentation slide modes');
+
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');
@@ -2308,9 +2323,11 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     if (serverLog) console.error(serverLog.slice(-5000));
     throw error;
   } finally {
-    if (browser) await browser.close();
+    if (browser) await Promise.race([browser.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
     if (server.exitCode === null) server.kill('SIGTERM');
-    await new Promise((resolve) => aiServer.close(resolve));
+    aiServer.closeAllConnections?.();
+    await Promise.race([new Promise((resolve) => aiServer.close(resolve)), new Promise((r) => setTimeout(r, 2000))]);
     fs.rmSync(temporary, { recursive: true, force: true });
+    process.exit(process.exitCode || 0);
   }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

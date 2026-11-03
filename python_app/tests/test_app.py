@@ -44,12 +44,14 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.75"
+    assert health.json()["version"] == "3.76"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۷۵ · Python</span>' in index_html
+    assert '<span class="ver">۳.۷۶ · Python</span>' in index_html
+    assert 'id="exportPptxBtn"' in index_html
+    assert 'id="pptxExportDialog"' in index_html
     assert 'id="helpTopBtn"' in index_html
     assert 'id="helpDialog"' in index_html
     assert 'id="ocrSuitabilityPanel"' in index_html
@@ -2375,6 +2377,176 @@ def test_memory_endpoints_and_immediate_unload_after_ocr(client, monkeypatch):
     assert payload["ok"] is True
     assert payload["memory"]["loadedCount"] == 0
     assert len(payload["engines"]) == 13
+
+
+def test_pptx_export_visual_and_flowing_slides_and_backup_restore(client):
+    import xml.etree.ElementTree as ET
+    from PIL import ImageDraw
+    from comic_studio import backup
+    from comic_studio.paths import project_root
+    from comic_studio.store import ProjectStore
+
+    project, item = make_project(client)
+    store = ProjectStore()
+    img_path = project_root(project["id"]) / "images" / item["file"]
+    with Image.open(img_path) as opened:
+        canvas = opened.convert("RGB")
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle([20, 15, 110, 50], fill=(10, 10, 10))
+    canvas.save(img_path)
+
+    state = store.get(project["id"])
+    state["images"][0]["pageMode"] = "document"
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1,
+            "text": "CHAPTER ONE: PPTX",
+            "tr": "فصل اول: ارائهٔ پاورپوینت",
+            "richHtml": '<b><span style="color:#dc2626">فصل اول:</span> ارائهٔ پاورپوینت</b>',
+            "x0": 20, "y0": 15, "x1": 110, "y1": 50,
+            "enabled": True,
+            "bg": "white",
+            "dir": "rtl",
+            "align": "right",
+            "pageRole": "heading",
+        },
+        {
+            "id": 2,
+            "text": 'Point <A> & "B"',
+            "tr": "نکتهٔ کلیدی اول",
+            "richHtml": "",
+            "x0": 20, "y0": 65, "x1": 140, "y1": 100,
+            "enabled": True,
+            "bg": "auto",
+            "dir": "rtl",
+            "align": "justify",
+            "pageRole": "list",
+        },
+    ]
+    store.save(state)
+
+    # 1. Visual PPTX (translated text boxes over cleaned background image)
+    vis_res = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={
+            "kind": "pptx",
+            "image_ids": [item["id"]],
+            "name": "comic-slides-out",
+            "pptx_mode": "translation",
+            "pptx_layout": "visual",
+        },
+    )
+    assert vis_res.status_code == 200
+    assert vis_res.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+    assert "comic-slides-out.pptx" in vis_res.headers.get("content-disposition", "")
+
+    ns = {
+        "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    }
+    with zipfile.ZipFile(io.BytesIO(vis_res.content)) as archive:
+        names = set(archive.namelist())
+        required_parts = {
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "docProps/core.xml",
+            "docProps/app.xml",
+            "ppt/presentation.xml",
+            "ppt/_rels/presentation.xml.rels",
+            "ppt/presProps.xml",
+            "ppt/viewProps.xml",
+            "ppt/tableStyles.xml",
+            "ppt/theme/theme1.xml",
+            "ppt/slideMasters/slideMaster1.xml",
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            "ppt/slideLayouts/slideLayout1.xml",
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            "ppt/slides/slide1.xml",
+            "ppt/slides/_rels/slide1.xml.rels",
+            "ppt/media/slide_bg_001.png",
+        }
+        assert required_parts <= names
+        for member in names:
+            if member.endswith((".xml", ".rels")):
+                ET.fromstring(archive.read(member))
+
+        with Image.open(io.BytesIO(archive.read("ppt/media/slide_bg_001.png"))) as bg_img:
+            assert bg_img.getpixel((40, 30)) == (255, 255, 255)
+
+        pres_root = ET.fromstring(archive.read("ppt/presentation.xml"))
+        sld_sz = pres_root.find("p:sldSz", ns)
+        assert sld_sz is not None
+        assert 914400 <= int(sld_sz.attrib["cx"]) <= 51206400
+        assert 914400 <= int(sld_sz.attrib["cy"]) <= 51206400
+
+        slide_root = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        assert slide_root.find(".//p:pic", ns) is not None
+        tx_shapes = slide_root.findall(".//p:sp", ns)
+        assert len(tx_shapes) == 2
+        slide_text = "".join(t.text or "" for t in slide_root.findall(".//a:t", ns))
+        assert "فصل اول:" in slide_text
+        assert "ارائهٔ پاورپوینت" in slide_text
+        assert "نکتهٔ کلیدی اول" in slide_text
+        assert "CHAPTER ONE" not in slide_text
+        # Verify ECMA-376 CT_TextCharacterProperties child sequence: solidFill BEFORE latin/ea/cs
+        first_rpr = slide_root.find(".//a:r/a:rPr", ns)
+        assert first_rpr is not None
+        rpr_tags = [child.tag.rsplit("}", 1)[-1] for child in list(first_rpr)]
+        assert rpr_tags.index("solidFill") < rpr_tags.index("latin")
+
+    # 2. Visual PPTX in OCR (original source text) mode
+    ocr_vis_res = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={
+            "kind": "pptx",
+            "image_ids": [item["id"]],
+            "name": "comic-slides-en",
+            "pptx_mode": "ocr",
+            "pptx_layout": "visual",
+        },
+    )
+    assert ocr_vis_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(ocr_vis_res.content)) as archive:
+        slide_root = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        slide_text = "".join(t.text or "" for t in slide_root.findall(".//a:t", ns))
+        assert "CHAPTER ONE: PPTX" in slide_text
+        assert 'Point <A> & "B"' in slide_text
+        assert "فصل اول" not in slide_text
+
+    # 3. Flowing 16:9 Presentation PPTX (no background media images, clean widescreen slides)
+    flow_res = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={
+            "kind": "pptx",
+            "image_ids": [item["id"]],
+            "name": "book-lecture-slides",
+            "pptx_mode": "translation",
+            "pptx_layout": "flowing",
+        },
+    )
+    assert flow_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(flow_res.content)) as archive:
+        names = set(archive.namelist())
+        assert not any(n.startswith("ppt/media/") for n in names)
+        pres_root = ET.fromstring(archive.read("ppt/presentation.xml"))
+        sld_sz = pres_root.find("p:sldSz", ns)
+        assert sld_sz.attrib["cx"] == "12192000"
+        assert sld_sz.attrib["cy"] == "6858000"
+        slide_root = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+        slide_text = "".join(t.text or "" for t in slide_root.findall(".//a:t", ns))
+        assert "فصل اول:" in slide_text
+        assert "نکتهٔ کلیدی اول" in slide_text
+        assert slide_root.find(".//a:buChar", ns) is not None
+
+    # 4. Project Backup & Restore preserves exported .pptx files atomically
+    backup_res = client.post(f"/api/projects/{project['id']}/backup", json={"drafts": []})
+    assert backup_res.status_code == 200
+    restored, _ = backup.restore_backup(ProjectStore(), io.BytesIO(backup_res.content))
+    assert (project_root(restored["id"]) / "exports" / "comic-slides-out.pptx").is_file()
+    assert (project_root(restored["id"]) / "exports" / "book-lecture-slides.pptx").is_file()
+
 
 
 

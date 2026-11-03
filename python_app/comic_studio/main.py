@@ -26,7 +26,7 @@ from starlette.background import BackgroundTask
 from . import APP_NAME, APP_VERSION
 from .activity import ActivityLog, reporting
 from .backup import BackupError, make_backup, restore_backup
-from .exporter import build_docx, build_images_zip, build_pdf, build_txt, image_payload
+from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
 from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
 from .paths import STATIC_DIR
@@ -1278,6 +1278,8 @@ def create_app() -> FastAPI:
                 path = await run_reported(build_images_zip, store, state, request, pulse_label="ساخت ZIP")
             elif values.kind == "docx":
                 path = await run_reported(build_docx, store, state, request, pulse_label="ساخت فایل Word")
+            elif values.kind == "pptx":
+                path = await run_reported(build_pptx, store, state, request, pulse_label="ساخت فایل PowerPoint")
             else:
                 path = await run_reported(build_txt, store, state, request, pulse_label="ساخت TXT")
         except ValueError as exc:
@@ -1292,6 +1294,7 @@ def create_app() -> FastAPI:
             "images": "application/zip",
             "txt": "text/plain; charset=utf-8",
             "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         }[values.kind]
         return FileResponse(path, media_type=media_type, filename=path.name)
 
