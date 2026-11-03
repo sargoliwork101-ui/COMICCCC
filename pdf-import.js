@@ -5,6 +5,7 @@ const token = params.get('token') || '';
 const returnTabId = Number.parseInt(params.get('returnTab'), 10);
 const $ = (id) => document.getElementById(id);
 let conversionStarted = false;
+let conversionDone = false;
 
 function setStatus(text, kind = '') {
   const status = $('statusText');
@@ -27,18 +28,22 @@ function safeMessage(error) {
 }
 async function notifyPreview(session) {
   await PDFImportStore.putSession(session);
-  if (!chrome.runtime || !chrome.runtime.sendMessage) return;
-  chrome.runtime.sendMessage({ type: 'PIC_TO_PDF_IMPORT_COMPLETE', token }, () => {
-    // اگر تب پیش‌نمایش بسته شده باشد، خطای lastError نباید پیام موفقیت تبدیل را خراب کند.
-    void chrome.runtime.lastError;
-    if (session.status === 'complete' && Number.isInteger(returnTabId) && chrome.tabs && chrome.tabs.update) {
-      chrome.tabs.update(returnTabId, { active: true }, () => { void chrome.runtime.lastError; });
-    }
+  if (!chrome.runtime || !chrome.runtime.sendMessage) return false;
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'PIC_TO_PDF_IMPORT_COMPLETE', token }, (response) => {
+      // اگر تب پیش‌نمایش بسته شده باشد، خطای lastError نباید پیام موفقیت تبدیل را خراب کند.
+      const hadError = Boolean(chrome.runtime && chrome.runtime.lastError);
+      const delivered = !hadError && Boolean(response && response.ok);
+      if (Number.isInteger(returnTabId) && chrome.tabs && chrome.tabs.update) {
+        chrome.tabs.update(returnTabId, { active: true }, () => { void (chrome.runtime && chrome.runtime.lastError); });
+      }
+      resolve(delivered);
+    });
   });
 }
 
 async function convertPdf(file) {
-  if (!file || conversionStarted) return;
+  if (!file || conversionStarted || conversionDone) return;
   if (!token) {
     setStatus('نشانی این برگه ناقص است؛ برگردید به پیش‌نمایش و دوباره تبدیل PDF را بزنید.', 'error');
     return;
@@ -52,13 +57,13 @@ async function convertPdf(file) {
   $('choosePdf').disabled = true;
   $('selectedFile').textContent = file.name;
   $('selectedFile').classList.remove('hidden');
-  $('retryButton').classList.add('hidden');
   setStatus('در حال آماده‌سازی فایل PDF...');
   setProgress(0, 0, 'در حال بازکردن PDF');
 
   let pdf = null;
   let convertedPages = 0;
   let error = null;
+  let delivered = false;
   try {
     await PDFImportStore.deleteSession(token);
     await PDFImportStore.putSession({ token, status: 'converting', fileName: file.name, count: 0 });
@@ -116,39 +121,44 @@ async function convertPdf(file) {
       count: convertedPages,
       finishedAt: Date.now()
     };
-    await notifyPreview(session);
+    conversionDone = true;
+    delivered = await notifyPreview(session);
     $('progressBar').style.width = '100%';
     setStatus(`${convertedPages} صفحه تبدیل شد و به فهرست تصاویر در برگهٔ پیش‌نمایش فرستاده شد.`, 'success');
-    $('retryButton').classList.remove('hidden');
   } catch (caught) {
     error = caught;
     console.error('PDF conversion failed', caught);
-    const session = {
-      token,
-      status: 'failed',
-      fileName: file.name,
-      count: convertedPages,
-      error: safeMessage(caught),
-      finishedAt: Date.now()
-    };
-    try { await notifyPreview(session); } catch (notifyError) { console.warn('Could not notify preview tab', notifyError); }
+    if (convertedPages > 0) {
+      conversionDone = true;
+      const session = {
+        token,
+        status: 'failed',
+        fileName: file.name,
+        count: convertedPages,
+        error: safeMessage(caught),
+        finishedAt: Date.now()
+      };
+      try { delivered = await notifyPreview(session); } catch (notifyError) { console.warn('Could not notify preview tab', notifyError); }
+    } else {
+      try { await PDFImportStore.deleteSession(token); } catch {}
+    }
     setStatus(`تبدیل ناموفق بود: ${safeMessage(error)}`, 'error');
-    $('retryButton').classList.remove('hidden');
   } finally {
     if (pdf) { try { await pdf.destroy(); } catch {} }
     conversionStarted = false;
-    $('choosePdf').disabled = false;
+    $('choosePdf').disabled = conversionDone;
+    if (conversionDone && delivered && !error && typeof window.close === 'function') {
+      try { window.close(); } catch {}
+    }
   }
 }
 
+if (typeof PDFImportStore !== 'undefined' && typeof PDFImportStore.pruneStaleSessions === 'function') {
+  PDFImportStore.pruneStaleSessions(undefined, token).catch(() => {});
+}
 if (!token) setStatus('نشانی این برگه ناقص است؛ برگردید به پیش‌نمایش و دوباره تبدیل PDF را بزنید.', 'error');
-$('choosePdf').addEventListener('click', () => $('pdfFile').click());
-$('retryButton').addEventListener('click', () => {
-  $('pdfFile').value = '';
-  $('selectedFile').classList.add('hidden');
-  $('progressArea').classList.add('hidden');
-  $('retryButton').classList.add('hidden');
-  setStatus('فایل PDF بعدی را انتخاب کنید.');
+$('choosePdf').addEventListener('click', () => {
+  if (!conversionDone && !conversionStarted) $('pdfFile').click();
 });
 $('pdfFile').addEventListener('change', () => {
   const file = $('pdfFile').files && $('pdfFile').files[0];

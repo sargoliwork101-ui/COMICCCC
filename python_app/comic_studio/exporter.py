@@ -289,13 +289,18 @@ def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
     total = max(1, len(images))
     for index, item in enumerate(images, start=1):
         chunks.append(f"===== تصویر {index:03d} — {item['name']} =====\n")
-        blocks = sorted(item.get("blocks", []), key=lambda block: (block.get("y0", 0), block.get("x0", 0)))
+        blocks = sorted(
+            [b for b in item.get("blocks", []) if b.get("enabled", True) is not False],
+            key=lambda block: (block.get("y0", 0), block.get("x0", 0)),
+        )
         if not blocks:
             chunks.append("(متنی تشخیص داده نشده است)\n")
         for block in blocks:
             indent = " " * max(0, min(40, int(block.get("sourceIndent", 0) or 0)))
-            chunks.append(f"[{block.get('id', '-')}] {indent}{block.get('text', '')}")
-            chunks.append(f"    ← {block.get('tr') or '(بدون ترجمه)'}\n")
+            ocr_text = _strip_inline_markers(_clean_text(block.get("text") or ""))
+            tr_text = _block_translation_plain(block)
+            chunks.append(f"[{block.get('id', '-')}] {indent}{ocr_text}")
+            chunks.append(f"    ← {tr_text if tr_text.strip() else '(بدون ترجمه)'}\n")
         emit(f"نوشتن متن تصویر {index} از {total} در فایل TXT", progress=index / total)
     output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.txt"
     with _atomic_export_path(output) as tmp_output:
@@ -307,6 +312,13 @@ _INVALID_XML_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 _RTL_CHAR_RE = re.compile(r"[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]")
 _HEX_COLOR_RE = re.compile(r"^#?([0-9a-fA-F]{6})$")
 _RGB_COLOR_RE = re.compile(r"^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})")
+_LEGACY_INLINE_MARKERS = (
+    (re.compile(r"\*\*([\s\S]+?)\*\*"), r"\1"),
+    (re.compile(r"__([\s\S]+?)__"), r"\1"),
+    (re.compile(r"\*([^*\n]+?)\*"), r"\1"),
+    (re.compile(r"\[size=\d{1,3}\]([\s\S]+?)\[/size\]"), r"\1"),
+    (re.compile(r"\[color=#[0-9a-fA-F]{6}\]([\s\S]+?)\[/color\]"), r"\1"),
+)
 
 _DOCX_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -347,6 +359,61 @@ _DOCX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 def _clean_text(value: Any) -> str:
     return _INVALID_XML_RE.sub("", str(value or "")).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _strip_inline_markers(text: str) -> str:
+    cleaned = str(text or "")
+    for pattern, repl in _LEGACY_INLINE_MARKERS:
+        cleaned = pattern.sub(repl, cleaned)
+    return cleaned
+
+
+class _PlainHtmlExtractor(HTMLParser):
+    """Extract clean plain text from bubble richHtml, preserving line breaks."""
+
+    _BLOCK_TAGS = {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "tr"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        if t in ("br", "hr"):
+            self.parts.append("\n")
+        elif t in self._BLOCK_TAGS and self.parts and not self.parts[-1].endswith("\n"):
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in self._BLOCK_TAGS and self.parts and not self.parts[-1].endswith("\n"):
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self.parts.append(data.replace("\xa0", " "))
+
+
+def _plain_from_rich_html(html_text: Any) -> str:
+    raw = _clean_text(html_text).strip()
+    if not raw:
+        return ""
+    extractor = _PlainHtmlExtractor()
+    extractor.feed(raw)
+    extractor.close()
+    return _strip_inline_markers("".join(extractor.parts)).rstrip("\n")
+
+
+def _block_translation_plain(block: dict[str, Any]) -> str:
+    tr_clean = _strip_inline_markers(_clean_text(block.get("tr") or "")).strip("\n")
+    if tr_clean.strip():
+        return tr_clean
+    return _plain_from_rich_html(block.get("richHtml") or "").strip("\n")
+
+
+def _effective_docx_block_mode(block: dict[str, Any], docx_mode: str) -> str:
+    if docx_mode == "ocr":
+        return "ocr"
+    return "ocr" if str(block.get("textMode") or "").lower() == "ocr" else "translation"
 
 
 def _xml_attr(value: Any) -> str:
@@ -549,13 +616,17 @@ def _build_textbox_paragraphs_xml(
 ) -> str:
     if docx_mode == "ocr":
         indent = " " * max(0, min(40, int(block.get("sourceIndent", 0) or 0)))
-        plain = _clean_text(f"{indent}{block.get('text') or ''}").strip("\n")
+        plain = _strip_inline_markers(_clean_text(f"{indent}{block.get('text') or ''}")).strip("\n")
         rich_html = ""
         rtl_default = bool(_RTL_CHAR_RE.search(plain))
-        align_default = str(block.get("align") or ("right" if rtl_default else "left"))
+        raw_align = str(block.get("align") or "")
+        if not rtl_default and raw_align == "right" and str(block.get("textMode") or "").lower() == "ocr":
+            align_default = "left"
+        else:
+            align_default = raw_align or ("right" if rtl_default else "left")
         bold_default = True
     else:
-        plain = _clean_text(block.get("tr") or "").strip("\n")
+        plain = _block_translation_plain(block)
         rich_html = _clean_text(block.get("richHtml") or "").strip()
         dir_field = str(block.get("dir") or "").lower()
         rtl_default = (dir_field == "rtl") if dir_field in ("rtl", "ltr") else (True if not plain else bool(_RTL_CHAR_RE.search(plain) or not re.search(r"[A-Za-z]", plain)))
@@ -710,10 +781,11 @@ def _prepare_docx_pages(
             for blk in sorted_blocks:
                 if blk.get("enabled", True) is False:
                     continue
-                if docx_mode == "ocr":
-                    has_text = bool(_clean_text(blk.get("text") or "").strip())
+                eff_mode = _effective_docx_block_mode(blk, docx_mode)
+                if eff_mode == "ocr":
+                    has_text = bool(_strip_inline_markers(_clean_text(blk.get("text") or "")).strip())
                 else:
-                    has_text = bool(_clean_text(blk.get("tr") or "").strip() or _clean_text(blk.get("richHtml") or "").strip())
+                    has_text = bool(_block_translation_plain(blk).strip())
                 if not has_text:
                     continue
                 bx0, by0, bx1, by1 = _block_box(blk, m["off_x"], m["off_y"], m_scale, canvas_w, mh)
@@ -781,12 +853,17 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
         )
         img_w, img_h = max(1, page["w"]), max(1, page["h"])
         scale_pt = min(540.0 / img_w, 1500.0 / img_h)
-        w_pt = max(72.0, img_w * scale_pt)
-        h_pt = max(72.0, img_h * scale_pt)
-        w_dxa = max(1440, min(31680, round(w_pt * 20)))
-        h_dxa = max(1440, min(31680, round(h_pt * 20)))
-        cx_emu = max(914400, round(w_pt * 12700))
-        cy_emu = max(914400, round(h_pt * 12700))
+        raw_w_pt = max(72.0, img_w * scale_pt)
+        raw_h_pt = max(72.0, img_h * scale_pt)
+        w_dxa = max(1440, min(31680, round(raw_w_pt * 20)))
+        h_dxa = max(1440, min(31680, round(raw_h_pt * 20)))
+        page_w_pt = w_dxa / 20.0
+        page_h_pt = h_dxa / 20.0
+        cx_emu = max(914400, round(page_w_pt * 12700))
+        cy_emu = max(914400, round(page_h_pt * 12700))
+        scale_x_pt = page_w_pt / img_w
+        scale_y_pt = page_h_pt / img_h
+        font_scale_pt = min(scale_x_pt, scale_y_pt)
 
         sect_pr = (
             f'<w:sectPr><w:bidi/>'
@@ -823,19 +900,22 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
         box_runs: list[str] = []
         for spec in page["blocks"]:
             blk = spec["block"]
+            eff_mode = _effective_docx_block_mode(blk, docx_mode)
             bw_px = max(2.0, spec["x1"] - spec["x0"])
             bh_px = max(2.0, spec["y1"] - spec["y0"])
-            left_pt = spec["x0"] * scale_pt
-            top_pt = spec["y0"] * scale_pt
-            bw_pt = max(8.0, bw_px * scale_pt)
-            bh_pt = max(8.0, bh_px * scale_pt)
-            inset_x = _box_inset_px(bw_px) * scale_pt
-            inset_y = _box_inset_px(bh_px) * scale_pt
-            valign = str(blk.get("verticalAlign") or ("middle" if docx_mode == "ocr" else "top"))
-            v_anchor = valign if valign in ("top", "middle", "bottom") else ("middle" if docx_mode == "ocr" else "top")
+            left_pt = spec["x0"] * scale_x_pt
+            top_pt = spec["y0"] * scale_y_pt
+            bw_pt = max(8.0, bw_px * scale_x_pt)
+            bh_pt = max(8.0, bh_px * scale_y_pt)
+            eff_bw_px = max(2.0, bw_pt / max(1e-6, font_scale_pt))
+            eff_bh_px = max(2.0, bh_pt / max(1e-6, font_scale_pt))
+            inset_x = _box_inset_px(bw_px) * scale_x_pt
+            inset_y = _box_inset_px(bh_px) * scale_y_pt
+            valign = str(blk.get("verticalAlign") or ("middle" if eff_mode == "ocr" else "top"))
+            v_anchor = valign if valign in ("top", "middle", "bottom") else ("middle" if eff_mode == "ocr" else "top")
             txbx_p = _build_textbox_paragraphs_xml(
-                blk, docx_mode=docx_mode, bw_px=bw_px, bh_px=bh_px,
-                scale_pt=scale_pt, bg_rgb=spec.get("bg_rgb"),
+                blk, docx_mode=eff_mode, bw_px=eff_bw_px, bh_px=eff_bh_px,
+                scale_pt=font_scale_pt, bg_rgb=spec.get("bg_rgb"),
             )
             shape_style = (
                 f"position:absolute;margin-left:{left_pt:.2f}pt;margin-top:{top_pt:.2f}pt;"

@@ -54,6 +54,54 @@ recoveredEmpty.clearDraft(); assert.equal(window.localStorage.getItem('test-draf
   assert.ok(asyncPromptMsg.includes('پیش‌نویس'), 'confirmDraft receives Persian message');
   assert.equal(asyncEditor.getHTML(), '<p>از پیش‌نویس</p>', 'async confirmDraft restores saved HTML');
   asyncEditor.clearDraft();
+
+  // v3.68: .classic-modal Escape capture priority, Tab focus trap, backdrop click, and lifecycle auto-close
+  let docEscCount = 0;
+  const docEscSpy = (ev) => { if (ev.key === 'Escape') docEscCount += 1; };
+  window.document.addEventListener('keydown', docEscSpy);
+  editor.element.querySelector('button[aria-label="درج پیوند (Ctrl+K)"]').click();
+  assert.equal(editor.hasOpenModal(), true, 'link dialog opens .classic-modal');
+  const modalEl = editor.element.querySelector('.classic-modal');
+  assert.ok(modalEl, '.classic-modal exists in DOM');
+  const focusables = [...modalEl.querySelectorAll('input,button')];
+  assert.ok(focusables.length >= 4, 'link modal has inputs and buttons');
+  assert.equal(window.document.activeElement, focusables[0], 'first input receives initial focus');
+  // Shift+Tab from first wraps to last
+  focusables[0].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+  assert.equal(window.document.activeElement, focusables[focusables.length - 1], 'Shift+Tab wraps from first to last');
+  // Tab from last wraps to first
+  focusables[focusables.length - 1].dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+  assert.equal(window.document.activeElement, focusables[0], 'Tab wraps from last to first');
+  // Escape closes ONLY .classic-modal even when focus moved outside modal (capture-phase interception)
+  window.document.body.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  assert.equal(editor.hasOpenModal(), false, 'Escape closes .classic-modal');
+  assert.equal(docEscCount, 0, 'Escape was intercepted before bubble listeners could close parent editor');
+  window.document.removeEventListener('keydown', docEscSpy);
+
+  // Backdrop click closes .classic-modal, clicking inside .classic-modal-box does not
+  editor.element.querySelector('button[aria-label="درج جدول"]').click();
+  assert.equal(editor.hasOpenModal(), true);
+  const tableModal = editor.element.querySelector('.classic-modal');
+  tableModal.querySelector('.classic-modal-box').dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+  assert.equal(editor.hasOpenModal(), true, 'clicking inside modal box keeps modal open');
+  tableModal.dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+  assert.equal(editor.hasOpenModal(), false, 'clicking modal backdrop closes modal');
+
+  // Auto-close on setContext, setPlainMode(true), and resetToolbar
+  editor.element.querySelector('button[aria-label="درج تصویر"]').click();
+  assert.equal(editor.hasOpenModal(), true);
+  editor.setContext('other-block', '<p>next</p>', 'r2');
+  assert.equal(editor.hasOpenModal(), false, 'setContext auto-closes open modal');
+  editor.element.querySelector('button[aria-label="درج پیوند (Ctrl+K)"]').click();
+  assert.equal(editor.hasOpenModal(), true);
+  editor.setPlainMode(true);
+  assert.equal(editor.hasOpenModal(), false, 'setPlainMode(true) auto-closes open modal');
+  editor.setPlainMode(false);
+  editor.element.querySelector('button[aria-label="درج پیوند (Ctrl+K)"]').click();
+  assert.equal(editor.hasOpenModal(), true);
+  editor.resetToolbar();
+  assert.equal(editor.hasOpenModal(), false, 'resetToolbar auto-closes open modal');
+
   asyncEditor.destroy();
   editor.destroy(); recoveredEmpty.destroy(); dom.window.close();
   console.log('rich editor: safe HTML, API, tabs, autosave, async confirmDraft and empty-draft recovery passed');

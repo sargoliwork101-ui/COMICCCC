@@ -124,8 +124,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.57', manifest.version === '2.57' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۵۷'));
+  check('manifest and viewer version badge are synchronized at 2.58', manifest.version === '2.58' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۵۸'));
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(fs.readFileSync(path.join(ROOT, 'viewer.css'), 'utf8')));
   check('PDF-to-image import opens the dedicated converter tab',
@@ -177,6 +177,11 @@ const $ = (id) => window.document.getElementById(id);
   check('PDF converter opens in a separate extension tab',
     /pdf-import\.html\?/.test(window.__openedPdfImportUrl || '') && /returnTab=17/.test(window.__openedPdfImportUrl || ''),
     window.__openedPdfImportUrl);
+  const pdfImportHtml = fs.readFileSync(path.join(ROOT, 'pdf-import.html'), 'utf8');
+  check('pdf-import keeps single-PDF chooser and removes repeat retryButton',
+    pdfImportHtml.includes('id="choosePdf"') && !pdfImportHtml.includes('retryButton') && !pdfImportHtml.includes('انتخاب PDF دیگری'));
+  check('PDFImportStore exposes pruneStaleSessions helper',
+    typeof window.PDFImportStore?.pruneStaleSessions === 'function');
   ev('pendingPdfImportToken = null');
   check('summary shows 3 selected', /3/.test($('selCount').textContent), $('selCount').textContent);
   check('build button enabled', !$('buildBtn').disabled);

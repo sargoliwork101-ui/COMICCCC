@@ -1,4 +1,4 @@
-# Comic OCR Studio 3.67
+# Comic OCR Studio 3.68
 
 برنامهٔ مستقل Python برای کار روی خروجی افزونه: **PDF یا تصویر ورودی → OCR → ترجمه/AI → ویرایش → PDF، ZIP تصویر، TXT یا Word (DOCX)**.
 
@@ -37,18 +37,18 @@
 
 ## نصب برنامه از شاخهٔ GitHub
 
-برای نصب **خود برنامه** از شاخهٔ `arena/c1cd47de-comicccc`، در ویندوز این کارها را انجام دهید:
+برای نصب **خود برنامه** از شاخهٔ `arena/6cac229a-comicccc`، در ویندوز این کارها را انجام دهید:
 
-1. Python 3.11 یا جدیدتر و Git را نصب کنید. در نصب Python گزینهٔ **Add Python to PATH** را فعال کنید.
+1. Python ۶۴ بیتی سازگار (۳.۱۱ تا ۳.۱۳) و Git را نصب کنید. در نصب Python گزینهٔ **Add Python to PATH** را فعال کنید.
 2. PowerShell را در پوشه‌ای که می‌خواهید برنامه در آن باشد باز کنید و اجرا کنید:
 
 ```powershell
-git clone --branch arena/c1cd47de-comicccc --single-branch https://github.com/sargoliwork101-ui/COMICCCC.git
+git clone --branch arena/6cac229a-comicccc --single-branch https://github.com/sargoliwork101-ui/COMICCCC.git
 cd COMICCCC\python_app
 .\start_windows.bat
 ```
 
-اگر Git ندارید، صفحهٔ [همین شاخه](https://github.com/sargoliwork101-ui/COMICCCC/tree/arena/c1cd47de-comicccc) را باز کنید، از **Code → Download ZIP** فایل را بگیرید، آن را Extract کنید و سپس داخل پوشهٔ `python_app` فایل `start_windows.bat` را اجرا کنید. لازم نیست مخزن‌های مدل‌های دیگر را برای نصب برنامه دانلود کنید.
+اگر Git ندارید، صفحهٔ [همین شاخه](https://github.com/sargoliwork101-ui/COMICCCC/tree/arena/6cac229a-comicccc) را باز کنید، از **Code → Download ZIP** فایل را بگیرید، آن را Extract کنید و سپس داخل پوشهٔ `python_app` فایل `start_windows.bat` را اجرا کنید. لازم نیست مخزن‌های مدل‌های دیگر را برای نصب برنامه دانلود کنید.
 
 لینک‌های روی کارت‌های «اجرای جداگانه» مربوط به پروژه‌های خارجی هستند. آن‌ها داخل Comic OCR Studio نصب یا اجرا نمی‌شوند؛ اگر خواستید جداگانه از آن‌ها استفاده کنید، باید دستورهای **README همان مخزن رسمی** را در یک محیط جدا دنبال کنید. خروجی آن‌ها هم فعلاً به کادرهای قابل ویرایش این برنامه تبدیل نمی‌شود.
 
@@ -234,7 +234,7 @@ node tests/app_ui.test.js
 node --check comic_studio/static/app.js
 ```
 
-از ریشهٔ مخزن نیز `npm test` تست‌های افزونهٔ 2.57 را بدون تغییر در کد آن اجرا می‌کند. برای آزمون واقعی مسیر ترجمه/ویرایش تا پیش‌نمایش و دانلود در Chromium:
+از ریشهٔ مخزن نیز `npm test` تست‌های افزونهٔ 2.58 را بدون تغییر در کد آن اجرا می‌کند. برای آزمون واقعی مسیر ترجمه/ویرایش تا پیش‌نمایش و دانلود در Chromium:
 
 ```bash
 npm install

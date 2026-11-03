@@ -40,7 +40,7 @@
     function changed() { dirty = true; if (mode === 'text') { field.innerHTML = html(); } updateStatus(); const value = html(); listeners.forEach((fn) => fn(value)); }
     function setMode(next) {
       if (next === mode) return;
-      if (next === 'text') { remember(); source.value = sanitize(rawHtml()); field.hidden = true; source.hidden = false; mode = 'text'; source.focus(); }
+      if (next === 'text') { closeModal({ restoreFocus: false }); remember(); source.value = sanitize(rawHtml()); field.hidden = true; source.hidden = false; mode = 'text'; source.focus(); }
       else { field.innerHTML = sanitize(source.value); source.hidden = true; field.hidden = false; mode = 'visual'; field.dispatchEvent(new Event('input', { bubbles: true })); field.focus(); }
       visualTab.setAttribute('aria-selected', String(mode === 'visual')); textTab.setAttribute('aria-selected', String(mode === 'text'));
       toolbar.querySelectorAll('button,select,input').forEach((control) => { control.disabled = mode === 'text' && !control.dataset.allowText; }); updateStatus();
@@ -58,15 +58,37 @@
     [['justifyRight','تراز راست','right'],['justifyCenter','تراز وسط','center'],['justifyLeft','تراز چپ','left'],['justifyFull','جاستیفای','justify']].forEach(([cmd,label,value])=>button(row1,cmd,label,()=>options.align ? options.align(value) : exec(cmd)));
     function direction(dir){restore();document.execCommand('formatBlock',false,'div');const node=window.getSelection()?.anchorNode;let element=node?.nodeType===1?node:node?.parentElement;while(element&&element!==field&&!['DIV','P','LI','H1','H2','H3','H4','H5','H6','PRE','BLOCKQUOTE'].includes(element.tagName))element=element.parentElement;if(element&&element!==field)element.style.direction=dir;else field.style.direction=dir;remember();field.dispatchEvent(new Event('input',{bubbles:true}));changed();}
     button(row1,'rtl','راست‌به‌چپ',()=>options.direction ? options.direction('rtl') : direction('rtl'));button(row1,'ltr','چپ‌به‌راست',()=>options.direction ? options.direction('ltr') : direction('ltr'));
-    let modal = null;
-    function closeModal() { if (modal) { modal.remove(); modal = null; restore(); } }
+    let modal = null, modalKeyHandler = null;
+    function closeModal(opts = {}) {
+      if (!modal) return false;
+      if (modalKeyHandler) { document.removeEventListener('keydown', modalKeyHandler, true); modalKeyHandler = null; }
+      modal.remove(); modal = null;
+      if (opts.restoreFocus !== false) restore();
+      return true;
+    }
     function dialog(title, build) {
-      if (modal) closeModal(); remember(); modal = document.createElement('div'); modal.className = 'classic-modal'; modal.setAttribute('role','dialog'); modal.setAttribute('aria-modal','true'); modal.setAttribute('aria-label',title);
+      if (modal) closeModal({ restoreFocus: false });
+      remember();
+      modal = document.createElement('div'); modal.className = 'classic-modal'; modal.setAttribute('role','dialog'); modal.setAttribute('aria-modal','true'); modal.setAttribute('aria-label',title);
       const box = document.createElement('div'); box.className = 'classic-modal-box'; const heading = document.createElement('strong'); heading.textContent = title; box.appendChild(heading);
       const err = document.createElement('div'); err.className = 'classic-modal-error'; err.setAttribute('role','alert');
-      const footer = document.createElement('div'); footer.className = 'classic-modal-actions'; const cancel = document.createElement('button'); cancel.type='button'; cancel.textContent='لغو'; cancel.addEventListener('click',closeModal);
+      const footer = document.createElement('div'); footer.className = 'classic-modal-actions'; const cancel = document.createElement('button'); cancel.type='button'; cancel.textContent='لغو'; cancel.addEventListener('click',()=>closeModal());
       const apply = document.createElement('button'); apply.type='button'; apply.textContent='درج'; apply.className='classic-primary'; footer.append(cancel,apply); build(box,apply,err); box.append(err,footer); modal.appendChild(box); shell.appendChild(modal);
-      modal.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closeModal();} }); box.querySelector('input')?.focus();
+      modal.addEventListener('mousedown', (e) => { if (e.target === modal) { e.preventDefault(); closeModal(); } });
+      modalKeyHandler = (e) => {
+        if (!modal) return;
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation?.(); closeModal(); return; }
+        if (e.key === 'Tab') {
+          const focusables = [...box.querySelectorAll('input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled]),[tabindex]:not([tabindex="-1"])')];
+          if (!focusables.length) { e.preventDefault(); return; }
+          const first = focusables[0], last = focusables[focusables.length - 1], active = document.activeElement;
+          if (!box.contains(active)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); return; }
+          if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+          else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+        }
+      };
+      document.addEventListener('keydown', modalKeyHandler, true);
+      (box.querySelector('input,select,textarea,button') || apply).focus();
     }
     function insertHTML(value) { exec('insertHTML', sanitize(value)); }
     function linkDialog() { dialog('درج پیوند', (box,apply,error) => { const label=document.createElement('label'); label.textContent='نشانی URL'; const input=document.createElement('input'); input.type='url'; input.placeholder='https://example.com'; label.append(input); const line=document.createElement('label'); line.className='classic-check'; const check=document.createElement('input'); check.type='checkbox'; line.append(check,document.createTextNode('باز شدن در تب جدید')); box.append(label,line); apply.addEventListener('click',()=>{ const url=safeURL(input.value); if(!url){error.textContent='نشانی معتبر وارد کنید.';return;} const blank=check.checked; closeModal(); restore(); const sel=window.getSelection(); if (!sel || sel.isCollapsed) insertHTML(`<a href="${url.replace(/&/g,'&amp;').replace(/"/g,'&quot;')}"${blank?' target="_blank"':''}>${url.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</a>`); else { document.execCommand('createLink',false,url); const node=window.getSelection()?.anchorNode; const a=(node?.nodeType===1?node:node?.parentElement)?.closest('a'); if(a&&field.contains(a)){ if(blank){a.target='_blank';a.rel='noopener noreferrer';} else {a.removeAttribute('target');a.removeAttribute('rel');} } remember(); changed(); } }); }); }
@@ -94,16 +116,18 @@
       getHTML: html, getText: text, focus(){(mode==='visual'?field:source).focus({ preventScroll: true });},
       setHTML(value){field.innerHTML=sanitize(value);source.value=field.innerHTML;savedRange=null;changed();},
       onChange(fn){listeners.add(fn);return()=>listeners.delete(fn);},
-      setContext(key,value,revision=''){ currentKey=key||'';base=revision; savedAt=''; dirty=false; savedRange=null; mode='visual';source.hidden=true;field.hidden=false;field.innerHTML=sanitize(value);source.value=field.innerHTML;visualTab.setAttribute('aria-selected','true');textTab.setAttribute('aria-selected','false');toolbar.querySelectorAll('button,select,input').forEach((el)=>{el.disabled=false;});let recovered=false;try{const saved=currentKey?JSON.parse(localStorage.getItem(currentKey)||'null'):null;if(typeof saved?.html === 'string'){const differs=saved.html!==field.innerHTML || JSON.stringify(saved.meta ?? null)!==JSON.stringify(options.getDraftMetadata?.() ?? null);if(!differs){if(currentKey)localStorage.removeItem(currentKey);}else{const msg=saved.base===base ? 'پیش‌نویس ذخیره‌شده‌ای پیدا شد. آیا بازیابی شود؟' : 'این پیش‌نویس متعلق به نسخهٔ قدیمی‌تری از کادر است و بازیابی آن متن فعلی را در ویرایشگر جایگزین می‌کند. آیا بازیابی شود؟';const ask=typeof options.confirmDraft==='function'?options.confirmDraft:confirm;const decision=ask(msg);if(decision&&typeof decision.then==='function'){updateStatus();return decision.then((accepted)=>{if(currentKey!==(key||''))return false;if(accepted){field.innerHTML=sanitize(saved.html);source.value=field.innerHTML;options.onRestore?.(saved.meta);dirty=true;changed();return true;}try{if(key)localStorage.removeItem(key);}catch{}updateStatus();return false;});}if(decision){field.innerHTML=sanitize(saved.html);source.value=field.innerHTML;options.onRestore?.(saved.meta);dirty=true;recovered=true;}else if(currentKey){localStorage.removeItem(currentKey);}}}}catch{}updateStatus();return recovered;},
+      setContext(key,value,revision=''){ closeModal({ restoreFocus: false }); currentKey=key||'';base=revision; savedAt=''; dirty=false; savedRange=null; mode='visual';source.hidden=true;field.hidden=false;field.innerHTML=sanitize(value);source.value=field.innerHTML;visualTab.setAttribute('aria-selected','true');textTab.setAttribute('aria-selected','false');toolbar.querySelectorAll('button,select,input').forEach((el)=>{el.disabled=false;});let recovered=false;try{const saved=currentKey?JSON.parse(localStorage.getItem(currentKey)||'null'):null;if(typeof saved?.html === 'string'){const differs=saved.html!==field.innerHTML || JSON.stringify(saved.meta ?? null)!==JSON.stringify(options.getDraftMetadata?.() ?? null);if(!differs){if(currentKey)localStorage.removeItem(currentKey);}else{const msg=saved.base===base ? 'پیش‌نویس ذخیره‌شده‌ای پیدا شد. آیا بازیابی شود؟' : 'این پیش‌نویس متعلق به نسخهٔ قدیمی‌تری از کادر است و بازیابی آن متن فعلی را در ویرایشگر جایگزین می‌کند. آیا بازیابی شود؟';const ask=typeof options.confirmDraft==='function'?options.confirmDraft:confirm;const decision=ask(msg);if(decision&&typeof decision.then==='function'){updateStatus();return decision.then((accepted)=>{if(currentKey!==(key||''))return false;if(accepted){field.innerHTML=sanitize(saved.html);source.value=field.innerHTML;options.onRestore?.(saved.meta);dirty=true;changed();return true;}try{if(key)localStorage.removeItem(key);}catch{}updateStatus();return false;});}if(decision){field.innerHTML=sanitize(saved.html);source.value=field.innerHTML;options.onRestore?.(saved.meta);dirty=true;recovered=true;}else if(currentKey){localStorage.removeItem(currentKey);}}}}catch{}updateStatus();return recovered;},
       saveDraft, clearDraft(){try{if(currentKey)localStorage.removeItem(currentKey);}catch{}dirty=false;},
-      setPlainMode(enabled){ plainMode=!!enabled; shell.classList.toggle('classic-plain-mode', plainMode); if(enabled&&mode==='text')setMode('visual'); field.contentEditable=enabled?'plaintext-only':'true'; },
-      resetToolbar(){ mode='visual'; source.hidden=true; field.hidden=false; visualTab.setAttribute('aria-selected','true'); textTab.setAttribute('aria-selected','false'); currentKey=''; dirty=false; },
+      setPlainMode(enabled){ plainMode=!!enabled; if(plainMode)closeModal({ restoreFocus: false }); shell.classList.toggle('classic-plain-mode', plainMode); if(enabled&&mode==='text')setMode('visual'); field.contentEditable=enabled?'plaintext-only':'true'; },
+      resetToolbar(){ closeModal({ restoreFocus: false }); mode='visual'; source.hidden=true; field.hidden=false; visualTab.setAttribute('aria-selected','true'); textTab.setAttribute('aria-selected','false'); currentKey=''; dirty=false; },
       syncRange(range){ if(range&&field.contains(range.startContainer)&&field.contains(range.endContainer)) savedRange=range.cloneRange(); },
       notifyChange(){ remember(); changed(); },
       attachField(container){ container.append(field, source); },
       detachField(){ shell.insertBefore(field, status); shell.insertBefore(source, status); },
+      hasOpenModal: () => Boolean(modal),
+      closeModal,
       exitFullscreen(){ if(shell.classList.contains('classic-fullscreen')) {shell.classList.remove('classic-fullscreen'); full.setAttribute('aria-pressed','false'); options.onFullscreen?.(false);} },
-      destroy(){clearInterval(timer);shell.remove();}, element: shell, field, colorInput: color,
+      destroy(){ closeModal({ restoreFocus: false }); clearInterval(timer); shell.remove(); }, element: shell, field, colorInput: color,
     };
     if (options.autosaveKey) api.setContext(options.autosaveKey, options.initialHTML ?? field.innerHTML, options.revision || '');
     updateStatus(); return api;

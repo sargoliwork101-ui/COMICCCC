@@ -44,11 +44,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.67"
+    assert health.json()["version"] == "3.68"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۶۷ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۶۸ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -1928,6 +1928,185 @@ def test_atomic_exports_leave_no_partial_or_tmp_files_on_failure(client, monkeyp
     assert not (exports_dir / "atomic-check.docx").exists()
     assert not (exports_dir / "atomic-check-images.zip").exists()
     assert list(exports_dir.glob("*.tmp")) == []
+
+
+def test_docx_extreme_aspect_ratio_aligns_textbox_coordinates_with_clamped_page(client):
+    import re
+    import xml.etree.ElementTree as ET
+
+    buf = io.BytesIO()
+    Image.new("RGB", (300, 12000), "white").save(buf, "PNG")
+    create_res = client.post("/api/projects", json={"name": "Webtoon Clamp"})
+    assert create_res.status_code == 201
+    project_id = create_res.json()["id"]
+    up_res = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("strip.png", buf.getvalue(), "image/png"))],
+    )
+    assert up_res.status_code == 200
+    img_item = up_res.json()["images"][0]
+    state = client.get(f"/api/projects/{project_id}").json()
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1,
+            "x0": 75,
+            "y0": 1200,
+            "x1": 225,
+            "y1": 2400,
+            "tx0": 75,
+            "ty0": 1200,
+            "tx1": 225,
+            "ty1": 2400,
+            "text": "TALL",
+            "tr": "حباب وسط نوار باریک",
+            "enabled": True,
+        }
+    ]
+    put_res = client.put(f"/api/projects/{project_id}/state", json={"state": state})
+    assert put_res.status_code == 200
+
+    exp_res = client.post(
+        f"/api/projects/{project_id}/export",
+        json={"kind": "docx", "image_ids": [img_item["id"]], "name": "webtoon-clamp", "docx_mode": "translation"},
+    )
+    assert exp_res.status_code == 200, exp_res.text
+    with zipfile.ZipFile(io.BytesIO(exp_res.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+
+    ET.fromstring(doc_xml)
+    assert 'w:w="1440"' in doc_xml
+    assert 'w:h="30000"' in doc_xml
+    m = re.search(
+        r'margin-left:([0-9.]+)pt;margin-top:([0-9.]+)pt;width:([0-9.]+)pt;height:([0-9.]+)pt',
+        doc_xml,
+    )
+    assert m is not None, doc_xml
+    left_pt, top_pt, width_pt, height_pt = (float(v) for v in m.groups())
+    # Clamped page width is 1440 dxa = 72pt; bubble spans 25%..75% horizontally -> left=18pt, width=36pt.
+    assert abs(left_pt - 18.0) < 0.05
+    assert abs(width_pt - 36.0) < 0.05
+    # Page height is 30000 dxa = 1500pt; bubble spans 10%..20% vertically -> top=150pt, height=150pt.
+    assert abs(top_pt - 150.0) < 0.05
+    assert abs(height_pt - 150.0) < 0.05
+
+
+def test_txt_and_docx_clean_legacy_markers_extract_rich_html_and_skip_disabled(client):
+    import re
+
+    project, item = make_project(client)
+    state = client.get(f"/api/projects/{project['id']}").json()
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1,
+            "x0": 20,
+            "y0": 20,
+            "x1": 180,
+            "y1": 80,
+            "text": "**HELLO** [color=#ff0000]WORLD[/color]",
+            "tr": "**سلام** __دوست__ *خوب* [size=20][color=#112233]من[/color][/size]",
+            "enabled": True,
+        },
+        {
+            "id": 2,
+            "x0": 20,
+            "y0": 90,
+            "x1": 120,
+            "y1": 130,
+            "tx0": 20,
+            "ty0": 90,
+            "tx1": 120,
+            "ty1": 130,
+            "text": "RICH ONLY",
+            "tr": "",
+            "richHtml": "<div><b>خط اول طولانی برای آزمایش اندازه خودکار متن داخل کادر</b></div><div>خط دوم</div>",
+            "enabled": True,
+        },
+        {
+            "id": 3,
+            "x0": 20,
+            "y0": 140,
+            "x1": 120,
+            "y1": 175,
+            "text": "HIDDEN SOURCE",
+            "tr": "این کادر غیرفعال نباید در خروجی متنی بیاید",
+            "enabled": False,
+        },
+    ]
+    put_res = client.put(f"/api/projects/{project['id']}/state", json={"state": state})
+    assert put_res.status_code == 200
+
+    txt_res = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={"kind": "txt", "image_ids": [item["id"]], "name": "clean-export"},
+    )
+    assert txt_res.status_code == 200, txt_res.text
+    txt_body = txt_res.content.decode("utf-8-sig")
+    assert "HELLO WORLD" in txt_body
+    assert "سلام دوست خوب من" in txt_body
+    assert "**" not in txt_body and "[size=" not in txt_body and "[color=" not in txt_body
+    assert "خط اول طولانی برای آزمایش اندازه خودکار متن داخل کادر\nخط دوم" in txt_body
+    assert "(بدون ترجمه)" not in txt_body
+    assert "HIDDEN SOURCE" not in txt_body
+    assert "این کادر غیرفعال" not in txt_body
+
+    docx_res = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={"kind": "docx", "image_ids": [item["id"]], "name": "clean-docx", "docx_mode": "translation"},
+    )
+    assert docx_res.status_code == 200, docx_res.text
+    with zipfile.ZipFile(io.BytesIO(docx_res.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+    assert "**" not in doc_xml and "[size=" not in doc_xml and "[color=" not in doc_xml
+    assert "HIDDEN SOURCE" not in doc_xml and "این کادر غیرفعال" not in doc_xml
+    # Block 2 (100x40px with long richHtml and empty `tr`) must auto-fit cleanly instead of exploding to 44px (~238 half-pts).
+    sz_vals = [int(v) for v in re.findall(r'<w:sz w:val="(\d+)"/>', doc_xml)]
+    assert sz_vals and max(sz_vals) < 160
+
+
+def test_docx_translation_mode_honors_per_block_ocr_text_mode(client):
+    project, item = make_project(client)
+    state = client.get(f"/api/projects/{project['id']}").json()
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1,
+            "x0": 20,
+            "y0": 20,
+            "x1": 180,
+            "y1": 80,
+            "text": "HELLO HERO",
+            "tr": "سلام قهرمان",
+            "textMode": "translation",
+            "enabled": True,
+        },
+        {
+            "id": 2,
+            "x0": 20,
+            "y0": 95,
+            "x1": 180,
+            "y1": 155,
+            "text": "BOOM SFX!",
+            "tr": "ترجمه پنهان جلوه صوتی",
+            "align": "right",
+            "textMode": "ocr",
+            "enabled": True,
+        },
+    ]
+    put_res = client.put(f"/api/projects/{project['id']}/state", json={"state": state})
+    assert put_res.status_code == 200
+
+    docx_res = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={"kind": "docx", "image_ids": [item["id"]], "name": "mixed-mode", "docx_mode": "translation"},
+    )
+    assert docx_res.status_code == 200, docx_res.text
+    with zipfile.ZipFile(io.BytesIO(docx_res.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+
+    assert "سلام قهرمان" in doc_xml
+    assert "BOOM SFX!" in doc_xml
+    assert "ترجمه پنهان جلوه صوتی" not in doc_xml
+    assert '<w:jc w:val="left"/>' in doc_xml
+
 
 
 

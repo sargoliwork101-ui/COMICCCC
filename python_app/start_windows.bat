@@ -21,7 +21,7 @@ set "COMIC_MANAGED_PYTHON=%LocalAppData%\Programs\ComicOCRStudio\Python313\pytho
 
 rem A broken or unsupported existing environment is preserved before rebuilding.
 if not exist "%VENV_PYTHON%" goto prepare_python
-"%VENV_PYTHON%" -c "import sys,struct; sys.exit(0 if sys.version_info >= (3,11) and struct.calcsize('P') == 8 else 1)" >nul 2>&1
+"%VENV_PYTHON%" -c "import sys,struct; sys.exit(0 if (3,11) <= sys.version_info[:2] < (3,14) and struct.calcsize('P') == 8 else 1)" >nul 2>&1
 if errorlevel 1 goto unsupported_venv
 if not exist "%READY%" goto have_venv
 echo [Comic OCR Studio] Using the installed packages in this folder's .venv.

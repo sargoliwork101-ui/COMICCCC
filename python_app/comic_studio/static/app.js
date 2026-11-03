@@ -1394,74 +1394,6 @@ async function performContextTranslation(request, preview, ongoing = null, corre
   }
 }
 
-async function performTranslation(ids, provider, preview, startIndex = 0, previouslyCompleted = 0) {
-  translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
-  const controller = new AbortController();
-  translationAbortController = controller; translationCancelledByUser = false; translationClosingNormally = false;
-  translationRunning = true; $('cancelTranslationBtn')?.classList.remove('hidden'); showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden'); $('translationStatus').textContent = 'در حال آماده‌سازی ترجمه…'; setProgress('translationProgress', null, true);
-  const projectId = state.project.id; const language = $('ocrLanguage').value; let completed = previouslyCompleted; let currentPage = ''; let phase = 'translation'; let failedIndex = startIndex;
-  const checkNotCancelled = () => {
-    if (translationCancelledByUser || controller.signal.aborted) {
-      const err = new Error('عملیات توسط کاربر لغو شد.'); err.name = 'AbortError'; err.cancelled = true; throw err;
-    }
-  };
-  try {
-    await runJob('در حال ترجمهٔ متن‌ها…', async () => {
-      if (provider === 'free') {
-        const result = await api(`/api/projects/${projectId}/translate`, {
-          ...jsonOptions('POST', { image_ids: ids, provider, source_language: language, confirmation: preview.signature }),
-          signal: controller.signal,
-        });
-        checkNotCancelled();
-        adoptProject(result); setOverlayMode('translation', false); await saveProject(); await renderImagesText();
-      } else {
-        if (!Array.isArray(preview.tasks) || !preview.tasks.length) throw new Error('فهرست درخواست‌های تأییدشده موجود نیست؛ دوباره پیش‌نمایش بگیرید.');
-        for (const [index, page] of preview.tasks.entries()) {
-          if (index < startIndex) continue;
-          checkNotCancelled();
-          failedIndex = index;
-          currentPage = page.imageName || String(index + 1);
-          $('translationStatus').textContent = `درخواست ${index + 1} از ${preview.tasks.length}: ${currentPage}${page.paragraph ? ` · بند ${page.paragraph}` : ''}`;
-          phase = 'translation';
-          const result = await api(`/api/projects/${projectId}/translate`, {
-            ...jsonOptions('POST', {
-              image_ids: ids, provider, source_language: language, skill: preview.skill, reuse_repeated: preview.reuseRepeated ?? true, confirmation: page.signature, call_id: page.callId, call_image_id: page.imageId,
-              batch_index: index + 1, batch_total: preview.tasks.length,
-            }),
-            signal: controller.signal,
-          });
-          checkNotCancelled();
-          // A successful response means the page has already been persisted.
-          adoptProject(result); completed += 1; setOverlayMode('translation', false);
-          phase = 'preview';
-          try { await renderImagesText(page.affectedImageIds || [page.imageId]); }
-          catch (error) { toast(`درخواست ترجمه ذخیره شد، اما همگام‌سازی پیش‌نمایش ناموفق بود: ${error.message || error}`, true); }
-        }
-        phase = 'save'; await saveProject();
-      }
-    }, 'translationProgress');
-    translationClosingNormally = true;
-    closeDialog('translationDialog'); toast('ترجمه روی تصویر آمد و پیش‌نمایش آماده شد');
-  } catch (error) {
-    if (translationCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
-      toast('پنجرهٔ ترجمه بسته شد و عملیات متوقف گردید');
-      api(`/api/projects/${projectId}`).then((fresh) => { if (state.project?.id === projectId && !inlineDraft) adoptProject(fresh); }).catch(() => {});
-      return;
-    }
-    if (provider !== 'free') {
-      const outcome = phase !== 'translation' ? 'پاسخ این درخواست ذخیره شده، اما به‌روزرسانی پیش‌نمایش یا تنظیمات کامل نشد.' : 'وضعیت درخواست جاری ممکن است نامشخص باشد؛ قبل از ارسال دوباره گزارش و پروژه را بررسی کنید.';
-      error.message = `${completed} درخواست با موفقیت ذخیره شد؛ در صفحهٔ «${currentPage || 'اول'}» متوقف شد. ${outcome} ${error.message || ''} برای ادامه، فقط صفحه‌های باقی‌مانده و صفحهٔ ناتمام را انتخاب و پیش‌نمایش تازه را تأیید کنید؛ بخش‌های ذخیره‌شدهٔ صفحهٔ ناتمام دوباره فرستاده نمی‌شوند.`;
-    }
-    $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`;
-    translationRetryAction = phase === 'translation' && error.status !== 409 ? () => performTranslation(ids, provider, preview, failedIndex, completed) : null;
-    $('retryTranslation').classList.toggle('hidden', !translationRetryAction); $('translationErrorChoice').classList.remove('hidden'); $('copyTranslationError').classList.remove('hidden'); throw error;
-  } finally {
-    if (translationAbortController === controller) translationAbortController = null;
-    translationClosingNormally = false; translationRunning = false; $('cancelTranslationBtn')?.classList.add('hidden');
-    dismissJobCancelModal('translation');
-  }
-}
-
 // ---------- Typeset preview and export ----------
 async function ensureFont() { if (document.fonts?.load) { try { await Promise.all([document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'), document.fonts.load('400 16px Vazirmatn', 'ابپتثجچ')]); } catch { /* fallback */ } } }
 async function renderAndUploadNow(item, projectId, mode) {
@@ -2224,6 +2156,7 @@ function closeInlineEditor(force = false) {
   const committed = inlineEditSession?.close({ discardConflict: force }) ?? false;
   if (!committed && !force) return false;
   if (committed) classicEditor.clearDraft(); else classicEditor.saveDraft();
+  classicEditor.closeModal?.({ restoreFocus: false });
   classicEditor.exitFullscreen(); classicEditor.detachField();
   const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
   box?.classList.remove('editing', 'show-output');
@@ -3636,7 +3569,7 @@ function bindEvents() {
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
   [['editorAlignLeft', 'left'], ['editorAlignCenter', 'center'], ['editorAlignRight', 'right'], ['editorAlignTop', 'top'], ['editorAlignMiddle', 'middle'], ['editorAlignBottom', 'bottom']].forEach(([id, direction]) => $(id).addEventListener('click', () => alignSelectedBoxes(direction)));
-  $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); if (imageOverview) exitImageOverview().catch((error) => toast(error.message, true)); else if (inlineDraft) closeInlineEditor(); else closeEditor().catch((error) => toast(error.message, true)); });
+  $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); if (classicEditor?.hasOpenModal?.()) classicEditor.closeModal(); else if (imageOverview) exitImageOverview().catch((error) => toast(error.message, true)); else if (inlineDraft) closeInlineEditor(); else closeEditor().catch((error) => toast(error.message, true)); });
   $('inlineEditorApply').addEventListener('click', applyInlineEditor);
   $('inlinePreview').addEventListener('mousedown', (event) => event.preventDefault());
   $('inlinePreview').addEventListener('click', () => setInlineOutputPreview(!inlineDraft?.showOutput));
@@ -3782,6 +3715,7 @@ function bindEvents() {
       lastEscapeKeyAt = performance.now();
       if (event.repeat) { event.preventDefault(); event.stopPropagation(); return; }
       if ($('appModalDialog')?.open) { resolveActiveModal(false); event.preventDefault(); event.stopPropagation(); return; }
+      if (classicEditor?.hasOpenModal?.()) { classicEditor.closeModal(); event.preventDefault(); event.stopPropagation(); return; }
       const topStackedId = [...openDialogStack].reverse().find((id) => $(id)?.open);
       if (topStackedId && topStackedId !== 'editorDialog') {
         if (closeTopDialog()) { event.preventDefault(); event.stopPropagation(); }

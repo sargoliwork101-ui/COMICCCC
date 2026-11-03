@@ -1,5 +1,125 @@
 const $ = (id) => document.getElementById(id);
 
+let extModalResolver = null;
+let extModalKeyHandler = null;
+let extModalPrevFocus = null;
+
+function isCustomDialogSpy(fn) {
+  return !window.__forceExtModal && typeof fn === 'function' && !/\[native code\]/.test(String(fn));
+}
+function ensureExtModal() {
+  let root = $('extModal');
+  if (root) return root;
+  root = document.createElement('div');
+  root.id = 'extModal';
+  root.className = 'ext-modal hidden';
+  root.setAttribute('role', 'dialog');
+  root.setAttribute('aria-modal', 'true');
+  root.setAttribute('aria-labelledby', 'extModalTitle');
+  root.setAttribute('aria-describedby', 'extModalMsg');
+  root.innerHTML = '<div class="ext-modal-card"><h3 id="extModalTitle" class="ext-modal-title">تأیید عملیات</h3>' +
+    '<p id="extModalMsg" class="ext-modal-msg"></p>' +
+    '<div class="ext-modal-actions"><button type="button" id="extModalCancel" class="btn ghost">انصراف</button>' +
+    '<button type="button" id="extModalOk" class="btn">تأیید</button></div></div>';
+  document.body.appendChild(root);
+  return root;
+}
+function isExtModalOpen() {
+  const root = $('extModal');
+  return Boolean(root && !root.classList.contains('hidden'));
+}
+function finishExtModal(result) {
+  const root = $('extModal');
+  if (extModalKeyHandler) {
+    document.removeEventListener('keydown', extModalKeyHandler, true);
+    extModalKeyHandler = null;
+  }
+  if (root) root.classList.add('hidden');
+  const resolve = extModalResolver;
+  extModalResolver = null;
+  const prev = extModalPrevFocus;
+  extModalPrevFocus = null;
+  if (prev && typeof prev.focus === 'function' && prev.isConnected) {
+    try { prev.focus(); } catch { /* تمرکز قبلی دیگر در دسترس نیست */ }
+  }
+  if (resolve) resolve(result);
+}
+function openExtModal(message, opts = {}) {
+  if (extModalResolver) finishExtModal(false);
+  const root = ensureExtModal();
+  const titleEl = $('extModalTitle');
+  const msgEl = $('extModalMsg');
+  const okBtn = $('extModalOk');
+  const cancelBtn = $('extModalCancel');
+  const isAlert = Boolean(opts.alert);
+  titleEl.textContent = opts.title || (isAlert ? 'پیام افزونه' : 'تأیید عملیات');
+  msgEl.textContent = String(message || '');
+  okBtn.textContent = opts.okText || (isAlert ? 'باشه' : 'تأیید');
+  okBtn.classList.toggle('danger', Boolean(opts.danger && !isAlert));
+  cancelBtn.textContent = opts.cancelText || 'انصراف';
+  cancelBtn.classList.toggle('hidden', isAlert);
+  extModalPrevFocus = document.activeElement;
+  root.classList.remove('hidden');
+  okBtn.onclick = () => finishExtModal(true);
+  cancelBtn.onclick = () => finishExtModal(false);
+  root.onmousedown = (e) => { if (e.target === root) { e.preventDefault(); finishExtModal(false); } };
+  return new Promise((resolve) => {
+    extModalResolver = resolve;
+    extModalKeyHandler = (e) => {
+      if (!isExtModalOpen()) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+        finishExtModal(false);
+        return;
+      }
+      if (e.key === 'Tab') {
+        const focusables = isAlert ? [okBtn] : [cancelBtn, okBtn];
+        const active = document.activeElement;
+        if (!focusables.includes(active)) {
+          e.preventDefault();
+          focusables[0].focus();
+          return;
+        }
+        if (focusables.length === 1) {
+          e.preventDefault();
+          okBtn.focus();
+          return;
+        }
+        if (e.shiftKey && active === focusables[0]) { e.preventDefault(); focusables[1].focus(); }
+        else if (!e.shiftKey && active === focusables[1]) { e.preventDefault(); focusables[0].focus(); }
+      }
+    };
+    document.addEventListener('keydown', extModalKeyHandler, true);
+    (isAlert ? okBtn : (opts.danger ? cancelBtn : okBtn)).focus();
+  });
+}
+function extConfirm(message, opts = {}) {
+  if (isCustomDialogSpy(window.confirm)) return Promise.resolve(Boolean(window.confirm(message)));
+  return openExtModal(message, { ...opts, alert: false });
+}
+function runExtConfirm(message, opts, onApproved) {
+  if (isCustomDialogSpy(window.confirm)) {
+    const ok = Boolean(window.confirm(message));
+    if (ok && onApproved) return Promise.resolve(onApproved()).then(() => true);
+    return Promise.resolve(ok);
+  }
+  return openExtModal(message, { ...opts, alert: false }).then((ok) => {
+    if (ok && onApproved) return Promise.resolve(onApproved()).then(() => true);
+    return ok;
+  });
+}
+function extAlert(message, opts = {}) {
+  if (isCustomDialogSpy(window.alert)) {
+    window.alert(message);
+    return Promise.resolve(true);
+  }
+  return openExtModal(message, { title: 'پیام افزونه', okText: 'باشه', ...opts, alert: true });
+}
+window.extConfirm = extConfirm;
+window.extAlert = extAlert;
+
 const ICON_CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 const ICON_ZOOM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg>';
 const ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/></svg>';
@@ -349,18 +469,28 @@ function removeItemsFromGrid(targets) {
 }
 function deleteItem(it) {
   if (!it || building || loading) return;
-  if (!confirm(`تصویر ${it.i + 1} حذف شود؟`)) return;
-  if (editingPageGroupId !== null) cancelPageGroupEdit();
-  removeItemsFromGrid([it]);
+  runExtConfirm(
+    `تصویر ${it.i + 1} حذف شود؟`,
+    { title: 'حذف تصویر', okText: 'حذف', cancelText: 'انصراف', danger: true },
+    () => {
+      if (editingPageGroupId !== null) cancelPageGroupEdit();
+      removeItemsFromGrid([it]);
+    }
+  );
 }
 // حذف دسته‌جمعی: فقط کارت‌های بارگیری‌شده و انتخاب‌شده؛ یک تأیید برای کل مجموعه
 function deleteSelectedItems() {
   if (building || loading) return;
   const targets = items.filter((it) => it.state === 'ok' && it.selected);
   if (!targets.length) return;
-  if (!confirm(`${targets.length} تصویر انتخاب‌شده حذف شوند؟`)) return;
-  if (editingPageGroupId !== null) cancelPageGroupEdit();
-  removeItemsFromGrid(targets);
+  runExtConfirm(
+    `${targets.length} تصویر انتخاب‌شده حذف شوند؟`,
+    { title: 'حذف تصاویر انتخاب‌شده', okText: 'حذف همه', cancelText: 'انصراف', danger: true },
+    () => {
+      if (editingPageGroupId !== null) cancelPageGroupEdit();
+      removeItemsFromGrid(targets);
+    }
+  );
 }
 
 // پالت رنگی گروه‌ها: هر گروه شمارهٔ نمایشی خودش رنگ ثابتی دارد تا گروه‌ها به‌راحتی از هم تفکیک شوند
@@ -621,6 +751,9 @@ async function openPdfImportTab() {
     if (currentTab && Number.isInteger(currentTab.id)) returnTabId = currentTab.id;
   } catch { /* پیش‌نمایش ممکن است در محیطی بدون tabs.getCurrent باز شده باشد */ }
 
+  if (typeof PDFImportStore !== 'undefined' && typeof PDFImportStore.pruneStaleSessions === 'function') {
+    PDFImportStore.pruneStaleSessions(undefined, pendingPdfImportToken || '').catch(() => {});
+  }
   pendingPdfImportToken = token;
   const query = new URLSearchParams({ token });
   if (returnTabId !== null) query.set('returnTab', String(returnTabId));
@@ -629,7 +762,7 @@ async function openPdfImportTab() {
     $('loadText').innerText = 'فایل PDF را در زبانهٔ تازه انتخاب کنید؛ پس از تبدیل به این پیش‌نمایش برمی‌گردد.';
   } catch (error) {
     pendingPdfImportToken = null;
-    alert(`بازکردن زبانهٔ تبدیل PDF ناموفق بود: ${error && error.message ? error.message : error}`);
+    extAlert(`بازکردن زبانهٔ تبدیل PDF ناموفق بود: ${error && error.message ? error.message : error}`, { title: 'خطا در بازکردن زبانه' });
   }
 }
 
@@ -1187,7 +1320,7 @@ async function openLightbox(it) {
     $('lbImg').src = lbUrl;
     $('lightbox').classList.remove('hidden');
     document.body.style.overflow = 'hidden';
-  } catch (e) { alert('بازکردن تصویر ناموفق بود: ' + (e.message || e)); }
+  } catch (e) { extAlert('بازکردن تصویر ناموفق بود: ' + (e.message || e), { title: 'خطا در نمایش تصویر' }); }
 }
 function closeLightbox() {
   $('lightbox').classList.add('hidden');
@@ -1213,7 +1346,7 @@ async function copyLightboxImage() {
     const btn = $('lbCopy');
     btn.innerText = 'کپی شد ✓';
     setTimeout(() => { if (btn.isConnected) btn.innerText = 'کپی تصویر'; }, 1400);
-  } catch (e) { alert('کپی تصویر ناموفق بود: ' + (e.message || e)); }
+  } catch (e) { extAlert('کپی تصویر ناموفق بود: ' + (e.message || e), { title: 'خطا در کپی تصویر' }); }
 }
 
 function cropImageDimensions() {
@@ -1297,10 +1430,20 @@ function adjustCropToRatio() {
   };
   paintCropSelection(cropRectDraft);
 }
+let cropInitialSnapshot = 'null';
+function cropSnapshot(rect) {
+  if (!rect || !(rect.w > 0 && rect.h > 0)) return 'null';
+  const r = (v) => Math.round(Number(v || 0) * 1e6);
+  return `${r(rect.x)},${r(rect.y)},${r(rect.w)},${r(rect.h)}`;
+}
+function isCropDirty() {
+  return cropSnapshot(cropRectDraft) !== cropInitialSnapshot;
+}
 async function openCropper(it) {
   if (!it || !it.blob) return;
   cropItem = it;
   cropRectDraft = it.cropRect ? { ...it.cropRect } : null;
+  cropInitialSnapshot = cropSnapshot(cropRectDraft);
   const base = it.edited || it;
   if (cropObjectUrl) URL.revokeObjectURL(cropObjectUrl);
   cropObjectUrl = URL.createObjectURL(base.blob);
@@ -1316,7 +1459,7 @@ function closeCropper() {
   $('cropImg').removeAttribute('src');
   $('cropSelection').style.display = 'none';
   if (cropObjectUrl) { URL.revokeObjectURL(cropObjectUrl); cropObjectUrl = null; }
-  cropItem = null; cropDragStart = null;
+  cropItem = null; cropDragStart = null; cropInitialSnapshot = 'null';
   document.body.style.overflow = '';
 }
 function applyCrop() {
@@ -1435,8 +1578,18 @@ function handleOverlayKeydown(e) {
     return;
   }
   if (e.key !== 'Escape') return;
-  if (cropOpen) closeCropper();
-  else if (!$('lightbox').classList.contains('hidden')) closeLightbox();
+  if (isExtModalOpen()) return;
+  if (cropOpen) {
+    if (!isCropDirty()) {
+      closeCropper();
+    } else {
+      runExtConfirm(
+        'تغییرات کراپ هنوز اعمال نشده است. بدون ذخیره بسته شود؟',
+        { title: 'لغو تغییرات برش', okText: 'بستن بدون ذخیره', cancelText: 'ادامهٔ ویرایش', danger: true },
+        () => closeCropper()
+      );
+    }
+  } else if (!$('lightbox').classList.contains('hidden')) closeLightbox();
 }
 
 // ---------- آماده‌سازی تصاویر برای PDF ----------
@@ -1567,7 +1720,7 @@ async function onBuild() {
     .sort((a, b) => (a.pdfOrder || a.i + 1) - (b.pdfOrder || b.i + 1) || a.uid - b.uid);
   if (!sel.length) return;
   const jsPDFLib = window.jspdf && window.jspdf.jsPDF;
-  if (!jsPDFLib) { alert('فایل jspdf.umd.min.js پیدا نشد!'); return; }
+  if (!jsPDFLib) { extAlert('فایل jspdf.umd.min.js پیدا نشد!', { title: 'خطا در ساخت PDF' }); return; }
 
   building = true;
   jobCancelRequested = false;
@@ -1699,8 +1852,23 @@ async function exportBlob(it, fmt) {
   } finally { bmp.close(); }
 }
 
+const WIN_RESERVED_FOLDER_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
 function cleanFolderName(s) {
-  return (s || '').replace(/[\\/:*?"<>|]/g, '_').replace(/^\.+/, '').trim();
+  let cleaned = Array.from(String(s || ''))
+    .filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code > 31 && code !== 127;
+    })
+    .join('')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/^\.+/, '')
+    .replace(/[\s.]+$/, '')
+    .trim();
+  if (cleaned.length > 120) cleaned = cleaned.slice(0, 120).replace(/[\s.]+$/, '').trim();
+  if (!cleaned) return '';
+  if (WIN_RESERVED_FOLDER_RE.test(cleaned)) cleaned = `_${cleaned}`.slice(0, 120);
+  return cleaned;
 }
 
 async function fileExists(dir, name) {
@@ -1924,13 +2092,18 @@ async function savePageProfile() {
 }
 async function deletePageProfile() {
   if (!pageProfileKey || !pageProfileAvailable || loading || building) return;
-  if (!confirm('پروفایل ذخیره‌شدهٔ این صفحه حذف شود؟')) return;
-  try {
-    await chrome.storage.local.remove(pageProfileKey);
-    pageProfileAvailable = false;
-    $('profileStatus').innerText = 'پروفایل این صفحه حذف شد.';
-    updateProfileButtons();
-  } catch { $('profileStatus').innerText = 'حذف پروفایل ناموفق بود.'; }
+  return runExtConfirm(
+    'پروفایل ذخیره‌شدهٔ این صفحه حذف شود؟',
+    { title: 'حذف پروفایل صفحه', okText: 'حذف پروفایل', cancelText: 'انصراف', danger: true },
+    async () => {
+      try {
+        await chrome.storage.local.remove(pageProfileKey);
+        pageProfileAvailable = false;
+        $('profileStatus').innerText = 'پروفایل این صفحه حذف شد.';
+        updateProfileButtons();
+      } catch { $('profileStatus').innerText = 'حذف پروفایل ناموفق بود.'; }
+    }
+  );
 }
 function applyProfileSettings(settings = {}) {
   if (typeof settings.pdfName === 'string') $('pdfName').value = settings.pdfName;
@@ -2161,7 +2334,7 @@ async function main() {
     if (topMenu && topMenu.open && !topMenu.contains(e.target)) topMenu.open = false;
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' || isExtModalOpen()) return;
     // اولویت اول: منوها و پنل‌های باز با ESC بسته شوند، نه اینکه کار لغو شود
     let menuConsumed = false;
     if (outputSettings.open) {

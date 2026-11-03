@@ -462,7 +462,7 @@ async function applyEditor() {
     drawThumb(item);
   } catch (e) {
     console.warn(e);
-    alert('خطا در ساخت تصویر: ' + (e && e.message ? e.message : e));
+    extAlert('خطا در ساخت تصویر: ' + (e && e.message ? e.message : e), { title: 'خطا در ساخت تصویر' });
   } finally {
     edBusy = false;
     if (edPending) { edPending = false; applyEditor(); }
@@ -567,7 +567,8 @@ function buildEditor() {
     });
     box.querySelectorAll('.ed-resize').forEach((handle) => handle.addEventListener('pointerdown', (event) => {
       event.preventDefault(); event.stopPropagation();
-      const stageRect = document.querySelector('.ed-stage').getBoundingClientRect();
+      const stageRect = document.querySelector('.ed-stage')?.getBoundingClientRect();
+      if (!stageRect || !stageRect.width || !stageRect.height) return;
       const sx = it.w / stageRect.width, sy = it.h / stageRect.height;
       const dir = handle.dataset.dir;
       let x0 = Number.isFinite(b.tx0) ? b.tx0 : b.x0, y0 = Number.isFinite(b.ty0) ? b.ty0 : b.y0;
@@ -722,7 +723,7 @@ async function closeEditor() {
 // ---------- خروجی متنی قابل ویرایش ----------
 function exportText() {
   const done = items.filter((it) => it.ocr && it.ocr.blocks.length);
-  if (!done.length) { alert('هنوز متنی استخراج نشده است. ابتدا «ترجمهٔ متن تصاویر» را اجرا کنید.'); return; }
+  if (!done.length) { extAlert('هنوز متنی استخراج نشده است. ابتدا «ترجمهٔ متن تصاویر» را اجرا کنید.', { title: 'متنی برای خروجی وجود ندارد' }); return; }
   const pad = Math.max(3, String(items.length).length);
   let out = '';
   done.forEach((it) => {

@@ -49,7 +49,10 @@
       }));
     },
     putSession(session) {
-      return storeRequest('sessions', 'readwrite', (store) => store.put(session));
+      return storeRequest('sessions', 'readwrite', (store) => store.put({
+        updatedAt: Date.now(),
+        ...session
+      }));
     },
     getSession(token) {
       return storeRequest('sessions', 'readonly', (store) => store.get(token));
@@ -75,6 +78,44 @@
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error || new Error('پاک‌سازی داده‌های PDF ناموفق بود'));
         tx.onabort = () => reject(tx.error || new Error('پاک‌سازی داده‌های PDF لغو شد'));
+      }));
+    },
+    pruneStaleSessions(maxAgeMs = 6 * 60 * 60 * 1000, keepToken = '') {
+      const cutoff = Date.now() - Math.max(60 * 1000, Number(maxAgeMs) || 0);
+      return openDatabase().then((db) => new Promise((resolve, reject) => {
+        const tx = db.transaction(['sessions', 'pages'], 'readwrite');
+        const sessionsStore = tx.objectStore('sessions');
+        const pagesStore = tx.objectStore('pages');
+        const validTokens = new Set(keepToken ? [keepToken] : []);
+        let removed = 0;
+        const sessionsReq = sessionsStore.getAll();
+        sessionsReq.onsuccess = () => {
+          for (const entry of sessionsReq.result || []) {
+            if (!entry || !entry.token) continue;
+            if (entry.token === keepToken) {
+              validTokens.add(entry.token);
+              continue;
+            }
+            const stamp = Number(entry.finishedAt || entry.updatedAt || 0);
+            if (!stamp || stamp < cutoff) {
+              sessionsStore.delete(entry.token);
+              removed += 1;
+            } else {
+              validTokens.add(entry.token);
+            }
+          }
+          const pageCursorReq = pagesStore.openCursor();
+          pageCursorReq.onsuccess = () => {
+            const cursor = pageCursorReq.result;
+            if (!cursor) return;
+            const val = cursor.value;
+            if (!val || !validTokens.has(val.token)) cursor.delete();
+            cursor.continue();
+          };
+        };
+        tx.oncomplete = () => resolve(removed);
+        tx.onerror = () => reject(tx.error || new Error('پاک‌سازی نشست‌های قدیمی PDF ناموفق بود'));
+        tx.onabort = () => reject(tx.error || new Error('پاک‌سازی نشست‌های قدیمی PDF لغو شد'));
       }));
     }
   };

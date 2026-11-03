@@ -55,6 +55,57 @@
     }
   }
 
+  function confirmUpdateModal(message) {
+    if (typeof window.extConfirm === 'function') {
+      return window.extConfirm(message, { title: 'به‌روزرسانی افزونه', okText: 'دانلود نسخهٔ جدید', cancelText: 'انصراف' });
+    }
+    if (!window.__forceExtModal && typeof window.confirm === 'function' && !/\[native code\]/.test(String(window.confirm))) {
+      return Promise.resolve(Boolean(window.confirm(message)));
+    }
+    let root = document.getElementById('extModal');
+    if (!root) {
+      root = document.createElement('div');
+      root.id = 'extModal';
+      root.className = 'ext-modal hidden';
+      root.setAttribute('role', 'dialog');
+      root.setAttribute('aria-modal', 'true');
+      root.innerHTML = '<div class="ext-modal-card"><h3 id="extModalTitle" class="ext-modal-title">به‌روزرسانی افزونه</h3>' +
+        '<p id="extModalMsg" class="ext-modal-msg"></p>' +
+        '<div class="ext-modal-actions"><button type="button" id="extModalCancel" class="btn ghost">انصراف</button>' +
+        '<button type="button" id="extModalOk" class="btn">دانلود نسخهٔ جدید</button></div></div>';
+      document.body.appendChild(root);
+    }
+    const titleEl = document.getElementById('extModalTitle');
+    const msgEl = document.getElementById('extModalMsg');
+    const okBtn = document.getElementById('extModalOk');
+    const cancelBtn = document.getElementById('extModalCancel');
+    if (titleEl) titleEl.textContent = 'به‌روزرسانی افزونه';
+    if (msgEl) msgEl.textContent = message;
+    if (okBtn) okBtn.textContent = 'دانلود نسخهٔ جدید';
+    if (cancelBtn) { cancelBtn.textContent = 'انصراف'; cancelBtn.classList.remove('hidden'); }
+    root.classList.remove('hidden');
+    return new Promise((resolve) => {
+      const done = (val) => {
+        document.removeEventListener('keydown', onKey, true);
+        root.classList.add('hidden');
+        resolve(val);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(false); }
+        else if (e.key === 'Tab' && okBtn && cancelBtn) {
+          const active = document.activeElement;
+          if (e.shiftKey && active === cancelBtn) { e.preventDefault(); okBtn.focus(); }
+          else if (!e.shiftKey && active === okBtn) { e.preventDefault(); cancelBtn.focus(); }
+        }
+      };
+      document.addEventListener('keydown', onKey, true);
+      if (okBtn) okBtn.onclick = () => done(true);
+      if (cancelBtn) cancelBtn.onclick = () => done(false);
+      root.onmousedown = (e) => { if (e.target === root) { e.preventDefault(); done(false); } };
+      if (okBtn) okBtn.focus();
+    });
+  }
+
   btn.addEventListener('click', async () => {
     setBusy(true);
     setStatus('در حال بررسی نسخهٔ جدید...');
@@ -70,7 +121,7 @@
         return;
       }
 
-      const approved = window.confirm(
+      const approved = await confirmUpdateModal(
         `نسخهٔ جدید v${latest} پیدا شد. مایل به دانلود به‌روزرسانی هستید؟\n\n` +
         'پس از دانلود باید فایل‌ها را دستی جایگزین و افزونه را Reload کنید.'
       );

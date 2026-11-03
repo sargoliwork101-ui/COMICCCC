@@ -58,3 +58,11 @@ def test_offline_fallback_requires_prior_ready_and_healthy_packages():
     assert 'call :check_imports' in update_failed
     assert update_failed.count('if errorlevel 1 goto failed') >= 2
     assert 'goto run_app' in update_failed
+
+
+def test_existing_venv_and_bootstrap_enforce_matching_python_311_to_313_bounds():
+    venv_check = NORMAL.split('if not exist "%VENV_PYTHON%" goto prepare_python\n', 1)[1].split('\nif errorlevel 1 goto unsupported_venv', 1)[0]
+    assert "(3,11) <= sys.version_info[:2] < (3,14)" in venv_check
+    assert "struct.calcsize('P') == 8" in venv_check
+    assert NORMAL.count("(3,11) <= sys.version_info[:2] < (3,14)") >= 2
+

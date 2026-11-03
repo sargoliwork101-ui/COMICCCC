@@ -30,7 +30,8 @@ export default [
         setStatus: 'readonly', setTaskTitle: 'readonly', setJobHint: 'readonly',
         refreshAll: 'readonly',
         refreshCard: 'readonly', refreshSummary: 'readonly', drawThumb: 'readonly',
-        openEditor: 'readonly', PDFImportStore: 'readonly'
+        openEditor: 'readonly', PDFImportStore: 'readonly',
+        extConfirm: 'readonly', extAlert: 'readonly'
       }
     },
     rules: {

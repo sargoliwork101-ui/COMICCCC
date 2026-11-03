@@ -1236,6 +1236,27 @@ main()
     assert.equal(await page.evaluate(() => !!document.getElementById('inlineEditorField').closest('.classic-fullscreen')), true);
     await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => document.getElementById('inlineEditorField').parentElement === document.querySelector('#editorBoxes .editor-box.editing') && !document.getElementById('inlineEditor').classList.contains('hidden')), true, 'Escape exits fullscreen back to direct editing in the same image box');
+    // v3.68: real Chromium Escape priority + Tab focus trap on .classic-modal inside <dialog id="editorDialog"> + dead performTranslation removed
+    assert.equal(await page.evaluate(() => typeof performTranslation), 'undefined', 'unused performTranslation helper was removed cleanly');
+    await page.click('#inlineEditor .classic-toolbar button[aria-label="درج پیوند (Ctrl+K)"]');
+    assert.equal(await page.evaluate(() => classicEditor.hasOpenModal()), true);
+    await page.keyboard.down('Shift');
+    await page.keyboard.press('Tab');
+    await page.keyboard.up('Shift');
+    assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('classic-primary')), true, 'Shift+Tab wraps focus to last button inside .classic-modal');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('type') === 'url'), true, 'Tab wraps focus back to URL input inside .classic-modal');
+    await page.evaluate(() => document.getElementById('editorDialog').focus());
+    await page.keyboard.press('Escape');
+    assert.deepEqual(
+      await page.evaluate(() => ({
+        modalOpen: classicEditor.hasOpenModal(),
+        dialogOpen: document.getElementById('editorDialog').open,
+        stillEditing: Boolean(inlineDraft),
+      })),
+      { modalOpen: false, dialogOpen: true, stillEditing: true },
+      'Escape closes only .classic-modal without closing inlineDraft or #editorDialog',
+    );
     await page.select('#inlineVerticalAlign', 'bottom');
     await page.$eval('#inlineEditorSize', el => {el.value='33';el.dispatchEvent(new Event('input',{bubbles:true}));});
     await page.waitForFunction(() => Object.keys(localStorage).some(key => key.startsWith('comic-studio-draft:') && JSON.parse(localStorage.getItem(key)).meta?.size === '33'), {timeout:6000});

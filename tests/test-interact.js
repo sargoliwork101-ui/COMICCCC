@@ -89,6 +89,13 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   // ---- helpers ----
   check('cleanFolderName strips illegal chars', h.ev(`cleanFolderName('a/b\\\\c:d*e?f"g<h>i|j')`) === 'a_b_c_d_e_f_g_h_i_j');
   check('cleanFolderName trims leading dots', h.ev(`cleanFolderName('...name')`) === 'name');
+  check('cleanFolderName strips trailing dots/spaces, control chars, caps length, and guards Windows reserved names',
+    h.ev(`cleanFolderName('CON')`) === '_CON' &&
+    h.ev(`cleanFolderName('aux.v1')`) === '_aux.v1' &&
+    h.ev(`cleanFolderName('folder...   ')`) === 'folder' &&
+    h.ev(`cleanFolderName('ch1\\x07\\n')`) === 'ch1' &&
+    h.ev(`cleanFolderName('...')`) === '' &&
+    h.ev(`cleanFolderName('a'.repeat(160)).length`) === 120);
   check('blobExt png', await h.ev(`blobExt(new Blob([new Uint8Array([0x89,0x50,0x4e,0x47])], {type:'image/png'}))`) === 'png');
   check('blobExt jpg', await h.ev(`blobExt(new Blob([new Uint8Array([0xff,0xd8,0xff])], {type:'image/jpeg'}))`) === 'jpg');
   check('canConvert bounds', h.ev('canConvert(100,100)') === true && h.ev('canConvert(40000,100)') === false);
@@ -454,6 +461,17 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
     handle.dispatchEvent(pointer('pointerup', 110, 90));
     check('dragging a resize handle changes translation box geometry', h.ev('items[0].ocr.blocks[0].tx1 > 80 && items[0].ocr.blocks[0].ty1 > 60'),
       h.ev('[items[0].ocr.blocks[0].tx1,items[0].ocr.blocks[0].ty1]'));
+    const savedBeforeZeroStage = h.ev('({tx0:items[0].ocr.blocks[0].tx0, ty0:items[0].ocr.blocks[0].ty0, tx1:items[0].ocr.blocks[0].tx1, ty1:items[0].ocr.blocks[0].ty1})');
+    const edStageEl = h.window.document.querySelector('.ed-stage');
+    const origStageBcr = edStageEl.getBoundingClientRect;
+    edStageEl.getBoundingClientRect = () => ({ left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 });
+    handle.dispatchEvent(pointer('pointerdown', 80, 60));
+    handle.dispatchEvent(pointer('pointermove', 150, 150));
+    handle.dispatchEvent(pointer('pointerup', 150, 150));
+    edStageEl.getBoundingClientRect = origStageBcr;
+    check('zero-dimension stage resize guard prevents NaN/Infinity box coordinates',
+      h.ev('Number.isFinite(items[0].ocr.blocks[0].tx1) && Number.isFinite(items[0].ocr.blocks[0].ty1)') &&
+      JSON.stringify(h.ev('({tx0:items[0].ocr.blocks[0].tx0, ty0:items[0].ocr.blocks[0].ty0, tx1:items[0].ocr.blocks[0].tx1, ty1:items[0].ocr.blocks[0].ty1})')) === JSON.stringify(savedBeforeZeroStage));
     const moveHandle = h.$('edBoxes').querySelector('.ed-move');
     check('translation box has a visible move handle', !!moveHandle);
     moveHandle.setPointerCapture = () => {};
@@ -550,6 +568,43 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   await sleep(20);
   h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   check('escape closes lightbox', h.$('lightbox').classList.contains('hidden'));
+
+  // ---- v2.58: dark Persian #extModal + cropper dirty Escape guard ----
+  h.window.__forceExtModal = true;
+  h.ev('openCropper(items[0])');
+  h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check('unchanged cropper closes immediately on Escape without opening #extModal',
+    h.$('cropper').classList.contains('hidden') && h.$('extModal').classList.contains('hidden'));
+
+  h.ev('openCropper(items[0])');
+  h.ev('cropRectDraft = {x:0.1,y:0.1,w:0.4,h:0.4}');
+  h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  check('dirty cropper Escape opens Persian #extModal while keeping cropper open',
+    !h.$('cropper').classList.contains('hidden') && !h.$('extModal').classList.contains('hidden') &&
+    /کراپ/.test(h.$('extModalMsg').textContent));
+  // Escape while #extModal is open closes ONLY #extModal and preserves dirty cropper
+  h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  await sleep(10);
+  check('Escape on #extModal dismisses only confirmation and keeps dirty cropper intact',
+    !h.$('cropper').classList.contains('hidden') && h.$('extModal').classList.contains('hidden') &&
+    Math.abs(h.ev('cropRectDraft.w') - 0.4) < 1e-9);
+  // Trigger Escape again and confirm discard via #extModalOk
+  h.window.document.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  h.$('extModalOk').click();
+  await sleep(10);
+  check('confirming discard in #extModal closes cropper without overwriting saved cropRect',
+    h.$('cropper').classList.contains('hidden') && h.$('extModal').classList.contains('hidden') &&
+    Math.abs(h.ev('items[0].cropRect.w') - 0.2) < 1e-9);
+
+  // Alert mode hides cancel button and traps Tab on single OK button
+  const alertPromise = h.window.extAlert('آزمایش پیام هشدار فارسی', { title: 'هشدار آزمایشی' });
+  check('extAlert shows single-button Persian modal with hidden cancel',
+    !h.$('extModal').classList.contains('hidden') && h.$('extModalCancel').classList.contains('hidden') &&
+    h.$('extModalOk').textContent === 'باشه');
+  h.$('extModalOk').click();
+  await alertPromise;
+  check('extAlert resolves and hides #extModal on OK click', h.$('extModal').classList.contains('hidden'));
+  h.window.__forceExtModal = false;
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL INTERACTION TESTS PASSED');
   process.exit(failures ? 1 : 0);
