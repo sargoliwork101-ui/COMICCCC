@@ -796,8 +796,8 @@ function check(name, condition) {
 
     $('ocrPageMode').value = 'document';
     vm.runInContext('collectOcrSettings()', context);
-    check('ocrPageMode selector supports auto/comic/document and persists in project settings', vm.runInContext("state.project.settings.ocrPageMode === 'document'", context));
-    $('ocrPageMode').value = 'auto';
+    check('ocrPageMode selector offers explicit comic/document only (no auto) and persists in project settings', JSON.stringify([...$('ocrPageMode').options].map((o) => o.value)) === JSON.stringify(['comic', 'document']) && JSON.stringify([...$('modelsPageMode').options].map((o) => o.value)) === JSON.stringify(['comic', 'document']) && $('ocrConfidence').defaultValue === '0.35' && vm.runInContext("state.project.settings.ocrPageMode === 'document'", context));
+    $('ocrPageMode').value = 'comic';
     vm.runInContext('collectOcrSettings()', context);
     check('dock, Word, PowerPoint, preview, AI and editor progress bars all carry accessible progressbar roles and percentage labels', ['dockProgress', 'docxProgress', 'pptxProgress', 'previewPrepProgress', 'aiProgress', 'editorProgress'].every((id) => $(id) && $(id).closest('[role="progressbar"]')) && !!$('dockProgressPercent'));
     await vm.runInContext(`(async () => {
@@ -1081,11 +1081,27 @@ function check(name, condition) {
     $('modelsBtn').click();
     const cardTier = (name) => [...window.document.querySelectorAll('#engineCards .engine-card')].find((el) => el.querySelector('h3')?.textContent === name)?.dataset.suitability;
     check('modelsDialog syncs #modelsPageMode with #ocrPageMode (document) and highlights engine cards', $('modelsPageMode').value === 'document' && cardTier('Tesseract 5 LSTM') === 'best' && cardTier('Surya') === 'best' && cardTier('PP-OCRv6 Small') === 'medium' && cardTier('EasyOCR') === 'weak');
+    $('modelsPageMode').value = 'document';
+    const origFetchTestEng = window.fetch;
+    let capturedTestBody = null;
+    window.fetch = async (url, opts) => {
+      if (String(url).endsWith('/api/engines/tesseract/test')) {
+        capturedTestBody = JSON.parse(opts.body);
+        return jsonResponse({ blocks: [{ text: 'Article Paragraph', conf: 92, sourceIndent: 0 }] });
+      }
+      return origFetchTestEng(url, opts);
+    };
+    await vm.runInContext(`testEngine('tesseract')`, context);
+    window.fetch = origFetchTestEng;
+    check('testing an engine inside modelsDialog sends current page_mode (document) to /api/engines/<id>/test', capturedTestBody?.page_mode === 'document' && $('modelTestResult').textContent.includes('Article Paragraph'));
+
     $('modelsPageMode').value = 'comic';
     $('modelsPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
     check('switching #modelsPageMode inside modelsDialog re-colors engine cards live', cardTier('PP-OCRv6 Small') === 'best' && cardTier('EasyOCR') === 'best' && cardTier('Surya') === 'medium' && cardTier('Tesseract 5 LSTM') === 'weak' && cardTier('MinerU2.5-Pro') === 'weak');
+    vm.runInContext(`adoptProject({ ...state.project, settings: { ...state.project.settings, ocrPageMode: 'auto' } })`, context);
+    check('legacy projects saved with ocrPageMode=auto normalize cleanly to comic without empty select values', $('ocrPageMode').value === 'comic' && $('modelsPageMode').value === 'comic');
     vm.runInContext(`closeDialog('modelsDialog')`, context);
-    $('ocrPageMode').value = 'auto';
+    $('ocrPageMode').value = 'comic';
     $('ocrPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
     vm.runInContext('state.engines = prevEngines;', Object.assign(context, { prevEngines: prevEnginesV372 }));
     vm.runInContext('updateEngineOptions("rapidocr-v6")', context);

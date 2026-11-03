@@ -682,7 +682,7 @@ function adoptProject(project) {
   state.groupEditId = null; state.groupSnapshot = null;
   $('projectName').value = project.name || 'پروژهٔ کمیک';
   const settings = project.settings || {};
-  const pageMode = ['auto', 'comic', 'document'].includes(settings.ocrPageMode) ? settings.ocrPageMode : 'auto';
+  const pageMode = settings.ocrPageMode === 'document' ? 'document' : 'comic';
   if ($('ocrPageMode')) $('ocrPageMode').value = pageMode;
   if ($('modelsPageMode')) $('modelsPageMode').value = pageMode;
   $('ocrLanguage').value = settings.ocrLanguage || 'eng';
@@ -991,7 +991,7 @@ function collectOutputSettings() {
 function collectOcrSettings() {
   if (!state.project) return;
   state.project.settings = state.project.settings || {};
-  Object.assign(state.project.settings, { ocrEngine: $('ocrEngine').value, ocrLanguage: $('ocrLanguage').value, ocrPageMode: $('ocrPageMode')?.value || 'auto', contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, groupOcrLines: $('ocrGroupLines').checked, eraseOriginal: $('ocrErase').checked });
+  Object.assign(state.project.settings, { ocrEngine: $('ocrEngine').value, ocrLanguage: $('ocrLanguage').value, ocrPageMode: normalizePageMode($('ocrPageMode')?.value), contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, groupOcrLines: $('ocrGroupLines').checked, eraseOriginal: $('ocrErase').checked });
 }
 const DEFAULT_ENGINE_SUITABILITY = {
   'rapidocr-v6': {
@@ -1066,19 +1066,21 @@ const SUITABILITY_META = {
   weak: { icon: '🔴', short: 'ضعیف', badge: 'عملکرد ضعیف', cardBadge: 'عملکرد ضعیف' },
 };
 const PAGE_MODE_LABELS = {
-  auto: 'تشخیص خودکار (کمیک، کتاب و مقاله)',
   comic: 'کمیک و مانگا',
   document: 'کتاب، مقاله و جزوه',
 };
-function engineSuitability(engine, pageMode = 'auto') {
-  const mode = ['auto', 'comic', 'document'].includes(pageMode) ? pageMode : 'auto';
+function normalizePageMode(pageMode) {
+  return pageMode === 'document' ? 'document' : 'comic';
+}
+function engineSuitability(engine, pageMode = 'comic') {
+  const mode = normalizePageMode(pageMode);
   const entry = engine?.suitability?.[mode] || DEFAULT_ENGINE_SUITABILITY[engine?.id]?.[mode] || { tier: 'medium', reason: '' };
   const tier = ['best', 'medium', 'weak'].includes(entry.tier) ? entry.tier : 'medium';
   return { tier, reason: entry.reason || '', ...SUITABILITY_META[tier] };
 }
 function updateEngineOptions(preferredEngine = '') {
   const select = $('ocrEngine'); if (!select) return;
-  const pageMode = $('ocrPageMode')?.value || state.project?.settings?.ocrPageMode || 'auto';
+  const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
   const previous = (typeof preferredEngine === 'string' && preferredEngine) || select.value || state.project?.settings?.ocrEngine || 'rapidocr-v6';
   select.textContent = '';
   state.engines.filter((engine) => engine.selectable !== false).forEach((engine) => {
@@ -1098,7 +1100,7 @@ function updateEngineOptions(preferredEngine = '') {
 function updateOcrEngineStatus() {
   const select = $('ocrEngine');
   const engine = state.engines.find((entry) => entry.id === select?.value); if (!engine) return;
-  const pageMode = $('ocrPageMode')?.value || state.project?.settings?.ocrPageMode || 'auto';
+  const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
   select.dataset.suitability = engineSuitability(engine, pageMode).tier;
   [...$('ocrLanguage').options].forEach((option) => { option.disabled = !engine.languages.includes(option.value); });
   if (!engine.languages.includes($('ocrLanguage').value)) $('ocrLanguage').value = engine.languages[0];
@@ -1292,7 +1294,7 @@ async function runOcr() {
     await runJob('OCR محلی در حال اجراست…', async () => {
       const confidence = $('ocrConfidence').value.trim();
       const result = await api(`/api/projects/${state.project.id}/ocr`, {
-        ...jsonOptions('POST', { image_ids: ids, engine: $('ocrEngine').value, language: $('ocrLanguage').value, page_mode: $('ocrPageMode')?.value || 'auto', contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, group_lines: $('ocrGroupLines').checked, min_confidence: confidence === '' ? .35 : Number(confidence) }),
+        ...jsonOptions('POST', { image_ids: ids, engine: $('ocrEngine').value, language: $('ocrLanguage').value, page_mode: normalizePageMode($('ocrPageMode')?.value), contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, group_lines: $('ocrGroupLines').checked, min_confidence: confidence === '' ? .35 : Number(confidence) }),
         signal: controller.signal,
       });
       if (ocrCancelledByUser || controller.signal.aborted) { const e = new Error('لغو شد'); e.cancelled = true; throw e; }
@@ -1938,7 +1940,7 @@ async function confirmHardwareIfNeeded(engine, hwOverride = null) {
 function renderModels() {
   const container = $('engineCards'); if (!container) return;
   container.textContent = ''; const language = $('testLanguage').value;
-  const modelsMode = $('modelsPageMode')?.value || $('ocrPageMode')?.value || 'auto';
+  const modelsMode = normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value);
   const addGroup = (title, engines, external = false) => {
     if (!engines.length) return;
     const group = document.createElement('section'); group.className = 'model-group';
@@ -2290,7 +2292,7 @@ async function testEngine(engineId) {
   const controller = new AbortController();
   modelAbortController = controller; modelCancelledByUser = false;
   state.modelBusy = engineId; setProgress('modelProgress', null, true); renderModels(); $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
-  try { const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value }), signal: controller.signal }); if (result?.memory) engineMemorySummary = result.memory; setProgress('modelProgress', 1, false); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
+  try { const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value, page_mode: normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value) }), signal: controller.signal }); if (result?.memory) engineMemorySummary = result.memory; setProgress('modelProgress', 1, false); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
   catch (error) {
     setProgress('modelProgress', 0, false);
     if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {

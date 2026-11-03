@@ -1543,7 +1543,7 @@ with zipfile.ZipFile(flow_ocr_path) as zf:
     ocr_text = ''.join(el.text or '' for el in root_ocr.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
     assert 'SOURCE TWO' in ocr_text and 'SOURCE THREE' in ocr_text and 'ترجمهٔ سوم' not in ocr_text
 `, files.docxFlowTr, files.docxFlowOcr]);
-    assert.deepEqual(await page.$eval('#ocrPageMode', (el) => [...el.options].map((o) => o.value)), ['auto', 'comic', 'document'], 'ocrPageMode offers auto, comic, and document modes');
+    assert.deepEqual(await page.$eval('#ocrPageMode', (el) => [...el.options].map((o) => o.value)), ['comic', 'document'], 'ocrPageMode offers explicit comic and document modes without auto');
 
     const latestEdit = Buffer.from(await (await fetch(`${base}/api/projects/${projectId}/images/${imageId}/content?edited=true`)).arrayBuffer());
     const editedPath = path.join(temporary, 'latest-edited.png'); fs.writeFileSync(editedPath, latestEdit);
@@ -2199,9 +2199,24 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     await page.waitForFunction(() => !document.getElementById('editorDialog').open);
     console.log('PASS: v3.71 interactive 13-section Help menu, search, contextual F1 inside editor, and clean Escape stacking');
 
-    // v3.72 / v3.77: Real Chromium verification of compact #ocrDialog (no #ocrSuitabilityPanel box) + subtle #ocrEngine dropdown suitability indicator across page modes
+    // v3.72 / v3.78: Real Chromium verification of wider 4-column #ocrDialog (all 4 controls on 1 horizontal row), no auto option, and #ocrEngine suitability indicator
+    await page.setViewport({ width: 1280, height: 900 });
     await page.click('#ocrBtn');
     await page.waitForSelector('#ocrDialog[open]');
+    const ocrLayout = await page.evaluate(() => {
+      const labels = [...document.querySelectorAll('#ocrDialog .form-grid > label')];
+      const tops = labels.map((el) => Math.round(el.getBoundingClientRect().top));
+      return {
+        labelCount: labels.length,
+        sameRow: tops.length === 4 && Math.max(...tops) - Math.min(...tops) <= 4,
+        ocrModes: [...document.getElementById('ocrPageMode').options].map((o) => o.value),
+        modelsModes: [...document.getElementById('modelsPageMode').options].map((o) => o.value),
+      };
+    });
+    assert.equal(ocrLayout.labelCount, 4);
+    assert.equal(ocrLayout.sameRow, true, 'all 4 controls in #ocrDialog fit side-by-side on a single row');
+    assert.deepEqual(ocrLayout.ocrModes, ['comic', 'document']);
+    assert.deepEqual(ocrLayout.modelsModes, ['comic', 'document']);
     await page.select('#ocrPageMode', 'comic');
     const comicHighlights = await page.evaluate(() => {
       const opt = (id) => document.querySelector(`#ocrEngine option[value="${id}"]`);
@@ -2231,11 +2246,11 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert.equal(await page.$eval('#ocrEngine option[value="mineru-2-5-pro"]', (el) => el.dataset.suitability), 'best');
     assert.equal(await page.$eval('#ocrEngine option[value="rapidocr-v6"]', (el) => el.dataset.suitability), 'medium');
     assert.equal(await page.$eval('#ocrEngine option[value="easyocr"]', (el) => el.dataset.suitability), 'weak');
-    await page.select('#ocrPageMode', 'auto');
+    await page.select('#ocrPageMode', 'comic');
     await page.select('#ocrEngine', 'rapidocr-v6');
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => !document.getElementById('ocrDialog').open);
-    console.log('PASS: v3.77 compact #ocrDialog without suitability box + subtle #ocrEngine suitability indicator across comic, document, and auto modes');
+    console.log('PASS: v3.78 single-row 4-column #ocrDialog without auto option + subtle #ocrEngine suitability indicator across comic and document modes');
 
     // v3.73: Live OCR model download/update progress bars inside #modelsDialog and #ocrDialog + update loop suppression
     const liveProgressState = await page.evaluate(async () => {

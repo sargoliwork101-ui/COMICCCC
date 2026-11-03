@@ -239,7 +239,11 @@ dialog.help-dialog[open]{width:min(1160px,calc(100vw - 20px));height:min(88vh,86
   .help-layout{grid-template-columns:1fr;grid-template-rows:145px minmax(0,1fr);gap:10px}
 }
 
-/* OCR Engine Suitability Color-Coding (Green = best, Amber/Yellow = medium, Red = weak) */
+/* OCR Dialog Dynamic 4-Column Row & Suitability Color-Coding */
+.ocr-dialog{width:min(920px,calc(100vw - 24px))}
+.ocr-dialog .form-grid{grid-template-columns:minmax(185px,1.25fr) minmax(220px,1.55fr) minmax(115px,.75fr) minmax(105px,.68fr);align-items:end}
+@media(max-width:780px){.ocr-dialog .form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:460px){.ocr-dialog .form-grid{grid-template-columns:1fr}}
 #ocrEngine[data-suitability=best]{border-color:#10b981;background:color-mix(in srgb,#10b981 11%,var(--surface));box-shadow:0 0 0 1px #10b98144}
 #ocrEngine[data-suitability=medium]{border-color:#f59e0b;background:color-mix(in srgb,#f59e0b 11%,var(--surface));box-shadow:0 0 0 1px #f59e0b44}
 #ocrEngine[data-suitability=weak]{border-color:#f43f5e;background:color-mix(in srgb,#f43f5e 11%,var(--surface));box-shadow:0 0 0 1px #f43f5e44}

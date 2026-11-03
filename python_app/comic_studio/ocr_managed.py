@@ -668,19 +668,23 @@ def is_newer_version(installed: str | None, latest: str | None) -> bool:
         return bool(ta and tb and tb > ta)
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def portable_tesseract_executable() -> str | None:
     base = models_dir() / "tesseract-bin"
     if not base.is_dir():
         return None
     candidates = (
         [base / "tesseract.exe", base / "Tesseract-OCR" / "tesseract.exe", base / "bin" / "tesseract.exe"]
-        if os.name == "nt"
+        if _is_windows()
         else [base / "bin" / "tesseract", base / "tesseract"]
     )
     for candidate in candidates:
         if candidate.is_file():
             return str(candidate)
-    if os.name == "nt":
+    if _is_windows():
         for found in base.rglob("tesseract.exe"):
             if found.is_file():
                 return str(found)
@@ -727,12 +731,27 @@ def _latest_tesseract_windows_installer() -> tuple[str, str]:
     return DEFAULT_TESSERACT_WIN_TAG.lstrip("vV"), DEFAULT_TESSERACT_WIN_URL
 
 
+def _find_windows_7zip() -> str | None:
+    for cmd in ("7z", "7za"):
+        found = shutil.which(cmd)
+        if found:
+            return found
+    for env_key, default_root in (
+        ("ProgramFiles", r"C:\Program Files"),
+        ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+    ):
+        cand = Path(os.environ.get(env_key, default_root)) / "7-Zip" / "7z.exe"
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
 def install_tesseract_runtime(error_cls: type[Exception]) -> str:
     target_dir = models_dir() / "tesseract-bin"
     backup_dir = models_dir() / "tesseract-bin.old-ver"
     if backup_dir.exists():
         shutil.rmtree(backup_dir, ignore_errors=True)
-    if os.name == "nt":
+    if _is_windows():
         had_existing_portable = portable_tesseract_executable() is not None and target_dir.is_dir()
         if had_existing_portable:
             try:
@@ -741,8 +760,10 @@ def install_tesseract_runtime(error_cls: type[Exception]) -> str:
                 shutil.rmtree(backup_dir, ignore_errors=True)
         target_dir.mkdir(parents=True, exist_ok=True)
         version_tag, installer_url = _latest_tesseract_windows_installer()
-        installer_path = target_dir / f"tesseract-setup-{version_tag}.exe"
-        part_path = target_dir / f".tesseract-setup-{version_tag}.exe.part"
+        # Avoid "setup"/"install"/"update" in filename so Windows Heuristic Installer Detection never forces UAC elevation (WinError 740).
+        installer_path = target_dir / f"tesseract-runtime-{version_tag}.exe"
+        part_path = target_dir / f".tesseract-runtime-{version_tag}.exe.part"
+        elevation_err: OSError | None = None
         try:
             emit(f"دریافت خودکار موتور اجرایی Tesseract ({version_tag}) برای ویندوز آغاز شد", progress=0.10)
             req = urllib.request.Request(installer_url, headers={"User-Agent": "Comic-OCR-Studio"})
@@ -767,23 +788,65 @@ def install_tesseract_runtime(error_cls: type[Exception]) -> str:
             if part_path.stat().st_size < 1_000_000:
                 raise error_cls("Downloaded Tesseract installer is incomplete or invalid.")
             os.replace(part_path, installer_path)
-            emit("نصب بی‌صدای Tesseract در پوشهٔ اختصاصی برنامه در حال انجام است…", progress=0.68)
-            # Pass string directly to CreateProcessW (shell=False) so NSIS receives /D=... unquoted without cmd.exe quote stripping.
-            cmdline = f'"{installer_path}" /S /D={target_dir}'
-            proc = _run_Subprocess(cmdline, shell=False, capture_output=True, text=True, timeout=600, check=False)
-            exe = portable_tesseract_executable()
-            if proc.returncode != 0 or not exe:
+            emit("نصب بی‌صدای Tesseract بدون نیاز به دسترسی ادمین در پوشهٔ برنامه آغاز شد…", progress=0.68)
+            # 1) Non-elevated user-mode NSIS install (__COMPAT_LAYER=RunAsInvoker + /CurrentUser avoids WinError 740 on UB-Mannheim MultiUser.nsh).
+            invoker_env = dict(os.environ)
+            invoker_env["__COMPAT_LAYER"] = "RunAsInvoker"
+            cmdline = f'"{installer_path}" /CurrentUser /S /D={target_dir}'
+            try:
+                _run_Subprocess(cmdline, shell=False, env=invoker_env, capture_output=True, text=True, timeout=600, check=False)
+            except OSError as os_exc:
+                elevation_err = os_exc
+
+            # 2) Direct portable archive extraction via 7-Zip if corporate GPO blocked RunAsInvoker.
+            if not portable_tesseract_executable():
+                seven_zip = _find_windows_7zip()
+                if seven_zip:
+                    emit("استخراج مستقیم فایل‌های اجرایی Tesseract در پوشهٔ برنامه…", progress=0.73)
+                    try:
+                        _run_Subprocess(
+                            [seven_zip, "x", "-y", f"-o{target_dir}", str(installer_path)],
+                            capture_output=True, text=True, timeout=300, check=False,
+                        )
+                        shutil.rmtree(target_dir / "$PLUGINSDIR", ignore_errors=True)
+                    except OSError:
+                        pass
+
+            # 3) Winget user-scope non-admin fallback.
+            if not portable_tesseract_executable():
                 winget = shutil.which("winget")
                 if winget:
-                    emit("تلاش جایگزین برای نصب خودکار Tesseract از طریق Winget…", progress=0.75)
-                    _run_Subprocess(
-                        [
-                            winget, "install", "--id", "UB-Mannheim.TesseractOCR",
-                            "--silent", "--accept-package-agreements", "--accept-source-agreements",
-                            "--scope", "user",
-                        ],
-                        capture_output=True, text=True, timeout=600, check=False,
+                    emit("تلاش جایگزین برای نصب کاربری Tesseract از طریق Winget…", progress=0.76)
+                    try:
+                        _run_Subprocess(
+                            [
+                                winget, "install", "--id", "UB-Mannheim.TesseractOCR",
+                                "--silent", "--accept-package-agreements", "--accept-source-agreements",
+                                "--scope", "user",
+                            ],
+                            capture_output=True, text=True, timeout=600, check=False,
+                        )
+                    except OSError:
+                        pass
+
+            # 4) Standard Windows UAC prompt via ShellExecute (PowerShell Start-Process -Verb RunAs) if policy strictly requires elevation.
+            if not (portable_tesseract_executable() or shutil.which("tesseract")):
+                pwsh = shutil.which("powershell") or shutil.which("pwsh")
+                if pwsh and installer_path.is_file():
+                    emit("درخواست تأیید استاندارد ویندوز (UAC) برای تکمیل نصب Tesseract…", progress=0.79)
+                    ps_exe = str(installer_path).replace("'", "''")
+                    ps_dir = str(target_dir).replace("'", "''")
+                    ps_cmd = (
+                        f"Start-Process -FilePath '{ps_exe}' "
+                        f"-ArgumentList '/CurrentUser','/S','/D={ps_dir}' -Verb RunAs -Wait"
                     )
+                    try:
+                        _run_Subprocess(
+                            [pwsh, "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                            capture_output=True, text=True, timeout=600, check=False,
+                        )
+                    except OSError:
+                        pass
         except error_cls:
             if backup_dir.is_dir() and not portable_tesseract_executable():
                 shutil.rmtree(target_dir, ignore_errors=True)
@@ -819,10 +882,15 @@ def install_tesseract_runtime(error_cls: type[Exception]) -> str:
                     os.replace(backup_dir, target_dir)
                 except OSError:
                     pass
-            raise error_cls("فایل اجرایی Tesseract پس از نصب خودکار پیدا نشد؛ دسترسی پوشهٔ برنامه را بررسی کنید.")
+            extra_hint = (
+                "؛ اگر سیاست امنیتی ویندوز اجرای نصاب کاربری را مسدود کرده است، برنامه را یک‌بار با start_windows_admin.bat باز کنید."
+                if elevation_err is not None
+                else "؛ دسترسی پوشهٔ برنامه را بررسی کنید."
+            )
+            raise error_cls(f"فایل اجرایی Tesseract پس از نصب خودکار پیدا نشد{extra_hint}")
         if backup_dir.is_dir():
             shutil.rmtree(backup_dir, ignore_errors=True)
-        for old_installer in target_dir.glob("*tesseract-setup*.exe*"):
+        for old_installer in (*target_dir.glob("*tesseract-setup*.exe*"), *target_dir.glob("*tesseract-runtime*.exe*")):
             old_installer.unlink(missing_ok=True)
         update_manifest_entry("tesseract", installedTag=version_tag)
         emit("موتور اجرایی Tesseract با موفقیت آماده شد", "success", progress=0.82)

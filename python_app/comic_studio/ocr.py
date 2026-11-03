@@ -495,12 +495,22 @@ def _tesseract_executable() -> str | None:
 
 def _lines_from_tesseract(payload: str) -> list[OcrLine]:
     """Turn Tesseract TSV words into physical lines and bounding boxes."""
-    groups: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
-    reader = csv.DictReader(io.StringIO(payload), delimiter="\t")
+    groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    reader = csv.DictReader(
+        io.StringIO(payload),
+        delimiter="\t",
+        quoting=csv.QUOTE_NONE,
+        restkey="_extra",
+    )
     for row in reader:
-        if row.get("level") != "5" or not (row.get("text") or "").strip():
+        raw_text = row.get("text") or ""
+        extra = row.get("_extra")
+        if isinstance(extra, list) and extra:
+            raw_text = "\t".join([raw_text, *(str(part) for part in extra)])
+        if row.get("level") != "5" or not raw_text.strip():
             continue
-        key = tuple(row.get(key, "") for key in ("page_num", "block_num", "par_num", "line_num"))
+        row["text"] = raw_text
+        key = tuple(str(row.get(k, "")) for k in ("page_num", "block_num", "par_num", "line_num"))
         groups.setdefault(key, []).append(row)
     lines = []
     for words in groups.values():
@@ -532,6 +542,16 @@ class TesseractEngine:
 
     def _model_dir(self) -> Path:
         return models_dir() / "tesseract"
+
+    def _ensure_tsv_config(self) -> None:
+        configs_dir = self._model_dir() / "configs"
+        tsv_cfg = configs_dir / "tsv"
+        if not tsv_cfg.is_file():
+            try:
+                configs_dir.mkdir(parents=True, exist_ok=True)
+                tsv_cfg.write_text("tessedit_create_tsv 1\n", encoding="utf-8")
+            except OSError:
+                pass
 
     def _expected_models(self, language: str) -> list[str]:
         return [f"{language}.traineddata"]
@@ -601,6 +621,7 @@ class TesseractEngine:
             if temporary.stat().st_size < 1000:
                 raise OcrError("The downloaded Tesseract language file is empty or invalid.")
             os.replace(temporary, target)
+            self._ensure_tsv_config()
             emit(f"فایل زبان Tesseract ({language}) ذخیره شد", "success", progress=0.94)
             return target
         except OcrError:
@@ -676,9 +697,17 @@ class TesseractEngine:
             raise OcrError("Tesseract is not installed. Install the binary and use the explicit language download button.")
         if language not in self.ready_languages:
             raise OcrError(f"Tesseract language {language} is not ready. Use the explicit model download button first.")
-        buffer = io.BytesIO(); image.convert("RGB").save(buffer, "PNG")
-        command = [executable, "stdin", "stdout", "-l", language, "--psm", psm]
+        buffer = io.BytesIO()
+        _to_white_backed_rgb(image).save(buffer, "PNG", dpi=(300, 300))
+        command = [
+            executable, "stdin", "stdout",
+            "-l", language,
+            "--psm", psm,
+            "--dpi", "300",
+            "-c", "tessedit_create_tsv=1",
+        ]
         if (self._model_dir() / f"{language}.traineddata").is_file():
+            self._ensure_tsv_config()
             command.extend(["--tessdata-dir", str(self._model_dir())])
         command.append("tsv")
         try:
@@ -1223,12 +1252,39 @@ class EngineRegistry:
 
 
 PRECISE_UPSCALE_MAX_PIXELS = 4_000_000
+DOCUMENT_FALLBACK_SCALE = 2
 
 
-def preprocess(image: Image.Image, contrast: bool, precise: bool) -> tuple[Image.Image, float]:
-    image = ImageOps.exif_transpose(image).convert("RGB")
+def _to_white_backed_rgb(image: Image.Image) -> Image.Image:
+    """Flatten transparent pixels onto white paper so dark ink never turns black-on-black."""
+    oriented = ImageOps.exif_transpose(image)
+    if oriented.mode in {"RGBA", "LA"} or (oriented.mode == "P" and "transparency" in oriented.info):
+        rgba = oriented.convert("RGBA")
+        white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        composited = Image.alpha_composite(white, rgba).convert("RGB")
+        rgba.close()
+        white.close()
+        if oriented is not image:
+            oriented.close()
+        return composited
+    rgb = oriented.convert("RGB")
+    if oriented is not image and oriented is not rgb:
+        oriented.close()
+    return rgb
+
+
+def preprocess(
+    image: Image.Image,
+    contrast: bool,
+    precise: bool,
+    *,
+    page_mode: str = "comic",
+) -> tuple[Image.Image, float]:
+    image = _to_white_backed_rgb(image)
     if contrast:
-        image = ImageOps.autocontrast(image, cutoff=1)
+        # In document/article mode, keep dark ink strokes unclipped (cutoff_low=0) while brightening off-white paper.
+        cutoff = (0, 1) if page_mode == "document" else 1
+        image = ImageOps.autocontrast(image, cutoff=cutoff)
     scale = 1.0
     if precise and image.width * image.height <= PRECISE_UPSCALE_MAX_PIXELS:
         scale = 2.0
@@ -1298,7 +1354,7 @@ def _recognize_image_primary(
 
     # Isolated VLM/layout engines handle their own vision scaling; skipping 2x Lanczos prevents multi-GB RAM spikes.
     effective_precise = False if isinstance(engine, IsolatedOcrEngine) else precise
-    prepared, scale = preprocess(image, contrast, effective_precise)
+    prepared, scale = preprocess(image, contrast, effective_precise, page_mode=page_mode)
     width, height = prepared.size
     slice_height = 3000
     overlap = 100
@@ -1488,6 +1544,26 @@ def _better_fallback(candidate: list[dict[str, Any]], primary: list[dict[str, An
     return False
 
 
+def _document_preprocess_image(image: Image.Image) -> tuple[Image.Image, float]:
+    """Normalize uneven paper shading/scans into crisp dark-ink-on-white for articles and books."""
+    import cv2
+
+    base = _to_white_backed_rgb(image)
+    try:
+        rgb = np.asarray(base)
+    finally:
+        base.close()
+    scale = float(DOCUMENT_FALLBACK_SCALE) if rgb.shape[0] * rgb.shape[1] <= PRECISE_UPSCALE_MAX_PIXELS else 1.0
+    if scale > 1.0:
+        rgb = cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    background = cv2.GaussianBlur(gray, (0, 0), sigmaX=25, sigmaY=25)
+    background = np.maximum(background, 1)
+    normalized = cv2.divide(gray, background, scale=255)
+    out = ImageOps.autocontrast(Image.fromarray(normalized, mode="L"), cutoff=(0, 1)).convert("RGB")
+    return out, scale
+
+
 def recognize_image(
     engine: Any,
     image: Image.Image,
@@ -1507,6 +1583,25 @@ def recognize_image(
     if not _needs_extra_preprocess(primary):
         return primary
     best = primary
+    if page_mode == "document":
+        emit("نتیجهٔ اولیهٔ مقاله/کتاب ضعیف بود؛ پیش‌پردازش تخصصی شفاف‌سازی کاغذ و متن اجرا می‌شود")
+        try:
+            doc_image, doc_scale = _document_preprocess_image(image)
+            try:
+                doc_fallback = _recognize_image_primary(
+                    engine, doc_image, language, False, False, min_confidence,
+                    input_scale=doc_scale, page_mode=page_mode,
+                )
+            finally:
+                doc_image.close()
+        except Exception:
+            emit("پیش‌پردازش تخصصی مقاله ممکن نبود؛ نتیجهٔ اولیه حفظ شد", "warning")
+        else:
+            if _better_fallback(doc_fallback, best):
+                emit("نتیجهٔ پیش‌پردازش تخصصی مقاله بهتر بود و انتخاب شد", "success")
+                best = doc_fallback
+                if not _needs_extra_preprocess(best):
+                    return best
     if EXTRA_PREPROCESS_ENABLED:
         emit("نتیجهٔ OCR اصلی ضعیف یا کوتاه است؛ پیش‌پردازش تکمیلی متن روشن اجرا می‌شود")
         try:

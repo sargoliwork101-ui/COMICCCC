@@ -931,6 +931,143 @@ def test_immediate_ram_unload_and_preprocess_memory_cap(tmp_path, monkeypatch):
     assert isinstance(mem["totalRamMb"], float)
 
 
+def test_tesseract_custom_tessdata_passes_create_tsv_flag_and_writes_configs_tsv(tmp_path, monkeypatch):
+    """Simulate real Tesseract CLI where --tessdata-dir lacks system configs/tsv unless we supply it."""
+    from pathlib import Path
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    tess_dir = tmp_path / "models" / "tesseract"
+    tess_dir.mkdir(parents=True, exist_ok=True)
+    (tess_dir / "eng.traineddata").write_bytes(b"traineddata" * 200)
+
+    def strict_tesseract_cli(command, **kwargs):
+        has_c_flag = False
+        for idx, arg in enumerate(command[:-1]):
+            if arg == "-c" and command[idx + 1] == "tessedit_create_tsv=1":
+                has_c_flag = True
+        has_dpi_300 = "--dpi" in command and command[command.index("--dpi") + 1] == "300"
+        assert has_dpi_300, f"expected --dpi 300 in {command}"
+        cfg_file_ok = True
+        if "--tessdata-dir" in command:
+            td = Path(command[command.index("--tessdata-dir") + 1])
+            cfg_file_ok = (td / "configs" / "tsv").is_file()
+        if has_c_flag and cfg_file_ok:
+            tsv_out = (
+                "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+                "5\t1\t1\t1\t1\t1\t30\t40\t120\t22\t94\tArticle\n"
+                "5\t1\t1\t1\t1\t2\t160\t40\t180\t22\t91\tIntroduction\n"
+            )
+            return subprocess.CompletedProcess(command, 0, tsv_out.encode("utf-8"), b"")
+        # Plain text fallback (what real Tesseract outputs when tessedit_create_tsv stays false!)
+        return subprocess.CompletedProcess(command, 0, b"Article Introduction\n", b"read_params_file: Can't open tsv\n")
+
+    monkeypatch.setattr(subprocess, "run", strict_tesseract_cli)
+    engine = TesseractEngine()
+    blocks = recognize_image(engine, Image.new("RGB", (600, 400), "white"), "eng", contrast=True, precise=False, page_mode="document")
+    assert len(blocks) == 1
+    assert blocks[0]["text"] == "Article Introduction"
+    assert (tess_dir / "configs" / "tsv").is_file()
+
+
+def test_tesseract_tsv_unclosed_double_quotes_in_articles_never_swallow_lines():
+    payload = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+        '5\t1\t1\t1\t1\t1\t20\t20\t90\t18\t88\t"Modern\n'
+        "5\t1\t1\t1\t1\t2\t118\t20\t80\t18\t92\tOptics\n"
+        "5\t1\t1\t2\t1\t1\t20\t52\t210\t18\t95\tSecond-paragraph-kept\n"
+    )
+    lines = _lines_from_tesseract(payload)
+    assert len(lines) == 2
+    assert lines[0].text == '"Modern Optics'
+    assert lines[1].text == "Second-paragraph-kept"
+
+
+def test_article_transparent_png_and_document_illumination_fallback(monkeypatch):
+    from PIL import ImageDraw
+    from comic_studio.ocr import OcrLine, _to_white_backed_rgb
+
+    # 1. Black ink on transparent (0, 0, 0, 0) RGBA PNG must composite onto white, never black-on-black!
+    rgba = Image.new("RGBA", (120, 60), (0, 0, 0, 0))
+    ImageDraw.Draw(rgba).rectangle([30, 15, 90, 45], fill=(0, 0, 0, 255))
+    rgb = _to_white_backed_rgb(rgba)
+    assert rgb.getpixel((5, 5)) == (255, 255, 255)
+    assert rgb.getpixel((50, 30)) == (0, 0, 0)
+    rgb.close()
+    rgba.close()
+
+    # 2. Shaded gray scanned article triggers _document_preprocess_image when primary is empty
+    class ShadedDocEngine:
+        def recognize_document(self, crop, language):
+            arr = __import__("numpy").asarray(crop)
+            # Only succeeds once paper background is brightened above 230
+            if float(arr.max()) >= 245.0 and float(arr.mean()) >= 220.0:
+                return [OcrLine("Normalized article paragraph", 0.91, [[20, 20], [260, 20], [260, 46], [20, 46]])]
+            return []
+
+        def recognize(self, crop, language):
+            return []
+
+    shaded = Image.new("RGB", (300, 160), (145, 145, 145))
+    ImageDraw.Draw(shaded).rectangle([20, 20, 180, 36], fill=(95, 95, 95))
+    blocks = recognize_image(ShadedDocEngine(), shaded, "eng", contrast=False, precise=False, page_mode="document")
+    shaded.close()
+    assert len(blocks) == 1
+    assert blocks[0]["text"] == "Normalized article paragraph"
+
+
+def test_windows_tesseract_installer_handles_winerror_740_via_runasinvoker_and_fallbacks(tmp_path, monkeypatch):
+    import io
+    from pathlib import Path
+    import comic_studio.ocr_managed as managed
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    monkeypatch.setattr(managed, "_is_windows", lambda: True)
+    monkeypatch.setattr(
+        managed,
+        "_latest_tesseract_windows_installer",
+        lambda: ("5.4.0.20240606", "https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-setup-5.4.0.20240606.exe"),
+    )
+
+    class FakeDownloadResp:
+        headers = {"Content-Length": str(1_200_000)}
+        def __init__(self):
+            self._buf = io.BytesIO(b"MZ" + b"0" * 1_200_000)
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self, n=-1): return self._buf.read(n)
+
+    monkeypatch.setattr(managed.urllib.request, "urlopen", lambda req, timeout=300: FakeDownloadResp())
+    monkeypatch.setattr(managed, "_find_windows_7zip", lambda: r"C:\Program Files\7-Zip\7z.exe")
+
+    seen_calls = []
+
+    def fake_subproc(cmd, **kwargs):
+        seen_calls.append((cmd, kwargs))
+        if isinstance(cmd, str):
+            # Verify installer filename avoids 'setup'/'install' and passes RunAsInvoker + /CurrentUser
+            assert "tesseract-runtime-" in cmd
+            assert "setup" not in cmd.lower()
+            assert "/CurrentUser" in cmd
+            assert kwargs.get("env", {}).get("__COMPAT_LAYER") == "RunAsInvoker"
+            # Simulate corporate policy still throwing WinError 740 on CreateProcessW
+            raise OSError(22, "The requested operation requires elevation", None, 740)
+        # Fallback 2: 7-Zip extracts portable tesseract.exe cleanly without elevation!
+        if isinstance(cmd, list) and "7z" in str(cmd[0]):
+            out_arg = next(a for a in cmd if str(a).startswith("-o"))
+            out_dir = Path(out_arg[2:])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "tesseract.exe").write_bytes(b"MZ-portable")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(managed, "_run_Subprocess", fake_subproc)
+    exe_path = managed.install_tesseract_runtime(OcrError)
+    assert exe_path.endswith("tesseract.exe")
+    assert Path(exe_path).is_file()
+    assert len(seen_calls) >= 2
+
+
+
 
 
 

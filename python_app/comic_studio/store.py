@@ -107,7 +107,7 @@ class ProjectStore:
             "settings": {
                 "ocrEngine": "rapidocr-v6",
                 "ocrLanguage": "eng",
-                "ocrPageMode": "auto",
+                "ocrPageMode": "comic",
                 "contrast": True,
                 "precise": True,
                 "eraseOriginal": True,
