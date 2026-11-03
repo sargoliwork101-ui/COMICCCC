@@ -1049,7 +1049,7 @@ function check(name, condition) {
     vm.runInContext(`closeDialog('helpDialog')`, context);
   }
 
-  // v3.72: Dynamic Green / Yellow-Orange / Red OCR engine suitability highlighting by page mode
+  // v3.72 / v3.77: Compact #ocrDialog (no #ocrSuitabilityPanel box; full 13-model matrix in Help) + subtle #ocrEngine & #modelsDialog suitability indicators
   {
     const prevEnginesV372 = vm.runInContext('state.engines', context);
     vm.runInContext(`state.engines = [
@@ -1060,19 +1060,21 @@ function check(name, condition) {
       { id: 'mineru-2-5-pro', name: 'MinerU2.5-Pro', selectable: true, isolated: true, runtimeInstalled: false, languages: ['eng'], readyLanguages: [], description: 'pdf/book', family: 'OpenDataLab' }
     ];`, context);
     $('ocrBtn').click();
+    check('v3.77 removes #ocrSuitabilityPanel, #ocrEngineTierGrid, and #ocrEngineFitBanner from #ocrDialog and keeps full 13-model guide in Help', !$('ocrSuitabilityPanel') && !$('ocrEngineTierGrid') && !$('ocrEngineFitBanner') && window.ComicHelpGuide.HELP_SECTIONS.find((c) => c.id === 'ocr-modes').features.some((f) => f.includes('PP-OCRv6 Small') && f.includes('MinerU2.5-Pro') && f.includes('HunyuanOCR')));
     $('ocrPageMode').value = 'comic';
     $('ocrPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
-    const chipTier = (id) => window.document.querySelector(`#ocrEngineTierGrid .ocr-tier-chip[data-engine-id="${id}"]`)?.dataset.suitability;
-    check('comic mode highlights PP-OCRv6 & EasyOCR green, Surya yellow/medium, Tesseract & MinerU red/weak', chipTier('rapidocr-v6') === 'best' && chipTier('easyocr') === 'best' && chipTier('surya') === 'medium' && chipTier('tesseract') === 'weak' && chipTier('mineru-2-5-pro') === 'weak');
+    const optTier = (id) => window.document.querySelector(`#ocrEngine option[value="${id}"]`)?.dataset.suitability;
+    check('comic mode marks #ocrEngine options PP-OCRv6 & EasyOCR green, Surya yellow/medium, Tesseract & MinerU red/weak', optTier('rapidocr-v6') === 'best' && optTier('easyocr') === 'best' && optTier('surya') === 'medium' && optTier('tesseract') === 'weak' && optTier('mineru-2-5-pro') === 'weak');
 
-    // Click red Tesseract chip in comic mode -> select + banner turn weak/red and suggest green alternatives
-    window.document.querySelector('#ocrEngineTierGrid .ocr-tier-chip[data-engine-id="tesseract"]').click();
-    check('clicking Tesseract chip in comic mode highlights #ocrEngine and #ocrEngineFitBanner as weak (red) with green recommendation', $('ocrEngine').value === 'tesseract' && $('ocrEngine').dataset.suitability === 'weak' && $('ocrEngineFitBanner').dataset.suitability === 'weak' && $('ocrEngineFitBanner').textContent.includes('پیشنهاد بهتر (سبز)') && $('ocrEngineFitBanner').textContent.includes('PP-OCRv6 Small'));
+    // Selecting Tesseract in comic mode updates #ocrEngine select suitability indicator to weak
+    $('ocrEngine').value = 'tesseract';
+    $('ocrEngine').dispatchEvent(new window.Event('change', { bubbles: true }));
+    check('selecting Tesseract in comic mode sets #ocrEngine suitability indicator to weak (red)', $('ocrEngine').value === 'tesseract' && $('ocrEngine').dataset.suitability === 'weak');
 
     // Switch page mode to document -> Tesseract, Surya, MinerU flip to green (best), PP-OCRv6 to yellow (medium), EasyOCR to red (weak)!
     $('ocrPageMode').value = 'document';
     $('ocrPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
-    check('switching #ocrPageMode to document dynamically flips Tesseract, Surya & MinerU to green, PP-OCRv6 to medium, and EasyOCR to red', chipTier('tesseract') === 'best' && chipTier('surya') === 'best' && chipTier('mineru-2-5-pro') === 'best' && chipTier('rapidocr-v6') === 'medium' && chipTier('easyocr') === 'weak' && $('ocrEngine').dataset.suitability === 'best' && $('ocrEngineFitBanner').dataset.suitability === 'best');
+    check('switching #ocrPageMode to document dynamically flips Tesseract, Surya & MinerU options to green, PP-OCRv6 to medium, and EasyOCR to red', optTier('tesseract') === 'best' && optTier('surya') === 'best' && optTier('mineru-2-5-pro') === 'best' && optTier('rapidocr-v6') === 'medium' && optTier('easyocr') === 'weak' && $('ocrEngine').dataset.suitability === 'best');
     vm.runInContext(`closeDialog('ocrDialog')`, context);
 
     // Open #modelsDialog -> syncs #modelsPageMode to document and highlights engine cards

@@ -2199,44 +2199,43 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     await page.waitForFunction(() => !document.getElementById('editorDialog').open);
     console.log('PASS: v3.71 interactive 13-section Help menu, search, contextual F1 inside editor, and clean Escape stacking');
 
-    // v3.72: Real Chromium verification of Green / Amber / Red OCR engine suitability highlighting across page modes
+    // v3.72 / v3.77: Real Chromium verification of compact #ocrDialog (no #ocrSuitabilityPanel box) + subtle #ocrEngine dropdown suitability indicator across page modes
     await page.click('#ocrBtn');
     await page.waitForSelector('#ocrDialog[open]');
     await page.select('#ocrPageMode', 'comic');
     const comicHighlights = await page.evaluate(() => {
-      const chip = (id) => document.querySelector(`#ocrEngineTierGrid .ocr-tier-chip[data-engine-id="${id}"]`);
+      const opt = (id) => document.querySelector(`#ocrEngine option[value="${id}"]`);
       return {
-        totalChips: document.querySelectorAll('#ocrEngineTierGrid .ocr-tier-chip').length,
-        rapidTier: chip('rapidocr-v6')?.dataset.suitability,
-        rapidBorder: getComputedStyle(chip('rapidocr-v6')).borderColor,
-        suryaTier: chip('surya')?.dataset.suitability,
-        suryaBorder: getComputedStyle(chip('surya')).borderColor,
-        tessTier: chip('tesseract')?.dataset.suitability,
-        tessBorder: getComputedStyle(chip('tesseract')).borderColor,
+        panelExists: Boolean(document.getElementById('ocrSuitabilityPanel')),
+        totalOpts: document.querySelectorAll('#ocrEngine option').length,
+        rapidTier: opt('rapidocr-v6')?.dataset.suitability,
+        suryaTier: opt('surya')?.dataset.suitability,
+        tessTier: opt('tesseract')?.dataset.suitability,
+        selectBorderBest: getComputedStyle(document.getElementById('ocrEngine')).borderColor,
       };
     });
-    assert.equal(comicHighlights.totalChips, 13);
+    assert.equal(comicHighlights.panelExists, false);
+    assert.equal(comicHighlights.totalOpts, 13);
     assert.equal(comicHighlights.rapidTier, 'best');
     assert.equal(comicHighlights.suryaTier, 'medium');
     assert.equal(comicHighlights.tessTier, 'weak');
-    assert.notEqual(comicHighlights.rapidBorder, comicHighlights.suryaBorder);
-    assert.notEqual(comicHighlights.rapidBorder, comicHighlights.tessBorder);
-    // Click red Tesseract chip in comic mode -> select & banner turn weak/red and suggest green engines
-    await page.click('#ocrEngineTierGrid .ocr-tier-chip[data-engine-id="tesseract"]');
+    // Select weak Tesseract in comic mode -> #ocrEngine border turns weak/red
+    await page.select('#ocrEngine', 'tesseract');
     assert.equal(await page.$eval('#ocrEngine', (el) => el.dataset.suitability), 'weak');
-    assert.ok((await page.$eval('#ocrEngineFitBanner', (el) => el.textContent)).includes('پیشنهاد بهتر (سبز)'));
+    const selectBorderWeak = await page.$eval('#ocrEngine', (el) => getComputedStyle(el).borderColor);
+    assert.notEqual(comicHighlights.selectBorderBest, selectBorderWeak);
     // Switch to document (book/article) -> Tesseract immediately flips from weak (red) to best (green)!
     await page.select('#ocrPageMode', 'document');
     assert.equal(await page.$eval('#ocrEngine', (el) => el.dataset.suitability), 'best');
-    assert.equal(await page.$eval('#ocrEngineTierGrid .ocr-tier-chip[data-engine-id="surya"]', (el) => el.dataset.suitability), 'best');
-    assert.equal(await page.$eval('#ocrEngineTierGrid .ocr-tier-chip[data-engine-id="mineru-2-5-pro"]', (el) => el.dataset.suitability), 'best');
-    assert.equal(await page.$eval('#ocrEngineTierGrid .ocr-tier-chip[data-engine-id="rapidocr-v6"]', (el) => el.dataset.suitability), 'medium');
-    assert.equal(await page.$eval('#ocrEngineTierGrid .ocr-tier-chip[data-engine-id="easyocr"]', (el) => el.dataset.suitability), 'weak');
+    assert.equal(await page.$eval('#ocrEngine option[value="surya"]', (el) => el.dataset.suitability), 'best');
+    assert.equal(await page.$eval('#ocrEngine option[value="mineru-2-5-pro"]', (el) => el.dataset.suitability), 'best');
+    assert.equal(await page.$eval('#ocrEngine option[value="rapidocr-v6"]', (el) => el.dataset.suitability), 'medium');
+    assert.equal(await page.$eval('#ocrEngine option[value="easyocr"]', (el) => el.dataset.suitability), 'weak');
     await page.select('#ocrPageMode', 'auto');
-    await page.click('#ocrEngineTierGrid .ocr-tier-chip[data-engine-id="rapidocr-v6"]');
+    await page.select('#ocrEngine', 'rapidocr-v6');
     await page.keyboard.press('Escape');
     await page.waitForFunction(() => !document.getElementById('ocrDialog').open);
-    console.log('PASS: v3.72 dynamic Green / Yellow-Orange / Red OCR engine suitability highlighting across comic, document, and auto modes');
+    console.log('PASS: v3.77 compact #ocrDialog without suitability box + subtle #ocrEngine suitability indicator across comic, document, and auto modes');
 
     // v3.73: Live OCR model download/update progress bars inside #modelsDialog and #ocrDialog + update loop suppression
     const liveProgressState = await page.evaluate(async () => {
@@ -2320,6 +2319,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');
   } catch (error) {
+    process.exitCode = 1;
     if (serverLog) console.error(serverLog.slice(-5000));
     throw error;
   } finally {

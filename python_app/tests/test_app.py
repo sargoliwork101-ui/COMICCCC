@@ -44,19 +44,19 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.76"
+    assert health.json()["version"] == "3.77"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۷۶ · Python</span>' in index_html
+    assert '<span class="ver">۳.۷۷ · Python</span>' in index_html
     assert 'id="exportPptxBtn"' in index_html
     assert 'id="pptxExportDialog"' in index_html
     assert 'id="helpTopBtn"' in index_html
     assert 'id="helpDialog"' in index_html
-    assert 'id="ocrSuitabilityPanel"' in index_html
-    assert 'id="ocrEngineTierGrid"' in index_html
-    assert 'id="ocrEngineFitBanner"' in index_html
+    assert 'id="ocrSuitabilityPanel"' not in index_html
+    assert 'id="ocrEngineTierGrid"' not in index_html
+    assert 'id="ocrEngineFitBanner"' not in index_html
     assert 'id="modelsPageMode"' in index_html
     assert 'id="modelsRamStatus"' in index_html
     assert 'id="freeModelsRamBtn"' in index_html

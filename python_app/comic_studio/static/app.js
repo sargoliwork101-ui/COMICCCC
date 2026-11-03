@@ -1095,80 +1095,13 @@ function updateEngineOptions(preferredEngine = '') {
   updateOcrEngineStatus();
   syncEngineUpdateUi();
 }
-function renderOcrSuitabilityPanel() {
-  const grid = $('ocrEngineTierGrid');
-  const banner = $('ocrEngineFitBanner');
-  const titleEl = $('ocrSuitabilityTitle');
-  const select = $('ocrEngine');
-  if (!grid || !banner || !select) return;
-  const pageMode = $('ocrPageMode')?.value || 'auto';
-  const selectedId = select.value;
-  const activeLang = $('ocrLanguage')?.value || 'eng';
-  if (titleEl) {
-    titleEl.textContent = `رنگ‌بندی عملکرد موتورها برای «${PAGE_MODE_LABELS[pageMode] || PAGE_MODE_LABELS.auto}»`;
-  }
-  const selectable = state.engines.filter((engine) => engine.selectable !== false);
-  const tierOrder = { best: 0, medium: 1, weak: 2 };
-  const sortedForChips = [...selectable].sort((a, b) => {
-    const ta = tierOrder[engineSuitability(a, pageMode).tier] ?? 1;
-    const tb = tierOrder[engineSuitability(b, pageMode).tier] ?? 1;
-    return ta - tb;
-  });
-  grid.textContent = '';
-  sortedForChips.forEach((engine) => {
-    const suit = engineSuitability(engine, pageMode);
-    const isSelected = engine.id === selectedId;
-    const langSupported = (engine.languages || []).includes(activeLang);
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = `ocr-tier-chip is-${suit.tier}${isSelected ? ' is-selected' : ''}${!langSupported ? ' is-lang-unsupported' : ''}`;
-    btn.dataset.engineId = engine.id;
-    btn.dataset.suitability = suit.tier;
-    btn.setAttribute('aria-pressed', String(isSelected));
-    btn.title = `${engine.name} — ${suit.badge}${suit.reason ? `: ${suit.reason}` : ''}`;
-    const nameSpan = document.createElement('span');
-    nameSpan.dir = 'ltr';
-    nameSpan.textContent = `${isSelected ? '✓ ' : ''}${engine.name}`;
-    const tagSpan = document.createElement('span');
-    tagSpan.className = 'ocr-tier-chip-tag';
-    tagSpan.textContent = `(${suit.short})`;
-    btn.append(nameSpan, tagSpan);
-    btn.addEventListener('click', () => {
-      select.value = engine.id;
-      collectOcrSettings();
-      updateOcrEngineStatus();
-    });
-    grid.appendChild(btn);
-  });
-
-  const currentEngine = state.engines.find((entry) => entry.id === selectedId);
-  if (!currentEngine) return;
-  const curSuit = engineSuitability(currentEngine, pageMode);
-  select.dataset.suitability = curSuit.tier;
-  banner.dataset.suitability = curSuit.tier;
-  banner.textContent = '';
-  const badge = document.createElement('span');
-  badge.className = 'ocr-fit-badge';
-  badge.textContent = `${curSuit.badge} برای ${PAGE_MODE_LABELS[pageMode] || 'این حالت'}`;
-  const reasonSpan = document.createElement('span');
-  let extraHint = '';
-  if (curSuit.tier === 'weak') {
-    const greenNames = selectable
-      .filter((e) => engineSuitability(e, pageMode).tier === 'best' && (e.languages || []).includes(activeLang))
-      .slice(0, 4)
-      .map((e) => e.name);
-    if (greenNames.length) {
-      extraHint = ` پیشنهاد بهتر (سبز): ${greenNames.join('، ')}.`;
-    }
-  }
-  reasonSpan.textContent = `${currentEngine.name}: ${curSuit.reason}${extraHint}`;
-  banner.append(badge, reasonSpan);
-}
 function updateOcrEngineStatus() {
-  const engine = state.engines.find((entry) => entry.id === $('ocrEngine').value); if (!engine) return;
+  const select = $('ocrEngine');
+  const engine = state.engines.find((entry) => entry.id === select?.value); if (!engine) return;
+  const pageMode = $('ocrPageMode')?.value || state.project?.settings?.ocrPageMode || 'auto';
+  select.dataset.suitability = engineSuitability(engine, pageMode).tier;
   [...$('ocrLanguage').options].forEach((option) => { option.disabled = !engine.languages.includes(option.value); });
   if (!engine.languages.includes($('ocrLanguage').value)) $('ocrLanguage').value = engine.languages[0];
-  renderOcrSuitabilityPanel();
   const lang = $('ocrLanguage').value;
   const langReady = Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(lang));
   const versionLabel = engine.installedVersion ? ` (نسخهٔ ${engine.installedVersion})` : '';
