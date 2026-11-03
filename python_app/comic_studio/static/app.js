@@ -595,6 +595,7 @@ function adoptProject(project) {
   const settings = project.settings || {};
   $('ocrEngine').value = settings.ocrEngine || 'rapidocr-v6';
   $('ocrLanguage').value = settings.ocrLanguage || 'eng';
+  if ($('ocrPageMode')) $('ocrPageMode').value = ['auto', 'comic', 'document'].includes(settings.ocrPageMode) ? settings.ocrPageMode : 'auto';
   $('ocrContrast').checked = settings.contrast !== false;
   $('ocrPrecise').checked = settings.precise !== false;
   $('ocrGroupLines').checked = settings.groupOcrLines !== false;
@@ -606,6 +607,7 @@ function adoptProject(project) {
   $('exportTwo').checked = !!output.twoPerPage;
   $('exportFormat').value = output.imageFormat || 'orig';
   $('exportFolder').value = output.folderName || '';
+  if ($('exportDocxLayout')) $('exportDocxLayout').value = output.docxLayout === 'flowing' ? 'flowing' : 'visual';
   setOverlayMode(settings.overlayMode || 'translation', false);
   renderAll();
 }
@@ -888,11 +890,11 @@ async function waitForProjectLoads() {
 }
 function collectOutputSettings() {
   if (!state.project) return; state.project.settings = state.project.settings || {};
-  state.project.settings.output = { name: $('exportName').value, seamless: $('exportSeamless').checked, uniformSize: $('exportUniform').checked, twoPerPage: $('exportTwo').checked, imageFormat: $('exportFormat').value, folderName: $('exportFolder').value };
+  state.project.settings.output = { name: $('exportName').value, seamless: $('exportSeamless').checked, uniformSize: $('exportUniform').checked, twoPerPage: $('exportTwo').checked, imageFormat: $('exportFormat').value, folderName: $('exportFolder').value, docxLayout: $('exportDocxLayout')?.value || 'visual' };
 }
 function collectOcrSettings() {
   state.project.settings = state.project.settings || {};
-  Object.assign(state.project.settings, { ocrEngine: $('ocrEngine').value, ocrLanguage: $('ocrLanguage').value, contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, groupOcrLines: $('ocrGroupLines').checked, eraseOriginal: $('ocrErase').checked });
+  Object.assign(state.project.settings, { ocrEngine: $('ocrEngine').value, ocrLanguage: $('ocrLanguage').value, ocrPageMode: $('ocrPageMode')?.value || 'auto', contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, groupOcrLines: $('ocrGroupLines').checked, eraseOriginal: $('ocrErase').checked });
 }
 function updateEngineOptions() {
   const select = $('ocrEngine'); const previous = select.value || state.project?.settings?.ocrEngine || 'rapidocr-v6'; select.textContent = '';
@@ -1101,7 +1103,7 @@ async function runOcr() {
     await runJob('OCR محلی در حال اجراست…', async () => {
       const confidence = $('ocrConfidence').value.trim();
       const result = await api(`/api/projects/${state.project.id}/ocr`, {
-        ...jsonOptions('POST', { image_ids: ids, engine: $('ocrEngine').value, language: $('ocrLanguage').value, contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, group_lines: $('ocrGroupLines').checked, min_confidence: confidence === '' ? .35 : Number(confidence) }),
+        ...jsonOptions('POST', { image_ids: ids, engine: $('ocrEngine').value, language: $('ocrLanguage').value, page_mode: $('ocrPageMode')?.value || 'auto', contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, group_lines: $('ocrGroupLines').checked, min_confidence: confidence === '' ? .35 : Number(confidence) }),
         signal: controller.signal,
       });
       if (ocrCancelledByUser || controller.signal.aborted) { const e = new Error('لغو شد'); e.cancelled = true; throw e; }
@@ -1333,7 +1335,7 @@ async function runTranslation() {
     const skillLimit = Math.floor(limit * (state.ai?.skill_percent ?? 15) / 100);
     const contextLimit = Math.floor(limit * (state.ai?.context_percent ?? 15) / 100);
     const oldSkill = savedTranslationSkill(projectId);
-    const skill = oldSkill ?? 'ترجمه را روان و طبیعی و متناسب با لحن شخصیت‌ها بنویس؛ نام‌ها، اعداد و آواها را با دقت حفظ کن.';
+    const skill = oldSkill ?? 'ترجمه را روان و متناسب با لحن کمیک یا کتاب بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.';
     const previous = previousRun;
     const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
     // A new translation starts without stale story context; only an explicit
@@ -1475,7 +1477,7 @@ function updateExportFields() {
   $('docxExportFields')?.classList.toggle('hidden', kind !== 'docx');
   $('exportOverlayModeWrap')?.classList.toggle('hidden', kind === 'txt' || kind === 'docx');
 }
-async function exportResult(kind = null, docxModeOverride = null) {
+async function exportResult(kind = null, docxModeOverride = null, docxLayoutOverride = null) {
   if (kind) { $('exportKind').value = kind; updateExportFields(); }
   if (!selectedImages().length) throw new Error('حداقل یک تصویر را برای خروجی انتخاب کنید');
   const controller = new AbortController();
@@ -1488,8 +1490,10 @@ async function exportResult(kind = null, docxModeOverride = null) {
   try {
     await overlayPreviewTask;
     checkNotCancelled();
+    if (docxLayoutOverride && $('exportDocxLayout')) $('exportDocxLayout').value = docxLayoutOverride;
     collectOutputSettings(); await saveProject(); const exportKind = $('exportKind').value;
     const docxMode = docxModeOverride || $('exportDocxMode')?.value || 'translation';
+    const docxLayout = docxLayoutOverride || $('exportDocxLayout')?.value || 'visual';
     if (exportKind !== 'txt' && exportKind !== 'docx') {
       const targets = selectedImages().filter((item) => hasOverlayText(item) || item.edited);
       for (let idx = 0; idx < targets.length; idx += 1) {
@@ -1506,11 +1510,12 @@ async function exportResult(kind = null, docxModeOverride = null) {
     }
     checkNotCancelled();
     const baseExportName = safeName($('exportName').value);
-    const finalExportName = exportKind === 'docx' && docxMode === 'ocr' && !/-(?:en|ocr)$/i.test(baseExportName) ? `${baseExportName}-en` : baseExportName;
+    const layoutExportName = exportKind === 'docx' && docxLayout === 'flowing' && !/-book$/i.test(baseExportName) ? `${baseExportName}-book` : baseExportName;
+    const finalExportName = exportKind === 'docx' && docxMode === 'ocr' && !/-(?:en|ocr)$/i.test(layoutExportName) ? `${layoutExportName}-en` : layoutExportName;
     let response;
     try {
       response = await fetch(`/api/projects/${state.project.id}/export`, {
-        ...jsonOptions('POST', { kind: exportKind, image_ids: selectedImages().map((item) => item.id), name: finalExportName, seamless: $('exportSeamless').checked, uniform_size: $('exportUniform').checked, two_per_page: $('exportTwo').checked, image_format: $('exportFormat').value, folder_name: $('exportFolder').value, docx_mode: docxMode }),
+        ...jsonOptions('POST', { kind: exportKind, image_ids: selectedImages().map((item) => item.id), name: finalExportName, seamless: $('exportSeamless').checked, uniform_size: $('exportUniform').checked, two_per_page: $('exportTwo').checked, image_format: $('exportFormat').value, folder_name: $('exportFolder').value, docx_mode: docxMode, docx_layout: docxLayout }),
         signal: controller.signal,
       });
     } catch (cause) {
@@ -1545,12 +1550,15 @@ function openDocxExportPrompt() {
   setProgress('docxProgress', 0, false);
   showDialog('docxExportDialog');
 }
-async function runDocxChoiceExport(mode) {
-  const buttons = ['docxChoiceTranslation', 'docxChoiceOcr'].map((id) => $(id)).filter(Boolean);
+async function runDocxChoiceExport(mode, layout = 'visual') {
+  const buttons = ['docxChoiceTranslation', 'docxChoiceOcr', 'docxChoiceFlowingTranslation', 'docxChoiceFlowingOcr'].map((id) => $(id)).filter(Boolean);
   buttons.forEach((btn) => { btn.disabled = true; });
   if ($('exportDocxMode')) $('exportDocxMode').value = mode;
-  const label = mode === 'ocr' ? 'در حال ساخت فایل Word (متن انگلیسی / OCR)…' : 'در حال ساخت فایل Word (متن ترجمه‌شده)…';
-  try { await runJob(label, () => exportResult('docx', mode), 'docxProgress'); }
+  if ($('exportDocxLayout')) $('exportDocxLayout').value = layout;
+  const layoutText = layout === 'flowing' ? 'متن پیوستهٔ کتابی' : 'تصویری';
+  const modeText = mode === 'ocr' ? 'متن اصلی / OCR' : 'متن ترجمه‌شده';
+  const label = `در حال ساخت فایل Word (${layoutText} — ${modeText})…`;
+  try { await runJob(label, () => exportResult('docx', mode, layout), 'docxProgress'); }
   finally { buttons.forEach((btn) => { btn.disabled = false; }); }
 }
 
@@ -3600,7 +3608,7 @@ async function retranslateBlock(block) {
     const limit = profiles.length ? Math.min(...profiles.map(p => p.source_limit ?? 1000)) : 1000;
     const skillLimit = Math.floor(limit * (state.ai?.skill_percent ?? 15) / 100);
     const contextLimit = Math.floor(limit * (state.ai?.context_percent ?? 15) / 100);
-    const skill = savedTranslationSkill(projectId) ?? 'ترجمه را روان و طبیعی و متناسب با لحن شخصیت‌ها بنویس؛ نام‌ها، اعداد و آواها را با دقت حفظ کن.';
+    const skill = savedTranslationSkill(projectId) ?? 'ترجمه را روان و متناسب با لحن کمیک یا کتاب بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.';
     const summary = state.project._aiStorySummary || '';
     const safeSkill = Array.from(skill).length <= skillLimit ? skill : '';
     const safeSummary = Array.from(summary).length <= contextLimit ? summary : '';
@@ -3919,7 +3927,7 @@ function bindEvents() {
   $('engineUpdateOpenModelsBtn')?.addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); });
   $('engineUpdateDismissBtn')?.addEventListener('click', () => { engineUpdateNoticeDismissed = true; syncEngineUpdateUi(); });
   $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
-  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {}));
+  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'visual').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'visual').catch(() => {})); $('docxChoiceFlowingTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'flowing').catch(() => {})); $('docxChoiceFlowingOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'flowing').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);

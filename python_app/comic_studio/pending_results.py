@@ -161,6 +161,8 @@ def resolve(store: ProjectStore, project_id: str, token: str, revision: str,
                 if row['missing'] or (row['conflict'] and choices[row['key']] == 'keep'): continue
                 item = images[output['id']]
                 item['blocks'] = copy.deepcopy(output['blocks']); item['ocrCompleted'] = True; item['edited'] = False
+                if output.get('pageMode') in {'comic', 'document'}:
+                    item['pageMode'] = output['pageMode']
                 replace.append(output['id'])
             if replace and state.get('settings', {}).get('overlayMode') == entry.get('overlayMode'):
                 state['settings']['overlayMode'] = 'ocr'

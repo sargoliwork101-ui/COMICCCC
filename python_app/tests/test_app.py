@@ -44,11 +44,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.69"
+    assert health.json()["version"] == "3.70"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۶۹ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۷۰ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -2154,6 +2154,119 @@ def test_docx_translation_mode_honors_per_block_ocr_text_mode(client):
     assert "BOOM SFX!" in doc_xml
     assert "ترجمه پنهان جلوه صوتی" not in doc_xml
     assert '<w:jc w:val="left"/>' in doc_xml
+
+
+def test_book_and_article_ocr_and_flowing_docx_export(client, monkeypatch):
+    project, item = make_project(client)
+
+    def fake_two_col_ocr(*args, **kwargs):
+        raw = [
+            (1, "Chapter 1: Foundations of Optics", 40, 15, 240, 24),
+            (2, "Light propagates through media-", 40, 52, 115, 16),
+            (3, "• Wave interference principle", 180, 52, 120, 16),
+            (4, "ted electromagnetic fields.", 40, 72, 105, 16),
+            (5, "• Snell refraction law", 180, 72, 120, 16),
+            (6, "    Second indented paragraph starts", 62, 94, 98, 16),
+            (7, "here on the left column.", 40, 114, 110, 16),
+        ]
+        return [
+            {
+                "id": idx,
+                "text": txt,
+                "tr": "",
+                "richHtml": "",
+                "enabled": True,
+                "x0": x,
+                "y0": y,
+                "x1": x + w,
+                "y1": y + h,
+                "lineH": h,
+                "conf": 95,
+                "bg": "auto",
+            }
+            for idx, txt, x, y, w, h in raw
+        ]
+
+    monkeypatch.setattr("comic_studio.main.recognize_image", fake_two_col_ocr)
+    ocr_res = client.post(
+        f"/api/projects/{project['id']}/ocr",
+        json={"image_ids": [item["id"]], "group_lines": True, "page_mode": "auto"},
+    )
+    assert ocr_res.status_code == 200, ocr_res.text
+    img_state = ocr_res.json()["images"][0]
+    assert img_state["pageMode"] == "document"
+    blocks = img_state["blocks"]
+    assert [b["text"] for b in blocks] == [
+        "Chapter 1: Foundations of Optics",
+        "Light propagates through mediated electromagnetic fields.",
+        "Second indented paragraph starts here on the left column.",
+        "• Wave interference principle",
+        "• Snell refraction law",
+    ]
+    assert blocks[0]["pageRole"] == "heading" and blocks[0]["bold"] is True
+    assert blocks[1]["pageRole"] == "paragraph" and blocks[1]["bold"] is False
+
+    # Add Persian translations & rich formatting, then export BOTH flowing Word (.docx) and TXT
+    state = ocr_res.json()
+    translations = [
+        "فصل اول: مبانی اپتیک",
+        "نور از طریق میدان‌های الکترومغناطیسی منتشر می‌شود.",
+        "پاراگراف دوم با تورفتگی در ستون چپ آغاز می‌شود.",
+        "• اصل تداخل امواج",
+        "• قانون شکست اسنل",
+    ]
+    for blk, tr in zip(state["images"][0]["blocks"], translations):
+        blk["tr"] = tr
+    state["images"][0]["blocks"][1]["richHtml"] = "نور از طریق <b>میدان‌های الکترومغناطیسی</b> منتشر می‌شود."
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": state}).status_code == 200
+
+    # 1. Flowing Word export (translation): no raster background image, standard A4 book layout, keepNext heading, bold inline run
+    flowing_tr = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={
+            "kind": "docx",
+            "image_ids": [item["id"]],
+            "name": "optics-book-fa",
+            "docx_mode": "translation",
+            "docx_layout": "flowing",
+        },
+    )
+    assert flowing_tr.status_code == 200, flowing_tr.text
+    with zipfile.ZipFile(io.BytesIO(flowing_tr.content)) as zf:
+        names = zf.namelist()
+        assert not any(n.startswith("word/media/") for n in names)
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+    assert "فصل اول: مبانی اپتیک" in doc_xml
+    assert "میدان‌های الکترومغناطیسی" in doc_xml
+    assert "<w:keepNext/>" in doc_xml
+    assert '<w:pgMar w:top="1440"' in doc_xml
+
+    # 2. Flowing Word export (OCR): preserves English book text in column reading order without background images
+    flowing_ocr = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={
+            "kind": "docx",
+            "image_ids": [item["id"]],
+            "name": "optics-book-en",
+            "docx_mode": "ocr",
+            "docx_layout": "flowing",
+        },
+    )
+    assert flowing_ocr.status_code == 200, flowing_ocr.text
+    with zipfile.ZipFile(io.BytesIO(flowing_ocr.content)) as zf:
+        ocr_xml = zf.read("word/document.xml").decode("utf-8")
+    assert "Light propagates through mediated electromagnetic fields." in ocr_xml
+    assert ocr_xml.index("Second indented paragraph") < ocr_xml.index("Wave interference principle")
+
+    # 3. TXT export also follows multi-column reading order
+    txt_res = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={"kind": "txt", "image_ids": [item["id"]], "name": "optics-book"},
+    )
+    assert txt_res.status_code == 200
+    txt_body = txt_res.content.decode("utf-8-sig")
+    assert txt_body.index("Second indented paragraph") < txt_body.index("Wave interference principle")
+
 
 
 

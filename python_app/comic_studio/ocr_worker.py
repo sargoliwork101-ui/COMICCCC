@@ -302,9 +302,18 @@ class _TransformersRegionAdapter(_BaseAdapter):
         self._model, self._processor, self._device = model, processor, device
         return model, processor, device
 
-    def _infer_crop(self, crop_img: Any) -> str:
+    def _infer_crop(self, crop_img: Any, *, max_tokens: int | None = None) -> str:
         import torch
         model, processor, device = self._load()
+        cw, ch = getattr(crop_img, "size", (400, 200))
+        if max_tokens is None:
+            area = int(cw) * int(ch)
+            if area >= 600_000:
+                max_tokens = 2048
+            elif area >= 180_000:
+                max_tokens = 1024
+            else:
+                max_tokens = 512
         messages = [
             {
                 "role": "user",
@@ -321,7 +330,7 @@ class _TransformersRegionAdapter(_BaseAdapter):
             inputs = processor(images=crop_img, return_tensors="pt")
         inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
         with torch.no_grad():
-            generated = model.generate(**inputs, max_new_tokens=512, do_sample=False)
+            generated = model.generate(**inputs, max_new_tokens=max_tokens, do_sample=False)
         prompt_len = inputs["input_ids"].shape[-1] if "input_ids" in inputs else 0
         new_tokens = generated[:, prompt_len:] if prompt_len and generated.shape[-1] > prompt_len else generated
         decoded = processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
@@ -357,7 +366,7 @@ class _DotsOcrAdapter(_TransformersRegionAdapter):
         with Image.open(image_path) as im:
             rgb = im.convert("RGB")
             width, height = rgb.size
-        raw = self._infer_crop(rgb)
+        raw = self._infer_crop(rgb, max_tokens=2048)
         match = re.search(r"\[.*\]", raw, flags=re.DOTALL)
         if match:
             try:

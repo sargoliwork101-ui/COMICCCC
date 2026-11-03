@@ -281,6 +281,21 @@ def build_images_zip(store: ProjectStore, state: dict[str, Any], request: dict[s
     return output
 
 
+def _ordered_export_blocks(item: dict[str, Any]) -> list[dict[str, Any]]:
+    from .ocr_grouping import detect_page_mode, sort_document_reading_order
+
+    enabled = [b for b in item.get("blocks", []) if b.get("enabled", True) is not False]
+    if len(enabled) < 2:
+        return enabled
+    w = int(item.get("width") or 0)
+    h = int(item.get("height") or 0)
+    page_size = (w, h) if w > 0 and h > 0 else None
+    mode = item.get("pageMode") or detect_page_mode(enabled, page_size=page_size)
+    if mode == "document":
+        return sort_document_reading_order(enabled, page_size=page_size)
+    return sorted(enabled, key=lambda block: (block.get("y0", 0), block.get("x0", 0)))
+
+
 def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any]) -> Path:
     images = selected_images(state, request.get("image_ids", []))
     if not images:
@@ -289,10 +304,7 @@ def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
     total = max(1, len(images))
     for index, item in enumerate(images, start=1):
         chunks.append(f"===== تصویر {index:03d} — {item['name']} =====\n")
-        blocks = sorted(
-            [b for b in item.get("blocks", []) if b.get("enabled", True) is not False],
-            key=lambda block: (block.get("y0", 0), block.get("x0", 0)),
-        )
+        blocks = _ordered_export_blocks(item)
         if not blocks:
             chunks.append("(متنی تشخیص داده نشده است)\n")
         for block in blocks:
@@ -582,20 +594,22 @@ def _box_inset_px(dim: float) -> float:
     return min(4.0, max(0.0, float(dim) * 0.02))
 
 
-def _estimate_fit_px(text: str, bw: float, bh: float) -> float:
+def _estimate_fit_px(text: str, bw: float, bh: float, line_h: float | None = None) -> float:
     """Estimate auto-fit pixel font size inside (bw, bh) when block['size'] is unset."""
     ix = _box_inset_px(bw)
     iy = _box_inset_px(bh)
     usable_w = max(16.0, bw - 2.0 * ix)
     usable_h = max(14.0, bh - 2.0 * iy)
     raw_lines = [ln for ln in _clean_text(text).split("\n")] or [""]
-    for sz in range(min(44, max(8, int(usable_h * 0.72))), 7, -1):
+    lh_cap = max(12, min(64, round(float(line_h) * 1.1))) if line_h and float(line_h) > 0 else 44
+    top_sz = min(lh_cap, 44, max(8, int(usable_h * 0.72)))
+    for sz in range(top_sz, 6, -1):
         char_w = sz * 0.54
         chars_per_line = max(1.0, usable_w / max(1.0, char_w))
         wrapped = sum(max(1, math.ceil(len(ln) / chars_per_line)) for ln in raw_lines)
         if wrapped * (sz * 1.52) <= usable_h:
             return float(sz)
-    return 8.0
+    return 7.0
 
 
 def _block_box(block: dict[str, Any], offset_x: float, offset_y: float, scale: float, max_w: int, max_h: int) -> tuple[float, float, float, float]:
@@ -624,7 +638,7 @@ def _build_textbox_paragraphs_xml(
             align_default = "left"
         else:
             align_default = raw_align or ("right" if rtl_default else "left")
-        bold_default = True
+        bold_default = block.get("bold") is not False
     else:
         plain = _block_translation_plain(block)
         rich_html = _clean_text(block.get("richHtml") or "").strip()
@@ -633,11 +647,19 @@ def _build_textbox_paragraphs_xml(
         align_default = str(block.get("align") or ("justify" if rtl_default else "left"))
         bold_default = block.get("bold") is not False
 
+    raw_line_h = block.get("lineH")
+    line_h_val: float | None = None
+    try:
+        if raw_line_h is not None and float(raw_line_h) > 0:
+            line_h_val = float(raw_line_h)
+    except (TypeError, ValueError):
+        line_h_val = None
+
     raw_size = block.get("size")
     try:
-        base_px = float(raw_size) if raw_size is not None and float(raw_size) > 0 else _estimate_fit_px(plain, bw_px, bh_px)
+        base_px = float(raw_size) if raw_size is not None and float(raw_size) > 0 else _estimate_fit_px(plain, bw_px, bh_px, line_h=line_h_val)
     except (TypeError, ValueError):
-        base_px = _estimate_fit_px(plain, bw_px, bh_px)
+        base_px = _estimate_fit_px(plain, bw_px, bh_px, line_h=line_h_val)
 
     explicit_color = _parse_css_color(block.get("color"))
     if explicit_color:
@@ -831,11 +853,212 @@ def _prepare_docx_pages(
     return pages
 
 
+def _build_flowing_paragraphs_xml(block: dict[str, Any], *, docx_mode: str) -> str:
+    role = str(block.get("pageRole") or "paragraph")
+    if docx_mode == "ocr":
+        indent_spaces = " " * max(0, min(12, int(block.get("sourceIndent", 0) or 0))) if role != "heading" else ""
+        plain = _strip_inline_markers(_clean_text(f"{indent_spaces}{block.get('text') or ''}")).strip("\n")
+        rich_html = ""
+        rtl_default = bool(_RTL_CHAR_RE.search(plain))
+        align_default = "justify" if role == "paragraph" and len(plain) >= 60 else ("right" if rtl_default else "left")
+        bold_default = True if role == "heading" else (block.get("bold") is True and block.get("pageRole") is not None)
+    else:
+        plain = _block_translation_plain(block)
+        rich_html = _clean_text(block.get("richHtml") or "").strip()
+        dir_field = str(block.get("dir") or "").lower()
+        rtl_default = (dir_field == "rtl") if dir_field in ("rtl", "ltr") else (True if not plain else bool(_RTL_CHAR_RE.search(plain) or not re.search(r"[A-Za-z]", plain)))
+        raw_align = str(block.get("align") or "")
+        align_default = raw_align if raw_align in ("left", "right", "center", "justify") else ("right" if role == "heading" and rtl_default else ("left" if role == "heading" else "justify"))
+        if role == "heading":
+            bold_default = True
+        elif block.get("pageRole") in ("paragraph", "list"):
+            bold_default = block.get("bold") is True
+        else:
+            bold_default = False
+
+    base_pt = 15.0 if role == "heading" else 12.0
+    explicit_color = _parse_css_color(block.get("color")) or "141414"
+    base_style = {
+        "bold": bold_default,
+        "italic": bool(block.get("italic")),
+        "underline": bool(block.get("underline")),
+        "strike": False,
+        "color": explicit_color,
+        "px_size": base_pt,
+        "rtl": rtl_default,
+        "align": align_default,
+    }
+
+    if rich_html and docx_mode != "ocr":
+        parser = _RichHtmlToDocxParser(base_style)
+        parser.feed(rich_html)
+        parser.close()
+        paragraphs = [p for p in parser.paragraphs if p["runs"]]
+    else:
+        paragraphs = []
+
+    if not paragraphs:
+        lines = plain.split("\n") if plain else [""]
+        paragraphs = [{
+            "align": align_default,
+            "rtl": rtl_default,
+            "runs": [
+                entry
+                for idx, line in enumerate(lines)
+                for entry in (([{"br": True, **base_style}] if idx > 0 else []) + ([{"text": line, **base_style}] if line else []))
+            ],
+        }]
+
+    p_xml_list: list[str] = []
+    for para in paragraphs:
+        p_rtl = bool(para["rtl"])
+        jc = _word_jc(str(para["align"]), p_rtl)
+        before_dxa = "200" if role == "heading" else "0"
+        after_dxa = "100" if role == "heading" else ("60" if role == "list" else "120")
+        line_dxa = "280" if role == "heading" else "320"
+        keep_next = "<w:keepNext/>" if role == "heading" else ""
+        ind_xml = '<w:ind w:left="360" w:right="360"/>' if role == "list" else ""
+        ppr = (
+            f'<w:bidi w:val="{"1" if p_rtl else "0"}"/>'
+            f'<w:jc w:val="{jc}"/>'
+            f"{keep_next}{ind_xml}"
+            f'<w:spacing w:before="{before_dxa}" w:after="{after_dxa}" w:line="{line_dxa}" w:lineRule="auto"/>'
+        )
+        r_xml_list: list[str] = []
+        for run in para["runs"]:
+            raw_run_sz = float(run.get("px_size") or base_pt)
+            pt_size = max(8.0, min(48.0, raw_run_sz))
+            half_pt = max(16, min(96, round(pt_size * 2)))
+            rpr = [f'<w:sz w:val="{half_pt}"/><w:szCs w:val="{half_pt}"/>']
+            if run.get("bold"):
+                rpr.append("<w:b/><w:bCs/>")
+            if run.get("italic"):
+                rpr.append("<w:i/><w:iCs/>")
+            if run.get("underline"):
+                rpr.append('<w:u w:val="single"/>')
+            if run.get("strike"):
+                rpr.append("<w:strike/>")
+            if run.get("rtl"):
+                rpr.append("<w:rtl/>")
+            if run.get("color"):
+                rpr.append(f'<w:color w:val="{run["color"]}"/>')
+            rpr_xml = f"<w:rPr>{''.join(rpr)}</w:rPr>"
+            if run.get("br"):
+                r_xml_list.append(f"<w:r>{rpr_xml}<w:br/></w:r>")
+            else:
+                r_xml_list.append(f'<w:r>{rpr_xml}<w:t xml:space="preserve">{xml_escape(str(run.get("text") or ""))}</w:t></w:r>')
+        p_xml_list.append(f"<w:p><w:pPr>{ppr}</w:pPr>{''.join(r_xml_list)}</w:p>")
+    return "".join(p_xml_list)
+
+
+def _build_flowing_docx(
+    store: ProjectStore,
+    state: dict[str, Any],
+    images: list[dict[str, Any]],
+    request: dict[str, Any],
+    docx_mode: str,
+) -> Path:
+    """Build a clean, reflowable book/article Word (.docx) document without background images."""
+    by_group: dict[str, list[dict[str, Any]]] = {}
+    for item in images:
+        gid = str(item.get("groupId") or "").strip()
+        if gid:
+            by_group.setdefault(gid, []).append(item)
+
+    units: list[list[dict[str, Any]]] = []
+    consumed: set[str] = set()
+    for item in images:
+        gid = str(item.get("groupId") or "").strip()
+        members = by_group.get(gid)
+        if not gid or not members or len(members) < 2:
+            units.append([item])
+            continue
+        if gid in consumed:
+            continue
+        consumed.add(gid)
+        units.append(members)
+
+    seamless = bool(request.get("seamless"))
+    page_xml_chunks: list[str] = []
+    doc_has_rtl = False
+    total_units = max(1, len(units))
+
+    for unit_idx, members in enumerate(units, start=1):
+        unit_paras: list[str] = []
+        for item in members:
+            crop = crop_box(item)
+            ordered_blocks = _ordered_export_blocks(item)
+            for blk in ordered_blocks:
+                if crop:
+                    cx0, cy0, cx1, cy1 = crop
+                    bx0 = float(blk.get("tx0", blk.get("x0", 0)) or 0)
+                    by0 = float(blk.get("ty0", blk.get("y0", 0)) or 0)
+                    bx1 = float(blk.get("tx1", blk.get("x1", bx0)) or bx0)
+                    by1 = float(blk.get("ty1", blk.get("y1", by0)) or by0)
+                    if min(bx1, cx1) - max(bx0, cx0) <= 1 or min(by1, cy1) - max(by0, cy0) <= 1:
+                        continue
+                eff_mode = _effective_docx_block_mode(blk, docx_mode)
+                if eff_mode == "ocr":
+                    sample = _strip_inline_markers(_clean_text(blk.get("text") or "")).strip()
+                else:
+                    sample = _block_translation_plain(blk).strip()
+                if not sample:
+                    continue
+                if _RTL_CHAR_RE.search(sample):
+                    doc_has_rtl = True
+                unit_paras.append(_build_flowing_paragraphs_xml(blk, docx_mode=eff_mode))
+        if unit_paras:
+            page_xml_chunks.append("".join(unit_paras))
+        emit(
+            f"چیدمان متن صفحهٔ {unit_idx} از {total_units} در سند Word کتابی",
+            progress=unit_idx / total_units * 0.9,
+        )
+
+    if not page_xml_chunks:
+        body_xml = "<w:p/>"
+    elif seamless:
+        body_xml = "".join(page_xml_chunks)
+    else:
+        page_break_xml = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>'
+        body_xml = page_break_xml.join(page_xml_chunks)
+
+    bidi_sect = "<w:bidi/>" if (doc_has_rtl or docx_mode == "translation") else ""
+    sect_pr = (
+        f"<w:sectPr>{bidi_sect}"
+        '<w:pgSz w:w="11906" w:h="16838"/>'
+        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>'
+        "</w:sectPr>"
+    )
+    doc_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
+        '  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n'
+        "</Relationships>"
+    )
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body_xml}{sect_pr}</w:body></w:document>"
+    )
+    emit("در حال بسته‌بندی فایل Word کتابی…", progress=0.96)
+    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.docx"
+    with _atomic_export_path(output) as tmp_output:
+        with zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", _DOCX_CONTENT_TYPES.encode("utf-8"))
+            archive.writestr("_rels/.rels", _DOCX_ROOT_RELS.encode("utf-8"))
+            archive.writestr("word/_rels/document.xml.rels", doc_rels_xml.encode("utf-8"))
+            archive.writestr("word/styles.xml", _DOCX_STYLES.encode("utf-8"))
+            archive.writestr("word/document.xml", document_xml.encode("utf-8"))
+    return output
+
+
 def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, Any]) -> Path:
     images = selected_images(state, request.get("image_ids", []))
     if not images:
         raise ValueError("No images selected")
     docx_mode = "ocr" if request.get("docx_mode") == "ocr" else "translation"
+    if request.get("docx_layout") == "flowing":
+        return _build_flowing_docx(store, state, images, request, docx_mode)
     pages = _prepare_docx_pages(store, state["id"], images, docx_mode)
 
     rel_entries = [

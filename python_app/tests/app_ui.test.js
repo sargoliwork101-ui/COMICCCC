@@ -760,11 +760,24 @@ function check(name, condition) {
     check('clicking Word export opens pre-export language choice dialog before generating docx', $('docxExportDialog').open === true && exportRequests.at(-1)?.kind !== 'docx');
     $('docxChoiceTranslation').click();
     await sleep(35);
-    check('choosing Translated in Word prompt sends docx_mode=translation without unnecessary image re-renders', exportRequests.at(-1)?.kind === 'docx' && exportRequests.at(-1)?.docx_mode === 'translation' && renderedUploads === uploadsBefore && $('downloadLink').download === 'word-check.docx' && $('docxExportDialog').open === false);
+    check('choosing Translated in Word prompt sends docx_mode=translation and docx_layout=visual without unnecessary image re-renders', exportRequests.at(-1)?.kind === 'docx' && exportRequests.at(-1)?.docx_mode === 'translation' && exportRequests.at(-1)?.docx_layout === 'visual' && renderedUploads === uploadsBefore && $('downloadLink').download === 'word-check.docx' && $('docxExportDialog').open === false);
     $('exportDocxBtn').click();
     $('docxChoiceOcr').click();
     await sleep(35);
-    check('choosing English/OCR in Word prompt sends docx_mode=ocr', exportRequests.at(-1)?.kind === 'docx' && exportRequests.at(-1)?.docx_mode === 'ocr');
+    check('choosing English/OCR in Word prompt sends docx_mode=ocr and docx_layout=visual', exportRequests.at(-1)?.kind === 'docx' && exportRequests.at(-1)?.docx_mode === 'ocr' && exportRequests.at(-1)?.docx_layout === 'visual');
+    $('exportDocxBtn').click();
+    $('docxChoiceFlowingTranslation').click();
+    await sleep(35);
+    check('choosing Flowing Book Translation in Word prompt sends docx_mode=translation and docx_layout=flowing', exportRequests.at(-1)?.kind === 'docx' && exportRequests.at(-1)?.docx_mode === 'translation' && exportRequests.at(-1)?.docx_layout === 'flowing');
+    $('exportDocxBtn').click();
+    $('docxChoiceFlowingOcr').click();
+    await sleep(35);
+    check('choosing Flowing Book OCR in Word prompt sends docx_mode=ocr and docx_layout=flowing', exportRequests.at(-1)?.kind === 'docx' && exportRequests.at(-1)?.docx_mode === 'ocr' && exportRequests.at(-1)?.docx_layout === 'flowing');
+    $('ocrPageMode').value = 'document';
+    vm.runInContext('collectOcrSettings()', context);
+    check('ocrPageMode selector supports auto/comic/document and persists in project settings', vm.runInContext("state.project.settings.ocrPageMode === 'document'", context));
+    $('ocrPageMode').value = 'auto';
+    vm.runInContext('collectOcrSettings()', context);
     check('dock, Word, preview, AI and editor progress bars all carry accessible progressbar roles and percentage labels', ['dockProgress', 'docxProgress', 'previewPrepProgress', 'aiProgress', 'editorProgress'].every((id) => $(id) && $(id).closest('[role="progressbar"]')) && !!$('dockProgressPercent'));
     await vm.runInContext(`(async () => {
       state.ai = { ...state.ai, provider: 'openai', providers: { ...state.ai.providers, openai: { ...state.ai.providers.openai, profiles: [{ id: 'p1', name: 'k', hasApiKey: true, source_limit: 200 }] } } };

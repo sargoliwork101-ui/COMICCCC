@@ -542,3 +542,54 @@ def test_isolated_engine_prepare_serve_and_update_lifecycle(tmp_path, monkeypatc
     finally:
         engine.close()
 
+
+def test_detect_comic_text_regions_supports_dense_book_pages_and_over_36_regions():
+    from PIL import ImageDraw
+    from comic_studio.ocr_managed import detect_comic_text_regions
+
+    # 1. Narrow-margin dense book page (>80% page coverage) must NOT be dropped and splits into paragraph chunks:
+    book_img = Image.new("RGB", (600, 900), "white")
+    draw = ImageDraw.Draw(book_img)
+    for para_idx, base_y in enumerate((30, 320, 610)):
+        for ln in range(7):
+            y = base_y + ln * 24
+            draw.rectangle([20, y, 580, y + 10], fill="black")
+    regions = detect_comic_text_regions(book_img, page_mode="document")
+    assert len(regions) >= 2
+    assert min(r[1] for r in regions) <= 40
+    assert max(r[3] for r in regions) >= 740
+
+    # 2. Dense glossary/table page with >36 separate cells preserves >36 regions:
+    grid_img = Image.new("RGB", (1000, 1400), "white")
+    gdraw = ImageDraw.Draw(grid_img)
+    for row in range(12):
+        for col in range(4):
+            x0 = 40 + col * 230
+            y0 = 40 + row * 105
+            gdraw.rectangle([x0, y0, x0 + 130, y0 + 22], fill="black")
+    grid_regions = detect_comic_text_regions(grid_img, page_mode="document")
+    assert len(grid_regions) == 48
+
+
+def test_tesseract_document_mode_uses_psm_3_and_skips_bubble_fallback(monkeypatch):
+    from comic_studio.ocr import OcrLine, TesseractEngine
+
+    engine = TesseractEngine()
+    calls: list[str] = []
+
+    def fake_psm(image, language, psm):
+        calls.append(psm)
+        return [OcrLine("Book chapter line", 0.92, [[20, 20], [320, 20], [320, 44], [20, 44]])]
+
+    monkeypatch.setattr(engine, "_recognize_with_psm", fake_psm)
+    sample = Image.new("RGB", (400, 200), "white")
+    doc_blocks = recognize_image(engine, sample, "eng", contrast=False, precise=False, page_mode="document")
+    assert calls == ["3"]
+    assert doc_blocks[0]["text"] == "Book chapter line"
+
+    calls.clear()
+    comic_blocks = recognize_image(engine, sample, "eng", contrast=False, precise=False, page_mode="comic")
+    assert calls == ["11"]
+    assert comic_blocks[0]["text"] == "Book chapter line"
+
+

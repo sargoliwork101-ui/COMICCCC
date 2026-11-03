@@ -487,13 +487,13 @@
         const lines = wrapInlineAt(ctx, inWords, usableW, st, st.size);
         return { inline: true, size: st.size, lines, lh: st.size * 1.55, lineLh: lineHeightsFor(lines, st, st.size) };
       }
-      return Object.assign({ inline: true }, fitInline(ctx, inWords, usableW, usableH, maxSize, 8, st));
+      return Object.assign({ inline: true }, fitInline(ctx, inWords, usableW, usableH, maxSize, 7, st));
     }
     if (st.size) {
       ctx.font = `${fontPrefix}${st.size}px ${FONT}`;
       return { inline: false, size: st.size, lines: wrapWords(ctx, sourceText, usableW), lh: st.size * 1.55 };
     }
-    return Object.assign({ inline: false }, fit(ctx, sourceText, usableW, usableH, maxSize, 8, fontPrefix));
+    return Object.assign({ inline: false }, fit(ctx, sourceText, usableW, usableH, maxSize, 7, fontPrefix));
   }
 
   function resolveDomNodeStyle(node, rootBox, st, baseSize) {
@@ -542,8 +542,8 @@
       } else {
         const jsEst = computeJsFit(ctx, b, st, bw, bh, richWordsOpt).size;
         const startSize = Math.min(maxSize, jsEst + 2);
-        size = 8;
-        for (let s = startSize; s >= 8; s -= 1) {
+        size = 7;
+        for (let s = startSize; s >= 7; s -= 1) {
           applyDomLayoutStyles(box, tpl, st, bw, padX, s);
           if (box.scrollHeight <= usableH + 0.75 && box.scrollWidth <= bw + usableW * 0.04 + 0.5) {
             size = s;

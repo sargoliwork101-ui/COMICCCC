@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.69">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.69">
+  <link rel="stylesheet" href="/style.css?v=3.70">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.70">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۶۹ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۷۰ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu">☰ پروژه و تنظیمات</button>
   </header>
 
@@ -110,13 +110,14 @@
     <div class="form-grid">
       <label>موتور OCR<select id="ocrEngine"></select></label>
       <label>زبان متن<select id="ocrLanguage"><option value="eng">English</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label>
+      <label>نوع صفحه و چیدمان<select id="ocrPageMode"><option value="auto">تشخیص خودکار (کمیک، کتاب و مقاله)</option><option value="comic">کمیک و مانگا (حباب گفتگو)</option><option value="document">کتاب، مقاله و جزوه (پاراگراف و ستون)</option></select></label>
       <label>حداقل اطمینان<input id="ocrConfidence" type="number" min="0" max="0.95" step="0.05" value="0.35"></label>
     </div>
     <div class="checks">
       <label><input id="ocrOnlySelected" type="checkbox" checked> فقط تصاویر انتخاب‌شده</label>
       <label><input id="ocrContrast" type="checkbox" checked> افزایش کنتراست نسخهٔ موقت OCR</label>
       <label><input id="ocrPrecise" type="checkbox" checked> بزرگ‌نمایی برای دقت بیشتر</label>
-      <label><input id="ocrGroupLines" type="checkbox" checked> ادغام خودکار خط‌های نزدیک در یک کادر حباب</label>
+      <label><input id="ocrGroupLines" type="checkbox" checked> ادغام خودکار خط‌های هم‌خانواده (حباب کمیک یا پاراگراف کتاب)</label>
       <label><input id="ocrErase" type="checkbox" checked> پاک‌کردن متن قبلی زیر متن نمایش‌داده‌شده</label>
     </div>
     <p id="ocrEngineStatus" class="hint"></p>
@@ -210,26 +211,41 @@
     <form method="dialog" class="dialog-head"><h2>تنظیمات خروجی</h2><button class="icon" value="cancel">×</button></form>
     <label>نوع خروجی<select id="exportKind"><option value="pdf">PDF</option><option value="images">تصاویر جداگانه (ZIP)</option><option value="txt">متن OCR و ترجمه (TXT)</option><option value="docx">فایل Word (DOCX)</option></select></label>
     <label id="exportOverlayModeWrap">متن روی تصاویر<select id="exportOverlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label>
-    <div id="docxExportFields" class="checks hidden"><label>متن داخل حباب‌های فایل Word<select id="exportDocxMode"><option value="translation">متن ترجمه‌شده (فارسی)</option><option value="ocr">متن انگلیسی / اصلی (OCR)</option></select></label></div>
+    <div id="docxExportFields" class="checks hidden">
+      <label>متن داخل فایل Word<select id="exportDocxMode"><option value="translation">متن ترجمه‌شده (فارسی)</option><option value="ocr">متن انگلیسی / اصلی (OCR)</option></select></label>
+      <label>قالب چیدمان فایل Word<select id="exportDocxLayout"><option value="visual">صفحهٔ تصویری (کمیک و کتاب مصور — حفظ تصویر و جای کادرها)</option><option value="flowing">متن پیوستهٔ کتابی (کتاب، مقاله و جزوه — بدون تصویر پس‌زمینه)</option></select></label>
+    </div>
     <div id="pdfExportFields" class="checks"><label><input id="exportSeamless" type="checkbox"> همهٔ تصاویر پشت سر هم در یک صفحهٔ بلند</label><label><input id="exportUniform" type="checkbox"> قاب‌های هم‌اندازه</label><label><input id="exportTwo" type="checkbox"> دو تصویر در هر صفحه (گروه‌ها جدا می‌مانند)</label></div>
     <div id="imageExportFields" class="form-grid hidden"><label>فرمت<select id="exportFormat"><option value="orig">اصلی / PNG برای ویرایش‌شده</option><option value="png">PNG</option><option value="jpg">JPEG کیفیت ۱۰۰٪</option></select></label><label>زیرپوشه داخل ZIP<input id="exportFolder" placeholder="اختیاری"></label></div>
-    <p class="hint">در PDF و ZIP، انتخاب فارسی/انگلیسیِ هر کادر همان‌طور اعمال می‌شود؛ بنابراین یک صفحه می‌تواند بعضی متن‌ها را فارسی و بعضی را انگلیسی داشته باشد. در فایل Word، صفحه‌های کمیک با حباب‌های پاک‌شده در پس‌زمینه و کادرهای متن قابل‌ویرایش در همان موقعیت حباب‌ها ساخته می‌شوند.</p>
+    <p class="hint">در PDF و ZIP، انتخاب فارسی/انگلیسیِ هر کادر همان‌طور اعمال می‌شود. در فایل Word، هم حالت تصویری (حفظ تصویر صفحه و جای حباب‌ها) و هم حالت متن پیوستهٔ کتابی (سند Word معمولی بدون پس‌زمینه برای کتاب و مقاله) در دسترس است.</p>
     <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت ساخت خروجی" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="exportProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
     <div id="exportActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
     <div class="dialog-actions"><button id="startExportBtn" class="bt success">ساخت و دانلود</button></div>
   </dialog>
 
   <dialog id="docxExportDialog" class="dlg small-dialog">
-    <form method="dialog" class="dialog-head"><h2>انتخاب متن خروجی Word</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
-    <p class="hint">فایل Word شبیه همان پیش‌نمایش ساخته می‌شود: تصویر صفحه با پاک‌شدن نوشته‌های قبلی زیر کادرها در پس‌زمینه قرار می‌گیرد و کادرهای قابل‌ویرایش Word دقیقاً روی همان جای حباب‌ها می‌نشینند. می‌خواهید کدام متن داخل کادرها قرار بگیرد؟</p>
+    <form method="dialog" class="dialog-head"><h2>انتخاب قالب و متن خروجی Word</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <p class="hint">قالب و زبان فایل Word را انتخاب کنید: حالت تصویری برای کمیک و کتاب مصور (تصویر تمیز صفحه در پس‌زمینه + کادرهای روی حباب) و حالت کتابی پیوسته برای کتاب، مقاله و جزوه (سند متنی استاندارد و قابل‌ویرایش آزاد بدون تصویر پس‌زمینه).</p>
+    <div class="docx-section-label">۱. صفحهٔ تصویری (کمیک و کتاب مصور — حفظ تصویر و جای کادرها)</div>
     <div class="docx-choice-grid">
       <button id="docxChoiceTranslation" class="bt primary docx-choice-btn" type="button">
-        <strong>متن ترجمه‌شده</strong>
-        <span>قرار دادن متن فارسی / ترجمه‌شده با قالب‌بندی راست‌به‌چپ داخل حباب‌ها</span>
+        <strong>تصویری — متن ترجمه‌شده</strong>
+        <span>قرار دادن متن فارسی / ترجمه‌شده داخل کادرها روی تصویر صفحه</span>
       </button>
       <button id="docxChoiceOcr" class="bt docx-choice-btn" type="button">
-        <strong>متن انگلیسی / اصلی (OCR)</strong>
-        <span>قرار دادن متن اصلی خوانده‌شده از تصویر داخل حباب‌ها</span>
+        <strong>تصویری — متن اصلی (OCR)</strong>
+        <span>قرار دادن متن اصلی خوانده‌شده داخل کادرها روی تصویر صفحه</span>
+      </button>
+    </div>
+    <div class="docx-section-label">۲. متن پیوستهٔ کتابی (کتاب، مقاله و جزوه — بدون تصویر پس‌زمینه)</div>
+    <div class="docx-choice-grid">
+      <button id="docxChoiceFlowingTranslation" class="bt primary docx-choice-btn" type="button">
+        <strong>کتابی پیوسته — متن ترجمه‌شده</strong>
+        <span>سند Word معمولی و قابل‌ویرایش آزاد با پاراگراف‌ها، تیترها و فهرست‌های فارسی</span>
+      </button>
+      <button id="docxChoiceFlowingOcr" class="bt docx-choice-btn" type="button">
+        <strong>کتابی پیوسته — متن اصلی (OCR)</strong>
+        <span>سند Word معمولی و قابل‌ویرایش آزاد با متن اصلی استخراج‌شده از صفحات</span>
       </button>
     </div>
     <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت ساخت فایل Word" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="docxProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
@@ -319,7 +335,7 @@
     <p class="hint">هنوز هیچ متنی برای ترجمه ارسال نشده است. درخواست اول را بررسی کنید؛ در حالت حافظه، متن درخواست‌های بعدی بر اساس خلاصهٔ پاسخ قبلی ساخته می‌شود.</p>
     <div id="translationPreviewRequests" class="payload-requests"></div>
     <div id="translationContextWrap" class="hidden">
-      <label id="translationContextLabel" for="translationContext">خلاصهٔ داستان برای درخواست اول</label>
+      <label id="translationContextLabel" for="translationContext">خلاصهٔ زمینه / داستان برای درخواست اول</label>
       <input id="translationContext" type="text" dir="auto" aria-describedby="translationContextHelp translationContextCounter">
       <p id="translationContextCounter" class="budget-counter" aria-live="polite"></p>
       <p id="translationContextHelp" class="hint"></p>

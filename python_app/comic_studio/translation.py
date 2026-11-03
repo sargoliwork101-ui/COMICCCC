@@ -65,7 +65,7 @@ MAX_AI_RETRY_WAIT = 300
 DEFAULT_AI_SOURCE_LIMIT = 1000
 MAX_AI_SOURCE_LIMIT = 100_000
 MAX_AI_SKILL_CHARS = 4000
-DEFAULT_AI_SKILL = "ترجمه را روان و طبیعی و متناسب با لحن شخصیت‌ها بنویس؛ نام‌ها، اعداد و آواها را با دقت حفظ کن."
+DEFAULT_AI_SKILL = "ترجمه را روان و متناسب با لحن کمیک یا کتاب بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن."
 MIN_AI_TIMEOUT, MAX_AI_TIMEOUT = 5, 600
 MAX_AI_RETRIES = 5
 
@@ -434,8 +434,8 @@ def _ai_prompt(source_language: str, skill: str | None = None) -> tuple[str, str
     source = LANGUAGES.get(source_language, LANGUAGES["eng"])["name"]
     guidance = normalize_ai_skill(skill)
     return (
-        "Translate the entire input to natural Persian using all paragraphs and comic bubbles together as shared context. "
-        "Use every line as context while preserving the original order, names, numbers and sound effects. "
+        "Translate the entire input to natural Persian using all paragraphs, headings and comic bubbles together as shared context. "
+        "Use every line as context while preserving the original order, names, terms, numbers and sound effects. "
         "Return exactly one output line for every input line, with the same number of lines. "
         "Never merge, split, add, remove, or reorder lines; keep blank lines in place and each translated line on one ordinary text line. "
         "Return only the translation without adding labels, numbers, markers, code fences, or explanations."

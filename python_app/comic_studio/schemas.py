@@ -21,6 +21,7 @@ class OcrRequest(BaseModel):
     contrast: bool = True
     precise: bool = True
     group_lines: bool = False
+    page_mode: Literal["auto", "comic", "document"] = "auto"
     min_confidence: float = Field(default=0.35, ge=0.0, le=1.0)
 
 
@@ -70,6 +71,7 @@ class EngineTestRequest(BaseModel):
     project_id: str
     image_id: str
     language: str = "eng"
+    page_mode: Literal["auto", "comic", "document"] = "auto"
 
 
 class EngineDownloadRequest(BaseModel):
@@ -99,6 +101,7 @@ class ExportRequest(BaseModel):
     image_format: Literal["orig", "png", "jpg"] = "orig"
     folder_name: str = ""
     docx_mode: Literal["translation", "ocr"] = "translation"
+    docx_layout: Literal["visual", "flowing"] = "visual"
 
 
 class StateUpdate(BaseModel):

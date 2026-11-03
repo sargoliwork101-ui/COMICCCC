@@ -89,11 +89,11 @@ def build_context_request(budget: ContextBudget, language: str, skill: str, prev
     if "\n" in previous_context or "\r" in previous_context:
         raise TranslationError("خلاصهٔ قبلی باید یک خط باشد؛ پیش از ارسال آن را اصلاح کنید.")
     system = (
-        "Translate to Persian; preserve names/numbers/sounds. JSON keys: \"translation\", \"summary\". "
+        "Translate to Persian; preserve names/terms/numbers/sounds. JSON keys: \"translation\", \"summary\". "
         "CRITICAL: translation line count/order must exactly match Text, one output line per input line. "
         "Add no lines, breaks, headings or commentary; verify count. "
         f"Summary: one Persian line, max {budget.context_limit} chars incl spaces; shorten to fit. "
-        "Context: names/events/tone only."
+        "Context: names/terms/events/tone only."
     )
     if skill:
         system += "\nGuidance: " + skill

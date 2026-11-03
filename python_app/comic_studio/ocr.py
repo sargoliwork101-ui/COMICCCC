@@ -572,6 +572,9 @@ class TesseractEngine:
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         return self._recognize_with_psm(image, language, "11")
 
+    def recognize_document(self, image: Image.Image, language: str) -> list[OcrLine]:
+        return self._recognize_with_psm(image, language, "3")
+
     def recognize_bubble(self, image: Image.Image, language: str) -> list[OcrLine]:
         return self._recognize_with_psm(image, language, "6")
 
@@ -632,7 +635,7 @@ ENGINE_INFO = {
     "rapidocr-v6": {
         "name": "PP-OCRv6 Small",
         "family": "RapidOCR / ONNX",
-        "description": "مدل جدید، سریع و سبک برای متن کمیک؛ مناسب انگلیسی، چینی و ژاپنی.",
+        "description": "مدل جدید، سریع و سبک برای متن کمیک، کتاب و مقاله؛ مناسب انگلیسی، چینی و ژاپنی.",
         "languages": ["eng", "jpn", "chi_sim"],
         "selectable": True,
         "action": "download",
@@ -894,6 +897,21 @@ def _blocks_from_lines(lines: list[OcrLine], coordinate_scale: float = 1.0) -> l
     return blocks
 
 
+def _recognize_crop_lines(
+    engine: Any,
+    crop: Image.Image,
+    language: str,
+    page_mode: str = "auto",
+) -> list[OcrLine]:
+    if page_mode == "document":
+        doc_rec = getattr(engine, "recognize_document", None)
+        if callable(doc_rec):
+            return doc_rec(crop, language)
+    if isinstance(engine, IsolatedOcrEngine):
+        return engine.recognize(crop, language, page_mode=page_mode)
+    return engine.recognize(crop, language)
+
+
 def _recognize_image_primary(
     engine: Any,
     image: Image.Image,
@@ -902,8 +920,11 @@ def _recognize_image_primary(
     precise: bool = True,
     min_confidence: float = 0.35,
     input_scale: float = 1.0,
+    page_mode: str = "auto",
 ) -> list[dict[str, Any]]:
     """The established OCR path; input_scale only restores fallback geometry."""
+    from .ocr_grouping import detect_page_mode, sort_document_reading_order
+
     prepared, scale = preprocess(image, contrast, precise)
     width, height = prepared.size
     slice_height = 3000
@@ -914,7 +935,7 @@ def _recognize_image_primary(
         read_y0 = max(0, start - overlap)
         read_y1 = min(height, end + overlap)
         crop = prepared if (read_y0 == 0 and read_y1 == height) else prepared.crop((0, read_y0, width, read_y1))
-        for line in engine.recognize(crop, language):
+        for line in _recognize_crop_lines(engine, crop, language, page_mode=page_mode):
             polygon = [[x, y + read_y0] for x, y in line.polygon]
             adjusted = OcrLine(line.text, line.confidence, polygon)
             center_y = (adjusted.box[1] + adjusted.box[3]) / 2
@@ -927,7 +948,13 @@ def _recognize_image_primary(
             break
     # Reading order is stable: physical row first, then horizontal position. No text is flattened.
     lines.sort(key=lambda line: (round(((line.box[1] + line.box[3]) / 2) / 12) * 12, line.box[0], line.box[1]))
-    return _blocks_from_lines(lines, scale * input_scale)
+    blocks = _blocks_from_lines(lines, scale * input_scale)
+    effective_mode = detect_page_mode(blocks, page_size=image.size) if page_mode == "auto" else page_mode
+    if effective_mode == "document" and len(blocks) >= 2:
+        blocks = sort_document_reading_order(blocks, page_size=image.size)
+        for index, blk in enumerate(blocks, start=1):
+            blk["id"] = index
+    return blocks
 
 
 def _extra_preprocess_image(image: Image.Image) -> Image.Image:
@@ -1086,9 +1113,13 @@ def recognize_image(
     contrast: bool = True,
     precise: bool = True,
     min_confidence: float = 0.35,
+    *,
+    page_mode: str = "auto",
 ) -> list[dict[str, Any]]:
     """Run the established OCR first; optional fallbacks only compete after a weak result."""
-    primary = _recognize_image_primary(engine, image, language, contrast, precise, min_confidence)
+    primary = _recognize_image_primary(
+        engine, image, language, contrast, precise, min_confidence, page_mode=page_mode,
+    )
     if isinstance(engine, IsolatedOcrEngine) and primary:
         return primary
     if not _needs_extra_preprocess(primary):
@@ -1100,7 +1131,7 @@ def recognize_image(
             fallback_image = _extra_preprocess_image(image)
             fallback = _recognize_image_primary(
                 engine, fallback_image, language, False, False, min_confidence,
-                input_scale=EXTRA_PREPROCESS_SCALE,
+                input_scale=EXTRA_PREPROCESS_SCALE, page_mode=page_mode,
             )
         except Exception:
             # An optional preprocessing backend must never break the established OCR result.
@@ -1111,7 +1142,7 @@ def recognize_image(
                 best = fallback
             else:
                 emit("نتیجهٔ OCR اصلی بهتر بود و حفظ شد")
-    if BUBBLE_PREPROCESS_ENABLED:
+    if BUBBLE_PREPROCESS_ENABLED and page_mode != "document":
         emit("پیش‌پردازش حباب کمیک برای مقایسه اجرا می‌شود")
         try:
             bubble = _recognize_bubble(engine, image, language, min_confidence)

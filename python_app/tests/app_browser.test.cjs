@@ -1512,6 +1512,39 @@ main()
     assert.ok(files.docxOcr.endsWith('.docx') && fs.statSync(files.docxOcr).size > 0, 'DOCX (OCR) must be a real nonempty download');
     await page.waitForFunction(() => !document.getElementById('docxExportDialog').open);
 
+    // v3.70: Flowing book/article Word (.docx) export without background page images (both translation and OCR):
+    await page.click('#exportDocxBtn');
+    await page.waitForSelector('#docxExportDialog[open]');
+    const docxFlowTrDownload = nextDownload(cdp, downloads);
+    await page.click('#docxChoiceFlowingTranslation');
+    files.docxFlowTr = await docxFlowTrDownload;
+    assert.ok(files.docxFlowTr.endsWith('.docx') && fs.statSync(files.docxFlowTr).size > 0, 'Flowing DOCX (translation) must be a real nonempty download');
+    await page.waitForFunction(() => !document.getElementById('docxExportDialog').open);
+
+    await page.click('#exportDocxBtn');
+    await page.waitForSelector('#docxExportDialog[open]');
+    const docxFlowOcrDownload = nextDownload(cdp, downloads);
+    await page.click('#docxChoiceFlowingOcr');
+    files.docxFlowOcr = await docxFlowOcrDownload;
+    assert.ok(files.docxFlowOcr.endsWith('.docx') && fs.statSync(files.docxFlowOcr).size > 0, 'Flowing DOCX (OCR) must be a real nonempty download');
+    await page.waitForFunction(() => !document.getElementById('docxExportDialog').open);
+
+    execFileSync(python, ['-c', `
+import sys, xml.etree.ElementTree as ET, zipfile
+flow_tr_path, flow_ocr_path = sys.argv[1:]
+with zipfile.ZipFile(flow_tr_path) as zf:
+    assert not any(n.startswith('word/media/') for n in zf.namelist()), 'flowing book docx must not embed background page images'
+    root_tr = ET.fromstring(zf.read('word/document.xml'))
+    tr_text = ''.join(el.text or '' for el in root_tr.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+    assert 'ویرایش تازه ۳٫۲۱' in tr_text and 'SOURCE TWO' in tr_text and 'ترجمهٔ سوم' in tr_text and 'SOURCE THREE' not in tr_text
+with zipfile.ZipFile(flow_ocr_path) as zf:
+    assert not any(n.startswith('word/media/') for n in zf.namelist())
+    root_ocr = ET.fromstring(zf.read('word/document.xml'))
+    ocr_text = ''.join(el.text or '' for el in root_ocr.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+    assert 'SOURCE TWO' in ocr_text and 'SOURCE THREE' in ocr_text and 'ترجمهٔ سوم' not in ocr_text
+`, files.docxFlowTr, files.docxFlowOcr]);
+    assert.deepEqual(await page.$eval('#ocrPageMode', (el) => [...el.options].map((o) => o.value)), ['auto', 'comic', 'document'], 'ocrPageMode offers auto, comic, and document modes');
+
     const latestEdit = Buffer.from(await (await fetch(`${base}/api/projects/${projectId}/images/${imageId}/content?edited=true`)).arrayBuffer());
     const editedPath = path.join(temporary, 'latest-edited.png'); fs.writeFileSync(editedPath, latestEdit);
     const text = fs.readFileSync(files.txt, 'utf8');

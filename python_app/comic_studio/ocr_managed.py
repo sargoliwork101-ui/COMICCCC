@@ -594,9 +594,79 @@ def proc_ok(proc: subprocess.CompletedProcess[Any]) -> bool:
     return proc.returncode == 0
 
 
-def detect_comic_text_regions(image: Image.Image) -> list[list[float]]:
-    """Detect candidate comic bubble / text regions for crop-based VLM recognizers."""
+def _split_tall_book_region(
+    bw_grad: np.ndarray,
+    box: list[float],
+    page_w: int,
+    page_h: int,
+) -> list[list[float]]:
+    """Split a tall book/article text block along clean horizontal paragraph gaps."""
+    x0, y0, x1, y1 = [int(round(v)) for v in box]
+    bh = y1 - y0
+    bw = x1 - x0
+    if bh < max(260, int(page_h * 0.42)) or bw < max(120, int(page_w * 0.25)):
+        return [box]
+    sub = bw_grad[max(0, y0):min(page_h, y1), max(0, x0):min(page_w, x1)]
+    if sub.size == 0:
+        return [box]
+    row_ink = np.count_nonzero(sub > 0, axis=1)
+    quiet_thresh = max(1, int(bw * 0.008))
+    min_gap = max(6, bh // 90)
+    spans: list[tuple[int, int]] = []
+    in_text = False
+    seg_start = 0
+    quiet_run = 0
+    for r, count in enumerate(row_ink):
+        if count > quiet_thresh:
+            if not in_text:
+                seg_start = r
+                in_text = True
+            quiet_run = 0
+        elif in_text:
+            quiet_run += 1
+            if quiet_run >= min_gap:
+                seg_end = r - quiet_run + 1
+                if seg_end - seg_start >= 10:
+                    spans.append((seg_start, seg_end))
+                in_text = False
+                quiet_run = 0
+    if in_text and len(row_ink) - seg_start >= 10:
+        spans.append((seg_start, len(row_ink)))
+    if len(spans) <= 1:
+        return [box]
+
+    target_h = max(160, int(page_h * 0.26))
+    chunks: list[list[int]] = []
+    for s0, s1 in spans:
+        if not chunks:
+            chunks.append([s0, s1])
+            continue
+        prev_h = chunks[-1][1] - chunks[-1][0]
+        gap = s0 - chunks[-1][1]
+        if prev_h + (s1 - chunks[-1][0]) <= target_h and gap <= max(18, min_gap * 2):
+            chunks[-1][1] = s1
+        else:
+            chunks.append([s0, s1])
+    if len(chunks) <= 1:
+        return [box]
+
+    out: list[list[float]] = []
+    for c0, c1 in chunks:
+        cy0 = max(0, y0 + c0 - 4)
+        cy1 = min(page_h, y0 + c1 + 4)
+        if cy1 - cy0 >= 10:
+            out.append([float(x0), float(cy0), float(x1), float(cy1)])
+    return out or [box]
+
+
+def detect_comic_text_regions(
+    image: Image.Image,
+    *,
+    page_mode: str = "auto",
+) -> list[list[float]]:
+    """Detect candidate comic bubble, paragraph, and column regions for crop-based VLM recognizers."""
     import cv2
+    from .ocr_grouping import sort_document_reading_order
 
     rgb = np.asarray(image.convert("RGB"))
     height, width = rgb.shape[:2]
@@ -608,34 +678,60 @@ def detect_comic_text_regions(image: Image.Image) -> list[list[float]]:
     grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, grad_kernel)
     _, bw = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     connect_w = max(9, min(35, width // 36))
-    connect_h = max(5, min(21, height // 60))
+    connect_h = max(4, min(15 if page_mode == "document" else 21, height // (75 if page_mode == "document" else 60)))
     close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (connect_w, connect_h))
     connected = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, close_kernel)
     contours, _ = cv2.findContours(connected, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    raw_boxes: list[list[float]] = []
     min_area = max(140, int(width * height * 0.00025))
-    max_area = int(width * height * 0.80)
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        area = w * h
-        if area < min_area or area > max_area or w < 14 or h < 10:
-            continue
-        pad_x = min(12, max(4, w // 12))
-        pad_y = min(10, max(4, h // 10))
-        raw_boxes.append([
-            float(max(0, x - pad_x)),
-            float(max(0, y - pad_y)),
-            float(min(width, x + w + pad_x)),
-            float(min(height, y + h + pad_y)),
-        ])
+    max_area = int(width * height * 0.985)
+
+    def _collect_boxes(contour_list: Any) -> list[list[float]]:
+        collected: list[list[float]] = []
+        for contour in contour_list:
+            x, y, w, h = cv2.boundingRect(contour)
+            area = w * h
+            if area < min_area or area > max_area or w < 14 or h < 10:
+                continue
+            pad_x = min(12, max(4, w // 12))
+            pad_y = min(10, max(4, h // 10))
+            collected.append([
+                float(max(0, x - pad_x)),
+                float(max(0, y - pad_y)),
+                float(min(width, x + w + pad_x)),
+                float(min(height, y + h + pad_y)),
+            ])
+        return collected
+
+    raw_boxes = _collect_boxes(contours)
+    if not raw_boxes:
+        all_contours, _ = cv2.findContours(connected, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        raw_boxes = _collect_boxes(all_contours)
 
     if not raw_boxes:
         return [[0.0, 0.0, float(width), float(height)]]
 
     merged = _merge_overlapping_boxes(raw_boxes)
-    merged.sort(key=lambda b: (round(((b[1] + b[3]) * 0.5) / 24.0) * 24.0, b[0], b[1]))
-    return merged[:36]
+    if page_mode != "comic":
+        refined: list[list[float]] = []
+        for box in merged:
+            refined.extend(_split_tall_book_region(bw, box, width, height))
+        merged = refined
+
+    if page_mode == "comic":
+        merged.sort(key=lambda b: (round(((b[1] + b[3]) * 0.5) / 24.0) * 24.0, b[0], b[1]))
+    else:
+        pseudo_blocks = [
+            {"x0": b[0], "y0": b[1], "x1": b[2], "y1": b[3], "lineH": max(12.0, min(32.0, (b[3] - b[1]) * 0.25))}
+            for b in merged
+        ]
+        ordered_pseudo = sort_document_reading_order(pseudo_blocks, page_size=(width, height))
+        merged = [[float(p["x0"]), float(p["y0"]), float(p["x1"]), float(p["y1"])] for p in ordered_pseudo]
+
+    return merged[:160]
+
+
+detect_text_regions = detect_comic_text_regions
 
 
 def _merge_overlapping_boxes(boxes: list[list[float]]) -> list[list[float]]:
@@ -969,10 +1065,10 @@ class IsolatedOcrEngine:
         self._worker_proc = proc
         return proc
 
-    def recognize(self, image: Image.Image, language: str) -> list[Any]:
+    def recognize(self, image: Image.Image, language: str, *, page_mode: str = "auto") -> list[Any]:
         if not self.runtime_installed or not self.model_ready:
             raise self._error_cls(f"{self.id} is not ready. Click the explicit preparation button first.")
-        regions = detect_comic_text_regions(image) if self._spec.get("needs_regions") else None
+        regions = detect_comic_text_regions(image, page_mode=page_mode) if self._spec.get("needs_regions") else None
         with tempfile.NamedTemporaryFile(prefix=f"comic-{self.id}-", suffix=".png", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         try:
@@ -980,7 +1076,7 @@ class IsolatedOcrEngine:
             with self._worker_lock:
                 proc = self._ensure_worker()
                 assert proc.stdin is not None and proc.stdout is not None
-                req = {"imagePath": str(tmp_path), "language": language, "regions": regions}
+                req = {"imagePath": str(tmp_path), "language": language, "regions": regions, "pageMode": page_mode}
                 proc.stdin.write(json.dumps(req) + "\n")
                 proc.stdin.flush()
                 raw_resp = proc.stdout.readline().strip()

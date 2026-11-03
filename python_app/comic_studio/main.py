@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import hmac
+import inspect
 import ipaddress
 import os
 import re
@@ -27,7 +28,7 @@ from .activity import ActivityLog, reporting
 from .backup import BackupError, make_backup, restore_backup
 from .exporter import build_docx, build_images_zip, build_pdf, build_txt, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
-from .ocr_grouping import group_ocr_lines
+from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
 from .paths import STATIC_DIR
 from . import pending_results
 from .schemas import (
@@ -486,11 +487,30 @@ def create_app() -> FastAPI:
         activity.add(f"مدل {info['name']} به آخرین نسخه به‌روزرسانی شد", "success", 1.0)
         return {"ok": True, "language": language, "engines": registry.status()}
 
+    def _invoke_recognize(
+        engine: Any,
+        image: Any,
+        language: str,
+        contrast: bool,
+        precise: bool,
+        min_confidence: float,
+        page_mode: str = "auto",
+    ) -> list[dict[str, Any]]:
+        try:
+            params = inspect.signature(recognize_image).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "page_mode" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return recognize_image(
+                engine, image, language, contrast, precise, min_confidence, page_mode=page_mode,
+            )
+        return recognize_image(engine, image, language, contrast, precise, min_confidence)
+
     @app.post("/api/engines/{engine_id}/test")
     async def test_engine(engine_id: str, values: EngineTestRequest) -> dict[str, Any]:
         engine = registry.get(engine_id)
         if not ENGINE_INFO[engine_id].get("selectable", False):
-            raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR کمیک نیست.")
+            raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR نیست.")
         if values.language not in ENGINE_INFO[engine_id]["languages"]:
             raise HTTPException(400, "این موتور از زبان انتخاب‌شده پشتیبانی نمی‌کند.")
         state = project(values.project_id)
@@ -503,7 +523,10 @@ def create_app() -> FastAPI:
             image = im.copy()
         activity.add(f"آزمایش {ENGINE_INFO[engine_id]['name']} روی {path.name} آغاز شد")
         try:
-            blocks = await run_reported(recognize_image, engine, image, values.language, True, True, 0.2, pulse_label=f"آزمایش {ENGINE_INFO[engine_id]['name']}")
+            blocks = await run_reported(
+                _invoke_recognize, engine, image, values.language, True, True, 0.2, values.page_mode,
+                pulse_label=f"آزمایش {ENGINE_INFO[engine_id]['name']}",
+            )
         except Exception as exc:
             activity.add(f"آزمایش موتور ناموفق بود: {exc}", "error")
             raise
@@ -519,7 +542,7 @@ def create_app() -> FastAPI:
             original_ocr = {item['id']: '\n'.join(str(b.get('text') or '') for b in item.get('blocks', [])) for item in state['images']}
         engine = registry.get(values.engine)
         if not ENGINE_INFO[values.engine].get("selectable", False):
-            raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR کمیک نیست.")
+            raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR نیست.")
         if values.language not in LANGUAGES or values.language not in ENGINE_INFO[values.engine]["languages"]:
             raise HTTPException(400, "این موتور از زبان انتخاب‌شده پشتیبانی نمی‌کند.")
         ids = image_ids(state, values.image_ids)
@@ -546,18 +569,27 @@ def create_app() -> FastAPI:
                 with Image.open(path) as im:
                     image = im.copy()
                 blocks = await run_reported(
-                    recognize_image, engine, image, values.language,
-                    values.contrast, values.precise, values.min_confidence,
+                    _invoke_recognize, engine, image, values.language,
+                    values.contrast, values.precise, values.min_confidence, values.page_mode,
                     pulse_label=f"در حال خواندن {item['name']}",
                 )
                 for block in blocks:
                     block["bg"] = "auto" if state.get("settings", {}).get("eraseOriginal", True) else "none"
-                if values.group_lines:
-                    blocks = group_ocr_lines(blocks)
+                blocks, resolved_mode = organize_ocr_blocks(
+                    blocks,
+                    page_mode=values.page_mode,
+                    group_lines=values.group_lines,
+                    page_size=image.size,
+                )
                 item["blocks"] = blocks
+                item["pageMode"] = resolved_mode
                 item["ocrCompleted"] = True
                 item["edited"] = False
-                activity.add(f"در «{item['name']}» {len(blocks)} تکه متن پیدا شد", progress=completed / len(ids))
+                mode_label = "کتاب/مقاله" if resolved_mode == "document" else "کمیک/حباب"
+                activity.add(
+                    f"در «{item['name']}» {len(blocks)} تکه متن ({mode_label}) پیدا شد",
+                    progress=completed / len(ids),
+                )
                 recognized_lines = [block.get("text", "").strip() for block in blocks if block.get("text", "").strip()]
                 if recognized_lines:
                     activity.add(f"متن خوانده‌شده در «{item['name']}»:\n" + "\n".join(recognized_lines))
@@ -570,7 +602,7 @@ def create_app() -> FastAPI:
                 entry = pending_results.stage(store, project_id, 'ocr', {
                     'baseline': {i: baseline[i] for i in ids}, 'originals': {i: original_ocr[i] for i in ids},
                     'overlayMode': state.get('settings', {}).get('overlayMode'),
-                    'outputs': [{'id':item['id'], 'name':item.get('name', ''), 'blocks':item['blocks']} for item in state['images'] if item['id'] in ids],
+                    'outputs': [{'id':item['id'], 'name':item.get('name', ''), 'blocks':item['blocks'], 'pageMode':item.get('pageMode')} for item in state['images'] if item['id'] in ids],
                 })
                 view = pending_results.inspect(store, project_id, entry)
                 if any(row['conflict'] for row in view['rows']):

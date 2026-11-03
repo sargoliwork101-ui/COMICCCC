@@ -107,6 +107,7 @@ class ProjectStore:
             "settings": {
                 "ocrEngine": "rapidocr-v6",
                 "ocrLanguage": "eng",
+                "ocrPageMode": "auto",
                 "contrast": True,
                 "precise": True,
                 "eraseOriginal": True,
@@ -118,6 +119,7 @@ class ProjectStore:
                     "twoPerPage": False,
                     "imageFormat": "orig",
                     "folderName": "",
+                    "docxLayout": "visual",
                 },
             },
         }
@@ -192,7 +194,7 @@ class ProjectStore:
                 seen.add(image_id)
                 old = existing[image_id]
                 item = dict(old)
-                for key in ("order", "selected", "groupId", "crop", "blocks"):
+                for key in ("order", "selected", "groupId", "crop", "blocks", "pageMode"):
                     if key in candidate:
                         item[key] = candidate[key]
                 item["edited"] = (project_root(project_id) / "images" / f"{image_id}-edited.png").exists()
