@@ -36,6 +36,7 @@ let sampleScratchCanvas = null;
 let inlineDraft = null;
 let inlineEditSession = null;
 let classicEditor = null;
+let helpController = null;
 let imageOverview = null;
 let jobBusy = false;
 let translationRunning = false;
@@ -400,6 +401,15 @@ function closeDialog(id) {
   const idx = openDialogStack.indexOf(id);
   if (idx >= 0) openDialogStack.splice(idx, 1);
   if ($(id)?.open) $(id).close();
+}
+function openHelpDialog(sectionId = null) {
+  if (!helpController && window.ComicHelpGuide?.createHelpController) {
+    helpController = window.ComicHelpGuide.createHelpController();
+  }
+  if (sectionId && helpController?.selectSection) {
+    helpController.selectSection(sectionId);
+  }
+  showDialog('helpDialog');
 }
 async function requestCancelOcrDialog() {
   if (!ocrRunning || ocrClosingNormally) { closeDialog('ocrDialog'); return true; }
@@ -3926,6 +3936,13 @@ function bindEvents() {
   });
   $('engineUpdateOpenModelsBtn')?.addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); });
   $('engineUpdateDismissBtn')?.addEventListener('click', () => { engineUpdateNoticeDismissed = true; syncEngineUpdateUi(); });
+  if (!helpController && window.ComicHelpGuide?.createHelpController) {
+    helpController = window.ComicHelpGuide.createHelpController();
+  }
+  $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(null));
+  $('helpMenuBtn')?.addEventListener('click', () => openHelpDialog(null));
+  $('editorOpenFullHelpBtn')?.addEventListener('click', () => openHelpDialog('visual-editor'));
+  $('helpDialogClose')?.addEventListener('click', (event) => { event.preventDefault(); closeDialog('helpDialog'); });
   $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'visual').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'visual').catch(() => {})); $('docxChoiceFlowingTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'flowing').catch(() => {})); $('docxChoiceFlowingOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'flowing').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
@@ -4074,6 +4091,13 @@ function bindEvents() {
   ['cropX', 'cropY', 'cropW', 'cropH'].forEach((id) => $(id).addEventListener('change', readCropInputs)); $('cropRatio').addEventListener('change', changeCropRatio); $('cropStage').addEventListener('pointerdown', cropPointerDown); $('cropStage').addEventListener('pointermove', cropPointerMove); const stopCrop = () => { state.cropPointer = null; }; $('cropStage').addEventListener('pointerup', stopCrop); $('cropStage').addEventListener('pointercancel', stopCrop);
   $('cropReset').addEventListener('click', () => { cropItem().crop = null; state.crop = null; closeDialog('cropDialog'); renderGrid(); scheduleSave(); }); $('cropApply').addEventListener('click', () => { readCropInputs(); cropItem().crop = state.crop; closeDialog('cropDialog'); renderGrid(); scheduleSave(); });
   document.addEventListener('keydown', (event) => {
+    if (event.key === 'F1') {
+      event.preventDefault();
+      event.stopPropagation();
+      if ($('helpDialog')?.open) closeDialog('helpDialog');
+      else openHelpDialog($('editorDialog')?.open ? 'visual-editor' : null);
+      return;
+    }
     if (event.key === 'Escape') {
       lastEscapeKeyAt = performance.now();
       if (event.repeat) { event.preventDefault(); event.stopPropagation(); return; }

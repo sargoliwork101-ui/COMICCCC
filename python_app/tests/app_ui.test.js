@@ -207,7 +207,7 @@ window.Typeset = {
   },
 };
 
-for (const file of ['groups.js', 'rich-sanitize.js', 'rich-editor.js', 'inline-edit-session.js', 'app.js']) {
+for (const file of ['groups.js', 'rich-sanitize.js', 'rich-editor.js', 'inline-edit-session.js', 'help-guide.js', 'app.js']) {
   vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1001,6 +1001,31 @@ function check(name, condition) {
     check('1-click update upgrades outdated engine and clears top update banner and badge', engineUpdateCalls.length === 1 && $('engineUpdateNotice').classList.contains('hidden') && $('modelsBtnBadge').classList.contains('hidden') && $('modelsUpdateBanner').classList.contains('hidden') && vm.runInContext(`state.engines.find(e => e.id === 'rapidocr-v6').installedVersion === '3.10.0'`, context));
     vm.runInContext(`closeDialog('modelsDialog')`, context);
     window.fetch = origFetchV369;
+  }
+
+  // v3.71: Interactive section-by-section Help Center (#helpDialog, #helpTopBtn, #helpMenuBtn, F1, search, examples)
+  {
+    check('all 13 Help sections include practical examples and untranslated terms', window.ComicHelpGuide.HELP_SECTIONS.length === 13 && window.ComicHelpGuide.HELP_SECTIONS.every((s) => s.example && s.example.title.includes('مثال عملی') && s.example.body.length > 60 && s.features?.length >= 3 && s.steps?.length >= 3));
+    $('helpTopBtn').click();
+    check('clicking topbar Help button opens #helpDialog with 13 chapter nav items', $('helpDialog').open === true && window.document.querySelectorAll('#helpNavList .help-nav-item').length === 13);
+    check('chapter mode renders active chapter with practical example box', window.document.querySelectorAll('#helpContentArea .help-article').length === 1 && $('helpContentArea').textContent.includes('مثال عملی'));
+    $('helpViewAllBtn').click();
+    check('view-all mode renders all 13 sections simultaneously', window.document.querySelectorAll('#helpContentArea .help-article').length === 13);
+    $('helpSearchInput').value = 'Flowing Book';
+    $('helpSearchInput').dispatchEvent(new window.Event('input', { bubbles: true }));
+    check('searching untranslated term Flowing Book filters matching Help section', window.document.querySelectorAll('#helpContentArea .help-article').length >= 1 && $('helpContentArea').textContent.includes('Flowing Book Layout'));
+    $('helpSearchClear').click();
+    $('helpViewChapterBtn').click();
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    check('Escape closes #helpDialog cleanly', $('helpDialog').open === false);
+    $('menuBtn').click();
+    $('helpMenuBtn').click();
+    check('clicking Help inside hamburger menu opens #helpDialog and closes #menu', $('helpDialog').open === true && $('menu').classList.contains('hidden'));
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+    check('pressing F1 while #helpDialog is open toggles it closed', $('helpDialog').open === false);
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+    check('pressing F1 opens #helpDialog from anywhere', $('helpDialog').open === true);
+    vm.runInContext(`closeDialog('helpDialog')`, context);
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

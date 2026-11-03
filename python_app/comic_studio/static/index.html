@@ -4,13 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.70">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.70">
+  <link rel="stylesheet" href="/style.css?v=3.71">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.71">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۷۰ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
-    <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu">☰ پروژه و تنظیمات</button>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۷۱ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="topbar-actions">
+      <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)">؟ راهنما (Help)</button>
+      <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu">☰ پروژه و تنظیمات</button>
+    </div>
   </header>
 
   <div id="menu" class="menu hidden">
@@ -23,6 +26,7 @@
     </div>
     <button id="modelsBtn" class="mi"><span>مدل‌های OCR و آزمایش</span><span id="modelsBtnBadge" class="menu-update-badge hidden"></span></button>
     <button id="aiBtn" class="mi">ترجمهٔ رایگان / AI</button>
+    <button id="helpMenuBtn" class="mi" type="button"><span>راهنمای کامل برنامه (Help)</span><kbd class="menu-kbd" dir="ltr">F1</kbd></button>
     <button id="themeBtn" class="mi">تغییر تم روشن / تیره</button>
     <div class="mi save-line"><span id="saveState">آماده</span><span>ذخیرهٔ خودکار روی همین کامپیوتر</span></div>
   </div>
@@ -317,7 +321,7 @@
       </section>
     <div class="editor-body"><div class="editor-view"><div class="editor-preview"><div id="editorStage" title="فضای خالی تصویر را بکشید تا جابه‌جا شود"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div>
 
-    </div><div class="editor-side"><details class="editor-help-details"><summary>راهنمای کوتاه ویرایش</summary><div class="editor-help">روی هر کادر در تصویر کلیک کنید و مستقیم تایپ یا بخشی از متن را انتخاب و قالب‌بندی کنید؛ تغییرها خودکار ذخیره می‌شوند. با Ctrl/⌘ + کلیک روی کادرها (یا ⠿) چند کادر را انتخاب کنید تا با دکمه‌های ردیف کادرها در نوار بالا آن‌ها را هم‌اندازه یا هم‌تراز کنید (اولین کادر انتخابی مرجع هم‌اندازه‌سازی است). چرخ ماوس صفحه را اسکرول می‌کند و با نگه داشتن Ctrl بزرگ‌نمایی را تغییر می‌دهد.</div></details><div id="blockList"></div></div></div>
+    </div><div class="editor-side"><details class="editor-help-details"><summary>راهنمای کوتاه ویرایش</summary><div class="editor-help">روی هر کادر در تصویر کلیک کنید و مستقیم تایپ یا بخشی از متن را انتخاب و قالب‌بندی کنید؛ تغییرها خودکار ذخیره می‌شوند. با Ctrl/⌘ + کلیک روی کادرها (یا ⠿) چند کادر را انتخاب کنید تا با دکمه‌های ردیف کادرها در نوار بالا آن‌ها را هم‌اندازه یا هم‌تراز کنید (اولین کادر انتخابی مرجع هم‌اندازه‌سازی است). چرخ ماوس صفحه را اسکرول می‌کند و با نگه داشتن Ctrl بزرگ‌نمایی را تغییر می‌دهد. <button id="editorOpenFullHelpBtn" class="bt editor-open-help-btn" type="button">بازکردن راهنمای کامل ویرایشگر (F1)</button></div></details><div id="blockList"></div></div></div>
   </dialog>
 
   <dialog id="cropDialog" class="dlg crop-dialog">
@@ -359,6 +363,34 @@
     <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت آماده‌سازی پیش‌نمایش ترجمه" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="previewPrepProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
+
+  <dialog id="helpDialog" class="dlg help-dialog" aria-labelledby="helpDialogTitle">
+    <form method="dialog" class="dialog-head">
+      <div class="help-head-title">
+        <span class="help-head-icon" aria-hidden="true">؟</span>
+        <div>
+          <h2 id="helpDialogTitle">راهنمای کامل Comic OCR Studio <span class="ver" dir="ltr">Help · F1</span></h2>
+          <span id="helpSearchCount" class="muted">۱۳ بخش کامل · آموزش گام‌به‌گام + مثال عملی برای تک‌تک قسمت‌ها</span>
+        </div>
+      </div>
+      <button id="helpDialogClose" class="icon" value="cancel" aria-label="بستن راهنما">×</button>
+    </form>
+    <div class="help-toolbar">
+      <div class="help-search-wrap">
+        <input id="helpSearchInput" type="search" dir="auto" placeholder="جست‌وجو در راهنما... (مثلاً: Word، ستون، GPU، Merge، API Key، Crop، Backup)" aria-label="جست‌وجو در راهنما">
+        <button id="helpSearchClear" class="bt hidden" type="button">پاک‌کردن</button>
+      </div>
+      <div class="help-view-modes" role="group" aria-label="حالت نمایش راهنما">
+        <button id="helpViewChapterBtn" class="bt primary" type="button" aria-pressed="true">بخش‌به‌بخش</button>
+        <button id="helpViewAllBtn" class="bt" type="button" aria-pressed="false">نمایش یکجای همهٔ ۱۳ بخش</button>
+      </div>
+    </div>
+    <div class="help-layout">
+      <nav id="helpNavList" class="help-nav" aria-label="فهرست فصل‌های راهنما"></nav>
+      <div id="helpContentArea" class="help-content" tabindex="0"></div>
+    </div>
+  </dialog>
+
   <dialog id="appModalDialog" class="dlg app-modal-dialog" data-variant="confirm" role="alertdialog" aria-modal="true" aria-labelledby="appModalTitle" aria-describedby="appModalMessage">
     <div class="dialog-head app-modal-head">
       <div class="app-modal-title-wrap">
@@ -375,11 +407,12 @@
     </div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.69"></script>
-  <script src="/groups.js?v=3.69"></script>
-  <script src="/rich-sanitize.js?v=3.69"></script>
-  <script src="/rich-editor.js?v=3.69"></script>
-  <script src="/inline-edit-session.js?v=3.69"></script>
-  <script src="/app.js?v=3.69"></script>
+  <script src="/typeset.js?v=3.71"></script>
+  <script src="/groups.js?v=3.71"></script>
+  <script src="/rich-sanitize.js?v=3.71"></script>
+  <script src="/rich-editor.js?v=3.71"></script>
+  <script src="/inline-edit-session.js?v=3.71"></script>
+  <script src="/help-guide.js?v=3.71"></script>
+  <script src="/app.js?v=3.71"></script>
 </body>
 </html>

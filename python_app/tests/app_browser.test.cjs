@@ -2177,6 +2177,28 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert.deepEqual(nativeBrowserDialogs, [], `expected zero native dialogs in v3.69 flow, got: ${nativeBrowserDialogs.join(' | ')}`);
     console.log('PASS: v3.69 all 13 OCR models auto-setup, Persian GPU warning modal, top update banner, and 1-click update');
 
+    // v3.71: Interactive Help Center (#helpTopBtn, #helpMenuBtn, F1 contextual jump inside editor, search, 13 sections + examples)
+    await page.click('#helpTopBtn');
+    await page.waitForSelector('#helpDialog[open]');
+    assert.equal(await page.$$eval('#helpNavList .help-nav-item', (els) => els.length), 13);
+    assert.ok((await page.$eval('#helpContentArea', (el) => el.textContent)).includes('مثال عملی'));
+    await page.type('#helpSearchInput', 'API Key');
+    await page.waitForFunction(() => document.getElementById('helpContentArea').textContent.includes('Multi-Key Profiles'));
+    await page.click('#helpSearchClear');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.getElementById('helpDialog').open);
+    // Open editor and press F1 -> jumps directly to Visual Editor chapter and Escape closes only Help without closing editor!
+    await page.evaluate(() => openEditor(state.project.images[0].id));
+    await page.waitForSelector('#editorDialog[open]');
+    await page.keyboard.press('F1');
+    await page.waitForSelector('#helpDialog[open]');
+    assert.ok((await page.$eval('#helpContentArea h3', (el) => el.textContent)).includes('Visual Editor'));
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.getElementById('helpDialog').open && document.getElementById('editorDialog').open);
+    await page.click('#editorClose');
+    await page.waitForFunction(() => !document.getElementById('editorDialog').open);
+    console.log('PASS: v3.71 interactive 13-section Help menu, search, contextual F1 inside editor, and clean Escape stacking');
+
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');
