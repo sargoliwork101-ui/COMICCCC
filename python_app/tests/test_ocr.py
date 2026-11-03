@@ -750,5 +750,67 @@ def test_rapid_update_skips_locked_onnxruntime_and_emits_numeric_progress(tmp_pa
     assert numeric[-1] == 1.0
 
 
+def test_paddleocr_vl_adapter_falls_back_cleanly_when_v1_6_not_supported(tmp_path, monkeypatch):
+    import types
+    from comic_studio import ocr_worker
+
+    init_calls: list[dict[str, object]] = []
+
+    class FakePaddleOCRVL:
+        def __init__(self, pipeline_version="v1.5", **kwargs):
+            init_calls.append({"pipeline_version": pipeline_version, **kwargs})
+            if pipeline_version not in ["v1", "v1.5"]:
+                raise ValueError(
+                    f"Invalid pipeline version: {pipeline_version}. Supported versions are ['v1', 'v1.5']."
+                )
+
+        def predict(self, image_path):
+            return [
+                {
+                    "res": {
+                        "parsing_res_list": [
+                            {"block_label": "text", "block_content": "Hello PaddleVL", "block_bbox": [12, 18, 180, 56]}
+                        ]
+                    }
+                }
+            ]
+
+    fake_pkg = types.ModuleType("paddleocr")
+    fake_pkg.__version__ = "3.6.0"
+    fake_pkg.PaddleOCRVL = FakePaddleOCRVL
+    fake_pipelines = types.ModuleType("paddleocr._pipelines")
+    fake_pvl = types.ModuleType("paddleocr._pipelines.paddleocr_vl")
+    fake_pvl._AVAILABLE_PIPELINE_VERSIONS = ["v1", "v1.5"]
+    fake_pvl._DEFAULT_PIPELINE_VERSION = "v1.5"
+
+    monkeypatch.setitem(sys.modules, "paddleocr", fake_pkg)
+    monkeypatch.setitem(sys.modules, "paddleocr._pipelines", fake_pipelines)
+    monkeypatch.setitem(sys.modules, "paddleocr._pipelines.paddleocr_vl", fake_pvl)
+
+    img_path = tmp_path / "sample.png"
+    Image.new("RGB", (240, 100), "white").save(img_path)
+
+    adapter = ocr_worker._PaddleOcrVlAdapter(tmp_path)
+    rev = adapter.prepare("eng")
+    assert rev
+    assert init_calls[0]["pipeline_version"] == "v1.5"
+
+    out = adapter.recognize(str(img_path), "eng", None)
+    assert len(out) == 1
+    assert out[0]["text"] == "Hello PaddleVL"
+
+    # Also verify dot-free HF folder sanitization for dots.mocr and MinerU 4.x nested payload extraction
+    dots_adapter = ocr_worker._DotsOcrAdapter(tmp_path)
+    assert "." not in dots_adapter._safe_repo_folder_name()
+    mineru_lines = ocr_worker._MinerUAdapter._extract_mineru_payload(
+        {"pages": [{"blocks": [{"text": "Chapter 1", "bbox": [50, 40, 300, 90]}]}]},
+        800,
+        1200,
+    )
+    assert len(mineru_lines) == 1
+    assert mineru_lines[0]["text"] == "Chapter 1"
+
+
+
 
 

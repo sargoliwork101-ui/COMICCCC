@@ -90,8 +90,9 @@ ISOLATED_ENGINE_SPECS: dict[str, dict[str, Any]] = {
         "pypi_pkg": "paddleocr",
         "github_repo": "PaddlePaddle/PaddleOCR",
         "hf_repo": None,
-        "pip_packages_cpu": ["paddlepaddle>=3.2.1", "paddleocr[doc-parser]>=3.3.0", "pillow>=10.3"],
-        "pip_packages_gpu": ["paddlepaddle>=3.2.1", "paddleocr[doc-parser]>=3.3.0", "pillow>=10.3"],
+        "pip_packages_cpu": ["paddlepaddle>=3.3.0", "paddleocr[doc-parser]>=3.7.0", "pillow>=10.3"],
+        "pip_packages_gpu": ["paddlepaddle>=3.3.0", "paddleocr[doc-parser]>=3.7.0", "pillow>=10.3"],
+        "pip_packages_fallback": ["paddlepaddle>=3.2.1", "paddleocr[doc-parser]>=3.4.0", "pillow>=10.3"],
         "needs_torch": False,
         "needs_regions": False,
         "download_size_gb": 2.4,
@@ -952,6 +953,63 @@ class IsolatedOcrEngine:
         finally:
             zip_tmp.unlink(missing_ok=True)
 
+    def _run_pip_streaming(
+        self,
+        pip_cmd: list[str],
+        *,
+        start_p: float,
+        end_p: float,
+        label_prefix: str,
+        timeout: int = 3600,
+    ) -> tuple[int, str]:
+        full_cmd = [*pip_cmd, "--progress-bar", "off"]
+        tail_lines: list[str] = []
+        started = time.monotonic()
+        step_count = 0
+        proc = subprocess.Popen(
+            full_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=_SUBPROCESS_NO_WINDOW if os.name == "nt" else 0,
+        )
+        try:
+            assert proc.stdout is not None
+            for raw_line in proc.stdout:
+                if time.monotonic() - started > timeout:
+                    proc.kill()
+                    return 1, "Operation timed out during pip installation."
+                line = raw_line.strip()
+                if not line:
+                    continue
+                tail_lines.append(line)
+                if len(tail_lines) > 80:
+                    tail_lines.pop(0)
+                lower = line.lower()
+                if lower.startswith("downloading "):
+                    step_count += 1
+                    ratio = min(0.82, 1.0 - (1.0 / (1.0 + step_count * 0.14)))
+                    cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                    wheel_part = line.split("/")[-1].split(" ")[0][:48]
+                    emit(f"{label_prefix}: دانلود بستهٔ {wheel_part}…", progress=cur_p)
+                elif lower.startswith("collecting "):
+                    step_count += 1
+                    ratio = min(0.75, 1.0 - (1.0 / (1.0 + step_count * 0.10)))
+                    cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                    pkg_part = line[11:].split()[0][:40]
+                    emit(f"{label_prefix}: آماده‌سازی بستهٔ {pkg_part}…", progress=cur_p)
+                elif lower.startswith("installing collected packages"):
+                    cur_p = round(start_p + (end_p - start_p) * 0.88, 3)
+                    emit(f"{label_prefix}: در حال ثبت و نصب بسته‌ها روی دیسک…", progress=cur_p)
+            rc = proc.wait(timeout=120)
+            return rc, "\n".join(tail_lines)
+        except Exception as exc:
+            proc.kill()
+            return 1, f"{exc}\n" + "\n".join(tail_lines)
+
     def _ensure_isolated_venv(self, upgrade: bool = False) -> None:
         env_dir = self._env_dir()
         py = self._env_python()
@@ -963,7 +1021,7 @@ class IsolatedOcrEngine:
                 res = _run_Subprocess([sys.executable, "-m", "venv", str(env_dir)], capture_output=True, text=True, timeout=300, check=False)
                 if res.returncode != 0 or not py.is_file():
                     raise self._error_cls(f"ساخت محیط مستقل برای {self.id} ناموفق بود: {(res.stderr or res.stdout)[-800:]}")
-                emit(f"آماده‌سازی ابزار نصب در محیط مستقل {self.id}…", progress=0.15)
+                emit(f"آماده‌سازی ابزار نصب در محیط مستقل {self.id}…", progress=0.14)
                 _run_Subprocess([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300, check=False)
                 _run_Subprocess([str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], capture_output=True, text=True, timeout=600, check=False)
 
@@ -973,31 +1031,47 @@ class IsolatedOcrEngine:
                     torch_cmd = [str(py), "-m", "pip", "install", "torch>=2.3.0", "torchvision>=0.18.0"]
                     if os.name == "nt" and hw.get("hasNvidiaGpu"):
                         torch_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
-                    emit(f"نصب زیرساخت پردازش تصویر برای {self.id} (ممکن است چند دقیقه طول بکشد)…", progress=0.25)
-                    t_res = _run_Subprocess(torch_cmd, capture_output=True, text=True, timeout=3600, check=False)
-                    if t_res.returncode != 0:
-                        raise self._error_cls(f"نصب PyTorch برای {self.id} ناموفق بود: {(t_res.stderr or t_res.stdout)[-1200:]}")
+                    emit(f"نصب زیرساخت PyTorch برای {self.id}…", progress=0.20)
+                    t_rc, t_out = self._run_pip_streaming(
+                        torch_cmd, start_p=0.20, end_p=0.45, label_prefix=f"زیرساخت {self.id}"
+                    )
+                    if t_rc != 0:
+                        raise self._error_cls(f"نصب PyTorch برای {self.id} ناموفق بود: {t_out[-1200:]}")
 
             packages = self._spec["pip_packages_gpu"] if hw.get("hasNvidiaGpu") else self._spec["pip_packages_cpu"]
-            pip_cmd = [str(py), "-m", "pip", "install"]
+            pip_base = [str(py), "-m", "pip", "install"]
             if upgrade:
-                pip_cmd.append("--upgrade")
-            pip_cmd.extend(packages)
+                pip_base.append("--upgrade")
             action_word = "به‌روزرسانی" if upgrade else "نصب"
-            emit(f"{action_word} بسته‌های اختصاصی مدل {self.id} آغاز شد…", progress=0.48)
-            p_res = _run_Subprocess(pip_cmd, capture_output=True, text=True, timeout=3600, check=False)
-            if p_res.returncode != 0:
-                details = (p_res.stderr or p_res.stdout or "pip failed")[-1500:].strip()
+            p_start = 0.46 if self._spec.get("needs_torch") else 0.18
+            emit(f"{action_word} بسته‌های اختصاصی مدل {self.id} آغاز شد…", progress=p_start)
+            p_rc, p_out = self._run_pip_streaming(
+                [*pip_base, *packages],
+                start_p=p_start,
+                end_p=0.70,
+                label_prefix=f"{action_word} {self.id}",
+            )
+            fallback_pkgs = self._spec.get("pip_packages_fallback")
+            if p_rc != 0 and fallback_pkgs:
+                emit(f"تنظیم نسخهٔ سازگار بسته‌های {self.id} برای سیستم شما…", progress=round((p_start + 0.70) / 2, 2))
+                p_rc, p_out = self._run_pip_streaming(
+                    [*pip_base, *fallback_pkgs],
+                    start_p=round((p_start + 0.70) / 2, 2),
+                    end_p=0.70,
+                    label_prefix=f"{action_word} سازگار {self.id}",
+                )
+            if p_rc != 0:
+                details = (p_out or "pip failed")[-1500:].strip()
                 raise self._error_cls(f"نصب بسته‌های مدل {self.id} ناموفق بود: {details}")
 
-            emit(f"بسته‌های اجرایی مدل {self.id} آماده شد", progress=0.70)
+            emit(f"بسته‌های اجرایی مدل {self.id} آماده شد", progress=0.72)
             self._ensure_llama_cpp_for_surya()
             (env_dir / ".runtime-ready").write_text(_now_iso(), encoding="utf-8")
 
     def _prepare_weights(self, language: str) -> str:
         worker_script = _worker_script_path()
-        emit(f"دریافت و آماده‌سازی فایل‌های مدل {self.id}…", progress=0.82)
-        proc = _run_Subprocess(
+        emit(f"دریافت و آماده‌سازی فایل‌های مدل {self.id}…", progress=0.80)
+        proc = subprocess.Popen(
             [
                 str(self._env_python()),
                 str(worker_script),
@@ -1007,13 +1081,59 @@ class IsolatedOcrEngine:
                 "--language", language,
             ],
             env=self._worker_env(),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=3600,
-            check=False,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_SUBPROCESS_NO_WINDOW if os.name == "nt" else 0,
         )
+        stderr_tail: list[str] = []
+        weight_steps = [0]
+
+        def _drain_stderr() -> None:
+            assert proc.stderr is not None
+            last_emit_at = 0.0
+            for raw in proc.stderr:
+                cleaned = raw.replace("\r", "\n")
+                for part in cleaned.splitlines():
+                    s = part.strip()
+                    if not s:
+                        continue
+                    stderr_tail.append(s)
+                    if len(stderr_tail) > 60:
+                        stderr_tail.pop(0)
+                    now_t = time.monotonic()
+                    if now_t - last_emit_at >= 1.5:
+                        weight_steps[0] += 1
+                        ratio = min(0.92, 1.0 - (1.0 / (1.0 + weight_steps[0] * 0.18)))
+                        cur_p = round(0.80 + 0.14 * ratio, 3)
+                        pct_match = re.search(r"(\d{1,3})%", s)
+                        if pct_match:
+                            sub_pct = min(100, max(0, int(pct_match.group(1))))
+                            emit(
+                                f"دانلود فایل‌های مدل {self.id} ({sub_pct}٪ از فایل جاری)…",
+                                progress=cur_p,
+                            )
+                        else:
+                            emit(f"در حال آماده‌سازی وزن‌های مدل {self.id}…", progress=cur_p)
+                        last_emit_at = now_t
+
+        err_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        err_thread.start()
+        stdout_text = ""
+        try:
+            assert proc.stdout is not None
+            stdout_text = proc.stdout.read()
+            proc.wait(timeout=3600)
+        except Exception:
+            proc.kill()
+            raise
+        finally:
+            err_thread.join(timeout=2.0)
+
         last_json: dict[str, Any] = {}
-        for line in reversed((proc.stdout or "").splitlines()):
+        for line in reversed((stdout_text or "").splitlines()):
             line = line.strip()
             if line.startswith("{") and line.endswith("}"):
                 try:
@@ -1022,13 +1142,13 @@ class IsolatedOcrEngine:
                 except Exception:
                     continue
         if proc.returncode != 0 or not last_json.get("ok"):
-            err = last_json.get("error") or (proc.stderr or proc.stdout or "weight download failed")[-1200:]
+            err = last_json.get("error") or ("\n".join(stderr_tail) or stdout_text or "weight download failed")[-1200:]
             raise self._error_cls(f"آماده‌سازی فایل‌های مدل {self.id} ناموفق بود: {err}")
         state = self._state_dir()
         state.mkdir(parents=True, exist_ok=True)
         (state / ".ready-all").write_text(_now_iso(), encoding="utf-8")
         (state / f".ready-{language}").write_text(_now_iso(), encoding="utf-8")
-        emit(f"فایل‌های مدل {self.id} ذخیره و تایید شد", progress=0.95)
+        emit(f"فایل‌های مدل {self.id} ذخیره و تایید شد", progress=0.96)
         return str(last_json.get("modelRevision") or "ready")
 
     def download(self, language: str = "eng") -> None:

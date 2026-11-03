@@ -199,7 +199,9 @@ async function pollActivity() {
       if (!activityEntries.some((existing) => existing.id === entry.id)) activityEntries.push(entry);
     });
     activityEntries = activityEntries.slice(-100);
-    const latest = payload.entries?.at(-1);
+    const entries = payload.entries || [];
+    const latest = entries.at(-1);
+    const latestWithProgress = [...entries].reverse().find((e) => typeof e?.progress === 'number' && Number.isFinite(e.progress));
     if (jobBusy && latest) {
       $('jobStatus').textContent = latest.message;
       if ($('dockProgressStatus')) $('dockProgressStatus').textContent = latest.message;
@@ -210,17 +212,18 @@ async function pollActivity() {
       if (modelFromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = latest.message;
       syncModelProgressUi(modelCurrentProgress, true, latest.message);
     }
-    if (latest && typeof latest.progress === 'number' && Number.isFinite(latest.progress)) {
+    if (latestWithProgress) {
+      const progVal = latestWithProgress.progress;
       if (jobBusy) {
-        setProgress('jobProgress', latest.progress, true);
-        setProgress('dockProgress', latest.progress, true);
-        if ($('editorDialog')?.open) setProgress('editorProgress', latest.progress, true);
+        setProgress('jobProgress', progVal, true);
+        setProgress('dockProgress', progVal, true);
+        if ($('editorDialog')?.open) setProgress('editorProgress', progVal, true);
       }
-      if (activeProgressId) setProgress(activeProgressId, latest.progress, true);
-      if (translationRunning) setProgress('translationProgress', latest.progress, true);
+      if (activeProgressId) setProgress(activeProgressId, progVal, true);
+      if (translationRunning) setProgress('translationProgress', progVal, true);
       if (state.modelBusy) {
-        const monotonic = typeof modelCurrentProgress === 'number' ? Math.max(modelCurrentProgress, latest.progress) : latest.progress;
-        syncModelProgressUi(monotonic, true, latest.message || modelCurrentLabel);
+        const monotonic = typeof modelCurrentProgress === 'number' ? Math.max(modelCurrentProgress, progVal) : progVal;
+        syncModelProgressUi(monotonic, true, latest?.message || latestWithProgress.message || modelCurrentLabel);
       }
     }
     if (payload.entries?.length) renderActivity();

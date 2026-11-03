@@ -75,10 +75,17 @@ class _BaseAdapter:
     def __init__(self, models_root: Path) -> None:
         self.models_root = models_root
 
+    def _safe_repo_folder_name(self) -> str:
+        assert self.hf_repo
+        # Replace dots and special chars so transformers `trust_remote_code=True` dynamic module
+        # imports never fail on dotted folder names like `rednote-hilab__dots.mocr`.
+        raw = self.hf_repo.replace("/", "__")
+        return re.sub(r"[^A-Za-z0-9_-]+", "_", raw)
+
     def prepare(self, language: str) -> str:
         if self.hf_repo:
             from huggingface_hub import snapshot_download
-            local_dir = self.models_root / "hf-repos" / self.hf_repo.replace("/", "__")
+            local_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name()
             local_dir.mkdir(parents=True, exist_ok=True)
             snapshot_download(repo_id=self.hf_repo, local_dir=str(local_dir))
             return "ready"
@@ -86,13 +93,27 @@ class _BaseAdapter:
 
     def local_repo_or_id(self) -> str:
         assert self.hf_repo
-        local_dir = self.models_root / "hf-repos" / self.hf_repo.replace("/", "__")
-        if local_dir.is_dir() and any(local_dir.iterdir()):
-            return str(local_dir)
+        safe_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name()
+        if safe_dir.is_dir() and any(safe_dir.iterdir()):
+            return str(safe_dir)
+        legacy_dir = self.models_root / "hf-repos" / self.hf_repo.replace("/", "__")
+        if "." not in legacy_dir.name and legacy_dir.is_dir() and any(legacy_dir.iterdir()):
+            return str(legacy_dir)
         return self.hf_repo
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         raise NotImplementedError
+
+
+def _select_paddleocr_vl_version(pvl_module: Any) -> str | None:
+    supported = getattr(pvl_module, "_AVAILABLE_PIPELINE_VERSIONS", None)
+    if isinstance(supported, (list, tuple, set)) and supported:
+        for preferred in ("v1.6", "v1.5", "v1"):
+            if preferred in supported:
+                return preferred
+        return str(list(supported)[-1])
+    default_ver = getattr(pvl_module, "_DEFAULT_PIPELINE_VERSION", None)
+    return str(default_ver) if default_ver else None
 
 
 class _PaddleOcrVlAdapter(_BaseAdapter):
@@ -103,13 +124,57 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
     def _get_pipeline(self) -> Any:
         if self._pipeline is None:
             from paddleocr import PaddleOCRVL
-            self._pipeline = PaddleOCRVL(pipeline_version="v1.6")
+            try:
+                from paddleocr._pipelines import paddleocr_vl as _pvl_mod
+            except Exception:
+                _pvl_mod = None
+
+            chosen_ver = _select_paddleocr_vl_version(_pvl_mod) if _pvl_mod is not None else None
+            candidates: list[str | None] = []
+            if chosen_ver:
+                candidates.append(chosen_ver)
+            for fallback_ver in ("v1.6", "v1.5", "v1", None):
+                if fallback_ver not in candidates:
+                    candidates.append(fallback_ver)
+
+            last_err: Exception | None = None
+            for candidate in candidates:
+                kwargs: dict[str, Any] = {}
+                if candidate is not None:
+                    kwargs["pipeline_version"] = candidate
+                try:
+                    self._pipeline = PaddleOCRVL(
+                        use_chart_recognition=False,
+                        use_seal_recognition=False,
+                        **kwargs,
+                    )
+                    break
+                except TypeError:
+                    try:
+                        self._pipeline = PaddleOCRVL(**kwargs)
+                        break
+                    except ValueError as exc:
+                        last_err = exc
+                        if "Invalid pipeline version" in str(exc):
+                            continue
+                        raise
+                except ValueError as exc:
+                    last_err = exc
+                    if "Invalid pipeline version" in str(exc):
+                        continue
+                    raise
+            if self._pipeline is None:
+                raise RuntimeError(f"Could not initialize PaddleOCRVL pipeline: {last_err}")
         return self._pipeline
 
     def prepare(self, language: str) -> str:
         self._get_pipeline()
-        import paddleocr
-        return getattr(paddleocr, "__version__", "ready")
+        import importlib.metadata
+        try:
+            return importlib.metadata.version("paddleocr")
+        except Exception:
+            import paddleocr
+            return getattr(paddleocr, "__version__", "ready")
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         from PIL import Image
@@ -216,7 +281,40 @@ class _SuryaAdapter(_BaseAdapter):
 class _MinerUAdapter(_BaseAdapter):
     def prepare(self, language: str) -> str:
         import importlib.metadata
+        import subprocess
+
+        dl_bin = shutil_which_in_venv("mineru-models-download")
+        if dl_bin:
+            subprocess.run([dl_bin, "--tier", "basic"], capture_output=True, text=True, timeout=1800, check=False)
         return importlib.metadata.version("mineru")
+
+    @staticmethod
+    def _extract_mineru_payload(payload: Any, width: int, height: int) -> list[dict[str, Any]]:
+        lines: list[dict[str, Any]] = []
+
+        def _visit(node: Any) -> None:
+            if isinstance(node, list):
+                for child in node:
+                    _visit(child)
+                return
+            if not isinstance(node, dict):
+                return
+            text = _strip_markup(node.get("text") or node.get("content") or node.get("markdown") or "")
+            bbox = node.get("bbox")
+            if text and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                bx0, by0, bx1, by1 = [float(v) for v in bbox[:4]]
+                if max(bx1, by1) <= 1000.0 and (width > 1000 or height > 1000):
+                    bx0, bx1 = bx0 * width / 1000.0, bx1 * width / 1000.0
+                    by0, by1 = by0 * height / 1000.0, by1 * height / 1000.0
+                poly = _clamp_polygon(_rect_polygon(bx0, by0, bx1, by1), width, height)
+                lines.append({"text": text, "confidence": 0.9, "polygon": poly})
+                return
+            for key in ("pages", "pdf_info", "para_blocks", "blocks", "preproc_blocks", "lines", "spans"):
+                if key in node:
+                    _visit(node[key])
+
+        _visit(payload)
+        return lines
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         import subprocess
@@ -225,38 +323,52 @@ class _MinerUAdapter(_BaseAdapter):
 
         with Image.open(image_path) as im:
             width, height = im.size
+
+        # 1. MinerU 4.x native Python parser API
+        try:
+            from mineru.parser import parse as mineru_parse
+            parsed = mineru_parse(image_path, tier="basic", ocr_mode="ocr", image_analysis=False)
+            native_lines = self._extract_mineru_payload(parsed.to_dict(), width, height)
+            if native_lines:
+                return native_lines
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        # 2. MinerU 4.x `mineru-kit parse` or legacy 2.x/3.x `mineru` CLI
         with tempfile.TemporaryDirectory(prefix="comic-mineru-") as tmp:
             out_dir = Path(tmp) / "out"
             out_dir.mkdir(parents=True, exist_ok=True)
-            lang_map = {"eng": "en", "kor": "korean", "jpn": "japan", "chi_sim": "ch"}
-            cmd = [sys.executable, "-m", "mineru.cli.client", "-p", image_path, "-o", str(out_dir), "-l", lang_map.get(language, "en")]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
-            if proc.returncode != 0:
-                alt = shutil_which_in_venv("mineru")
-                if alt:
-                    proc = subprocess.run([alt, "-p", image_path, "-o", str(out_dir)], capture_output=True, text=True, timeout=600, check=False)
+            kit_bin = shutil_which_in_venv("mineru-kit")
+            if kit_bin:
+                json_out = out_dir / "middle.json"
+                proc = subprocess.run(
+                    [kit_bin, "parse", image_path, "-o", str(json_out), "-f", "middle_json", "--ocr-mode", "ocr"],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    check=False,
+                )
+            else:
+                lang_map = {"eng": "en", "kor": "korean", "jpn": "japan", "chi_sim": "ch"}
+                cmd = [sys.executable, "-m", "mineru.cli.client", "-p", image_path, "-o", str(out_dir), "-l", lang_map.get(language, "en")]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
                 if proc.returncode != 0:
-                    raise RuntimeError((proc.stderr or proc.stdout or "MinerU execution failed")[-1200:])
-            lines: list[dict[str, Any]] = []
-            for json_file in out_dir.rglob("*content_list*.json"):
-                payload = json.loads(json_file.read_text(encoding="utf-8"))
-                items = payload if isinstance(payload, list) else payload.get("pdf_info", [])
-                for entry in items:
-                    if not isinstance(entry, dict):
-                        continue
-                    text = _strip_markup(entry.get("text") or entry.get("content") or "")
-                    bbox = entry.get("bbox")
-                    if not text or not bbox or len(bbox) < 4:
-                        continue
-                    bx0, by0, bx1, by1 = [float(v) for v in bbox[:4]]
-                    if max(bx1, by1) <= 1000.0 and (width > 1000 or height > 1000):
-                        bx0, bx1 = bx0 * width / 1000.0, bx1 * width / 1000.0
-                        by0, by1 = by0 * height / 1000.0, by1 * height / 1000.0
-                    poly = _clamp_polygon(_rect_polygon(bx0, by0, bx1, by1), width, height)
-                    lines.append({"text": text, "confidence": 0.9, "polygon": poly})
-                if lines:
-                    break
-            return lines
+                    alt = shutil_which_in_venv("mineru")
+                    if alt:
+                        proc = subprocess.run([alt, "-p", image_path, "-o", str(out_dir)], capture_output=True, text=True, timeout=600, check=False)
+            if proc.returncode != 0:
+                raise RuntimeError((proc.stderr or proc.stdout or "MinerU execution failed")[-1200:])
+            for json_file in out_dir.rglob("*.json"):
+                try:
+                    payload = json.loads(json_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                extracted = self._extract_mineru_payload(payload, width, height)
+                if extracted:
+                    return extracted
+            return []
 
 
 def shutil_which_in_venv(binary_name: str) -> str | None:
@@ -282,12 +394,15 @@ class _TransformersRegionAdapter(_BaseAdapter):
         if self._model is not None and self._processor is not None:
             return self._model, self._processor, self._device
         import torch
-        from transformers import AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor
+        from transformers import AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
 
         model_id = self.local_repo_or_id()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.bfloat16 if device == "cuda" else torch.float32
-        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        try:
+            processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        except Exception:
+            processor = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         model = None
         last_err: Exception | None = None
         for loader in (AutoModelForImageTextToText, AutoModelForCausalLM, AutoModel):

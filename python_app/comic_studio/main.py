@@ -176,15 +176,33 @@ def create_app() -> FastAPI:
     async def run_reported(function: Any, *args: Any, pulse_label: str | None = None) -> Any:
         stop_pulse = threading.Event()
         started = time.monotonic()
+        last_state: dict[str, Any] = {"ts": started, "progress": None}
         pulse = None
+
+        def tracked_report(message: str, kind: str = "info", progress: float | None = None) -> None:
+            last_state["ts"] = time.monotonic()
+            if progress is not None:
+                last_state["progress"] = progress
+            activity.add(message, kind, progress)
+
         if pulse_label:
             def report_alive() -> None:
                 while not stop_pulse.wait(5):
-                    activity.add(f"{pulse_label} همچنان در حال انجام است · {int(time.monotonic() - started)} ثانیه")
+                    now = time.monotonic()
+                    if now - float(last_state["ts"]) < 4.2:
+                        continue
+                    cur_p = last_state["progress"]
+                    if isinstance(cur_p, (int, float)) and 0.0 < cur_p < 0.93:
+                        cur_p = round(min(0.93, float(cur_p) + 0.008), 3)
+                        last_state["progress"] = cur_p
+                    activity.add(
+                        f"{pulse_label} همچنان در حال انجام است · {int(now - started)} ثانیه",
+                        progress=cur_p if isinstance(cur_p, (int, float)) else None,
+                    )
             pulse = threading.Thread(target=report_alive, daemon=True)
             pulse.start()
         try:
-            with reporting(activity.add):
+            with reporting(tracked_report):
                 return await run_in_threadpool(function, *args)
         finally:
             stop_pulse.set()

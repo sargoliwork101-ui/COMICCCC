@@ -1111,10 +1111,13 @@ function check(name, condition) {
 
     check('starting model update shows sticky #modelsActiveProgressWrap, per-card .engine-card-progress, #engineNoticeProgressWrap, and #dockProgressWrap', !$('modelsActiveProgressWrap').classList.contains('hidden') && Boolean(rapidCard().querySelector('.engine-card-progress')) && !$('engineNoticeProgressWrap').classList.contains('hidden') && !$('dockProgressWrap').classList.contains('hidden'));
 
-    // Feed live 62% progress from /api/activity and verify all bars update to 62%!
-    nextActivityEntries = [{ id: ++activitySeq, message: 'در حال نصب بستهٔ rapidocr (۶۲٪)…', kind: 'info', progress: 0.62, time: new Date().toISOString() }];
+    // Feed live 62% progress FOLLOWED BY a progress:null heartbeat in the SAME /api/activity batch -> must still apply 62%!
+    nextActivityEntries = [
+      { id: ++activitySeq, message: 'در حال نصب بستهٔ rapidocr (۶۲٪)…', kind: 'info', progress: 0.62, time: new Date().toISOString() },
+      { id: ++activitySeq, message: 'آماده‌سازی همچنان در حال انجام است · 15 ثانیه', kind: 'info', progress: null, time: new Date().toISOString() },
+    ];
     await vm.runInContext(`pollActivity()`, context);
-    check('live activity progress updates sticky bar, per-card bar, notice bar, and dock bar to 62%', $('modelsActiveProgressPercent').textContent === '62%' && $('modelsActiveProgress').style.width === '62%' && rapidCard().querySelector('.engine-card-progress-pct')?.textContent === '62%' && $('engineNoticeProgressPercent').textContent === '62%' && $('dockProgressPercent').textContent === '62%');
+    check('live activity progress updates sticky bar, per-card bar, notice bar, and dock bar to 62% even when followed by a null-progress heartbeat', $('modelsActiveProgressPercent').textContent === '62%' && $('modelsActiveProgress').style.width === '62%' && rapidCard().querySelector('.engine-card-progress-pct')?.textContent === '62%' && $('engineNoticeProgressPercent').textContent === '62%' && $('dockProgressPercent').textContent === '62%');
 
     // Finish update request -> updateAvailable becomes false and progress bars hide cleanly
     resolveUpdateReq(jsonResponse({
