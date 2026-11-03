@@ -80,8 +80,8 @@ class _BaseAdapter:
             from huggingface_hub import snapshot_download
             local_dir = self.models_root / "hf-repos" / self.hf_repo.replace("/", "__")
             local_dir.mkdir(parents=True, exist_ok=True)
-            path = snapshot_download(repo_id=self.hf_repo, local_dir=str(local_dir))
-            return str(Path(path).name)
+            snapshot_download(repo_id=self.hf_repo, local_dir=str(local_dir))
+            return "ready"
         return "ready"
 
     def local_repo_or_id(self) -> str:

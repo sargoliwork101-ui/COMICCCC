@@ -20,14 +20,17 @@ from .activity import emit
 from .ocr_managed import (
     ISOLATED_ENGINE_SPECS,
     IsolatedOcrEngine,
+    acknowledge_engine_update,
     check_remote_updates,
     clear_cached_engine_update,
     compute_engine_update_fields,
     detect_builtin_installed_version,
     engine_meta,
     evaluate_engine_hardware,
+    fetch_tessdata_revision,
     inspect_hardware,
     install_tesseract_runtime,
+    is_newer_version,
     portable_tesseract_executable,
     read_manifest,
     read_update_cache,
@@ -88,7 +91,8 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
     if not packages:
         return
     command = [sys.executable, "-m", "pip", "install", *(["--upgrade"] if upgrade else []), *packages]
-    emit(f"{'به‌روزرسانی' if upgrade else 'نصب'} بسته‌های OCR آغاز شد: {', '.join(packages)}")
+    action_label = "به‌روزرسانی" if upgrade else "نصب"
+    emit(f"{action_label} بسته‌های OCR آغاز شد: {', '.join(packages)}", progress=0.18)
     try:
         with _INSTALL_LOCK:
             result = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False)
@@ -106,7 +110,7 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
         emit(f"نصب بسته‌های OCR ناموفق بود: {details}", "error")
         raise OcrError(f"OCR runtime installation failed: {details}")
     importlib.invalidate_caches()
-    emit("نصب بسته‌های OCR تمام شد", "success")
+    emit("نصب بسته‌های OCR تمام شد", "success", progress=0.68)
 
 
 def _lines_from_rapid(result: Any) -> list[OcrLine]:
@@ -244,13 +248,15 @@ class RapidEngine:
         engine(np.asarray(sample), use_cls=False)
 
     def download(self, language: str = "eng") -> None:
+        emit(f"شروع آماده‌سازی مدل {self.id}…", progress=0.06)
         self._ensure_runtime()
         languages = [language] if self.version == "v5" else ["eng"]
-        for selected in languages:
+        for idx, selected in enumerate(languages):
             try:
-                emit(f"آماده‌سازی مدل {self.id} برای {selected}؛ ممکن است دانلود چند دقیقه طول بکشد")
+                step_p = 0.72 + (0.20 * idx / max(1, len(languages)))
+                emit(f"آماده‌سازی مدل {self.id} برای {selected}؛ ممکن است دانلود چند دقیقه طول بکشد", progress=round(step_p, 2))
                 self._warm(self._get(selected, allow_download=True))
-                emit(f"مدل {self.id} برای {selected} بارگذاری و آزمایش شد", "success")
+                emit(f"مدل {self.id} برای {selected} بارگذاری و آزمایش شد", "success", progress=0.94)
             except OcrError:
                 raise
             except Exception as exc:
@@ -260,19 +266,24 @@ class RapidEngine:
                     "Check the internet connection and model host access, then try again."
                 ) from exc
         ver = detect_builtin_installed_version(self.id, self)
-        update_manifest_entry(self.id, installedVersion=ver, readyLanguages=self.ready_languages)
+        acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
 
     def update(self, language: str = "eng") -> None:
+        emit(f"شروع به‌روزرسانی خودکار {self.id}…", progress=0.06)
         target_langs = list(self.ready_languages) if self.version == "v5" and self.ready_languages else ([language] if self.version == "v5" else ["eng"])
         with self._lock:
             self._instances.clear()
-        install_packages(["rapidocr>=3.10,<4", "onnxruntime>=1.20,<2"], upgrade=True)
-        for selected in target_langs:
+        # Avoid upgrading onnxruntime when already loaded on Windows (prevents locked .pyd WinError 5/32).
+        pkgs = ["rapidocr>=3.10"]
+        if not importlib.util.find_spec("onnxruntime"):
+            pkgs.append("onnxruntime>=1.20,<2")
+        install_packages(pkgs, upgrade=True)
+        for idx, selected in enumerate(target_langs):
+            emit(f"بررسی و آماده‌سازی فایل‌های مدل {self.id} ({selected})…", progress=round(0.74 + 0.18 * (idx / max(1, len(target_langs))), 2))
             self._warm(self._get(selected, allow_download=True))
         ver = detect_builtin_installed_version(self.id, self)
-        update_manifest_entry(self.id, installedVersion=ver, readyLanguages=self.ready_languages)
-        clear_cached_engine_update(self.id, ver)
-        emit(f"مدل {self.id} با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success")
+        acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
+        emit(f"مدل {self.id} با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success", progress=1.0)
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         engine = self._get(language)
@@ -347,33 +358,39 @@ class EasyEngine:
         return self._readers[lang]
 
     def download(self, language: str = "eng") -> None:
+        emit(f"شروع آماده‌سازی مدل EasyOCR ({language})…", progress=0.06)
         self._ensure_runtime()
         try:
-            emit(f"آماده‌سازی EasyOCR برای {language}؛ فقط مدل همین زبان دریافت می‌شود")
+            emit(f"آماده‌سازی EasyOCR برای {language}؛ فقط مدل همین زبان دریافت می‌شود", progress=0.62)
             self._reader(language, True)
             self._model_dir().mkdir(parents=True, exist_ok=True)
             (self._model_dir() / f".ready-{language}").write_text("downloaded by user request\n", encoding="utf-8")
             ver = detect_builtin_installed_version(self.id, self)
-            update_manifest_entry(self.id, installedVersion=ver, readyLanguages=self.ready_languages)
-            emit(f"مدل EasyOCR برای {language} آماده شد", "success")
+            acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
+            emit(f"مدل EasyOCR برای {language} آماده شد", "success", progress=1.0)
         except OcrError:
             raise
         except Exception as exc:
             raise OcrError(f"EasyOCR model download failed for {language}: {exc}") from exc
 
     def update(self, language: str = "eng") -> None:
+        emit("شروع به‌روزرسانی خودکار EasyOCR…", progress=0.06)
         target_langs = list(self.ready_languages) or [language]
         with self._lock:
             self._readers.clear()
-        install_packages(["easyocr>=1.7", "torch>=2.2,<3"], upgrade=True)
-        for selected in target_langs:
+        # Avoid upgrading torch when already installed on Windows (prevents locked torch_cpu.dll errors).
+        pkgs = ["easyocr>=1.7"]
+        if not importlib.util.find_spec("torch"):
+            pkgs.append("torch>=2.2,<3")
+        install_packages(pkgs, upgrade=True)
+        for idx, selected in enumerate(target_langs):
+            emit(f"آماده‌سازی وزن‌های EasyOCR برای {selected}…", progress=round(0.72 + 0.20 * (idx / max(1, len(target_langs))), 2))
             self._reader(selected, True)
             self._model_dir().mkdir(parents=True, exist_ok=True)
             (self._model_dir() / f".ready-{selected}").write_text("downloaded by user request\n", encoding="utf-8")
         ver = detect_builtin_installed_version(self.id, self)
-        update_manifest_entry(self.id, installedVersion=ver, readyLanguages=self.ready_languages)
-        clear_cached_engine_update(self.id, ver)
-        emit(f"مدل EasyOCR با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success")
+        acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
+        emit(f"مدل EasyOCR با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success", progress=1.0)
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         reader = self._reader(language, False)
@@ -485,23 +502,30 @@ class TesseractEngine:
         temporary = self._model_dir() / f".{language}.traineddata.part"
         target = self._model_dir() / f"{language}.traineddata"
         try:
-            emit(f"دانلود فایل زبان Tesseract ({language}) از منبع رسمی آغاز شد")
+            emit(f"دانلود فایل زبان Tesseract ({language}) از منبع رسمی آغاز شد", progress=0.20)
             request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio"})
             with urllib.request.urlopen(request, timeout=180) as response, temporary.open("wb") as output:
+                hdrs = getattr(response, "headers", None)
+                raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
+                expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 12 * 1024 * 1024
                 total = 0
                 while True:
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
                     total += len(chunk)
-                    emit(f"Tesseract {language}: {total / (1024 * 1024):.1f} مگابایت دریافت شد")
+                    ratio = min(1.0, total / max(1, expected_bytes))
+                    emit(
+                        f"Tesseract {language}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
+                        progress=round(0.24 + 0.66 * ratio, 3),
+                    )
                     if total > 50 * 1024 * 1024:
                         raise OcrError("The selected Tesseract language file is unexpectedly large.")
                     output.write(chunk)
             if temporary.stat().st_size < 1000:
                 raise OcrError("The downloaded Tesseract language file is empty or invalid.")
             os.replace(temporary, target)
-            emit(f"فایل زبان Tesseract ({language}) ذخیره شد", "success")
+            emit(f"فایل زبان Tesseract ({language}) ذخیره شد", "success", progress=0.94)
             return target
         except OcrError:
             temporary.unlink(missing_ok=True)
@@ -513,22 +537,37 @@ class TesseractEngine:
     def download(self, language: str = "eng") -> None:
         if language not in LANGUAGES:
             raise OcrError(f"Unsupported Tesseract language: {language}")
+        emit(f"شروع آماده‌سازی Tesseract ({language})…", progress=0.06)
         if not self.runtime_installed:
             install_tesseract_runtime(OcrError)
             self._system_languages = None
         target = self._download_language_file(language)
         ver = detect_builtin_installed_version(self.id, self)
-        update_manifest_entry(
+        remote_rev = fetch_tessdata_revision([language])
+        local_hash = sha256_short(target)
+        # Never store an unprefixed local file SHA-256 where check_remote_updates compares Git commit SHAs.
+        rev_to_save = remote_rev or (f"sha256:{local_hash}" if local_hash else "ready")
+        acknowledge_engine_update(
             self.id,
-            installedVersion=ver,
-            modelRevision=sha256_short(target),
-            readyLanguages=self.ready_languages,
+            installed_version=ver,
+            model_revision=rev_to_save,
+            ready_languages=self.ready_languages,
         )
 
     def update(self, language: str = "eng") -> None:
-        if os.name == "nt" and (not self.runtime_installed or portable_tesseract_executable()):
-            install_tesseract_runtime(OcrError)
-            self._system_languages = None
+        emit("شروع به‌روزرسانی خودکار Tesseract…", progress=0.06)
+        if os.name == "nt":
+            cur_ver = detect_builtin_installed_version(self.id, self)
+            cached = (read_update_cache().get("engines") or {}).get(self.id) or {}
+            latest_ver = cached.get("latestVersion")
+            needs_win_bin = (
+                not self.runtime_installed
+                or bool(portable_tesseract_executable())
+                or bool(cur_ver and latest_ver and is_newer_version(cur_ver, latest_ver))
+            )
+            if needs_win_bin:
+                install_tesseract_runtime(OcrError)
+                self._system_languages = None
         elif not self.runtime_installed:
             install_tesseract_runtime(OcrError)
             self._system_languages = None
@@ -538,16 +577,16 @@ class TesseractEngine:
         for selected in target_langs:
             last_target = self._download_language_file(selected)
         ver = detect_builtin_installed_version(self.id, self)
-        from .ocr_managed import fetch_tessdata_revision
-        remote_rev = fetch_tessdata_revision(target_langs) or (sha256_short(last_target) if last_target else None)
-        update_manifest_entry(
+        remote_rev = fetch_tessdata_revision(target_langs)
+        local_hash = sha256_short(last_target) if last_target else None
+        rev_to_save = remote_rev or (f"sha256:{local_hash}" if local_hash else "ready")
+        acknowledge_engine_update(
             self.id,
-            installedVersion=ver,
-            modelRevision=remote_rev,
-            readyLanguages=self.ready_languages,
+            installed_version=ver,
+            model_revision=rev_to_save,
+            ready_languages=self.ready_languages,
         )
-        clear_cached_engine_update(self.id, ver, remote_rev)
-        emit(f"مدل Tesseract با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success")
+        emit(f"مدل Tesseract با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success", progress=1.0)
 
     def _recognize_with_psm(self, image: Image.Image, language: str, psm: str) -> list[OcrLine]:
         executable = _tesseract_executable()

@@ -1068,6 +1068,84 @@ function check(name, condition) {
     vm.runInContext('updateEngineOptions("rapidocr-v6")', context);
   }
 
+  // v3.73: Live OCR model download/update progress bars + stale check-updates race guard
+  {
+    const origFetchV373 = window.fetch;
+    const prevEnginesV373 = vm.runInContext('state.engines', context);
+    let resolveUpdateReq;
+    let resolveStaleCheck;
+    let nextActivityEntries = [];
+    let activitySeq = 9000;
+
+    vm.runInContext(`state.engines = [
+      { id: 'rapidocr-v6', name: 'PP-OCRv6 Small', selectable: true, runtimeInstalled: true, languages: ['eng'], readyLanguages: ['eng'], installedVersion: '3.8.0', latestVersion: '3.10.0', updateAvailable: true, updateSummary: 'نسخهٔ ۳.۱۰ آماده است', description: 'fast', family: 'Paddle' },
+      { id: 'surya', name: 'Surya', selectable: true, isolated: true, runtimeInstalled: false, languages: ['eng'], readyLanguages: [], description: 'layout', family: 'Datalab' }
+    ]; engineUpdateNoticeDismissed = false; syncEngineUpdateUi(); renderModels(); updateEngineOptions('rapidocr-v6');`, context);
+
+    window.fetch = async (url, options = {}) => {
+      const parsed = new URL(url, 'http://127.0.0.1:8765');
+      if (parsed.pathname === '/api/activity') {
+        const entries = nextActivityEntries;
+        nextActivityEntries = [];
+        return jsonResponse({ entries, next: ++activitySeq });
+      }
+      if (parsed.pathname === '/api/engines/check-updates' && options.method === 'POST') {
+        return new Promise((resolve) => { resolveStaleCheck = resolve; });
+      }
+      if (parsed.pathname === '/api/engines/rapidocr-v6/update' && options.method === 'POST') {
+        return new Promise((resolve) => { resolveUpdateReq = resolve; });
+      }
+      return origFetchV373(url, options);
+    };
+
+    // Start an in-flight silent checkEngineUpdates BEFORE updating
+    const staleCheckPromise = vm.runInContext(`checkEngineUpdates({ force: false, silent: true })`, context);
+    await new Promise((r) => setTimeout(r, 15));
+
+    // Open modelsDialog and start updating PP-OCRv6 Small
+    $('modelsBtn').click();
+    const rapidCard = () => [...window.document.querySelectorAll('#engineCards .engine-card')].find((el) => el.querySelector('h3')?.textContent === 'PP-OCRv6 Small');
+    const updBtn = [...rapidCard().querySelectorAll('.card-buttons button')].find((b) => b.textContent.includes('به‌روزرسانی'));
+    updBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    check('starting model update shows sticky #modelsActiveProgressWrap, per-card .engine-card-progress, #engineNoticeProgressWrap, and #dockProgressWrap', !$('modelsActiveProgressWrap').classList.contains('hidden') && Boolean(rapidCard().querySelector('.engine-card-progress')) && !$('engineNoticeProgressWrap').classList.contains('hidden') && !$('dockProgressWrap').classList.contains('hidden'));
+
+    // Feed live 62% progress from /api/activity and verify all bars update to 62%!
+    nextActivityEntries = [{ id: ++activitySeq, message: 'در حال نصب بستهٔ rapidocr (۶۲٪)…', kind: 'info', progress: 0.62, time: new Date().toISOString() }];
+    await vm.runInContext(`pollActivity()`, context);
+    check('live activity progress updates sticky bar, per-card bar, notice bar, and dock bar to 62%', $('modelsActiveProgressPercent').textContent === '62%' && $('modelsActiveProgress').style.width === '62%' && rapidCard().querySelector('.engine-card-progress-pct')?.textContent === '62%' && $('engineNoticeProgressPercent').textContent === '62%' && $('dockProgressPercent').textContent === '62%');
+
+    // Finish update request -> updateAvailable becomes false and progress bars hide cleanly
+    resolveUpdateReq(jsonResponse({
+      ok: true,
+      language: 'eng',
+      engines: [
+        { id: 'rapidocr-v6', name: 'PP-OCRv6 Small', selectable: true, runtimeInstalled: true, languages: ['eng'], readyLanguages: ['eng'], installedVersion: '3.10.0', latestVersion: '3.10.0', updateAvailable: false, updateSummary: '', description: 'fast', family: 'Paddle' },
+        { id: 'surya', name: 'Surya', selectable: true, isolated: true, runtimeInstalled: false, languages: ['eng'], readyLanguages: [], description: 'layout', family: 'Datalab' },
+      ],
+    }));
+    await new Promise((r) => setTimeout(r, 25));
+    check('finishing update hides active progress bars and clears update banner', $('modelsActiveProgressWrap').classList.contains('hidden') && !rapidCard().querySelector('.engine-card-progress') && $('engineUpdateNotice').classList.contains('hidden'));
+
+    // Now resolve the earlier stale check-updates response carrying outdated updateAvailable: true -> must be ignored!
+    resolveStaleCheck(jsonResponse({
+      checkedAt: Date.now() / 1000,
+      updatesAvailable: 1,
+      engines: [
+        { id: 'rapidocr-v6', name: 'PP-OCRv6 Small', selectable: true, runtimeInstalled: true, languages: ['eng'], readyLanguages: ['eng'], installedVersion: '3.8.0', latestVersion: '3.10.0', updateAvailable: true, updateSummary: 'کهنه', description: 'fast', family: 'Paddle' },
+      ],
+    }));
+    await staleCheckPromise;
+    await new Promise((r) => setTimeout(r, 15));
+    check('stale in-flight check-updates response cannot resurrect updateAvailable after updateEngine succeeds', vm.runInContext(`state.engines.find(e => e.id === 'rapidocr-v6').updateAvailable === false`, context) && $('engineUpdateNotice').classList.contains('hidden') && $('modelsBtnBadge').classList.contains('hidden'));
+
+    vm.runInContext(`closeDialog('modelsDialog')`, context);
+    window.fetch = origFetchV373;
+    vm.runInContext('state.engines = prevEngines;', Object.assign(context, { prevEngines: prevEnginesV373 }));
+    vm.runInContext('syncEngineUpdateUi(); updateEngineOptions("rapidocr-v6");', context);
+  }
+
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));
   window.dispatchEvent(new window.Event('pagehide'));

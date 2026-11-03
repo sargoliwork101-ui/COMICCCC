@@ -115,6 +115,70 @@ function setProgress(id, progress = null, active = false) {
   if (id === 'dockProgress' && $('dockProgressPercent')) {
     $('dockProgressPercent').textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
   }
+  if (id === 'modelsActiveProgress' && $('modelsActiveProgressPercent')) {
+    $('modelsActiveProgressPercent').textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
+  }
+  if (id === 'ocrQuickProgress' && $('ocrQuickProgressPercent')) {
+    $('ocrQuickProgressPercent').textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
+  }
+  if (id === 'engineNoticeProgress' && $('engineNoticeProgressPercent')) {
+    $('engineNoticeProgressPercent').textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
+  }
+}
+let modelFromOcrDialog = false;
+let modelCurrentProgress = null;
+let modelCurrentLabel = '';
+let engineMutationSeq = 0;
+
+function syncModelProgressUi(progress = modelCurrentProgress, active = Boolean(state.modelBusy), labelText = modelCurrentLabel) {
+  modelCurrentProgress = progress;
+  if (labelText !== undefined && labelText !== null) modelCurrentLabel = String(labelText);
+  const determinate = typeof progress === 'number' && Number.isFinite(progress);
+  const pctStr = determinate ? `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%` : (active ? '…' : '0%');
+
+  setProgress('modelProgress', progress, active);
+  if ($('modelsActiveProgressWrap')) {
+    $('modelsActiveProgressWrap').classList.toggle('hidden', !active);
+    if (modelCurrentLabel && $('modelsActiveProgressLabel')) $('modelsActiveProgressLabel').textContent = modelCurrentLabel;
+    setProgress('modelsActiveProgress', progress, active);
+  }
+  if ($('ocrQuickProgressWrap')) {
+    const showQuick = active && modelFromOcrDialog;
+    $('ocrQuickProgressWrap').classList.toggle('hidden', !showQuick);
+    if (showQuick && modelCurrentLabel && $('ocrQuickProgressLabel')) $('ocrQuickProgressLabel').textContent = modelCurrentLabel;
+    setProgress('ocrQuickProgress', showQuick ? progress : 0, showQuick);
+  }
+  if ($('engineNoticeProgressWrap')) {
+    const showNoticeProg = active && $('engineUpdateNotice') && !$('engineUpdateNotice').classList.contains('hidden');
+    $('engineNoticeProgressWrap').classList.toggle('hidden', !showNoticeProg);
+    if (showNoticeProg && modelCurrentLabel && $('engineNoticeProgressLabel')) $('engineNoticeProgressLabel').textContent = modelCurrentLabel;
+    setProgress('engineNoticeProgress', showNoticeProg ? progress : 0, showNoticeProg);
+  }
+  if (modelFromOcrDialog) {
+    setProgress('ocrProgress', progress, active);
+  }
+  if (!jobBusy && $('dockProgressWrap')) {
+    $('dockProgressWrap').classList.toggle('hidden', !active);
+    if ($('dockProgressStatus')) $('dockProgressStatus').textContent = active ? (modelCurrentLabel || 'در حال آماده‌سازی مدل…') : 'آماده';
+    setProgress('dockProgress', active ? progress : 0, active);
+    setProgress('jobProgress', active ? progress : (progress === 1 ? 1 : 0), active);
+    if ($('jobStatus') && active && modelCurrentLabel) $('jobStatus').textContent = modelCurrentLabel;
+  }
+  document.querySelectorAll('#engineCards .engine-card-progress').forEach((wrap) => {
+    const fill = wrap.querySelector('.engine-card-progress-fill');
+    const bar = wrap.querySelector('.bar');
+    const pct = wrap.querySelector('.engine-card-progress-pct');
+    const txt = wrap.querySelector('.engine-card-progress-text');
+    const widthPct = determinate ? Math.round(Math.max(0, Math.min(1, progress)) * 100) : (active ? 30 : 0);
+    if (fill) fill.style.width = `${widthPct}%`;
+    if (bar) {
+      bar.classList.toggle('indeterminate', active && !determinate);
+      if (determinate) bar.setAttribute('aria-valuenow', String(widthPct));
+      else bar.removeAttribute('aria-valuenow');
+    }
+    if (pct) pct.textContent = pctStr;
+    if (txt && modelCurrentLabel) txt.textContent = modelCurrentLabel;
+  });
 }
 function appendLocalActivity(message, kind = 'info') {
   if (!message) return;
@@ -141,6 +205,11 @@ async function pollActivity() {
       if ($('dockProgressStatus')) $('dockProgressStatus').textContent = latest.message;
       if (translationRunning) $('translationStatus').textContent = latest.message;
     }
+    if (state.modelBusy && latest?.message) {
+      if ($('modelTestResult')) $('modelTestResult').textContent = latest.message;
+      if (modelFromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = latest.message;
+      syncModelProgressUi(modelCurrentProgress, true, latest.message);
+    }
     if (latest && typeof latest.progress === 'number' && Number.isFinite(latest.progress)) {
       if (jobBusy) {
         setProgress('jobProgress', latest.progress, true);
@@ -149,7 +218,10 @@ async function pollActivity() {
       }
       if (activeProgressId) setProgress(activeProgressId, latest.progress, true);
       if (translationRunning) setProgress('translationProgress', latest.progress, true);
-      if (state.modelBusy) setProgress('modelProgress', latest.progress, true);
+      if (state.modelBusy) {
+        const monotonic = typeof modelCurrentProgress === 'number' ? Math.max(modelCurrentProgress, latest.progress) : latest.progress;
+        syncModelProgressUi(monotonic, true, latest.message || modelCurrentLabel);
+      }
     }
     if (payload.entries?.length) renderActivity();
   } catch { /* the server may be shutting down; do not create a toast loop */ }
@@ -1771,7 +1843,7 @@ function syncEngineUpdateUi() {
   const updateAllBtn = $('updateAllModelsBtn');
   if (updateAllBtn) {
     updateAllBtn.textContent = updates.length > 1 ? `به‌روزرسانی همه (${updates.length} مدل)` : 'به‌روزرسانی مدل به نسخهٔ جدید';
-    updateAllBtn.disabled = Boolean(state.modelBusy || checkingEngineUpdates);
+    updateAllBtn.disabled = Boolean(state.modelBusy);
     updateAllBtn.classList.toggle('hidden', updates.length === 0);
   }
   const checkBtn = $('checkModelUpdatesBtn');
@@ -1796,7 +1868,7 @@ function syncEngineUpdateUi() {
         : `نسخهٔ جدید برای ${updates.length} مدل نصب‌شدهٔ OCR (${updates.map((item) => item.name).join('، ')}) منتشر شده است و با یک کلیک قابل دریافت است.`;
       if (topBtn) {
         topBtn.textContent = updates.length > 1 ? `به‌روزرسانی همه (${updates.length})` : 'به‌روزرسانی خودکار';
-        topBtn.disabled = Boolean(state.modelBusy || checkingEngineUpdates);
+        topBtn.disabled = Boolean(state.modelBusy);
       }
       topNotice.classList.remove('hidden');
     } else {
@@ -1835,7 +1907,8 @@ function renderModels() {
     const cards = document.createElement('div'); cards.className = 'model-group-grid'; group.appendChild(cards); container.appendChild(group);
     engines.forEach((engine) => {
       const suit = engineSuitability(engine, modelsMode);
-      const card = document.createElement('section'); card.className = `engine-card${external ? ' external-engine' : ''}`;
+      const isBusyThis = state.modelBusy === engine.id;
+      const card = document.createElement('section'); card.className = `engine-card${external ? ' external-engine' : ''}${isBusyThis ? ' is-busy-card' : ''}`;
       if (!external) card.dataset.suitability = suit.tier;
       const head = document.createElement('div'); head.className = 'engine-card-head';
       const titleEl = document.createElement('h3'); titleEl.textContent = engine.name;
@@ -1902,20 +1975,48 @@ function renderModels() {
           card.appendChild(hwWarn);
         }
         if (engine.requirements) { const requirements = document.createElement('div'); requirements.className = 'engine-limit'; requirements.textContent = engine.requirements; card.appendChild(requirements); }
+        if (isBusyThis) {
+          const progWrap = document.createElement('div');
+          progWrap.className = 'engine-card-progress';
+          const progHead = document.createElement('div');
+          progHead.className = 'engine-card-progress-head';
+          const progTxt = document.createElement('span');
+          progTxt.className = 'engine-card-progress-text';
+          progTxt.textContent = modelCurrentLabel || `در حال آماده‌سازی ${engine.name}…`;
+          const progPct = document.createElement('span');
+          progPct.className = 'engine-card-progress-pct';
+          const isDet = typeof modelCurrentProgress === 'number' && Number.isFinite(modelCurrentProgress);
+          const pctNum = isDet ? Math.round(Math.max(0, Math.min(1, modelCurrentProgress)) * 100) : 30;
+          progPct.textContent = isDet ? `${pctNum}%` : '…';
+          progHead.append(progTxt, progPct);
+          const bar = document.createElement('div');
+          bar.className = `bar${isDet ? '' : ' indeterminate'}`;
+          bar.setAttribute('role', 'progressbar');
+          bar.setAttribute('aria-label', `پیشرفت ${engine.name}`);
+          bar.setAttribute('aria-valuemin', '0');
+          bar.setAttribute('aria-valuemax', '100');
+          if (isDet) bar.setAttribute('aria-valuenow', String(pctNum));
+          const fill = document.createElement('div');
+          fill.className = 'fill engine-card-progress-fill';
+          fill.style.width = `${pctNum}%`;
+          bar.appendChild(fill);
+          progWrap.append(progHead, bar);
+          card.appendChild(progWrap);
+        }
         const buttons = document.createElement('div'); buttons.className = 'card-buttons';
         const prepareLabel = ready ? 'بررسی / آماده‌سازی مجدد' : 'آماده‌سازی / دانلود خودکار';
         const prepare = makeButton(prepareLabel, () => downloadEngine(engine));
         prepare.classList.toggle('primary', !ready && !engine.updateAvailable);
-        prepare.disabled = !!state.modelBusy || !supported;
+        prepare.disabled = Boolean(state.modelBusy || !supported);
         buttons.appendChild(prepare);
         if (engine.updateAvailable || engine.runtimeInstalled) {
           const updateBtn = makeButton(engine.updateAvailable ? 'به‌روزرسانی به نسخهٔ جدید' : 'به‌روزرسانی مدل', () => updateEngine(engine));
           if (engine.updateAvailable) updateBtn.classList.add('primary');
-          updateBtn.disabled = !!state.modelBusy;
+          updateBtn.disabled = Boolean(state.modelBusy);
           buttons.appendChild(updateBtn);
         }
         const test = makeButton('آزمایش روی تصویر', () => testEngine(engine.id));
-        test.disabled = !!state.modelBusy || !supported;
+        test.disabled = Boolean(state.modelBusy || !supported);
         buttons.appendChild(test);
         if (engine.repository) { const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'راهنمای رسمی'; buttons.appendChild(guide); }
         card.appendChild(buttons);
@@ -1941,49 +2042,57 @@ async function downloadEngine(engine, options = {}) {
   if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return false; }
   const precheck = await confirmHardwareIfNeeded(engine);
   if (!precheck.ok) return false;
-  const progressId = options.fromOcrDialog ? 'ocrProgress' : 'modelProgress';
+  ++engineMutationSeq;
+  modelFromOcrDialog = Boolean(options.fromOcrDialog);
   const controller = new AbortController();
   modelAbortController = controller; modelCancelledByUser = false;
-  state.modelBusy = engine.id; setProgress(progressId, null, true);
-  const startMsg = `آماده‌سازی و دانلود خودکار ${engine.name} برای زبان ${language} آغاز شد؛ لطفاً صبر کنید…`;
+  state.modelBusy = engine.id;
+  const startMsg = `در حال دانلود و آماده‌سازی خودکار ${engine.name} (${language})…`;
+  syncModelProgressUi(null, true, startMsg);
   if ($('modelTestResult')) $('modelTestResult').textContent = startMsg;
   if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = startMsg;
   appendLocalActivity(`آماده‌سازی خودکار ${engine.name} برای ${language} آغاز شد`);
   renderModels(); updateOcrEngineStatus();
+  syncModelProgressUi(null, true, startMsg);
+  const pollFast = setInterval(() => { pollActivity().catch(() => {}); }, 350);
   const performRequest = (forceFlag) => api(`/api/engines/${engine.id}/download`, {
     ...jsonOptions('POST', forceFlag ? { language, force: true } : { language }),
     signal: controller.signal,
   });
+  let succeeded = false;
   try {
     let result;
     try {
       result = await performRequest(precheck.force);
     } catch (firstErr) {
       if (firstErr?.hardwareWarning) {
-        setProgress(progressId, 0, false);
+        syncModelProgressUi(0, false, '');
         const retryConfirm = await confirmHardwareIfNeeded(engine, firstErr.hardwareCheck);
         if (!retryConfirm.ok) {
           if ($('modelTestResult')) $('modelTestResult').textContent = 'نصب مدل به دلیل پیش‌نیاز سخت‌افزاری لغو شد.';
           if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = 'نصب مدل به درخواست شما لغو شد.';
           return false;
         }
-        setProgress(progressId, null, true);
+        syncModelProgressUi(null, true, startMsg);
         result = await performRequest(true);
       } else {
         throw firstErr;
       }
     }
+    ++engineMutationSeq;
     state.engines = result.engines;
-    setProgress(progressId, 1, false);
+    succeeded = true;
+    syncModelProgressUi(1, false, `مدل ${engine.name} آماده شد.`);
     const doneMsg = `مدل ${engine.name} برای زبان ${language} به‌طور کامل نصب و آماده شد.`;
     if ($('modelTestResult')) $('modelTestResult').textContent = doneMsg;
     if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = doneMsg;
+    if ($('jobStatus') && !jobBusy) $('jobStatus').textContent = doneMsg;
     appendLocalActivity(`مدل ${engine.name} آماده شد`, 'success');
     updateEngineOptions();
     toast(`مدل ${engine.name} آمادهٔ استفاده است`);
     return true;
   } catch (error) {
-    setProgress(progressId, 0, false);
+    syncModelProgressUi(0, false, '');
     if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
       const cancelMsg = 'عملیات آماده‌سازی مدل به درخواست شما لغو شد.';
       if ($('modelTestResult')) $('modelTestResult').textContent = cancelMsg;
@@ -1999,8 +2108,13 @@ async function downloadEngine(engine, options = {}) {
     }
     return false;
   } finally {
+    clearInterval(pollFast);
     if (modelAbortController === controller) modelAbortController = null;
     state.modelBusy = null;
+    syncModelProgressUi(succeeded ? 1 : 0, false, '');
+    modelFromOcrDialog = false;
+    modelCurrentProgress = null;
+    modelCurrentLabel = '';
     dismissJobCancelModal('model');
     renderModels();
     updateOcrEngineStatus();
@@ -2009,33 +2123,42 @@ async function downloadEngine(engine, options = {}) {
 async function updateEngine(engine, options = {}) {
   if (state.modelBusy) return false;
   const targetLang = options.languageOverride || (engine.languages?.includes($('testLanguage')?.value) ? $('testLanguage').value : (engine.languages?.[0] || 'eng'));
-  const progressId = options.fromOcrDialog ? 'ocrProgress' : 'modelProgress';
+  ++engineMutationSeq;
+  modelFromOcrDialog = Boolean(options.fromOcrDialog);
   const controller = new AbortController();
   modelAbortController = controller; modelCancelledByUser = false;
-  state.modelBusy = engine.id; setProgress(progressId, null, true);
-  const startMsg = `در حال دریافت و نصب نسخهٔ جدید ${engine.name}…`;
+  state.modelBusy = engine.id;
+  const batchPrefix = options.batchIndex && options.batchTotal > 1 ? `(${options.batchIndex}/${options.batchTotal}) ` : '';
+  const startMsg = `${batchPrefix}در حال دریافت و نصب نسخهٔ جدید ${engine.name}…`;
+  syncModelProgressUi(null, true, startMsg);
   if ($('modelTestResult')) $('modelTestResult').textContent = startMsg;
   if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = startMsg;
   appendLocalActivity(`به‌روزرسانی ${engine.name} آغاز شد`);
   renderModels(); updateOcrEngineStatus();
+  syncModelProgressUi(null, true, startMsg);
+  const pollFast = setInterval(() => { pollActivity().catch(() => {}); }, 350);
+  let succeeded = false;
   try {
     const result = await api(`/api/engines/${engine.id}/update`, {
       ...jsonOptions('POST', { language: targetLang }),
       signal: controller.signal,
     });
+    ++engineMutationSeq;
     state.engines = result.engines;
-    setProgress(progressId, 1, false);
+    succeeded = true;
+    syncModelProgressUi(1, false, `مدل ${engine.name} به‌روزرسانی شد.`);
     const updatedEntry = state.engines.find((entry) => entry.id === engine.id);
     const verLabel = updatedEntry?.installedVersion ? ` (نسخهٔ ${updatedEntry.installedVersion})` : '';
     const doneMsg = `مدل ${engine.name}${verLabel} با موفقیت به آخرین نسخه به‌روزرسانی شد.`;
     if ($('modelTestResult')) $('modelTestResult').textContent = doneMsg;
     if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = doneMsg;
+    if ($('jobStatus') && !jobBusy) $('jobStatus').textContent = doneMsg;
     appendLocalActivity(doneMsg, 'success');
     updateEngineOptions();
     if (!options.batchSilentToast) toast(`مدل ${engine.name} به‌روزرسانی شد`);
     return true;
   } catch (error) {
-    setProgress(progressId, 0, false);
+    syncModelProgressUi(0, false, '');
     if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
       const cancelMsg = 'به‌روزرسانی مدل به درخواست شما لغو شد.';
       if ($('modelTestResult')) $('modelTestResult').textContent = cancelMsg;
@@ -2050,8 +2173,13 @@ async function updateEngine(engine, options = {}) {
     }
     return false;
   } finally {
+    clearInterval(pollFast);
     if (modelAbortController === controller) modelAbortController = null;
     state.modelBusy = null;
+    syncModelProgressUi(succeeded ? 1 : 0, false, '');
+    modelFromOcrDialog = false;
+    modelCurrentProgress = null;
+    modelCurrentLabel = '';
     dismissJobCancelModal('model');
     renderModels();
     updateOcrEngineStatus();
@@ -2062,8 +2190,13 @@ async function updateAllEngines() {
   const targets = outdatedEngines();
   if (!targets.length) { toast('همهٔ مدل‌های نصب‌شده به‌روز هستند'); return; }
   let succeeded = 0;
-  for (const engine of targets) {
-    const ok = await updateEngine(engine, { batchSilentToast: targets.length > 1 });
+  for (let i = 0; i < targets.length; i += 1) {
+    const engine = targets[i];
+    const ok = await updateEngine(engine, {
+      batchSilentToast: targets.length > 1,
+      batchIndex: i + 1,
+      batchTotal: targets.length,
+    });
     if (!ok) break;
     succeeded += 1;
   }
@@ -2073,14 +2206,17 @@ async function updateAllEngines() {
 }
 async function checkEngineUpdates({ force = false, silent = false } = {}) {
   if (checkingEngineUpdates || state.modelBusy) return;
+  const seqAtStart = engineMutationSeq;
   checkingEngineUpdates = true;
   syncEngineUpdateUi();
   if (!silent) {
-    setProgress('modelProgress', null, true);
+    syncModelProgressUi(null, true, 'در حال بررسی انتشار نسخهٔ جدید برای مدل‌های نصب‌شده…');
     if ($('modelTestResult')) $('modelTestResult').textContent = 'در حال بررسی انتشار نسخهٔ جدید برای مدل‌های نصب‌شده…';
   }
   try {
     const report = await api('/api/engines/check-updates', jsonOptions('POST', { force }));
+    // Ignore stale check-updates responses if a model download/update started or finished meanwhile.
+    if (seqAtStart !== engineMutationSeq || state.modelBusy) return;
     if (Array.isArray(report?.engines)) state.engines = report.engines;
     if (report?.hardware) engineHardwareSummary = report.hardware;
     const updates = outdatedEngines();
@@ -2088,7 +2224,7 @@ async function checkEngineUpdates({ force = false, silent = false } = {}) {
     updateEngineOptions();
     renderModels();
     if (!silent) {
-      setProgress('modelProgress', 1, false);
+      syncModelProgressUi(1, false, '');
       const summary = updates.length
         ? `نسخهٔ جدید برای ${updates.length} مدل در دسترس است:\n${updates.map((item) => `• ${item.updateSummary || item.name}`).join('\n')}`
         : 'بررسی انجام شد؛ همهٔ مدل‌های نصب‌شدهٔ شما آخرین نسخه هستند.';
@@ -2096,13 +2232,14 @@ async function checkEngineUpdates({ force = false, silent = false } = {}) {
       toast(updates.length ? `نسخهٔ جدید برای ${updates.length} مدل OCR پیدا شد` : 'همهٔ مدل‌های نصب‌شده به‌روز هستند');
     }
   } catch (error) {
-    if (!silent) {
-      setProgress('modelProgress', 0, false);
+    if (!silent && seqAtStart === engineMutationSeq) {
+      syncModelProgressUi(0, false, '');
       if ($('modelTestResult')) $('modelTestResult').textContent = `بررسی نسخهٔ جدید ممکن نشد:\n${error.message}`;
       toast(error.message, true);
     }
   } finally {
     checkingEngineUpdates = false;
+    if (!state.modelBusy && !silent) syncModelProgressUi(modelCurrentProgress === 1 ? 1 : 0, false, '');
     syncEngineUpdateUi();
   }
 }
@@ -4120,6 +4257,7 @@ function bindEvents() {
   $('modelsPageMode')?.addEventListener('change', renderModels);
   $('checkModelUpdatesBtn')?.addEventListener('click', () => checkEngineUpdates({ force: true, silent: false }).catch(() => {}));
   $('updateAllModelsBtn')?.addEventListener('click', () => updateAllEngines().catch(() => {}));
+  $('modelsActiveCancelBtn')?.addEventListener('click', () => requestCancelModelJob().catch(() => {}));
   $('engineUpdateNowBtn')?.addEventListener('click', () => {
     if (!$('modelsDialog').open) { renderModels(); showDialog('modelsDialog'); }
     updateAllEngines().catch(() => {});

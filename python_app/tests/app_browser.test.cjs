@@ -2238,6 +2238,69 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     await page.waitForFunction(() => !document.getElementById('ocrDialog').open);
     console.log('PASS: v3.72 dynamic Green / Yellow-Orange / Red OCR engine suitability highlighting across comic, document, and auto modes');
 
+    // v3.73: Live OCR model download/update progress bars inside #modelsDialog and #ocrDialog + update loop suppression
+    const liveProgressState = await page.evaluate(async () => {
+      const prevEngines = state.engines;
+      const origFetch = window.fetch.bind(window);
+      let releaseDownload;
+      window.fetch = async (url, opts = {}) => {
+        const u = String(url);
+        if (u.includes('/api/engines/rapidocr-v6/update')) {
+          await new Promise((r) => { releaseDownload = r; });
+          return new Response(JSON.stringify({
+            ok: true,
+            language: 'eng',
+            engines: prevEngines.map((e) => e.id === 'rapidocr-v6' ? { ...e, installedVersion: '3.10.0', updateAvailable: false, updateSummary: '' } : e),
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        return origFetch(url, opts);
+      };
+      try {
+        state.engines = prevEngines.map((e) => e.id === 'rapidocr-v6' ? { ...e, updateAvailable: true, latestVersion: '3.10.0', updateSummary: 'نسخهٔ ۳.۱۰ آماده است' } : e);
+        engineUpdateNoticeDismissed = false;
+        syncEngineUpdateUi();
+        document.getElementById('ocrBtn').click();
+        updateEngineOptions('rapidocr-v6');
+        const updPromise = updateEngine(state.engines.find((e) => e.id === 'rapidocr-v6'), { fromOcrDialog: true });
+        await new Promise((r) => setTimeout(r, 20));
+        syncModelProgressUi(0.55, true, 'در حال ارتقای مدل PP-OCRv6 Small…');
+        const during = {
+          ocrQuickVisible: !document.getElementById('ocrQuickProgressWrap').classList.contains('hidden'),
+          ocrQuickPct: document.getElementById('ocrQuickProgressPercent').textContent,
+          modelsStickyVisible: !document.getElementById('modelsActiveProgressWrap').classList.contains('hidden'),
+          modelsStickyPct: document.getElementById('modelsActiveProgressPercent').textContent,
+          cardBarCount: document.querySelectorAll('#engineCards .engine-card-progress').length,
+          noticeBarVisible: !document.getElementById('engineNoticeProgressWrap').classList.contains('hidden'),
+        };
+        releaseDownload();
+        await updPromise;
+        const after = {
+          ocrQuickHidden: document.getElementById('ocrQuickProgressWrap').classList.contains('hidden'),
+          modelsStickyHidden: document.getElementById('modelsActiveProgressWrap').classList.contains('hidden'),
+          noticeHidden: document.getElementById('engineUpdateNotice').classList.contains('hidden'),
+          updateAvailableAfter: state.engines.find((e) => e.id === 'rapidocr-v6')?.updateAvailable,
+        };
+        closeDialog('ocrDialog');
+        return { during, after };
+      } finally {
+        window.fetch = origFetch;
+        state.engines = prevEngines;
+        syncEngineUpdateUi();
+        updateEngineOptions('rapidocr-v6');
+      }
+    });
+    assert.equal(liveProgressState.during.ocrQuickVisible, true);
+    assert.equal(liveProgressState.during.ocrQuickPct, '55%');
+    assert.equal(liveProgressState.during.modelsStickyVisible, true);
+    assert.equal(liveProgressState.during.modelsStickyPct, '55%');
+    assert.equal(liveProgressState.during.cardBarCount, 1);
+    assert.equal(liveProgressState.during.noticeBarVisible, true);
+    assert.equal(liveProgressState.after.ocrQuickHidden, true);
+    assert.equal(liveProgressState.after.modelsStickyHidden, true);
+    assert.equal(liveProgressState.after.noticeHidden, true);
+    assert.equal(liveProgressState.after.updateAvailableAfter, false);
+    console.log('PASS: v3.73 live OCR download/update progress bars and update-loop suppression');
+
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');

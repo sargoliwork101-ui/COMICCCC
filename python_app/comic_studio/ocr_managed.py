@@ -456,14 +456,20 @@ def is_newer_version(installed: str | None, latest: str | None) -> bool:
 
 def portable_tesseract_executable() -> str | None:
     base = models_dir() / "tesseract-bin"
+    if not base.is_dir():
+        return None
     candidates = (
-        [base / "tesseract.exe", base / "Tesseract-OCR" / "tesseract.exe"]
+        [base / "tesseract.exe", base / "Tesseract-OCR" / "tesseract.exe", base / "bin" / "tesseract.exe"]
         if os.name == "nt"
         else [base / "bin" / "tesseract", base / "tesseract"]
     )
     for candidate in candidates:
         if candidate.is_file():
             return str(candidate)
+    if os.name == "nt":
+        for found in base.rglob("tesseract.exe"):
+            if found.is_file():
+                return str(found)
     return None
 
 
@@ -515,9 +521,12 @@ def install_tesseract_runtime(error_cls: type[Exception]) -> str:
         installer_path = target_dir / f"tesseract-setup-{version_tag}.exe"
         part_path = target_dir / f".tesseract-setup-{version_tag}.exe.part"
         try:
-            emit(f"دریافت خودکار موتور اجرایی Tesseract ({version_tag}) برای ویندوز آغاز شد")
+            emit(f"دریافت خودکار موتور اجرایی Tesseract ({version_tag}) برای ویندوز آغاز شد", progress=0.10)
             req = urllib.request.Request(installer_url, headers={"User-Agent": "Comic-OCR-Studio"})
             with urllib.request.urlopen(req, timeout=300) as resp, part_path.open("wb") as out:
+                hdrs = getattr(resp, "headers", None)
+                raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
+                expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 55 * 1024 * 1024
                 total = 0
                 while True:
                     chunk = resp.read(1024 * 1024)
@@ -525,21 +534,25 @@ def install_tesseract_runtime(error_cls: type[Exception]) -> str:
                         break
                     total += len(chunk)
                     out.write(chunk)
-                    emit(f"دانلود موتور Tesseract: {total / (1024 * 1024):.1f} مگابایت دریافت شد")
+                    ratio = min(1.0, total / max(1, expected_bytes))
+                    emit(
+                        f"دانلود موتور Tesseract: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
+                        progress=round(0.12 + 0.50 * ratio, 3),
+                    )
                     if total > 220 * 1024 * 1024:
                         raise error_cls("Downloaded Tesseract installer exceeded safe size limit.")
             if part_path.stat().st_size < 1_000_000:
                 raise error_cls("Downloaded Tesseract installer is incomplete or invalid.")
             os.replace(part_path, installer_path)
-            emit("نصب بی‌صدای Tesseract در پوشهٔ اختصاصی برنامه در حال انجام است…")
-            # NSIS requires /D=... unquoted as the final argument on the command line.
+            emit("نصب بی‌صدای Tesseract در پوشهٔ اختصاصی برنامه در حال انجام است…", progress=0.68)
+            # Pass string directly to CreateProcessW (shell=False) so NSIS receives /D=... unquoted without cmd.exe quote stripping.
             cmdline = f'"{installer_path}" /S /D={target_dir}'
-            proc = _run_Subprocess(cmdline, shell=True, capture_output=True, text=True, timeout=600, check=False)
+            proc = _run_Subprocess(cmdline, shell=False, capture_output=True, text=True, timeout=600, check=False)
             exe = portable_tesseract_executable()
             if proc.returncode != 0 or not exe:
                 winget = shutil.which("winget")
                 if winget:
-                    emit("تلاش جایگزین برای نصب خودکار Tesseract از طریق Winget…")
+                    emit("تلاش جایگزین برای نصب خودکار Tesseract از طریق Winget…", progress=0.75)
                     _run_Subprocess(
                         [
                             winget, "install", "--id", "UB-Mannheim.TesseractOCR",
@@ -566,7 +579,8 @@ def install_tesseract_runtime(error_cls: type[Exception]) -> str:
                     break
         if not exe:
             raise error_cls("فایل اجرایی Tesseract پس از نصب خودکار پیدا نشد؛ دسترسی پوشهٔ برنامه را بررسی کنید.")
-        emit("موتور اجرایی Tesseract با موفقیت آماده شد", "success")
+        update_manifest_entry("tesseract", installedTag=version_tag)
+        emit("موتور اجرایی Tesseract با موفقیت آماده شد", "success", progress=0.82)
         return exe
 
     if sys.platform.startswith("linux"):
@@ -886,7 +900,7 @@ class IsolatedOcrEngine:
         exe_name = "llama-server.exe" if os.name == "nt" else "llama-server"
         if any(llama_dir.rglob(exe_name)):
             return
-        emit("دریافت خودکار موتور کمکی llama-server برای اجرای Surya روی پردازنده (CPU)…")
+        emit("دریافت خودکار موتور کمکی llama-server برای اجرای Surya روی پردازنده (CPU)…", progress=0.72)
         rel = _fetch_json("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest", timeout=15.0)
         wanted_url = ""
         for asset in rel.get("assets") or []:
@@ -905,6 +919,9 @@ class IsolatedOcrEngine:
         try:
             req = urllib.request.Request(wanted_url, headers={"User-Agent": "Comic-OCR-Studio"})
             with urllib.request.urlopen(req, timeout=300) as resp, zip_tmp.open("wb") as out:
+                hdrs = getattr(resp, "headers", None)
+                raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
+                expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 35 * 1024 * 1024
                 total = 0
                 while True:
                     chunk = resp.read(1024 * 1024)
@@ -912,7 +929,11 @@ class IsolatedOcrEngine:
                         break
                     total += len(chunk)
                     out.write(chunk)
-                    emit(f"دانلود موتور کمکی CPU برای Surya: {total / (1024 * 1024):.1f} مگابایت")
+                    ratio = min(1.0, total / max(1, expected_bytes))
+                    emit(
+                        f"دانلود موتور کمکی CPU برای Surya: {total / (1024 * 1024):.1f} مگابایت",
+                        progress=round(0.73 + 0.08 * ratio, 3),
+                    )
             with zipfile.ZipFile(zip_tmp) as archive:
                 for member in archive.infolist():
                     member_path = (llama_dir / member.filename).resolve()
@@ -937,43 +958,45 @@ class IsolatedOcrEngine:
         hw = inspect_hardware()
         with self._install_lock:
             if not py.is_file():
-                emit(f"ساخت پوشه و محیط مستقل برای مدل {self.id}…")
+                emit(f"ساخت پوشه و محیط مستقل برای مدل {self.id}…", progress=0.08)
                 env_dir.parent.mkdir(parents=True, exist_ok=True)
                 res = _run_Subprocess([sys.executable, "-m", "venv", str(env_dir)], capture_output=True, text=True, timeout=300, check=False)
                 if res.returncode != 0 or not py.is_file():
                     raise self._error_cls(f"ساخت محیط مستقل برای {self.id} ناموفق بود: {(res.stderr or res.stdout)[-800:]}")
+                emit(f"آماده‌سازی ابزار نصب در محیط مستقل {self.id}…", progress=0.15)
                 _run_Subprocess([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300, check=False)
                 _run_Subprocess([str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], capture_output=True, text=True, timeout=600, check=False)
 
             if self._spec.get("needs_torch"):
-                torch_cmd = [str(py), "-m", "pip", "install"]
-                if upgrade:
-                    torch_cmd.append("--upgrade")
-                torch_cmd.extend(["torch>=2.3.0", "torchvision>=0.18.0"])
-                if os.name == "nt" and hw.get("hasNvidiaGpu"):
-                    torch_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
-                emit(f"نصب زیرساخت پردازش تصویر برای {self.id} (ممکن است چند دقیقه طول بکشد)…")
-                t_res = _run_Subprocess(torch_cmd, capture_output=True, text=True, timeout=3600, check=False)
-                if t_res.returncode != 0:
-                    raise self._error_cls(f"نصب PyTorch برای {self.id} ناموفق بود: {(t_res.stderr or t_res.stdout)[-1200:]}")
+                torch_ready = _read_dist_version_in_venv(env_dir, "torch") is not None
+                if not torch_ready:
+                    torch_cmd = [str(py), "-m", "pip", "install", "torch>=2.3.0", "torchvision>=0.18.0"]
+                    if os.name == "nt" and hw.get("hasNvidiaGpu"):
+                        torch_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
+                    emit(f"نصب زیرساخت پردازش تصویر برای {self.id} (ممکن است چند دقیقه طول بکشد)…", progress=0.25)
+                    t_res = _run_Subprocess(torch_cmd, capture_output=True, text=True, timeout=3600, check=False)
+                    if t_res.returncode != 0:
+                        raise self._error_cls(f"نصب PyTorch برای {self.id} ناموفق بود: {(t_res.stderr or t_res.stdout)[-1200:]}")
 
             packages = self._spec["pip_packages_gpu"] if hw.get("hasNvidiaGpu") else self._spec["pip_packages_cpu"]
             pip_cmd = [str(py), "-m", "pip", "install"]
             if upgrade:
                 pip_cmd.append("--upgrade")
             pip_cmd.extend(packages)
-            emit(f"{'به‌روزرسانی' if upgrade else 'نصب'} بسته‌های اختصاصی مدل {self.id} آغاز شد…")
+            action_word = "به‌روزرسانی" if upgrade else "نصب"
+            emit(f"{action_word} بسته‌های اختصاصی مدل {self.id} آغاز شد…", progress=0.48)
             p_res = _run_Subprocess(pip_cmd, capture_output=True, text=True, timeout=3600, check=False)
             if p_res.returncode != 0:
                 details = (p_res.stderr or p_res.stdout or "pip failed")[-1500:].strip()
                 raise self._error_cls(f"نصب بسته‌های مدل {self.id} ناموفق بود: {details}")
 
+            emit(f"بسته‌های اجرایی مدل {self.id} آماده شد", progress=0.70)
             self._ensure_llama_cpp_for_surya()
             (env_dir / ".runtime-ready").write_text(_now_iso(), encoding="utf-8")
 
     def _prepare_weights(self, language: str) -> str:
         worker_script = _worker_script_path()
-        emit(f"دریافت و آماده‌سازی فایل‌های مدل {self.id}…")
+        emit(f"دریافت و آماده‌سازی فایل‌های مدل {self.id}…", progress=0.82)
         proc = _run_Subprocess(
             [
                 str(self._env_python()),
@@ -1005,36 +1028,45 @@ class IsolatedOcrEngine:
         state.mkdir(parents=True, exist_ok=True)
         (state / ".ready-all").write_text(_now_iso(), encoding="utf-8")
         (state / f".ready-{language}").write_text(_now_iso(), encoding="utf-8")
+        emit(f"فایل‌های مدل {self.id} ذخیره و تایید شد", progress=0.95)
         return str(last_json.get("modelRevision") or "ready")
 
     def download(self, language: str = "eng") -> None:
         self.close()
+        emit(f"شروع آماده‌سازی خودکار مدل {self.id}…", progress=0.05)
         if not self.runtime_installed:
             self._ensure_isolated_venv(upgrade=False)
+        else:
+            emit(f"محیط اجرایی {self.id} از قبل آماده است؛ بررسی فایل‌های مدل…", progress=0.65)
         revision = self._prepare_weights(language)
+        if revision == "ready" and self._spec.get("hf_repo"):
+            remote_rev = fetch_remote_repo_revision(self._spec.get("github_repo"))
+            if remote_rev:
+                revision = remote_rev
         ver = self.installed_version or "installed"
-        update_manifest_entry(
+        acknowledge_engine_update(
             self.id,
-            installedVersion=ver,
-            modelRevision=revision,
-            readyLanguages=self.ready_languages,
+            installed_version=ver,
+            model_revision=revision,
+            ready_languages=self.ready_languages,
         )
-        emit(f"مدل {self.id} آماده و قابل استفاده است", "success")
+        emit(f"مدل {self.id} آماده و قابل استفاده است", "success", progress=1.0)
 
     def update(self, language: str = "eng") -> None:
         self.close()
+        emit(f"شروع به‌روزرسانی خودکار مدل {self.id}…", progress=0.06)
         self._ensure_isolated_venv(upgrade=True)
         revision = self._prepare_weights(language)
         ver = self.installed_version or "installed"
         remote_rev = fetch_remote_repo_revision(self._spec.get("github_repo"))
-        update_manifest_entry(
+        final_rev = remote_rev or revision
+        acknowledge_engine_update(
             self.id,
-            installedVersion=ver,
-            modelRevision=remote_rev or revision,
-            readyLanguages=self.ready_languages,
+            installed_version=ver,
+            model_revision=final_rev,
+            ready_languages=self.ready_languages,
         )
-        clear_cached_engine_update(self.id, ver, remote_rev or revision)
-        emit(f"مدل {self.id} با موفقیت به نسخهٔ {ver} به‌روزرسانی شد", "success")
+        emit(f"مدل {self.id} با موفقیت به نسخهٔ {ver} به‌روزرسانی شد", "success", progress=1.0)
 
     def _ensure_worker(self) -> subprocess.Popen[str]:
         if self._worker_proc is not None and self._worker_proc.poll() is None:
@@ -1123,17 +1155,80 @@ def write_update_cache(payload: dict[str, Any]) -> None:
         os.replace(tmp, path)
 
 
+def _shared_package_siblings(engine_id: str) -> list[str]:
+    meta = engine_meta(engine_id)
+    pypi_pkg = meta.get("pypi_pkg")
+    if not pypi_pkg or engine_id in ISOLATED_ENGINE_SPECS:
+        return [engine_id]
+    return [eid for eid, m in BUILTIN_ENGINE_META.items() if m.get("pypi_pkg") == pypi_pkg]
+
+
 def clear_cached_engine_update(engine_id: str, new_version: str | None, new_revision: str | None = None) -> None:
     cache = read_update_cache()
     entries = cache.get("engines")
-    if isinstance(entries, dict) and engine_id in entries:
-        entry = dict(entries[engine_id] or {})
-        if new_version:
-            entry["latestVersion"] = new_version
-        if new_revision:
-            entry["latestRevision"] = new_revision
-        entries[engine_id] = entry
+    if not isinstance(entries, dict):
+        return
+    changed = False
+    for target_id in _shared_package_siblings(engine_id):
+        if target_id in entries:
+            entry = dict(entries[target_id] or {})
+            if new_version:
+                entry["latestVersion"] = new_version
+            if new_revision:
+                entry["latestRevision"] = new_revision
+            entries[target_id] = entry
+            changed = True
+    if changed:
         write_update_cache(cache)
+
+
+def acknowledge_engine_update(
+    engine_id: str,
+    installed_version: str | None,
+    model_revision: str | None = None,
+    ready_languages: list[str] | None = None,
+    installed_tag: str | None = None,
+) -> None:
+    """Persist installed state AND acknowledge the current upstream version/revision so
+    environment-ceiling upgrades (e.g. Python/OS wheel constraints or system binaries)
+    never re-trigger an infinite 'update available' loop for the same upstream release."""
+    cache = read_update_cache()
+    entries = cache.get("engines") if isinstance(cache.get("engines"), dict) else {}
+    siblings = _shared_package_siblings(engine_id)
+
+    cached_latest_ver: str | None = None
+    cached_latest_rev: str | None = None
+    for sid in siblings:
+        item = entries.get(sid) or {}
+        if not cached_latest_ver and item.get("latestVersion"):
+            cached_latest_ver = str(item["latestVersion"])
+        if not cached_latest_rev and item.get("latestRevision"):
+            cached_latest_rev = str(item["latestRevision"])
+
+    ack_ver = installed_version
+    if cached_latest_ver and (not installed_version or is_newer_version(installed_version, cached_latest_ver)):
+        ack_ver = cached_latest_ver
+
+    clean_rev = model_revision if (model_revision and "__" not in model_revision) else None
+    ack_rev = cached_latest_rev or clean_rev
+
+    for sid in siblings:
+        extra: dict[str, Any] = {
+            "installedVersion": installed_version,
+            "acknowledgedVersion": ack_ver,
+        }
+        if sid == engine_id:
+            if clean_rev:
+                extra["modelRevision"] = clean_rev
+            if ack_rev:
+                extra["acknowledgedRevision"] = ack_rev
+            if ready_languages is not None:
+                extra["readyLanguages"] = ready_languages
+            if installed_tag:
+                extra["installedTag"] = installed_tag
+        update_manifest_entry(sid, **extra)
+
+    clear_cached_engine_update(engine_id, installed_version or ack_ver, clean_rev or ack_rev)
 
 
 def fetch_pypi_latest_version(pkg_name: str, timeout: float = 6.0) -> str | None:
@@ -1195,23 +1290,44 @@ def sha256_short(path: Path) -> str | None:
 def detect_builtin_installed_version(engine_id: str, engine: Any) -> str | None:
     if not engine.runtime_installed:
         return None
+    entry = read_manifest().get(engine_id) or {}
     if engine_id in {"rapidocr-v6", "rapidocr-v5"}:
+        disk_ver = _read_dist_version_in_venv(Path(sys.prefix), "rapidocr")
+        if disk_ver:
+            return disk_ver
         try:
             return importlib.metadata.version("rapidocr")
         except Exception:
             pass
     elif engine_id == "easyocr":
+        disk_ver = _read_dist_version_in_venv(Path(sys.prefix), "easyocr")
+        if disk_ver:
+            return disk_ver
         try:
             return importlib.metadata.version("easyocr")
         except Exception:
             pass
     elif engine_id == "tesseract":
         from .ocr import _tesseract_executable
-        ver = detect_tesseract_version(_tesseract_executable())
+        exe = _tesseract_executable()
+        ver = detect_tesseract_version(exe)
+        installed_tag = str(entry.get("installedTag") or "").strip().lstrip("vV")
+        if ver and installed_tag and portable_tesseract_executable() == exe:
+            # UB-Mannheim binaries often print 3-part '5.4.0' while the release tag is '5.4.0.20240606'.
+            if installed_tag == ver or installed_tag.startswith(f"{ver}."):
+                return installed_tag
         if ver:
             return ver
-    entry = read_manifest().get(engine_id) or {}
     return entry.get("installedVersion")
+
+
+def _is_valid_comparable_revision(rev: Any) -> bool:
+    if not rev or not isinstance(rev, str):
+        return False
+    cleaned = rev.strip()
+    if not cleaned or cleaned == "ready" or "__" in cleaned or cleaned.startswith("sha256:"):
+        return False
+    return True
 
 
 def compute_engine_update_fields(
@@ -1223,19 +1339,47 @@ def compute_engine_update_fields(
     cached_remote: dict[str, Any] | None,
 ) -> dict[str, Any]:
     remote = cached_remote or {}
+    manifest = manifest_entry or {}
     latest_version = remote.get("latestVersion")
     latest_revision = remote.get("latestRevision")
-    installed_ready = bool(engine.runtime_installed and (engine.model_ready or installed_version))
+    # For shared-runtime engines like rapidocr-v5, only notify if its own model was actually prepared.
+    if engine_id == "rapidocr-v5":
+        installed_ready = bool(engine.runtime_installed and engine.model_ready)
+    else:
+        installed_ready = bool(engine.runtime_installed and (engine.model_ready or installed_version))
     update_available = False
     summary = ""
 
     if installed_ready:
-        if installed_version and latest_version and is_newer_version(installed_version, latest_version):
+        ack_ver = manifest.get("acknowledgedVersion")
+        manifest_inst_ver = manifest.get("installedVersion")
+        # Only honor acknowledgedVersion when the currently installed binary/package hasn't been downgraded.
+        baseline_ver = installed_version
+        if ack_ver and installed_version and (not manifest_inst_ver or manifest_inst_ver == installed_version):
+            if is_newer_version(installed_version, ack_ver):
+                baseline_ver = ack_ver
+
+        # UB-Mannheim Tesseract binary often prints '5.4.0' for release tag '5.4.0.20240606'.
+        same_tesseract_base = (
+            engine_id == "tesseract"
+            and bool(baseline_ver)
+            and bool(latest_version)
+            and str(latest_version).lstrip("vV").startswith(f"{str(baseline_ver).lstrip('vV')}.")
+            and len(_version_tuple(baseline_ver)) <= 3
+        )
+
+        if baseline_ver and latest_version and not same_tesseract_base and is_newer_version(baseline_ver, latest_version):
             update_available = True
             summary = f"نسخهٔ جدید {latest_version} برای مدل «{engine_name}» آمادهٔ نصب است (نسخهٔ فعلی: {installed_version})"
         else:
-            local_rev = (manifest_entry or {}).get("modelRevision")
-            if local_rev and latest_revision and local_rev != latest_revision and local_rev != "ready":
+            local_rev = manifest.get("modelRevision")
+            ack_rev = manifest.get("acknowledgedRevision")
+            if (
+                _is_valid_comparable_revision(local_rev)
+                and _is_valid_comparable_revision(latest_revision)
+                and local_rev != latest_revision
+                and ack_rev != latest_revision
+            ):
                 update_available = True
                 summary = f"فایل‌های مدل «{engine_name}» در منبع رسمی به‌روز شده است"
 

@@ -44,18 +44,21 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.72"
+    assert health.json()["version"] == "3.73"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۷۲ · Python</span>' in index_html
+    assert '<span class="ver">۳.۷۳ · Python</span>' in index_html
     assert 'id="helpTopBtn"' in index_html
     assert 'id="helpDialog"' in index_html
     assert 'id="ocrSuitabilityPanel"' in index_html
     assert 'id="ocrEngineTierGrid"' in index_html
     assert 'id="ocrEngineFitBanner"' in index_html
     assert 'id="modelsPageMode"' in index_html
+    assert 'id="modelsActiveProgressWrap"' in index_html
+    assert 'id="ocrQuickProgressWrap"' in index_html
+    assert 'id="engineNoticeProgressWrap"' in index_html
     engines_resp = client.get("/api/engines")
     assert engines_resp.status_code == 200
     engines_list = engines_resp.json()
@@ -2286,6 +2289,52 @@ def test_book_and_article_ocr_and_flowing_docx_export(client, monkeypatch):
     assert txt_res.status_code == 200
     txt_body = txt_res.content.decode("utf-8-sig")
     assert txt_body.index("Second indented paragraph") < txt_body.index("Wave interference principle")
+
+
+def test_engine_update_endpoint_clears_update_loop_and_emits_progress(client, monkeypatch):
+    import importlib.util
+    from comic_studio import ocr as ocr_mod
+    from comic_studio import ocr_managed
+
+    monkeypatch.setattr(ocr_managed, "detect_builtin_installed_version", lambda eid, eng=None: "3.8.0" if str(eid).startswith("rapidocr") else None)
+    monkeypatch.setattr(ocr_mod, "detect_builtin_installed_version", lambda eid, eng=None: "3.8.0" if str(eid).startswith("rapidocr") else None)
+    monkeypatch.setattr(ocr_managed, "fetch_pypi_latest_version", lambda pkg, timeout=6.0: "3.10.0" if pkg == "rapidocr" else None)
+    monkeypatch.setattr(ocr_managed, "fetch_remote_repo_revision", lambda repo, timeout=6.0: None)
+    monkeypatch.setattr(ocr_managed, "fetch_tessdata_revision", lambda langs, timeout=6.0: None)
+    orig_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a, **kw: object() if name in {"rapidocr", "onnxruntime"} else orig_find_spec(name, *a, **kw))
+    monkeypatch.setattr(ocr_mod, "install_packages", lambda pkgs, upgrade=False: None)
+    monkeypatch.setattr(ocr_mod.RapidEngine, "ready_languages", property(lambda self: ["eng"] if self.id == "rapidocr-v6" else []))
+    monkeypatch.setattr(ocr_mod.RapidEngine, "_get", lambda self, lang, allow_download=False: "dummy")
+    monkeypatch.setattr(ocr_mod.RapidEngine, "_warm", staticmethod(lambda inst: None))
+
+    ocr_managed.update_manifest_entry("rapidocr-v6", installedVersion="3.8.0")
+
+    # Step 1: Check updates -> rapidocr-v6 shows updateAvailable=True, un-prepared rapidocr-v5 stays False
+    chk1 = client.post("/api/engines/check-updates", json={"force": True})
+    assert chk1.status_code == 200
+    engines_before = {e["id"]: e for e in chk1.json()["engines"]}
+    assert engines_before["rapidocr-v6"]["updateAvailable"] is True
+    assert engines_before["rapidocr-v5"]["updateAvailable"] is False
+
+    # Step 2: Update rapidocr-v6 -> even if wheel ceiling stays 3.8.0 on older Python, update is acknowledged & loop stops
+    upd = client.post("/api/engines/rapidocr-v6/update", json={"language": "eng"})
+    assert upd.status_code == 200
+    engines_after_upd = {e["id"]: e for e in upd.json()["engines"]}
+    assert engines_after_upd["rapidocr-v6"]["updateAvailable"] is False
+
+    # Step 3: Subsequent forced check-updates still reports updateAvailable=False (no infinite update loop!)
+    chk2 = client.post("/api/engines/check-updates", json={"force": True})
+    assert chk2.status_code == 200
+    engines_rechecked = {e["id"]: e for e in chk2.json()["engines"]}
+    assert engines_rechecked["rapidocr-v6"]["updateAvailable"] is False
+
+    # Step 4: Activity log recorded determinate numeric progress values ending at 1.0
+    act = client.get("/api/activity?after=0").json()["entries"]
+    progresses = [e["progress"] for e in act if isinstance(e.get("progress"), (int, float))]
+    assert any(0 < p < 1 for p in progresses)
+    assert progresses[-1] == 1.0
+
 
 
 

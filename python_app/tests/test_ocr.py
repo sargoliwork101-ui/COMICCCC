@@ -624,4 +624,131 @@ def test_engine_suitability_matrix_covers_all_13_engines_and_page_modes():
     assert ENGINE_INFO["easyocr"]["suitability"]["document"]["tier"] == "weak"
 
 
+def test_update_loop_prevention_across_tesseract_hf_and_shared_packages(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from comic_studio.ocr_managed import (
+        acknowledge_engine_update,
+        compute_engine_update_fields,
+        read_manifest,
+        read_update_cache,
+        update_manifest_entry,
+        write_update_cache,
+    )
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+
+    ready_eng = SimpleNamespace(runtime_installed=True, model_ready=True, ready_languages=["eng"])
+    unprepared_eng = SimpleNamespace(runtime_installed=True, model_ready=False, ready_languages=[])
+
+    update_manifest_entry(
+        "tesseract",
+        installedVersion="5.4.0.20240606",
+        installedTag="5.4.0.20240606",
+        modelRevision="sha256:abcdef123456",
+    )
+    update_manifest_entry(
+        "glm-ocr",
+        installedVersion="0.1.5",
+        modelRevision="zai-org__GLM-OCR",
+    )
+    update_manifest_entry("rapidocr-v6", installedVersion="3.8.0")
+    write_update_cache(
+        {
+            "checkedAt": 9999999999,
+            "engines": {
+                "tesseract": {
+                    "latestVersion": "5.4.0.20240606",
+                    "latestRevision": "deadbeef1234",
+                },
+                "glm-ocr": {
+                    "latestVersion": "0.1.5",
+                    "latestRevision": "cafebabe9876",
+                },
+                "rapidocr-v6": {
+                    "latestVersion": "3.10.0",
+                },
+                "rapidocr-v5": {
+                    "latestVersion": "3.10.0",
+                },
+            },
+        }
+    )
+
+    manifest = read_manifest()
+    cache_engines = read_update_cache()["engines"]
+
+    # 1. Tesseract: 3-part `tesseract --version` ('5.4.0') vs 4-part UB-Mannheim tag ('5.4.0.20240606') + sha256 fallback
+    tess_fields = compute_engine_update_fields(
+        "tesseract", "Tesseract 5 LSTM", ready_eng, "5.4.0", manifest["tesseract"], cache_engines["tesseract"]
+    )
+    assert tess_fields["updateAvailable"] is False
+
+    # 2. Isolated HF engine with folder-style modelRevision ("zai-org__GLM-OCR") does not false-trigger git SHA mismatch
+    glm_fields = compute_engine_update_fields(
+        "glm-ocr", "GLM-OCR", ready_eng, "0.1.5", manifest["glm-ocr"], cache_engines["glm-ocr"]
+    )
+    assert glm_fields["updateAvailable"] is False
+
+    # 3. Un-downloaded rapidocr-v5 does not raise false update alert merely because rapidocr package is present
+    v5_unprepared = compute_engine_update_fields(
+        "rapidocr-v5", "PP-OCRv5 Mobile", unprepared_eng, "3.8.0", manifest.get("rapidocr-v5"), cache_engines["rapidocr-v5"]
+    )
+    assert v5_unprepared["updateAvailable"] is False
+    v6_prepared = compute_engine_update_fields(
+        "rapidocr-v6", "PP-OCRv6 Small", ready_eng, "3.8.0", manifest["rapidocr-v6"], cache_engines["rapidocr-v6"]
+    )
+    assert v6_prepared["updateAvailable"] is True
+
+    # 4. Acknowledging update clears sibling cache AND suppresses repeated prompt even if PyPI ceiling > compatible wheel
+    acknowledge_engine_update("rapidocr-v6", installed_version="3.8.0")
+    write_update_cache(
+        {
+            "checkedAt": 9999999999,
+            "engines": {
+                "rapidocr-v6": {"latestVersion": "3.10.0"},
+                "rapidocr-v5": {"latestVersion": "3.10.0"},
+            },
+        }
+    )
+    updated_manifest = read_manifest()
+    rechecked_cache = read_update_cache()["engines"]
+    assert compute_engine_update_fields(
+        "rapidocr-v6", "PP-OCRv6 Small", ready_eng, "3.8.0", updated_manifest["rapidocr-v6"], rechecked_cache["rapidocr-v6"]
+    )["updateAvailable"] is False
+    assert compute_engine_update_fields(
+        "rapidocr-v5", "PP-OCRv5 Mobile", ready_eng, "3.8.0", updated_manifest.get("rapidocr-v5"), rechecked_cache["rapidocr-v5"]
+    )["updateAvailable"] is False
+
+
+def test_rapid_update_skips_locked_onnxruntime_and_emits_numeric_progress(tmp_path, monkeypatch):
+    import importlib.util
+    from comic_studio import ocr as ocr_mod
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    upgraded_calls: list[tuple[list[str], bool]] = []
+    progress_events: list[tuple[str, float | None]] = []
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object() if name in {"rapidocr", "onnxruntime"} else None)
+    monkeypatch.setattr(
+        ocr_mod,
+        "install_packages",
+        lambda pkgs, upgrade=False: upgraded_calls.append((list(pkgs), upgrade)),
+    )
+    monkeypatch.setattr(ocr_mod, "detect_builtin_installed_version", lambda eid, eng=None: "3.10.0")
+    monkeypatch.setattr(ocr_mod, "emit", lambda msg, kind="info", progress=None: progress_events.append((msg, progress)))
+
+    engine = ocr_mod.RapidEngine("rapidocr-v6", "v6")
+    monkeypatch.setattr(engine, "_get", lambda lang, allow_download=False: "dummy")
+    monkeypatch.setattr(engine, "_warm", lambda inst: None)
+    engine.update("eng")
+
+    # Must upgrade only ['rapidocr>=3.10'] (not onnxruntime, preventing Windows .pyd/.dll file lock failures)
+    assert upgraded_calls == [(["rapidocr>=3.10"], True)]
+    numeric = [p for _, p in progress_events if isinstance(p, (int, float))]
+    assert len(numeric) >= 3
+    assert numeric[0] > 0.0
+    assert numeric[-1] == 1.0
+
+
+
 
