@@ -44,18 +44,20 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.74"
+    assert health.json()["version"] == "3.75"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۷۴ · Python</span>' in index_html
+    assert '<span class="ver">۳.۷۵ · Python</span>' in index_html
     assert 'id="helpTopBtn"' in index_html
     assert 'id="helpDialog"' in index_html
     assert 'id="ocrSuitabilityPanel"' in index_html
     assert 'id="ocrEngineTierGrid"' in index_html
     assert 'id="ocrEngineFitBanner"' in index_html
     assert 'id="modelsPageMode"' in index_html
+    assert 'id="modelsRamStatus"' in index_html
+    assert 'id="freeModelsRamBtn"' in index_html
     assert 'id="modelsActiveProgressWrap"' in index_html
     assert 'id="ocrQuickProgressWrap"' in index_html
     assert 'id="engineNoticeProgressWrap"' in index_html
@@ -2334,6 +2336,46 @@ def test_engine_update_endpoint_clears_update_loop_and_emits_progress(client, mo
     progresses = [e["progress"] for e in act if isinstance(e.get("progress"), (int, float))]
     assert any(0 < p < 1 for p in progresses)
     assert progresses[-1] == 1.0
+
+
+def test_memory_endpoints_and_immediate_unload_after_ocr(client, monkeypatch):
+    from comic_studio import ocr as ocr_mod
+    from comic_studio.ocr import OcrLine
+
+    project, item = make_project(client)
+
+    def fake_recognize(self, image, language):
+        # Simulate loading ONNX session into _instances during recognition
+        self._instances[language] = {"session": "loaded"}
+        return [OcrLine("CLEAN RAM TEST", 0.96, [[12, 14], [140, 14], [140, 44], [12, 44]])]
+
+    monkeypatch.setattr(ocr_mod.RapidEngine, "recognize", fake_recognize)
+
+    mem_before = client.get("/api/engines/memory")
+    assert mem_before.status_code == 200
+    assert mem_before.json()["loadedCount"] == 0
+
+    ocr_res = client.post(
+        f"/api/projects/{project['id']}/ocr",
+        json={"image_ids": [item["id"]], "engine": "rapidocr-v6", "language": "eng"},
+    )
+    assert ocr_res.status_code == 200
+    assert ocr_res.json()["images"][0]["blocks"][0]["text"] == "CLEAN RAM TEST"
+
+    # Immediately after OCR completes, model must already be unloaded from RAM!
+    mem_after_ocr = client.get("/api/engines/memory")
+    assert mem_after_ocr.status_code == 200
+    assert mem_after_ocr.json()["loadedCount"] == 0
+    assert mem_after_ocr.json()["loadedEngines"] == []
+
+    # Manual POST /api/engines/unload also succeeds cleanly and returns memory + engines
+    unload_res = client.post("/api/engines/unload", json={})
+    assert unload_res.status_code == 200
+    payload = unload_res.json()
+    assert payload["ok"] is True
+    assert payload["memory"]["loadedCount"] == 0
+    assert len(payload["engines"]) == 13
+
 
 
 

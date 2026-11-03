@@ -447,6 +447,27 @@ def create_app() -> FastAPI:
     def engines_hardware() -> dict[str, Any]:
         return registry.hardware_summary()
 
+    @app.get("/api/engines/memory")
+    def engines_memory() -> dict[str, Any]:
+        return registry.memory_status()
+
+    @app.post("/api/engines/unload")
+    async def unload_engines_memory() -> dict[str, Any]:
+        summary = await run_in_threadpool(registry.unload_all)
+        freed = float(summary.get("freedRamMb") or 0.0)
+        unloaded_count = len(summary.get("unloadedEngines") or [])
+        if unloaded_count > 0 or freed >= 1.0:
+            activity.add(
+                f"حافظهٔ رم مدل‌های OCR آزاد شد (مصرف فعلی برنامه: {summary.get('totalRamMb', 0):.0f} مگابایت)",
+                "success",
+            )
+        else:
+            activity.add(
+                f"حافظهٔ رم بهینه شد؛ هیچ مدل فعالی در رم باقی نمانده است ({summary.get('totalRamMb', 0):.0f} مگابایت)",
+                "info",
+            )
+        return {"ok": True, "memory": summary, "engines": registry.status()}
+
     @app.post("/api/engines/check-updates")
     async def check_engine_updates(values: EngineUpdateCheckRequest | None = None) -> dict[str, Any]:
         force = bool(values.force) if values else False
@@ -456,7 +477,7 @@ def create_app() -> FastAPI:
             activity.add(f"برای {count} مدل OCR نسخهٔ جدید در دسترس است", "info")
         elif force:
             activity.add("همهٔ مدل‌های نصب‌شدهٔ OCR به‌روز هستند", "success")
-        return {**report, "hardware": registry.hardware_summary()}
+        return {**report, "hardware": registry.hardware_summary(), "memory": registry.memory_status()}
 
     @app.post("/api/engines/{engine_id}/download", response_model=None)
     async def download_engine(engine_id: str, values: EngineDownloadRequest | None = None) -> Response | dict[str, Any]:
@@ -487,7 +508,7 @@ def create_app() -> FastAPI:
             activity.add(f"آماده‌سازی {info['name']} ناموفق بود: {exc}", "error")
             raise
         activity.add(f"مدل {info['name']} برای {language} آماده شد", "success", 1.0)
-        return {"ok": True, "language": language, "engines": registry.status()}
+        return {"ok": True, "language": language, "engines": registry.status(), "memory": registry.memory_status()}
 
     @app.post("/api/engines/{engine_id}/update")
     async def update_engine_route(engine_id: str, values: EngineUpdateRequest | None = None) -> dict[str, Any]:
@@ -503,7 +524,7 @@ def create_app() -> FastAPI:
             activity.add(f"به‌روزرسانی {info['name']} ناموفق بود: {exc}", "error")
             raise
         activity.add(f"مدل {info['name']} به آخرین نسخه به‌روزرسانی شد", "success", 1.0)
-        return {"ok": True, "language": language, "engines": registry.status()}
+        return {"ok": True, "language": language, "engines": registry.status(), "memory": registry.memory_status()}
 
     def _invoke_recognize(
         engine: Any,
@@ -537,6 +558,7 @@ def create_app() -> FastAPI:
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         from PIL import Image
+        await run_in_threadpool(registry.unload_all, engine_id)
         with Image.open(path) as im:
             image = im.copy()
         activity.add(f"آزمایش {ENGINE_INFO[engine_id]['name']} روی {path.name} آغاز شد")
@@ -548,8 +570,11 @@ def create_app() -> FastAPI:
         except Exception as exc:
             activity.add(f"آزمایش موتور ناموفق بود: {exc}", "error")
             raise
+        finally:
+            image.close()
+            await run_in_threadpool(registry.unload_all)
         activity.add(f"آزمایش تمام شد؛ {len(blocks)} خط تشخیص داده شد", "success", 1.0)
-        return {"engine": engine_id, "imageId": values.image_id, "blocks": blocks}
+        return {"engine": engine_id, "imageId": values.image_id, "blocks": blocks, "memory": registry.memory_status()}
 
     @app.post("/api/projects/{project_id}/ocr")
     async def run_ocr(project_id: str, values: OcrRequest, http_request: Request) -> dict[str, Any]:
@@ -571,6 +596,7 @@ def create_app() -> FastAPI:
                 entry = pending_results.load(store, project_id, pending['id'])
                 if set(ids).intersection(output['id'] for output in entry['outputs']):
                     raise PendingResultConflict(pending['id'], 'ocr')
+        await run_in_threadpool(registry.unload_all, values.engine)
         activity.add(f"خواندن متن در {len(ids)} تصویر آغاز شد")
         completed = 0
         try:
@@ -586,18 +612,22 @@ def create_app() -> FastAPI:
                 from PIL import Image
                 with Image.open(path) as im:
                     image = im.copy()
-                blocks = await run_reported(
-                    _invoke_recognize, engine, image, values.language,
-                    values.contrast, values.precise, values.min_confidence, values.page_mode,
-                    pulse_label=f"در حال خواندن {item['name']}",
-                )
+                try:
+                    blocks = await run_reported(
+                        _invoke_recognize, engine, image, values.language,
+                        values.contrast, values.precise, values.min_confidence, values.page_mode,
+                        pulse_label=f"در حال خواندن {item['name']}",
+                    )
+                    page_size = image.size
+                finally:
+                    image.close()
                 for block in blocks:
                     block["bg"] = "auto" if state.get("settings", {}).get("eraseOriginal", True) else "none"
                 blocks, resolved_mode = organize_ocr_blocks(
                     blocks,
                     page_mode=values.page_mode,
                     group_lines=values.group_lines,
-                    page_size=image.size,
+                    page_size=page_size,
                 )
                 item["blocks"] = blocks
                 item["pageMode"] = resolved_mode
@@ -630,6 +660,8 @@ def create_app() -> FastAPI:
         except Exception as exc:
             activity.add(f"خواندن متن ناموفق بود: {exc}", "error")
             raise
+        finally:
+            await run_in_threadpool(registry.unload_all)
         activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
         return state
 

@@ -22,6 +22,7 @@ from .ocr_managed import (
     IsolatedOcrEngine,
     acknowledge_engine_update,
     check_remote_updates,
+    cleanup_superseded_engine_files,
     clear_cached_engine_update,
     compute_engine_update_fields,
     detect_builtin_installed_version,
@@ -32,9 +33,11 @@ from .ocr_managed import (
     install_tesseract_runtime,
     is_newer_version,
     portable_tesseract_executable,
+    process_rss_mb,
     read_manifest,
     read_update_cache,
     sha256_short,
+    trim_process_memory,
     update_manifest_entry,
 )
 from .paths import models_dir
@@ -90,7 +93,7 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
     """Install a whitelisted runtime only after an explicit user preparation click."""
     if not packages:
         return
-    command = [sys.executable, "-m", "pip", "install", *(["--upgrade"] if upgrade else []), *packages]
+    command = [sys.executable, "-m", "pip", "install", "--no-cache-dir", *(["--upgrade"] if upgrade else []), *packages]
     action_label = "به‌روزرسانی" if upgrade else "نصب"
     emit(f"{action_label} بسته‌های OCR آغاز شد: {', '.join(packages)}", progress=0.18)
     try:
@@ -174,6 +177,15 @@ class RapidEngine:
     def model_ready(self) -> bool:
         return bool(self.ready_languages)
 
+    @property
+    def is_loaded_in_ram(self) -> bool:
+        with self._lock:
+            return bool(self._instances)
+
+    def unload(self) -> None:
+        with self._lock:
+            self._instances.clear()
+
     def _language_names(self, language: str) -> tuple[str, str]:
         if self.version == "v6":
             name = {"eng": "en", "jpn": "japan", "chi_sim": "ch"}.get(language, "en")
@@ -213,7 +225,14 @@ class RapidEngine:
         if self.version == "v5":
             # Keep user-downloaded models outside the virtual environment.
             params["Global.model_root_dir"] = str(self._model_dir())
-        return RapidOCR(params=params)
+        try:
+            low_mem_params = {
+                **params,
+                "EngineConfig.onnxruntime.enable_cpu_mem_arena": False,
+            }
+            return RapidOCR(params=low_mem_params)
+        except Exception:
+            return RapidOCR(params=params)
 
     def _ensure_runtime(self) -> None:
         if not self.runtime_installed:
@@ -251,39 +270,60 @@ class RapidEngine:
         emit(f"شروع آماده‌سازی مدل {self.id}…", progress=0.06)
         self._ensure_runtime()
         languages = [language] if self.version == "v5" else ["eng"]
-        for idx, selected in enumerate(languages):
-            try:
-                step_p = 0.72 + (0.20 * idx / max(1, len(languages)))
-                emit(f"آماده‌سازی مدل {self.id} برای {selected}؛ ممکن است دانلود چند دقیقه طول بکشد", progress=round(step_p, 2))
-                self._warm(self._get(selected, allow_download=True))
-                emit(f"مدل {self.id} برای {selected} بارگذاری و آزمایش شد", "success", progress=0.94)
-            except OcrError:
-                raise
-            except Exception as exc:
-                cause = f"; cause: {exc.__cause__}" if exc.__cause__ else ""
-                raise OcrError(
-                    f"Model download failed for {self.id} ({selected}): {exc}{cause}. "
-                    "Check the internet connection and model host access, then try again."
-                ) from exc
-        ver = detect_builtin_installed_version(self.id, self)
-        acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
+        try:
+            for idx, selected in enumerate(languages):
+                try:
+                    step_p = 0.72 + (0.20 * idx / max(1, len(languages)))
+                    emit(f"آماده‌سازی مدل {self.id} برای {selected}؛ ممکن است دانلود چند دقیقه طول بکشد", progress=round(step_p, 2))
+                    self._warm(self._get(selected, allow_download=True))
+                    emit(f"مدل {self.id} برای {selected} بارگذاری و آزمایش شد", "success", progress=0.94)
+                except OcrError:
+                    raise
+                except Exception as exc:
+                    cause = f"; cause: {exc.__cause__}" if exc.__cause__ else ""
+                    raise OcrError(
+                        f"Model download failed for {self.id} ({selected}): {exc}{cause}. "
+                        "Check the internet connection and model host access, then try again."
+                    ) from exc
+            cleanup_superseded_engine_files(self.id)
+            ver = detect_builtin_installed_version(self.id, self)
+            acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
+        finally:
+            self.unload()
+            trim_process_memory()
 
     def update(self, language: str = "eng") -> None:
         emit(f"شروع به‌روزرسانی خودکار {self.id}…", progress=0.06)
         target_langs = list(self.ready_languages) if self.version == "v5" and self.ready_languages else ([language] if self.version == "v5" else ["eng"])
-        with self._lock:
-            self._instances.clear()
-        # Avoid upgrading onnxruntime when already loaded on Windows (prevents locked .pyd WinError 5/32).
-        pkgs = ["rapidocr>=3.10"]
-        if not importlib.util.find_spec("onnxruntime"):
-            pkgs.append("onnxruntime>=1.20,<2")
-        install_packages(pkgs, upgrade=True)
-        for idx, selected in enumerate(target_langs):
-            emit(f"بررسی و آماده‌سازی فایل‌های مدل {self.id} ({selected})…", progress=round(0.74 + 0.18 * (idx / max(1, len(target_langs))), 2))
-            self._warm(self._get(selected, allow_download=True))
-        ver = detect_builtin_installed_version(self.id, self)
-        acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
-        emit(f"مدل {self.id} با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success", progress=1.0)
+        self.unload()
+        try:
+            cur_ver = detect_builtin_installed_version(self.id, self)
+            cached = (read_update_cache().get("engines") or {}).get(self.id) or {}
+            latest_ver = cached.get("latestVersion")
+            need_pkg_upgrade = (
+                not self.runtime_installed
+                or not cur_ver
+                or not latest_ver
+                or is_newer_version(cur_ver, latest_ver)
+            )
+            if need_pkg_upgrade:
+                # Avoid upgrading onnxruntime when already loaded on Windows (prevents locked .pyd WinError 5/32).
+                pkgs = ["rapidocr>=3.10"]
+                if not importlib.util.find_spec("onnxruntime"):
+                    pkgs.append("onnxruntime>=1.20,<2")
+                install_packages(pkgs, upgrade=True)
+            else:
+                emit(f"بستهٔ اجرایی {self.id} ({cur_ver}) در آخرین نسخه است…", progress=0.68)
+            for idx, selected in enumerate(target_langs):
+                emit(f"بررسی و آماده‌سازی فایل‌های مدل {self.id} ({selected})…", progress=round(0.74 + 0.18 * (idx / max(1, len(target_langs))), 2))
+                self._warm(self._get(selected, allow_download=True))
+            cleanup_superseded_engine_files(self.id)
+            ver = detect_builtin_installed_version(self.id, self)
+            acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
+            emit(f"مدل {self.id} با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success", progress=1.0)
+        finally:
+            self.unload()
+            trim_process_memory()
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         engine = self._get(language)
@@ -329,6 +369,15 @@ class EasyEngine:
     def model_ready(self) -> bool:
         return bool(self.ready_languages)
 
+    @property
+    def is_loaded_in_ram(self) -> bool:
+        with self._lock:
+            return bool(self._readers)
+
+    def unload(self) -> None:
+        with self._lock:
+            self._readers.clear()
+
     def _ensure_runtime(self) -> None:
         if not self.runtime_installed:
             emit("بستهٔ اجرای EasyOCR موجود نیست؛ نصب آگاهانه آغاز می‌شود")
@@ -365,6 +414,7 @@ class EasyEngine:
             self._reader(language, True)
             self._model_dir().mkdir(parents=True, exist_ok=True)
             (self._model_dir() / f".ready-{language}").write_text("downloaded by user request\n", encoding="utf-8")
+            cleanup_superseded_engine_files(self.id)
             ver = detect_builtin_installed_version(self.id, self)
             acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
             emit(f"مدل EasyOCR برای {language} آماده شد", "success", progress=1.0)
@@ -372,25 +422,44 @@ class EasyEngine:
             raise
         except Exception as exc:
             raise OcrError(f"EasyOCR model download failed for {language}: {exc}") from exc
+        finally:
+            self.unload()
+            trim_process_memory()
 
     def update(self, language: str = "eng") -> None:
         emit("شروع به‌روزرسانی خودکار EasyOCR…", progress=0.06)
         target_langs = list(self.ready_languages) or [language]
-        with self._lock:
-            self._readers.clear()
-        # Avoid upgrading torch when already installed on Windows (prevents locked torch_cpu.dll errors).
-        pkgs = ["easyocr>=1.7"]
-        if not importlib.util.find_spec("torch"):
-            pkgs.append("torch>=2.2,<3")
-        install_packages(pkgs, upgrade=True)
-        for idx, selected in enumerate(target_langs):
-            emit(f"آماده‌سازی وزن‌های EasyOCR برای {selected}…", progress=round(0.72 + 0.20 * (idx / max(1, len(target_langs))), 2))
-            self._reader(selected, True)
-            self._model_dir().mkdir(parents=True, exist_ok=True)
-            (self._model_dir() / f".ready-{selected}").write_text("downloaded by user request\n", encoding="utf-8")
-        ver = detect_builtin_installed_version(self.id, self)
-        acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
-        emit(f"مدل EasyOCR با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success", progress=1.0)
+        self.unload()
+        try:
+            cur_ver = detect_builtin_installed_version(self.id, self)
+            cached = (read_update_cache().get("engines") or {}).get(self.id) or {}
+            latest_ver = cached.get("latestVersion")
+            need_pkg_upgrade = (
+                not self.runtime_installed
+                or not cur_ver
+                or not latest_ver
+                or is_newer_version(cur_ver, latest_ver)
+            )
+            if need_pkg_upgrade:
+                # Avoid upgrading torch when already installed on Windows (prevents locked torch_cpu.dll errors).
+                pkgs = ["easyocr>=1.7"]
+                if not importlib.util.find_spec("torch"):
+                    pkgs.append("torch>=2.2,<3")
+                install_packages(pkgs, upgrade=True)
+            else:
+                emit(f"بستهٔ اجرایی EasyOCR ({cur_ver}) در آخرین نسخه است…", progress=0.68)
+            for idx, selected in enumerate(target_langs):
+                emit(f"آماده‌سازی وزن‌های EasyOCR برای {selected}…", progress=round(0.72 + 0.20 * (idx / max(1, len(target_langs))), 2))
+                self._reader(selected, True)
+                self._model_dir().mkdir(parents=True, exist_ok=True)
+                (self._model_dir() / f".ready-{selected}").write_text("downloaded by user request\n", encoding="utf-8")
+            cleanup_superseded_engine_files(self.id)
+            ver = detect_builtin_installed_version(self.id, self)
+            acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
+            emit(f"مدل EasyOCR با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success", progress=1.0)
+        finally:
+            self.unload()
+            trim_process_memory()
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         reader = self._reader(language, False)
@@ -494,6 +563,13 @@ class TesseractEngine:
     def model_ready(self) -> bool:
         return bool(self.ready_languages)
 
+    @property
+    def is_loaded_in_ram(self) -> bool:
+        return False
+
+    def unload(self) -> None:
+        self._system_languages = None
+
     def _download_language_file(self, language: str) -> Path:
         if language not in LANGUAGES:
             raise OcrError(f"Unsupported Tesseract language: {language}")
@@ -556,37 +632,43 @@ class TesseractEngine:
 
     def update(self, language: str = "eng") -> None:
         emit("شروع به‌روزرسانی خودکار Tesseract…", progress=0.06)
-        if os.name == "nt":
-            cur_ver = detect_builtin_installed_version(self.id, self)
-            cached = (read_update_cache().get("engines") or {}).get(self.id) or {}
-            latest_ver = cached.get("latestVersion")
-            needs_win_bin = (
-                not self.runtime_installed
-                or bool(portable_tesseract_executable())
-                or bool(cur_ver and latest_ver and is_newer_version(cur_ver, latest_ver))
-            )
-            if needs_win_bin:
+        try:
+            if os.name == "nt":
+                cur_ver = detect_builtin_installed_version(self.id, self)
+                cached = (read_update_cache().get("engines") or {}).get(self.id) or {}
+                latest_ver = cached.get("latestVersion")
+                needs_win_bin = (
+                    not self.runtime_installed
+                    or bool(cur_ver and latest_ver and is_newer_version(cur_ver, latest_ver))
+                )
+                if needs_win_bin:
+                    install_tesseract_runtime(OcrError)
+                    self._system_languages = None
+                else:
+                    emit(f"فایل اجرایی Tesseract ({cur_ver or 'نصب‌شده'}) در آخرین نسخه است…", progress=0.45)
+            elif not self.runtime_installed:
                 install_tesseract_runtime(OcrError)
                 self._system_languages = None
-        elif not self.runtime_installed:
-            install_tesseract_runtime(OcrError)
-            self._system_languages = None
-        local_langs = [lang for lang in LANGUAGES if (self._model_dir() / f"{lang}.traineddata").is_file()]
-        target_langs = local_langs or [language if language in LANGUAGES else "eng"]
-        last_target: Path | None = None
-        for selected in target_langs:
-            last_target = self._download_language_file(selected)
-        ver = detect_builtin_installed_version(self.id, self)
-        remote_rev = fetch_tessdata_revision(target_langs)
-        local_hash = sha256_short(last_target) if last_target else None
-        rev_to_save = remote_rev or (f"sha256:{local_hash}" if local_hash else "ready")
-        acknowledge_engine_update(
-            self.id,
-            installed_version=ver,
-            model_revision=rev_to_save,
-            ready_languages=self.ready_languages,
-        )
-        emit(f"مدل Tesseract با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success", progress=1.0)
+            local_langs = [lang for lang in LANGUAGES if (self._model_dir() / f"{lang}.traineddata").is_file()]
+            target_langs = local_langs or [language if language in LANGUAGES else "eng"]
+            last_target: Path | None = None
+            for selected in target_langs:
+                last_target = self._download_language_file(selected)
+            cleanup_superseded_engine_files(self.id)
+            ver = detect_builtin_installed_version(self.id, self)
+            remote_rev = fetch_tessdata_revision(target_langs)
+            local_hash = sha256_short(last_target) if last_target else None
+            rev_to_save = remote_rev or (f"sha256:{local_hash}" if local_hash else "ready")
+            acknowledge_engine_update(
+                self.id,
+                installed_version=ver,
+                model_revision=rev_to_save,
+                ready_languages=self.ready_languages,
+            )
+            emit(f"مدل Tesseract با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success", progress=1.0)
+        finally:
+            self.unload()
+            trim_process_memory()
 
     def _recognize_with_psm(self, image: Image.Image, language: str, psm: str) -> list[OcrLine]:
         executable = _tesseract_executable()
@@ -1065,24 +1147,82 @@ class EngineRegistry:
                 "runtimeInstalled": engine.runtime_installed,
                 "modelReady": bool(ready_languages),
                 "readyLanguages": ready_languages,
+                "isLoadedInRam": bool(getattr(engine, "is_loaded_in_ram", False)),
                 **update_fields,
                 "hardwareCheck": evaluate_engine_hardware(engine_id, hw),
             })
         return result
 
+    def memory_status(self) -> dict[str, Any]:
+        app_ram_mb = process_rss_mb()
+        worker_ram_mb = 0.0
+        loaded_engines: list[dict[str, str]] = []
+        for engine_id, info in ENGINE_INFO.items():
+            engine = self.engines.get(engine_id)
+            if engine is None:
+                continue
+            if bool(getattr(engine, "is_loaded_in_ram", False)):
+                loaded_engines.append({"id": engine_id, "name": str(info.get("name") or engine_id)})
+                w_pid = getattr(engine, "worker_pid", None)
+                if w_pid:
+                    worker_ram_mb += process_rss_mb(int(w_pid))
+        total_mb = round(app_ram_mb + worker_ram_mb, 1)
+        return {
+            "processRamMb": app_ram_mb,
+            "workerRamMb": round(worker_ram_mb, 1),
+            "totalRamMb": total_mb,
+            "loadedEngines": loaded_engines,
+            "loadedCount": len(loaded_engines),
+        }
+
+    def unload_all(self, except_id: str | None = None) -> dict[str, Any]:
+        before = self.memory_status()
+        unloaded: list[str] = []
+        for engine_id, engine in self.engines.items():
+            if except_id and engine_id == except_id:
+                continue
+            was_loaded = bool(getattr(engine, "is_loaded_in_ram", False))
+            unloader = getattr(engine, "unload", None) or getattr(engine, "close", None)
+            if callable(unloader):
+                try:
+                    unloader()
+                except Exception:
+                    pass
+            if was_loaded:
+                unloaded.append(engine_id)
+        trim_process_memory()
+        after = self.memory_status()
+        freed_mb = round(max(0.0, float(before["totalRamMb"]) - float(after["totalRamMb"])), 1)
+        return {
+            **after,
+            "unloadedEngines": unloaded,
+            "freedRamMb": freed_mb,
+        }
+
     def download(self, engine_id: str, language: str = "eng") -> None:
-        self.get(engine_id).download(language)
+        self.unload_all(except_id=engine_id)
+        try:
+            self.get(engine_id).download(language)
+        finally:
+            self.unload_all()
 
     def update(self, engine_id: str, language: str = "eng") -> None:
+        self.unload_all(except_id=engine_id)
         engine = self.get(engine_id)
         updater = getattr(engine, "update", None)
-        if callable(updater):
-            updater(language)
-        else:
-            engine.download(language)
+        try:
+            if callable(updater):
+                updater(language)
+            else:
+                engine.download(language)
+        finally:
+            self.unload_all()
 
     def check_updates(self, force: bool = False) -> dict[str, Any]:
         return check_remote_updates(self, force=force)
+
+
+PRECISE_UPSCALE_MAX_PIXELS = 4_000_000
 
 
 def preprocess(image: Image.Image, contrast: bool, precise: bool) -> tuple[Image.Image, float]:
@@ -1090,9 +1230,11 @@ def preprocess(image: Image.Image, contrast: bool, precise: bool) -> tuple[Image
     if contrast:
         image = ImageOps.autocontrast(image, cutoff=1)
     scale = 1.0
-    if precise and image.width * image.height <= 25_000_000:
+    if precise and image.width * image.height <= PRECISE_UPSCALE_MAX_PIXELS:
         scale = 2.0
-        image = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
+        resized = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
+        image.close()
+        image = resized
     return image, scale
 
 
@@ -1154,27 +1296,38 @@ def _recognize_image_primary(
     """The established OCR path; input_scale only restores fallback geometry."""
     from .ocr_grouping import detect_page_mode, sort_document_reading_order
 
-    prepared, scale = preprocess(image, contrast, precise)
+    # Isolated VLM/layout engines handle their own vision scaling; skipping 2x Lanczos prevents multi-GB RAM spikes.
+    effective_precise = False if isinstance(engine, IsolatedOcrEngine) else precise
+    prepared, scale = preprocess(image, contrast, effective_precise)
     width, height = prepared.size
     slice_height = 3000
     overlap = 100
     lines: list[OcrLine] = []
-    for start in range(0, height, slice_height):
-        end = min(height, start + slice_height)
-        read_y0 = max(0, start - overlap)
-        read_y1 = min(height, end + overlap)
-        crop = prepared if (read_y0 == 0 and read_y1 == height) else prepared.crop((0, read_y0, width, read_y1))
-        for line in _recognize_crop_lines(engine, crop, language, page_mode=page_mode):
-            polygon = [[x, y + read_y0] for x, y in line.polygon]
-            adjusted = OcrLine(line.text, line.confidence, polygon)
-            center_y = (adjusted.box[1] + adjusted.box[3]) / 2
-            if center_y < start or center_y >= end:
-                continue
-            if adjusted.confidence < min_confidence:
-                continue
-            lines.append(adjusted)
-        if end >= height:
-            break
+    try:
+        for start in range(0, height, slice_height):
+            end = min(height, start + slice_height)
+            read_y0 = max(0, start - overlap)
+            read_y1 = min(height, end + overlap)
+            is_full = read_y0 == 0 and read_y1 == height
+            crop = prepared if is_full else prepared.crop((0, read_y0, width, read_y1))
+            try:
+                for line in _recognize_crop_lines(engine, crop, language, page_mode=page_mode):
+                    polygon = [[x, y + read_y0] for x, y in line.polygon]
+                    adjusted = OcrLine(line.text, line.confidence, polygon)
+                    center_y = (adjusted.box[1] + adjusted.box[3]) / 2
+                    if center_y < start or center_y >= end:
+                        continue
+                    if adjusted.confidence < min_confidence:
+                        continue
+                    lines.append(adjusted)
+            finally:
+                if not is_full:
+                    crop.close()
+            if end >= height:
+                break
+    finally:
+        if prepared is not image:
+            prepared.close()
     # Reading order is stable: physical row first, then horizontal position. No text is flattened.
     lines.sort(key=lambda line: (round(((line.box[1] + line.box[3]) / 2) / 12) * 12, line.box[0], line.box[1]))
     blocks = _blocks_from_lines(lines, scale * input_scale)

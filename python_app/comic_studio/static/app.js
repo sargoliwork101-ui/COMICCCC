@@ -1379,6 +1379,7 @@ async function runOcr() {
     if (ocrAbortController === controller) ocrAbortController = null;
     ocrClosingNormally = false; ocrRunning = false; $('startOcrBtn').disabled = false; $('cancelOcrBtn')?.classList.add('hidden');
     dismissJobCancelModal('ocr');
+    refreshEngineMemory().catch(() => {});
   }
 }
 
@@ -1816,7 +1817,10 @@ async function runDocxChoiceExport(mode, layout = 'visual') {
 // ---------- Models and AI (explicit downloads remain user initiated) ----------
 let engineUpdateNoticeDismissed = false;
 let engineHardwareSummary = null;
+let engineMemorySummary = null;
 let checkingEngineUpdates = false;
+let freeingModelsRam = false;
+let startupUpdateChecked = false;
 
 function outdatedEngines() {
   return (state.engines || []).filter((engine) => engine.updateAvailable === true);
@@ -1834,10 +1838,61 @@ function formatHardwareSummary() {
   return `وضعیت سیستم شما: ${gpuPart}${diskPart}`;
 }
 
+function formatRamSummary() {
+  if (!engineMemorySummary || typeof engineMemorySummary.totalRamMb !== 'number') {
+    const loadedFromEngines = (state.engines || []).filter((item) => item.isLoadedInRam).length;
+    return `مدیریت خودکار رم فعال · مدل مقیم در رم: ${loadedFromEngines}`;
+  }
+  const totalMb = Math.round(engineMemorySummary.totalRamMb);
+  const loadedCount = Number(engineMemorySummary.loadedCount || 0);
+  const loadedNames = Array.isArray(engineMemorySummary.loadedEngines) && engineMemorySummary.loadedEngines.length
+    ? ` (${engineMemorySummary.loadedEngines.map((item) => item.name).join('، ')})`
+    : '';
+  return `رم مصرفی برنامه: ${totalMb} مگابایت · مدل مقیم در رم: ${loadedCount}${loadedNames}`;
+}
+
+async function refreshEngineMemory() {
+  try {
+    const mem = await api('/api/engines/memory');
+    if (mem && typeof mem === 'object') {
+      engineMemorySummary = mem;
+      syncEngineUpdateUi();
+    }
+  } catch {}
+}
+
+async function freeModelsRam() {
+  if (freeingModelsRam || state.modelBusy || ocrRunning) return;
+  freeingModelsRam = true;
+  syncEngineUpdateUi();
+  try {
+    const res = await api('/api/engines/unload', jsonOptions('POST', {}));
+    if (Array.isArray(res?.engines)) state.engines = res.engines;
+    if (res?.memory) engineMemorySummary = res.memory;
+    renderModels();
+    const totalMb = Math.round(res?.memory?.totalRamMb ?? 0);
+    const freedMb = Math.round(res?.memory?.freedRamMb ?? 0);
+    const msg = freedMb > 0
+      ? `حافظهٔ رم مدل‌ها آزاد شد (${freedMb} مگابایت آزاد شد · مصرف فعلی: ${totalMb} مگابایت).`
+      : `حافظهٔ رم بهینه شد؛ هیچ مدلی در رم باقی نمانده است (مصرف فعلی: ${totalMb} مگابایت).`;
+    if ($('modelTestResult')) $('modelTestResult').textContent = msg;
+    toast('حافظهٔ رم مدل‌های OCR آزاد شد');
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    freeingModelsRam = false;
+    syncEngineUpdateUi();
+  }
+}
+
 function syncEngineUpdateUi() {
   const updates = outdatedEngines();
   const hwEl = $('modelsHardwareSummary');
   if (hwEl) hwEl.textContent = formatHardwareSummary();
+  const ramEl = $('modelsRamStatus');
+  if (ramEl) ramEl.textContent = formatRamSummary();
+  const freeRamBtn = $('freeModelsRamBtn');
+  if (freeRamBtn) freeRamBtn.disabled = Boolean(freeingModelsRam || state.modelBusy || ocrRunning);
   const badge = $('modelsBtnBadge');
   if (badge) {
     badge.textContent = updates.length ? `${updates.length} جدید` : '';
@@ -2084,6 +2139,7 @@ async function downloadEngine(engine, options = {}) {
     }
     ++engineMutationSeq;
     state.engines = result.engines;
+    if (result?.memory) engineMemorySummary = result.memory;
     succeeded = true;
     syncModelProgressUi(1, false, `مدل ${engine.name} آماده شد.`);
     const doneMsg = `مدل ${engine.name} برای زبان ${language} به‌طور کامل نصب و آماده شد.`;
@@ -2148,6 +2204,7 @@ async function updateEngine(engine, options = {}) {
     });
     ++engineMutationSeq;
     state.engines = result.engines;
+    if (result?.memory) engineMemorySummary = result.memory;
     succeeded = true;
     syncModelProgressUi(1, false, `مدل ${engine.name} به‌روزرسانی شد.`);
     const updatedEntry = state.engines.find((entry) => entry.id === engine.id);
@@ -2222,6 +2279,7 @@ async function checkEngineUpdates({ force = false, silent = false } = {}) {
     if (seqAtStart !== engineMutationSeq || state.modelBusy) return;
     if (Array.isArray(report?.engines)) state.engines = report.engines;
     if (report?.hardware) engineHardwareSummary = report.hardware;
+    if (report?.memory) engineMemorySummary = report.memory;
     const updates = outdatedEngines();
     if (updates.length && force) engineUpdateNoticeDismissed = false;
     updateEngineOptions();
@@ -2251,7 +2309,7 @@ async function testEngine(engineId) {
   const controller = new AbortController();
   modelAbortController = controller; modelCancelledByUser = false;
   state.modelBusy = engineId; setProgress('modelProgress', null, true); renderModels(); $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
-  try { const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value }), signal: controller.signal }); setProgress('modelProgress', 1, false); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
+  try { const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value }), signal: controller.signal }); if (result?.memory) engineMemorySummary = result.memory; setProgress('modelProgress', 1, false); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
   catch (error) {
     setProgress('modelProgress', 0, false);
     if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
@@ -4254,10 +4312,11 @@ function bindEvents() {
     renderModels();
     showDialog('modelsDialog');
     setMenuOpen(false);
-    checkEngineUpdates({ force: false, silent: true }).catch(() => {});
+    refreshEngineMemory().catch(() => {});
   });
   $('testLanguage').addEventListener('change', renderModels);
   $('modelsPageMode')?.addEventListener('change', renderModels);
+  $('freeModelsRamBtn')?.addEventListener('click', () => freeModelsRam().catch(() => {}));
   $('checkModelUpdatesBtn')?.addEventListener('click', () => checkEngineUpdates({ force: true, silent: false }).catch(() => {}));
   $('updateAllModelsBtn')?.addEventListener('click', () => updateAllEngines().catch(() => {}));
   $('modelsActiveCancelBtn')?.addEventListener('click', () => requestCancelModelJob().catch(() => {}));
@@ -4265,7 +4324,11 @@ function bindEvents() {
     if (!$('modelsDialog').open) { renderModels(); showDialog('modelsDialog'); }
     updateAllEngines().catch(() => {});
   });
-  $('engineUpdateOpenModelsBtn')?.addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); });
+  $('engineUpdateOpenModelsBtn')?.addEventListener('click', () => {
+    renderModels();
+    showDialog('modelsDialog');
+    refreshEngineMemory().catch(() => {});
+  });
   $('engineUpdateDismissBtn')?.addEventListener('click', () => { engineUpdateNoticeDismissed = true; syncEngineUpdateUi(); });
   if (!helpController && window.ComicHelpGuide?.createHelpController) {
     helpController = window.ComicHelpGuide.createHelpController();
@@ -4457,9 +4520,13 @@ async function init() {
     const [projects, engines, ai] = await Promise.all([api('/api/projects'), api('/api/engines'), api('/api/ai-settings')]);
     state.engines = engines; state.ai = ai;
     const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
-    adoptProject(project); await refreshProjectList(); await loadAiSettings(); await renderImagesText();
+    adoptProject(project); await refreshProjectList(); await loadAiSettings();
+    const unrenderedIds = sortedImages().filter((item) => hasOverlayText(item) && !item.edited).map((item) => item.id);
+    if (unrenderedIds.length) await renderImagesText(unrenderedIds);
     syncEngineUpdateUi();
-    if (state.engines.some((entry) => entry.runtimeInstalled)) {
+    refreshEngineMemory().catch(() => {});
+    if (!startupUpdateChecked && state.engines.some((entry) => entry.runtimeInstalled)) {
+      startupUpdateChecked = true;
       checkEngineUpdates({ force: false, silent: true }).catch(() => {});
     }
   } catch (error) { toast(`راه‌اندازی ناموفق: ${error.message}`, true); }

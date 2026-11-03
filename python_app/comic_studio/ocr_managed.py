@@ -243,6 +243,219 @@ def _run_Subprocess(command: list[str] | str, **kwargs: Any) -> subprocess.Compl
     return subprocess.run(command, **kwargs)
 
 
+def process_rss_mb(pid: int | None = None) -> float:
+    """Return Resident Set Size / Working Set in MB for `pid` (defaults to current process)."""
+    target_pid = os.getpid() if pid is None else int(pid)
+    if target_pid <= 0:
+        return 0.0
+    try:
+        if os.name == "nt":
+            class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("cb", ctypes.c_ulong),
+                    ("PageFaultCount", ctypes.c_ulong),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = _PROCESS_MEMORY_COUNTERS()
+            counters.cb = ctypes.sizeof(_PROCESS_MEMORY_COUNTERS)
+            if target_pid == os.getpid():
+                handle = ctypes.windll.kernel32.GetCurrentProcess()
+                close_after = False
+            else:
+                # PROCESS_QUERY_LIMITED_INFORMATION (0x1000) | PROCESS_VM_READ (0x0010)
+                handle = ctypes.windll.kernel32.OpenProcess(0x1010, False, target_pid)
+                close_after = bool(handle)
+            if handle:
+                try:
+                    ok = ctypes.windll.psapi.GetProcessMemoryInfo(
+                        handle, ctypes.byref(counters), counters.cb
+                    )
+                    if ok:
+                        return round(counters.WorkingSetSize / (1024 * 1024), 1)
+                finally:
+                    if close_after:
+                        ctypes.windll.kernel32.CloseHandle(handle)
+        else:
+            status_file = Path(f"/proc/{target_pid}/status")
+            if status_file.is_file():
+                for line in status_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if line.startswith("VmRSS:"):
+                        kb = int(line.split()[1])
+                        return round(kb / 1024.0, 1)
+    except Exception:
+        pass
+    return 0.0
+
+
+def trim_process_memory() -> None:
+    """Run Python GC, flush optional torch caches if already loaded, and return unused heap/working-set pages to OS."""
+    import gc
+    gc.collect()
+    gc.collect()
+    torch_mod = sys.modules.get("torch")
+    if torch_mod is not None:
+        try:
+            if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
+                torch_mod.cuda.empty_cache()
+        except Exception:
+            pass
+    try:
+        if os.name == "nt":
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            try:
+                ctypes.windll.psapi.EmptyWorkingSet(handle)
+            except Exception:
+                ctypes.windll.kernel32.SetProcessWorkingSetSize(
+                    handle, ctypes.c_size_t(-1), ctypes.c_size_t(-1)
+                )
+        elif sys.platform.startswith("linux"):
+            libc = ctypes.CDLL("libc.so.6")
+            if hasattr(libc, "malloc_trim"):
+                libc.malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _remove_path_safely(target: Path) -> int:
+    """Delete a file or directory tree best-effort and return approximate bytes freed."""
+    if not target.exists() and not target.is_symlink():
+        return 0
+    freed = 0
+    try:
+        if target.is_symlink() or target.is_file():
+            try:
+                freed = target.stat().st_size
+            except OSError:
+                freed = 0
+            target.unlink(missing_ok=True)
+            return freed
+        if target.is_dir():
+            for child in target.rglob("*"):
+                if child.is_file() and not child.is_symlink():
+                    try:
+                        freed += child.stat().st_size
+                    except OSError:
+                        pass
+            shutil.rmtree(target, ignore_errors=True)
+            return freed
+    except Exception:
+        pass
+    return freed
+
+
+def cleanup_superseded_engine_files(engine_id: str) -> int:
+    """Remove ONLY superseded old versions, orphaned snapshot blobs, and leftover download/pip temp files.
+    Never removes active installed models."""
+    freed = 0
+    root = models_dir()
+    if not root.is_dir():
+        return 0
+
+    # 1. Clean incomplete/temporary download remnants across models_dir
+    for pattern in ("*.part", "*.tmp", "*.incomplete", "*.bak"):
+        for leftover in root.rglob(pattern):
+            if leftover.is_file():
+                freed += _remove_path_safely(leftover)
+
+    # 2. Isolated venv cleanup: remove broken `~pkg` remnants from Windows upgrades & duplicate older .dist-info
+    spec = ISOLATED_ENGINE_SPECS.get(engine_id)
+    if spec:
+        env_dir = root / "envs" / engine_id
+        if env_dir.is_dir():
+            site_dirs = (
+                [env_dir / "Lib" / "site-packages"]
+                if os.name == "nt"
+                else list((env_dir / "lib").glob("python*/site-packages"))
+            )
+            for sp in site_dirs:
+                if not sp.is_dir():
+                    continue
+                for broken in sp.glob("~*"):
+                    freed += _remove_path_safely(broken)
+                by_pkg: dict[str, list[tuple[str, Path]]] = {}
+                for dist_dir in sp.glob("*.dist-info"):
+                    m = re.match(r"^([A-Za-z0-9_.-]+)-(\d[A-Za-z0-9_.-]*)\.dist-info$", dist_dir.name)
+                    if not m:
+                        continue
+                    norm_name = re.sub(r"[-_.]+", "_", m.group(1)).lower()
+                    by_pkg.setdefault(norm_name, []).append((m.group(2), dist_dir))
+                for versions in by_pkg.values():
+                    if len(versions) <= 1:
+                        continue
+                    newest_ver = versions[0][0]
+                    for cand_ver, _ in versions[1:]:
+                        if is_newer_version(newest_ver, cand_ver):
+                            newest_ver = cand_ver
+                    for cand_ver, dist_path in versions:
+                        if cand_ver != newest_ver:
+                            freed += _remove_path_safely(dist_path)
+
+        # 3. HuggingFace superseded snapshots & legacy dotted duplicate folder
+        hf_repo = spec.get("hf_repo")
+        if hf_repo:
+            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", hf_repo.replace("/", "__"))
+            legacy_name = hf_repo.replace("/", "__")
+            safe_dir = root / "hf-repos" / safe_name
+            legacy_dir = root / "hf-repos" / legacy_name
+            if safe_name != legacy_name and safe_dir.is_dir() and any(safe_dir.iterdir()) and legacy_dir.is_dir():
+                freed += _remove_path_safely(legacy_dir)
+            # Clean local_dir `.cache/huggingface/download` temp chunks
+            for dl_cache in (safe_dir / ".cache", legacy_dir / ".cache"):
+                if dl_cache.is_dir():
+                    freed += _remove_path_safely(dl_cache)
+
+            hub_repo_dir = root / "hf" / "hub" / f"models--{hf_repo.replace('/', '--')}"
+            snapshots_dir = hub_repo_dir / "snapshots"
+            ref_main = hub_repo_dir / "refs" / "main"
+            if snapshots_dir.is_dir() and ref_main.is_file():
+                active_rev = ref_main.read_text(encoding="utf-8", errors="ignore").strip()
+                if active_rev and (snapshots_dir / active_rev).is_dir():
+                    for snap in snapshots_dir.iterdir():
+                        if snap.is_dir() and snap.name != active_rev:
+                            freed += _remove_path_safely(snap)
+                    # Prune unreferenced blobs in hub_repo_dir/blobs
+                    blobs_dir = hub_repo_dir / "blobs"
+                    if blobs_dir.is_dir():
+                        referenced_blobs: set[str] = set()
+                        for link in (snapshots_dir / active_rev).rglob("*"):
+                            if link.is_symlink():
+                                try:
+                                    referenced_blobs.add(Path(os.readlink(link)).name)
+                                except OSError:
+                                    pass
+                        if referenced_blobs:
+                            for blob in blobs_dir.iterdir():
+                                if blob.is_file() and blob.name not in referenced_blobs:
+                                    freed += _remove_path_safely(blob)
+
+    # 4. PaddleX superseded sub-models & archive remnants
+    if engine_id == "paddleocr-vl-1-6":
+        paddlex_dir = root / "paddlex"
+        if paddlex_dir.is_dir():
+            for archive in paddlex_dir.rglob("*.tar*"):
+                if archive.is_file():
+                    freed += _remove_path_safely(archive)
+            official = paddlex_dir / "official_models"
+            if official.is_dir():
+                has_newer_vl = any(
+                    (official / name).is_dir()
+                    for name in ("PaddleOCR-VL-1.5-0.9B", "PaddleOCR-VL-1.6-0.9B")
+                )
+                old_v1 = official / "PaddleOCR-VL-0.9B"
+                if has_newer_vl and old_v1.is_dir():
+                    freed += _remove_path_safely(old_v1)
+
+    return freed
+
+
 def _detect_system_ram_gb() -> float:
     try:
         if os.name == "nt":
@@ -516,8 +729,17 @@ def _latest_tesseract_windows_installer() -> tuple[str, str]:
 
 def install_tesseract_runtime(error_cls: type[Exception]) -> str:
     target_dir = models_dir() / "tesseract-bin"
-    target_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir = models_dir() / "tesseract-bin.old-ver"
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir, ignore_errors=True)
     if os.name == "nt":
+        had_existing_portable = portable_tesseract_executable() is not None and target_dir.is_dir()
+        if had_existing_portable:
+            try:
+                os.replace(target_dir, backup_dir)
+            except OSError:
+                shutil.rmtree(backup_dir, ignore_errors=True)
+        target_dir.mkdir(parents=True, exist_ok=True)
         version_tag, installer_url = _latest_tesseract_windows_installer()
         installer_path = target_dir / f"tesseract-setup-{version_tag}.exe"
         part_path = target_dir / f".tesseract-setup-{version_tag}.exe.part"
@@ -563,8 +785,20 @@ def install_tesseract_runtime(error_cls: type[Exception]) -> str:
                         capture_output=True, text=True, timeout=600, check=False,
                     )
         except error_cls:
+            if backup_dir.is_dir() and not portable_tesseract_executable():
+                shutil.rmtree(target_dir, ignore_errors=True)
+                try:
+                    os.replace(backup_dir, target_dir)
+                except OSError:
+                    pass
             raise
         except Exception as exc:
+            if backup_dir.is_dir() and not portable_tesseract_executable():
+                shutil.rmtree(target_dir, ignore_errors=True)
+                try:
+                    os.replace(backup_dir, target_dir)
+                except OSError:
+                    pass
             raise error_cls(f"نصب خودکار موتور اجرایی Tesseract ناموفق بود: {exc}") from exc
         finally:
             part_path.unlink(missing_ok=True)
@@ -579,10 +813,21 @@ def install_tesseract_runtime(error_cls: type[Exception]) -> str:
                     exe = str(candidate)
                     break
         if not exe:
+            if backup_dir.is_dir():
+                shutil.rmtree(target_dir, ignore_errors=True)
+                try:
+                    os.replace(backup_dir, target_dir)
+                except OSError:
+                    pass
             raise error_cls("فایل اجرایی Tesseract پس از نصب خودکار پیدا نشد؛ دسترسی پوشهٔ برنامه را بررسی کنید.")
+        if backup_dir.is_dir():
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        for old_installer in target_dir.glob("*tesseract-setup*.exe*"):
+            old_installer.unlink(missing_ok=True)
         update_manifest_entry("tesseract", installedTag=version_tag)
         emit("موتور اجرایی Tesseract با موفقیت آماده شد", "success", progress=0.82)
         return exe
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     if sys.platform.startswith("linux"):
         apt = shutil.which("apt-get")
@@ -867,18 +1112,55 @@ class IsolatedOcrEngine:
         entry = read_manifest().get(self.id) or {}
         return entry.get("installedVersion")
 
+    @property
+    def is_loaded_in_ram(self) -> bool:
+        return self._worker_proc is not None and self._worker_proc.poll() is None
+
+    @property
+    def worker_pid(self) -> int | None:
+        proc = self._worker_proc
+        if proc is not None and proc.poll() is None:
+            return proc.pid
+        return None
+
+    def unload(self) -> None:
+        self.close()
+
     def close(self) -> None:
         with self._worker_lock:
             proc = self._worker_proc
             self._worker_proc = None
             if proc is not None and proc.poll() is None:
+                pid = proc.pid
                 try:
                     if proc.stdin:
                         proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
                         proc.stdin.flush()
-                    proc.wait(timeout=3)
+                    proc.wait(timeout=2)
                 except Exception:
-                    proc.kill()
+                    pass
+                if proc.poll() is None:
+                    if os.name == "nt" and pid:
+                        try:
+                            _run_Subprocess(
+                                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                                capture_output=True,
+                                timeout=5,
+                                check=False,
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        pass
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
 
     def _worker_env(self) -> dict[str, str]:
         env = dict(os.environ)
@@ -1023,12 +1305,12 @@ class IsolatedOcrEngine:
                     raise self._error_cls(f"ساخت محیط مستقل برای {self.id} ناموفق بود: {(res.stderr or res.stdout)[-800:]}")
                 emit(f"آماده‌سازی ابزار نصب در محیط مستقل {self.id}…", progress=0.14)
                 _run_Subprocess([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300, check=False)
-                _run_Subprocess([str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], capture_output=True, text=True, timeout=600, check=False)
+                _run_Subprocess([str(py), "-m", "pip", "install", "--no-cache-dir", "--upgrade", "pip", "setuptools", "wheel"], capture_output=True, text=True, timeout=600, check=False)
 
             if self._spec.get("needs_torch"):
                 torch_ready = _read_dist_version_in_venv(env_dir, "torch") is not None
                 if not torch_ready:
-                    torch_cmd = [str(py), "-m", "pip", "install", "torch>=2.3.0", "torchvision>=0.18.0"]
+                    torch_cmd = [str(py), "-m", "pip", "install", "--no-cache-dir", "torch>=2.3.0", "torchvision>=0.18.0"]
                     if os.name == "nt" and hw.get("hasNvidiaGpu"):
                         torch_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
                     emit(f"نصب زیرساخت PyTorch برای {self.id}…", progress=0.20)
@@ -1039,7 +1321,7 @@ class IsolatedOcrEngine:
                         raise self._error_cls(f"نصب PyTorch برای {self.id} ناموفق بود: {t_out[-1200:]}")
 
             packages = self._spec["pip_packages_gpu"] if hw.get("hasNvidiaGpu") else self._spec["pip_packages_cpu"]
-            pip_base = [str(py), "-m", "pip", "install"]
+            pip_base = [str(py), "-m", "pip", "install", "--no-cache-dir"]
             if upgrade:
                 pip_base.append("--upgrade")
             action_word = "به‌روزرسانی" if upgrade else "نصب"
@@ -1153,40 +1435,82 @@ class IsolatedOcrEngine:
 
     def download(self, language: str = "eng") -> None:
         self.close()
-        emit(f"شروع آماده‌سازی خودکار مدل {self.id}…", progress=0.05)
-        if not self.runtime_installed:
-            self._ensure_isolated_venv(upgrade=False)
-        else:
-            emit(f"محیط اجرایی {self.id} از قبل آماده است؛ بررسی فایل‌های مدل…", progress=0.65)
-        revision = self._prepare_weights(language)
-        if revision == "ready" and self._spec.get("hf_repo"):
-            remote_rev = fetch_remote_repo_revision(self._spec.get("github_repo"))
-            if remote_rev:
-                revision = remote_rev
-        ver = self.installed_version or "installed"
-        acknowledge_engine_update(
-            self.id,
-            installed_version=ver,
-            model_revision=revision,
-            ready_languages=self.ready_languages,
-        )
-        emit(f"مدل {self.id} آماده و قابل استفاده است", "success", progress=1.0)
+        try:
+            emit(f"شروع آماده‌سازی خودکار مدل {self.id}…", progress=0.05)
+            if not self.runtime_installed:
+                self._ensure_isolated_venv(upgrade=False)
+            else:
+                emit(f"محیط اجرایی {self.id} از قبل آماده است؛ بررسی فایل‌های مدل…", progress=0.65)
+            revision = self._prepare_weights(language)
+            if revision == "ready" and self._spec.get("hf_repo"):
+                remote_rev = fetch_remote_repo_revision(self._spec.get("github_repo"))
+                if remote_rev:
+                    revision = remote_rev
+            cleanup_superseded_engine_files(self.id)
+            ver = self.installed_version or "installed"
+            acknowledge_engine_update(
+                self.id,
+                installed_version=ver,
+                model_revision=revision,
+                ready_languages=self.ready_languages,
+            )
+            emit(f"مدل {self.id} آماده و قابل استفاده است", "success", progress=1.0)
+        finally:
+            self.close()
+            trim_process_memory()
 
     def update(self, language: str = "eng") -> None:
         self.close()
-        emit(f"شروع به‌روزرسانی خودکار مدل {self.id}…", progress=0.06)
-        self._ensure_isolated_venv(upgrade=True)
-        revision = self._prepare_weights(language)
-        ver = self.installed_version or "installed"
-        remote_rev = fetch_remote_repo_revision(self._spec.get("github_repo"))
-        final_rev = remote_rev or revision
-        acknowledge_engine_update(
-            self.id,
-            installed_version=ver,
-            model_revision=final_rev,
-            ready_languages=self.ready_languages,
-        )
-        emit(f"مدل {self.id} با موفقیت به نسخهٔ {ver} به‌روزرسانی شد", "success", progress=1.0)
+        try:
+            emit(f"شروع به‌روزرسانی خودکار مدل {self.id}…", progress=0.06)
+            cached = (read_update_cache().get("engines") or {}).get(self.id) or {}
+            manifest_entry = read_manifest().get(self.id) or {}
+            cur_ver = self.installed_version
+            latest_ver = cached.get("latestVersion")
+            cur_rev = str(manifest_entry.get("modelRevision") or "")
+            latest_rev = str(cached.get("latestRevision") or "")
+
+            need_pkg_upgrade = (
+                not self.runtime_installed
+                or not cur_ver
+                or not latest_ver
+                or is_newer_version(cur_ver, latest_ver)
+            )
+            if need_pkg_upgrade:
+                self._ensure_isolated_venv(upgrade=True)
+            else:
+                emit(f"بستهٔ اجرایی {self.id} ({cur_ver}) در آخرین نسخه است…", progress=0.72)
+
+            need_weights_refresh = (
+                not self.model_ready
+                or need_pkg_upgrade
+                or (bool(latest_rev) and cur_rev != latest_rev)
+            )
+            if need_weights_refresh:
+                revision = self._prepare_weights(language)
+            else:
+                revision = cur_rev or "ready"
+
+            freed_bytes = cleanup_superseded_engine_files(self.id)
+            if freed_bytes >= 1024 * 1024:
+                emit(
+                    f"نسخه‌ها و فایل‌های قدیمی {self.id} پاک‌سازی شد ({freed_bytes / (1024 * 1024):.1f} مگابایت آزاد شد)",
+                    progress=0.98,
+                )
+
+            ver = self.installed_version or "installed"
+            remote_rev = fetch_remote_repo_revision(self._spec.get("github_repo"))
+            final_rev = remote_rev or revision
+            acknowledge_engine_update(
+                self.id,
+                installed_version=ver,
+                model_revision=final_rev,
+                ready_languages=self.ready_languages,
+            )
+            emit(f"مدل {self.id} با موفقیت به نسخهٔ {ver} به‌روزرسانی شد", "success", progress=1.0)
+        finally:
+            self.close()
+            trim_process_memory()
 
     def _ensure_worker(self) -> subprocess.Popen[str]:
         if self._worker_proc is not None and self._worker_proc.poll() is None:

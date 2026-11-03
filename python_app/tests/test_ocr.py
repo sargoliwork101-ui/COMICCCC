@@ -811,6 +811,127 @@ def test_paddleocr_vl_adapter_falls_back_cleanly_when_v1_6_not_supported(tmp_pat
     assert mineru_lines[0]["text"] == "Chapter 1"
 
 
+def test_cleanup_superseded_versions_preserves_unused_installed_models(tmp_path, monkeypatch):
+    from comic_studio import ocr_managed
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    models_root = tmp_path / "models"
+
+    # 1. Unused installed model (e.g. surya) must NEVER be deleted when cleaning another or itself!
+    unused_env = models_root / "envs" / "surya"
+    unused_env.mkdir(parents=True)
+    (unused_env / ".runtime-ready").write_text("ok", encoding="utf-8")
+    unused_weights = models_root / "isolated" / "surya" / "weights.bin"
+    unused_weights.parent.mkdir(parents=True)
+    unused_weights.write_bytes(b"ACTIVE_UNUSED_MODEL_WEIGHTS")
+
+    # 2. HuggingFace repo for dots-ocr: old snapshot + unreferenced blob + legacy dotted folder + .part file
+    hub_dir = models_root / "hf" / "hub" / "models--rednote-hilab--dots.mocr"
+    (hub_dir / "refs").mkdir(parents=True)
+    (hub_dir / "refs" / "main").write_text("new_rev_222", encoding="utf-8")
+    old_snap = hub_dir / "snapshots" / "old_rev_111"
+    new_snap = hub_dir / "snapshots" / "new_rev_222"
+    blobs_dir = hub_dir / "blobs"
+    old_snap.mkdir(parents=True)
+    new_snap.mkdir(parents=True)
+    blobs_dir.mkdir(parents=True)
+    active_blob = blobs_dir / "blob_active"
+    orphan_blob = blobs_dir / "blob_old_superseded"
+    active_blob.write_bytes(b"NEW_WEIGHTS" * 200)
+    orphan_blob.write_bytes(b"OLD_SUPERSEDED_WEIGHTS" * 400)
+    (old_snap / "model.safetensors").symlink_to(orphan_blob)
+    (new_snap / "model.safetensors").symlink_to(active_blob)
+
+    safe_hf_dir = models_root / "hf-repos" / "rednote-hilab__dots_mocr"
+    legacy_hf_dir = models_root / "hf-repos" / "rednote-hilab__dots.mocr"
+    safe_hf_dir.mkdir(parents=True)
+    (safe_hf_dir / "config.json").write_text("{}", encoding="utf-8")
+    legacy_hf_dir.mkdir(parents=True)
+    (legacy_hf_dir / "old_config.json").write_text("{}", encoding="utf-8")
+    part_file = models_root / "rapidocr" / "model.onnx.part"
+    part_file.parent.mkdir(parents=True)
+    part_file.write_bytes(b"partial")
+
+    # 3. Broken pip ~temp directory & older duplicate .dist-info in isolated venv
+    sp = models_root / "envs" / "dots-ocr" / "lib" / "python3.11" / "site-packages"
+    (sp / "~ransformers").mkdir(parents=True)
+    (sp / "~ransformers" / "old.so").write_bytes(b"1234")
+    (sp / "transformers-4.48.0.dist-info").mkdir(parents=True)
+    (sp / "transformers-5.12.1.dist-info").mkdir(parents=True)
+
+    freed = ocr_managed.cleanup_superseded_engine_files("dots-ocr")
+    assert freed > 0
+    assert not old_snap.exists()
+    assert new_snap.is_dir()
+    assert active_blob.is_file()
+    assert not orphan_blob.exists()
+    assert safe_hf_dir.is_dir()
+    assert not legacy_hf_dir.exists()
+    assert not part_file.exists()
+    assert not (sp / "~ransformers").exists()
+    assert not (sp / "transformers-4.48.0.dist-info").exists()
+    assert (sp / "transformers-5.12.1.dist-info").is_dir()
+
+    # Verify unused installed model (surya) is 100% untouched!
+    assert (unused_env / ".runtime-ready").is_file()
+    assert unused_weights.is_file()
+
+    # 4. PaddleX superseded v1 directory removed when v1.5/v1.6 is present
+    official = models_root / "paddlex" / "official_models"
+    (official / "PaddleOCR-VL-0.9B").mkdir(parents=True)
+    (official / "PaddleOCR-VL-0.9B" / "old.pdiparams").write_bytes(b"OLD_VL")
+    (official / "PaddleOCR-VL-1.5-0.9B").mkdir(parents=True)
+    (official / "PaddleOCR-VL-1.5-0.9B" / "new.safetensors").write_bytes(b"NEW_VL")
+    ocr_managed.cleanup_superseded_engine_files("paddleocr-vl-1-6")
+    assert not (official / "PaddleOCR-VL-0.9B").exists()
+    assert (official / "PaddleOCR-VL-1.5-0.9B" / "new.safetensors").is_file()
+
+
+def test_immediate_ram_unload_and_preprocess_memory_cap(tmp_path, monkeypatch):
+    from comic_studio import ocr as ocr_mod
+    from comic_studio.ocr import EngineRegistry, OcrLine, preprocess, recognize_image
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+
+    # 1. Normal comic image upscales 2x when precise=True, while >4MP high-res scan skips 2x RAM spike
+    small = Image.new("RGB", (600, 800), "white")
+    prep_small, scale_small = preprocess(small, contrast=False, precise=True)
+    assert scale_small == 2.0
+    assert prep_small.size == (1200, 1600)
+    prep_small.close()
+
+    huge = Image.new("RGB", (2400, 2000), "white")  # 4.8 MP > 4.0 MP cap
+    prep_huge, scale_huge = preprocess(huge, contrast=False, precise=True)
+    assert scale_huge == 1.0
+    assert prep_huge.size == (2400, 2000)
+    prep_huge.close()
+
+    # 2. IsolatedOcrEngine skips 2x Lanczos pre-upscaling even on small images
+    registry = EngineRegistry()
+    iso_engine = registry.get("surya")
+    observed_sizes = []
+    monkeypatch.setattr(
+        iso_engine,
+        "recognize",
+        lambda crop, lang, page_mode="auto": (observed_sizes.append(crop.size) or [OcrLine("BOOK", 0.95, [[10, 10], [80, 10], [80, 30], [10, 30]])]),
+    )
+    blocks = recognize_image(iso_engine, Image.new("RGB", (500, 700), "white"), "eng", contrast=False, precise=True)
+    assert observed_sizes == [(500, 700)]
+    assert blocks[0]["text"] == "BOOK"
+
+    # 3. RapidEngine download() & unload_all() leave 0 models resident in RAM
+    rapid = registry.get("rapidocr-v6")
+    monkeypatch.setattr(ocr_mod.RapidEngine, "runtime_installed", property(lambda self: True))
+    monkeypatch.setattr(rapid, "_ensure_runtime", lambda: None)
+    monkeypatch.setattr(rapid, "_create", lambda lang: lambda arr, **kw: None)
+    rapid.download("eng")
+    assert rapid.is_loaded_in_ram is False
+    mem = registry.memory_status()
+    assert mem["loadedCount"] == 0
+    assert isinstance(mem["totalRamMb"], float)
+
+
+
 
 
 

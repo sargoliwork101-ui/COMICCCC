@@ -1149,6 +1149,43 @@ function check(name, condition) {
     vm.runInContext('syncEngineUpdateUi(); updateEngineOptions("rapidocr-v6");', context);
   }
 
+  // v3.75: Opening #modelsDialog does NOT auto-check updates (only manual #checkModelUpdatesBtn does), and #freeModelsRamBtn frees RAM
+  {
+    const origFetchV375 = window.fetch;
+    let manualCheckCount = 0;
+    let unloadCalls = 0;
+    window.fetch = async (url, options = {}) => {
+      const parsed = new URL(url, 'http://127.0.0.1');
+      if (parsed.pathname === '/api/engines/check-updates' && options.method === 'POST') {
+        manualCheckCount += 1;
+        return jsonResponse({ checkedAt: Date.now() / 1000, updatesCount: 0, engines: vm.runInContext('state.engines', context), memory: { totalRamMb: 118, loadedCount: 0, loadedEngines: [] } });
+      }
+      if (parsed.pathname === '/api/engines/memory') {
+        return jsonResponse({ totalRamMb: 132, loadedCount: 0, loadedEngines: [] });
+      }
+      if (parsed.pathname === '/api/engines/unload' && options.method === 'POST') {
+        unloadCalls += 1;
+        return jsonResponse({ ok: true, memory: { totalRamMb: 109, freedRamMb: 23, loadedCount: 0, loadedEngines: [] }, engines: vm.runInContext('state.engines', context) });
+      }
+      return origFetchV375(url, options);
+    };
+
+    $('modelsBtn').click();
+    await new Promise((r) => setTimeout(r, 25));
+    check('opening #modelsDialog does NOT trigger automatic check-updates request and shows live RAM badge', manualCheckCount === 0 && $('modelsRamStatus').textContent.includes('۱۳۲') === false && $('modelsRamStatus').textContent.includes('132'));
+
+    $('freeModelsRamBtn').click();
+    await new Promise((r) => setTimeout(r, 25));
+    check('clicking #freeModelsRamBtn calls POST /api/engines/unload and updates RAM status to 109 MB', unloadCalls === 1 && $('modelsRamStatus').textContent.includes('109') && $('modelTestResult').textContent.includes('آزاد شد'));
+
+    $('checkModelUpdatesBtn').click();
+    await new Promise((r) => setTimeout(r, 25));
+    check('clicking #checkModelUpdatesBtn explicitly runs manual update check', manualCheckCount === 1);
+
+    vm.runInContext(`closeDialog('modelsDialog')`, context);
+    window.fetch = origFetchV375;
+  }
+
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));
   window.dispatchEvent(new window.Event('pagehide'));
