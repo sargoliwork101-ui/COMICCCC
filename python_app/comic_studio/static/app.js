@@ -257,6 +257,7 @@ async function api(url, options = {}) {
     if (payload?.kind === 'invalid_context_response') { error.responseText = payload.response_text; error.recoveryToken = payload.recovery_token; error.responseTruncated = payload.response_truncated; }
     if (payload?.kind === 'pending_result') { error.pendingId = payload.pending_id; error.pendingKind = payload.pending_kind; }
     if (payload?.kind === 'unstored_result') error.unstoredResult = `${payload.translation || ''}\nخلاصه: ${payload.summary || ''}`;
+    if (payload?.kind === 'hardware_warning') { error.hardwareWarning = true; error.warnings = payload.warnings || []; error.hardwareCheck = payload.hardwareCheck || null; }
     throw error;
   }
   return payload;
@@ -895,14 +896,47 @@ function collectOcrSettings() {
 }
 function updateEngineOptions() {
   const select = $('ocrEngine'); const previous = select.value || state.project?.settings?.ocrEngine || 'rapidocr-v6'; select.textContent = '';
-  state.engines.filter((engine) => engine.selectable !== false).forEach((engine) => { const option = document.createElement('option'); option.value = engine.id; option.textContent = `${engine.name}${engine.runtimeInstalled ? '' : ' (نیازمند نصب)'}`; select.appendChild(option); });
-  select.value = state.engines.some((engine) => engine.id === previous) ? previous : 'rapidocr-v6'; updateOcrEngineStatus();
+  state.engines.filter((engine) => engine.selectable !== false).forEach((engine) => {
+    const option = document.createElement('option');
+    option.value = engine.id;
+    const suffix = engine.updateAvailable ? ' (نسخهٔ جدید موجود است)' : engine.runtimeInstalled ? '' : ' (نیازمند نصب خودکار)';
+    option.textContent = `${engine.name}${suffix}`;
+    select.appendChild(option);
+  });
+  select.value = state.engines.some((engine) => engine.id === previous) ? previous : 'rapidocr-v6';
+  updateOcrEngineStatus();
+  syncEngineUpdateUi();
 }
 function updateOcrEngineStatus() {
   const engine = state.engines.find((entry) => entry.id === $('ocrEngine').value); if (!engine) return;
-  $('ocrEngineStatus').textContent = engine.runtimeInstalled ? `${engine.description} وضعیت: آمادهٔ اجرا روی همین کامپیوتر.` : 'ابزار اجرای این مدل نصب نشده است؛ از «مدل‌ها و آزمایش» دکمهٔ آماده‌سازی را بزنید.';
   [...$('ocrLanguage').options].forEach((option) => { option.disabled = !engine.languages.includes(option.value); });
   if (!engine.languages.includes($('ocrLanguage').value)) $('ocrLanguage').value = engine.languages[0];
+  const lang = $('ocrLanguage').value;
+  const langReady = Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(lang));
+  const versionLabel = engine.installedVersion ? ` (نسخهٔ ${engine.installedVersion})` : '';
+  let statusText = engine.runtimeInstalled
+    ? (langReady
+      ? `${engine.description} وضعیت: آمادهٔ اجرا روی همین کامپیوتر${versionLabel}.`
+      : `${engine.description} ابزار اجرا نصب است، اما فایل زبان انتخاب‌شده (${lang}) هنوز دانلود نشده است.`)
+    : 'این مدل هنوز روی سیستم شما نصب نشده است؛ با زدن دکمهٔ زیر، نصب و دانلود آن کاملاً خودکار انجام می‌شود.';
+  if (engine.updateAvailable) {
+    statusText += ` · ${engine.updateSummary || 'نسخهٔ جدید برای این مدل منتشر شده است.'}`;
+  }
+  $('ocrEngineStatus').textContent = statusText;
+  const quickWrap = $('ocrEngineQuickActions');
+  const quickPrep = $('ocrQuickPrepareBtn');
+  const quickUpd = $('ocrQuickUpdateBtn');
+  if (quickWrap && quickPrep && quickUpd) {
+    const needPrep = !langReady;
+    const hasUpd = Boolean(engine.updateAvailable);
+    quickPrep.textContent = engine.runtimeInstalled ? `دانلود خودکار فایل زبان (${lang})` : 'نصب و دانلود خودکار همین مدل';
+    quickPrep.disabled = Boolean(state.modelBusy || ocrRunning);
+    quickUpd.textContent = engine.latestVersion ? `به‌روزرسانی به نسخهٔ ${engine.latestVersion}` : 'به‌روزرسانی به نسخهٔ جدید';
+    quickUpd.disabled = Boolean(state.modelBusy || ocrRunning);
+    quickPrep.classList.toggle('hidden', !needPrep);
+    quickUpd.classList.toggle('hidden', !hasUpd);
+    quickWrap.classList.toggle('hidden', !needPrep && !hasUpd);
+  }
 }
 function projectBrowserDrafts(project) {
   const prefix = `comic-studio-draft:${encodeURIComponent(project.id)}:`;
@@ -1521,8 +1555,94 @@ async function runDocxChoiceExport(mode) {
 }
 
 // ---------- Models and AI (explicit downloads remain user initiated) ----------
+let engineUpdateNoticeDismissed = false;
+let engineHardwareSummary = null;
+let checkingEngineUpdates = false;
+
+function outdatedEngines() {
+  return (state.engines || []).filter((engine) => engine.updateAvailable === true);
+}
+
+function formatHardwareSummary() {
+  const hw = engineHardwareSummary || state.engines.find((entry) => entry.hardwareCheck)?.hardwareCheck;
+  if (!hw) return 'وضعیت سخت‌افزار سیستم به همراه هر مدل بررسی می‌شود.';
+  const gpuLabel = hw.gpuName || hw.gpuNames?.[0] || '';
+  const diskGb = hw.freeDiskGb ?? hw.diskFreeGb ?? 0;
+  const gpuPart = hw.hasNvidiaGpu
+    ? `کارت گرافیک NVIDIA${gpuLabel ? ` (${gpuLabel})` : ''}${hw.vramGb ? ` · حافظهٔ گرافیکی: ${hw.vramGb} گیگابایت` : ''}`
+    : 'بدون کارت گرافیک مجزای NVIDIA (اجرا روی پردازندهٔ CPU)';
+  const diskPart = diskGb ? ` · فضای خالی دیسک: ${diskGb} گیگابایت` : '';
+  return `وضعیت سیستم شما: ${gpuPart}${diskPart}`;
+}
+
+function syncEngineUpdateUi() {
+  const updates = outdatedEngines();
+  const hwEl = $('modelsHardwareSummary');
+  if (hwEl) hwEl.textContent = formatHardwareSummary();
+  const badge = $('modelsBtnBadge');
+  if (badge) {
+    badge.textContent = updates.length ? `${updates.length} جدید` : '';
+    badge.classList.toggle('hidden', updates.length === 0);
+  }
+  const updateAllBtn = $('updateAllModelsBtn');
+  if (updateAllBtn) {
+    updateAllBtn.textContent = updates.length > 1 ? `به‌روزرسانی همه (${updates.length} مدل)` : 'به‌روزرسانی مدل به نسخهٔ جدید';
+    updateAllBtn.disabled = Boolean(state.modelBusy || checkingEngineUpdates);
+    updateAllBtn.classList.toggle('hidden', updates.length === 0);
+  }
+  const checkBtn = $('checkModelUpdatesBtn');
+  if (checkBtn) checkBtn.disabled = Boolean(state.modelBusy || checkingEngineUpdates);
+  const dialogBanner = $('modelsUpdateBanner');
+  if (dialogBanner) {
+    if (updates.length) {
+      dialogBanner.textContent = updates.map((engine) => `• ${engine.updateSummary || `نسخهٔ جدید برای «${engine.name}» در دسترس است.`}`).join('\n');
+      dialogBanner.classList.remove('hidden');
+    } else {
+      dialogBanner.textContent = '';
+      dialogBanner.classList.add('hidden');
+    }
+  }
+  const topNotice = $('engineUpdateNotice');
+  const topText = $('engineUpdateNoticeText');
+  const topBtn = $('engineUpdateNowBtn');
+  if (topNotice && topText) {
+    if (updates.length && !engineUpdateNoticeDismissed) {
+      topText.textContent = updates.length === 1
+        ? (updates[0].updateSummary || `نسخهٔ جدید مدل OCR «${updates[0].name}» آمادهٔ دریافت است.`)
+        : `نسخهٔ جدید برای ${updates.length} مدل نصب‌شدهٔ OCR (${updates.map((item) => item.name).join('، ')}) منتشر شده است و با یک کلیک قابل دریافت است.`;
+      if (topBtn) {
+        topBtn.textContent = updates.length > 1 ? `به‌روزرسانی همه (${updates.length})` : 'به‌روزرسانی خودکار';
+        topBtn.disabled = Boolean(state.modelBusy || checkingEngineUpdates);
+      }
+      topNotice.classList.remove('hidden');
+    } else {
+      topNotice.classList.add('hidden');
+    }
+  }
+}
+
+async function confirmHardwareIfNeeded(engine, hwOverride = null) {
+  const hw = hwOverride || engine.hardwareCheck;
+  if (!hw || hw.compatible !== false) return { ok: true, force: false };
+  const warnings = Array.isArray(hw.warnings) && hw.warnings.length
+    ? hw.warnings.join('\n\n')
+    : `مدل «${engine.name}» به سخت‌افزار قوی‌تری نسبت به سیستم فعلی نیاز دارد.`;
+  const confirmed = await appConfirm(
+    `${warnings}\n\nآیا با وجود این محدودیت سخت‌افزاری، باز هم مایل به ادامهٔ نصب و دانلود خودکار این مدل هستید؟`,
+    {
+      title: `هشدار پیش‌نیاز سخت‌افزاری — ${engine.name}`,
+      hint: 'پیشنهاد می‌شود روی سیستم‌های بدون کارت گرافیک NVIDIA از موتورهای سریع (PP-OCR، EasyOCR، Tesseract) یا مدل‌های سازگار با CPU استفاده کنید.',
+      confirmText: 'بله، با همین سیستم نصب شود',
+      cancelText: 'انصراف',
+      variant: 'warning',
+    },
+  );
+  return { ok: Boolean(confirmed), force: true };
+}
+
 function renderModels() {
-  const container = $('engineCards'); container.textContent = ''; const language = $('testLanguage').value;
+  const container = $('engineCards'); if (!container) return;
+  container.textContent = ''; const language = $('testLanguage').value;
   const addGroup = (title, engines, external = false) => {
     if (!engines.length) return;
     const group = document.createElement('section'); group.className = 'model-group';
@@ -1530,11 +1650,35 @@ function renderModels() {
     const cards = document.createElement('div'); cards.className = 'model-group-grid'; group.appendChild(cards); container.appendChild(group);
     engines.forEach((engine) => {
       const card = document.createElement('section'); card.className = `engine-card${external ? ' external-engine' : ''}`;
+      const head = document.createElement('div'); head.className = 'engine-card-head';
       const titleEl = document.createElement('h3'); titleEl.textContent = engine.name;
-      const family = document.createElement('div'); family.className = 'hint'; family.textContent = engine.family;
+      const badges = document.createElement('div'); badges.className = 'engine-badges';
+      const supported = (engine.languages || []).includes(language);
+      const ready = supported && (engine.readyLanguages || []).includes(language);
+      if (ready) {
+        const chip = document.createElement('span'); chip.className = 'engine-chip is-ready'; chip.textContent = 'آمادهٔ استفاده'; badges.appendChild(chip);
+      }
+      if (engine.installedVersion) {
+        const chip = document.createElement('span'); chip.className = 'engine-chip'; chip.dir = 'ltr'; chip.textContent = `v${engine.installedVersion}`; badges.appendChild(chip);
+      }
+      if (engine.updateAvailable) {
+        const chip = document.createElement('span'); chip.className = 'engine-chip is-update';
+        chip.textContent = engine.latestVersion ? `نسخهٔ جدید: ${engine.latestVersion}` : 'نسخهٔ جدید موجود است';
+        badges.appendChild(chip);
+      }
+      if (engine.requiresNvidiaGpu) {
+        const chip = document.createElement('span'); chip.className = 'engine-chip is-gpu';
+        chip.textContent = engine.minVramGb ? `NVIDIA ≥ ${engine.minVramGb}GB` : 'نیازمند NVIDIA GPU';
+        badges.appendChild(chip);
+      } else if (engine.isolated) {
+        const chip = document.createElement('span'); chip.className = 'engine-chip'; chip.textContent = 'محیط ایزولهٔ خودکار'; badges.appendChild(chip);
+      }
+      head.append(titleEl, badges);
+      const family = document.createElement('div'); family.className = 'hint';
+      family.textContent = engine.downloadSizeGb ? `${engine.family} · حجم تقریبی: ${engine.downloadSizeGb} گیگابایت` : engine.family;
       const description = document.createElement('p'); description.textContent = engine.description;
       const status = document.createElement('div'); status.className = 'engine-status';
-      card.append(titleEl, family, description, status);
+      card.append(head, family, description, status);
       if (external) {
         status.textContent = 'اجرای جداگانه · آداپتور مستقیم OCR کمیک ندارد';
         const requirements = document.createElement('div'); requirements.className = 'engine-limit'; requirements.textContent = engine.requirements || '';
@@ -1543,39 +1687,229 @@ function renderModels() {
         const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'دانلود / راهنمای رسمی';
         buttons.appendChild(guide); card.append(requirements, limitations, buttons);
       } else {
-        const supported = engine.languages.includes(language); const ready = supported && (engine.readyLanguages || []).includes(language);
-        status.textContent = state.modelBusy === engine.id ? 'در حال نصب بسته و دانلود مدل؛ لطفاً صبر کنید…' : !supported ? 'این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند.' : !engine.runtimeInstalled ? 'بسته یا برنامهٔ اجرایی نصب نیست؛ دکمهٔ آماده‌سازی را بزنید.' : ready ? 'مدل زبان انتخاب‌شده آماده و آفلاین است.' : 'مدل زبان انتخاب‌شده هنوز آماده نیست؛ دکمهٔ آماده‌سازی را بزنید.';
+        status.textContent = state.modelBusy === engine.id
+          ? 'در حال نصب خودکار بسته‌ها و دانلود مدل؛ لطفاً صبر کنید…'
+          : !supported
+            ? 'این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند.'
+            : !engine.runtimeInstalled
+              ? 'آمادهٔ نصب خودکار با یک کلیک (بدون نیاز به نصب دستی).'
+              : ready
+                ? 'مدل زبان انتخاب‌شده آماده و آفلاین است.'
+                : 'ابزار اجرا نصب است؛ برای دریافت خودکار فایل زبان انتخاب‌شده دکمهٔ آماده‌سازی را بزنید.';
+        if (engine.updateAvailable && engine.updateSummary) {
+          const updateMsg = document.createElement('div'); updateMsg.className = 'engine-update-msg';
+          updateMsg.textContent = engine.updateSummary;
+          card.appendChild(updateMsg);
+        }
+        if (engine.hardwareCheck && engine.hardwareCheck.compatible === false && Array.isArray(engine.hardwareCheck.warnings) && engine.hardwareCheck.warnings.length) {
+          const hwWarn = document.createElement('div'); hwWarn.className = 'engine-hw-warn';
+          hwWarn.textContent = engine.hardwareCheck.warnings[0];
+          card.appendChild(hwWarn);
+        }
         if (engine.requirements) { const requirements = document.createElement('div'); requirements.className = 'engine-limit'; requirements.textContent = engine.requirements; card.appendChild(requirements); }
         const buttons = document.createElement('div'); buttons.className = 'card-buttons';
-        const prepare = makeButton('آماده‌سازی / دانلود مدل', () => downloadEngine(engine)); const test = makeButton('آزمایش روی تصویر', () => testEngine(engine.id));
-        prepare.disabled = !!state.modelBusy || !supported; test.disabled = !!state.modelBusy || !supported; buttons.append(prepare, test);
-        if (engine.repository) { const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'نصب / راهنمای رسمی'; buttons.appendChild(guide); }
+        const prepareLabel = ready ? 'بررسی / آماده‌سازی مجدد' : 'آماده‌سازی / دانلود خودکار';
+        const prepare = makeButton(prepareLabel, () => downloadEngine(engine));
+        prepare.classList.toggle('primary', !ready && !engine.updateAvailable);
+        prepare.disabled = !!state.modelBusy || !supported;
+        buttons.appendChild(prepare);
+        if (engine.updateAvailable || engine.runtimeInstalled) {
+          const updateBtn = makeButton(engine.updateAvailable ? 'به‌روزرسانی به نسخهٔ جدید' : 'به‌روزرسانی مدل', () => updateEngine(engine));
+          if (engine.updateAvailable) updateBtn.classList.add('primary');
+          updateBtn.disabled = !!state.modelBusy;
+          buttons.appendChild(updateBtn);
+        }
+        const test = makeButton('آزمایش روی تصویر', () => testEngine(engine.id));
+        test.disabled = !!state.modelBusy || !supported;
+        buttons.appendChild(test);
+        if (engine.repository) { const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'راهنمای رسمی'; buttons.appendChild(guide); }
         card.appendChild(buttons);
       }
       cards.appendChild(card);
     });
   };
-  addGroup('قابل اجرا در برنامه — خروجی موقعیت‌دار', state.engines.filter((engine) => engine.selectable !== false));
+  const selectable = state.engines.filter((engine) => engine.selectable !== false);
+  const standardEngines = selectable.filter((engine) => engine.category !== 'advanced');
+  const advancedEngines = selectable.filter((engine) => engine.category === 'advanced');
+  if (advancedEngines.length) {
+    addGroup('موتورهای سریع و سبک کمیک — نصب خودکار و مناسب همهٔ سیستم‌ها', standardEngines);
+    addGroup('مدل‌های هوش مصنوعی پیشرفته — نصب خودکار در محیط ایزوله', advancedEngines);
+  } else {
+    addGroup('قابل اجرا در برنامه — خروجی موقعیت‌دار', selectable);
+  }
   addGroup('دانلود و راه‌اندازی جداگانه — فعلاً خارج از OCR داخلی', state.engines.filter((engine) => engine.selectable === false), true);
+  syncEngineUpdateUi();
 }
-async function downloadEngine(engine) {
-  if (state.modelBusy) return; const language = $('testLanguage').value; if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return; }
+async function downloadEngine(engine, options = {}) {
+  if (state.modelBusy) return false;
+  const language = options.languageOverride || $('testLanguage').value;
+  if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return false; }
+  const precheck = await confirmHardwareIfNeeded(engine);
+  if (!precheck.ok) return false;
+  const progressId = options.fromOcrDialog ? 'ocrProgress' : 'modelProgress';
   const controller = new AbortController();
   modelAbortController = controller; modelCancelledByUser = false;
-  state.modelBusy = engine.id; setProgress('modelProgress', null, true); $('modelTestResult').textContent = `آماده‌سازی ${engine.name} برای ${language} آغاز شد؛ فقط مدل همین زبان دانلود می‌شود.`; appendLocalActivity(`آماده‌سازی ${engine.name} برای ${language} آغاز شد`); renderModels();
-  try { const result = await api(`/api/engines/${engine.id}/download`, { ...jsonOptions('POST', { language }), signal: controller.signal }); state.engines = result.engines; setProgress('modelProgress', 1, false); $('modelTestResult').textContent = `مدل ${engine.name} برای ${language} آماده است.`; appendLocalActivity(`مدل ${engine.name} آماده شد`, 'success'); updateEngineOptions(); toast('مدل آماده است'); }
-  catch (error) {
-    setProgress('modelProgress', 0, false);
+  state.modelBusy = engine.id; setProgress(progressId, null, true);
+  const startMsg = `آماده‌سازی و دانلود خودکار ${engine.name} برای زبان ${language} آغاز شد؛ لطفاً صبر کنید…`;
+  if ($('modelTestResult')) $('modelTestResult').textContent = startMsg;
+  if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = startMsg;
+  appendLocalActivity(`آماده‌سازی خودکار ${engine.name} برای ${language} آغاز شد`);
+  renderModels(); updateOcrEngineStatus();
+  const performRequest = (forceFlag) => api(`/api/engines/${engine.id}/download`, {
+    ...jsonOptions('POST', forceFlag ? { language, force: true } : { language }),
+    signal: controller.signal,
+  });
+  try {
+    let result;
+    try {
+      result = await performRequest(precheck.force);
+    } catch (firstErr) {
+      if (firstErr?.hardwareWarning) {
+        setProgress(progressId, 0, false);
+        const retryConfirm = await confirmHardwareIfNeeded(engine, firstErr.hardwareCheck);
+        if (!retryConfirm.ok) {
+          if ($('modelTestResult')) $('modelTestResult').textContent = 'نصب مدل به دلیل پیش‌نیاز سخت‌افزاری لغو شد.';
+          if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = 'نصب مدل به درخواست شما لغو شد.';
+          return false;
+        }
+        setProgress(progressId, null, true);
+        result = await performRequest(true);
+      } else {
+        throw firstErr;
+      }
+    }
+    state.engines = result.engines;
+    setProgress(progressId, 1, false);
+    const doneMsg = `مدل ${engine.name} برای زبان ${language} به‌طور کامل نصب و آماده شد.`;
+    if ($('modelTestResult')) $('modelTestResult').textContent = doneMsg;
+    if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = doneMsg;
+    appendLocalActivity(`مدل ${engine.name} آماده شد`, 'success');
+    updateEngineOptions();
+    toast(`مدل ${engine.name} آمادهٔ استفاده است`);
+    return true;
+  } catch (error) {
+    setProgress(progressId, 0, false);
     if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
-      $('modelTestResult').textContent = 'عملیات آماده‌سازی مدل به درخواست شما لغو شد.';
+      const cancelMsg = 'عملیات آماده‌سازی مدل به درخواست شما لغو شد.';
+      if ($('modelTestResult')) $('modelTestResult').textContent = cancelMsg;
+      if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = cancelMsg;
       appendLocalActivity('آماده‌سازی مدل لغو شد', 'warning');
       toast('آماده‌سازی مدل متوقف شد');
     } else {
-      $('modelTestResult').textContent = `آماده‌سازی ناموفق بود:\n${error.message}\n\nاتصال اینترنت و دسترسی به میزبان مدل را بررسی کنید.`;
-      appendLocalActivity(`آماده‌سازی ناموفق بود: ${error.message}`, 'error'); toast(error.message, true);
+      const failMsg = `آماده‌سازی ناموفق بود:\n${error.message}\n\nاتصال اینترنت و فضای دیسک را بررسی کنید.`;
+      if ($('modelTestResult')) $('modelTestResult').textContent = failMsg;
+      if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = failMsg;
+      appendLocalActivity(`آماده‌سازی ناموفق بود: ${error.message}`, 'error');
+      toast(error.message, true);
     }
+    return false;
+  } finally {
+    if (modelAbortController === controller) modelAbortController = null;
+    state.modelBusy = null;
+    dismissJobCancelModal('model');
+    renderModels();
+    updateOcrEngineStatus();
   }
-  finally { if (modelAbortController === controller) modelAbortController = null; state.modelBusy = null; dismissJobCancelModal('model'); renderModels(); }
+}
+async function updateEngine(engine, options = {}) {
+  if (state.modelBusy) return false;
+  const targetLang = options.languageOverride || (engine.languages?.includes($('testLanguage')?.value) ? $('testLanguage').value : (engine.languages?.[0] || 'eng'));
+  const progressId = options.fromOcrDialog ? 'ocrProgress' : 'modelProgress';
+  const controller = new AbortController();
+  modelAbortController = controller; modelCancelledByUser = false;
+  state.modelBusy = engine.id; setProgress(progressId, null, true);
+  const startMsg = `در حال دریافت و نصب نسخهٔ جدید ${engine.name}…`;
+  if ($('modelTestResult')) $('modelTestResult').textContent = startMsg;
+  if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = startMsg;
+  appendLocalActivity(`به‌روزرسانی ${engine.name} آغاز شد`);
+  renderModels(); updateOcrEngineStatus();
+  try {
+    const result = await api(`/api/engines/${engine.id}/update`, {
+      ...jsonOptions('POST', { language: targetLang }),
+      signal: controller.signal,
+    });
+    state.engines = result.engines;
+    setProgress(progressId, 1, false);
+    const updatedEntry = state.engines.find((entry) => entry.id === engine.id);
+    const verLabel = updatedEntry?.installedVersion ? ` (نسخهٔ ${updatedEntry.installedVersion})` : '';
+    const doneMsg = `مدل ${engine.name}${verLabel} با موفقیت به آخرین نسخه به‌روزرسانی شد.`;
+    if ($('modelTestResult')) $('modelTestResult').textContent = doneMsg;
+    if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = doneMsg;
+    appendLocalActivity(doneMsg, 'success');
+    updateEngineOptions();
+    if (!options.batchSilentToast) toast(`مدل ${engine.name} به‌روزرسانی شد`);
+    return true;
+  } catch (error) {
+    setProgress(progressId, 0, false);
+    if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      const cancelMsg = 'به‌روزرسانی مدل به درخواست شما لغو شد.';
+      if ($('modelTestResult')) $('modelTestResult').textContent = cancelMsg;
+      appendLocalActivity(cancelMsg, 'warning');
+      toast('به‌روزرسانی مدل متوقف شد');
+    } else {
+      const failMsg = `به‌روزرسانی ${engine.name} ناموفق بود:\n${error.message}`;
+      if ($('modelTestResult')) $('modelTestResult').textContent = failMsg;
+      if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = failMsg;
+      appendLocalActivity(`به‌روزرسانی ${engine.name} ناموفق بود: ${error.message}`, 'error');
+      toast(error.message, true);
+    }
+    return false;
+  } finally {
+    if (modelAbortController === controller) modelAbortController = null;
+    state.modelBusy = null;
+    dismissJobCancelModal('model');
+    renderModels();
+    updateOcrEngineStatus();
+  }
+}
+async function updateAllEngines() {
+  if (state.modelBusy) return;
+  const targets = outdatedEngines();
+  if (!targets.length) { toast('همهٔ مدل‌های نصب‌شده به‌روز هستند'); return; }
+  let succeeded = 0;
+  for (const engine of targets) {
+    const ok = await updateEngine(engine, { batchSilentToast: targets.length > 1 });
+    if (!ok) break;
+    succeeded += 1;
+  }
+  if (targets.length > 1 && succeeded === targets.length) {
+    toast(`همهٔ ${succeeded} مدل OCR با موفقیت به‌روزرسانی شدند`);
+  }
+}
+async function checkEngineUpdates({ force = false, silent = false } = {}) {
+  if (checkingEngineUpdates || state.modelBusy) return;
+  checkingEngineUpdates = true;
+  syncEngineUpdateUi();
+  if (!silent) {
+    setProgress('modelProgress', null, true);
+    if ($('modelTestResult')) $('modelTestResult').textContent = 'در حال بررسی انتشار نسخهٔ جدید برای مدل‌های نصب‌شده…';
+  }
+  try {
+    const report = await api('/api/engines/check-updates', jsonOptions('POST', { force }));
+    if (Array.isArray(report?.engines)) state.engines = report.engines;
+    if (report?.hardware) engineHardwareSummary = report.hardware;
+    const updates = outdatedEngines();
+    if (updates.length && force) engineUpdateNoticeDismissed = false;
+    updateEngineOptions();
+    renderModels();
+    if (!silent) {
+      setProgress('modelProgress', 1, false);
+      const summary = updates.length
+        ? `نسخهٔ جدید برای ${updates.length} مدل در دسترس است:\n${updates.map((item) => `• ${item.updateSummary || item.name}`).join('\n')}`
+        : 'بررسی انجام شد؛ همهٔ مدل‌های نصب‌شدهٔ شما آخرین نسخه هستند.';
+      if ($('modelTestResult')) $('modelTestResult').textContent = summary;
+      toast(updates.length ? `نسخهٔ جدید برای ${updates.length} مدل OCR پیدا شد` : 'همهٔ مدل‌های نصب‌شده به‌روز هستند');
+    }
+  } catch (error) {
+    if (!silent) {
+      setProgress('modelProgress', 0, false);
+      if ($('modelTestResult')) $('modelTestResult').textContent = `بررسی نسخهٔ جدید ممکن نشد:\n${error.message}`;
+      toast(error.message, true);
+    }
+  } finally {
+    checkingEngineUpdates = false;
+    syncEngineUpdateUi();
+  }
 }
 async function testEngine(engineId) {
   if (state.modelBusy) return; const item = selectedImages()[0] || sortedImages()[0]; if (!item) { toast('ابتدا یک تصویر وارد کنید', true); return; }
@@ -3492,7 +3826,18 @@ function bindEvents() {
   $('cancelGroupEdit').addEventListener('click', () => finishGroupEdit(true));
   $('duplicateBtn').addEventListener('click', () => duplicateImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
-  $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); }); $('ocrEngine').addEventListener('change', updateOcrEngineStatus); $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('cancelOcrBtn')?.addEventListener('click', () => requestCancelOcrDialog().catch(() => {})); $('cancelTranslationBtn')?.addEventListener('click', () => requestCancelTranslationDialog().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
+  $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); });
+  $('ocrEngine').addEventListener('change', updateOcrEngineStatus);
+  $('ocrLanguage').addEventListener('change', updateOcrEngineStatus);
+  $('ocrQuickPrepareBtn')?.addEventListener('click', () => {
+    const engine = state.engines.find((entry) => entry.id === $('ocrEngine').value);
+    if (engine) downloadEngine(engine, { languageOverride: $('ocrLanguage').value, fromOcrDialog: true }).catch(() => {});
+  });
+  $('ocrQuickUpdateBtn')?.addEventListener('click', () => {
+    const engine = state.engines.find((entry) => entry.id === $('ocrEngine').value);
+    if (engine) updateEngine(engine, { languageOverride: $('ocrLanguage').value, fromOcrDialog: true }).catch(() => {});
+  });
+  $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('cancelOcrBtn')?.addEventListener('click', () => requestCancelOcrDialog().catch(() => {})); $('cancelTranslationBtn')?.addEventListener('click', () => requestCancelTranslationDialog().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
   $('ocrDialog').addEventListener('cancel', (event) => {
     if (ocrRunning && !ocrClosingNormally) { event.preventDefault(); requestCancelOcrDialog().catch(() => {}); }
   });
@@ -3563,7 +3908,17 @@ function bindEvents() {
   $('translationSkill').addEventListener('input', updateTranslationSkillStatus); $('translationContext').addEventListener('input', updateTranslationSkillStatus); $('translationContextResume').addEventListener('change', updateTranslationSkillStatus);
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; } });
-  $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); $('menu').classList.add('hidden'); }); $('testLanguage').addEventListener('change', renderModels); $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); $('menu').classList.add('hidden'); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
+  $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); setMenuOpen(false); checkEngineUpdates({ force: false, silent: true }).catch(() => {}); });
+  $('testLanguage').addEventListener('change', renderModels);
+  $('checkModelUpdatesBtn')?.addEventListener('click', () => checkEngineUpdates({ force: true, silent: false }).catch(() => {}));
+  $('updateAllModelsBtn')?.addEventListener('click', () => updateAllEngines().catch(() => {}));
+  $('engineUpdateNowBtn')?.addEventListener('click', () => {
+    if (!$('modelsDialog').open) { renderModels(); showDialog('modelsDialog'); }
+    updateAllEngines().catch(() => {});
+  });
+  $('engineUpdateOpenModelsBtn')?.addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); });
+  $('engineUpdateDismissBtn')?.addEventListener('click', () => { engineUpdateNoticeDismissed = true; syncEngineUpdateUi(); });
+  $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
@@ -3735,7 +4090,15 @@ function bindEvents() {
 }
 async function init() {
   bindEvents(); startActivityFeed(); startSession();
-  try { const [projects, engines, ai] = await Promise.all([api('/api/projects'), api('/api/engines'), api('/api/ai-settings')]); state.engines = engines; state.ai = ai; const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' })); adoptProject(project); await refreshProjectList(); await loadAiSettings(); await renderImagesText(); }
-  catch (error) { toast(`راه‌اندازی ناموفق: ${error.message}`, true); }
+  try {
+    const [projects, engines, ai] = await Promise.all([api('/api/projects'), api('/api/engines'), api('/api/ai-settings')]);
+    state.engines = engines; state.ai = ai;
+    const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
+    adoptProject(project); await refreshProjectList(); await loadAiSettings(); await renderImagesText();
+    syncEngineUpdateUi();
+    if (state.engines.some((entry) => entry.runtimeInstalled)) {
+      checkEngineUpdates({ force: false, silent: true }).catch(() => {});
+    }
+  } catch (error) { toast(`راه‌اندازی ناموفق: ${error.message}`, true); }
 }
 init();

@@ -894,6 +894,100 @@ function check(name, condition) {
     $('appModalCancel').click();
     await new Promise((r) => setTimeout(r, 20));
     check('cancelling delete confirmation keeps project image intact', $('appModalDialog').open === false && vm.runInContext('state.project.images.length === 1', context));
+
+    // v3.69: 1-click auto-download with hardware preflight warning modal + update notification banner & 1-click update
+    const engineDownloadCalls = [];
+    const engineUpdateCalls = [];
+    let checkUpdatesCalls = 0;
+    let mockCatalog = [
+      {
+        id: 'rapidocr-v6', name: 'PP-OCRv6 Small', family: 'RapidOCR / ONNX',
+        description: 'مدل سریع کمیک', languages: ['eng', 'jpn', 'chi_sim'],
+        selectable: true, action: 'download', isolated: false, category: 'standard',
+        downloadSizeGb: 0.06, requiresNvidiaGpu: false, minVramGb: 0,
+        runtimeInstalled: true, modelReady: true, readyLanguages: ['eng'],
+        installedVersion: '3.9.0', latestVersion: '3.10.0', updateAvailable: true,
+        updateSummary: 'نسخهٔ جدید 3.10.0 برای مدل «PP-OCRv6 Small» آمادهٔ نصب است (نسخهٔ فعلی: 3.9.0)',
+        hardwareCheck: { compatible: true, warnings: [], hasNvidiaGpu: false, gpuName: '', vramGb: 0, freeDiskGb: 80 },
+      },
+      {
+        id: 'olmocr', name: 'olmOCR', family: 'AllenAI / 7B VLM OCR',
+        description: 'مدل سنگین ۷ میلیارد پارامتری', languages: ['eng', 'kor', 'jpn', 'chi_sim'],
+        selectable: true, action: 'download', isolated: true, category: 'advanced',
+        downloadSizeGb: 15, requiresNvidiaGpu: true, minVramGb: 16,
+        runtimeInstalled: false, modelReady: false, readyLanguages: [],
+        installedVersion: null, latestVersion: null, updateAvailable: false, updateSummary: '',
+        hardwareCheck: {
+          compatible: false,
+          warnings: ['این مدل برای اجرا به کارت گرافیک NVIDIA با حداقل 16 گیگابایت حافظهٔ گرافیکی نیاز دارد، اما کارت گرافیک NVIDIA روی این سیستم شناسایی نشد.'],
+          hasNvidiaGpu: false, gpuName: '', vramGb: 0, freeDiskGb: 80,
+        },
+      },
+    ];
+    const origFetchV369 = window.fetch;
+    window.fetch = async (url, options = {}) => {
+      const parsed = new URL(url, 'http://127.0.0.1:8765');
+      if (parsed.pathname === '/api/engines' && (!options.method || options.method === 'GET')) {
+        return jsonResponse(mockCatalog);
+      }
+      if (parsed.pathname === '/api/engines/check-updates' && options.method === 'POST') {
+        checkUpdatesCalls += 1;
+        return jsonResponse({
+          checked: true, online: true,
+          updatesCount: mockCatalog.filter((e) => e.updateAvailable).length,
+          updatableIds: mockCatalog.filter((e) => e.updateAvailable).map((e) => e.id),
+          engines: mockCatalog,
+          hardware: { hasNvidiaGpu: false, gpuName: '', vramGb: 0, freeDiskGb: 80 },
+        });
+      }
+      if (parsed.pathname === '/api/engines/olmocr/download' && options.method === 'POST') {
+        const body = JSON.parse(options.body || '{}');
+        engineDownloadCalls.push(body);
+        if (!body.force) {
+          return jsonResponse({ kind: 'hardware_warning', detail: 'NVIDIA GPU required', warnings: mockCatalog[1].hardwareCheck.warnings, hardwareCheck: mockCatalog[1].hardwareCheck }, 409);
+        }
+        mockCatalog = mockCatalog.map((item) => item.id === 'olmocr' ? { ...item, runtimeInstalled: true, modelReady: true, readyLanguages: [body.language || 'eng'], installedVersion: '0.4.27' } : item);
+        return jsonResponse({ ok: true, language: body.language || 'eng', engines: mockCatalog });
+      }
+      if (parsed.pathname === '/api/engines/rapidocr-v6/update' && options.method === 'POST') {
+        const body = JSON.parse(options.body || '{}');
+        engineUpdateCalls.push(body);
+        mockCatalog = mockCatalog.map((item) => item.id === 'rapidocr-v6' ? { ...item, installedVersion: '3.10.0', updateAvailable: false, updateSummary: '' } : item);
+        return jsonResponse({ ok: true, language: body.language || 'eng', engines: mockCatalog });
+      }
+      return origFetchV369(url, options);
+    };
+
+    await vm.runInContext(`checkEngineUpdates({ force: true, silent: false })`, context);
+    check('checkEngineUpdates populates top Persian update banner and menu badge', checkUpdatesCalls === 1 && !$('engineUpdateNotice').classList.contains('hidden') && $('engineUpdateNoticeText').textContent.includes('PP-OCRv6 Small') && !$('modelsBtnBadge').classList.contains('hidden'));
+
+    $('modelsBtn').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('modelsDialog shows hardware summary, update banner, and both standard + isolated model groups', $('modelsDialog').open === true && $('modelsHardwareSummary').textContent.includes('بدون کارت گرافیک مجزای NVIDIA') && !$('modelsUpdateBanner').classList.contains('hidden') && !$('updateAllModelsBtn').classList.contains('hidden') && $('engineCards').querySelectorAll('.model-group').length === 2);
+
+    // Click prepare on heavy GPU model olmOCR -> Persian hardware warning modal opens BEFORE downloading
+    const olmCard = [...$('engineCards').querySelectorAll('.engine-card')].find((el) => el.querySelector('h3')?.textContent === 'olmOCR');
+    const olmPrepareBtn = [...olmCard.querySelectorAll('.card-buttons button')].find((b) => b.textContent.includes('آماده‌سازی'));
+    olmPrepareBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('clicking prepare on heavy GPU model opens Persian hardware warning modal before downloading', $('appModalDialog').open === true && $('appModalDialog').dataset.variant === 'warning' && $('appModalMessage').textContent.includes('NVIDIA') && engineDownloadCalls.length === 0);
+    $('appModalCancel').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('declining hardware warning cancels download cleanly without sending network download request', $('appModalDialog').open === false && engineDownloadCalls.length === 0);
+
+    // Confirming hardware warning sends force=true and prepares olmOCR
+    olmPrepareBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    $('appModalConfirm').click();
+    await new Promise((r) => setTimeout(r, 30));
+    check('confirming hardware warning sends force=true and marks isolated engine ready', engineDownloadCalls.length === 1 && engineDownloadCalls[0].force === true && vm.runInContext(`state.engines.find(e => e.id === 'olmocr').runtimeInstalled === true`, context));
+
+    // Clicking 1-click update updates rapidocr-v6 and hides update banner + badge
+    $('updateAllModelsBtn').click();
+    await new Promise((r) => setTimeout(r, 30));
+    check('1-click update upgrades outdated engine and clears top update banner and badge', engineUpdateCalls.length === 1 && $('engineUpdateNotice').classList.contains('hidden') && $('modelsBtnBadge').classList.contains('hidden') && $('modelsUpdateBanner').classList.contains('hidden') && vm.runInContext(`state.engines.find(e => e.id === 'rapidocr-v6').installedVersion === '3.10.0'`, context));
+    vm.runInContext(`closeDialog('modelsDialog')`, context);
+    window.fetch = origFetchV369;
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

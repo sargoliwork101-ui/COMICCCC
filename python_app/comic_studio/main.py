@@ -31,7 +31,7 @@ from .ocr_grouping import group_ocr_lines
 from .paths import STATIC_DIR
 from . import pending_results
 from .schemas import (
-    AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, ExportRequest, OcrRequest, ProjectCreate,
+    AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest, OcrRequest, ProjectCreate,
     SessionRequest, StateUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .sessions import SessionManager
@@ -424,22 +424,66 @@ def create_app() -> FastAPI:
     def engines() -> list[dict[str, Any]]:
         return registry.status()
 
-    @app.post("/api/engines/{engine_id}/download")
-    async def download_engine(engine_id: str, values: EngineDownloadRequest | None = None) -> dict[str, Any]:
+    @app.get("/api/engines/hardware")
+    def engines_hardware() -> dict[str, Any]:
+        return registry.hardware_summary()
+
+    @app.post("/api/engines/check-updates")
+    async def check_engine_updates(values: EngineUpdateCheckRequest | None = None) -> dict[str, Any]:
+        force = bool(values.force) if values else False
+        report = await run_in_threadpool(registry.check_updates, force)
+        count = int(report.get("updatesCount") or 0)
+        if count > 0 and force:
+            activity.add(f"برای {count} مدل OCR نسخهٔ جدید در دسترس است", "info")
+        elif force:
+            activity.add("همهٔ مدل‌های نصب‌شدهٔ OCR به‌روز هستند", "success")
+        return {**report, "hardware": registry.hardware_summary()}
+
+    @app.post("/api/engines/{engine_id}/download", response_model=None)
+    async def download_engine(engine_id: str, values: EngineDownloadRequest | None = None) -> Response | dict[str, Any]:
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
         if info.get("action") == "guide":
             return {"ok": False, "guide": True, "engine": {"id": engine_id, **info}, "engines": registry.status()}
         language = values.language if values else "eng"
+        force = bool(values.force) if values else False
         if language not in info["languages"]:
             raise HTTPException(400, "این موتور از زبان انتخاب‌شده پشتیبانی نمی‌کند.")
-        activity.add(f"آماده‌سازی {info['name']} برای زبان {language} آغاز شد؛ دانلود فقط با درخواست شما انجام می‌شود")
+        if not force:
+            hw = registry.check_hardware(engine_id)
+            if not hw.get("compatible", True):
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": " ".join(hw.get("warnings") or []),
+                        "kind": "hardware_warning",
+                        "warnings": hw.get("warnings") or [],
+                        "hardwareCheck": hw,
+                    },
+                )
+        activity.add(f"آماده‌سازی خودکار {info['name']} برای زبان {language} آغاز شد")
         try:
             await run_reported(registry.download, engine_id, language, pulse_label=f"آماده‌سازی {info['name']}")
         except Exception as exc:
             activity.add(f"آماده‌سازی {info['name']} ناموفق بود: {exc}", "error")
             raise
         activity.add(f"مدل {info['name']} برای {language} آماده شد", "success", 1.0)
+        return {"ok": True, "language": language, "engines": registry.status()}
+
+    @app.post("/api/engines/{engine_id}/update")
+    async def update_engine_route(engine_id: str, values: EngineUpdateRequest | None = None) -> dict[str, Any]:
+        registry.get(engine_id)
+        info = ENGINE_INFO[engine_id]
+        language = values.language if values else (info["languages"][0] if info["languages"] else "eng")
+        if info["languages"] and language not in info["languages"]:
+            language = info["languages"][0]
+        activity.add(f"به‌روزرسانی خودکار {info['name']} آغاز شد")
+        try:
+            await run_reported(registry.update, engine_id, language, pulse_label=f"به‌روزرسانی {info['name']}")
+        except Exception as exc:
+            activity.add(f"به‌روزرسانی {info['name']} ناموفق بود: {exc}", "error")
+            raise
+        activity.add(f"مدل {info['name']} به آخرین نسخه به‌روزرسانی شد", "success", 1.0)
         return {"ok": True, "language": language, "engines": registry.status()}
 
     @app.post("/api/engines/{engine_id}/test")

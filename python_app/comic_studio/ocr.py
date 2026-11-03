@@ -17,6 +17,23 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from .activity import emit
+from .ocr_managed import (
+    ISOLATED_ENGINE_SPECS,
+    IsolatedOcrEngine,
+    check_remote_updates,
+    clear_cached_engine_update,
+    compute_engine_update_fields,
+    detect_builtin_installed_version,
+    engine_meta,
+    evaluate_engine_hardware,
+    inspect_hardware,
+    install_tesseract_runtime,
+    portable_tesseract_executable,
+    read_manifest,
+    read_update_cache,
+    sha256_short,
+    update_manifest_entry,
+)
 from .paths import models_dir
 
 # Optional bright-white-text fallback. The original OCR path always runs first.
@@ -66,12 +83,12 @@ class OcrError(RuntimeError):
     pass
 
 
-def install_packages(packages: list[str]) -> None:
+def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
     """Install a whitelisted runtime only after an explicit user preparation click."""
     if not packages:
         return
-    command = [sys.executable, "-m", "pip", "install", *packages]
-    emit(f"نصب بسته‌های OCR آغاز شد: {', '.join(packages)}")
+    command = [sys.executable, "-m", "pip", "install", *(["--upgrade"] if upgrade else []), *packages]
+    emit(f"{'به‌روزرسانی' if upgrade else 'نصب'} بسته‌های OCR آغاز شد: {', '.join(packages)}")
     try:
         with _INSTALL_LOCK:
             result = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False)
@@ -242,6 +259,20 @@ class RapidEngine:
                     f"Model download failed for {self.id} ({selected}): {exc}{cause}. "
                     "Check the internet connection and model host access, then try again."
                 ) from exc
+        ver = detect_builtin_installed_version(self.id, self)
+        update_manifest_entry(self.id, installedVersion=ver, readyLanguages=self.ready_languages)
+
+    def update(self, language: str = "eng") -> None:
+        target_langs = list(self.ready_languages) if self.version == "v5" and self.ready_languages else ([language] if self.version == "v5" else ["eng"])
+        with self._lock:
+            self._instances.clear()
+        install_packages(["rapidocr>=3.10,<4", "onnxruntime>=1.20,<2"], upgrade=True)
+        for selected in target_langs:
+            self._warm(self._get(selected, allow_download=True))
+        ver = detect_builtin_installed_version(self.id, self)
+        update_manifest_entry(self.id, installedVersion=ver, readyLanguages=self.ready_languages)
+        clear_cached_engine_update(self.id, ver)
+        emit(f"مدل {self.id} با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success")
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         engine = self._get(language)
@@ -322,11 +353,27 @@ class EasyEngine:
             self._reader(language, True)
             self._model_dir().mkdir(parents=True, exist_ok=True)
             (self._model_dir() / f".ready-{language}").write_text("downloaded by user request\n", encoding="utf-8")
+            ver = detect_builtin_installed_version(self.id, self)
+            update_manifest_entry(self.id, installedVersion=ver, readyLanguages=self.ready_languages)
             emit(f"مدل EasyOCR برای {language} آماده شد", "success")
         except OcrError:
             raise
         except Exception as exc:
             raise OcrError(f"EasyOCR model download failed for {language}: {exc}") from exc
+
+    def update(self, language: str = "eng") -> None:
+        target_langs = list(self.ready_languages) or [language]
+        with self._lock:
+            self._readers.clear()
+        install_packages(["easyocr>=1.7", "torch>=2.2,<3"], upgrade=True)
+        for selected in target_langs:
+            self._reader(selected, True)
+            self._model_dir().mkdir(parents=True, exist_ok=True)
+            (self._model_dir() / f".ready-{selected}").write_text("downloaded by user request\n", encoding="utf-8")
+        ver = detect_builtin_installed_version(self.id, self)
+        update_manifest_entry(self.id, installedVersion=ver, readyLanguages=self.ready_languages)
+        clear_cached_engine_update(self.id, ver)
+        emit(f"مدل EasyOCR با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success")
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         reader = self._reader(language, False)
@@ -342,6 +389,9 @@ class EasyEngine:
 
 
 def _tesseract_executable() -> str | None:
+    portable = portable_tesseract_executable()
+    if portable:
+        return portable
     executable = shutil.which("tesseract")
     if executable:
         return executable
@@ -427,9 +477,7 @@ class TesseractEngine:
     def model_ready(self) -> bool:
         return bool(self.ready_languages)
 
-    def download(self, language: str = "eng") -> None:
-        if not self.runtime_installed:
-            raise OcrError("Tesseract executable is not installed. Install it from the official project first; pip alone cannot install the Tesseract binary. https://github.com/tesseract-ocr/tesseract")
+    def _download_language_file(self, language: str) -> Path:
         if language not in LANGUAGES:
             raise OcrError(f"Unsupported Tesseract language: {language}")
         self._model_dir().mkdir(parents=True, exist_ok=True)
@@ -454,12 +502,52 @@ class TesseractEngine:
                 raise OcrError("The downloaded Tesseract language file is empty or invalid.")
             os.replace(temporary, target)
             emit(f"فایل زبان Tesseract ({language}) ذخیره شد", "success")
+            return target
         except OcrError:
             temporary.unlink(missing_ok=True)
             raise
         except Exception as exc:
             temporary.unlink(missing_ok=True)
             raise OcrError(f"Tesseract language download failed for {language}: {exc}. The official tessdata_fast host must be reachable.") from exc
+
+    def download(self, language: str = "eng") -> None:
+        if language not in LANGUAGES:
+            raise OcrError(f"Unsupported Tesseract language: {language}")
+        if not self.runtime_installed:
+            install_tesseract_runtime(OcrError)
+            self._system_languages = None
+        target = self._download_language_file(language)
+        ver = detect_builtin_installed_version(self.id, self)
+        update_manifest_entry(
+            self.id,
+            installedVersion=ver,
+            modelRevision=sha256_short(target),
+            readyLanguages=self.ready_languages,
+        )
+
+    def update(self, language: str = "eng") -> None:
+        if os.name == "nt" and (not self.runtime_installed or portable_tesseract_executable()):
+            install_tesseract_runtime(OcrError)
+            self._system_languages = None
+        elif not self.runtime_installed:
+            install_tesseract_runtime(OcrError)
+            self._system_languages = None
+        local_langs = [lang for lang in LANGUAGES if (self._model_dir() / f"{lang}.traineddata").is_file()]
+        target_langs = local_langs or [language if language in LANGUAGES else "eng"]
+        last_target: Path | None = None
+        for selected in target_langs:
+            last_target = self._download_language_file(selected)
+        ver = detect_builtin_installed_version(self.id, self)
+        from .ocr_managed import fetch_tessdata_revision
+        remote_rev = fetch_tessdata_revision(target_langs) or (sha256_short(last_target) if last_target else None)
+        update_manifest_entry(
+            self.id,
+            installedVersion=ver,
+            modelRevision=remote_rev,
+            readyLanguages=self.ready_languages,
+        )
+        clear_cached_engine_update(self.id, ver, remote_rev)
+        emit(f"مدل Tesseract با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success")
 
     def _recognize_with_psm(self, image: Image.Image, language: str, psm: str) -> list[OcrLine]:
         executable = _tesseract_executable()
@@ -512,12 +600,31 @@ class ManualEngine:
         raise OcrError("This model is listed for manual/external setup and is not a direct comic line-OCR engine in this application.")
 
 
-def _external_info(name: str, family: str, description: str, repository: str, requirements: str, limitations: str) -> dict[str, Any]:
+def _isolated_info(
+    engine_id: str,
+    name: str,
+    family: str,
+    description: str,
+    repository: str,
+    requirements: str,
+) -> dict[str, Any]:
+    spec = ISOLATED_ENGINE_SPECS[engine_id]
     return {
-        "name": name, "family": family, "description": description,
-        "languages": [], "selectable": False, "action": "guide",
-        "repository": repository, "requirements": requirements, "limitations": limitations,
-        "install": "راهنمای رسمی روی کارت مدل",
+        "name": name,
+        "family": family,
+        "description": description,
+        "languages": ["eng", "kor", "jpn", "chi_sim"],
+        "selectable": True,
+        "action": "download",
+        "isolated": True,
+        "category": spec["category"],
+        "downloadSizeGb": spec["download_size_gb"],
+        "requiresNvidiaGpu": spec["requires_nvidia_gpu"],
+        "minVramGb": spec["min_vram_gb"],
+        "minDiskGb": spec["min_disk_gb"],
+        "repository": repository,
+        "requirements": requirements,
+        "install": "نصب و دانلود کاملاً خودکار در محیط ایزوله با یک کلیک",
     }
 
 
@@ -525,114 +632,166 @@ ENGINE_INFO = {
     "rapidocr-v6": {
         "name": "PP-OCRv6 Small",
         "family": "RapidOCR / ONNX",
-        "description": "مدل جدید و سبک برای متن عمومی؛ مناسب انگلیسی، چینی و ژاپنی.",
+        "description": "مدل جدید، سریع و سبک برای متن کمیک؛ مناسب انگلیسی، چینی و ژاپنی.",
         "languages": ["eng", "jpn", "chi_sim"],
-        "selectable": True, "action": "download",
+        "selectable": True,
+        "action": "download",
+        "isolated": False,
+        "category": "standard",
+        "downloadSizeGb": 0.06,
+        "requiresNvidiaGpu": False,
+        "minVramGb": 0.0,
+        "minDiskGb": 0.4,
+        "repository": "https://github.com/RapidAI/RapidOCR",
+        "requirements": "سبک و سریع؛ بدون نیاز به کارت گرافیک مجزا روی همهٔ کامپیوترها اجرا می‌شود.",
         "install": "python -m pip install -e \".[ocr]\"",
     },
     "rapidocr-v5": {
         "name": "PP-OCRv5 Multilingual",
         "family": "RapidOCR / ONNX",
-        "description": "بستهٔ چندزبانه با مدل اختصاصی کره‌ای و پشتیبانی از زبان‌های فعلی برنامه.",
+        "description": "بستهٔ چندزبانهٔ سبک با مدل اختصاصی کره‌ای و پشتیبانی از هر چهار زبان برنامه.",
         "languages": ["eng", "kor", "jpn", "chi_sim"],
-        "selectable": True, "action": "download",
+        "selectable": True,
+        "action": "download",
+        "isolated": False,
+        "category": "standard",
+        "downloadSizeGb": 0.08,
+        "requiresNvidiaGpu": False,
+        "minVramGb": 0.0,
+        "minDiskGb": 0.4,
+        "repository": "https://github.com/RapidAI/RapidOCR",
+        "requirements": "سبک و سریع؛ بدون نیاز به کارت گرافیک مجزا روی همهٔ کامپیوترها اجرا می‌شود.",
         "install": "python -m pip install -e \".[ocr]\"",
     },
     "easyocr": {
         "name": "EasyOCR",
-        "family": "CRAFT + CRNN / ONNX یا PyTorch",
-        "description": "گزینهٔ مستقل و سنگین‌تر برای مقایسهٔ دقت در چهار زبان.",
+        "family": "CRAFT + CRNN / PyTorch",
+        "description": "موتور مستقل و دقیق برای مقایسهٔ کیفیت تشخیص در هر چهار زبان.",
         "languages": ["eng", "kor", "jpn", "chi_sim"],
-        "selectable": True, "action": "download",
+        "selectable": True,
+        "action": "download",
+        "isolated": False,
+        "category": "standard",
+        "downloadSizeGb": 0.65,
+        "requiresNvidiaGpu": False,
+        "minVramGb": 0.0,
+        "minDiskGb": 1.8,
+        "repository": "https://github.com/JaidedAI/EasyOCR",
+        "requirements": "قابل اجرا روی پردازندهٔ معمولی (CPU)؛ دانلود اولیه شامل زیرساخت PyTorch و فایل زبان انتخابی است.",
         "install": "python -m pip install -e \".[easyocr]\"",
     },
     "tesseract": {
         "name": "Tesseract",
-        "family": "Tesseract CLI / TSV",
-        "description": "موتور متن‌خوان کلاسیک با خروجی موقعیت‌دار؛ اجرای محلی و بدون ارسال تصویر به اینترنت.",
+        "family": "Tesseract OCR / TSV",
+        "description": "موتور متن‌خوان کلاسیک با نصب بی‌صدای خودکار در ویندوز و دریافت خودکار فایل زبان.",
         "languages": ["eng", "kor", "jpn", "chi_sim"],
-        "selectable": True, "action": "download",
+        "selectable": True,
+        "action": "download",
+        "isolated": False,
+        "category": "standard",
+        "downloadSizeGb": 0.09,
+        "requiresNvidiaGpu": False,
+        "minVramGb": 0.0,
+        "minDiskGb": 0.35,
         "repository": "https://github.com/tesseract-ocr/tesseract",
-        "requirements": "برنامهٔ اجرایی Tesseract باید جداگانه نصب شود؛ فایل زبان انتخابی با دکمهٔ آماده‌سازی دانلود می‌شود.",
-        "limitations": "کیفیت به فونت و چیدمان صفحه وابسته است؛ نصب پایتون به‌تنهایی فایل اجرایی Tesseract را نصب نمی‌کند.",
+        "requirements": "نصب کاملاً خودکار موتور اجرایی و فایل زبان در پوشهٔ اختصاصی برنامه، بدون نیاز به نصب دستی.",
         "install": "https://github.com/tesseract-ocr/tesseract",
     },
-    "paddleocr-vl-1-6": _external_info(
-        "PaddleOCR-VL-1.6", "PaddleOCR / VLM",
-        "مدل تحلیل سند و تشخیص متن، فرمول و جدول؛ برای اجرای کامل به زیرساخت VLM نیاز دارد.",
+    "paddleocr-vl-1-6": _isolated_info(
+        "paddleocr-vl-1-6",
+        "PaddleOCR-VL-1.6",
+        "PaddleOCR / VLM",
+        "مدل چندزبانهٔ تشخیص چیدمان و متن با نصب خودکار در پوشهٔ ایزوله و خروجی کادربندی‌شده.",
         "https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/PaddleOCR-VL.md",
-        "Python/Backend سازگار با PaddleOCR-VL و فضای کافی برای مدل و وابستگی‌ها.",
-        "خروجی مستقیم آن خطوط حباب کمیک با مختصات برنامه نیست؛ فعلاً فقط راهنمای رسمی و دانلود دستی ارائه می‌شود.",
+        "نصب خودکار در محیط جدا؛ قابل اجرا روی CPU و کارت گرافیک NVIDIA (حجم دانلود حدود ۲٫۴ گیگابایت).",
     ),
-    "mineru-2-5-pro": _external_info(
-        "MinerU2.5-Pro", "MinerU / Document pipeline",
-        "پایپ‌لاین تبدیل PDF و سند به خروجی ساختاریافته، نه یک جایگزین مستقیم برای OCR حباب کمیک.",
-        "https://github.com/opendatalab/MinerU",
-        "محیط رسمی MinerU و مدل/Backend متناسب با سخت‌افزار کاربر.",
-        "به پردازش سند و خروجی Markdown/JSON تمرکز دارد؛ آداپتور مختصات حباب در برنامه موجود نیست.",
-    ),
-    "glm-ocr": _external_info(
-        "GLM-OCR", "GLM / VLM",
-        "مدل چندوجهی OCR و تحلیل سند با گزینهٔ اجرای محلی یا سرویس.",
-        "https://github.com/zai-org/GLM-OCR",
-        "vLLM/SGLang/Ollama یا سرویس ابری رسمی؛ نیازمند فضای مدل و حافظهٔ مناسب.",
-        "استفادهٔ ابری تصویر را از کامپیوتر خارج می‌کند؛ حالت محلی به Backend جدا و آداپتور خروجی نیاز دارد.",
-    ),
-    "deepseek-ocr-2": _external_info(
-        "DeepSeek-OCR-2", "DeepSeek / VLM",
-        "مدل پژوهشی بینایی‌ـ‌زبان برای درک سند و OCR.",
-        "https://github.com/deepseek-ai/DeepSeek-OCR-2",
-        "محیط رسمی CUDA/PyTorch و حافظهٔ GPU مناسب؛ نصب سادهٔ pip کافی نیست.",
-        "مدل سنگین است و خروجی آن به‌صورت پیش‌فرض کادرهای خط‌به‌خط برنامه را تولید نمی‌کند.",
-    ),
-    "got-ocr-2": _external_info(
-        "GOT-OCR 2.0", "GOT / VLM",
-        "مدل end-to-end برای OCR عمومی و اسناد، با راه‌اندازی رسمی جداگانه.",
-        "https://github.com/Ucas-HaoranWei/GOT-OCR2.0",
-        "وابستگی‌های رسمی، وزن‌های مدل و حافظهٔ کافی؛ پیش از استفادهٔ تجاری مجوز را بررسی کنید.",
-        "خروجی سند/متن با مختصات موردنیاز ویرایشگر کمیک یکسان نیست؛ اجرای مستقیم فعال نیست.",
-    ),
-    "dots-ocr": _external_info(
-        "dots.ocr", "dots / VLM",
-        "مدل چندزبانهٔ تحلیل سند و OCR با خروجی ساختاریافته.",
-        "https://github.com/studio-dots-ai/dots.ocr",
-        "محیط رسمی مدل، Backend مناسب و فضای قابل‌توجه برای وزن‌ها.",
-        "به آداپتور تبدیل خروجی به کادرهای حباب نیاز دارد؛ دانلود از طریق لینک رسمی و با انتخاب کاربر انجام می‌شود.",
-    ),
-    "olmocr": _external_info(
-        "olmOCR", "AllenAI / VLM",
-        "ابزار/مدل OCR و تبدیل اسناد به متن ساختاریافته با تمرکز بر PDF.",
-        "https://github.com/allenai/olmocr",
-        "معمولاً GPU و محیط vLLM یا سرور جدا؛ مدل‌ها حجم و حافظهٔ زیادی لازم دارند.",
-        "برای تحلیل سند ساخته شده، نه تشخیص مستقیم حباب‌های کمیک با همان مختصات برنامه.",
-    ),
-    "hunyuan-ocr": _external_info(
-        "HunyuanOCR", "Tencent Hunyuan / VLM",
-        "مدل OCR بینایی‌ـ‌زبان با گزینه‌های vLLM و اجرای PC-side در پروژهٔ رسمی.",
-        "https://github.com/Tencent-Hunyuan/HunyuanOCR",
-        "CUDA/Backend رسمی یا llama.cpp و مدل تبدیل‌شده؛ به راهنمای نسخهٔ انتخابی رجوع کنید.",
-        "نسخه‌ها و Backendها تفاوت دارند؛ بدون آداپتور خروجی، در OCR داخلی برنامه فعال نیست.",
-    ),
-    "surya": _external_info(
-        "Surya", "Datalab / OCR + Layout",
-        "ابزار OCR و تحلیل چیدمان چندزبانه؛ نسخه‌های جدید به Backend استنتاج جدا وابسته‌اند.",
+    "surya": _isolated_info(
+        "surya",
+        "Surya",
+        "Datalab / OCR + Layout",
+        "مدل چندزبانهٔ تشخیص متن و چیدمان با دریافت خودکار پیش‌نیازهای پردازنده یا کارت گرافیک.",
         "https://github.com/datalab-to/surya",
-        "surya-ocr و vLLM با GPU یا llama.cpp روی CPU؛ مدل و Backend باید جدا آماده شوند.",
-        "مجوز وزن‌ها با مجوز کد متفاوت است و API نسخه‌ها تغییر می‌کند؛ اتصال مستقیم فعلی عمداً غیرفعال است.",
+        "نصب خودکار در محیط جدا به همراه موتور کمکی CPU در صورت نبود کارت گرافیک (حجم حدود ۲٫۲ گیگابایت).",
+    ),
+    "mineru-2-5-pro": _isolated_info(
+        "mineru-2-5-pro",
+        "MinerU2.5-Pro",
+        "MinerU / Document + OCR",
+        "موتور ساختاریافتهٔ تشخیص بلوک‌های متن و تصویر با نصب خودکار در محیط مستقل.",
+        "https://github.com/opendatalab/MinerU",
+        "نصب خودکار در محیط جدا؛ قابل اجرا روی CPU و GPU (حجم دانلود حدود ۳ گیگابایت).",
+    ),
+    "got-ocr-2": _isolated_info(
+        "got-ocr-2",
+        "GOT-OCR 2.0",
+        "GOT / Vision-Language OCR",
+        "مدل هوش مصنوعی بینایی برای خواندن دقیق متنِ حباب‌های کمیک در محیط مستقل.",
+        "https://github.com/Ucas-HaoranWei/GOT-OCR2.0",
+        "نصب خودکار در محیط جدا؛ قابل اجرا روی CPU و GPU ولی با کارت گرافیک سریع‌تر است (حدود ۱٫۸ گیگابایت).",
+    ),
+    "glm-ocr": _isolated_info(
+        "glm-ocr",
+        "GLM-OCR",
+        "GLM / Vision-Language OCR",
+        "مدل چندوجهی خواندن متن با تشخیص خودکار نواحی حباب گفتگو و نصب ایزوله.",
+        "https://github.com/zai-org/GLM-OCR",
+        "نصب خودکار در محیط جدا؛ قابل اجرا روی CPU و کارت گرافیک NVIDIA (حجم حدود ۲٫۴ گیگابایت).",
+    ),
+    "dots-ocr": _isolated_info(
+        "dots-ocr",
+        "dots.ocr",
+        "dots / Vision-Language OCR",
+        "مدل سنگین چندزبانهٔ تشخیص چیدمان و متن با خروجی مختصات کادرها.",
+        "https://github.com/studio-dots-ai/dots.ocr",
+        "مدل سنگین؛ نیازمند کارت گرافیک NVIDIA با حداقل ۸ گیگابایت حافظه و حدود ۴٫۵ گیگابایت دانلود.",
+    ),
+    "deepseek-ocr-2": _isolated_info(
+        "deepseek-ocr-2",
+        "DeepSeek-OCR-2",
+        "DeepSeek / Vision-Language OCR",
+        "مدل بینایی‌ـ‌زبان پیشرفته با قابلیت مکان‌یابی متن روی صفحه در محیط مستقل.",
+        "https://github.com/deepseek-ai/DeepSeek-OCR-2",
+        "مدل سنگین؛ نیازمند کارت گرافیک NVIDIA با حداقل ۱۲ گیگابایت حافظه و حدود ۷٫۵ گیگابایت دانلود.",
+    ),
+    "olmocr": _isolated_info(
+        "olmocr",
+        "olmOCR",
+        "AllenAI / 7B VLM OCR",
+        "مدل ۷ میلیارد پارامتری خواندن متن‌های دشوار در محیط کاملاً ایزوله.",
+        "https://github.com/allenai/olmocr",
+        "مدل بسیار سنگین؛ نیازمند کارت گرافیک NVIDIA با حداقل ۱۶ گیگابایت حافظه و حدود ۱۵ گیگابایت دانلود.",
+    ),
+    "hunyuan-ocr": _isolated_info(
+        "hunyuan-ocr",
+        "HunyuanOCR",
+        "Tencent Hunyuan / VLM OCR",
+        "مدل بزرگ بینایی‌ـ‌زبان برای تشخیص متن با نصب خودکار در محیط ایزوله.",
+        "https://github.com/Tencent-Hunyuan/HunyuanOCR",
+        "مدل بسیار سنگین؛ نیازمند کارت گرافیک حرفه‌ای NVIDIA با حداقل ۲۴ گیگابایت حافظه و حدود ۲۰ گیگابایت دانلود.",
     ),
 }
 
 
 class EngineRegistry:
     def __init__(self) -> None:
-        self.engines = {
+        self.engines: dict[str, Any] = {
             "rapidocr-v6": RapidEngine("rapidocr-v6", "v6"),
             "rapidocr-v5": RapidEngine("rapidocr-v5", "v5"),
             "easyocr": EasyEngine(),
             "tesseract": TesseractEngine(),
         }
         for engine_id, info in ENGINE_INFO.items():
-            if info.get("action") == "guide":
+            if engine_id in self.engines:
+                continue
+            if info.get("isolated"):
+                self.engines[engine_id] = IsolatedOcrEngine(
+                    engine_id=engine_id,
+                    languages=info["languages"],
+                    install_lock=_INSTALL_LOCK,
+                    line_factory=OcrLine,
+                    error_cls=OcrError,
+                )
+            elif info.get("action") == "guide":
                 self.engines[engine_id] = ManualEngine(engine_id)
 
     def get(self, engine_id: str):
@@ -640,21 +799,58 @@ class EngineRegistry:
             raise OcrError(f"Unknown OCR engine: {engine_id}")
         return self.engines[engine_id]
 
+    def hardware_summary(self) -> dict[str, Any]:
+        return inspect_hardware()
+
+    def check_hardware(self, engine_id: str) -> dict[str, Any]:
+        self.get(engine_id)
+        return evaluate_engine_hardware(engine_id)
+
     def status(self) -> list[dict[str, Any]]:
+        hw = inspect_hardware()
+        manifest = read_manifest()
+        cached_updates = (read_update_cache().get("engines") or {})
         result = []
         for engine_id, info in ENGINE_INFO.items():
             engine = self.get(engine_id)
             ready_languages = engine.ready_languages
+            installed_ver = (
+                engine.installed_version
+                if hasattr(engine, "installed_version")
+                else detect_builtin_installed_version(engine_id, engine)
+            )
+            update_fields = compute_engine_update_fields(
+                engine_id=engine_id,
+                engine_name=info["name"],
+                engine=engine,
+                installed_version=installed_ver,
+                manifest_entry=manifest.get(engine_id),
+                cached_remote=cached_updates.get(engine_id),
+            )
             result.append({
-                "id": engine_id, **info,
+                "id": engine_id,
+                **info,
                 "runtimeInstalled": engine.runtime_installed,
                 "modelReady": bool(ready_languages),
                 "readyLanguages": ready_languages,
+                **update_fields,
+                "hardwareCheck": evaluate_engine_hardware(engine_id, hw),
             })
         return result
 
     def download(self, engine_id: str, language: str = "eng") -> None:
         self.get(engine_id).download(language)
+
+    def update(self, engine_id: str, language: str = "eng") -> None:
+        engine = self.get(engine_id)
+        updater = getattr(engine, "update", None)
+        if callable(updater):
+            updater(language)
+        else:
+            engine.download(language)
+
+    def check_updates(self, force: bool = False) -> dict[str, Any]:
+        return check_remote_updates(self, force=force)
 
 
 def preprocess(image: Image.Image, contrast: bool, precise: bool) -> tuple[Image.Image, float]:
@@ -893,6 +1089,8 @@ def recognize_image(
 ) -> list[dict[str, Any]]:
     """Run the established OCR first; optional fallbacks only compete after a weak result."""
     primary = _recognize_image_primary(engine, image, language, contrast, precise, min_confidence)
+    if isinstance(engine, IsolatedOcrEngine) and primary:
+        return primary
     if not _needs_extra_preprocess(primary):
         return primary
     best = primary

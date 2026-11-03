@@ -2081,6 +2081,69 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert.deepEqual(nativeBrowserDialogs, [], `expected zero native browser confirm/alert popups, got: ${nativeBrowserDialogs.join(' | ')}`);
     console.log('PASS: v3.65 hamburger outside-click, Persian cancel-job confirmation modal, dark/light theme parity, and zero native dialogs');
 
+    // v3.69 E2E: all 13 OCR models selectable, hardware warning modal on heavy GPU model, update banner + 1-click update, and quick prepare inside #ocrDialog
+    const realEngines = await api(base, '/api/engines');
+    assert.equal(realEngines.length, 13, 'all 13 OCR models are registered in /api/engines');
+    assert.equal(realEngines.every((entry) => entry.selectable === true && entry.action === 'download'), true, 'all 13 OCR models support 1-click download');
+    await page.evaluate(() => {
+      window.__origFetchV369 = window.fetch.bind(window);
+      window.__v369Calls = { downloads: [], updates: 0, checks: 0 };
+      window.fetch = async (input, init = {}) => {
+        const u = typeof input === 'string' ? input : (input?.url || '');
+        if (u.includes('/api/engines/check-updates') && init?.method === 'POST') {
+          window.__v369Calls.checks += 1;
+          const next = state.engines.map((e) => e.id === 'rapidocr-v6'
+            ? { ...e, runtimeInstalled: true, modelReady: true, readyLanguages: ['eng'], installedVersion: '3.9.0', latestVersion: '3.10.0', updateAvailable: true, updateSummary: 'نسخهٔ جدید 3.10.0 برای مدل «PP-OCRv6 Small» آمادهٔ نصب است (نسخهٔ فعلی: 3.9.0)' }
+            : e.id === 'hunyuan-ocr'
+              ? { ...e, hardwareCheck: { compatible: false, warnings: ['این مدل نیازمند کارت گرافیک NVIDIA با حداقل ۲۴ گیگابایت حافظه است.'], hasNvidiaGpu: false, gpuName: '', vramGb: 0, freeDiskGb: 75 } }
+              : e);
+          return new Response(JSON.stringify({ checked: true, online: true, updatesCount: 1, updatableIds: ['rapidocr-v6'], engines: next, hardware: { hasNvidiaGpu: false, gpuName: '', vramGb: 0, freeDiskGb: 75 } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (u.includes('/api/engines/hunyuan-ocr/download') && init?.method === 'POST') {
+          const body = JSON.parse(init.body || '{}');
+          window.__v369Calls.downloads.push(body);
+          const next = state.engines.map((e) => e.id === 'hunyuan-ocr' ? { ...e, runtimeInstalled: true, modelReady: true, readyLanguages: ['eng'], installedVersion: '1.0.0' } : e);
+          return new Response(JSON.stringify({ ok: true, language: body.language || 'eng', engines: next }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (u.includes('/api/engines/rapidocr-v6/update') && init?.method === 'POST') {
+          window.__v369Calls.updates += 1;
+          const next = state.engines.map((e) => e.id === 'rapidocr-v6' ? { ...e, installedVersion: '3.10.0', updateAvailable: false, updateSummary: '' } : e);
+          return new Response(JSON.stringify({ ok: true, language: 'eng', engines: next }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        return window.__origFetchV369(input, init);
+      };
+    });
+    await page.evaluate(() => checkEngineUpdates({ force: true, silent: false }));
+    await page.waitForFunction(() => !document.getElementById('engineUpdateNotice').classList.contains('hidden'));
+    assert.ok((await page.$eval('#engineUpdateNoticeText', (el) => el.textContent)).includes('PP-OCRv6 Small'));
+    // Click 1-click update right from the top main-page notification banner!
+    await page.click('#engineUpdateNowBtn');
+    await page.waitForFunction(() => window.__v369Calls.updates === 1 && document.getElementById('engineUpdateNotice').classList.contains('hidden'));
+    assert.equal(await page.$eval('#modelsDialog', (el) => el.open), true);
+    // Test heavy GPU pre-download Persian warning inside #modelsDialog on HunyuanOCR
+    await page.evaluate(() => {
+      const card = [...document.querySelectorAll('#engineCards .engine-card')].find((el) => el.querySelector('h3')?.textContent === 'HunyuanOCR');
+      card.querySelector('.card-buttons button').click();
+    });
+    await page.waitForSelector('#appModalDialog[open]');
+    assert.ok((await page.$eval('#appModalMessage', (el) => el.textContent)).includes('NVIDIA'));
+    await page.click('#appModalCancel');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open);
+    assert.equal(await page.evaluate(() => window.__v369Calls.downloads.length), 0, 'declining GPU warning does not trigger download');
+    await page.evaluate(() => {
+      const card = [...document.querySelectorAll('#engineCards .engine-card')].find((el) => el.querySelector('h3')?.textContent === 'HunyuanOCR');
+      card.querySelector('.card-buttons button').click();
+    });
+    await page.waitForSelector('#appModalDialog[open]');
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(() => window.__v369Calls.downloads.length === 1 && state.modelBusy === null);
+    assert.equal(await page.evaluate(() => window.__v369Calls.downloads[0].force), true, 'confirming GPU warning passes force: true');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.getElementById('modelsDialog').open);
+    await page.evaluate(() => { window.fetch = window.__origFetchV369; delete window.__origFetchV369; delete window.__v369Calls; });
+    assert.deepEqual(nativeBrowserDialogs, [], `expected zero native dialogs in v3.69 flow, got: ${nativeBrowserDialogs.join(' | ')}`);
+    console.log('PASS: v3.69 all 13 OCR models auto-setup, Persian GPU warning modal, top update banner, and 1-click update');
+
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');

@@ -245,10 +245,12 @@ def test_tesseract_explicit_download_uses_selected_language(tmp_path, monkeypatc
     assert (tmp_path / "models" / "tesseract" / "kor.traineddata").stat().st_size == 2000
 
 
-def test_requested_model_catalog_marks_external_models_honestly():
+def test_requested_model_catalog_enables_auto_download_for_all_models():
     expected = {"paddleocr-vl-1-6", "mineru-2-5-pro", "glm-ocr", "deepseek-ocr-2", "got-ocr-2", "dots-ocr", "olmocr", "hunyuan-ocr", "surya"}
     assert expected <= set(ENGINE_INFO)
-    assert all(ENGINE_INFO[engine_id]["selectable"] is False for engine_id in expected)
+    assert all(ENGINE_INFO[engine_id]["selectable"] is True for engine_id in ENGINE_INFO)
+    assert all(ENGINE_INFO[engine_id]["action"] == "download" for engine_id in ENGINE_INFO)
+    assert all(ENGINE_INFO[engine_id]["isolated"] is True for engine_id in expected)
     assert all(ENGINE_INFO[engine_id]["repository"].startswith("https://github.com/") for engine_id in expected)
     assert ENGINE_INFO["tesseract"]["selectable"] is True
 
@@ -408,3 +410,135 @@ def test_fallback_preprocess_failure_returns_primary(monkeypatch):
     monkeypatch.setattr("comic_studio.ocr._extra_preprocess_image", lambda image: (_ for _ in ()).throw(RuntimeError("no cv2")))
     blocks = recognize_image(engine, Image.new("RGB", (40, 20), "black"), "eng", contrast=False, precise=False)
     assert blocks[0]["text"] == "abc"
+
+
+def test_hardware_evaluation_and_version_comparison(monkeypatch):
+    from comic_studio.ocr_managed import evaluate_engine_hardware, is_newer_version
+
+    assert is_newer_version("3.9.0", "3.10.0") is True
+    assert is_newer_version("3.10.0", "3.10.0") is False
+    assert is_newer_version("0.23.0", "0.22.9") is False
+    assert is_newer_version("5.4.0.20240605", "v5.4.0.20240606") is True
+
+    cpu_hw = {"hasNvidiaGpu": False, "gpuNames": [], "vramGb": 0.0, "diskFreeGb": 50.0, "os": "nt", "arch": "amd64"}
+    assert evaluate_engine_hardware("rapidocr-v6", cpu_hw)["compatible"] is True
+    assert evaluate_engine_hardware("surya", cpu_hw)["compatible"] is True
+    heavy_eval = evaluate_engine_hardware("olmocr", cpu_hw)
+    assert heavy_eval["compatible"] is False
+    assert any("NVIDIA" in warning for warning in heavy_eval["warnings"])
+
+    low_vram_hw = {"hasNvidiaGpu": True, "gpuNames": ["RTX 3060"], "vramGb": 8.0, "diskFreeGb": 50.0, "os": "nt", "arch": "amd64"}
+    assert evaluate_engine_hardware("dots-ocr", low_vram_hw)["compatible"] is True
+    assert evaluate_engine_hardware("hunyuan-ocr", low_vram_hw)["compatible"] is False
+
+    low_disk_hw = {"hasNvidiaGpu": True, "gpuNames": ["RTX 4090"], "vramGb": 24.0, "diskFreeGb": 2.0, "os": "nt", "arch": "amd64"}
+    disk_eval = evaluate_engine_hardware("paddleocr-vl-1-6", low_disk_hw)
+    assert disk_eval["compatible"] is False
+    assert any("دیسک" in warning for warning in disk_eval["warnings"])
+
+
+def test_tesseract_download_auto_installs_missing_binary(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    engine = TesseractEngine()
+    portable_bin = tmp_path / "models" / "tesseract-bin" / "tesseract"
+
+    def fake_install_tesseract(error_cls):
+        portable_bin.parent.mkdir(parents=True, exist_ok=True)
+        portable_bin.write_text("#!/bin/sh\necho 'tesseract 5.4.0'\n", encoding="utf-8")
+        portable_bin.chmod(0o755)
+        return str(portable_bin)
+
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: str(portable_bin) if portable_bin.is_file() else None)
+    monkeypatch.setattr("comic_studio.ocr.install_tesseract_runtime", fake_install_tesseract)
+
+    class Response:
+        def __init__(self): self.stream = __import__("io").BytesIO(b"t" * 2048)
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self, size=-1): return self.stream.read(size)
+
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", lambda req, timeout: Response())
+    assert engine.runtime_installed is False
+    engine.download("eng")
+    assert engine.runtime_installed is True
+    assert "eng" in engine.ready_languages
+
+
+def test_isolated_engine_prepare_serve_and_update_lifecycle(tmp_path, monkeypatch):
+    import sys as _sys
+    from comic_studio.ocr import EngineRegistry
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    registry = EngineRegistry()
+    engine = registry.get("glm-ocr")
+    assert engine.runtime_installed is False
+    assert engine.model_ready is False
+
+    # Fake _ensure_isolated_venv to symlink current python into isolated env and write a tiny mock worker
+    def fake_ensure_venv(upgrade=False):
+        env_dir = engine._env_dir()
+        py = engine._env_python()
+        py.parent.mkdir(parents=True, exist_ok=True)
+        if not py.exists():
+            py.symlink_to(_sys.executable)
+        sp = env_dir / ("Lib/site-packages" if __import__("os").name == "nt" else "lib/python3.11/site-packages")
+        for old in sp.glob("glmocr-*.dist-info"):
+            __import__("shutil").rmtree(old)
+        ver = "0.2.0" if upgrade else "0.1.5"
+        dist_info = sp / f"glmocr-{ver}.dist-info"
+        dist_info.mkdir(parents=True, exist_ok=True)
+        (dist_info / "METADATA").write_text(f"Name: glmocr\nVersion: {ver}\n", encoding="utf-8")
+        (env_dir / ".runtime-ready").write_text("ok", encoding="utf-8")
+
+    fake_worker = tmp_path / "fake_ocr_worker.py"
+    fake_worker.write_text(
+        "import argparse, json, sys\n"
+        "p = argparse.ArgumentParser()\n"
+        "p.add_argument('--engine'); p.add_argument('--models-root'); p.add_argument('--language', default='eng')\n"
+        "p.add_argument('--prepare', action='store_true'); p.add_argument('--serve', action='store_true')\n"
+        "args = p.parse_args()\n"
+        "if args.prepare:\n"
+        "    print(json.dumps({'ok': True, 'modelRevision': 'rev-1'}), flush=True)\n"
+        "    raise SystemExit(0)\n"
+        "if args.serve:\n"
+        "    print(json.dumps({'ok': True, 'status': 'serving', 'engine': args.engine}), flush=True)\n"
+        "    for raw in sys.stdin:\n"
+        "        req = json.loads(raw)\n"
+        "        if req.get('cmd') == 'quit':\n"
+        "            break\n"
+        "        print(json.dumps({'ok': True, 'lines': [{'text': 'ISOLATED HELLO', 'confidence': 0.93, 'polygon': [[10, 12], [110, 12], [110, 42], [10, 42]]}]}), flush=True)\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(engine, "_ensure_isolated_venv", fake_ensure_venv)
+    monkeypatch.setattr("comic_studio.ocr_managed._worker_script_path", lambda: fake_worker)
+
+    try:
+        registry.download("glm-ocr", "eng")
+        assert engine.runtime_installed is True
+        assert engine.model_ready is True
+        assert engine.installed_version == "0.1.5"
+
+        sample = Image.new("RGB", (160, 80), "white")
+        blocks = recognize_image(engine, sample, "eng", contrast=False, precise=False)
+        assert len(blocks) == 1
+        assert blocks[0]["text"] == "ISOLATED HELLO"
+
+        # Simulate upstream PyPI having 0.2.0
+        monkeypatch.setattr("comic_studio.ocr_managed.fetch_pypi_latest_version", lambda pkg: "0.2.0" if pkg == "glmocr" else None)
+        monkeypatch.setattr("comic_studio.ocr_managed.fetch_remote_repo_revision", lambda repo: "rev-1")
+        report = registry.check_updates(force=True)
+        assert report["updatesCount"] >= 1
+        glm_status = next(item for item in report["engines"] if item["id"] == "glm-ocr")
+        assert glm_status["updateAvailable"] is True
+        assert glm_status["latestVersion"] == "0.2.0"
+        assert "GLM-OCR" in glm_status["updateSummary"]
+
+        # Perform 1-click update and verify updateAvailable clears immediately
+        registry.update("glm-ocr", "eng")
+        after_status = next(item for item in registry.status() if item["id"] == "glm-ocr")
+        assert after_status["installedVersion"] == "0.2.0"
+        assert after_status["updateAvailable"] is False
+    finally:
+        engine.close()
+

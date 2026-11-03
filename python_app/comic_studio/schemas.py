@@ -74,6 +74,15 @@ class EngineTestRequest(BaseModel):
 
 class EngineDownloadRequest(BaseModel):
     language: str = "eng"
+    force: bool = False
+
+
+class EngineUpdateRequest(BaseModel):
+    language: str = "eng"
+
+
+class EngineUpdateCheckRequest(BaseModel):
+    force: bool = False
 
 
 class SessionRequest(BaseModel):

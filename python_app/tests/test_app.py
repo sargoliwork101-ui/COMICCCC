@@ -44,11 +44,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.68"
+    assert health.json()["version"] == "3.69"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۶۸ · Python</span>' in client.get("/").text
+    assert '<span class="ver">۳.۶۹ · Python</span>' in client.get("/").text
     assert client.get("/typeset.js").status_code == 200
     assert "no-store" in client.get("/").headers.get("cache-control", "")
     assert "no-store" in client.get("/typeset.js").headers.get("cache-control", "")
@@ -507,19 +507,67 @@ def test_browser_session_heartbeat_and_close(client):
     assert response.json() == {"ok": True, "active": 0, "accepted": True}
 
 
-def test_external_model_guide_is_explicit_and_not_executable(client):
+def test_all_models_auto_download_hardware_gate_and_updates_api(client, monkeypatch):
+    import json as _json
+
+    monkeypatch.setenv(
+        "COMIC_STUDIO_FAKE_HARDWARE_JSON",
+        _json.dumps({"hasNvidiaGpu": False, "gpuNames": [], "vramGb": 0.0, "diskFreeGb": 60.0, "os": "linux", "arch": "x86_64"}),
+    )
     response = client.get("/api/engines")
     assert response.status_code == 200
     engines = {entry["id"]: entry for entry in response.json()}
     assert "paddleocr-vl-1-6" in engines
-    assert engines["paddleocr-vl-1-6"]["selectable"] is False
-    response = client.post("/api/engines/glm-ocr/download", json={"language": "eng"})
-    assert response.status_code == 200
-    assert response.json()["guide"] is True
-    assert response.json()["ok"] is False
-    response = client.post("/api/engines/glm-ocr/test", json={"project_id": "missing", "image_id": "missing", "language": "eng"})
-    assert response.status_code == 400
-    assert "external runtime" in response.json()["detail"]
+    assert all(entry["selectable"] is True for entry in engines.values())
+    assert engines["olmocr"]["requiresNvidiaGpu"] is True
+    assert engines["olmocr"]["hardwareCheck"]["compatible"] is False
+
+    # Heavy GPU model without force returns 409 hardware_warning with Persian message
+    warn_res = client.post("/api/engines/olmocr/download", json={"language": "eng"})
+    assert warn_res.status_code == 409
+    warn_body = warn_res.json()
+    assert warn_body["kind"] == "hardware_warning"
+    assert any("NVIDIA" in msg for msg in warn_body["warnings"])
+
+    # With force=True, proceeds to registry.download
+    downloaded = []
+    monkeypatch.setattr(
+        "comic_studio.ocr.EngineRegistry.download",
+        lambda self, engine_id, language: downloaded.append((engine_id, language)),
+    )
+    forced_res = client.post("/api/engines/olmocr/download", json={"language": "eng", "force": True})
+    assert forced_res.status_code == 200
+    assert forced_res.json()["ok"] is True
+    assert downloaded == [("olmocr", "eng")]
+
+    # CPU-friendly advanced model downloads directly without needing force
+    cpu_adv_res = client.post("/api/engines/glm-ocr/download", json={"language": "eng"})
+    assert cpu_adv_res.status_code == 200
+    assert cpu_adv_res.json()["ok"] is True
+    assert downloaded[-1] == ("glm-ocr", "eng")
+
+    # Hardware summary, check-updates, and update endpoints
+    hw_res = client.get("/api/engines/hardware")
+    assert hw_res.status_code == 200
+    assert hw_res.json()["freeDiskGb"] == 60.0
+
+    monkeypatch.setattr(
+        "comic_studio.ocr.EngineRegistry.check_updates",
+        lambda self, force=False: {"checkedAt": 123456.0, "cached": not force, "updates": [], "updatesCount": 0, "engines": self.status()},
+    )
+    chk_res = client.post("/api/engines/check-updates", json={"force": True})
+    assert chk_res.status_code == 200
+    assert chk_res.json()["updatesCount"] == 0
+
+    updated = []
+    monkeypatch.setattr(
+        "comic_studio.ocr.EngineRegistry.update",
+        lambda self, engine_id, language="eng": updated.append((engine_id, language)),
+    )
+    upd_res = client.post("/api/engines/glm-ocr/update", json={"language": "kor"})
+    assert upd_res.status_code == 200
+    assert upd_res.json()["ok"] is True
+    assert updated == [("glm-ocr", "kor")]
 
 
 def test_pdf_import(client):
