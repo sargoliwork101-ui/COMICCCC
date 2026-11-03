@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.71">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.71">
+  <link rel="stylesheet" href="/style.css?v=3.72">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.72">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۷۱ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۷۲ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)">؟ راهنما (Help)</button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu">☰ پروژه و تنظیمات</button>
@@ -109,14 +109,26 @@
     <div class="dialog-actions"><button id="pendingCopy" class="bt hidden" type="button">کپی نتیجه</button><button id="pendingDiscard" class="bt danger hidden" type="button">حذف نتیجهٔ منتظر</button><button id="pendingApply" class="bt primary hidden" type="button">ثبت انتخاب‌ها</button></div>
   </dialog>
 
-  <dialog id="ocrDialog" class="dlg small-dialog">
+  <dialog id="ocrDialog" class="dlg small-dialog ocr-dialog-wide">
     <form method="dialog" class="dialog-head"><h2>OCR آفلاین</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
     <div class="form-grid">
+      <label>نوع صفحه و چیدمان<select id="ocrPageMode"><option value="auto">تشخیص خودکار (کمیک، کتاب و مقاله)</option><option value="comic">کمیک و مانگا (حباب گفتگو)</option><option value="document">کتاب، مقاله و جزوه (پاراگراف و ستون)</option></select></label>
       <label>موتور OCR<select id="ocrEngine"></select></label>
       <label>زبان متن<select id="ocrLanguage"><option value="eng">English</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label>
-      <label>نوع صفحه و چیدمان<select id="ocrPageMode"><option value="auto">تشخیص خودکار (کمیک، کتاب و مقاله)</option><option value="comic">کمیک و مانگا (حباب گفتگو)</option><option value="document">کتاب، مقاله و جزوه (پاراگراف و ستون)</option></select></label>
       <label>حداقل اطمینان<input id="ocrConfidence" type="number" min="0" max="0.95" step="0.05" value="0.35"></label>
     </div>
+    <section id="ocrSuitabilityPanel" class="ocr-suitability-panel" aria-label="تناسب عملکرد موتورهای OCR با نوع صفحه">
+      <div class="ocr-suitability-head">
+        <strong id="ocrSuitabilityTitle">راهنمای عملکرد موتورها بر اساس نوع صفحه</strong>
+        <div class="ocr-suitability-legend" aria-hidden="true">
+          <span class="suit-legend is-best">سبز: بهترین عملکرد</span>
+          <span class="suit-legend is-medium">زرد/نارنجی: متوسط</span>
+          <span class="suit-legend is-weak">قرمز: ضعیف</span>
+        </div>
+      </div>
+      <div id="ocrEngineTierGrid" class="ocr-engine-tier-grid" role="group" aria-label="انتخاب سریع موتور OCR با رنگ‌بندی عملکرد"></div>
+      <div id="ocrEngineFitBanner" class="ocr-engine-fit-banner" data-suitability="best" role="status" aria-live="polite"></div>
+    </section>
     <div class="checks">
       <label><input id="ocrOnlySelected" type="checkbox" checked> فقط تصاویر انتخاب‌شده</label>
       <label><input id="ocrContrast" type="checkbox" checked> افزایش کنتراست نسخهٔ موقت OCR</label>
@@ -172,6 +184,7 @@
     <div id="modelsToolbar" class="models-toolbar">
       <span id="modelsHardwareSummary" class="muted">وضعیت سخت‌افزار سیستم به همراه هر مدل بررسی می‌شود.</span>
       <div class="models-toolbar-actions">
+        <label class="models-mode-filter"><span>رنگ‌بندی عملکرد برای:</span><select id="modelsPageMode" aria-label="نوع صفحه برای رنگ‌بندی عملکرد مدل‌ها"><option value="auto">تشخیص خودکار</option><option value="comic">کمیک و مانگا</option><option value="document">کتاب، مقاله و جزوه</option></select></label>
         <button id="checkModelUpdatesBtn" class="bt" type="button">بررسی نسخهٔ جدید</button>
         <button id="updateAllModelsBtn" class="bt primary hidden" type="button">به‌روزرسانی همهٔ مدل‌ها</button>
       </div>
@@ -407,12 +420,12 @@
     </div>
   </dialog>
   <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.71"></script>
-  <script src="/groups.js?v=3.71"></script>
-  <script src="/rich-sanitize.js?v=3.71"></script>
-  <script src="/rich-editor.js?v=3.71"></script>
-  <script src="/inline-edit-session.js?v=3.71"></script>
-  <script src="/help-guide.js?v=3.71"></script>
-  <script src="/app.js?v=3.71"></script>
+  <script src="/typeset.js?v=3.72"></script>
+  <script src="/groups.js?v=3.72"></script>
+  <script src="/rich-sanitize.js?v=3.72"></script>
+  <script src="/rich-editor.js?v=3.72"></script>
+  <script src="/inline-edit-session.js?v=3.72"></script>
+  <script src="/help-guide.js?v=3.72"></script>
+  <script src="/app.js?v=3.72"></script>
 </body>
 </html>

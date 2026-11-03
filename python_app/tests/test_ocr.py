@@ -593,3 +593,35 @@ def test_tesseract_document_mode_uses_psm_3_and_skips_bubble_fallback(monkeypatc
     assert comic_blocks[0]["text"] == "Book chapter line"
 
 
+def test_engine_suitability_matrix_covers_all_13_engines_and_page_modes():
+    from comic_studio.ocr import ENGINE_INFO, ENGINE_SUITABILITY
+
+    assert set(ENGINE_SUITABILITY.keys()) == set(ENGINE_INFO.keys())
+    assert len(ENGINE_INFO) == 13
+    for engine_id, meta in ENGINE_INFO.items():
+        suit = meta["suitability"]
+        for mode in ("comic", "document", "auto"):
+            assert suit[mode]["tier"] in {"best", "medium", "weak"}, f"{engine_id}:{mode}"
+            assert isinstance(suit[mode]["reason"], str) and len(suit[mode]["reason"]) > 15
+
+    # Comic mode tiers: comic engines green, doc-layout engines amber/red
+    assert ENGINE_INFO["rapidocr-v6"]["suitability"]["comic"]["tier"] == "best"
+    assert ENGINE_INFO["easyocr"]["suitability"]["comic"]["tier"] == "best"
+    assert ENGINE_INFO["glm-ocr"]["suitability"]["comic"]["tier"] == "best"
+    assert ENGINE_INFO["surya"]["suitability"]["comic"]["tier"] == "medium"
+    assert ENGINE_INFO["paddleocr-vl-1-6"]["suitability"]["comic"]["tier"] == "medium"
+    assert ENGINE_INFO["tesseract"]["suitability"]["comic"]["tier"] == "weak"
+    assert ENGINE_INFO["mineru-2-5-pro"]["suitability"]["comic"]["tier"] == "weak"
+    assert ENGINE_INFO["olmocr"]["suitability"]["comic"]["tier"] == "weak"
+
+    # Document (book/article) mode tiers: document/layout engines green, comic-only red
+    assert ENGINE_INFO["tesseract"]["suitability"]["document"]["tier"] == "best"
+    assert ENGINE_INFO["surya"]["suitability"]["document"]["tier"] == "best"
+    assert ENGINE_INFO["paddleocr-vl-1-6"]["suitability"]["document"]["tier"] == "best"
+    assert ENGINE_INFO["mineru-2-5-pro"]["suitability"]["document"]["tier"] == "best"
+    assert ENGINE_INFO["olmocr"]["suitability"]["document"]["tier"] == "best"
+    assert ENGINE_INFO["rapidocr-v6"]["suitability"]["document"]["tier"] == "medium"
+    assert ENGINE_INFO["easyocr"]["suitability"]["document"]["tier"] == "weak"
+
+
+

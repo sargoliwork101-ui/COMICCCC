@@ -44,13 +44,28 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.71"
+    assert health.json()["version"] == "3.72"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
-    assert "Comic OCR Studio" in client.get("/").text
-    assert '<span class="ver">۳.۷۱ · Python</span>' in client.get("/").text
-    assert 'id="helpTopBtn"' in client.get("/").text
-    assert 'id="helpDialog"' in client.get("/").text
+    index_html = client.get("/").text
+    assert "Comic OCR Studio" in index_html
+    assert '<span class="ver">۳.۷۲ · Python</span>' in index_html
+    assert 'id="helpTopBtn"' in index_html
+    assert 'id="helpDialog"' in index_html
+    assert 'id="ocrSuitabilityPanel"' in index_html
+    assert 'id="ocrEngineTierGrid"' in index_html
+    assert 'id="ocrEngineFitBanner"' in index_html
+    assert 'id="modelsPageMode"' in index_html
+    engines_resp = client.get("/api/engines")
+    assert engines_resp.status_code == 200
+    engines_list = engines_resp.json()
+    assert len(engines_list) == 13
+    for eng in engines_list:
+        suit = eng.get("suitability")
+        assert isinstance(suit, dict)
+        for mode in ("auto", "comic", "document"):
+            assert suit[mode]["tier"] in {"best", "medium", "weak"}
+            assert len(suit[mode]["reason"]) > 15
     help_js = client.get("/help-guide.js")
     assert help_js.status_code == 200
     assert "ComicHelpGuide" in help_js.text and "مثال عملی" in help_js.text

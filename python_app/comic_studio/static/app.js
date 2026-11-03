@@ -603,9 +603,15 @@ function adoptProject(project) {
   state.groupEditId = null; state.groupSnapshot = null;
   $('projectName').value = project.name || 'پروژهٔ کمیک';
   const settings = project.settings || {};
-  $('ocrEngine').value = settings.ocrEngine || 'rapidocr-v6';
+  const pageMode = ['auto', 'comic', 'document'].includes(settings.ocrPageMode) ? settings.ocrPageMode : 'auto';
+  if ($('ocrPageMode')) $('ocrPageMode').value = pageMode;
+  if ($('modelsPageMode')) $('modelsPageMode').value = pageMode;
   $('ocrLanguage').value = settings.ocrLanguage || 'eng';
-  if ($('ocrPageMode')) $('ocrPageMode').value = ['auto', 'comic', 'document'].includes(settings.ocrPageMode) ? settings.ocrPageMode : 'auto';
+  if (state.engines.length) {
+    updateEngineOptions(settings.ocrEngine || 'rapidocr-v6');
+  } else {
+    $('ocrEngine').value = settings.ocrEngine || 'rapidocr-v6';
+  }
   $('ocrContrast').checked = settings.contrast !== false;
   $('ocrPrecise').checked = settings.precise !== false;
   $('ocrGroupLines').checked = settings.groupOcrLines !== false;
@@ -903,26 +909,186 @@ function collectOutputSettings() {
   state.project.settings.output = { name: $('exportName').value, seamless: $('exportSeamless').checked, uniformSize: $('exportUniform').checked, twoPerPage: $('exportTwo').checked, imageFormat: $('exportFormat').value, folderName: $('exportFolder').value, docxLayout: $('exportDocxLayout')?.value || 'visual' };
 }
 function collectOcrSettings() {
+  if (!state.project) return;
   state.project.settings = state.project.settings || {};
   Object.assign(state.project.settings, { ocrEngine: $('ocrEngine').value, ocrLanguage: $('ocrLanguage').value, ocrPageMode: $('ocrPageMode')?.value || 'auto', contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, groupOcrLines: $('ocrGroupLines').checked, eraseOriginal: $('ocrErase').checked });
 }
-function updateEngineOptions() {
-  const select = $('ocrEngine'); const previous = select.value || state.project?.settings?.ocrEngine || 'rapidocr-v6'; select.textContent = '';
+const DEFAULT_ENGINE_SUITABILITY = {
+  'rapidocr-v6': {
+    comic: { tier: 'best', reason: 'تشخیص سریع و دقیق حباب‌های گفتگوی کمیک و مانگا روی هر سیستمی (بدون نیاز به GPU).' },
+    document: { tier: 'medium', reason: 'خط‌خوانی سریع روی CPU؛ برای چیدمان پیچیدهٔ کتاب و مقاله موتورهای سبز (مثل Surya، PaddleOCR-VL یا Tesseract) دقیق‌ترند.' },
+    auto: { tier: 'best', reason: 'سریع‌ترین انتخاب متعادل برای صفحات ترکیبی کمیک و متن روزمره روی همهٔ سیستم‌ها.' },
+  },
+  'rapidocr-v5': {
+    comic: { tier: 'best', reason: 'عالی برای کمیک، مانگا و به‌ویژه مانهوای کره‌ای با سرعت بالا روی هر سیستمی.' },
+    document: { tier: 'medium', reason: 'سبک و چندزبانه (شامل کره‌ای)، اما روی فونت‌های ریز و متراکم کتاب متوسط است.' },
+    auto: { tier: 'medium', reason: 'گزینهٔ سبک چندزبانه (مناسب کره‌ای)؛ در انگلیسی دقت PP-OCRv6 و مدل‌های چیدمان بالاتر است.' },
+  },
+  easyocr: {
+    comic: { tier: 'best', reason: 'تشخیص بسیار خوب حروف و حباب‌های منحنی یا پراکندهٔ کمیک در هر چهار زبان.' },
+    document: { tier: 'weak', reason: 'فاقد تحلیل ساختار پاراگراف و ستون؛ در صفحات پُرمتن کتاب کند است و فاصلهٔ کلمات ریز را گاهی اشتباه می‌گیرد.' },
+    auto: { tier: 'medium', reason: 'مناسب حباب‌های کمیک است اما برای صفحات متراکم کتاب و مقاله توصیه نمی‌شود.' },
+  },
+  tesseract: {
+    comic: { tier: 'weak', reason: 'طراحی‌شده برای اسناد مسطح؛ روی فونت‌های فانتزی کمیک، حباب‌های منحنی و پس‌زمینهٔ نقاشی عملکرد ضعیفی دارد.' },
+    document: { tier: 'best', reason: 'عملکرد عالی، سریع و کم‌مصرف برای کتاب، مقاله و جزوه‌های چاپی یا اسکن‌شدهٔ تمیز با صفحه‌بندی خودکار ستون‌ها.' },
+    auto: { tier: 'medium', reason: 'عالی برای صفحات کتاب و مقاله، ولی اگر صفحه کمیک باشد روی حباب‌ها ضعیف عمل می‌کند.' },
+  },
+  'paddleocr-vl-1-6': {
+    comic: { tier: 'medium', reason: 'دقت خواندن متن بالاست اما بیشتر برای چیدمان اسناد ساخته شده و از موتورهای کمیک سنگین‌تر است.' },
+    document: { tier: 'best', reason: 'فوق‌العاده برای کتاب، مقالات چندستونی، تیترها و جداول با تشخیص هوشمند ساختار صفحه.' },
+    auto: { tier: 'best', reason: 'تشخیص هوشمند چیدمان برای پروژه‌های ترکیبی، کتاب‌های مصور و مقالات.' },
+  },
+  surya: {
+    comic: { tier: 'medium', reason: 'حباب‌های ساده را می‌خواند اما برای فونت‌های دفرمه و جلوه‌های صوتی کمیک بهینه نشده است.' },
+    document: { tier: 'best', reason: 'یکی از بهترین موتورها برای کتاب، مقالهٔ علمی، جزوه و تشخیص دقیق ترتیب سطرها و ستون‌ها.' },
+    auto: { tier: 'best', reason: 'عملکرد قوی و چندزبانه روی صفحات کتاب، جزوه و کتاب‌های مصور.' },
+  },
+  'mineru-2-5-pro': {
+    comic: { tier: 'weak', reason: 'مخصوص مقالات و اسناد علمی است؛ پنل‌های نقاشی کمیک را به‌عنوان تصویر غیرمتنی رد یا ناقص بخش‌بندی می‌کند.' },
+    document: { tier: 'best', reason: 'تخصصی‌ترین موتور برای کتاب‌های درسی، مقالات دانشگاهی چندستونی، جداول و جزوه‌های پیچیده.' },
+    auto: { tier: 'weak', reason: 'تک‌منظوره برای کتاب و مقاله است و روی کمیک ضعیف عمل می‌کند؛ برای کتاب، نوع صفحه را روی «کتاب و مقاله» بگذارید.' },
+  },
+  'got-ocr-2': {
+    comic: { tier: 'best', reason: 'مدل بینایی دقیق برای خواندن فونت‌های خاص داخل حباب‌های برش‌خوردهٔ کمیک و مانگا.' },
+    document: { tier: 'medium', reason: 'متن پاراگراف‌ها را خوب می‌خواند اما تحلیل مستقیم ستون‌بندی کل صفحه را ندارد و کندتر از Surya است.' },
+    auto: { tier: 'medium', reason: 'دقت خوب روی برش‌های متنی کمیک و پاراگراف‌های کوتاه، با سرعت متوسط روی CPU.' },
+  },
+  'glm-ocr': {
+    comic: { tier: 'best', reason: 'مدل بینایی‌ـ‌زبان قدرتمند در خواندن دیالوگ‌های کمیک، مانگا و فونت‌های دشوار.' },
+    document: { tier: 'medium', reason: 'کیفیت خوانش خوب روی بلوک‌های متن، ولی در صفحات خیلی پُرمتن کندتر از موتورهای تخصصی چیدمان سند است.' },
+    auto: { tier: 'best', reason: 'انعطاف‌پذیری بالا هم روی حباب‌های کمیک و هم روی پاراگراف‌های کتاب.' },
+  },
+  'dots-ocr': {
+    comic: { tier: 'medium', reason: 'قادر به خواندن کادرهاست اما نیازمند GPU قوی است و تمرکز اصلی آن روی اسناد است.' },
+    document: { tier: 'best', reason: 'عالی برای تشخیص هم‌زمان مختصات کادرها، ستون‌ها و متن در کتاب و مقاله (نیازمند NVIDIA GPU ≥ 8GB).' },
+    auto: { tier: 'medium', reason: 'دقیق ولی سنگین (نیازمند کارت گرافیک NVIDIA)؛ بیشتر مناسب اسناد و کتاب است.' },
+  },
+  'deepseek-ocr-2': {
+    comic: { tier: 'medium', reason: 'متن را دقیق می‌خواند ولی برای صفحات کمیک بسیار سنگین است (نیازمند GPU ≥ 12GB).' },
+    document: { tier: 'best', reason: 'دقت بسیار بالا در مکان‌یابی و استخراج متون متراکم کتاب، مقاله و جداول (روی NVIDIA GPU ≥ 12GB).' },
+    auto: { tier: 'medium', reason: 'مدل سنگین مخصوص سیستم‌های دارای GPU قوی؛ در اسناد و کتاب درخشان‌تر از کمیک است.' },
+  },
+  olmocr: {
+    comic: { tier: 'weak', reason: 'صرفاً روی مقالات و کتاب‌های PDF آموزش دیده و برای حباب‌های کمیک و مانگا نامناسب و بسیار سنگین است.' },
+    document: { tier: 'best', reason: 'فوق‌العاده برای کتاب‌های اسکن‌شدهٔ قدیمی، مقالات علمی و متون دشوار چاپی (نیازمند NVIDIA GPU ≥ 16GB).' },
+    auto: { tier: 'weak', reason: 'مدل ۷ میلیارد پارامتری مخصوص کتاب و اسناد روی GPU سنگین؛ برای حالت عمومی یا کمیک مناسب نیست.' },
+  },
+  'hunyuan-ocr': {
+    comic: { tier: 'medium', reason: 'تشخیص متن قوی دارد اما به دلیل نیاز به ۲۴ گیگابایت VRAM برای کمیک بیش‌ازحد سنگین است.' },
+    document: { tier: 'medium', reason: 'خوانش دقیق متن‌های چندزبانه، اما نیازمند کارت گرافیک حرفه‌ای ۲۴ گیگابایتی و کندتر از مدل‌های تخصصی سند است.' },
+    auto: { tier: 'weak', reason: 'صرفاً مناسب ایستگاه‌های کاری دارای GPU حرفه‌ای (24GB VRAM) در موارد خاص.' },
+  },
+};
+const SUITABILITY_META = {
+  best: { icon: '🟢', short: 'عالی', badge: 'بهترین عملکرد', cardBadge: 'عملکرد عالی' },
+  medium: { icon: '🟡', short: 'متوسط', badge: 'عملکرد متوسط', cardBadge: 'عملکرد متوسط' },
+  weak: { icon: '🔴', short: 'ضعیف', badge: 'عملکرد ضعیف', cardBadge: 'عملکرد ضعیف' },
+};
+const PAGE_MODE_LABELS = {
+  auto: 'تشخیص خودکار (کمیک، کتاب و مقاله)',
+  comic: 'کمیک و مانگا',
+  document: 'کتاب، مقاله و جزوه',
+};
+function engineSuitability(engine, pageMode = 'auto') {
+  const mode = ['auto', 'comic', 'document'].includes(pageMode) ? pageMode : 'auto';
+  const entry = engine?.suitability?.[mode] || DEFAULT_ENGINE_SUITABILITY[engine?.id]?.[mode] || { tier: 'medium', reason: '' };
+  const tier = ['best', 'medium', 'weak'].includes(entry.tier) ? entry.tier : 'medium';
+  return { tier, reason: entry.reason || '', ...SUITABILITY_META[tier] };
+}
+function updateEngineOptions(preferredEngine = '') {
+  const select = $('ocrEngine'); if (!select) return;
+  const pageMode = $('ocrPageMode')?.value || state.project?.settings?.ocrPageMode || 'auto';
+  const previous = (typeof preferredEngine === 'string' && preferredEngine) || select.value || state.project?.settings?.ocrEngine || 'rapidocr-v6';
+  select.textContent = '';
   state.engines.filter((engine) => engine.selectable !== false).forEach((engine) => {
+    const suit = engineSuitability(engine, pageMode);
     const option = document.createElement('option');
     option.value = engine.id;
-    const suffix = engine.updateAvailable ? ' (نسخهٔ جدید موجود است)' : engine.runtimeInstalled ? '' : ' (نیازمند نصب خودکار)';
-    option.textContent = `${engine.name}${suffix}`;
+    option.className = `ocr-opt-${suit.tier}`;
+    option.dataset.suitability = suit.tier;
+    const suffix = engine.updateAvailable ? ' · نسخهٔ جدید' : engine.runtimeInstalled ? '' : ' · نیازمند نصب خودکار';
+    option.textContent = `${suit.icon} ${engine.name} — ${suit.short}${suffix}`;
     select.appendChild(option);
   });
   select.value = state.engines.some((engine) => engine.id === previous) ? previous : 'rapidocr-v6';
   updateOcrEngineStatus();
   syncEngineUpdateUi();
 }
+function renderOcrSuitabilityPanel() {
+  const grid = $('ocrEngineTierGrid');
+  const banner = $('ocrEngineFitBanner');
+  const titleEl = $('ocrSuitabilityTitle');
+  const select = $('ocrEngine');
+  if (!grid || !banner || !select) return;
+  const pageMode = $('ocrPageMode')?.value || 'auto';
+  const selectedId = select.value;
+  const activeLang = $('ocrLanguage')?.value || 'eng';
+  if (titleEl) {
+    titleEl.textContent = `رنگ‌بندی عملکرد موتورها برای «${PAGE_MODE_LABELS[pageMode] || PAGE_MODE_LABELS.auto}»`;
+  }
+  const selectable = state.engines.filter((engine) => engine.selectable !== false);
+  const tierOrder = { best: 0, medium: 1, weak: 2 };
+  const sortedForChips = [...selectable].sort((a, b) => {
+    const ta = tierOrder[engineSuitability(a, pageMode).tier] ?? 1;
+    const tb = tierOrder[engineSuitability(b, pageMode).tier] ?? 1;
+    return ta - tb;
+  });
+  grid.textContent = '';
+  sortedForChips.forEach((engine) => {
+    const suit = engineSuitability(engine, pageMode);
+    const isSelected = engine.id === selectedId;
+    const langSupported = (engine.languages || []).includes(activeLang);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `ocr-tier-chip is-${suit.tier}${isSelected ? ' is-selected' : ''}${!langSupported ? ' is-lang-unsupported' : ''}`;
+    btn.dataset.engineId = engine.id;
+    btn.dataset.suitability = suit.tier;
+    btn.setAttribute('aria-pressed', String(isSelected));
+    btn.title = `${engine.name} — ${suit.badge}${suit.reason ? `: ${suit.reason}` : ''}`;
+    const nameSpan = document.createElement('span');
+    nameSpan.dir = 'ltr';
+    nameSpan.textContent = `${isSelected ? '✓ ' : ''}${engine.name}`;
+    const tagSpan = document.createElement('span');
+    tagSpan.className = 'ocr-tier-chip-tag';
+    tagSpan.textContent = `(${suit.short})`;
+    btn.append(nameSpan, tagSpan);
+    btn.addEventListener('click', () => {
+      select.value = engine.id;
+      collectOcrSettings();
+      updateOcrEngineStatus();
+    });
+    grid.appendChild(btn);
+  });
+
+  const currentEngine = state.engines.find((entry) => entry.id === selectedId);
+  if (!currentEngine) return;
+  const curSuit = engineSuitability(currentEngine, pageMode);
+  select.dataset.suitability = curSuit.tier;
+  banner.dataset.suitability = curSuit.tier;
+  banner.textContent = '';
+  const badge = document.createElement('span');
+  badge.className = 'ocr-fit-badge';
+  badge.textContent = `${curSuit.badge} برای ${PAGE_MODE_LABELS[pageMode] || 'این حالت'}`;
+  const reasonSpan = document.createElement('span');
+  let extraHint = '';
+  if (curSuit.tier === 'weak') {
+    const greenNames = selectable
+      .filter((e) => engineSuitability(e, pageMode).tier === 'best' && (e.languages || []).includes(activeLang))
+      .slice(0, 4)
+      .map((e) => e.name);
+    if (greenNames.length) {
+      extraHint = ` پیشنهاد بهتر (سبز): ${greenNames.join('، ')}.`;
+    }
+  }
+  reasonSpan.textContent = `${currentEngine.name}: ${curSuit.reason}${extraHint}`;
+  banner.append(badge, reasonSpan);
+}
 function updateOcrEngineStatus() {
   const engine = state.engines.find((entry) => entry.id === $('ocrEngine').value); if (!engine) return;
   [...$('ocrLanguage').options].forEach((option) => { option.disabled = !engine.languages.includes(option.value); });
   if (!engine.languages.includes($('ocrLanguage').value)) $('ocrLanguage').value = engine.languages[0];
+  renderOcrSuitabilityPanel();
   const lang = $('ocrLanguage').value;
   const langReady = Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(lang));
   const versionLabel = engine.installedVersion ? ` (نسخهٔ ${engine.installedVersion})` : '';
@@ -1661,16 +1827,25 @@ async function confirmHardwareIfNeeded(engine, hwOverride = null) {
 function renderModels() {
   const container = $('engineCards'); if (!container) return;
   container.textContent = ''; const language = $('testLanguage').value;
+  const modelsMode = $('modelsPageMode')?.value || $('ocrPageMode')?.value || 'auto';
   const addGroup = (title, engines, external = false) => {
     if (!engines.length) return;
     const group = document.createElement('section'); group.className = 'model-group';
     const heading = document.createElement('h3'); heading.className = 'model-group-title'; heading.textContent = title; group.appendChild(heading);
     const cards = document.createElement('div'); cards.className = 'model-group-grid'; group.appendChild(cards); container.appendChild(group);
     engines.forEach((engine) => {
+      const suit = engineSuitability(engine, modelsMode);
       const card = document.createElement('section'); card.className = `engine-card${external ? ' external-engine' : ''}`;
+      if (!external) card.dataset.suitability = suit.tier;
       const head = document.createElement('div'); head.className = 'engine-card-head';
       const titleEl = document.createElement('h3'); titleEl.textContent = engine.name;
       const badges = document.createElement('div'); badges.className = 'engine-badges';
+      if (!external) {
+        const suitChip = document.createElement('span');
+        suitChip.className = `engine-chip is-suit-${suit.tier}`;
+        suitChip.textContent = `${suit.cardBadge} (${PAGE_MODE_LABELS[modelsMode] || modelsMode})`;
+        badges.appendChild(suitChip);
+      }
       const supported = (engine.languages || []).includes(language);
       const ready = supported && (engine.readyLanguages || []).includes(language);
       if (ready) {
@@ -1695,8 +1870,10 @@ function renderModels() {
       const family = document.createElement('div'); family.className = 'hint';
       family.textContent = engine.downloadSizeGb ? `${engine.family} · حجم تقریبی: ${engine.downloadSizeGb} گیگابایت` : engine.family;
       const description = document.createElement('p'); description.textContent = engine.description;
+      const suitReason = !external && suit.reason ? (() => { const el = document.createElement('div'); el.className = 'engine-suit-reason'; el.textContent = `عملکرد در «${PAGE_MODE_LABELS[modelsMode] || modelsMode}»: ${suit.reason}`; return el; })() : null;
       const status = document.createElement('div'); status.className = 'engine-status';
-      card.append(head, family, description, status);
+      if (suitReason) card.append(head, family, description, suitReason, status);
+      else card.append(head, family, description, status);
       if (external) {
         status.textContent = 'اجرای جداگانه · آداپتور مستقیم OCR کمیک ندارد';
         const requirements = document.createElement('div'); requirements.className = 'engine-limit'; requirements.textContent = engine.requirements || '';
@@ -3845,8 +4022,14 @@ function bindEvents() {
   $('duplicateBtn').addEventListener('click', () => duplicateImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); });
-  $('ocrEngine').addEventListener('change', updateOcrEngineStatus);
-  $('ocrLanguage').addEventListener('change', updateOcrEngineStatus);
+  $('ocrEngine').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); });
+  $('ocrLanguage').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); });
+  $('ocrPageMode')?.addEventListener('change', () => {
+    collectOcrSettings();
+    if ($('modelsPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
+    updateEngineOptions();
+    if ($('modelsDialog')?.open) renderModels();
+  });
   $('ocrQuickPrepareBtn')?.addEventListener('click', () => {
     const engine = state.engines.find((entry) => entry.id === $('ocrEngine').value);
     if (engine) downloadEngine(engine, { languageOverride: $('ocrLanguage').value, fromOcrDialog: true }).catch(() => {});
@@ -3926,8 +4109,15 @@ function bindEvents() {
   $('translationSkill').addEventListener('input', updateTranslationSkillStatus); $('translationContext').addEventListener('input', updateTranslationSkillStatus); $('translationContextResume').addEventListener('change', updateTranslationSkillStatus);
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewData = null; } });
-  $('modelsBtn').addEventListener('click', () => { renderModels(); showDialog('modelsDialog'); setMenuOpen(false); checkEngineUpdates({ force: false, silent: true }).catch(() => {}); });
+  $('modelsBtn').addEventListener('click', () => {
+    if ($('modelsPageMode') && $('ocrPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
+    renderModels();
+    showDialog('modelsDialog');
+    setMenuOpen(false);
+    checkEngineUpdates({ force: false, silent: true }).catch(() => {});
+  });
   $('testLanguage').addEventListener('change', renderModels);
+  $('modelsPageMode')?.addEventListener('change', renderModels);
   $('checkModelUpdatesBtn')?.addEventListener('click', () => checkEngineUpdates({ force: true, silent: false }).catch(() => {}));
   $('updateAllModelsBtn')?.addEventListener('click', () => updateAllEngines().catch(() => {}));
   $('engineUpdateNowBtn')?.addEventListener('click', () => {
