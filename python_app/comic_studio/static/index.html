@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.80">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.80">
+  <link rel="stylesheet" href="/style.css?v=3.81">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.81">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۸۰ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۸۱ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)">؟ راهنما (Help)</button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu">☰ پروژه و تنظیمات</button>
@@ -64,6 +64,11 @@
         <button id="ungroupBtn" class="bt">لغو گروه</button>
         <button id="duplicateBtn" class="bt">ساخت کپی</button>
         <button id="deleteBtn" class="bt danger">حذف تصاویر</button>
+        <span class="row2-sep" aria-hidden="true"></span>
+        <button id="approveSelectedBtn" class="bt approve-toolbar-btn" type="button" title="زدن مهر تأیید نهایی روی صفحات انتخاب‌شده (فقط داخل برنامه)">✓ تأیید انتخاب‌شده‌ها</button>
+        <button id="unapproveSelectedBtn" class="bt" type="button" title="برداشتن مهر تأیید از صفحات انتخاب‌شده">لغو تأیید</button>
+        <button id="selectApprovedBtn" class="bt" type="button" title="انتخاب فقط صفحاتی که مهر تأیید نهایی دارند (مناسب خروجی گرفتن)">انتخاب تأییدشده‌ها</button>
+        <button id="selectUnapprovedBtn" class="bt" type="button" title="انتخاب فقط صفحاتی که هنوز تأیید نهایی نشده‌اند">انتخاب تأییدنشده‌ها</button>
         <span class="hint-inline">کارت‌ها را بکشید: وسط کارت = گروه، لبه‌ها = جابه‌جایی، لبهٔ کارت هم‌گروه = ترتیب داخلی، فضای خالی = خارج‌کردن از گروه</span>
       </div>
     </section>
@@ -315,7 +320,7 @@
   </dialog>
 
   <dialog id="editorDialog" class="dlg editor-dialog">
-    <div class="dialog-head"><h2 id="editorTitle">ویرایش متن</h2><div><label class="overlay-mode-control">متن روی تصویر<select id="overlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label><button id="editorRevert" class="bt danger">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt">به‌روزرسانی پیش‌نمایش</button><button id="editorClose" class="bt primary">ذخیره و بستن</button></div></div>
+    <div class="dialog-head"><h2 id="editorTitle">ویرایش متن</h2><div><label class="overlay-mode-control">متن روی تصویر<select id="overlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label><button id="editorRevert" class="bt danger" type="button">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt" type="button">به‌روزرسانی پیش‌نمایش</button><button id="editorUnapproveBtn" class="bt hidden" type="button" title="برداشتن مهر تأیید نهایی از این صفحه">لغو تأیید صفحه</button><button id="editorCancel" class="bt" type="button" title="لغو تغییرات این نوبت ویرایش و خروج بدون ذخیره">انصراف بدون ذخیره</button><button id="editorClose" class="bt primary" type="button">ذخیره و بستن</button><button id="editorApproveClose" class="bt success" type="button" title="ذخیرهٔ تغییرات، زدن مهر تأیید نهایی روی این صفحه و بستن ویرایشگر">✓ ذخیره، تأیید و بستن</button></div></div>
     <div id="editorProgressWrap" class="editor-progress-wrap hidden"><div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت عملیات ویرایشگر" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="editorProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div></div>
       <section id="inlineEditor" class="inline-editor is-idle" role="region" aria-label="ویرایش متن انتخاب‌شده">
         <div class="inline-editor-head">
@@ -485,12 +490,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-  <script src="/typeset.js?v=3.80"></script>
-  <script src="/groups.js?v=3.80"></script>
-  <script src="/rich-sanitize.js?v=3.80"></script>
-  <script src="/rich-editor.js?v=3.80"></script>
-  <script src="/inline-edit-session.js?v=3.80"></script>
-  <script src="/help-guide.js?v=3.80"></script>
-  <script src="/app.js?v=3.80"></script>
+  <script src="/typeset.js?v=3.81"></script>
+  <script src="/groups.js?v=3.81"></script>
+  <script src="/rich-sanitize.js?v=3.81"></script>
+  <script src="/rich-editor.js?v=3.81"></script>
+  <script src="/inline-edit-session.js?v=3.81"></script>
+  <script src="/help-guide.js?v=3.81"></script>
+  <script src="/app.js?v=3.81"></script>
 </body>
 </html>

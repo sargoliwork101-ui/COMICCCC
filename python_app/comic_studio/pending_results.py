@@ -160,7 +160,7 @@ def resolve(store: ProjectStore, project_id: str, token: str, revision: str,
             for row, output in zip(view['rows'], entry['outputs']):
                 if row['missing'] or (row['conflict'] and choices[row['key']] == 'keep'): continue
                 item = images[output['id']]
-                item['blocks'] = copy.deepcopy(output['blocks']); item['ocrCompleted'] = True; item['edited'] = False
+                item['blocks'] = copy.deepcopy(output['blocks']); item['ocrCompleted'] = True; item['edited'] = False; item['approved'] = False
                 if output.get('pageMode') in {'comic', 'document'}:
                     item['pageMode'] = output['pageMode']
                 replace.append(output['id'])

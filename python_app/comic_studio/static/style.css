@@ -295,6 +295,21 @@ input,textarea,[contenteditable="true"]{user-select:text;-webkit-user-select:tex
 .mini-clip-btn{padding:3px 9px!important;min-height:26px!important;font-size:10.5px!important;border-radius:7px!important}
 .bt.over-budget-blocked{background:linear-gradient(135deg,#e11d48,#fb7185)!important;border-color:transparent!important;color:#fff!important;opacity:.92}
 
+/* v3.81: App-only center approval stamp, bulk approval filters, and editor cancel/approve actions */
+.tw-shell{position:relative;display:block;width:100%}
+.approval-stamp{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-9deg);z-index:4;pointer-events:none;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-width:84px;padding:7px 14px;border-radius:999px;border:2.5px solid #34d399;outline:1px solid #34d39977;outline-offset:-5px;background:#062117d8;color:#6ee7b7;font-weight:800;box-shadow:0 8px 22px #000b,0 0 18px #10b98144;backdrop-filter:blur(4px);transition:transform .2s ease;text-align:center;line-height:1.2}
+.approval-stamp-check{font-size:19px;line-height:1;color:#34d399;text-shadow:0 1px 4px #000a}
+.approval-stamp-text{font-size:10px;letter-spacing:.2px;white-space:nowrap;color:#ecfdf5}
+.item:hover .approval-stamp{transform:translate(-50%,calc(-50% - 3px)) rotate(-9deg)}
+.item .act{flex-wrap:wrap;max-width:calc(100% - 36px);gap:3px}
+.item .act button{padding:3px 5px;min-width:24px}
+.item .act .approve-mark.is-approved{background:linear-gradient(135deg,#059669,#10b981);border-color:#6ee7b7aa;color:#fff}
+.row2-sep{width:1px;height:18px;background:var(--line-2);margin:0 2px;flex:none}
+.approve-toolbar-btn{border-color:#10b98166;color:#34d399}
+body.light .approve-toolbar-btn{border-color:#05966955;color:#059669}
+.editor-dialog>.dialog-head>div{align-items:center}
+
+
 
 
 

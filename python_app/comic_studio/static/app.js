@@ -29,6 +29,8 @@ let heartbeatInFlight = false;
 let sessionVisibilityBound = false;
 let localActivityId = 0;
 let editorCloseTask = null;
+let editorSessionSnapshot = null;
+let savePending = false;
 let editorCanvasFrame = 0;
 let editorLoadSeq = 0;
 let overlayMeasureCtx = null;
@@ -663,11 +665,13 @@ async function runJob(message, task, progressId = null) {
   }
 }
 function scheduleSave() {
-  clearTimeout(saveTimer); ++saveRevision; $('saveState').textContent = 'در حال ذخیره…';
+  clearTimeout(saveTimer); savePending = true;
+  if (editorSessionSnapshot && state.editorId === editorSessionSnapshot.imageId) editorSessionSnapshot.autoSaved = true;
+  ++saveRevision; $('saveState').textContent = 'در حال ذخیره…';
   saveTimer = setTimeout(() => saveProject().catch((error) => toast(error.message, true)), 350);
 }
 async function saveProject() {
-  clearTimeout(saveTimer);
+  clearTimeout(saveTimer); savePending = false;
   if (!state.project) return;
   const project = state.project;
   G.normalizeLayout(project.images);
@@ -767,13 +771,27 @@ function hasRenderableText(block) { return !!block.tr?.trim() || !!(!block._plai
 function hasOverlayText(item, mode = currentOverlayMode()) { return overlayBlocks(item, mode).some((block) => block.enabled && hasRenderableText(block)); }
 function renderAll() { renderGrid(); updateEngineOptions(); }
 function updateSummary() {
-  const total = state.project?.images.length || 0;
+  const images = state.project?.images || [];
+  const total = images.length;
   const selected = selectedImages().length;
-  const groups = G.info(state.project?.images || []).length;
-  $('selectionSummary').textContent = total ? `${selected} از ${total} تصویر انتخاب شده · ${groups} گروه` : 'هنوز فایلی وارد نشده است';
+  const approved = images.filter((item) => item.approved).length;
+  const groups = G.info(images).length;
+  $('selectionSummary').textContent = total ? `${selected} از ${total} تصویر انتخاب شده · ${approved} از ${total} تأیید شده · ${groups} گروه` : 'هنوز فایلی وارد نشده است';
   $('emptyState').classList.toggle('hidden', total > 0);
   $('ocrBtn').disabled = !total; $('translateBtn').disabled = !total;
   $('exportBtn').disabled = !total;
+  ['approveSelectedBtn', 'unapproveSelectedBtn', 'selectApprovedBtn', 'selectUnapprovedBtn'].forEach((id) => {
+    const btn = $(id);
+    if (btn) btn.disabled = !total;
+  });
+}
+function toggleImageApproved(imageId, nextValue = null) {
+  const item = state.project?.images.find((entry) => entry.id === imageId);
+  if (!item) return;
+  item.approved = nextValue === null ? !item.approved : !!nextValue;
+  if (state.editorId === item.id) syncEditorApprovalHeader(item);
+  renderGrid();
+  scheduleSave();
 }
 function makeButton(label, handler, className = 'bt') {
   const button = document.createElement('button'); button.type = 'button'; button.textContent = label; button.className = className;
@@ -806,20 +824,42 @@ function renderGrid() {
   sortedImages().forEach((item, index) => {
     const info = G.validId(item.groupId) ? byId.get(G.idKey(item.groupId)) : null;
     const card = document.createElement('article');
-    card.className = `item${item.selected ? ' selected' : ''}${info ? ' in-group' : ''}${state.groupEditId && info && G.idKey(state.groupEditId) === info.key ? ' group-focus' : ''}`;
+    card.className = `item${item.selected ? ' selected' : ''}${item.approved ? ' approved' : ''}${info ? ' in-group' : ''}${item.crop ? ' cropped' : ''}${state.groupEditId && info && G.idKey(state.groupEditId) === info.key ? ' group-focus' : ''}`;
     card.dataset.id = item.id; card.draggable = true;
     if (info) card.style.setProperty('--group-color', groupColor(info.id));
+    const frameShell = document.createElement('div'); frameShell.className = 'tw-shell';
     const frame = document.createElement('div'); frame.className = 'tw';
     const image = document.createElement('img'); image.src = imageUrl(item, !!item.edited, true); image.alt = item.name; image.loading = 'lazy'; image.draggable = false;
     image.addEventListener('load', scheduleOutlines); image.addEventListener('click', (event) => { event.stopPropagation(); setSelected(item, !item.selected, event); });
     frame.appendChild(image);
+    frameShell.appendChild(frame);
+    if (item.approved) {
+      const stamp = document.createElement('div');
+      stamp.className = 'approval-stamp';
+      stamp.setAttribute('aria-label', 'تأیید نهایی شده');
+      const stampCheck = document.createElement('span'); stampCheck.className = 'approval-stamp-check'; stampCheck.textContent = '✓';
+      const stampText = document.createElement('span'); stampText.className = 'approval-stamp-text'; stampText.textContent = 'تأیید شد';
+      stamp.append(stampCheck, stampText);
+      frameShell.appendChild(stamp);
+    }
     const tick = document.createElement('input'); tick.type = 'checkbox'; tick.className = 'tick'; tick.checked = !!item.selected; tick.setAttribute('aria-label', `انتخاب ${item.name}`);
     tick.addEventListener('click', (event) => {
       // The browser has already applied the new checkbox value; consume this one click without cancelling it.
       event.stopPropagation(); setSelected(item, tick.checked, event);
     });
     const act = document.createElement('div'); act.className = 'act';
-    act.append(makeButton('👁', () => openPreview(item), 'bt'), makeButton('✎', () => openEditor(item.id), 'bt'), makeButton('✂', () => openCrop(item.id), 'bt crop-mark'), makeButton('⧉', () => duplicateImages([item.id]), 'bt'), makeButton('🗑', () => deleteImages([item.id]), 'bt danger'));
+    const approveBtn = makeButton('✓', () => toggleImageApproved(item.id), `bt approve-mark${item.approved ? ' is-approved' : ''}`);
+    approveBtn.title = item.approved ? 'برداشتن مهر تأیید نهایی این صفحه' : 'زدن مهر تأیید نهایی (آمادهٔ خروجی)';
+    approveBtn.setAttribute('aria-label', approveBtn.title);
+    approveBtn.setAttribute('aria-pressed', String(!!item.approved));
+    act.append(
+      makeButton('👁', () => openPreview(item), 'bt'),
+      makeButton('✎', () => openEditor(item.id), 'bt'),
+      makeButton('✂', () => openCrop(item.id), 'bt crop-mark'),
+      makeButton('⧉', () => duplicateImages([item.id]), 'bt'),
+      makeButton('🗑', () => deleteImages([item.id]), 'bt danger'),
+      approveBtn,
+    );
     const name = document.createElement('div'); name.className = 'name';
     const nameText = document.createElement('span'); nameText.className = 'name-text'; nameText.textContent = item.name; nameText.title = item.name; nameText.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:10px';
     const order = document.createElement('input'); order.type = 'number'; order.min = '1'; order.value = String(index + 1); order.className = 'mini'; order.title = 'ترتیب'; order.setAttribute('aria-label', 'ترتیب تصویر');
@@ -831,8 +871,8 @@ function renderGrid() {
     });
     name.append(nameText, order, makeButton('↑', () => moveImageBy(item.id, -1), 'bt mini'), makeButton('↓', () => moveImageBy(item.id, 1), 'bt mini'));
     const meta = document.createElement('div'); meta.className = 'meta';
-    meta.textContent = `${item.width}×${item.height} · ${item.blocks?.length || 0} متن${item.crop ? ' · برش' : ''}${item.edited ? ' · ویرایش' : ''}`;
-    card.append(frame, tick, act, name, meta);
+    meta.textContent = `${item.width}×${item.height} · ${item.blocks?.length || 0} متن${item.crop ? ' · برش' : ''}${item.edited ? ' · ویرایش' : ''}${item.approved ? ' · تأیید ✓' : ''}`;
+    card.append(frameShell, tick, act, name, meta);
     if (info) {
       const badge = document.createElement('span'); badge.className = 'grp'; badge.textContent = `گروه ${info.id}`; badge.title = `${info.members.length} عضو`; card.appendChild(badge);
     }
@@ -2735,6 +2775,48 @@ async function saveAiSettings(options = {}) {
 
 // ---------- Full-page translation editor ----------
 function editorItem() { return state.project?.images.find((item) => item.id === state.editorId); }
+function syncEditorApprovalHeader(item = editorItem()) {
+  if (!item) return;
+  $('editorTitle').textContent = `ویرایش — ${item.name}${item.approved ? ' (✓ تأییدشده)' : ''}`;
+  $('editorUnapproveBtn')?.classList.toggle('hidden', !item.approved);
+}
+function readProjectImageDrafts(projectId, imageId) {
+  const entries = [];
+  if (!projectId || !imageId || typeof localStorage === 'undefined') return entries;
+  const prefix = `comic-studio-draft:${encodeURIComponent(projectId)}:${encodeURIComponent(imageId)}:`;
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith(prefix)) entries.push([key, localStorage.getItem(key)]);
+  }
+  return entries;
+}
+function restoreProjectImageDrafts(projectId, imageId, entries) {
+  if (!projectId || !imageId || typeof localStorage === 'undefined') return;
+  const prefix = `comic-studio-draft:${encodeURIComponent(projectId)}:${encodeURIComponent(imageId)}:`;
+  const toRemove = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith(prefix)) toRemove.push(key);
+  }
+  toRemove.forEach((key) => localStorage.removeItem(key));
+  (entries || []).forEach(([key, value]) => {
+    if (value !== null && value !== undefined) localStorage.setItem(key, value);
+  });
+}
+function discardInlineEditorForCancel() {
+  if (!inlineDraft) return;
+  if (document.activeElement === $('inlineLineSize')) $('inlineLineSize').blur();
+  classicEditor.clearDraft();
+  classicEditor.closeModal?.({ restoreFocus: false });
+  classicEditor.exitFullscreen();
+  classicEditor.detachField();
+  const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
+  box?.classList.remove('editing', 'show-output');
+  inlineDraft = null; inlineEditSession = null;
+  updateInlineSelectionHighlight();
+  syncInlineDockIdleState();
+  document.querySelector('.editor-preview').style.paddingTop = '';
+}
 function boxOf(block) { return { x0: Number.isFinite(block.tx0) ? block.tx0 : block.x0, y0: Number.isFinite(block.ty0) ? block.ty0 : block.y0, x1: Number.isFinite(block.tx1) ? block.tx1 : block.x1, y1: Number.isFinite(block.ty1) ? block.ty1 : block.y1 }; }
 async function openEditor(imageId) {
   const loadSeq = ++editorLoadSeq;
@@ -2743,7 +2825,19 @@ async function openEditor(imageId) {
   const item = state.project?.images.find((entry) => entry.id === imageId);
   if (!item) return;
   if (inlineDraft) closeInlineEditor(true); else syncInlineDockIdleState();
-  state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null; $('editorStage').classList.remove('panning'); $('editorTitle').textContent = `ویرایش — ${item.name}`; $('blockList').textContent = ''; showDialog('editorDialog');
+  state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null;
+  editorSessionSnapshot = {
+    projectId: state.project.id,
+    imageId: item.id,
+    blocksJson: JSON.stringify(item.blocks || []),
+    approved: !!item.approved,
+    edited: !!item.edited,
+    overlayMode: currentOverlayMode(),
+    draftEntries: readProjectImageDrafts(state.project.id, item.id),
+    serverPreviewTouched: false,
+    autoSaved: false,
+  };
+  $('editorStage').classList.remove('panning'); syncEditorApprovalHeader(item); $('blockList').textContent = ''; showDialog('editorDialog');
   const response = await fetch(imageUrl(item));
   if (response.ok === false) throw new Error('تصویر اصلی باز نشد');
   const bitmap = await createImageBitmap(await response.blob());
@@ -4277,24 +4371,76 @@ function buildBlockList() {
 }
 async function applyEditor() {
   const item = editorItem(); if (!item) return !inlineDraft; if (!applyInlineEditor()) return false;
+  if (editorSessionSnapshot && editorSessionSnapshot.imageId === item.id) editorSessionSnapshot.serverPreviewTouched = true;
   $('editorProgressWrap')?.classList.remove('hidden'); setProgress('editorProgress', 0.25, true);
   try { await overlayPreviewTask; setProgress('editorProgress', 0.55, true); await saveProject(); await renderAndUpload(item); renderGrid(); setProgress('editorProgress', 1, false); return true; }
   finally { $('editorProgressWrap')?.classList.add('hidden'); }
 }
-async function closeEditor() {
+async function closeEditor(markApproved = false) {
   if (imageOverview) await exitImageOverview();
   if (editorCloseTask) return editorCloseTask;
   editorCloseTask = (async () => {
     const item = editorItem();
     if (item ? !applyInlineEditor() : !!inlineDraft) return;
     editorLoadSeq += 1;
-    if (item) { await overlayPreviewTask; await saveProject(); await renderAndUpload(item); renderGrid(); }
+    if (item) {
+      if (markApproved === true) item.approved = true;
+      await overlayPreviewTask;
+      await saveProject();
+      await renderAndUpload(item);
+      renderGrid();
+    }
+    editorSessionSnapshot = null;
     if (editorCanvasFrame) { cancelAnimationFrame(editorCanvasFrame); editorCanvasFrame = 0; }
     closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; $('editorCanvas').width = $('editorCanvas').height = 0; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
+    if (item && markApproved === true) toast('تغییرات ذخیره شد و مهر تأیید نهایی روی صفحه ثبت گردید');
   })();
   try { await editorCloseTask; } finally { editorCloseTask = null; }
 }
-async function revertEditor() { const item = editorItem(); if (!item || !closeInlineEditor()) return; item.blocks.forEach((block) => { block.enabled = false; }); await saveProject(); await renderAndUpload(item); drawEditor(); buildBlockList(); renderGrid(); toast('تصویر اصلی بازیابی شد؛ متن‌ها برای استفادهٔ بعدی باقی ماندند'); }
+async function cancelEditor() {
+  if (imageOverview) await exitImageOverview();
+  if (editorCloseTask) return editorCloseTask;
+  editorCloseTask = (async () => {
+    const item = editorItem();
+    const snap = editorSessionSnapshot;
+    const hadInlineDraft = !!inlineDraft;
+    const hadPendingSave = savePending;
+    discardInlineEditorForCancel();
+    clearTimeout(saveTimer); savePending = false;
+    editorLoadSeq += 1;
+    if (item && snap && state.project?.id === snap.projectId && item.id === snap.imageId) {
+      const changedBlocks = JSON.stringify(item.blocks || []) !== snap.blocksJson;
+      const changedApproved = !!item.approved !== snap.approved;
+      const changedMode = currentOverlayMode() !== snap.overlayMode;
+      item.blocks = JSON.parse(snap.blocksJson);
+      item.approved = snap.approved;
+      restoreProjectImageDrafts(snap.projectId, snap.imageId, snap.draftEntries);
+      if (changedMode) {
+        state.project.settings = state.project.settings || {};
+        state.project.settings.overlayMode = snap.overlayMode;
+        $('overlayMode').value = snap.overlayMode;
+        $('exportOverlayMode').value = snap.overlayMode;
+      }
+      if (changedBlocks || changedApproved || changedMode || hadInlineDraft || hadPendingSave || snap.autoSaved || snap.serverPreviewTouched) {
+        await overlayPreviewTask;
+        await saveProject();
+        if (changedMode) await renderImagesText();
+        else await renderAndUpload(item);
+      }
+      renderGrid();
+    }
+    editorSessionSnapshot = null;
+    if (editorCanvasFrame) { cancelAnimationFrame(editorCanvasFrame); editorCanvasFrame = 0; }
+    closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; $('editorCanvas').width = $('editorCanvas').height = 0; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
+    toast('ویرایش این صفحه بدون ذخیرهٔ تغییرات بسته شد');
+  })();
+  try { await editorCloseTask; } finally { editorCloseTask = null; }
+}
+async function revertEditor() {
+  const item = editorItem(); if (!item || !closeInlineEditor()) return;
+  if (editorSessionSnapshot && editorSessionSnapshot.imageId === item.id) editorSessionSnapshot.serverPreviewTouched = true;
+  item.blocks.forEach((block) => { block.enabled = false; }); await saveProject(); await renderAndUpload(item); drawEditor(); buildBlockList(); renderGrid(); toast('تصویر اصلی بازیابی شد؛ متن‌ها برای استفادهٔ بعدی باقی ماندند');
+}
 
 // ---------- Crop with aspect ratio, moving, and eight handles ----------
 function cropItem() { return state.project.images.find((item) => item.id === state.cropId); }
@@ -4445,6 +4591,36 @@ function bindEvents() {
   $('cancelGroupEdit').addEventListener('click', () => finishGroupEdit(true));
   $('duplicateBtn').addEventListener('click', () => duplicateImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
   $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
+  $('approveSelectedBtn')?.addEventListener('click', () => {
+    const items = selectedImages();
+    if (!items.length) { toast('ابتدا حداقل یک صفحه را انتخاب کنید', true); return; }
+    items.forEach((item) => { item.approved = true; });
+    renderGrid(); scheduleSave();
+    toast(`مهر تأیید روی ${items.length} صفحه ثبت شد`);
+  });
+  $('unapproveSelectedBtn')?.addEventListener('click', () => {
+    const items = selectedImages();
+    if (!items.length) { toast('ابتدا حداقل یک صفحه را انتخاب کنید', true); return; }
+    items.forEach((item) => { item.approved = false; });
+    renderGrid(); scheduleSave();
+    toast(`مهر تأیید از ${items.length} صفحه برداشته شد`);
+  });
+  $('selectApprovedBtn')?.addEventListener('click', () => {
+    const images = state.project?.images || [];
+    const approvedCount = images.filter((item) => item.approved).length;
+    if (!approvedCount) { toast('هنوز هیچ صفحه‌ای تأیید نهایی نشده است', true); return; }
+    images.forEach((item) => { item.selected = !!item.approved; });
+    renderGrid(); scheduleSave();
+    toast(`${approvedCount} صفحهٔ تأییدشده انتخاب شد (آمادهٔ خروجی گرفتن)`);
+  });
+  $('selectUnapprovedBtn')?.addEventListener('click', () => {
+    const images = state.project?.images || [];
+    const unapprovedCount = images.filter((item) => !item.approved).length;
+    if (!unapprovedCount) { toast('همهٔ صفحات پروژه تأیید نهایی شده‌اند'); return; }
+    images.forEach((item) => { item.selected = !item.approved; });
+    renderGrid(); scheduleSave();
+    toast(`${unapprovedCount} صفحهٔ تأییدنشده انتخاب شد`);
+  });
   $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); });
   $('ocrEngine').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); });
   $('ocrLanguage').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); });
@@ -4562,7 +4738,21 @@ function bindEvents() {
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
   [['editorAlignLeft', 'left'], ['editorAlignCenter', 'center'], ['editorAlignRight', 'right'], ['editorAlignTop', 'top'], ['editorAlignMiddle', 'middle'], ['editorAlignBottom', 'bottom']].forEach(([id, direction]) => $(id).addEventListener('click', () => alignSelectedBoxes(direction)));
-  $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true))); $('editorClose').addEventListener('click', () => closeEditor().catch((error) => toast(error.message, true))); $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true))); $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); if (classicEditor?.hasOpenModal?.()) classicEditor.closeModal(); else if (imageOverview) exitImageOverview().catch((error) => toast(error.message, true)); else if (inlineDraft) closeInlineEditor(); else closeEditor().catch((error) => toast(error.message, true)); });
+  $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true)));
+  $('editorClose').addEventListener('click', () => closeEditor(false).catch((error) => toast(error.message, true)));
+  $('editorApproveClose')?.addEventListener('click', () => closeEditor(true).catch((error) => toast(error.message, true)));
+  $('editorCancel')?.addEventListener('click', () => cancelEditor().catch((error) => toast(error.message, true)));
+  $('editorUnapproveBtn')?.addEventListener('click', () => {
+    const item = editorItem();
+    if (!item) return;
+    item.approved = false;
+    syncEditorApprovalHeader(item);
+    renderGrid();
+    scheduleSave();
+    toast('مهر تأیید این صفحه برداشته شد');
+  });
+  $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true)));
+  $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); if (classicEditor?.hasOpenModal?.()) classicEditor.closeModal(); else if (imageOverview) exitImageOverview().catch((error) => toast(error.message, true)); else if (inlineDraft) closeInlineEditor(); else closeEditor(false).catch((error) => toast(error.message, true)); });
   $('inlineEditorApply').addEventListener('click', applyInlineEditor);
   $('inlinePreview').addEventListener('mousedown', (event) => event.preventDefault());
   $('inlinePreview').addEventListener('click', () => setInlineOutputPreview(!inlineDraft?.showOutput));

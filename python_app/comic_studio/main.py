@@ -633,6 +633,7 @@ def create_app() -> FastAPI:
                 item["pageMode"] = resolved_mode
                 item["ocrCompleted"] = True
                 item["edited"] = False
+                item["approved"] = False
                 mode_label = "کتاب/مقاله" if resolved_mode == "document" else "کمیک/حباب"
                 activity.add(
                     f"در «{item['name']}» {len(blocks)} تکه متن ({mode_label}) پیدا شد",

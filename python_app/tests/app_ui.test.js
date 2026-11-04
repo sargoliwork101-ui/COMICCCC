@@ -1346,6 +1346,72 @@ function check(name, condition) {
     window.fetch = origFetchV380;
   }
 
+  // v3.81: App-only center approval stamp, selection filters, #editorApproveClose, and #editorCancel (exit without saving)
+  {
+    const origFetchV381 = window.fetch;
+    window.fetch = async (url, options = {}) => {
+      const parsed = new URL(url, 'http://127.0.0.1');
+      if (/\/api\/projects\/[^/]+\/images\/[^/]+\/content$/.test(parsed.pathname)) {
+        return { ok: true, blob: async () => new window.Blob() };
+      }
+      if (/\/api\/projects\/[^/]+\/images\/[^/]+\/(rendered|revert)$/.test(parsed.pathname)) {
+        return jsonResponse({ ok: true });
+      }
+      return origFetchV381(url, options);
+    };
+    vm.runInContext(`
+      state.project.images = [
+        { id: 'img1', name: 'page-1.png', file: 'img1.png', width: 200, height: 300, order: 0, selected: true, approved: false, edited: false, blocks: [{ id: 1, text: 'HELLO', tr: 'سلام اصلی', x0: 10, y0: 10, x1: 120, y1: 60, enabled: true, bg: 'white' }] },
+        { id: 'img2', name: 'page-2.png', file: 'img2.png', width: 200, height: 300, order: 1, selected: true, approved: false, edited: false, blocks: [{ id: 1, text: 'WORLD', tr: 'جهان', x0: 10, y0: 10, x1: 120, y1: 60, enabled: true, bg: 'white' }] }
+      ];
+      renderGrid();
+    `, context);
+    check('unapproved cards start without .approval-stamp and summary shows 0 از 2 تأیید شده', $('grid').querySelectorAll('.approval-stamp').length === 0 && $('selectionSummary').textContent.includes('0 از 2 تأیید شده'));
+
+    // Per-card approve button toggles center stamp without outer green card border
+    const card1ApproveBtn = $('grid').querySelector('.item[data-id="img1"] .act .approve-mark');
+    card1ApproveBtn.click();
+    await sleep(20);
+    check(
+      'clicking per-card ✓ button renders .approval-stamp inside .tw-shell and updates summary to 1 از 2 تأیید شده',
+      !!$('grid').querySelector('.item[data-id="img1"] .tw-shell .approval-stamp') &&
+      $('grid').querySelector('.item[data-id="img1"] .approval-stamp').textContent.includes('تأیید شد') &&
+      $('selectionSummary').textContent.includes('1 از 2 تأیید شده'),
+    );
+
+    // Select only approved / only unapproved
+    $('selectApprovedBtn').click();
+    check('selectApprovedBtn selects only approved pages', vm.runInContext('state.project.images[0].selected === true && state.project.images[1].selected === false', context));
+    $('selectUnapprovedBtn').click();
+    check('selectUnapprovedBtn selects only unapproved pages', vm.runInContext('state.project.images[0].selected === false && state.project.images[1].selected === true', context));
+
+    // Editor #editorApproveClose saves edits + sets approved=true + closes editor
+    await vm.runInContext("openEditor('img2')", context);
+    vm.runInContext("state.project.images[1].blocks[0].tr = 'جهان ویرایش‌شده'; scheduleSave();", context);
+    $('editorApproveClose').click();
+    await sleep(30);
+    check(
+      '#editorApproveClose saves changes, marks page approved, and closes #editorDialog',
+      !$('editorDialog').open &&
+      vm.runInContext("state.project.images[1].approved === true && state.project.images[1].blocks[0].tr === 'جهان ویرایش‌شده'", context) &&
+      $('grid').querySelectorAll('.approval-stamp').length === 2,
+    );
+
+    // Editor #editorCancel discards edits made during session (even after scheduleSave/auto-save!) and restores previous state
+    await vm.runInContext("openEditor('img1')", context);
+    check('opening an approved page shows #editorUnapproveBtn and approved badge in #editorTitle', !$('editorUnapproveBtn').classList.contains('hidden') && $('editorTitle').textContent.includes('تأییدشده'));
+    vm.runInContext("state.project.images[0].blocks[0].tr = 'تغییر اشتباهی که نباید بماند'; state.project.images[0].blocks[0].tx0 = 77; state.project.images[0].approved = false; scheduleSave();", context);
+    await sleep(20);
+    $('editorCancel').click();
+    await sleep(30);
+    check(
+      '#editorCancel discards session text/geometry/approval edits and restores exact pre-open snapshot',
+      !$('editorDialog').open &&
+      vm.runInContext("state.project.images[0].blocks[0].tr === 'سلام اصلی' && state.project.images[0].blocks[0].tx0 === undefined && state.project.images[0].approved === true", context),
+    );
+    window.fetch = origFetchV381;
+  }
+
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));
   window.dispatchEvent(new window.Event('pagehide'));

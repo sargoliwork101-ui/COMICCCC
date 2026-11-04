@@ -2364,6 +2364,51 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     await page.waitForFunction(() => !document.getElementById('pptxExportDialog').open && document.getElementById('downloadLink').download === 'e2e-deck-slides.pptx');
     console.log('PASS: v3.76 PowerPoint (PPTX) export in both Visual and 16:9 Presentation slide modes');
 
+    // v3.81: Real Chromium E2E verification of center approval stamp, #editorApproveClose, and #editorCancel (discard without saving)
+    {
+      const beforeBlockTr = await page.evaluate(() => state.project.images[0].blocks[0]?.tr || '');
+      await page.evaluate(() => openEditor(state.project.images[0].id));
+      await page.waitForSelector('#editorDialog[open]');
+      // Mutate block inside editor and wait >400ms so auto-save (scheduleSave) actually hits the real Python backend!
+      await page.evaluate(() => {
+        state.project.images[0].blocks[0].tr = 'ویرایش آزمایشی برای انصراف';
+        drawEditor();
+        scheduleSave();
+      });
+      await sleep(450);
+      await page.click('#editorCancel');
+      await page.waitForFunction(() => !document.getElementById('editorDialog').open);
+      const restoredServerTr = await page.evaluate(async () => {
+        const fresh = await (await fetch(`/api/projects/${state.project.id}`)).json();
+        return fresh.images[0].blocks[0]?.tr || '';
+      });
+      assert.equal(restoredServerTr, beforeBlockTr, '#editorCancel must revert even auto-saved session edits on the Python server');
+
+      // Now open editor and click #editorApproveClose -> saves and places center .approval-stamp without blocking image click selection
+      await page.evaluate(() => openEditor(state.project.images[0].id));
+      await page.waitForSelector('#editorDialog[open]');
+      await page.click('#editorApproveClose');
+      await page.waitForFunction(() => !document.getElementById('editorDialog').open);
+      const stampInfo = await page.evaluate(() => {
+        const card = document.querySelector('#grid .item');
+        const tw = card.querySelector('.tw').getBoundingClientRect();
+        const stamp = card.querySelector('.approval-stamp');
+        if (!stamp) return null;
+        const sr = stamp.getBoundingClientRect();
+        return {
+          text: stamp.textContent,
+          pointerEvents: getComputedStyle(stamp).pointerEvents,
+          centeredX: Math.abs((sr.left + sr.width / 2) - (tw.left + tw.width / 2)) < 4,
+          centeredY: Math.abs((sr.top + sr.height / 2) - (tw.top + tw.height / 2)) < 4,
+        };
+      });
+      assert.ok(stampInfo && stampInfo.text.includes('تأیید شد'), 'approved card shows center approval stamp');
+      assert.equal(stampInfo.pointerEvents, 'none', 'stamp does not intercept image selection clicks');
+      assert.equal(stampInfo.centeredX, true, 'stamp is horizontally centered over image');
+      assert.equal(stampInfo.centeredY, true, 'stamp is vertically centered over image');
+      console.log('PASS: v3.81 center approval stamp, #editorApproveClose, and #editorCancel full server rollback');
+    }
+
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');

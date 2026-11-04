@@ -194,9 +194,9 @@ class ProjectStore:
                 seen.add(image_id)
                 old = existing[image_id]
                 item = dict(old)
-                for key in ("order", "selected", "groupId", "crop", "blocks", "pageMode"):
+                for key in ("order", "selected", "groupId", "crop", "blocks", "pageMode", "approved"):
                     if key in candidate:
-                        item[key] = candidate[key]
+                        item[key] = bool(candidate[key]) if key == "approved" else candidate[key]
                 item["edited"] = (project_root(project_id) / "images" / f"{image_id}-edited.png").exists()
                 merged.append(item)
             # An image omitted by the UI is deliberately removed from the project, not from source files on disk.
@@ -341,6 +341,7 @@ class ProjectStore:
             "bytes": len(content),
             "order": self._next_order(state),
             "selected": True,
+            "approved": False,
             "groupId": None,
             "crop": None,
             "blocks": [],
@@ -362,6 +363,7 @@ class ProjectStore:
                 new["file"] = f"{new['id']}{Path(old['file']).suffix}"
                 # A copy starts independent, rather than silently enlarging the original group.
                 new["groupId"] = None
+                new["approved"] = False
                 shutil.copyfile(project_root(project_id) / "images" / old["file"], project_root(project_id) / "images" / new["file"])
                 old_edited = project_root(project_id) / "images" / f"{old['id']}-edited.png"
                 if old_edited.exists():

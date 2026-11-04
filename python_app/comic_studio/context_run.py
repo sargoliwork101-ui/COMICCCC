@@ -354,6 +354,10 @@ def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict
             block.pop('_aiTranslationParts', None); block.pop('_aiReusedTranslation', None)
             ref['snapshot'] = target_snapshot(block)
             affected.add(ref['imageId'])
+    if affected:
+        for image in state.get('images', []):
+            if str(image.get('id')) in affected:
+                image['approved'] = False
     run['context'] = summary
     run['completed'] += 1
     if run['provider'] != 'free':

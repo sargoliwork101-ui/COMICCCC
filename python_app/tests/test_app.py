@@ -44,12 +44,16 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.80"
+    assert health.json()["version"] == "3.81"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۸۰ · Python</span>' in index_html
+    assert '<span class="ver">۳.۸۱ · Python</span>' in index_html
+    assert 'id="approveSelectedBtn"' in index_html
+    assert 'id="selectApprovedBtn"' in index_html
+    assert 'id="editorApproveClose"' in index_html
+    assert 'id="editorCancel"' in index_html
     assert 'id="exportPptxBtn"' in index_html
     assert 'id="pptxExportDialog"' in index_html
     assert 'id="helpTopBtn"' in index_html
@@ -2650,6 +2654,66 @@ def test_configured_provider_and_profile_selection_for_translation(client, monke
     assert single_res.status_code == 200
     assert single_res.json()["text"] == "سلام از کمیک"
     assert used_headers == ["Bearer secret-big", "Bearer secret-big"]
+
+
+def test_page_approval_persists_excludes_exports_and_resets_on_reprocess(client, monkeypatch):
+    project, item1 = make_project(client)
+    imported2 = client.post(
+        f"/api/projects/{project['id']}/files",
+        files=[("files", ("page-2.png", png_bytes(), "image/png"))],
+    )
+    assert imported2.status_code == 200
+    project = imported2.json()
+    item2 = project["images"][1]
+    assert item1.get("approved") is False
+    assert item2.get("approved") is False
+
+    # Mark both pages approved and save state
+    project["images"][0]["approved"] = True
+    project["images"][0]["blocks"] = [{"id": 1, "text": "PAGE ONE", "tr": "صفحه اول", "x0": 10, "y0": 10, "x1": 90, "y1": 40, "bg": "white"}]
+    project["images"][1]["approved"] = True
+    project["images"][1]["blocks"] = [{"id": 1, "text": "PAGE TWO", "tr": "صفحه دوم", "x0": 10, "y0": 10, "x1": 90, "y1": 40, "bg": "white"}]
+    saved = client.put(f"/api/projects/{project['id']}/state", json={"state": project})
+    assert saved.status_code == 200
+    reloaded = client.get(f"/api/projects/{project['id']}").json()
+    assert reloaded["images"][0]["approved"] is True
+    assert reloaded["images"][1]["approved"] is True
+
+    # Duplicating an approved page creates an independent unapproved copy
+    duplicated = client.post(f"/api/projects/{project['id']}/duplicate", json=[item1["id"]])
+    assert duplicated.status_code == 200
+    dup_images = duplicated.json()["images"]
+    assert len(dup_images) == 3
+    assert dup_images[0]["approved"] is True
+    assert dup_images[1]["approved"] is False
+
+    # Exported ZIP image pixels remain pure white at center (approval stamp is strictly UI-only)
+    exp = client.post(
+        f"/api/projects/{project['id']}/export",
+        json={"kind": "images", "image_ids": [item1["id"]], "name": "approved-check", "image_format": "png"},
+    )
+    assert exp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(exp.content)) as zf:
+        img_names = [n for n in zf.namelist() if n.endswith(".png")]
+        assert len(img_names) == 1
+        with Image.open(io.BytesIO(zf.read(img_names[0]))) as exported_im:
+            w, h = exported_im.size
+            assert exported_im.convert("RGB").getpixel((w // 2, h // 2)) == (255, 255, 255)
+
+    # Re-running OCR on page 1 resets approved=False on page 1 while keeping page 2 approved=True
+    monkeypatch.setattr(
+        "comic_studio.main.recognize_image",
+        lambda *a, **kw: [{"id": 1, "text": "NEW OCR", "tr": "", "x0": 12, "y0": 12, "x1": 80, "y1": 36, "lineH": 24, "enabled": True}],
+    )
+    ocr_res = client.post(
+        f"/api/projects/{project['id']}/ocr",
+        json={"image_ids": [item1["id"]], "engine": "rapidocr-v6", "language": "eng", "page_mode": "comic"},
+    )
+    assert ocr_res.status_code == 200
+    after_ocr = {im["id"]: im for im in ocr_res.json()["images"]}
+    assert after_ocr[item1["id"]]["approved"] is False
+    assert after_ocr[item2["id"]]["approved"] is True
+
 
 
 
