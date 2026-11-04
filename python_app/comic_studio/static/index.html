@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.82">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.82">
+  <link rel="stylesheet" href="/style.css?v=3.83">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.83">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۸۲ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۸۳ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h11"/></svg><span>پروژه و تنظیمات</span></button>
@@ -411,16 +411,41 @@
   </dialog>
 
   <dialog id="editorDialog" class="dlg editor-dialog">
-    <div class="dialog-head"><h2 id="editorTitle">ویرایش متن</h2><div><label class="overlay-mode-control">متن روی تصویر<select id="overlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label><button id="editorRevert" class="bt danger" type="button">بازگشت به تصویر اصلی</button><button id="editorApply" class="bt" type="button">به‌روزرسانی پیش‌نمایش</button><button id="editorUnapproveBtn" class="bt hidden" type="button" title="برداشتن مهر تأیید نهایی از این صفحه">لغو تأیید صفحه</button><button id="editorCancel" class="bt" type="button" title="لغو تغییرات این نوبت ویرایش و خروج بدون ذخیره">انصراف بدون ذخیره</button><button id="editorClose" class="bt primary" type="button">ذخیره و بستن</button><button id="editorApproveClose" class="bt success" type="button" title="ذخیرهٔ تغییرات، زدن مهر تأیید نهایی روی این صفحه و بستن ویرایشگر">✓ ذخیره، تأیید و بستن</button></div></div>
+    <div class="dialog-head">
+      <h2 id="editorTitle">ویرایش متن</h2>
+      <div class="editor-head-actions">
+        <div class="editor-head-group ehg-view" role="group" aria-label="نمایش و پیش‌نمایش تصویر">
+          <span class="editor-head-label">نمایش</span>
+          <label class="overlay-mode-control" title="انتخاب نوع متنی که روی تصویر نمایش داده می‌شود"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span>متن تصویر</span><select id="overlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label>
+          <button id="editorApply" class="bt" type="button" title="به‌روزرسانی پیش‌نمایش نهایی تصویر"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"/><path d="M16 16h5v5"/></svg><span>پیش‌نمایش</span></button>
+          <button id="editorRevert" class="bt danger" type="button" title="بازگشت به تصویر اصلی بدون لایهٔ متن"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg><span>تصویر اصلی</span></button>
+        </div>
+        <div class="editor-head-group ehg-finish" role="group" aria-label="ذخیره، تأیید و خروج از ویرایشگر">
+          <span class="editor-head-label">خروج</span>
+          <button id="editorUnapproveBtn" class="bt hidden" type="button" title="برداشتن مهر تأیید نهایی از این صفحه"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg><span>لغو تأیید صفحه</span></button>
+          <button id="editorCancel" class="bt" type="button" title="لغو تغییرات این نوبت ویرایش و خروج بدون ذخیره"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg><span>انصراف بدون ذخیره</span></button>
+          <button id="editorClose" class="bt primary" type="button" title="ذخیرهٔ تغییرات و بستن پنجرهٔ ویرایشگر"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>ذخیره و بستن</span></button>
+          <button id="editorApproveClose" class="bt success" type="button" title="ذخیرهٔ تغییرات، زدن مهر تأیید نهایی روی این صفحه و بستن ویرایشگر"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg><span>ذخیره، تأیید و بستن</span></button>
+        </div>
+      </div>
+    </div>
     <div id="editorProgressWrap" class="editor-progress-wrap hidden"><div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت عملیات ویرایشگر" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="editorProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div></div>
       <section id="inlineEditor" class="inline-editor is-idle" role="region" aria-label="ویرایش متن انتخاب‌شده">
         <div class="inline-editor-head">
           <div class="inline-editor-status"><span class="inline-status-dot" aria-hidden="true"></span><strong id="inlineEditorTitle">ویرایشگر متن آماده است · برای ویرایش، روی هر کادر متن در تصویر کلیک کنید</strong><span id="inlineTargetBadge" class="inline-target-badge hidden" aria-live="polite"></span></div>
-          <div class="editor-zoom-controls" role="group" aria-label="زوم تصویر"><button id="editorZoomOut" type="button" aria-label="کوچک‌نمایی" title="کوچک‌نمایی تصویر">−</button><output id="editorZoomLabel" aria-live="polite">100٪</output><button id="editorZoomIn" type="button" aria-label="بزرگ‌نمایی" title="بزرگ‌نمایی تصویر">+</button><button id="editorZoomActual" type="button" title="نمایش با اندازهٔ واقعی ۱۰۰٪">۱۰۰٪</button><button id="editorZoomFit" type="button" title="تنظیم بر اساس عرض صفحه">عرض صفحه</button><button id="editorImageFullscreen" type="button" aria-label="تمام‌صفحهٔ تصویر" aria-pressed="false" title="نمایش تمام تصویر">تمام‌صفحه تصویر</button></div>
-          <div class="inline-editor-actions">
-            <button id="inlinePreview" type="button" aria-label="نمایش دقیق متن روی تصویر" aria-pressed="false" title="پیش‌نمایش تمیز بدون نشانگر کادر">پیش‌نمایش دقیق</button>
-            <button id="inlineEditorCancel" type="button" class="hidden" aria-label="بستن بدون ذخیره" title="بستن و صرف‌نظر از ویرایشِ ناسازگار">بستن بدون ذخیره</button>
-            <button id="inlineEditorApply" type="button" class="primary" title="پایان ویرایش کادر فعلی (تغییرها خودکار ذخیره می‌شوند)">پایان ویرایش کادر</button>
+          <div class="editor-zoom-controls" role="group" aria-label="زوم تصویر">
+            <span class="zoom-group-label">نما</span>
+            <button id="editorZoomOut" type="button" aria-label="کوچک‌نمایی" title="کوچک‌نمایی تصویر">−</button>
+            <output id="editorZoomLabel" aria-live="polite">100٪</output>
+            <button id="editorZoomIn" type="button" aria-label="بزرگ‌نمایی" title="بزرگ‌نمایی تصویر">+</button>
+            <button id="editorZoomActual" type="button" title="نمایش با اندازهٔ واقعی ۱۰۰٪">۱۰۰٪</button>
+            <button id="editorZoomFit" type="button" title="تنظیم بر اساس عرض صفحه"><svg class="btn-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><path d="M8 12h8"/></svg><span>عرض صفحه</span></button>
+            <button id="editorImageFullscreen" type="button" aria-label="تمام‌صفحهٔ تصویر" aria-pressed="false" title="نمایش تمام تصویر"><svg class="btn-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg><span class="btn-label">تمام‌صفحه تصویر</span></button>
+          </div>
+          <div class="inline-editor-actions" role="group" aria-label="ابزار کادر در حال ویرایش">
+            <button id="inlinePreview" type="button" aria-label="نمایش دقیق متن روی تصویر" aria-pressed="false" title="پیش‌نمایش تمیز بدون نشانگر کادر"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg><span class="btn-label">پیش‌نمایش دقیق</span></button>
+            <button id="inlineEditorCancel" type="button" class="hidden" aria-label="بستن بدون ذخیره" title="بستن و صرف‌نظر از ویرایشِ ناسازگار"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg><span>بستن بدون ذخیره</span></button>
+            <button id="inlineEditorApply" type="button" class="primary" title="پایان ویرایش کادر فعلی (تغییرها خودکار ذخیره می‌شوند)"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span>پایان ویرایش کادر</span></button>
           </div>
         </div>
         <div class="inline-editor-workbench">
@@ -443,23 +468,32 @@
         <hr class="inline-section-divider" aria-label="جداکنندهٔ ابزارهای چیدمان و هم‌اندازه‌سازی کادرها">
         <div class="inline-box-ops-row">
           <div id="inlineMergeSplitTools" class="editor-multi-tools inline-merge-split-tools" role="group" aria-label="ادغام و تفکیک کادرهای متن">
-            <span class="inline-box-layout-label">ادغام و تفکیک:</span>
-            <button id="editorMergeText" class="bt" type="button" title="ادغام دو یا چند کادر انتخاب‌شده در یک کادر واحد (با Ctrl+کلیک چند کادر را انتخاب کنید)">ادغام متن‌ها</button>
-            <button id="editorSplitText" class="bt" type="button" title="جداکردن کادر ادغام‌شده یا چندخطی به کادرهای مجزا">جداکردن خط‌ها</button>
+            <span class="box-capsule-title">ادغام و تفکیک</span>
+            <button id="editorMergeText" class="bt" type="button" title="ادغام دو یا چند کادر انتخاب‌شده در یک کادر واحد (با Ctrl+کلیک چند کادر را انتخاب کنید)"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="7" height="7" rx="1.5"/><rect x="14" y="4" width="7" height="7" rx="1.5"/><rect x="5" y="15" width="14" height="5" rx="1.5"/><path d="M7 11v4"/><path d="M17 11v4"/></svg><span>ادغام متن‌ها</span></button>
+            <button id="editorSplitText" class="bt" type="button" title="جداکردن کادر ادغام‌شده یا چندخطی به کادرهای مجزا"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="5" rx="1.5"/><rect x="3" y="15" width="7" height="5" rx="1.5"/><rect x="14" y="15" width="7" height="5" rx="1.5"/><path d="M8 9v6"/><path d="M16 9v6"/></svg><span>جداکردن خط‌ها</span></button>
           </div>
           <div class="editor-multi-tools inline-box-layout-tools" role="group" aria-label="انتخاب، هم‌اندازه‌سازی و تراز گروهی کادرها">
-            <span class="inline-box-layout-label">چیدمان کادرها:</span>
-            <button id="editorSelectAll" class="bt" type="button" title="انتخاب همهٔ کادرهای صفحه">انتخاب همه</button>
-            <button id="editorSelectNone" class="bt" type="button" title="لغو انتخاب همهٔ کادرها">لغو انتخاب</button>
-            <span class="inline-mini-sep" aria-hidden="true"></span>
-            <button id="editorSameSize" class="bt" type="button" title="عرض و ارتفاع همهٔ کادرهای انتخاب‌شده برابر اولین انتخاب؛ مرکز هر کادر تا حد امکان حفظ می‌شود">هم‌اندازه با اولی</button>
-            <span class="inline-mini-sep" aria-hidden="true"></span>
-            <button id="editorAlignRight" class="bt" type="button" title="تراز لبه‌های راست کادرها">تراز راست</button>
-            <button id="editorAlignCenter" class="bt" type="button" title="تراز مراکز افقی کادرها">وسط افقی</button>
-            <button id="editorAlignLeft" class="bt" type="button" title="تراز لبه‌های چپ کادرها">تراز چپ</button>
-            <button id="editorAlignTop" class="bt" type="button" title="تراز لبه‌های بالای کادرها">تراز بالا</button>
-            <button id="editorAlignMiddle" class="bt" type="button" title="تراز مراکز عمودی کادرها">وسط عمودی</button>
-            <button id="editorAlignBottom" class="bt" type="button" title="تراز لبه‌های پایین کادرها">تراز پایین</button>
+            <div class="box-sub-group bsg-select" role="group" aria-label="انتخاب کادرهای صفحه">
+              <span class="box-capsule-title">انتخاب</span>
+              <button id="editorSelectAll" class="bt" type="button" title="انتخاب همهٔ کادرهای صفحه"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m9 12 2 2 4-4"/></svg><span>همه</span></button>
+              <button id="editorSelectNone" class="bt" type="button" title="لغو انتخاب همهٔ کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" stroke-dasharray="3 2.5"/></svg><span>لغو</span></button>
+            </div>
+            <div class="box-sub-group bsg-size" role="group" aria-label="هم‌اندازه‌سازی کادرها">
+              <span class="box-capsule-title">ابعاد</span>
+              <button id="editorSameSize" class="bt" type="button" title="عرض و ارتفاع همهٔ کادرهای انتخاب‌شده برابر اولین انتخاب؛ مرکز هر کادر تا حد امکان حفظ می‌شود"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="8" height="12" rx="1.5"/><rect x="13" y="6" width="8" height="12" rx="1.5"/><path d="M7 10h0"/><path d="M17 10h0"/></svg><span>هم‌اندازه با اولی</span></button>
+            </div>
+            <div class="box-sub-group bsg-align-h" role="group" aria-label="تراز افقی کادرها">
+              <span class="box-capsule-title">افقی</span>
+              <button id="editorAlignRight" class="bt" type="button" title="تراز لبه‌های راست کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="20" y1="4" x2="20" y2="20"/><rect x="6" y="6" width="11" height="4" rx="1"/><rect x="10" y="14" width="7" height="4" rx="1"/></svg><span>راست</span></button>
+              <button id="editorAlignCenter" class="bt" type="button" title="تراز مراکز افقی کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="3" x2="12" y2="21"/><rect x="5" y="6" width="14" height="4" rx="1"/><rect x="7" y="14" width="10" height="4" rx="1"/></svg><span>وسط</span></button>
+              <button id="editorAlignLeft" class="bt" type="button" title="تراز لبه‌های چپ کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="4" x2="4" y2="20"/><rect x="7" y="6" width="11" height="4" rx="1"/><rect x="7" y="14" width="7" height="4" rx="1"/></svg><span>چپ</span></button>
+            </div>
+            <div class="box-sub-group bsg-align-v" role="group" aria-label="تراز عمودی کادرها">
+              <span class="box-capsule-title">عمودی</span>
+              <button id="editorAlignTop" class="bt" type="button" title="تراز لبه‌های بالای کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="4" x2="20" y2="4"/><rect x="6" y="7" width="4" height="11" rx="1"/><rect x="14" y="7" width="4" height="7" rx="1"/></svg><span>بالا</span></button>
+              <button id="editorAlignMiddle" class="bt" type="button" title="تراز مراکز عمودی کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="12" x2="21" y2="12"/><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="7" width="4" height="10" rx="1"/></svg><span>وسط</span></button>
+              <button id="editorAlignBottom" class="bt" type="button" title="تراز لبه‌های پایین کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="20" x2="20" y2="20"/><rect x="6" y="6" width="4" height="11" rx="1"/><rect x="14" y="10" width="4" height="7" rx="1"/></svg><span>پایین</span></button>
+            </div>
             <span id="editorSelectionStatus" class="editor-selection-status" role="status">متنی انتخاب نشده</span>
           </div>
         </div>
@@ -474,7 +508,7 @@
       </section>
     <div class="editor-body"><div class="editor-view"><div class="editor-preview"><div id="editorStage" title="فضای خالی تصویر را بکشید تا جابه‌جا شود"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div>
 
-    </div><div class="editor-side"><details class="editor-help-details"><summary>راهنمای کوتاه ویرایش</summary><div class="editor-help">روی هر کادر در تصویر کلیک کنید و مستقیم تایپ یا بخشی از متن را انتخاب و قالب‌بندی کنید؛ تغییرها خودکار ذخیره می‌شوند. با Ctrl/⌘ + کلیک روی کادرها (یا ⠿) چند کادر را انتخاب کنید تا با دکمه‌های ردیف کادرها در نوار بالا آن‌ها را هم‌اندازه یا هم‌تراز کنید (اولین کادر انتخابی مرجع هم‌اندازه‌سازی است). چرخ ماوس صفحه را اسکرول می‌کند و با نگه داشتن Ctrl بزرگ‌نمایی را تغییر می‌دهد. <button id="editorOpenFullHelpBtn" class="bt editor-open-help-btn" type="button">بازکردن راهنمای کامل ویرایشگر (F1)</button></div></details><div id="blockList"></div></div></div>
+    </div><div class="editor-side"><details class="editor-help-details"><summary><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg><span>راهنمای کوتاه ویرایش</span></summary><div class="editor-help">روی هر کادر در تصویر کلیک کنید و مستقیم تایپ یا بخشی از متن را انتخاب و قالب‌بندی کنید؛ تغییرها خودکار ذخیره می‌شوند. با Ctrl/⌘ + کلیک روی کادرها (یا ⠿) چند کادر را انتخاب کنید تا با کپسول‌های ردیف پایینِ نوار ابزار، آن‌ها را هم‌اندازه یا هم‌تراز کنید (اولین کادر انتخابی مرجع هم‌اندازه‌سازی است). چرخ ماوس صفحه را اسکرول می‌کند و با نگه داشتن Ctrl بزرگ‌نمایی را تغییر می‌دهد. <button id="editorOpenFullHelpBtn" class="bt editor-open-help-btn" type="button"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><span>بازکردن راهنمای کامل ویرایشگر (F1)</span></button></div></details><div id="blockList"></div></div></div>
   </dialog>
 
   <dialog id="cropDialog" class="dlg crop-dialog">
@@ -581,12 +615,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-  <script src="/typeset.js?v=3.82"></script>
-  <script src="/groups.js?v=3.82"></script>
-  <script src="/rich-sanitize.js?v=3.82"></script>
-  <script src="/rich-editor.js?v=3.82"></script>
-  <script src="/inline-edit-session.js?v=3.82"></script>
-  <script src="/help-guide.js?v=3.82"></script>
-  <script src="/app.js?v=3.82"></script>
+  <script src="/typeset.js?v=3.83"></script>
+  <script src="/groups.js?v=3.83"></script>
+  <script src="/rich-sanitize.js?v=3.83"></script>
+  <script src="/rich-editor.js?v=3.83"></script>
+  <script src="/inline-edit-session.js?v=3.83"></script>
+  <script src="/help-guide.js?v=3.83"></script>
+  <script src="/app.js?v=3.83"></script>
 </body>
 </html>

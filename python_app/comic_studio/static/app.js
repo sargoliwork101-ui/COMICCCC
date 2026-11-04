@@ -2901,13 +2901,19 @@ function fitWholeEditorImage() {
   imageOverview.fitScale = Math.min(4, width / item.width, height / item.height);
   setEditorZoom(imageOverview.fitScale); preview.scrollLeft = 0; preview.scrollTop = 0;
 }
+function setButtonLabel(el, text) {
+  if (!el) return;
+  const label = el.querySelector('.btn-label');
+  if (label) label.textContent = text;
+  else el.textContent = text;
+}
 async function enterImageOverview() {
   if (imageOverview || !editorItem()) return;
   const preview = document.querySelector('.editor-preview'); const dialog = $('editorDialog');
   // Capture the draft before its field is hidden; the project itself remains untouched.
   imageOverview = { scale: state.editorScale, fitScaleBefore: state.editorFitScale,
     left: preview.scrollLeft, top: preview.scrollTop, draft: inlineDraft ? draftBlockForPreview() : null, native: false };
-  dialog.classList.add('image-fullscreen'); $('editorImageFullscreen').textContent = 'خروج از تمام‌صفحه';
+  dialog.classList.add('image-fullscreen'); setButtonLabel($('editorImageFullscreen'), 'خروج از تمام‌صفحه');
   $('editorImageFullscreen').setAttribute('aria-pressed', 'true'); $('editorImageFullscreen').setAttribute('aria-label', 'خروج از تمام‌صفحهٔ تصویر');
   drawEditorCanvas(); fitWholeEditorImage();
   if (dialog.requestFullscreen && !document.fullscreenElement) {
@@ -2920,7 +2926,7 @@ async function exitImageOverview(fromBrowser = false) {
   if (!imageOverview) return;
   const previous = imageOverview; imageOverview = null;
   const dialog = $('editorDialog'); dialog.classList.remove('image-fullscreen');
-  $('editorImageFullscreen').textContent = 'تمام‌صفحه تصویر'; $('editorImageFullscreen').setAttribute('aria-pressed', 'false');
+  setButtonLabel($('editorImageFullscreen'), 'تمام‌صفحه تصویر'); $('editorImageFullscreen').setAttribute('aria-pressed', 'false');
   $('editorImageFullscreen').setAttribute('aria-label', 'تمام‌صفحهٔ تصویر');
   if (!fromBrowser && document.fullscreenElement === dialog && document.exitFullscreen) {
     try { await document.exitFullscreen(); } catch { /* The browser may already have exited. */ }
@@ -3190,7 +3196,7 @@ function syncInlineDockIdleState() {
   const badge = $('inlineTargetBadge');
   if (badge) { badge.textContent = ''; badge.classList.add('hidden'); badge.classList.remove('is-word'); }
   if ($('inlineLineSize')) $('inlineLineSize').value = '';
-  $('inlinePreview').textContent = 'پیش‌نمایش دقیق';
+  setButtonLabel($('inlinePreview'), 'پیش‌نمایش دقیق');
   $('inlinePreview').setAttribute('aria-pressed', 'false');
   $('inlineEditorCancel').classList.add('hidden');
   $('inlineLineTools').classList.remove('hidden');
@@ -3203,7 +3209,7 @@ function setInlineOutputPreview(enabled) {
   const activeBox = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
   activeBox?.classList.toggle('show-output', inlineDraft.showOutput);
   const button = $('inlinePreview'); button.setAttribute('aria-pressed', String(inlineDraft.showOutput));
-  button.textContent = inlineDraft.showOutput ? 'ادامهٔ ویرایش' : 'پیش‌نمایش دقیق';
+  setButtonLabel(button, inlineDraft.showOutput ? 'ادامهٔ ویرایش' : 'پیش‌نمایش دقیق');
   drawEditorCanvas();
   if (!enabled) {
     const range = inlineDraft.range; classicEditor.focus();
@@ -4362,6 +4368,14 @@ async function copyBlockText(text) {
   else { const temp = document.createElement('textarea'); temp.value = text; temp.style.position = 'fixed'; temp.style.opacity = '0'; document.body.appendChild(temp); try { temp.select(); if (!document.execCommand('copy')) throw new Error('مرورگر اجازهٔ کپی نداد'); } finally { temp.remove(); } }
   toast('کپی شد');
 }
+function makeBlockToolButton(svgInner, label, handler, extraClass = '') {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `bt${extraClass ? ` ${extraClass}` : ''}`;
+  btn.innerHTML = `<svg class="btn-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${svgInner}</svg><span>${escapeHtml(label)}</span>`;
+  btn.addEventListener('click', handler);
+  return btn;
+}
 function buildBlockList() {
   const item = editorItem(); const list = $('blockList'); list.textContent = ''; const selected = new Set(editorSelectedKeys()); if (!item?.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; updateEditorSelection(); return; }
   item.blocks.forEach((block) => {
@@ -4378,19 +4392,23 @@ function buildBlockList() {
     const openBlockTranslation = () => { if (!block.enabled || blockOverlayMode(block) === 'none') { toast('ابتدا نمایش متن روی تصویر را فعال کنید.', true); return; } if (blockTextMode(block) === 'ocr') setBlockTextMode(block, 'translation'); openInlineEditor(block); };
     translation.addEventListener('click', openBlockTranslation);
     translation.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openBlockTranslation(); } });
-    const actions = document.createElement('div'); actions.className = 'block-tools';
-    actions.append(makeButton('کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))), makeButton('ترجمهٔ دوباره', () => retranslateBlock(block)), makeButton('پاک‌کردن ترجمه', async () => {
-      if (inlineDraft?.block === block && !closeInlineEditor()) return;
-      const ok = await appConfirm('آیا مطمئن هستید که می‌خواهید ترجمهٔ این کادر را پاک کنید؟', {
-        title: 'پاک‌کردن ترجمهٔ کادر',
-        confirmText: 'بله، پاک شود',
-        cancelText: 'انصراف',
-        variant: 'danger',
-        destructive: true,
-      });
-      if (!ok) return;
-      block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave();
-    }));
+    const actions = document.createElement('div'); actions.className = 'block-tools block-card-actions';
+    actions.append(
+      makeBlockToolButton('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', 'کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))),
+      makeBlockToolButton('<path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"/><path d="M16 16h5v5"/>', 'ترجمهٔ دوباره', () => retranslateBlock(block), 'block-retranslate-btn'),
+      makeBlockToolButton('<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>', 'پاک‌کردن ترجمه', async () => {
+        if (inlineDraft?.block === block && !closeInlineEditor()) return;
+        const ok = await appConfirm('آیا مطمئن هستید که می‌خواهید ترجمهٔ این کادر را پاک کنید؟', {
+          title: 'پاک‌کردن ترجمهٔ کادر',
+          confirmText: 'بله، پاک شود',
+          cancelText: 'انصراف',
+          variant: 'danger',
+          destructive: true,
+        });
+        if (!ok) return;
+        block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave();
+      }, 'block-clear-btn'),
+    );
     enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; drawEditor(); scheduleSave(); });
     card.append(head, languageRow, source, translation, actions); list.appendChild(card);
   });

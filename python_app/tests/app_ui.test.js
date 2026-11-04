@@ -1422,6 +1422,20 @@ function check(name, condition) {
     check('clicking #dragGuideBtn opens .drag-guide-wrap popover with aria-expanded=true', $('dragGuideBtn').closest('.drag-guide-wrap').classList.contains('is-open') && $('dragGuideBtn').getAttribute('aria-expanded') === 'true');
     window.document.body.click();
     check('clicking outside closes .drag-guide-wrap popover cleanly', !$('dragGuideBtn').closest('.drag-guide-wrap').classList.contains('is-open') && $('dragGuideBtn').getAttribute('aria-expanded') === 'false');
+
+    // v3.83: Categorized icon capsules inside #editorDialog header, #inlineEditor zoom/actions/box-ops, and sidebar block cards
+    await vm.runInContext("openEditor('img1')", context);
+    check(
+      '#editorDialog organizes top header into 2 capsules, box-ops into merge/split + 4 layout sub-capsules, and preserves SVG icons across dynamic label updates',
+      window.document.querySelectorAll('#editorDialog > .dialog-head .editor-head-group').length === 2 &&
+      window.document.querySelectorAll('#inlineEditor .inline-box-layout-tools .box-sub-group').length === 4 &&
+      window.document.querySelectorAll('#editorDialog svg.btn-ico').length >= 22 &&
+      !!$('editorImageFullscreen').querySelector('svg.btn-ico') &&
+      !!$('inlinePreview').querySelector('svg.btn-ico') &&
+      $('blockList').querySelectorAll('.block-card-actions svg.btn-ico').length >= 3,
+    );
+    $('editorCancel').click();
+    await sleep(20);
     window.fetch = origFetchV381;
   }
 

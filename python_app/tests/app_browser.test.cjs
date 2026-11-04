@@ -2410,11 +2410,17 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         groupCount: document.querySelectorAll('.selection-actions .action-group').length,
         pillCount: document.querySelectorAll('#selectionSummary .summary-pill').length,
         dockIcons: document.querySelectorAll('#dock svg.btn-ico').length,
+        editorHeadGroups: document.querySelectorAll('#editorDialog > .dialog-head .editor-head-group').length,
+        editorBoxSubGroups: document.querySelectorAll('#inlineEditor .inline-box-layout-tools .box-sub-group').length,
+        editorIcons: document.querySelectorAll('#editorDialog svg.btn-ico').length,
       }));
       assert.equal(toolbarLayout.groupCount, 4, '4 distinct categorized capsules render in selection toolbar');
       assert.equal(toolbarLayout.pillCount, 3, '3 status pills render in #selectionSummary');
       assert.ok(toolbarLayout.dockIcons >= 6, 'export dock buttons render SVG icons');
-      console.log('PASS: v3.81/v3.82 center approval stamp, categorized icon capsules, and #editorCancel full server rollback');
+      assert.equal(toolbarLayout.editorHeadGroups, 2, '2 categorized capsules render in #editorDialog header');
+      assert.equal(toolbarLayout.editorBoxSubGroups, 4, '4 categorized sub-capsules render in .inline-box-layout-tools');
+      assert.ok(toolbarLayout.editorIcons >= 22, 'all #editorDialog header, zoom, preview, merge/split, and align controls render SVG icons');
+      console.log('PASS: v3.81/v3.82/v3.83 center approval stamp, main + editor categorized icon capsules, and #editorCancel full server rollback');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
