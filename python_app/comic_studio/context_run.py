@@ -327,10 +327,19 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
 
 
 def apply_translated_block_defaults(block: dict[str, Any]) -> None:
-    block['align'] = 'justify'
-    block['size'] = 12
-    block['verticalAlign'] = 'top'
-    block['bold'] = block.get('pageRole') == 'heading'
+    if block.get('pageRole') == 'heading':
+        raw_lh = float(block.get('lineH') or (float(block.get('y1', 0)) - float(block.get('y0', 0))) or 22.0)
+        block['align'] = 'left' if str(block.get('dir') or '').lower() == 'ltr' else 'right'
+        block['size'] = max(14, min(36, round(raw_lh * 0.78)))
+        block['verticalAlign'] = 'middle'
+        block['bold'] = True
+    else:
+        block['align'] = 'justify'
+        block['size'] = 12
+        block['verticalAlign'] = 'top'
+        block['bold'] = bool(block.get('_detectedBold'))
+    if block.get('_detectedItalic'):
+        block['italic'] = True
 
 
 def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict[str, Any]],

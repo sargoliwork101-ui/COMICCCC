@@ -196,7 +196,8 @@ window.HTMLElement.prototype.hasPointerCapture = function (pointerId) { return t
 window.HTMLElement.prototype.releasePointerCapture = function (pointerId) { if (this._capturedPointerId === pointerId) delete this._capturedPointerId; };
 const realTypeset = require(path.join(root, 'typeset.js'));
 window.Typeset = {
-  blockStyle(block) { return { dir: block.dir === 'ltr' ? 'ltr' : 'rtl', align: block.align || 'right', bold: block.bold !== false, italic: false, underline: false, size: 12, color: null }; },
+  blockStyle(block) { return { dir: block.dir === 'ltr' ? 'ltr' : 'rtl', align: block.align || 'right', bold: block.bold !== false, italic: !!block.italic, underline: false, size: 12, color: null, firstLineIndent: Number(block.firstLineIndent) || 0, hangingIndent: Number(block.hangingIndent) || 0 }; },
+  indentGeometry: realTypeset.indentGeometry,
   hasInlineMarks: realTypeset.hasInlineMarks,
   inlineMarksToHtml: realTypeset.inlineMarksToHtml,
   richHtmlWords(html) { return String(html || '').includes('<hr>') ? [{ t: '────────' }] : []; },
@@ -1545,6 +1546,43 @@ function check(name, condition) {
       })()
     `, context);
     check('cropped imageUrl attaches cache-busting revision while raw content URL stays clean and crop buttons guard missing item', cropCacheCheck === true);
+
+    // v3.89: Heading vs Body role pill toggle in #blockList, proportional heading size, _detectedBold/_detectedItalic preservation, and Typeset.indentGeometry
+    const v389Check = vm.runInContext(`
+      (() => {
+        const hBlk = { id: 10, text: '8.3.5.7.1 Heel Fillet', pageRole: 'heading', lineH: 26, x0: 20, y0: 20, x1: 260, y1: 46, enabled: true };
+        const bBlk = { id: 11, text: 'Bold note', pageRole: 'paragraph', lineH: 18, _detectedBold: true, _detectedItalic: true, firstLineIndent: 1.5, enabled: true };
+        applyTranslatedBlockDefaults(hBlk, '۸.۳.۵.۷.۱ فیله پاشنه');
+        applyTranslatedBlockDefaults(bBlk, 'یادداشت مهم');
+        const stFirst = Typeset.blockStyle(bBlk);
+        const geomFirst = Typeset.indentGeometry(stFirst, 4, 16);
+        const stHang = Typeset.blockStyle({ pageRole: 'list', dir: 'ltr', hangingIndent: 1.5 });
+        const geomHang = Typeset.indentGeometry(stHang, 4, 16);
+
+        const img = state.project.images[0];
+        state.editorId = img.id;
+        img.blocks = [
+          { id: 1, text: 'Sample Title', tr: 'عنوان نمونه', pageRole: 'paragraph', lineH: 24, x0: 10, y0: 10, x1: 180, y1: 34, bold: false, italic: true, firstLineIndent: 1.2, enabled: true },
+        ];
+        buildBlockList();
+        const pillBefore = document.querySelector('#blockList .block-role-pill');
+        const chipBefore = [...document.querySelectorAll('#blockList .block-style-chip')].map((el) => el.textContent);
+        const wasText = pillBefore?.textContent === 'متن' && !pillBefore.classList.contains('is-heading');
+        pillBefore?.click();
+        const pillAfter = document.querySelector('#blockList .block-role-pill');
+        const becameHeading = img.blocks[0].pageRole === 'heading' && img.blocks[0].bold === true && img.blocks[0].size > 12 && pillAfter?.textContent === 'تیتر' && pillAfter.classList.contains('is-heading');
+        pillAfter?.click();
+        const reverted = img.blocks[0].pageRole === 'paragraph' && img.blocks[0].bold === false && img.blocks[0].size === 12;
+        state.editorId = null;
+
+        return hBlk.size === Math.round(26 * 0.78) && hBlk.bold === true
+          && bBlk.size === 12 && bBlk.bold === true && bBlk.italic === true
+          && geomFirst.textIndentPx === 24 && geomFirst.padLeft === 4
+          && geomHang.textIndentPx === -24 && geomHang.padLeft === 28
+          && wasText && chipBefore.includes('I') && chipBefore.includes('↳ تورفتگی') && becameHeading && reverted;
+      })()
+    `, context);
+    check('v3.89 role pill toggles تیتر/متن with proportional size, preserves detected bold/italic, and computes shared indent/hanging geometry', v389Check === true);
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

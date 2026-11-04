@@ -851,7 +851,15 @@ function overlayBlock(block, mode = currentOverlayMode()) {
   const effectiveMode = blockOverlayMode(block, mode);
   if (effectiveMode === 'none') return { ...block, tr: '', richHtml: '' };
   if (effectiveMode !== 'ocr') return block;
-  return { ...block, tr: block.text || '', richHtml: '', dir: 'ltr', align: ['center', 'justify'].includes(block.align) ? block.align : 'left', _plainText: true };
+  const ocrRtl = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(block.text || '') && !/[A-Za-z]{3,}/.test(block.text || '');
+  return {
+    ...block,
+    tr: block.text || '',
+    richHtml: '',
+    dir: ocrRtl ? 'rtl' : 'ltr',
+    align: ['center', 'justify'].includes(block.align) ? block.align : (ocrRtl ? 'right' : 'left'),
+    _plainText: true,
+  };
 }
 function overlayBlocks(item, mode = currentOverlayMode()) { return (item.blocks || []).map((block) => overlayBlock(block, mode)); }
 function hasRenderableText(block) { return !!block.tr?.trim() || !!(!block._plainText && block.richHtml && Typeset.richHtmlWords(block.richHtml).some((word) => String(word.t || '').trim())); }
@@ -2716,7 +2724,22 @@ async function testEngine(engineId) {
   const controller = new AbortController();
   modelAbortController = controller; modelCancelledByUser = false;
   state.modelBusy = engineId; scheduleActivityPoll(true); setProgress('modelProgress', null, true); renderModels(); $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
-  try { const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value, page_mode: normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value) }), signal: controller.signal }); if (result?.memory) engineMemorySummary = result.memory; setProgress('modelProgress', 1, false); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
+  try {
+    const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value, page_mode: normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value) }), signal: controller.signal });
+    if (result?.memory) engineMemorySummary = result.memory;
+    setProgress('modelProgress', 1, false);
+    $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => {
+      const pad = ' '.repeat(Math.max(0, Math.min(24, Number(block.sourceIndent) || 0)));
+      const firstExtra = Number(block.firstLineIndent) >= 0.75 ? '  ' : '';
+      const hangExtra = Number(block.hangingIndent) >= 0.75 ? '  ' : '';
+      const roleTag = block.pageRole === 'heading' ? '[تیتر] ' : '';
+      const styleTag = [block.bold ? 'B' : '', block.italic ? 'I' : ''].filter(Boolean).join('+');
+      const suffix = `  (${block.conf}%${styleTag ? ` · ${styleTag}` : ''})`;
+      const lines = String(block.text || '').split(/\r?\n/);
+      return lines.map((ln, idx) => (idx === 0 ? `${pad}${firstExtra}${roleTag}${ln}` : `${pad}${hangExtra}${ln}`)).join('\n') + suffix;
+    }).join('\n') : 'متنی تشخیص داده نشد.';
+    appendLocalActivity('آزمایش موتور تمام شد', 'success');
+  }
   catch (error) {
     setProgress('modelProgress', 0, false);
     if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
@@ -3237,9 +3260,11 @@ function refreshInlineTypography() {
     el.style.fontSize = `${eff * layoutZoom}px`;
   });
   const insetX = (Typeset.boxInset ? Typeset.boxInset(bw) : Math.min(4, Math.max(0, bw * 0.02))) * layoutZoom;
+  const ind = Typeset.indentGeometry ? Typeset.indentGeometry(style, insetX, baseSize * layoutZoom) : { textIndentPx: 0, padLeft: insetX, padRight: insetX };
   field.style.right = 'auto'; field.style.bottom = 'auto';
   field.style.width = `${bw * layoutZoom}px`;
-  field.style.paddingLeft = `${insetX}px`; field.style.paddingRight = `${insetX}px`;
+  field.style.paddingLeft = `${ind.padLeft}px`; field.style.paddingRight = `${ind.padRight}px`;
+  field.style.textIndent = `${ind.textIndentPx}px`;
   field.style.paddingTop = '0px'; field.style.paddingBottom = '0px';
   field.style.minHeight = '0px'; field.style.height = 'auto';
   field.style.transformOrigin = '0 0';
@@ -4445,10 +4470,19 @@ async function runSingleBlockTranslation(task) {
 function applyTranslatedBlockDefaults(block, text) {
   block.tr = text;
   block.richHtml = '';
-  block.align = 'justify';
-  block.size = 12;
-  block.verticalAlign = 'top';
-  block.bold = block.pageRole === 'heading';
+  if (block.pageRole === 'heading') {
+    const rawLh = Number(block.lineH) || Math.max(16, (Number(block.y1) || 0) - (Number(block.y0) || 0)) || 22;
+    block.align = block.dir === 'ltr' ? 'left' : 'right';
+    block.size = Math.max(14, Math.min(36, Math.round(rawLh * 0.78)));
+    block.verticalAlign = 'middle';
+    block.bold = true;
+  } else {
+    block.align = 'justify';
+    block.size = 12;
+    block.verticalAlign = 'top';
+    block.bold = !!block._detectedBold;
+  }
+  if (block._detectedItalic) block.italic = true;
 }
 async function retranslateBlock(block, targetOverride = null) {
   if (inlineDraft?.block === block && !closeInlineEditor()) return;
@@ -4515,14 +4549,65 @@ function buildBlockList() {
   item.blocks.forEach((block) => {
     const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', (event) => { const additive = event.ctrlKey || event.metaKey; if (additive && inlineDraft && !closeInlineEditor()) return; selectEditorBlock(block.id, false, additive); });
     const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabled.dataset.visibility = 'sidebar'; enabled.setAttribute('aria-label', `نمایش متن ${block.id} روی تصویر`); enabledLabel.append(enabled, document.createTextNode(` نمایش متن ${block.id} روی تصویر · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
+    const isHeading = block.pageRole === 'heading';
+    const roleBtn = document.createElement('button');
+    roleBtn.type = 'button';
+    roleBtn.className = `block-role-pill${isHeading ? ' is-heading' : ''}`;
+    roleBtn.dataset.roleToggle = String(block.id);
+    roleBtn.textContent = isHeading ? 'تیتر' : 'متن';
+    roleBtn.setAttribute('aria-pressed', isHeading ? 'true' : 'false');
+    roleBtn.setAttribute('aria-label', `تغییر نقش کادر ${block.id} بین تیتر و متن معمولی`);
+    roleBtn.title = isHeading
+      ? 'این کادر «تیتر» است؛ برای تبدیل به «متن معمولی» کلیک کنید'
+      : 'این کادر «متن معمولی» است؛ برای تبدیل به «تیتر» (بولد و درشت‌تر) کلیک کنید';
+    roleBtn.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+    roleBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (inlineDraft?.block === block && !closeInlineEditor()) return;
+      const nextHeading = block.pageRole !== 'heading';
+      block.pageRole = nextHeading ? 'heading' : 'paragraph';
+      if (nextHeading) {
+        const rawLh = Number(block.lineH) || Math.max(16, (Number(block.y1) || 0) - (Number(block.y0) || 0)) || 22;
+        block.bold = true;
+        block.size = Math.max(14, Math.min(36, Math.round(rawLh * 0.78)));
+        block.align = block.dir === 'ltr' ? 'left' : 'right';
+        block.verticalAlign = 'middle';
+      } else {
+        block.bold = !!block._detectedBold;
+        block.size = block.tr ? 12 : null;
+        block.align = block.tr ? 'justify' : 'right';
+        block.verticalAlign = 'top';
+      }
+      buildBlockList();
+      drawEditor();
+      scheduleSave();
+    });
+    head.appendChild(roleBtn);
     const bg = document.createElement('select'); [['auto', 'پس‌زمینه خودکار'], ['white', 'سفید'], ['black', 'مشکی'], ['none', 'بدون پاک‌کردن']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; bg.appendChild(option); }); bg.value = block.bg || 'auto'; head.appendChild(bg);
     const languageRow = document.createElement('div'); languageRow.className = 'block-tools block-language-tools';
     const languageLabel = document.createElement('label'); languageLabel.className = 'block-language-label'; languageLabel.appendChild(document.createTextNode('نمایش همین متن:'));
     const language = document.createElement('select'); language.dataset.textMode = 'sidebar'; language.setAttribute('aria-label', `زبان نمایش متن ${block.id} روی تصویر`); [['translation', 'فارسی / ترجمه'], ['ocr', 'انگلیسی / OCR']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; language.appendChild(option); }); language.value = blockTextMode(block); languageLabel.appendChild(language); languageRow.appendChild(languageLabel);
+    const metaBadges = [];
+    if (block.bold) metaBadges.push(['B', 'تشخیص/قالب پررنگ (Bold)']);
+    if (block.italic) metaBadges.push(['I', 'تشخیص/قالب کج (Italic)']);
+    if ((Number(block.firstLineIndent) || 0) >= 0.5 || (!isHeading && (Number(block.sourceIndent) || 0) >= 2)) metaBadges.push(['↳ تورفتگی', 'دارای تورفتگی نسبت به حاشیهٔ ستون']);
+    if ((Number(block.hangingIndent) || 0) >= 0.5 || (Number(block.blockOutdent) || 0) >= 0.5) metaBadges.push(['↰ بیرون‌زدگی', 'دارای بیرون‌زدگی خط اول / حاشیه']);
+    metaBadges.forEach(([txt, tip]) => {
+      const chip = document.createElement('span');
+      chip.className = 'block-style-chip';
+      chip.textContent = txt;
+      chip.title = tip;
+      languageRow.appendChild(chip);
+    });
     const source = document.createElement('p'); source.className = 'block-readonly block-source-edit'; source.dir = 'auto'; source.textContent = `متن اصلی: ${block.text || '—'}`; source.tabIndex = 0; source.setAttribute('role', 'button'); source.setAttribute('aria-label', `ویرایش متن انگلیسی/OCR کادر ${block.id}`); source.title = 'برای ویرایش متن اصلی کلیک کنید';
+    if (block.bold) source.style.fontWeight = '700';
+    if (block.italic) source.style.fontStyle = 'italic';
+    if (!isHeading && (Number(block.sourceIndent) || 0) > 0) source.style.paddingInlineStart = `${Math.min(36, Math.round((Number(block.sourceIndent) || 0) * 3.5))}px`;
     source.addEventListener('click', () => editOcrText(block));
     source.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); editOcrText(block); } });
     const translation = document.createElement('p'); translation.className = 'block-readonly block-tr-edit'; translation.dir = 'auto'; translation.textContent = `ترجمه: ${block.tr || '—'}`; translation.tabIndex = 0; translation.setAttribute('role', 'button'); translation.setAttribute('aria-label', `ویرایش ترجمهٔ کادر ${block.id} روی تصویر`); translation.title = 'برای ویرایش ترجمه روی تصویر کلیک کنید';
+    if (block.bold) translation.style.fontWeight = '700';
+    if (block.italic) translation.style.fontStyle = 'italic';
     const openBlockTranslation = () => { if (!block.enabled || blockOverlayMode(block) === 'none') { toast('ابتدا نمایش متن روی تصویر را فعال کنید.', true); return; } if (blockTextMode(block) === 'ocr') setBlockTextMode(block, 'translation'); openInlineEditor(block); };
     translation.addEventListener('click', openBlockTranslation);
     translation.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openBlockTranslation(); } });

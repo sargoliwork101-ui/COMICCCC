@@ -9,14 +9,33 @@ from typing import Any
 from .text_preparation import join_ocr_lines
 
 _LIST_ITEM_RE = re.compile(
-    r"^\s*(?:[•●▪◦‣⁃\-–—*]|\(?[0-9۰-۹]{1,3}[.)]|\([a-zA-Z]\)|\[[0-9]{1,3}\])\s+\S"
+    r"^\s*(?:[•●▪▫◦‣⁃\-–—*]|\(?[0-9۰-۹]{1,3}[.)]|\([a-zA-Zآ-ی]\)|\[[0-9]{1,3}\])\s+\S"
+)
+_MULTI_LEVEL_NUM_HEADING_RE = re.compile(
+    r"^\s*\d+(?:\.\d+){1,8}\b[\s.:)\-–—]*\S"
+)
+_SINGLE_NUM_TITLE_RE = re.compile(
+    r"^\s*(?:\d{1,3}|[IVXLCDM]{1,6})[.)\-:]\s+\S"
 )
 _HEADING_PREFIX_RE = re.compile(
-    r"^\s*(?:chapter|section|part|appendix|abstract|introduction|conclusion|references|"
-    r"فصل|بخش|مقدمه|نتیجه‌گیری|منابع|\d+(?:\.\d+){0,3}\s+[A-ZА-Я\u4e00-\u9fff\uac00-\ud7af\u3040-\u30ff])\b",
+    r"^\s*(?:"
+    r"(?:chapter|section|part|appendix|annex|clause|abstract|introduction|conclusion|references|summary|overview|scope|"
+    r"table|figure|fig\.|"
+    r"فصل|بخش|گفتار|مقدمه|پیشگفتار|نتیجه‌گیری|منابع|پیوست|ضمیمه|خلاصه|جدول|شکل)\b"
+    r"|(?:target|acceptable|process\s+indicator|defect|nonconforming)\s*[-–—:]\s*class\b"
+    r"|[IVXLCDM]{1,6}[.)\-:]\s+[A-Zآ-ی]"
+    r"|\d+(?:\.\d+){1,8}\b[\s.:)\-–—]*[A-Za-zآ-یА-Я\u4e00-\u9fff\uac00-\ud7af\u3040-\u30ff]"
+    r")",
+    re.IGNORECASE,
+)
+_STRUCTURED_LABEL_LINE_RE = re.compile(
+    r"^\s*(?:class\s*[0-9,/\s]+|note\s*\d*|warning|caution|target|acceptable|defect|process\s+indicator|minimum|maximum|"
+    r"کلاس\s*[۰-۹0-9]+|تبصره|نکته|هشدار|حداقل|حداکثر)\b[^.!?]{0,32}[:\-–—]\s*\S",
     re.IGNORECASE,
 )
 _SENTENCE_END_RE = re.compile(r'[.!?…。！？:؛»")\]]\s*$')
+_PROSE_STOP_PUNCT_RE = re.compile(r'[.!?…。！？؛,،]\s*$')
+_RTL_TEXT_RE = re.compile(r"[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]")
 
 
 def _height(block: dict[str, Any]) -> float:
@@ -88,7 +107,9 @@ def detect_page_mode(
     ]
     list_or_heading_hits = sum(
         1 for b in valid
-        if _LIST_ITEM_RE.match(str(b.get("text") or "")) or _HEADING_PREFIX_RE.match(str(b.get("text") or ""))
+        if _LIST_ITEM_RE.match(str(b.get("text") or ""))
+        or _HEADING_PREFIX_RE.match(str(b.get("text") or ""))
+        or _MULTI_LEVEL_NUM_HEADING_RE.match(str(b.get("text") or ""))
     )
 
     # Check margin alignment consistency (1-column or 2-column book/article pages).
@@ -236,19 +257,67 @@ def sort_document_reading_order(
     return ordered
 
 
+def _is_all_caps_title(txt: str) -> bool:
+    words = txt.split()
+    if not (1 <= len(words) <= 14) or len(txt) > 100 or txt.endswith((".", ",", ";")):
+        return False
+    latin_alpha = [ch for ch in txt if "A" <= ch.upper() <= "Z" and ch.isalpha()]
+    if len(latin_alpha) < 4:
+        return False
+    if any("a" <= ch <= "z" for ch in latin_alpha):
+        return False
+    if _RTL_TEXT_RE.search(txt):
+        return False
+    return True
+
+
 def _classify_document_line_role(
     block: dict[str, Any],
     med_lh: float,
     col_width: float,
 ) -> str:
+    preset_role = str(block.get("pageRole") or "").strip().lower()
+    if preset_role in {"heading", "list"}:
+        return preset_role
+
     txt = str(block.get("text") or "").strip()
+    if not txt:
+        return "paragraph"
     lh = _line_h(block)
-    if lh >= med_lh * 1.26 and len(txt) <= 140:
+    words = txt.split()
+    word_count = len(words)
+    is_bold = bool(block.get("_detectedBold") or block.get("_explicitBold") or block.get("bold"))
+
+    if lh >= med_lh * 1.24 and len(txt) <= 140 and not txt.endswith((".", "،", ",", ";", "؛")):
         return "heading"
-    if _HEADING_PREFIX_RE.match(txt) and len(txt) <= 110 and not txt.endswith("."):
+    if (
+        (_MULTI_LEVEL_NUM_HEADING_RE.match(txt) or _HEADING_PREFIX_RE.match(txt))
+        and len(txt) <= 130
+        and word_count <= 22
+        and not txt.endswith(".")
+    ):
+        return "heading"
+    if (
+        _SINGLE_NUM_TITLE_RE.match(txt)
+        and word_count <= 14
+        and len(txt) <= 100
+        and not txt.endswith(".")
+        and (is_bold or lh >= med_lh * 1.15 or _is_all_caps_title(txt))
+    ):
         return "heading"
     if _LIST_ITEM_RE.match(txt):
         return "list"
+    if (
+        is_bold
+        and not _is_multi_line_box(block)
+        and word_count <= 16
+        and len(txt) <= 110
+        and _width(block) <= max(col_width * 0.88, med_lh * 18.0)
+        and not _PROSE_STOP_PUNCT_RE.search(txt)
+    ):
+        return "heading"
+    if not _is_multi_line_box(block) and _is_all_caps_title(txt) and _width(block) <= max(col_width * 0.88, med_lh * 18.0):
+        return "heading"
     if (
         not _is_multi_line_box(block)
         and len(txt) <= 70
@@ -260,10 +329,31 @@ def _classify_document_line_role(
     return "paragraph"
 
 
+def _dominant_margin(values: list[float], tol: float, *, pick_high: bool = False) -> float:
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    best_cluster: list[float] = [sorted_vals[0]]
+    for anchor in sorted_vals:
+        cluster = [v for v in sorted_vals if abs(v - anchor) <= tol]
+        if len(cluster) > len(best_cluster):
+            best_cluster = cluster
+        elif len(cluster) == len(best_cluster):
+            if pick_high and median(cluster) > median(best_cluster):
+                best_cluster = cluster
+            elif not pick_high and median(cluster) < median(best_cluster):
+                best_cluster = cluster
+    return float(median(best_cluster))
+
+
 def _apply_document_block_defaults(block: dict[str, Any], role: str) -> dict[str, Any]:
     block["pageRole"] = role
-    if "_explicitBold" not in block:
-        block["bold"] = role == "heading"
+    if role == "heading":
+        block["bold"] = True
+    else:
+        block["bold"] = bool(block.get("_detectedBold") or block.get("_explicitBold"))
+    if block.get("_detectedItalic") or block.get("italic"):
+        block["italic"] = True
     return block
 
 
@@ -282,6 +372,7 @@ def group_document_lines(
         med_lh = _line_h(single)
         role = _classify_document_line_role(single, med_lh, _width(single))
         single["id"] = 1
+        single["sourceIndent"] = 0
         return [_apply_document_block_defaults(single, role)]
 
     med_lh = median(_line_h(b) for b in ordered)
@@ -303,6 +394,24 @@ def group_document_lines(
         )
         return idx, columns[idx][0], max(columns[idx][0] + 1.0, columns[idx][1])
 
+    col_lines_map: dict[int, list[dict[str, Any]]] = {}
+    for line in ordered:
+        c_idx, _, _ = _column_bounds(line)
+        col_lines_map.setdefault(c_idx, []).append(line)
+
+    col_base_left_map: dict[int, float] = {}
+    col_base_right_map: dict[int, float] = {}
+    col_min_x0_map: dict[int, float] = {}
+    col_max_x1_map: dict[int, float] = {}
+    margin_tol = max(10.0, med_lh * 0.75)
+    for c_idx, c_items in col_lines_map.items():
+        x0_vals = [float(b.get("x0", 0)) for b in c_items if str(b.get("text") or "").strip()] or [float(b.get("x0", 0)) for b in c_items]
+        x1_vals = [float(b.get("x1", 0)) for b in c_items if str(b.get("text") or "").strip()] or [float(b.get("x1", 0)) for b in c_items]
+        col_min_x0_map[c_idx] = min(x0_vals)
+        col_max_x1_map[c_idx] = max(x1_vals)
+        col_base_left_map[c_idx] = _dominant_margin(x0_vals, margin_tol, pick_high=False)
+        col_base_right_map[c_idx] = _dominant_margin(x1_vals, margin_tol, pick_high=True)
+
     # Estimate typical intra-paragraph vertical line gap on this page.
     small_gaps = []
     for prev, cur in zip(ordered, ordered[1:]):
@@ -312,7 +421,7 @@ def group_document_lines(
     typical_gap = median(small_gaps) if small_gaps else med_lh * 0.25
     max_para_gap = max(med_lh * 0.65, typical_gap + med_lh * 0.32)
 
-    groups: list[tuple[str, list[dict[str, Any]]]] = []
+    groups: list[tuple[str, int, list[dict[str, Any]]]] = []
     cur_lines: list[dict[str, Any]] = []
     cur_role = "paragraph"
     cur_col = -2
@@ -320,12 +429,13 @@ def group_document_lines(
     def _flush() -> None:
         if not cur_lines:
             return
-        groups.append((cur_role, list(cur_lines)))
+        groups.append((cur_role, cur_col, list(cur_lines)))
         cur_lines.clear()
 
     for line in ordered:
         col_idx, col_left, col_right = _column_bounds(line)
         col_w = max(1.0, col_right - col_left)
+        col_base_left = col_base_left_map.get(col_idx, col_left)
         role = _classify_document_line_role(line, med_lh, col_w)
 
         if not cur_lines:
@@ -347,33 +457,61 @@ def group_document_lines(
         either_heading = cur_role == "heading" or role == "heading"
         already_segmented = _is_multi_line_box(prev) or _is_multi_line_box(line)
 
-        # Detect first-line paragraph indentation or previous short paragraph-ending line.
+        prev_txt = str(prev.get("text") or "").strip()
+        cur_txt = str(line.get("text") or "").strip()
+
+        prev_bold = bool(prev.get("_detectedBold") or prev.get("_explicitBold") or prev.get("bold"))
+        cur_bold = bool(line.get("_detectedBold") or line.get("_explicitBold") or line.get("bold"))
+        prev_italic = bool(prev.get("_detectedItalic") or prev.get("italic"))
+        cur_italic = bool(line.get("_detectedItalic") or line.get("italic"))
+        style_changed = bool(prev_txt and cur_txt and (prev_bold != cur_bold or prev_italic != cur_italic))
+
+        # Detect first-line paragraph indentation or outward outdent step.
         indent_delta = float(line.get("x0", 0)) - float(prev.get("x0", 0))
         first_line_indent = (
             cur_role == "paragraph"
-            and indent_delta >= avg_lh * 1.25
-            and (float(line.get("x0", 0)) - col_left) >= avg_lh * 1.15
-            and abs(float(prev.get("x0", 0)) - col_left) <= avg_lh * 1.1
+            and indent_delta >= avg_lh * 1.15
+            and (float(line.get("x0", 0)) - col_base_left) >= avg_lh * 1.10
+            and abs(float(prev.get("x0", 0)) - col_base_left) <= avg_lh * 1.15
         )
-        prev_ended_early = (
-            cur_role in {"paragraph", "list"}
-            and (col_right - float(prev.get("x1", 0))) >= max(avg_lh * 2.6, col_w * 0.22)
-            and _SENTENCE_END_RE.search(str(prev.get("text") or "")) is not None
+        outdent_break = (
+            cur_role == "paragraph"
+            and -indent_delta >= avg_lh * 1.10
+            and float(line.get("x0", 0)) < col_base_left - avg_lh * 0.80
         )
 
+        right_slack = col_right - float(prev.get("x1", 0))
+        prev_ended_early = bool(
+            prev_txt
+            and cur_role in {"paragraph", "list"}
+            and right_slack >= max(avg_lh * 2.6, col_w * 0.22)
+            and _SENTENCE_END_RE.search(prev_txt) is not None
+        )
+        prev_hard_break = bool(
+            prev_txt
+            and cur_role in {"paragraph", "list"}
+            and right_slack >= max(avg_lh * 3.2, col_w * 0.28)
+            and _width(prev) < max(_width(line) * 0.80, col_w * 0.56)
+        )
+        structured_label = bool(cur_txt and _STRUCTURED_LABEL_LINE_RE.match(cur_txt))
+
         x_overlap = min(float(prev.get("x1", 0)), float(line.get("x1", 0))) - max(float(prev.get("x0", 0)), float(line.get("x0", 0)))
-        aligned_left = abs(float(line.get("x0", 0)) - float( cur_lines[0].get("x0", 0))) <= avg_lh * 2.2 or abs(float(line.get("x0", 0)) - col_left) <= avg_lh * 2.2
+        aligned_left = abs(float(line.get("x0", 0)) - float(cur_lines[0].get("x0", 0))) <= avg_lh * 2.2 or abs(float(line.get("x0", 0)) - col_base_left) <= avg_lh * 2.2
 
         can_merge = (
             same_col
             and not new_list_item
             and not either_heading
             and not already_segmented
+            and not style_changed
+            and not structured_label
             and lh_ratio <= 1.35
             and -0.35 * min(prev_lh, cur_lh) <= v_gap <= max_para_gap
             and (x_overlap >= 0.15 * min(_width(prev), _width(line)) or aligned_left)
             and not first_line_indent
+            and not outdent_break
             and not prev_ended_early
+            and not prev_hard_break
         )
 
         if can_merge:
@@ -386,11 +524,64 @@ def group_document_lines(
 
     _flush()
 
+    def _compute_indent_fields(
+        target: dict[str, Any],
+        col_idx: int,
+        members: list[dict[str, Any]],
+        role: str,
+    ) -> None:
+        lh_ref = max(10.0, float(target.get("lineH") or med_lh))
+        space_px = max(4.0, lh_ref * 0.45)
+        txt_sample = str(target.get("text") or "")
+        is_rtl = bool(_RTL_TEXT_RE.search(txt_sample)) and not bool(re.search(r"[A-Za-z]{3,}", txt_sample))
+
+        if col_idx == -1:
+            target["sourceIndent"] = 0
+            return
+
+        col_min_x0 = col_min_x0_map.get(col_idx, float(target.get("x0", 0)))
+        col_max_x1 = col_max_x1_map.get(col_idx, float(target.get("x1", 0)))
+        col_base_left = col_base_left_map.get(col_idx, col_min_x0)
+        col_base_right = col_base_right_map.get(col_idx, col_max_x1)
+
+        if is_rtl:
+            outer_edge = float(target.get("x1", 0))
+            rel_from_extreme = max(0.0, col_max_x1 - outer_edge)
+            rel_from_base = col_base_right - outer_edge
+        else:
+            outer_edge = float(target.get("x0", 0))
+            rel_from_extreme = max(0.0, outer_edge - col_min_x0)
+            rel_from_base = outer_edge - col_base_left
+
+        if role == "heading" and abs(rel_from_base) < lh_ref * 1.2:
+            target["sourceIndent"] = 0
+        else:
+            target["sourceIndent"] = min(32, max(0, round(rel_from_extreme / space_px))) if rel_from_extreme >= lh_ref * 0.75 else 0
+
+        if rel_from_base >= lh_ref * 0.85:
+            target["blockIndent"] = round(min(6.0, rel_from_base / lh_ref), 2)
+        elif -rel_from_base >= lh_ref * 0.85:
+            target["blockOutdent"] = round(min(6.0, (-rel_from_base) / lh_ref), 2)
+
+        non_empty_members = [m for m in members if str(m.get("text") or "").strip()]
+        if len(non_empty_members) >= 2:
+            m0 = non_empty_members[0]
+            rest = non_empty_members[1:]
+            if is_rtl:
+                delta = float(median(float(m.get("x1", 0)) for m in rest)) - float(m0.get("x1", 0))
+            else:
+                delta = float(m0.get("x0", 0)) - float(median(float(m.get("x0", 0)) for m in rest))
+            if delta >= lh_ref * 0.80:
+                target["firstLineIndent"] = round(min(4.0, delta / lh_ref), 2)
+            elif -delta >= lh_ref * 0.80:
+                target["hangingIndent"] = round(min(4.0, (-delta) / lh_ref), 2)
+
     grouped: list[dict[str, Any]] = []
-    for block_id, (role, members) in enumerate(groups, start=1):
+    for block_id, (role, col_idx, members) in enumerate(groups, start=1):
         if len(members) == 1:
             single = copy.deepcopy(members[0])
             single["id"] = block_id
+            _compute_indent_fields(single, col_idx, members, role)
             grouped.append(_apply_document_block_defaults(single, role))
             continue
         first = copy.deepcopy(members[0])
@@ -398,13 +589,28 @@ def group_document_lines(
         y0 = min(float(m["y0"]) for m in members)
         x1 = max(float(m["x1"]) for m in members)
         y1 = max(float(m["y1"]) for m in members)
-        paired = [(t, float(m.get("conf", 0))) for m in members if (t := str(m.get("text") or "").strip())]
+        non_empty = [m for m in members if str(m.get("text") or "").strip()]
+        paired = [(str(m.get("text") or "").strip(), float(m.get("conf", 0))) for m in non_empty]
         texts = [t for t, _ in paired]
         if paired:
             weights = [max(1, len(t)) for t, _ in paired]
             weighted_conf = round(sum(c * w for (_, c), w in zip(paired, weights)) / sum(weights), 2)
         else:
             weighted_conf = round(sum(float(m.get("conf", 0)) for m in members) / max(1, len(members)), 2)
+        bold_votes = sum(1 for m in non_empty if m.get("_detectedBold") or m.get("_explicitBold") or m.get("bold"))
+        italic_votes = sum(1 for m in non_empty if m.get("_detectedItalic") or m.get("italic"))
+        if non_empty and bold_votes * 2 >= len(non_empty):
+            first["_detectedBold"] = True
+            first["_explicitBold"] = True
+        else:
+            first.pop("_detectedBold", None)
+            first.pop("_explicitBold", None)
+        if non_empty and italic_votes * 2 >= len(non_empty):
+            first["_detectedItalic"] = True
+            first["italic"] = True
+        else:
+            first.pop("_detectedItalic", None)
+            first["italic"] = False
         first.update({
             "id": block_id,
             "text": join_ocr_lines(texts),
@@ -417,11 +623,11 @@ def group_document_lines(
             "y1": y1,
             "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
             "lineH": round(median(_line_h(m) for m in members), 2),
-            "sourceIndent": int(members[0].get("sourceIndent") or 0),
             "sourceLines": copy.deepcopy(members),
         })
-        for key in ("tx0", "ty0", "tx1", "ty1"):
+        for key in ("tx0", "ty0", "tx1", "ty1", "firstLineIndent", "hangingIndent", "blockIndent", "blockOutdent"):
             first.pop(key, None)
+        _compute_indent_fields(first, col_idx, members, role)
         grouped.append(_apply_document_block_defaults(first, role))
     return grouped
 
@@ -492,13 +698,16 @@ def _group_comic_lines(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         y0 = min(float(b["y0"]) for b in items)
         x1 = max(float(b["x1"]) for b in items)
         y1 = max(float(b["y1"]) for b in items)
-        paired = [(t, float(b.get("conf", 0))) for b in items if (t := str(b.get("text") or "").strip())]
+        non_empty = [b for b in items if str(b.get("text") or "").strip()]
+        paired = [(str(b.get("text") or "").strip(), float(b.get("conf", 0))) for b in non_empty]
         texts = [t for t, _ in paired]
         if paired:
             weights = [max(1, len(text)) for text, _ in paired]
             weighted_conf = round(sum(c * w for (_, c), w in zip(paired, weights)) / sum(weights), 2)
         else:
             weighted_conf = first.get("conf", 0)
+        bold_votes = sum(1 for b in non_empty if b.get("_detectedBold") or b.get("_explicitBold") or b.get("bold"))
+        italic_votes = sum(1 for b in non_empty if b.get("_detectedItalic") or b.get("italic"))
         first.update({
             "id": block_id,
             "text": " ".join(texts),
@@ -508,6 +717,8 @@ def _group_comic_lines(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "x0": x0, "y0": y0, "x1": x1, "y1": y1,
             "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
             "lineH": round(median(_height(b) for b in items), 2),
+            "bold": bool(non_empty and bold_votes * 2 >= len(non_empty)),
+            "italic": bool(non_empty and italic_votes * 2 >= len(non_empty)),
             "sourceLines": copy.deepcopy(items),
         })
         for key in ("tx0", "ty0", "tx1", "ty1"):
@@ -523,7 +734,7 @@ def group_ocr_lines(
     page_size: tuple[int, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Group OCR lines according to comic bubble mode, document mode, or auto-detection."""
-    effective = detect_page_mode(blocks, page_size=page_size) if page_mode == "auto" else page_mode
+    effective = "document" if page_mode == "document" else detect_page_mode(blocks, page_size=page_size)
     if effective == "document":
         return group_document_lines(blocks, page_size=page_size)
     return _group_comic_lines(blocks)
@@ -537,22 +748,43 @@ def organize_ocr_blocks(
     page_size: tuple[int, int] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Order and optionally group OCR blocks for comics, books, articles, and handouts."""
-    effective = detect_page_mode(blocks, page_size=page_size) if page_mode == "auto" else page_mode
+    effective = "document" if page_mode == "document" else detect_page_mode(blocks, page_size=page_size)
     if effective == "document":
         if group_lines:
             return group_document_lines(blocks, page_size=page_size), "document"
         ordered = sort_document_reading_order(blocks, page_size=page_size)
         med_lh = median(_line_h(b) for b in ordered) if ordered else 16.0
         col_w = max((_width(b) for b in ordered), default=200.0)
+        x0_vals = [float(b.get("x0", 0)) for b in ordered if str(b.get("text") or "").strip()]
+        min_x0 = min(x0_vals) if x0_vals else 0.0
+        base_left = _dominant_margin(x0_vals, max(10.0, med_lh * 0.75), pick_high=False) if x0_vals else 0.0
+        space_px = max(4.0, med_lh * 0.45)
         for idx, blk in enumerate(ordered, start=1):
             blk["id"] = idx
             role = _classify_document_line_role(blk, med_lh, col_w)
+            bx0 = float(blk.get("x0", 0))
+            rel_ext = max(0.0, bx0 - min_x0)
+            rel_base = bx0 - base_left
+            blk["sourceIndent"] = min(32, max(0, round(rel_ext / space_px))) if rel_ext >= med_lh * 0.75 else 0
+            if rel_base >= med_lh * 0.85:
+                blk["blockIndent"] = round(min(6.0, rel_base / med_lh), 2)
+            elif -rel_base >= med_lh * 0.85:
+                blk["blockOutdent"] = round(min(6.0, (-rel_base) / med_lh), 2)
             _apply_document_block_defaults(blk, role)
         return ordered, "document"
 
     if group_lines:
         return _group_comic_lines(blocks), "comic"
     copied = [copy.deepcopy(b) for b in blocks]
+    if copied:
+        med_lh = median(_line_h(b) for b in copied)
+        x0_vals = [float(b.get("x0", 0)) for b in copied if str(b.get("text") or "").strip()]
+        min_x0 = min(x0_vals) if x0_vals else 0.0
+        space_px = max(4.0, med_lh * 0.45)
+    else:
+        med_lh, min_x0, space_px = 16.0, 0.0, 7.2
     for idx, blk in enumerate(copied, start=1):
         blk["id"] = idx
+        rel_ext = max(0.0, float(blk.get("x0", 0)) - min_x0)
+        blk["sourceIndent"] = min(32, max(0, round(rel_ext / space_px))) if rel_ext >= med_lh * 0.75 else 0
     return copied, "comic"

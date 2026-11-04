@@ -32,7 +32,7 @@ from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_ima
 from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
 from .ocr_managed import configure_native_runtime, iter_parallel_ordered, trim_process_memory
 from .paths import STATIC_DIR
-from . import pending_results
+from . import context_run, pending_results
 from .schemas import (
     AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest, OcrRequest, ProjectCreate,
     SessionRequest, StateUpdate, TextTranslateRequest, TranslateRequest,
@@ -571,11 +571,18 @@ def create_app() -> FastAPI:
         await run_in_threadpool(registry.unload_all, engine_id)
         with Image.open(path) as im:
             image = im.copy()
+            page_size = image.size
         activity.add(f"آزمایش {ENGINE_INFO[engine_id]['name']} روی {path.name} آغاز شد")
         try:
-            blocks = await run_reported(
+            raw_blocks = await run_reported(
                 _invoke_recognize, engine, image, values.language, True, True, 0.2, values.page_mode,
                 pulse_label=f"آزمایش {ENGINE_INFO[engine_id]['name']}",
+            )
+            blocks, _ = organize_ocr_blocks(
+                raw_blocks,
+                page_mode=values.page_mode,
+                group_lines=True,
+                page_size=page_size,
             )
         except Exception as exc:
             activity.add(f"آزمایش موتور ناموفق بود: {exc}", "error")
@@ -583,7 +590,7 @@ def create_app() -> FastAPI:
         finally:
             image.close()
             await run_in_threadpool(registry.unload_all)
-        activity.add(f"آزمایش تمام شد؛ {len(blocks)} خط تشخیص داده شد", "success", 1.0)
+        activity.add(f"آزمایش تمام شد؛ {len(blocks)} تکه متن تشخیص داده شد", "success", 1.0)
         return {"engine": engine_id, "imageId": values.image_id, "blocks": blocks, "memory": registry.memory_status()}
 
     @app.post("/api/projects/{project_id}/ocr")
@@ -631,7 +638,23 @@ def create_app() -> FastAPI:
                 f"در «{item['name']}» {len(organized)} تکه متن ({mode_label}) پیدا شد",
                 progress=step / total_targets,
             )
-            recognized_lines = [block.get("text", "").strip() for block in organized if block.get("text", "").strip()]
+            def _format_ocr_log_entry(blk: dict[str, Any]) -> str:
+                raw_txt = str(blk.get("text") or "").strip("\r\n")
+                if not raw_txt.strip():
+                    return ""
+                pad = " " * max(0, min(24, int(blk.get("sourceIndent") or 0)))
+                first_extra = "  " if float(blk.get("firstLineIndent") or 0) >= 0.75 else ""
+                hang_extra = "  " if float(blk.get("hangingIndent") or 0) >= 0.75 else ""
+                sub_lines = [ln for ln in raw_txt.split("\n") if ln.strip()]
+                if not sub_lines:
+                    return ""
+                role_tag = "[تیتر] " if blk.get("pageRole") == "heading" else ""
+                formatted = [f"{pad}{first_extra}{role_tag}{sub_lines[0].strip()}"]
+                for cont in sub_lines[1:]:
+                    formatted.append(f"{pad}{hang_extra}{cont.strip()}")
+                return "\n".join(formatted)
+
+            recognized_lines = [line for block in organized if (line := _format_ocr_log_entry(block))]
             if recognized_lines:
                 activity.add(f"متن خوانده‌شده در «{item['name']}»:\n" + "\n".join(recognized_lines))
             else:
@@ -1246,7 +1269,7 @@ def create_app() -> FastAPI:
                             for i, join in enumerate(call["joins"], start=1):
                                 output += join + saved["parts"][str(i)]
                             block["tr"] = output; block["richHtml"] = ""
-                            block["align"] = "justify"; block["size"] = 12; block["verticalAlign"] = "top"; block["bold"] = block.get("pageRole") == "heading"
+                            context_run.apply_translated_block_defaults(block)
                             block.pop(AI_PARTS_KEY, None); block.pop(AI_REUSE_KEY, None)
                             page_result = [output]
                             completed_block = True
@@ -1255,7 +1278,7 @@ def create_app() -> FastAPI:
                             for target_index in target_indices:
                                 block = blocks[target_index]
                                 block["tr"] = text; block["richHtml"] = ""
-                                block["align"] = "justify"; block["size"] = 12; block["verticalAlign"] = "top"; block["bold"] = block.get("pageRole") == "heading"
+                                context_run.apply_translated_block_defaults(block)
                                 block.pop(AI_PARTS_KEY, None); block.pop(AI_REUSE_KEY, None)
                                 if target_index != block_index:
                                     mark_reused_translation(block, source_texts[target_index], values.provider, values.source_language, settings)
@@ -1274,10 +1297,7 @@ def create_app() -> FastAPI:
                 for block, text in zip(blocks, translated_blocks):
                     block["tr"] = text
                     block["richHtml"] = ""
-                    block["align"] = "justify"
-                    block["size"] = 12
-                    block["verticalAlign"] = "top"
-                    block["bold"] = block.get("pageRole") == "heading"
+                    context_run.apply_translated_block_defaults(block)
                 try:
                     store.save_if_unchanged(state, expected_updated_at)
                 except OSError as exc:

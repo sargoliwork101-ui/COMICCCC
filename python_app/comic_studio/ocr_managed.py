@@ -1991,15 +1991,26 @@ class IsolatedOcrEngine:
                 payload = json.loads(raw_resp)
                 if not payload.get("ok"):
                     raise self._error_cls(f"OCR failed ({self.id}): {payload.get('error')}")
-                return [
-                    self._line_factory(
-                        str(entry["text"]).strip(),
-                        float(entry.get("confidence", 0.9)),
-                        [[float(pt[0]), float(pt[1])] for pt in entry["polygon"]],
-                    )
-                    for entry in payload.get("lines") or []
-                    if str(entry.get("text", "")).strip() and entry.get("polygon")
-                ]
+                out_lines: list[Any] = []
+                for entry in payload.get("lines") or []:
+                    raw_txt = str(entry.get("text", "")).strip("\r\n")
+                    if not raw_txt.strip() or not entry.get("polygon"):
+                        continue
+                    poly = [[float(pt[0]), float(pt[1])] for pt in entry["polygon"]]
+                    conf = float(entry.get("confidence", 0.9))
+                    extra = {
+                        k: entry[k]
+                        for k in ("bold", "italic", "role")
+                        if k in entry and entry[k] is not None
+                    }
+                    if extra:
+                        try:
+                            out_lines.append(self._line_factory(raw_txt, conf, poly, **extra))
+                            continue
+                        except TypeError:
+                            pass
+                    out_lines.append(self._line_factory(raw_txt, conf, poly))
+                return out_lines
         finally:
             tmp_path.unlink(missing_ok=True)
 

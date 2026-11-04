@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.88"
+    assert health.json()["version"] == "3.89"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۸۸ · Python</span>' in index_html
+    assert '<span class="ver">۳.۸۹ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -3001,6 +3001,68 @@ def test_v388_url_ipv6_nan_progress_reuse_repeated_and_duplicate_edited_sync(cli
     store.save(duplicated)
     backup_res = client.post(f"/api/projects/{pid}/backup", json={"drafts": []})
     assert backup_res.status_code == 200 and len(backup_res.content) > 100
+
+
+def test_v389_proportional_headings_typography_and_indent_exports(client):
+    from comic_studio.context_run import apply_translated_block_defaults
+
+    project, item = make_project(client)
+    pid, iid = project["id"], item["id"]
+
+    heading_blk = {
+        "id": 1, "text": "8.3.5.7.1 Minimum Heel Fillet", "tr": "۸.۳.۵.۷.۱ حداقل ارتفاع فیلهٔ پاشنه",
+        "pageRole": "heading", "x0": 40, "y0": 20, "x1": 280, "y1": 48, "lineH": 28, "enabled": True,
+    }
+    indented_para = {
+        "id": 2, "text": "The solder joint shall wet cleanly.", "tr": "اتصال لحیم باید کاملاً یکنواخت باشد.",
+        "pageRole": "paragraph", "x0": 65, "y0": 60, "x1": 290, "y1": 100, "lineH": 20,
+        "firstLineIndent": 1.5, "sourceIndent": 4, "_detectedItalic": True, "italic": True, "enabled": True,
+    }
+    hanging_bullet = {
+        "id": 3, "text": "• Target condition\ncontinuation line", "tr": "• وضعیت هدف\nادامهٔ سطر دوم",
+        "pageRole": "list", "x0": 40, "y0": 110, "x1": 290, "y1": 150, "lineH": 20,
+        "hangingIndent": 1.4, "_detectedBold": True, "bold": True, "enabled": True,
+    }
+    apply_translated_block_defaults(heading_blk)
+    apply_translated_block_defaults(indented_para)
+    apply_translated_block_defaults(hanging_bullet)
+
+    assert heading_blk["size"] == round(28 * 0.78) and heading_blk["size"] > 12 and heading_blk["bold"] is True
+    assert indented_para["size"] == 12 and indented_para["bold"] is False and indented_para["italic"] is True
+    assert hanging_bullet["size"] == 12 and hanging_bullet["bold"] is True
+
+    state = client.get(f"/api/projects/{pid}").json()
+    state["images"][0]["pageMode"] = "document"
+    state["images"][0]["blocks"] = [heading_blk, indented_para, hanging_bullet]
+    assert client.put(f"/api/projects/{pid}/state", json={"state": state}).status_code == 200
+
+    # 1. TXT export formats headings distinctly with ■ تیتر + rule and preserves indents & line breaks
+    txt_res = client.post(f"/api/projects/{pid}/export", json={"kind": "txt", "image_ids": [iid], "name": "ipc-txt"})
+    assert txt_res.status_code == 200
+    txt_body = txt_res.content.decode("utf-8-sig")
+    assert "■ تیتر: 8.3.5.7.1 Minimum Heel Fillet" in txt_body
+    assert "────────────" in txt_body
+    assert "← ■ ۸.۳.۵.۷.۱ حداقل ارتفاع فیلهٔ پاشنه" in txt_body
+    assert "• وضعیت هدف\n" in txt_body and "ادامهٔ سطر دوم" in txt_body
+
+    # 2. Flowing DOCX export emits proportional heading size (>30 half-pt), firstLine, hanging, and italic <w:i/>
+    docx_res = client.post(f"/api/projects/{pid}/export", json={"kind": "docx", "image_ids": [iid], "docx_layout": "flowing"})
+    assert docx_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(docx_res.content)) as zdoc:
+        doc_xml = zdoc.read("word/document.xml").decode("utf-8")
+        assert 'w:firstLine="' in doc_xml
+        assert 'w:hanging="' in doc_xml
+        assert "<w:i/>" in doc_xml
+        assert 'w:sz w:val="42"' in doc_xml  # round(22 * 0.95, 1) * 2 = 41.8 -> 42 half-pt (21pt heading vs 12pt body)
+
+    # 3. Flowing PPTX export emits proportional heading size, indent/marL attributes, and italic i="1"
+    pptx_res = client.post(f"/api/projects/{pid}/export", json={"kind": "pptx", "image_ids": [iid], "pptx_layout": "flowing"})
+    assert pptx_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(pptx_res.content)) as zppt:
+        slide_xml = zppt.read("ppt/slides/slide1.xml").decode("utf-8")
+        assert 'indent="' in slide_xml
+        assert 'indent="-' in slide_xml
+        assert ' i="1"' in slide_xml
 
 
 

@@ -385,6 +385,7 @@
 
   // قالب‌بندی هر بلوک با پیش‌فرض‌های ایمن برای بلوک‌های قدیمی (ذخیره‌شده قبل از نسخهٔ ۲.۲۸)
   function blockStyle(b) {
+    const isHeading = b.pageRole === 'heading';
     return {
       dir: b.dir === 'ltr' ? 'ltr' : 'rtl',       // جهت متن: پیش‌فرض راست‌به‌چپ
       align: ['center', 'left', 'justify'].includes(b.align) ? b.align : 'right', // physical alignment; old projects default right
@@ -393,8 +394,18 @@
       italic: !!b.italic,
       underline: !!b.underline,
       size: Number.isFinite(+b.size) && +b.size > 0 ? +b.size : null,
-      color: /^#[0-9a-fA-F]{6}$/.test(b.color) ? b.color : null // null = رنگ خودکار بر اساس پس‌زمینه
+      color: /^#[0-9a-fA-F]{6}$/.test(b.color) ? b.color : null, // null = رنگ خودکار بر اساس پس‌زمینه
+      firstLineIndent: !isHeading && Number.isFinite(+b.firstLineIndent) && +b.firstLineIndent > 0 ? Math.min(4, +b.firstLineIndent) : 0,
+      hangingIndent: !isHeading && Number.isFinite(+b.hangingIndent) && +b.hangingIndent > 0 ? Math.min(4, +b.hangingIndent) : 0,
     };
+  }
+
+  function indentGeometry(st, padX, size) {
+    const hangPx = st.hangingIndent > 0 ? Math.round(st.hangingIndent * size) : 0;
+    const textIndentPx = hangPx > 0 ? -hangPx : (st.firstLineIndent > 0 ? Math.round(st.firstLineIndent * size) : 0);
+    const padLeft = padX + (st.dir === 'ltr' ? hangPx : 0);
+    const padRight = padX + (st.dir === 'rtl' ? hangPx : 0);
+    return { textIndentPx, padLeft, padRight, hangPx };
   }
 
   let domMeasureState = null;
@@ -455,12 +466,14 @@
   function applyDomLayoutStyles(box, tpl, st, bw, padX, size) {
     box.replaceChildren(tpl.content.cloneNode(true));
     box.dir = st.dir;
+    const ind = indentGeometry(st, padX, size);
     box.style.cssText = [
       'position:absolute', 'left:0', 'top:0', 'box-sizing:border-box',
-      `width:${bw}px`, `padding:0px ${padX}px`, 'margin:0', 'border:0',
+      `width:${bw}px`, `padding:0px ${ind.padRight}px 0px ${ind.padLeft}px`, 'margin:0', 'border:0',
       `font-family:${FONT}`, `font-size:${size}px`, 'line-height:1.55',
       `font-weight:${st.bold ? '700' : '400'}`, `font-style:${st.italic ? 'italic' : 'normal'}`,
       'white-space:pre-line', 'text-justify:inter-word',
+      `text-indent:${ind.textIndentPx}px`,
       'overflow-wrap:normal', 'word-break:normal',
       'letter-spacing:0px', 'word-spacing:0px', 'font-kerning:auto',
       `direction:${st.dir}`, `text-align:${st.align}`
@@ -875,7 +888,7 @@
   }
 
   const api = {
-    FONT, render, sampleBg, fit, wrapWords, blockStyle, boxInset, fitBlockSize,
+    FONT, render, sampleBg, fit, wrapWords, blockStyle, boxInset, indentGeometry, fitBlockSize,
     hasInlineMarks, tokenizeInline, inlineMarksToHtml, stripInlineMarkers, inlineWords, richHtmlWords, fitInline, visualLineOrder
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Typeset = api;

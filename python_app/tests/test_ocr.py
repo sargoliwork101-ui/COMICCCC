@@ -1422,6 +1422,58 @@ def test_v388_rapid_gpu_fallback_race_and_worker_edge_cases(monkeypatch, tmp_pat
     assert len(out_lines) == 1 and out_lines[0]["text"] == "Valid line"
 
 
+def test_v389_pixel_typography_bold_italic_and_worker_markup_hints():
+    import io
+    import pymupdf
+    from PIL import Image
+    from comic_studio.ocr import OcrLine, _blocks_from_lines, analyze_blocks_typography
+    from comic_studio.ocr_worker import _extract_markup_hints, _strip_markup
+
+    # 1. Worker markup hints preserve bold, italic, heading role, and leading spaces
+    h_hints = _extract_markup_hints("## **8.3.5.7 Heel Fillet**", "section-header")
+    assert h_hints == {"role": "heading", "bold": True}
+    i_hints = _extract_markup_hints("    *Italic note line*\n      second indented line", "text")
+    assert i_hints["italic"] is True
+    cleaned = _strip_markup("    *Italic note line*\n      second indented line")
+    assert cleaned == "    Italic note line\n      second indented line"
+
+    # 2. Pixel-level stroke-weight (bold) and shear-projection (italic) detection on rendered page
+    doc = pymupdf.open()
+    page = doc.new_page(width=520, height=300)
+    samples = [
+        ("hebo", 14, "8.3.5.7.1 Minimum Heel Fillet", 40, 50),
+        ("helv", 12, "The solder fillet shall wet the lead and land termination cleanly.", 40, 95),
+        ("helv", 12, "Inspect all connections under standard magnification levels.", 40, 130),
+        ("heit", 12, "Note: Refer to Figure 8-35 for side view geometry.", 40, 165),
+        ("hebo", 12, "Warning: Excessive heat may delaminate the land pad.", 40, 200),
+    ]
+    raw_lines = []
+    scale = 150.0 / 72.0
+    for fontname, fsize, text, x, y in samples:
+        page.insert_text((x, y), text, fontname=fontname, fontsize=fsize, color=(0, 0, 0))
+    pix = page.get_pixmap(dpi=150)
+    pil_img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+    for w_box in page.get_text("dict")["blocks"]:
+        for ln in w_box.get("lines", []):
+            txt = "".join(sp["text"] for sp in ln["spans"]).strip()
+            if not txt:
+                continue
+            bx0, by0, bx1, by1 = [v * scale for v in ln["bbox"]]
+            raw_lines.append(OcrLine(txt, 0.96, [[bx0, by0], [bx1, by0], [bx1, by1], [bx0, by1]]))
+    doc.close()
+
+    blocks = _blocks_from_lines(raw_lines)
+    analyze_blocks_typography(pil_img, blocks, page_mode="document")
+    pil_img.close()
+
+    by_prefix = {b["text"].split()[0]: b for b in blocks}
+    assert by_prefix["8.3.5.7.1"]["bold"] is True and by_prefix["8.3.5.7.1"].get("_detectedBold") is True
+    assert by_prefix["Warning:"]["bold"] is True and by_prefix["Warning:"].get("_detectedBold") is True
+    assert by_prefix["The"]["bold"] is False and by_prefix["The"]["italic"] is False
+    assert by_prefix["Inspect"]["bold"] is False and by_prefix["Inspect"]["italic"] is False
+    assert by_prefix["Note:"]["italic"] is True and by_prefix["Note:"].get("_detectedItalic") is True
+
+
 
 
 

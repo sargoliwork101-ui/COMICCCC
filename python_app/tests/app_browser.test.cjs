@@ -2473,8 +2473,16 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v3.88: Verify version badge ۳.۸۸, async thumbnail decoding, hardware cpuCores endpoint, and Help section 5 GPU/multi-core guide
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۸۸ · Python', 'header shows version ۳.۸۸');
+      // v3.85–v3.89: Verify version badge ۳.۸۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, and Help section 5 GPU/multi-core guide
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۸۹ · Python', 'header shows version ۳.۸۹');
+      const v389BrowserCheck = await page.evaluate(() => {
+        const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
+        applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
+        const st = Typeset.blockStyle({ dir: 'rtl', firstLineIndent: 1.5 });
+        const ind = Typeset.indentGeometry(st, 4, 16);
+        return { headingSize: h.size, headingBold: h.bold, textIndentPx: ind.textIndentPx };
+      });
+      assert.ok(v389BrowserCheck.headingSize > 14 && v389BrowserCheck.headingBold === true && v389BrowserCheck.textIndentPx === 24, 'v3.89 proportional heading size and indentGeometry work in Chromium');
       const hwReport = await api(base, '/api/engines/hardware');
       assert.ok(Number(hwReport.cpuCores) >= 1 && typeof hwReport.hasGpu === 'boolean', '/api/engines/hardware reports cpuCores and hasGpu');
       await page.keyboard.press('F1');

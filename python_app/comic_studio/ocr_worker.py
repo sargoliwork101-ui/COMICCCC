@@ -95,16 +95,66 @@ def _release_worker_caches() -> None:
             pass
 
 
+_HEADING_LABELS = {
+    "title", "doc_title", "paragraph_title", "section_header", "section-header",
+    "header", "heading", "sub_title", "subtitle", "caption", "figure_title", "table_title",
+}
+_LIST_LABELS = {"list", "list_item", "list-item"}
+
+
+def _extract_markup_hints(raw: str, label: str = "") -> dict[str, Any]:
+    text = str(raw or "").strip()
+    norm_label = str(label or "").strip().lower()
+    hints: dict[str, Any] = {}
+    if norm_label in _HEADING_LABELS or re.search(r"<h[1-6]\b", text, re.IGNORECASE) or re.match(r"^\s*#{1,6}\s+\S", text):
+        hints["role"] = "heading"
+        hints["bold"] = True
+    elif norm_label in _LIST_LABELS or re.search(r"<li\b", text, re.IGNORECASE):
+        hints["role"] = "list"
+    stripped_tags = re.sub(r"<[^>]+>", "", text).strip()
+    if stripped_tags:
+        lines = [ln.strip() for ln in stripped_tags.splitlines() if ln.strip()]
+        bold_lines = sum(
+            1 for ln in lines
+            if ln.startswith("**") and ln.endswith("**") and len(ln) > 4 and "**" not in ln[2:-2]
+        )
+        italic_lines = sum(
+            1 for ln in lines
+            if (
+                (ln.startswith("*") and not ln.startswith("**") and ln.endswith("*") and not ln.endswith("**") and len(ln) > 2)
+                or (ln.startswith("_") and not ln.startswith("__") and ln.endswith("_") and not ln.endswith("__") and len(ln) > 2)
+            )
+        )
+        if (
+            re.match(r"^\s*<(?:b|strong)\b[^>]*>[\s\S]*</(?:b|strong)>\s*$", text, re.IGNORECASE)
+            or (lines and bold_lines * 2 >= len(lines))
+        ):
+            hints["bold"] = True
+        if (
+            re.match(r"^\s*<(?:i|em)\b[^>]*>[\s\S]*</(?:i|em)>\s*$", text, re.IGNORECASE)
+            or (lines and italic_lines * 2 >= len(lines))
+        ):
+            hints["italic"] = True
+    return hints
+
+
 def _strip_markup(raw: str) -> str:
     text = str(raw or "")
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</(?:p|div|li|tr|h[1-6])>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
     text = html.unescape(text)
-    text = re.sub(r"^\s*#{1,6}\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^(\s*)#{1,6}\s+", r"\1", text, flags=re.MULTILINE)
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-    lines = [" ".join(part.split()) for part in text.splitlines()]
-    return "\n".join(line for line in lines if line).strip()
+    text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", text)
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines():
+        expanded = raw_line.expandtabs(4)
+        lead_len = min(16, len(expanded) - len(expanded.lstrip(" ")))
+        body = " ".join(expanded.split())
+        if body:
+            cleaned_lines.append((" " * lead_len) + body)
+    return "\n".join(cleaned_lines).strip("\n")
 
 
 def _rect_polygon(x0: float, y0: float, x1: float, y1: float) -> list[list[float]]:
@@ -281,18 +331,22 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
             for block in blocks:
                 if isinstance(block, dict):
                     label = str(block.get("block_label") or block.get("label") or "text").lower()
-                    content = _strip_markup(block.get("block_content") or block.get("content") or block.get("text") or "")
+                    raw_content = block.get("block_content") or block.get("content") or block.get("text") or ""
+                    content = _strip_markup(raw_content)
+                    hints = _extract_markup_hints(raw_content, label)
                     bbox = block.get("block_bbox") or block.get("bbox") or block.get("coordinate")
                     score = float(block.get("score", 0.9) or 0.9)
                 else:
                     label = str(getattr(block, "label", "text")).lower()
-                    content = _strip_markup(getattr(block, "content", ""))
+                    raw_content = getattr(block, "content", "")
+                    content = _strip_markup(raw_content)
+                    hints = _extract_markup_hints(raw_content, label)
                     bbox = getattr(block, "bbox", None)
                     score = float(getattr(block, "score", 0.9) or 0.9)
                 if label in {"image", "figure", "header_image", "footer_image"} or not content or not bbox or len(bbox) < 4:
                     continue
                 poly = _clamp_polygon(_rect_polygon(bbox[0], bbox[1], bbox[2], bbox[3]), width, height)
-                lines.append({"text": content, "confidence": max(0.0, min(1.0, score)), "polygon": poly})
+                lines.append({"text": content, "confidence": max(0.0, min(1.0, score)), "polygon": poly, **hints})
         return lines
 
 
@@ -350,7 +404,10 @@ class _SuryaAdapter(_BaseAdapter):
                 for block in getattr(page, "blocks", []) or []:
                     if getattr(block, "skipped", False) or getattr(block, "error", False):
                         continue
-                    text = _strip_markup(getattr(block, "html", "") or getattr(block, "text", ""))
+                    raw_content = getattr(block, "html", "") or getattr(block, "text", "")
+                    label = str(getattr(block, "label", "") or getattr(block, "block_type", "") or "")
+                    text = _strip_markup(raw_content)
+                    hints = _extract_markup_hints(raw_content, label)
                     if not text:
                         continue
                     raw_poly = getattr(block, "polygon", None)
@@ -362,13 +419,15 @@ class _SuryaAdapter(_BaseAdapter):
                     else:
                         continue
                     conf = float(getattr(block, "confidence", 0.9) or 0.9)
-                    lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height)})
+                    lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height), **hints})
             elif self._legacy is not None:
                 rec, det = self._legacy
                 preds = rec([rgb], det_predictor=det)
                 page = preds[0] if preds else None
                 for line in getattr(page, "text_lines", []) or []:
-                    text = _strip_markup(getattr(line, "text", ""))
+                    raw_content = getattr(line, "text", "")
+                    text = _strip_markup(raw_content)
+                    hints = _extract_markup_hints(raw_content)
                     if not text:
                         continue
                     raw_poly = getattr(line, "polygon", None)
@@ -380,7 +439,7 @@ class _SuryaAdapter(_BaseAdapter):
                     else:
                         continue
                     conf = float(getattr(line, "confidence", 0.9) or 0.9)
-                    lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height)})
+                    lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height), **hints})
         finally:
             rgb.close()
         return lines
@@ -407,7 +466,10 @@ class _MinerUAdapter(_BaseAdapter):
                 return
             if not isinstance(node, dict):
                 return
-            text = _strip_markup(node.get("text") or node.get("content") or node.get("markdown") or "")
+            raw_content = node.get("text") or node.get("content") or node.get("markdown") or ""
+            label = str(node.get("type") or node.get("category") or node.get("label") or "")
+            text = _strip_markup(raw_content)
+            hints = _extract_markup_hints(raw_content, label)
             bbox = node.get("bbox")
             if text and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
                 bx0, by0, bx1, by1 = [float(v) for v in bbox[:4]]
@@ -415,7 +477,7 @@ class _MinerUAdapter(_BaseAdapter):
                     bx0, bx1 = bx0 * width / 1000.0, bx1 * width / 1000.0
                     by0, by1 = by0 * height / 1000.0, by1 * height / 1000.0
                 poly = _clamp_polygon(_rect_polygon(bx0, by0, bx1, by1), width, height)
-                lines.append({"text": text, "confidence": 0.9, "polygon": poly})
+                lines.append({"text": text, "confidence": 0.9, "polygon": poly, **hints})
                 return
             for key in ("pages", "pdf_info", "para_blocks", "blocks", "preproc_blocks", "lines", "spans"):
                 if key in node:
@@ -656,11 +718,14 @@ class _DotsOcrAdapter(_TransformersRegionAdapter):
                     if not isinstance(entry, dict):
                         continue
                     bbox = entry.get("bbox")
-                    text = _strip_markup(entry.get("text") or entry.get("content") or "")
+                    raw_content = entry.get("text") or entry.get("content") or ""
+                    label = str(entry.get("category") or entry.get("type") or entry.get("label") or "")
+                    text = _strip_markup(raw_content)
+                    hints = _extract_markup_hints(raw_content, label)
                     if not text or not bbox or len(bbox) < 4:
                         continue
                     poly = _clamp_polygon(_rect_polygon(bbox[0], bbox[1], bbox[2], bbox[3]), width, height)
-                    lines.append({"text": text, "confidence": 0.9, "polygon": poly})
+                    lines.append({"text": text, "confidence": 0.9, "polygon": poly, **hints})
                 if lines:
                     return lines
             except Exception:

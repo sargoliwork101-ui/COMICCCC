@@ -89,6 +89,9 @@ class OcrLine:
     text: str
     confidence: float
     polygon: list[list[float]]
+    bold: bool = False
+    italic: bool = False
+    role: str | None = None
 
     @property
     def box(self) -> list[float]:
@@ -1583,7 +1586,10 @@ def _blocks_from_lines(lines: list[OcrLine], coordinate_scale: float = 1.0) -> l
         x0, y0, x1, y1 = [value / coordinate_scale for value in line.box]
         polygon = [[x / coordinate_scale, y / coordinate_scale] for x, y in line.polygon]
         line_h = max(8.0, y1 - y0)
-        blocks.append({
+        is_bold = bool(getattr(line, "bold", False))
+        is_italic = bool(getattr(line, "italic", False))
+        role = getattr(line, "role", None)
+        entry: dict[str, Any] = {
             "id": index,
             "text": line.text,
             "tr": "",
@@ -1597,12 +1603,20 @@ def _blocks_from_lines(lines: list[OcrLine], coordinate_scale: float = 1.0) -> l
             "bg": "auto",
             "dir": "rtl",
             "align": "right",
-            "bold": False,
-            "italic": False,
+            "bold": is_bold,
+            "italic": is_italic,
             "underline": False,
             "size": None,
             "color": None,
-        })
+        }
+        if is_bold:
+            entry["_detectedBold"] = True
+            entry["_explicitBold"] = True
+        if is_italic:
+            entry["_detectedItalic"] = True
+        if role in {"heading", "list", "paragraph"}:
+            entry["pageRole"] = role
+        blocks.append(entry)
     return blocks
 
 
@@ -1651,7 +1665,14 @@ def _recognize_image_primary(
             try:
                 for line in _recognize_crop_lines(engine, crop, language, page_mode=page_mode):
                     polygon = [[x, y + read_y0] for x, y in line.polygon]
-                    adjusted = OcrLine(line.text, line.confidence, polygon)
+                    adjusted = OcrLine(
+                        line.text,
+                        line.confidence,
+                        polygon,
+                        bold=bool(getattr(line, "bold", False)),
+                        italic=bool(getattr(line, "italic", False)),
+                        role=getattr(line, "role", None),
+                    )
                     center_y = (adjusted.box[1] + adjusted.box[3]) / 2
                     if center_y < start or center_y >= end:
                         continue
@@ -1850,6 +1871,127 @@ def _document_preprocess_image(image: Image.Image) -> tuple[Image.Image, float]:
     return out, scale
 
 
+def analyze_blocks_typography(
+    image: Image.Image,
+    blocks: list[dict[str, Any]],
+    *,
+    page_mode: str = "auto",
+) -> None:
+    """Measure stroke weight (bold) and shear slant (italic) directly from image pixels."""
+    if not blocks:
+        return
+    oriented = ImageOps.exif_transpose(image)
+    gray_img = oriented.convert("L")
+    try:
+        gray = np.asarray(gray_img)
+    finally:
+        if gray_img is not image:
+            gray_img.close()
+        if oriented is not image and oriented is not gray_img:
+            oriented.close()
+    if gray.ndim != 2 or gray.shape[0] < 10 or gray.shape[1] < 10:
+        return
+
+    img_h, img_w = gray.shape
+    slant_angles = (-4.0, 0.0, 4.0, 8.0, 10.0, 12.0, 14.0, 16.0)
+    slant_tans = [float(np.tan(np.deg2rad(a))) for a in slant_angles]
+    measured: list[tuple[dict[str, Any], float, float]] = []
+
+    for blk in blocks:
+        txt = str(blk.get("text") or "").strip()
+        if len(txt) < 2:
+            continue
+        ix0 = max(0, min(img_w - 2, int(round(float(blk.get("x0", 0)))) - 2))
+        iy0 = max(0, min(img_h - 2, int(round(float(blk.get("y0", 0)))) - 2))
+        ix1 = max(ix0 + 2, min(img_w, int(round(float(blk.get("x1", 0)))) + 2))
+        iy1 = max(iy0 + 2, min(img_h, int(round(float(blk.get("y1", 0)))) + 2))
+        if (iy1 - iy0) < 8 or (ix1 - ix0) < 12:
+            continue
+        crop = gray[iy0:iy1, ix0:ix1]
+        p1, p99 = float(np.percentile(crop, 1.0)), float(np.percentile(crop, 99.0))
+        if p99 - p1 < 28.0:
+            continue
+        border = np.concatenate([crop[0, :], crop[-1, :], crop[:, 0], crop[:, -1]])
+        bg = float(np.median(border))
+        if abs(bg - p1) >= abs(bg - p99):
+            denom = max(24.0, bg - p1)
+            cov = np.clip((bg - crop.astype(np.float32)) / denom, 0.0, 1.0)
+        else:
+            denom = max(24.0, p99 - bg)
+            cov = np.clip((crop.astype(np.float32) - bg) / denom, 0.0, 1.0)
+
+        ys, xs = np.nonzero(cov >= 0.42)
+        if len(ys) < 18:
+            continue
+        sub = cov[int(ys.min()):int(ys.max()) + 1, int(xs.min()):int(xs.max()) + 1]
+        sh, sw = sub.shape
+        if sh < 6 or sw < 10:
+            continue
+
+        total_mass = float(sub.sum())
+        h_edges = float(np.abs(np.diff(sub, axis=1, prepend=0.0, append=0.0)).sum()) * 0.5
+        v_edges = float(np.abs(np.diff(sub, axis=0, prepend=0.0, append=0.0)).sum()) * 0.5
+        rx = total_mass / max(1.0, h_edges)
+        ry = total_mass / max(1.0, v_edges)
+        stroke_w = (2.0 * rx * ry) / max(0.1, rx + ry)
+        active_cols = max(1, int(np.count_nonzero(sub.max(axis=0) >= 0.35)))
+        col_fill = total_mass / float(sh * active_cols)
+
+        has_lower = any("a" <= ch <= "z" for ch in txt)
+        has_tall = any(("A" <= ch <= "Z") or ("0" <= ch <= "9") or ch in "bdfhkltgjpqy" for ch in txt)
+        eff_h = float(sh) / 0.76 if (has_lower and not has_tall) else float(sh)
+        sw_ratio = stroke_w / max(6.0, eff_h)
+        measured.append((blk, sw_ratio, col_fill))
+
+        # Italic / oblique detection on single-row alphabetic lines
+        alpha_count = sum(ch.isalpha() for ch in txt)
+        if alpha_count >= 4 and "\n" not in txt and sh >= 9 and sw >= 16 and not blk.get("italic"):
+            edge = np.abs(np.diff((sub >= 0.42).astype(np.float32), axis=1))
+            eh, ew = edge.shape
+            if ew >= 8 and float(edge.sum()) >= 8.0:
+                yc = np.arange(eh, dtype=np.float32) - (eh - 1) * 0.5
+                scores: list[float] = []
+                for tan_a in slant_tans:
+                    pad = int(np.ceil(abs(tan_a) * eh)) + 2
+                    acc = np.zeros(ew + 2 * pad, dtype=np.float32)
+                    for r_idx in range(eh):
+                        shift = tan_a * float(yc[r_idx])
+                        s_floor = int(np.floor(shift))
+                        frac = shift - s_floor
+                        base = pad + s_floor
+                        row_val = edge[r_idx]
+                        acc[base:base + ew] += row_val * (1.0 - frac)
+                        acc[base + 1:base + 1 + ew] += row_val * frac
+                    scores.append(float(np.sum(acc * acc)))
+                best_idx = int(np.argmax(scores))
+                best_deg = slant_angles[best_idx]
+                zero_score = scores[1]  # angle 0.0°
+                slant_gain = scores[best_idx] / max(1e-6, zero_score)
+                if best_deg >= 8.0 and slant_gain >= 1.08:
+                    blk["italic"] = True
+                    blk["_detectedItalic"] = True
+
+    if not measured:
+        return
+    sw_vals = [item[1] for item in measured]
+    fill_vals = [item[2] for item in measured]
+    has_weight_contrast = len(measured) >= 3 and (max(sw_vals) >= min(sw_vals) * 1.18)
+    if has_weight_contrast:
+        base_sw = float(np.percentile(sw_vals, 38.0))
+        base_fill = float(np.percentile(fill_vals, 38.0))
+        for blk, sw_r, fill_r in measured:
+            if sw_r >= base_sw * 1.20 and fill_r >= base_fill * 1.10:
+                blk["bold"] = True
+                blk["_detectedBold"] = True
+                blk["_explicitBold"] = True
+    elif page_mode == "document":
+        for blk, sw_r, fill_r in measured:
+            if sw_r >= 0.265 and fill_r >= 0.40:
+                blk["bold"] = True
+                blk["_detectedBold"] = True
+                blk["_explicitBold"] = True
+
+
 def recognize_image(
     engine: Any,
     image: Image.Image,
@@ -1865,8 +2007,10 @@ def recognize_image(
         engine, image, language, contrast, precise, min_confidence, page_mode=page_mode,
     )
     if isinstance(engine, IsolatedOcrEngine):
+        analyze_blocks_typography(image, primary, page_mode=page_mode)
         return primary
     if not _needs_extra_preprocess(primary):
+        analyze_blocks_typography(image, primary, page_mode=page_mode)
         return primary
     best = primary
     if page_mode == "document":
@@ -1887,6 +2031,7 @@ def recognize_image(
                 emit("نتیجهٔ پیش‌پردازش تخصصی مقاله بهتر بود و انتخاب شد", "success")
                 best = doc_fallback
                 if not _needs_extra_preprocess(best):
+                    analyze_blocks_typography(image, best, page_mode=page_mode)
                     return best
     if EXTRA_PREPROCESS_ENABLED:
         emit("نتیجهٔ OCR اصلی ضعیف یا کوتاه است؛ پیش‌پردازش تکمیلی متن روشن اجرا می‌شود")
@@ -1920,4 +2065,5 @@ def recognize_image(
                 best = bubble
             else:
                 emit("نتیجهٔ حباب بهتر نبود؛ بهترین نتیجهٔ فعلی حفظ شد")
+    analyze_blocks_typography(image, best, page_mode=page_mode)
     return best

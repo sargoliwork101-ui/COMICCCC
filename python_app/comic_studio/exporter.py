@@ -376,12 +376,49 @@ def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
         blocks = _ordered_export_blocks(item)
         if not blocks:
             chunks.append("(متنی تشخیص داده نشده است)\n")
-        for block in blocks:
-            indent = " " * max(0, min(40, int(block.get("sourceIndent", 0) or 0)))
-            ocr_text = _strip_inline_markers(_clean_text(block.get("text") or ""))
-            tr_text = _block_translation_plain(block)
-            chunks.append(f"[{block.get('id', '-')}] {indent}{ocr_text}")
-            chunks.append(f"    ← {tr_text if tr_text.strip() else '(بدون ترجمه)'}\n")
+        for b_idx, block in enumerate(blocks):
+            role = str(block.get("pageRole") or "paragraph")
+            base_indent = " " * (0 if role == "heading" else max(0, min(32, int(block.get("sourceIndent", 0) or 0))))
+            first_extra = " " * (round(float(block.get("firstLineIndent") or 0) * 2) if role != "heading" else 0)
+            hang_extra = " " * (round(float(block.get("hangingIndent") or 0) * 2) if role != "heading" else 0)
+            ocr_text = _strip_inline_markers(_clean_text(block.get("text") or "")).strip("\r\n")
+            tr_text = _block_translation_plain(block).strip("\r\n")
+
+            ocr_lines = ocr_text.split("\n") if ocr_text else [""]
+            id_prefix = f"[{block.get('id', '-')}] "
+            cont_pad = " " * len(id_prefix)
+
+            if role == "heading":
+                if b_idx > 0:
+                    chunks.append("")
+                first_ocr = f"{id_prefix}■ تیتر: {ocr_lines[0]}"
+                ocr_formatted = [first_ocr] + [f"{cont_pad}        {ln}" for ln in ocr_lines[1:]]
+                chunks.extend(ocr_formatted)
+                rule_len = max(12, min(56, len(ocr_lines[0]) + 8))
+                chunks.append(f"{cont_pad}{'─' * rule_len}")
+                if tr_text.strip():
+                    tr_lines = tr_text.split("\n")
+                    chunks.append(f"    ← ■ {tr_lines[0]}")
+                    for tln in tr_lines[1:]:
+                        chunks.append(f"        {tln}")
+                    chunks.append("")
+                else:
+                    chunks.append("    ← (بدون ترجمه)\n")
+            else:
+                first_ocr = f"{id_prefix}{base_indent}{first_extra}{ocr_lines[0]}"
+                ocr_formatted = [first_ocr] + [f"{cont_pad}{base_indent}{hang_extra}{ln}" for ln in ocr_lines[1:]]
+                chunks.extend(ocr_formatted)
+                if tr_text.strip():
+                    if base_indent or first_extra or hang_extra:
+                        tr_lines = tr_text.split("\n")
+                        chunks.append(f"    ← {base_indent}{first_extra}{tr_lines[0]}")
+                        for tln in tr_lines[1:]:
+                            chunks.append(f"      {base_indent}{hang_extra}{tln}")
+                        chunks[-1] = chunks[-1] + "\n"
+                    else:
+                        chunks.append(f"    ← {tr_text}\n")
+                else:
+                    chunks.append("    ← (بدون ترجمه)\n")
         emit(f"نوشتن متن تصویر {index} از {total} در فایل TXT", progress=index / total)
     output = project_root(state["id"]) / "exports" / f"{_export_stem(state, request)}.txt"
     with _atomic_export_path(output) as tmp_output:
@@ -698,8 +735,7 @@ def _build_textbox_paragraphs_xml(
     scale_pt: float, bg_rgb: tuple[int, int, int] | None,
 ) -> str:
     if docx_mode == "ocr":
-        indent = " " * max(0, min(40, int(block.get("sourceIndent", 0) or 0)))
-        plain = _strip_inline_markers(_clean_text(f"{indent}{block.get('text') or ''}")).strip("\n")
+        plain = _strip_inline_markers(_clean_text(block.get("text") or "")).strip("\n")
         rich_html = ""
         rtl_default = bool(_RTL_CHAR_RE.search(plain))
         raw_align = str(block.get("align") or "")
@@ -707,14 +743,14 @@ def _build_textbox_paragraphs_xml(
             align_default = "left"
         else:
             align_default = raw_align or ("right" if rtl_default else "left")
-        bold_default = block.get("bold") is not False
+        bold_default = True if block.get("pageRole") == "heading" else (block.get("bold") is not False)
     else:
         plain = _block_translation_plain(block)
         rich_html = _clean_text(block.get("richHtml") or "").strip()
         dir_field = str(block.get("dir") or "").lower()
         rtl_default = (dir_field == "rtl") if dir_field in ("rtl", "ltr") else (True if not plain else bool(_RTL_CHAR_RE.search(plain) or not re.search(r"[A-Za-z]", plain)))
         align_default = str(block.get("align") or ("justify" if rtl_default else "left"))
-        bold_default = block.get("bold") is not False
+        bold_default = True if block.get("pageRole") == "heading" else (block.get("bold") is not False)
 
     raw_line_h = block.get("lineH")
     line_h_val: float | None = None
@@ -769,6 +805,16 @@ def _build_textbox_paragraphs_xml(
             ],
         }]
 
+    first_ind_em = float(block.get("firstLineIndent") or 0.0) if block.get("pageRole") != "heading" else 0.0
+    hang_ind_em = float(block.get("hangingIndent") or 0.0) if block.get("pageRole") != "heading" else 0.0
+    box_ind_xml = ""
+    if hang_ind_em >= 0.5:
+        h_dxa = max(140, min(1080, round(hang_ind_em * 200)))
+        box_ind_xml = f'<w:ind w:left="{h_dxa}" w:hanging="{h_dxa}"/>'
+    elif first_ind_em >= 0.5:
+        f_dxa = max(140, min(1080, round(first_ind_em * 200)))
+        box_ind_xml = f'<w:ind w:firstLine="{f_dxa}"/>'
+
     p_xml_list: list[str] = []
     for para in paragraphs:
         p_rtl = bool(para["rtl"])
@@ -776,6 +822,7 @@ def _build_textbox_paragraphs_xml(
         ppr = (
             f'<w:bidi w:val="{"1" if p_rtl else "0"}"/>'
             f'<w:jc w:val="{jc}"/>'
+            f"{box_ind_xml}"
             '<w:spacing w:before="0" w:after="20" w:line="276" w:lineRule="auto"/>'
         )
         r_xml_list: list[str] = []
@@ -973,8 +1020,7 @@ def _prepare_docx_pages(
 def _build_flowing_paragraphs_xml(block: dict[str, Any], *, docx_mode: str) -> str:
     role = str(block.get("pageRole") or "paragraph")
     if docx_mode == "ocr":
-        indent_spaces = " " * max(0, min(12, int(block.get("sourceIndent", 0) or 0))) if role != "heading" else ""
-        plain = _strip_inline_markers(_clean_text(f"{indent_spaces}{block.get('text') or ''}")).strip("\n")
+        plain = _strip_inline_markers(_clean_text(block.get("text") or "")).strip("\n")
         rich_html = ""
         rtl_default = bool(_RTL_CHAR_RE.search(plain))
         align_default = "justify" if role == "paragraph" and len(plain) >= 60 else ("right" if rtl_default else "left")
@@ -988,7 +1034,17 @@ def _build_flowing_paragraphs_xml(block: dict[str, Any], *, docx_mode: str) -> s
         align_default = raw_align if raw_align in ("left", "right", "center", "justify") else ("right" if role == "heading" and rtl_default else ("left" if role == "heading" else "justify"))
         bold_default = True if role == "heading" else (block.get("bold") is True)
 
-    base_pt = 15.0 if role == "heading" else 12.0
+    raw_sz = float(block.get("size") or 0.0)
+    raw_lh = float(block.get("lineH") or 0.0)
+    if role == "heading":
+        if raw_sz > 12.0:
+            base_pt = max(14.5, min(28.0, round(raw_sz * 0.95, 1)))
+        elif raw_lh > 0.0:
+            base_pt = max(14.5, min(24.0, round(raw_lh * 0.62, 1)))
+        else:
+            base_pt = 15.5
+    else:
+        base_pt = max(9.0, min(32.0, raw_sz)) if (raw_sz > 0.0 and raw_sz != 12.0) else 12.0
     explicit_color = _parse_css_color(block.get("color")) or "141414"
     base_style = {
         "bold": bold_default,
@@ -1021,15 +1077,33 @@ def _build_flowing_paragraphs_xml(block: dict[str, Any], *, docx_mode: str) -> s
             ],
         }]
 
+    block_ind_em = float(block.get("blockIndent") or 0.0)
+    if block_ind_em <= 0.0 and role != "heading" and int(block.get("sourceIndent") or 0) > 0:
+        block_ind_em = min(4.5, round(int(block.get("sourceIndent") or 0) * 0.35, 2))
+    first_ind_em = float(block.get("firstLineIndent") or 0.0) if role != "heading" else 0.0
+    hang_ind_em = float(block.get("hangingIndent") or 0.0) if role != "heading" else 0.0
+    base_dxa = 360 if role == "list" else (max(0, min(2160, round(block_ind_em * 240))) if role != "heading" else 0)
+    if hang_ind_em >= 0.5:
+        hang_dxa = max(180, min(1440, round(hang_ind_em * 240)))
+        ind_xml = f'<w:ind w:left="{base_dxa + hang_dxa}" w:hanging="{hang_dxa}"/>'
+    elif first_ind_em >= 0.5:
+        first_dxa = max(180, min(1440, round(first_ind_em * 240)))
+        ind_xml = f'<w:ind w:left="{base_dxa}" w:firstLine="{first_dxa}"/>'
+    elif role == "list":
+        ind_xml = '<w:ind w:left="360" w:right="360"/>'
+    elif base_dxa > 0:
+        ind_xml = f'<w:ind w:left="{base_dxa}"/>'
+    else:
+        ind_xml = ""
+
     p_xml_list: list[str] = []
     for para in paragraphs:
         p_rtl = bool(para["rtl"])
         jc = _word_jc(str(para["align"]), p_rtl)
-        before_dxa = "200" if role == "heading" else "0"
+        before_dxa = "220" if role == "heading" else "0"
         after_dxa = "100" if role == "heading" else ("60" if role == "list" else "120")
         line_dxa = "280" if role == "heading" else "320"
         keep_next = "<w:keepNext/>" if role == "heading" else ""
-        ind_xml = '<w:ind w:left="360" w:right="360"/>' if role == "list" else ""
         ppr = (
             f'<w:bidi w:val="{"1" if p_rtl else "0"}"/>'
             f'<w:jc w:val="{jc}"/>'
@@ -1497,8 +1571,7 @@ def _build_pptx_textbox_paragraphs_xml(
 ) -> tuple[str, bool]:
     """Return DrawingML `<a:p>...` XML and whether RTL column layout applies."""
     if pptx_mode == "ocr":
-        indent = " " * max(0, min(40, int(block.get("sourceIndent", 0) or 0)))
-        plain = _strip_inline_markers(_clean_text(f"{indent}{block.get('text') or ''}")).strip("\n")
+        plain = _strip_inline_markers(_clean_text(block.get("text") or "")).strip("\n")
         rich_html = ""
         rtl_default = bool(_RTL_CHAR_RE.search(plain))
         raw_align = str(block.get("align") or "")
@@ -1506,7 +1579,7 @@ def _build_pptx_textbox_paragraphs_xml(
             align_default = "left"
         else:
             align_default = raw_align or ("right" if rtl_default else "left")
-        bold_default = block.get("bold") is not False
+        bold_default = True if block.get("pageRole") == "heading" else (block.get("bold") is not False)
     else:
         plain = _block_translation_plain(block)
         rich_html = _clean_text(block.get("richHtml") or "").strip()
@@ -1515,7 +1588,7 @@ def _build_pptx_textbox_paragraphs_xml(
             True if not plain else bool(_RTL_CHAR_RE.search(plain) or not re.search(r"[A-Za-z]", plain))
         )
         align_default = str(block.get("align") or ("justify" if rtl_default else "left"))
-        bold_default = block.get("bold") is not False
+        bold_default = True if block.get("pageRole") == "heading" else (block.get("bold") is not False)
 
     raw_line_h = block.get("lineH")
     line_h_val: float | None = None
@@ -1570,6 +1643,16 @@ def _build_pptx_textbox_paragraphs_xml(
             ],
         }]
 
+    first_ind_em = float(block.get("firstLineIndent") or 0.0) if block.get("pageRole") != "heading" else 0.0
+    hang_ind_em = float(block.get("hangingIndent") or 0.0) if block.get("pageRole") != "heading" else 0.0
+    box_mar_attr = ""
+    if hang_ind_em >= 0.5:
+        h_emu = max(91440, min(685800, round(hang_ind_em * 152400)))
+        box_mar_attr = f' marL="{h_emu}" indent="-{h_emu}"'
+    elif first_ind_em >= 0.5:
+        f_emu = max(91440, min(685800, round(first_ind_em * 152400)))
+        box_mar_attr = f' indent="{f_emu}"'
+
     p_xml_list: list[str] = []
     any_rtl = rtl_default
     for para in paragraphs:
@@ -1578,7 +1661,7 @@ def _build_pptx_textbox_paragraphs_xml(
             any_rtl = True
         algn = _pptx_algn(str(para["align"]), p_rtl)
         ppr = (
-            f'<a:pPr algn="{algn}" rtl="{"1" if p_rtl else "0"}">'
+            f'<a:pPr algn="{algn}" rtl="{"1" if p_rtl else "0"}"{box_mar_attr}>'
             '<a:lnSpc><a:spcPct val="115000"/></a:lnSpc>'
             '<a:spcAft><a:spcPts val="100"/></a:spcAft>'
             "</a:pPr>"
@@ -1789,7 +1872,12 @@ def _build_flowing_pptx(
                 if not plain:
                     continue
 
-                base_pt = 22.0 if role == "heading" else 15.5
+                raw_sz = float(blk.get("size") or 0.0)
+                raw_lh = float(blk.get("lineH") or 0.0)
+                if role == "heading":
+                    base_pt = max(19.0, min(32.0, raw_sz * 1.15 if raw_sz > 12.0 else (raw_lh * 0.85 if raw_lh > 0.0 else 22.0)))
+                else:
+                    base_pt = max(11.0, min(28.0, raw_sz)) if (raw_sz > 0.0 and raw_sz != 12.0) else 15.5
                 default_color = _parse_css_color(blk.get("color")) or ("1E1B4B" if role == "heading" else "1E293B")
                 raw_align = str(blk.get("align") or "")
                 align_default = raw_align if raw_align in ("left", "right", "center", "justify") else ("right" if rtl_default else "left")
@@ -1823,10 +1911,28 @@ def _build_flowing_pptx(
                         ],
                     }]
 
+                block_ind_em = float(blk.get("blockIndent") or 0.0) if role != "heading" else 0.0
+                if block_ind_em <= 0.0 and role != "heading" and int(blk.get("sourceIndent") or 0) > 0:
+                    block_ind_em = min(4.0, round(int(blk.get("sourceIndent") or 0) * 0.35, 2))
+                first_ind_em = float(blk.get("firstLineIndent") or 0.0) if role != "heading" else 0.0
+                hang_ind_em = float(blk.get("hangingIndent") or 0.0) if role != "heading" else 0.0
+                base_emu = 274320 if role == "list" else max(0, min(1097280, round(block_ind_em * 182880)))
+                if hang_ind_em >= 0.5:
+                    h_emu = max(137160, min(822960, round(hang_ind_em * 182880)))
+                    mar_attr = f' marL="{base_emu + h_emu}" indent="-{h_emu}"'
+                elif first_ind_em >= 0.5:
+                    f_emu = max(137160, min(822960, round(first_ind_em * 182880)))
+                    mar_attr = f' marL="{base_emu}" indent="{f_emu}"' if base_emu > 0 else f' indent="{f_emu}"'
+                elif role == "list":
+                    mar_attr = ' marL="274320" marR="274320"'
+                elif base_emu > 0:
+                    mar_attr = f' marL="{base_emu}"'
+                else:
+                    mar_attr = ""
+
                 for para in paragraphs:
                     p_rtl = bool(para["rtl"])
                     algn = _pptx_algn(str(para["align"]), p_rtl)
-                    mar_attr = ' marL="274320" marR="274320"' if role == "list" else ""
                     spc_bef = "800" if role == "heading" else "200"
                     spc_aft = "450" if role == "heading" else "450"
                     bu_xml = '<a:buChar char="•"/>' if role == "list" else "<a:buNone/>"

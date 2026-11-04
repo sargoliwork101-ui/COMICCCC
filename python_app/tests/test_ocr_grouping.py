@@ -114,3 +114,64 @@ def test_weighted_confidence_ignores_empty_member_offset():
     assert doc_grouped[0]["conf"] == 94.0
 
 
+def test_v389_ipc_headings_line_breaks_indents_outdents_and_auto_doc_promotion():
+    from comic_studio.ocr_grouping import organize_ocr_blocks
+
+    def _line(idx, text, x0, y0, x1, y1):
+        return line(idx, text, x0, y0, width=x1 - x0, height=y1 - y0)
+
+    raw_ipc_lines = [
+        # Deep 5-level IPC heading at normal body height (22px)
+        _line(1, "8.3.5.7.1 Minimum Heel Fillet Height", 80, 60, 420, 82),
+        # IPC condition header without period at normal height
+        _line(2, "Target - Class 1, 2, 3", 80, 98, 290, 120),
+        # Hanging-indented bullet item (first line at x0=80, wrapped continuation at x0=112)
+        _line(3, "• Smooth concave solder fillet across the entire lead", 80, 130, 710, 152),
+        _line(4, "termination interface.", 112, 158, 320, 180),
+        # Visually bold standalone sub-title at body height
+        {**_line(5, "Dimensional Criteria", 80, 198, 275, 220), "bold": True, "_detectedBold": True, "_explicitBold": True},
+        # Stacked short lines WITHOUT periods (must NOT concatenate onto one line!)
+        _line(6, "Class 1: Minimum 50% lead thickness", 80, 230, 390, 252),
+        _line(7, "Class 2: Minimum 75% lead thickness", 80, 258, 392, 280),
+        # First-line indented prose paragraph (x0=118 -> x0=80)
+        _line(8, "The solder joint shall wet both the lead heel and the land", 118, 300, 712, 322),
+        _line(9, "without bridging adjacent conductors.", 80, 328, 430, 350),
+        # Outdented warning callout sticking left of the 80px margin (x0=44)
+        _line(10, "NOTE: Verify magnification per Table 1-2.", 44, 370, 430, 392),
+        # Figure caption & ALL-CAPS title
+        _line(11, "Figure 8-35 Butt/I Lead Heel Fillet", 80, 412, 410, 434),
+        _line(12, "GENERAL SOLDERING REQUIREMENTS", 80, 452, 430, 474),
+    ]
+
+    # Even if user leaves page_mode="comic", unmistakable IPC/document structure promotes to "document"
+    blocks, resolved = organize_ocr_blocks(raw_ipc_lines, page_mode="comic", group_lines=True, page_size=(800, 1000))
+    assert resolved == "document"
+
+    by_text = {b["text"]: b for b in blocks}
+    assert by_text["8.3.5.7.1 Minimum Heel Fillet Height"]["pageRole"] == "heading"
+    assert by_text["Target - Class 1, 2, 3"]["pageRole"] == "heading"
+    assert by_text["Dimensional Criteria"]["pageRole"] == "heading"
+    assert by_text["Figure 8-35 Butt/I Lead Heel Fillet"]["pageRole"] == "heading"
+    assert by_text["GENERAL SOLDERING REQUIREMENTS"]["pageRole"] == "heading"
+
+    # Explicit short lines stay separate instead of concatenating behind each other
+    assert "Class 1: Minimum 50% lead thickness" in by_text
+    assert "Class 2: Minimum 75% lead thickness" in by_text
+
+    # Hanging indent on wrapped bullet item
+    bullet_blk = next(b for b in blocks if b["text"].startswith("• Smooth concave"))
+    assert bullet_blk["pageRole"] == "list"
+    assert bullet_blk.get("hangingIndent", 0) >= 1.0
+
+    # First-line indent on indented prose paragraph
+    ind_blk = next(b for b in blocks if b["text"].startswith("The solder joint"))
+    assert ind_blk["pageRole"] == "paragraph"
+    assert ind_blk.get("firstLineIndent", 0) >= 1.2
+
+    # Outdented callout gets blockOutdent > 0 and sourceIndent == 0 while body blocks get sourceIndent > 0
+    note_blk = by_text["NOTE: Verify magnification per Table 1-2."]
+    assert note_blk.get("blockOutdent", 0) >= 1.2
+    assert note_blk.get("sourceIndent") == 0
+    assert ind_blk.get("sourceIndent", 0) > 0
+
+
