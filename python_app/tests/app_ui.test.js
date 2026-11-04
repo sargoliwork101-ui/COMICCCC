@@ -1423,19 +1423,49 @@ function check(name, condition) {
     window.document.body.click();
     check('clicking outside closes .drag-guide-wrap popover cleanly', !$('dragGuideBtn').closest('.drag-guide-wrap').classList.contains('is-open') && $('dragGuideBtn').getAttribute('aria-expanded') === 'false');
 
-    // v3.83: Categorized icon capsules inside #editorDialog header, #inlineEditor zoom/actions/box-ops, and sidebar block cards
+    // v3.83/v3.84: Categorized icon capsules inside #editorDialog header (with no oversized select control), #inlineEditor zoom/actions/box-ops, sidebar block cards, and #newProjectBtn name prompt
     await vm.runInContext("openEditor('img1')", context);
     check(
-      '#editorDialog organizes top header into 2 capsules, box-ops into merge/split + 4 layout sub-capsules, and preserves SVG icons across dynamic label updates',
+      '#editorDialog organizes top header into 2 uniform capsules without .overlay-mode-control select, box-ops into merge/split + 4 layout sub-capsules, and preserves SVG icons across dynamic label updates',
       window.document.querySelectorAll('#editorDialog > .dialog-head .editor-head-group').length === 2 &&
+      !window.document.querySelector('#editorDialog > .dialog-head select') &&
+      !window.document.querySelector('#editorDialog .overlay-mode-control') &&
       window.document.querySelectorAll('#inlineEditor .inline-box-layout-tools .box-sub-group').length === 4 &&
-      window.document.querySelectorAll('#editorDialog svg.btn-ico').length >= 22 &&
+      window.document.querySelectorAll('#editorDialog svg.btn-ico').length >= 21 &&
       !!$('editorImageFullscreen').querySelector('svg.btn-ico') &&
       !!$('inlinePreview').querySelector('svg.btn-ico') &&
       $('blockList').querySelectorAll('.block-card-actions svg.btn-ico').length >= 3,
     );
     $('editorCancel').click();
     await sleep(20);
+
+    let createdProjectPayload = null;
+    const prevFetchForNewProj = window.fetch;
+    window.fetch = async (url, opts = {}) => {
+      if (String(url).endsWith('/api/projects') && String(opts.method || 'GET').toUpperCase() === 'POST') {
+        createdProjectPayload = JSON.parse(opts.body || '{}');
+        return {
+          ok: true,
+          status: 201,
+          headers: new Map([['content-type', 'application/json']]),
+          text: async () => JSON.stringify({ id: 'proj-v384', name: createdProjectPayload.name || 'پروژهٔ کمیک', images: [], settings: { overlayMode: 'translation' } }),
+          json: async () => ({ id: 'proj-v384', name: createdProjectPayload.name || 'پروژهٔ کمیک', images: [], settings: { overlayMode: 'translation' } }),
+        };
+      }
+      return prevFetchForNewProj(url, opts);
+    };
+    $('newProjectBtn').click();
+    await sleep(20);
+    check('clicking #newProjectBtn opens #appModalDialog with visible #appModalInput asking for project name', $('appModalDialog').open && !$('appModalInputWrap').classList.contains('hidden'));
+    $('appModalCancel').click();
+    await sleep(20);
+    check('cancelling #newProjectBtn prompt does not create a project', !$('appModalDialog').open && createdProjectPayload === null);
+    $('newProjectBtn').click();
+    await sleep(20);
+    $('appModalInput').value = 'بتمن سال اول';
+    $('appModalInput').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await sleep(40);
+    check('entering a custom project name and pressing Enter creates the new project with that exact name', createdProjectPayload?.name === 'بتمن سال اول' && $('projectName').value === 'بتمن سال اول');
     window.fetch = origFetchV381;
   }
 

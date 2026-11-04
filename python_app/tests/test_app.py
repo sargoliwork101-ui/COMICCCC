@@ -44,22 +44,28 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.83"
+    assert health.json()["version"] == "3.84"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۸۳ · Python</span>' in index_html
+    assert '<span class="ver">۳.۸۴ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
     assert 'class="action-group group-manage"' in index_html
     assert 'class="editor-head-group ehg-view"' in index_html
     assert 'class="editor-head-group ehg-finish"' in index_html
+    assert 'class="overlay-mode-control"' not in index_html
+    assert 'id="appModalInput"' in index_html
     assert 'class="box-sub-group bsg-select"' in index_html
     assert 'class="box-sub-group bsg-size"' in index_html
     assert 'class="box-sub-group bsg-align-h"' in index_html
     assert 'class="box-sub-group bsg-align-v"' in index_html
+    blank_proj = client.post("/api/projects", json={"name": "   "}).json()
+    assert blank_proj["name"] == "پروژهٔ کمیک"
+    named_proj = client.post("/api/projects", json={"name": "  تن‌تن در تبت  "}).json()
+    assert named_proj["name"] == "تن‌تن در تبت"
     assert 'id="dragGuideBtn"' in index_html
     assert 'id="approveSelectedBtn"' in index_html
     assert 'id="selectApprovedBtn"' in index_html

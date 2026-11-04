@@ -364,9 +364,16 @@ function resolveActiveModal(result) {
   const current = activeModalState;
   activeModalState = null;
   if (current.cancelJobKind) pendingCancelModals.delete(current.cancelJobKind);
+  const inputVal = $('appModalInput')?.value ?? '';
+  if ($('appModalInputWrap')) $('appModalInputWrap').classList.add('hidden');
   closeDialog('appModalDialog');
   try { current.returnFocus?.focus?.({ preventScroll: true }); } catch { /* ignore */ }
-  current.resolve(Boolean(result));
+  if (current.promptMode) {
+    if (!result) current.resolve(null);
+    else current.resolve(inputVal.trim() || current.fallbackValue || '');
+  } else {
+    current.resolve(Boolean(result));
+  }
 }
 function dismissJobCancelModal(kind) {
   if (activeModalState && (!kind || activeModalState.cancelJobKind === kind)) resolveActiveModal(false);
@@ -382,10 +389,15 @@ function showAppModal(options = {}) {
     destructive = false,
     alertOnly = false,
     cancelJobKind = null,
+    promptMode = false,
+    inputLabel = 'نام پروژه',
+    placeholder = '',
+    defaultValue = '',
+    fallbackValue = '',
   } = options;
   if (cancelJobKind && pendingCancelModals.has(cancelJobKind)) return pendingCancelModals.get(cancelJobKind);
   const dlg = $('appModalDialog');
-  if (!dlg) return Promise.resolve(!alertOnly);
+  if (!dlg) return Promise.resolve(promptMode ? (defaultValue || fallbackValue || null) : !alertOnly);
   let queued = null;
   const run = () => new Promise((resolve) => {
     const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -399,6 +411,14 @@ function showAppModal(options = {}) {
       hintEl.textContent = hint || '';
       hintEl.classList.toggle('hidden', !hint);
     }
+    const inputWrap = $('appModalInputWrap');
+    const inputEl = $('appModalInput');
+    if (inputWrap && inputEl) {
+      inputWrap.classList.toggle('hidden', !promptMode);
+      if ($('appModalInputLabel')) $('appModalInputLabel').textContent = inputLabel;
+      inputEl.placeholder = placeholder;
+      inputEl.value = promptMode ? defaultValue : '';
+    }
     const cancelBtn = $('appModalCancel');
     const confirmBtn = $('appModalConfirm');
     if (cancelBtn) {
@@ -410,9 +430,13 @@ function showAppModal(options = {}) {
       confirmBtn.classList.toggle('danger-solid', !!destructive);
       confirmBtn.classList.toggle('primary', !destructive);
     }
-    activeModalState = { resolve, returnFocus, cancelJobKind, alertOnly, promise: queued };
+    activeModalState = { resolve, returnFocus, cancelJobKind, alertOnly, promptMode, fallbackValue, promise: queued };
     showDialog('appModalDialog');
     queueMicrotask(() => {
+      if (promptMode && inputEl) {
+        try { inputEl.focus({ preventScroll: true }); inputEl.select(); } catch { /* ignore */ }
+        return;
+      }
       const target = (destructive && !alertOnly ? cancelBtn : confirmBtn) || confirmBtn;
       try { target?.focus?.({ preventScroll: true }); } catch { /* ignore */ }
     });
@@ -440,6 +464,23 @@ function appConfirm(message, options = {}) {
     cancelJobKind: options.cancelJobKind || null,
   });
 }
+function appPrompt(message, options = {}) {
+  return showAppModal({
+    title: options.title || 'ورود نام',
+    message,
+    hint: options.hint || '',
+    confirmText: options.confirmText || 'ثبت',
+    cancelText: options.cancelText || 'انصراف',
+    variant: options.variant || 'confirm',
+    destructive: false,
+    alertOnly: false,
+    promptMode: true,
+    inputLabel: options.inputLabel || 'نام',
+    placeholder: options.placeholder || '',
+    defaultValue: options.defaultValue ?? '',
+    fallbackValue: options.fallbackValue ?? '',
+  });
+}
 function appAlert(message, options = {}) {
   return showAppModal({
     title: options.title || 'اعلان برنامه',
@@ -452,6 +493,7 @@ function appAlert(message, options = {}) {
   });
 }
 window.appConfirm = appConfirm;
+window.appPrompt = appPrompt;
 window.appAlert = appAlert;
 window.alert = (msg) => { appAlert(String(msg ?? ''), { title: 'اعلان برنامه', variant: 'warning' }); };
 
@@ -4573,6 +4615,12 @@ function bindEvents() {
   $('appModalConfirm')?.addEventListener('click', () => resolveActiveModal(true));
   $('appModalCancel')?.addEventListener('click', () => resolveActiveModal(false));
   $('appModalClose')?.addEventListener('click', () => resolveActiveModal(false));
+  $('appModalInput')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && activeModalState?.promptMode) {
+      event.preventDefault();
+      resolveActiveModal(true);
+    }
+  });
   $('appModalDialog')?.addEventListener('cancel', (event) => { event.preventDefault(); resolveActiveModal(false); });
   $('appModalDialog')?.addEventListener('close', () => { if (activeModalState && !$('appModalDialog')?.open) resolveActiveModal(false); });
   $('dockCancelJobBtn')?.addEventListener('click', () => requestCancelActiveJob().catch(() => {}));
@@ -4581,15 +4629,19 @@ function bindEvents() {
   $('restoreProjectBtn').addEventListener('click', () => $('restoreProjectInput').click());
   $('restoreProjectInput').addEventListener('change', () => restoreProjectBackup($('restoreProjectInput').files?.[0]).catch(() => {}).finally(() => { $('restoreProjectInput').value = ''; }));
   $('newProjectBtn').addEventListener('click', async () => {
-    const ok = await appConfirm('پروژهٔ جدید ساخته شود؟ پروژهٔ فعلی شما ذخیره و محفوظ می‌ماند.', {
+    const projectName = await appPrompt('نام پروژهٔ جدید را وارد کنید (پروژهٔ فعلی شما ذخیره و محفوظ می‌ماند):', {
       title: 'ساخت پروژهٔ جدید',
-      confirmText: 'بله، پروژهٔ جدید بساز',
+      inputLabel: 'نام پروژهٔ جدید',
+      placeholder: 'مثلاً: جلد اول تن‌تن یا فصل ۳ کتاب زیست',
+      defaultValue: '',
+      fallbackValue: 'پروژهٔ کمیک',
+      confirmText: 'ساخت پروژه',
       cancelText: 'انصراف',
       variant: 'confirm',
     });
-    if (!ok) return;
+    if (projectName === null) return;
     await saveProject(); await clearActivity(false);
-    adoptProject(await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' })));
+    adoptProject(await api('/api/projects', jsonOptions('POST', { name: projectName })));
     await refreshProjectList(); setMenuOpen(false);
   });
   $('clearActivityBtn').addEventListener('click', () => clearActivity());

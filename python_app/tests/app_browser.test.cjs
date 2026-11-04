@@ -2411,6 +2411,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         pillCount: document.querySelectorAll('#selectionSummary .summary-pill').length,
         dockIcons: document.querySelectorAll('#dock svg.btn-ico').length,
         editorHeadGroups: document.querySelectorAll('#editorDialog > .dialog-head .editor-head-group').length,
+        editorHeadSelects: document.querySelectorAll('#editorDialog > .dialog-head select').length,
         editorBoxSubGroups: document.querySelectorAll('#inlineEditor .inline-box-layout-tools .box-sub-group').length,
         editorIcons: document.querySelectorAll('#editorDialog svg.btn-ico').length,
       }));
@@ -2418,9 +2419,22 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(toolbarLayout.pillCount, 3, '3 status pills render in #selectionSummary');
       assert.ok(toolbarLayout.dockIcons >= 6, 'export dock buttons render SVG icons');
       assert.equal(toolbarLayout.editorHeadGroups, 2, '2 categorized capsules render in #editorDialog header');
+      assert.equal(toolbarLayout.editorHeadSelects, 0, 'oversized overlayMode select is removed from #editorDialog header');
       assert.equal(toolbarLayout.editorBoxSubGroups, 4, '4 categorized sub-capsules render in .inline-box-layout-tools');
-      assert.ok(toolbarLayout.editorIcons >= 22, 'all #editorDialog header, zoom, preview, merge/split, and align controls render SVG icons');
-      console.log('PASS: v3.81/v3.82/v3.83 center approval stamp, main + editor categorized icon capsules, and #editorCancel full server rollback');
+      assert.ok(toolbarLayout.editorIcons >= 21, 'all #editorDialog header, zoom, preview, merge/split, and align controls render SVG icons');
+
+      // v3.84: Real Chromium verification that clicking #newProjectBtn asks the user for the project name and creates it on the Python server
+      await page.click('#menuBtn');
+      await page.waitForFunction(() => !document.getElementById('menu').classList.contains('hidden'));
+      await page.click('#newProjectBtn');
+      await page.waitForSelector('#appModalDialog[open]');
+      assert.equal(await page.$eval('#appModalInputWrap', (el) => el.classList.contains('hidden')), false, '#appModalInputWrap must be visible for #newProjectBtn');
+      await page.focus('#appModalInput');
+      await page.keyboard.type('پروژهٔ آزمایشی ۳.۸۴');
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => state.project && state.project.name === 'پروژهٔ آزمایشی ۳.۸۴');
+      assert.equal(await page.$eval('#projectName', (el) => el.value), 'پروژهٔ آزمایشی ۳.۸۴', 'new project adopts user-provided project name');
+      console.log('PASS: v3.81/v3.82/v3.83/v3.84 center approval stamp, clean editor header without select, icon capsules, and named new-project prompt');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

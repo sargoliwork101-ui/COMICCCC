@@ -98,9 +98,10 @@ class ProjectStore:
     def create(self, name: str) -> dict[str, Any]:
         project_id = new_id()
         now = utc_now()
+        clean_name = (name or "").strip()
         state = {
             "id": project_id,
-            "name": (name or "پروژهٔ کمیک")[:120],
+            "name": (clean_name or "پروژهٔ کمیک")[:120],
             "createdAt": now,
             "updatedAt": now,
             "images": [],

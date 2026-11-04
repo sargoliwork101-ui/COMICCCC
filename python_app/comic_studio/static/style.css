@@ -370,10 +370,9 @@ body.light .editor-head-group.ehg-view .editor-head-label{color:#0284c7}
 .editor-head-group.ehg-finish .editor-head-label{color:#34d399}
 body.light .editor-head-group.ehg-finish .editor-head-label{color:#059669}
 .editor-head-group .bt{padding:4px 8px;font-size:11px;min-height:27px;border-radius:7px;gap:4.5px}
-.editor-head-group .overlay-mode-control{display:inline-flex;align-items:center;gap:5px;padding:2px 6px;border-radius:7px;border:1px solid var(--line);background:var(--surface);font-size:11px;font-weight:600;color:var(--text);margin:0}
-.editor-head-group .overlay-mode-control .btn-ico{color:#38bdf8;width:13px;height:13px}
-body.light .editor-head-group .overlay-mode-control .btn-ico{color:#0284c7}
-.editor-head-group .overlay-mode-control select{padding:2px 5px;font-size:11px;border-radius:6px;min-height:22px}
+.app-modal-input-wrap{display:flex;flex-direction:column;gap:5px;margin:10px 0 4px;font-size:11.5px;font-weight:700;color:var(--a2)}
+.app-modal-input-wrap input{width:100%;font-size:12.5px;font-weight:500;padding:8px 10px;border-radius:9px;background:var(--surface-2);border:1.5px solid var(--line-2);color:var(--text)}
+.app-modal-input-wrap input:focus{border-color:var(--a1);box-shadow:0 0 0 3px #8b7bff28}
 #inlineEditor .editor-zoom-controls{align-items:center;gap:4px;padding:3px 6px;border-radius:9px}
 .zoom-group-label{font-size:10px;font-weight:800;color:var(--a2);padding:0 5px 0 3px;border-inline-end:1px solid var(--line-2);margin-inline-end:1px;white-space:nowrap;user-select:none}
 .editor-dialog.image-fullscreen .zoom-group-label{display:none}
