@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.85"
+    assert health.json()["version"] == "3.86"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۸۵ · Python</span>' in index_html
+    assert '<span class="ver">۳.۸۶ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -2820,6 +2820,72 @@ def test_v385_parallel_pdf_import_multi_page_ocr_and_low_ram_spooled_exports(cli
         slide_infos = [zi for zi in out_pptx.infolist() if zi.filename.startswith("ppt/media/slide_bg_")]
         assert len(slide_infos) == 5
         assert all(zi.compress_type == zipfile.ZIP_STORED for zi in slide_infos)
+
+
+def test_v386_project_export_name_sync_and_non_bold_translation_defaults(client):
+    from urllib.parse import unquote
+    from comic_studio.context_run import apply_translated_block_defaults
+    from comic_studio.ocr import OcrLine, _blocks_from_lines
+
+    # 1. Newly created project syncs output.name to project.name with nameCustomized=False
+    proj = client.post("/api/projects", json={"name": "مرد عنکبوتی ۱"}).json()
+    pid = proj["id"]
+    assert proj["name"] == "مرد عنکبوتی ۱"
+    assert proj["settings"]["output"]["name"] == "مرد عنکبوتی ۱"
+    assert proj["settings"]["output"]["nameCustomized"] is False
+
+    imported = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("p1.png", png_bytes(), "image/png"))],
+    )
+    assert imported.status_code == 200
+    img_id = imported.json()["images"][0]["id"]
+
+    # 2. Exporting with empty/omitted name defaults to project.name; custom name overrides it
+    exp_default = client.post(f"/api/projects/{pid}/export", json={"kind": "pdf", "image_ids": [img_id]})
+    assert exp_default.status_code == 200
+    disp_default = unquote(exp_default.headers.get("content-disposition", ""))
+    assert "مرد عنکبوتی ۱.pdf" in disp_default
+
+    exp_custom = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "pdf", "image_ids": [img_id], "name": "نسخه-ویژه-کمیک"},
+    )
+    assert exp_custom.status_code == 200
+    disp_custom = unquote(exp_custom.headers.get("content-disposition", ""))
+    assert "نسخه-ویژه-کمیک.pdf" in disp_custom
+
+    # 3. OCR blocks and placed translations default to normal weight (bold=False), while document headings remain bold=True
+    ocr_blocks = _blocks_from_lines([OcrLine(text="Hello there!", confidence=0.98, polygon=[[10, 10], [90, 10], [90, 35], [10, 35]])])
+    assert ocr_blocks[0]["bold"] is False
+
+    legacy_block = {"id": 1, "text": "Hello!", "tr": "سلام دوستان", "bold": True, "x0": 10, "y0": 10, "x1": 100, "y1": 45, "polygon": [[10, 10], [100, 10], [100, 45], [10, 45]], "enabled": True}
+    apply_translated_block_defaults(legacy_block)
+    assert legacy_block["bold"] is False
+
+    heading_block = {"id": 2, "text": "Chapter 1", "tr": "فصل اول", "pageRole": "heading", "bold": True}
+    apply_translated_block_defaults(heading_block)
+    assert heading_block["bold"] is True
+
+    # Verify Visual DOCX & Visual PPTX exports do NOT emit bold runs for normal translated blocks
+    state = imported.json()
+    state["images"][0]["blocks"] = [legacy_block]
+    assert client.put(f"/api/projects/{pid}/state", json={"state": state}).status_code == 200
+
+    vis_docx = client.post(f"/api/projects/{pid}/export", json={"kind": "docx", "image_ids": [img_id], "docx_layout": "visual"})
+    assert vis_docx.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(vis_docx.content)) as zdoc:
+        doc_xml = zdoc.read("word/document.xml").decode("utf-8")
+        assert "سلام دوستان" in doc_xml
+        assert "<w:b/>" not in doc_xml and "<w:bCs/>" not in doc_xml
+
+    vis_pptx = client.post(f"/api/projects/{pid}/export", json={"kind": "pptx", "image_ids": [img_id], "pptx_layout": "visual"})
+    assert vis_pptx.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(vis_pptx.content)) as zppt:
+        slide_xml = zppt.read("ppt/slides/slide1.xml").decode("utf-8")
+        assert "سلام دوستان" in slide_xml
+        assert ' b="1"' not in slide_xml
+
 
 
 

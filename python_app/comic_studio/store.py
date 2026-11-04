@@ -100,9 +100,10 @@ class ProjectStore:
         project_id = new_id()
         now = utc_now()
         clean_name = (name or "").strip()
+        resolved_name = (clean_name or "پروژهٔ کمیک")[:120]
         state = {
             "id": project_id,
-            "name": (clean_name or "پروژهٔ کمیک")[:120],
+            "name": resolved_name,
             "createdAt": now,
             "updatedAt": now,
             "images": [],
@@ -115,7 +116,8 @@ class ProjectStore:
                 "eraseOriginal": True,
                 "provider": "free",
                 "output": {
-                    "name": "comic-translated",
+                    "name": resolved_name,
+                    "nameCustomized": False,
                     "seamless": False,
                     "uniformSize": False,
                     "twoPerPage": False,

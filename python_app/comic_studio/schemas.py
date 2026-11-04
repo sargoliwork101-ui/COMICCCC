@@ -94,7 +94,7 @@ class SessionRequest(BaseModel):
 class ExportRequest(BaseModel):
     kind: Literal["pdf", "images", "txt", "docx", "pptx"]
     image_ids: list[str] = Field(default_factory=list)
-    name: str = "comic-translated"
+    name: str = ""
     seamless: bool = False
     uniform_size: bool = False
     two_per_page: bool = False

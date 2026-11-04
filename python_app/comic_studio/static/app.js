@@ -672,7 +672,24 @@ function imageUrl(item, edited = false, cropped = false) {
 }
 function escapeHtml(value) { const el = document.createElement('div'); el.textContent = String(value ?? ''); return el.innerHTML; }
 function plainToHtml(value) { return escapeHtml(value).replace(/\n/g, '<br>'); }
-function safeName(value) { return String(value || 'comic-translated').replace(/[<>:\"/\\|?*]/g, '-'); }
+function safeName(value, fallback = 'comic-translated') {
+  const raw = String(value || '').trim();
+  return (raw || fallback).replace(/[<>:\"/\\|?*]/g, '-');
+}
+function parseExportFilename(disposition, fallback) {
+  const header = String(disposition || '');
+  const starMatch = header.match(/filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;\r\n]+)/);
+  if (starMatch?.[1]) {
+    const raw = starMatch[1].trim().replace(/^"(.*)"$/, '$1');
+    try { return decodeURIComponent(raw); } catch { return raw; }
+  }
+  const plainMatch = header.match(/filename\s*=\s*(?:"([^"]+)"|([^;\r\n]+))/i);
+  const plain = (plainMatch?.[1] || plainMatch?.[2] || '').trim();
+  if (plain) {
+    try { return decodeURIComponent(plain); } catch { return plain; }
+  }
+  return fallback;
+}
 function sanitizeHtml(html) { return window.ComicSanitize.sanitize(html); }
 
 function setBusy(message) {
@@ -754,7 +771,8 @@ function adoptProject(project) {
   state.project.images = project.images || [];
   G.normalizeLayout(state.project.images);
   state.groupEditId = null; state.groupSnapshot = null;
-  $('projectName').value = project.name || 'پروژهٔ کمیک';
+  const projName = String(project.name || '').trim() || 'پروژهٔ کمیک';
+  $('projectName').value = projName;
   const settings = project.settings || {};
   const pageMode = settings.ocrPageMode === 'document' ? 'document' : 'comic';
   if ($('ocrPageMode')) $('ocrPageMode').value = pageMode;
@@ -770,7 +788,17 @@ function adoptProject(project) {
   $('ocrGroupLines').checked = settings.groupOcrLines !== false;
   $('ocrErase').checked = settings.eraseOriginal !== false;
   const output = settings.output || {};
-  $('exportName').value = output.name || 'comic-translated';
+  const rawOutName = String(output.name || '').trim();
+  const hasCustomizedFlag = typeof output.nameCustomized === 'boolean';
+  const isCustomExportName = hasCustomizedFlag
+    ? Boolean(output.nameCustomized && rawOutName && rawOutName !== projName)
+    : Boolean(rawOutName && rawOutName !== 'comic-translated' && rawOutName !== projName);
+  const effectiveOutName = isCustomExportName ? rawOutName : projName;
+  output.nameCustomized = isCustomExportName;
+  output.name = effectiveOutName;
+  settings.output = output;
+  project.settings = settings;
+  $('exportName').value = effectiveOutName;
   $('exportSeamless').checked = !!output.seamless;
   $('exportUniform').checked = !!output.uniformSize;
   $('exportTwo').checked = !!output.twoPerPage;
@@ -1123,7 +1151,11 @@ async function waitForProjectLoads() {
 }
 function collectOutputSettings() {
   if (!state.project) return; state.project.settings = state.project.settings || {};
-  state.project.settings.output = { name: $('exportName').value, seamless: $('exportSeamless').checked, uniformSize: $('exportUniform').checked, twoPerPage: $('exportTwo').checked, imageFormat: $('exportFormat').value, folderName: $('exportFolder').value, docxLayout: $('exportDocxLayout')?.value || 'visual', pptxLayout: $('exportPptxLayout')?.value || 'visual' };
+  const projName = String(state.project.name || '').trim() || 'پروژهٔ کمیک';
+  const rawExport = $('exportName').value.trim();
+  const nameCustomized = Boolean(rawExport && rawExport !== projName);
+  const effectiveName = rawExport || projName;
+  state.project.settings.output = { name: effectiveName, nameCustomized, seamless: $('exportSeamless').checked, uniformSize: $('exportUniform').checked, twoPerPage: $('exportTwo').checked, imageFormat: $('exportFormat').value, folderName: $('exportFolder').value, docxLayout: $('exportDocxLayout')?.value || 'visual', pptxLayout: $('exportPptxLayout')?.value || 'visual' };
 }
 function collectOcrSettings() {
   if (!state.project) return;
@@ -2089,7 +2121,7 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
       setProgress('jobProgress', 0.18, true); setProgress('dockProgress', 0.18, true);
     }
     checkNotCancelled();
-    const baseExportName = safeName($('exportName').value);
+    const baseExportName = safeName($('exportName').value, safeName(state.project?.name || '', 'comic-translated'));
     const activeDocMode = exportKind === 'pptx' ? pptxMode : docxMode;
     const layoutExportName = exportKind === 'docx' && docxLayout === 'flowing' && !/-book$/i.test(baseExportName)
       ? `${baseExportName}-book`
@@ -2127,10 +2159,10 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
     checkNotCancelled();
     if (!blob.size) throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
     if (activeProgressId) setProgress(activeProgressId, 1, false);
-    const disposition = response.headers.get('content-disposition') || ''; const match = disposition.match(/filename\*?=(?:UTF-8''|\")?([^\";]+)/i);
+    const disposition = response.headers.get('content-disposition') || '';
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
     downloadUrl = URL.createObjectURL(blob);
-    const link = $('downloadLink'); link.href = downloadUrl; link.download = match ? decodeURIComponent(match[1]) : `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`;
+    const link = $('downloadLink'); link.href = downloadUrl; link.download = parseExportFilename(disposition, `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`);
     link.textContent = `دانلود ${link.download}`; link.classList.remove('hidden'); link.click();
     closeDialog('exportDialog'); closeDialog('docxExportDialog'); closeDialog('pptxExportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
   } catch (error) {
@@ -4403,6 +4435,7 @@ function applyTranslatedBlockDefaults(block, text) {
   block.align = 'justify';
   block.size = 12;
   block.verticalAlign = 'top';
+  block.bold = block.pageRole === 'heading';
 }
 async function retranslateBlock(block, targetOverride = null) {
   if (inlineDraft?.block === block && !closeInlineEditor()) return;
@@ -4724,7 +4757,47 @@ function bindEvents() {
     adoptProject(project); await refreshProjectList(); setMenuOpen(false);
   });
   $('projectSelect').addEventListener('change', () => requestProjectLoad($('projectSelect').value).catch((error) => toast(error.message, true)));
-  $('projectName').addEventListener('change', () => { state.project.name = $('projectName').value; scheduleSave(); });
+  $('projectName').addEventListener('input', () => {
+    if (!state.project) return;
+    const nextProjName = $('projectName').value.trim();
+    const out = state.project.settings?.output;
+    if ((!out || !out.nameCustomized) && nextProjName) $('exportName').value = nextProjName;
+  });
+  $('projectName').addEventListener('change', () => {
+    if (!state.project) return;
+    const nextName = $('projectName').value.trim() || state.project.name || 'پروژهٔ کمیک';
+    $('projectName').value = nextName;
+    state.project.name = nextName;
+    state.project.settings = state.project.settings || {};
+    const out = state.project.settings.output || {};
+    if (!out.nameCustomized) {
+      $('exportName').value = nextName;
+      out.name = nextName;
+      out.nameCustomized = false;
+      state.project.settings.output = out;
+    }
+    scheduleSave();
+    refreshProjectList().catch(() => {});
+  });
+  $('exportName').addEventListener('input', () => {
+    if (!state.project) return;
+    state.project.settings = state.project.settings || {};
+    const projName = String(state.project.name || '').trim() || 'پروژهٔ کمیک';
+    const trimmed = $('exportName').value.trim();
+    state.project.settings.output = {
+      ...(state.project.settings.output || {}),
+      name: trimmed || projName,
+      nameCustomized: Boolean(trimmed && trimmed !== projName),
+    };
+    scheduleSave();
+  });
+  $('exportName').addEventListener('change', () => {
+    if (!state.project) return;
+    const projName = String(state.project.name || '').trim() || 'پروژهٔ کمیک';
+    if (!$('exportName').value.trim()) $('exportName').value = projName;
+    collectOutputSettings();
+    scheduleSave();
+  });
   $('fileInput').addEventListener('change', () => importFiles($('fileInput').files).catch(() => {}).finally(() => { $('fileInput').value = ''; }));
   $('selectAllBtn').addEventListener('click', () => { state.project.images.forEach((item) => { item.selected = true; }); renderGrid(); scheduleSave(); });
   $('selectNoneBtn').addEventListener('click', () => { state.project.images.forEach((item) => { item.selected = false; }); renderGrid(); scheduleSave(); });

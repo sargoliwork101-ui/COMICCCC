@@ -41,6 +41,17 @@ def clean_name(value: str, fallback: str = "comic-translated") -> str:
     return safe_fallback or "comic-translated"
 
 
+def _export_stem(state: dict[str, Any], request: dict[str, Any]) -> str:
+    raw = str(request.get("name") or "").strip()
+    if not raw:
+        out = (state.get("settings") or {}).get("output") or {}
+        if out.get("nameCustomized") and str(out.get("name") or "").strip():
+            raw = str(out.get("name") or "").strip()
+        else:
+            raw = str(state.get("name") or "").strip()
+    return clean_name(raw, "comic-translated")
+
+
 @contextlib.contextmanager
 def _atomic_export_path(output: Path) -> Iterator[Path]:
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -304,7 +315,7 @@ def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
                     _insert(document, page_width, page_height, [entry])
                     entry["data"] = b""
                     emit(f"چیدمان صفحهٔ {idx} از {len(entries)} در PDF", progress=0.55 + idx / max(1, len(entries)) * 0.4)
-        output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.pdf"
+        output = project_root(state["id"]) / "exports" / f"{_export_stem(state, request)}.pdf"
         emit("در حال ذخیره‌سازی فایل PDF…", progress=0.97)
         with _atomic_export_path(output) as tmp_output:
             document.save(tmp_output, garbage=4, deflate=True)
@@ -317,7 +328,7 @@ def build_images_zip(store: ProjectStore, state: dict[str, Any], request: dict[s
     images = selected_images(state, request.get("image_ids", []))
     if not images:
         raise ValueError("No images selected")
-    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}-images.zip"
+    output = project_root(state["id"]) / "exports" / f"{_export_stem(state, request)}-images.zip"
     folder = clean_name(request.get("folder_name", ""), "") if request.get("folder_name") else ""
     prefix = f"{folder}/" if folder else ""
     target_format = request.get("image_format", "orig")
@@ -372,7 +383,7 @@ def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
             chunks.append(f"[{block.get('id', '-')}] {indent}{ocr_text}")
             chunks.append(f"    ← {tr_text if tr_text.strip() else '(بدون ترجمه)'}\n")
         emit(f"نوشتن متن تصویر {index} از {total} در فایل TXT", progress=index / total)
-    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.txt"
+    output = project_root(state["id"]) / "exports" / f"{_export_stem(state, request)}.txt"
     with _atomic_export_path(output) as tmp_output:
         tmp_output.write_text("\ufeff" + "\n".join(chunks), encoding="utf-8")
     return output
@@ -1147,7 +1158,7 @@ def _build_flowing_docx(
         f"<w:body>{body_xml}{sect_pr}</w:body></w:document>"
     )
     emit("در حال بسته‌بندی فایل Word کتابی…", progress=0.96)
-    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.docx"
+    output = project_root(state["id"]) / "exports" / f"{_export_stem(state, request)}.docx"
     with _atomic_export_path(output) as tmp_output:
         with zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("[Content_Types].xml", _DOCX_CONTENT_TYPES.encode("utf-8"))
@@ -1299,7 +1310,7 @@ def _finalize_visual_docx(
         + "</w:body></w:document>"
     )
     emit("در حال بسته‌بندی فایل Word…", progress=0.95)
-    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.docx"
+    output = project_root(state["id"]) / "exports" / f"{_export_stem(state, request)}.docx"
     with _atomic_export_path(output) as tmp_output:
         with zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("[Content_Types].xml", _DOCX_CONTENT_TYPES.encode("utf-8"))
@@ -1920,7 +1931,7 @@ def _build_flowing_pptx(
         )
 
     emit("در حال بسته‌بندی فایل PowerPoint…", progress=0.96)
-    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.pptx"
+    output = project_root(state["id"]) / "exports" / f"{_export_stem(state, request)}.pptx"
     return _write_pptx_package(output, slide_cx, slide_cy, slides, state.get("name") or "Presentation")
 
 
@@ -2051,6 +2062,6 @@ def _finalize_visual_pptx(
         })
 
     emit("در حال بسته‌بندی فایل PowerPoint…", progress=0.95)
-    output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.pptx"
+    output = project_root(state["id"]) / "exports" / f"{_export_stem(state, request)}.pptx"
     return _write_pptx_package(output, slide_cx, slide_cy, slides, state.get("name") or "Comic Presentation")
 

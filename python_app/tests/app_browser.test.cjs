@@ -2434,9 +2434,47 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       await page.keyboard.press('Enter');
       await page.waitForFunction(() => state.project && state.project.name === 'پروژهٔ آزمایشی ۳.۸۴');
       assert.equal(await page.$eval('#projectName', (el) => el.value), 'پروژهٔ آزمایشی ۳.۸۴', 'new project adopts user-provided project name');
+      assert.equal(await page.$eval('#exportName', (el) => el.value), 'پروژهٔ آزمایشی ۳.۸۴', 'v3.86: #exportName automatically matches new project name');
 
-      // v3.85: Verify version badge ۳.۸۵, async thumbnail decoding, hardware cpuCores endpoint, and Help section 5 GPU/multi-core guide
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۸۵ · Python', 'header shows version ۳.۸۵');
+      // v3.86: Verify file-import button inline icon layout (side-by-side, not stacked above text)
+      const importBtnLayout = await page.evaluate(() => {
+        const btn = document.querySelector('label.file-button');
+        const svg = btn.querySelector('svg.btn-ico');
+        const txt = btn.querySelector('span');
+        const cs = getComputedStyle(btn);
+        const svgRect = svg.getBoundingClientRect();
+        const txtRect = txt.getBoundingClientRect();
+        return {
+          flexDirection: cs.flexDirection,
+          centerDeltaY: Math.abs((svgRect.top + svgRect.height / 2) - (txtRect.top + txtRect.height / 2)),
+          horizontalSeparation: svgRect.left >= txtRect.right - 2 || txtRect.left >= svgRect.right - 2,
+        };
+      });
+      assert.equal(importBtnLayout.flexDirection, 'row', 'file-button uses horizontal row layout');
+      assert.ok(importBtnLayout.centerDeltaY <= 6 && importBtnLayout.horizontalSeparation, `file-button icon sits inline beside label: ${JSON.stringify(importBtnLayout)}`);
+
+      // v3.86: Verify #exportName remains editable by user while defaulting to project name
+      await page.evaluate(() => {
+        const exp = document.getElementById('exportName');
+        exp.value = 'نام-سفارشی-خروجی';
+        exp.dispatchEvent(new Event('input', { bubbles: true }));
+        exp.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      assert.equal(await page.$eval('#exportName', (el) => el.value), 'نام-سفارشی-خروجی');
+      assert.equal(await page.evaluate(() => state.project.settings.output.nameCustomized), true);
+
+      // v3.86: Verify placed translations default to regular non-bold weight (400 / bold: false)
+      const normalWeightCheck = await page.evaluate(() => {
+        const blk = { id: 1, x0: 10, y0: 10, x1: 140, y1: 60, polygon: [[10, 10], [140, 10], [140, 60], [10, 60]], text: 'Hello world', tr: '', bold: true, enabled: true };
+        applyTranslatedBlockDefaults(blk, 'سلام دنیا');
+        const st = Typeset.blockStyle(blk);
+        return { blockBold: blk.bold, styleBold: st.bold };
+      });
+      assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
+      assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
+
+      // v3.85 / v3.86: Verify version badge ۳.۸۶, async thumbnail decoding, hardware cpuCores endpoint, and Help section 5 GPU/multi-core guide
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۸۶ · Python', 'header shows version ۳.۸۶');
       const hwReport = await api(base, '/api/engines/hardware');
       assert.ok(Number(hwReport.cpuCores) >= 1 && typeof hwReport.hasGpu === 'boolean', '/api/engines/hardware reports cpuCores and hasGpu');
       await page.keyboard.press('F1');
@@ -2452,7 +2490,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       );
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.getElementById('helpDialog').open);
-      console.log('PASS: v3.81–v3.85 center approval stamp, clean editor header, icon capsules, named new-project prompt, and GPU/multi-core runtime checks');
+      console.log('PASS: v3.81–v3.86 center approval stamp, clean editor header, icon capsules, inline import icon, synced editable export name, regular translation font weight, and GPU/multi-core runtime checks');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

@@ -1561,7 +1561,7 @@ def _blocks_from_lines(lines: list[OcrLine], coordinate_scale: float = 1.0) -> l
             "bg": "auto",
             "dir": "rtl",
             "align": "right",
-            "bold": True,
+            "bold": False,
             "italic": False,
             "underline": False,
             "size": None,

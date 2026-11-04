@@ -196,7 +196,7 @@ window.HTMLElement.prototype.hasPointerCapture = function (pointerId) { return t
 window.HTMLElement.prototype.releasePointerCapture = function (pointerId) { if (this._capturedPointerId === pointerId) delete this._capturedPointerId; };
 const realTypeset = require(path.join(root, 'typeset.js'));
 window.Typeset = {
-  blockStyle(block) { return { dir: block.dir === 'ltr' ? 'ltr' : 'rtl', align: block.align || 'right', bold: true, italic: false, underline: false, size: 12, color: null }; },
+  blockStyle(block) { return { dir: block.dir === 'ltr' ? 'ltr' : 'rtl', align: block.align || 'right', bold: block.bold !== false, italic: false, underline: false, size: 12, color: null }; },
   hasInlineMarks: realTypeset.hasInlineMarks,
   inlineMarksToHtml: realTypeset.inlineMarksToHtml,
   richHtmlWords(html) { return String(html || '').includes('<hr>') ? [{ t: '────────' }] : []; },
@@ -1465,7 +1465,7 @@ function check(name, condition) {
     $('appModalInput').value = 'بتمن سال اول';
     $('appModalInput').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await sleep(40);
-    check('entering a custom project name and pressing Enter creates the new project with that exact name', createdProjectPayload?.name === 'بتمن سال اول' && $('projectName').value === 'بتمن سال اول');
+    check('entering a custom project name and pressing Enter creates the new project with that exact name', createdProjectPayload?.name === 'بتمن سال اول' && $('projectName').value === 'بتمن سال اول' && $('exportName').value === 'بتمن سال اول');
 
     // v3.85: async image decoding, multi-core browser render concurrency, cross-vendor GPU/CPU summary, and adaptive activity polling
     vm.runInContext(`
@@ -1484,6 +1484,36 @@ function check(name, condition) {
       formatHardwareSummary();
     `, context);
     check('formatHardwareSummary reports DirectML GPU acceleration and CPU core count', amdSummary.includes('DirectML') && amdSummary.includes('AMD Radeon RX 7800') && amdSummary.includes('12 هسته'));
+
+    // v3.86: project-name <-> export-name synchronization with user override, RFC 5987 UTF-8 filename decoding, and regular non-bold translation default
+    $('projectName').value = 'کمیک بتمن جلد ۲';
+    $('projectName').dispatchEvent(new window.Event('input', { bubbles: true }));
+    $('projectName').dispatchEvent(new window.Event('change', { bubbles: true }));
+    check('renaming project updates #exportName automatically while export filename is not customized', $('exportName').value === 'کمیک بتمن جلد ۲' && vm.runInContext('state.project.settings.output.nameCustomized === false', context));
+
+    $('exportName').value = 'خروجی-دلخواه-کاربر';
+    $('exportName').dispatchEvent(new window.Event('input', { bubbles: true }));
+    $('exportName').dispatchEvent(new window.Event('change', { bubbles: true }));
+    $('projectName').value = 'کمیک بتمن جلد ۳';
+    $('projectName').dispatchEvent(new window.Event('input', { bubbles: true }));
+    $('projectName').dispatchEvent(new window.Event('change', { bubbles: true }));
+    check('editing #exportName marks nameCustomized=true and preserves custom export name across project renames', $('exportName').value === 'خروجی-دلخواه-کاربر' && vm.runInContext('state.project.settings.output.nameCustomized === true', context));
+
+    $('exportName').value = '   ';
+    $('exportName').dispatchEvent(new window.Event('change', { bubbles: true }));
+    check('clearing #exportName falls back cleanly to current project name and resets nameCustomized=false', $('exportName').value === 'کمیک بتمن جلد ۳' && vm.runInContext('state.project.settings.output.nameCustomized === false', context));
+
+    const decodedPersianName = vm.runInContext(`parseExportFilename("attachment; filename=\\"fallback.pdf\\"; filename*=utf-8''%DA%A9%D9%85%DB%8C%DA%A9%20%DB%B1.pdf", "fallback.pdf")`, context);
+    check('parseExportFilename prefers RFC 5987 UTF-8 filename* over ASCII fallback', decodedPersianName === 'کمیک ۱.pdf');
+
+    const nonBoldDefault = vm.runInContext(`
+      (() => {
+        const b = { id: 99, text: 'Hi', bold: true };
+        applyTranslatedBlockDefaults(b, 'سلام');
+        return b.bold === false && b.tr === 'سلام' && Typeset.blockStyle(b).bold === false;
+      })()
+    `, context);
+    check('applyTranslatedBlockDefaults sets regular non-bold weight (bold: false) on placed translations', nonBoldDefault === true);
     window.fetch = origFetchV381;
   }
 

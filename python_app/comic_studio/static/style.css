@@ -408,6 +408,11 @@ body.light .block-card-actions .block-retranslate-btn:hover{color:#0284c7}
 .block-card-actions .block-clear-btn:hover{border-color:#fb7185;color:#fda4af;background:#f43f5e14}
 body.light .block-card-actions .block-clear-btn:hover{color:#be123c}
 
+/* v3.86: Inline icon beside file-import button label & direction-aware export filename input */
+label.bt,.file-button{display:inline-flex;flex-direction:row;align-items:center;justify-content:center;gap:6px;white-space:nowrap}
+label.bt.primary{color:#fff}
+#dock #exportName{direction:unset;unicode-bidi:plaintext;text-align:start}
+
 
 
 

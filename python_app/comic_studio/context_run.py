@@ -330,6 +330,7 @@ def apply_translated_block_defaults(block: dict[str, Any]) -> None:
     block['align'] = 'justify'
     block['size'] = 12
     block['verticalAlign'] = 'top'
+    block['bold'] = block.get('pageRole') == 'heading'
 
 
 def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict[str, Any]],
