@@ -38,7 +38,7 @@ from .schemas import (
 from .sessions import SessionManager
 from .store import ProjectChangedError, ProjectStore
 from .translation import (
-    TranslationError, InvalidContextResponse, TranslationService, combine_translation_texts,
+    AI_PROVIDERS, TranslationError, InvalidContextResponse, TranslationService, combine_translation_texts,
     distribute_translation, normalize_ai_skill, context_uses_json, _redact_diagnostic,
 )
 from .translation_plan import (
@@ -678,13 +678,18 @@ def create_app() -> FastAPI:
         if not ids:
             raise HTTPException(400, "حداقل یک تصویر را انتخاب کنید.")
         settings = translations.public_settings()
-        policy = provider_policy(settings, values.provider)
+        selected_profile_id = (values.profile_id or '').strip() if values.provider != 'free' else ''
+        if selected_profile_id:
+            configured_profiles = settings.get('providers', {}).get(values.provider, {}).get('profiles', [])
+            if not any(str(p.get('id') or '') == selected_profile_id and p.get('hasApiKey') for p in configured_profiles):
+                raise HTTPException(400, "کلید API انتخاب‌شده در تنظیمات این سرویس ثبت یا فعال نیست.")
+        policy = provider_policy(settings, values.provider, selected_profile_id or None)
         if values.resume:
             run = state.get(RUN_KEY)
             if not isinstance(run, dict) or not any(j.get('remaining') for j in run.get('jobs', [])):
                 raise HTTPException(409, "ترجمهٔ ناتمامی برای ادامه وجود ندارد.")
-            if (run['imageIds'] != ids or run['provider'] != values.provider or run['language'] != values.source_language
-                    or run['reuse'] != values.reuse_repeated):
+            if (run['imageIds'] != ids or run['provider'] != values.provider or (run.get('profileId') or '') != selected_profile_id
+                    or run['language'] != values.source_language or run['reuse'] != values.reuse_repeated):
                 raise HTTPException(409, "انتخاب یا روش نوبت ناتمام تغییر کرده است؛ تنظیمات قبلی را برگردانید یا نوبت تازه شروع کنید.")
             # Resume previews may explicitly revise guidance, summary, budget,
             # or API policy; source and target snapshots must still match.
@@ -692,7 +697,7 @@ def create_app() -> FastAPI:
             run = copy.deepcopy(run)
             run['baseResumeRunHash'] = digest(state.get(RUN_KEY))
             run['context'] = values.summary; run['skillHash'] = digest(values.skill); run['policyHash'] = digest(policy)
-            run['limit'] = min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings)
+            run['limit'] = min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None)
             run['contextPercent'] = 0 if values.provider == 'free' else settings['context_percent']; run['skillPercent'] = 0 if values.provider == 'free' else settings['skill_percent']
         else:
             previous = state.get(RUN_KEY)
@@ -703,9 +708,9 @@ def create_app() -> FastAPI:
             if legacy and not values.restart_legacy:
                 raise HTTPException(409, 'پیشرفت ناتمام نسخهٔ قبلی وجود دارد. برای جلوگیری از ارسال تکراری، ادامه را با نسخهٔ قبلی انجام دهید یا صریحاً شروع دوباره را تأیید کنید.')
             run = create_run(state, ids, values.provider, values.source_language, values.skill, values.summary,
-                             min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings),
+                             min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None),
                              0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
-                             values.reuse_repeated, policy)
+                             values.reuse_repeated, policy, profile_id=selected_profile_id or None)
             run['legacyRestart'] = values.restart_legacy
             run['legacyHash'] = digest([{'imageId': item['id'], 'page': item.get(AI_PAGE_PROGRESS_KEY),
                                          'parts': [block.get(AI_PARTS_KEY) for block in item.get('blocks', [])]}
@@ -728,13 +733,15 @@ def create_app() -> FastAPI:
     def context_view(run: dict[str, Any], request: Any, chosen: list[dict[str, Any]], provider: str) -> dict[str, Any]:
         text = combine_translation_texts([entry['text'] for entry in chosen])
         first = run['jobs'][chosen[0]['job']] if chosen else {}
-        policy = provider_policy(translations.public_settings(), provider)
+        selected_profile_id = run.get('profileId') or None
+        public_cfg = translations.public_settings()
+        policy = provider_policy(public_cfg, provider, selected_profile_id)
         if digest(policy) != run['policyHash']:
             raise ProjectChangedError('تنظیمات API تغییر کرده است؛ پیش‌نمایش تازه بگیرید.')
         if provider == 'free':
             config = policy['services']
             limits = '؛ '.join(f"{name}: انتظار {p['timeout_seconds']}، تکرار {p['retry_count']}، فاصله {p['retry_wait_seconds']} ثانیه، سقف {p['source_limit']} نویسه" for name, p in config.items())
-            return {'provider':'free', 'rollingMode':True, 'contextMode':False, 'skill':'', 'summary':'', 'defaultSkill':'',
+            return {'provider':'free', 'profileId': '', 'rollingMode':True, 'contextMode':False, 'skill':'', 'summary':'', 'defaultSkill':'',
                     'blockCount':len(run['jobs']), 'requestCount':1 if chosen else 0, 'systemPrompt':'',
                     'requests':[{'index':1, 'text':text, 'characters':request.character_count(text), 'imageName':first.get('imageName','')}] if chosen else [],
                     'providerLabel':'Google Translate؛ در صورت خطا MyMemory', 'base_url':'https://translate.googleapis.com/translate_a/single',
@@ -745,11 +752,16 @@ def create_app() -> FastAPI:
         mode_label = 'حالت JSON سرویس' if context_uses_json(provider, policy['base_url'], policy.get('response_mode', 'auto')) else 'متن معمولی'
         policies = '؛ '.join(f"API {index}: زمان انتظار {p['timeout_seconds']}، تکرار {p['retry_count']}، فاصله {p['retry_wait_seconds']} ثانیه، سقف {p['source_limit']}" for index, p in enumerate(active, 1))
         trim_notice = ' پس از تأیید، خلاصهٔ قبلی در یک درخواست جداگانه به AI داده می‌شود تا فقط آن را کوتاه کند و سپس در زمینهٔ نوبت قرار گیرد؛ این درخواست ممکن است هزینه داشته باشد.' if run.get('contextAutoShortened') else ''
-        return {'provider': provider, 'skill': '', 'defaultSkill': '', 'blockCount': len(run['jobs']),
+        provider_title = AI_PROVIDERS.get(provider, {}).get('label', provider)
+        if selected_profile_id:
+            matched_profile = next((p for p in public_cfg.get('providers', {}).get(provider, {}).get('profiles', []) if str(p.get('id') or '') == selected_profile_id), None)
+            if matched_profile and matched_profile.get('name'):
+                provider_title = f"{provider_title} ({matched_profile['name']})"
+        return {'provider': provider, 'profileId': selected_profile_id or '', 'skill': '', 'defaultSkill': '', 'blockCount': len(run['jobs']),
                 'requestCount': 1 if chosen else 0, 'systemPrompt': request.system,
                 'requests': [{'index': 1, 'text': request.user_message(text), 'characters': request.character_count(text),
                               'imageName': first.get('imageName', '')}] if chosen else [],
-                'providerLabel': provider, 'model': policy['model'], 'base_url': policy['base_url'],
+                'providerLabel': provider_title, 'model': policy['model'], 'base_url': policy['base_url'],
                 'note': f"درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.{trim_notice}",
                 'signature': digest(run), 'rollingMode': True, 'contextMode': True, 'summary': run['context'], 'skillLimit': request.skill_limit,
                 'contextLimit': request.context_limit, 'totalLimit': run['limit'], 'contextPercent': run['contextPercent'], 'skillPercent': run['skillPercent'], 'previewError': run.get('previewError', ''), 'resume': bool(run.get('id'))}
@@ -778,7 +790,7 @@ def create_app() -> FastAPI:
             nonlocal state, expected
             if latest.get('updatedAt', '') == expected:
                 return
-            policy_now = provider_policy(translations.public_settings(), values.provider)
+            policy_now = provider_policy(translations.public_settings(), values.provider, (values.profile_id or '').strip() or None if values.provider != 'free' else None)
             verify_run(latest, run, values.skill, policy_now)
             if digest(latest.get(SUMMARY_KEY, '')) != run.get('baseSummaryHash'):
                 raise ProjectChangedError('خلاصهٔ پروژه پس از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی کنید.')
@@ -834,7 +846,7 @@ def create_app() -> FastAPI:
             settings = translations.public_settings()
             if run['provider'] != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
                 raise ProjectChangedError('درصدهای خلاصه یا اسکیل تغییر کرده‌اند؛ نوبت متوقف شد.')
-            policy = provider_policy(settings, run['provider'])
+            policy = provider_policy(settings, run['provider'], run.get('profileId') or None)
             verify_run(state, run, values.skill, policy)
             request, chosen = next_request(run, values.skill)
             if run.pop('contextAutoShortened', False):
@@ -939,10 +951,15 @@ def create_app() -> FastAPI:
         state = {'images': [{'id': 'single', 'name': 'بازترجمهٔ یک کادر', 'order': 0,
                             'blocks': [{'id': 1, 'text': values.text, 'enabled': True, 'sourceLines': values.source_lines}]}]}
         settings = translations.public_settings()
+        selected_profile_id = (values.profile_id or '').strip() if values.provider != 'free' else ''
+        if selected_profile_id:
+            configured_profiles = settings.get('providers', {}).get(values.provider, {}).get('profiles', [])
+            if not any(str(p.get('id') or '') == selected_profile_id and p.get('hasApiKey') for p in configured_profiles):
+                raise HTTPException(400, 'کلید API انتخاب‌شده در تنظیمات این سرویس ثبت یا فعال نیست.')
         run = create_run(state, ['single'], values.provider, values.source_language, values.skill, values.summary,
-                         min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings),
+                         min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None),
                          0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
-                         False, provider_policy(settings, values.provider))
+                         False, provider_policy(settings, values.provider, selected_profile_id or None), profile_id=selected_profile_id or None)
         if values.provider != 'free':
             try:
                 if run.get('previewError'):
@@ -987,7 +1004,7 @@ def create_app() -> FastAPI:
             use_repair = entry is not None
             while chosen:
                 settings = translations.public_settings()
-                policy = provider_policy(settings, values.provider)
+                policy = provider_policy(settings, values.provider, run.get('profileId') or None)
                 verify_run(state, run, values.skill, policy)
                 if values.provider != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
                     raise ProjectChangedError('درصدها پس از تأیید تغییر کرده‌اند.')

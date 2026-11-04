@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.79">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.79">
+  <link rel="stylesheet" href="/style.css?v=3.80">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.80">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۷۹ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۸۰ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)">؟ راهنما (Help)</button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu">☰ پروژه و تنظیمات</button>
@@ -391,20 +391,41 @@
   <dialog id="previewDialog" class="dlg preview-dialog"><form method="dialog"><button class="icon" aria-label="بستن">×</button><button id="previewCopy" type="button" class="bt">کپی تصویر</button></form><img id="previewImage" alt=""></dialog>
   <dialog id="translationPreviewDialog" class="dlg payload-dialog">
     <form method="dialog" class="dialog-head"><h2>بررسی متن قبل از ترجمه</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <div id="translationPreviewServiceBar" class="preview-service-bar">
+      <label class="preview-service-label" for="translationPreviewService">
+        <span>سرویس ترجمه برای این نوبت</span>
+        <select id="translationPreviewService"></select>
+      </label>
+      <button id="openAiSettingsFromPreview" class="bt" type="button" title="افزودن کلید جدید یا ویرایش تنظیمات سرویس‌های ترجمه">تنظیمات سرویس‌ها…</button>
+    </div>
     <p id="translationPreviewSummary" class="payload-summary"></p>
     <p id="translationPreviewDestination" class="hint" dir="auto"></p>
     <p class="hint">هنوز هیچ متنی برای ترجمه ارسال نشده است. درخواست اول را بررسی کنید؛ در حالت حافظه، متن درخواست‌های بعدی بر اساس خلاصهٔ پاسخ قبلی ساخته می‌شود.</p>
     <div id="translationPreviewRequests" class="payload-requests"></div>
     <div id="translationContextWrap" class="hidden">
-      <label id="translationContextLabel" for="translationContext">خلاصهٔ زمینه / داستان برای درخواست اول</label>
+      <div id="translationContextHead" class="field-head-row">
+        <label id="translationContextLabel" for="translationContext">خلاصهٔ زمینه / داستان برای درخواست اول</label>
+        <div id="translationContextClipActions" class="field-clip-actions" role="group" aria-label="ابزار کپی و پیست خلاصهٔ زمینه">
+          <button id="copyTranslationContext" type="button" class="bt mini-clip-btn" title="کپی متن خلاصهٔ زمینه">کپی</button>
+          <button id="pasteTranslationContext" type="button" class="bt mini-clip-btn" title="چسباندن متن از کلیپ‌بورد">پیست</button>
+          <button id="clearTranslationContext" type="button" class="bt mini-clip-btn" title="پاک‌کردن متن خلاصهٔ زمینه">پاک‌کردن</button>
+        </div>
+      </div>
       <input id="translationContext" type="text" dir="auto" aria-describedby="translationContextHelp translationContextCounter">
       <p id="translationContextCounter" class="budget-counter" aria-live="polite"></p>
       <p id="translationContextHelp" class="hint"></p>
       <label><input id="translationContextResume" type="checkbox"> ادامهٔ نوبت ناتمام قبلی</label>
     </div>
     <div id="translationSkillWrap" class="hidden">
-      <label for="translationSkill">راهنمای ترجمهٔ AI برای این نوبت</label>
-      <textarea id="translationSkill" rows="4" maxlength="4000" dir="auto" aria-describedby="translationSkillHelp translationSkillCounter"></textarea>
+      <div class="field-head-row">
+        <label for="translationSkill">راهنمای ترجمهٔ AI برای این نوبت</label>
+        <div class="field-clip-actions" role="group" aria-label="ابزار کپی و پیست راهنمای ترجمه">
+          <button id="copyTranslationSkill" type="button" class="bt mini-clip-btn" title="کپی متن راهنمای ترجمه">کپی</button>
+          <button id="pasteTranslationSkill" type="button" class="bt mini-clip-btn" title="چسباندن متن از کلیپ‌بورد">پیست</button>
+          <button id="clearTranslationSkill" type="button" class="bt mini-clip-btn" title="پاک‌کردن متن راهنمای ترجمه">پاک‌کردن</button>
+        </div>
+      </div>
+      <textarea id="translationSkill" rows="4" maxlength="100000" dir="auto" aria-describedby="translationSkillHelp translationSkillCounter"></textarea>
       <p id="translationSkillCounter" class="budget-counter" aria-live="polite"></p>
       <p id="translationSkillHelp" class="hint">این راهنما همراه تمام درخواست‌های AI همین نوبت ارسال می‌شود. بعد از تغییر، ابتدا پیش‌نمایش به‌روز می‌شود و برای ارسال باید دوباره تأیید کنید. دستور اصلیِ حفظ ترتیب جداگانه نمایش داده می‌شود؛ راهنمای متناقض ممکن است کیفیت پاسخ را خراب کند. اطلاعات محرمانه وارد نکنید؛ راهنمای تأییدشده در مرورگر همین پروژه ذخیره می‌شود.</p>
       <button id="translationSkillReset" type="button" class="bt">بازگرداندن راهنمای پیش‌فرض</button>
@@ -463,13 +484,13 @@
       <button id="appModalConfirm" class="bt primary" type="button">تأیید</button>
     </div>
   </dialog>
-  <div id="toast" role="status"></div>
-  <script src="/typeset.js?v=3.79"></script>
-  <script src="/groups.js?v=3.79"></script>
-  <script src="/rich-sanitize.js?v=3.79"></script>
-  <script src="/rich-editor.js?v=3.79"></script>
-  <script src="/inline-edit-session.js?v=3.79"></script>
-  <script src="/help-guide.js?v=3.79"></script>
-  <script src="/app.js?v=3.79"></script>
+  <div id="toast" role="status" popover="manual"></div>
+  <script src="/typeset.js?v=3.80"></script>
+  <script src="/groups.js?v=3.80"></script>
+  <script src="/rich-sanitize.js?v=3.80"></script>
+  <script src="/rich-editor.js?v=3.80"></script>
+  <script src="/inline-edit-session.js?v=3.80"></script>
+  <script src="/help-guide.js?v=3.80"></script>
+  <script src="/app.js?v=3.80"></script>
 </body>
 </html>

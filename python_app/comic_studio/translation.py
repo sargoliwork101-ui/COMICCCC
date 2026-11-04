@@ -606,15 +606,17 @@ class TranslationService:
             pass
         return self.public_settings()
 
-    def _profiles(self, settings: dict[str, Any], provider: str) -> list[dict[str, Any]]:
+    def _profiles(self, settings: dict[str, Any], provider: str, profile_id: str | None = None) -> list[dict[str, Any]]:
         config = settings["providers"][provider]
+        chosen_id = (profile_id or "").strip()
         return [
             {
                 "provider": provider, "model": config["model"], "base_url": config["base_url"], "response_mode": config["response_mode"],
                 "api_key": profile["api_key"], "profile_id": profile["id"],
                 "profile_name": profile["name"] or f"API {index + 1}", **_profile_policy(profile),
             }
-            for index, profile in enumerate(config["profiles"]) if profile["api_key"]
+            for index, profile in enumerate(config["profiles"])
+            if profile["api_key"] and (not chosen_id or str(profile["id"]) == chosen_id)
         ]
 
     def translate(self, text: str, source_language: str, provider: str | None = None, source_texts: list[str] | None = None, skill: str | None = None) -> str:
@@ -675,9 +677,10 @@ class TranslationService:
             raise TranslationError("سرویس AI معتبر نیست.")
         user = request.user_message(text)
         settings = self._secret()
-        if provider_policy(settings, provider) != expected_policy:
+        selected_profile_id = (expected_policy.get("profile_id") if isinstance(expected_policy, dict) else None) or None
+        if provider_policy(settings, provider, selected_profile_id) != expected_policy:
             raise ProjectChangedError("تنظیمات API پس از تأیید تغییر کرده است؛ درخواست ارسال نشد.")
-        profiles = self._profiles(settings, provider)
+        profiles = self._profiles(settings, provider, selected_profile_id)
         if not profiles:
             raise TranslationError(f"برای {AI_PROVIDERS[provider]['label']} حداقل یک کلید API معتبر وارد کنید.")
         secrets = [p["api_key"] for c in settings["providers"].values() for p in c["profiles"] if p["api_key"]]
@@ -745,9 +748,10 @@ class TranslationService:
         if not context or max_chars <= 0:
             return ''
         settings = self._secret()
-        if provider_policy(settings, provider) != expected_policy:
+        selected_profile_id = (expected_policy.get("profile_id") if isinstance(expected_policy, dict) else None) or None
+        if provider_policy(settings, provider, selected_profile_id) != expected_policy:
             raise ProjectChangedError("تنظیمات API پس از تأیید تغییر کرده است؛ درخواست فشرده‌سازی ارسال نشد.")
-        profiles = self._profiles(settings, provider)
+        profiles = self._profiles(settings, provider, selected_profile_id)
         if not profiles:
             raise TranslationError(f"برای {AI_PROVIDERS[provider]['label']} حداقل یک کلید API معتبر وارد کنید.")
         secrets = [p["api_key"] for c in settings["providers"].values() for p in c["profiles"] if p["api_key"]]

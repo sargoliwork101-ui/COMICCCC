@@ -1900,7 +1900,8 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.equal(aiGenerations.slice(independentStart).filter(text=>text.includes('HEADER SAME')).length, 2);
     console.log('PASS: repeated title is sent once and applied to both pages; opt-out sends it per page');
 
-    // A skill saved by an earlier version must never be silently truncated.
+    // A skill saved by an earlier version or pasted over limit must never be silently truncated,
+    // and clicking the translate button while over limit warns the user without sending.
     await page.evaluate(() => localStorage.setItem(`comic-studio-ai-skill:${state.project.id}`, 'x'.repeat(120)));
     const beforeOverlong = aiGenerations.length;
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
@@ -1911,17 +1912,48 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.equal(await page.$eval('#translationContextCounter', el => el.classList.contains('over-budget')), true);
     assert.equal(await page.$eval('#translationContext', el => el.classList.contains('budget-over-limit')), true);
     await page.$eval('#translationContext', el => {el.value=''; el.dispatchEvent(new Event('input',{bubbles:true}));});
-    assert.equal(await page.$eval('#translationPreviewConfirm', el => el.disabled), true);
     assert.ok(await page.$eval('#translationSkillStatus', el => el.textContent.includes('بیش از سقف')));
-    await page.click('#translationSkill'); await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control');
-    await page.type('#translationSkill', 'x'.repeat(100));
-    assert.equal(await page.$eval('#translationSkill', el => [...el.value].length), 97, 'typing cannot exceed fifteen percent of the 650-character cap');
+
+    // Native paste event with >97 chars pastes the FULL text without blocking or truncating
+    await page.click('#clearTranslationSkill');
+    assert.equal(await page.$eval('#translationSkill', el => el.value), '');
+    await page.$eval('#translationSkill', (el) => {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', 'پ'.repeat(135));
+      const pasteEvent = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt });
+      const allowed = el.dispatchEvent(pasteEvent);
+      if (allowed) {
+        el.value = 'پ'.repeat(135);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+    assert.equal(await page.$eval('#translationSkill', el => [...el.value].length), 135, 'pasting over-limit guidance pastes full text without blocking');
+    assert.equal(await page.$eval('#translationPreviewConfirm', el => el.disabled), false, 'confirm button remains clickable to explain over-budget warning');
+    await page.click('#translationPreviewConfirm');
+    await page.waitForSelector('#appModalDialog[open]');
+    assert.ok(await page.$eval('#appModalMessage', el => el.textContent.includes('بیش از سقف مجاز') && el.textContent.includes('135')));
+    assert.equal(aiGenerations.length, beforeOverlong, 'over-limit click must never send translation');
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open);
+
+    // Configured translation service selector at top of preview lists free + configured openai and hides unconfigured providers
+    const configuredOpts = await page.$$eval('#translationPreviewService option', opts => opts.map(o => o.value));
+    assert.ok(configuredOpts.includes('free') && configuredOpts.includes('openai') && !configuredOpts.includes('gemini'), 'only configured AI services plus free appear in selector');
+    await page.select('#translationPreviewService', 'free');
+    await page.waitForFunction(() => document.getElementById('translationSkillWrap').classList.contains('hidden'));
+    await page.select('#translationPreviewService', 'openai');
+    await page.waitForFunction(() => !document.getElementById('translationSkillWrap').classList.contains('hidden'));
+
+    // Shortening skill back within 97-char cap refreshes cleanly without sending
+    await page.click('#clearTranslationSkill');
+    await page.type('#translationSkill', 'x'.repeat(97));
+    assert.equal(await page.$eval('#translationSkill', el => [...el.value].length), 97);
     await page.click('#translationPreviewConfirm');
     await page.waitForFunction(() => document.getElementById('translationPreviewSystem').textContent.includes('x'.repeat(97)) && !document.getElementById('translationPreviewConfirm').disabled);
     assert.equal(aiGenerations.length, beforeOverlong);
     await page.click('#translationPreviewCancel');
     await page.evaluate(value => localStorage.setItem(`comic-studio-ai-skill:${state.project.id}`, value), defaultSkill);
-    console.log('PASS: overlong saved skill is shown as an error and new typing obeys its percentage cap');
+    console.log('PASS: overlong pasted/saved skill warns on confirm click without sending, and configured service selector switches live');
 
     // A cancelled refresh may fail after a different preview has opened.
     await page.evaluate(() => {

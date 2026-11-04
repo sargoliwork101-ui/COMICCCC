@@ -1222,6 +1222,130 @@ function check(name, condition) {
     window.fetch = origFetchV375;
   }
 
+  // v3.80: Configured translation service selector + Copy/Paste/Clear + over-budget click warning
+  {
+    const origFetchV380 = window.fetch;
+    window.fetch = async (url, options = {}) => {
+      const parsed = new URL(url, 'http://127.0.0.1');
+      if (parsed.pathname.endsWith('/context-preview') && options.method === 'POST') {
+        const reqBody = JSON.parse(options.body);
+        translationPreviewCalls.push(reqBody);
+        const isFree = reqBody.provider === 'free';
+        const lim = reqBody.profile_id === 'or-2' ? 2000 : 1000;
+        return jsonResponse({
+          provider: reqBody.provider,
+          profileId: reqBody.profile_id || '',
+          providerLabel: isFree ? 'Google Translate؛ در صورت خطا MyMemory' : 'OpenRouter (کلید دوم)',
+          model: isFree ? '' : 'openai/gpt-4o-mini',
+          base_url: isFree ? '' : 'https://openrouter.ai/api/v1',
+          rollingMode: true,
+          contextMode: !isFree,
+          totalLimit: lim,
+          contextLimit: isFree ? 0 : Math.floor(lim * 0.15),
+          skillLimit: isFree ? 0 : Math.floor(lim * 0.15),
+          contextPercent: isFree ? 0 : 15,
+          skillPercent: isFree ? 0 : 15,
+          blockCount: 1,
+          requestCount: 1,
+          requests: [{ index: 1, characters: 11, text: 'SAMPLE LINE' }],
+          systemPrompt: isFree ? '' : 'Translate to Persian',
+          skill: reqBody.skill || '',
+          defaultSkill: 'راهنمای پیش‌فرض',
+          summary: reqBody.summary || '',
+          signature: 'sig-v380',
+        });
+      }
+      return origFetchV380(url, options);
+    };
+    await vm.runInContext(`(async () => {
+      state.ai = {
+        provider: 'free',
+        reuse_repeated: true,
+        context_percent: 15,
+        skill_percent: 15,
+        free_services: {
+          google: { timeout_seconds: 90, retry_count: 0, retry_wait_seconds: 20, source_limit: 1000 },
+          mymemory: { timeout_seconds: 90, retry_count: 0, retry_wait_seconds: 20, source_limit: 500 },
+        },
+        providers: {
+          gemini: { label: 'Google Gemini', model: 'gemini-2.5-flash', base_url: 'https://generativelanguage.googleapis.com/v1beta', profiles: [{ id: 'gem-1', name: 'کلید اصلی', hasApiKey: true, source_limit: 1200 }] },
+          openai: { label: 'OpenAI', model: 'gpt-4o-mini', base_url: 'https://api.openai.com/v1', profiles: [{ id: 'oa-1', name: 'خالی', hasApiKey: false, source_limit: 1000 }] },
+          openrouter: { label: 'OpenRouter', model: 'openai/gpt-4o-mini', base_url: 'https://openrouter.ai/api/v1', profiles: [{ id: 'or-1', name: 'کلید اول', hasApiKey: true, source_limit: 1000 }, { id: 'or-2', name: 'کلید دوم', hasApiKey: true, source_limit: 2000 }] },
+          avalai: { label: 'AvalAI', model: 'gpt-6-luna', base_url: 'https://api.avalai.ir/v1', profiles: [] },
+        },
+      };
+      lastSyncedAiProvider = null;
+      preferredTranslationTarget = null;
+      state.project.images[0].selected = true;
+      state.project.images[0].blocks = [{ id: 1, text: 'SAMPLE LINE', tr: '', enabled: true, x0: 0, y0: 0, x1: 80, y1: 30 }];
+    })()`, context);
+    await vm.runInContext('runTranslation()', context);
+    const serviceOpts = [...$('translationPreviewService').options].map((o) => o.value);
+    check(
+      'translation preview service selector lists free + configured AI providers/profiles and hides unconfigured providers',
+      serviceOpts.includes('free') &&
+      serviceOpts.includes('gemini') &&
+      serviceOpts.includes('openrouter') &&
+      serviceOpts.includes('openrouter::or-1') &&
+      serviceOpts.includes('openrouter::or-2') &&
+      !serviceOpts.includes('openai') &&
+      !serviceOpts.includes('avalai'),
+    );
+
+    // Switch live to openrouter::or-2 right inside #translationPreviewDialog
+    $('translationPreviewService').value = 'openrouter::or-2';
+    $('translationPreviewService').dispatchEvent(new window.Event('change', { bubbles: true }));
+    await sleep(30);
+    check(
+      'switching #translationPreviewService updates preview to chosen configured AI profile and reveals #translationSkillWrap',
+      translationPreviewCalls.at(-1).provider === 'openrouter' &&
+      translationPreviewCalls.at(-1).profile_id === 'or-2' &&
+      !$('translationSkillWrap').classList.contains('hidden'),
+    );
+
+    // Clipboard Copy / Paste / Clear buttons & full paste over limit without truncation
+    let clipBuffer = 'پرامپت آزمایشی طولانی برای تست سقف نویسه '.repeat(10);
+    Object.defineProperty(window.navigator, 'clipboard', {
+      value: {
+        writeText: async (txt) => { clipBuffer = txt; },
+        readText: async () => clipBuffer,
+      },
+      configurable: true,
+    });
+    $('clearTranslationSkill').click();
+    check('clearTranslationSkill empties #translationSkill', $('translationSkill').value === '');
+    $('pasteTranslationSkill').click();
+    await sleep(20);
+    check(
+      'pasteTranslationSkill pastes full over-limit text without truncating and flags over-budget state',
+      $('translationSkill').value === clipBuffer &&
+      $('translationSkill').classList.contains('budget-over-limit') &&
+      $('translationPreviewConfirm').disabled === false &&
+      $('translationPreviewConfirm').classList.contains('over-budget-blocked'),
+    );
+
+    const callsBeforeBlockedConfirm = translationCalls.length;
+    $('translationPreviewConfirm').click();
+    await sleep(25);
+    check(
+      'clicking #translationPreviewConfirm while over character limit blocks translation and shows Persian warning modal',
+      $('appModalDialog').open === true &&
+      $('appModalMessage').textContent.includes('بیش از سقف مجاز') &&
+      translationCalls.length === callsBeforeBlockedConfirm &&
+      $('translationPreviewDialog').open === true,
+    );
+    $('appModalConfirm').click();
+    await sleep(20);
+
+    $('translationSkill').value = 'راهنمای کوتاه';
+    $('translationSkill').dispatchEvent(new window.Event('input', { bubbles: true }));
+    $('copyTranslationSkill').click();
+    await sleep(20);
+    check('copyTranslationSkill copies current #translationSkill text to clipboard', clipBuffer === 'راهنمای کوتاه');
+    $('translationPreviewCancel').click();
+    window.fetch = origFetchV380;
+  }
+
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));
   window.dispatchEvent(new window.Event('pagehide'));

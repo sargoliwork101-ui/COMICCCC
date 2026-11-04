@@ -116,6 +116,7 @@ class ContextPreviewRequest(BaseModel):
     restart_existing: bool = False
     image_ids: list[str] = Field(default_factory=list)
     provider: str
+    profile_id: str | None = Field(default=None, max_length=120)
     source_language: str = "eng"
     skill: str = Field(default="", max_length=100000)
     summary: str = Field(default="", max_length=100000)
@@ -141,6 +142,7 @@ class ContextTextRequest(BaseModel):
     source_lines: list[dict[str, Any]] | None = None
     source_language: str = 'eng'
     provider: str
+    profile_id: str | None = Field(default=None, max_length=120)
     skill: str = Field(default='', max_length=100000)
     summary: str = Field(default='', max_length=100000)
     confirmation: str | None = None

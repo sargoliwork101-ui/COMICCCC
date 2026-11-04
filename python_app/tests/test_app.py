@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.79"
+    assert health.json()["version"] == "3.80"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۷۹ · Python</span>' in index_html
+    assert '<span class="ver">۳.۸۰ · Python</span>' in index_html
     assert 'id="exportPptxBtn"' in index_html
     assert 'id="pptxExportDialog"' in index_html
     assert 'id="helpTopBtn"' in index_html
@@ -2551,6 +2551,106 @@ def test_pptx_export_visual_and_flowing_slides_and_backup_restore(client):
     restored, _ = backup.restore_backup(ProjectStore(), io.BytesIO(backup_res.content))
     assert (project_root(restored["id"]) / "exports" / "comic-slides-out.pptx").is_file()
     assert (project_root(restored["id"]) / "exports" / "book-lecture-slides.pptx").is_file()
+
+
+def test_configured_provider_and_profile_selection_for_translation(client, monkeypatch):
+    import httpx
+    project, item = make_project(client)
+    route = f"/api/projects/{project['id']}"
+    project["images"][0]["blocks"] = [{"id": 1, "text": "HELLO FROM COMIC", "tr": "", "enabled": True}]
+    assert client.put(f"{route}/state", json={"state": project}).status_code == 200
+
+    save_res = client.put(
+        "/api/ai-settings",
+        json={
+            "provider": "free",
+            "providers": {
+                "openrouter": {
+                    "model": "openai/gpt-4o-mini",
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "profiles": [
+                        {"id": "prof-small", "name": "کلید کم‌سقف", "api_key": "secret-small", "source_limit": 700, "retry_count": 0, "retry_wait_seconds": 0},
+                        {"id": "prof-big", "name": "کلید پرسقف", "api_key": "secret-big", "source_limit": 2400, "retry_count": 0, "retry_wait_seconds": 0},
+                    ],
+                },
+                "gemini": {
+                    "model": "gemini-2.5-flash",
+                    "base_url": "https://generativelanguage.googleapis.com/v1beta",
+                    "profiles": [
+                        {"id": "gem-1", "name": "کلید Gemini", "api_key": "secret-gemini", "source_limit": 1600, "retry_count": 0, "retry_wait_seconds": 0},
+                    ],
+                },
+            },
+        },
+    )
+    assert save_res.status_code == 200
+    assert save_res.json()["provider"] == "free"
+
+    # Unknown / unconfigured profile_id is rejected cleanly with 400
+    bad_preview = client.post(f"{route}/context-preview", json={"image_ids": [item["id"]], "provider": "openrouter", "profile_id": "missing-id"})
+    assert bad_preview.status_code == 400
+
+    # Selecting specific profile_id="prof-big" uses its 2400 limit and only its key
+    preview_big = client.post(
+        f"{route}/context-preview",
+        json={"image_ids": [item["id"]], "provider": "openrouter", "profile_id": "prof-big", "skill": "لحن صمیمی", "summary": ""},
+    )
+    assert preview_big.status_code == 200
+    preview_json = preview_big.json()
+    assert preview_json["totalLimit"] == 2400
+    assert preview_json["profileId"] == "prof-big"
+    assert "کلید پرسقف" in preview_json["providerLabel"]
+
+    used_headers: list[str] = []
+
+    def fake_post(url, **kwargs):
+        used_headers.append(kwargs.get("headers", {}).get("Authorization", ""))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"translation":"سلام از کمیک","summary":"شروع"}'}}]},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    started = client.post(
+        f"{route}/context-start",
+        json={
+            "image_ids": [item["id"]],
+            "provider": "openrouter",
+            "profile_id": "prof-big",
+            "skill": "لحن صمیمی",
+            "summary": "",
+            "confirmation": preview_json["signature"],
+        },
+    )
+    assert started.status_code == 200
+    stepped = client.post(f"{route}/context-step", json={"run_id": started.json()["runId"], "completed": 0, "skill": "لحن صمیمی"})
+    assert stepped.status_code == 200
+    assert used_headers == ["Bearer secret-big"]
+    assert stepped.json()["project"]["images"][0]["blocks"][0]["tr"] == "سلام از کمیک"
+
+    # Single-block retranslate also respects profile_id
+    single_prev = client.post(
+        "/api/translate-text/context-preview",
+        json={"text": "ONE BLOCK", "provider": "openrouter", "profile_id": "prof-big", "skill": "", "summary": ""},
+    )
+    assert single_prev.status_code == 200
+    assert single_prev.json()["totalLimit"] == 2400
+    single_res = client.post(
+        "/api/translate-text/context",
+        json={
+            "text": "ONE BLOCK",
+            "provider": "openrouter",
+            "profile_id": "prof-big",
+            "skill": "",
+            "summary": "",
+            "confirmation": single_prev.json()["signature"],
+        },
+    )
+    assert single_res.status_code == 200
+    assert single_res.json()["text"] == "سلام از کمیک"
+    assert used_headers == ["Bearer secret-big", "Bearer secret-big"]
+
 
 
 

@@ -20,16 +20,23 @@ def digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def provider_policy(settings: dict[str, Any], provider: str) -> dict[str, Any]:
+def provider_policy(settings: dict[str, Any], provider: str, profile_id: str | None = None) -> dict[str, Any]:
     if provider == 'free':
         return {'services': settings.get('free_services', {})}
     config = settings.get('providers', {}).get(provider, {})
     mode = config.get('response_mode', 'auto')
-    return {**({'response_mode': mode} if mode != 'auto' else {}), 'model': config.get('model', ''), 'base_url': config.get('base_url', ''),
+    chosen_id = (profile_id or '').strip()
+    source_profiles = [
+        p for p in config.get('profiles', [])
+        if not chosen_id or str(p.get('id', '')) == chosen_id
+    ]
+    return {**({'response_mode': mode} if mode != 'auto' else {}),
+            **({'profile_id': chosen_id} if chosen_id else {}),
+            'model': config.get('model', ''), 'base_url': config.get('base_url', ''),
             'profiles': [{'id': p.get('id', ''), 'hasApiKey': bool(p.get('hasApiKey', p.get('api_key', ''))),
                           'timeout_seconds': p.get('timeout_seconds', 90), 'retry_count': p.get('retry_count', 0),
                           'retry_wait_seconds': p.get('retry_wait_seconds', 20), 'source_limit': p.get('source_limit', 1000)}
-                         for p in config.get('profiles', [])]}
+                         for p in source_profiles]}
 
 
 def source_layout(state: dict[str, Any], image_ids: list[str]) -> str:
@@ -128,7 +135,8 @@ def safe_prefix(text: str, fits: Any, source_lines: Any = None, *, allow_fallbac
 
 def create_run(state: dict[str, Any], image_ids: list[str], provider: str, language: str,
                skill: str, context: str, limit: int, context_percent: int,
-               skill_percent: int, reuse: bool, policy: dict[str, Any]) -> dict[str, Any]:
+               skill_percent: int, reuse: bool, policy: dict[str, Any],
+               profile_id: str | None = None) -> dict[str, Any]:
     """Snapshot source and target references; no secret or skill is persisted."""
     if provider == 'free':
         if skill or context:
@@ -188,7 +196,9 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
                 lines = matching_source_lines(lines, remaining)
             if preview_error:
                 break
-    return {'provider': provider, 'language': language, 'skillHash': digest(skill), 'context': context, 'previewError': preview_error if provider != 'free' else '',
+    chosen_profile = (profile_id or '').strip() if provider != 'free' else ''
+    return {'provider': provider, **({'profileId': chosen_profile} if chosen_profile else {}),
+            'language': language, 'skillHash': digest(skill), 'context': context, 'previewError': preview_error if provider != 'free' else '',
             'limit': limit, 'contextPercent': context_percent, 'skillPercent': skill_percent,
             'reuse': reuse, 'policyHash': digest(policy), 'imageIds': [i['id'] for i in items], 'sourceLayout': source_layout(state, [i['id'] for i in items]), 'jobs': jobs,
             'completed': 0}

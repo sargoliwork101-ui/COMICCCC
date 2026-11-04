@@ -18,9 +18,14 @@ AI_PAGE_PROGRESS_KEY = "_aiPageProgress"
 AI_REUSE_KEY = "_aiReusedTranslation"
 
 
-def effective_ai_limit(provider: str, settings: dict[str, Any]) -> int:
+def effective_ai_limit(provider: str, settings: dict[str, Any], profile_id: str | None = None) -> int:
     profiles = settings.get("providers", {}).get(provider, {}).get("profiles", [])
-    limits = [p.get("source_limit", MAX_AI_SOURCE_CHARS) for p in profiles if p.get("hasApiKey")]
+    chosen_id = (profile_id or "").strip()
+    limits = [
+        p.get("source_limit", MAX_AI_SOURCE_CHARS)
+        for p in profiles
+        if p.get("hasApiKey") and (not chosen_id or str(p.get("id") or "") == chosen_id)
+    ]
     return min(limits) if limits else MAX_AI_SOURCE_CHARS
 
 
