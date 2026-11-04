@@ -274,7 +274,7 @@
 
   // bmp: تصویر اصلی؛ blocks: بلوک‌ها؛ برمی‌گرداند canvas نهایی
   function render(bmp, blocks, opts) {
-    const o = Object.assign({ createCanvas: null }, opts);
+    const o = Object.assign({ createCanvas: null, eraseOriginal: true }, opts);
     const mk = o.createCanvas || ((w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; });
     const W = bmp.width, H = bmp.height;
     const cv = mk(W, H);
@@ -301,7 +301,7 @@
       if (bw <= 0 || bh <= 0) return;
 
       let sourceFill = null, targetFill = null, txt = '#0b0b0b', stroke = null;
-      if (b.bg === 'none') {
+      if (b.bg === 'none' || (o.eraseOriginal === false && (!b.bg || b.bg === 'auto'))) {
         txt = '#ffffff'; stroke = '#000000';
       } else if (b.bg === 'white') { sourceFill = targetFill = '#ffffff'; }
       else if (b.bg === 'black') { sourceFill = targetFill = '#000000'; txt = '#fafafa'; }

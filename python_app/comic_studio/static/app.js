@@ -662,12 +662,12 @@ function sortedImages() { return G.byOrder(state.project?.images || []); }
 function selectedImages() { return sortedImages().filter((item) => item.selected); }
 function imageUrl(item, edited = false, cropped = false) {
   const query = new URLSearchParams();
-  if (edited) {
-    query.set('edited', 'true');
+  if (edited) query.set('edited', 'true');
+  if (cropped) query.set('cropped', 'true');
+  if (edited || cropped) {
     const version = imagePreviewVersions.get(`${state.project?.id}:${item.id}`);
     if (version) query.set('v', String(version));
   }
-  if (cropped) query.set('cropped', 'true');
   return `/api/projects/${state.project.id}/images/${item.id}/content${query.toString() ? `?${query}` : ''}`;
 }
 function escapeHtml(value) { const el = document.createElement('div'); el.textContent = String(value ?? ''); return el.innerHTML; }
@@ -4623,7 +4623,18 @@ async function revertEditor() {
 
 // ---------- Crop with aspect ratio, moving, and eight handles ----------
 function cropItem() { return state.project?.images.find((item) => item.id === state.cropId); }
-function openCrop(imageId) { const item = state.project?.images.find((entry) => entry.id === imageId); if (!item) return; state.cropId = imageId; state.crop = item.crop ? { ...item.crop } : null; $('cropRatio').value = String(item.crop?.ratio || 0); $('cropImage').src = imageUrl(item, !!item.edited); $('cropImage').onload = () => { normalizeCropInputs(); drawCropRect(); }; showDialog('cropDialog'); }
+function openCrop(imageId) {
+  const item = state.project?.images.find((entry) => entry.id === imageId);
+  if (!item) return;
+  state.cropId = imageId;
+  state.crop = item.crop ? { ...item.crop } : null;
+  $('cropRatio').value = String(item.crop?.ratio || 0);
+  const img = $('cropImage');
+  img.onload = () => { normalizeCropInputs(); drawCropRect(); };
+  img.src = imageUrl(item, !!item.edited);
+  showDialog('cropDialog');
+  if (img.complete && img.naturalWidth) { normalizeCropInputs(); drawCropRect(); }
+}
 function normalizeCropInputs() { const item = cropItem(); if (!item) return; const crop = state.crop || { x: 0, y: 0, w: item.width, h: item.height }; $('cropX').value = Math.round(crop.x); $('cropY').value = Math.round(crop.y); $('cropW').value = Math.round(crop.w); $('cropH').value = Math.round(crop.h); }
 function readCropInputs(event) { const item = cropItem(); if (!item) return; const x = Math.max(0, Math.min(item.width - 1, Number($('cropX').value) || 0)); const y = Math.max(0, Math.min(item.height - 1, Number($('cropY').value) || 0)); let w = Math.max(1, Math.min(item.width - x, Number($('cropW').value) || 1)); let h = Math.max(1, Math.min(item.height - y, Number($('cropH').value) || 1)); const ratio = Number($('cropRatio').value); if (ratio > 0) { if (event?.target?.id === 'cropH') { w = Math.min(item.width - x, h * ratio); h = w / ratio; } else { h = Math.min(item.height - y, w / ratio); w = h * ratio; } } state.crop = { x, y, w, h, ratio: ratio || 0 }; drawCropRect(); }
 function drawCropRect() { const item = cropItem(); const rect = $('cropRect'); if (!item || !state.crop || !$('cropImage').clientWidth) { rect.style.display = 'none'; return; } const sx = $('cropImage').clientWidth / item.width; const sy = $('cropImage').clientHeight / item.height; rect.style.display = 'block'; rect.style.left = `${state.crop.x * sx}px`; rect.style.top = `${state.crop.y * sy}px`; rect.style.width = `${state.crop.w * sx}px`; rect.style.height = `${state.crop.h * sy}px`; }
@@ -5136,7 +5147,36 @@ function bindEvents() {
   $('previewCopy').addEventListener('click', copyPreview);
   window.addEventListener('resize', () => { if (state.editorId) { if (imageOverview) fitWholeEditorImage(); else fitEditor(); } if (state.cropId) drawCropRect(); scheduleOutlines(); });
   ['cropX', 'cropY', 'cropW', 'cropH'].forEach((id) => $(id).addEventListener('change', readCropInputs)); $('cropRatio').addEventListener('change', changeCropRatio); $('cropStage').addEventListener('pointerdown', cropPointerDown); $('cropStage').addEventListener('pointermove', cropPointerMove); const stopCrop = () => { state.cropPointer = null; }; $('cropStage').addEventListener('pointerup', stopCrop); $('cropStage').addEventListener('pointercancel', stopCrop);
-  $('cropReset').addEventListener('click', () => { cropItem().crop = null; state.crop = null; closeDialog('cropDialog'); renderGrid(); scheduleSave(); }); $('cropApply').addEventListener('click', () => { readCropInputs(); cropItem().crop = state.crop; closeDialog('cropDialog'); renderGrid(); scheduleSave(); });
+  $('cropReset').addEventListener('click', () => {
+    const item = cropItem();
+    if (!item) { closeDialog('cropDialog'); return; }
+    item.crop = null;
+    state.crop = null;
+    const projectId = state.project?.id;
+    closeDialog('cropDialog');
+    renderGrid();
+    saveProject().then(() => {
+      if (projectId && state.project?.id === projectId) {
+        imagePreviewVersions.set(`${projectId}:${item.id}`, ++previewRevision);
+        renderGrid();
+      }
+    }).catch((error) => toast(error.message, true));
+  });
+  $('cropApply').addEventListener('click', () => {
+    const item = cropItem();
+    if (!item) { closeDialog('cropDialog'); return; }
+    readCropInputs();
+    item.crop = state.crop;
+    const projectId = state.project?.id;
+    closeDialog('cropDialog');
+    renderGrid();
+    saveProject().then(() => {
+      if (projectId && state.project?.id === projectId) {
+        imagePreviewVersions.set(`${projectId}:${item.id}`, ++previewRevision);
+        renderGrid();
+      }
+    }).catch((error) => toast(error.message, true));
+  });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'F1') {
       event.preventDefault();

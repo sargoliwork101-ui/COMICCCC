@@ -506,13 +506,18 @@ class ProjectStore:
         with self._lock:
             state = self.get(project_id)
             originals = {item["id"]: item for item in state["images"]}
+            used_ids = set(originals)
             additions: dict[str, dict[str, Any]] = {}
             for image_id in image_ids:
                 if image_id not in originals or image_id in additions:
                     continue
                 old = originals[image_id]
                 new = json.loads(json.dumps(old))
-                new["id"] = new_id()
+                candidate_id = new_id()
+                while candidate_id in used_ids:
+                    candidate_id = new_id()
+                used_ids.add(candidate_id)
+                new["id"] = candidate_id
                 new["name"] = f"کپی — {old['name']}"
                 new["file"] = f"{new['id']}{Path(old['file']).suffix}"
                 # A copy starts independent, rather than silently enlarging the original group.
@@ -520,8 +525,10 @@ class ProjectStore:
                 new["approved"] = False
                 shutil.copyfile(project_root(project_id) / "images" / old["file"], project_root(project_id) / "images" / new["file"])
                 old_edited = project_root(project_id) / "images" / f"{old['id']}-edited.png"
-                if old_edited.exists():
+                has_edited = old_edited.exists()
+                if has_edited:
                     shutil.copyfile(old_edited, project_root(project_id) / "images" / f"{new['id']}-edited.png")
+                new["edited"] = has_edited
                 additions[image_id] = new
             merged = []
             for item in state["images"]:

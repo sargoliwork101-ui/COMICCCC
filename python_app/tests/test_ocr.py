@@ -1329,6 +1329,100 @@ def test_v387_isolated_blank_page_no_fallback_and_worker_stdout_protocol(monkeyp
     assert "Inference progress 50% on stdout..." in proto_err.getvalue()
 
 
+def test_v388_rapid_gpu_fallback_race_and_worker_edge_cases(monkeypatch, tmp_path):
+    import threading
+    from PIL import Image
+    from comic_studio import ocr as ocr_mod
+    from comic_studio import ocr_worker as worker_mod
+
+    # 1. RapidEngine concurrent GPU->CPU fallback: both threads that checked out the GPU engine recover via CPU
+    engine = ocr_mod.RapidEngine("rapidocr-v6", "v6")
+    engine._using_gpu = True
+    barrier = threading.Barrier(2)
+    gpu_calls = 0
+
+    def gpu_broken(_arr, **_kw):
+        nonlocal gpu_calls
+        gpu_calls += 1
+        raise RuntimeError("DirectML VRAM exhausted")
+
+    def cpu_ok(_arr, **_kw):
+        return ([[[[0, 0], [40, 0], [40, 20], [0, 20]], "Recovered", 0.96]], None)
+
+    orig_checkout = engine._checkout
+
+    @ocr_mod.contextlib.contextmanager
+    def synced_checkout(language: str):
+        if engine.using_gpu and not engine._force_cpu:
+            barrier.wait(timeout=5.0)
+            yield gpu_broken
+            return
+        yield cpu_ok
+
+    def fake_unload():
+        engine._using_gpu = False
+
+    monkeypatch.setattr(engine, "_checkout", synced_checkout)
+    monkeypatch.setattr(engine, "unload", fake_unload)
+
+    results = []
+    errors = []
+
+    def worker_call():
+        im = Image.new("RGB", (60, 30), "white")
+        try:
+            results.append(engine.recognize(im, "eng"))
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            im.close()
+
+    with engine.configure_batch(2):
+        t1 = threading.Thread(target=worker_call)
+        t2 = threading.Thread(target=worker_call)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+    assert not errors, f"concurrent GPU fallback failed: {errors}"
+    assert len(results) == 2 and all(r[0].text == "Recovered" for r in results)
+    assert gpu_calls == 1, "second thread should skip calling the already-failed GPU instance"
+    _ = orig_checkout
+
+    # 2. _DotsOcrAdapter._extract_json_array handles leading bracket noise before actual JSON list
+    noisy = '[Layout output] Note [1]:\n[{"bbox": [10, 12, 90, 34], "text": "Dots clean"}]'
+    extracted = worker_mod._DotsOcrAdapter._extract_json_array(noisy)
+    assert isinstance(extracted, list) and extracted[0]["text"] == "Dots clean"
+
+    # 3. _SuryaAdapter legacy branch skips malformed lines missing both polygon and bbox
+    img_file = tmp_path / "sample.png"
+    im = Image.new("RGB", (100, 60), "white")
+    im.save(img_file)
+    im.close()
+    surya = worker_mod._SuryaAdapter(tmp_path)
+    monkeypatch.setattr(surya, "_ensure_loaded", lambda: None)
+
+    class LegacyLine:
+        def __init__(self, text, polygon=None, bbox=None):
+            self.text = text
+            self.polygon = polygon
+            self.bbox = bbox
+            self.confidence = 0.88
+
+    class LegacyPage:
+        text_lines = [
+            LegacyLine("Bad line without coords", None, None),
+            LegacyLine("Valid line", None, [5, 6, 80, 24]),
+        ]
+
+    surya._predictor = None
+    surya._legacy = (lambda imgs, det_predictor=None: [LegacyPage()], object())
+    out_lines = surya.recognize(str(img_file), "eng", None)
+    assert len(out_lines) == 1 and out_lines[0]["text"] == "Valid line"
+
+
+
 
 
 

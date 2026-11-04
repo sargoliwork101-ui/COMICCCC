@@ -1561,10 +1561,11 @@ class IsolatedOcrEngine:
                         f"دانلود موتور کمکی CPU برای Surya: {total / (1024 * 1024):.1f} مگابایت",
                         progress=round(0.73 + 0.08 * ratio, 3),
                     )
+            resolved_llama_dir = llama_dir.resolve()
             with zipfile.ZipFile(zip_tmp) as archive:
                 for member in archive.infolist():
                     member_path = (llama_dir / member.filename).resolve()
-                    if not str(member_path).startswith(str(llama_dir.resolve())):
+                    if not member_path.is_relative_to(resolved_llama_dir):
                         continue
                     archive.extract(member, llama_dir)
             for found in llama_dir.rglob(exe_name):
@@ -1635,6 +1636,18 @@ class IsolatedOcrEngine:
         except Exception as exc:
             proc.kill()
             return 1, f"{exc}\n" + "\n".join(tail_lines)
+        finally:
+            if proc.stdout is not None:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+            if proc.poll() is None:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
 
     def _ensure_isolated_venv(self, upgrade: bool = False) -> None:
         env_dir = self._env_dir()

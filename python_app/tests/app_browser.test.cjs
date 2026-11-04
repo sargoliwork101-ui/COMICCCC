@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v3.87: Verify version badge ۳.۸۷, async thumbnail decoding, hardware cpuCores endpoint, and Help section 5 GPU/multi-core guide
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۸۷ · Python', 'header shows version ۳.۸۷');
+      // v3.85–v3.88: Verify version badge ۳.۸۸, async thumbnail decoding, hardware cpuCores endpoint, and Help section 5 GPU/multi-core guide
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۸۸ · Python', 'header shows version ۳.۸۸');
       const hwReport = await api(base, '/api/engines/hardware');
       assert.ok(Number(hwReport.cpuCores) >= 1 && typeof hwReport.hasGpu === 'boolean', '/api/engines/hardware reports cpuCores and hasGpu');
       await page.keyboard.press('F1');
@@ -2498,6 +2498,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     console.log('PASS: every export leaves a persistent browser-download link');
   } catch (error) {
     process.exitCode = 1;
+    console.error(error);
     if (serverLog) console.error(serverLog.slice(-5000));
     throw error;
   } finally {

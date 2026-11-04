@@ -238,8 +238,12 @@
         if (a < 0) continue;
         cx.drawImage(cv, a, c.miny + r, b - a + 1, 1, a - c.minx + M, r + M, b - a + 1, 1);
       }
-      const res = await worker.recognize(crop, {}, { blocks: true });
-      crop.width = crop.height = 0;
+      let res;
+      try {
+        res = await worker.recognize(crop, {}, { blocks: true });
+      } finally {
+        crop.width = crop.height = 0;
+      }
       if (cancelled()) break;
       extractLines(res.data, yOffset + c.miny - M, o.cjk, o.minConf, o.lang, o.stats, c.minx - M).forEach((l) => out.push(l));
     }
@@ -268,16 +272,23 @@
       cv.getContext('2d', { willReadFrequently: true }).drawImage(bmp, 0, y0, bmp.width, h, 0, 0, bmp.width, h);
 
       let cand = [];
-      for (const mode of o.passes) {
-        if (cancelled()) break;
-        if (mode === 'bubbles') { cand = cand.concat(await ocrBubbles(cv, bmp.width, h, worker, mk, o, y0)); continue; }
-        const pc = makePass(cv, bmp.width, h, mode, mk);
-        const r = await worker.recognize(pc, {}, { blocks: true });
-        pc.width = pc.height = 0;
-        if (cancelled()) break;
-        cand = cand.concat(extractLines(r.data, y0, o.cjk, o.minConf, o.lang, o.stats));
+      try {
+        for (const mode of o.passes) {
+          if (cancelled()) break;
+          if (mode === 'bubbles') { cand = cand.concat(await ocrBubbles(cv, bmp.width, h, worker, mk, o, y0)); continue; }
+          const pc = makePass(cv, bmp.width, h, mode, mk);
+          let r;
+          try {
+            r = await worker.recognize(pc, {}, { blocks: true });
+          } finally {
+            pc.width = pc.height = 0;
+          }
+          if (cancelled()) break;
+          cand = cand.concat(extractLines(r.data, y0, o.cjk, o.minConf, o.lang, o.stats));
+        }
+      } finally {
+        cv.width = cv.height = 0;
       }
-      cv.width = cv.height = 0;
       if (cancelled()) break;
       cand.sort((a, b) => b.conf - a.conf);
       const kept = [];

@@ -1340,8 +1340,13 @@ async function copyLightboxImage() {
     if (blob.type !== 'image/png') {
       const bmp = await createImageBitmap(blob);
       const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
-      cv.getContext('2d').drawImage(bmp, 0, 0); bmp.close();
-      blob = await canvasToBlob(cv, 'image/png'); cv.width = cv.height = 0;
+      try {
+        cv.getContext('2d').drawImage(bmp, 0, 0);
+        blob = await canvasToBlob(cv, 'image/png');
+      } finally {
+        bmp.close();
+        cv.width = cv.height = 0;
+      }
     }
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
     const btn = $('lbCopy');
@@ -2060,6 +2065,7 @@ function collectPageProfile() {
       folderName: $('folderName').value,
       outFmt: $('outFmt').value,
       ocrEnabled: $('ocrEnabled').checked,
+      trContrast: $('trContrast') ? $('trContrast').checked : true,
       trLang: $('trLang').value,
       trOnlySel: $('trOnlySel').checked,
       trErase: $('trErase').checked,
@@ -2113,7 +2119,7 @@ function applyProfileSettings(settings = {}) {
   if (['orig', 'png', 'jpg'].includes(settings.outFmt)) $('outFmt').value = settings.outFmt;
   if (['free', '1/1', '4/3', '3/4', '16/9', '9/16'].includes(settings.cropRatio)) $('cropRatio').value = settings.cropRatio;
   if (['eng', 'kor', 'jpn', 'chi_sim'].includes(settings.trLang)) $('trLang').value = settings.trLang;
-  for (const id of ['trOnlySel', 'trErase', 'trPrecise']) if (typeof settings[id] === 'boolean') $(id).checked = settings[id];
+  for (const id of ['trOnlySel', 'trErase', 'trPrecise', 'trContrast']) if ($(id) && typeof settings[id] === 'boolean') $(id).checked = settings[id];
   const seamless = !!settings.seamless;
   $('seamless').checked = seamless;
   $('twoPerPage').checked = !seamless && !!settings.twoPerPage;

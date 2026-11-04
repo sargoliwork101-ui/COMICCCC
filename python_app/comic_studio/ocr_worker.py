@@ -325,11 +325,14 @@ class _SuryaAdapter(_BaseAdapter):
         from PIL import Image
         self._ensure_loaded()
         sample = Image.new("RGB", (160, 64), "white")
-        if self._predictor is not None:
-            self._predictor([sample])
-        elif self._legacy is not None:
-            rec, det = self._legacy
-            rec([sample], det_predictor=det)
+        try:
+            if self._predictor is not None:
+                self._predictor([sample])
+            elif self._legacy is not None:
+                rec, det = self._legacy
+                rec([sample], det_predictor=det)
+        finally:
+            sample.close()
         import importlib.metadata
         return importlib.metadata.version("surya-ocr")
 
@@ -340,38 +343,46 @@ class _SuryaAdapter(_BaseAdapter):
             rgb = im.convert("RGB")
             width, height = rgb.size
         lines: list[dict[str, Any]] = []
-        if self._predictor is not None:
-            preds = self._predictor([rgb])
-            page = preds[0] if preds else None
-            for block in getattr(page, "blocks", []) or []:
-                if getattr(block, "skipped", False) or getattr(block, "error", False):
-                    continue
-                text = _strip_markup(getattr(block, "html", "") or getattr(block, "text", ""))
-                if not text:
-                    continue
-                raw_poly = getattr(block, "polygon", None)
-                bbox = getattr(block, "bbox", None)
-                if raw_poly and len(raw_poly) >= 4:
-                    poly = [[float(pt[0]), float(pt[1])] for pt in raw_poly[:4]]
-                elif bbox and len(bbox) >= 4:
-                    poly = _rect_polygon(bbox[0], bbox[1], bbox[2], bbox[3])
-                else:
-                    continue
-                conf = float(getattr(block, "confidence", 0.9) or 0.9)
-                lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height)})
-        elif self._legacy is not None:
-            rec, det = self._legacy
-            preds = rec([rgb], det_predictor=det)
-            page = preds[0] if preds else None
-            for line in getattr(page, "text_lines", []) or []:
-                text = _strip_markup(getattr(line, "text", ""))
-                if not text:
-                    continue
-                raw_poly = getattr(line, "polygon", None)
-                bbox = getattr(line, "bbox", None)
-                poly = [[float(pt[0]), float(pt[1])] for pt in raw_poly[:4]] if raw_poly and len(raw_poly) >= 4 else _rect_polygon(*bbox[:4])
-                conf = float(getattr(line, "confidence", 0.9) or 0.9)
-                lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height)})
+        try:
+            if self._predictor is not None:
+                preds = self._predictor([rgb])
+                page = preds[0] if preds else None
+                for block in getattr(page, "blocks", []) or []:
+                    if getattr(block, "skipped", False) or getattr(block, "error", False):
+                        continue
+                    text = _strip_markup(getattr(block, "html", "") or getattr(block, "text", ""))
+                    if not text:
+                        continue
+                    raw_poly = getattr(block, "polygon", None)
+                    bbox = getattr(block, "bbox", None)
+                    if raw_poly and len(raw_poly) >= 4:
+                        poly = [[float(pt[0]), float(pt[1])] for pt in raw_poly[:4]]
+                    elif bbox and len(bbox) >= 4:
+                        poly = _rect_polygon(bbox[0], bbox[1], bbox[2], bbox[3])
+                    else:
+                        continue
+                    conf = float(getattr(block, "confidence", 0.9) or 0.9)
+                    lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height)})
+            elif self._legacy is not None:
+                rec, det = self._legacy
+                preds = rec([rgb], det_predictor=det)
+                page = preds[0] if preds else None
+                for line in getattr(page, "text_lines", []) or []:
+                    text = _strip_markup(getattr(line, "text", ""))
+                    if not text:
+                        continue
+                    raw_poly = getattr(line, "polygon", None)
+                    bbox = getattr(line, "bbox", None)
+                    if raw_poly and len(raw_poly) >= 4:
+                        poly = [[float(pt[0]), float(pt[1])] for pt in raw_poly[:4]]
+                    elif bbox and len(bbox) >= 4:
+                        poly = _rect_polygon(bbox[0], bbox[1], bbox[2], bbox[3])
+                    else:
+                        continue
+                    conf = float(getattr(line, "confidence", 0.9) or 0.9)
+                    lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height)})
+        finally:
+            rgb.close()
         return lines
 
 
@@ -609,6 +620,25 @@ class _DotsOcrAdapter(_TransformersRegionAdapter):
     def __init__(self, models_root: Path) -> None:
         super().__init__(models_root, "rednote-hilab/dots.mocr", self.LAYOUT_PROMPT)
 
+    @staticmethod
+    def _extract_json_array(raw: str) -> list[Any] | None:
+        decoder = json.JSONDecoder()
+        empty_fallback: list[Any] | None = None
+        cursor = 0
+        while True:
+            idx = raw.find("[", cursor)
+            if idx < 0:
+                return empty_fallback
+            try:
+                parsed, _ = decoder.raw_decode(raw, idx)
+                if isinstance(parsed, list) and all(isinstance(el, dict) for el in parsed):
+                    if parsed:
+                        return parsed
+                    empty_fallback = parsed
+            except json.JSONDecodeError:
+                pass
+            cursor = idx + 1
+
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         from PIL import Image
         with Image.open(image_path) as im:
@@ -618,10 +648,9 @@ class _DotsOcrAdapter(_TransformersRegionAdapter):
             raw = self._infer_crop(rgb, max_tokens=2048)
         finally:
             rgb.close()
-        match = re.search(r"\[.*\]", raw, flags=re.DOTALL)
-        if match:
+        items = self._extract_json_array(raw)
+        if items is not None:
             try:
-                items = json.loads(match.group(0))
                 lines: list[dict[str, Any]] = []
                 for entry in items:
                     if not isinstance(entry, dict):

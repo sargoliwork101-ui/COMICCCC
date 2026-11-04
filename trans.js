@@ -200,6 +200,7 @@ async function retranslateBlock(item, block, originalField, editor, overlay, but
   try {
     const result = await TranslateTools.translate(source.trim(), lang.sl);
     if (!result.ok || !result.text) throw new Error('ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید.');
+    if (!$('ocrEnabled').checked || !item.ocr || !items.includes(item)) return;
     block.tr = result.text;
     block.richHtml = safeEditorHtml(escapeEditorText(result.text).replace(/\n/g, '<br>'));
     if (EDI === item) {
@@ -671,6 +672,7 @@ function buildEditor() {
       syncBlockTextStyles(b, editor, overlay);
       scheduleApply();
     });
+    row.querySelector('.blk-color').value = b.color || '#0b0b0b';
     row.querySelector('.blk-color').addEventListener('input', (event) => {
       const selection = activeRichEditor && String(activeRichEditor.dataset.id) === String(b.id) && hasRichSelection(activeRichEditor);
       if (selection && applyRichStyle('color', event.target.value)) return;

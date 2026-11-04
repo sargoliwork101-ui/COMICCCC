@@ -398,15 +398,19 @@ def group_document_lines(
         y0 = min(float(m["y0"]) for m in members)
         x1 = max(float(m["x1"]) for m in members)
         y1 = max(float(m["y1"]) for m in members)
-        texts = [str(m.get("text") or "").strip() for m in members if str(m.get("text") or "").strip()]
-        weights = [max(1, len(t)) for t in texts] or [1]
-        confs = [float(m.get("conf", 0)) for m in members]
+        paired = [(t, float(m.get("conf", 0))) for m in members if (t := str(m.get("text") or "").strip())]
+        texts = [t for t, _ in paired]
+        if paired:
+            weights = [max(1, len(t)) for t, _ in paired]
+            weighted_conf = round(sum(c * w for (_, c), w in zip(paired, weights)) / sum(weights), 2)
+        else:
+            weighted_conf = round(sum(float(m.get("conf", 0)) for m in members) / max(1, len(members)), 2)
         first.update({
             "id": block_id,
             "text": join_ocr_lines(texts),
             "tr": "",
             "richHtml": "",
-            "conf": round(sum(c * w for c, w in zip(confs, weights)) / sum(weights), 2),
+            "conf": weighted_conf,
             "x0": x0,
             "y0": y0,
             "x1": x1,
@@ -488,15 +492,19 @@ def _group_comic_lines(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         y0 = min(float(b["y0"]) for b in items)
         x1 = max(float(b["x1"]) for b in items)
         y1 = max(float(b["y1"]) for b in items)
-        texts = [str(b.get("text") or "").strip() for b in items if str(b.get("text") or "").strip()]
-        weights = [max(1, len(text)) for text in texts]
-        confs = [float(b.get("conf", 0)) for b in items]
+        paired = [(t, float(b.get("conf", 0))) for b in items if (t := str(b.get("text") or "").strip())]
+        texts = [t for t, _ in paired]
+        if paired:
+            weights = [max(1, len(text)) for text, _ in paired]
+            weighted_conf = round(sum(c * w for (_, c), w in zip(paired, weights)) / sum(weights), 2)
+        else:
+            weighted_conf = first.get("conf", 0)
         first.update({
             "id": block_id,
             "text": " ".join(texts),
             "tr": "",
             "richHtml": "",
-            "conf": round(sum(c * w for c, w in zip(confs, weights)) / sum(weights), 2) if texts else first.get("conf", 0),
+            "conf": weighted_conf,
             "x0": x0, "y0": y0, "x1": x1, "y1": y1,
             "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
             "lineH": round(median(_height(b) for b in items), 2),

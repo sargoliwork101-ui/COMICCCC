@@ -606,6 +606,32 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('extAlert resolves and hides #extModal on OK click', h.$('extModal').classList.contains('hidden'));
   h.window.__forceExtModal = false;
 
+  // ---- v2.60: profile trContrast persistence, editor color picker init, and Typeset eraseOriginal: false ----
+  h.$('trContrast').checked = false;
+  const savedProf = h.ev('collectPageProfile()');
+  h.$('trContrast').checked = true;
+  h.ev(`applyProfileSettings(${JSON.stringify(savedProf.settings)})`);
+  check('page profile saves and restores trContrast setting',
+    savedProf.settings.trContrast === false && h.$('trContrast').checked === false);
+  h.$('trContrast').checked = true;
+
+  h.ev(`items[0].ocr = { lang: 'eng', blocks: [{ id: 1, text: 'Hi', tr: 'سلام', x0: 10, y0: 10, x1: 90, y1: 40, lineH: 20, enabled: true, bg: 'auto', color: '#e11d48' }] }; openEditor(items[0]);`);
+  check('buildEditor initializes .blk-color input from block.color',
+    h.window.document.querySelector('.blk-color').value.toLowerCase() === '#e11d48');
+  await h.ev('closeEditor()');
+
+  const noEraseFills = h.ev(`(() => {
+    const rects = [];
+    const ctx = new Proxy({ measureText: (t) => ({ width: String(t).length * 6 }), fillRect: (...a) => rects.push(a), fillText: () => {} }, {
+      get: (target, prop) => prop in target ? target[prop] : (typeof prop === 'string' ? () => {} : undefined),
+      set: () => true
+    });
+    Typeset.render({ width: 200, height: 80 }, [{ id: 1, enabled: true, tr: 'تست', x0: 10, y0: 10, x1: 120, y1: 40, lineH: 20, bg: 'auto' }],
+      { eraseOriginal: false, createCanvas: (w, ht) => ({ width: w, height: ht, getContext: () => ctx }) });
+    return rects.length;
+  })()`);
+  check('Typeset.render respects eraseOriginal: false for auto background blocks', noEraseFills === 0);
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL INTERACTION TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

@@ -594,8 +594,15 @@ class TranslationService:
         active_name = provider if provider in AI_PROVIDERS else "avalai"
         active = providers[active_name]
         active_key = next((profile["api_key"] for profile in active["profiles"] if profile["api_key"]), "")
+        raw_reuse = values.get("reuse_repeated", current["reuse_repeated"])
+        if raw_reuse is None:
+            reuse_repeated = bool(current["reuse_repeated"])
+        elif isinstance(raw_reuse, bool):
+            reuse_repeated = raw_reuse
+        else:
+            raise ValueError("مقدار reuse_repeated باید بولین باشد.")
         next_value = {
-            "provider": provider, "providers": providers, "reuse_repeated": values.get("reuse_repeated", current["reuse_repeated"]), "context_percent": context_percent, "skill_percent": skill_percent, "free_services": free_services,
+            "provider": provider, "providers": providers, "reuse_repeated": reuse_repeated, "context_percent": context_percent, "skill_percent": skill_percent, "free_services": free_services,
             # Legacy top-level fields keep older local API clients and backups readable.
             "base_url": active["base_url"], "model": active["model"], "api_key": active_key,
         }

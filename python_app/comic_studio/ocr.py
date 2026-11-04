@@ -435,9 +435,12 @@ class RapidEngine:
     def _warm(engine: Any) -> None:
         # RapidOCR loads its ONNX sessions lazily; this explicit warm-up is used only by download().
         sample = Image.new("RGB", (240, 80), "white")
-        from PIL import ImageDraw, ImageFont
-        ImageDraw.Draw(sample).text((8, 15), "TEST", fill="black", font=ImageFont.load_default(size=32))
-        engine(np.asarray(sample), use_cls=False)
+        try:
+            from PIL import ImageDraw, ImageFont
+            ImageDraw.Draw(sample).text((8, 15), "TEST", fill="black", font=ImageFont.load_default(size=32))
+            engine(np.asarray(sample), use_cls=False)
+        finally:
+            sample.close()
 
     def download(self, language: str = "eng") -> None:
         emit(f"شروع آماده‌سازی مدل {self.id}…", progress=0.06)
@@ -500,28 +503,38 @@ class RapidEngine:
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         arr = np.asarray(image)
+        need_cpu_retry = False
+        force_cpu_before = self._force_cpu
         with self._checkout(language) as engine:
-            infer_ctx = self._gpu_infer_lock if self.using_gpu else contextlib.nullcontext()
+            used_gpu_engine = self.using_gpu or (not force_cpu_before and self._force_cpu)
+            infer_ctx = self._gpu_infer_lock if used_gpu_engine else contextlib.nullcontext()
             try:
                 with infer_ctx:
-                    try:
-                        result = engine(arr, use_cls=False)
-                    except TypeError:
-                        result = engine(arr)
+                    if used_gpu_engine and self._force_cpu:
+                        need_cpu_retry = True
+                    else:
+                        try:
+                            result = engine(arr, use_cls=False)
+                        except TypeError:
+                            result = engine(arr)
             except Exception as exc:
-                if self.using_gpu:
+                if used_gpu_engine:
                     # Automatic fallback to multi-core CPU if GPU provider fails at runtime (e.g. VRAM limit)
-                    self._force_cpu = True
-                    self.unload()
-                    cpu_engine = self._get(language)
-                    try:
-                        result = cpu_engine(arr, use_cls=False)
-                    except TypeError:
-                        result = cpu_engine(arr)
-                    except Exception as cpu_exc:
-                        raise OcrError(f"OCR failed: {cpu_exc}") from cpu_exc
+                    with self._gpu_infer_lock:
+                        if not self._force_cpu:
+                            self._force_cpu = True
+                            self.unload()
+                    need_cpu_retry = True
                 else:
                     raise OcrError(f"OCR failed: {exc}") from exc
+        if need_cpu_retry:
+            with self._checkout(language) as cpu_engine:
+                try:
+                    result = cpu_engine(arr, use_cls=False)
+                except TypeError:
+                    result = cpu_engine(arr)
+                except Exception as cpu_exc:
+                    raise OcrError(f"OCR failed: {cpu_exc}") from cpu_exc
         return _lines_from_rapid(result)
 
 

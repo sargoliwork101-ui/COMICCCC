@@ -1,6 +1,7 @@
 """Small thread-safe activity feed and context-local progress reporting."""
 from __future__ import annotations
 
+import math
 import threading
 from collections import deque
 from contextlib import contextmanager
@@ -22,12 +23,17 @@ class ActivityLog:
         text = str(message or "").strip()
         if not text:
             return
+        progress_val: float | None = None
+        if progress is not None:
+            raw_progress = float(progress)
+            if math.isfinite(raw_progress):
+                progress_val = max(0.0, min(1.0, raw_progress))
         with self._lock:
             entry = {
                 "id": self._next_id,
                 "message": text,
                 "kind": kind if kind in {"info", "success", "error", "warning"} else "info",
-                "progress": max(0.0, min(1.0, float(progress))) if progress is not None else None,
+                "progress": progress_val,
                 "time": datetime.now(timezone.utc).isoformat(),
             }
             self._next_id += 1

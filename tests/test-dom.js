@@ -124,8 +124,8 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.59', manifest.version === '2.59' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۵۹'));
+  check('manifest and viewer version badge are synchronized at 2.60', manifest.version === '2.60' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۶۰'));
   check('viewer.css contains no literal escaped newline token before .blk-copy-orig.copied',
     !fs.readFileSync(path.join(ROOT, 'viewer.css'), 'utf8').includes('\\n.blk-copy-orig.copied'));
   check('topbar keeps the hamburger visible while the page scrolls',

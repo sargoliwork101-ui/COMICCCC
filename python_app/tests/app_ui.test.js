@@ -1530,6 +1530,21 @@ function check(name, condition) {
       openFailed && !$('editorDialog').open && vm.runInContext('state.editorId === null && editorSessionSnapshot === null', context));
     check('#downloadLink keeps its svg.btn-ico child', !!$('downloadLink').querySelector('svg.btn-ico'));
     window.fetch = origFetchV381;
+
+    // v3.88: imageUrl includes version cache-buster for cropped thumbnails & cropReset/cropApply guard missing cropItem
+    const cropCacheCheck = vm.runInContext(`
+      (() => {
+        const img = state.project.images[0];
+        imagePreviewVersions.set(state.project.id + ':' + img.id, 42);
+        const croppedUrl = imageUrl(img, false, true);
+        const rawUrl = imageUrl(img, false, false);
+        state.cropId = 'non-existent-id';
+        $('cropReset').click();
+        $('cropApply').click();
+        return croppedUrl.includes('cropped=true') && croppedUrl.includes('v=42') && !rawUrl.includes('v=');
+      })()
+    `, context);
+    check('cropped imageUrl attaches cache-busting revision while raw content URL stays clean and crop buttons guard missing item', cropCacheCheck === true);
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.87"
+    assert health.json()["version"] == "3.88"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۸۷ · Python</span>' in index_html
+    assert '<span class="ver">۳.۸۸ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -2950,6 +2950,58 @@ def test_v387_audit_project_id_validation_404_routes_mpo_jpeg_and_flowing_bold(c
         assert "خط معمولی بدون بولد" in slide_xml
         assert "خط تأکیدی بولد" in slide_xml
         assert slide_xml.count(' b="1"') == 1  # only the bold block has b="1", not the normal block
+
+
+def test_v388_url_ipv6_nan_progress_reuse_repeated_and_duplicate_edited_sync(client, tmp_path):
+    import pytest
+    from comic_studio.__main__ import _format_browser_url
+    from comic_studio.activity import ActivityLog
+    from comic_studio.backup import make_backup
+    from comic_studio.paths import project_root
+    from comic_studio.store import ProjectStore, atomic_json
+    from comic_studio.translation import TranslationService
+
+    # 1. IPv6 URL formatting brackets literals properly
+    assert _format_browser_url("0.0.0.0", 8765) == "http://127.0.0.1:8765"
+    assert _format_browser_url("::", 8765) == "http://[::1]:8765"
+    assert _format_browser_url("::1", 8765) == "http://[::1]:8765"
+    assert _format_browser_url("[::1]", 8765) == "http://[::1]:8765"
+
+    # 2. ActivityLog ignores NaN / infinite progress instead of turning NaN into 1.0
+    feed = ActivityLog()
+    feed.add("nan test", progress=float("nan"))
+    feed.add("inf test", progress=float("inf"))
+    feed.add("finite test", progress=0.45)
+    entries = feed.since(0)["entries"]
+    assert entries[0]["progress"] is None
+    assert entries[1]["progress"] is None
+    assert entries[2]["progress"] == 0.45
+
+    # 3. TranslationService.save_settings validates reuse_repeated boolean and preserves False on None/omission
+    svc = TranslationService()
+    saved = svc.save_settings({"reuse_repeated": False})
+    assert saved["reuse_repeated"] is False
+    saved_after_none = svc.save_settings({"reuse_repeated": None})
+    assert saved_after_none["reuse_repeated"] is False
+    with pytest.raises(ValueError):
+        svc.save_settings({"reuse_repeated": "false"})
+
+    # 4. ProjectStore.duplicate syncs new["edited"] with actual -edited.png existence so backup never fails
+    project, image = make_project(client)
+    pid, iid = project["id"], image["id"]
+    store = ProjectStore()
+    state = store.get(pid)
+    state["images"][0]["edited"] = True  # stale flag without -edited.png on disk
+    atomic_json(project_root(pid) / "project.json", state)
+    duplicated = store.duplicate(pid, [iid])
+    dup_item = [it for it in duplicated["images"] if it["id"] != iid][0]
+    assert dup_item["edited"] is False
+    # Fix source flag too and verify backup endpoint succeeds cleanly
+    duplicated["images"][0]["edited"] = False
+    store.save(duplicated)
+    backup_res = client.post(f"/api/projects/{pid}/backup", json={"drafts": []})
+    assert backup_res.status_code == 200 and len(backup_res.content) > 100
+
 
 
 

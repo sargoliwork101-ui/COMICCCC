@@ -92,3 +92,25 @@ def test_two_column_article_reading_order_and_document_paragraph_grouping():
     assert len(blocks[1]["sourceLines"]) == 3
     assert blocks[3]["pageRole"] == "list" and blocks[4]["pageRole"] == "list"
 
+
+def test_weighted_confidence_ignores_empty_member_offset():
+    from comic_studio.ocr_grouping import _group_comic_lines, group_document_lines
+
+    comic_members = [
+        {"id": 1, "text": "   ", "conf": 11.0, "x0": 40, "y0": 40, "x1": 180, "y1": 62},
+        {"id": 2, "text": "Real bubble text", "conf": 95.0, "x0": 42, "y0": 66, "x1": 182, "y1": 88},
+    ]
+    comic_grouped = _group_comic_lines(comic_members)
+    assert len(comic_grouped) == 1
+    assert comic_grouped[0]["text"] == "Real bubble text"
+    assert comic_grouped[0]["conf"] == 95.0
+
+    doc_members = [
+        {"id": 1, "text": "", "conf": 12.0, "x0": 50, "y0": 100, "x1": 520, "y1": 122},
+        {"id": 2, "text": "Paragraph line with reliable OCR confidence here", "conf": 94.0, "x0": 50, "y0": 126, "x1": 520, "y1": 148},
+    ]
+    doc_grouped = group_document_lines(doc_members, page_size=(600, 900))
+    assert len(doc_grouped) == 1
+    assert doc_grouped[0]["conf"] == 94.0
+
+

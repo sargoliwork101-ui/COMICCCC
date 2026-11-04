@@ -53,6 +53,12 @@ Typeset.render({ width: 500, height: 120 }, [{
   lineH: 30, bg: 'white', dir: 'rtl', align: 'right',
 }], { createCanvas: (width, height) => ({ width, height, getContext: () => eraseCtx }) });
 assert.deepStrictEqual(eraseOperations.rects, [[10, 10, 100, 30]]);
+eraseOperations.rects.length = 0;
+Typeset.render({ width: 500, height: 120 }, [{
+  enabled: true, tr: 'ترجمه', richHtml: '', x0: 10, y0: 10, x1: 110, y1: 40,
+  lineH: 30, bg: 'auto', dir: 'rtl', align: 'right',
+}], { eraseOriginal: false, createCanvas: (width, height) => ({ width, height, getContext: () => eraseCtx }) });
+assert.deepStrictEqual(eraseOperations.rects, [], 'eraseOriginal: false skips auto background fill');
 console.log('PASS: background fill strictly matches the box position and dimensions without erasing outside or at old coordinates');
 
 const paintOrder = [];

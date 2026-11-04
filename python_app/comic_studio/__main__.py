@@ -11,12 +11,26 @@ import uvicorn
 from .browser import BrowserError, ask_preferences, load_preferences, open_url, save_preferences
 
 
+def _format_browser_url(host: str, port: int) -> str:
+    raw = host.strip()
+    if raw == "0.0.0.0":
+        display_host = "127.0.0.1"
+    elif raw in {"::", "[::]"}:
+        display_host = "[::1]"
+    elif ":" in raw and not raw.startswith("["):
+        display_host = f"[{raw}]"
+    else:
+        display_host = raw
+    return f"http://{display_host}:{port}"
+
+
 def run_server(host: str, port: int) -> None:
     """Run one server whose lifetime can follow the last open app tab."""
     from .main import app
 
+    stripped_host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
     try:
-        local_bind = host.lower() == "localhost" or ipaddress.ip_address(host).is_loopback
+        local_bind = stripped_host.lower() == "localhost" or ipaddress.ip_address(stripped_host).is_loopback
     except ValueError:
         local_bind = False
     if not local_bind:
@@ -56,8 +70,7 @@ def main() -> None:
     browser = browser or "default"
     window = window or "existing"
     if not args.no_browser and browser != "none":
-        display_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
-        url = f"http://{display_host}:{args.port}"
+        url = _format_browser_url(args.host, args.port)
         def open_selected_browser() -> None:
             try:
                 open_url(url, browser, window)
