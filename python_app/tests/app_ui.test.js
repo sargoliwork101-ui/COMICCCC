@@ -1409,6 +1409,19 @@ function check(name, condition) {
       !$('editorDialog').open &&
       vm.runInContext("state.project.images[0].blocks[0].tr === 'سلام اصلی' && state.project.images[0].blocks[0].tx0 === undefined && state.project.images[0].approved === true", context),
     );
+
+    // v3.82: Categorized icon-capsule groups, status pills, iconized dock, and toggleable drag guide popover
+    check(
+      'main toolbar renders 4 categorized .action-group capsules with SVG icons and 3 summary pills',
+      window.document.querySelectorAll('.selection-actions .action-group').length === 4 &&
+      window.document.querySelectorAll('.selection-actions .action-group svg.btn-ico').length >= 11 &&
+      $('selectionSummary').querySelectorAll('.summary-pill').length === 3 &&
+      window.document.querySelectorAll('#dock svg.btn-ico').length >= 6,
+    );
+    $('dragGuideBtn').click();
+    check('clicking #dragGuideBtn opens .drag-guide-wrap popover with aria-expanded=true', $('dragGuideBtn').closest('.drag-guide-wrap').classList.contains('is-open') && $('dragGuideBtn').getAttribute('aria-expanded') === 'true');
+    window.document.body.click();
+    check('clicking outside closes .drag-guide-wrap popover cleanly', !$('dragGuideBtn').closest('.drag-guide-wrap').classList.contains('is-open') && $('dragGuideBtn').getAttribute('aria-expanded') === 'false');
     window.fetch = origFetchV381;
   }
 

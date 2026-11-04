@@ -770,17 +770,44 @@ function overlayBlocks(item, mode = currentOverlayMode()) { return (item.blocks 
 function hasRenderableText(block) { return !!block.tr?.trim() || !!(!block._plainText && block.richHtml && Typeset.richHtmlWords(block.richHtml).some((word) => String(word.t || '').trim())); }
 function hasOverlayText(item, mode = currentOverlayMode()) { return overlayBlocks(item, mode).some((block) => block.enabled && hasRenderableText(block)); }
 function renderAll() { renderGrid(); updateEngineOptions(); }
+function makeSummaryPill(text, extraClass = '') {
+  const pill = document.createElement('span');
+  pill.className = `summary-pill${extraClass ? ` ${extraClass}` : ''}`;
+  const dot = document.createElement('span');
+  dot.className = 'summary-pill-dot';
+  dot.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span');
+  label.textContent = text;
+  pill.append(dot, label);
+  return pill;
+}
 function updateSummary() {
   const images = state.project?.images || [];
   const total = images.length;
   const selected = selectedImages().length;
   const approved = images.filter((item) => item.approved).length;
   const groups = G.info(images).length;
-  $('selectionSummary').textContent = total ? `${selected} از ${total} تصویر انتخاب شده · ${approved} از ${total} تأیید شده · ${groups} گروه` : 'هنوز فایلی وارد نشده است';
+  const summaryEl = $('selectionSummary');
+  if (summaryEl) {
+    summaryEl.textContent = '';
+    if (!total) {
+      const empty = document.createElement('span');
+      empty.className = 'summary-empty';
+      empty.textContent = 'هنوز فایلی وارد نشده است';
+      summaryEl.appendChild(empty);
+    } else {
+      summaryEl.append(
+        makeSummaryPill(`${selected} از ${total} انتخاب شده`, 'pill-select'),
+        makeSummaryPill(`${approved} از ${total} تأیید شده`, `pill-approve${approved ? ' has-approved' : ''}`),
+        makeSummaryPill(`${groups} گروه`, `pill-group${groups ? ' has-groups' : ''}`),
+      );
+    }
+  }
   $('emptyState').classList.toggle('hidden', total > 0);
   $('ocrBtn').disabled = !total; $('translateBtn').disabled = !total;
   $('exportBtn').disabled = !total;
-  ['approveSelectedBtn', 'unapproveSelectedBtn', 'selectApprovedBtn', 'selectUnapprovedBtn'].forEach((id) => {
+  ['selectAllBtn', 'selectNoneBtn', 'invertBtn', 'groupBtn', 'ungroupBtn', 'duplicateBtn', 'deleteBtn',
+    'approveSelectedBtn', 'unapproveSelectedBtn', 'selectApprovedBtn', 'selectUnapprovedBtn'].forEach((id) => {
     const btn = $(id);
     if (btn) btn.disabled = !total;
   });
@@ -4620,6 +4647,21 @@ function bindEvents() {
     images.forEach((item) => { item.selected = !item.approved; });
     renderGrid(); scheduleSave();
     toast(`${unapprovedCount} صفحهٔ تأییدنشده انتخاب شد`);
+  });
+  $('dragGuideBtn')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const wrap = $('dragGuideBtn').closest('.drag-guide-wrap');
+    if (!wrap) return;
+    const nextOpen = !wrap.classList.contains('is-open');
+    wrap.classList.toggle('is-open', nextOpen);
+    $('dragGuideBtn').setAttribute('aria-expanded', String(nextOpen));
+  });
+  document.addEventListener('click', (event) => {
+    const wrap = $('dragGuideBtn')?.closest('.drag-guide-wrap');
+    if (wrap?.classList.contains('is-open') && !wrap.contains(event.target)) {
+      wrap.classList.remove('is-open');
+      $('dragGuideBtn')?.setAttribute('aria-expanded', 'false');
+    }
   });
   $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); });
   $('ocrEngine').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); });

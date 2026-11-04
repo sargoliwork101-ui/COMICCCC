@@ -2406,7 +2406,15 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(stampInfo.pointerEvents, 'none', 'stamp does not intercept image selection clicks');
       assert.equal(stampInfo.centeredX, true, 'stamp is horizontally centered over image');
       assert.equal(stampInfo.centeredY, true, 'stamp is vertically centered over image');
-      console.log('PASS: v3.81 center approval stamp, #editorApproveClose, and #editorCancel full server rollback');
+      const toolbarLayout = await page.evaluate(() => ({
+        groupCount: document.querySelectorAll('.selection-actions .action-group').length,
+        pillCount: document.querySelectorAll('#selectionSummary .summary-pill').length,
+        dockIcons: document.querySelectorAll('#dock svg.btn-ico').length,
+      }));
+      assert.equal(toolbarLayout.groupCount, 4, '4 distinct categorized capsules render in selection toolbar');
+      assert.equal(toolbarLayout.pillCount, 3, '3 status pills render in #selectionSummary');
+      assert.ok(toolbarLayout.dockIcons >= 6, 'export dock buttons render SVG icons');
+      console.log('PASS: v3.81/v3.82 center approval stamp, categorized icon capsules, and #editorCancel full server rollback');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
