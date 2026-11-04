@@ -1466,6 +1466,24 @@ function check(name, condition) {
     $('appModalInput').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await sleep(40);
     check('entering a custom project name and pressing Enter creates the new project with that exact name', createdProjectPayload?.name === 'بتمن سال اول' && $('projectName').value === 'بتمن سال اول');
+
+    // v3.85: async image decoding, multi-core browser render concurrency, cross-vendor GPU/CPU summary, and adaptive activity polling
+    vm.runInContext(`
+      state.project.images = [
+        { id: 'v385-1', name: 'p1.png', file: 'p1.png', width: 320, height: 200, format: 'PNG', order: 0, selected: true, approved: false, edited: false, blocks: [] },
+        { id: 'v385-2', name: 'p2.png', file: 'p2.png', width: 320, height: 200, format: 'PNG', order: 1, selected: true, approved: false, edited: false, blocks: [] },
+      ];
+      renderGrid();
+    `, context);
+    const firstGridImg = $('grid').querySelector('img');
+    check('grid thumbnail images enable both lazy loading and off-main-thread async decoding', firstGridImg?.loading === 'lazy' && firstGridImg?.decoding === 'async');
+    const conc8 = vm.runInContext('browserRenderConcurrency(8)', context);
+    check('browserRenderConcurrency bounds parallel canvas renders between 2 and 4 workers', conc8 >= 2 && conc8 <= 4);
+    const amdSummary = vm.runInContext(`
+      engineHardwareSummary = { hasNvidiaGpu: false, hasGpu: true, gpuBackend: 'directml', gpuName: 'AMD Radeon RX 7800', cpuCores: 12, freeDiskGb: 45 };
+      formatHardwareSummary();
+    `, context);
+    check('formatHardwareSummary reports DirectML GPU acceleration and CPU core count', amdSummary.includes('DirectML') && amdSummary.includes('AMD Radeon RX 7800') && amdSummary.includes('12 هسته'));
     window.fetch = origFetchV381;
   }
 

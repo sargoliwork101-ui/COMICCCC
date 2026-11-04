@@ -2434,7 +2434,25 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       await page.keyboard.press('Enter');
       await page.waitForFunction(() => state.project && state.project.name === 'پروژهٔ آزمایشی ۳.۸۴');
       assert.equal(await page.$eval('#projectName', (el) => el.value), 'پروژهٔ آزمایشی ۳.۸۴', 'new project adopts user-provided project name');
-      console.log('PASS: v3.81/v3.82/v3.83/v3.84 center approval stamp, clean editor header without select, icon capsules, and named new-project prompt');
+
+      // v3.85: Verify version badge ۳.۸۵, async thumbnail decoding, hardware cpuCores endpoint, and Help section 5 GPU/multi-core guide
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۸۵ · Python', 'header shows version ۳.۸۵');
+      const hwReport = await api(base, '/api/engines/hardware');
+      assert.ok(Number(hwReport.cpuCores) >= 1 && typeof hwReport.hasGpu === 'boolean', '/api/engines/hardware reports cpuCores and hasGpu');
+      await page.keyboard.press('F1');
+      await page.waitForSelector('#helpDialog[open]');
+      await page.evaluate(() => {
+        const navBtns = [...document.querySelectorAll('#helpNavList button')];
+        const ocrModelsNav = navBtns.find((b) => b.textContent.includes('۱۳ مدل'));
+        ocrModelsNav?.click();
+      });
+      assert.ok(
+        await page.$eval('#helpContentArea', (el) => el.textContent.includes('DirectML') && el.textContent.includes('چند‌هسته‌ای')),
+        'Help guide documents automatic GPU (CUDA/DirectML/Metal) and multi-core CPU optimization',
+      );
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.getElementById('helpDialog').open);
+      console.log('PASS: v3.81–v3.85 center approval stamp, clean editor header, icon capsules, named new-project prompt, and GPU/multi-core runtime checks');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

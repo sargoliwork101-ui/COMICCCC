@@ -235,12 +235,27 @@ async function pollActivity() {
   } catch { /* the server may be shutting down; do not create a toast loop */ }
   finally { activityPollInFlight = false; }
 }
+function isActivityHighRate() {
+  return Boolean(jobBusy || state.modelBusy || translationRunning || exportRunning);
+}
+function scheduleActivityPoll(immediate = false) {
+  if (sessionCloseSent) return;
+  if (activityPollTimer) { clearTimeout(activityPollTimer); activityPollTimer = null; }
+  if (!isActivityHighRate() && document.hidden) return;
+  const delay = immediate ? 0 : (isActivityHighRate() ? 650 : 2600);
+  activityPollTimer = setTimeout(async () => {
+    activityPollTimer = null;
+    await pollActivity();
+    scheduleActivityPoll(false);
+  }, delay);
+  activityPollTimer.unref?.();
+}
 function startActivityFeed() {
-  pollActivity();
-  if (!activityPollTimer) {
-    activityPollTimer = setInterval(pollActivity, 700);
-    activityPollTimer.unref?.();
-  }
+  pollActivity().finally(() => scheduleActivityPoll(false));
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) scheduleActivityPoll(true);
+    else if (!isActivityHighRate() && activityPollTimer) { clearTimeout(activityPollTimer); activityPollTimer = null; }
+  });
 }
 async function clearActivity(notify = true) {
   ++activityGeneration; activityEntries = []; renderActivity();
@@ -281,6 +296,7 @@ function closeSession() {
   if (sessionCloseSent) return;
   sessionCloseSent = true;
   if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
+  if (activityPollTimer) { clearTimeout(activityPollTimer); activityPollTimer = null; }
   if (downloadUrl) { URL.revokeObjectURL(downloadUrl); downloadUrl = null; }
   if (backupDownloadUrl) { URL.revokeObjectURL(backupDownloadUrl); backupDownloadUrl = null; }
   const body = JSON.stringify({ client_id: TAB_ID });
@@ -677,6 +693,7 @@ function setBusy(message) {
     $('translationStatus').textContent = message || 'آماده';
     setProgress('translationProgress', null, !!message);
   }
+  scheduleActivityPoll(!!message);
   document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button:not(#dockCancelJobBtn), #backupProjectBtn, #restoreProjectBtn, #restoreProjectInput, #newProjectBtn, #deleteProjectBtn, #projectSelect, #projectName').forEach((el) => { el.disabled = !!message; });
 }
 async function runJob(message, task, progressId = null) {
@@ -898,7 +915,7 @@ function renderGrid() {
     if (info) card.style.setProperty('--group-color', groupColor(info.id));
     const frameShell = document.createElement('div'); frameShell.className = 'tw-shell';
     const frame = document.createElement('div'); frame.className = 'tw';
-    const image = document.createElement('img'); image.src = imageUrl(item, !!item.edited, true); image.alt = item.name; image.loading = 'lazy'; image.draggable = false;
+    const image = document.createElement('img'); image.loading = 'lazy'; image.decoding = 'async'; image.alt = item.name; image.draggable = false; image.src = imageUrl(item, !!item.edited, true);
     image.addEventListener('load', scheduleOutlines); image.addEventListener('click', (event) => { event.stopPropagation(); setSelected(item, !item.selected, event); });
     frame.appendChild(image);
     frameShell.appendChild(frame);
@@ -1996,13 +2013,29 @@ function renderAndUpload(item) {
   task.finally(() => { if (imageRenderTasks.get(key) === task) imageRenderTasks.delete(key); }).catch(() => {});
   return task;
 }
-async function renderImagesText(ids = null, onStep = null) {
+function browserRenderConcurrency(totalCount = 1) {
+  const hw = Number(globalThis.navigator?.hardwareConcurrency) || 4;
+  const slots = Math.max(2, Math.min(4, Math.floor(hw / 2)));
+  return Math.max(1, Math.min(totalCount, slots));
+}
+async function renderImagesText(ids = null, onStep = null, checkCancel = null) {
   const wanted = ids ? new Set(ids) : null;
   const targets = sortedImages().filter((item) => (!wanted || wanted.has(item.id)) && (hasOverlayText(item) || item.edited));
-  for (let idx = 0; idx < targets.length; idx += 1) {
-    await renderAndUpload(targets[idx]);
-    if (onStep) onStep(idx + 1, targets.length);
-  }
+  if (!targets.length) { renderGrid(); return; }
+  const concurrency = browserRenderConcurrency(targets.length);
+  let nextIdx = 0;
+  let completed = 0;
+  const runWorker = async () => {
+    while (nextIdx < targets.length) {
+      if (checkCancel) checkCancel();
+      const currentIdx = nextIdx;
+      nextIdx += 1;
+      await renderAndUpload(targets[currentIdx]);
+      completed += 1;
+      if (onStep) onStep(completed, targets.length);
+    }
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
   renderGrid();
 }
 function updateExportFields() {
@@ -2038,14 +2071,19 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
     const pptxLayout = layoutOverride || $('exportPptxLayout')?.value || 'visual';
     if (exportKind !== 'txt' && exportKind !== 'docx' && exportKind !== 'pptx') {
       const targets = selectedImages().filter((item) => hasOverlayText(item) || item.edited);
-      for (let idx = 0; idx < targets.length; idx += 1) {
-        checkNotCancelled();
-        await renderAndUpload(targets[idx]);
-        const p = ((idx + 1) / Math.max(1, targets.length)) * 0.5;
-        if (activeProgressId) setProgress(activeProgressId, p, true);
-        setProgress('jobProgress', p, true); setProgress('dockProgress', p, true);
+      if (targets.length) {
+        await renderImagesText(
+          targets.map((item) => item.id),
+          (done, total) => {
+            const p = (done / Math.max(1, total)) * 0.5;
+            if (activeProgressId) setProgress(activeProgressId, p, true);
+            setProgress('jobProgress', p, true); setProgress('dockProgress', p, true);
+          },
+          checkNotCancelled,
+        );
+      } else {
+        renderGrid();
       }
-      renderGrid();
     } else {
       if (activeProgressId) setProgress(activeProgressId, 0.18, true);
       setProgress('jobProgress', 0.18, true); setProgress('dockProgress', 0.18, true);
@@ -2157,11 +2195,19 @@ function formatHardwareSummary() {
   if (!hw) return 'وضعیت سخت‌افزار سیستم به همراه هر مدل بررسی می‌شود.';
   const gpuLabel = hw.gpuName || hw.gpuNames?.[0] || '';
   const diskGb = hw.freeDiskGb ?? hw.diskFreeGb ?? 0;
-  const gpuPart = hw.hasNvidiaGpu
-    ? `کارت گرافیک NVIDIA${gpuLabel ? ` (${gpuLabel})` : ''}${hw.vramGb ? ` · حافظهٔ گرافیکی: ${hw.vramGb} گیگابایت` : ''}`
-    : 'بدون کارت گرافیک مجزای NVIDIA (اجرا روی پردازندهٔ CPU)';
+  const cores = Number(hw.cpuCores || 0);
+  let gpuPart;
+  if (hw.hasNvidiaGpu) {
+    gpuPart = `کارت گرافیک NVIDIA${gpuLabel ? ` (${gpuLabel})` : ''}${hw.vramGb ? ` · حافظهٔ گرافیکی: ${hw.vramGb} گیگابایت` : ''} (شتاب‌دهی خودکار GPU فعال)`;
+  } else if (hw.hasGpu) {
+    const backendLabel = hw.gpuBackend === 'mps' ? 'Apple Metal' : hw.gpuBackend === 'directml' ? 'DirectML' : 'GPU';
+    gpuPart = `شتاب‌دهی گرافیکی ${backendLabel}${gpuLabel ? ` (${gpuLabel})` : ''} فعال · بدون کارت گرافیک مجزای NVIDIA`;
+  } else {
+    gpuPart = 'بدون کارت گرافیک مجزای NVIDIA (اجرا روی پردازندهٔ چند‌هسته‌ای CPU)';
+  }
+  const cpuPart = cores > 0 ? ` · پردازنده: ${cores} هسته` : '';
   const diskPart = diskGb ? ` · فضای خالی دیسک: ${diskGb} گیگابایت` : '';
-  return `وضعیت سیستم شما: ${gpuPart}${diskPart}`;
+  return `وضعیت سیستم شما: ${gpuPart}${cpuPart}${diskPart}`;
 }
 
 function formatRamSummary() {
@@ -2634,7 +2680,7 @@ async function testEngine(engineId) {
   if (state.modelBusy) return; const item = selectedImages()[0] || sortedImages()[0]; if (!item) { toast('ابتدا یک تصویر وارد کنید', true); return; }
   const controller = new AbortController();
   modelAbortController = controller; modelCancelledByUser = false;
-  state.modelBusy = engineId; setProgress('modelProgress', null, true); renderModels(); $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
+  state.modelBusy = engineId; scheduleActivityPoll(true); setProgress('modelProgress', null, true); renderModels(); $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
   try { const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value, page_mode: normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value) }), signal: controller.signal }); if (result?.memory) engineMemorySummary = result.memory; setProgress('modelProgress', 1, false); $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => `${' '.repeat(block.sourceIndent || 0)}${block.text}  (${block.conf}%)`).join('\n') : 'متنی تشخیص داده نشد.'; appendLocalActivity('آزمایش موتور تمام شد', 'success'); }
   catch (error) {
     setProgress('modelProgress', 0, false);

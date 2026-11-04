@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import hmac
 import inspect
 import ipaddress
@@ -29,6 +30,7 @@ from .backup import BackupError, make_backup, restore_backup
 from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
 from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
+from .ocr_managed import configure_native_runtime, iter_parallel_ordered, trim_process_memory
 from .paths import STATIC_DIR
 from . import pending_results
 from .schemas import (
@@ -63,6 +65,7 @@ class PendingResultConflict(Exception):
 
 
 def create_app() -> FastAPI:
+    configure_native_runtime()
     app = FastAPI(title=APP_NAME, version=APP_VERSION)
     store = ProjectStore()
     registry = EngineRegistry()
@@ -397,6 +400,9 @@ def create_app() -> FastAPI:
         except Exception as exc:
             activity.add(f"ورود فایل ناموفق بود: {exc}", "error")
             raise
+        finally:
+            payloads.clear()
+            await run_in_threadpool(trim_process_memory)
 
     @app.get("/api/projects/{project_id}/images/{image_id}/content")
     def image_content(project_id: str, image_id: str, edited: bool = False, cropped: bool = False) -> Response:
@@ -597,53 +603,116 @@ def create_app() -> FastAPI:
                 if set(ids).intersection(output['id'] for output in entry['outputs']):
                     raise PendingResultConflict(pending['id'], 'ocr')
         await run_in_threadpool(registry.unload_all, values.engine)
-        activity.add(f"خواندن متن در {len(ids)} تصویر آغاز شد")
-        completed = 0
+        target_items = [item for item in state["images"] if item["id"] in ids]
+        total_targets = len(target_items)
+        erase_original = bool(state.get("settings", {}).get("eraseOriginal", True))
+        activity.add(f"خواندن متن در {total_targets} تصویر آغاز شد")
+
+        def _apply_page_ocr_result(item: dict[str, Any], raw_blocks: list[dict[str, Any]], page_size: tuple[int, int], step: int) -> None:
+            for block in raw_blocks:
+                block["bg"] = "auto" if erase_original else "none"
+            organized, resolved_mode = organize_ocr_blocks(
+                raw_blocks,
+                page_mode=values.page_mode,
+                group_lines=values.group_lines,
+                page_size=page_size,
+            )
+            item["blocks"] = organized
+            item["pageMode"] = resolved_mode
+            item["ocrCompleted"] = True
+            item["edited"] = False
+            item["approved"] = False
+            mode_label = "کتاب/مقاله" if resolved_mode == "document" else "کمیک/حباب"
+            activity.add(
+                f"در «{item['name']}» {len(organized)} تکه متن ({mode_label}) پیدا شد",
+                progress=step / total_targets,
+            )
+            recognized_lines = [block.get("text", "").strip() for block in organized if block.get("text", "").strip()]
+            if recognized_lines:
+                activity.add(f"متن خوانده‌شده در «{item['name']}»:\n" + "\n".join(recognized_lines))
+            else:
+                activity.add(f"در «{item['name']}» متنی پیدا نشد", "warning")
+
+        batch_ctx = (
+            engine.configure_batch(total_targets)
+            if hasattr(engine, "configure_batch") and total_targets > 1
+            else contextlib.nullcontext(1)
+        )
         try:
-            for item in state["images"]:
-                if item["id"] not in ids:
-                    continue
-                if await http_request.is_disconnected():
-                    activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
-                    return store.get(project_id)
-                completed += 1
-                activity.add(f"در حال خواندن تصویر {completed} از {len(ids)}: {item['name']}")
-                path = store.image_path(project_id, item["id"])
-                from PIL import Image
-                with Image.open(path) as im:
-                    image = im.copy()
-                try:
-                    blocks = await run_reported(
-                        _invoke_recognize, engine, image, values.language,
-                        values.contrast, values.precise, values.min_confidence, values.page_mode,
-                        pulse_label=f"در حال خواندن {item['name']}",
-                    )
-                    page_size = image.size
-                finally:
-                    image.close()
-                for block in blocks:
-                    block["bg"] = "auto" if state.get("settings", {}).get("eraseOriginal", True) else "none"
-                blocks, resolved_mode = organize_ocr_blocks(
-                    blocks,
-                    page_mode=values.page_mode,
-                    group_lines=values.group_lines,
-                    page_size=page_size,
-                )
-                item["blocks"] = blocks
-                item["pageMode"] = resolved_mode
-                item["ocrCompleted"] = True
-                item["edited"] = False
-                item["approved"] = False
-                mode_label = "کتاب/مقاله" if resolved_mode == "document" else "کمیک/حباب"
-                activity.add(
-                    f"در «{item['name']}» {len(blocks)} تکه متن ({mode_label}) پیدا شد",
-                    progress=completed / len(ids),
-                )
-                recognized_lines = [block.get("text", "").strip() for block in blocks if block.get("text", "").strip()]
-                if recognized_lines:
-                    activity.add(f"متن خوانده‌شده در «{item['name']}»:\n" + "\n".join(recognized_lines))
+            from PIL import Image
+
+            with batch_ctx as batch_workers:
+                if int(batch_workers) <= 1:
+                    for completed, item in enumerate(target_items, start=1):
+                        if await http_request.is_disconnected():
+                            activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
+                            return store.get(project_id)
+                        activity.add(f"در حال خواندن تصویر {completed} از {total_targets}: {item['name']}")
+                        path = store.image_path(project_id, item["id"])
+                        with Image.open(path) as im:
+                            image = im.copy()
+                        try:
+                            blocks = await run_reported(
+                                _invoke_recognize, engine, image, values.language,
+                                values.contrast, values.precise, values.min_confidence, values.page_mode,
+                                pulse_label=f"در حال خواندن {item['name']}",
+                            )
+                            page_size = image.size
+                        finally:
+                            image.close()
+                        _apply_page_ocr_result(item, blocks, page_size, completed)
                 else:
-                    activity.add(f"در «{item['name']}» متنی پیدا نشد", "warning")
+                    cancel_event = threading.Event()
+
+                    async def _watch_disconnect() -> None:
+                        while not cancel_event.is_set():
+                            if await http_request.is_disconnected():
+                                cancel_event.set()
+                                return
+                            await asyncio.sleep(0.15)
+
+                    def _run_parallel_ocr() -> bool:
+                        def _ocr_single_page(idx: int, item: dict[str, Any]) -> tuple[list[dict[str, Any]], tuple[int, int]] | None:
+                            if cancel_event.is_set():
+                                return None
+                            activity.add(f"در حال خواندن تصویر {idx + 1} از {total_targets}: {item['name']}")
+                            path = store.image_path(project_id, item["id"])
+                            with Image.open(path) as im:
+                                image = im.copy()
+                            try:
+                                page_size = image.size
+                                blocks = _invoke_recognize(
+                                    engine, image, values.language,
+                                    values.contrast, values.precise, values.min_confidence, values.page_mode,
+                                )
+                                return blocks, page_size
+                            finally:
+                                image.close()
+
+                        for idx, item, outcome in iter_parallel_ordered(target_items, _ocr_single_page, max_workers=int(batch_workers)):
+                            if cancel_event.is_set() or outcome is None:
+                                cancel_event.set()
+                                return False
+                            raw_blocks, page_size = outcome
+                            _apply_page_ocr_result(item, raw_blocks, page_size, idx + 1)
+                        return not cancel_event.is_set()
+
+                    watcher = asyncio.create_task(_watch_disconnect())
+                    try:
+                        finished_ok = await run_reported(
+                            _run_parallel_ocr,
+                            pulse_label=f"خواندن موازی {total_targets} تصویر",
+                        )
+                    finally:
+                        cancel_event.set()
+                        watcher.cancel()
+                        try:
+                            await watcher
+                        except asyncio.CancelledError:
+                            pass
+                    if not finished_ok:
+                        activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
+                        return store.get(project_id)
             if await http_request.is_disconnected():
                 activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
                 return store.get(project_id)
@@ -1306,6 +1375,9 @@ def create_app() -> FastAPI:
         except Exception as exc:
             activity.add(f"ساخت خروجی ناموفق بود: {exc}", "error")
             raise
+        finally:
+            if values.kind in {"pdf", "images", "docx", "pptx"}:
+                await run_in_threadpool(trim_process_memory)
         activity.add(f"خروجی {values.kind.upper()} آماده شد", "success", 1.0)
         media_type = {
             "pdf": "application/pdf",

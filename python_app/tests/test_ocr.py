@@ -1067,6 +1067,207 @@ def test_windows_tesseract_installer_handles_winerror_740_via_runasinvoker_and_f
     assert len(seen_calls) >= 2
 
 
+def test_v385_multi_core_worker_budget_and_ordered_contextvar_propagation(monkeypatch):
+    import threading
+    import time
+    from comic_studio.activity import reporting
+    import comic_studio.ocr_managed as managed
+
+    # 8 cores, ample RAM (16 GB) -> partitions cores cleanly without oversubscription
+    monkeypatch.setattr(managed, "inspect_hardware", lambda: {"cpuCores": 8, "ramGb": 16.0})
+    monkeypatch.setattr(managed, "cpu_core_count", lambda: 8)
+    workers, threads_per_worker = managed.compute_worker_count(10, per_worker_mb=200, max_cap=6)
+    assert workers == 6
+    assert threads_per_worker >= 1
+    assert workers * threads_per_worker <= 8 + workers
+
+    # Low system RAM (1.5 GB -> usable_mb=307 MB) with 320 MB/worker -> clamps cleanly to 1 worker
+    monkeypatch.setattr(managed, "inspect_hardware", lambda: {"cpuCores": 8, "ramGb": 1.5})
+    low_ram_workers, low_ram_threads = managed.compute_worker_count(10, per_worker_mb=320, max_cap=6)
+    assert low_ram_workers == 1
+    assert low_ram_threads == 8
+
+    # iter_parallel_ordered preserves strict order AND propagates ContextVar activity emission across threads
+    emitted: list[str] = []
+    emit_lock = threading.Lock()
+    active_threads: set[int] = set()
+
+    def record_emit(msg: str, kind: str = "info", progress: float | None = None) -> None:
+        with emit_lock:
+            emitted.append(msg)
+
+    def slow_first_worker(idx: int, val: int) -> int:
+        from comic_studio.activity import emit
+        with emit_lock:
+            active_threads.add(threading.get_ident())
+        if idx == 0:
+            time.sleep(0.04)
+        emit(f"worker-{idx}")
+        return val * 10
+
+    with reporting(record_emit):
+        outputs = list(managed.iter_parallel_ordered([1, 2, 3, 4], slow_first_worker, max_workers=3))
+
+    assert [idx for idx, _, _ in outputs] == [0, 1, 2, 3]
+    assert [res for _, _, res in outputs] == [10, 20, 30, 40]
+    assert sorted(emitted) == ["worker-0", "worker-1", "worker-2", "worker-3"]
+    assert len(active_threads) >= 2
+
+
+def test_v385_onnx_gpu_detection_and_rapidengine_gpu_fallback_plus_cpu_pool(monkeypatch):
+    import sys
+    import threading
+    import time
+    import types
+    import numpy as np
+    from PIL import Image
+    import comic_studio.ocr as ocr_mod
+    from comic_studio.ocr import RapidEngine
+
+    # 1) Windows DirectML detection includes explicit high-performance GPU dml_ep_cfg
+    fake_ort = types.SimpleNamespace(
+        get_available_providers=lambda: ["DmlExecutionProvider", "CPUExecutionProvider"],
+        get_device=lambda: "GPU",
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+    accel = ocr_mod._detect_onnx_acceleration()
+    assert accel["mode"] == "directml"
+    assert accel["gpu"] is True
+    assert accel["params"]["EngineConfig.onnxruntime.use_dml"] is True
+    assert accel["params"]["EngineConfig.onnxruntime.dml_ep_cfg"]["performance_preference"] == "high_performance"
+
+    # 2) CUDA takes priority when CUDAExecutionProvider is present
+    fake_ort.get_available_providers = lambda: ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]
+    accel_cuda = ocr_mod._detect_onnx_acceleration()
+    assert accel_cuda["mode"] == "cuda"
+    assert accel_cuda["gpu"] is True
+    assert accel_cuda["params"]["EngineConfig.onnxruntime.use_cuda"] is True
+
+    # 3) Runtime GPU failure falls back seamlessly to CPU without failing OCR
+    engine = RapidEngine("rapidocr-v6", "v6")
+    monkeypatch.setattr(RapidEngine, "runtime_installed", property(lambda self: True))
+    monkeypatch.setattr(RapidEngine, "model_ready", property(lambda self: True))
+    monkeypatch.setattr(RapidEngine, "ready_languages", property(lambda self: ["eng"]))
+    monkeypatch.setattr(RapidEngine, "_validate_ready", lambda self, language, allow_download=False: None)
+
+    created_modes: list[bool] = []
+
+    def fake_create(self, language: str):
+        is_cpu_forced = self._force_cpu
+        created_modes.append(is_cpu_forced)
+        if not is_cpu_forced:
+            self._using_gpu = True
+
+            def broken_gpu_call(arr, **kw):
+                raise RuntimeError("CUDA out of memory")
+
+            return broken_gpu_call
+        self._using_gpu = False
+        return lambda arr, **kw: types.SimpleNamespace(boxes=[[[0, 0], [40, 0], [40, 20], [0, 20]]], txts=["FALLBACK OK"], scores=[0.95])
+
+    monkeypatch.setattr(RapidEngine, "_create", fake_create)
+    sample = Image.new("RGB", (80, 40), "white")
+    lines = engine.recognize(sample, "eng")
+    sample.close()
+    assert [ln.text for ln in lines] == ["FALLBACK OK"]
+    assert created_modes == [False, True]
+    assert engine.using_gpu is False
+    engine.unload()
+    assert engine.is_loaded_in_ram is False
+
+    # 4) Multi-page CPU batch pool creates distinct instances for concurrent threads and unloads cleanly
+    monkeypatch.setattr(ocr_mod, "_detect_onnx_acceleration", lambda: {"mode": "cpu", "gpu": False, "params": {}})
+    pool_engine = RapidEngine("rapidocr-v6", "v6")
+    instance_counter = 0
+    counter_lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    def fake_pooled_create(self, language: str):
+        nonlocal instance_counter
+        with counter_lock:
+            instance_counter += 1
+            my_id = instance_counter
+        self._using_gpu = False
+
+        def run_infer(arr, **kw):
+            try:
+                barrier.wait(timeout=1.5)
+            except threading.BrokenBarrierError:
+                pass
+            time.sleep(0.02)
+            return types.SimpleNamespace(boxes=[[[0, 0], [30, 0], [30, 15], [0, 15]]], txts=[f"INST-{my_id}"], scores=[0.9])
+
+        return run_infer
+
+    monkeypatch.setattr(RapidEngine, "_create", fake_pooled_create)
+    with pool_engine.configure_batch(total_pages=2, threads_per_worker=2) as slots:
+        assert slots == 2
+        results: list[str] = []
+
+        def worker_task():
+            im = Image.new("RGB", (60, 30), "white")
+            try:
+                out = pool_engine.recognize(im, "eng")
+                results.append(out[0].text)
+            finally:
+                im.close()
+
+        t1 = threading.Thread(target=worker_task)
+        t2 = threading.Thread(target=worker_task)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+    assert instance_counter == 2
+    assert sorted(results) == ["INST-1", "INST-2"]
+    assert pool_engine.is_loaded_in_ram is True
+    pool_engine.unload()
+    assert pool_engine.is_loaded_in_ram is False
+
+
+def test_v385_tesseract_omp_thread_partition_and_cross_vendor_hardware_summary(monkeypatch):
+    import json
+    import subprocess
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_managed as managed
+    from PIL import Image
+
+    tess = ocr_mod.TesseractEngine()
+    monkeypatch.setattr(ocr_mod, "_tesseract_executable", lambda: "/usr/bin/tesseract")
+    monkeypatch.setattr(ocr_mod.TesseractEngine, "ready_languages", property(lambda self: ["eng"]))
+    captured_envs: list[str | None] = []
+
+    def fake_run(cmd, **kwargs):
+        captured_envs.append((kwargs.get("env") or {}).get("OMP_THREAD_LIMIT"))
+        tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t92\tHELLO\n"
+        return subprocess.CompletedProcess(cmd, 0, tsv, "")
+
+    monkeypatch.setattr(ocr_mod.subprocess, "run", fake_run)
+    im = Image.new("RGB", (100, 50), "white")
+    try:
+        with tess.configure_batch(total_pages=4, threads_per_worker=2) as workers:
+            assert workers == 4
+            out = tess.recognize(im, "eng")
+            assert [ln.text for ln in out] == ["HELLO"]
+        assert tess._omp_threads is None
+    finally:
+        im.close()
+    assert captured_envs == ["2"]
+
+    # Fake non-NVIDIA hardware (e.g. AMD Radeon DirectML) keeps hasNvidiaGpu=False while exposing hasGpu=True
+    monkeypatch.setenv(
+        "COMIC_STUDIO_FAKE_HARDWARE_JSON",
+        json.dumps({"hasNvidiaGpu": False, "hasGpu": True, "gpuVendor": "amd", "gpuBackend": "directml", "gpuName": "AMD Radeon RX 7800 XT", "vramGb": 0.0, "freeDiskGb": 50.0, "cpuCores": 12}),
+    )
+    hw = managed.inspect_hardware()
+    assert hw["hasNvidiaGpu"] is False
+    assert hw["hasGpu"] is True
+    assert hw["gpuBackend"] == "directml"
+    assert hw["cpuCores"] == 12
+
+
+
 
 
 

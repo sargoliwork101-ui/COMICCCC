@@ -16,6 +16,7 @@ from typing import Any
 import pymupdf as fitz
 from PIL import Image
 
+from .ocr_managed import compute_worker_count, iter_parallel_ordered
 from .paths import data_dir, project_root
 
 Image.MAX_IMAGE_PIXELS = 100_000_000
@@ -218,16 +219,17 @@ class ProjectStore:
         return path
 
     def save_rendered(self, project_id: str, image_id: str, content: bytes) -> dict[str, Any]:
+        if len(content) > 100 * 1024 * 1024:
+            raise ValueError("Rendered image is too large")
+        with Image.open(io.BytesIO(content)) as im:
+            if (im.format or "").upper() != "PNG":
+                raise ValueError("Rendered image must be PNG")
+            rendered_size = im.size
+            im.verify()
         with self._lock:
             item = self.image(project_id, image_id)
-            if len(content) > 100 * 1024 * 1024:
-                raise ValueError("Rendered image is too large")
-            with Image.open(io.BytesIO(content)) as im:
-                if (im.format or "").upper() != "PNG":
-                    raise ValueError("Rendered image must be PNG")
-                if im.size != (item["width"], item["height"]):
-                    raise ValueError("Rendered image dimensions do not match the source")
-                im.verify()
+            if rendered_size != (item["width"], item["height"]):
+                raise ValueError("Rendered image dimensions do not match the source")
             path = project_root(project_id) / "images" / f"{image_id}-edited.png"
             atomic_bytes(path, content)
             state = self.get(project_id)
@@ -246,18 +248,91 @@ class ProjectStore:
                     item["edited"] = False
             return self.save(state)
 
+    @staticmethod
+    def _validate_image_bytes(filename: str, content: bytes) -> tuple[str, int, int]:
+        if len(content) > 150 * 1024 * 1024:
+            raise ValueError(f"Image is too large: {filename}")
+        try:
+            with Image.open(io.BytesIO(content)) as im:
+                image_format = (im.format or "PNG").upper()
+                width, height = im.size
+                if width < 1 or height < 1 or width * height > 100_000_000:
+                    raise ValueError(f"Invalid image dimensions: {filename}")
+                im.load()
+        except (OSError, Image.DecompressionBombError) as exc:
+            raise ValueError(f"Invalid or unsupported image: {filename}") from exc
+        return image_format, width, height
+
+    def _commit_validated_image(
+        self,
+        state: dict[str, Any],
+        filename: str,
+        content: bytes,
+        image_format: str,
+        width: int,
+        height: int,
+    ) -> None:
+        extension = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "BMP": ".bmp", "GIF": ".gif"}.get(image_format, ".png")
+        known = {item["id"] for item in state["images"]}
+        image_id, file_name, image_path = self._allocate_image_slot(state["id"], known, extension)
+        try:
+            image_path.write_bytes(content)
+        except OSError:
+            image_path.unlink(missing_ok=True)
+            raise
+        state["images"].append({
+            "id": image_id,
+            "name": Path(filename).name,
+            "file": file_name,
+            "width": width,
+            "height": height,
+            "format": image_format,
+            "bytes": len(content),
+            "order": self._next_order(state),
+            "selected": True,
+            "approved": False,
+            "groupId": None,
+            "crop": None,
+            "blocks": [],
+            "edited": False,
+        })
+
     def import_files(self, project_id: str, files: list[tuple[str, bytes]], pdf_scale: float = 2.0) -> dict[str, Any]:
         state = self.get(project_id)
         original_count = len(state["images"])
         try:
+            for filename, _ in files:
+                suffix = Path(filename).suffix.lower()
+                if suffix != ".pdf" and suffix not in ALLOWED_IMAGES:
+                    raise ValueError(f"Unsupported file: {filename}")
+
+            image_batch: list[tuple[str, bytes]] = []
+
+            def _flush_image_batch() -> None:
+                if not image_batch:
+                    return
+                if len(image_batch) == 1:
+                    fn, raw = image_batch[0]
+                    self._import_image(state, fn, raw)
+                else:
+                    workers, _ = compute_worker_count(len(image_batch), per_worker_mb=120, max_cap=8)
+                    for _, (fn, raw), (fmt, w, h) in iter_parallel_ordered(
+                        image_batch,
+                        lambda _i, pair: self._validate_image_bytes(pair[0], pair[1]),
+                        max_workers=workers,
+                    ):
+                        self._commit_validated_image(state, fn, raw, fmt, w, h)
+                image_batch.clear()
+
             for filename, content in files:
                 suffix = Path(filename).suffix.lower()
                 if suffix == ".pdf":
+                    _flush_image_batch()
                     self._import_pdf(state, filename, content, pdf_scale)
-                elif suffix in ALLOWED_IMAGES:
-                    self._import_image(state, filename, content)
                 else:
-                    raise ValueError(f"Unsupported file: {filename}")
+                    image_batch.append((filename, content))
+            _flush_image_batch()
+
             # Import adds fresh IDs and never changes existing images. Merge
             # those additions into the latest project under the same lock so
             # unrelated edits do not discard a long PDF import.
@@ -283,26 +358,108 @@ class ProjectStore:
     def _next_order(self, state: dict[str, Any]) -> int:
         return max((int(item.get("order", 0)) for item in state["images"]), default=-1) + 1
 
+    def _allocate_image_slot(self, project_id: str, known: set[str], extension: str) -> tuple[str, str, Path]:
+        images_dir = project_root(project_id) / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        for _ in range(100):
+            image_id = new_id()
+            file_name = f"{image_id}{extension}"
+            image_path = images_dir / file_name
+            if image_id not in known and not any(images_dir.glob(f"{image_id}.*")):
+                known.add(image_id)
+                return image_id, file_name, image_path
+        raise ValueError("Could not allocate a unique image ID")
+
     def _import_pdf(self, state: dict[str, Any], filename: str, content: bytes, scale: float) -> None:
         if len(content) > 500 * 1024 * 1024:
             raise ValueError("PDF is too large")
         scale = max(1.0, min(4.0, float(scale)))
-        with fitz.open(stream=content, filetype="pdf") as document:
-            if document.needs_pass:
+        with fitz.open(stream=content, filetype="pdf") as check_doc:
+            if check_doc.needs_pass:
                 raise ValueError("Password-protected PDF is not supported")
-            if len(document) > 1000:
+            page_count = len(check_doc)
+            if page_count > 1000:
                 raise ValueError("PDF has too many pages")
-            for index, page in enumerate(document):
-                # Keep the extension's 2x default, but cap extreme page sizes before rasterization.
-                rect = page.rect
-                page_scale = min(
-                    scale, 16000.0 / max(rect.width, 1), 16000.0 / max(rect.height, 1),
-                    math.sqrt(48_000_000.0 / max(rect.width * rect.height, 1)),
-                )
-                page_scale = max(0.1, page_scale)
-                pix = page.get_pixmap(matrix=fitz.Matrix(page_scale, page_scale), alpha=False)
-                png = pix.tobytes("png")
-                self._import_image(state, f"{Path(filename).stem} — صفحهٔ {index + 1}.png", png)
+
+        if page_count == 0:
+            return
+
+        project_id = state["id"]
+        known = {item["id"] for item in state["images"]}
+        slots = [self._allocate_image_slot(project_id, known, ".png") for _ in range(page_count)]
+        stem = Path(filename).stem
+        workers, _ = compute_worker_count(page_count, per_worker_mb=140, max_cap=8)
+
+        tls = threading.local()
+        opened_docs: list[fitz.Document] = []
+        docs_lock = threading.Lock()
+
+        def _get_thread_doc() -> fitz.Document:
+            doc = getattr(tls, "doc", None)
+            if doc is None:
+                doc = fitz.open(stream=content, filetype="pdf")
+                tls.doc = doc
+                with docs_lock:
+                    opened_docs.append(doc)
+            return doc
+
+        def _render_one_page(_idx: int, page_index: int) -> dict[str, Any]:
+            image_id, file_name, image_path = slots[page_index]
+            doc = _get_thread_doc()
+            page = doc[page_index]
+            rect = page.rect
+            page_scale = min(
+                scale, 16000.0 / max(rect.width, 1), 16000.0 / max(rect.height, 1),
+                math.sqrt(48_000_000.0 / max(rect.width * rect.height, 1)),
+            )
+            page_scale = max(0.1, page_scale)
+            pix = page.get_pixmap(matrix=fitz.Matrix(page_scale, page_scale), alpha=False)
+            width, height = int(pix.width), int(pix.height)
+            if width < 1 or height < 1 or width * height > 100_000_000:
+                del pix
+                raise ValueError(f"Invalid image dimensions: {stem} — صفحهٔ {page_index + 1}.png")
+            png = pix.tobytes("png")
+            byte_len = len(png)
+            del pix
+            try:
+                image_path.write_bytes(png)
+            except OSError:
+                image_path.unlink(missing_ok=True)
+                raise
+            finally:
+                del png
+            return {
+                "id": image_id,
+                "name": f"{stem} — صفحهٔ {page_index + 1}.png",
+                "file": file_name,
+                "width": width,
+                "height": height,
+                "format": "PNG",
+                "bytes": byte_len,
+                "selected": True,
+                "approved": False,
+                "groupId": None,
+                "crop": None,
+                "blocks": [],
+                "edited": False,
+            }
+
+        written_paths: list[Path] = []
+        try:
+            for _, page_idx, entry in iter_parallel_ordered(list(range(page_count)), _render_one_page, max_workers=workers):
+                written_paths.append(slots[page_idx][2])
+                entry["order"] = self._next_order(state)
+                state["images"].append(entry)
+        except Exception:
+            for _, _, slot_path in slots:
+                slot_path.unlink(missing_ok=True)
+            raise
+        finally:
+            for doc in opened_docs:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
 
     def _import_image(self, state: dict[str, Any], filename: str, content: bytes) -> None:
         if len(content) > 150 * 1024 * 1024:
@@ -317,16 +474,8 @@ class ProjectStore:
         except (OSError, Image.DecompressionBombError) as exc:
             raise ValueError(f"Invalid or unsupported image: {filename}") from exc
         extension = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "BMP": ".bmp", "GIF": ".gif"}.get(image_format, ".png")
-        # Never overwrite an existing page even if ID generation collides.
         known = {item['id'] for item in state['images']}
-        for _ in range(100):
-            image_id = new_id()
-            file_name = f"{image_id}{extension}"
-            image_path = project_root(state["id"]) / "images" / file_name
-            if image_id not in known and not any(image_path.parent.glob(f"{image_id}.*")):
-                break
-        else:
-            raise ValueError("Could not allocate a unique image ID")
+        image_id, file_name, image_path = self._allocate_image_slot(state["id"], known, extension)
         try:
             image_path.write_bytes(content)
         except OSError:

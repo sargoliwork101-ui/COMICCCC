@@ -18,6 +18,7 @@ import pymupdf as fitz
 from PIL import Image, ImageDraw
 
 from .activity import emit
+from .ocr_managed import compute_worker_count, iter_parallel_ordered
 from .paths import project_root
 from .store import ProjectStore
 
@@ -126,72 +127,112 @@ def compose_images(entries: list[dict[str, Any]]) -> dict[str, Any]:
     widths = [max(1, round(common_width * scale)) for _ in entries]
     heights = [max(1, round(entry["h"] * (common_width / entry["w"]) * scale)) for entry in entries]
     canvas = Image.new("RGB", (max(1, round(common_width * scale)), sum(heights)), "white")
-    y = 0
-    for entry, width, height in zip(entries, widths, heights):
-        with Image.open(io.BytesIO(entry["data"])) as opened:
-            image = opened.convert("RGB")
-            if image.size != (width, height):
-                image = image.resize((width, height), Image.Resampling.LANCZOS)
-            x = (canvas.width - width) // 2
-            canvas.paste(image, (x, y))
-        y += height
-    buffer = io.BytesIO()
-    canvas.save(buffer, "PNG")
-    return {
-        "data": buffer.getvalue(), "w": canvas.width, "h": canvas.height,
-        "order": min(entry.get("order", 0) for entry in entries), "grouped": True,
-    }
+    try:
+        y = 0
+        for entry, width, height in zip(entries, widths, heights):
+            with Image.open(io.BytesIO(entry["data"])) as opened:
+                image = opened.convert("RGB")
+            try:
+                if image.size != (width, height):
+                    resized = image.resize((width, height), Image.Resampling.LANCZOS)
+                    image.close()
+                    image = resized
+                x = (canvas.width - width) // 2
+                canvas.paste(image, (x, y))
+            finally:
+                image.close()
+            y += height
+        buffer = io.BytesIO()
+        canvas.save(buffer, "PNG")
+        return {
+            "data": buffer.getvalue(), "w": canvas.width, "h": canvas.height,
+            "order": min(entry.get("order", 0) for entry in entries), "grouped": True,
+        }
+    finally:
+        canvas.close()
 
 
-def prepare_pdf_entries(
-    store: ProjectStore, state: dict[str, Any], images: list[dict[str, Any]], two_per_page: bool,
-) -> list[dict[str, Any]]:
-    source = []
-    total_src = max(1, len(images))
-    for idx, item in enumerate(images, start=1):
-        data, _, width, height = image_payload(store, state["id"], item)
-        source.append({
-            "data": data, "w": width, "h": height, "order": int(item.get("order", 0)),
-            "groupId": item.get("groupId"), "grouped": False,
-        })
-        emit(f"آماده‌سازی تصویر {idx} از {total_src} برای PDF", progress=idx / total_src * 0.55)
+def _plan_pdf_units(images: list[dict[str, Any]], two_per_page: bool) -> list[tuple[list[dict[str, Any]], bool]]:
+    """Group page metadata into output PDF units before reading or decoding image bytes."""
     by_group: dict[str, list[dict[str, Any]]] = {}
-    for entry in source:
-        if entry["groupId"] is not None and str(entry["groupId"]).strip():
-            by_group.setdefault(str(entry["groupId"]), []).append(entry)
-    grouped: list[dict[str, Any]] = []
-    consumed: set[str] = set()
-    for entry in source:
-        key = str(entry["groupId"]) if entry["groupId"] is not None else ""
-        members = by_group.get(key)
-        if not key or not members or len(members) < 2:
-            grouped.append(entry)
-            continue
-        if key in consumed:
-            continue
-        consumed.add(key)
-        grouped.append(compose_images(members))
-    if not two_per_page:
-        return grouped
+    for item in images:
+        gid = str(item["groupId"]).strip() if item.get("groupId") is not None else ""
+        if gid:
+            by_group.setdefault(gid, []).append(item)
 
-    # Groups always keep their own composed page; only adjacent ungrouped pages are paired.
-    result: list[dict[str, Any]] = []
+    grouped_units: list[tuple[list[dict[str, Any]], bool]] = []
+    consumed: set[str] = set()
+    for item in images:
+        gid = str(item["groupId"]).strip() if item.get("groupId") is not None else ""
+        members = by_group.get(gid)
+        if not gid or not members or len(members) < 2:
+            grouped_units.append(([item], False))
+            continue
+        if gid in consumed:
+            continue
+        consumed.add(gid)
+        grouped_units.append((members, True))
+
+    if not two_per_page:
+        return grouped_units
+
+    result: list[tuple[list[dict[str, Any]], bool]] = []
     pending: list[dict[str, Any]] = []
 
     def flush() -> None:
         for index in range(0, len(pending), 2):
             pair = pending[index:index + 2]
-            result.append(compose_images(pair) if len(pair) == 2 else pair[0])
+            result.append((pair, len(pair) == 2))
         pending.clear()
 
-    for entry in grouped:
-        if entry.get("grouped"):
+    for members, is_grouped in grouped_units:
+        if is_grouped:
             flush()
-            result.append(entry)
+            result.append((members, True))
         else:
-            pending.append(entry)
+            pending.append(members[0])
     flush()
     return result
+
+
+def _iter_pdf_entries(
+    store: ProjectStore, state: dict[str, Any], images: list[dict[str, Any]], two_per_page: bool,
+) -> Iterator[tuple[int, int, dict[str, Any]]]:
+    units = _plan_pdf_units(images, two_per_page)
+    total_units = max(1, len(units))
+    workers, _ = compute_worker_count(len(units), per_worker_mb=160, max_cap=8)
+    project_id = state["id"]
+
+    def _render_unit(_idx: int, unit: tuple[list[dict[str, Any]], bool]) -> dict[str, Any]:
+        members, should_compose = unit
+        member_entries: list[dict[str, Any]] = []
+        for item in members:
+            data, _, width, height = image_payload(store, project_id, item)
+            member_entries.append({
+                "data": data,
+                "w": width,
+                "h": height,
+                "order": int(item.get("order", 0)),
+                "groupId": item.get("groupId"),
+                "grouped": False,
+            })
+        if should_compose and len(member_entries) > 1:
+            composed = compose_images(member_entries)
+            for m in member_entries:
+                m["data"] = b""
+            return composed
+        return member_entries[0]
+
+    for idx, _unit, entry in iter_parallel_ordered(units, _render_unit, max_workers=workers):
+        step = idx + 1
+        emit(f"آماده‌سازی تصویر {step} از {total_units} برای PDF", progress=step / total_units * 0.55)
+        yield step, total_units, entry
+
+
+def prepare_pdf_entries(
+    store: ProjectStore, state: dict[str, Any], images: list[dict[str, Any]], two_per_page: bool,
+) -> list[dict[str, Any]]:
+    return [entry for _, _, entry in _iter_pdf_entries(store, state, images, two_per_page)]
 
 
 def _page_scale(width: float, height: float) -> float:
@@ -223,38 +264,46 @@ def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
     seamless = bool(request.get("seamless"))
     uniform = bool(request.get("uniform_size")) and not seamless
     two_per_page = bool(request.get("two_per_page")) and not seamless
-    entries = prepare_pdf_entries(store, state, images, two_per_page)
     document = fitz.open()
     try:
-        if seamless:
-            common_width = Counter(entry["w"] for entry in entries).most_common(1)[0][0]
-            scaled = []
-            for entry in entries:
-                ratio = common_width / entry["w"]
-                scaled.append({**entry, "w": common_width, "h": entry["h"] * ratio})
-            total_height = sum(entry["h"] for entry in scaled)
-            scale = _page_scale(common_width, total_height)
-            # One long page whenever possible; split only at image boundaries above PDF's safe limit.
-            pending: list[dict[str, Any]] = []
-            pending_height = 0.0
-            for entry in scaled:
-                if pending and (pending_height + entry["h"]) * scale > SAFE_PT:
-                    _insert(document, common_width, pending_height, pending, stacked=True)
-                    pending, pending_height = [], 0.0
-                pending.append(entry)
-                pending_height += entry["h"]
-            if pending:
-                _insert(document, common_width, pending_height, pending, stacked=True)
-        elif uniform:
-            page_width = max(entry["w"] for entry in entries)
-            page_height = max(entry["h"] for entry in entries)
-            for idx, entry in enumerate(entries, start=1):
-                _insert(document, page_width, page_height, [entry])
-                emit(f"چیدمان صفحهٔ {idx} از {len(entries)} در PDF", progress=0.55 + idx / max(1, len(entries)) * 0.4)
-        else:
-            for idx, entry in enumerate(entries, start=1):
+        if not seamless and not uniform:
+            # Stream prepared pages straight into PyMuPDF and drop image bytes immediately.
+            for idx, total_entries, entry in _iter_pdf_entries(store, state, images, two_per_page):
                 _insert(document, entry["w"], entry["h"], [entry])
-                emit(f"چیدمان صفحهٔ {idx} از {len(entries)} در PDF", progress=0.55 + idx / max(1, len(entries)) * 0.4)
+                entry["data"] = b""
+                emit(f"چیدمان صفحهٔ {idx} از {total_entries} در PDF", progress=0.55 + idx / max(1, total_entries) * 0.4)
+        else:
+            entries = prepare_pdf_entries(store, state, images, two_per_page)
+            if seamless:
+                common_width = Counter(entry["w"] for entry in entries).most_common(1)[0][0]
+                scaled = []
+                for entry in entries:
+                    ratio = common_width / entry["w"]
+                    scaled.append({**entry, "w": common_width, "h": entry["h"] * ratio})
+                total_height = sum(entry["h"] for entry in scaled)
+                scale = _page_scale(common_width, total_height)
+                # One long page whenever possible; split only at image boundaries above PDF's safe limit.
+                pending: list[dict[str, Any]] = []
+                pending_height = 0.0
+                for entry in scaled:
+                    if pending and (pending_height + entry["h"]) * scale > SAFE_PT:
+                        _insert(document, common_width, pending_height, pending, stacked=True)
+                        for p in pending:
+                            p["data"] = b""
+                        pending, pending_height = [], 0.0
+                    pending.append(entry)
+                    pending_height += entry["h"]
+                if pending:
+                    _insert(document, common_width, pending_height, pending, stacked=True)
+                    for p in pending:
+                        p["data"] = b""
+            else:
+                page_width = max(entry["w"] for entry in entries)
+                page_height = max(entry["h"] for entry in entries)
+                for idx, entry in enumerate(entries, start=1):
+                    _insert(document, page_width, page_height, [entry])
+                    entry["data"] = b""
+                    emit(f"چیدمان صفحهٔ {idx} از {len(entries)} در PDF", progress=0.55 + idx / max(1, len(entries)) * 0.4)
         output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}.pdf"
         emit("در حال ذخیره‌سازی فایل PDF…", progress=0.97)
         with _atomic_export_path(output) as tmp_output:
@@ -271,12 +320,21 @@ def build_images_zip(store: ProjectStore, state: dict[str, Any], request: dict[s
     output = project_root(state["id"]) / "exports" / f"{clean_name(request.get('name', ''))}-images.zip"
     folder = clean_name(request.get("folder_name", ""), "") if request.get("folder_name") else ""
     prefix = f"{folder}/" if folder else ""
+    target_format = request.get("image_format", "orig")
+    project_id = state["id"]
     total = max(1, len(images))
+    workers, _ = compute_worker_count(len(images), per_worker_mb=130, max_cap=8)
+
+    def _prepare_zip_item(_idx: int, item: dict[str, Any]) -> tuple[bytes, str]:
+        data, extension, _, _ = image_payload(store, project_id, item, target_format)
+        return data, extension
+
     with _atomic_export_path(output) as tmp_output:
         with zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_STORED) as archive:
-            for index, item in enumerate(images, start=1):
-                data, extension, _, _ = image_payload(store, state["id"], item, request.get("image_format", "orig"))
+            for idx, item, (data, extension) in iter_parallel_ordered(images, _prepare_zip_item, max_workers=workers):
+                index = idx + 1
                 archive.writestr(f"{prefix}{index:03d}-{clean_name(Path(item['name']).stem)}.{extension}", data)
+                del data
                 emit(f"افزودن تصویر {index} از {total} به بستهٔ ZIP", progress=index / total)
     return output
 
@@ -742,122 +800,161 @@ def _prepare_docx_pages(
     docx_mode: str,
     *,
     target_label: str = "فایل Word",
+    spool_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Build per-page cleaned background images and scaled block specs (supporting page groups)."""
-    raw_entries: list[dict[str, Any]] = []
-    for item in images:
-        source_path = project_root(project_id) / "images" / item["file"]
-        with Image.open(source_path) as opened:
-            im = opened.convert("RGB")
-        crop = crop_box(item)
-        off_x, off_y = (float(crop[0]), float(crop[1])) if crop else (0.0, 0.0)
-        if crop:
-            im = im.crop(crop)
-        raw_entries.append({
-            "image": im,
-            "w": im.width,
-            "h": im.height,
-            "item": item,
-            "off_x": off_x,
-            "off_y": off_y,
-            "groupId": item.get("groupId"),
-        })
+    """Build per-page cleaned background images and scaled block specs (supporting page groups).
 
+    Groups metadata BEFORE decoding bitmaps and processes units across CPU cores with bounded
+    concurrency. When `spool_dir` is given, rendered PNGs are spooled to disk instead of held
+    simultaneously in RAM.
+    """
     by_group: dict[str, list[dict[str, Any]]] = {}
-    for entry in raw_entries:
-        gid = str(entry["groupId"]).strip() if entry["groupId"] is not None else ""
+    for item in images:
+        gid = str(item["groupId"]).strip() if item.get("groupId") is not None else ""
         if gid:
-            by_group.setdefault(gid, []).append(entry)
+            by_group.setdefault(gid, []).append(item)
 
     grouped_units: list[list[dict[str, Any]]] = []
     consumed: set[str] = set()
-    for entry in raw_entries:
-        gid = str(entry["groupId"]).strip() if entry["groupId"] is not None else ""
+    for item in images:
+        gid = str(item["groupId"]).strip() if item.get("groupId") is not None else ""
         members = by_group.get(gid)
         if not gid or not members or len(members) < 2:
-            grouped_units.append([entry])
+            grouped_units.append([item])
             continue
         if gid in consumed:
             continue
         consumed.add(gid)
         grouped_units.append(members)
 
-    pages: list[dict[str, Any]] = []
     total_units = max(1, len(grouped_units))
-    for page_idx, members in enumerate(grouped_units, start=1):
-        common_w = max(m["w"] for m in members)
-        raw_h = sum(m["h"] * common_w / max(1, m["w"]) for m in members)
-        comp_scale = min(
-            1.0,
-            16000.0 / max(common_w, 1),
-            16000.0 / max(raw_h, 1),
-            math.sqrt(180_000_000.0 / max(common_w * raw_h, 1)),
-        )
-        canvas_w = max(1, round(common_w * comp_scale))
-        member_heights = [max(1, round(m["h"] * (common_w / max(1, m["w"])) * comp_scale)) for m in members]
-        canvas = Image.new("RGB", (canvas_w, sum(member_heights)), "white")
-        page_blocks: list[dict[str, Any]] = []
-        y_cursor = 0
-        for m, mh in zip(members, member_heights):
-            m_scale = (common_w / max(1, m["w"])) * comp_scale
-            part = m["image"]
-            if part.size != (canvas_w, mh):
-                part = part.resize((canvas_w, mh), Image.Resampling.LANCZOS)
-            canvas.paste(part, (0, y_cursor))
-            sorted_blocks = sorted(m["item"].get("blocks", []), key=lambda b: (b.get("ty0", b.get("y0", 0)), b.get("tx0", b.get("x0", 0))))
-            for blk in sorted_blocks:
-                if blk.get("enabled", True) is False:
-                    continue
-                eff_mode = _effective_docx_block_mode(blk, docx_mode)
-                if eff_mode == "ocr":
-                    has_text = bool(_strip_inline_markers(_clean_text(blk.get("text") or "")).strip())
-                else:
-                    has_text = bool(_block_translation_plain(blk).strip())
-                if not has_text:
-                    continue
-                bx0, by0, bx1, by1 = _block_box(blk, m["off_x"], m["off_y"], m_scale, canvas_w, mh)
-                if bx1 - bx0 < 2 or by1 - by0 < 2:
-                    continue
-                page_blocks.append({
-                    "block": blk,
-                    "x0": bx0,
-                    "y0": by0 + y_cursor,
-                    "x1": bx1,
-                    "y1": by1 + y_cursor,
+    workers, _ = compute_worker_count(len(grouped_units), per_worker_mb=180, max_cap=8)
+
+    def _render_unit(unit_zero_idx: int, item_members: list[dict[str, Any]]) -> dict[str, Any]:
+        page_idx = unit_zero_idx + 1
+        loaded_members: list[dict[str, Any]] = []
+        canvas: Image.Image | None = None
+        try:
+            for item in item_members:
+                source_path = project_root(project_id) / "images" / item["file"]
+                with Image.open(source_path) as opened:
+                    im = opened.convert("RGB")
+                crop = crop_box(item)
+                off_x, off_y = (float(crop[0]), float(crop[1])) if crop else (0.0, 0.0)
+                if crop:
+                    cropped = im.crop(crop)
+                    im.close()
+                    im = cropped
+                loaded_members.append({
+                    "image": im,
+                    "w": im.width,
+                    "h": im.height,
+                    "item": item,
+                    "off_x": off_x,
+                    "off_y": off_y,
                 })
-            y_cursor += mh
 
-        # Erase/fill bubble backgrounds first (matching Typeset.render targetFills) without baking raster text.
-        draw = ImageDraw.Draw(canvas)
-        for spec in page_blocks:
-            bg_mode = str(spec["block"].get("bg") or "auto")
-            ix0, iy0 = int(round(spec["x0"])), int(round(spec["y0"]))
-            ix1, iy1 = int(round(spec["x1"])), int(round(spec["y1"]))
-            if bg_mode == "none":
-                spec["bg_rgb"] = _sample_box_bg(canvas, ix0, iy0, ix1, iy1)
-                continue
-            if bg_mode == "white":
-                fill_rgb = (255, 255, 255)
-            elif bg_mode == "black":
-                fill_rgb = (16, 16, 16)
-            else:
-                fill_rgb = _sample_box_bg(canvas, ix0, iy0, ix1, iy1)
-            spec["bg_rgb"] = fill_rgb
-            draw.rectangle([ix0, iy0, max(ix0, ix1 - 1), max(iy0, iy1 - 1)], fill=fill_rgb)
+            common_w = max(m["w"] for m in loaded_members)
+            raw_h = sum(m["h"] * common_w / max(1, m["w"]) for m in loaded_members)
+            comp_scale = min(
+                1.0,
+                16000.0 / max(common_w, 1),
+                16000.0 / max(raw_h, 1),
+                math.sqrt(180_000_000.0 / max(common_w * raw_h, 1)),
+            )
+            canvas_w = max(1, round(common_w * comp_scale))
+            member_heights = [max(1, round(m["h"] * (common_w / max(1, m["w"])) * comp_scale)) for m in loaded_members]
+            canvas = Image.new("RGB", (canvas_w, sum(member_heights)), "white")
+            page_blocks: list[dict[str, Any]] = []
+            y_cursor = 0
+            for m, mh in zip(loaded_members, member_heights):
+                m_scale = (common_w / max(1, m["w"])) * comp_scale
+                part = m["image"]
+                if part.size != (canvas_w, mh):
+                    resized = part.resize((canvas_w, mh), Image.Resampling.LANCZOS)
+                    try:
+                        canvas.paste(resized, (0, y_cursor))
+                    finally:
+                        resized.close()
+                else:
+                    canvas.paste(part, (0, y_cursor))
+                part.close()
+                m["image"] = None
+                sorted_blocks = sorted(
+                    m["item"].get("blocks", []),
+                    key=lambda b: (b.get("ty0", b.get("y0", 0)), b.get("tx0", b.get("x0", 0))),
+                )
+                for blk in sorted_blocks:
+                    if blk.get("enabled", True) is False:
+                        continue
+                    eff_mode = _effective_docx_block_mode(blk, docx_mode)
+                    if eff_mode == "ocr":
+                        has_text = bool(_strip_inline_markers(_clean_text(blk.get("text") or "")).strip())
+                    else:
+                        has_text = bool(_block_translation_plain(blk).strip())
+                    if not has_text:
+                        continue
+                    bx0, by0, bx1, by1 = _block_box(blk, m["off_x"], m["off_y"], m_scale, canvas_w, mh)
+                    if bx1 - bx0 < 2 or by1 - by0 < 2:
+                        continue
+                    page_blocks.append({
+                        "block": blk,
+                        "x0": bx0,
+                        "y0": by0 + y_cursor,
+                        "x1": bx1,
+                        "y1": by1 + y_cursor,
+                    })
+                y_cursor += mh
 
-        buf = io.BytesIO()
-        canvas.save(buf, "PNG")
-        canvas_w_final, canvas_h_final = canvas.width, canvas.height
-        canvas.close()
-        for m in members:
-            m["image"].close()
-        pages.append({
-            "png": buf.getvalue(),
-            "w": canvas_w_final,
-            "h": canvas_h_final,
-            "blocks": page_blocks,
-            "name": members[0]["item"].get("name", f"page-{page_idx}"),
-        })
+            # Erase/fill bubble backgrounds first (matching Typeset.render targetFills) without baking raster text.
+            draw = ImageDraw.Draw(canvas)
+            for spec in page_blocks:
+                bg_mode = str(spec["block"].get("bg") or "auto")
+                ix0, iy0 = int(round(spec["x0"])), int(round(spec["y0"]))
+                ix1, iy1 = int(round(spec["x1"])), int(round(spec["y1"]))
+                if bg_mode == "none":
+                    spec["bg_rgb"] = _sample_box_bg(canvas, ix0, iy0, ix1, iy1)
+                    continue
+                if bg_mode == "white":
+                    fill_rgb = (255, 255, 255)
+                elif bg_mode == "black":
+                    fill_rgb = (16, 16, 16)
+                else:
+                    fill_rgb = _sample_box_bg(canvas, ix0, iy0, ix1, iy1)
+                spec["bg_rgb"] = fill_rgb
+                draw.rectangle([ix0, iy0, max(ix0, ix1 - 1), max(iy0, iy1 - 1)], fill=fill_rgb)
+
+            canvas_w_final, canvas_h_final = canvas.width, canvas.height
+            if spool_dir is not None:
+                png_path = spool_dir / f"page_{page_idx:04d}.png"
+                canvas.save(png_path, "PNG")
+                return {
+                    "png_path": png_path,
+                    "w": canvas_w_final,
+                    "h": canvas_h_final,
+                    "blocks": page_blocks,
+                    "name": item_members[0].get("name", f"page-{page_idx}"),
+                }
+            buf = io.BytesIO()
+            canvas.save(buf, "PNG")
+            return {
+                "png": buf.getvalue(),
+                "w": canvas_w_final,
+                "h": canvas_h_final,
+                "blocks": page_blocks,
+                "name": item_members[0].get("name", f"page-{page_idx}"),
+            }
+        finally:
+            if canvas is not None:
+                canvas.close()
+            for m in loaded_members:
+                if m.get("image") is not None:
+                    m["image"].close()
+
+    pages: list[dict[str, Any]] = []
+    for idx, _members, page_dict in iter_parallel_ordered(grouped_units, _render_unit, max_workers=workers):
+        page_idx = idx + 1
+        pages.append(page_dict)
         emit(f"آماده‌سازی صفحهٔ {page_idx} از {total_units} برای {target_label}", progress=page_idx / total_units * 0.85)
     return pages
 
@@ -1068,8 +1165,17 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
     docx_mode = "ocr" if request.get("docx_mode") == "ocr" else "translation"
     if request.get("docx_layout") == "flowing":
         return _build_flowing_docx(store, state, images, request, docx_mode)
-    pages = _prepare_docx_pages(store, state["id"], images, docx_mode)
+    with tempfile.TemporaryDirectory(prefix="comic-docx-") as spool_raw:
+        pages = _prepare_docx_pages(store, state["id"], images, docx_mode, spool_dir=Path(spool_raw))
+        return _finalize_visual_docx(state, request, docx_mode, pages)
 
+
+def _finalize_visual_docx(
+    state: dict[str, Any],
+    request: dict[str, Any],
+    docx_mode: str,
+    pages: list[dict[str, Any]],
+) -> Path:
     rel_entries = [
         '  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
     ]
@@ -1201,7 +1307,11 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
             archive.writestr("word/_rels/document.xml.rels", doc_rels_xml.encode("utf-8"))
             archive.writestr("word/styles.xml", _DOCX_STYLES.encode("utf-8"))
             for page_idx, page in enumerate(pages, start=1):
-                archive.writestr(f"word/media/page_{page_idx:03d}.png", page["png"])
+                arc_media = f"word/media/page_{page_idx:03d}.png"
+                if page.get("png_path"):
+                    archive.write(page["png_path"], arc_media, compress_type=zipfile.ZIP_STORED)
+                else:
+                    archive.writestr(arc_media, page["png"], compress_type=zipfile.ZIP_STORED)
             archive.writestr("word/document.xml", document_xml.encode("utf-8"))
     return output
 
@@ -1590,8 +1700,12 @@ def _write_pptx_package(
             for idx, slide in enumerate(slides, start=1):
                 archive.writestr(f"ppt/slides/slide{idx}.xml", slide["xml"].encode("utf-8"))
                 archive.writestr(f"ppt/slides/_rels/slide{idx}.xml.rels", slide["rels"].encode("utf-8"))
-                if slide.get("media_name") and slide.get("media_bytes"):
-                    archive.writestr(f"ppt/media/{slide['media_name']}", slide["media_bytes"])
+                if slide.get("media_name"):
+                    arc_media = f"ppt/media/{slide['media_name']}"
+                    if slide.get("media_path"):
+                        archive.write(slide["media_path"], arc_media, compress_type=zipfile.ZIP_STORED)
+                    elif slide.get("media_bytes"):
+                        archive.writestr(arc_media, slide["media_bytes"], compress_type=zipfile.ZIP_STORED)
     return output
 
 
@@ -1821,7 +1935,19 @@ def build_pptx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
     if raw_layout == "flowing":
         return _build_flowing_pptx(state, images, request, pptx_mode)
 
-    pages = _prepare_docx_pages(store, state["id"], images, pptx_mode, target_label="فایل PowerPoint")
+    with tempfile.TemporaryDirectory(prefix="comic-pptx-") as spool_raw:
+        pages = _prepare_docx_pages(
+            store, state["id"], images, pptx_mode, target_label="فایل PowerPoint", spool_dir=Path(spool_raw),
+        )
+        return _finalize_visual_pptx(state, request, pptx_mode, pages)
+
+
+def _finalize_visual_pptx(
+    state: dict[str, Any],
+    request: dict[str, Any],
+    pptx_mode: str,
+    pages: list[dict[str, Any]],
+) -> Path:
     # Choose deck slide dimensions matching the median page aspect ratio within PowerPoint's 1"–56" limits
     aspects = sorted(max(0.15, min(6.5, p["h"] / max(1, p["w"]))) for p in pages)
     median_aspect = aspects[len(aspects) // 2]
@@ -1920,7 +2046,8 @@ def build_pptx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
             "xml": slide_xml,
             "rels": slide_rels,
             "media_name": media_name,
-            "media_bytes": page["png"],
+            "media_path": page.get("png_path"),
+            "media_bytes": page.get("png"),
         })
 
     emit("در حال بسته‌بندی فایل PowerPoint…", progress=0.95)

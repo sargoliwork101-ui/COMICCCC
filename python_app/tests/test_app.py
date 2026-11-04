@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.84"
+    assert health.json()["version"] == "3.85"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۸۴ · Python</span>' in index_html
+    assert '<span class="ver">۳.۸۵ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -2730,6 +2730,97 @@ def test_page_approval_persists_excludes_exports_and_resets_on_reprocess(client,
     after_ocr = {im["id"]: im for im in ocr_res.json()["images"]}
     assert after_ocr[item1["id"]]["approved"] is False
     assert after_ocr[item2["id"]]["approved"] is True
+
+
+def test_v385_parallel_pdf_import_multi_page_ocr_and_low_ram_spooled_exports(client, monkeypatch):
+    import contextlib
+    import threading
+    import time
+    import pymupdf as fitz
+
+    # 1) Create a 5-page synthetic PDF and import it via multi-core _import_pdf
+    pdf_doc = fitz.open()
+    for p_idx in range(5):
+        p = pdf_doc.new_page(width=240, height=160)
+        p.insert_text((24, 72), f"PAGE {p_idx + 1}")
+    raw_pdf = pdf_doc.tobytes()
+    pdf_doc.close()
+
+    proj = client.post("/api/projects", json={"name": "v3.85 MultiCore"}).json()
+    pid = proj["id"]
+    imp = client.post(f"/api/projects/{pid}/files", files=[("files", ("chapter.pdf", raw_pdf, "application/pdf"))])
+    assert imp.status_code == 200, imp.text
+    imported_images = imp.json()["images"]
+    assert len(imported_images) == 5
+    assert [im["name"] for im in imported_images] == [f"chapter — صفحهٔ {i}.png" for i in range(1, 6)]
+    assert all(im["width"] == 480 and im["height"] == 320 for im in imported_images)
+
+    # 2) Run multi-page OCR across all 5 pages using a multi-worker batch engine
+    seen_threads: set[int] = set()
+    seen_lock = threading.Lock()
+    reg_engine = client.app.state  # verify via monkeypatching recognize_image + RapidEngine.configure_batch
+
+    from comic_studio.ocr import RapidEngine
+    monkeypatch.setattr(
+        RapidEngine,
+        "configure_batch",
+        contextlib.contextmanager(lambda self, total_pages, threads_per_worker=None: (yield min(3, total_pages))),
+    )
+
+    def parallel_fake_ocr(engine, image, *args, **kwargs):
+        with seen_lock:
+            seen_threads.add(threading.get_ident())
+        time.sleep(0.025)
+        w, h = image.size
+        return [{"id": 1, "text": f"OCR-{w}x{h}", "tr": "ترجمهٔ آزمایشی", "x0": 20, "y0": 20, "x1": 220, "y1": 80, "lineH": 28, "enabled": True}]
+
+    monkeypatch.setattr("comic_studio.main.recognize_image", parallel_fake_ocr)
+    all_ids = [im["id"] for im in imported_images]
+    ocr_resp = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={"image_ids": all_ids, "engine": "rapidocr-v6", "language": "eng", "page_mode": "comic"},
+    )
+    assert ocr_resp.status_code == 200, ocr_resp.text
+    ocr_images = ocr_resp.json()["images"]
+    assert all(im["ocrCompleted"] is True and im["blocks"][0]["text"] == "OCR-480x320" for im in ocr_images)
+    assert len(seen_threads) >= 2
+
+    # Memory endpoint confirms 0 models remain resident in RAM after parallel OCR
+    mem_resp = client.get("/api/engines/memory")
+    assert mem_resp.status_code == 200
+    assert mem_resp.json()["loadedCount"] == 0
+
+    # Add translation text so visual DOCX & PPTX embed cleaned page backgrounds + textboxes
+    for im in ocr_images:
+        im["blocks"][0]["tr"] = f"صفحهٔ فارسی {im['order'] + 1}"
+    assert client.put(f"/api/projects/{pid}/state", json={"state": {**ocr_resp.json(), "images": ocr_images}}).status_code == 200
+
+    # 3) Export PDF, ZIP, visual DOCX (spooled), and visual PPTX (spooled)
+    pdf_exp = client.post(f"/api/projects/{pid}/export", json={"kind": "pdf", "image_ids": all_ids, "name": "multi-out"})
+    assert pdf_exp.status_code == 200
+    with fitz.open(stream=pdf_exp.content, filetype="pdf") as out_pdf:
+        assert len(out_pdf) == 5
+
+    zip_exp = client.post(f"/api/projects/{pid}/export", json={"kind": "images", "image_ids": all_ids, "name": "multi-out", "image_format": "jpg"})
+    assert zip_exp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(zip_exp.content)) as out_zip:
+        jpgs = sorted(n for n in out_zip.namelist() if n.endswith(".jpg"))
+        assert len(jpgs) == 5
+
+    docx_exp = client.post(f"/api/projects/{pid}/export", json={"kind": "docx", "image_ids": all_ids, "name": "multi-out", "docx_layout": "visual"})
+    assert docx_exp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(docx_exp.content)) as out_docx:
+        media_infos = [zi for zi in out_docx.infolist() if zi.filename.startswith("word/media/page_")]
+        assert len(media_infos) == 5
+        assert all(zi.compress_type == zipfile.ZIP_STORED for zi in media_infos)
+
+    pptx_exp = client.post(f"/api/projects/{pid}/export", json={"kind": "pptx", "image_ids": all_ids, "name": "multi-out", "pptx_layout": "visual"})
+    assert pptx_exp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(pptx_exp.content)) as out_pptx:
+        slide_infos = [zi for zi in out_pptx.infolist() if zi.filename.startswith("ppt/media/slide_bg_")]
+        assert len(slide_infos) == 5
+        assert all(zi.compress_type == zipfile.ZIP_STORED for zi in slide_infos)
+
 
 
 

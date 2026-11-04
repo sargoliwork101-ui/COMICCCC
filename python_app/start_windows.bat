@@ -84,6 +84,13 @@ if errorlevel 1 goto update_failed
 rem Install the local application without resolving the dependency list twice.
 "%VENV_PYTHON%" -m pip install -e "%APP_DIR%" --no-deps --no-build-isolation
 if errorlevel 1 goto update_failed
+rem Enable DirectX 12 GPU acceleration (DirectML) for ONNX Runtime when a hardware GPU is available.
+"%VENV_PYTHON%" -c "import sys, onnxruntime as ort; from comic_studio.ocr_managed import inspect_hardware; hw = inspect_hardware(); sys.exit(0 if hw.get('hasGpu') and 'DmlExecutionProvider' not in ort.get_available_providers() and 'CUDAExecutionProvider' not in ort.get_available_providers() else 1)" >nul 2>&1
+if not errorlevel 1 (
+    echo [Comic OCR Studio] Hardware GPU detected; enabling DirectML GPU acceleration...
+    "%VENV_PYTHON%" -m pip uninstall -y onnxruntime >nul 2>&1
+    "%VENV_PYTHON%" -m pip install --upgrade "onnxruntime-directml>=1.20,<2" || "%VENV_PYTHON%" -m pip install --upgrade "onnxruntime>=1.20,<2"
+)
 "%VENV_PYTHON%" -m pip check
 if errorlevel 1 goto failed
 call :check_imports

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import csv
 import importlib.util
 import io
@@ -25,6 +26,8 @@ from .ocr_managed import (
     cleanup_superseded_engine_files,
     clear_cached_engine_update,
     compute_engine_update_fields,
+    compute_worker_count,
+    cpu_core_count,
     detect_builtin_installed_version,
     engine_meta,
     evaluate_engine_hardware,
@@ -146,16 +149,76 @@ def _polygon(box: Any) -> list[list[float]]:
     return [[float(point[0]), float(point[1])] for point in values]
 
 
+def _detect_onnx_acceleration() -> dict[str, Any]:
+    """Detect available ONNX Runtime GPU execution providers (CUDA, Windows DirectML, macOS CoreML)."""
+    try:
+        import onnxruntime as ort
+        providers = list(ort.get_available_providers())
+        ort_device = str(ort.get_device()).upper() if hasattr(ort, "get_device") else "CPU"
+    except Exception:
+        return {"mode": "cpu", "gpu": False, "params": {}}
+
+    if "CUDAExecutionProvider" in providers and ort_device == "GPU":
+        return {
+            "mode": "cuda",
+            "gpu": True,
+            "params": {
+                "EngineConfig.onnxruntime.use_cuda": True,
+                "EngineConfig.onnxruntime.cuda_ep_cfg": {
+                    "device_id": 0,
+                    "arena_extend_strategy": "kSameAsRequested",
+                    "cudnn_conv_algo_search": "HEURISTIC",
+                    "do_copy_in_default_stream": True,
+                },
+            },
+        }
+    if "DmlExecutionProvider" in providers:
+        hw = inspect_hardware()
+        if hw.get("hasGpu", True) or "DmlExecutionProvider" in providers:
+            return {
+                "mode": "directml",
+                "gpu": True,
+                "params": {
+                    "EngineConfig.onnxruntime.use_dml": True,
+                    "EngineConfig.onnxruntime.dml_ep_cfg": {
+                        "performance_preference": "high_performance",
+                        "device_filter": "gpu",
+                    },
+                },
+            }
+    if "CoreMLExecutionProvider" in providers and sys.platform == "darwin":
+        return {
+            "mode": "coreml",
+            "gpu": True,
+            "params": {
+                "EngineConfig.onnxruntime.use_coreml": True,
+            },
+        }
+    return {"mode": "cpu", "gpu": False, "params": {}}
+
+
 class RapidEngine:
     def __init__(self, engine_id: str, version: str) -> None:
         self.id = engine_id
         self.version = version
         self._instances: dict[str, Any] = {}
+        self._idle_pool: dict[str, list[Any]] = {}
+        self._created_counts: dict[str, int] = {}
         self._lock = threading.Lock()
+        self._pool_cond = threading.Condition(self._lock)
+        self._gpu_infer_lock = threading.Lock()
+        self._using_gpu: bool = False
+        self._force_cpu: bool = False
+        self._batch_slots: int = 1
+        self._batch_threads: int | None = None
 
     @property
     def runtime_installed(self) -> bool:
         return bool(importlib.util.find_spec("rapidocr")) and bool(importlib.util.find_spec("onnxruntime"))
+
+    @property
+    def using_gpu(self) -> bool:
+        return bool(self._using_gpu and not self._force_cpu)
 
     @property
     def ready_languages(self) -> list[str]:
@@ -180,11 +243,37 @@ class RapidEngine:
     @property
     def is_loaded_in_ram(self) -> bool:
         with self._lock:
-            return bool(self._instances)
+            return bool(self._instances or any(self._idle_pool.values()) or any(self._created_counts.values()))
 
     def unload(self) -> None:
-        with self._lock:
+        with self._pool_cond:
             self._instances.clear()
+            self._idle_pool.clear()
+            self._created_counts.clear()
+            self._pool_cond.notify_all()
+
+    @contextlib.contextmanager
+    def configure_batch(self, total_pages: int, threads_per_worker: int | None = None):
+        if threads_per_worker is None:
+            accel = _detect_onnx_acceleration()
+            if accel.get("gpu") and not self._force_cpu:
+                worker_slots, computed_threads = 1, max(1, cpu_core_count())
+            else:
+                worker_slots, computed_threads = compute_worker_count(total_pages, per_worker_mb=320, max_cap=6)
+        else:
+            worker_slots = max(1, int(total_pages))
+            computed_threads = max(1, int(threads_per_worker))
+        with self._pool_cond:
+            prev_slots, prev_threads = self._batch_slots, self._batch_threads
+            self._batch_slots = max(1, int(worker_slots))
+            self._batch_threads = max(1, int(computed_threads))
+        try:
+            yield self._batch_slots
+        finally:
+            with self._pool_cond:
+                self._batch_slots = prev_slots
+                self._batch_threads = prev_threads
+                self._pool_cond.notify_all()
 
     def _language_names(self, language: str) -> tuple[str, str]:
         if self.version == "v6":
@@ -225,23 +314,55 @@ class RapidEngine:
         if self.version == "v5":
             # Keep user-downloaded models outside the virtual environment.
             params["Global.model_root_dir"] = str(self._model_dir())
+
+        cores = cpu_core_count()
+        intra = max(1, min(cores, int(self._batch_threads))) if self._batch_threads else cores
+        inter = min(4, max(1, intra // 2))
+        cpu_params = {
+            **params,
+            "EngineConfig.onnxruntime.enable_cpu_mem_arena": False,
+            "EngineConfig.onnxruntime.intra_op_num_threads": intra,
+            "EngineConfig.onnxruntime.inter_op_num_threads": inter,
+        }
+        if not self._force_cpu:
+            accel = _detect_onnx_acceleration()
+            if accel.get("gpu"):
+                try:
+                    gpu_params = {**cpu_params, **accel["params"]}
+                    instance = RapidOCR(params=gpu_params)
+                    self._using_gpu = True
+                    return instance
+                except Exception:
+                    self._using_gpu = False
+        self._using_gpu = False
         try:
-            low_mem_params = {
-                **params,
-                "EngineConfig.onnxruntime.enable_cpu_mem_arena": False,
-            }
-            return RapidOCR(params=low_mem_params)
+            return RapidOCR(params=cpu_params)
         except Exception:
             return RapidOCR(params=params)
 
     def _ensure_runtime(self) -> None:
         if not self.runtime_installed:
             emit("بستهٔ اجرای RapidOCR موجود نیست؛ نصب آگاهانه آغاز می‌شود")
-            install_packages(["rapidocr>=3.10,<3.11", "onnxruntime>=1.20,<2"])
+            hw = inspect_hardware()
+            installed_gpu = False
+            if os.name == "nt" and hw.get("hasGpu"):
+                try:
+                    install_packages(["rapidocr>=3.10,<3.11", "onnxruntime-directml>=1.20,<2"])
+                    installed_gpu = self.runtime_installed
+                except OcrError:
+                    installed_gpu = False
+            elif sys.platform.startswith("linux") and hw.get("hasNvidiaGpu"):
+                try:
+                    install_packages(["rapidocr>=3.10,<3.11", "onnxruntime-gpu>=1.20,<2"])
+                    installed_gpu = self.runtime_installed
+                except OcrError:
+                    installed_gpu = False
+            if not installed_gpu and not self.runtime_installed:
+                install_packages(["rapidocr>=3.10,<3.11", "onnxruntime>=1.20,<2"])
         if not self.runtime_installed:
             raise OcrError("RapidOCR was installed but cannot be imported. Restart the application and try again.")
 
-    def _get(self, language: str, allow_download: bool = False):
+    def _validate_ready(self, language: str, allow_download: bool = False) -> None:
         if not self.runtime_installed:
             raise OcrError("RapidOCR is not installed. Click the explicit preparation button to install it.")
         if not allow_download:
@@ -249,14 +370,57 @@ class RapidEngine:
             missing = [name for name in self._expected_models(language) if not (root / name).is_file()]
             if missing:
                 raise OcrError(f"{self.id} model is not ready. Use the explicit model download button first.")
+
+    def _get(self, language: str, allow_download: bool = False):
+        self._validate_ready(language, allow_download)
         with self._lock:
             if language not in self._instances:
                 emit(f"بارگذاری یا دانلود مدل {self.id} برای {language} آغاز شد")
                 try:
-                    self._instances[language] = self._create(language)
+                    inst = self._create(language)
                 except Exception as exc:
                     raise OcrError(f"Could not initialize {self.id}: {exc}") from exc
+                self._instances[language] = inst
+                self._idle_pool.setdefault(language, []).append(inst)
+                self._created_counts[language] = max(1, self._created_counts.get(language, 0))
         return self._instances[language]
+
+    @contextlib.contextmanager
+    def _checkout(self, language: str):
+        # Ensure primary instance is initialized (honoring any test monkeypatch on `_get`).
+        primary = self._get(language)
+        if self._batch_slots <= 1 or self.using_gpu:
+            yield primary
+            return
+        with self._pool_cond:
+            pool = self._idle_pool.setdefault(language, [])
+            if not pool and self._created_counts.get(language, 0) == 0:
+                pool.append(primary)
+                self._created_counts[language] = 1
+            while not pool and self._created_counts.get(language, 0) >= self._batch_slots:
+                self._pool_cond.wait(timeout=2.0)
+                if not self._instances and self._created_counts.get(language, 0) == 0:
+                    break
+            if pool:
+                chosen = pool.pop()
+            else:
+                self._created_counts[language] = self._created_counts.get(language, 0) + 1
+                chosen = None
+        if chosen is None:
+            try:
+                chosen = self._create(language)
+            except Exception as exc:
+                with self._pool_cond:
+                    self._created_counts[language] = max(0, self._created_counts.get(language, 1) - 1)
+                    self._pool_cond.notify_all()
+                raise OcrError(f"Could not initialize {self.id} worker: {exc}") from exc
+        try:
+            yield chosen
+        finally:
+            with self._pool_cond:
+                if language in self._instances:
+                    self._idle_pool.setdefault(language, []).append(chosen)
+                self._pool_cond.notify()
 
     @staticmethod
     def _warm(engine: Any) -> None:
@@ -326,14 +490,29 @@ class RapidEngine:
             trim_process_memory()
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
-        engine = self._get(language)
         arr = np.asarray(image)
-        try:
-            result = engine(arr, use_cls=False)
-        except TypeError:
-            result = engine(arr)
-        except Exception as exc:
-            raise OcrError(f"OCR failed: {exc}") from exc
+        with self._checkout(language) as engine:
+            infer_ctx = self._gpu_infer_lock if self.using_gpu else contextlib.nullcontext()
+            try:
+                with infer_ctx:
+                    try:
+                        result = engine(arr, use_cls=False)
+                    except TypeError:
+                        result = engine(arr)
+            except Exception as exc:
+                if self.using_gpu:
+                    # Automatic fallback to multi-core CPU if GPU provider fails at runtime (e.g. VRAM limit)
+                    self._force_cpu = True
+                    self.unload()
+                    cpu_engine = self._get(language)
+                    try:
+                        result = cpu_engine(arr, use_cls=False)
+                    except TypeError:
+                        result = cpu_engine(arr)
+                    except Exception as cpu_exc:
+                        raise OcrError(f"OCR failed: {cpu_exc}") from cpu_exc
+                else:
+                    raise OcrError(f"OCR failed: {exc}") from exc
         return _lines_from_rapid(result)
 
 
@@ -343,6 +522,8 @@ class EasyEngine:
     def __init__(self) -> None:
         self._readers: dict[str, Any] = {}
         self._lock = threading.Lock()
+        self._infer_lock = threading.Lock()
+        self._using_gpu: bool = False
 
     @property
     def runtime_installed(self) -> bool:
@@ -381,7 +562,18 @@ class EasyEngine:
     def _ensure_runtime(self) -> None:
         if not self.runtime_installed:
             emit("بستهٔ اجرای EasyOCR موجود نیست؛ نصب آگاهانه آغاز می‌شود")
-            install_packages(["easyocr>=1.7,<2", "torch>=2.2,<3"])
+            installed_cuda = False
+            if os.name == "nt" and inspect_hardware().get("hasNvidiaGpu") and not importlib.util.find_spec("torch"):
+                try:
+                    install_packages([
+                        "--extra-index-url", "https://download.pytorch.org/whl/cu126",
+                        "easyocr>=1.7,<2", "torch>=2.2,<3",
+                    ])
+                    installed_cuda = True
+                except OcrError:
+                    installed_cuda = False
+            if not installed_cuda:
+                install_packages(["easyocr>=1.7,<2", "torch>=2.2,<3"])
         if not self.runtime_installed:
             raise OcrError("EasyOCR was installed but cannot be imported. Restart the application and try again.")
 
@@ -397,13 +589,37 @@ class EasyEngine:
             if lang not in self._readers:
                 emit(f"بارگذاری یا دانلود مدل EasyOCR برای {language} آغاز شد")
                 import easyocr
+                use_gpu = False
+                try:
+                    import torch
+                    try:
+                        torch.set_num_threads(cpu_core_count())
+                    except Exception:
+                        pass
+                    use_gpu = bool(
+                        (hasattr(torch, "cuda") and torch.cuda.is_available())
+                        or (hasattr(torch, "backends") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+                    )
+                except Exception:
+                    use_gpu = False
                 try:
                     self._readers[lang] = easyocr.Reader(
-                        [lang], gpu=False, model_storage_directory=str(self._model_dir()),
+                        [lang], gpu=use_gpu, model_storage_directory=str(self._model_dir()),
                         download_enabled=download, verbose=False,
                     )
+                    self._using_gpu = use_gpu
                 except Exception as exc:
-                    raise OcrError(f"Could not initialize EasyOCR: {exc}") from exc
+                    if use_gpu:
+                        try:
+                            self._readers[lang] = easyocr.Reader(
+                                [lang], gpu=False, model_storage_directory=str(self._model_dir()),
+                                download_enabled=download, verbose=False,
+                            )
+                            self._using_gpu = False
+                        except Exception as cpu_exc:
+                            raise OcrError(f"Could not initialize EasyOCR: {cpu_exc}") from cpu_exc
+                    else:
+                        raise OcrError(f"Could not initialize EasyOCR: {exc}") from exc
         return self._readers[lang]
 
     def download(self, language: str = "eng") -> None:
@@ -463,8 +679,20 @@ class EasyEngine:
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         reader = self._reader(language, False)
+        arr = np.asarray(image)
+        batch_sz = 8 if self._using_gpu else 4
+        grad_ctx: Any = contextlib.nullcontext
         try:
-            result = reader.readtext(np.asarray(image), detail=1, paragraph=False)
+            import torch
+            grad_ctx = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
+        except Exception:
+            pass
+        try:
+            with self._infer_lock, grad_ctx():
+                try:
+                    result = reader.readtext(arr, detail=1, paragraph=False, batch_size=batch_sz)
+                except TypeError:
+                    result = reader.readtext(arr, detail=1, paragraph=False)
         except Exception as exc:
             raise OcrError(f"EasyOCR failed: {exc}") from exc
         lines = []
@@ -535,6 +763,21 @@ class TesseractEngine:
     def __init__(self) -> None:
         self._system_languages: set[str] | None = None
         self._lock = threading.Lock()
+        self._omp_threads: int | None = None
+
+    @contextlib.contextmanager
+    def configure_batch(self, total_pages: int, threads_per_worker: int | None = None):
+        if threads_per_worker is None:
+            workers, computed_threads = compute_worker_count(total_pages, per_worker_mb=180, max_cap=8)
+        else:
+            workers = max(1, int(total_pages))
+            computed_threads = int(threads_per_worker)
+        prev = self._omp_threads
+        self._omp_threads = max(1, min(4, int(computed_threads)))
+        try:
+            yield workers
+        finally:
+            self._omp_threads = prev
 
     @property
     def runtime_installed(self) -> bool:
@@ -710,8 +953,11 @@ class TesseractEngine:
             self._ensure_tsv_config()
             command.extend(["--tessdata-dir", str(self._model_dir())])
         command.append("tsv")
+        tess_env = dict(os.environ)
+        omp_limit = self._omp_threads if self._omp_threads is not None else min(4, cpu_core_count())
+        tess_env["OMP_THREAD_LIMIT"] = str(max(1, omp_limit))
         try:
-            result = subprocess.run(command, input=buffer.getvalue(), capture_output=True, timeout=180, check=False)
+            result = subprocess.run(command, input=buffer.getvalue(), env=tess_env, capture_output=True, timeout=180, check=False)
         except Exception as exc:
             raise OcrError(f"Tesseract failed: {exc}") from exc
         if result.returncode:
@@ -1486,7 +1732,10 @@ def _recognize_bubble(
     regions = _bubble_preprocess_regions(image)
     blocks: list[dict[str, Any]] = []
     for prepared, offset_x, offset_y in sorted(regions, key=lambda region: (region[2], region[1])):
-        lines = [line for line in _recognize_bubble_lines(engine, prepared, language) if line.text.strip()]
+        try:
+            lines = [line for line in _recognize_bubble_lines(engine, prepared, language) if line.text.strip()]
+        finally:
+            prepared.close()
         if not lines or _bubble_region_confidence(lines) < BUBBLE_MIN_REGION_CONFIDENCE:
             continue
         restored = []
@@ -1606,10 +1855,13 @@ def recognize_image(
         emit("نتیجهٔ OCR اصلی ضعیف یا کوتاه است؛ پیش‌پردازش تکمیلی متن روشن اجرا می‌شود")
         try:
             fallback_image = _extra_preprocess_image(image)
-            fallback = _recognize_image_primary(
-                engine, fallback_image, language, False, False, min_confidence,
-                input_scale=EXTRA_PREPROCESS_SCALE, page_mode=page_mode,
-            )
+            try:
+                fallback = _recognize_image_primary(
+                    engine, fallback_image, language, False, False, min_confidence,
+                    input_scale=EXTRA_PREPROCESS_SCALE, page_mode=page_mode,
+                )
+            finally:
+                fallback_image.close()
         except Exception:
             # An optional preprocessing backend must never break the established OCR result.
             emit("پیش‌پردازش تکمیلی ممکن نبود؛ نتیجهٔ OCR اصلی حفظ شد", "warning")

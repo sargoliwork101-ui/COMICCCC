@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import atexit
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
+from collections.abc import Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+import contextvars
 import ctypes
 from datetime import datetime, timezone
 import hashlib
@@ -9,6 +12,7 @@ import importlib.metadata
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
@@ -16,7 +20,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 import urllib.request
 import zipfile
 
@@ -296,7 +300,7 @@ def process_rss_mb(pid: int | None = None) -> float:
 
 
 def trim_process_memory() -> None:
-    """Run Python GC, flush optional torch caches if already loaded, and return unused heap/working-set pages to OS."""
+    """Run Python GC, flush optional GPU caches if already loaded, and return unused heap/working-set pages to OS."""
     import gc
     gc.collect()
     gc.collect()
@@ -305,6 +309,20 @@ def trim_process_memory() -> None:
         try:
             if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
                 torch_mod.cuda.empty_cache()
+        except Exception:
+            pass
+        try:
+            if hasattr(torch_mod, "mps") and hasattr(torch_mod.mps, "empty_cache"):
+                if hasattr(torch_mod, "backends") and hasattr(torch_mod.backends, "mps") and torch_mod.backends.mps.is_available():
+                    torch_mod.mps.empty_cache()
+        except Exception:
+            pass
+    paddle_mod = sys.modules.get("paddle")
+    if paddle_mod is not None:
+        try:
+            if hasattr(paddle_mod, "device") and hasattr(paddle_mod.device, "cuda"):
+                if paddle_mod.device.is_compiled_with_cuda() and paddle_mod.device.cuda.device_count() > 0:
+                    paddle_mod.device.cuda.empty_cache()
         except Exception:
             pass
     try:
@@ -322,6 +340,118 @@ def trim_process_memory() -> None:
                 libc.malloc_trim(0)
     except Exception:
         pass
+
+
+_TItem = TypeVar("_TItem")
+_TResult = TypeVar("_TResult")
+_RUNTIME_CONFIGURED = False
+_RUNTIME_LOCK = threading.Lock()
+
+
+def cpu_core_count() -> int:
+    """Return available logical CPU cores (honoring COMIC_STUDIO_FAKE_HARDWARE_JSON when set)."""
+    override = os.environ.get("COMIC_STUDIO_FAKE_HARDWARE_JSON")
+    if override:
+        try:
+            parsed = json.loads(override)
+            if isinstance(parsed, dict) and parsed.get("cpuCores") is not None:
+                return max(1, int(parsed["cpuCores"]))
+        except Exception:
+            pass
+    return max(1, int(os.cpu_count() or 1))
+
+
+def compute_worker_count(
+    task_count: int,
+    *,
+    per_worker_mb: int = 180,
+    max_cap: int = 8,
+) -> tuple[int, int]:
+    """Compute `(worker_count, threads_per_worker)` to saturate multi-core CPUs without oversubscribing RAM or threads."""
+    cores = cpu_core_count()
+    if task_count <= 1 or cores <= 1:
+        return 1, cores
+    hw = inspect_hardware()
+    cores = max(1, int(hw.get("cpuCores") or cores))
+    ram_gb = float(hw.get("ramGb") or 0.0)
+    if ram_gb > 0:
+        usable_mb = max(128.0, (ram_gb - 1.2) * 1024.0)
+        ram_cap = max(1, int(usable_mb // max(32, per_worker_mb)))
+    else:
+        ram_cap = max_cap
+    workers = max(1, min(int(task_count), cores, max(1, int(max_cap)), ram_cap))
+    threads_per_worker = max(1, cores // workers)
+    return workers, threads_per_worker
+
+
+def iter_parallel_ordered(
+    items: Sequence[_TItem],
+    worker_fn: Callable[[int, _TItem], _TResult],
+    *,
+    max_workers: int,
+) -> Iterator[tuple[int, _TItem, _TResult]]:
+    """Execute `worker_fn(index, item)` across a bounded sliding-window thread pool, preserving ContextVars and strict order."""
+    total = len(items)
+    if total == 0:
+        return
+    effective_workers = max(1, min(int(max_workers), total))
+    if effective_workers <= 1:
+        for idx, item in enumerate(items):
+            yield idx, item, worker_fn(idx, item)
+        return
+
+    inflight: deque[tuple[int, _TItem, Future[_TResult]]] = deque()
+    next_idx = 0
+    with ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="comic-worker") as pool:
+        try:
+            while next_idx < total and len(inflight) < effective_workers:
+                item = items[next_idx]
+                ctx = contextvars.copy_context()
+                fut = pool.submit(ctx.run, worker_fn, next_idx, item)
+                inflight.append((next_idx, item, fut))
+                next_idx += 1
+
+            while inflight:
+                done_idx, done_item, done_fut = inflight.popleft()
+                result = done_fut.result()
+                if next_idx < total:
+                    item = items[next_idx]
+                    ctx = contextvars.copy_context()
+                    fut = pool.submit(ctx.run, worker_fn, next_idx, item)
+                    inflight.append((next_idx, item, fut))
+                    next_idx += 1
+                yield done_idx, done_item, result
+        finally:
+            while inflight:
+                _, _, pending_fut = inflight.popleft()
+                pending_fut.cancel()
+
+
+def configure_native_runtime() -> dict[str, Any]:
+    """Configure OpenCV, OpenMP/BLAS, and transparent OpenCL GPU acceleration once per process."""
+    global _RUNTIME_CONFIGURED
+    cores = cpu_core_count()
+    for env_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(env_key, str(cores))
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+    cv_threads = cores
+    opencl_active = False
+    try:
+        import cv2
+        cv2.setUseOptimized(True)
+        cv2.setNumThreads(cores)
+        cv_threads = int(cv2.getNumThreads())
+        if hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
+            hw = inspect_hardware()
+            if hw.get("hasGpu"):
+                cv2.ocl.setUseOpenCL(True)
+                opencl_active = bool(cv2.ocl.useOpenCL())
+    except Exception:
+        pass
+    with _RUNTIME_LOCK:
+        _RUNTIME_CONFIGURED = True
+    return {"cpuCores": cores, "cvThreads": cv_threads, "openclActive": opencl_active}
 
 
 def _remove_path_safely(target: Path) -> int:
@@ -528,7 +658,118 @@ def _detect_nvidia_gpu() -> tuple[bool, str, float]:
     return False, "", 0.0
 
 
+def _detect_other_gpu() -> tuple[bool, str, float, str, str]:
+    """Detect non-NVIDIA hardware GPUs (Windows DirectML AMD/Intel/Qualcomm, macOS Apple Metal, Linux ROCm/DRM)."""
+    if sys.platform == "darwin":
+        arch = platform.machine().lower()
+        if arch in {"arm64", "aarch64"}:
+            return True, "Apple Silicon GPU", 0.0, "apple", "mps"
+        return False, "", 0.0, "", ""
+
+    if os.name == "nt":
+        ps = shutil.which("powershell.exe") or shutil.which("powershell")
+        if ps:
+            try:
+                proc = _run_Subprocess(
+                    [
+                        ps,
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    raw = json.loads(proc.stdout.strip())
+                    adapters = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
+                    virtual_tokens = (
+                        "microsoft basic",
+                        "remote",
+                        "hyper-v",
+                        "parsec",
+                        "indirect",
+                        "virtual",
+                        "vmware",
+                        "vbox",
+                        "citrix",
+                    )
+                    best_name = ""
+                    best_vram_gb = 0.0
+                    best_vendor = ""
+                    best_score = -1
+                    for entry in adapters:
+                        if not isinstance(entry, dict):
+                            continue
+                        name = str(entry.get("Name") or "").strip()
+                        lower = name.lower()
+                        if not name or any(tok in lower for tok in virtual_tokens):
+                            continue
+                        ram_bytes = 0
+                        try:
+                            ram_bytes = int(entry.get("AdapterRAM") or 0)
+                        except (TypeError, ValueError):
+                            ram_bytes = 0
+                        vram_gb = round(max(0, ram_bytes) / (1024 ** 3), 1) if ram_bytes > 0 else 0.0
+                        if "nvidia" in lower or "geforce" in lower or "rtx" in lower or "quadro" in lower:
+                            vendor, score = "nvidia", 3
+                        elif "amd" in lower or "radeon" in lower:
+                            vendor, score = "amd", 2
+                        elif "intel" in lower or "arc" in lower or "iris" in lower:
+                            vendor, score = "intel", 1
+                        else:
+                            vendor, score = "other", 1
+                        if score > best_score or (score == best_score and vram_gb >= best_vram_gb):
+                            best_name = name
+                            best_vram_gb = vram_gb
+                            best_vendor = vendor
+                            best_score = score
+                    if best_name:
+                        return True, best_name, best_vram_gb, best_vendor, "directml"
+            except Exception:
+                pass
+        return False, "", 0.0, "", ""
+
+    if sys.platform.startswith("linux"):
+        rocm_smi = shutil.which("rocm-smi")
+        if rocm_smi:
+            try:
+                proc = _run_Subprocess([rocm_smi, "--showproductname"], capture_output=True, text=True, timeout=4, check=False)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return True, "AMD ROCm GPU", 0.0, "amd", "rocm"
+            except Exception:
+                pass
+        dri_dir = Path("/dev/dri")
+        drm_dir = Path("/sys/class/drm")
+        if dri_dir.is_dir() and any(dri_dir.glob("renderD*")) and drm_dir.is_dir():
+            vendor_map = {
+                "0x10de": ("NVIDIA GPU", "nvidia", "cuda", 3),
+                "0x1002": ("AMD Radeon GPU", "amd", "opencl", 2),
+                "0x8086": ("Intel Integrated/Arc GPU", "intel", "opencl", 1),
+            }
+            best: tuple[str, str, str, int] | None = None
+            for vendor_file in drm_dir.glob("card*/device/vendor"):
+                try:
+                    vid = vendor_file.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                except OSError:
+                    continue
+                cand = vendor_map.get(vid)
+                if cand and (best is None or cand[3] > best[3]):
+                    best = cand
+            if best is not None:
+                return True, best[0], 0.0, best[1], best[2]
+
+    return False, "", 0.0, "", ""
+
+
 def inspect_hardware(force_refresh: bool = False) -> dict[str, Any]:
+    cores = cpu_core_count()
     override = os.environ.get("COMIC_STUDIO_FAKE_HARDWARE_JSON")
     if override:
         try:
@@ -536,11 +777,19 @@ def inspect_hardware(force_refresh: bool = False) -> dict[str, Any]:
             if isinstance(parsed, dict):
                 disk_val = parsed.get("freeDiskGb", parsed.get("diskFreeGb", 100.0))
                 gpu_name = str(parsed.get("gpuName") or ((parsed.get("gpuNames") or [""])[0] if isinstance(parsed.get("gpuNames"), list) else ""))
+                has_nvidia = bool(parsed.get("hasNvidiaGpu", False))
+                has_any_gpu = bool(parsed.get("hasGpu", has_nvidia or bool(gpu_name)))
+                default_vendor = "nvidia" if has_nvidia else ("other" if has_any_gpu else "")
+                default_backend = "cuda" if has_nvidia else (("directml" if os.name == "nt" else "mps" if sys.platform == "darwin" else "opencl") if has_any_gpu else "")
                 return {
-                    "hasNvidiaGpu": bool(parsed.get("hasNvidiaGpu", False)),
+                    "hasNvidiaGpu": has_nvidia,
+                    "hasGpu": has_any_gpu,
+                    "gpuVendor": str(parsed.get("gpuVendor", default_vendor)),
+                    "gpuBackend": str(parsed.get("gpuBackend", default_backend)),
                     "gpuName": gpu_name,
                     "vramGb": float(parsed.get("vramGb", 0.0)),
                     "ramGb": float(parsed.get("ramGb", 16.0)),
+                    "cpuCores": max(1, int(parsed.get("cpuCores", cores))),
                     "freeDiskGb": float(disk_val),
                 }
         except Exception:
@@ -552,15 +801,29 @@ def inspect_hardware(force_refresh: bool = False) -> dict[str, Any]:
         if not force_refresh and _HW_CACHE is not None and (now - _HW_CACHE[0]) < 60.0:
             base = dict(_HW_CACHE[1])
         else:
-            has_gpu, gpu_name, vram_gb = _detect_nvidia_gpu()
+            has_nvidia, gpu_name, vram_gb = _detect_nvidia_gpu()
+            if has_nvidia:
+                has_any_gpu = True
+                gpu_vendor = "nvidia"
+                gpu_backend = "cuda"
+            else:
+                has_any_gpu, other_name, other_vram, gpu_vendor, gpu_backend = _detect_other_gpu()
+                if has_any_gpu:
+                    gpu_name = other_name
+                    vram_gb = other_vram
             ram_gb = _detect_system_ram_gb()
             base = {
-                "hasNvidiaGpu": has_gpu,
+                "hasNvidiaGpu": has_nvidia,
+                "hasGpu": has_any_gpu,
+                "gpuVendor": gpu_vendor,
+                "gpuBackend": gpu_backend,
                 "gpuName": gpu_name,
                 "vramGb": vram_gb,
                 "ramGb": ram_gb,
+                "cpuCores": cores,
             }
             _HW_CACHE = (now, dict(base))
+    base["cpuCores"] = cores
     target_dir = models_dir()
     probe = target_dir if target_dir.exists() else (target_dir.parent if target_dir.parent.exists() else Path.home())
     try:
@@ -605,9 +868,13 @@ def evaluate_engine_hardware(engine_id: str, hw: dict[str, Any] | None = None) -
         "compatible": len(warnings) == 0,
         "warnings": warnings,
         "hasNvidiaGpu": bool(hw_info.get("hasNvidiaGpu")),
+        "hasGpu": bool(hw_info.get("hasGpu", hw_info.get("hasNvidiaGpu", False))),
+        "gpuVendor": str(hw_info.get("gpuVendor") or ""),
+        "gpuBackend": str(hw_info.get("gpuBackend") or ""),
         "gpuName": str(hw_info.get("gpuName") or ""),
         "vramGb": float(hw_info.get("vramGb") or 0.0),
         "ramGb": float(hw_info.get("ramGb") or 0.0),
+        "cpuCores": int(hw_info.get("cpuCores") or cpu_core_count()),
         "freeDiskGb": free_disk,
     }
 
@@ -1239,6 +1506,12 @@ class IsolatedOcrEngine:
             extra_paths.insert(0, str(llama_bin))
         env["PATH"] = os.pathsep.join([*extra_paths, env.get("PATH", "")])
         env["PYTHONIOENCODING"] = "utf-8"
+        cores_str = str(cpu_core_count())
+        for thread_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            env.setdefault(thread_var, cores_str)
+        env.setdefault("TOKENIZERS_PARALLELISM", "true")
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        env.setdefault("FLAGS_use_mkldnn", "1")
         return env
 
     def _ensure_llama_cpp_for_surya(self) -> None:
@@ -1388,19 +1661,40 @@ class IsolatedOcrEngine:
                     if t_rc != 0:
                         raise self._error_cls(f"نصب PyTorch برای {self.id} ناموفق بود: {t_out[-1200:]}")
 
-            packages = self._spec["pip_packages_gpu"] if hw.get("hasNvidiaGpu") else self._spec["pip_packages_cpu"]
+            packages = list(self._spec["pip_packages_gpu"] if hw.get("hasNvidiaGpu") else self._spec["pip_packages_cpu"])
             pip_base = [str(py), "-m", "pip", "install", "--no-cache-dir"]
+            if os.name == "nt" and hw.get("hasNvidiaGpu") and self.id in {"surya", "mineru-2-5-pro"}:
+                pip_base.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
             if upgrade:
                 pip_base.append("--upgrade")
             action_word = "به‌روزرسانی" if upgrade else "نصب"
             p_start = 0.46 if self._spec.get("needs_torch") else 0.18
             emit(f"{action_word} بسته‌های اختصاصی مدل {self.id} آغاز شد…", progress=p_start)
-            p_rc, p_out = self._run_pip_streaming(
-                [*pip_base, *packages],
-                start_p=p_start,
-                end_p=0.70,
-                label_prefix=f"{action_word} {self.id}",
-            )
+            if self.id == "paddleocr-vl-1-6" and hw.get("hasNvidiaGpu") and sys.platform.startswith("linux"):
+                gpu_paddle_pkgs = [
+                    "paddlepaddle-gpu>=3.2.0" if pkg.startswith("paddlepaddle>=") else pkg
+                    for pkg in packages
+                ]
+                p_rc, p_out = self._run_pip_streaming(
+                    [*pip_base, *gpu_paddle_pkgs],
+                    start_p=p_start,
+                    end_p=0.70,
+                    label_prefix=f"{action_word} GPU {self.id}",
+                )
+                if p_rc != 0:
+                    p_rc, p_out = self._run_pip_streaming(
+                        [*pip_base, *packages],
+                        start_p=p_start,
+                        end_p=0.70,
+                        label_prefix=f"{action_word} {self.id}",
+                    )
+            else:
+                p_rc, p_out = self._run_pip_streaming(
+                    [*pip_base, *packages],
+                    start_p=p_start,
+                    end_p=0.70,
+                    label_prefix=f"{action_word} {self.id}",
+                )
             fallback_pkgs = self._spec.get("pip_packages_fallback")
             if p_rc != 0 and fallback_pkgs:
                 emit(f"تنظیم نسخهٔ سازگار بسته‌های {self.id} برای سیستم شما…", progress=round((p_start + 0.70) / 2, 2))

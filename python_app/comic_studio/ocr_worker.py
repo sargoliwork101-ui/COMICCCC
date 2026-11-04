@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import gc
 import html
 import json
 import os
@@ -21,7 +23,75 @@ def _configure_cache_dirs(models_root: Path) -> None:
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_dir / "hub"))
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(paddlex_dir))
     os.environ.setdefault("TORCH_HOME", str(torch_dir))
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    cores = str(max(1, int(os.cpu_count() or 1)))
+    for thread_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(thread_key, cores)
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault("FLAGS_use_mkldnn", "1")
+
+
+def _configure_torch_runtime(torch_mod: Any) -> str:
+    """Configure PyTorch multi-core CPU threads and return best available accelerator ('cuda', 'mps', or 'cpu')."""
+    cores = max(1, int(os.cpu_count() or 1))
+    try:
+        torch_mod.set_num_threads(cores)
+    except Exception:
+        pass
+    try:
+        torch_mod.set_num_interop_threads(min(4, max(1, cores // 2)))
+    except Exception:
+        pass
+    try:
+        if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
+            try:
+                torch_mod.backends.cuda.matmul.allow_tf32 = True
+                torch_mod.backends.cudnn.allow_tf32 = True
+                torch_mod.backends.cudnn.benchmark = True
+            except Exception:
+                pass
+            return "cuda"
+    except Exception:
+        pass
+    try:
+        if hasattr(torch_mod, "backends") and hasattr(torch_mod.backends, "mps") and torch_mod.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _release_worker_caches() -> None:
+    """Release transient CPU/GPU activation buffers after each recognized page."""
+    gc.collect()
+    torch_mod = sys.modules.get("torch")
+    if torch_mod is not None:
+        try:
+            if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
+                torch_mod.cuda.empty_cache()
+        except Exception:
+            pass
+        try:
+            if hasattr(torch_mod, "mps") and hasattr(torch_mod.mps, "empty_cache"):
+                if hasattr(torch_mod, "backends") and hasattr(torch_mod.backends, "mps") and torch_mod.backends.mps.is_available():
+                    torch_mod.mps.empty_cache()
+        except Exception:
+            pass
+    paddle_mod = sys.modules.get("paddle")
+    if paddle_mod is not None:
+        try:
+            if hasattr(paddle_mod, "device") and hasattr(paddle_mod.device, "cuda"):
+                if paddle_mod.device.is_compiled_with_cuda() and paddle_mod.device.cuda.device_count() > 0:
+                    paddle_mod.device.cuda.empty_cache()
+        except Exception:
+            pass
+    if sys.platform.startswith("linux"):
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            if hasattr(libc, "malloc_trim"):
+                libc.malloc_trim(0)
+        except Exception:
+            pass
 
 
 def _strip_markup(raw: str) -> str:
@@ -137,27 +207,47 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
                 if fallback_ver not in candidates:
                     candidates.append(fallback_ver)
 
+            paddle_device: str | None = None
+            try:
+                import paddle
+                if hasattr(paddle, "device") and paddle.device.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
+                    paddle_device = "gpu:0"
+                else:
+                    paddle_device = "cpu"
+            except Exception:
+                paddle_device = None
+
             last_err: Exception | None = None
             for candidate in candidates:
                 kwargs: dict[str, Any] = {}
                 if candidate is not None:
                     kwargs["pipeline_version"] = candidate
+                device_kwargs = {"device": paddle_device} if paddle_device else {}
                 try:
                     self._pipeline = PaddleOCRVL(
                         use_chart_recognition=False,
                         use_seal_recognition=False,
+                        **device_kwargs,
                         **kwargs,
                     )
                     break
                 except TypeError:
                     try:
-                        self._pipeline = PaddleOCRVL(**kwargs)
+                        self._pipeline = PaddleOCRVL(
+                            use_chart_recognition=False,
+                            use_seal_recognition=False,
+                            **kwargs,
+                        )
                         break
-                    except ValueError as exc:
-                        last_err = exc
-                        if "Invalid pipeline version" in str(exc):
-                            continue
-                        raise
+                    except TypeError:
+                        try:
+                            self._pipeline = PaddleOCRVL(**kwargs)
+                            break
+                        except ValueError as exc:
+                            last_err = exc
+                            if "Invalid pipeline version" in str(exc):
+                                continue
+                            raise
                 except ValueError as exc:
                     last_err = exc
                     if "Invalid pipeline version" in str(exc):
@@ -214,6 +304,12 @@ class _SuryaAdapter(_BaseAdapter):
     def _ensure_loaded(self) -> None:
         if self._predictor is not None or self._legacy is not None:
             return
+        try:
+            import torch
+            dev = _configure_torch_runtime(torch)
+            os.environ.setdefault("TORCH_DEVICE", dev)
+        except Exception:
+            pass
         try:
             from surya.inference import SuryaInferenceManager
             from surya.recognition import RecognitionPredictor
@@ -321,6 +417,13 @@ class _MinerUAdapter(_BaseAdapter):
         import tempfile
         from PIL import Image
 
+        try:
+            import torch
+            dev = _configure_torch_runtime(torch)
+            os.environ.setdefault("MINERU_DEVICE_MODE", dev)
+        except Exception:
+            pass
+
         with Image.open(image_path) as im:
             width, height = im.size
 
@@ -397,8 +500,14 @@ class _TransformersRegionAdapter(_BaseAdapter):
         from transformers import AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
 
         model_id = self.local_repo_or_id()
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+        device = _configure_torch_runtime(torch)
+        if device == "cuda":
+            bf16_ok = bool(hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported())
+            dtype = torch.bfloat16 if bf16_ok else torch.float16
+        elif device == "mps":
+            dtype = torch.float16
+        else:
+            dtype = torch.float32
         try:
             processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
         except Exception:
@@ -407,13 +516,28 @@ class _TransformersRegionAdapter(_BaseAdapter):
         last_err: Exception | None = None
         for loader in (AutoModelForImageTextToText, AutoModelForCausalLM, AutoModel):
             try:
-                model = loader.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
+                try:
+                    model = loader.from_pretrained(
+                        model_id,
+                        torch_dtype=dtype,
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
+                    )
+                except TypeError:
+                    model = loader.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
                 break
             except Exception as exc:
                 last_err = exc
         if model is None:
             raise RuntimeError(f"Could not load model {self.hf_repo}: {last_err}")
-        model = model.to(device).eval()
+        try:
+            model = model.to(device).eval()
+        except Exception:
+            if device != "cpu":
+                device = "cpu"
+                model = model.to(dtype=torch.float32, device="cpu").eval()
+            else:
+                raise
         self._model, self._processor, self._device = model, processor, device
         return model, processor, device
 
@@ -444,11 +568,13 @@ class _TransformersRegionAdapter(_BaseAdapter):
         else:
             inputs = processor(images=crop_img, return_tensors="pt")
         inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
-        with torch.no_grad():
+        grad_ctx = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
+        with grad_ctx():
             generated = model.generate(**inputs, max_new_tokens=max_tokens, do_sample=False)
         prompt_len = inputs["input_ids"].shape[-1] if "input_ids" in inputs else 0
         new_tokens = generated[:, prompt_len:] if prompt_len and generated.shape[-1] > prompt_len else generated
         decoded = processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
+        del inputs, generated, new_tokens
         return _strip_markup(decoded)
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
@@ -456,15 +582,21 @@ class _TransformersRegionAdapter(_BaseAdapter):
         with Image.open(image_path) as im:
             rgb = im.convert("RGB")
             width, height = rgb.size
-        boxes = _default_regions(width, height, regions)
-        lines: list[dict[str, Any]] = []
-        for x0, y0, x1, y1 in boxes:
-            crop = rgb.crop((int(x0), int(y0), int(x1), int(y1)))
-            text = self._infer_crop(crop)
-            if text:
-                poly = _clamp_polygon(_rect_polygon(x0, y0, x1, y1), width, height)
-                lines.append({"text": text, "confidence": 0.88, "polygon": poly})
-        return lines
+        try:
+            boxes = _default_regions(width, height, regions)
+            lines: list[dict[str, Any]] = []
+            for x0, y0, x1, y1 in boxes:
+                crop = rgb.crop((int(x0), int(y0), int(x1), int(y1)))
+                try:
+                    text = self._infer_crop(crop)
+                finally:
+                    crop.close()
+                if text:
+                    poly = _clamp_polygon(_rect_polygon(x0, y0, x1, y1), width, height)
+                    lines.append({"text": text, "confidence": 0.88, "polygon": poly})
+            return lines
+        finally:
+            rgb.close()
 
 
 class _DotsOcrAdapter(_TransformersRegionAdapter):
@@ -608,12 +740,15 @@ def main() -> int:
                     sys.stdout.flush()
                     return 0
                 else:
-                    out_lines = adapter.recognize(
-                        req["imagePath"],
-                        req.get("language", "eng"),
-                        req.get("regions"),
-                    )
-                    resp = {"ok": True, "lines": out_lines}
+                    try:
+                        out_lines = adapter.recognize(
+                            req["imagePath"],
+                            req.get("language", "eng"),
+                            req.get("regions"),
+                        )
+                        resp = {"ok": True, "lines": out_lines}
+                    finally:
+                        _release_worker_caches()
             except Exception as exc:
                 resp = {"ok": False, "error": str(exc)}
             sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
