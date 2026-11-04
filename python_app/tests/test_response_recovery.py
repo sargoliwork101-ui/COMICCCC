@@ -23,6 +23,36 @@ def test_parse_common_envelopes_without_model_request(text):
     assert parse_context_response(text, ['hello'], 100) == ('سلام', 'خلاصه')
 
 
+@pytest.mark.parametrize('payload,expected_summary', [
+    (json.dumps({'translation': 'اول\nدوم'}, ensure_ascii=False), ''),
+    (json.dumps({'translation': 'اول\nدوم', 'summary': None}, ensure_ascii=False), ''),
+    (json.dumps({'translation': ['اول', 'دوم'], 'summary': 'خلاصه'}, ensure_ascii=False), 'خلاصه'),
+    (json.dumps({'translation': [{'line': 1, 'text': 'اول'}, {'line': 2, 'text': 'دوم'}], 'summary': None}, ensure_ascii=False), ''),
+    (json.dumps({'Translation': 'اول\nدوم', 'Summary': 'خلاصه'}, ensure_ascii=False), 'خلاصه'),
+    (json.dumps({'translations': ['اول', 'دوم']}, ensure_ascii=False), ''),
+    (json.dumps({'result': {'translation': 'اول\nدوم', 'summary': 'خلاصه'}}, ensure_ascii=False), 'خلاصه'),
+    ('<think>Checking {"draft": 1} before output</think>\n' + json.dumps({'translation': 'اول\nدوم', 'summary': 'خلاصه'}, ensure_ascii=False), 'خلاصه'),
+])
+def test_parse_real_world_model_json_shapes_without_false_422(payload, expected_summary):
+    assert parse_context_response(payload, ['one', 'two'], 100) == ('اول\nدوم', expected_summary)
+
+
+def test_openai_compatible_structured_content_skips_thinking_parts():
+    from comic_studio.translation import _response_text
+    raw = _response_text({
+        'choices': [{
+            'message': {
+                'content': [
+                    {'type': 'thinking', 'text': 'internal {"draft": true}'},
+                    {'type': 'reasoning', 'text': 'step 2'},
+                    {'type': 'text', 'text': json.dumps({'translation': 'سلام', 'summary': ''}, ensure_ascii=False)},
+                ],
+            },
+        }],
+    }, 'openrouter')
+    assert parse_context_response(raw, ['hi'], 100) == ('سلام', '')
+
+
 @pytest.mark.parametrize('text', [
     encoded() + '\n' + encoded('دیگر'),
     encoded() + '\n{"translation":"partial"',

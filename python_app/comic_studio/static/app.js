@@ -1392,7 +1392,20 @@ function clearResponseRepair() {
 function offerResponseRepair(error, action) {
   if (!error.recoveryToken || typeof error.responseText !== 'string') return;
   $('responseRepairText').value = error.responseText;
-  try { const parsed = JSON.parse(error.responseText); $('repairTranslation').value = typeof parsed.translation === 'string' ? parsed.translation : ''; $('repairSummary').value = typeof parsed.summary === 'string' ? parsed.summary : ''; } catch { $('repairTranslation').value = ''; $('repairSummary').value = ''; }
+  let prefillTranslation = '';
+  let prefillSummary = '';
+  try {
+    const cleaned = error.responseText.replace(/<(?:think|thinking)\b[^>]*>[\s\S]*?<\/(?:think|thinking)\s*>/gi, '').trim();
+    const fenceMatch = cleaned.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(fenceMatch ? fenceMatch[0] : cleaned);
+    const rawTr = parsed.translation ?? parsed.Translation ?? parsed.translations ?? parsed.translated_text;
+    const rawSum = parsed.summary ?? parsed.Summary ?? parsed.story_summary ?? parsed.context;
+    if (typeof rawTr === 'string') prefillTranslation = rawTr;
+    else if (Array.isArray(rawTr) && rawTr.every((x) => typeof x === 'string')) prefillTranslation = rawTr.join('\n');
+    if (typeof rawSum === 'string') prefillSummary = rawSum;
+  } catch { /* raw text remains editable in responseRepairText */ }
+  $('repairTranslation').value = prefillTranslation;
+  $('repairSummary').value = prefillSummary;
   $('responseRepairStatus').textContent = error.responseTruncated ? 'پاسخ بزرگ‌تر از حد مجاز بود و فقط ۲۰۰٬۰۰۰ نویسهٔ اول نمایش داده شده است.' : '';
   $('responseRepair').classList.remove('hidden');
   translationRepairAction = value => action({recovery_token: error.recoveryToken, corrected_response: value});
@@ -4321,7 +4334,6 @@ function bindEvents() {
     helpController = window.ComicHelpGuide.createHelpController();
   }
   $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(null));
-  $('helpMenuBtn')?.addEventListener('click', () => openHelpDialog(null));
   $('editorOpenFullHelpBtn')?.addEventListener('click', () => openHelpDialog('visual-editor'));
   $('helpDialogClose')?.addEventListener('click', (event) => { event.preventDefault(); closeDialog('helpDialog'); });
   $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });

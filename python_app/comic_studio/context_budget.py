@@ -6,9 +6,10 @@ provider JSON keys, wire encoding, and generated output are not input text.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
-from .translation import TranslationError, distribute_translation
+from .translation import TranslationError, distribute_translation, normalize_translation_text
 
 DEFAULT_CONTEXT_PERCENT = 15
 DEFAULT_SKILL_PERCENT = 15
@@ -93,7 +94,7 @@ def build_context_request(budget: ContextBudget, language: str, skill: str, prev
         "CRITICAL: translation line count/order must exactly match Text, one output line per input line. "
         "Add no lines, breaks, headings or commentary; verify count. "
         f"Summary: one Persian line, max {budget.context_limit} chars incl spaces; shorten to fit. "
-        "Context: names/terms/events/tone only."
+        "Both JSON values must be plain string."
     )
     if skill:
         system += "\nGuidance: " + skill
@@ -119,6 +120,99 @@ def shorten_context(text: str, limit: int) -> str:
     return text.rstrip()
 
 
+_REASONING_TAG_RE = re.compile(r"<(?:think|thinking)\b[^>]*>.*?</(?:think|thinking)\s*>", re.IGNORECASE | re.DOTALL)
+_WRAPPER_DICT_KEYS = {"result", "output", "data", "response"}
+_TRANSLATION_ALIAS_KEYS = ("translations", "translated_text", "translated", "persian_translation", "persian", "fa", "lines")
+_SUMMARY_ALIAS_KEYS = ("story_summary", "context_summary", "context", "memory")
+_ITEM_TEXT_KEYS = ("translation", "translated_text", "translated", "persian", "fa", "text", "line")
+
+
+def _normalize_translation_field(raw: object) -> str | None:
+    if isinstance(raw, str):
+        return normalize_translation_text(raw)
+    if isinstance(raw, list) and raw:
+        if all(isinstance(item, str) for item in raw):
+            return "\n".join(normalize_translation_text(item) for item in raw)
+        if all(isinstance(item, dict) for item in raw):
+            extracted: list[str] = []
+            for item in raw:
+                lower_map = {str(k).strip().lower(): v for k, v in item.items()}
+                picked: object = None
+                for candidate_key in _ITEM_TEXT_KEYS:
+                    if candidate_key in lower_map:
+                        picked = lower_map[candidate_key]
+                        break
+                if not isinstance(picked, str):
+                    return None
+                extracted.append(normalize_translation_text(picked))
+            return "\n".join(extracted)
+    return None
+
+
+def _normalize_summary_field(raw: object) -> str | None:
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+        return " ".join(item.strip() for item in raw if item.strip())
+    return None
+
+
+def _extract_context_fields(value: dict[str, object]) -> tuple[str, str]:
+    current: dict[str, object] = value
+    for _ in range(2):
+        lower_keys = {str(k).strip().lower() for k in current}
+        if "translation" in lower_keys or any(alias in lower_keys for alias in _TRANSLATION_ALIAS_KEYS):
+            break
+        if len(current) == 1:
+            sole_key, sole_val = next(iter(current.items()))
+            if isinstance(sole_val, dict) and str(sole_key).strip().lower() in _WRAPPER_DICT_KEYS:
+                current = sole_val
+                continue
+        break
+
+    # Resolve translation field (exact -> case-insensitive -> single unambiguous alias).
+    has_translation = False
+    raw_translation: object = None
+    if "translation" in current:
+        has_translation = True
+        raw_translation = current["translation"]
+    else:
+        ci_matches = [k for k in current if str(k).strip().lower() == "translation"]
+        if len(ci_matches) == 1:
+            has_translation = True
+            raw_translation = current[ci_matches[0]]
+        elif len(ci_matches) == 0:
+            alias_matches = [k for k in current if str(k).strip().lower() in _TRANSLATION_ALIAS_KEYS]
+            if len(alias_matches) == 1:
+                has_translation = True
+                raw_translation = current[alias_matches[0]]
+
+    # Resolve summary field (exact -> case-insensitive -> single unambiguous alias -> omitted => "").
+    raw_summary: object = None
+    if "summary" in current:
+        raw_summary = current["summary"]
+    else:
+        ci_sum = [k for k in current if str(k).strip().lower() == "summary"]
+        if len(ci_sum) == 1:
+            raw_summary = current[ci_sum[0]]
+        elif len(ci_sum) > 1:
+            raise TranslationError("پاسخ AI کلیدهای خلاصهٔ مبهم دارد؛ چیزی ذخیره نشد.")
+        else:
+            alias_sum = [k for k in current if str(k).strip().lower() in _SUMMARY_ALIAS_KEYS]
+            if len(alias_sum) == 1:
+                raw_summary = current[alias_sum[0]]
+
+    if not has_translation:
+        raise TranslationError("پاسخ AI فاقد ترجمه یا خلاصهٔ معتبر است؛ چیزی ذخیره نشد.")
+    translation = _normalize_translation_field(raw_translation)
+    summary = _normalize_summary_field(raw_summary)
+    if translation is None or summary is None:
+        raise TranslationError("پاسخ AI فاقد ترجمه یا خلاصهٔ معتبر است؛ چیزی ذخیره نشد.")
+    return translation, summary
+
+
 def parse_context_response(response: str, source_texts: list[str], context_limit: int) -> tuple[str, str]:
     """Accept both pieces together only after validating structure and boundaries."""
     def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -132,6 +226,9 @@ def parse_context_response(response: str, source_texts: list[str], context_limit
     if not isinstance(response, str) or len(response) > 200_000:
         raise TranslationError("پاسخ AI خالی یا بیش از حد بزرگ است؛ ترجمه و خلاصه ذخیره نشدند.")
     text = response.strip()
+    stripped_reasoning = _REASONING_TAG_RE.sub("", text).strip()
+    if stripped_reasoning:
+        text = stripped_reasoning
     decoder = json.JSONDecoder(object_pairs_hook=unique_object)
     try:
         value = decoder.decode(text)
@@ -159,14 +256,15 @@ def parse_context_response(response: str, source_texts: list[str], context_limit
         if len(objects) != 1 or unparsed_object:
             raise TranslationError("پاسخ AI در قالب JSON معتبر و بدون ابهام نیست؛ ترجمه و خلاصه ذخیره نشدند.") from exc
         value = objects[0]
-    if not isinstance(value, dict) or not isinstance(value.get("translation"), str) or not isinstance(value.get("summary"), str):
+    if not isinstance(value, dict):
         raise TranslationError("پاسخ AI فاقد ترجمه یا خلاصهٔ معتبر است؛ چیزی ذخیره نشد.")
-    translation = value["translation"].strip()
+    raw_translation, raw_summary = _extract_context_fields(value)
+    translation = raw_translation.strip()
     # The prompt asks the model to obey this exact dynamic budget, but model
     # output is not guaranteed. Normalize it locally so an overlong summary
     # cannot discard an otherwise valid translation or consume the next request's
     # budget. Prefer a whole-word boundary when one is close to the cap.
-    summary = shorten_context(value["summary"], context_limit)
+    summary = shorten_context(raw_summary, context_limit)
     # Verify line-to-block mapping before callers commit either result.
     distribute_translation(source_texts, translation)
     return translation, summary

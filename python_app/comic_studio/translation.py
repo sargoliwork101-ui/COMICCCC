@@ -374,6 +374,8 @@ def _content_text(content: Any) -> str:
         if isinstance(part, str):
             parts.append(part)
         elif isinstance(part, dict):
+            if part.get("type") in {"thinking", "reasoning", "thought"} or part.get("thought") is True:
+                continue
             text = part.get("text")
             if isinstance(text, str):
                 parts.append(text)

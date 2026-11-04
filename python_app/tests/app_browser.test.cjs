@@ -165,7 +165,7 @@ function nextDownload(cdp, directory) {
         aiGenerations.push(text);
         const reply = translation => JSON.stringify({choices:[{message:{content:JSON.stringify({translation,summary:'جان دوست مری است'})}}]});
         if (text.includes('FENCED PAGE')) response.end(JSON.stringify({choices:[{message:{content:'Here is the result:\n```json\n'+JSON.stringify({translation:'صفحه حصار',summary:'خلاصه'})+'\n```'}}]}));
-        else if (text.includes('BROKEN RESPONSE')) response.end(JSON.stringify({choices:[{message:{content:JSON.stringify({translation:'خصوصی پاسخ'})}}]}));
+        else if (text.includes('BROKEN RESPONSE')) response.end(JSON.stringify({choices:[{message:{content:JSON.stringify({broken_output:'خصوصی پاسخ'})}}]}));
         else if (text.includes('HEADER SAME') && dedupFailuresRemaining > 0) { dedupFailuresRemaining -= 1; response.statusCode = 503; response.end(JSON.stringify({error:{message:'temporary failure'}})); }
         else if (text.includes('HEADER SAME')) { response.end(reply('عنوان مشترک\nمحتوای اول')); }
         else if (text.includes('DEDUP SECOND')) { response.end(reply('محتوای دوم')); }
@@ -2177,7 +2177,9 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert.deepEqual(nativeBrowserDialogs, [], `expected zero native dialogs in v3.69 flow, got: ${nativeBrowserDialogs.join(' | ')}`);
     console.log('PASS: v3.69 all 13 OCR models auto-setup, Persian GPU warning modal, top update banner, and 1-click update');
 
-    // v3.71: Interactive Help Center (#helpTopBtn, #helpMenuBtn, F1 contextual jump inside editor, search, 13 sections + examples)
+    // v3.71 / v3.79: Interactive Help Center (#helpTopBtn, F1 contextual jump inside editor, search, 13 sections + examples; removed from #menu)
+    assert.equal(await page.$('#helpMenuBtn'), null);
+    assert.equal(await page.$('#menu .hint'), null);
     await page.click('#helpTopBtn');
     await page.waitForSelector('#helpDialog[open]');
     assert.equal(await page.$$eval('#helpNavList .help-nav-item', (els) => els.length), 13);

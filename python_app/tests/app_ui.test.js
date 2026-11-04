@@ -1039,14 +1039,11 @@ function check(name, condition) {
     $('helpViewChapterBtn').click();
     window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     check('Escape closes #helpDialog cleanly', $('helpDialog').open === false);
-    $('menuBtn').click();
-    $('helpMenuBtn').click();
-    check('clicking Help inside hamburger menu opens #helpDialog and closes #menu', $('helpDialog').open === true && $('menu').classList.contains('hidden'));
-    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
-    check('pressing F1 while #helpDialog is open toggles it closed', $('helpDialog').open === false);
+    check('hamburger menu excludes Help button and backup hint while Help Chapter 2 documents backup details', !$('helpMenuBtn') && !window.document.querySelector('#menu .hint') && window.ComicHelpGuide.HELP_SECTIONS[1].features.some((f) => f.includes('بک‌آپ شامل تصاویر، متن‌ها، پیش‌نمایش‌ها')));
     window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
     check('pressing F1 opens #helpDialog from anywhere', $('helpDialog').open === true);
-    vm.runInContext(`closeDialog('helpDialog')`, context);
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+    check('pressing F1 while #helpDialog is open toggles it closed', $('helpDialog').open === false);
   }
 
   // v3.72 / v3.77: Compact #ocrDialog (no #ocrSuitabilityPanel box; full 13-model matrix in Help) + subtle #ocrEngine & #modelsDialog suitability indicators
