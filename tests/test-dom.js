@@ -124,8 +124,10 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.58', manifest.version === '2.58' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۵۸'));
+  check('manifest and viewer version badge are synchronized at 2.59', manifest.version === '2.59' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۵۹'));
+  check('viewer.css contains no literal escaped newline token before .blk-copy-orig.copied',
+    !fs.readFileSync(path.join(ROOT, 'viewer.css'), 'utf8').includes('\\n.blk-copy-orig.copied'));
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(fs.readFileSync(path.join(ROOT, 'viewer.css'), 'utf8')));
   check('PDF-to-image import opens the dedicated converter tab',
@@ -230,7 +232,16 @@ const $ = (id) => window.document.getElementById(id);
   ev('duplicateItem(items[0])');
   check('duplicate added', items.length === before + 1 && items[items.length - 1].dupNo === 1);
   const dup = items[items.length - 1];
+  ev('duplicateItem(items[0])');
+  const dup2 = items[items.length - 1];
+  check('second duplicate gets dupNo=2', dup2.dupNo === 2);
   ev(`deleteItem(items.find((x) => x.uid === ${dup.uid}))`);
+  ev('duplicateItem(items[0])');
+  const itemsWithDup3 = ev('items');
+  const dup3 = itemsWithDup3[itemsWithDup3.length - 1];
+  check('duplicate after deleting dupNo=1 gets unique dupNo=3 (never collides with dupNo=2)', dup3.dupNo === 3);
+  ev(`deleteItem(items.find((x) => x.uid === ${dup2.uid}))`);
+  ev(`deleteItem(items.find((x) => x.uid === ${dup3.uid}))`);
   const itemsAfterDelete = ev('items'); // deleteItem reassigns the global items binding
   check('delete removed', itemsAfterDelete.length === before && $('grid').children.length === before);
 

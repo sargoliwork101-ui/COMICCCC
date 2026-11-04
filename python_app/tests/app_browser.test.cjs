@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85 / v3.86: Verify version badge ۳.۸۶, async thumbnail decoding, hardware cpuCores endpoint, and Help section 5 GPU/multi-core guide
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۸۶ · Python', 'header shows version ۳.۸۶');
+      // v3.85–v3.87: Verify version badge ۳.۸۷, async thumbnail decoding, hardware cpuCores endpoint, and Help section 5 GPU/multi-core guide
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۸۷ · Python', 'header shows version ۳.۸۷');
       const hwReport = await api(base, '/api/engines/hardware');
       assert.ok(Number(hwReport.cpuCores) >= 1 && typeof hwReport.hasGpu === 'boolean', '/api/engines/hardware reports cpuCores and hasGpu');
       await page.keyboard.press('F1');

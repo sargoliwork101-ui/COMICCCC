@@ -780,7 +780,7 @@
       const textTop = st.verticalAlign === 'top' ? layoutBox.y0 + insetY
         : st.verticalAlign === 'bottom' ? layoutBox.y1 - insetY - totalH
         : (layoutBox.y0 + layoutBox.y1 - totalH) / 2;
-      let y = textTop + (inline ? f.lineLh[0] : f.lh) / 2;
+      let y = textTop + (inline ? (f.lineLh[0] || f.lh) : f.lh) / 2;
       // لنگر هر خط بر اساس چیدمان انتخابی، با حاشیهٔ کوچک از لبهٔ کادر
       const anchorX = st.align === 'left' || (st.align === 'justify' && st.dir === 'ltr') ? layoutBox.x0 + padX
         : st.align === 'center' ? (layoutBox.x0 + layoutBox.x1) / 2

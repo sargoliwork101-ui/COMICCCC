@@ -373,8 +373,9 @@ function makeHarness(pageUrl, fetchImpl) {
     comic.appendChild(h.img('https://cdn.test/comic-1.jpg', 300, 420));
     comic.appendChild(h.img('https://cdn.test/comic-2.jpg', 300, 420));
     h.window.document.body.appendChild(comic);
-    // decoy big image outside the container that generic scanning would collect
+    // decoy big images outside the container (including non-banner URLs) that generic scroll scanning would collect
     h.window.document.body.appendChild(h.img('https://cdn.test/banner-ad.jpg', 500, 300));
+    h.window.document.body.appendChild(h.img('https://cdn.test/extra-cover-photo.jpg', 500, 420));
 
     const targeted = await h.window.eval('scrapeAndSend("c.pdf", "scroll", { imageSelector: ".comic img" })');
     const job1 = h.urlJobs().slice(-1)[0];

@@ -430,10 +430,11 @@ function makeCard(it) {
 function makeDuplicateData(source) {
   const state = { ...source };
   delete state.el; // مرجع DOM کارت مبدأ نباید به نسخهٔ کپی منتقل شود
+  const nextDupNo = items.reduce((max, it) => (it.i === source.i ? Math.max(max, it.dupNo || 0) : max), 0) + 1;
   return {
     ...state,
     uid: nextItemUid++,
-    dupNo: items.filter((it) => it.i === source.i).length,
+    dupNo: nextDupNo,
     selected: true,
     pageGroup: null,
     cropRect: source.cropRect ? { ...source.cropRect } : null,
@@ -1595,12 +1596,13 @@ function handleOverlayKeydown(e) {
 // ---------- آماده‌سازی تصاویر برای PDF ----------
 async function decodeSlices(it, maxSrcH) {
   // it می‌تواند خود تصویر یا نسخهٔ ویرایش‌شده (edited) باشد
+  const stepH = Math.max(1, maxSrcH);
   const bmp = await createImageBitmap(it.blob, { imageOrientation: 'none' });
   const asPng = it.info && it.info.fmt === 'PNG';
   const segs = [];
   try {
-    for (let y = 0; y < bmp.height; y += maxSrcH) {
-      const sh = Math.min(maxSrcH, bmp.height - y);
+    for (let y = 0; y < bmp.height; y += stepH) {
+      const sh = Math.min(stepH, bmp.height - y);
       const canvas = document.createElement('canvas');
       canvas.width = bmp.width;
       canvas.height = sh;
@@ -1618,7 +1620,7 @@ async function decodeSlices(it, maxSrcH) {
 
 async function prepare(it, r) {
   const src = await getDisplaySource(it);
-  const rawMax = Math.floor(PdfBuilder.SAFE_PT / r);
+  const rawMax = Math.max(1, Math.floor(PdfBuilder.SAFE_PT / Math.max(r, 1e-6)));
   const inf = src.info;
   const key = it.pdfKey || it.uid || it.i;
   // فایل JPEG/PNG بدون هیچ فشرده‌سازی مجدد
@@ -1626,7 +1628,7 @@ async function prepare(it, r) {
     const u8 = new Uint8Array(await src.blob.arrayBuffer());
     return [{ data: u8, fmt: inf.fmt, w: inf.w, h: inf.h, alias: `i${key}` }];
   }
-  return decodeSlices({ i: key, pdfKey: key, blob: src.blob, info: src.info }, Math.min(rawMax, MAX_CANVAS_H));
+  return decodeSlices({ i: key, pdfKey: key, blob: src.blob, info: src.info }, Math.max(1, Math.min(rawMax, MAX_CANVAS_H)));
 }
 
 async function fallback(seg) {

@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,7 +10,10 @@ _LOCAL_PYTHON = _APP_DIR / ".venv" / ("Scripts/python.exe" if os.name == "nt" el
 _IN_APP_VENV = Path(sys.prefix).resolve() == (_APP_DIR / ".venv").resolve()
 
 if __name__ == "__main__" and not _IN_APP_VENV and _LOCAL_PYTHON.is_file():
-    os.execv(str(_LOCAL_PYTHON), [str(_LOCAL_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+    _HANDOFF_ARGV = [str(_LOCAL_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]]
+    if os.name == "nt":
+        raise SystemExit(subprocess.call(_HANDOFF_ARGV))
+    os.execv(str(_LOCAL_PYTHON), _HANDOFF_ARGV)
 
 # Keep dependency failures actionable when run.py is launched before the local venv exists.
 _REQUIRED_IMPORTS = {

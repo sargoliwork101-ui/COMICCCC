@@ -978,7 +978,7 @@ def _build_flowing_paragraphs_xml(block: dict[str, Any], *, docx_mode: str) -> s
         rich_html = ""
         rtl_default = bool(_RTL_CHAR_RE.search(plain))
         align_default = "justify" if role == "paragraph" and len(plain) >= 60 else ("right" if rtl_default else "left")
-        bold_default = True if role == "heading" else (block.get("bold") is True and block.get("pageRole") is not None)
+        bold_default = True if role == "heading" else (block.get("bold") is True)
     else:
         plain = _block_translation_plain(block)
         rich_html = _clean_text(block.get("richHtml") or "").strip()
@@ -986,12 +986,7 @@ def _build_flowing_paragraphs_xml(block: dict[str, Any], *, docx_mode: str) -> s
         rtl_default = (dir_field == "rtl") if dir_field in ("rtl", "ltr") else (True if not plain else bool(_RTL_CHAR_RE.search(plain) or not re.search(r"[A-Za-z]", plain)))
         raw_align = str(block.get("align") or "")
         align_default = raw_align if raw_align in ("left", "right", "center", "justify") else ("right" if role == "heading" and rtl_default else ("left" if role == "heading" else "justify"))
-        if role == "heading":
-            bold_default = True
-        elif block.get("pageRole") in ("paragraph", "list"):
-            bold_default = block.get("bold") is True
-        else:
-            bold_default = False
+        bold_default = True if role == "heading" else (block.get("bold") is True)
 
     base_pt = 15.0 if role == "heading" else 12.0
     explicit_color = _parse_css_color(block.get("color")) or "141414"
@@ -1798,7 +1793,7 @@ def _build_flowing_pptx(
                 default_color = _parse_css_color(blk.get("color")) or ("1E1B4B" if role == "heading" else "1E293B")
                 raw_align = str(blk.get("align") or "")
                 align_default = raw_align if raw_align in ("left", "right", "center", "justify") else ("right" if rtl_default else "left")
-                bold_default = True if role == "heading" else (blk.get("bold") is True and blk.get("pageRole") is not None)
+                bold_default = True if role == "heading" else (blk.get("bold") is True)
                 base_style = {
                     "bold": bold_default,
                     "italic": bool(blk.get("italic")),

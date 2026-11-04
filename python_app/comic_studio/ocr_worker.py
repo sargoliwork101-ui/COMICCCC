@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import gc
 import html
@@ -613,7 +614,10 @@ class _DotsOcrAdapter(_TransformersRegionAdapter):
         with Image.open(image_path) as im:
             rgb = im.convert("RGB")
             width, height = rgb.size
-        raw = self._infer_crop(rgb, max_tokens=2048)
+        try:
+            raw = self._infer_crop(rgb, max_tokens=2048)
+        finally:
+            rgb.close()
         match = re.search(r"\[.*\]", raw, flags=re.DOTALL)
         if match:
             try:
@@ -709,24 +713,27 @@ def main() -> int:
     parser.add_argument("--language", default="eng")
     args = parser.parse_args()
 
+    protocol_out = sys.stdout
     models_root = Path(args.models_root).resolve()
     _configure_cache_dirs(models_root)
-    adapter = _create_adapter(args.engine, models_root)
+    with contextlib.redirect_stdout(sys.stderr):
+        adapter = _create_adapter(args.engine, models_root)
 
     if args.prepare:
         try:
-            revision = adapter.prepare(args.language)
-            sys.stdout.write(json.dumps({"ok": True, "modelRevision": revision}) + "\n")
-            sys.stdout.flush()
+            with contextlib.redirect_stdout(sys.stderr):
+                revision = adapter.prepare(args.language)
+            protocol_out.write(json.dumps({"ok": True, "modelRevision": revision}) + "\n")
+            protocol_out.flush()
             return 0
         except Exception as exc:
-            sys.stdout.write(json.dumps({"ok": False, "error": f"{exc}\n{traceback.format_exc()[-1000:]}"}) + "\n")
-            sys.stdout.flush()
+            protocol_out.write(json.dumps({"ok": False, "error": f"{exc}\n{traceback.format_exc()[-1000:]}"}) + "\n")
+            protocol_out.flush()
             return 1
 
     if args.serve:
-        sys.stdout.write(json.dumps({"ready": True, "engine": args.engine}) + "\n")
-        sys.stdout.flush()
+        protocol_out.write(json.dumps({"ready": True, "engine": args.engine}) + "\n")
+        protocol_out.flush()
         for raw_line in sys.stdin:
             line = raw_line.strip()
             if not line:
@@ -736,23 +743,24 @@ def main() -> int:
                 if req.get("cmd") == "ping":
                     resp = {"ok": True, "pong": True}
                 elif req.get("cmd") == "quit":
-                    sys.stdout.write(json.dumps({"ok": True, "bye": True}) + "\n")
-                    sys.stdout.flush()
+                    protocol_out.write(json.dumps({"ok": True, "bye": True}) + "\n")
+                    protocol_out.flush()
                     return 0
                 else:
                     try:
-                        out_lines = adapter.recognize(
-                            req["imagePath"],
-                            req.get("language", "eng"),
-                            req.get("regions"),
-                        )
+                        with contextlib.redirect_stdout(sys.stderr):
+                            out_lines = adapter.recognize(
+                                req["imagePath"],
+                                req.get("language", "eng"),
+                                req.get("regions"),
+                            )
                         resp = {"ok": True, "lines": out_lines}
                     finally:
                         _release_worker_caches()
             except Exception as exc:
                 resp = {"ok": False, "error": str(exc)}
-            sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+            protocol_out.write(json.dumps(resp, ensure_ascii=False) + "\n")
+            protocol_out.flush()
         return 0
 
     return 2

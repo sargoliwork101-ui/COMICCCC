@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import csv
 import importlib.util
 import io
@@ -67,6 +68,14 @@ BUBBLE_MIN_REGION_CONFIDENCE = 60.0
 # Several tabs may request preparation together; never run two pip processes at once.
 _INSTALL_LOCK = threading.Lock()
 
+
+def _win_subprocess_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if no_win:
+            return {"creationflags": no_win}
+    return {}
+
 LANGUAGES = {
     "eng": {"name": "English", "source": "en"},
     "kor": {"name": "한국어", "source": "ko"},
@@ -101,7 +110,7 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
     emit(f"{action_label} بسته‌های OCR آغاز شد: {', '.join(packages)}", progress=0.18)
     try:
         with _INSTALL_LOCK:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False, **_win_subprocess_kwargs())
     except Exception as exc:
         emit(f"نصب بسته‌های OCR ناموفق بود: {exc}", "error")
         raise OcrError(f"Could not install the OCR runtime: {exc}") from exc
@@ -763,7 +772,17 @@ class TesseractEngine:
     def __init__(self) -> None:
         self._system_languages: set[str] | None = None
         self._lock = threading.Lock()
-        self._omp_threads: int | None = None
+        self._omp_threads_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+            f"tesseract_omp_threads_{id(self)}", default=None,
+        )
+
+    @property
+    def _omp_threads(self) -> int | None:
+        return self._omp_threads_var.get()
+
+    @_omp_threads.setter
+    def _omp_threads(self, value: int | None) -> None:
+        self._omp_threads_var.set(value)
 
     @contextlib.contextmanager
     def configure_batch(self, total_pages: int, threads_per_worker: int | None = None):
@@ -772,12 +791,11 @@ class TesseractEngine:
         else:
             workers = max(1, int(total_pages))
             computed_threads = int(threads_per_worker)
-        prev = self._omp_threads
-        self._omp_threads = max(1, min(4, int(computed_threads)))
+        token = self._omp_threads_var.set(max(1, min(4, int(computed_threads))))
         try:
             yield workers
         finally:
-            self._omp_threads = prev
+            self._omp_threads_var.reset(token)
 
     @property
     def runtime_installed(self) -> bool:
@@ -806,7 +824,7 @@ class TesseractEngine:
         if not executable:
             return set()
         try:
-            result = subprocess.run([executable, "--list-langs"], capture_output=True, text=True, timeout=30, check=False)
+            result = subprocess.run([executable, "--list-langs"], capture_output=True, text=True, timeout=30, check=False, **_win_subprocess_kwargs())
             if result.returncode == 0:
                 self._system_languages = {line.strip() for line in result.stdout.splitlines()[1:] if line.strip()}
             else:
@@ -941,7 +959,12 @@ class TesseractEngine:
         if language not in self.ready_languages:
             raise OcrError(f"Tesseract language {language} is not ready. Use the explicit model download button first.")
         buffer = io.BytesIO()
-        _to_white_backed_rgb(image).save(buffer, "PNG", dpi=(300, 300))
+        rgb = _to_white_backed_rgb(image)
+        try:
+            rgb.save(buffer, "PNG", dpi=(300, 300))
+        finally:
+            if rgb is not image:
+                rgb.close()
         command = [
             executable, "stdin", "stdout",
             "-l", language,
@@ -957,7 +980,7 @@ class TesseractEngine:
         omp_limit = self._omp_threads if self._omp_threads is not None else min(4, cpu_core_count())
         tess_env["OMP_THREAD_LIMIT"] = str(max(1, omp_limit))
         try:
-            result = subprocess.run(command, input=buffer.getvalue(), env=tess_env, capture_output=True, timeout=180, check=False)
+            result = subprocess.run(command, input=buffer.getvalue(), env=tess_env, capture_output=True, timeout=180, check=False, **_win_subprocess_kwargs())
         except Exception as exc:
             raise OcrError(f"Tesseract failed: {exc}") from exc
         if result.returncode:
@@ -1801,7 +1824,8 @@ def _document_preprocess_image(image: Image.Image) -> tuple[Image.Image, float]:
     try:
         rgb = np.asarray(base)
     finally:
-        base.close()
+        if base is not image:
+            base.close()
     scale = float(DOCUMENT_FALLBACK_SCALE) if rgb.shape[0] * rgb.shape[1] <= PRECISE_UPSCALE_MAX_PIXELS else 1.0
     if scale > 1.0:
         rgb = cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
@@ -1827,7 +1851,7 @@ def recognize_image(
     primary = _recognize_image_primary(
         engine, image, language, contrast, precise, min_confidence, page_mode=page_mode,
     )
-    if isinstance(engine, IsolatedOcrEngine) and primary:
+    if isinstance(engine, IsolatedOcrEngine):
         return primary
     if not _needs_extra_preprocess(primary):
         return primary

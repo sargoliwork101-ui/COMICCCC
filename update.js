@@ -40,7 +40,13 @@
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (!data || !data.content) throw new Error('پاسخ گیت‌هاب معتبر نیست');
-    const json = JSON.parse(atob(data.content.replace(/\s/g, '')));
+    const binary = atob(data.content.replace(/\s/g, ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i) & 0xff;
+    const text = typeof globalThis.TextDecoder === 'function'
+      ? new globalThis.TextDecoder('utf-8').decode(bytes)
+      : decodeURIComponent(Array.from(bytes, (b) => `%${b.toString(16).padStart(2, '0')}`).join(''));
+    const json = JSON.parse(text);
     if (!json.version) throw new Error('نسخه در manifest شاخه پیدا نشد');
     return json.version;
   }

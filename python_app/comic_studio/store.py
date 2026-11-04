@@ -145,7 +145,7 @@ class ProjectStore:
         return sorted(result, key=lambda item: item["updatedAt"], reverse=True)
 
     def get(self, project_id: str) -> dict[str, Any]:
-        if not project_id.isalnum():
+        if not project_id.isascii() or not project_id.isalnum():
             raise KeyError(project_id)
         state = read_json(project_root(project_id) / "project.json", None)
         if not state:
@@ -256,7 +256,8 @@ class ProjectStore:
             raise ValueError(f"Image is too large: {filename}")
         try:
             with Image.open(io.BytesIO(content)) as im:
-                image_format = (im.format or "PNG").upper()
+                raw_format = (im.format or "PNG").upper()
+                image_format = "JPEG" if raw_format == "MPO" else raw_format
                 width, height = im.size
                 if width < 1 or height < 1 or width * height > 100_000_000:
                     raise ValueError(f"Invalid image dimensions: {filename}")
@@ -468,7 +469,8 @@ class ProjectStore:
             raise ValueError(f"Image is too large: {filename}")
         try:
             with Image.open(io.BytesIO(content)) as im:
-                image_format = (im.format or "PNG").upper()
+                raw_format = (im.format or "PNG").upper()
+                image_format = "JPEG" if raw_format == "MPO" else raw_format
                 width, height = im.size
                 if width < 1 or height < 1 or width * height > 100_000_000:
                     raise ValueError(f"Invalid image dimensions: {filename}")

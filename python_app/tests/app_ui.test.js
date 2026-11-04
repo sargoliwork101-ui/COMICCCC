@@ -1514,6 +1514,21 @@ function check(name, condition) {
       })()
     `, context);
     check('applyTranslatedBlockDefaults sets regular non-bold weight (bold: false) on placed translations', nonBoldDefault === true);
+
+    // v3.87: openEditor rolls back state.editorId / editorSessionSnapshot and closes #editorDialog if image fetch fails
+    window.fetch = async (url, init) => {
+      if (String(url).includes('/images/')) return { ok: false, status: 500, blob: async () => new Blob([]) };
+      return origFetchV381(url, init);
+    };
+    let openFailed = false;
+    try {
+      await vm.runInContext("openEditor(state.project.images[0].id)", context);
+    } catch {
+      openFailed = true;
+    }
+    check('openEditor cleans up state and closes dialog on image load failure',
+      openFailed && !$('editorDialog').open && vm.runInContext('state.editorId === null && editorSessionSnapshot === null', context));
+    check('#downloadLink keeps its svg.btn-ico child', !!$('downloadLink').querySelector('svg.btn-ico'));
     window.fetch = origFetchV381;
   }
 

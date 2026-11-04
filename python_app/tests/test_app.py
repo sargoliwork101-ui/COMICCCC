@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.86"
+    assert health.json()["version"] == "3.87"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۸۶ · Python</span>' in index_html
+    assert '<span class="ver">۳.۸۷ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -2885,6 +2885,72 @@ def test_v386_project_export_name_sync_and_non_bold_translation_defaults(client)
         slide_xml = zppt.read("ppt/slides/slide1.xml").decode("utf-8")
         assert "سلام دوستان" in slide_xml
         assert ' b="1"' not in slide_xml
+
+
+def test_v387_audit_project_id_validation_404_routes_mpo_jpeg_and_flowing_bold(client, monkeypatch):
+    from comic_studio import backup
+    from comic_studio.store import ProjectStore
+
+    # 1. Non-ASCII alphanumeric strings (e.g. Persian digits "۱۲۳۴") are rejected cleanly with 404
+    assert client.get("/api/projects/۱۲۳۴").status_code == 404
+    assert client.post("/api/projects/missing999/duplicate", json=["img1"]).status_code == 404
+    assert client.post("/api/projects/missing999/delete", json=["img1"]).status_code == 404
+
+    # 2. MPO camera JPEG format is normalized to JPEG (.jpg) across import, export, and backup/restore
+    project = client.post("/api/projects", json={"name": "آزمون ممیزی"}).json()
+    pid = project["id"]
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (220, 210, 200)).save(buf, "JPEG", quality=92)
+    raw_jpg = buf.getvalue()
+
+    real_open = Image.open
+
+    def mpo_open(fp, *args, **kwargs):
+        im = real_open(fp, *args, **kwargs)
+        if getattr(im, "format", None) == "JPEG":
+            im.format = "MPO"
+        return im
+
+    monkeypatch.setattr(Image, "open", mpo_open)
+    imported = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("camera-shot.jpg", raw_jpg, "image/jpeg"))],
+    )
+    assert imported.status_code == 200, imported.text
+    img = imported.json()["images"][0]
+    assert img["format"] == "JPEG"
+    assert img["file"].endswith(".jpg")
+
+    backup_res = client.post(f"/api/projects/{pid}/backup", json={"drafts": []})
+    assert backup_res.status_code == 200
+    restored, _ = backup.restore_backup(ProjectStore(), io.BytesIO(backup_res.content))
+    assert restored["images"][0]["format"] == "JPEG"
+    monkeypatch.setattr(Image, "open", real_open)
+
+    # 3. Flowing DOCX and Flowing PPTX honor explicit user Bold=True on blocks without pageRole while keeping Bold=False normal
+    state = imported.json()
+    state["images"][0]["blocks"] = [
+        {"id": 1, "text": "Plain line", "tr": "خط معمولی بدون بولد", "bold": False, "x0": 5, "y0": 5, "x1": 55, "y1": 20, "polygon": [[5, 5], [55, 5], [55, 20], [5, 20]], "enabled": True},
+        {"id": 2, "text": "Bold line", "tr": "خط تأکیدی بولد", "bold": True, "x0": 5, "y0": 24, "x1": 55, "y1": 42, "polygon": [[5, 24], [55, 24], [55, 42], [5, 42]], "enabled": True},
+    ]
+    assert client.put(f"/api/projects/{pid}/state", json={"state": state}).status_code == 200
+
+    flow_docx = client.post(f"/api/projects/{pid}/export", json={"kind": "docx", "image_ids": [img["id"]], "docx_layout": "flowing"})
+    assert flow_docx.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(flow_docx.content)) as zdoc:
+        doc_xml = zdoc.read("word/document.xml").decode("utf-8")
+        assert "خط معمولی بدون بولد" in doc_xml
+        assert "خط تأکیدی بولد" in doc_xml
+        assert "<w:b/>" in doc_xml
+
+    flow_pptx = client.post(f"/api/projects/{pid}/export", json={"kind": "pptx", "image_ids": [img["id"]], "pptx_layout": "flowing"})
+    assert flow_pptx.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(flow_pptx.content)) as zppt:
+        slide_xml = zppt.read("ppt/slides/slide1.xml").decode("utf-8")
+        assert "خط معمولی بدون بولد" in slide_xml
+        assert "خط تأکیدی بولد" in slide_xml
+        assert slide_xml.count(' b="1"') == 1  # only the bold block has b="1", not the normal block
+
 
 
 

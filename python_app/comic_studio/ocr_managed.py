@@ -1407,6 +1407,7 @@ class IsolatedOcrEngine:
         self._spec = ISOLATED_ENGINE_SPECS[engine_id]
         self._worker_lock = threading.Lock()
         self._worker_proc: subprocess.Popen[str] | None = None
+        self._worker_stderr_tail: deque[str] = deque(maxlen=40)
         atexit.register(self.close)
 
     def _env_dir(self) -> Path:
@@ -1465,7 +1466,9 @@ class IsolatedOcrEngine:
         with self._worker_lock:
             proc = self._worker_proc
             self._worker_proc = None
-            if proc is not None and proc.poll() is None:
+            if proc is None:
+                return
+            if proc.poll() is None:
                 pid = proc.pid
                 try:
                     if proc.stdin:
@@ -1490,12 +1493,12 @@ class IsolatedOcrEngine:
                         proc.wait(timeout=2)
                     except Exception:
                         pass
-                for stream in (proc.stdin, proc.stdout, proc.stderr):
-                    if stream is not None:
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
 
     def _worker_env(self) -> dict[str, str]:
         env = dict(os.environ)
@@ -1877,6 +1880,15 @@ class IsolatedOcrEngine:
     def _ensure_worker(self) -> subprocess.Popen[str]:
         if self._worker_proc is not None and self._worker_proc.poll() is None:
             return self._worker_proc
+        if self._worker_proc is not None:
+            for stale_stream in (self._worker_proc.stdin, self._worker_proc.stdout, self._worker_proc.stderr):
+                if stale_stream is not None:
+                    try:
+                        stale_stream.close()
+                    except Exception:
+                        pass
+            self._worker_proc = None
+        self._worker_stderr_tail.clear()
         worker_script = _worker_script_path()
         proc = subprocess.Popen(
             [
@@ -1891,14 +1903,43 @@ class IsolatedOcrEngine:
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            errors="replace",
             bufsize=1,
             env=self._worker_env(),
             creationflags=_SUBPROCESS_NO_WINDOW if os.name == "nt" else 0,
         )
+        stderr_tail = self._worker_stderr_tail
+
+        def _drain_worker_stderr() -> None:
+            stream = proc.stderr
+            if stream is None:
+                return
+            try:
+                for raw in stream:
+                    for part in raw.replace("\r", "\n").splitlines():
+                        cleaned = part.strip()
+                        if cleaned:
+                            stderr_tail.append(cleaned)
+            except Exception:
+                pass
+
+        err_thread = threading.Thread(target=_drain_worker_stderr, daemon=True)
+        err_thread.start()
         banner = proc.stdout.readline().strip() if proc.stdout else ""
         if not banner:
-            err_tail = proc.stderr.read()[-800:] if proc.stderr else ""
-            proc.kill()
+            try:
+                proc.kill()
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+            err_thread.join(timeout=1.0)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+            err_tail = "\n".join(stderr_tail)[-800:]
             raise self._error_cls(f"راه‌اندازی پردازشگر مدل {self.id} ناموفق بود: {err_tail}")
         self._worker_proc = proc
         return proc
@@ -1919,8 +1960,21 @@ class IsolatedOcrEngine:
                 proc.stdin.flush()
                 raw_resp = proc.stdout.readline().strip()
                 if not raw_resp:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        pass
+                    for stream in (proc.stdin, proc.stdout, proc.stderr):
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
                     self._worker_proc = None
-                    raise self._error_cls(f"پردازشگر مدل {self.id} به شکل غیرمنتظره‌ای بسته شد.")
+                    err_hint = ("\n".join(self._worker_stderr_tail))[-600:]
+                    suffix = f": {err_hint}" if err_hint else ""
+                    raise self._error_cls(f"پردازشگر مدل {self.id} به شکل غیرمنتظره‌ای بسته شد.{suffix}")
                 payload = json.loads(raw_resp)
                 if not payload.get("ok"):
                     raise self._error_cls(f"OCR failed ({self.id}): {payload.get('error')}")

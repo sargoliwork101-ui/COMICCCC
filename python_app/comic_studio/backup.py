@@ -180,9 +180,15 @@ def _read_json(archive: zipfile.ZipFile, name: str, limit: int, remaining_total:
 def _verify_image(path: Path, item: dict[str, Any], edited: bool) -> None:
     try:
         with Image.open(path) as image:
-            if image.size != (item['width'], item['height']) or (edited and image.format != 'PNG'):
+            actual_format = (image.format or '').upper()
+            if actual_format == 'MPO':
+                actual_format = 'JPEG'
+            expected_format = str(item.get('format', '')).upper()
+            if expected_format == 'MPO':
+                expected_format = 'JPEG'
+            if image.size != (item['width'], item['height']) or (edited and actual_format != 'PNG'):
                 raise BackupError('اندازه یا قالب تصویر با اطلاعات پروژه مطابقت ندارد.')
-            if not edited and image.format != str(item.get('format', '')).upper():
+            if not edited and actual_format != expected_format:
                 raise BackupError('قالب تصویر اصلی با اطلاعات پروژه مطابقت ندارد.')
             image.verify()
     except (OSError, UnidentifiedImageError, Image.DecompressionBombError, ValueError) as exc:

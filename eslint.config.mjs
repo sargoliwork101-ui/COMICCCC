@@ -20,7 +20,7 @@ export default [
         createImageBitmap: 'readonly', HTMLCanvasElement: 'readonly', HTMLElement: 'readonly',
         globalThis: 'readonly', module: 'readonly', exports: 'writable', self: 'readonly',
         getComputedStyle: 'readonly', URLSearchParams: 'readonly',
-        AbortController: 'readonly', ResizeObserver: 'readonly',
+        AbortController: 'readonly', ResizeObserver: 'readonly', TextDecoder: 'readonly',
         atob: 'readonly', btoa: 'readonly',
         // globals shared across the extension's classic scripts
         PdfBuilder: 'readonly', OcrTools: 'readonly', Typeset: 'readonly', TranslateTools: 'readonly',

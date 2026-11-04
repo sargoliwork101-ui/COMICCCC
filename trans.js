@@ -749,8 +749,15 @@ function exportText() {
 $('ocrEnabled').addEventListener('change', async () => {
   if (!$('ocrEnabled').checked) {
     TR.cancel = true;
+    clearTimeout(edTimer);
+    edDirty = false;
+    edFieldFocused = false;
+    activeRichEditor = null;
+    richSelectionRange = null;
+    if (EDI) await closeEditor();
+    if (!$('trDialog').classList.contains('hidden')) closeTrDialog();
     // خاموش‌کردن سراسری OCR، ترجمه‌های موقت را کنار می‌گذارد و تصویر اصلی را برمی‌گرداند.
-    items.forEach((it) => { it.ocr = null; it.edited = null; });
+    items.forEach((it) => { it.ocr = null; it.edited = null; it.cropCache = null; });
     refreshAll();
     items.filter((it) => it.state === 'ok').forEach((it) => drawThumb(it));
     if (TR.worker) {
@@ -794,6 +801,8 @@ $('editor').addEventListener('focusout', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  const extModal = $('extModal');
+  if (extModal && !extModal.classList.contains('hidden')) return;
   if (!$('editor').classList.contains('hidden')) closeEditor();
   else if (!$('trDialog').classList.contains('hidden')) closeTrDialog();
 });

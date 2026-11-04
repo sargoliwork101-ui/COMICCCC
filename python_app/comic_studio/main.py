@@ -339,6 +339,8 @@ def create_app() -> FastAPI:
             store.delete_project(project_id)
         except KeyError as exc:
             raise HTTPException(404, "پروژهٔ موردنظر پیدا نشد.") from exc
+        if project_id in context_locks and not context_locks[project_id].locked():
+            context_locks.pop(project_id, None)
         return Response(status_code=204)
 
     @app.put("/api/projects/{project_id}/state")
@@ -439,10 +441,12 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/duplicate")
     def duplicate(project_id: str, ids: list[str] = Body(...)) -> dict[str, Any]:
+        project(project_id)
         return store.duplicate(project_id, ids)
 
     @app.post("/api/projects/{project_id}/delete")
     def delete(project_id: str, ids: list[str] = Body(...)) -> dict[str, Any]:
+        project(project_id)
         return store.delete(project_id, ids)
 
     @app.get("/api/engines")

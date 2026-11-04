@@ -2163,7 +2163,10 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
     downloadUrl = URL.createObjectURL(blob);
     const link = $('downloadLink'); link.href = downloadUrl; link.download = parseExportFilename(disposition, `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`);
-    link.textContent = `دانلود ${link.download}`; link.classList.remove('hidden'); link.click();
+    const linkLabel = link.querySelector('span');
+    if (linkLabel) linkLabel.textContent = `دانلود ${link.download}`;
+    else link.textContent = `دانلود ${link.download}`;
+    link.classList.remove('hidden'); link.click();
     closeDialog('exportDialog'); closeDialog('docxExportDialog'); closeDialog('pptxExportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
   } catch (error) {
     if (exportCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
@@ -2985,9 +2988,19 @@ async function openEditor(imageId) {
     autoSaved: false,
   };
   $('editorStage').classList.remove('panning'); syncEditorApprovalHeader(item); $('blockList').textContent = ''; showDialog('editorDialog');
-  const response = await fetch(imageUrl(item));
-  if (response.ok === false) throw new Error('تصویر اصلی باز نشد');
-  const bitmap = await createImageBitmap(await response.blob());
+  let bitmap;
+  try {
+    const response = await fetch(imageUrl(item));
+    if (response.ok === false) throw new Error('تصویر اصلی باز نشد');
+    bitmap = await createImageBitmap(await response.blob());
+  } catch (error) {
+    if (loadSeq === editorLoadSeq && state.editorId === imageId) {
+      state.editorId = null;
+      editorSessionSnapshot = null;
+      closeDialog('editorDialog');
+    }
+    throw error;
+  }
   if (loadSeq !== editorLoadSeq || state.editorId !== imageId) { bitmap.close?.(); return; }
   state.editorBitmap?.close?.(); state.editorBitmap = bitmap; $('editorCanvas').width = state.editorBitmap.width; $('editorCanvas').height = state.editorBitmap.height; buildBlockList(); fitEditor(); drawEditor();
 }
@@ -4609,19 +4622,19 @@ async function revertEditor() {
 }
 
 // ---------- Crop with aspect ratio, moving, and eight handles ----------
-function cropItem() { return state.project.images.find((item) => item.id === state.cropId); }
-function openCrop(imageId) { state.cropId = imageId; const item = state.project.images.find((entry) => entry.id === imageId); state.crop = item.crop ? { ...item.crop } : null; $('cropRatio').value = String(item.crop?.ratio || 0); $('cropImage').src = imageUrl(item, !!item.edited); $('cropImage').onload = () => { normalizeCropInputs(); drawCropRect(); }; showDialog('cropDialog'); }
+function cropItem() { return state.project?.images.find((item) => item.id === state.cropId); }
+function openCrop(imageId) { const item = state.project?.images.find((entry) => entry.id === imageId); if (!item) return; state.cropId = imageId; state.crop = item.crop ? { ...item.crop } : null; $('cropRatio').value = String(item.crop?.ratio || 0); $('cropImage').src = imageUrl(item, !!item.edited); $('cropImage').onload = () => { normalizeCropInputs(); drawCropRect(); }; showDialog('cropDialog'); }
 function normalizeCropInputs() { const item = cropItem(); if (!item) return; const crop = state.crop || { x: 0, y: 0, w: item.width, h: item.height }; $('cropX').value = Math.round(crop.x); $('cropY').value = Math.round(crop.y); $('cropW').value = Math.round(crop.w); $('cropH').value = Math.round(crop.h); }
 function readCropInputs(event) { const item = cropItem(); if (!item) return; const x = Math.max(0, Math.min(item.width - 1, Number($('cropX').value) || 0)); const y = Math.max(0, Math.min(item.height - 1, Number($('cropY').value) || 0)); let w = Math.max(1, Math.min(item.width - x, Number($('cropW').value) || 1)); let h = Math.max(1, Math.min(item.height - y, Number($('cropH').value) || 1)); const ratio = Number($('cropRatio').value); if (ratio > 0) { if (event?.target?.id === 'cropH') { w = Math.min(item.width - x, h * ratio); h = w / ratio; } else { h = Math.min(item.height - y, w / ratio); w = h * ratio; } } state.crop = { x, y, w, h, ratio: ratio || 0 }; drawCropRect(); }
 function drawCropRect() { const item = cropItem(); const rect = $('cropRect'); if (!item || !state.crop || !$('cropImage').clientWidth) { rect.style.display = 'none'; return; } const sx = $('cropImage').clientWidth / item.width; const sy = $('cropImage').clientHeight / item.height; rect.style.display = 'block'; rect.style.left = `${state.crop.x * sx}px`; rect.style.top = `${state.crop.y * sy}px`; rect.style.width = `${state.crop.w * sx}px`; rect.style.height = `${state.crop.h * sy}px`; }
 function changeCropRatio() { const item = cropItem(); const ratio = Number($('cropRatio').value); if (!item || !ratio) { if (state.crop) state.crop.ratio = 0; return; } const old = state.crop || { x: 0, y: 0, w: item.width, h: item.height }; const cx = old.x + old.w / 2; const cy = old.y + old.h / 2; let w = Math.min(item.width, old.w); let h = w / ratio; if (h > item.height) { h = item.height; w = h * ratio; } state.crop = { x: Math.max(0, Math.min(item.width - w, cx - w / 2)), y: Math.max(0, Math.min(item.height - h, cy - h / 2)), w, h, ratio }; normalizeCropInputs(); drawCropRect(); }
 function cropPointerDown(event) {
-  const item = cropItem(); if (!item) return; const bounds = $('cropImage').getBoundingClientRect(); const handle = event.target.closest('#cropRect i'); const inside = event.target.closest('#cropRect');
+  const item = cropItem(); if (!item) return; const bounds = $('cropImage').getBoundingClientRect(); if (bounds.width <= 0 || bounds.height <= 0) return; const handle = event.target.closest('#cropRect i'); const inside = event.target.closest('#cropRect');
   let mode = 'draw'; let dir = ''; if (handle) { mode = 'resize'; dir = handle.dataset.dir; } else if (inside && state.crop) mode = 'move';
   state.cropPointer = { mode, dir, x: event.clientX, y: event.clientY, bounds, original: state.crop ? { ...state.crop } : null }; $('cropStage').setPointerCapture(event.pointerId); event.preventDefault();
 }
 function cropPointerMove(event) {
-  const start = state.cropPointer; const item = cropItem(); if (!start || !item) return; const b = start.bounds; const sx = item.width / b.width; const sy = item.height / b.height; const dx = (event.clientX - start.x) * sx; const dy = (event.clientY - start.y) * sy; const ratio = Number($('cropRatio').value) || 0;
+  const start = state.cropPointer; const item = cropItem(); if (!start || !item) return; const b = start.bounds; if (b.width <= 0 || b.height <= 0) return; const sx = item.width / b.width; const sy = item.height / b.height; const dx = (event.clientX - start.x) * sx; const dy = (event.clientY - start.y) * sy; const ratio = Number($('cropRatio').value) || 0;
   if (start.mode === 'draw') {
     const ax = (Math.max(b.left, Math.min(b.right, start.x)) - b.left) * sx;
     const ay = (Math.max(b.top, Math.min(b.bottom, start.y)) - b.top) * sy;

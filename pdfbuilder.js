@@ -27,7 +27,7 @@
     if (seamless) {
       // کل تصاویر در «یک» صفحه: مقیاس طوری انتخاب می‌شود که مجموع ارتفاع زیر سقف ۱۴۴۰۰ بماند
       let totalPx = 0;
-      o.items.forEach((it) => { totalPx += it.h * (W / it.w); });
+      o.items.forEach((it) => { totalPx += it.h * (W / Math.max(1, it.w)); });
       s = Math.min(s, SAFE_PT / Math.max(totalPx, 1));
     }
     let pdf = null, pages = 0, cancelled = false;

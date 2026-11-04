@@ -1267,6 +1267,69 @@ def test_v385_tesseract_omp_thread_partition_and_cross_vendor_hardware_summary(m
     assert hw["cpuCores"] == 12
 
 
+def test_v387_isolated_blank_page_no_fallback_and_worker_stdout_protocol(monkeypatch, tmp_path):
+    import io
+    import json
+    from comic_studio import ocr as ocr_mod
+    from comic_studio import ocr_managed as managed
+    from comic_studio import ocr_worker as worker_mod
+
+    # 1. Blank page on an IsolatedOcrEngine returns [] immediately without running extra/bubble/document VLM fallbacks
+    iso_engine = managed.IsolatedOcrEngine(
+        "surya",
+        ["eng"],
+        threading.Lock(),
+        ocr_mod.OcrLine,
+        ocr_mod.OcrError,
+    )
+    vlm_calls = 0
+
+    def fake_iso_recognize(crop, language, *, page_mode="auto"):
+        nonlocal vlm_calls
+        vlm_calls += 1
+        return []
+
+    monkeypatch.setattr(iso_engine, "recognize", fake_iso_recognize)
+    blank = Image.new("RGB", (240, 320), "white")
+    try:
+        out = ocr_mod.recognize_image(iso_engine, blank, "eng", page_mode="document")
+        assert out == []
+        assert vlm_calls == 1
+    finally:
+        blank.close()
+
+    # 2. ocr_worker.main redirects adapter stdout chatter to stderr so protocol stdout stays pure JSON lines
+    class ChatterAdapter:
+        def prepare(self, language: str) -> str:
+            print("Downloading noisy third-party banner to stdout...")
+            return "rev-clean"
+
+        def recognize(self, image_path: str, language: str, regions):
+            print("Inference progress 50% on stdout...")
+            return [{"text": "Clean protocol", "confidence": 0.95, "polygon": [[0, 0], [40, 0], [40, 20], [0, 20]]}]
+
+    monkeypatch.setattr(worker_mod, "_create_adapter", lambda eid, root: ChatterAdapter())
+    proto_out = io.StringIO()
+    proto_err = io.StringIO()
+    req_in = io.StringIO(
+        json.dumps({"imagePath": str(tmp_path / "dummy.png"), "language": "eng"}) + "\n"
+        + json.dumps({"cmd": "quit"}) + "\n"
+    )
+    monkeypatch.setattr(sys, "argv", ["ocr_worker.py", "--engine", "surya", "--models-root", str(tmp_path), "--serve"])
+    monkeypatch.setattr(sys, "stdout", proto_out)
+    monkeypatch.setattr(sys, "stderr", proto_err)
+    monkeypatch.setattr(sys, "stdin", req_in)
+    assert worker_mod.main() == 0
+    stdout_lines = [ln for ln in proto_out.getvalue().splitlines() if ln.strip()]
+    assert len(stdout_lines) == 3
+    parsed = [json.loads(ln) for ln in stdout_lines]
+    assert parsed[0]["ready"] is True
+    assert parsed[1]["ok"] is True and parsed[1]["lines"][0]["text"] == "Clean protocol"
+    assert parsed[2]["bye"] is True
+    assert "Inference progress 50% on stdout..." in proto_err.getvalue()
+
+
+
 
 
 
