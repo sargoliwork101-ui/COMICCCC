@@ -19,13 +19,17 @@ def _configure_cache_dirs(models_root: Path) -> None:
     paddlex_dir = models_root / "paddlex"
     torch_dir = models_root / "torch"
     surya_dir = models_root / "surya"
-    for directory in (hf_dir, paddlex_dir, torch_dir, surya_dir):
+    mineru_dir = models_root / "mineru"
+    for directory in (hf_dir, paddlex_dir, torch_dir, surya_dir, mineru_dir):
         directory.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(hf_dir))
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_dir / "hub"))
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(paddlex_dir))
     os.environ.setdefault("TORCH_HOME", str(torch_dir))
     os.environ.setdefault("MODEL_CACHE_DIR", str(surya_dir))
+    os.environ.setdefault("MINERU_HOME", str(mineru_dir))
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
     os.environ.setdefault("SURYA_INFERENCE_BACKEND", "llamacpp")
     os.environ.setdefault("SURYA_INFERENCE_PARALLEL", "1")
     os.environ.setdefault("SURYA_INFERENCE_CTX_SIZE", "16384")
@@ -230,37 +234,70 @@ def _default_regions(width: int, height: int, regions: list[list[float]] | None)
 
 class _BaseAdapter:
     hf_repo: str | None = None
+    hf_ignore_patterns: tuple[str, ...] | None = None
 
     def __init__(self, models_root: Path) -> None:
         self.models_root = models_root
 
-    def _safe_repo_folder_name(self) -> str:
-        assert self.hf_repo
+    def _safe_repo_folder_name(self, repo_override: str | None = None) -> str:
+        target = repo_override or self.hf_repo
+        assert target
         # Replace dots and special chars so transformers `trust_remote_code=True` dynamic module
         # imports never fail on dotted folder names like `rednote-hilab__dots.mocr`.
-        raw = self.hf_repo.replace("/", "__")
+        raw = target.replace("/", "__")
         return re.sub(r"[^A-Za-z0-9_-]+", "_", raw)
+
+    def _resolve_hf_repo_revision(self, repo_id: str, endpoint: str | None = None) -> str | None:
+        ref_file = self.models_root / "hf" / "hub" / f"models--{repo_id.replace('/', '--')}" / "refs" / "main"
+        if ref_file.is_file():
+            sha = ref_file.read_text(encoding="utf-8", errors="ignore").strip()
+            if len(sha) >= 12:
+                return f"hf:{sha[:12]}"
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi(endpoint=endpoint) if endpoint else HfApi()
+            info = api.model_info(repo_id, timeout=8.0)
+            sha = str(getattr(info, "sha", "") or "").strip()
+            if len(sha) >= 12:
+                return f"hf:{sha[:12]}"
+        except Exception:
+            pass
+        return None
+
+    def _download_hf_repo_resilient(
+        self,
+        repo_id: str,
+        *,
+        ignore_patterns: tuple[str, ...] | list[str] | None = None,
+    ) -> tuple[str, str]:
+        from huggingface_hub import snapshot_download
+
+        local_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name(repo_id)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        dl_kwargs: dict[str, Any] = {"repo_id": repo_id, "local_dir": str(local_dir)}
+        if ignore_patterns:
+            dl_kwargs["ignore_patterns"] = list(ignore_patterns)
+        used_endpoint: str | None = os.environ.get("HF_ENDPOINT") or None
+        print(f"Downloading {repo_id} (15%)...", file=sys.stderr, flush=True)
+        try:
+            snapshot_download(max_workers=3, **dl_kwargs)
+        except Exception as first_exc:
+            err_low = str(first_exc).lower()
+            is_net = any(k in err_low for k in ("timed out", "timeout", "connection", "ssl", "chunked", "reset", "eof"))
+            if not is_net or os.environ.get("HF_ENDPOINT"):
+                raise
+            used_endpoint = "https://hf-mirror.com"
+            print(f"Retrying {repo_id} via hf-mirror.com (30%)...", file=sys.stderr, flush=True)
+            snapshot_download(max_workers=2, endpoint=used_endpoint, **dl_kwargs)
+        print(f"Model {repo_id} weights ready (100%).", file=sys.stderr, flush=True)
+        rev = self._resolve_hf_repo_revision(repo_id, endpoint=used_endpoint) or "ready"
+        return str(local_dir), rev
 
     def prepare(self, language: str) -> str:
         _widen_requests_default_timeout(120.0)
         if self.hf_repo:
-            from huggingface_hub import snapshot_download
-            local_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name()
-            local_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                snapshot_download(repo_id=self.hf_repo, local_dir=str(local_dir), max_workers=3)
-            except Exception as first_exc:
-                err_low = str(first_exc).lower()
-                is_net = any(k in err_low for k in ("timed out", "timeout", "connection", "ssl", "chunked", "reset", "eof"))
-                if not is_net or os.environ.get("HF_ENDPOINT"):
-                    raise
-                snapshot_download(
-                    repo_id=self.hf_repo,
-                    local_dir=str(local_dir),
-                    max_workers=2,
-                    endpoint="https://hf-mirror.com",
-                )
-            return "ready"
+            _, rev = self._download_hf_repo_resilient(self.hf_repo, ignore_patterns=self.hf_ignore_patterns)
+            return rev
         return "ready"
 
     def local_repo_or_id(self) -> str:
@@ -364,6 +401,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
 
     def prepare(self, language: str) -> str:
         _widen_requests_default_timeout(120.0)
+        print("Preparing PaddleOCR-VL sub-models (20%)...", file=sys.stderr, flush=True)
         try:
             self._get_pipeline()
         except Exception as first_exc:
@@ -371,6 +409,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
             is_net = any(k in err_low for k in ("timed out", "timeout", "connection", "ssl", "chunked", "reset", "eof"))
             if not is_net or os.environ.get("PADDLE_PDX_HUGGING_FACE_ENDPOINT"):
                 raise
+            print("Retrying PaddleOCR-VL download via hf-mirror.com (40%)...", file=sys.stderr, flush=True)
             os.environ["PADDLE_PDX_HUGGING_FACE_ENDPOINT"] = "https://hf-mirror.com"
             os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
             try:
@@ -380,6 +419,9 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
                 pass
             self._pipeline = None
             self._get_pipeline()
+        self._pipeline = None
+        _release_worker_caches()
+        print("PaddleOCR-VL weights ready (100%).", file=sys.stderr, flush=True)
         import importlib.metadata
         try:
             return importlib.metadata.version("paddleocr")
@@ -594,20 +636,84 @@ class _MinerUAdapter(_BaseAdapter):
         import importlib.metadata
         import subprocess
 
+        # 1. MinerU 4.x official Python model downloader with verification & multi-source fallback
+        try:
+            from mineru.model.download import download_model_repo, verify_model_repo
+            from mineru.model.registry import model_repos_for_tier
+
+            repos = list(model_repos_for_tier("basic"))
+            total = max(1, len(repos))
+            for idx, repo_key in enumerate(repos):
+                pct = int(15 + (idx / total) * 75)
+                if verify_model_repo(repo_key):
+                    print(f"MinerU {repo_key} already verified ({pct}%).", file=sys.stderr, flush=True)
+                    continue
+                print(f"Downloading MinerU {repo_key} ({pct}%)...", file=sys.stderr, flush=True)
+                last_exc: Exception | None = None
+                attempts: list[tuple[str, str | None]] = [("huggingface", None)]
+                if not os.environ.get("HF_ENDPOINT"):
+                    attempts.append(("huggingface", "https://hf-mirror.com"))
+                attempts.append(("modelscope", None))
+                for src_name, mirror_ep in attempts:
+                    prev_ep = os.environ.get("HF_ENDPOINT")
+                    try:
+                        if mirror_ep:
+                            os.environ["HF_ENDPOINT"] = mirror_ep
+                        download_model_repo(repo_key, source=src_name)
+                        if verify_model_repo(repo_key):
+                            last_exc = None
+                            break
+                        last_exc = RuntimeError(f"MinerU model '{repo_key}' incomplete after download from {src_name}")
+                    except Exception as exc:
+                        last_exc = exc
+                    finally:
+                        if mirror_ep:
+                            if prev_ep is None:
+                                os.environ.pop("HF_ENDPOINT", None)
+                            else:
+                                os.environ["HF_ENDPOINT"] = prev_ep
+                if last_exc is not None:
+                    raise RuntimeError(f"Failed to download MinerU sub-model '{repo_key}': {last_exc}") from last_exc
+            print("MinerU weights verified (100%).", file=sys.stderr, flush=True)
+            return importlib.metadata.version("mineru")
+        except ImportError:
+            pass
+
+        # 2. Legacy / CLI fallback with strict exit-code verification
         dl_bin = shutil_which_in_venv("mineru-models-download")
         if dl_bin:
-            subprocess.run(
+            cli_candidates = [
                 [dl_bin, "--tier", "basic"],
-                stdout=sys.stderr,
-                stderr=sys.stderr,
-                text=True,
-                timeout=1800,
-                check=False,
-            )
+                [dl_bin, "-s", "huggingface", "-m", "auto"],
+                [dl_bin, "-s", "modelscope", "-m", "auto"],
+            ]
+            last_err = ""
+            succeeded = False
+            for cmd in cli_candidates:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=sys.stderr,
+                    stderr=sys.stderr,
+                    text=True,
+                    timeout=1800,
+                    check=False,
+                )
+                if proc.returncode == 0:
+                    succeeded = True
+                    break
+                last_err = f"exit code {proc.returncode} for {' '.join(cmd)}"
+            if not succeeded:
+                raise RuntimeError(f"MinerU model download CLI failed ({last_err})")
         return importlib.metadata.version("mineru")
 
     @staticmethod
-    def _extract_mineru_payload(payload: Any, width: int, height: int) -> list[dict[str, Any]]:
+    def _extract_mineru_payload(
+        payload: Any,
+        width: int,
+        height: int,
+        *,
+        coord_mode: str = "auto",
+    ) -> list[dict[str, Any]]:
         lines: list[dict[str, Any]] = []
 
         def _visit(node: Any) -> None:
@@ -617,16 +723,38 @@ class _MinerUAdapter(_BaseAdapter):
                 return
             if not isinstance(node, dict):
                 return
-            raw_content = node.get("text") or node.get("content") or node.get("markdown") or ""
+            raw_content = (
+                node.get("text")
+                or node.get("content")
+                or node.get("markdown")
+                or node.get("table_body")
+                or ""
+            )
+            if not raw_content and isinstance(node.get("list_items"), list):
+                raw_content = "\n".join(str(it) for it in node["list_items"] if str(it).strip())
             label = str(node.get("type") or node.get("category") or node.get("label") or "")
+            if label.lower() in {"image", "figure", "discarded"}:
+                return
             text = _strip_markup(raw_content)
             hints = _extract_markup_hints(raw_content, label)
             bbox = node.get("bbox")
             if text and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
                 bx0, by0, bx1, by1 = [float(v) for v in bbox[:4]]
-                if max(bx1, by1) <= 1000.0 and (width > 1000 or height > 1000):
+                max_c = max(bx0, by0, bx1, by1)
+                if coord_mode == "norm1000":
                     bx0, bx1 = bx0 * width / 1000.0, bx1 * width / 1000.0
                     by0, by1 = by0 * height / 1000.0, by1 * height / 1000.0
+                elif coord_mode == "norm1":
+                    bx0, bx1 = bx0 * width, bx1 * width
+                    by0, by1 = by0 * height, by1 * height
+                else:
+                    has_frac = any(float(v) != int(float(v)) for v in bbox[:4])
+                    if 0.0 < max_c <= 1.05 and (width > 2 or height > 2) and (has_frac or max_c <= 1.0):
+                        bx0, bx1 = bx0 * width, bx1 * width
+                        by0, by1 = by0 * height, by1 * height
+                    elif max_c <= 1000.0 and (width > 1000 or height > 1000):
+                        bx0, bx1 = bx0 * width / 1000.0, bx1 * width / 1000.0
+                        by0, by1 = by0 * height / 1000.0, by1 * height / 1000.0
                 poly = _clamp_polygon(_rect_polygon(bx0, by0, bx1, by1), width, height)
                 lines.append({"text": text, "confidence": 0.9, "polygon": poly, **hints})
                 return
@@ -656,7 +784,16 @@ class _MinerUAdapter(_BaseAdapter):
         try:
             from mineru.parser import parse as mineru_parse
             parsed = mineru_parse(image_path, tier="basic", ocr_mode="ocr", image_analysis=False)
-            native_lines = self._extract_mineru_payload(parsed.to_dict(), width, height)
+            try:
+                from mineru.render import render_content_list
+                rendered_list = render_content_list(parsed)
+                cl_lines = self._extract_mineru_payload(rendered_list, width, height, coord_mode="norm1000")
+                if cl_lines:
+                    return cl_lines
+            except Exception:
+                pass
+            raw_dict = parsed.to_dict() if hasattr(parsed, "to_dict") else parsed
+            native_lines = self._extract_mineru_payload(raw_dict, width, height, coord_mode="norm1")
             if native_lines:
                 return native_lines
         except ImportError:
@@ -709,7 +846,19 @@ def shutil_which_in_venv(binary_name: str) -> str | None:
     return shutil.which(binary_name)
 
 
+def _has_flash_attn() -> bool:
+    import importlib.util
+    try:
+        return importlib.util.find_spec("flash_attn") is not None
+    except Exception:
+        return False
+
+
 class _TransformersRegionAdapter(_BaseAdapter):
+    preferred_attn: str | None = None
+    system_prompt: str | None = None
+    repetition_penalty: float | None = None
+
     def __init__(self, models_root: Path, hf_repo: str, prompt: str) -> None:
         super().__init__(models_root)
         self.hf_repo = hf_repo
@@ -718,11 +867,27 @@ class _TransformersRegionAdapter(_BaseAdapter):
         self._processor: Any = None
         self._device: str = "cpu"
 
+    def _candidate_loaders(self, transformers_mod: Any) -> list[Any]:
+        loaders: list[Any] = []
+        for attr in ("AutoModelForImageTextToText", "AutoModelForCausalLM", "AutoModel"):
+            cls = getattr(transformers_mod, attr, None)
+            if cls is not None:
+                loaders.append(cls)
+        return loaders
+
+    def _load_processor(self, transformers_mod: Any, model_id: str) -> Any:
+        auto_proc = getattr(transformers_mod, "AutoProcessor")
+        auto_tok = getattr(transformers_mod, "AutoTokenizer")
+        try:
+            return auto_proc.from_pretrained(model_id, trust_remote_code=True)
+        except Exception:
+            return auto_tok.from_pretrained(model_id, trust_remote_code=True)
+
     def _load(self) -> tuple[Any, Any, str]:
         if self._model is not None and self._processor is not None:
             return self._model, self._processor, self._device
         import torch
-        from transformers import AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
+        import transformers
 
         model_id = self.local_repo_or_id()
         device = _configure_torch_runtime(torch)
@@ -733,26 +898,39 @@ class _TransformersRegionAdapter(_BaseAdapter):
             dtype = torch.float16
         else:
             dtype = torch.float32
-        try:
-            processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        except Exception:
-            processor = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+
+        attn_candidates: list[str | None] = []
+        if device == "cuda" and _has_flash_attn():
+            attn_candidates.append("flash_attention_2")
+        if self.preferred_attn and self.preferred_attn not in attn_candidates:
+            attn_candidates.append(self.preferred_attn)
+        for fallback_attn in ("sdpa", "eager", None):
+            if fallback_attn not in attn_candidates:
+                attn_candidates.append(fallback_attn)
+
+        processor = self._load_processor(transformers, model_id)
         model = None
         last_err: Exception | None = None
-        for loader in (AutoModelForImageTextToText, AutoModelForCausalLM, AutoModel):
-            try:
+        for loader in self._candidate_loaders(transformers):
+            for attn_impl in attn_candidates:
+                extra_kw: dict[str, Any] = {"trust_remote_code": True}
+                if attn_impl is not None:
+                    extra_kw["attn_implementation"] = attn_impl
                 try:
-                    model = loader.from_pretrained(
-                        model_id,
-                        torch_dtype=dtype,
-                        low_cpu_mem_usage=True,
-                        trust_remote_code=True,
-                    )
-                except TypeError:
-                    model = loader.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True)
+                    try:
+                        model = loader.from_pretrained(
+                            model_id,
+                            torch_dtype=dtype,
+                            low_cpu_mem_usage=True,
+                            **extra_kw,
+                        )
+                    except TypeError:
+                        model = loader.from_pretrained(model_id, torch_dtype=dtype, **extra_kw)
+                    break
+                except Exception as exc:
+                    last_err = exc
+            if model is not None:
                 break
-            except Exception as exc:
-                last_err = exc
         if model is None:
             raise RuntimeError(f"Could not load model {self.hf_repo}: {last_err}")
         try:
@@ -778,28 +956,66 @@ class _TransformersRegionAdapter(_BaseAdapter):
                 max_tokens = 1024
             else:
                 max_tokens = 512
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": crop_img},
-                    {"type": "text", "text": self.prompt},
-                ],
-            }
-        ]
-        if hasattr(processor, "apply_chat_template"):
-            text_input = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = processor(text=[text_input], images=[crop_img], return_tensors="pt")
-        else:
+
+        inputs = None
+        has_chat_tmpl = bool(
+            hasattr(processor, "apply_chat_template")
+            and getattr(processor, "chat_template", None)
+        )
+        if has_chat_tmpl:
+            messages: list[dict[str, Any]] = []
+            if self.system_prompt is not None:
+                messages.append({"role": "system", "content": self.system_prompt})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": crop_img},
+                        {"type": "text", "text": self.prompt},
+                    ],
+                }
+            )
+            try:
+                text_input = processor.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+                inputs = processor(text=[text_input], images=[crop_img], return_tensors="pt")
+            except (ValueError, TypeError, AttributeError):
+                inputs = None
+
+        if inputs is None:
             inputs = processor(images=crop_img, return_tensors="pt")
-        inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
+
+        if hasattr(inputs, "pop"):
+            inputs.pop("token_type_ids", None)
+        model_dtype = getattr(model, "dtype", None)
+        prepared_inputs: dict[str, Any] = {}
+        for k, v in inputs.items():
+            if hasattr(v, "to"):
+                if (
+                    device != "cpu"
+                    and model_dtype is not None
+                    and hasattr(v, "is_floating_point")
+                    and v.is_floating_point()
+                ):
+                    prepared_inputs[k] = v.to(device=device, dtype=model_dtype)
+                else:
+                    prepared_inputs[k] = v.to(device)
+            else:
+                prepared_inputs[k] = v
+
+        gen_kwargs: dict[str, Any] = {"max_new_tokens": max_tokens, "do_sample": False}
+        if self.repetition_penalty is not None:
+            gen_kwargs["repetition_penalty"] = self.repetition_penalty
+
         grad_ctx = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
         with grad_ctx():
-            generated = model.generate(**inputs, max_new_tokens=max_tokens, do_sample=False)
-        prompt_len = inputs["input_ids"].shape[-1] if "input_ids" in inputs else 0
+            generated = model.generate(**prepared_inputs, **gen_kwargs)
+        prompt_len = prepared_inputs["input_ids"].shape[-1] if "input_ids" in prepared_inputs else 0
         new_tokens = generated[:, prompt_len:] if prompt_len and generated.shape[-1] > prompt_len else generated
         decoded = processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
-        del inputs, generated, new_tokens
+        del inputs, prepared_inputs, generated, new_tokens
+        decoded = re.sub(r"<｜hy_[^｜]*｜>", "", decoded)
         return _strip_markup(decoded)
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
@@ -829,9 +1045,35 @@ class _DotsOcrAdapter(_TransformersRegionAdapter):
         "Please output the layout information from the image as a JSON list of objects with "
         "'bbox' ([x1, y1, x2, y2]) and 'text' fields. Output JSON only."
     )
+    FALLBACK_HF_REPO = "rednote-hilab/dots.ocr"
 
     def __init__(self, models_root: Path) -> None:
+        os.environ.setdefault("LOCAL_RANK", "0")
         super().__init__(models_root, "rednote-hilab/dots.mocr", self.LAYOUT_PROMPT)
+
+    def prepare(self, language: str) -> str:
+        os.environ.setdefault("LOCAL_RANK", "0")
+        _widen_requests_default_timeout(120.0)
+        assert self.hf_repo
+        try:
+            _, rev = self._download_hf_repo_resilient(self.hf_repo)
+            return rev
+        except Exception as exc:
+            msg = str(exc).lower()
+            if any(tok in msg for tok in ("404", "not found", "repositorynotfound", "gated")):
+                _, rev = self._download_hf_repo_resilient(self.FALLBACK_HF_REPO)
+                return rev
+            raise
+
+    def local_repo_or_id(self) -> str:
+        os.environ.setdefault("LOCAL_RANK", "0")
+        primary = super().local_repo_or_id()
+        if primary != self.hf_repo:
+            return primary
+        alt_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name(self.FALLBACK_HF_REPO)
+        if alt_dir.is_dir() and any(alt_dir.iterdir()):
+            return str(alt_dir)
+        return primary
 
     @staticmethod
     def _extract_json_array(raw: str) -> list[Any] | None:
@@ -853,6 +1095,7 @@ class _DotsOcrAdapter(_TransformersRegionAdapter):
             cursor = idx + 1
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
+        os.environ.setdefault("LOCAL_RANK", "0")
         from PIL import Image
         with Image.open(image_path) as im:
             rgb = im.convert("RGB")
@@ -885,6 +1128,7 @@ class _DotsOcrAdapter(_TransformersRegionAdapter):
 
 
 class _DeepSeekOcr2Adapter(_TransformersRegionAdapter):
+    preferred_attn = "eager"
     GROUNDING_RE = re.compile(
         r"<\|ref\|>(.*?)<\|/ref\|>\s*<\|det\|>\s*\[\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]\]\s*<\|/det\|>",
         re.DOTALL,
@@ -927,6 +1171,39 @@ class _DeepSeekOcr2Adapter(_TransformersRegionAdapter):
         return super().recognize(image_path, language, regions)
 
 
+class _HunyuanOcrAdapter(_TransformersRegionAdapter):
+    hf_ignore_patterns = ("v1.0/*", "dflash/*")
+    preferred_attn = "eager"
+    system_prompt = ""
+    repetition_penalty = 1.08
+
+    def __init__(self, models_root: Path) -> None:
+        super().__init__(
+            models_root,
+            "tencent/HunyuanOCR",
+            "Extract all text from the image accurately, preserving line breaks.",
+        )
+
+    def _candidate_loaders(self, transformers_mod: Any) -> list[Any]:
+        loaders: list[Any] = []
+        hy_cls = getattr(transformers_mod, "HunYuanVLForConditionalGeneration", None)
+        if hy_cls is not None:
+            loaders.append(hy_cls)
+        loaders.extend(super()._candidate_loaders(transformers_mod))
+        return loaders
+
+    def _load_processor(self, transformers_mod: Any, model_id: str) -> Any:
+        auto_proc = getattr(transformers_mod, "AutoProcessor")
+        try:
+            proc = auto_proc.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
+        except Exception:
+            proc = super()._load_processor(transformers_mod, model_id)
+        if getattr(proc, "video_token", None) is None:
+            with contextlib.suppress(Exception):
+                proc.video_token = "<｜hy_video｜>"
+        return proc
+
+
 def _create_adapter(engine_id: str, models_root: Path) -> _BaseAdapter:
     if engine_id == "paddleocr-vl-1-6":
         return _PaddleOcrVlAdapter(models_root)
@@ -945,7 +1222,7 @@ def _create_adapter(engine_id: str, models_root: Path) -> _BaseAdapter:
     if engine_id == "olmocr":
         return _TransformersRegionAdapter(models_root, "allenai/olmOCR-2-7B-1025", "Read the exact text in this image.")
     if engine_id == "hunyuan-ocr":
-        return _TransformersRegionAdapter(models_root, "tencent/HunyuanOCR", "Extract the exact text in this image.")
+        return _HunyuanOcrAdapter(models_root)
     raise ValueError(f"Unsupported isolated engine: {engine_id}")
 
 

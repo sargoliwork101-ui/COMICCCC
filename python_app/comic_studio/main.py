@@ -509,6 +509,15 @@ def create_app() -> FastAPI:
                 except Exception:
                     return
 
+    @app.post("/api/engines/{engine_id}/cancel")
+    async def cancel_engine_operation(engine_id: str) -> dict[str, Any]:
+        registry.get(engine_id)
+        cancel_fn = getattr(registry, "cancel_install", None)
+        if callable(cancel_fn):
+            cancel_fn(engine_id)
+        activity.add(f"درخواست توقف عملیات مدل {engine_id} ثبت شد", "warning")
+        return {"ok": True, "engineId": engine_id}
+
     @app.post("/api/engines/{engine_id}/download", response_model=None)
     async def download_engine(request: Request, engine_id: str, values: EngineDownloadRequest | None = None) -> Response | dict[str, Any]:
         registry.get(engine_id)

@@ -4,6 +4,7 @@ import atexit
 from collections import deque
 from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+import contextlib
 import contextvars
 import ctypes
 from datetime import datetime, timezone
@@ -162,8 +163,8 @@ ISOLATED_ENGINE_SPECS: dict[str, dict[str, Any]] = {
         "pypi_pkg": "glmocr",
         "github_repo": "zai-org/GLM-OCR",
         "hf_repo": "zai-org/GLM-OCR",
-        "pip_packages_cpu": ["glmocr>=0.1.0", "transformers>=5.0.0", "accelerate>=0.34.0", "huggingface-hub>=0.26.0", "safetensors", "pillow>=12.1.0"],
-        "pip_packages_gpu": ["glmocr>=0.1.0", "transformers>=5.0.0", "accelerate>=0.34.0", "huggingface-hub>=0.26.0", "safetensors", "pillow>=12.1.0"],
+        "pip_packages_cpu": ["glmocr>=0.1.0", "transformers>=5.3.0", "sentencepiece>=0.2.0", "accelerate>=0.34.0", "huggingface-hub>=0.26.0", "safetensors", "pillow>=12.1.0"],
+        "pip_packages_gpu": ["glmocr>=0.1.0", "transformers>=5.3.0", "sentencepiece>=0.2.0", "accelerate>=0.34.0", "huggingface-hub>=0.26.0", "safetensors", "pillow>=12.1.0"],
         "needs_torch": True,
         "needs_regions": True,
         "download_size_gb": 2.4,
@@ -176,10 +177,10 @@ ISOLATED_ENGINE_SPECS: dict[str, dict[str, Any]] = {
         "primary_pkg": "transformers",
         "dist_name": "transformers",
         "pypi_pkg": "transformers",
-        "github_repo": "studio-dots-ai/dots.ocr",
+        "github_repo": "rednote-hilab/dots.ocr",
         "hf_repo": "rednote-hilab/dots.mocr",
-        "pip_packages_cpu": ["transformers>=4.51.0", "accelerate>=0.34.0", "qwen-vl-utils", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3"],
-        "pip_packages_gpu": ["transformers>=4.51.0", "accelerate>=0.34.0", "qwen-vl-utils", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3"],
+        "pip_packages_cpu": ["transformers>=4.51.0,<5.0.0", "accelerate>=0.34.0", "qwen-vl-utils", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3"],
+        "pip_packages_gpu": ["transformers>=4.51.0,<5.0.0", "accelerate>=0.34.0", "qwen-vl-utils", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3"],
         "needs_torch": True,
         "needs_regions": True,
         "download_size_gb": 4.5,
@@ -194,8 +195,8 @@ ISOLATED_ENGINE_SPECS: dict[str, dict[str, Any]] = {
         "pypi_pkg": "transformers",
         "github_repo": "deepseek-ai/DeepSeek-OCR-2",
         "hf_repo": "deepseek-ai/DeepSeek-OCR-2",
-        "pip_packages_cpu": ["transformers>=4.51.0", "accelerate>=0.34.0", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3", "einops", "addict", "easydict"],
-        "pip_packages_gpu": ["transformers>=4.51.0", "accelerate>=0.34.0", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3", "einops", "addict", "easydict"],
+        "pip_packages_cpu": ["transformers>=4.46.3,<5.0.0", "accelerate>=0.34.0", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3", "einops", "addict", "easydict"],
+        "pip_packages_gpu": ["transformers>=4.46.3,<5.0.0", "accelerate>=0.34.0", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3", "einops", "addict", "easydict"],
         "needs_torch": True,
         "needs_regions": True,
         "download_size_gb": 7.5,
@@ -210,8 +211,8 @@ ISOLATED_ENGINE_SPECS: dict[str, dict[str, Any]] = {
         "pypi_pkg": "olmocr",
         "github_repo": "allenai/olmocr",
         "hf_repo": "allenai/olmOCR-2-7B-1025",
-        "pip_packages_cpu": ["olmocr>=0.4.0", "transformers>=4.51.0", "accelerate>=0.34.0", "qwen-vl-utils", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3"],
-        "pip_packages_gpu": ["olmocr>=0.4.0", "transformers>=4.51.0", "accelerate>=0.34.0", "qwen-vl-utils", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3"],
+        "pip_packages_cpu": ["olmocr>=0.4.0", "transformers>=4.51.0,<5.0.0", "accelerate>=0.34.0", "qwen-vl-utils", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3"],
+        "pip_packages_gpu": ["olmocr>=0.4.0", "transformers>=4.51.0,<5.0.0", "accelerate>=0.34.0", "qwen-vl-utils", "huggingface-hub>=0.26.0", "safetensors", "pillow>=10.3"],
         "needs_torch": True,
         "needs_regions": True,
         "download_size_gb": 15.0,
@@ -784,6 +785,21 @@ def cleanup_superseded_engine_files(engine_id: str) -> int:
                 if has_newer_vl and old_v1.is_dir():
                     freed += _remove_path_safely(old_v1)
 
+    # 5. MinerU temporary download chunks & Hunyuan legacy excluded subfolders
+    if engine_id == "mineru-2-5-pro":
+        mineru_dir = root / "mineru"
+        if mineru_dir.is_dir():
+            for tmp_dir_name in ("._____temp", ".cache"):
+                for cand_tmp in mineru_dir.rglob(tmp_dir_name):
+                    if cand_tmp.is_dir():
+                        freed += _remove_path_safely(cand_tmp)
+    elif engine_id == "hunyuan-ocr":
+        hy_dir = root / "hf-repos" / "tencent__HunyuanOCR"
+        for unused_sub in ("v1.0", "dflash"):
+            sub_path = hy_dir / unused_sub
+            if sub_path.is_dir():
+                freed += _remove_path_safely(sub_path)
+
     return freed
 
 
@@ -1186,16 +1202,30 @@ def _fetch_json(url: str, timeout: float = 8.0) -> Any:
 
 
 def _latest_tesseract_windows_installer() -> tuple[str, str]:
+    candidates: list[dict[str, Any]] = []
     try:
         rel = _fetch_json("https://api.github.com/repos/UB-Mannheim/tesseract/releases/latest", timeout=10.0)
+        if isinstance(rel, dict):
+            candidates.append(rel)
+    except Exception:
+        pass
+    try:
+        if not any(
+            str(a.get("browser_download_url") or "") and "w64" in str(a.get("name") or "").lower() and str(a.get("name") or "").lower().endswith(".exe")
+            for r in candidates for a in (r.get("assets") or [])
+        ):
+            rels = _fetch_json("https://api.github.com/repos/UB-Mannheim/tesseract/releases?per_page=5", timeout=10.0)
+            if isinstance(rels, list):
+                candidates.extend(r for r in rels if isinstance(r, dict))
+    except Exception:
+        pass
+    for rel in candidates:
         tag = str(rel.get("tag_name") or DEFAULT_TESSERACT_WIN_TAG).lstrip("vV")
         for asset in rel.get("assets") or []:
             name = str(asset.get("name") or "").lower()
             dl_url = str(asset.get("browser_download_url") or "")
             if dl_url and "w64" in name and name.endswith(".exe"):
                 return tag, dl_url
-    except Exception:
-        pass
     return DEFAULT_TESSERACT_WIN_TAG.lstrip("vV"), DEFAULT_TESSERACT_WIN_URL
 
 
@@ -1214,7 +1244,9 @@ def _find_windows_7zip() -> str | None:
     return None
 
 
-def install_tesseract_runtime(error_cls: type[Exception]) -> str:
+def install_tesseract_runtime(error_cls: type[Exception], cancel_event: threading.Event | None = None) -> str:
+    if cancel_event is not None and cancel_event.is_set():
+        raise error_cls("عملیات آماده‌سازی مدل لغو شد.")
     target_dir = models_dir() / "tesseract-bin"
     backup_dir = models_dir() / "tesseract-bin.old-ver"
     if backup_dir.exists():
@@ -1241,6 +1273,8 @@ def install_tesseract_runtime(error_cls: type[Exception]) -> str:
                 expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 55 * 1024 * 1024
                 total = 0
                 while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise error_cls("عملیات آماده‌سازی مدل لغو شد.")
                     chunk = resp.read(1024 * 1024)
                     if not chunk:
                         break
@@ -1767,7 +1801,14 @@ class IsolatedOcrEngine:
         env.setdefault("FLAGS_use_mkldnn", "1")
         env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
         env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
+        env.setdefault("HF_HUB_DISABLE_XET", "1")
+        env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
         env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        if self.id == "mineru-2-5-pro":
+            mineru_home = models_dir() / "mineru"
+            with contextlib.suppress(OSError):
+                mineru_home.mkdir(parents=True, exist_ok=True)
+            env.setdefault("MINERU_HOME", str(mineru_home))
         if self.id == "surya":
             hw = inspect_hardware()
             surya_cache = models_dir() / "surya"
@@ -2144,23 +2185,74 @@ class IsolatedOcrEngine:
                     _run_Subprocess([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300, check=False)
 
             if self._spec.get("needs_torch"):
-                torch_ready = _read_dist_version_in_venv(env_dir, "torch") is not None
+                existing_torch_ver = _read_dist_version_in_venv(env_dir, "torch")
+                existing_tv_ver = _read_dist_version_in_venv(env_dir, "torchvision")
+                repair_cpu_torch_on_nvidia = bool(
+                    upgrade
+                    and _is_windows()
+                    and hw.get("hasNvidiaGpu")
+                    and existing_torch_ver
+                    and "+cu" not in existing_torch_ver.lower()
+                )
+                torch_ready = (
+                    existing_torch_ver is not None
+                    and existing_tv_ver is not None
+                    and not repair_cpu_torch_on_nvidia
+                )
                 if not torch_ready:
-                    torch_args = ["torch>=2.3.0", "torchvision>=0.18.0"]
-                    if os.name == "nt" and hw.get("hasNvidiaGpu"):
-                        torch_args.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
+                    if repair_cpu_torch_on_nvidia:
+                        emit(f"جایگزینی نسخهٔ CPU زیرساخت PyTorch با نسخهٔ شتاب‌دهندهٔ NVIDIA برای {self.id}…", progress=0.19)
+                        _run_Subprocess(
+                            [str(py), "-m", "pip", "uninstall", "-y", "torch", "torchvision"],
+                            capture_output=True, text=True, timeout=180, check=False, env=clean_pip_env(),
+                        )
+                    base_torch_pkgs = ["torch>=2.3.0", "torchvision>=0.18.0"]
+                    torch_candidates: list[list[str]] = []
+                    if hw.get("hasNvidiaGpu"):
+                        # Dedicated --index-url ensures pip installs genuine CUDA wheels (+cu128/+cu126)
+                        # instead of shadowing them with a higher-numbered CPU-only wheel from pypi.org.
+                        torch_candidates.append([*base_torch_pkgs, "--index-url", "https://download.pytorch.org/whl/cu128"])
+                        torch_candidates.append([*base_torch_pkgs, "--index-url", "https://download.pytorch.org/whl/cu126"])
+                        torch_candidates.append(list(base_torch_pkgs))
+                    elif sys.platform.startswith("linux") and not _is_windows():
+                        # Avoid pulling >4 GB of Linux CUDA 13 libraries on CPU-only Linux machines.
+                        torch_candidates.append([*base_torch_pkgs, "--index-url", "https://download.pytorch.org/whl/cpu"])
+                        torch_candidates.append(list(base_torch_pkgs))
+                    else:
+                        torch_candidates.append(list(base_torch_pkgs))
+
                     emit(f"نصب زیرساخت PyTorch برای {self.id}…", progress=0.20)
-                    t_rc, t_out = self._run_pip_resilient(
-                        py, torch_args, upgrade=False, start_p=0.20, end_p=0.45, label_prefix=f"زیرساخت {self.id}"
-                    )
+                    t_rc, t_out = 1, ""
+                    for cand_args in torch_candidates:
+                        t_rc, t_out = self._run_pip_resilient(
+                            py, cand_args, upgrade=False, start_p=0.20, end_p=0.45, label_prefix=f"زیرساخت {self.id}"
+                        )
+                        if t_rc == 0 or self._cancel_install.is_set() or t_rc == 130:
+                            break
                     if t_rc != 0:
                         raise self._error_cls(f"نصب PyTorch برای {self.id} ناموفق بود: {t_out[-1200:]}")
+            elif (
+                self.id == "surya"
+                and sys.platform.startswith("linux")
+                and not _is_windows()
+                and not hw.get("hasNvidiaGpu")
+                and _read_dist_version_in_venv(env_dir, "torch") is None
+            ):
+                # Pre-install lightweight CPU PyTorch on Linux CPU machines so surya-ocr's layout detector
+                # does not pull 4.5 GB of Linux CUDA 13 packages from default PyPI.
+                emit("نصب نسخهٔ سبک پردازنده (CPU) زیرساخت Surya…", progress=0.18)
+                self._run_pip_resilient(
+                    py,
+                    ["torch>=2.7.0,<3", "torchvision>=0.20.0,<1", "--index-url", "https://download.pytorch.org/whl/cpu"],
+                    upgrade=False,
+                    start_p=0.18,
+                    end_p=0.34,
+                    label_prefix="زیرساخت سبک Surya",
+                )
 
             packages = list(self._spec["pip_packages_gpu"] if hw.get("hasNvidiaGpu") else self._spec["pip_packages_cpu"])
             extra_flags: list[str] = []
-            # Note: Surya 2.5 runs VLM inference via native llama-server (Vulkan/CPU), so avoid pulling the 2.65 GB cu126 PyTorch wheel for Surya.
-            if os.name == "nt" and hw.get("hasNvidiaGpu") and self.id in {"mineru-2-5-pro"}:
-                extra_flags.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
+            # Neither Surya 2.5 (native llama-server) nor MinerU 4.x (ONNX DirectML + llama-cpp) uses PyTorch CUDA wheels.
             action_word = "به‌روزرسانی" if upgrade else "نصب"
             p_start = 0.46 if self._spec.get("needs_torch") else 0.18
             emit(f"{action_word} بسته‌های اختصاصی مدل {self.id} آغاز شد…", progress=p_start)
@@ -2215,12 +2307,16 @@ class IsolatedOcrEngine:
             raise self._error_cls("عملیات آماده‌سازی مدل لغو شد.")
         worker_script = _worker_script_path()
         m_root = models_dir()
-        base_weight_bytes = (
-            _dir_bytes_fast(m_root / "hf")
-            + _dir_bytes_fast(m_root / "hf-repos")
-            + _dir_bytes_fast(m_root / "paddlex")
-            + _dir_bytes_fast(m_root / "surya")
-        )
+        def _tracked_weight_bytes() -> int:
+            return (
+                _dir_bytes_fast(m_root / "hf")
+                + _dir_bytes_fast(m_root / "hf-repos")
+                + _dir_bytes_fast(m_root / "paddlex")
+                + _dir_bytes_fast(m_root / "surya")
+                + _dir_bytes_fast(m_root / "mineru")
+            )
+
+        base_weight_bytes = _tracked_weight_bytes()
         last_weight_bytes = base_weight_bytes
         emit(f"دریافت و آماده‌سازی فایل‌های مدل {self.id}…", progress=0.80)
         proc = subprocess.Popen(
@@ -2304,12 +2400,7 @@ class IsolatedOcrEngine:
                     raise self._error_cls(f"مهلت آماده‌سازی فایل‌های مدل {self.id} به پایان رسید.")
                 time.sleep(0.5)
                 if time.monotonic() - last_activity_at[0] >= 3.0:
-                    cur_bytes = (
-                        _dir_bytes_fast(m_root / "hf")
-                        + _dir_bytes_fast(m_root / "hf-repos")
-                        + _dir_bytes_fast(m_root / "paddlex")
-                        + _dir_bytes_fast(m_root / "surya")
-                    )
+                    cur_bytes = _tracked_weight_bytes()
                     if cur_bytes > last_weight_bytes:
                         last_weight_bytes = cur_bytes
                         last_activity_at[0] = time.monotonic()
@@ -2367,8 +2458,9 @@ class IsolatedOcrEngine:
                 emit(f"محیط اجرایی {self.id} از قبل آماده است؛ بررسی ابزارها و فایل‌های مدل…", progress=0.65)
                 self._ensure_llama_cpp_for_surya()
             revision = self._prepare_weights(language)
-            if revision == "ready" and self._spec.get("hf_repo"):
-                remote_rev = fetch_remote_repo_revision(self._spec.get("github_repo"))
+            hf_repo = self._spec.get("hf_repo")
+            if revision == "ready" and hf_repo:
+                remote_rev = fetch_hf_repo_revision(hf_repo) or fetch_remote_repo_revision(self._spec.get("github_repo"))
                 if remote_rev:
                     revision = remote_rev
             cleanup_superseded_engine_files(self.id)
@@ -2426,8 +2518,10 @@ class IsolatedOcrEngine:
                 )
 
             ver = self.installed_version or "installed"
-            remote_rev = fetch_remote_repo_revision(self._spec.get("github_repo"))
-            final_rev = remote_rev or revision
+            hf_repo = self._spec.get("hf_repo")
+            final_rev = revision
+            if hf_repo and (not final_rev or final_rev == "ready"):
+                final_rev = fetch_hf_repo_revision(hf_repo) or fetch_remote_repo_revision(self._spec.get("github_repo")) or "ready"
             acknowledge_engine_update(
                 self.id,
                 installed_version=ver,
@@ -2672,6 +2766,77 @@ def fetch_pypi_latest_version(pkg_name: str, timeout: float = 6.0) -> str | None
     return ver or None
 
 
+def _engine_pypi_specifier(engine_id: str, pypi_pkg: str | None) -> str | None:
+    if not pypi_pkg:
+        return None
+    spec = ISOLATED_ENGINE_SPECS.get(engine_id)
+    if not spec:
+        return None
+    norm_target = re.sub(r"[-_.]+", "_", pypi_pkg.lower())
+    for raw_req in spec.get("pip_packages_cpu") or []:
+        m = re.match(r"^([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?\s*(.*)$", str(raw_req).strip())
+        if not m:
+            continue
+        pkg_part, spec_part = m.group(1), m.group(2).strip()
+        if re.sub(r"[-_.]+", "_", pkg_part.lower()) == norm_target and spec_part:
+            return spec_part
+    return None
+
+
+def _satisfies_specifier(version_str: str | None, spec_str: str | None) -> bool:
+    if not version_str or not spec_str:
+        return True
+    try:
+        from packaging.specifiers import SpecifierSet
+        from packaging.version import Version
+        return Version(str(version_str).strip().lstrip("vV")) in SpecifierSet(spec_str)
+    except Exception:
+        return True
+
+
+def _resolve_compatible_pypi_version(
+    engine_id: str,
+    pypi_pkg: str,
+    raw_latest: str | None,
+    installed_ver: str | None = None,
+    timeout: float = 6.0,
+) -> str | None:
+    if not raw_latest:
+        return None
+    spec_str = _engine_pypi_specifier(engine_id, pypi_pkg)
+    if not spec_str or _satisfies_specifier(raw_latest, spec_str):
+        return raw_latest
+    try:
+        from packaging.specifiers import SpecifierSet
+        from packaging.version import Version
+
+        spec_set = SpecifierSet(spec_str)
+        data = _fetch_json(f"https://pypi.org/pypi/{pypi_pkg}/json", timeout=timeout)
+        releases = data.get("releases") or {}
+        compatible: list[Version] = []
+        raw_by_ver: dict[Version, str] = {}
+        for ver_key, files in releases.items():
+            if not files or not isinstance(files, list):
+                continue
+            if all(bool(f.get("yanked")) for f in files if isinstance(f, dict)):
+                continue
+            try:
+                parsed = Version(str(ver_key))
+            except Exception:
+                continue
+            if parsed.is_prerelease or parsed.is_devrelease:
+                continue
+            if parsed in spec_set:
+                compatible.append(parsed)
+                raw_by_ver[parsed] = str(ver_key)
+        if compatible:
+            best = max(compatible)
+            return raw_by_ver[best]
+    except Exception:
+        pass
+    return installed_ver
+
+
 def fetch_remote_repo_revision(github_repo: str | None, timeout: float = 6.0) -> str | None:
     if not github_repo:
         return None
@@ -2682,14 +2847,21 @@ def fetch_remote_repo_revision(github_repo: str | None, timeout: float = 6.0) ->
             return tag.lstrip("vV")
     except Exception:
         pass
-    try:
-        commits = _fetch_json(f"https://api.github.com/repos/{github_repo}/commits?per_page=1", timeout=timeout)
-        if isinstance(commits, list) and commits:
-            sha = str(commits[0].get("sha") or "").strip()
-            if sha:
-                return sha[:12]
-    except Exception:
-        pass
+    return None
+
+
+def fetch_hf_repo_revision(hf_repo: str | None, timeout: float = 6.0) -> str | None:
+    if not hf_repo:
+        return None
+    endpoints = ("https://huggingface.co", "https://hf-mirror.com")
+    for base in endpoints:
+        try:
+            info = _fetch_json(f"{base}/api/models/{hf_repo}", timeout=timeout)
+            sha = str((info or {}).get("sha") or "").strip()
+            if len(sha) >= 12:
+                return f"hf:{sha[:12]}"
+        except Exception:
+            continue
     return None
 
 
@@ -2765,6 +2937,16 @@ def _is_valid_comparable_revision(rev: Any) -> bool:
     return True
 
 
+def _revisions_same_namespace(rev_a: Any, rev_b: Any) -> bool:
+    if not (_is_valid_comparable_revision(rev_a) and _is_valid_comparable_revision(rev_b)):
+        return False
+    a = str(rev_a).strip()
+    b = str(rev_b).strip()
+    prefix_a = a.split(":", 1)[0] if ":" in a else ""
+    prefix_b = b.split(":", 1)[0] if ":" in b else ""
+    return prefix_a == prefix_b
+
+
 def compute_engine_update_fields(
     engine_id: str,
     engine_name: str,
@@ -2777,6 +2959,10 @@ def compute_engine_update_fields(
     manifest = manifest_entry or {}
     latest_version = remote.get("latestVersion")
     latest_revision = remote.get("latestRevision")
+    meta = engine_meta(engine_id)
+    spec_str = _engine_pypi_specifier(engine_id, meta.get("pypi_pkg"))
+    if latest_version and spec_str and not _satisfies_specifier(str(latest_version), spec_str):
+        latest_version = installed_version
     # For shared-runtime engines like rapidocr-v5, only notify if its own model was actually prepared.
     if engine_id == "rapidocr-v5":
         installed_ready = bool(engine.runtime_installed and engine.model_ready)
@@ -2810,8 +2996,7 @@ def compute_engine_update_fields(
             local_rev = manifest.get("modelRevision")
             ack_rev = manifest.get("acknowledgedRevision")
             if (
-                _is_valid_comparable_revision(local_rev)
-                and _is_valid_comparable_revision(latest_revision)
+                _revisions_same_namespace(local_rev, latest_revision)
                 and local_rev != latest_revision
                 and ack_rev != latest_revision
             ):
@@ -2856,17 +3041,25 @@ def check_remote_updates(registry: Any, force: bool = False) -> dict[str, Any]:
 
     any_network_ok = use_cache
     if not use_cache:
+        manifest_snapshot = read_manifest()
+
         def _probe_one(eid: str) -> tuple[str, dict[str, Any], bool]:
             meta = engine_meta(eid)
             engine = registry.get(eid)
+            inst_ver = (
+                engine.installed_version
+                if hasattr(engine, "installed_version")
+                else detect_builtin_installed_version(eid, engine)
+            )
             latest_ver: str | None = None
             latest_rev: str | None = None
             ok = False
             pypi_pkg = meta.get("pypi_pkg")
             if pypi_pkg:
                 try:
-                    latest_ver = fetch_pypi_latest_version(pypi_pkg)
-                    if latest_ver:
+                    raw_ver = fetch_pypi_latest_version(pypi_pkg)
+                    if raw_ver:
+                        latest_ver = _resolve_compatible_pypi_version(eid, pypi_pkg, raw_ver, installed_ver=inst_ver)
                         ok = True
                 except Exception:
                     pass
@@ -2884,7 +3077,12 @@ def check_remote_updates(registry: Any, force: bool = False) -> dict[str, Any]:
                     latest_rev = rev
                     ok = True
             elif eid in ISOLATED_ENGINE_SPECS and ISOLATED_ENGINE_SPECS[eid].get("hf_repo"):
-                rev = fetch_remote_repo_revision(meta.get("github_repo"))
+                hf_repo = ISOLATED_ENGINE_SPECS[eid].get("hf_repo")
+                stored_rev = str((manifest_snapshot.get(eid) or {}).get("modelRevision") or "")
+                if stored_rev.startswith("hf:"):
+                    rev = fetch_hf_repo_revision(hf_repo)
+                else:
+                    rev = fetch_remote_repo_revision(meta.get("github_repo")) or fetch_hf_repo_revision(hf_repo)
                 if rev:
                     latest_rev = rev
                     ok = True

@@ -1788,6 +1788,264 @@ def test_pip_streaming_stall_watchdog_and_cancel_kill_hung_child(monkeypatch, tm
     assert (time.monotonic() - t1) < 5.0
 
 
+def test_all_13_engines_specs_pins_and_dots_repo_url(tmp_path):
+    import comic_studio.ocr_managed as managed
+    import comic_studio.ocr_worker as worker
+
+    assert len(ENGINE_INFO) == 13
+    assert ENGINE_INFO["dots-ocr"]["repository"] == "https://github.com/rednote-hilab/dots.ocr"
+    assert managed.ISOLATED_ENGINE_SPECS["dots-ocr"]["github_repo"] == "rednote-hilab/dots.ocr"
+    for v4_id in ("dots-ocr", "deepseek-ocr-2", "olmocr"):
+        cpu_reqs = " ".join(managed.ISOLATED_ENGINE_SPECS[v4_id]["pip_packages_cpu"])
+        assert "<5.0.0" in cpu_reqs
+    glm_reqs = " ".join(managed.ISOLATED_ENGINE_SPECS["glm-ocr"]["pip_packages_cpu"])
+    assert "transformers>=5.3.0" in glm_reqs
+    assert "sentencepiece>=0.2.0" in glm_reqs
+
+    hy_adapter = worker._create_adapter("hunyuan-ocr", tmp_path)
+    assert isinstance(hy_adapter, worker._HunyuanOcrAdapter)
+    assert hy_adapter.hf_ignore_patterns == ("v1.0/*", "dflash/*")
+    assert hy_adapter.preferred_attn == "eager"
+    assert hy_adapter.system_prompt == ""
+
+    eng = managed.IsolatedOcrEngine("mineru-2-5-pro", ["eng"], threading.Lock(), OcrLine, OcrError)
+    env = eng._worker_env()
+    assert env.get("HF_HUB_DISABLE_XET") == "1"
+    assert env.get("HF_HUB_ENABLE_HF_TRANSFER") == "0"
+    assert "mineru" in env.get("MINERU_HOME", "")
+
+
+def test_nvidia_isolated_torch_uses_dedicated_cu128_index_with_cu126_fallback(monkeypatch, tmp_path):
+    import comic_studio.ocr_managed as managed
+
+    monkeypatch.setattr(managed, "models_dir", lambda: tmp_path / "models")
+    monkeypatch.setattr(managed, "_is_windows", lambda: True)
+    monkeypatch.setattr(managed, "inspect_hardware", lambda: {"hasNvidiaGpu": True, "hasGpu": True})
+
+    env_dir = tmp_path / "models" / "envs" / "got-ocr-2"
+    fake_py = env_dir / "Scripts" / "python.exe"
+    fake_py.parent.mkdir(parents=True, exist_ok=True)
+    fake_py.write_text("echo ok", encoding="utf-8")
+
+    monkeypatch.setattr(managed, "_read_dist_version_in_venv", lambda d, pkg: None)
+
+    pip_calls: list[list[str]] = []
+
+    def fake_pip_resilient(self, py, args, *, upgrade, start_p, end_p, label_prefix):
+        pip_calls.append(list(args))
+        # Simulate cu128 temporarily failing so fallback to cu126 is exercised
+        if "https://download.pytorch.org/whl/cu128" in args:
+            return 1, "ReadTimeoutError"
+        return 0, "ok"
+
+    monkeypatch.setattr(managed.IsolatedOcrEngine, "_run_pip_resilient", fake_pip_resilient)
+    monkeypatch.setattr(managed, "_run_Subprocess", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "ok", ""))
+
+    eng = managed.IsolatedOcrEngine("got-ocr-2", ["eng"], threading.Lock(), OcrLine, OcrError)
+    monkeypatch.setattr(eng, "_env_python", lambda: fake_py)
+    eng._ensure_isolated_venv(upgrade=False)
+
+    assert pip_calls[0] == ["torch>=2.3.0", "torchvision>=0.18.0", "--index-url", "https://download.pytorch.org/whl/cu128"]
+    assert pip_calls[1] == ["torch>=2.3.0", "torchvision>=0.18.0", "--index-url", "https://download.pytorch.org/whl/cu126"]
+    assert "--extra-index-url" not in pip_calls[0]
+
+
+def test_update_checks_cap_transformers_v4_and_eliminate_false_commit_updates(monkeypatch):
+    import comic_studio.ocr_managed as managed
+
+    urls_requested: list[str] = []
+
+    def fake_fetch_json(url: str, timeout: float = 6.0):
+        urls_requested.append(url)
+        if url.endswith("/pypi/transformers/json"):
+            return {
+                "info": {"version": "5.22.1"},
+                "releases": {
+                    "4.46.3": [{"yanked": False}],
+                    "4.57.3": [{"yanked": False}],
+                    "5.0.0rc1": [{"yanked": False}],
+                    "5.22.1": [{"yanked": False}],
+                },
+            }
+        if "/releases/latest" in url:
+            raise RuntimeError("HTTP 404 no release")
+        raise AssertionError(f"Unexpected URL fetched: {url}")
+
+    monkeypatch.setattr(managed, "_fetch_json", fake_fetch_json)
+
+    # 1. fetch_remote_repo_revision must NEVER hit /commits?per_page=1
+    assert managed.fetch_remote_repo_revision("zai-org/GLM-OCR") is None
+    assert not any("/commits" in u for u in urls_requested)
+
+    # 2. <5.0.0 engines resolve 4.57.3 instead of 5.22.1
+    resolved_dots = managed._resolve_compatible_pypi_version("dots-ocr", "transformers", "5.22.1", installed_ver="4.57.3")
+    assert resolved_dots == "4.57.3"
+    # >=5.3.0 engines keep 5.22.1
+    resolved_hunyuan = managed._resolve_compatible_pypi_version("hunyuan-ocr", "transformers", "5.22.1", installed_ver="5.13.0")
+    assert resolved_hunyuan == "5.22.1"
+
+    # 3. Stale cache with 5.22.1 or mismatched revision namespace must NOT trigger false updateAvailable
+    class DummyEng:
+        runtime_installed = True
+        model_ready = True
+
+    fields = managed.compute_engine_update_fields(
+        engine_id="deepseek-ocr-2",
+        engine_name="DeepSeek-OCR-2",
+        engine=DummyEng(),
+        installed_version="4.57.3",
+        manifest_entry={"installedVersion": "4.57.3", "modelRevision": "hf:abcdef123456"},
+        cached_remote={"latestVersion": "5.22.1", "latestRevision": "0.4.27"},
+    )
+    assert fields["updateAvailable"] is False
+
+    # Same hf: namespace WITH a new weight commit DOES trigger updateAvailable
+    fields_real = managed.compute_engine_update_fields(
+        engine_id="deepseek-ocr-2",
+        engine_name="DeepSeek-OCR-2",
+        engine=DummyEng(),
+        installed_version="4.57.3",
+        manifest_entry={"installedVersion": "4.57.3", "modelRevision": "hf:abcdef123456"},
+        cached_remote={"latestVersion": "4.57.3", "latestRevision": "hf:999999888888"},
+    )
+    assert fields_real["updateAvailable"] is True
+
+
+def test_got_ocr_2_processor_without_chat_template_and_token_type_ids_strip(monkeypatch, tmp_path):
+    import contextlib
+    import types
+    import comic_studio.ocr_worker as worker
+
+    class FakeTensor:
+        def __init__(self, arr):
+            self._arr = arr
+            self.shape = (1, len(arr[0]))
+        def to(self, *args, **kwargs):
+            return self
+        def is_floating_point(self):
+            return False
+        def __getitem__(self, item):
+            return FakeTensor([[10, 11]])
+
+    class FakeGotProcessor:
+        chat_template = None
+        def apply_chat_template(self, *args, **kwargs):
+            raise ValueError("Cannot use apply_chat_template because this processor does not have a chat template.")
+        def __call__(self, *args, **kwargs):
+            return {"input_ids": FakeTensor([[1, 2, 3]]), "token_type_ids": FakeTensor([[0, 0, 0]])}
+        def batch_decode(self, tokens, skip_special_tokens=True):
+            return ["<｜hy_begin｜>Decoded GOT Text<｜hy_end｜>"]
+
+    seen_gen_kwargs: dict[str, object] = {}
+
+    class FakeModel:
+        dtype = None
+        def generate(self, **kwargs):
+            seen_gen_kwargs.update(kwargs)
+            return FakeTensor([[1, 2, 3, 10, 11]])
+
+    fake_torch = types.SimpleNamespace(no_grad=contextlib.nullcontext)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    adapter = worker._TransformersRegionAdapter(tmp_path, "stepfun-ai/GOT-OCR-2.0-hf", "OCR this.")
+    monkeypatch.setattr(adapter, "_load", lambda: (FakeModel(), FakeGotProcessor(), "cpu"))
+    crop = Image.new("RGB", (120, 60), "white")
+    try:
+        out_text = adapter._infer_crop(crop)
+    finally:
+        crop.close()
+    assert out_text == "Decoded GOT Text"
+    assert "token_type_ids" not in seen_gen_kwargs
+
+
+def test_mineru_4x_norm1_and_norm1000_bboxes_and_cli_exit_check(monkeypatch, tmp_path):
+    import comic_studio.ocr_worker as worker
+
+    # 1. MiddleJson 0.0..1.0 float coordinates on a 1000x2000 page must scale to pixels (not <1px!)
+    middle_json = {
+        "pdf_info": [
+            {
+                "para_blocks": [
+                    {"type": "title", "text": "Chapter One", "bbox": [0.1, 0.05, 0.8, 0.12]},
+                ]
+            }
+        ]
+    }
+    res_m = worker._MinerUAdapter._extract_mineru_payload(middle_json, 1000, 2000)
+    assert len(res_m) == 1
+    assert res_m[0]["text"] == "Chapter One"
+    assert res_m[0]["role"] == "heading"
+    assert res_m[0]["polygon"][0] == [100.0, 100.0]
+    assert res_m[0]["polygon"][2] == [800.0, 240.0]
+
+    # 2. ContentListV1 0..1000 integer coordinates + list_items on a small 400x300 page
+    content_list = [
+        {"type": "list", "list_items": ["Item A", "Item B"], "bbox": [100, 200, 900, 500], "page_idx": 0}
+    ]
+    res_cl = worker._MinerUAdapter._extract_mineru_payload(content_list, 400, 300, coord_mode="norm1000")
+    assert len(res_cl) == 1
+    assert "Item A" in res_cl[0]["text"] and "Item B" in res_cl[0]["text"]
+    assert res_cl[0]["polygon"][0] == [40.0, 60.0]
+    assert res_cl[0]["polygon"][2] == [360.0, 150.0]
+
+    # 3. CLI fallback must raise if mineru-models-download returns non-zero
+    adapter = worker._MinerUAdapter(tmp_path)
+    monkeypatch.setattr(worker, "shutil_which_in_venv", lambda name: "/fake/mineru-models-download")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, "", "network unreachable"),
+    )
+    with pytest.raises(RuntimeError, match="MinerU model download CLI failed"):
+        adapter.prepare("eng")
+
+
+def test_tesseract_language_mirror_failover_and_cancel_api_route(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    from comic_studio.main import create_app
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    engine = TesseractEngine()
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+
+    attempted_urls: list[str] = []
+
+    class GoodResp:
+        headers = {"Content-Length": "2048"}
+        def __init__(self):
+            self._buf = io.BytesIO(b"z" * 2048)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self, sz=-1):
+            return self._buf.read(sz)
+
+    def flaky_urlopen(req, timeout=180):
+        attempted_urls.append(req.full_url)
+        if len(attempted_urls) < 3:
+            raise urllib.error.URLError("blocked host")
+        return GoodResp()
+
+    import io
+    import urllib.error
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", flaky_urlopen)
+    saved = engine._download_language_file("eng")
+    assert saved.stat().st_size == 2048
+    assert len(attempted_urls) == 3
+    assert "cdn.jsdelivr.net" in attempted_urls[-1]
+
+    # Explicit POST /api/engines/{id}/cancel route works for both built-in and isolated engines
+    client = TestClient(create_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+    resp_builtin = client.post("/api/engines/easyocr/cancel")
+    assert resp_builtin.status_code == 200
+    assert resp_builtin.json()["ok"] is True
+    resp_iso = client.post("/api/engines/surya/cancel")
+    assert resp_iso.status_code == 200
+    assert resp_iso.json()["ok"] is True
+
+
+
 
 
 

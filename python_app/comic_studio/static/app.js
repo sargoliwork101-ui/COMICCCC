@@ -531,7 +531,13 @@ function abortRunningExport() {
 }
 function abortRunningModelJob() {
   if (!state.modelBusy) return;
+  const busyId = state.modelBusy;
   modelCancelledByUser = true;
+  try {
+    if (typeof fetch === 'function') {
+      Promise.resolve(fetch(`/api/engines/${encodeURIComponent(busyId)}/cancel`, { method: 'POST' })).catch(() => {});
+    }
+  } catch { /* ignore */ }
   try { modelAbortController?.abort(); } catch { /* ignore */ }
 }
 function showDialog(id) {

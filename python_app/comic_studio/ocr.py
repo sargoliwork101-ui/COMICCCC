@@ -68,6 +68,15 @@ BUBBLE_PADDING = 30
 BUBBLE_MIN_REGION_CONFIDENCE = 60.0
 # Several tabs may request preparation together; never run two pip processes at once.
 _INSTALL_LOCK = threading.Lock()
+_ORIG_SUBPROCESS_RUN = subprocess.run
+_ORIG_INSTALL_TESSERACT = install_tesseract_runtime
+_STANDARD_CANCEL_EVENT = threading.Event()
+
+
+def _call_install_tesseract_runtime() -> str:
+    if install_tesseract_runtime is _ORIG_INSTALL_TESSERACT:
+        return install_tesseract_runtime(OcrError, cancel_event=_STANDARD_CANCEL_EVENT)
+    return install_tesseract_runtime(OcrError)
 
 
 def _win_subprocess_kwargs() -> dict[str, Any]:
@@ -76,6 +85,42 @@ def _win_subprocess_kwargs() -> dict[str, Any]:
         if no_win:
             return {"creationflags": no_win}
     return {}
+
+
+@contextlib.contextmanager
+def _widen_download_timeouts(min_timeout: float = 120.0):
+    """Ensure RapidOCR (`requests`) and EasyOCR (`urllib.request.urlretrieve` via socket timeout)
+    never hang indefinitely on dead TCP sockets or fail prematurely on 15s timeouts."""
+    import socket
+
+    prev_sock_timeout = socket.getdefaulttimeout()
+    if prev_sock_timeout is None or prev_sock_timeout < min_timeout:
+        socket.setdefaulttimeout(min_timeout)
+    orig_req = None
+    requests_mod = None
+    try:
+        import requests as _req_mod
+        requests_mod = _req_mod
+        orig_req = getattr(_req_mod.Session, "request", None)
+        if orig_req is not None and not getattr(orig_req, "_comic_studio_widened", False):
+            def _wrapped(self_sess: Any, method: str, url: str, **kwargs: Any) -> Any:
+                raw_t = kwargs.get("timeout")
+                if raw_t is None or (isinstance(raw_t, (int, float)) and raw_t < min_timeout):
+                    kwargs["timeout"] = min_timeout
+                return orig_req(self_sess, method, url, **kwargs)
+            _wrapped._comic_studio_widened = True  # type: ignore[attr-defined]
+            _req_mod.Session.request = _wrapped  # type: ignore[method-assign]
+        else:
+            orig_req = None
+    except Exception:
+        orig_req = None
+    try:
+        yield
+    finally:
+        socket.setdefaulttimeout(prev_sock_timeout)
+        if requests_mod is not None and orig_req is not None:
+            with contextlib.suppress(Exception):
+                requests_mod.Session.request = orig_req  # type: ignore[method-assign]
 
 LANGUAGES = {
     "eng": {"name": "English", "source": "en"},
@@ -105,10 +150,103 @@ class OcrError(RuntimeError):
     pass
 
 
+def _run_standard_pip_streaming(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    cdir: Path,
+    cancel_event: threading.Event,
+    stall_timeout: float = 180.0,
+    start_p: float = 0.18,
+    end_p: float = 0.66,
+) -> subprocess.CompletedProcess[str]:
+    from .ocr_managed import _dir_bytes_fast, _kill_process_tree
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=env,
+        **_win_subprocess_kwargs(),
+    )
+    tail: list[str] = []
+    last_activity_at = [time.monotonic()]
+    base_bytes = _dir_bytes_fast(cdir)
+    last_bytes = [base_bytes]
+    stalled = [False]
+    done = threading.Event()
+    cur_p = [start_p]
+    span = max(0.05, end_p - start_p)
+
+    def _watchdog() -> None:
+        while not done.wait(1.0):
+            if cancel_event.is_set():
+                _kill_process_tree(proc)
+                return
+            now = time.monotonic()
+            if now - last_activity_at[0] >= 3.0:
+                b_now = _dir_bytes_fast(cdir)
+                if b_now > last_bytes[0]:
+                    last_bytes[0] = b_now
+                    last_activity_at[0] = now
+                    mb = max(0.1, (b_now - base_bytes) / (1024 * 1024))
+                    cur_p[0] = min(end_p - 0.02, cur_p[0] + span * 0.03)
+                    emit(f"در حال دریافت بسته‌های OCR ({mb:.1f} مگابایت)…", progress=round(cur_p[0], 3))
+                    continue
+            if now - last_activity_at[0] >= stall_timeout:
+                stalled[0] = True
+                _kill_process_tree(proc)
+                return
+
+    watcher = threading.Thread(target=_watchdog, daemon=True)
+    watcher.start()
+    try:
+        assert proc.stdout is not None
+        for raw_line in proc.stdout:
+            last_activity_at[0] = time.monotonic()
+            if cancel_event.is_set():
+                _kill_process_tree(proc)
+                return subprocess.CompletedProcess(cmd, 130, "", "Cancelled by user")
+            line = raw_line.strip()
+            if not line:
+                continue
+            tail.append(line)
+            if len(tail) > 120:
+                tail.pop(0)
+            low = line.lower()
+            if low.startswith("downloading ") or low.startswith("collecting "):
+                cur_p[0] = min(end_p - 0.03, cur_p[0] + span * 0.06)
+                emit(f"دریافت بسته: {line[:95]}", progress=round(cur_p[0], 3))
+            elif low.startswith("installing collected packages"):
+                cur_p[0] = max(cur_p[0], start_p + span * 0.85)
+                emit("در حال نصب بسته‌های دریافت‌شده روی سیستم…", progress=round(cur_p[0], 3))
+        rc = proc.wait(timeout=30)
+    except Exception:
+        _kill_process_tree(proc)
+        rc = 1
+    finally:
+        done.set()
+        watcher.join(timeout=2.0)
+
+    joined = "\n".join(tail)
+    if cancel_event.is_set():
+        return subprocess.CompletedProcess(cmd, 130, "", "Cancelled by user")
+    if stalled[0]:
+        joined = (joined + f"\nOperation timed out during pip installation (stalled >{int(stall_timeout)}s).").strip()
+        return subprocess.CompletedProcess(cmd, 124, "", joined)
+    return subprocess.CompletedProcess(cmd, rc, joined if rc == 0 else "", "" if rc == 0 else joined)
+
+
 def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
     """Install a whitelisted runtime only after an explicit user preparation click."""
     if not packages:
         return
+    if _STANDARD_CANCEL_EVENT.is_set():
+        raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
     from .ocr_managed import (
         PYPI_FALLBACK_MIRRORS,
         clean_pip_env,
@@ -152,21 +290,36 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
     try:
         with _INSTALL_LOCK:
             for idx, (mirror_url, notice) in enumerate(attempts):
+                if _STANDARD_CANCEL_EVENT.is_set():
+                    raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
                 if idx > 0:
                     if notice:
                         emit(notice, "warning", progress=0.25)
                     time.sleep(1.0)
                     wh = sync_local_wheelhouse()
-                result = subprocess.run(
-                    _build_cmd(mirror_url),
-                    capture_output=True, text=True, timeout=3600, check=False, env=clean_pip_env(), **_win_subprocess_kwargs(),
-                )
+                built_cmd = _build_cmd(mirror_url)
+                if subprocess.run is not _ORIG_SUBPROCESS_RUN:
+                    result = subprocess.run(
+                        built_cmd,
+                        capture_output=True, text=True, timeout=3600, check=False, env=clean_pip_env(), **_win_subprocess_kwargs(),
+                    )
+                else:
+                    result = _run_standard_pip_streaming(
+                        built_cmd,
+                        env=clean_pip_env(),
+                        cdir=cdir,
+                        cancel_event=_STANDARD_CANCEL_EVENT,
+                    )
+                if _STANDARD_CANCEL_EVENT.is_set() or (result is not None and result.returncode == 130):
+                    raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
                 if result.returncode == 0:
                     sync_local_wheelhouse()
                     break
                 combined_err = f"{result.stderr or ''}\n{result.stdout or ''}"
                 if not is_pip_network_or_index_error(combined_err):
                     break
+    except OcrError:
+        raise
     except Exception as exc:
         emit(f"نصب بسته‌های OCR ناموفق بود: {exc}", "error")
         raise OcrError(f"Could not install the OCR runtime: {exc}") from exc
@@ -499,25 +652,32 @@ class RapidEngine:
         finally:
             sample.close()
 
+    def cancel_install(self) -> None:
+        _STANDARD_CANCEL_EVENT.set()
+
     def download(self, language: str = "eng") -> None:
+        _STANDARD_CANCEL_EVENT.clear()
         emit(f"شروع آماده‌سازی مدل {self.id}…", progress=0.06)
         self._ensure_runtime()
         languages = [language] if self.version == "v5" else ["eng"]
         try:
-            for idx, selected in enumerate(languages):
-                try:
-                    step_p = 0.72 + (0.20 * idx / max(1, len(languages)))
-                    emit(f"آماده‌سازی مدل {self.id} برای {selected}؛ ممکن است دانلود چند دقیقه طول بکشد", progress=round(step_p, 2))
-                    self._warm(self._get(selected, allow_download=True))
-                    emit(f"مدل {self.id} برای {selected} بارگذاری و آزمایش شد", "success", progress=0.94)
-                except OcrError:
-                    raise
-                except Exception as exc:
-                    cause = f"; cause: {exc.__cause__}" if exc.__cause__ else ""
-                    raise OcrError(
-                        f"Model download failed for {self.id} ({selected}): {exc}{cause}. "
-                        "Check the internet connection and model host access, then try again."
-                    ) from exc
+            with _widen_download_timeouts():
+                for idx, selected in enumerate(languages):
+                    if _STANDARD_CANCEL_EVENT.is_set():
+                        raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
+                    try:
+                        step_p = 0.72 + (0.20 * idx / max(1, len(languages)))
+                        emit(f"آماده‌سازی مدل {self.id} برای {selected}؛ ممکن است دانلود چند دقیقه طول بکشد", progress=round(step_p, 2))
+                        self._warm(self._get(selected, allow_download=True))
+                        emit(f"مدل {self.id} برای {selected} بارگذاری و آزمایش شد", "success", progress=0.94)
+                    except OcrError:
+                        raise
+                    except Exception as exc:
+                        cause = f"; cause: {exc.__cause__}" if exc.__cause__ else ""
+                        raise OcrError(
+                            f"Model download failed for {self.id} ({selected}): {exc}{cause}. "
+                            "Check the internet connection and model host access, then try again."
+                        ) from exc
             cleanup_superseded_engine_files(self.id)
             ver = detect_builtin_installed_version(self.id, self)
             acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
@@ -526,6 +686,7 @@ class RapidEngine:
             trim_process_memory()
 
     def update(self, language: str = "eng") -> None:
+        _STANDARD_CANCEL_EVENT.clear()
         emit(f"شروع به‌روزرسانی خودکار {self.id}…", progress=0.06)
         target_langs = list(self.ready_languages) if self.version == "v5" and self.ready_languages else ([language] if self.version == "v5" else ["eng"])
         self.unload()
@@ -547,9 +708,12 @@ class RapidEngine:
                 install_packages(pkgs, upgrade=True)
             else:
                 emit(f"بستهٔ اجرایی {self.id} ({cur_ver}) در آخرین نسخه است…", progress=0.68)
-            for idx, selected in enumerate(target_langs):
-                emit(f"بررسی و آماده‌سازی فایل‌های مدل {self.id} ({selected})…", progress=round(0.74 + 0.18 * (idx / max(1, len(target_langs))), 2))
-                self._warm(self._get(selected, allow_download=True))
+            with _widen_download_timeouts():
+                for idx, selected in enumerate(target_langs):
+                    if _STANDARD_CANCEL_EVENT.is_set():
+                        raise OcrError("عملیات به‌روزرسانی مدل لغو شد.")
+                    emit(f"بررسی و آماده‌سازی فایل‌های مدل {self.id} ({selected})…", progress=round(0.74 + 0.18 * (idx / max(1, len(target_langs))), 2))
+                    self._warm(self._get(selected, allow_download=True))
             cleanup_superseded_engine_files(self.id)
             ver = detect_builtin_installed_version(self.id, self)
             acknowledge_engine_update(self.id, installed_version=ver, ready_languages=self.ready_languages)
@@ -634,6 +798,9 @@ class EasyEngine:
         with self._lock:
             return bool(self._readers)
 
+    def cancel_install(self) -> None:
+        _STANDARD_CANCEL_EVENT.set()
+
     def unload(self) -> None:
         with self._lock:
             self._readers.clear()
@@ -643,14 +810,19 @@ class EasyEngine:
             emit("بستهٔ اجرای EasyOCR موجود نیست؛ نصب آگاهانه آغاز می‌شود")
             installed_cuda = False
             if os.name == "nt" and inspect_hardware().get("hasNvidiaGpu") and not importlib.util.find_spec("torch"):
-                try:
-                    install_packages([
-                        "--extra-index-url", "https://download.pytorch.org/whl/cu126",
-                        "easyocr>=1.7,<2", "torch>=2.2,<3",
-                    ])
-                    installed_cuda = True
-                except OcrError:
-                    installed_cuda = False
+                for cuda_idx in ("https://download.pytorch.org/whl/cu128", "https://download.pytorch.org/whl/cu126"):
+                    try:
+                        install_packages([
+                            "--index-url", cuda_idx,
+                            "torch>=2.3.0,<3", "torchvision>=0.18.0,<1",
+                        ])
+                        install_packages(["easyocr>=1.7,<2"])
+                        installed_cuda = True
+                        break
+                    except OcrError:
+                        if _STANDARD_CANCEL_EVENT.is_set():
+                            raise
+                        installed_cuda = False
             if not installed_cuda:
                 install_packages(["easyocr>=1.7,<2", "torch>=2.2,<3"])
         if not self.runtime_installed:
@@ -681,30 +853,35 @@ class EasyEngine:
                     )
                 except Exception:
                     use_gpu = False
-                try:
-                    self._readers[lang] = easyocr.Reader(
-                        [lang], gpu=use_gpu, model_storage_directory=str(self._model_dir()),
-                        download_enabled=download, verbose=False,
-                    )
-                    self._using_gpu = use_gpu
-                except Exception as exc:
-                    if use_gpu:
-                        try:
-                            self._readers[lang] = easyocr.Reader(
-                                [lang], gpu=False, model_storage_directory=str(self._model_dir()),
-                                download_enabled=download, verbose=False,
-                            )
-                            self._using_gpu = False
-                        except Exception as cpu_exc:
-                            raise OcrError(f"Could not initialize EasyOCR: {cpu_exc}") from cpu_exc
-                    else:
-                        raise OcrError(f"Could not initialize EasyOCR: {exc}") from exc
+                dl_ctx = _widen_download_timeouts() if download else contextlib.nullcontext()
+                with dl_ctx:
+                    try:
+                        self._readers[lang] = easyocr.Reader(
+                            [lang], gpu=use_gpu, model_storage_directory=str(self._model_dir()),
+                            download_enabled=download, verbose=False,
+                        )
+                        self._using_gpu = use_gpu
+                    except Exception as exc:
+                        if use_gpu:
+                            try:
+                                self._readers[lang] = easyocr.Reader(
+                                    [lang], gpu=False, model_storage_directory=str(self._model_dir()),
+                                    download_enabled=download, verbose=False,
+                                )
+                                self._using_gpu = False
+                            except Exception as cpu_exc:
+                                raise OcrError(f"Could not initialize EasyOCR: {cpu_exc}") from cpu_exc
+                        else:
+                            raise OcrError(f"Could not initialize EasyOCR: {exc}") from exc
         return self._readers[lang]
 
     def download(self, language: str = "eng") -> None:
+        _STANDARD_CANCEL_EVENT.clear()
         emit(f"شروع آماده‌سازی مدل EasyOCR ({language})…", progress=0.06)
         self._ensure_runtime()
         try:
+            if _STANDARD_CANCEL_EVENT.is_set():
+                raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
             emit(f"آماده‌سازی EasyOCR برای {language}؛ فقط مدل همین زبان دریافت می‌شود", progress=0.62)
             self._reader(language, True)
             self._model_dir().mkdir(parents=True, exist_ok=True)
@@ -722,6 +899,7 @@ class EasyEngine:
             trim_process_memory()
 
     def update(self, language: str = "eng") -> None:
+        _STANDARD_CANCEL_EVENT.clear()
         emit("شروع به‌روزرسانی خودکار EasyOCR…", progress=0.06)
         target_langs = list(self.ready_languages) or [language]
         self.unload()
@@ -918,56 +1096,79 @@ class TesseractEngine:
     def is_loaded_in_ram(self) -> bool:
         return False
 
+    def cancel_install(self) -> None:
+        _STANDARD_CANCEL_EVENT.set()
+
     def unload(self) -> None:
         self._system_languages = None
 
     def _download_language_file(self, language: str) -> Path:
         if language not in LANGUAGES:
             raise OcrError(f"Unsupported Tesseract language: {language}")
+        if _STANDARD_CANCEL_EVENT.is_set():
+            raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
         self._model_dir().mkdir(parents=True, exist_ok=True)
-        url = f"https://github.com/tesseract-ocr/tessdata_fast/raw/main/{language}.traineddata"
+        urls = [
+            f"https://github.com/tesseract-ocr/tessdata_fast/raw/main/{language}.traineddata",
+            f"https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/{language}.traineddata",
+            f"https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_fast@main/{language}.traineddata",
+        ]
         temporary = self._model_dir() / f".{language}.traineddata.part"
         target = self._model_dir() / f"{language}.traineddata"
-        try:
-            emit(f"دانلود فایل زبان Tesseract ({language}) از منبع رسمی آغاز شد", progress=0.20)
-            request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio"})
-            with urllib.request.urlopen(request, timeout=180) as response, temporary.open("wb") as output:
-                hdrs = getattr(response, "headers", None)
-                raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
-                expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 12 * 1024 * 1024
-                total = 0
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    ratio = min(1.0, total / max(1, expected_bytes))
-                    emit(
-                        f"Tesseract {language}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
-                        progress=round(0.24 + 0.66 * ratio, 3),
-                    )
-                    if total > 50 * 1024 * 1024:
-                        raise OcrError("The selected Tesseract language file is unexpectedly large.")
-                    output.write(chunk)
-            if temporary.stat().st_size < 1000:
-                raise OcrError("The downloaded Tesseract language file is empty or invalid.")
-            os.replace(temporary, target)
-            self._ensure_tsv_config()
-            emit(f"فایل زبان Tesseract ({language}) ذخیره شد", "success", progress=0.94)
-            return target
-        except OcrError:
-            temporary.unlink(missing_ok=True)
-            raise
-        except Exception as exc:
-            temporary.unlink(missing_ok=True)
-            raise OcrError(f"Tesseract language download failed for {language}: {exc}. The official tessdata_fast host must be reachable.") from exc
+        emit(f"دانلود فایل زبان Tesseract ({language}) از منبع رسمی آغاز شد", progress=0.20)
+        last_exc: Exception | None = None
+        for attempt_idx, url in enumerate(urls):
+            if _STANDARD_CANCEL_EVENT.is_set():
+                temporary.unlink(missing_ok=True)
+                raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
+            if attempt_idx > 0:
+                emit(f"ادامهٔ دانلود فایل زبان Tesseract ({language}) از میرور جایگزین…", "warning", progress=0.22)
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio"})
+                with urllib.request.urlopen(request, timeout=180) as response, temporary.open("wb") as output:
+                    hdrs = getattr(response, "headers", None)
+                    raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
+                    expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 12 * 1024 * 1024
+                    total = 0
+                    while True:
+                        if _STANDARD_CANCEL_EVENT.is_set():
+                            raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        ratio = min(1.0, total / max(1, expected_bytes))
+                        emit(
+                            f"Tesseract {language}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
+                            progress=round(0.24 + 0.66 * ratio, 3),
+                        )
+                        if total > 50 * 1024 * 1024:
+                            raise OcrError("The selected Tesseract language file is unexpectedly large.")
+                        output.write(chunk)
+                if temporary.stat().st_size < 1000:
+                    raise OcrError("The downloaded Tesseract language file is empty or invalid.")
+                os.replace(temporary, target)
+                self._ensure_tsv_config()
+                emit(f"فایل زبان Tesseract ({language}) ذخیره شد", "success", progress=0.94)
+                return target
+            except OcrError:
+                temporary.unlink(missing_ok=True)
+                raise
+            except Exception as exc:
+                temporary.unlink(missing_ok=True)
+                last_exc = exc
+                continue
+        raise OcrError(
+            f"Tesseract language download failed for {language}: {last_exc}. The official tessdata_fast host must be reachable."
+        ) from last_exc
 
     def download(self, language: str = "eng") -> None:
         if language not in LANGUAGES:
             raise OcrError(f"Unsupported Tesseract language: {language}")
+        _STANDARD_CANCEL_EVENT.clear()
         emit(f"شروع آماده‌سازی Tesseract ({language})…", progress=0.06)
         if not self.runtime_installed:
-            install_tesseract_runtime(OcrError)
+            _call_install_tesseract_runtime()
             self._system_languages = None
         target = self._download_language_file(language)
         ver = detect_builtin_installed_version(self.id, self)
@@ -983,6 +1184,7 @@ class TesseractEngine:
         )
 
     def update(self, language: str = "eng") -> None:
+        _STANDARD_CANCEL_EVENT.clear()
         emit("شروع به‌روزرسانی خودکار Tesseract…", progress=0.06)
         try:
             if os.name == "nt":
@@ -994,12 +1196,12 @@ class TesseractEngine:
                     or bool(cur_ver and latest_ver and is_newer_version(cur_ver, latest_ver))
                 )
                 if needs_win_bin:
-                    install_tesseract_runtime(OcrError)
+                    _call_install_tesseract_runtime()
                     self._system_languages = None
                 else:
                     emit(f"فایل اجرایی Tesseract ({cur_ver or 'نصب‌شده'}) در آخرین نسخه است…", progress=0.45)
             elif not self.runtime_installed:
-                install_tesseract_runtime(OcrError)
+                _call_install_tesseract_runtime()
                 self._system_languages = None
             local_langs = [lang for lang in LANGUAGES if (self._model_dir() / f"{lang}.traineddata").is_file()]
             target_langs = local_langs or [language if language in LANGUAGES else "eng"]
@@ -1420,7 +1622,7 @@ ENGINE_INFO = {
         "dots.ocr",
         "dots / Vision-Language OCR",
         "مدل سنگین چندزبانهٔ تشخیص چیدمان و متن با خروجی مختصات کادرها.",
-        "https://github.com/studio-dots-ai/dots.ocr",
+        "https://github.com/rednote-hilab/dots.ocr",
         "مدل سنگین؛ نیازمند کارت گرافیک NVIDIA با حداقل ۸ گیگابایت حافظه و حدود ۴٫۵ گیگابایت دانلود.",
     ),
     "deepseek-ocr-2": _isolated_info(

@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v3.91: Verify version badge ۳.۹۱, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, and Help section 5 GPU/multi-core guide
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۱ · Python', 'header shows version ۳.۹۱');
+      // v3.85–v3.92: Verify version badge ۳.۹۲, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, and Help section 5 GPU/multi-core guide
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۲ · Python', 'header shows version ۳.۹۲');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
