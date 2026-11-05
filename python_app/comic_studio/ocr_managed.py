@@ -237,6 +237,116 @@ ISOLATED_ENGINE_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
+PYPI_FALLBACK_MIRRORS: tuple[tuple[str, str], ...] = (
+    ("Aliyun PyPI", "https://mirrors.aliyun.com/pypi/simple/"),
+    ("Tsinghua TUNA", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+)
+
+_PIP_NETWORK_ERROR_MARKERS: tuple[str, ...] = (
+    "readtimeouterror",
+    "connecttimeouterror",
+    "read timed out",
+    "connection timed out",
+    "connection broken",
+    "connectionreseterror",
+    "connectionabortederror",
+    "newconnectionerror",
+    "max retries exceeded",
+    "network is unreachable",
+    "temporary failure in name resolution",
+    "getaddrinfo failed",
+    "name or service not known",
+    "sslerror",
+    "eof occurred in violation of protocol",
+    "chunkedencodingerror",
+    "incompleteread",
+    "retrying (retry(total=",
+    "operation timed out during pip installation",
+)
+
+
+def pip_cache_dir() -> Path:
+    cdir = models_dir() / "pip-cache"
+    try:
+        cdir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return cdir
+
+
+def sync_local_wheelhouse() -> Path:
+    """Link/copy any cached `.whl` files from OS and Studio pip caches into a flat wheelhouse folder."""
+    wheelhouse = models_dir() / "wheelhouse"
+    try:
+        wheelhouse.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return wheelhouse
+
+    roots: list[Path] = [pip_cache_dir() / "wheels"]
+    if _is_windows():
+        local_app = os.environ.get("LOCALAPPDATA")
+        if local_app:
+            roots.append(Path(local_app) / "pip" / "Cache" / "wheels")
+    else:
+        roots.append(Path.home() / ".cache" / "pip" / "wheels")
+        roots.append(Path.home() / "Library" / "Caches" / "pip" / "wheels")
+
+    seen_roots: set[Path] = set()
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+            resolved = root.resolve()
+            if resolved in seen_roots:
+                continue
+            seen_roots.add(resolved)
+            for whl in root.rglob("*.whl"):
+                if not whl.is_file():
+                    continue
+                dest = wheelhouse / whl.name
+                if dest.exists():
+                    continue
+                try:
+                    os.link(whl, dest)
+                except OSError:
+                    try:
+                        shutil.copy2(whl, dest)
+                    except OSError:
+                        pass
+        except OSError:
+            continue
+    return wheelhouse
+
+
+def clean_pip_env() -> dict[str, str]:
+    """Build a sanitized environment for pip subprocesses so launcher vars like PIP_RETRIES=1 or PIP_TIMEOUT=15 never throttle model installs."""
+    env = dict(os.environ)
+    for blocked in ("PIP_NO_CACHE_DIR",):
+        env.pop(blocked, None)
+    env["PIP_TIMEOUT"] = "120"
+    env["PIP_RETRIES"] = "10"
+    env["PIP_PREFER_BINARY"] = "1"
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def is_pip_network_or_index_error(output: str) -> bool:
+    lower = str(output or "").lower()
+    if not lower:
+        return False
+    if "winerror 32" in lower or "being used by another process" in lower:
+        return False
+    if "winerror 5" in lower or "access is denied" in lower:
+        return False
+    if any(marker in lower for marker in _PIP_NETWORK_ERROR_MARKERS):
+        return True
+    if "(from versions: none)" in lower:
+        return True
+    return False
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1515,6 +1625,9 @@ class IsolatedOcrEngine:
         env.setdefault("TOKENIZERS_PARALLELISM", "true")
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         env.setdefault("FLAGS_use_mkldnn", "1")
+        env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
+        env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
+        env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
         return env
 
     def _ensure_llama_cpp_for_surya(self) -> None:
@@ -1601,6 +1714,7 @@ class IsolatedOcrEngine:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=clean_pip_env(),
             creationflags=_SUBPROCESS_NO_WINDOW if os.name == "nt" else 0,
         )
         try:
@@ -1649,11 +1763,103 @@ class IsolatedOcrEngine:
                 except Exception:
                     pass
 
+    def _clean_broken_venv_artifacts(self) -> None:
+        env_dir = self._env_dir()
+        if not env_dir.is_dir():
+            return
+        site_dirs = (
+            [env_dir / "Lib" / "site-packages"]
+            if _is_windows()
+            else list((env_dir / "lib").glob("python*/site-packages"))
+        )
+        for sp in site_dirs:
+            if not sp.is_dir():
+                continue
+            for broken in sp.glob("~*"):
+                _remove_path_safely(broken)
+
+    def _run_pip_resilient(
+        self,
+        py: Path,
+        packages_and_flags: list[str],
+        *,
+        upgrade: bool,
+        start_p: float,
+        end_p: float,
+        label_prefix: str,
+        timeout: int = 3600,
+    ) -> tuple[int, str]:
+        cdir = pip_cache_dir()
+        wheelhouse = sync_local_wheelhouse()
+        has_custom_index = bool(os.environ.get("PIP_INDEX_URL")) or ("--index-url" in packages_and_flags) or ("-i" in packages_and_flags)
+
+        attempts: list[tuple[str | None, str | None]] = [
+            (None, None),
+            (None, "اختلال موقت شبکه در دریافت بسته؛ تلاش مجدد با ادامه از فایل‌های کش‌شده…"),
+        ]
+        if not has_custom_index:
+            for mirror_name, mirror_url in PYPI_FALLBACK_MIRRORS:
+                attempts.append((
+                    mirror_url,
+                    f"سرور اصلی PyPI پاسخ نداد یا دچار کندی شدید است؛ ادامهٔ نصب از مسیر جایگزین ({mirror_name})…",
+                ))
+
+        last_rc, last_out = 1, "pip failed"
+        for idx, (mirror_url, retry_notice) in enumerate(attempts):
+            if idx > 0:
+                if retry_notice:
+                    emit(retry_notice, "warning", progress=start_p)
+                time.sleep(1.5)
+                wheelhouse = sync_local_wheelhouse()
+            self._clean_broken_venv_artifacts()
+
+            cmd = [
+                str(py), "-m", "pip", "install",
+                "--timeout", "120",
+                "--retries", "10",
+                "--prefer-binary",
+                "--cache-dir", str(cdir),
+            ]
+            try:
+                if wheelhouse.is_dir() and any(wheelhouse.glob("*.whl")):
+                    cmd.extend(["--find-links", str(wheelhouse)])
+            except OSError:
+                pass
+            if mirror_url:
+                cmd.extend(["--index-url", mirror_url])
+            if upgrade:
+                cmd.append("--upgrade")
+            cmd.extend(packages_and_flags)
+
+            rc, out = self._run_pip_streaming(
+                cmd,
+                start_p=start_p,
+                end_p=end_p,
+                label_prefix=label_prefix,
+                timeout=timeout,
+            )
+            last_rc, last_out = rc, out
+            if rc == 0:
+                sync_local_wheelhouse()
+                return 0, out
+            if not is_pip_network_or_index_error(out):
+                return rc, out
+        return last_rc, last_out
+
     def _ensure_isolated_venv(self, upgrade: bool = False) -> None:
         env_dir = self._env_dir()
         py = self._env_python()
         hw = inspect_hardware()
         with self._install_lock:
+            cdir = pip_cache_dir()
+            wheelhouse = sync_local_wheelhouse()
+            find_links_args: list[str] = []
+            try:
+                if wheelhouse.is_dir() and any(wheelhouse.glob("*.whl")):
+                    find_links_args = ["--find-links", str(wheelhouse)]
+            except OSError:
+                pass
+
             if not py.is_file():
                 emit(f"ساخت پوشه و محیط مستقل برای مدل {self.id}…", progress=0.08)
                 env_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -1662,27 +1868,33 @@ class IsolatedOcrEngine:
                     raise self._error_cls(f"ساخت محیط مستقل برای {self.id} ناموفق بود: {(res.stderr or res.stdout)[-800:]}")
                 emit(f"آماده‌سازی ابزار نصب در محیط مستقل {self.id}…", progress=0.14)
                 _run_Subprocess([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300, check=False)
-                _run_Subprocess([str(py), "-m", "pip", "install", "--no-cache-dir", "--upgrade", "pip", "setuptools", "wheel"], capture_output=True, text=True, timeout=600, check=False)
+                _run_Subprocess(
+                    [str(py), "-m", "pip", "install", "--timeout", "90", "--retries", "5", "--prefer-binary", "--cache-dir", str(cdir), *find_links_args, "--upgrade", "pip", "setuptools", "wheel"],
+                    capture_output=True, text=True, timeout=600, check=False, env=clean_pip_env(),
+                )
+            else:
+                self._clean_broken_venv_artifacts()
+                pip_probe = _run_Subprocess([str(py), "-m", "pip", "--version"], capture_output=True, text=True, timeout=60, check=False)
+                if pip_probe.returncode != 0:
+                    _run_Subprocess([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300, check=False)
 
             if self._spec.get("needs_torch"):
                 torch_ready = _read_dist_version_in_venv(env_dir, "torch") is not None
                 if not torch_ready:
-                    torch_cmd = [str(py), "-m", "pip", "install", "--no-cache-dir", "torch>=2.3.0", "torchvision>=0.18.0"]
+                    torch_args = ["torch>=2.3.0", "torchvision>=0.18.0"]
                     if os.name == "nt" and hw.get("hasNvidiaGpu"):
-                        torch_cmd.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
+                        torch_args.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
                     emit(f"نصب زیرساخت PyTorch برای {self.id}…", progress=0.20)
-                    t_rc, t_out = self._run_pip_streaming(
-                        torch_cmd, start_p=0.20, end_p=0.45, label_prefix=f"زیرساخت {self.id}"
+                    t_rc, t_out = self._run_pip_resilient(
+                        py, torch_args, upgrade=False, start_p=0.20, end_p=0.45, label_prefix=f"زیرساخت {self.id}"
                     )
                     if t_rc != 0:
                         raise self._error_cls(f"نصب PyTorch برای {self.id} ناموفق بود: {t_out[-1200:]}")
 
             packages = list(self._spec["pip_packages_gpu"] if hw.get("hasNvidiaGpu") else self._spec["pip_packages_cpu"])
-            pip_base = [str(py), "-m", "pip", "install", "--no-cache-dir"]
+            extra_flags: list[str] = []
             if os.name == "nt" and hw.get("hasNvidiaGpu") and self.id in {"surya", "mineru-2-5-pro"}:
-                pip_base.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
-            if upgrade:
-                pip_base.append("--upgrade")
+                extra_flags.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
             action_word = "به‌روزرسانی" if upgrade else "نصب"
             p_start = 0.46 if self._spec.get("needs_torch") else 0.18
             emit(f"{action_word} بسته‌های اختصاصی مدل {self.id} آغاز شد…", progress=p_start)
@@ -1691,22 +1903,25 @@ class IsolatedOcrEngine:
                     "paddlepaddle-gpu>=3.2.0" if pkg.startswith("paddlepaddle>=") else pkg
                     for pkg in packages
                 ]
-                p_rc, p_out = self._run_pip_streaming(
-                    [*pip_base, *gpu_paddle_pkgs],
+                p_rc, p_out = self._run_pip_resilient(
+                    py, [*extra_flags, *gpu_paddle_pkgs],
+                    upgrade=upgrade,
                     start_p=p_start,
                     end_p=0.70,
                     label_prefix=f"{action_word} GPU {self.id}",
                 )
                 if p_rc != 0:
-                    p_rc, p_out = self._run_pip_streaming(
-                        [*pip_base, *packages],
+                    p_rc, p_out = self._run_pip_resilient(
+                        py, [*extra_flags, *packages],
+                        upgrade=upgrade,
                         start_p=p_start,
                         end_p=0.70,
                         label_prefix=f"{action_word} {self.id}",
                     )
             else:
-                p_rc, p_out = self._run_pip_streaming(
-                    [*pip_base, *packages],
+                p_rc, p_out = self._run_pip_resilient(
+                    py, [*extra_flags, *packages],
+                    upgrade=upgrade,
                     start_p=p_start,
                     end_p=0.70,
                     label_prefix=f"{action_word} {self.id}",
@@ -1714,8 +1929,9 @@ class IsolatedOcrEngine:
             fallback_pkgs = self._spec.get("pip_packages_fallback")
             if p_rc != 0 and fallback_pkgs:
                 emit(f"تنظیم نسخهٔ سازگار بسته‌های {self.id} برای سیستم شما…", progress=round((p_start + 0.70) / 2, 2))
-                p_rc, p_out = self._run_pip_streaming(
-                    [*pip_base, *fallback_pkgs],
+                p_rc, p_out = self._run_pip_resilient(
+                    py, [*extra_flags, *fallback_pkgs],
+                    upgrade=upgrade,
                     start_p=round((p_start + 0.70) / 2, 2),
                     end_p=0.70,
                     label_prefix=f"{action_word} سازگار {self.id}",

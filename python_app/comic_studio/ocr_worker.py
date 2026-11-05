@@ -30,6 +30,38 @@ def _configure_cache_dirs(models_root: Path) -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     os.environ.setdefault("FLAGS_use_mkldnn", "1")
+    os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
+
+def _widen_requests_default_timeout(min_timeout: float = 120.0) -> None:
+    """Prevent hardcoded short HTTP timeouts (such as PaddleX's 15s `requests.get(..., timeout=15)`)
+    from aborting multi-hundred-MB weight downloads on slow connections."""
+    try:
+        import requests
+    except Exception:
+        return
+    orig_req = getattr(requests.Session, "request", None)
+    if orig_req is None or getattr(orig_req, "_comic_studio_widened", False):
+        return
+
+    def _wrapped_request(self: Any, method: str, url: str, **kwargs: Any) -> Any:
+        raw_t = kwargs.get("timeout")
+        if raw_t is None:
+            kwargs["timeout"] = min_timeout
+        elif isinstance(raw_t, (int, float)) and raw_t < min_timeout:
+            kwargs["timeout"] = min_timeout
+        elif isinstance(raw_t, tuple) and len(raw_t) == 2:
+            c_t, r_t = raw_t
+            kwargs["timeout"] = (
+                max(float(c_t), 30.0) if isinstance(c_t, (int, float)) else c_t,
+                max(float(r_t), min_timeout) if isinstance(r_t, (int, float)) else r_t,
+            )
+        return orig_req(self, method, url, **kwargs)
+
+    _wrapped_request._comic_studio_widened = True  # type: ignore[attr-defined]
+    requests.Session.request = _wrapped_request  # type: ignore[method-assign]
 
 
 def _configure_torch_runtime(torch_mod: Any) -> str:
@@ -204,11 +236,24 @@ class _BaseAdapter:
         return re.sub(r"[^A-Za-z0-9_-]+", "_", raw)
 
     def prepare(self, language: str) -> str:
+        _widen_requests_default_timeout(120.0)
         if self.hf_repo:
             from huggingface_hub import snapshot_download
             local_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name()
             local_dir.mkdir(parents=True, exist_ok=True)
-            snapshot_download(repo_id=self.hf_repo, local_dir=str(local_dir))
+            try:
+                snapshot_download(repo_id=self.hf_repo, local_dir=str(local_dir), max_workers=3)
+            except Exception as first_exc:
+                err_low = str(first_exc).lower()
+                is_net = any(k in err_low for k in ("timed out", "timeout", "connection", "ssl", "chunked", "reset", "eof"))
+                if not is_net or os.environ.get("HF_ENDPOINT"):
+                    raise
+                snapshot_download(
+                    repo_id=self.hf_repo,
+                    local_dir=str(local_dir),
+                    max_workers=2,
+                    endpoint="https://hf-mirror.com",
+                )
             return "ready"
         return "ready"
 
@@ -309,7 +354,23 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
         return self._pipeline
 
     def prepare(self, language: str) -> str:
-        self._get_pipeline()
+        _widen_requests_default_timeout(120.0)
+        try:
+            self._get_pipeline()
+        except Exception as first_exc:
+            err_low = str(first_exc).lower()
+            is_net = any(k in err_low for k in ("timed out", "timeout", "connection", "ssl", "chunked", "reset", "eof"))
+            if not is_net or os.environ.get("PADDLE_PDX_HUGGING_FACE_ENDPOINT"):
+                raise
+            os.environ["PADDLE_PDX_HUGGING_FACE_ENDPOINT"] = "https://hf-mirror.com"
+            os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+            try:
+                from paddlex.utils import flags as _pdx_flags
+                _pdx_flags.HUGGING_FACE_ENDPOINT = "https://hf-mirror.com"
+            except Exception:
+                pass
+            self._pipeline = None
+            self._get_pipeline()
         import importlib.metadata
         try:
             return importlib.metadata.version("paddleocr")

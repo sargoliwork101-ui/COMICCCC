@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,15 +109,68 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
     """Install a whitelisted runtime only after an explicit user preparation click."""
     if not packages:
         return
-    command = [sys.executable, "-m", "pip", "install", "--no-cache-dir", *(["--upgrade"] if upgrade else []), *packages]
+    from .ocr_managed import (
+        PYPI_FALLBACK_MIRRORS,
+        clean_pip_env,
+        is_pip_network_or_index_error,
+        pip_cache_dir,
+        sync_local_wheelhouse,
+    )
+
+    cdir = pip_cache_dir()
+    wh = sync_local_wheelhouse()
+    has_custom_index = bool(os.environ.get("PIP_INDEX_URL")) or ("--index-url" in packages) or ("-i" in packages)
+
+    def _build_cmd(mirror_url: str | None = None) -> list[str]:
+        cmd = [
+            sys.executable, "-m", "pip", "install",
+            "--timeout", "120",
+            "--retries", "10",
+            "--prefer-binary",
+            "--cache-dir", str(cdir),
+        ]
+        try:
+            if wh.is_dir() and any(wh.glob("*.whl")):
+                cmd.extend(["--find-links", str(wh)])
+        except OSError:
+            pass
+        if mirror_url:
+            cmd.extend(["--index-url", mirror_url])
+        if upgrade:
+            cmd.append("--upgrade")
+        cmd.extend(packages)
+        return cmd
+
     action_label = "به‌روزرسانی" if upgrade else "نصب"
     emit(f"{action_label} بسته‌های OCR آغاز شد: {', '.join(packages)}", progress=0.18)
+    attempts: list[tuple[str | None, str | None]] = [(None, None), (None, "تلاش مجدد برای دریافت بسته‌های OCR از کش محلی…")]
+    if not has_custom_index:
+        for mirror_name, mirror_url in PYPI_FALLBACK_MIRRORS:
+            attempts.append((mirror_url, f"ادامهٔ نصب بسته‌های OCR از میرور جایگزین ({mirror_name})…"))
+
+    result: subprocess.CompletedProcess[str] | None = None
     try:
         with _INSTALL_LOCK:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False, **_win_subprocess_kwargs())
+            for idx, (mirror_url, notice) in enumerate(attempts):
+                if idx > 0:
+                    if notice:
+                        emit(notice, "warning", progress=0.25)
+                    time.sleep(1.0)
+                    wh = sync_local_wheelhouse()
+                result = subprocess.run(
+                    _build_cmd(mirror_url),
+                    capture_output=True, text=True, timeout=3600, check=False, env=clean_pip_env(), **_win_subprocess_kwargs(),
+                )
+                if result.returncode == 0:
+                    sync_local_wheelhouse()
+                    break
+                combined_err = f"{result.stderr or ''}\n{result.stdout or ''}"
+                if not is_pip_network_or_index_error(combined_err):
+                    break
     except Exception as exc:
         emit(f"نصب بسته‌های OCR ناموفق بود: {exc}", "error")
         raise OcrError(f"Could not install the OCR runtime: {exc}") from exc
+    assert result is not None
     if result.returncode:
         details = (result.stderr or result.stdout or "pip failed")[-1800:].strip()
         if "WinError 32" in details or "being used by another process" in details:

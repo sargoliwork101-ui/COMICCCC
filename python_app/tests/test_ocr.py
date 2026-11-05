@@ -1474,6 +1474,160 @@ def test_v389_pixel_typography_bold_italic_and_worker_markup_hints():
     assert by_prefix["Note:"]["italic"] is True and by_prefix["Note:"].get("_detectedItalic") is True
 
 
+def test_clean_pip_env_overrides_launcher_timeout_and_retries(monkeypatch):
+    from comic_studio.ocr_managed import clean_pip_env
+
+    monkeypatch.setenv("PIP_RETRIES", "1")
+    monkeypatch.setenv("PIP_TIMEOUT", "15")
+    monkeypatch.setenv("PIP_NO_CACHE_DIR", "1")
+    env = clean_pip_env()
+    assert env["PIP_TIMEOUT"] == "120"
+    assert env["PIP_RETRIES"] == "10"
+    assert env["PIP_PREFER_BINARY"] == "1"
+    assert "PIP_NO_CACHE_DIR" not in env
+
+
+def test_sync_local_wheelhouse_links_cached_wheels_from_os_pip_cache(monkeypatch, tmp_path):
+    import comic_studio.ocr_managed as managed
+
+    fake_models = tmp_path / "models"
+    fake_localappdata = tmp_path / "LocalAppData"
+    nested_wheel_dir = fake_localappdata / "pip" / "Cache" / "wheels" / "ab" / "cd" / "ef"
+    nested_wheel_dir.mkdir(parents=True)
+    wheel_file = nested_wheel_dir / "pillow-12.1.0-cp313-cp313-win_amd64.whl"
+    wheel_file.write_bytes(b"fake-wheel-bytes")
+
+    monkeypatch.setattr(managed, "models_dir", lambda: fake_models)
+    monkeypatch.setattr(managed, "_is_windows", lambda: True)
+    monkeypatch.setenv("LOCALAPPDATA", str(fake_localappdata))
+
+    wh = managed.sync_local_wheelhouse()
+    linked = wh / "pillow-12.1.0-cp313-cp313-win_amd64.whl"
+    assert linked.is_file()
+    assert linked.read_bytes() == b"fake-wheel-bytes"
+
+
+def test_isolated_engine_install_retries_and_falls_back_to_pypi_mirror_on_read_timeout(monkeypatch, tmp_path):
+    import comic_studio.ocr_managed as managed
+
+    fake_models = tmp_path / "models"
+    env_dir = fake_models / "envs" / "paddleocr-vl-1-6"
+    py_exe = env_dir / "bin" / "python"
+    py_exe.parent.mkdir(parents=True)
+    py_exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    sp_dir = env_dir / "lib" / "python3.13" / "site-packages"
+    sp_dir.mkdir(parents=True)
+    broken_remnant = sp_dir / "~illow"
+    broken_remnant.mkdir()
+
+    # Pre-seed a cached wheel to verify `--find-links` is wired
+    os_wheel = fake_models / "pip-cache" / "wheels" / "11" / "pillow-12.1.0-cp313-cp313-win_amd64.whl"
+    os_wheel.parent.mkdir(parents=True)
+    os_wheel.write_bytes(b"whl")
+
+    monkeypatch.setattr(managed, "models_dir", lambda: fake_models)
+    monkeypatch.setattr(managed, "_is_windows", lambda: False)
+    monkeypatch.setattr(managed, "inspect_hardware", lambda: {"hasNvidiaGpu": False, "hasGpu": False})
+    monkeypatch.setattr(managed.time, "sleep", lambda _s: None)
+    monkeypatch.delenv("PIP_INDEX_URL", raising=False)
+    monkeypatch.setattr(
+        managed,
+        "_run_Subprocess",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "pip 25.2", ""),
+    )
+
+    eng = managed.IsolatedOcrEngine("paddleocr-vl-1-6", ["eng"], threading.Lock(), OcrLine, OcrError)
+    seen_cmds: list[list[str]] = []
+    timeout_log = (
+        "WARNING: Retrying (Retry(total=0, connect=None, read=None, redirect=None, status=None)) "
+        "after connection broken by 'ReadTimeoutError(\"HTTPSConnectionPool(host='pypi.org', port=443): "
+        "Read timed out. (read timeout=15)\")': /simple/pillow/\n"
+        "WARNING: Connection timed out while downloading.\n"
+        "ERROR: Could not find a version that satisfies the requirement pillow>=10.3 (from versions: none)\n"
+        "ERROR: No matching distribution found for pillow>=10.3"
+    )
+
+    def fake_pip_stream(cmd, **_kwargs):
+        seen_cmds.append(list(cmd))
+        # Fail first two attempts on primary PyPI, succeed as soon as mirror --index-url is used
+        if "--index-url" in cmd:
+            return 0, "Successfully installed paddlepaddle-3.3.1 paddleocr-3.7.0 pillow-12.1.0"
+        return 1, timeout_log
+
+    monkeypatch.setattr(eng, "_run_pip_streaming", fake_pip_stream)
+    eng._ensure_isolated_venv(upgrade=False)
+
+    assert not broken_remnant.exists(), "broken ~pkg remnants must be cleaned before retrying pip"
+    assert (env_dir / ".runtime-ready").is_file()
+    assert len(seen_cmds) == 3
+    for cmd in seen_cmds:
+        assert "--no-cache-dir" not in cmd
+        assert "--timeout" in cmd and cmd[cmd.index("--timeout") + 1] == "120"
+        assert "--retries" in cmd and cmd[cmd.index("--retries") + 1] == "10"
+        assert "--prefer-binary" in cmd
+        assert "--cache-dir" in cmd
+        assert "--find-links" in cmd
+        # Primary 3.7.0 package preserved rather than needlessly downgrading on network timeout
+        assert any("paddleocr[doc-parser]>=3.7.0" in part for part in cmd)
+    assert "--index-url" not in seen_cmds[0]
+    assert "--index-url" not in seen_cmds[1]
+    assert "--index-url" in seen_cmds[2]
+    assert "mirrors.aliyun.com/pypi/simple" in seen_cmds[2][seen_cmds[2].index("--index-url") + 1]
+
+
+def test_install_packages_mirror_fallback_on_timeout(monkeypatch, tmp_path):
+    import comic_studio.ocr_managed as managed
+
+    monkeypatch.setattr(managed, "models_dir", lambda: tmp_path / "models")
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+    monkeypatch.delenv("PIP_INDEX_URL", raising=False)
+
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        assert kwargs.get("env", {}).get("PIP_TIMEOUT") == "120"
+        assert kwargs.get("env", {}).get("PIP_RETRIES") == "10"
+        if "--index-url" in command:
+            return subprocess.CompletedProcess(command, 0, "ok", "")
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "",
+            "ERROR: Could not find a version that satisfies the requirement pillow>=10.3 (from versions: none)",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    install_packages(["easyocr>=1.7,<2"])
+    assert len(calls) == 3
+    assert "--no-cache-dir" not in calls[0]
+    assert "--index-url" in calls[2]
+
+
+def test_worker_requests_timeout_widener_upgrades_short_timeouts(monkeypatch):
+    import types
+    import comic_studio.ocr_worker as worker
+
+    captured: list[Any] = []
+
+    class FakeSession:
+        def request(self, method, url, **kwargs):
+            captured.append(kwargs.get("timeout"))
+            return "ok"
+
+    fake_requests = types.SimpleNamespace(Session=FakeSession)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    worker._widen_requests_default_timeout(120.0)
+
+    sess = FakeSession()
+    sess.request("GET", "https://example.com/a", timeout=15)
+    sess.request("GET", "https://example.com/b", timeout=(5, 15))
+    sess.request("GET", "https://example.com/c", timeout=300)
+    sess.request("GET", "https://example.com/d")
+    assert captured == [120.0, (30.0, 120.0), 300, 120.0]
+
+
+
 
 
 

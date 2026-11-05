@@ -55,6 +55,10 @@ if errorlevel 1 goto failed
 :have_venv
 set "HAD_READY="
 if exist "%VENV_DIR%\.comic-ocr-studio-*.ready" set "HAD_READY=1"
+if not defined HAD_READY (
+    set "PIP_RETRIES=5"
+    set "PIP_TIMEOUT=90"
+)
 "%VENV_PYTHON%" -m pip --version >nul 2>&1
 if not errorlevel 1 goto update_tools
 echo [Comic OCR Studio] Restoring pip using Python ensurepip...
@@ -111,6 +115,8 @@ echo [Comic OCR Studio] Existing packages are usable; starting without the updat
 goto run_app
 
 :run_app
+set "PIP_RETRIES="
+set "PIP_TIMEOUT="
 echo [Comic OCR Studio] Starting. Answer the browser and window questions below...
 "%VENV_PYTHON%" "%APP_DIR%\run.py"
 if errorlevel 1 goto failed

@@ -66,3 +66,11 @@ def test_existing_venv_and_bootstrap_enforce_matching_python_311_to_313_bounds()
     assert "struct.calcsize('P') == 8" in venv_check
     assert NORMAL.count("(3,11) <= sys.version_info[:2] < (3,14)") >= 2
 
+
+def test_windows_launcher_clears_pip_timeout_before_starting_server():
+    run_app_section = NORMAL.split(":run_app\n", 1)[1].split("\n:find_python", 1)[0]
+    assert 'set "PIP_RETRIES="' in run_app_section
+    assert 'set "PIP_TIMEOUT="' in run_app_section
+    assert run_app_section.index('set "PIP_TIMEOUT="') < run_app_section.index('"%VENV_PYTHON%" "%APP_DIR%\\run.py"')
+
+
