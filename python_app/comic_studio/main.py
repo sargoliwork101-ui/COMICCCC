@@ -179,13 +179,16 @@ def create_app() -> FastAPI:
     async def run_reported(function: Any, *args: Any, pulse_label: str | None = None) -> Any:
         stop_pulse = threading.Event()
         started = time.monotonic()
-        last_state: dict[str, Any] = {"ts": started, "progress": None}
+        last_state: dict[str, Any] = {"ts": started, "progress": None, "detail": ""}
         pulse = None
 
         def tracked_report(message: str, kind: str = "info", progress: float | None = None) -> None:
             last_state["ts"] = time.monotonic()
             if progress is not None:
                 last_state["progress"] = progress
+            cleaned_msg = str(message or "").strip().rstrip("….")
+            if cleaned_msg and "همچنان در حال انجام است" not in cleaned_msg:
+                last_state["detail"] = cleaned_msg[:90]
             activity.add(message, kind, progress)
 
         if pulse_label:
@@ -198,8 +201,10 @@ def create_app() -> FastAPI:
                     if isinstance(cur_p, (int, float)) and 0.0 < cur_p < 0.93:
                         cur_p = round(min(0.93, float(cur_p) + 0.008), 3)
                         last_state["progress"] = cur_p
+                    detail = str(last_state.get("detail") or "").strip()
+                    detail_part = f" ({detail})" if detail and detail != pulse_label else ""
                     activity.add(
-                        f"{pulse_label} همچنان در حال انجام است · {int(now - started)} ثانیه",
+                        f"{pulse_label} همچنان در حال انجام است{detail_part} · {int(now - started)} ثانیه",
                         progress=cur_p if isinstance(cur_p, (int, float)) else None,
                     )
             pulse = threading.Thread(target=report_alive, daemon=True)
@@ -489,8 +494,23 @@ def create_app() -> FastAPI:
             activity.add("همهٔ مدل‌های نصب‌شدهٔ OCR به‌روز هستند", "success")
         return {**report, "hardware": registry.hardware_summary(), "memory": registry.memory_status()}
 
+    async def _watch_client_cancel(request: Request, engine_id: str, done_event: asyncio.Event) -> None:
+        while not done_event.is_set():
+            try:
+                await asyncio.wait_for(done_event.wait(), timeout=0.6)
+                return
+            except asyncio.TimeoutError:
+                try:
+                    if await request.is_disconnected():
+                        cancel_fn = getattr(registry, "cancel_install", None)
+                        if callable(cancel_fn):
+                            cancel_fn(engine_id)
+                        return
+                except Exception:
+                    return
+
     @app.post("/api/engines/{engine_id}/download", response_model=None)
-    async def download_engine(engine_id: str, values: EngineDownloadRequest | None = None) -> Response | dict[str, Any]:
+    async def download_engine(request: Request, engine_id: str, values: EngineDownloadRequest | None = None) -> Response | dict[str, Any]:
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
         if info.get("action") == "guide":
@@ -512,27 +532,41 @@ def create_app() -> FastAPI:
                     },
                 )
         activity.add(f"آماده‌سازی خودکار {info['name']} برای زبان {language} آغاز شد")
+        done_ev = asyncio.Event()
+        watch_task = asyncio.create_task(_watch_client_cancel(request, engine_id, done_ev))
         try:
             await run_reported(registry.download, engine_id, language, pulse_label=f"آماده‌سازی {info['name']}")
         except Exception as exc:
             activity.add(f"آماده‌سازی {info['name']} ناموفق بود: {exc}", "error")
             raise
+        finally:
+            done_ev.set()
+            watch_task.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await watch_task
         activity.add(f"مدل {info['name']} برای {language} آماده شد", "success", 1.0)
         return {"ok": True, "language": language, "engines": registry.status(), "memory": registry.memory_status()}
 
     @app.post("/api/engines/{engine_id}/update")
-    async def update_engine_route(engine_id: str, values: EngineUpdateRequest | None = None) -> dict[str, Any]:
+    async def update_engine_route(request: Request, engine_id: str, values: EngineUpdateRequest | None = None) -> dict[str, Any]:
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
         language = values.language if values else (info["languages"][0] if info["languages"] else "eng")
         if info["languages"] and language not in info["languages"]:
             language = info["languages"][0]
         activity.add(f"به‌روزرسانی خودکار {info['name']} آغاز شد")
+        done_ev = asyncio.Event()
+        watch_task = asyncio.create_task(_watch_client_cancel(request, engine_id, done_ev))
         try:
             await run_reported(registry.update, engine_id, language, pulse_label=f"به‌روزرسانی {info['name']}")
         except Exception as exc:
             activity.add(f"به‌روزرسانی {info['name']} ناموفق بود: {exc}", "error")
             raise
+        finally:
+            done_ev.set()
+            watch_task.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await watch_task
         activity.add(f"مدل {info['name']} به آخرین نسخه به‌روزرسانی شد", "success", 1.0)
         return {"ok": True, "language": language, "engines": registry.status(), "memory": registry.memory_status()}
 

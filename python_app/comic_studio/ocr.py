@@ -1567,6 +1567,15 @@ class EngineRegistry:
             "freedRamMb": freed_mb,
         }
 
+    def cancel_install(self, engine_id: str) -> None:
+        try:
+            engine = self.get(engine_id)
+        except Exception:
+            return
+        canceller = getattr(engine, "cancel_install", None)
+        if callable(canceller):
+            canceller()
+
     def download(self, engine_id: str, language: str = "eng") -> None:
         self.unload_all(except_id=engine_id)
         try:

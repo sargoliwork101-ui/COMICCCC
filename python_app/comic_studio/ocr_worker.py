@@ -18,12 +18,18 @@ def _configure_cache_dirs(models_root: Path) -> None:
     hf_dir = models_root / "hf"
     paddlex_dir = models_root / "paddlex"
     torch_dir = models_root / "torch"
-    for directory in (hf_dir, paddlex_dir, torch_dir):
+    surya_dir = models_root / "surya"
+    for directory in (hf_dir, paddlex_dir, torch_dir, surya_dir):
         directory.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(hf_dir))
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_dir / "hub"))
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(paddlex_dir))
     os.environ.setdefault("TORCH_HOME", str(torch_dir))
+    os.environ.setdefault("MODEL_CACHE_DIR", str(surya_dir))
+    os.environ.setdefault("SURYA_INFERENCE_BACKEND", "llamacpp")
+    os.environ.setdefault("SURYA_INFERENCE_PARALLEL", "1")
+    os.environ.setdefault("SURYA_INFERENCE_CTX_SIZE", "16384")
+    os.environ.setdefault("SURYA_INFERENCE_KEEP_ALIVE", "false")
     cores = str(max(1, int(os.cpu_count() or 1)))
     for thread_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ.setdefault(thread_key, cores)
@@ -267,6 +273,9 @@ class _BaseAdapter:
             return str(legacy_dir)
         return self.hf_repo
 
+    def close(self) -> None:
+        return None
+
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -414,6 +423,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
 class _SuryaAdapter(_BaseAdapter):
     def __init__(self, models_root: Path) -> None:
         super().__init__(models_root)
+        self._manager: Any = None
         self._predictor: Any = None
         self._legacy: tuple[Any, Any] | None = None
 
@@ -429,26 +439,83 @@ class _SuryaAdapter(_BaseAdapter):
         try:
             from surya.inference import SuryaInferenceManager
             from surya.recognition import RecognitionPredictor
+            manager = SuryaInferenceManager(method="llamacpp")
+            self._manager = manager
+            self._predictor = RecognitionPredictor(manager)
+        except TypeError:
+            from surya.inference import SuryaInferenceManager
+            from surya.recognition import RecognitionPredictor
             manager = SuryaInferenceManager()
+            self._manager = manager
             self._predictor = RecognitionPredictor(manager)
         except ImportError:
             from surya.detection import DetectionPredictor
             from surya.recognition import RecognitionPredictor
             self._legacy = (RecognitionPredictor(), DetectionPredictor())
 
+    def close(self) -> None:
+        mgr = self._manager
+        self._manager = None
+        self._predictor = None
+        if mgr is not None and hasattr(mgr, "stop"):
+            try:
+                mgr.stop()
+            except Exception:
+                pass
+
     def prepare(self, language: str) -> str:
-        from PIL import Image
-        self._ensure_loaded()
-        sample = Image.new("RGB", (160, 64), "white")
-        try:
-            if self._predictor is not None:
-                self._predictor([sample])
-            elif self._legacy is not None:
-                rec, det = self._legacy
-                rec([sample], det_predictor=det)
-        finally:
-            sample.close()
+        _widen_requests_default_timeout(120.0)
         import importlib.metadata
+
+        # Surya 2.x (0.20+): pre-download GGUF VLM + layout checkpoints directly via huggingface_hub
+        # without spawning llama-server or running slow full-page CPU inference on a dummy image.
+        surya_settings = None
+        try:
+            from surya.settings import settings as _ss
+            surya_settings = _ss
+        except Exception:
+            surya_settings = None
+
+        gguf_repo = getattr(surya_settings, "SURYA_GGUF_REPO", None) if surya_settings is not None else None
+        if gguf_repo:
+            from huggingface_hub import hf_hub_download, snapshot_download
+
+            model_file = str(getattr(surya_settings, "SURYA_GGUF_MODEL_FILE", "surya-2.5.gguf"))
+            mmproj_file = str(getattr(surya_settings, "SURYA_GGUF_MMPROJ_FILE", "surya-2.5-mmproj.gguf"))
+            ckpt_repo = str(getattr(surya_settings, "SURYA_MODEL_CHECKPOINT", "datalab-to/surya-ocr-2.5"))
+            fast_layout = str(getattr(surya_settings, "FAST_LAYOUT_MODEL_CHECKPOINT", "") or "")
+
+            def _hf_file_resilient(repo_id: str, filename: str) -> str:
+                try:
+                    return hf_hub_download(repo_id=repo_id, filename=filename)
+                except Exception as first_exc:
+                    err_low = str(first_exc).lower()
+                    is_net = any(k in err_low for k in ("timed out", "timeout", "connection", "ssl", "chunked", "reset", "eof"))
+                    if not is_net or os.environ.get("HF_ENDPOINT"):
+                        raise
+                    return hf_hub_download(repo_id=repo_id, filename=filename, endpoint="https://hf-mirror.com")
+
+            print("Downloading Surya config metadata (10%)...", file=sys.stderr, flush=True)
+            with contextlib.suppress(Exception):
+                _hf_file_resilient(ckpt_repo, "config.json")
+            print(f"Downloading {mmproj_file} from {gguf_repo} (25%)...", file=sys.stderr, flush=True)
+            _hf_file_resilient(gguf_repo, mmproj_file)
+            print(f"Downloading {model_file} from {gguf_repo} (60%)...", file=sys.stderr, flush=True)
+            _hf_file_resilient(gguf_repo, model_file)
+            if fast_layout.startswith("hf://"):
+                layout_repo = fast_layout[5:].split("/")[0] + "/" + fast_layout[5:].split("/")[1]
+                print(f"Downloading layout model {layout_repo} (88%)...", file=sys.stderr, flush=True)
+                with contextlib.suppress(Exception):
+                    try:
+                        snapshot_download(repo_id=layout_repo, max_workers=3)
+                    except Exception:
+                        if not os.environ.get("HF_ENDPOINT"):
+                            snapshot_download(repo_id=layout_repo, max_workers=2, endpoint="https://hf-mirror.com")
+            print("Surya weights verified (100%).", file=sys.stderr, flush=True)
+            return importlib.metadata.version("surya-ocr")
+
+        # Legacy Surya v1 (< 0.20) fallback
+        self._ensure_loaded()
         return importlib.metadata.version("surya-ocr")
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
@@ -460,7 +527,22 @@ class _SuryaAdapter(_BaseAdapter):
         lines: list[dict[str, Any]] = []
         try:
             if self._predictor is not None:
-                preds = self._predictor([rgb])
+                try:
+                    preds = self._predictor([rgb])
+                except Exception:
+                    # Fallback to pure CPU layers if GPU Vulkan offload failed on older drivers
+                    if os.environ.get("LLAMA_CPP_NGL", "0") != "0":
+                        self.close()
+                        os.environ["LLAMA_CPP_NGL"] = "0"
+                        try:
+                            from surya.settings import settings as _ss
+                            _ss.LLAMA_CPP_NGL = 0
+                        except Exception:
+                            pass
+                        self._ensure_loaded()
+                        preds = self._predictor([rgb])
+                    else:
+                        raise
                 page = preds[0] if preds else None
                 for block in getattr(page, "blocks", []) or []:
                     if getattr(block, "skipped", False) or getattr(block, "error", False):
@@ -508,12 +590,20 @@ class _SuryaAdapter(_BaseAdapter):
 
 class _MinerUAdapter(_BaseAdapter):
     def prepare(self, language: str) -> str:
+        _widen_requests_default_timeout(120.0)
         import importlib.metadata
         import subprocess
 
         dl_bin = shutil_which_in_venv("mineru-models-download")
         if dl_bin:
-            subprocess.run([dl_bin, "--tier", "basic"], capture_output=True, text=True, timeout=1800, check=False)
+            subprocess.run(
+                [dl_bin, "--tier", "basic"],
+                stdout=sys.stderr,
+                stderr=sys.stderr,
+                text=True,
+                timeout=1800,
+                check=False,
+            )
         return importlib.metadata.version("mineru")
 
     @staticmethod
@@ -898,6 +988,8 @@ def main() -> int:
                 if req.get("cmd") == "ping":
                     resp = {"ok": True, "pong": True}
                 elif req.get("cmd") == "quit":
+                    with contextlib.suppress(Exception):
+                        adapter.close()
                     protocol_out.write(json.dumps({"ok": True, "bye": True}) + "\n")
                     protocol_out.flush()
                     return 0

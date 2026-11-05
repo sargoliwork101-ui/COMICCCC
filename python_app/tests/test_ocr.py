@@ -1627,6 +1627,168 @@ def test_worker_requests_timeout_widener_upgrades_short_timeouts(monkeypatch):
     assert captured == [120.0, (30.0, 120.0), 300, 120.0]
 
 
+def test_pick_llama_cpp_asset_skips_empty_tag_release_and_supports_win_gpu_and_linux_targz():
+    from comic_studio.ocr_managed import _pick_llama_cpp_asset
+
+    releases = [
+        {
+            "tag_name": "v0.9.0",
+            "assets": [{"name": "nightly-tag.txt", "browser_download_url": "https://example.com/nightly-tag.txt"}],
+        },
+        {
+            "tag_name": "b12125",
+            "assets": [
+                {"name": "cudart-llama-bin-win-cuda-12.4-x64.zip", "browser_download_url": "https://example.com/cudart.zip"},
+                {"name": "llama-b12125-bin-win-vulkan-x64.zip", "browser_download_url": "https://example.com/win-vulkan.zip"},
+                {"name": "llama-b12125-bin-win-cpu-x64.zip", "browser_download_url": "https://example.com/win-cpu.zip"},
+                {"name": "llama-b12125-bin-ubuntu-vulkan-x64.tar.gz", "browser_download_url": "https://example.com/linux-vulkan.tar.gz"},
+                {"name": "llama-b12125-bin-ubuntu-x64.tar.gz", "browser_download_url": "https://example.com/linux-cpu.tar.gz"},
+            ],
+        },
+    ]
+
+    nm_wg, url_wg = _pick_llama_cpp_asset(releases, has_gpu=True, is_win=True, plat="win32", machine="AMD64")
+    assert nm_wg == "llama-b12125-bin-win-vulkan-x64.zip" and url_wg.endswith("/win-vulkan.zip")
+
+    nm_wc, url_wc = _pick_llama_cpp_asset(releases, has_gpu=False, is_win=True, plat="win32", machine="AMD64")
+    assert nm_wc == "llama-b12125-bin-win-cpu-x64.zip" and url_wc.endswith("/win-cpu.zip")
+
+    nm_lc, url_lc = _pick_llama_cpp_asset(releases, has_gpu=False, is_win=False, plat="linux", machine="x86_64")
+    assert nm_lc == "llama-b12125-bin-ubuntu-x64.tar.gz" and url_lc.endswith("/linux-cpu.tar.gz")
+
+
+def test_surya_windows_nvidia_skips_2_6gb_cu126_wheel_and_sets_llamacpp_env(monkeypatch, tmp_path):
+    import comic_studio.ocr_managed as managed
+
+    fake_models = tmp_path / "models"
+    env_dir = fake_models / "envs" / "surya"
+    py_exe = env_dir / "bin" / "python"
+    py_exe.parent.mkdir(parents=True)
+    py_exe.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.setattr(managed, "models_dir", lambda: fake_models)
+    monkeypatch.setattr(managed, "_is_windows", lambda: True)
+    monkeypatch.setattr(managed.os, "name", "nt", raising=False)
+    monkeypatch.setattr(managed, "inspect_hardware", lambda: {"hasNvidiaGpu": True, "hasGpu": True})
+    monkeypatch.setattr(
+        managed,
+        "_run_Subprocess",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "pip 25.2", ""),
+    )
+
+    eng = managed.IsolatedOcrEngine("surya", ["eng"], threading.Lock(), OcrLine, OcrError)
+    monkeypatch.setattr(eng, "_env_python", lambda: py_exe)
+
+    seen_cmds: list[list[str]] = []
+    llama_called = [False]
+
+    def fake_pip_stream(cmd, **_kwargs):
+        seen_cmds.append(list(cmd))
+        return 0, "Successfully installed surya-ocr-0.23.0"
+
+    def fake_llama_setup():
+        llama_called[0] = True
+        llama_bin = env_dir / "llama-bin"
+        llama_bin.mkdir(parents=True, exist_ok=True)
+        (llama_bin / "llama-server.exe").write_bytes(b"MZ")
+
+    monkeypatch.setattr(eng, "_run_pip_streaming", fake_pip_stream)
+    monkeypatch.setattr(eng, "_ensure_llama_cpp_for_surya", fake_llama_setup)
+    eng._ensure_isolated_venv(upgrade=False)
+
+    assert llama_called[0] is True, "llama-server setup must run even when hasNvidiaGpu=True"
+    assert len(seen_cmds) == 1
+    assert "https://download.pytorch.org/whl/cu126" not in seen_cmds[0], "Surya must not pull 2.65 GB cu126 wheel"
+
+    w_env = eng._worker_env()
+    assert w_env["SURYA_INFERENCE_BACKEND"] == "llamacpp"
+    assert w_env["SURYA_INFERENCE_PARALLEL"] == "1"
+    assert w_env["SURYA_INFERENCE_CTX_SIZE"] == "16384"
+    assert w_env["LLAMA_CPP_NGL"] == "99"
+    assert w_env["LLAMA_CPP_BINARY"].endswith("llama-server.exe")
+
+
+def test_surya_adapter_prepare_downloads_gguf_directly_without_spawning_server(monkeypatch, tmp_path):
+    import types
+    import comic_studio.ocr_worker as worker
+
+    fake_settings = types.SimpleNamespace(
+        SURYA_GGUF_REPO="datalab-to/surya-ocr-2.5-gguf",
+        SURYA_GGUF_MODEL_FILE="surya-2.5.gguf",
+        SURYA_GGUF_MMPROJ_FILE="surya-2.5-mmproj.gguf",
+        SURYA_MODEL_CHECKPOINT="datalab-to/surya-ocr-2.5",
+        FAST_LAYOUT_MODEL_CHECKPOINT="hf://datalab-to/surya_layout2",
+    )
+    fake_surya_pkg = types.ModuleType("surya")
+    fake_surya_settings = types.ModuleType("surya.settings")
+    fake_surya_settings.settings = fake_settings  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "surya", fake_surya_pkg)
+    monkeypatch.setitem(sys.modules, "surya.settings", fake_surya_settings)
+
+    downloaded_files: list[tuple[str, str]] = []
+    downloaded_snaps: list[str] = []
+    fake_hf = types.ModuleType("huggingface_hub")
+    fake_hf.hf_hub_download = lambda repo_id, filename, **kw: downloaded_files.append((repo_id, filename)) or str(tmp_path / filename)  # type: ignore[attr-defined]
+    fake_hf.snapshot_download = lambda repo_id, **kw: downloaded_snaps.append(repo_id) or str(tmp_path)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+    monkeypatch.setattr("importlib.metadata.version", lambda pkg: "0.23.0")
+
+    adapter = worker._SuryaAdapter(tmp_path)
+    monkeypatch.setattr(adapter, "_ensure_loaded", lambda: (_ for _ in ()).throw(AssertionError("must not spawn server in prepare")))
+    rev = adapter.prepare("eng")
+
+    assert rev == "0.23.0"
+    assert ("datalab-to/surya-ocr-2.5-gguf", "surya-2.5-mmproj.gguf") in downloaded_files
+    assert ("datalab-to/surya-ocr-2.5-gguf", "surya-2.5.gguf") in downloaded_files
+    assert "datalab-to/surya_layout2" in downloaded_snaps
+
+
+def test_pip_streaming_stall_watchdog_and_cancel_kill_hung_child(monkeypatch, tmp_path):
+    import comic_studio.ocr_managed as managed
+
+    monkeypatch.setattr(managed, "models_dir", lambda: tmp_path / "models")
+    eng = managed.IsolatedOcrEngine("surya", ["eng"], threading.Lock(), OcrLine, OcrError)
+
+    # 1. Stall watchdog terminates a child that prints one Downloading line then hangs silently
+    t0 = time.monotonic()
+    rc, out = eng._run_pip_streaming(
+        [
+            sys.executable,
+            "-c",
+            "import sys, time; print('Downloading https://x.test/big-1.0.whl (50.0 MB)', flush=True); time.sleep(30)",
+        ],
+        start_p=0.2,
+        end_p=0.7,
+        label_prefix="تست",
+        timeout=60,
+        stall_timeout=1,
+    )
+    elapsed = time.monotonic() - t0
+    assert rc != 0
+    assert "ReadTimeoutError" in out
+    assert elapsed < 10.0
+
+    # 2. Explicit user cancel kills active child in < 2s
+    def _cancel_soon():
+        time.sleep(0.4)
+        eng.cancel_install()
+
+    threading.Thread(target=_cancel_soon, daemon=True).start()
+    t1 = time.monotonic()
+    rc2, out2 = eng._run_pip_streaming(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_p=0.2,
+        end_p=0.7,
+        label_prefix="تست",
+        timeout=60,
+        stall_timeout=30,
+    )
+    assert rc2 == 130
+    assert "لغو" in out2
+    assert (time.monotonic() - t1) < 5.0
+
+
+
 
 
 

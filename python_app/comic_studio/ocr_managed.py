@@ -13,10 +13,12 @@ import json
 import os
 from pathlib import Path
 import platform
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -345,6 +347,95 @@ def is_pip_network_or_index_error(output: str) -> bool:
     if "(from versions: none)" in lower:
         return True
     return False
+
+
+def _dir_bytes_fast(root: Path, max_files: int = 8000) -> int:
+    """Fast non-throwing byte sum of files under `root` for live download progress & stall detection."""
+    total = 0
+    seen = 0
+    try:
+        if not root.exists():
+            return 0
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fname in filenames:
+                seen += 1
+                if seen > max_files:
+                    return total
+                try:
+                    st = os.stat(os.path.join(dirpath, fname), follow_symlinks=False)
+                    total += int(st.st_size)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
+
+
+def _pick_llama_cpp_asset(
+    releases: Sequence[dict[str, Any]],
+    *,
+    has_gpu: bool,
+    is_win: bool,
+    plat: str,
+    machine: str,
+) -> tuple[str, str]:
+    """Select the best `(asset_name, browser_download_url)` across recent llama.cpp GitHub releases.
+    Skips tag-only/meta releases like `v0.9.0` (`nightly-tag.txt`) that carry no binary archives."""
+    arch = (machine or "").lower()
+    is_arm = arch in {"arm64", "aarch64"}
+
+    def _is_archive(n: str) -> bool:
+        return n.endswith(".zip") or n.endswith(".tar.gz")
+
+    for rel in releases:
+        if not isinstance(rel, dict):
+            continue
+        assets = rel.get("assets") or []
+        parsed: list[tuple[str, str]] = []
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            nm = str(asset.get("name") or "")
+            dl = str(asset.get("browser_download_url") or "")
+            if nm and dl and _is_archive(nm.lower()) and not nm.lower().startswith("cudart-"):
+                parsed.append((nm, dl))
+        if not parsed:
+            continue
+
+        if is_win:
+            arch_tok = "arm64" if is_arm else "x64"
+            if has_gpu:
+                for nm, dl in parsed:
+                    low = nm.lower()
+                    if "win" in low and "vulkan" in low and arch_tok in low and low.endswith(".zip"):
+                        return nm, dl
+            for nm, dl in parsed:
+                low = nm.lower()
+                if "win" in low and "cpu" in low and arch_tok in low and low.endswith(".zip"):
+                    return nm, dl
+        elif plat.startswith("linux"):
+            if is_arm:
+                for nm, dl in parsed:
+                    low = nm.lower()
+                    if "ubuntu" in low and "arm64" in low and not any(x in low for x in ("cuda", "rocm", "vulkan", "sycl", "openvino")):
+                        return nm, dl
+            else:
+                if has_gpu:
+                    for nm, dl in parsed:
+                        low = nm.lower()
+                        if "ubuntu" in low and "vulkan" in low and "x64" in low:
+                            return nm, dl
+                for nm, dl in parsed:
+                    low = nm.lower()
+                    if "ubuntu" in low and "x64" in low and not any(x in low for x in ("cuda", "rocm", "vulkan", "sycl", "openvino", "s390x", "zdnn")):
+                        return nm, dl
+        elif plat == "darwin":
+            arch_tok = "arm64" if is_arm else "x64"
+            for nm, dl in parsed:
+                low = nm.lower()
+                if "macos" in low and arch_tok in low:
+                    return nm, dl
+    return "", ""
 
 
 def _now_iso() -> str:
@@ -1518,7 +1609,48 @@ class IsolatedOcrEngine:
         self._worker_lock = threading.Lock()
         self._worker_proc: subprocess.Popen[str] | None = None
         self._worker_stderr_tail: deque[str] = deque(maxlen=40)
+        self._cancel_install = threading.Event()
+        self._active_procs_lock = threading.Lock()
+        self._active_install_procs: set[subprocess.Popen[Any]] = set()
         atexit.register(self.close)
+
+    def _register_install_proc(self, proc: subprocess.Popen[Any]) -> None:
+        with self._active_procs_lock:
+            self._active_install_procs.add(proc)
+
+    def _unregister_install_proc(self, proc: subprocess.Popen[Any]) -> None:
+        with self._active_procs_lock:
+            self._active_install_procs.discard(proc)
+
+    def _kill_proc_tree(self, proc: subprocess.Popen[Any]) -> None:
+        if proc.poll() is not None:
+            return
+        pid = proc.pid
+        if _is_windows() and pid:
+            try:
+                _run_Subprocess(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+            except Exception:
+                pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            pass
+
+    def cancel_install(self) -> None:
+        self._cancel_install.set()
+        with self._active_procs_lock:
+            procs = list(self._active_install_procs)
+        for proc in procs:
+            self._kill_proc_tree(proc)
 
     def _env_dir(self) -> Path:
         return models_dir() / "envs" / self.id
@@ -1615,8 +1747,16 @@ class IsolatedOcrEngine:
         llama_bin = self._env_dir() / "llama-bin"
         scripts_dir = self._env_python().parent
         extra_paths = [str(scripts_dir)]
+        exe_name = "llama-server.exe" if _is_windows() else "llama-server"
         if llama_bin.is_dir():
             extra_paths.insert(0, str(llama_bin))
+            if sys.platform.startswith("linux"):
+                ld_prev = env.get("LD_LIBRARY_PATH", "")
+                env["LD_LIBRARY_PATH"] = os.pathsep.join([p for p in (str(llama_bin), ld_prev) if p])
+            for candidate_exe in llama_bin.rglob(exe_name):
+                if candidate_exe.is_file():
+                    env.setdefault("LLAMA_CPP_BINARY", str(candidate_exe))
+                    break
         env["PATH"] = os.pathsep.join([*extra_paths, env.get("PATH", "")])
         env["PYTHONIOENCODING"] = "utf-8"
         cores_str = str(cpu_core_count())
@@ -1628,42 +1768,75 @@ class IsolatedOcrEngine:
         env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
         env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
         env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        if self.id == "surya":
+            hw = inspect_hardware()
+            surya_cache = models_dir() / "surya"
+            try:
+                surya_cache.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            env.setdefault("MODEL_CACHE_DIR", str(surya_cache))
+            # Always use native llama.cpp rather than Surya 2.5's Docker-only vLLM backend
+            env.setdefault("SURYA_INFERENCE_BACKEND", "llamacpp")
+            env.setdefault("SURYA_INFERENCE_PARALLEL", "1")
+            env.setdefault("SURYA_INFERENCE_CTX_SIZE", "16384")
+            env.setdefault("SURYA_INFERENCE_KEEP_ALIVE", "false")
+            env.setdefault("LLAMA_CPP_NGL", "99" if hw.get("hasGpu") else "0")
         return env
 
     def _ensure_llama_cpp_for_surya(self) -> None:
         if not self._spec.get("needs_llama_cpp_cpu"):
             return
-        hw = inspect_hardware()
-        if hw.get("hasNvidiaGpu") or shutil.which("llama-server"):
-            return
+        if self._cancel_install.is_set():
+            raise self._error_cls("عملیات آماده‌سازی مدل لغو شد.")
         llama_dir = self._env_dir() / "llama-bin"
-        exe_name = "llama-server.exe" if os.name == "nt" else "llama-server"
-        if any(llama_dir.rglob(exe_name)):
+        exe_name = "llama-server.exe" if _is_windows() else "llama-server"
+        if any(llama_dir.rglob(exe_name)) or shutil.which("llama-server"):
             return
-        emit("دریافت خودکار موتور کمکی llama-server برای اجرای Surya روی پردازنده (CPU)…", progress=0.72)
-        rel = _fetch_json("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest", timeout=15.0)
-        wanted_url = ""
-        for asset in rel.get("assets") or []:
-            name = str(asset.get("name") or "").lower()
-            dl = str(asset.get("browser_download_url") or "")
-            if os.name == "nt" and "win" in name and "cpu" in name and "x64" in name and name.endswith(".zip"):
-                wanted_url = dl
-                break
-            if sys.platform.startswith("linux") and "ubuntu" in name and "x64" in name and name.endswith(".zip"):
-                wanted_url = dl
-                break
+        hw = inspect_hardware()
+        mode_hint = "شتاب‌دهندهٔ گرافیکی (Vulkan)" if hw.get("hasGpu") else "پردازنده (CPU)"
+        emit(f"دریافت خودکار موتور اجرایی llama-server ({mode_hint}) برای Surya…", progress=0.72)
+
+        releases: list[dict[str, Any]] = []
+        try:
+            raw_rels = _fetch_json("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=8", timeout=20.0)
+            if isinstance(raw_rels, list):
+                releases = [r for r in raw_rels if isinstance(r, dict)]
+        except Exception:
+            pass
+        if not releases:
+            try:
+                latest_rel = _fetch_json("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest", timeout=15.0)
+                if isinstance(latest_rel, dict):
+                    releases = [latest_rel]
+            except Exception:
+                pass
+
+        asset_name, wanted_url = _pick_llama_cpp_asset(
+            releases,
+            has_gpu=bool(hw.get("hasGpu")),
+            is_win=_is_windows(),
+            plat=sys.platform,
+            machine=platform.machine(),
+        )
         if not wanted_url:
-            return
+            raise self._error_cls(
+                "فایل اجرایی llama-server برای سیستم‌عامل شما در انتشارهای رسمی llama.cpp پیدا نشد. اتصال اینترنت به GitHub را بررسی کنید."
+            )
+
         llama_dir.mkdir(parents=True, exist_ok=True)
-        zip_tmp = llama_dir / ".llama-bin.zip.part"
+        suffix = ".tar.gz" if asset_name.lower().endswith(".tar.gz") else ".zip"
+        arc_tmp = llama_dir / f".llama-bin{suffix}.part"
         try:
             req = urllib.request.Request(wanted_url, headers={"User-Agent": "Comic-OCR-Studio"})
-            with urllib.request.urlopen(req, timeout=300) as resp, zip_tmp.open("wb") as out:
+            with urllib.request.urlopen(req, timeout=180) as resp, arc_tmp.open("wb") as out:
                 hdrs = getattr(resp, "headers", None)
                 raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
                 expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 35 * 1024 * 1024
                 total = 0
                 while True:
+                    if self._cancel_install.is_set():
+                        raise self._error_cls("عملیات آماده‌سازی مدل لغو شد.")
                     chunk = resp.read(1024 * 1024)
                     if not chunk:
                         break
@@ -1671,27 +1844,44 @@ class IsolatedOcrEngine:
                     out.write(chunk)
                     ratio = min(1.0, total / max(1, expected_bytes))
                     emit(
-                        f"دانلود موتور کمکی CPU برای Surya: {total / (1024 * 1024):.1f} مگابایت",
-                        progress=round(0.73 + 0.08 * ratio, 3),
+                        f"دانلود موتور اجرایی llama-server برای Surya: {total / (1024 * 1024):.1f} از {expected_bytes / (1024 * 1024):.1f} مگابایت",
+                        progress=round(0.73 + 0.06 * ratio, 3),
                     )
             resolved_llama_dir = llama_dir.resolve()
-            with zipfile.ZipFile(zip_tmp) as archive:
-                for member in archive.infolist():
-                    member_path = (llama_dir / member.filename).resolve()
-                    if not member_path.is_relative_to(resolved_llama_dir):
-                        continue
-                    archive.extract(member, llama_dir)
+            if suffix == ".zip":
+                with zipfile.ZipFile(arc_tmp) as archive:
+                    for member in archive.infolist():
+                        member_path = (llama_dir / member.filename).resolve()
+                        if not member_path.is_relative_to(resolved_llama_dir):
+                            continue
+                        archive.extract(member, llama_dir)
+            else:
+                with tarfile.open(arc_tmp, "r:*") as tar_arc:
+                    for tmember in tar_arc.getmembers():
+                        member_path = (llama_dir / tmember.name).resolve()
+                        if not member_path.is_relative_to(resolved_llama_dir):
+                            continue
+                        if tmember.issym() or tmember.islnk():
+                            link_target = (member_path.parent / tmember.linkname).resolve()
+                            if not link_target.is_relative_to(resolved_llama_dir):
+                                continue
+                        try:
+                            tar_arc.extract(tmember, llama_dir, filter="data")
+                        except TypeError:
+                            tar_arc.extract(tmember, llama_dir)
             for found in llama_dir.rglob(exe_name):
                 if found.parent != llama_dir:
-                    for item in found.parent.iterdir():
+                    for item in list(found.parent.iterdir()):
                         dest = llama_dir / item.name
                         if not dest.exists():
                             shutil.move(str(item), str(dest))
-                if os.name != "nt":
-                    (llama_dir / exe_name).chmod(0o755)
+                if not _is_windows():
+                    target_exe = llama_dir / exe_name
+                    if target_exe.exists():
+                        target_exe.chmod(0o755)
                 break
         finally:
-            zip_tmp.unlink(missing_ok=True)
+            arc_tmp.unlink(missing_ok=True)
 
     def _run_pip_streaming(
         self,
@@ -1701,11 +1891,21 @@ class IsolatedOcrEngine:
         end_p: float,
         label_prefix: str,
         timeout: int = 3600,
+        stall_timeout: int = 180,
     ) -> tuple[int, str]:
+        if self._cancel_install.is_set():
+            return 130, "عملیات آماده‌سازی مدل لغو شد."
         full_cmd = [*pip_cmd, "--progress-bar", "off"]
         tail_lines: list[str] = []
         started = time.monotonic()
-        step_count = 0
+        last_activity_ts = started
+        step_count = 0.0
+        current_pkg_label = ""
+        cdir = pip_cache_dir()
+        env_dir = self._env_dir()
+        base_dl_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
+        last_bytes = base_dl_bytes
+
         proc = subprocess.Popen(
             full_cmd,
             stdout=subprocess.PIPE,
@@ -1717,12 +1917,60 @@ class IsolatedOcrEngine:
             env=clean_pip_env(),
             creationflags=_SUBPROCESS_NO_WINDOW if os.name == "nt" else 0,
         )
+        self._register_install_proc(proc)
+        line_q: queue.Queue[str | None] = queue.Queue()
+
+        def _reader() -> None:
+            try:
+                if proc.stdout is not None:
+                    for rline in proc.stdout:
+                        line_q.put(rline)
+            except Exception:
+                pass
+            finally:
+                line_q.put(None)
+
+        reader_thread = threading.Thread(target=_reader, daemon=True)
+        reader_thread.start()
         try:
-            assert proc.stdout is not None
-            for raw_line in proc.stdout:
-                if time.monotonic() - started > timeout:
-                    proc.kill()
+            while True:
+                if self._cancel_install.is_set():
+                    self._kill_proc_tree(proc)
+                    return 130, "عملیات آماده‌سازی مدل لغو شد."
+                now_m = time.monotonic()
+                if now_m - started > timeout:
+                    self._kill_proc_tree(proc)
                     return 1, "Operation timed out during pip installation."
+                try:
+                    raw_line = line_q.get(timeout=2.5)
+                except queue.Empty:
+                    if proc.poll() is not None and line_q.empty():
+                        break
+                    now_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
+                    if now_bytes > last_bytes:
+                        last_bytes = now_bytes
+                        last_activity_ts = time.monotonic()
+                        gained_mb = (now_bytes - base_dl_bytes) / (1024 * 1024)
+                        if gained_mb >= 0.8:
+                            step_count += 0.35
+                            ratio = min(0.86, 1.0 - (1.0 / (1.0 + step_count * 0.14)))
+                            cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                            pkg_note = f" ({current_pkg_label})" if current_pkg_label else ""
+                            emit(
+                                f"{label_prefix}: در حال دانلود{pkg_note} — {gained_mb:.1f} مگابایت دریافت شد…",
+                                progress=cur_p,
+                            )
+                    elif time.monotonic() - last_activity_ts > stall_timeout:
+                        self._kill_proc_tree(proc)
+                        return 1, (
+                            f"ReadTimeoutError: Operation timed out during pip installation "
+                            f"(no network bytes received for {stall_timeout}s).\n" + "\n".join(tail_lines)
+                        )
+                    continue
+
+                if raw_line is None:
+                    break
+                last_activity_ts = time.monotonic()
                 line = raw_line.strip()
                 if not line:
                     continue
@@ -1731,37 +1979,50 @@ class IsolatedOcrEngine:
                     tail_lines.pop(0)
                 lower = line.lower()
                 if lower.startswith("downloading "):
-                    step_count += 1
+                    step_count += 1.0
                     ratio = min(0.82, 1.0 - (1.0 / (1.0 + step_count * 0.14)))
                     cur_p = round(start_p + (end_p - start_p) * ratio, 3)
                     wheel_part = line.split("/")[-1].split(" ")[0][:48]
-                    emit(f"{label_prefix}: دانلود بستهٔ {wheel_part}…", progress=cur_p)
+                    size_m = re.search(r"\(([\d.]+\s*[kKmMgG][bB])\)", line)
+                    size_str = size_m.group(1) if size_m else ""
+                    current_pkg_label = f"{wheel_part} · {size_str}" if size_str else wheel_part
+                    base_dl_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
+                    last_bytes = base_dl_bytes
+                    size_suffix = f" ({size_str})" if size_str else ""
+                    emit(f"{label_prefix}: دانلود بستهٔ {wheel_part}{size_suffix}…", progress=cur_p)
+                elif lower.startswith("using cached "):
+                    step_count += 0.5
+                    ratio = min(0.80, 1.0 - (1.0 / (1.0 + step_count * 0.12)))
+                    cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                    wheel_part = line.split("/")[-1].split(" ")[0][:44]
+                    emit(f"{label_prefix}: استفاده از فایل کش‌شدهٔ {wheel_part}…", progress=cur_p)
                 elif lower.startswith("collecting "):
-                    step_count += 1
+                    step_count += 0.8
                     ratio = min(0.75, 1.0 - (1.0 / (1.0 + step_count * 0.10)))
                     cur_p = round(start_p + (end_p - start_p) * ratio, 3)
                     pkg_part = line[11:].split()[0][:40]
-                    emit(f"{label_prefix}: آماده‌سازی بستهٔ {pkg_part}…", progress=cur_p)
+                    current_pkg_label = pkg_part
+                    emit(f"{label_prefix}: بررسی بستهٔ {pkg_part}…", progress=cur_p)
                 elif lower.startswith("installing collected packages"):
+                    current_pkg_label = "ثبت بسته‌ها روی دیسک"
                     cur_p = round(start_p + (end_p - start_p) * 0.88, 3)
-                    emit(f"{label_prefix}: در حال ثبت و نصب بسته‌ها روی دیسک…", progress=cur_p)
+                    emit(f"{label_prefix}: در حال بازگشایی و ثبت بسته‌ها روی دیسک…", progress=cur_p)
             rc = proc.wait(timeout=120)
+            if self._cancel_install.is_set():
+                return 130, "عملیات آماده‌سازی مدل لغو شد."
             return rc, "\n".join(tail_lines)
         except Exception as exc:
-            proc.kill()
+            self._kill_proc_tree(proc)
             return 1, f"{exc}\n" + "\n".join(tail_lines)
         finally:
+            self._unregister_install_proc(proc)
             if proc.stdout is not None:
                 try:
                     proc.stdout.close()
                 except Exception:
                     pass
             if proc.poll() is None:
-                proc.kill()
-                try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    pass
+                self._kill_proc_tree(proc)
 
     def _clean_broken_venv_artifacts(self) -> None:
         env_dir = self._env_dir()
@@ -1806,6 +2067,8 @@ class IsolatedOcrEngine:
 
         last_rc, last_out = 1, "pip failed"
         for idx, (mirror_url, retry_notice) in enumerate(attempts):
+            if self._cancel_install.is_set():
+                return 130, "عملیات آماده‌سازی مدل لغو شد."
             if idx > 0:
                 if retry_notice:
                     emit(retry_notice, "warning", progress=start_p)
@@ -1842,6 +2105,8 @@ class IsolatedOcrEngine:
             if rc == 0:
                 sync_local_wheelhouse()
                 return 0, out
+            if self._cancel_install.is_set() or rc == 130:
+                return rc, out
             if not is_pip_network_or_index_error(out):
                 return rc, out
         return last_rc, last_out
@@ -1893,7 +2158,8 @@ class IsolatedOcrEngine:
 
             packages = list(self._spec["pip_packages_gpu"] if hw.get("hasNvidiaGpu") else self._spec["pip_packages_cpu"])
             extra_flags: list[str] = []
-            if os.name == "nt" and hw.get("hasNvidiaGpu") and self.id in {"surya", "mineru-2-5-pro"}:
+            # Note: Surya 2.5 runs VLM inference via native llama-server (Vulkan/CPU), so avoid pulling the 2.65 GB cu126 PyTorch wheel for Surya.
+            if os.name == "nt" and hw.get("hasNvidiaGpu") and self.id in {"mineru-2-5-pro"}:
                 extra_flags.extend(["--extra-index-url", "https://download.pytorch.org/whl/cu126"])
             action_word = "به‌روزرسانی" if upgrade else "نصب"
             p_start = 0.46 if self._spec.get("needs_torch") else 0.18
@@ -1945,14 +2211,24 @@ class IsolatedOcrEngine:
             (env_dir / ".runtime-ready").write_text(_now_iso(), encoding="utf-8")
 
     def _prepare_weights(self, language: str) -> str:
+        if self._cancel_install.is_set():
+            raise self._error_cls("عملیات آماده‌سازی مدل لغو شد.")
         worker_script = _worker_script_path()
+        m_root = models_dir()
+        base_weight_bytes = (
+            _dir_bytes_fast(m_root / "hf")
+            + _dir_bytes_fast(m_root / "hf-repos")
+            + _dir_bytes_fast(m_root / "paddlex")
+            + _dir_bytes_fast(m_root / "surya")
+        )
+        last_weight_bytes = base_weight_bytes
         emit(f"دریافت و آماده‌سازی فایل‌های مدل {self.id}…", progress=0.80)
         proc = subprocess.Popen(
             [
                 str(self._env_python()),
                 str(worker_script),
                 "--engine", self.id,
-                "--models-root", str(models_dir()),
+                "--models-root", str(m_root),
                 "--prepare",
                 "--language", language,
             ],
@@ -1964,50 +2240,103 @@ class IsolatedOcrEngine:
             errors="replace",
             creationflags=_SUBPROCESS_NO_WINDOW if os.name == "nt" else 0,
         )
+        self._register_install_proc(proc)
         stderr_tail: list[str] = []
-        weight_steps = [0]
+        stdout_chunks: list[str] = []
+        weight_steps = [0.0]
+        last_activity_at = [time.monotonic()]
 
         def _drain_stderr() -> None:
-            assert proc.stderr is not None
+            if proc.stderr is None:
+                return
             last_emit_at = 0.0
-            for raw in proc.stderr:
-                cleaned = raw.replace("\r", "\n")
-                for part in cleaned.splitlines():
-                    s = part.strip()
-                    if not s:
-                        continue
-                    stderr_tail.append(s)
-                    if len(stderr_tail) > 60:
-                        stderr_tail.pop(0)
-                    now_t = time.monotonic()
-                    if now_t - last_emit_at >= 1.5:
-                        weight_steps[0] += 1
-                        ratio = min(0.92, 1.0 - (1.0 / (1.0 + weight_steps[0] * 0.18)))
-                        cur_p = round(0.80 + 0.14 * ratio, 3)
-                        pct_match = re.search(r"(\d{1,3})%", s)
-                        if pct_match:
-                            sub_pct = min(100, max(0, int(pct_match.group(1))))
-                            emit(
-                                f"دانلود فایل‌های مدل {self.id} ({sub_pct}٪ از فایل جاری)…",
-                                progress=cur_p,
-                            )
-                        else:
-                            emit(f"در حال آماده‌سازی وزن‌های مدل {self.id}…", progress=cur_p)
-                        last_emit_at = now_t
+            try:
+                for raw in proc.stderr:
+                    last_activity_at[0] = time.monotonic()
+                    cleaned = raw.replace("\r", "\n")
+                    for part in cleaned.splitlines():
+                        s = part.strip()
+                        if not s:
+                            continue
+                        stderr_tail.append(s)
+                        if len(stderr_tail) > 60:
+                            stderr_tail.pop(0)
+                        now_t = time.monotonic()
+                        if now_t - last_emit_at >= 1.5:
+                            weight_steps[0] += 1.0
+                            ratio = min(0.92, 1.0 - (1.0 / (1.0 + weight_steps[0] * 0.18)))
+                            cur_p = round(0.80 + 0.14 * ratio, 3)
+                            pct_match = re.search(r"(\d{1,3})%", s)
+                            if pct_match:
+                                sub_pct = min(100, max(0, int(pct_match.group(1))))
+                                emit(
+                                    f"دانلود فایل‌های مدل {self.id} ({sub_pct}٪ از فایل جاری)…",
+                                    progress=cur_p,
+                                )
+                            else:
+                                emit(f"در حال آماده‌سازی وزن‌های مدل {self.id}…", progress=cur_p)
+                            last_emit_at = now_t
+            except Exception:
+                pass
+
+        def _drain_stdout() -> None:
+            if proc.stdout is None:
+                return
+            try:
+                for out_line in proc.stdout:
+                    last_activity_at[0] = time.monotonic()
+                    stdout_chunks.append(out_line)
+            except Exception:
+                pass
 
         err_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        out_thread = threading.Thread(target=_drain_stdout, daemon=True)
         err_thread.start()
-        stdout_text = ""
+        out_thread.start()
+        started_w = time.monotonic()
         try:
-            assert proc.stdout is not None
-            stdout_text = proc.stdout.read()
-            proc.wait(timeout=3600)
+            while proc.poll() is None:
+                if self._cancel_install.is_set():
+                    self._kill_proc_tree(proc)
+                    raise self._error_cls("عملیات آماده‌سازی مدل لغو شد.")
+                if time.monotonic() - started_w > 3600:
+                    self._kill_proc_tree(proc)
+                    raise self._error_cls(f"مهلت آماده‌سازی فایل‌های مدل {self.id} به پایان رسید.")
+                time.sleep(0.5)
+                if time.monotonic() - last_activity_at[0] >= 3.0:
+                    cur_bytes = (
+                        _dir_bytes_fast(m_root / "hf")
+                        + _dir_bytes_fast(m_root / "hf-repos")
+                        + _dir_bytes_fast(m_root / "paddlex")
+                        + _dir_bytes_fast(m_root / "surya")
+                    )
+                    if cur_bytes > last_weight_bytes:
+                        last_weight_bytes = cur_bytes
+                        last_activity_at[0] = time.monotonic()
+                        dl_mb = (cur_bytes - base_weight_bytes) / (1024 * 1024)
+                        if dl_mb >= 1.0:
+                            weight_steps[0] += 0.4
+                            ratio = min(0.92, 1.0 - (1.0 / (1.0 + weight_steps[0] * 0.18)))
+                            cur_p = round(0.80 + 0.14 * ratio, 3)
+                            emit(
+                                f"دانلود وزن‌های مدل {self.id} — {dl_mb:.1f} مگابایت ذخیره شد…",
+                                progress=cur_p,
+                            )
         except Exception:
-            proc.kill()
+            self._kill_proc_tree(proc)
             raise
         finally:
+            self._unregister_install_proc(proc)
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
             err_thread.join(timeout=2.0)
+            out_thread.join(timeout=2.0)
 
+        stdout_text = "".join(stdout_chunks)
         last_json: dict[str, Any] = {}
         for line in reversed((stdout_text or "").splitlines()):
             line = line.strip()
@@ -2028,13 +2357,15 @@ class IsolatedOcrEngine:
         return str(last_json.get("modelRevision") or "ready")
 
     def download(self, language: str = "eng") -> None:
+        self._cancel_install.clear()
         self.close()
         try:
             emit(f"شروع آماده‌سازی خودکار مدل {self.id}…", progress=0.05)
             if not self.runtime_installed:
                 self._ensure_isolated_venv(upgrade=False)
             else:
-                emit(f"محیط اجرایی {self.id} از قبل آماده است؛ بررسی فایل‌های مدل…", progress=0.65)
+                emit(f"محیط اجرایی {self.id} از قبل آماده است؛ بررسی ابزارها و فایل‌های مدل…", progress=0.65)
+                self._ensure_llama_cpp_for_surya()
             revision = self._prepare_weights(language)
             if revision == "ready" and self._spec.get("hf_repo"):
                 remote_rev = fetch_remote_repo_revision(self._spec.get("github_repo"))
@@ -2054,6 +2385,7 @@ class IsolatedOcrEngine:
             trim_process_memory()
 
     def update(self, language: str = "eng") -> None:
+        self._cancel_install.clear()
         self.close()
         try:
             emit(f"شروع به‌روزرسانی خودکار مدل {self.id}…", progress=0.06)
@@ -2074,6 +2406,7 @@ class IsolatedOcrEngine:
                 self._ensure_isolated_venv(upgrade=True)
             else:
                 emit(f"بستهٔ اجرایی {self.id} ({cur_ver}) در آخرین نسخه است…", progress=0.72)
+                self._ensure_llama_cpp_for_surya()
 
             need_weights_refresh = (
                 not self.model_ready
@@ -2118,6 +2451,8 @@ class IsolatedOcrEngine:
                         pass
             self._worker_proc = None
         self._worker_stderr_tail.clear()
+        if self._spec.get("needs_llama_cpp_cpu"):
+            self._ensure_llama_cpp_for_surya()
         worker_script = _worker_script_path()
         proc = subprocess.Popen(
             [
