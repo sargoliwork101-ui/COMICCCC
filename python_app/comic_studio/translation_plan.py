@@ -8,7 +8,7 @@ from typing import Any
 
 from .translation import (
     AI_PROVIDERS, DEFAULT_AI_SKILL, DEFAULT_AI_SOURCE_LIMIT, MAX_FREE_QUERY_CHARS, TranslationError, combine_translation_texts,
-    normalize_ai_skill, translation_request_view,
+    normalize_ai_skill, normalize_target_language, translation_request_view,
 )
 
 
@@ -75,7 +75,10 @@ def target_snapshot(block: dict[str, Any]) -> str:
 
 def reuse_fingerprint(block: dict[str, Any], source: str, provider: str, language: str, settings: dict[str, Any]) -> str:
     config = settings.get("providers", {}).get(provider, {})
+    tl = normalize_target_language(settings.get("_target_language", "fa"))
     value = [provider, language, config.get("model", ""), config.get("base_url", ""), settings.get("_translation_skill", normalize_ai_skill(None)), source, target_snapshot(block)]
+    if tl != "fa":
+        value.append(tl)
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -90,10 +93,13 @@ def mark_reused_translation(block: dict[str, Any], source: str, provider: str, l
 
 def part_fingerprint(call: dict[str, Any], plan: dict[str, Any], provider: str, language: str, settings: dict[str, Any]) -> str:
     config = settings.get("providers", {}).get(provider, {})
+    tl = normalize_target_language(settings.get("_target_language", "fa"))
     index = call["indices"][0]
     payload = [provider, language, config.get("model", ""), config.get("base_url", ""), settings.get("_translation_skill", normalize_ai_skill(None)), plan["keys"][index],
                plan["source_texts"][index], plan["target_snapshots"][index],
                [c["text"] for c in plan["calls"] if c.get("image_id") == call.get("image_id") and c["indices"] == call["indices"]]]
+    if tl != "fa":
+        payload.append(tl)
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -107,10 +113,13 @@ def saved_part(call: dict[str, Any], plan: dict[str, Any], provider: str, langua
 
 def page_fingerprint(call: dict[str, Any], plan: dict[str, Any], provider: str, language: str, settings: dict[str, Any]) -> str:
     config = settings.get("providers", {}).get(provider, {})
+    tl = normalize_target_language(settings.get("_target_language", "fa"))
     indices = sorted({i for c in plan["calls"] if c.get("image_id") == call["image_id"] for i in c["indices"]})
     payload = [provider, language, config.get("model", ""), config.get("base_url", ""), settings.get("_translation_skill", normalize_ai_skill(None)), call["image_id"],
                [plan["keys"][i] for i in indices], [plan["source_texts"][i] for i in indices],
                [(c.get("call_id"), c["text"]) for c in plan["calls"] if c.get("image_id") == call["image_id"]]]
+    if tl != "fa":
+        payload.append(tl)
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -249,9 +258,11 @@ def plan_signature(
     public_settings: dict[str, Any],
 ) -> str:
     config = public_settings.get("providers", {}).get(provider, {})
+    tl = normalize_target_language(public_settings.get("_target_language", "fa"))
     canonical = {
         "provider": provider,
         "source_language": source_language,
+        **({"target_language": tl} if tl != "fa" else {}),
         "skill": public_settings.get("_translation_skill", normalize_ai_skill(None)) if provider != "free" else "",
         "model": config.get("model", "") if provider != "free" else "",
         "base_url": config.get("base_url", "") if provider != "free" else "",
@@ -274,13 +285,14 @@ def plan_preview(
     public_settings: dict[str, Any],
 ) -> dict[str, Any]:
     requests: list[dict[str, Any]] = []
+    tl = normalize_target_language(public_settings.get("_target_language", "fa"))
     # Even an empty plan must show the AI instructions: changing the skill can
     # invalidate reused translations and turn it into a nonempty plan.
-    system_prompt = translation_request_view("", source_language, provider, public_settings.get("_translation_skill"))["systemPrompt"]
+    system_prompt = translation_request_view("", source_language, provider, public_settings.get("_translation_skill"), target_language=tl)["systemPrompt"]
     for call_index, call in enumerate(plan["calls"], start=1):
         if "image_id" in call and saved_call(call, plan, provider, source_language, public_settings):
             continue
-        view = translation_request_view(call["text"], source_language, provider, public_settings.get("_translation_skill"))
+        view = translation_request_view(call["text"], source_language, provider, public_settings.get("_translation_skill"), target_language=tl)
         system_prompt = system_prompt or view["systemPrompt"]
         for text in view["texts"]:
             requests.append({

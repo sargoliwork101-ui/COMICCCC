@@ -35,6 +35,7 @@ class TranslateRequest(BaseModel):
     image_ids: list[str] = Field(default_factory=list)
     provider: str = "free"
     source_language: str = "eng"
+    target_language: str = "fa"
     confirmation: str | None = None
 
 
@@ -43,6 +44,7 @@ class TextTranslateRequest(BaseModel):
     text: str
     source_lines: list[dict[str, Any]] | None = None
     source_language: str = "eng"
+    target_language: str = "fa"
     provider: str = "free"
     confirmation: str | None = None
 
@@ -52,6 +54,7 @@ class AiSettings(BaseModel):
     context_percent: int | None = Field(default=None, ge=0, le=100)
     skill_percent: int | None = Field(default=None, ge=0, le=100)
     reuse_repeated: bool | None = None
+    target_language: str | None = None
     provider: str = "free"
     base_url: str | None = None
     model: str | None = None
@@ -118,6 +121,7 @@ class ContextPreviewRequest(BaseModel):
     provider: str
     profile_id: str | None = Field(default=None, max_length=120)
     source_language: str = "eng"
+    target_language: str = "fa"
     skill: str = Field(default="", max_length=100000)
     summary: str = Field(default="", max_length=100000)
     reuse_repeated: bool = True
@@ -141,6 +145,7 @@ class ContextTextRequest(BaseModel):
     text: str
     source_lines: list[dict[str, Any]] | None = None
     source_language: str = 'eng'
+    target_language: str = 'fa'
     provider: str
     profile_id: str | None = Field(default=None, max_length=120)
     skill: str = Field(default='', max_length=100000)

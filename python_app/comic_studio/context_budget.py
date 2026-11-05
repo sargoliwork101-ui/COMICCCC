@@ -9,7 +9,13 @@ import json
 import re
 from dataclasses import dataclass
 
-from .translation import TranslationError, distribute_translation, normalize_translation_text
+from .translation import (
+    TranslationError,
+    distribute_translation,
+    normalize_target_language,
+    normalize_translation_text,
+    target_language_english_name,
+)
 
 DEFAULT_CONTEXT_PERCENT = 15
 DEFAULT_SKILL_PERCENT = 15
@@ -75,7 +81,14 @@ class ContextRequest:
         return len(self.system) + len(self.user_message(text))
 
 
-def build_context_request(budget: ContextBudget, language: str, skill: str, previous_context: str) -> ContextRequest:
+def build_context_request(
+    budget: ContextBudget,
+    language: str,
+    skill: str,
+    previous_context: str,
+    *,
+    target_language: str = "fa",
+) -> ContextRequest:
     """Construct the exact strings and calculate source capacity from actual usage.
 
     Unused capacity is automatically available to the source text. Neither a
@@ -89,11 +102,12 @@ def build_context_request(budget: ContextBudget, language: str, skill: str, prev
         raise TranslationError(f"خلاصهٔ قبلی {len(previous_context)} نویسه دارد و از سقف {budget.context_limit} نویسه بیشتر است؛ پیش از ارسال آن را اصلاح کنید یا درصد خلاصه را تغییر دهید.")
     if "\n" in previous_context or "\r" in previous_context:
         raise TranslationError("خلاصهٔ قبلی باید یک خط باشد؛ پیش از ارسال آن را اصلاح کنید.")
+    target_name = target_language_english_name(normalize_target_language(target_language))
     system = (
-        "Translate to Persian; preserve names/terms/numbers/sounds. JSON keys: \"translation\", \"summary\". "
+        f"Translate to {target_name}; preserve names/terms/numbers/sounds. JSON keys: \"translation\", \"summary\". "
         "CRITICAL: translation line count/order must exactly match Text, one output line per input line. "
         "Add no lines, breaks, headings or commentary; verify count. "
-        f"Summary: one Persian line, max {budget.context_limit} chars incl spaces; shorten to fit. "
+        f"Summary: one {target_name} line, max {budget.context_limit} chars incl spaces; shorten to fit. "
         "Both JSON values must be plain string."
     )
     if skill:
@@ -122,9 +136,9 @@ def shorten_context(text: str, limit: int) -> str:
 
 _REASONING_TAG_RE = re.compile(r"<(?:think|thinking)\b[^>]*>.*?</(?:think|thinking)\s*>", re.IGNORECASE | re.DOTALL)
 _WRAPPER_DICT_KEYS = {"result", "output", "data", "response"}
-_TRANSLATION_ALIAS_KEYS = ("translations", "translated_text", "translated", "persian_translation", "persian", "fa", "lines")
+_TRANSLATION_ALIAS_KEYS = ("translations", "translated_text", "translated", "persian_translation", "english_translation", "target_translation", "persian", "fa", "lines")
 _SUMMARY_ALIAS_KEYS = ("story_summary", "context_summary", "context", "memory")
-_ITEM_TEXT_KEYS = ("translation", "translated_text", "translated", "persian", "fa", "text", "line")
+_ITEM_TEXT_KEYS = ("translation", "translated_text", "translated", "persian", "fa", "en", "text", "line")
 
 
 def _normalize_translation_field(raw: object) -> str | None:

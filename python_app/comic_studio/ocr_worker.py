@@ -20,7 +20,8 @@ def _configure_cache_dirs(models_root: Path) -> None:
     torch_dir = models_root / "torch"
     surya_dir = models_root / "surya"
     mineru_dir = models_root / "mineru"
-    for directory in (hf_dir, paddlex_dir, torch_dir, surya_dir, mineru_dir):
+    hezar_dir = models_root / "hezar"
+    for directory in (hf_dir, paddlex_dir, torch_dir, surya_dir, mineru_dir, hezar_dir):
         directory.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(hf_dir))
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_dir / "hub"))
@@ -28,6 +29,7 @@ def _configure_cache_dirs(models_root: Path) -> None:
     os.environ.setdefault("TORCH_HOME", str(torch_dir))
     os.environ.setdefault("MODEL_CACHE_DIR", str(surya_dir))
     os.environ.setdefault("MINERU_HOME", str(mineru_dir))
+    os.environ.setdefault("HEZAR_CACHE_DIR", str(hezar_dir))
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
     os.environ.setdefault("SURYA_INFERENCE_BACKEND", "llamacpp")
@@ -1204,6 +1206,146 @@ class _HunyuanOcrAdapter(_TransformersRegionAdapter):
         return proc
 
 
+class _HezarOcrAdapter(_BaseAdapter):
+    CRAFT_REPO = "hezarai/CRAFT"
+    CRNN_REPO = "hezarai/crnn-base-fa-v2"
+
+    def __init__(self, models_root: Path) -> None:
+        super().__init__(models_root)
+        self.hf_repo = self.CRNN_REPO
+        self._detector: Any = None
+        self._recognizer: Any = None
+        self._device: str = "cpu"
+
+    def _local_or_hub(self, repo_id: str) -> str:
+        safe_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name(repo_id)
+        if safe_dir.is_dir() and any(safe_dir.iterdir()):
+            return str(safe_dir)
+        return repo_id
+
+    def prepare(self, language: str) -> str:
+        _widen_requests_default_timeout(120.0)
+        print(f"Downloading Hezar CRAFT detector {self.CRAFT_REPO} (20%)...", file=sys.stderr, flush=True)
+        self._download_hf_repo_resilient(self.CRAFT_REPO)
+        print(f"Downloading Hezar Persian CRNN {self.CRNN_REPO} (60%)...", file=sys.stderr, flush=True)
+        _, rev = self._download_hf_repo_resilient(self.CRNN_REPO)
+        print("Hezar Persian OCR models ready (100%).", file=sys.stderr, flush=True)
+        return rev
+
+    def _ensure_loaded(self, force_cpu: bool = False) -> tuple[Any, Any]:
+        if force_cpu and self._device != "cpu":
+            self._detector = None
+            self._recognizer = None
+        if self._detector is not None and self._recognizer is not None:
+            return self._detector, self._recognizer
+        import torch
+        from hezar.models import Model
+
+        dev = "cpu" if force_cpu else _configure_torch_runtime(torch)
+        craft_src = self._local_or_hub(self.CRAFT_REPO)
+        crnn_src = self._local_or_hub(self.CRNN_REPO)
+        try:
+            detector = Model.load(craft_src, device=dev)
+            recognizer = Model.load(crnn_src, device=dev)
+        except Exception:
+            if dev != "cpu":
+                dev = "cpu"
+                detector = Model.load(craft_src, device="cpu")
+                recognizer = Model.load(crnn_src, device="cpu")
+            else:
+                raise
+        self._detector, self._recognizer, self._device = detector, recognizer, dev
+        return detector, recognizer
+
+    def close(self) -> None:
+        self._detector = None
+        self._recognizer = None
+
+    @staticmethod
+    def _extract_text(pred_item: Any) -> str:
+        if isinstance(pred_item, dict):
+            return str(pred_item.get("text") or "").strip()
+        if hasattr(pred_item, "text"):
+            return str(getattr(pred_item, "text") or "").strip()
+        if isinstance(pred_item, (list, tuple)) and pred_item:
+            first = pred_item[0]
+            if isinstance(first, dict):
+                return str(first.get("text") or "").strip()
+            if hasattr(first, "text"):
+                return str(getattr(first, "text") or "").strip()
+        return ""
+
+    def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
+        from PIL import Image
+
+        with Image.open(image_path) as im:
+            rgb = im.convert("RGB")
+            width, height = rgb.size
+        try:
+            detector, recognizer = self._ensure_loaded()
+            try:
+                det_outputs = detector.predict(rgb)
+            except Exception:
+                if self._device != "cpu":
+                    detector, recognizer = self._ensure_loaded(force_cpu=True)
+                    det_outputs = detector.predict(rgb)
+                else:
+                    raise
+
+            first_det = det_outputs[0] if isinstance(det_outputs, (list, tuple)) and det_outputs else det_outputs
+            raw_boxes = (
+                first_det.get("boxes", [])
+                if isinstance(first_det, dict)
+                else getattr(first_det, "boxes", [])
+            ) or []
+
+            crop_entries: list[tuple[Any, list[list[float]]]] = []
+            for raw_box in raw_boxes:
+                if not isinstance(raw_box, (list, tuple)) or len(raw_box) < 4:
+                    continue
+                # Hezar CRAFT boxes are (x1, y1, width, height).
+                bx, by, bw, bh = [float(v) for v in raw_box[:4]]
+                if bw < 4.0 or bh < 4.0:
+                    continue
+                cx0 = max(0, int(round(bx - 2.0)))
+                cy0 = max(0, int(round(by - 4.0)))
+                cx1 = min(width, int(round(bx + bw + 2.0)))
+                cy1 = min(height, int(round(by + bh + 4.0)))
+                if cx1 - cx0 < 4 or cy1 - cy0 < 4:
+                    continue
+                poly = _clamp_polygon(_rect_polygon(bx, by, bx + bw, by + bh), width, height)
+                crop_entries.append((rgb.crop((cx0, cy0, cx1, cy1)), poly))
+
+            if not crop_entries and regions:
+                for rx0, ry0, rx1, ry1 in _default_regions(width, height, regions):
+                    if rx1 - rx0 >= 4 and ry1 - ry0 >= 4:
+                        poly = _clamp_polygon(_rect_polygon(rx0, ry0, rx1, ry1), width, height)
+                        crop_entries.append((rgb.crop((int(rx0), int(ry0), int(rx1), int(ry1))), poly))
+
+            lines: list[dict[str, Any]] = []
+            try:
+                batch_size = 16
+                for start in range(0, len(crop_entries), batch_size):
+                    batch = crop_entries[start:start + batch_size]
+                    batch_imgs = [item[0] for item in batch]
+                    try:
+                        preds = recognizer.predict(batch_imgs)
+                    except Exception:
+                        preds = [recognizer.predict(img) for img in batch_imgs]
+                    if not isinstance(preds, (list, tuple)):
+                        preds = [preds]
+                    for (_, poly), pred in zip(batch, preds):
+                        txt = _strip_markup(self._extract_text(pred))
+                        if txt:
+                            lines.append({"text": txt, "confidence": 0.9, "polygon": poly})
+            finally:
+                for crop_img, _ in crop_entries:
+                    crop_img.close()
+            return lines
+        finally:
+            rgb.close()
+
+
 def _create_adapter(engine_id: str, models_root: Path) -> _BaseAdapter:
     if engine_id == "paddleocr-vl-1-6":
         return _PaddleOcrVlAdapter(models_root)
@@ -1223,6 +1365,8 @@ def _create_adapter(engine_id: str, models_root: Path) -> _BaseAdapter:
         return _TransformersRegionAdapter(models_root, "allenai/olmOCR-2-7B-1025", "Read the exact text in this image.")
     if engine_id == "hunyuan-ocr":
         return _HunyuanOcrAdapter(models_root)
+    if engine_id == "hezar-ocr":
+        return _HezarOcrAdapter(models_root)
     raise ValueError(f"Unsupported isolated engine: {engine_id}")
 
 

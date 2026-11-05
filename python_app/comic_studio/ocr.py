@@ -124,6 +124,7 @@ def _widen_download_timeouts(min_timeout: float = 120.0):
 
 LANGUAGES = {
     "eng": {"name": "English", "source": "en"},
+    "fas": {"name": "فارسی", "source": "fa"},
     "kor": {"name": "한국어", "source": "ko"},
     "jpn": {"name": "日本語", "source": "ja"},
     "chi_sim": {"name": "中文", "source": "zh-CN"},
@@ -498,7 +499,7 @@ class RapidEngine:
         if self.version == "v6":
             name = {"eng": "en", "jpn": "japan", "chi_sim": "ch"}.get(language, "en")
             return name, name
-        return "ch", {"kor": "korean", "eng": "latin", "jpn": "ch", "chi_sim": "ch"}.get(language, "ch")
+        return "ch", {"kor": "korean", "fas": "arabic", "eng": "latin", "jpn": "ch", "chi_sim": "ch"}.get(language, "ch")
 
     def _model_dir(self) -> Path:
         return models_dir() / "rapidocr"
@@ -776,7 +777,13 @@ class EasyEngine:
         return models_dir() / "easyocr"
 
     def _expected_models(self, language: str) -> list[str]:
-        recognition = {"eng": "english_g2.pth", "kor": "korean_g2.pth", "jpn": "japanese_g2.pth", "chi_sim": "zh_sim_g2.pth"}
+        recognition = {
+            "eng": "english_g2.pth",
+            "fas": "arabic.pth",
+            "kor": "korean_g2.pth",
+            "jpn": "japanese_g2.pth",
+            "chi_sim": "zh_sim_g2.pth",
+        }
         return ["craft_mlt_25k.pth", recognition.get(language, "english_g2.pth")]
 
     @property
@@ -835,7 +842,8 @@ class EasyEngine:
             missing = [name for name in self._expected_models(language) if not (self._model_dir() / name).is_file()]
             if missing and not (self._model_dir() / f".ready-{language}").is_file():
                 raise OcrError("EasyOCR model for this language is not ready. Click the explicit preparation button first.")
-        lang = {"eng": "en", "kor": "ko", "jpn": "ja", "chi_sim": "ch_sim"}.get(language, "en")
+        lang = {"eng": "en", "fas": "fa", "kor": "ko", "jpn": "ja", "chi_sim": "ch_sim"}.get(language, "en")
+        reader_langs = ["fa", "en"] if lang == "fa" else [lang]
         with self._lock:
             if lang not in self._readers:
                 emit(f"بارگذاری یا دانلود مدل EasyOCR برای {language} آغاز شد")
@@ -857,7 +865,7 @@ class EasyEngine:
                 with dl_ctx:
                     try:
                         self._readers[lang] = easyocr.Reader(
-                            [lang], gpu=use_gpu, model_storage_directory=str(self._model_dir()),
+                            reader_langs, gpu=use_gpu, model_storage_directory=str(self._model_dir()),
                             download_enabled=download, verbose=False,
                         )
                         self._using_gpu = use_gpu
@@ -865,7 +873,7 @@ class EasyEngine:
                         if use_gpu:
                             try:
                                 self._readers[lang] = easyocr.Reader(
-                                    [lang], gpu=False, model_storage_directory=str(self._model_dir()),
+                                    reader_langs, gpu=False, model_storage_directory=str(self._model_dir()),
                                     download_enabled=download, verbose=False,
                                 )
                                 self._using_gpu = False
@@ -1301,13 +1309,15 @@ def _isolated_info(
     description: str,
     repository: str,
     requirements: str,
+    *,
+    languages: list[str] | None = None,
 ) -> dict[str, Any]:
     spec = ISOLATED_ENGINE_SPECS[engine_id]
     return {
         "name": name,
         "family": family,
         "description": description,
-        "languages": ["eng", "kor", "jpn", "chi_sim"],
+        "languages": list(languages) if languages is not None else ["eng", "kor", "jpn", "chi_sim"],
         "selectable": True,
         "action": "download",
         "isolated": True,
@@ -1344,17 +1354,17 @@ ENGINE_SUITABILITY: dict[str, dict[str, dict[str, str]]] = {
         },
         "document": {
             "tier": "medium",
-            "reason": "سبک و چندزبانه (شامل کره‌ای)، اما روی فونت‌های ریز و متراکم کتاب متوسط است.",
+            "reason": "سبک و چندزبانه (شامل کره‌ای و فارسی)، اما روی فونت‌های ریز و متراکم کتاب متوسط است.",
         },
         "auto": {
             "tier": "medium",
-            "reason": "گزینهٔ سبک چندزبانه (مناسب کره‌ای)؛ در انگلیسی دقت PP-OCRv6 و مدل‌های چیدمان بالاتر است.",
+            "reason": "گزینهٔ سبک چندزبانه؛ در انگلیسی دقت PP-OCRv6 و مدل‌های چیدمان بالاتر است.",
         },
     },
     "easyocr": {
         "comic": {
             "tier": "best",
-            "reason": "تشخیص بسیار خوب حروف و حباب‌های منحنی یا پراکندهٔ کمیک در هر چهار زبان.",
+            "reason": "تشخیص بسیار خوب حروف و حباب‌های منحنی یا پراکندهٔ کمیک در زبان‌های مختلف (شامل فارسی).",
         },
         "document": {
             "tier": "weak",
@@ -1377,6 +1387,20 @@ ENGINE_SUITABILITY: dict[str, dict[str, dict[str, str]]] = {
         "auto": {
             "tier": "medium",
             "reason": "عالی برای صفحات کتاب و مقاله، ولی اگر صفحه کمیک باشد روی حباب‌ها ضعیف عمل می‌کند.",
+        },
+    },
+    "hezar-ocr": {
+        "comic": {
+            "tier": "weak",
+            "reason": "مدل بومی تخصصی زبان فارسی است؛ برای زبان فارسی در هر دو حالت کمیک و کتاب عالی (سبز) است اما برای انگلیسی و سایر زبان‌ها کاربرد ندارد.",
+        },
+        "document": {
+            "tier": "weak",
+            "reason": "مدل بومی تخصصی زبان فارسی است؛ زبان را روی «فارسی» قرار دهید تا با بالاترین دقت اجرا شود.",
+        },
+        "auto": {
+            "tier": "weak",
+            "reason": "مخصوص متون فارسی (CRAFT + CRNN-fa-v2)؛ فقط برای زبان فارسی طراحی شده است.",
         },
     },
     "paddleocr-vl-1-6": {
@@ -1424,7 +1448,7 @@ ENGINE_SUITABILITY: dict[str, dict[str, dict[str, str]]] = {
     "got-ocr-2": {
         "comic": {
             "tier": "best",
-            "reason": "مدل بینایی دقیق برای خواندن فونت‌های خاص داخل حباب‌های برش‌خوردهٔ کمیک و مانگا.",
+            "reason": "مدل بینایی دقیق برای خواندن فونت‌های خاص داخل حباب‌های برش‌خوردهٔ کمیک انگلیسی و چینی.",
         },
         "document": {
             "tier": "medium",
@@ -1432,7 +1456,7 @@ ENGINE_SUITABILITY: dict[str, dict[str, dict[str, str]]] = {
         },
         "auto": {
             "tier": "medium",
-            "reason": "دقت خوب روی برش‌های متنی کمیک و پاراگراف‌های کوتاه، با سرعت متوسط روی CPU.",
+            "reason": "دقت خوب روی برش‌های متنی کمیک و پاراگراف‌های کوتاه انگلیسی و چینی.",
         },
     },
     "glm-ocr": {
@@ -1508,6 +1532,286 @@ ENGINE_SUITABILITY: dict[str, dict[str, dict[str, str]]] = {
 }
 
 
+# Language × Page-Mode suitability overrides on top of ENGINE_SUITABILITY (which acts as the English baseline).
+_LANGUAGE_SUITABILITY_OVERRIDES: dict[str, dict[str, dict[str, dict[str, str]]]] = {
+    "fas": {
+        "hezar-ocr": {
+            "comic": {
+                "tier": "best",
+                "reason": "مدل بومی آموزش‌دیده روی فونت‌های فارسی؛ عالی و سبک برای حباب‌های کمیک و متون فارسی روی CPU و GPU.",
+            },
+            "document": {
+                "tier": "best",
+                "reason": "تشخیص بسیار دقیق حروف و کلمات چاپی فارسی (فونت‌های وزیر، نازنین، میترا، یکان و کتاب) با مصرف کم حافظه.",
+            },
+            "auto": {
+                "tier": "best",
+                "reason": "بهترین انتخاب تخصصی و سبک برای صفحات فارسی (هم کمیک و هم کتاب و جزوه).",
+            },
+        },
+        "rapidocr-v6": {
+            "comic": {"tier": "weak", "reason": "این مدل از الفبای فارسی پشتیبانی نمی‌کند (فقط انگلیسی، چینی و ژاپنی)."},
+            "document": {"tier": "weak", "reason": "این مدل از الفبای فارسی پشتیبانی نمی‌کند (فقط انگلیسی، چینی و ژاپنی)."},
+            "auto": {"tier": "weak", "reason": "عدم پشتیبانی از زبان فارسی؛ از Hezar، Tesseract، EasyOCR یا Surya استفاده کنید."},
+        },
+        "rapidocr-v5": {
+            "comic": {
+                "tier": "medium",
+                "reason": "حروف فارسی (شامل پ، چ، ژ، گ، ک، ی) را سریع می‌خواند، ولی مدل مشترک عربی‌ـ‌فارسی آن روی فونت فانتزی کمیک دقت متوسط دارد؛ Hezar و EasyOCR دقیق‌ترند.",
+            },
+            "document": {
+                "tier": "medium",
+                "reason": "سبک و سریع برای متون سادهٔ فارسی، اما در کتاب‌ها و مقالات متراکم فارسی دقت Hezar، Tesseract و Surya بالاتر است.",
+            },
+            "auto": {
+                "tier": "medium",
+                "reason": "گزینهٔ سبک کمکی برای فارسی روی سیستم‌های ضعیف؛ برای دقت بالاتر Hezar یا Tesseract پیشنهاد می‌شود.",
+            },
+        },
+        "easyocr": {
+            "comic": {
+                "tier": "best",
+                "reason": "پشتیبانی بومی هم‌زمان از فارسی و انگلیسی؛ بسیار مناسب دیالوگ‌های کمیک و کلمات پراکندهٔ فارسی.",
+            },
+            "document": {
+                "tier": "weak",
+                "reason": "در صفحات پُرمتن کتاب فارسی کند است، ستون‌بندی ندارد و گاهی اتصال حروف ریز پاراگراف‌ها را اشتباه می‌گیرد.",
+            },
+            "auto": {
+                "tier": "medium",
+                "reason": "عالی برای حباب‌های کمیک فارسی، اما برای کتاب و مقالهٔ متراکم فارسی مناسب نیست.",
+            },
+        },
+        "tesseract": {
+            "comic": {
+                "tier": "weak",
+                "reason": "مخصوص سطرهای صاف چاپی است و روی حباب‌های منحنی، پس‌زمینهٔ رنگی و فونت‌های فانتزی کمیک فارسی ضعیف عمل می‌کند.",
+            },
+            "document": {
+                "tier": "best",
+                "reason": "فایل رسمی fas.traineddata روی کتاب‌ها، مقالات و جزوه‌های چاپی فارسی بسیار سریع، دقیق و کم‌مصرف است.",
+            },
+            "auto": {
+                "tier": "medium",
+                "reason": "فوق‌العاده برای کتاب و مقالهٔ چاپی فارسی، ولی روی کمیک فارسی ضعیف است.",
+            },
+        },
+        "surya": {
+            "comic": {
+                "tier": "medium",
+                "reason": "خط فارسی را می‌شناسد اما برای فونت‌های فانتزی حباب کمیک ساخته نشده است.",
+            },
+            "document": {
+                "tier": "best",
+                "reason": "پشتیبانی رسمی از فارسی و چیدمان راست‌به‌چپ (RTL)؛ عالی برای مقالات چندستونی، کتاب و جزوه‌های فارسی.",
+            },
+            "auto": {
+                "tier": "best",
+                "reason": "تشخیص قدرتمند خط فارسی و ترتیب ستون‌های راست‌به‌چپ در کتاب و اسناد.",
+            },
+        },
+        "paddleocr-vl-1-6": {
+            "comic": {
+                "tier": "medium",
+                "reason": "پشتیبانی رسمی از فارسی در میان ۱۰۹ زبان، اما سنگین‌تر از Hezar و EasyOCR برای کمیک است.",
+            },
+            "document": {
+                "tier": "best",
+                "reason": "تشخیص دقیق چیدمان صفحه، تیترها، جداول و پاراگراف‌های فارسی در کتاب و مقاله.",
+            },
+            "auto": {
+                "tier": "best",
+                "reason": "مدل چندزبانهٔ قوی برای استخراج ساختاریافتهٔ کتاب و مقالهٔ فارسی.",
+            },
+        },
+        "mineru-2-5-pro": {
+            "comic": {"tier": "weak", "reason": "از خط فارسی و صفحات کمیک پشتیبانی نمی‌کند."},
+            "document": {"tier": "weak", "reason": "موتور OCR پیش‌فرض MinerU برای انگلیسی و چینی بهینه شده و از خط فارسی پشتیبانی مستقیم ندارد."},
+            "auto": {"tier": "weak", "reason": "عدم پشتیبانی مستقیم از خط فارسی؛ برای کتاب فارسی از Hezar، Tesseract یا Surya استفاده کنید."},
+        },
+        "got-ocr-2": {
+            "comic": {"tier": "weak", "reason": "فقط روی انگلیسی و چینی آموزش دیده و قادر به خواندن خط فارسی نیست."},
+            "document": {"tier": "weak", "reason": "فقط روی انگلیسی و چینی آموزش دیده و قادر به خواندن خط فارسی نیست."},
+            "auto": {"tier": "weak", "reason": "عدم پشتیبانی از الفبای فارسی."},
+        },
+        "glm-ocr": {
+            "comic": {
+                "tier": "medium",
+                "reason": "مدل چندزبانه است و فارسی را تا حدی می‌خواند، اما روی فونت‌های کمیک فارسی به دقت Hezar و EasyOCR نمی‌رسد.",
+            },
+            "document": {
+                "tier": "medium",
+                "reason": "خوانش قابل‌قبول متن فارسی، ولی کندتر و کم‌دقت‌تر از Hezar، Surya و Tesseract روی کتاب فارسی است.",
+            },
+            "auto": {
+                "tier": "medium",
+                "reason": "عملکرد متوسط روی متن فارسی در مقایسه با موتورهای تخصصی فارسی.",
+            },
+        },
+        "dots-ocr": {
+            "comic": {
+                "tier": "medium",
+                "reason": "از فارسی پشتیبانی می‌کند اما نیازمند GPU قوی است و تمرکز آن روی اسناد است.",
+            },
+            "document": {
+                "tier": "best",
+                "reason": "مدل ۱۰۰ زبانه با تشخیص هم‌زمان کادر و متن فارسی در کتاب و مقاله (نیازمند NVIDIA GPU ≥ 8GB).",
+            },
+            "auto": {
+                "tier": "medium",
+                "reason": "دقیق برای اسناد فارسی روی سیستم‌های دارای کارت گرافیک NVIDIA.",
+            },
+        },
+        "deepseek-ocr-2": {
+            "comic": {
+                "tier": "weak",
+                "reason": "بسیار سنگین (نیازمند GPU ≥ 12GB) و برای حباب‌های کمیک فارسی بهینه نشده است.",
+            },
+            "document": {
+                "tier": "medium",
+                "reason": "از خط فارسی پشتیبانی می‌کند اما بیشترین دقت آن روی اسناد انگلیسی و چینی است و به GPU قوی نیاز دارد.",
+            },
+            "auto": {
+                "tier": "weak",
+                "reason": "برای متن فارسی گزینه‌های سبک‌تر و دقیق‌تری مثل Hezar، Surya و Tesseract وجود دارد.",
+            },
+        },
+        "olmocr": {
+            "comic": {
+                "tier": "weak",
+                "reason": "مخصوص مقالات PDF است و برای کمیک فارسی کاربردی ندارد.",
+            },
+            "document": {
+                "tier": "medium",
+                "reason": "هستهٔ Qwen2.5-VL آن متن چاپی فارسی را می‌خواند، ولی عمدتاً روی مقالات انگلیسی تنظیم شده و نیازمند GPU ≥ 16GB است.",
+            },
+            "auto": {
+                "tier": "weak",
+                "reason": "مدل بسیار سنگین ویژهٔ اسناد روی GPU قوی؛ برای فارسی اولویت با Hezar و Surya است.",
+            },
+        },
+    },
+    "kor": {
+        "rapidocr-v6": {
+            "comic": {"tier": "weak", "reason": "مدل PP-OCRv6 Small از زبان کره‌ای پشتیبانی نمی‌کند؛ از PP-OCRv5، EasyOCR یا GLM-OCR استفاده کنید."},
+            "document": {"tier": "weak", "reason": "مدل PP-OCRv6 Small از زبان کره‌ای پشتیبانی نمی‌کند."},
+            "auto": {"tier": "weak", "reason": "عدم پشتیبانی از زبان کره‌ای (فقط انگلیسی، چینی و ژاپنی)."},
+        },
+        "rapidocr-v5": {
+            "comic": {
+                "tier": "best",
+                "reason": "دارای مدل اختصاصی کره‌ای (korean_PP-OCRv5)؛ سریع‌ترین و دقیق‌ترین موتور سبک برای مانهوا و وبتون کره‌ای.",
+            },
+            "document": {
+                "tier": "best",
+                "reason": "تشخیص دقیق و سبک خط هانگول کره‌ای روی CPU و GPU برای جزوه و کتاب کره‌ای.",
+            },
+            "auto": {
+                "tier": "best",
+                "reason": "بهترین انتخاب سریع و سبک برای تمام صفحات کره‌ای روی هر سیستمی.",
+            },
+        },
+        "tesseract": {
+            "comic": {"tier": "weak", "reason": "روی فونت‌های وبتون و مانهوای کره‌ای و پس‌زمینهٔ رنگی عملکرد ضعیفی دارد."},
+            "document": {
+                "tier": "medium",
+                "reason": "متن چاپی کره‌ای را می‌خواند اما در تشخیص فاصلهٔ بین هجاهای هانگول ضعیف‌تر از Surya، PaddleOCR-VL و PP-OCRv5 است.",
+            },
+            "auto": {"tier": "weak", "reason": "برای زبان کره‌ای موتورهای PP-OCRv5، EasyOCR و Surya بسیار دقیق‌ترند."},
+        },
+        "got-ocr-2": {
+            "comic": {"tier": "weak", "reason": "این مدل فقط روی انگلیسی و چینی آموزش دیده و حروف هانگول کره‌ای را به‌خوبی نمی‌شناسد."},
+            "document": {"tier": "weak", "reason": "این مدل فقط روی انگلیسی و چینی آموزش دیده و برای متون کره‌ای مناسب نیست."},
+            "auto": {"tier": "weak", "reason": "فاقد آموزش کافی روی خط کره‌ای."},
+        },
+        "olmocr": {
+            "comic": {"tier": "weak", "reason": "برای مانهوا و کمیک کره‌ای نامناسب و بسیار سنگین است."},
+            "document": {"tier": "medium", "reason": "عمدتاً روی مقالات انگلیسی آموزش دیده؛ برای اسناد کره‌ای Surya و PaddleOCR-VL دقیق‌ترند."},
+            "auto": {"tier": "weak", "reason": "سنگین و غیربهینه برای متون کره‌ای."},
+        },
+    },
+    "jpn": {
+        "rapidocr-v5": {
+            "comic": {
+                "tier": "medium",
+                "reason": "در نسخهٔ v5 از مدل مشترک چینی برای ژاپنی استفاده می‌شود؛ برای مانگای ژاپنی PP-OCRv6، EasyOCR یا GLM-OCR دقیق‌ترند.",
+            },
+            "document": {
+                "tier": "medium",
+                "reason": "برخی حروف هیراگانا و کاتاکانای ریز را با کانجی اشتباه می‌گیرد؛ از Surya، PaddleOCR-VL یا PP-OCRv6 استفاده کنید.",
+            },
+            "auto": {"tier": "medium", "reason": "عملکرد متوسط در ژاپنی؛ PP-OCRv6 مدل اختصاصی ژاپنی بهتری دارد."},
+        },
+        "tesseract": {
+            "comic": {"tier": "weak", "reason": "روی مانگای ژاپنی، متن‌های عمودی و حباب‌های منحنی عملکرد ضعیفی دارد."},
+            "document": {
+                "tier": "medium",
+                "reason": "متن افقی کتاب ژاپنی را می‌خواند اما در متون عمودی و فوریگانا ضعیف‌تر از PaddleOCR-VL، Surya و MinerU است.",
+            },
+            "auto": {"tier": "weak", "reason": "برای مانگا و کتاب ژاپنی مدل‌های PP-OCRv6، EasyOCR و PaddleOCR-VL توصیه می‌شوند."},
+        },
+        "got-ocr-2": {
+            "comic": {"tier": "weak", "reason": "عمدتاً روی انگلیسی و چینی آموزش دیده و حروف هیراگانا/کاتاکانای مانگا را ناقص می‌خواند."},
+            "document": {"tier": "weak", "reason": "برای مقالات و کتاب‌های ژاپنی دقت کافی روی حروف کانا ندارد."},
+            "auto": {"tier": "weak", "reason": "برای ژاپنی مناسب نیست؛ از PP-OCRv6 یا GLM-OCR استفاده کنید."},
+        },
+        "olmocr": {
+            "comic": {"tier": "weak", "reason": "مخصوص مقالات علمی انگلیسی است و برای مانگای ژاپنی نامناسب است."},
+            "document": {"tier": "medium", "reason": "روی متون ژاپنی دقت کمتری نسبت به PaddleOCR-VL، MinerU و Surya دارد و نیازمند GPU سنگین است."},
+            "auto": {"tier": "weak", "reason": "سنگین و غیرتخصصی برای ژاپنی."},
+        },
+    },
+    "chi_sim": {
+        "tesseract": {
+            "comic": {"tier": "weak", "reason": "روی مانهوای چینی و فونت‌های گرافیکی حباب‌ها عملکرد ضعیفی دارد."},
+            "document": {
+                "tier": "medium",
+                "reason": "در تشخیص نویسه‌های متراکم چینی ضعیف‌تر از موتورهای بومی چینی (PP-OCRv6، PaddleOCR-VL، MinerU و DeepSeek) است.",
+            },
+            "auto": {"tier": "weak", "reason": "برای زبان چینی، موتورهای خانوادهٔ PP-OCR، GOT-OCR و GLM-OCR بسیار دقیق‌ترند."},
+        },
+        "got-ocr-2": {
+            "comic": {
+                "tier": "best",
+                "reason": "آموزش‌دیده به‌طور تخصصی روی چینی و انگلیسی؛ فوق‌العاده دقیق برای مانهوا و کمیک چینی.",
+            },
+            "document": {
+                "tier": "best",
+                "reason": "تشخیص بسیار دقیق نویسه‌های چاپی چینی و انگلیسی در پاراگراف‌ها و جداول.",
+            },
+            "auto": {
+                "tier": "best",
+                "reason": "عملکرد عالی روی هر دو حالت کمیک و کتاب به زبان چینی.",
+            },
+        },
+        "glm-ocr": {
+            "comic": {
+                "tier": "best",
+                "reason": "مدل بومی چینی‌ـ‌انگلیسی با دقت عالی روی دیالوگ‌ها و فونت‌های دشوار مانهوا.",
+            },
+            "document": {
+                "tier": "best",
+                "reason": "عملکرد بسیار دقیق در خواندن متون چاپی و علمی چینی.",
+            },
+            "auto": {
+                "tier": "best",
+                "reason": "انتخاب درجهٔ یک برای صفحات چینی در کمیک و کتاب.",
+            },
+        },
+        "rapidocr-v5": {
+            "comic": {"tier": "best", "reason": "بسیار سریع و دقیق برای مانهوا و کمیک چینی روی هر سیستمی."},
+            "document": {"tier": "best", "reason": "مدل پایهٔ چینی PP-OCRv5 با دقت و سرعت بالا روی اسناد و کتاب‌های چینی."},
+            "auto": {"tier": "best", "reason": "عملکرد عالی و سبک برای متون چینی."},
+        },
+        "olmocr": {
+            "comic": {"tier": "weak", "reason": "برای مانهوا و کمیک چینی نامناسب و بسیار سنگین است."},
+            "document": {"tier": "medium", "reason": "تنظیم‌شده عمدتاً روی مقالات انگلیسی؛ در اسناد چینی MinerU، PaddleOCR-VL و DeepSeek برترند."},
+            "auto": {"tier": "weak", "reason": "برای زبان چینی مدل‌های تخصصی بسیار بهتری در برنامه وجود دارد."},
+        },
+    },
+}
+
+
 ENGINE_INFO = {
     "rapidocr-v6": {
         "name": "PP-OCRv6 Small",
@@ -1529,8 +1833,8 @@ ENGINE_INFO = {
     "rapidocr-v5": {
         "name": "PP-OCRv5 Multilingual",
         "family": "RapidOCR / ONNX",
-        "description": "بستهٔ چندزبانهٔ سبک با مدل اختصاصی کره‌ای و پشتیبانی از هر چهار زبان برنامه.",
-        "languages": ["eng", "kor", "jpn", "chi_sim"],
+        "description": "بستهٔ چندزبانهٔ سبک با مدل اختصاصی کره‌ای و پشتیبانی از انگلیسی، فارسی، کره‌ای، ژاپنی و چینی.",
+        "languages": ["eng", "fas", "kor", "jpn", "chi_sim"],
         "selectable": True,
         "action": "download",
         "isolated": False,
@@ -1546,8 +1850,8 @@ ENGINE_INFO = {
     "easyocr": {
         "name": "EasyOCR",
         "family": "CRAFT + CRNN / PyTorch",
-        "description": "موتور مستقل و دقیق برای مقایسهٔ کیفیت تشخیص در هر چهار زبان.",
-        "languages": ["eng", "kor", "jpn", "chi_sim"],
+        "description": "موتور مستقل و دقیق با پشتیبانی بومی از هر پنج زبان برنامه (شامل فارسی و انگلیسی هم‌زمان).",
+        "languages": ["eng", "fas", "kor", "jpn", "chi_sim"],
         "selectable": True,
         "action": "download",
         "isolated": False,
@@ -1563,8 +1867,8 @@ ENGINE_INFO = {
     "tesseract": {
         "name": "Tesseract",
         "family": "Tesseract OCR / TSV",
-        "description": "موتور متن‌خوان کلاسیک با نصب بی‌صدای خودکار در ویندوز و دریافت خودکار فایل زبان.",
-        "languages": ["eng", "kor", "jpn", "chi_sim"],
+        "description": "موتور متن‌خوان کلاسیک با نصب خودکار و پشتیبانی عالی از کتاب و مقاله در هر پنج زبان (شامل fas.traineddata فارسی).",
+        "languages": ["eng", "fas", "kor", "jpn", "chi_sim"],
         "selectable": True,
         "action": "download",
         "isolated": False,
@@ -1577,53 +1881,68 @@ ENGINE_INFO = {
         "requirements": "نصب کاملاً خودکار موتور اجرایی و فایل زبان در پوشهٔ اختصاصی برنامه، بدون نیاز به نصب دستی.",
         "install": "https://github.com/tesseract-ocr/tesseract",
     },
+    "hezar-ocr": _isolated_info(
+        "hezar-ocr",
+        "Hezar Persian OCR",
+        "Hezar / CRAFT + CRNN-fa-v2",
+        "مدل بومی و تخصصی زبان فارسی (تشخیص CRAFT + خوانش CRNN-fa-v2)؛ آموزش‌دیده مستقیماً روی فونت‌ها و متون چاپی فارسی.",
+        "https://github.com/hezarai/hezar",
+        "نصب خودکار در محیط جدا؛ بسیار سبک و قابل اجرا روی CPU معمولی و کارت گرافیک (حجم وزن‌ها حدود ۲۵۰ مگابایت).",
+        languages=["fas"],
+    ),
     "paddleocr-vl-1-6": _isolated_info(
         "paddleocr-vl-1-6",
         "PaddleOCR-VL-1.6",
         "PaddleOCR / VLM",
-        "مدل چندزبانهٔ تشخیص چیدمان و متن با نصب خودکار در پوشهٔ ایزوله و خروجی کادربندی‌شده.",
+        "مدل ۱۰۹ زبانهٔ تشخیص چیدمان و متن (شامل فارسی) با نصب خودکار در پوشهٔ ایزوله و خروجی کادربندی‌شده.",
         "https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/PaddleOCR-VL.md",
         "نصب خودکار در محیط جدا؛ قابل اجرا روی CPU و کارت گرافیک NVIDIA (حجم دانلود حدود ۲٫۴ گیگابایت).",
+        languages=["eng", "fas", "kor", "jpn", "chi_sim"],
     ),
     "surya": _isolated_info(
         "surya",
         "Surya",
         "Datalab / OCR + Layout",
-        "مدل چندزبانهٔ تشخیص متن و چیدمان با دریافت خودکار پیش‌نیازهای پردازنده یا کارت گرافیک.",
+        "مدل ۹۰+ زبانهٔ تشخیص متن و چیدمان راست‌به‌چپ/چپ‌به‌راست (شامل فارسی) با پیش‌نیازهای خودکار پردازنده یا کارت گرافیک.",
         "https://github.com/datalab-to/surya",
         "نصب خودکار در محیط جدا به همراه موتور کمکی CPU در صورت نبود کارت گرافیک (حجم حدود ۲٫۲ گیگابایت).",
+        languages=["eng", "fas", "kor", "jpn", "chi_sim"],
     ),
     "mineru-2-5-pro": _isolated_info(
         "mineru-2-5-pro",
         "MinerU2.5-Pro",
         "MinerU / Document + OCR",
-        "موتور ساختاریافتهٔ تشخیص بلوک‌های متن و تصویر با نصب خودکار در محیط مستقل.",
+        "موتور ساختاریافتهٔ تشخیص بلوک‌های متن و تصویر برای مقالات انگلیسی و شرق آسیا در محیط مستقل.",
         "https://github.com/opendatalab/MinerU",
         "نصب خودکار در محیط جدا؛ قابل اجرا روی CPU و GPU (حجم دانلود حدود ۳ گیگابایت).",
+        languages=["eng", "kor", "jpn", "chi_sim"],
     ),
     "got-ocr-2": _isolated_info(
         "got-ocr-2",
         "GOT-OCR 2.0",
         "GOT / Vision-Language OCR",
-        "مدل هوش مصنوعی بینایی برای خواندن دقیق متنِ حباب‌های کمیک در محیط مستقل.",
+        "مدل هوش مصنوعی بینایی برای خواندن دقیق متنِ حباب‌های کمیک انگلیسی و چینی در محیط مستقل.",
         "https://github.com/Ucas-HaoranWei/GOT-OCR2.0",
         "نصب خودکار در محیط جدا؛ قابل اجرا روی CPU و GPU ولی با کارت گرافیک سریع‌تر است (حدود ۱٫۸ گیگابایت).",
+        languages=["eng", "kor", "jpn", "chi_sim"],
     ),
     "glm-ocr": _isolated_info(
         "glm-ocr",
         "GLM-OCR",
         "GLM / Vision-Language OCR",
-        "مدل چندوجهی خواندن متن با تشخیص خودکار نواحی حباب گفتگو و نصب ایزوله.",
+        "مدل چندوجهی و چندزبانهٔ خواندن متن با تشخیص خودکار نواحی حباب گفتگو و نصب ایزوله.",
         "https://github.com/zai-org/GLM-OCR",
         "نصب خودکار در محیط جدا؛ قابل اجرا روی CPU و کارت گرافیک NVIDIA (حجم حدود ۲٫۴ گیگابایت).",
+        languages=["eng", "fas", "kor", "jpn", "chi_sim"],
     ),
     "dots-ocr": _isolated_info(
         "dots-ocr",
         "dots.ocr",
         "dots / Vision-Language OCR",
-        "مدل سنگین چندزبانهٔ تشخیص چیدمان و متن با خروجی مختصات کادرها.",
+        "مدل سنگین ۱۰۰ زبانهٔ تشخیص چیدمان و متن (شامل فارسی) با خروجی مختصات کادرها.",
         "https://github.com/rednote-hilab/dots.ocr",
         "مدل سنگین؛ نیازمند کارت گرافیک NVIDIA با حداقل ۸ گیگابایت حافظه و حدود ۴٫۵ گیگابایت دانلود.",
+        languages=["eng", "fas", "kor", "jpn", "chi_sim"],
     ),
     "deepseek-ocr-2": _isolated_info(
         "deepseek-ocr-2",
@@ -1632,28 +1951,64 @@ ENGINE_INFO = {
         "مدل بینایی‌ـ‌زبان پیشرفته با قابلیت مکان‌یابی متن روی صفحه در محیط مستقل.",
         "https://github.com/deepseek-ai/DeepSeek-OCR-2",
         "مدل سنگین؛ نیازمند کارت گرافیک NVIDIA با حداقل ۱۲ گیگابایت حافظه و حدود ۷٫۵ گیگابایت دانلود.",
+        languages=["eng", "fas", "kor", "jpn", "chi_sim"],
     ),
     "olmocr": _isolated_info(
         "olmocr",
         "olmOCR",
         "AllenAI / 7B VLM OCR",
-        "مدل ۷ میلیارد پارامتری خواندن متن‌های دشوار در محیط کاملاً ایزوله.",
+        "مدل ۷ میلیارد پارامتری خواندن متون چاپی دشوار در محیط کاملاً ایزوله.",
         "https://github.com/allenai/olmocr",
         "مدل بسیار سنگین؛ نیازمند کارت گرافیک NVIDIA با حداقل ۱۶ گیگابایت حافظه و حدود ۱۵ گیگابایت دانلود.",
+        languages=["eng", "fas", "kor", "jpn", "chi_sim"],
     ),
     "hunyuan-ocr": _isolated_info(
         "hunyuan-ocr",
         "HunyuanOCR",
         "Tencent Hunyuan / VLM OCR",
-        "مدل بزرگ بینایی‌ـ‌زبان برای تشخیص متن با نصب خودکار در محیط ایزوله.",
+        "مدل بزرگ ۱۰۰ زبانهٔ بینایی‌ـ‌زبان برای تشخیص متن با نصب خودکار در محیط ایزوله.",
         "https://github.com/Tencent-Hunyuan/HunyuanOCR",
         "مدل بسیار سنگین؛ نیازمند کارت گرافیک حرفه‌ای NVIDIA با حداقل ۲۴ گیگابایت حافظه و حدود ۲۰ گیگابایت دانلود.",
+        languages=["eng", "fas", "kor", "jpn", "chi_sim"],
     ),
 }
 
 
+def resolve_engine_suitability(engine_id: str, page_mode: str = "comic", language: str = "eng") -> dict[str, str]:
+    """Return {tier, reason} jointly determined by BOTH OCR language and page/text mode."""
+    norm_mode = page_mode if page_mode in {"comic", "document", "auto"} else "comic"
+    norm_lang = language if language in LANGUAGES else "eng"
+    info = ENGINE_INFO.get(engine_id) or {}
+    supported_langs = info.get("languages") or []
+    lang_override = (_LANGUAGE_SUITABILITY_OVERRIDES.get(norm_lang) or {}).get(engine_id) or {}
+    if norm_mode in lang_override:
+        return dict(lang_override[norm_mode])
+    if supported_langs and norm_lang not in supported_langs:
+        lang_label = LANGUAGES.get(norm_lang, {}).get("name", norm_lang)
+        return {
+            "tier": "weak",
+            "reason": f"این مدل از زبان «{lang_label}» پشتیبانی نمی‌کند؛ موتور دیگری را برای این زبان انتخاب کنید.",
+        }
+    base = ENGINE_SUITABILITY.get(engine_id) or {}
+    if norm_mode in base:
+        return dict(base[norm_mode])
+    return {"tier": "medium", "reason": "عملکرد عمومی متوسط برای این ترکیب زبان و نوع صفحه."}
+
+
+ENGINE_SUITABILITY_BY_LANGUAGE: dict[str, dict[str, dict[str, dict[str, str]]]] = {
+    _eid: {
+        _lang: {
+            _mode: resolve_engine_suitability(_eid, _mode, _lang)
+            for _mode in ("comic", "document", "auto")
+        }
+        for _lang in LANGUAGES
+    }
+    for _eid in ENGINE_INFO
+}
+
 for _eng_id, _eng_meta in ENGINE_INFO.items():
     _eng_meta["suitability"] = ENGINE_SUITABILITY.get(_eng_id, {})
+    _eng_meta["suitabilityByLanguage"] = ENGINE_SUITABILITY_BY_LANGUAGE.get(_eng_id, {})
 
 
 class EngineRegistry:
@@ -1952,12 +2307,19 @@ def _recognize_image_primary(
     finally:
         if prepared is not image:
             prepared.close()
-    # Reading order is stable: physical row first, then horizontal position. No text is flattened.
-    lines.sort(key=lambda line: (round(((line.box[1] + line.box[3]) / 2) / 12) * 12, line.box[0], line.box[1]))
+    # Reading order is stable: physical row first, then horizontal position (right-to-left for Persian/RTL).
+    is_rtl_lang = language in {"fas", "ara"}
+    lines.sort(
+        key=lambda line: (
+            round(((line.box[1] + line.box[3]) / 2) / 12) * 12,
+            -line.box[2] if is_rtl_lang else line.box[0],
+            line.box[1],
+        )
+    )
     blocks = _blocks_from_lines(lines, scale * input_scale)
     effective_mode = detect_page_mode(blocks, page_size=image.size) if page_mode == "auto" else page_mode
     if effective_mode == "document" and len(blocks) >= 2:
-        blocks = sort_document_reading_order(blocks, page_size=image.size)
+        blocks = sort_document_reading_order(blocks, page_size=image.size, rtl_columns=is_rtl_lang)
         for index, blk in enumerate(blocks, start=1):
             blk["id"] = index
     return blocks
@@ -2069,9 +2431,11 @@ def _recognize_bubble(
                 (y - BUBBLE_PADDING) / BUBBLE_SCALE + offset_y,
             ] for x, y in line.polygon]
             restored.append(OcrLine(line.text, line.confidence, polygon))
+        is_rtl_lang = language in {"fas", "ara"}
         restored.sort(key=lambda line: (
             round(((line.box[1] + line.box[3]) / 2) / 12) * 12,
-            line.box[0], line.box[1],
+            -line.box[2] if is_rtl_lang else line.box[0],
+            line.box[1],
         ))
         blocks.extend(_blocks_from_lines(restored))
     for index, block in enumerate(blocks, start=1):

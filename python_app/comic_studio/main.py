@@ -40,8 +40,8 @@ from .schemas import (
 from .sessions import SessionManager
 from .store import ProjectChangedError, ProjectStore
 from .translation import (
-    AI_PROVIDERS, TranslationError, InvalidContextResponse, TranslationService, combine_translation_texts,
-    distribute_translation, normalize_ai_skill, context_uses_json, _redact_diagnostic,
+    AI_PROVIDERS, TARGET_LANGUAGES, TranslationError, InvalidContextResponse, TranslationService, combine_translation_texts,
+    distribute_translation, normalize_ai_skill, normalize_target_language, context_uses_json, _redact_diagnostic,
 )
 from .translation_plan import (
     AI_PAGE_PROGRESS_KEY, AI_PARTS_KEY, AI_REUSE_KEY, build_project_plan, build_single_plan, call_plan, mark_completed_call, mark_reused_translation, part_fingerprint,
@@ -176,7 +176,7 @@ def create_app() -> FastAPI:
             response.headers["Cache-Control"] = "no-store"
         return response
 
-    async def run_reported(function: Any, *args: Any, pulse_label: str | None = None) -> Any:
+    async def run_reported(function: Any, *args: Any, pulse_label: str | None = None, **kwargs: Any) -> Any:
         stop_pulse = threading.Event()
         started = time.monotonic()
         last_state: dict[str, Any] = {"ts": started, "progress": None, "detail": ""}
@@ -211,7 +211,7 @@ def create_app() -> FastAPI:
             pulse.start()
         try:
             with reporting(tracked_report):
-                return await run_in_threadpool(function, *args)
+                return await run_in_threadpool(function, *args, **kwargs)
         finally:
             stop_pulse.set()
             if pulse:
@@ -526,6 +526,8 @@ def create_app() -> FastAPI:
             return {"ok": False, "guide": True, "engine": {"id": engine_id, **info}, "engines": registry.status()}
         language = values.language if values else "eng"
         force = bool(values.force) if values else False
+        if info.get("isolated") and info["languages"] and language not in info["languages"]:
+            language = info["languages"][0]
         if language not in info["languages"]:
             raise HTTPException(400, "این موتور از زبان انتخاب‌شده پشتیبانی نمی‌کند.")
         if not force:
@@ -805,14 +807,31 @@ def create_app() -> FastAPI:
         activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
         return state
 
-    def translation_settings(provider: str, skill: str | None) -> dict[str, Any]:
-        return {**translations.public_settings(), "_translation_skill": normalize_ai_skill(skill) if provider != "free" else ""}
+    def translation_settings(provider: str, skill: str | None, target_language: str = "fa") -> dict[str, Any]:
+        return {
+            **translations.public_settings(),
+            "_translation_skill": normalize_ai_skill(skill) if provider != "free" else "",
+            "_target_language": normalize_target_language(target_language),
+        }
+
+    def _call_with_target_lang(fn: Any, *args: Any, target_language: str = "fa") -> Any:
+        tl = normalize_target_language(target_language)
+        if tl == "fa":
+            return fn(*args)
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "target_language" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return fn(*args, target_language=tl)
+        return fn(*args)
 
     def context_preparation(state: dict[str, Any], values: ContextPreviewRequest) -> tuple[dict[str, Any], Any, list[dict[str, Any]]]:
         if values.provider not in {'free', 'openai', 'gemini', 'openrouter', 'avalai'}:
             raise HTTPException(400, "سرویس ترجمه معتبر نیست.")
         if values.provider == 'free' and (values.skill or values.summary):
             raise TranslationError('مترجم رایگان از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
+        target_lang = normalize_target_language(values.target_language)
         selected_ids = set(image_ids(state, values.image_ids))
         ids = [item['id'] for item in sorted(state['images'], key=lambda item: item.get('order', 0)) if item['id'] in selected_ids]
         if not ids:
@@ -829,6 +848,7 @@ def create_app() -> FastAPI:
             if not isinstance(run, dict) or not any(j.get('remaining') for j in run.get('jobs', [])):
                 raise HTTPException(409, "ترجمهٔ ناتمامی برای ادامه وجود ندارد.")
             if (run['imageIds'] != ids or run['provider'] != values.provider or (run.get('profileId') or '') != selected_profile_id
+                    or (run.get('targetLanguage') or 'fa') != target_lang
                     or run['language'] != values.source_language or run['reuse'] != values.reuse_repeated):
                 raise HTTPException(409, "انتخاب یا روش نوبت ناتمام تغییر کرده است؛ تنظیمات قبلی را برگردانید یا نوبت تازه شروع کنید.")
             # Resume previews may explicitly revise guidance, summary, budget,
@@ -850,7 +870,7 @@ def create_app() -> FastAPI:
             run = create_run(state, ids, values.provider, values.source_language, values.skill, values.summary,
                              min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None),
                              0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
-                             values.reuse_repeated, policy, profile_id=selected_profile_id or None)
+                             values.reuse_repeated, policy, profile_id=selected_profile_id or None, target_language=target_lang)
             run['legacyRestart'] = values.restart_legacy
             run['legacyHash'] = digest([{'imageId': item['id'], 'page': item.get(AI_PAGE_PROGRESS_KEY),
                                          'parts': [block.get(AI_PARTS_KEY) for block in item.get('blocks', [])]}
@@ -878,15 +898,18 @@ def create_app() -> FastAPI:
         policy = provider_policy(public_cfg, provider, selected_profile_id)
         if digest(policy) != run['policyHash']:
             raise ProjectChangedError('تنظیمات API تغییر کرده است؛ پیش‌نمایش تازه بگیرید.')
+        target_lang = normalize_target_language(run.get('targetLanguage', 'fa'))
+        target_label = TARGET_LANGUAGES.get(target_lang, TARGET_LANGUAGES['fa'])['label']
         if provider == 'free':
             config = policy['services']
             limits = '؛ '.join(f"{name}: انتظار {p['timeout_seconds']}، تکرار {p['retry_count']}، فاصله {p['retry_wait_seconds']} ثانیه، سقف {p['source_limit']} نویسه" for name, p in config.items())
-            return {'provider':'free', 'profileId': '', 'rollingMode':True, 'contextMode':False, 'skill':'', 'summary':'', 'defaultSkill':'',
+            return {'provider':'free', 'profileId': '', 'targetLanguage': target_lang, 'targetLanguageLabel': target_label,
+                    'rollingMode':True, 'contextMode':False, 'skill':'', 'summary':'', 'defaultSkill':'',
                     'blockCount':len(run['jobs']), 'requestCount':1 if chosen else 0, 'systemPrompt':'',
                     'requests':[{'index':1, 'text':text, 'characters':request.character_count(text), 'imageName':first.get('imageName','')}] if chosen else [],
                     'providerLabel':'Google Translate؛ در صورت خطا MyMemory', 'base_url':'https://translate.googleapis.com/translate_a/single',
                     'fallback_url':'https://api.mymemory.translated.net/get', 'model':'',
-                    'note':f"متن صفحه‌ها جداگانه و ترتیبی ارسال و ذخیره می‌شود؛ تأیید یک‌بار برای کل نوبت است. سقف مؤثر {run['limit']} نویسه و برای MyMemory حداکثر ۵۰۰ بایت UTF-8 است. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری. خلاصه و اسکیل AI در حالت رایگان استفاده نمی‌شوند. تنظیمات: {limits}.",
+                    'note':f"زبان مقصد: {target_label}. متن صفحه‌ها جداگانه و ترتیبی ارسال و ذخیره می‌شود؛ تأیید یک‌بار برای کل نوبت است. سقف مؤثر {run['limit']} نویسه و برای MyMemory حداکثر ۵۰۰ بایت UTF-8 است. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری. خلاصه و اسکیل AI در حالت رایگان استفاده نمی‌شوند. تنظیمات: {limits}.",
                     'signature':digest(run), 'totalLimit':run['limit'], 'resume':bool(run.get('id'))}
         active = [profile for profile in policy['profiles'] if profile['hasApiKey']]
         mode_label = 'حالت JSON سرویس' if context_uses_json(provider, policy['base_url'], policy.get('response_mode', 'auto')) else 'متن معمولی'
@@ -897,12 +920,13 @@ def create_app() -> FastAPI:
             matched_profile = next((p for p in public_cfg.get('providers', {}).get(provider, {}).get('profiles', []) if str(p.get('id') or '') == selected_profile_id), None)
             if matched_profile and matched_profile.get('name'):
                 provider_title = f"{provider_title} ({matched_profile['name']})"
-        return {'provider': provider, 'profileId': selected_profile_id or '', 'skill': '', 'defaultSkill': '', 'blockCount': len(run['jobs']),
+        return {'provider': provider, 'profileId': selected_profile_id or '', 'targetLanguage': target_lang, 'targetLanguageLabel': target_label,
+                'skill': '', 'defaultSkill': '', 'blockCount': len(run['jobs']),
                 'requestCount': 1 if chosen else 0, 'systemPrompt': request.system,
                 'requests': [{'index': 1, 'text': request.user_message(text), 'characters': request.character_count(text),
                               'imageName': first.get('imageName', '')}] if chosen else [],
                 'providerLabel': provider_title, 'model': policy['model'], 'base_url': policy['base_url'],
-                'note': f"درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.{trim_notice}",
+                'note': f"زبان مقصد: {target_label}. درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.{trim_notice}",
                 'signature': digest(run), 'rollingMode': True, 'contextMode': True, 'summary': run['context'], 'skillLimit': request.skill_limit,
                 'contextLimit': request.context_limit, 'totalLimit': run['limit'], 'contextPercent': run['contextPercent'], 'skillPercent': run['skillPercent'], 'previewError': run.get('previewError', ''), 'resume': bool(run.get('id'))}
 
@@ -996,8 +1020,9 @@ def create_app() -> FastAPI:
                     condensed = ''
                     try:
                         condensed = await run_reported(
-                            translations.condense_context, context_to_condense, target_context_length,
-                            run['provider'], policy, pulse_label='در حال فشرده‌سازی خلاصهٔ قبلی',
+                            _call_with_target_lang, translations.condense_context, context_to_condense, target_context_length,
+                            run['provider'], policy, target_language=run.get('targetLanguage', 'fa'),
+                            pulse_label='در حال فشرده‌سازی خلاصهٔ قبلی',
                         )
                     except Exception as exc:
                         activity.add(f"فشرده‌سازی AI انجام نشد؛ برای جلوگیری از توقف از نسخهٔ کوتاه‌شده استفاده می‌شود. {exc}", 'warning')
@@ -1038,7 +1063,12 @@ def create_app() -> FastAPI:
                 activity.add("ادامهٔ ترجمه با بستن پنجره متوقف شد.", "warning")
                 return {'project': state, 'done': False, 'affectedImageIds': [], 'completed': run['completed']}
             elif run['provider'] == 'free':
-                translated = await run_reported(translations.translate_free_batch, request, text, source_texts, run['language'], policy, pulse_label='ترجمهٔ رایگان')
+                translated = await run_reported(
+                    _call_with_target_lang, translations.translate_free_batch,
+                    request, text, source_texts, run['language'], policy,
+                    target_language=run.get('targetLanguage', 'fa'),
+                    pulse_label='ترجمهٔ رایگان',
+                )
                 summary = ''
             else:
                 try:
@@ -1099,7 +1129,8 @@ def create_app() -> FastAPI:
         run = create_run(state, ['single'], values.provider, values.source_language, values.skill, values.summary,
                          min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None),
                          0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
-                         False, provider_policy(settings, values.provider, selected_profile_id or None), profile_id=selected_profile_id or None)
+                         False, provider_policy(settings, values.provider, selected_profile_id or None),
+                         profile_id=selected_profile_id or None, target_language=values.target_language)
         if values.provider != 'free':
             try:
                 if run.get('previewError'):
@@ -1161,7 +1192,12 @@ def create_app() -> FastAPI:
                 else:
                     activity.add(f"متن دقیق بازترجمه (بدون هدر احراز هویت):\nدستور سیستم:\n{request.system}\nپیام کاربر:\n{request.user_message(text)}")
                     if values.provider == 'free':
-                        translated = await run_reported(translations.translate_free_batch, request, text, sources, values.source_language, policy, pulse_label='بازترجمهٔ رایگان')
+                        translated = await run_reported(
+                            _call_with_target_lang, translations.translate_free_batch,
+                            request, text, sources, values.source_language, policy,
+                            target_language=values.target_language,
+                            pulse_label='بازترجمهٔ رایگان',
+                        )
                         summary = ''
                     else:
                         try:
@@ -1186,8 +1222,13 @@ def create_app() -> FastAPI:
         return await execute()
 
     def legacy_free_context(values: TranslateRequest) -> ContextPreviewRequest:
-        return ContextPreviewRequest(image_ids=values.image_ids, provider='free', source_language=values.source_language,
-                                     reuse_repeated=values.reuse_repeated if values.reuse_repeated is not None else translations.public_settings()['reuse_repeated'])
+        return ContextPreviewRequest(
+            image_ids=values.image_ids,
+            provider='free',
+            source_language=values.source_language,
+            target_language=values.target_language,
+            reuse_repeated=values.reuse_repeated if values.reuse_repeated is not None else translations.public_settings()['reuse_repeated'],
+        )
 
     @app.post("/api/projects/{project_id}/translation-preview")
     def translation_preview(project_id: str, values: TranslateRequest) -> dict[str, Any]:
@@ -1195,7 +1236,7 @@ def create_app() -> FastAPI:
             return context_preview(project_id, legacy_free_context(values))
         state = project(project_id)
         ids = image_ids(state, values.image_ids)
-        settings = translation_settings(values.provider, values.skill)
+        settings = translation_settings(values.provider, values.skill, values.target_language)
         reuse = values.reuse_repeated if values.reuse_repeated is not None else settings.get("reuse_repeated", True)
         plan = build_project_plan(state, ids, values.provider, reuse, values.source_language, settings)
         return plan_preview(plan, values.provider, values.source_language, settings)
@@ -1222,7 +1263,7 @@ def create_app() -> FastAPI:
         state = project(project_id)
         expected_updated_at = state.get("updatedAt", "")
         ids = image_ids(state, values.image_ids)
-        settings = translation_settings(values.provider, values.skill)
+        settings = translation_settings(values.provider, values.skill, values.target_language)
         reuse = values.reuse_repeated if values.reuse_repeated is not None else settings.get("reuse_repeated", True)
         plan = build_project_plan(state, ids, values.provider, reuse, values.source_language, settings)
         items, blocks = plan["items"], plan["blocks"]
@@ -1240,7 +1281,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(409, "بخش انتخاب‌شده تغییر کرده است؛ پیش‌نمایش تازه بگیرید.")
             signed_plan = call_plan(plan, calls_to_run[0])
         if values.confirmation:
-            expected = plan_signature(signed_plan, values.provider, values.source_language, translation_settings(values.provider, values.skill))
+            expected = plan_signature(signed_plan, values.provider, values.source_language, translation_settings(values.provider, values.skill, values.target_language))
             if values.confirmation != expected:
                 raise HTTPException(409, "متن یا تنظیمات بعد از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی و دوباره تأیید کنید.")
         source_texts = plan["source_texts"]
@@ -1257,7 +1298,8 @@ def create_app() -> FastAPI:
             translated_blocks = [""] * len(blocks)
             if combined_free:
                 translated = await run_reported(
-                    translations.translate, combined_source, values.source_language, values.provider,
+                    _call_with_target_lang, translations.translate, combined_source, values.source_language, values.provider,
+                    target_language=values.target_language,
                     pulse_label="ترجمهٔ جمعی free همهٔ متن‌های OCR انتخاب‌شده",
                 )
                 activity.add("پاسخ مشترک free رسید؛ در حال تقسیم دقیق بین کادرهای OCR", progress=0.5)
@@ -1266,7 +1308,8 @@ def create_app() -> FastAPI:
                 for index, call in enumerate(plan["calls"], start=1):
                     activity.add(f"ترجمهٔ رایگان متن {index} از {len(blocks)}", progress=(index - 1) / len(blocks))
                     translated = await run_reported(
-                        translations.translate, call["text"], values.source_language, values.provider,
+                        _call_with_target_lang, translations.translate, call["text"], values.source_language, values.provider,
+                        target_language=values.target_language,
                         pulse_label=f"ترجمهٔ رایگان متن {index} از {len(blocks)}",
                     )
                     translated = translated.strip()
@@ -1281,9 +1324,9 @@ def create_app() -> FastAPI:
                     current = project(project_id)
                     if current.get("updatedAt", "") != expected_updated_at:
                         raise ProjectChangedError("پروژه در حین ترجمه تغییر کرد؛ صفحهٔ بعد ارسال نشد. صفحه‌های ذخیره‌شده حفظ شده‌اند.")
-                    if values.confirmation and values.confirmation != plan_signature(signed_plan, values.provider, values.source_language, translation_settings(values.provider, values.skill)):
+                    if values.confirmation and values.confirmation != plan_signature(signed_plan, values.provider, values.source_language, translation_settings(values.provider, values.skill, values.target_language)):
                         raise HTTPException(409, "تنظیمات ترجمه تغییر کرده است؛ صفحهٔ بعد ارسال نشد. صفحه‌های ذخیره‌شده حفظ شده‌اند.")
-                    settings = translation_settings(values.provider, values.skill)
+                    settings = translation_settings(values.provider, values.skill, values.target_language)
                     if saved_call(call, plan, values.provider, values.source_language, settings):
                         activity.add(f"درخواست {index} از {len(calls_to_run)} قبلاً ذخیره شده بود", progress=index / len(calls_to_run))
                         continue
@@ -1293,7 +1336,8 @@ def create_app() -> FastAPI:
                     page_total = values.batch_total if len(calls_to_run) == 1 and values.batch_index and values.batch_total and values.batch_index <= values.batch_total else len(calls_to_run)
                     activity.add(f"در حال ترجمهٔ درخواست {page_index} از {page_total}: {label}" + (f" · بند {call['paragraph']}، بخش {call.get('part_index', 0) + 1} از {call.get('part_count', 1)}" if call.get("paragraph") else ""))
                     translated = await run_reported(
-                        translations.translate, call["text"], values.source_language, values.provider, page_sources, settings["_translation_skill"],
+                        _call_with_target_lang, translations.translate, call["text"], values.source_language, values.provider, page_sources, settings["_translation_skill"],
+                        target_language=values.target_language,
                         pulse_label=f"ترجمهٔ درخواست {page_index} از {page_total}",
                     )
                     page_result = distribute_translation(page_sources, translated)
@@ -1312,7 +1356,7 @@ def create_app() -> FastAPI:
                             for i, join in enumerate(call["joins"], start=1):
                                 output += join + saved["parts"][str(i)]
                             block["tr"] = output; block["richHtml"] = ""
-                            context_run.apply_translated_block_defaults(block)
+                            context_run.apply_translated_block_defaults(block, target_language=values.target_language)
                             block.pop(AI_PARTS_KEY, None); block.pop(AI_REUSE_KEY, None)
                             page_result = [output]
                             completed_block = True
@@ -1321,7 +1365,7 @@ def create_app() -> FastAPI:
                             for target_index in target_indices:
                                 block = blocks[target_index]
                                 block["tr"] = text; block["richHtml"] = ""
-                                context_run.apply_translated_block_defaults(block)
+                                context_run.apply_translated_block_defaults(block, target_language=values.target_language)
                                 block.pop(AI_PARTS_KEY, None); block.pop(AI_REUSE_KEY, None)
                                 if target_index != block_index:
                                     mark_reused_translation(block, source_texts[target_index], values.provider, values.source_language, settings)
@@ -1340,7 +1384,7 @@ def create_app() -> FastAPI:
                 for block, text in zip(blocks, translated_blocks):
                     block["tr"] = text
                     block["richHtml"] = ""
-                    context_run.apply_translated_block_defaults(block)
+                    context_run.apply_translated_block_defaults(block, target_language=values.target_language)
                 try:
                     store.save_if_unchanged(state, expected_updated_at)
                 except OSError as exc:
@@ -1365,33 +1409,53 @@ def create_app() -> FastAPI:
     @app.post("/api/translate-text/preview")
     def translate_text_preview(values: TextTranslateRequest) -> dict[str, Any]:
         if values.provider == 'free':
-            return context_text_preview(ContextTextRequest(text=values.text, source_lines=values.source_lines, source_language=values.source_language, provider='free'))
-        plan = build_single_plan(values.text, values.provider, translation_settings(values.provider, values.skill), values.source_lines)
-        return plan_preview(plan, values.provider, values.source_language, translation_settings(values.provider, values.skill))
+            return context_text_preview(ContextTextRequest(
+                text=values.text,
+                source_lines=values.source_lines,
+                source_language=values.source_language,
+                target_language=values.target_language,
+                provider='free',
+            ))
+        settings = translation_settings(values.provider, values.skill, values.target_language)
+        plan = build_single_plan(values.text, values.provider, settings, values.source_lines)
+        return plan_preview(plan, values.provider, values.source_language, settings)
 
     @app.post("/api/translate-text")
     async def translate_text(values: TextTranslateRequest) -> dict[str, str]:
         if values.provider == 'free':
-            request = ContextTextRequest(text=values.text, source_lines=values.source_lines, source_language=values.source_language, provider='free')
+            request = ContextTextRequest(
+                text=values.text,
+                source_lines=values.source_lines,
+                source_language=values.source_language,
+                target_language=values.target_language,
+                provider='free',
+            )
             preview = context_text_preview(request)
             if values.confirmation and values.confirmation != preview['signature']:
                 raise HTTPException(409, 'متن یا تنظیمات پس از پیش‌نمایش تغییر کرده است.')
             result = await context_text_translate(request.model_copy(update={'confirmation': preview['signature']}))
             return {'text': result['text']}
+        settings = translation_settings(values.provider, values.skill, values.target_language)
         if values.confirmation:
-            plan = build_single_plan(values.text, values.provider, translation_settings(values.provider, values.skill), values.source_lines)
-            expected = plan_signature(plan, values.provider, values.source_language, translation_settings(values.provider, values.skill))
+            plan = build_single_plan(values.text, values.provider, settings, values.source_lines)
+            expected = plan_signature(plan, values.provider, values.source_language, settings)
             if values.confirmation != expected:
                 raise HTTPException(409, "متن یا تنظیمات بعد از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی و دوباره تأیید کنید.")
         activity.add("ترجمهٔ دوبارهٔ یک خط آغاز شد")
-        plan = build_single_plan(values.text, values.provider, translation_settings(values.provider, values.skill), values.source_lines)
+        plan = build_single_plan(values.text, values.provider, settings, values.source_lines)
         try:
             responses = []
             for call in plan["calls"]:
                 if values.provider == "free":
-                    translated_part = await run_reported(translations.translate, call["text"], values.source_language, values.provider)
+                    translated_part = await run_reported(
+                        _call_with_target_lang, translations.translate, call["text"], values.source_language, values.provider,
+                        target_language=values.target_language,
+                    )
                 else:
-                    translated_part = await run_reported(translations.translate, call["text"], values.source_language, values.provider, None, normalize_ai_skill(values.skill))
+                    translated_part = await run_reported(
+                        _call_with_target_lang, translations.translate, call["text"], values.source_language, values.provider, None, normalize_ai_skill(values.skill),
+                        target_language=values.target_language,
+                    )
                 responses.append(translated_part)
             translated = responses[0] if responses else ""
             if responses:

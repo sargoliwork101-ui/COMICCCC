@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.92"
+    assert health.json()["version"] == "3.93"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۹۲ · Python</span>' in index_html
+    assert '<span class="ver">۳.۹۳ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -84,6 +84,10 @@ def test_health_and_static_shell(client):
     assert 'تشخیص خودکار' not in index_html
     assert 'id="ocrConfidence" type="number" min="0" max="0.95" step="0.05" value="0.35"' in index_html
     assert 'id="modelsPageMode"' in index_html
+    assert 'id="modelsLanguage"' in index_html
+    assert 'id="translationTargetLang"' in index_html
+    assert 'id="aiTargetLanguage"' in index_html
+    assert '<option value="fas">' in index_html
     assert 'id="modelsRamStatus"' in index_html
     assert 'id="freeModelsRamBtn"' in index_html
     assert 'id="modelsActiveProgressWrap"' in index_html
@@ -92,13 +96,19 @@ def test_health_and_static_shell(client):
     engines_resp = client.get("/api/engines")
     assert engines_resp.status_code == 200
     engines_list = engines_resp.json()
-    assert len(engines_list) == 13
+    assert len(engines_list) == 14
     for eng in engines_list:
         suit = eng.get("suitability")
         assert isinstance(suit, dict)
         for mode in ("auto", "comic", "document"):
             assert suit[mode]["tier"] in {"best", "medium", "weak"}
             assert len(suit[mode]["reason"]) > 15
+        suit_by_lang = eng.get("suitabilityByLanguage")
+        assert isinstance(suit_by_lang, dict)
+        for lang_code in ("eng", "fas", "kor", "jpn", "chi_sim"):
+            for mode in ("auto", "comic", "document"):
+                assert suit_by_lang[lang_code][mode]["tier"] in {"best", "medium", "weak"}
+                assert len(suit_by_lang[lang_code][mode]["reason"]) > 10
     help_js = client.get("/help-guide.js")
     assert help_js.status_code == 200
     assert "ComicHelpGuide" in help_js.text and "مثال عملی" in help_js.text
@@ -2402,7 +2412,7 @@ def test_memory_endpoints_and_immediate_unload_after_ocr(client, monkeypatch):
     payload = unload_res.json()
     assert payload["ok"] is True
     assert payload["memory"]["loadedCount"] == 0
-    assert len(payload["engines"]) == 13
+    assert len(payload["engines"]) == 14
 
 
 def test_pptx_export_visual_and_flowing_slides_and_backup_restore(client):
@@ -3063,6 +3073,91 @@ def test_v389_proportional_headings_typography_and_indent_exports(client):
         assert 'indent="' in slide_xml
         assert 'indent="-' in slide_xml
         assert ' i="1"' in slide_xml
+
+
+def test_target_language_settings_persian_and_english_translation_pipeline(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+
+    # 1. Default target_language is 'fa', and PUT /api/ai-settings persists 'en' and back to 'fa'
+    initial_ai = client.get("/api/ai-settings").json()
+    assert initial_ai["target_language"] == "fa"
+    assert "fa" in initial_ai["target_languages"]
+    assert "en" in initial_ai["target_languages"]
+
+    saved_en = client.put("/api/ai-settings", json={"provider": "openai", "api_key": "sk-test", "target_language": "en"}).json()
+    assert saved_en["target_language"] == "en"
+
+    # 2. Project context-preview & context-step translate Persian OCR text -> English with LTR block placement
+    project, item = make_project(client)
+    pid, iid = project["id"], item["id"]
+    state = client.get(f"/api/projects/{pid}").json()
+    state["images"][0]["ocrCompleted"] = True
+    state["images"][0]["blocks"] = [
+        {"id": 1, "text": "۱. مقدمه", "tr": "", "x0": 400, "y0": 40, "x1": 760, "y1": 72, "lineH": 28, "pageRole": "heading", "dir": "rtl", "enabled": True},
+        {"id": 2, "text": "امروز هوا بسیار خوب است.", "tr": "", "x0": 320, "y0": 90, "x1": 760, "y1": 120, "lineH": 24, "dir": "rtl", "enabled": True},
+    ]
+    client.put(f"/api/projects/{pid}/state", json={"state": state})
+
+    captured_prompts = []
+
+    def fake_translate_context(self, request, text, sources, provider, policy):
+        captured_prompts.append(f"{request.system}\n{request.user_prefix}")
+        return "1. Introduction\nThe weather is great today.", "Intro summary"
+
+    monkeypatch.setattr(TranslationService, "translate_context", fake_translate_context)
+
+    req_en = {
+        "image_ids": [iid],
+        "provider": "openai",
+        "source_language": "fas",
+        "target_language": "en",
+        "skill": "",
+        "summary": "",
+    }
+    prev_en = client.post(f"/api/projects/{pid}/context-preview", json=req_en)
+    assert prev_en.status_code == 200
+    prev_json = prev_en.json()
+    assert prev_json["targetLanguage"] == "en"
+    assert "English" in prev_json["systemPrompt"]
+    assert "انگلیسی" in prev_json["note"]
+
+    start_en = client.post(f"/api/projects/{pid}/context-start", json={**req_en, "confirmation": prev_json["signature"]})
+    assert start_en.status_code == 200
+    run_id = start_en.json()["runId"]
+
+    step_en = client.post(f"/api/projects/{pid}/context-step", json={"run_id": run_id, "completed": 0, "skill": ""})
+    assert step_en.status_code == 200
+    step_blocks = step_en.json()["project"]["images"][0]["blocks"]
+    assert step_blocks[0]["tr"] == "1. Introduction"
+    assert step_blocks[0]["dir"] == "ltr"
+    assert step_blocks[0]["align"] == "left"
+    assert step_blocks[1]["tr"] == "The weather is great today."
+    assert step_blocks[1]["dir"] == "ltr"
+    assert any(("فارسی" in sys_p or "Persian" in sys_p) and "English" in sys_p for sys_p in captured_prompts)
+
+    # 3. Single-block context preview/translate also respects target_language (including Persian 'fa' and Turkish 'tr')
+    single_prev = client.post("/api/translate-text/context-preview", json={
+        "text": "سلام دنیا",
+        "source_language": "fas",
+        "target_language": "tr",
+        "provider": "free",
+    })
+    assert single_prev.status_code == 200
+    sp_json = single_prev.json()
+    assert sp_json["targetLanguage"] == "tr"
+    assert "ترکی" in sp_json["note"]
+
+    monkeypatch.setattr(TranslationService, "translate_free_batch", lambda self, req, txt, srcs, sl, pol, target_language="fa": f"[{sl}->{target_language}] Merhaba Dunya")
+    single_tr = client.post("/api/translate-text/context", json={
+        "text": "سلام دنیا",
+        "source_language": "fas",
+        "target_language": "tr",
+        "provider": "free",
+        "confirmation": sp_json["signature"],
+    })
+    assert single_tr.status_code == 200
+    assert single_tr.json()["text"] == "[fas->tr] Merhaba Dunya"
+
 
 
 

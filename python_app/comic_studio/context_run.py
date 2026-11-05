@@ -9,7 +9,13 @@ from typing import Any
 from .context_budget import ContextBudget, ContextRequest, FreeRequest, build_context_request
 from .ocr import LANGUAGES
 from .store import ProjectChangedError
-from .translation import TranslationError, combine_translation_texts, distribute_translation
+from .translation import (
+    TranslationError,
+    combine_translation_texts,
+    distribute_translation,
+    normalize_target_language,
+    target_language_direction,
+)
 from .translation_plan import split_ai_paragraph, target_snapshot
 
 RUN_KEY = '_aiContextRun'
@@ -51,7 +57,13 @@ def build_run_request(run: dict[str, Any], skill: str) -> ContextRequest | FreeR
     if run['provider'] == 'free':
         return FreeRequest(run['limit'])
     budget = ContextBudget(run['limit'], run['contextPercent'], run['skillPercent'])
-    return build_context_request(budget, LANGUAGES.get(run['language'], LANGUAGES['eng'])['name'], skill, run['context'])
+    return build_context_request(
+        budget,
+        LANGUAGES.get(run['language'], LANGUAGES['eng'])['name'],
+        skill,
+        run['context'],
+        target_language=run.get('targetLanguage', 'fa'),
+    )
 
 
 def safe_prefix(text: str, fits: Any, source_lines: Any = None, *, allow_fallback: bool = False) -> tuple[str, str, str] | None:
@@ -136,16 +148,17 @@ def safe_prefix(text: str, fits: Any, source_lines: Any = None, *, allow_fallbac
 def create_run(state: dict[str, Any], image_ids: list[str], provider: str, language: str,
                skill: str, context: str, limit: int, context_percent: int,
                skill_percent: int, reuse: bool, policy: dict[str, Any],
-               profile_id: str | None = None) -> dict[str, Any]:
+               profile_id: str | None = None, target_language: str = 'fa') -> dict[str, Any]:
     """Snapshot source and target references; no secret or skill is persisted."""
+    tl = normalize_target_language(target_language)
     if provider == 'free':
         if skill or context:
             raise TranslationError('مترجم رایگان از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
         maximum_request = FreeRequest(limit)
     else:
         budget = ContextBudget(limit, context_percent, skill_percent)
-        build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, context)
-        maximum_request = build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, '')
+        build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, context, target_language=tl)
+        maximum_request = build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, '', target_language=tl)
     selected = set(image_ids)
     items = [i for i in sorted(state.get('images', []), key=lambda i: i.get('order', 0)) if i['id'] in selected]
     jobs: list[dict[str, Any]] = []
@@ -198,6 +211,7 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
                 break
     chosen_profile = (profile_id or '').strip() if provider != 'free' else ''
     return {'provider': provider, **({'profileId': chosen_profile} if chosen_profile else {}),
+            **({'targetLanguage': tl} if tl != 'fa' else {}),
             'language': language, 'skillHash': digest(skill), 'context': context, 'previewError': preview_error if provider != 'free' else '',
             'limit': limit, 'contextPercent': context_percent, 'skillPercent': skill_percent,
             'reuse': reuse, 'policyHash': digest(policy), 'imageIds': [i['id'] for i in items], 'sourceLayout': source_layout(state, [i['id'] for i in items]), 'jobs': jobs,
@@ -326,7 +340,10 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
     return request, chosen
 
 
-def apply_translated_block_defaults(block: dict[str, Any]) -> None:
+def apply_translated_block_defaults(block: dict[str, Any], target_language: str | None = None) -> None:
+    if target_language is not None:
+        dir_val, _ = target_language_direction(target_language)
+        block['dir'] = dir_val
     if block.get('pageRole') == 'heading':
         raw_lh = float(block.get('lineH') or (float(block.get('y1', 0)) - float(block.get('y0', 0))) or 22.0)
         block['align'] = 'left' if str(block.get('dir') or '').lower() == 'ltr' else 'right'
@@ -347,6 +364,7 @@ def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict
     results = distribute_translation([entry['text'] for entry in chosen], translated)
     lookup = _block_lookup(state)
     affected: set[str] = set()
+    target_lang = run.get('targetLanguage', 'fa')
     for entry, result in zip(chosen, results):
         job = run['jobs'][entry['job']]
         job['accumulated'] += result + entry['join']
@@ -359,7 +377,7 @@ def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict
         for ref in job['refs']:
             block = lookup[(str(ref['imageId']), str(ref['blockId']))]
             block['tr'] = job['accumulated']; block['richHtml'] = ''
-            apply_translated_block_defaults(block)
+            apply_translated_block_defaults(block, target_language=target_lang)
             # Old checkpoints describe different payloads, not this context run.
             block.pop('_aiTranslationParts', None); block.pop('_aiReusedTranslation', None)
             ref['snapshot'] = target_snapshot(block)

@@ -597,7 +597,7 @@ def test_engine_suitability_matrix_covers_all_13_engines_and_page_modes():
     from comic_studio.ocr import ENGINE_INFO, ENGINE_SUITABILITY
 
     assert set(ENGINE_SUITABILITY.keys()) == set(ENGINE_INFO.keys())
-    assert len(ENGINE_INFO) == 13
+    assert len(ENGINE_INFO) == 14
     for engine_id, meta in ENGINE_INFO.items():
         suit = meta["suitability"]
         for mode in ("comic", "document", "auto"):
@@ -1792,7 +1792,7 @@ def test_all_13_engines_specs_pins_and_dots_repo_url(tmp_path):
     import comic_studio.ocr_managed as managed
     import comic_studio.ocr_worker as worker
 
-    assert len(ENGINE_INFO) == 13
+    assert len(ENGINE_INFO) == 14
     assert ENGINE_INFO["dots-ocr"]["repository"] == "https://github.com/rednote-hilab/dots.ocr"
     assert managed.ISOLATED_ENGINE_SPECS["dots-ocr"]["github_repo"] == "rednote-hilab/dots.ocr"
     for v4_id in ("dots-ocr", "deepseek-ocr-2", "olmocr"):
@@ -2043,6 +2043,130 @@ def test_tesseract_language_mirror_failover_and_cancel_api_route(monkeypatch, tm
     resp_iso = client.post("/api/engines/surya/cancel")
     assert resp_iso.status_code == 200
     assert resp_iso.json()["ok"] is True
+
+
+def test_persian_ocr_engines_hezar_adapter_2d_suitability_and_rtl_grouping(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import comic_studio.ocr_managed as managed
+    import comic_studio.ocr_worker as worker
+    from comic_studio.ocr import (
+        ENGINE_INFO,
+        EasyEngine,
+        LANGUAGES,
+        RapidEngine,
+        resolve_engine_suitability,
+    )
+    from comic_studio.ocr_grouping import organize_ocr_blocks
+
+    # 1. Persian language definitions & coverage across built-in and isolated engines
+    assert LANGUAGES["fas"] == {"name": "فارسی", "source": "fa"}
+    persian_supported = {eid for eid, info in ENGINE_INFO.items() if "fas" in info["languages"]}
+    assert "hezar-ocr" in persian_supported
+    assert {"tesseract", "easyocr", "rapidocr-v5", "surya", "paddleocr-vl-1-6", "dots-ocr", "hunyuan-ocr", "glm-ocr", "deepseek-ocr-2", "olmocr"} <= persian_supported
+    assert {"rapidocr-v6", "got-ocr-2", "mineru-2-5-pro"}.isdisjoint(persian_supported)
+
+    # RapidEngine maps fas -> arabic on v5, rejects fas on v6 _validate_ready
+    rapid_v5 = RapidEngine("rapidocr-v5", "v5")
+    assert rapid_v5._language_names("fas") == ("ch", "arabic")
+    assert "arabic_PP-OCRv5_rec_mobile.onnx" in rapid_v5._expected_models("fas")
+    rapid_v6 = RapidEngine("rapidocr-v6", "v6")
+    with pytest.raises(OcrError):
+        rapid_v6._validate_ready("fas")
+
+    # EasyEngine uses arabic.pth recognizer check for fas
+    easy = EasyEngine()
+    assert easy._expected_models("fas") == ["craft_mlt_25k.pth", "arabic.pth"]
+    monkeypatch.setattr("comic_studio.ocr.models_dir", lambda: tmp_path)
+    monkeypatch.setattr(EasyEngine, "runtime_installed", property(lambda self: True))
+    (tmp_path / "easyocr").mkdir(parents=True)
+    assert "fas" not in easy.ready_languages
+    (tmp_path / "easyocr" / "craft_mlt_25k.pth").write_bytes(b"1")
+    (tmp_path / "easyocr" / "arabic.pth").write_bytes(b"1")
+    assert "fas" in easy.ready_languages
+
+    # 2. 2D (language, page_mode) suitability matrix
+    assert resolve_engine_suitability("hezar-ocr", "comic", "fas")["tier"] == "best"
+    assert resolve_engine_suitability("hezar-ocr", "document", "fas")["tier"] == "best"
+    assert resolve_engine_suitability("hezar-ocr", "comic", "eng")["tier"] == "weak"
+    assert resolve_engine_suitability("tesseract", "document", "fas")["tier"] == "best"
+    assert resolve_engine_suitability("tesseract", "comic", "fas")["tier"] == "weak"
+    assert resolve_engine_suitability("easyocr", "comic", "fas")["tier"] == "best"
+    assert resolve_engine_suitability("easyocr", "document", "fas")["tier"] == "weak"
+    assert resolve_engine_suitability("rapidocr-v6", "comic", "fas")["tier"] == "weak"
+    assert resolve_engine_suitability("rapidocr-v6", "comic", "eng")["tier"] == "best"
+    assert resolve_engine_suitability("rapidocr-v5", "comic", "kor")["tier"] == "best"
+    assert resolve_engine_suitability("got-ocr-2", "document", "chi_sim")["tier"] == "best"
+    assert resolve_engine_suitability("got-ocr-2", "document", "fas")["tier"] == "weak"
+
+    # 3. Hezar isolated spec, worker env, and _HezarOcrAdapter offline inference
+    spec = managed.ISOLATED_ENGINE_SPECS["hezar-ocr"]
+    assert spec["primary_pkg"] == "hezar"
+    assert spec["requires_nvidia_gpu"] is False
+    hezar_eng = managed.IsolatedOcrEngine("hezar-ocr", ["fas"], threading.Lock(), OcrLine, OcrError)
+    env = hezar_eng._worker_env()
+    assert "HEZAR_CACHE_DIR" in env and "hezar" in env["HEZAR_CACHE_DIR"]
+
+    adapter = worker._create_adapter("hezar-ocr", tmp_path / "hezar_cache")
+    assert isinstance(adapter, worker._HezarOcrAdapter)
+
+    class FakeDetector:
+        def predict(self, img):
+            return [{"boxes": [(40, 20, 220, 32), (40, 62, 180, 32)]}]
+
+    class FakeRecognizer:
+        def predict(self, crops):
+            return [{"text": f"سطر فارسی {i + 1}"} for i in range(len(crops))]
+
+    class FakeModel:
+        @staticmethod
+        def load(path, device="cpu"):
+            return FakeDetector() if "CRAFT" in str(path) else FakeRecognizer()
+
+    fake_hezar_models = SimpleNamespace(Model=FakeModel)
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: False),
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
+        set_num_threads=lambda n: None,
+    )
+    monkeypatch.setitem(__import__("sys").modules, "torch", fake_torch)
+    monkeypatch.setitem(__import__("sys").modules, "hezar", SimpleNamespace(models=fake_hezar_models))
+    monkeypatch.setitem(__import__("sys").modules, "hezar.models", fake_hezar_models)
+    downloaded_repos = []
+
+    def fake_dl(repo_id, **kw):
+        dest = tmp_path / "hezar_cache" / "hf-repos" / adapter._safe_repo_folder_name(repo_id)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "model_config.yaml").write_text("name: fake", encoding="utf-8")
+        downloaded_repos.append(repo_id)
+        return dest, "hf:deadbeef1234"
+
+    monkeypatch.setattr(adapter, "_download_hf_repo_resilient", fake_dl)
+    assert adapter.prepare("fas") == "hf:deadbeef1234"
+    assert downloaded_repos == ["hezarai/CRAFT", "hezarai/crnn-base-fa-v2"]
+
+    img_path = tmp_path / "persian_sample.png"
+    Image.new("RGB", (400, 160), (255, 255, 255)).save(img_path)
+    lines = adapter.recognize(str(img_path), "fas", None)
+    assert len(lines) == 2
+    assert lines[0]["text"] == "سطر فارسی 1"
+    assert lines[0]["polygon"] == [[40.0, 20.0], [260.0, 20.0], [260.0, 52.0], [40.0, 52.0]]
+
+    # 4. RTL Persian paragraph grouping & right-margin first-line indent across 2 RTL columns
+    rtl_raw = [
+        # Right column (read first in RTL!), first line indented inward from right margin x1=760 -> x1=720
+        {"id": 1, "text": "در این بخش اصول طراحی مدارهای چاپی بررسی می‌شود و", "conf": 95, "x0": 430, "y0": 80, "x1": 720, "y1": 106, "lineH": 26},
+        {"id": 2, "text": "تمام استانداردهای لحیم‌کاری به دقت تشریح می‌گردد؟", "conf": 94, "x0": 440, "y0": 112, "x1": 760, "y1": 138, "lineH": 26},
+        # Left column (read second in RTL!)
+        {"id": 3, "text": "ستون چپ پس از ستون راست خوانده می‌شود و", "conf": 96, "x0": 60, "y0": 82, "x1": 360, "y1": 108, "lineH": 26},
+        {"id": 4, "text": "ادامهٔ مطالب فصل در این ستون قرار می‌گیرد.", "conf": 95, "x0": 60, "y0": 114, "x1": 360, "y1": 140, "lineH": 26},
+    ]
+    grouped, mode = organize_ocr_blocks(rtl_raw, group_lines=True, page_size=(820, 1100), page_mode="document")
+    assert mode == "document"
+    assert len(grouped) == 2
+    assert "اصول طراحی" in grouped[0]["text"] and "لحیم‌کاری" in grouped[0]["text"]
+    assert grouped[0].get("firstLineIndent", 0) >= 0.75
+    assert "ستون چپ" in grouped[1]["text"] and "ادامهٔ مطالب" in grouped[1]["text"]
+
 
 
 

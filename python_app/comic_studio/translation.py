@@ -94,6 +94,68 @@ FREE_SERVICES = {
     "mymemory": {"label": "MyMemory", "source_limit": 500},
 }
 
+TARGET_LANGUAGES: dict[str, dict[str, str]] = {
+    "fa": {"label": "فارسی (Persian)", "english_name": "Persian", "dir": "rtl", "align": "right"},
+    "en": {"label": "انگلیسی (English)", "english_name": "English", "dir": "ltr", "align": "left"},
+    "ar": {"label": "عربی (Arabic)", "english_name": "Arabic", "dir": "rtl", "align": "right"},
+    "tr": {"label": "ترکی استانبولی (Turkish)", "english_name": "Turkish", "dir": "ltr", "align": "left"},
+    "de": {"label": "آلمانی (German)", "english_name": "German", "dir": "ltr", "align": "left"},
+    "fr": {"label": "فرانسوی (French)", "english_name": "French", "dir": "ltr", "align": "left"},
+    "ru": {"label": "روسی (Russian)", "english_name": "Russian", "dir": "ltr", "align": "left"},
+    "es": {"label": "اسپانیایی (Spanish)", "english_name": "Spanish", "dir": "ltr", "align": "left"},
+    "ja": {"label": "ژاپنی (Japanese)", "english_name": "Japanese", "dir": "ltr", "align": "left"},
+    "ko": {"label": "کره‌ای (Korean)", "english_name": "Korean", "dir": "ltr", "align": "left"},
+    "zh-CN": {"label": "چینی (Chinese)", "english_name": "Chinese", "dir": "ltr", "align": "left"},
+}
+
+_TARGET_LANG_ALIASES = {
+    "fas": "fa",
+    "per": "fa",
+    "persian": "fa",
+    "eng": "en",
+    "ara": "ar",
+    "tur": "tr",
+    "deu": "de",
+    "ger": "de",
+    "fra": "fr",
+    "fre": "fr",
+    "rus": "ru",
+    "spa": "es",
+    "jpn": "ja",
+    "kor": "ko",
+    "chi_sim": "zh-CN",
+    "zh": "zh-CN",
+    "zh-cn": "zh-CN",
+}
+
+
+def normalize_target_language(value: Any, *, strict: bool = False) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "fa"
+    if raw in TARGET_LANGUAGES:
+        return raw
+    mapped = _TARGET_LANG_ALIASES.get(raw.lower())
+    if mapped:
+        return mapped
+    for key in TARGET_LANGUAGES:
+        if key.lower() == raw.lower():
+            return key
+    if strict:
+        raise ValueError("زبان مقصد ترجمه معتبر نیست.")
+    return "fa"
+
+
+def target_language_english_name(value: Any) -> str:
+    code = normalize_target_language(value)
+    return TARGET_LANGUAGES[code]["english_name"]
+
+
+def target_language_direction(value: Any) -> tuple[str, str]:
+    code = normalize_target_language(value)
+    info = TARGET_LANGUAGES[code]
+    return info["dir"], info["align"]
+
 
 def _free_policy(name: str, raw: dict[str, Any], *, strict: bool = False) -> dict[str, int]:
     return {
@@ -121,7 +183,7 @@ def split_free_query(text: str, limit: int = MAX_FREE_QUERY_CHARS) -> list[str]:
     while len(remaining) > limit:
         window = remaining[:limit]
         sentence_cut = 0
-        for match in re.finditer(r"[.!?…。！？][\"'”’»)]*", window):
+        for match in re.finditer(r"[.!?؟…。！？][\"'”’»)]*", window):
             sentence_cut = match.end()
         cut = sentence_cut if sentence_cut > 0 else 0
         if not cut:
@@ -250,7 +312,15 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         # Old AvalAI-default settings were labelled openai even though they used
         # AvalAI's endpoint. Preserve their working destination and credentials.
         provider = _legacy_provider(raw)
-    return {"provider": provider, "providers": providers, "reuse_repeated": raw.get("reuse_repeated", True) if isinstance(raw.get("reuse_repeated", True), bool) else True, "context_percent": _setting_int(raw.get("context_percent"), 15, 0, 100), "skill_percent": _setting_int(raw.get("skill_percent"), 15, 0, 100), "free_services": _free_settings(raw.get("free_services"))}
+    return {
+        "provider": provider,
+        "providers": providers,
+        "reuse_repeated": raw.get("reuse_repeated", True) if isinstance(raw.get("reuse_repeated", True), bool) else True,
+        "target_language": normalize_target_language(raw.get("target_language")),
+        "context_percent": _setting_int(raw.get("context_percent"), 15, 0, 100),
+        "skill_percent": _setting_int(raw.get("skill_percent"), 15, 0, 100),
+        "free_services": _free_settings(raw.get("free_services")),
+    }
 
 
 def _normalize_model(value: Any, provider: str) -> str:
@@ -432,11 +502,12 @@ def normalize_ai_skill(skill: str | None) -> str:
     return value
 
 
-def _ai_prompt(source_language: str, skill: str | None = None) -> tuple[str, str]:
+def _ai_prompt(source_language: str, skill: str | None = None, target_language: str = "fa") -> tuple[str, str]:
     source = LANGUAGES.get(source_language, LANGUAGES["eng"])["name"]
+    target_name = target_language_english_name(target_language)
     guidance = normalize_ai_skill(skill)
     return (
-        "Translate the entire input to natural Persian using all paragraphs, headings and comic bubbles together as shared context. "
+        f"Translate the entire input to natural {target_name} using all paragraphs, headings and comic bubbles together as shared context. "
         "Use every line as context while preserving the original order, names, terms, numbers and sound effects. "
         "Return exactly one output line for every input line, with the same number of lines. "
         "Never merge, split, add, remove, or reorder lines; keep blank lines in place and each translated line on one ordinary text line. "
@@ -445,14 +516,20 @@ def _ai_prompt(source_language: str, skill: str | None = None) -> tuple[str, str
     ), source
 
 
-def translation_request_view(text: str, source_language: str, provider: str, skill: str | None = None) -> dict[str, Any]:
+def translation_request_view(
+    text: str,
+    source_language: str,
+    provider: str,
+    skill: str | None = None,
+    target_language: str = "fa",
+) -> dict[str, Any]:
     """Return the exact user-visible request text without performing network I/O."""
     clean = str(text or "").strip()
     if provider == "free":
         return {"texts": split_free_query(clean), "systemPrompt": ""}
     if provider not in AI_PROVIDERS:
         raise TranslationError("Unknown translation provider")
-    system_prompt, source = _ai_prompt(source_language, skill)
+    system_prompt, source = _ai_prompt(source_language, skill, target_language=target_language)
     return {"texts": [f"Source language: {source}\n\n{clean}"], "systemPrompt": system_prompt}
 
 
@@ -509,6 +586,8 @@ class TranslationService:
         return {
             "provider": provider,
             "reuse_repeated": secret["reuse_repeated"],
+            "target_language": secret["target_language"],
+            "target_languages": TARGET_LANGUAGES,
             "context_percent": secret["context_percent"], "skill_percent": secret["skill_percent"], "free_services": secret["free_services"],
             "base_url": active["base_url"],
             "model": active["model"],
@@ -601,8 +680,14 @@ class TranslationService:
             reuse_repeated = raw_reuse
         else:
             raise ValueError("مقدار reuse_repeated باید بولین باشد.")
+        if "target_language" in values and values.get("target_language") is not None:
+            target_language = normalize_target_language(values.get("target_language"), strict=True)
+        else:
+            target_language = normalize_target_language(current.get("target_language"))
         next_value = {
-            "provider": provider, "providers": providers, "reuse_repeated": reuse_repeated, "context_percent": context_percent, "skill_percent": skill_percent, "free_services": free_services,
+            "provider": provider, "providers": providers, "reuse_repeated": reuse_repeated,
+            "target_language": target_language,
+            "context_percent": context_percent, "skill_percent": skill_percent, "free_services": free_services,
             # Legacy top-level fields keep older local API clients and backups readable.
             "base_url": active["base_url"], "model": active["model"], "api_key": active_key,
         }
@@ -626,19 +711,29 @@ class TranslationService:
             if profile["api_key"] and (not chosen_id or str(profile["id"]) == chosen_id)
         ]
 
-    def translate(self, text: str, source_language: str, provider: str | None = None, source_texts: list[str] | None = None, skill: str | None = None) -> str:
+    def translate(
+        self,
+        text: str,
+        source_language: str,
+        provider: str | None = None,
+        source_texts: list[str] | None = None,
+        skill: str | None = None,
+        target_language: str = "fa",
+    ) -> str:
         text = str(text or "").strip()
         if not text:
             return ""
+        tl = normalize_target_language(target_language)
         settings = self._secret()
         selected = provider or settings.get("provider", "free")
         if selected == "free":
-            translated = self._free(text, source_language)
+            translated = self._free(text, source_language) if tl == "fa" else self._free(text, source_language, target_language=tl)
         elif selected in AI_PROVIDERS:
             profiles = self._profiles(settings, selected)
             skill = normalize_ai_skill(skill)
             for profile in profiles:
                 profile["translation_skill"] = skill
+                profile["target_language"] = tl
             if not profiles:
                 raise TranslationError(f"برای {AI_PROVIDERS[selected]['label']} حداقل یک کلید API معتبر وارد کنید.")
             failures: list[str] = []
@@ -744,7 +839,14 @@ class TranslationService:
                     time.sleep(profile['retry_wait_seconds'])
         raise TranslationError("هیچ‌یک از کلیدها پاسخ قابل‌استفاده‌ای ندادند. " + "؛ ".join(failures))
 
-    def condense_context(self, context: str, max_chars: int, provider: str, expected_policy: dict[str, Any]) -> str:
+    def condense_context(
+        self,
+        context: str,
+        max_chars: int,
+        provider: str,
+        expected_policy: dict[str, Any],
+        target_language: str = "fa",
+    ) -> str:
         """Ask the selected AI API to compact only the rolling story context."""
         from .context_budget import ContextRequest, parse_context_response, shorten_context
         from .context_run import provider_policy
@@ -754,6 +856,7 @@ class TranslationService:
         context = str(context or '').strip()
         if not context or max_chars <= 0:
             return ''
+        target_name = target_language_english_name(target_language)
         settings = self._secret()
         selected_profile_id = (expected_policy.get("profile_id") if isinstance(expected_policy, dict) else None) or None
         if provider_policy(settings, provider, selected_profile_id) != expected_policy:
@@ -765,9 +868,9 @@ class TranslationService:
         failures: list[str] = []
         for profile_index, profile in enumerate(profiles):
             name = _redact_diagnostic(profile["profile_name"], secrets)
-            system = ("Summarize ONLY the supplied Persian story context. Keep essential names, events and relationships; "
+            system = (f"Summarize ONLY the supplied {target_name} story context. Keep essential names, events and relationships; "
                       "do not translate, answer questions or invent facts. Return JSON keys \"translation\" and \"summary\". "
-                      f"Put the condensed context in translation as one Persian line of at most {max_chars} characters; "
+                      f"Put the condensed context in translation as one {target_name} line of at most {max_chars} characters; "
                       "set summary to an empty string.")
             prefix = "Context to condense only:\n"
             limit = profile['source_limit']
@@ -828,7 +931,15 @@ class TranslationService:
                     time.sleep(wait)
         raise TranslationError("خلاصه فشرده نشد: " + "؛ ".join(failures))
 
-    def translate_free_batch(self, request: Any, text: str, source_texts: list[str], source_language: str, expected_policy: dict[str, Any]) -> str:
+    def translate_free_batch(
+        self,
+        request: Any,
+        text: str,
+        source_texts: list[str],
+        source_language: str,
+        expected_policy: dict[str, Any],
+        target_language: str = "fa",
+    ) -> str:
         """Translate one bounded page-local request, with independent retries."""
         from .context_run import provider_policy
         from .store import ProjectChangedError
@@ -837,6 +948,10 @@ class TranslationService:
         if provider_policy(settings, 'free') != expected_policy:
             raise ProjectChangedError('تنظیمات مترجم رایگان پس از تأیید تغییر کرده است؛ درخواست ارسال نشد.')
         source = LANGUAGES.get(source_language, LANGUAGES['eng'])['source']
+        tl = normalize_target_language(target_language)
+        same_pair = source.split('-')[0].lower() == tl.split('-')[0].lower()
+        google_sl = 'auto' if same_pair else source
+        mm_target = 'zh-CN' if tl == 'zh-CN' else tl.split('-')[0]
         failures = []
         services = settings['free_services']
         for index, (name, info) in enumerate(FREE_SERVICES.items()):
@@ -844,16 +959,20 @@ class TranslationService:
             if len(text) > profile['source_limit'] or (name == 'mymemory' and len(text.encode('utf-8')) > 500):
                 raise TranslationError(f"سقف {info['label']} برای این متن رعایت نشده است؛ درخواست ارسال نشد.")
             def action() -> str:
+                if name == 'mymemory' and same_pair:
+                    normalized_same = normalize_translation_text(text)
+                    distribute_translation(source_texts, normalized_same)
+                    return normalized_same
                 with httpx.Client(timeout=profile['timeout_seconds'], follow_redirects=True) as client:
                     if name == 'google':
-                        response = client.get('https://translate.googleapis.com/translate_a/single', params={'client':'gtx','sl':source,'tl':'fa','dt':'t','q':text})
+                        response = client.get('https://translate.googleapis.com/translate_a/single', params={'client':'gtx','sl':google_sl,'tl':tl,'dt':'t','q':text})
                         response.raise_for_status(); payload = response.json()
                         try:
                             translated = ''.join(str(part[0] or '') for part in (payload[0] or [])).strip()
                         except (IndexError, TypeError, KeyError) as exc:
                             raise TranslationError('Google Translate پاسخ نامعتبر برگرداند.') from exc
                     else:
-                        response = client.get('https://api.mymemory.translated.net/get', params={'q':text,'langpair':f"{source.split('-')[0]}|fa"})
+                        response = client.get('https://api.mymemory.translated.net/get', params={'q':text,'langpair':f"{source.split('-')[0]}|{mm_target}"})
                         response.raise_for_status(); payload = response.json()
                         if not isinstance(payload, dict) or not isinstance(payload.get('responseData', {}), dict):
                             raise TranslationError('MyMemory پاسخ نامعتبر برگرداند.')
@@ -878,21 +997,26 @@ class TranslationService:
                     time.sleep(wait)
         raise TranslationError('ترجمهٔ رایگان ناموفق بود: ' + '؛ '.join(failures))
 
-    def _free(self, text: str, source_language: str) -> str:
+    def _free(self, text: str, source_language: str, target_language: str = "fa") -> str:
         source = LANGUAGES.get(source_language, LANGUAGES["eng"])["source"]
+        tl = normalize_target_language(target_language)
         queries = split_free_query(text)
         translated_parts = []
         with httpx.Client(timeout=35, follow_redirects=True) as client:
             for query in queries:
-                translated_parts.append(self._free_query(client, query, source))
+                translated_parts.append(self._free_query(client, query, source) if tl == "fa" else self._free_query(client, query, source, tl))
         return " ".join(part.strip() for part in translated_parts if part.strip()).strip()
 
-    def _free_query(self, client: httpx.Client, text: str, source: str) -> str:
+    def _free_query(self, client: httpx.Client, text: str, source: str, target_language: str = "fa") -> str:
+        tl = normalize_target_language(target_language)
+        same_pair = source.split("-")[0].lower() == tl.split("-")[0].lower()
+        google_sl = "auto" if same_pair else source
+        mm_target = "zh-CN" if tl == "zh-CN" else tl.split("-")[0]
         errors = []
         try:
             response = client.get(
                 "https://translate.googleapis.com/translate_a/single",
-                params={"client": "gtx", "sl": source, "tl": "fa", "dt": "t", "q": text},
+                params={"client": "gtx", "sl": google_sl, "tl": tl, "dt": "t", "q": text},
             )
             response.raise_for_status()
             payload = response.json()
@@ -902,10 +1026,12 @@ class TranslationService:
             errors.append("Google returned no translation")
         except Exception as exc:
             errors.append(str(exc))
+        if same_pair:
+            return text
         try:
             response = client.get(
                 "https://api.mymemory.translated.net/get",
-                params={"q": text, "langpair": f"{source.split('-')[0]}|fa"},
+                params={"q": text, "langpair": f"{source.split('-')[0]}|{mm_target}"},
             )
             response.raise_for_status()
             translated = str(response.json().get("responseData", {}).get("translatedText", "")).strip()
@@ -924,7 +1050,11 @@ class TranslationService:
             provider = "openai"
         base_url = _normalize_base_url(settings.get("base_url"), provider)
         model = _normalize_model(settings.get("model"), provider)
-        system_prompt, source = _ai_prompt(source_language, settings.get("translation_skill"))
+        system_prompt, source = _ai_prompt(
+            source_language,
+            settings.get("translation_skill"),
+            target_language=settings.get("target_language", "fa"),
+        )
         payload = {
             "model": model,
             "messages": [
@@ -950,7 +1080,11 @@ class TranslationService:
             raise TranslationError("API key is not configured")
         base_url = _normalize_base_url(settings.get("base_url"), "gemini")
         model = _normalize_model(settings.get("model"), "gemini")
-        system_prompt, source = _ai_prompt(source_language, settings.get("translation_skill"))
+        system_prompt, source = _ai_prompt(
+            source_language,
+            settings.get("translation_skill"),
+            target_language=settings.get("target_language", "fa"),
+        )
         response = httpx.post(
             f"{base_url}/models/{quote(model, safe='')}:generateContent",
             headers={"x-goog-api-key": settings["api_key"]},

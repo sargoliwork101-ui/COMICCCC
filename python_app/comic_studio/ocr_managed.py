@@ -237,6 +237,44 @@ ISOLATED_ENGINE_SPECS: dict[str, dict[str, Any]] = {
         "min_disk_gb": 32.0,
         "category": "advanced",
     },
+    "hezar-ocr": {
+        "primary_pkg": "hezar",
+        "dist_name": "hezar",
+        "pypi_pkg": "hezar",
+        "github_repo": "hezarai/hezar",
+        "hf_repo": "hezarai/crnn-base-fa-v2",
+        "pip_packages_cpu": [
+            "hezar>=1.0.0",
+            "transformers>=4.38.0,<5.0.0",
+            "omegaconf>=2.3.0",
+            "huggingface-hub>=0.26.0",
+            "opencv-python-headless>=4.8.0",
+            "pillow>=10.3",
+        ],
+        "pip_packages_gpu": [
+            "hezar>=1.0.0",
+            "transformers>=4.38.0,<5.0.0",
+            "omegaconf>=2.3.0",
+            "huggingface-hub>=0.26.0",
+            "opencv-python-headless>=4.8.0",
+            "pillow>=10.3",
+        ],
+        "pip_packages_fallback": [
+            "hezar>=0.38.0",
+            "transformers>=4.38.0,<5.0.0",
+            "omegaconf>=2.3.0",
+            "huggingface-hub>=0.26.0",
+            "opencv-python-headless>=4.8.0",
+            "pillow>=10.3",
+        ],
+        "needs_torch": True,
+        "needs_regions": False,
+        "download_size_gb": 0.25,
+        "requires_nvidia_gpu": False,
+        "min_vram_gb": 0.0,
+        "min_disk_gb": 1.2,
+        "category": "advanced",
+    },
 }
 
 
@@ -1809,6 +1847,11 @@ class IsolatedOcrEngine:
             with contextlib.suppress(OSError):
                 mineru_home.mkdir(parents=True, exist_ok=True)
             env.setdefault("MINERU_HOME", str(mineru_home))
+        if self.id == "hezar-ocr":
+            hezar_home = models_dir() / "hezar"
+            with contextlib.suppress(OSError):
+                hezar_home.mkdir(parents=True, exist_ok=True)
+            env.setdefault("HEZAR_CACHE_DIR", str(hezar_home))
         if self.id == "surya":
             hw = inspect_hardware()
             surya_cache = models_dir() / "surya"

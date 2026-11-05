@@ -783,7 +783,12 @@ function adoptProject(project) {
   const pageMode = settings.ocrPageMode === 'document' ? 'document' : 'comic';
   if ($('ocrPageMode')) $('ocrPageMode').value = pageMode;
   if ($('modelsPageMode')) $('modelsPageMode').value = pageMode;
-  $('ocrLanguage').value = settings.ocrLanguage || 'eng';
+  const ocrLang = settings.ocrLanguage || 'eng';
+  $('ocrLanguage').value = ocrLang;
+  if ($('modelsLanguage')) $('modelsLanguage').value = ocrLang;
+  if ($('testLanguage')) $('testLanguage').value = ocrLang;
+  const targetLang = normalizeTargetLanguage(settings.targetLanguage || state.ai?.target_language || 'fa');
+  if ($('translationTargetLang')) $('translationTargetLang').value = targetLang;
   if (state.engines.length) {
     updateEngineOptions(settings.ocrEngine || 'rapidocr-v6');
   } else {
@@ -1174,7 +1179,57 @@ function collectOutputSettings() {
 function collectOcrSettings() {
   if (!state.project) return;
   state.project.settings = state.project.settings || {};
-  Object.assign(state.project.settings, { ocrEngine: $('ocrEngine').value, ocrLanguage: $('ocrLanguage').value, ocrPageMode: normalizePageMode($('ocrPageMode')?.value), contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, groupOcrLines: $('ocrGroupLines').checked, eraseOriginal: $('ocrErase').checked });
+  Object.assign(state.project.settings, {
+    ocrEngine: $('ocrEngine').value,
+    ocrLanguage: $('ocrLanguage').value,
+    ocrPageMode: normalizePageMode($('ocrPageMode')?.value),
+    contrast: $('ocrContrast').checked,
+    precise: $('ocrPrecise').checked,
+    groupOcrLines: $('ocrGroupLines').checked,
+    eraseOriginal: $('ocrErase').checked,
+  });
+}
+const OCR_LANGUAGE_LABELS = {
+  eng: 'English',
+  fas: 'فارسی',
+  kor: '한국어',
+  jpn: '日本語',
+  chi_sim: '中文',
+};
+const TARGET_LANGUAGE_META = {
+  fa: { label: 'فارسی (Persian)', dir: 'rtl', align: 'right' },
+  en: { label: 'انگلیسی (English)', dir: 'ltr', align: 'left' },
+  ar: { label: 'عربی (Arabic)', dir: 'rtl', align: 'right' },
+  tr: { label: 'ترکی استانبولی (Turkish)', dir: 'ltr', align: 'left' },
+  de: { label: 'آلمانی (German)', dir: 'ltr', align: 'left' },
+  fr: { label: 'فرانسوی (French)', dir: 'ltr', align: 'left' },
+  ru: { label: 'روسی (Russian)', dir: 'ltr', align: 'left' },
+  es: { label: 'اسپانیایی (Spanish)', dir: 'ltr', align: 'left' },
+  ja: { label: 'ژاپنی (Japanese)', dir: 'ltr', align: 'left' },
+  ko: { label: 'کره‌ای (Korean)', dir: 'ltr', align: 'left' },
+  'zh-CN': { label: 'چینی (Chinese)', dir: 'ltr', align: 'left' },
+};
+function normalizeTargetLanguage(value) {
+  const raw = String(value || '').trim();
+  if (raw && Object.prototype.hasOwnProperty.call(TARGET_LANGUAGE_META, raw)) return raw;
+  const lower = raw.toLowerCase();
+  if (lower === 'fas' || lower === 'per') return 'fa';
+  if (lower === 'eng') return 'en';
+  if (lower === 'zh' || lower === 'zh-cn' || lower === 'chi_sim') return 'zh-CN';
+  const match = Object.keys(TARGET_LANGUAGE_META).find((key) => key.toLowerCase() === lower);
+  return match || 'fa';
+}
+function activeTargetLanguage() {
+  return normalizeTargetLanguage(
+    $('translationTargetLang')?.value
+    || state.project?.settings?.targetLanguage
+    || state.ai?.target_language
+    || 'fa',
+  );
+}
+function targetLanguageDir(lang) {
+  const code = normalizeTargetLanguage(lang);
+  return TARGET_LANGUAGE_META[code]?.dir || 'rtl';
 }
 const DEFAULT_ENGINE_SUITABILITY = {
   'rapidocr-v6': {
@@ -1184,11 +1239,11 @@ const DEFAULT_ENGINE_SUITABILITY = {
   },
   'rapidocr-v5': {
     comic: { tier: 'best', reason: 'عالی برای کمیک، مانگا و به‌ویژه مانهوای کره‌ای با سرعت بالا روی هر سیستمی.' },
-    document: { tier: 'medium', reason: 'سبک و چندزبانه (شامل کره‌ای)، اما روی فونت‌های ریز و متراکم کتاب متوسط است.' },
-    auto: { tier: 'medium', reason: 'گزینهٔ سبک چندزبانه (مناسب کره‌ای)؛ در انگلیسی دقت PP-OCRv6 و مدل‌های چیدمان بالاتر است.' },
+    document: { tier: 'medium', reason: 'سبک و چندزبانه (شامل کره‌ای و فارسی)، اما روی فونت‌های ریز و متراکم کتاب متوسط است.' },
+    auto: { tier: 'medium', reason: 'گزینهٔ سبک چندزبانه؛ در انگلیسی دقت PP-OCRv6 و مدل‌های چیدمان بالاتر است.' },
   },
   easyocr: {
-    comic: { tier: 'best', reason: 'تشخیص بسیار خوب حروف و حباب‌های منحنی یا پراکندهٔ کمیک در هر چهار زبان.' },
+    comic: { tier: 'best', reason: 'تشخیص بسیار خوب حروف و حباب‌های منحنی یا پراکندهٔ کمیک در زبان‌های مختلف (شامل فارسی).' },
     document: { tier: 'weak', reason: 'فاقد تحلیل ساختار پاراگراف و ستون؛ در صفحات پُرمتن کتاب کند است و فاصلهٔ کلمات ریز را گاهی اشتباه می‌گیرد.' },
     auto: { tier: 'medium', reason: 'مناسب حباب‌های کمیک است اما برای صفحات متراکم کتاب و مقاله توصیه نمی‌شود.' },
   },
@@ -1196,6 +1251,11 @@ const DEFAULT_ENGINE_SUITABILITY = {
     comic: { tier: 'weak', reason: 'طراحی‌شده برای اسناد مسطح؛ روی فونت‌های فانتزی کمیک، حباب‌های منحنی و پس‌زمینهٔ نقاشی عملکرد ضعیفی دارد.' },
     document: { tier: 'best', reason: 'عملکرد عالی، سریع و کم‌مصرف برای کتاب، مقاله و جزوه‌های چاپی یا اسکن‌شدهٔ تمیز با صفحه‌بندی خودکار ستون‌ها.' },
     auto: { tier: 'medium', reason: 'عالی برای صفحات کتاب و مقاله، ولی اگر صفحه کمیک باشد روی حباب‌ها ضعیف عمل می‌کند.' },
+  },
+  'hezar-ocr': {
+    comic: { tier: 'weak', reason: 'مدل بومی تخصصی زبان فارسی است؛ زبان را روی «فارسی» قرار دهید تا در حالت عالی (سبز) اجرا شود.' },
+    document: { tier: 'weak', reason: 'مدل بومی تخصصی زبان فارسی است؛ زبان را روی «فارسی» قرار دهید تا با بالاترین دقت اجرا شود.' },
+    auto: { tier: 'weak', reason: 'مخصوص متون فارسی (CRAFT + CRNN-fa-v2).' },
   },
   'paddleocr-vl-1-6': {
     comic: { tier: 'medium', reason: 'دقت خواندن متن بالاست اما بیشتر برای چیدمان اسناد ساخته شده و از موتورهای کمیک سنگین‌تر است.' },
@@ -1243,6 +1303,136 @@ const DEFAULT_ENGINE_SUITABILITY = {
     auto: { tier: 'weak', reason: 'صرفاً مناسب ایستگاه‌های کاری دارای GPU حرفه‌ای (24GB VRAM) در موارد خاص.' },
   },
 };
+const DEFAULT_LANGUAGE_SUITABILITY_OVERRIDES = {
+  fas: {
+    'hezar-ocr': {
+      comic: { tier: 'best', reason: 'مدل بومی آموزش‌دیده روی فونت‌های فارسی؛ عالی و سبک برای حباب‌های کمیک و متون فارسی روی CPU و GPU.' },
+      document: { tier: 'best', reason: 'تشخیص بسیار دقیق حروف و کلمات چاپی فارسی (فونت‌های وزیر، نازنین، میترا، یکان و کتاب) با مصرف کم حافظه.' },
+      auto: { tier: 'best', reason: 'بهترین انتخاب تخصصی و سبک برای صفحات فارسی (هم کمیک و هم کتاب و جزوه).' },
+    },
+    'rapidocr-v6': {
+      comic: { tier: 'weak', reason: 'این مدل از الفبای فارسی پشتیبانی نمی‌کند (فقط انگلیسی، چینی و ژاپنی).' },
+      document: { tier: 'weak', reason: 'این مدل از الفبای فارسی پشتیبانی نمی‌کند (فقط انگلیسی، چینی و ژاپنی).' },
+      auto: { tier: 'weak', reason: 'عدم پشتیبانی از زبان فارسی.' },
+    },
+    'rapidocr-v5': {
+      comic: { tier: 'medium', reason: 'حروف فارسی را سریع می‌خواند ولی مدل عربی‌ـ‌فارسی آن روی فونت کمیک دقت متوسط دارد؛ Hezar و EasyOCR دقیق‌ترند.' },
+      document: { tier: 'medium', reason: 'سبک و سریع برای متون سادهٔ فارسی، اما در کتاب‌های متراکم فارسی دقت Hezar، Tesseract و Surya بالاتر است.' },
+      auto: { tier: 'medium', reason: 'گزینهٔ سبک کمکی برای فارسی روی سیستم‌های ضعیف.' },
+    },
+    easyocr: {
+      comic: { tier: 'best', reason: 'پشتیبانی بومی هم‌زمان از فارسی و انگلیسی؛ بسیار مناسب دیالوگ‌های کمیک فارسی.' },
+      document: { tier: 'weak', reason: 'در صفحات پُرمتن کتاب فارسی کند است و ستون‌بندی ندارد.' },
+      auto: { tier: 'medium', reason: 'عالی برای حباب‌های کمیک فارسی، اما برای کتاب و مقالهٔ فارسی مناسب نیست.' },
+    },
+    tesseract: {
+      comic: { tier: 'weak', reason: 'روی حباب‌های منحنی و فونت‌های فانتزی کمیک فارسی ضعیف عمل می‌کند.' },
+      document: { tier: 'best', reason: 'فایل رسمی fas.traineddata روی کتاب‌ها، مقالات و جزوه‌های چاپی فارسی بسیار سریع و دقیق است.' },
+      auto: { tier: 'medium', reason: 'فوق‌العاده برای کتاب و مقالهٔ فارسی، ولی روی کمیک فارسی ضعیف است.' },
+    },
+    surya: {
+      comic: { tier: 'medium', reason: 'خط فارسی را می‌شناسد اما برای فونت‌های فانتزی حباب کمیک ساخته نشده است.' },
+      document: { tier: 'best', reason: 'پشتیبانی رسمی از فارسی و چیدمان راست‌به‌چپ (RTL)؛ عالی برای مقالات چندستونی و کتاب فارسی.' },
+      auto: { tier: 'best', reason: 'تشخیص قدرتمند خط فارسی و ترتیب ستون‌های راست‌به‌چپ در کتاب و اسناد.' },
+    },
+    'paddleocr-vl-1-6': {
+      comic: { tier: 'medium', reason: 'پشتیبانی رسمی از فارسی، اما سنگین‌تر از Hezar و EasyOCR برای کمیک است.' },
+      document: { tier: 'best', reason: 'تشخیص دقیق چیدمان صفحه، تیترها و پاراگراف‌های فارسی در کتاب و مقاله.' },
+      auto: { tier: 'best', reason: 'مدل چندزبانهٔ قوی برای استخراج ساختاریافتهٔ کتاب و مقالهٔ فارسی.' },
+    },
+    'mineru-2-5-pro': {
+      comic: { tier: 'weak', reason: 'از خط فارسی و صفحات کمیک پشتیبانی نمی‌کند.' },
+      document: { tier: 'weak', reason: 'موتور پیش‌فرض MinerU از خط فارسی پشتیبانی مستقیم ندارد؛ از Hezar، Tesseract یا Surya استفاده کنید.' },
+      auto: { tier: 'weak', reason: 'عدم پشتیبانی مستقیم از خط فارسی.' },
+    },
+    'got-ocr-2': {
+      comic: { tier: 'weak', reason: 'فقط روی انگلیسی و چینی آموزش دیده و قادر به خواندن خط فارسی نیست.' },
+      document: { tier: 'weak', reason: 'فقط روی انگلیسی و چینی آموزش دیده و قادر به خواندن خط فارسی نیست.' },
+      auto: { tier: 'weak', reason: 'عدم پشتیبانی از الفبای فارسی.' },
+    },
+    'glm-ocr': {
+      comic: { tier: 'medium', reason: 'فارسی را تا حدی می‌خواند اما روی فونت کمیک فارسی به دقت Hezar و EasyOCR نمی‌رسد.' },
+      document: { tier: 'medium', reason: 'خوانش متوسط متن فارسی؛ Hezar، Surya و Tesseract روی کتاب فارسی دقیق‌ترند.' },
+      auto: { tier: 'medium', reason: 'عملکرد متوسط روی متن فارسی.' },
+    },
+    'dots-ocr': {
+      comic: { tier: 'medium', reason: 'از فارسی پشتیبانی می‌کند اما نیازمند GPU قوی است و تمرکز آن روی اسناد است.' },
+      document: { tier: 'best', reason: 'مدل ۱۰۰ زبانه با تشخیص هم‌زمان کادر و متن فارسی در کتاب و مقاله (نیازمند NVIDIA GPU ≥ 8GB).' },
+      auto: { tier: 'medium', reason: 'دقیق برای اسناد فارسی روی کارت گرافیک NVIDIA.' },
+    },
+    'deepseek-ocr-2': {
+      comic: { tier: 'weak', reason: 'بسیار سنگین و غیربهینه برای کمیک فارسی.' },
+      document: { tier: 'medium', reason: 'از فارسی پشتیبانی می‌کند اما بیشترین دقت آن روی انگلیسی و چینی است و به GPU قوی نیاز دارد.' },
+      auto: { tier: 'weak', reason: 'برای متن فارسی گزینه‌های سبک‌تر و دقیق‌تری مثل Hezar و Surya وجود دارد.' },
+    },
+    olmocr: {
+      comic: { tier: 'weak', reason: 'مخصوص مقالات PDF است و برای کمیک فارسی کاربردی ندارد.' },
+      document: { tier: 'medium', reason: 'متن چاپی فارسی را می‌خواند ولی عمدتاً روی انگلیسی تنظیم شده و نیازمند GPU ≥ 16GB است.' },
+      auto: { tier: 'weak', reason: 'سنگین؛ برای فارسی اولویت با Hezar و Surya است.' },
+    },
+  },
+  kor: {
+    'rapidocr-v6': {
+      comic: { tier: 'weak', reason: 'مدل PP-OCRv6 Small از زبان کره‌ای پشتیبانی نمی‌کند.' },
+      document: { tier: 'weak', reason: 'مدل PP-OCRv6 Small از زبان کره‌ای پشتیبانی نمی‌کند.' },
+      auto: { tier: 'weak', reason: 'عدم پشتیبانی از زبان کره‌ای.' },
+    },
+    'rapidocr-v5': {
+      comic: { tier: 'best', reason: 'دارای مدل اختصاصی کره‌ای؛ سریع‌ترین و دقیق‌ترین موتور سبک برای مانهوا و وبتون کره‌ای.' },
+      document: { tier: 'best', reason: 'تشخیص دقیق و سبک خط هانگول کره‌ای روی CPU و GPU.' },
+      auto: { tier: 'best', reason: 'بهترین انتخاب سبک برای صفحات کره‌ای.' },
+    },
+    tesseract: {
+      comic: { tier: 'weak', reason: 'روی فونت‌های مانهوای کره‌ای ضعیف است.' },
+      document: { tier: 'medium', reason: 'در فاصله‌گذاری هجاهای کره‌ای ضعیف‌تر از Surya، PaddleOCR-VL و PP-OCRv5 است.' },
+      auto: { tier: 'weak', reason: 'برای کره‌ای PP-OCRv5، EasyOCR و Surya دقیق‌ترند.' },
+    },
+    'got-ocr-2': {
+      comic: { tier: 'weak', reason: 'فقط روی انگلیسی و چینی آموزش دیده است.' },
+      document: { tier: 'weak', reason: 'فقط روی انگلیسی و چینی آموزش دیده است.' },
+      auto: { tier: 'weak', reason: 'فاقد آموزش کافی روی خط کره‌ای.' },
+    },
+  },
+  jpn: {
+    'rapidocr-v5': {
+      comic: { tier: 'medium', reason: 'در نسخهٔ v5 از مدل مشترک چینی استفاده می‌شود؛ برای ژاپنی PP-OCRv6 یا EasyOCR دقیق‌ترند.' },
+      document: { tier: 'medium', reason: 'برای کتاب ژاپنی Surya، PaddleOCR-VL یا PP-OCRv6 دقیق‌ترند.' },
+      auto: { tier: 'medium', reason: 'عملکرد متوسط در ژاپنی.' },
+    },
+    tesseract: {
+      comic: { tier: 'weak', reason: 'روی مانگای ژاپنی و متن عمودی ضعیف است.' },
+      document: { tier: 'medium', reason: 'در متون عمودی و فوریگانا ضعیف‌تر از PaddleOCR-VL و Surya است.' },
+      auto: { tier: 'weak', reason: 'برای ژاپنی PP-OCRv6 و PaddleOCR-VL توصیه می‌شوند.' },
+    },
+    'got-ocr-2': {
+      comic: { tier: 'weak', reason: 'عمدتاً روی انگلیسی و چینی آموزش دیده است.' },
+      document: { tier: 'weak', reason: 'برای کتاب‌های ژاپنی دقت کافی روی کانا ندارد.' },
+      auto: { tier: 'weak', reason: 'برای ژاپنی مناسب نیست.' },
+    },
+  },
+  chi_sim: {
+    tesseract: {
+      comic: { tier: 'weak', reason: 'روی مانهوای چینی ضعیف است.' },
+      document: { tier: 'medium', reason: 'ضعیف‌تر از موتورهای بومی چینی (PP-OCRv6، PaddleOCR-VL و MinerU).' },
+      auto: { tier: 'weak', reason: 'برای چینی موتورهای خانوادهٔ PP-OCR و GOT-OCR بسیار دقیق‌ترند.' },
+    },
+    'got-ocr-2': {
+      comic: { tier: 'best', reason: 'آموزش‌دیده تخصصی روی چینی و انگلیسی؛ عالی برای مانهوا و کمیک چینی.' },
+      document: { tier: 'best', reason: 'تشخیص بسیار دقیق نویسه‌های چاپی چینی در پاراگراف‌ها.' },
+      auto: { tier: 'best', reason: 'عملکرد عالی روی هر دو حالت کمیک و کتاب به زبان چینی.' },
+    },
+    'glm-ocr': {
+      comic: { tier: 'best', reason: 'مدل بومی چینی‌ـ‌انگلیسی با دقت عالی روی دیالوگ‌های مانهوا.' },
+      document: { tier: 'best', reason: 'عملکرد بسیار دقیق در خواندن متون چاپی چینی.' },
+      auto: { tier: 'best', reason: 'انتخاب درجهٔ یک برای صفحات چینی.' },
+    },
+    'rapidocr-v5': {
+      comic: { tier: 'best', reason: 'بسیار سریع و دقیق برای مانهوا و کمیک چینی.' },
+      document: { tier: 'best', reason: 'مدل پایهٔ چینی PP-OCRv5 با دقت بالا روی اسناد چینی.' },
+      auto: { tier: 'best', reason: 'عملکرد عالی و سبک برای متون چینی.' },
+    },
+  },
+};
 const SUITABILITY_META = {
   best: { icon: '🟢', short: 'عالی', badge: 'بهترین عملکرد', cardBadge: 'عملکرد عالی' },
   medium: { icon: '🟡', short: 'متوسط', badge: 'عملکرد متوسط', cardBadge: 'عملکرد متوسط' },
@@ -1255,28 +1445,68 @@ const PAGE_MODE_LABELS = {
 function normalizePageMode(pageMode) {
   return pageMode === 'document' ? 'document' : 'comic';
 }
-function engineSuitability(engine, pageMode = 'comic') {
+function engineSuitability(engine, pageMode = 'comic', language = 'eng') {
   const mode = normalizePageMode(pageMode);
-  const entry = engine?.suitability?.[mode] || DEFAULT_ENGINE_SUITABILITY[engine?.id]?.[mode] || { tier: 'medium', reason: '' };
+  const normLang = OCR_LANGUAGE_LABELS[language] ? language : 'eng';
+  const byLangEntry = engine?.suitabilityByLanguage?.[normLang]?.[mode]
+    || DEFAULT_LANGUAGE_SUITABILITY_OVERRIDES[normLang]?.[engine?.id]?.[mode];
+  let entry = byLangEntry;
+  if (!entry) {
+    const langs = Array.isArray(engine?.languages) ? engine.languages : [];
+    if (langs.length && !langs.includes(normLang)) {
+      entry = { tier: 'weak', reason: `این مدل از زبان «${OCR_LANGUAGE_LABELS[normLang] || normLang}» پشتیبانی نمی‌کند.` };
+    } else {
+      entry = engine?.suitability?.[mode] || DEFAULT_ENGINE_SUITABILITY[engine?.id]?.[mode] || { tier: 'medium', reason: '' };
+    }
+  }
   const tier = ['best', 'medium', 'weak'].includes(entry.tier) ? entry.tier : 'medium';
   return { tier, reason: entry.reason || '', ...SUITABILITY_META[tier] };
+}
+function pickBestEngineForLanguage(language, pageMode = 'comic', preferredEngine = '') {
+  const selectable = state.engines.filter((engine) => engine.selectable !== false);
+  const current = selectable.find((engine) => engine.id === preferredEngine);
+  if (current && (current.languages || []).includes(language)) return current.id;
+  const supporting = selectable.filter((engine) => (engine.languages || []).includes(language));
+  if (!supporting.length) return selectable[0]?.id || 'rapidocr-v6';
+  const tierScore = { best: 3, medium: 2, weak: 1 };
+  const ranked = [...supporting].sort((a, b) => {
+    const aReady = Boolean(a.runtimeInstalled && (a.readyLanguages || []).includes(language)) ? 1 : 0;
+    const bReady = Boolean(b.runtimeInstalled && (b.readyLanguages || []).includes(language)) ? 1 : 0;
+    if (bReady !== aReady) return bReady - aReady;
+    const aTier = tierScore[engineSuitability(a, pageMode, language).tier] || 0;
+    const bTier = tierScore[engineSuitability(b, pageMode, language).tier] || 0;
+    if (bTier !== aTier) return bTier - aTier;
+    const aCpu = a.requiresNvidiaGpu ? 0 : 1;
+    const bCpu = b.requiresNvidiaGpu ? 0 : 1;
+    return bCpu - aCpu;
+  });
+  return ranked[0].id;
 }
 function updateEngineOptions(preferredEngine = '') {
   const select = $('ocrEngine'); if (!select) return;
   const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
+  const language = $('ocrLanguage')?.value || state.project?.settings?.ocrLanguage || 'eng';
   const previous = (typeof preferredEngine === 'string' && preferredEngine) || select.value || state.project?.settings?.ocrEngine || 'rapidocr-v6';
   select.textContent = '';
   state.engines.filter((engine) => engine.selectable !== false).forEach((engine) => {
-    const suit = engineSuitability(engine, pageMode);
+    const suit = engineSuitability(engine, pageMode, language);
+    const supported = (engine.languages || []).includes(language);
     const option = document.createElement('option');
     option.value = engine.id;
     option.className = `ocr-opt-${suit.tier}`;
     option.dataset.suitability = suit.tier;
-    const suffix = engine.updateAvailable ? ' · نسخهٔ جدید' : engine.runtimeInstalled ? '' : ' · نیازمند نصب خودکار';
+    const suffix = !supported
+      ? ' · فاقد پشتیبانی از این زبان'
+      : engine.updateAvailable
+        ? ' · نسخهٔ جدید'
+        : engine.runtimeInstalled
+          ? ''
+          : ' · نیازمند نصب خودکار';
     option.textContent = `${suit.icon} ${engine.name} — ${suit.short}${suffix}`;
     select.appendChild(option);
   });
-  select.value = state.engines.some((engine) => engine.id === previous) ? previous : 'rapidocr-v6';
+  const chosenId = pickBestEngineForLanguage(language, pageMode, previous);
+  select.value = state.engines.some((engine) => engine.id === chosenId) ? chosenId : 'rapidocr-v6';
   updateOcrEngineStatus();
   syncEngineUpdateUi();
 }
@@ -1284,17 +1514,34 @@ function updateOcrEngineStatus() {
   const select = $('ocrEngine');
   const engine = state.engines.find((entry) => entry.id === select?.value); if (!engine) return;
   const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
-  select.dataset.suitability = engineSuitability(engine, pageMode).tier;
-  [...$('ocrLanguage').options].forEach((option) => { option.disabled = !engine.languages.includes(option.value); });
-  if (!engine.languages.includes($('ocrLanguage').value)) $('ocrLanguage').value = engine.languages[0];
+  [...($('ocrLanguage')?.options || [])].forEach((option) => { option.disabled = false; });
+  if (!engine.languages.includes($('ocrLanguage').value)) {
+    $('ocrLanguage').value = engine.languages[0] || 'eng';
+    if ($('modelsLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
+    if ($('testLanguage')) $('testLanguage').value = $('ocrLanguage').value;
+    [...select.options].forEach((opt) => {
+      const eng = state.engines.find((e) => e.id === opt.value);
+      if (!eng) return;
+      const suit = engineSuitability(eng, pageMode, $('ocrLanguage').value);
+      const supported = (eng.languages || []).includes($('ocrLanguage').value);
+      opt.className = `ocr-opt-${suit.tier}`;
+      opt.dataset.suitability = suit.tier;
+      const suffix = !supported ? ' · فاقد پشتیبانی از این زبان' : eng.updateAvailable ? ' · نسخهٔ جدید' : eng.runtimeInstalled ? '' : ' · نیازمند نصب خودکار';
+      opt.textContent = `${suit.icon} ${eng.name} — ${suit.short}${suffix}`;
+    });
+  }
   const lang = $('ocrLanguage').value;
+  const activeSuit = engineSuitability(engine, pageMode, lang);
+  select.dataset.suitability = activeSuit.tier;
+  const langLabel = OCR_LANGUAGE_LABELS[lang] || lang;
   const langReady = Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(lang));
   const versionLabel = engine.installedVersion ? ` (نسخهٔ ${engine.installedVersion})` : '';
+  const suitPrefix = activeSuit.reason ? `${activeSuit.icon} عملکرد در «${langLabel} + ${PAGE_MODE_LABELS[pageMode] || pageMode}»: ${activeSuit.reason} · ` : '';
   let statusText = engine.runtimeInstalled
     ? (langReady
-      ? `${engine.description} وضعیت: آمادهٔ اجرا روی همین کامپیوتر${versionLabel}.`
-      : `${engine.description} ابزار اجرا نصب است، اما فایل زبان انتخاب‌شده (${lang}) هنوز دانلود نشده است.`)
-    : 'این مدل هنوز روی سیستم شما نصب نشده است؛ با زدن دکمهٔ زیر، نصب و دانلود آن کاملاً خودکار انجام می‌شود.';
+      ? `${suitPrefix}وضعیت: آمادهٔ اجرا روی همین کامپیوتر${versionLabel}.`
+      : `${suitPrefix}ابزار اجرا نصب است، اما فایل زبان انتخاب‌شده (${langLabel}) هنوز دانلود نشده است.`)
+    : `${suitPrefix}این مدل هنوز روی سیستم شما نصب نشده است؛ با زدن دکمهٔ زیر، نصب و دانلود آن کاملاً خودکار انجام می‌شود.`;
   if (engine.updateAvailable) {
     statusText += ` · ${engine.updateSummary || 'نسخهٔ جدید برای این مدل منتشر شده است.'}`;
   }
@@ -1628,6 +1875,42 @@ async function switchTranslationPreviewService(nextTargetValue) {
     if (select) select.disabled = false;
   }
 }
+async function switchTranslationTargetLanguage(nextLang) {
+  const switcher = translationPreviewSwitchTarget;
+  const langSelect = $('translationTargetLang');
+  const normLang = normalizeTargetLanguage(nextLang);
+  if (langSelect) langSelect.value = normLang;
+  if (state.project) {
+    state.project.settings = state.project.settings || {};
+    state.project.settings.targetLanguage = normLang;
+    scheduleSave();
+  }
+  if ($('aiTargetLanguage')) $('aiTargetLanguage').value = normLang;
+  if (!switcher || !$('translationPreviewDialog')?.open) return;
+  if (state.project?.id) saveDraftTranslationSkill(state.project.id);
+  if (langSelect) langSelect.disabled = true;
+  if ($('translationPreviewService')) $('translationPreviewService').disabled = true;
+  $('translationPreviewConfirm').disabled = true;
+  $('translationPreviewError').classList.add('hidden');
+  $('copyTranslationPreviewError').classList.add('hidden');
+  setProgress('previewPrepProgress', null, true);
+  try {
+    await switcher($('translationPreviewService')?.value || null);
+  } catch (error) {
+    if (error?.cancelled || error?.name === 'AbortError') return;
+    setProgress('previewPrepProgress', 0, false);
+    if ($('translationPreviewDialog').open) {
+      const errMsg = error.message || String(error);
+      $('translationPreviewError').textContent = `${errMsg} هیچ متنی ارسال نشده است؛ می‌توانید زبان مقصد یا سرویس دیگری انتخاب کنید.`;
+      $('translationPreviewError').classList.remove('hidden');
+      $('copyTranslationPreviewError').classList.remove('hidden');
+      toast(errMsg, true);
+    }
+  } finally {
+    if (langSelect) langSelect.disabled = false;
+    if ($('translationPreviewService')) $('translationPreviewService').disabled = false;
+  }
+}
 function openAiSettingsFromPreviewDialog() {
   const activeProv = translationPreviewData?.provider;
   if (state.project?.id) saveDraftTranslationSkill(state.project.id);
@@ -1711,6 +1994,10 @@ function showTranslationRequestPreview(preview, action, refresh = null, switchTa
   translationPreviewAction = action; translationPreviewRefresh = refresh; translationPreviewSwitchTarget = switchTarget || translationPreviewSwitchTarget; translationPreviewData = preview;
   renderTranslationServiceSelector(preview.provider, preview.profileId || '');
   if ($('translationPreviewService')) $('translationPreviewService').disabled = false;
+  if ($('translationTargetLang')) {
+    $('translationTargetLang').disabled = false;
+    $('translationTargetLang').value = normalizeTargetLanguage(preview.targetLanguage || activeTargetLanguage());
+  }
   $('translationSkillWrap').classList.toggle('hidden', preview.provider === 'free');
   $('translationContextWrap').classList.toggle('hidden', !preview.rollingMode);
   $('translationContextHead')?.classList.toggle('hidden', !preview.contextMode);
@@ -1872,11 +2159,15 @@ async function runTranslation(targetOverride = null) {
     await saveProject();
     const target = resolvePreferredTranslationTarget(targetOverride);
     const provider = target.provider; const profileId = target.profileId; const projectId = state.project.id;
+    const targetLanguage = activeTargetLanguage();
+    state.project.settings = state.project.settings || {};
+    state.project.settings.targetLanguage = targetLanguage;
     const request = {
       image_ids: ids,
       provider,
       ...(profileId ? { profile_id: profileId } : {}),
       source_language: $('ocrLanguage').value,
+      target_language: targetLanguage,
       reuse_repeated: state.ai?.reuse_repeated !== false,
     };
     if (state.project.images.some(item => ids.includes(item.id) && (item._aiPageProgress || item.blocks?.some(block => block._aiTranslationParts)))) {
@@ -1911,7 +2202,7 @@ async function runTranslation(targetOverride = null) {
     const switchTarget = (nextVal) => runTranslation(nextVal);
     if (provider === 'free') {
       const previous = previousRun;
-      const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
+      const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && (previous.targetLanguage || 'fa') === targetLanguage && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
       const refresh = async (_skill, _summary, nextResume) => { await confirmRestart(nextResume); return api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: '', summary: '', resume: nextResume })); };
       let preview;
       try { preview = await refresh('', '', resume); }
@@ -1932,9 +2223,13 @@ async function runTranslation(targetOverride = null) {
     const skillLimit = Math.floor(limit * (state.ai?.skill_percent ?? 15) / 100);
     const contextLimit = Math.floor(limit * (state.ai?.context_percent ?? 15) / 100);
     const oldSkill = savedTranslationSkill(projectId);
-    const skill = oldSkill ?? 'ترجمه را روان و متناسب با لحن کمیک یا کتاب بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.';
+    const defaultTargetLabel = TARGET_LANGUAGE_META[targetLanguage]?.label || targetLanguage;
+    const fallbackSkill = targetLanguage === 'fa'
+      ? 'ترجمه را روان و متناسب با لحن کمیک یا کتاب بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.'
+      : `ترجمه را روان، طبیعی و متناسب با لحن کمیک یا کتاب به زبان ${defaultTargetLabel} بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.`;
+    const skill = oldSkill ?? fallbackSkill;
     const previous = previousRun;
-    const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && (previous.profileId || '') === profileId && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
+    const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && (previous.profileId || '') === profileId && (previous.targetLanguage || 'fa') === targetLanguage && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
     // A new translation starts without stale story context; only an explicit
     // resume carries the previous run's rolling summary into its first request.
     const summary = resume ? (previous.context || '') : '';
@@ -2377,7 +2672,11 @@ async function confirmHardwareIfNeeded(engine, hwOverride = null) {
 
 function renderModels() {
   const container = $('engineCards'); if (!container) return;
-  container.textContent = ''; const language = $('testLanguage').value;
+  container.textContent = '';
+  const language = $('modelsLanguage')?.value || $('testLanguage')?.value || $('ocrLanguage')?.value || 'eng';
+  if ($('modelsLanguage') && $('modelsLanguage').value !== language) $('modelsLanguage').value = language;
+  if ($('testLanguage') && $('testLanguage').value !== language) $('testLanguage').value = language;
+  const langLabel = OCR_LANGUAGE_LABELS[language] || language;
   const modelsMode = normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value);
   const addGroup = (title, engines, external = false) => {
     if (!engines.length) return;
@@ -2385,7 +2684,7 @@ function renderModels() {
     const heading = document.createElement('h3'); heading.className = 'model-group-title'; heading.textContent = title; group.appendChild(heading);
     const cards = document.createElement('div'); cards.className = 'model-group-grid'; group.appendChild(cards); container.appendChild(group);
     engines.forEach((engine) => {
-      const suit = engineSuitability(engine, modelsMode);
+      const suit = engineSuitability(engine, modelsMode, language);
       const isBusyThis = state.modelBusy === engine.id;
       const card = document.createElement('section'); card.className = `engine-card${external ? ' external-engine' : ''}${isBusyThis ? ' is-busy-card' : ''}`;
       if (!external) card.dataset.suitability = suit.tier;
@@ -2395,12 +2694,15 @@ function renderModels() {
       if (!external) {
         const suitChip = document.createElement('span');
         suitChip.className = `engine-chip is-suit-${suit.tier}`;
-        suitChip.textContent = `${suit.cardBadge} (${PAGE_MODE_LABELS[modelsMode] || modelsMode})`;
+        suitChip.textContent = `${suit.cardBadge} (${langLabel} · ${PAGE_MODE_LABELS[modelsMode] || modelsMode})`;
         badges.appendChild(suitChip);
       }
       const supported = (engine.languages || []).includes(language);
-      const ready = supported && (engine.readyLanguages || []).includes(language);
-      if (ready) {
+      const effectivePrepareLang = supported ? language : (engine.languages?.[0] || 'eng');
+      const ready = supported
+        ? (engine.readyLanguages || []).includes(language)
+        : Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(effectivePrepareLang));
+      if (ready && supported) {
         const chip = document.createElement('span'); chip.className = 'engine-chip is-ready'; chip.textContent = 'آمادهٔ استفاده'; badges.appendChild(chip);
       }
       if (engine.installedVersion) {
@@ -2422,7 +2724,7 @@ function renderModels() {
       const family = document.createElement('div'); family.className = 'hint';
       family.textContent = engine.downloadSizeGb ? `${engine.family} · حجم تقریبی: ${engine.downloadSizeGb} گیگابایت` : engine.family;
       const description = document.createElement('p'); description.textContent = engine.description;
-      const suitReason = !external && suit.reason ? (() => { const el = document.createElement('div'); el.className = 'engine-suit-reason'; el.textContent = `عملکرد در «${PAGE_MODE_LABELS[modelsMode] || modelsMode}»: ${suit.reason}`; return el; })() : null;
+      const suitReason = !external && suit.reason ? (() => { const el = document.createElement('div'); el.className = 'engine-suit-reason'; el.textContent = `عملکرد در «${langLabel} + ${PAGE_MODE_LABELS[modelsMode] || modelsMode}»: ${suit.reason}`; return el; })() : null;
       const status = document.createElement('div'); status.className = 'engine-status';
       if (suitReason) card.append(head, family, description, suitReason, status);
       else card.append(head, family, description, status);
@@ -2437,7 +2739,7 @@ function renderModels() {
         status.textContent = state.modelBusy === engine.id
           ? 'در حال نصب خودکار بسته‌ها و دانلود مدل؛ لطفاً صبر کنید…'
           : !supported
-            ? 'این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند.'
+            ? `این موتور زبان «${langLabel}» را پشتیبانی نمی‌کند (زبان‌های مورد پشتیبانی: ${(engine.languages || []).map((l) => OCR_LANGUAGE_LABELS[l] || l).join('، ')}).`
             : !engine.runtimeInstalled
               ? 'آمادهٔ نصب خودکار با یک کلیک (بدون نیاز به نصب دستی).'
               : ready
@@ -2483,10 +2785,18 @@ function renderModels() {
           card.appendChild(progWrap);
         }
         const buttons = document.createElement('div'); buttons.className = 'card-buttons';
+        const canPrepare = supported || Boolean(engine.isolated && engine.languages?.length);
         const prepareLabel = ready ? 'بررسی / آماده‌سازی مجدد' : 'آماده‌سازی / دانلود خودکار';
-        const prepare = makeButton(prepareLabel, () => downloadEngine(engine));
-        prepare.classList.toggle('primary', !ready && !engine.updateAvailable);
-        prepare.disabled = Boolean(state.modelBusy || !supported);
+        const prepare = makeButton(prepareLabel, () => {
+          if (!supported && engine.languages?.length) {
+            const firstLang = engine.languages[0];
+            if ($('modelsLanguage')) $('modelsLanguage').value = firstLang;
+            if ($('testLanguage')) $('testLanguage').value = firstLang;
+          }
+          downloadEngine(engine, { languageOverride: effectivePrepareLang }).catch(() => {});
+        });
+        prepare.classList.toggle('primary', !ready && !engine.updateAvailable && canPrepare);
+        prepare.disabled = Boolean(state.modelBusy || !canPrepare);
         buttons.appendChild(prepare);
         if (engine.updateAvailable || engine.runtimeInstalled) {
           const updateBtn = makeButton(engine.updateAvailable ? 'به‌روزرسانی به نسخهٔ جدید' : 'به‌روزرسانی مدل', () => updateEngine(engine));
@@ -2912,7 +3222,17 @@ function freeSettingsPayload() {
 }
 async function loadAiSettings() {
   state.ai = await api('/api/ai-settings');
-  aiEditorDrafts.clear(); renderFreeServices(); $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false; $('aiContextPercent').value = state.ai.context_percent ?? 15; $('aiSkillPercent').value = state.ai.skill_percent ?? 15; showAiProvider(state.ai.provider || 'free', false);
+  aiEditorDrafts.clear();
+  renderFreeServices();
+  $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false;
+  $('aiContextPercent').value = state.ai.context_percent ?? 15;
+  $('aiSkillPercent').value = state.ai.skill_percent ?? 15;
+  const defaultTargetLang = normalizeTargetLanguage(state.ai.target_language || 'fa');
+  if ($('aiTargetLanguage')) $('aiTargetLanguage').value = defaultTargetLang;
+  if ($('translationTargetLang') && !state.project?.settings?.targetLanguage) {
+    $('translationTargetLang').value = defaultTargetLang;
+  }
+  showAiProvider(state.ai.provider || 'free', false);
 }
 function aiSettingsPayload() {
   captureAiProvider();
@@ -2941,12 +3261,30 @@ function aiSettingsPayload() {
   const active = providers[aiEditorProvider];
   const contextPercent = Number($('aiContextPercent').value), skillPercent = Number($('aiSkillPercent').value);
   if ($('aiContextPercent').value.trim() === '' || $('aiSkillPercent').value.trim() === '' || !Number.isInteger(contextPercent) || !Number.isInteger(skillPercent) || contextPercent < 0 || skillPercent < 0 || contextPercent + skillPercent > 100) throw new Error('درصدهای خلاصه و اسکیل باید عدد صحیح غیرمنفی و جمع آن‌ها حداکثر ۱۰۰ باشد.');
-  return { provider: aiEditorProvider, free_services: freeSettingsPayload(), reuse_repeated: $('aiReuseRepeated').checked, context_percent: contextPercent, skill_percent: skillPercent, model: active?.model || null, base_url: active?.base_url || null, providers };
+  return {
+    provider: aiEditorProvider,
+    target_language: normalizeTargetLanguage($('aiTargetLanguage')?.value || state.ai?.target_language || 'fa'),
+    free_services: freeSettingsPayload(),
+    reuse_repeated: $('aiReuseRepeated').checked,
+    context_percent: contextPercent,
+    skill_percent: skillPercent,
+    model: active?.model || null,
+    base_url: active?.base_url || null,
+    providers,
+  };
 }
 async function saveAiSettings(options = {}) {
   state.ai = await api('/api/ai-settings', jsonOptions('PUT', aiSettingsPayload()));
   lastSyncedAiProvider = state.ai.provider || 'free';
   preferredTranslationTarget = lastSyncedAiProvider;
+  const savedTargetLang = normalizeTargetLanguage(state.ai.target_language || 'fa');
+  if ($('aiTargetLanguage')) $('aiTargetLanguage').value = savedTargetLang;
+  if ($('translationTargetLang')) $('translationTargetLang').value = savedTargetLang;
+  if (state.project) {
+    state.project.settings = state.project.settings || {};
+    state.project.settings.targetLanguage = savedTargetLang;
+    scheduleSave();
+  }
   aiEditorDrafts.clear(); $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false; showAiProvider(state.ai.provider || 'free', false);
   if (!options.quiet) toast('تنظیمات ترجمه ذخیره شد');
   return state.ai;
@@ -4473,12 +4811,14 @@ async function runSingleBlockTranslation(task) {
     if ($('translationDialog').open) closeDialog('translationDialog');
   }
 }
-function applyTranslatedBlockDefaults(block, text) {
+function applyTranslatedBlockDefaults(block, text, targetLang = null) {
   block.tr = text;
   block.richHtml = '';
+  const resolvedDir = targetLang ? targetLanguageDir(targetLang) : (block.dir === 'ltr' ? 'ltr' : 'rtl');
+  block.dir = resolvedDir;
   if (block.pageRole === 'heading') {
     const rawLh = Number(block.lineH) || Math.max(16, (Number(block.y1) || 0) - (Number(block.y0) || 0)) || 22;
-    block.align = block.dir === 'ltr' ? 'left' : 'right';
+    block.align = resolvedDir === 'ltr' ? 'left' : 'right';
     block.size = Math.max(14, Math.min(36, Math.round(rawLh * 0.78)));
     block.verticalAlign = 'middle';
     block.bold = true;
@@ -4495,9 +4835,10 @@ async function retranslateBlock(block, targetOverride = null) {
   const text = block.text || ''; const snapshot = inlineBlockSnapshot(block);
   const target = resolvePreferredTranslationTarget(targetOverride);
   const provider = target.provider; const profileId = target.profileId; const sourceLanguage = $('ocrLanguage').value;
+  const targetLanguage = activeTargetLanguage();
   try {
     const projectId = state.project.id;
-    const request = { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, provider, ...(profileId ? { profile_id: profileId } : {}) };
+    const request = { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, target_language: targetLanguage, provider, ...(profileId ? { profile_id: profileId } : {}) };
     const switchTarget = (nextVal) => retranslateBlock(block, nextVal);
     if (provider === 'free') {
       const refresh = () => api('/api/translate-text/context-preview', jsonOptions('POST', { ...request, skill: '', summary: '' }));
@@ -4507,7 +4848,7 @@ async function retranslateBlock(block, targetOverride = null) {
         const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill:'', summary:'', confirmation: accepted.signature }), signal }));
         if (!result || result.cancelled) return;
         if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-        applyTranslatedBlockDefaults(block, result.text); buildBlockList(); drawEditor(); scheduleSave();
+        applyTranslatedBlockDefaults(block, result.text, targetLanguage); buildBlockList(); drawEditor(); scheduleSave();
       }, refresh, switchTarget);
       return;
     }
@@ -4516,7 +4857,11 @@ async function retranslateBlock(block, targetOverride = null) {
     const limit = profiles.length ? Math.min(...profiles.map(p => p.source_limit ?? 1000)) : 1000;
     const skillLimit = Math.floor(limit * (state.ai?.skill_percent ?? 15) / 100);
     const contextLimit = Math.floor(limit * (state.ai?.context_percent ?? 15) / 100);
-    const skill = savedTranslationSkill(projectId) ?? 'ترجمه را روان و متناسب با لحن کمیک یا کتاب بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.';
+    const defaultTargetLabel = TARGET_LANGUAGE_META[targetLanguage]?.label || targetLanguage;
+    const fallbackSkill = targetLanguage === 'fa'
+      ? 'ترجمه را روان و متناسب با لحن کمیک یا کتاب بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.'
+      : `ترجمه را روان، طبیعی و متناسب با لحن کمیک یا کتاب به زبان ${defaultTargetLabel} بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.`;
+    const skill = savedTranslationSkill(projectId) ?? fallbackSkill;
     const summary = state.project._aiStorySummary || '';
     const safeSkill = Array.from(skill).length <= skillLimit ? skill : '';
     const safeSummary = Array.from(summary).length <= contextLimit ? summary : '';
@@ -4530,7 +4875,7 @@ async function retranslateBlock(block, targetOverride = null) {
       const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) }), signal }));
       if (!result || result.cancelled) return;
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-      applyTranslatedBlockDefaults(block, result.text); buildBlockList(); drawEditor(); scheduleSave();
+      applyTranslatedBlockDefaults(block, result.text, targetLanguage); buildBlockList(); drawEditor(); scheduleSave();
     }, refresh, switchTarget);
   } catch (error) {
     if (targetOverride && $('translationPreviewDialog').open) throw error;
@@ -4968,12 +5313,21 @@ function bindEvents() {
     }
   });
   $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); });
-  $('ocrEngine').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); });
-  $('ocrLanguage').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); });
+  $('ocrEngine').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); scheduleSave(); });
+  $('ocrLanguage').addEventListener('change', () => {
+    const nextLang = $('ocrLanguage').value;
+    if ($('modelsLanguage')) $('modelsLanguage').value = nextLang;
+    if ($('testLanguage')) $('testLanguage').value = nextLang;
+    updateEngineOptions($('ocrEngine').value);
+    collectOcrSettings();
+    scheduleSave();
+    if ($('modelsDialog')?.open) renderModels();
+  });
   $('ocrPageMode')?.addEventListener('change', () => {
     collectOcrSettings();
     if ($('modelsPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
     updateEngineOptions();
+    scheduleSave();
     if ($('modelsDialog')?.open) renderModels();
   });
   $('ocrQuickPrepareBtn')?.addEventListener('click', () => {
@@ -4998,6 +5352,9 @@ function bindEvents() {
   $('openAiSettingsFromPreview')?.addEventListener('click', openAiSettingsFromPreviewDialog);
   $('translationPreviewService')?.addEventListener('change', (event) => {
     switchTranslationPreviewService(event.target.value).catch(() => {});
+  });
+  $('translationTargetLang')?.addEventListener('change', (event) => {
+    switchTranslationTargetLanguage(event.target.value).catch(() => {});
   });
   $('retryTranslation').addEventListener('click', async () => {
     const retry = translationRetryAction; if (!retry || translationRunning || translationDecisionBusy) return;
@@ -5051,12 +5408,21 @@ function bindEvents() {
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewSwitchTarget = null; translationPreviewData = null; } });
   $('modelsBtn').addEventListener('click', () => {
     if ($('modelsPageMode') && $('ocrPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
+    if ($('modelsLanguage') && $('ocrLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
+    if ($('testLanguage') && $('ocrLanguage')) $('testLanguage').value = $('ocrLanguage').value;
     renderModels();
     showDialog('modelsDialog');
     setMenuOpen(false);
     refreshEngineMemory().catch(() => {});
   });
-  $('testLanguage').addEventListener('change', renderModels);
+  $('modelsLanguage')?.addEventListener('change', () => {
+    if ($('testLanguage')) $('testLanguage').value = $('modelsLanguage').value;
+    renderModels();
+  });
+  $('testLanguage').addEventListener('change', () => {
+    if ($('modelsLanguage')) $('modelsLanguage').value = $('testLanguage').value;
+    renderModels();
+  });
   $('modelsPageMode')?.addEventListener('change', renderModels);
   $('freeModelsRamBtn')?.addEventListener('click', () => freeModelsRam().catch(() => {}));
   $('checkModelUpdatesBtn')?.addEventListener('click', () => checkEngineUpdates({ force: true, silent: false }).catch(() => {}));

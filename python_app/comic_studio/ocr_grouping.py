@@ -33,9 +33,23 @@ _STRUCTURED_LABEL_LINE_RE = re.compile(
     r"کلاس\s*[۰-۹0-9]+|تبصره|نکته|هشدار|حداقل|حداکثر)\b[^.!?]{0,32}[:\-–—]\s*\S",
     re.IGNORECASE,
 )
-_SENTENCE_END_RE = re.compile(r'[.!?…。！？:؛»")\]]\s*$')
-_PROSE_STOP_PUNCT_RE = re.compile(r'[.!?…。！？؛,،]\s*$')
+_SENTENCE_END_RE = re.compile(r'[.!?؟…。！？:؛»")\]]\s*$')
+_PROSE_STOP_PUNCT_RE = re.compile(r'[.!?؟…。！？؛,،]\s*$')
 _RTL_TEXT_RE = re.compile(r"[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]")
+
+
+def _is_mostly_rtl_blocks(blocks: list[dict[str, Any]]) -> bool:
+    rtl_count = 0
+    ltr_count = 0
+    for blk in blocks:
+        txt = str(blk.get("text") or "")
+        for ch in txt:
+            code = ord(ch)
+            if (0x0590 <= code <= 0x08FF) or (0xFB1D <= code <= 0xFDFF) or (0xFE70 <= code <= 0xFEFC):
+                rtl_count += 1
+            elif ("A" <= ch <= "Z") or ("a" <= ch <= "z"):
+                ltr_count += 1
+    return rtl_count >= 6 and rtl_count >= ltr_count * 0.8
 
 
 def _height(block: dict[str, Any]) -> float:
@@ -56,11 +70,12 @@ def _is_multi_line_box(block: dict[str, Any]) -> bool:
     return _height(block) > lh * 1.85 or "\n" in str(block.get("text") or "").strip()
 
 
-def _prose_character_stats(blocks: list[dict[str, Any]]) -> tuple[int, int, int, int]:
+def _prose_character_stats(blocks: list[dict[str, Any]]) -> tuple[int, int, int, int, int]:
     total_chars = 0
     alpha_chars = 0
     lower_chars = 0
     cjk_chars = 0
+    rtl_chars = 0
     for blk in blocks:
         txt = str(blk.get("text") or "").strip()
         total_chars += len(txt)
@@ -68,11 +83,13 @@ def _prose_character_stats(blocks: list[dict[str, Any]]) -> tuple[int, int, int,
             code = ord(ch)
             if (0x4E00 <= code <= 0x9FFF) or (0x3040 <= code <= 0x30FF) or (0xAC00 <= code <= 0xD7AF):
                 cjk_chars += 1
+            elif (0x0590 <= code <= 0x08FF) or (0xFB1D <= code <= 0xFDFF) or (0xFE70 <= code <= 0xFEFC):
+                rtl_chars += 1
             elif ch.isalpha():
                 alpha_chars += 1
                 if ch.islower():
                     lower_chars += 1
-    return total_chars, alpha_chars, lower_chars, cjk_chars
+    return total_chars, alpha_chars, lower_chars, cjk_chars, rtl_chars
 
 
 def detect_page_mode(
@@ -84,9 +101,9 @@ def detect_page_mode(
     if not valid:
         return "comic"
 
-    total_chars, alpha_chars, lower_chars, cjk_chars = _prose_character_stats(valid)
+    total_chars, alpha_chars, lower_chars, cjk_chars, rtl_chars = _prose_character_stats(valid)
     lower_ratio = (lower_chars / alpha_chars) if alpha_chars else 0.0
-    has_natural_case = lower_ratio >= 0.42 or cjk_chars >= 60
+    has_natural_case = lower_ratio >= 0.42 or cjk_chars >= 60 or rtl_chars >= 60
 
     # Case 1: VLM / layout engines already returned multi-sentence paragraph blocks.
     lengths = [len(str(b.get("text") or "").strip()) for b in valid]
@@ -112,12 +129,15 @@ def detect_page_mode(
         or _MULTI_LEVEL_NUM_HEADING_RE.match(str(b.get("text") or ""))
     )
 
-    # Check margin alignment consistency (1-column or 2-column book/article pages).
+    # Check margin alignment consistency (left-aligned LTR or right-aligned RTL book/article pages).
     x0s = sorted(float(b.get("x0", 0)) for b in valid)
+    x1s = sorted(float(b.get("x1", 0)) for b in valid)
     tol = max(14.0, med_lh * 1.8)
     best_cluster = 0
     for anchor in x0s:
         best_cluster = max(best_cluster, sum(1 for x in x0s if abs(x - anchor) <= tol))
+    for anchor in x1s:
+        best_cluster = max(best_cluster, sum(1 for x in x1s if abs(x - anchor) <= tol))
 
     columns = _detect_column_ranges(valid, med_lh)
     if len(columns) >= 2 and len(valid) >= 6 and (has_natural_case or total_chars >= 180):
@@ -204,10 +224,17 @@ def sort_document_reading_order(
         return [copy.deepcopy(b) for b in blocks]
 
     working = [copy.deepcopy(b) for b in blocks]
+    effective_rtl = rtl_columns or _is_mostly_rtl_blocks(working)
     med_lh = median(_line_h(b) for b in working)
     columns = _detect_column_ranges(working, med_lh)
     if len(columns) < 2:
-        working.sort(key=lambda b: (round(((float(b.get("y0", 0)) + float(b.get("y1", 0))) * 0.5) / max(8.0, med_lh * 0.55)), float(b.get("x0", 0)), float(b.get("y0", 0))))
+        working.sort(
+            key=lambda b: (
+                round(((float(b.get("y0", 0)) + float(b.get("y1", 0))) * 0.5) / max(8.0, med_lh * 0.55)),
+                -float(b.get("x1", 0)) if effective_rtl else float(b.get("x0", 0)),
+                float(b.get("y0", 0)),
+            )
+        )
         return working
 
     total_left = columns[0][0]
@@ -222,7 +249,10 @@ def sort_document_reading_order(
         return touched >= 2
 
     # Partition vertically at spanning titles/dividers/footers so top titles stay first and bottom footers stay last.
-    by_y = sorted(working, key=lambda b: (float(b.get("y0", 0)), float(b.get("x0", 0))))
+    by_y = sorted(
+        working,
+        key=lambda b: (float(b.get("y0", 0)), -float(b.get("x1", 0)) if effective_rtl else float(b.get("x0", 0))),
+    )
     ordered: list[dict[str, Any]] = []
     band: list[dict[str, Any]] = []
 
@@ -240,10 +270,15 @@ def sort_document_reading_order(
                 key=lambda k: 0.0 if band_cols[k][0] <= cx <= band_cols[k][1] else min(abs(cx - band_cols[k][0]), abs(cx - band_cols[k][1])),
             )
             buckets[idx].append(item)
-        col_indices = list(reversed(range(len(buckets)))) if rtl_columns else list(range(len(buckets)))
+        col_indices = list(reversed(range(len(buckets)))) if effective_rtl else list(range(len(buckets)))
         for idx in col_indices:
             col_items = buckets[idx]
-            col_items.sort(key=lambda b: (round(((float(b.get("y0", 0)) + float(b.get("y1", 0))) * 0.5) / max(8.0, med_lh * 0.55)), float(b.get("x0", 0))))
+            col_items.sort(
+                key=lambda b: (
+                    round(((float(b.get("y0", 0)) + float(b.get("y1", 0))) * 0.5) / max(8.0, med_lh * 0.55)),
+                    -float(b.get("x1", 0)) if effective_rtl else float(b.get("x0", 0)),
+                )
+            )
             ordered.extend(col_items)
         band.clear()
 
@@ -366,7 +401,8 @@ def group_document_lines(
     """Group OCR lines into structured book/article headings, lists, and paragraphs."""
     if not blocks:
         return []
-    ordered = sort_document_reading_order(blocks, page_size=page_size, rtl_columns=rtl_columns)
+    effective_rtl = rtl_columns or _is_mostly_rtl_blocks(blocks)
+    ordered = sort_document_reading_order(blocks, page_size=page_size, rtl_columns=effective_rtl)
     if len(ordered) == 1:
         single = copy.deepcopy(ordered[0])
         med_lh = _line_h(single)
@@ -466,37 +502,66 @@ def group_document_lines(
         cur_italic = bool(line.get("_detectedItalic") or line.get("italic"))
         style_changed = bool(prev_txt and cur_txt and (prev_bold != cur_bold or prev_italic != cur_italic))
 
-        # Detect first-line paragraph indentation or outward outdent step.
-        indent_delta = float(line.get("x0", 0)) - float(prev.get("x0", 0))
-        first_line_indent = (
-            cur_role == "paragraph"
-            and indent_delta >= avg_lh * 1.15
-            and (float(line.get("x0", 0)) - col_base_left) >= avg_lh * 1.10
-            and abs(float(prev.get("x0", 0)) - col_base_left) <= avg_lh * 1.15
-        )
-        outdent_break = (
-            cur_role == "paragraph"
-            and -indent_delta >= avg_lh * 1.10
-            and float(line.get("x0", 0)) < col_base_left - avg_lh * 0.80
+        col_base_right = col_base_right_map.get(col_idx, col_right)
+        combined_sample = f"{prev_txt} {cur_txt}"
+        line_is_rtl = effective_rtl or (
+            bool(_RTL_TEXT_RE.search(combined_sample))
+            and not bool(re.search(r"[A-Za-z]{3,}", combined_sample))
         )
 
-        right_slack = col_right - float(prev.get("x1", 0))
+        # Detect first-line paragraph indentation or outward outdent step (right edge for RTL, left edge for LTR).
+        if line_is_rtl:
+            indent_delta = float(prev.get("x1", 0)) - float(line.get("x1", 0))
+            first_line_indent = (
+                cur_role == "paragraph"
+                and indent_delta >= avg_lh * 1.15
+                and (col_base_right - float(line.get("x1", 0))) >= avg_lh * 1.10
+                and abs(col_base_right - float(prev.get("x1", 0))) <= avg_lh * 1.15
+            )
+            outdent_break = (
+                cur_role == "paragraph"
+                and -indent_delta >= avg_lh * 1.10
+                and float(line.get("x1", 0)) > col_base_right + avg_lh * 0.80
+            )
+            trail_slack = max(0.0, float(prev.get("x0", 0)) - col_left)
+            aligned_margin = (
+                abs(float(line.get("x1", 0)) - float(cur_lines[0].get("x1", 0))) <= avg_lh * 2.2
+                or abs(float(line.get("x1", 0)) - col_base_right) <= avg_lh * 2.2
+            )
+        else:
+            indent_delta = float(line.get("x0", 0)) - float(prev.get("x0", 0))
+            first_line_indent = (
+                cur_role == "paragraph"
+                and indent_delta >= avg_lh * 1.15
+                and (float(line.get("x0", 0)) - col_base_left) >= avg_lh * 1.10
+                and abs(float(prev.get("x0", 0)) - col_base_left) <= avg_lh * 1.15
+            )
+            outdent_break = (
+                cur_role == "paragraph"
+                and -indent_delta >= avg_lh * 1.10
+                and float(line.get("x0", 0)) < col_base_left - avg_lh * 0.80
+            )
+            trail_slack = col_right - float(prev.get("x1", 0))
+            aligned_margin = (
+                abs(float(line.get("x0", 0)) - float(cur_lines[0].get("x0", 0))) <= avg_lh * 2.2
+                or abs(float(line.get("x0", 0)) - col_base_left) <= avg_lh * 2.2
+            )
+
         prev_ended_early = bool(
             prev_txt
             and cur_role in {"paragraph", "list"}
-            and right_slack >= max(avg_lh * 2.6, col_w * 0.22)
+            and trail_slack >= max(avg_lh * 2.6, col_w * 0.22)
             and _SENTENCE_END_RE.search(prev_txt) is not None
         )
         prev_hard_break = bool(
             prev_txt
             and cur_role in {"paragraph", "list"}
-            and right_slack >= max(avg_lh * 3.2, col_w * 0.28)
+            and trail_slack >= max(avg_lh * 3.2, col_w * 0.28)
             and _width(prev) < max(_width(line) * 0.80, col_w * 0.56)
         )
         structured_label = bool(cur_txt and _STRUCTURED_LABEL_LINE_RE.match(cur_txt))
 
         x_overlap = min(float(prev.get("x1", 0)), float(line.get("x1", 0))) - max(float(prev.get("x0", 0)), float(line.get("x0", 0)))
-        aligned_left = abs(float(line.get("x0", 0)) - float(cur_lines[0].get("x0", 0))) <= avg_lh * 2.2 or abs(float(line.get("x0", 0)) - col_base_left) <= avg_lh * 2.2
 
         can_merge = (
             same_col
@@ -507,7 +572,7 @@ def group_document_lines(
             and not structured_label
             and lh_ratio <= 1.35
             and -0.35 * min(prev_lh, cur_lh) <= v_gap <= max_para_gap
-            and (x_overlap >= 0.15 * min(_width(prev), _width(line)) or aligned_left)
+            and (x_overlap >= 0.15 * min(_width(prev), _width(line)) or aligned_margin)
             and not first_line_indent
             and not outdent_break
             and not prev_ended_early
@@ -755,16 +820,25 @@ def organize_ocr_blocks(
         ordered = sort_document_reading_order(blocks, page_size=page_size)
         med_lh = median(_line_h(b) for b in ordered) if ordered else 16.0
         col_w = max((_width(b) for b in ordered), default=200.0)
+        page_is_rtl = _is_mostly_rtl_blocks(ordered)
         x0_vals = [float(b.get("x0", 0)) for b in ordered if str(b.get("text") or "").strip()]
+        x1_vals = [float(b.get("x1", 0)) for b in ordered if str(b.get("text") or "").strip()]
         min_x0 = min(x0_vals) if x0_vals else 0.0
+        max_x1 = max(x1_vals) if x1_vals else 0.0
         base_left = _dominant_margin(x0_vals, max(10.0, med_lh * 0.75), pick_high=False) if x0_vals else 0.0
+        base_right = _dominant_margin(x1_vals, max(10.0, med_lh * 0.75), pick_high=True) if x1_vals else 0.0
         space_px = max(4.0, med_lh * 0.45)
         for idx, blk in enumerate(ordered, start=1):
             blk["id"] = idx
             role = _classify_document_line_role(blk, med_lh, col_w)
-            bx0 = float(blk.get("x0", 0))
-            rel_ext = max(0.0, bx0 - min_x0)
-            rel_base = bx0 - base_left
+            if page_is_rtl:
+                bx1 = float(blk.get("x1", 0))
+                rel_ext = max(0.0, max_x1 - bx1)
+                rel_base = base_right - bx1
+            else:
+                bx0 = float(blk.get("x0", 0))
+                rel_ext = max(0.0, bx0 - min_x0)
+                rel_base = bx0 - base_left
             blk["sourceIndent"] = min(32, max(0, round(rel_ext / space_px))) if rel_ext >= med_lh * 0.75 else 0
             if rel_base >= med_lh * 0.85:
                 blk["blockIndent"] = round(min(6.0, rel_base / med_lh), 2)

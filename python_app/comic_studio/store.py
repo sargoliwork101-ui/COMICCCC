@@ -115,6 +115,7 @@ class ProjectStore:
                 "precise": True,
                 "eraseOriginal": True,
                 "provider": "free",
+                "targetLanguage": "fa",
                 "output": {
                     "name": resolved_name,
                     "nameCustomized": False,

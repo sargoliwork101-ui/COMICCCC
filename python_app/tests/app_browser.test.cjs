@@ -2146,10 +2146,10 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert.deepEqual(nativeBrowserDialogs, [], `expected zero native browser confirm/alert popups, got: ${nativeBrowserDialogs.join(' | ')}`);
     console.log('PASS: v3.65 hamburger outside-click, Persian cancel-job confirmation modal, dark/light theme parity, and zero native dialogs');
 
-    // v3.69 E2E: all 13 OCR models selectable, hardware warning modal on heavy GPU model, update banner + 1-click update, and quick prepare inside #ocrDialog
+    // v3.69 / v3.93 E2E: all 14 OCR models selectable, hardware warning modal on heavy GPU model, update banner + 1-click update, and quick prepare inside #ocrDialog
     const realEngines = await api(base, '/api/engines');
-    assert.equal(realEngines.length, 13, 'all 13 OCR models are registered in /api/engines');
-    assert.equal(realEngines.every((entry) => entry.selectable === true && entry.action === 'download'), true, 'all 13 OCR models support 1-click download');
+    assert.equal(realEngines.length, 14, 'all 14 OCR models are registered in /api/engines');
+    assert.equal(realEngines.every((entry) => entry.selectable === true && entry.action === 'download'), true, 'all 14 OCR models support 1-click download');
     await page.evaluate(() => {
       window.__origFetchV369 = window.fetch.bind(window);
       window.__v369Calls = { downloads: [], updates: 0, checks: 0 };
@@ -2264,7 +2264,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       };
     });
     assert.equal(comicHighlights.panelExists, false);
-    assert.equal(comicHighlights.totalOpts, 13);
+    assert.equal(comicHighlights.totalOpts, 14);
     assert.equal(comicHighlights.rapidTier, 'best');
     assert.equal(comicHighlights.suryaTier, 'medium');
     assert.equal(comicHighlights.tessTier, 'weak');
@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v3.92: Verify version badge ۳.۹۲, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, and Help section 5 GPU/multi-core guide
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۲ · Python', 'header shows version ۳.۹۲');
+      // v3.85–v3.93: Verify version badge ۳.۹۳, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, and target language menu
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۳ · Python', 'header shows version ۳.۹۳');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2485,20 +2485,84 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.ok(v389BrowserCheck.headingSize > 14 && v389BrowserCheck.headingBold === true && v389BrowserCheck.textIndentPx === 24, 'v3.89 proportional heading size and indentGeometry work in Chromium');
       const hwReport = await api(base, '/api/engines/hardware');
       assert.ok(Number(hwReport.cpuCores) >= 1 && typeof hwReport.hasGpu === 'boolean', '/api/engines/hardware reports cpuCores and hasGpu');
+
+      // v3.93: Verify Persian OCR language, Hezar engine, 2D (language + pageMode) green/yellow/red suitability, and translation target language menu
+      const v393Check = await page.evaluate(() => {
+        const ocrLangOpts = [...document.getElementById('ocrLanguage').options].map((o) => o.value);
+        const targetLangOpts = [...document.getElementById('translationTargetLang').options].map((o) => o.value);
+        // Switch OCR dialog to Persian + Comic
+        document.getElementById('ocrPageMode').value = 'comic';
+        document.getElementById('ocrLanguage').value = 'fas';
+        document.getElementById('ocrLanguage').dispatchEvent(new Event('change', { bubbles: true }));
+        const optTier = (id) => document.querySelector(`#ocrEngine option[value="${id}"]`)?.dataset.suitability;
+        const fasComic = {
+          hezar: optTier('hezar-ocr'),
+          easy: optTier('easyocr'),
+          tess: optTier('tesseract'),
+          v6: optTier('rapidocr-v6'),
+          selected: document.getElementById('ocrEngine').value,
+        };
+        // Switch page mode to Document while staying on Persian -> EasyOCR flips best->weak, Tesseract flips weak->best!
+        document.getElementById('ocrPageMode').value = 'document';
+        document.getElementById('ocrPageMode').dispatchEvent(new Event('change', { bubbles: true }));
+        const fasDoc = {
+          hezar: optTier('hezar-ocr'),
+          easy: optTier('easyocr'),
+          tess: optTier('tesseract'),
+          surya: optTier('surya'),
+          got: optTier('got-ocr-2'),
+        };
+        // Switch language back to English on Document -> Hezar flips best->weak, MinerU becomes best!
+        document.getElementById('ocrLanguage').value = 'eng';
+        document.getElementById('ocrLanguage').dispatchEvent(new Event('change', { bubbles: true }));
+        const engDoc = {
+          hezar: optTier('hezar-ocr'),
+          mineru: optTier('mineru-2-5-pro'),
+          tess: optTier('tesseract'),
+        };
+        // Restore comic + eng default
+        document.getElementById('ocrPageMode').value = 'comic';
+        document.getElementById('ocrPageMode').dispatchEvent(new Event('change', { bubbles: true }));
+        // Verify applyTranslatedBlockDefaults sets LTR for English target and RTL for Persian target
+        const blkEn = { id: 9, text: 'سلام', pageRole: 'heading', lineH: 24, x0: 10, y0: 10, x1: 200, y1: 36, enabled: true };
+        applyTranslatedBlockDefaults(blkEn, 'Hello', 'en');
+        const blkFa = { id: 10, text: 'Hello', pageRole: 'heading', lineH: 24, x0: 10, y0: 10, x1: 200, y1: 36, enabled: true };
+        applyTranslatedBlockDefaults(blkFa, 'سلام', 'fa');
+        return { ocrLangOpts, targetLangOpts, fasComic, fasDoc, engDoc, blkEnDir: blkEn.dir, blkEnAlign: blkEn.align, blkFaDir: blkFa.dir, blkFaAlign: blkFa.align };
+      });
+      assert.ok(v393Check.ocrLangOpts.includes('fas'), '#ocrLanguage includes Persian (fas)');
+      assert.ok(v393Check.targetLangOpts[0] === 'fa' && v393Check.targetLangOpts.includes('en') && v393Check.targetLangOpts.includes('ar'), '#translationTargetLang includes Persian (fa) first plus English and Arabic');
+      assert.equal(v393Check.fasComic.hezar, 'best', 'Hezar is green (best) for Persian comic');
+      assert.equal(v393Check.fasComic.easy, 'best', 'EasyOCR is green (best) for Persian comic');
+      assert.equal(v393Check.fasComic.tess, 'weak', 'Tesseract is red (weak) for Persian comic');
+      assert.equal(v393Check.fasComic.v6, 'weak', 'PP-OCRv6 is red (weak) for Persian');
+      assert.notEqual(v393Check.fasComic.selected, 'rapidocr-v6', 'Selecting Persian auto-switches away from unsupported PP-OCRv6');
+      assert.equal(v393Check.fasDoc.hezar, 'best', 'Hezar stays green (best) for Persian document');
+      assert.equal(v393Check.fasDoc.easy, 'weak', 'EasyOCR flips to red (weak) for Persian document');
+      assert.equal(v393Check.fasDoc.tess, 'best', 'Tesseract flips to green (best) for Persian document');
+      assert.equal(v393Check.fasDoc.surya, 'best', 'Surya is green (best) for Persian document');
+      assert.equal(v393Check.fasDoc.got, 'weak', 'GOT-OCR 2.0 is red (weak) for Persian document');
+      assert.equal(v393Check.engDoc.hezar, 'weak', 'Hezar flips to red (weak) when language changes to English');
+      assert.equal(v393Check.engDoc.mineru, 'best', 'MinerU flips to green (best) when language changes to English document');
+      assert.equal(v393Check.blkEnDir, 'ltr', 'English target sets block.dir = ltr');
+      assert.equal(v393Check.blkEnAlign, 'left', 'English heading sets align = left');
+      assert.equal(v393Check.blkFaDir, 'rtl', 'Persian target sets block.dir = rtl');
+      assert.equal(v393Check.blkFaAlign, 'right', 'Persian heading sets align = right');
+
       await page.keyboard.press('F1');
       await page.waitForSelector('#helpDialog[open]');
       await page.evaluate(() => {
         const navBtns = [...document.querySelectorAll('#helpNavList button')];
-        const ocrModelsNav = navBtns.find((b) => b.textContent.includes('۱۳ مدل'));
+        const ocrModelsNav = navBtns.find((b) => b.textContent.includes('۱۴ مدل'));
         ocrModelsNav?.click();
       });
       assert.ok(
-        await page.$eval('#helpContentArea', (el) => el.textContent.includes('DirectML') && el.textContent.includes('چند‌هسته‌ای')),
-        'Help guide documents automatic GPU (CUDA/DirectML/Metal) and multi-core CPU optimization',
+        await page.$eval('#helpContentArea', (el) => el.textContent.includes('DirectML') && el.textContent.includes('Hezar Persian OCR')),
+        'Help guide documents 14 OCR models including Hezar Persian OCR and GPU acceleration',
       );
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.getElementById('helpDialog').open);
-      console.log('PASS: v3.81–v3.86 center approval stamp, clean editor header, icon capsules, inline import icon, synced editable export name, regular translation font weight, and GPU/multi-core runtime checks');
+      console.log('PASS: v3.81–v3.93 Persian OCR, Hezar engine, 2D language+pageMode suitability, target language menu, and UI checks');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

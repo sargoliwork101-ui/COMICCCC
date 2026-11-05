@@ -1583,6 +1583,36 @@ function check(name, condition) {
       })()
     `, context);
     check('v3.89 role pill toggles تیتر/متن with proportional size, preserves detected bold/italic, and computes shared indent/hanging geometry', v389Check === true);
+
+    const v393UiCheck = vm.runInContext(`
+      (() => {
+        state.engines = [
+          { id: 'rapidocr-v6', name: 'PP-OCRv6 Small', selectable: true, runtimeInstalled: true, languages: ['eng'], readyLanguages: ['eng'], description: 'fast', family: 'Paddle' },
+          { id: 'hezar-ocr', name: 'Hezar Persian OCR', selectable: true, isolated: true, runtimeInstalled: true, languages: ['fas'], readyLanguages: ['fas'], description: 'persian', family: 'Hezar' },
+          { id: 'easyocr', name: 'EasyOCR', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas', 'kor'], readyLanguages: ['eng', 'fas'], description: 'scene', family: 'CRAFT' },
+          { id: 'tesseract', name: 'Tesseract 5 LSTM', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'doc', family: 'Tesseract' },
+        ];
+        $('ocrPageMode').value = 'comic';
+        $('ocrLanguage').value = 'fas';
+        $('ocrLanguage').dispatchEvent(new Event('change', { bubbles: true }));
+        const tier = (id) => document.querySelector('#ocrEngine option[value="' + id + '"]')?.dataset.suitability;
+        const comicOk = tier('hezar-ocr') === 'best' && tier('easyocr') === 'best' && tier('tesseract') === 'weak' && tier('rapidocr-v6') === 'weak' && $('ocrEngine').value === 'hezar-ocr';
+        $('ocrPageMode').value = 'document';
+        $('ocrPageMode').dispatchEvent(new Event('change', { bubbles: true }));
+        const docOk = tier('hezar-ocr') === 'best' && tier('tesseract') === 'best' && tier('easyocr') === 'weak';
+        $('modelsLanguage').value = 'fas';
+        $('modelsPageMode').value = 'document';
+        renderModels();
+        const cardTiers = Object.fromEntries([...document.querySelectorAll('#engineCards .engine-card')].map((c) => [c.querySelector('h3')?.textContent, c.dataset.suitability]));
+        const modelsOk = cardTiers['Hezar Persian OCR'] === 'best' && cardTiers['Tesseract 5 LSTM'] === 'best' && cardTiers['EasyOCR'] === 'weak' && cardTiers['PP-OCRv6 Small'] === 'weak';
+        const targetLangHasFaFirst = $('translationTargetLang')?.options?.[0]?.value === 'fa' && [...$('translationTargetLang').options].some((o) => o.value === 'en');
+        $('ocrLanguage').value = 'eng';
+        $('ocrPageMode').value = 'comic';
+        updateEngineOptions('rapidocr-v6');
+        return comicOk && docOk && modelsOk && targetLangHasFaFirst;
+      })()
+    `, context);
+    check('v3.93 Persian OCR language, Hezar engine, 2D (language + pageMode) green/yellow/red suitability, and translation target language menu work in UI', v393UiCheck === true);
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
