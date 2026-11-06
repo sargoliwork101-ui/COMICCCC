@@ -2,7 +2,18 @@
 (function (root) {
   const FONT = 'Vazirmatn';
 
-  function median(arr) { arr.sort((a, b) => a - b); return arr[Math.floor(arr.length / 2)]; }
+  const _histR = new Uint32Array(256);
+  const _histG = new Uint32Array(256);
+  const _histB = new Uint32Array(256);
+  function histMedian(hist, total) {
+    const target = Math.floor(total / 2);
+    let acc = 0;
+    for (let v = 0; v < 256; v += 1) {
+      acc += hist[v];
+      if (acc > target) return v;
+    }
+    return 255;
+  }
   const lum = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
   // رنگ پس‌زمینهٔ اطراف کادر متن را از نوار باریک بیرون آن می‌خواند
@@ -14,18 +25,23 @@
       [box.x0 - off - t, box.y0, t, box.y1 - box.y0],
       [box.x1 + off, box.y0, t, box.y1 - box.y0]
     ];
-    const R = [], G = [], B = [];
+    _histR.fill(0); _histG.fill(0); _histB.fill(0);
+    let count = 0;
+    const Ls = [];
     strips.forEach(([x, y, w, h]) => {
       x = Math.max(0, Math.round(x)); y = Math.max(0, Math.round(y));
       w = Math.min(W - x, Math.round(w)); h = Math.min(H - y, Math.round(h));
       if (w <= 0 || h <= 0) return;
       const d = ctx.getImageData(x, y, w, h).data;
-      for (let i = 0; i < d.length; i += 4) { R.push(d[i]); G.push(d[i + 1]); B.push(d[i + 2]); }
+      for (let i = 0; i < d.length; i += 4) {
+        const rv = d[i], gv = d[i + 1], bv = d[i + 2];
+        _histR[rv] += 1; _histG[gv] += 1; _histB[bv] += 1;
+        if (count % 3 === 0) Ls.push(lum(rv, gv, bv));
+        count += 1;
+      }
     });
-    if (!R.length) return { r: 255, g: 255, b: 255, uniform: true };
-    const Ls = [];
-    for (let i = 0; i < R.length; i += 3) Ls.push(lum(R[i], G[i], B[i]));
-    const r = median(R), g = median(G), b = median(B);
+    if (!count) return { r: 255, g: 255, b: 255, uniform: true };
+    const r = histMedian(_histR, count), g = histMedian(_histG, count), b = histMedian(_histB, count);
     let s = 0; const L = lum(r, g, b);
     for (let i = 0; i < Ls.length; i++) { const d = Ls[i] - L; s += d * d; }
     return { r, g, b, uniform: Math.sqrt(s / Ls.length) < 28 };

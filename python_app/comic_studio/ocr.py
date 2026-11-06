@@ -611,7 +611,7 @@ class RapidEngine:
             if accel.get("gpu") and not self._force_cpu:
                 worker_slots, computed_threads = 1, max(1, cpu_core_count())
             else:
-                worker_slots, computed_threads = compute_worker_count(total_pages, per_worker_mb=320, max_cap=6)
+                worker_slots, computed_threads = compute_worker_count(total_pages, per_worker_mb=420, max_cap=3)
         else:
             worker_slots = max(1, int(total_pages))
             computed_threads = max(1, int(threads_per_worker))
@@ -650,13 +650,17 @@ class RapidEngine:
         from rapidocr import RapidOCR
         from rapidocr.utils.typings import EngineType, ModelType, OCRVersion
 
-        # Disable ONNX Runtime Eigen threadpool busy-spinning so threads sleep at 0% CPU between inferences.
+        # Disable ONNX Runtime Eigen threadpool busy-spinning AND unbounded variable-shape memory patterns
+        # so threads sleep at 0% CPU between pages and intermediate buffers release immediately after each page.
         with contextlib.suppress(Exception):
             from rapidocr.inference_engine.onnxruntime.main import OrtInferSession
             orig_opts = OrtInferSession._init_sess_opts
             if not getattr(orig_opts, "_comic_no_spin", False):
                 def _patched_sess_opts(cfg: Any):
                     so = orig_opts(cfg)
+                    with contextlib.suppress(Exception):
+                        so.enable_cpu_mem_arena = False
+                        so.enable_mem_pattern = False
                     with contextlib.suppress(Exception):
                         so.add_session_config_entry("session.intra_op.allow_spinning", "0")
                         so.add_session_config_entry("session.inter_op.allow_spinning", "0")
@@ -1334,6 +1338,8 @@ class EasyEngine:
                     raise OcrError(f"EasyOCR failed: {cpu_exc}") from cpu_exc
             else:
                 raise OcrError(f"EasyOCR failed: {exc}") from exc
+        finally:
+            del arr
         lines = []
         for box, text, score in result:
             if str(text).strip():

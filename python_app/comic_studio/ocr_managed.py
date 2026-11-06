@@ -562,6 +562,8 @@ def trim_process_memory() -> None:
         try:
             if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
                 torch_mod.cuda.empty_cache()
+                if hasattr(torch_mod.cuda, "ipc_collect"):
+                    torch_mod.cuda.ipc_collect()
         except Exception:
             pass
         try:
@@ -580,6 +582,12 @@ def trim_process_memory() -> None:
             pass
     try:
         if os.name == "nt":
+            try:
+                msvcrt = getattr(ctypes, "cdll", None)
+                if msvcrt is not None and hasattr(msvcrt, "msvcrt") and hasattr(msvcrt.msvcrt, "_heapmin"):
+                    msvcrt.msvcrt._heapmin()
+            except Exception:
+                pass
             handle = ctypes.windll.kernel32.GetCurrentProcess()
             try:
                 ctypes.windll.psapi.EmptyWorkingSet(handle)

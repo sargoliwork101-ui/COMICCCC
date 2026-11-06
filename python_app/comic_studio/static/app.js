@@ -555,10 +555,24 @@ function showDialog(id) {
   openDialogStack.push(id);
   if (!dlg.open) dlg.showModal();
 }
+function releaseImgElement(img) {
+  if (!img) return;
+  img.onload = null;
+  img.onclick = null;
+  if (img.dataset) delete img.dataset.renderedSrc;
+  img.removeAttribute('src');
+  img.src = '';
+}
 function closeDialog(id) {
   const idx = openDialogStack.indexOf(id);
   if (idx >= 0) openDialogStack.splice(idx, 1);
   if ($(id)?.open) $(id).close();
+  if (id === 'previewDialog') {
+    releaseImgElement($('previewImage'));
+    state.previewId = null;
+  } else if (id === 'cropDialog') {
+    releaseImgElement($('cropImage'));
+  }
 }
 function openHelpDialog(sectionId = null) {
   if (!helpController && window.ComicHelpGuide?.createHelpController) {
@@ -780,7 +794,7 @@ async function saveProject() {
   saveTask = task;
   return task;
 }
-function adoptProject(project) {
+function adoptProject(project, options = {}) {
   state.project = project;
   state.project.images = project.images || [];
   G.normalizeLayout(state.project.images);
@@ -826,7 +840,8 @@ function adoptProject(project) {
   if ($('exportDocxLayout')) $('exportDocxLayout').value = output.docxLayout === 'flowing' ? 'flowing' : 'visual';
   if ($('exportPptxLayout')) $('exportPptxLayout').value = output.pptxLayout === 'flowing' ? 'flowing' : 'visual';
   setOverlayMode(settings.overlayMode || 'translation', false);
-  renderAll();
+  if (options.skipGrid) updateEngineOptions();
+  else renderAll();
 }
 function normalizeOverlayMode(mode) { return mode === 'ocr' || mode === 'none' ? mode : 'translation'; }
 function currentOverlayMode() { return normalizeOverlayMode(state.project?.settings?.overlayMode); }
@@ -960,7 +975,13 @@ function setSelected(item, value, event = null) {
 // ---------- Grid, group manager, and drag/drop ----------
 function renderGrid() {
   const grid = $('grid'); if (!state.project) return;
-  G.normalizeLayout(state.project.images); grid.textContent = '';
+  G.normalizeLayout(state.project.images);
+  const prevImages = new Map();
+  grid.querySelectorAll('.item').forEach((oldCard) => {
+    const oldImg = oldCard.querySelector('.tw > img');
+    if (oldCard.dataset?.id && oldImg) prevImages.set(oldCard.dataset.id, oldImg);
+  });
+  grid.textContent = '';
   const infos = G.info(state.project.images); const byId = new Map(infos.map((info) => [info.key, info]));
   sortedImages().forEach((item, index) => {
     const info = G.validId(item.groupId) ? byId.get(G.idKey(item.groupId)) : null;
@@ -970,8 +991,32 @@ function renderGrid() {
     if (info) card.style.setProperty('--group-color', groupColor(info.id));
     const frameShell = document.createElement('div'); frameShell.className = 'tw-shell';
     const frame = document.createElement('div'); frame.className = 'tw';
-    const image = document.createElement('img'); image.loading = 'lazy'; image.decoding = 'async'; image.alt = item.name; image.draggable = false; image.src = imageUrl(item, !!item.edited, true);
-    image.addEventListener('load', scheduleOutlines); image.addEventListener('click', (event) => { event.stopPropagation(); setSelected(item, !item.selected, event); });
+    const nextSrc = imageUrl(item, !!item.edited, Boolean(item.crop));
+    const reusable = prevImages.get(item.id);
+    let image;
+    if (reusable && reusable.dataset?.renderedSrc === nextSrc) {
+      prevImages.delete(item.id);
+      image = reusable;
+      image.alt = item.name;
+    } else {
+      if (reusable) {
+        prevImages.delete(item.id);
+        releaseImgElement(reusable);
+      }
+      image = document.createElement('img');
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      image.alt = item.name;
+      image.draggable = false;
+      image.dataset.renderedSrc = nextSrc;
+      image.src = nextSrc;
+    }
+    image.onload = scheduleOutlines;
+    image.onclick = (event) => {
+      event.stopPropagation();
+      const live = state.project?.images.find((entry) => entry.id === item.id) || item;
+      setSelected(live, !live.selected, event);
+    };
     frame.appendChild(image);
     frameShell.appendChild(frame);
     if (item.approved) {
@@ -1031,6 +1076,8 @@ function renderGrid() {
     card.addEventListener('dragend', clearDrag);
     grid.appendChild(card);
   });
+  prevImages.forEach((staleImg) => releaseImgElement(staleImg));
+  prevImages.clear();
   renderGroupPanel(); updateSummary(); scheduleOutlines();
 }
 function moveImageBy(imageId, delta) { G.moveUnit(state.project.images, imageId, delta); renderGrid(); scheduleSave(); }
@@ -1045,7 +1092,9 @@ async function deleteImages(ids) {
     destructive: true,
   });
   if (!ok) return;
+  const deletingProjectId = state.project?.id;
   await saveProject();
+  if (deletingProjectId) ids.forEach((imgId) => renderedPageSignatures.delete(`${deletingProjectId}:${imgId}`));
   adoptProject(await api(`/api/projects/${state.project.id}/delete`, jsonOptions('POST', ids)));
 }
 function renderGroupPanel() {
@@ -1164,7 +1213,10 @@ async function loadProject(id) {
     const project = await api(`/api/projects/${id}`);
     if (state.project !== previous || revision !== projectLoadRevision) return;
     if (savedRevision !== saveRevision) continue;
-    adoptProject(project); await refreshProjectList(); await renderImagesText();
+    adoptProject(project);
+    await refreshProjectList();
+    const mismatchedIds = sortedImages().filter((item) => hasOverlayText(item) !== !!item.edited).map((item) => item.id);
+    if (mismatchedIds.length) await renderImagesText(mismatchedIds);
     return;
   }
 }
@@ -1885,6 +1937,8 @@ async function runOcr() {
   ocrRunning = true; setProgress('ocrProgress', null, true); $('startOcrBtn').disabled = true; $('cancelOcrBtn')?.classList.remove('hidden');
   $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden');
   let ocrSucceeded = false;
+  let usedKeepEngineLoaded = false;
+  let completedOcrPages = 0;
   try {
     if (pending && (state.project?.id !== pending.projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(pending.imageIds))) {
       throw new Error('پروژه یا تصاویر انتخاب‌شده تغییر کردند؛ پنجره را ببندید و دوباره ترجمه را شروع کنید.');
@@ -1902,28 +1956,77 @@ async function runOcr() {
     })) throw new Error('متن یا وضعیت یکی از تصاویر تغییر کرده است؛ برای جلوگیری از بازنویسی OCR انجام نشد.');
     await runJob('OCR محلی در حال اجراست…', async () => {
       const confidence = $('ocrConfidence').value.trim();
-      const result = await api(`/api/projects/${state.project.id}/ocr`, {
-        ...jsonOptions('POST', { image_ids: ids, engine: $('ocrEngine').value, language: $('ocrLanguage').value, page_mode: normalizePageMode($('ocrPageMode')?.value), contrast: $('ocrContrast').checked, precise: $('ocrPrecise').checked, group_lines: $('ocrGroupLines').checked, min_confidence: confidence === '' ? .35 : Number(confidence) }),
-        signal: controller.signal,
-      });
-      if (ocrCancelledByUser || controller.signal.aborted) { const e = new Error('لغو شد'); e.cancelled = true; throw e; }
-      if (pending && (state.project?.id !== pending.projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(pending.imageIds))) {
-        throw new Error('OCR در سرور ذخیره شد، اما پروژه یا انتخاب تغییر کرد؛ ترجمه ادامه نیافت. برای دیدن نتیجه پروژه را دوباره باز کنید.');
+      const basePayload = {
+        engine: $('ocrEngine').value,
+        language: $('ocrLanguage').value,
+        page_mode: normalizePageMode($('ocrPageMode')?.value),
+        contrast: $('ocrContrast').checked,
+        precise: $('ocrPrecise').checked,
+        group_lines: $('ocrGroupLines').checked,
+        min_confidence: confidence === '' ? .35 : Number(confidence),
+      };
+      const checkOcrNotCancelled = () => {
+        if (ocrCancelledByUser || controller.signal.aborted) {
+          const e = new Error('لغو شد'); e.cancelled = true; throw e;
+        }
+      };
+      const verifyPendingOcrState = () => {
+        if (pending && (state.project?.id !== pending.projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(pending.imageIds))) {
+          throw new Error('OCR در سرور ذخیره شد، اما پروژه یا انتخاب تغییر کرد؛ ترجمه ادامه نیافت. برای دیدن نتیجه پروژه را دوباره باز کنید.');
+        }
+      };
+      if (ids.length === 1) {
+        const result = await api(`/api/projects/${state.project.id}/ocr`, {
+          ...jsonOptions('POST', { ...basePayload, image_ids: ids, keep_engine_loaded: false }),
+          signal: controller.signal,
+        });
+        checkOcrNotCancelled();
+        verifyPendingOcrState();
+        adoptProject(result, { skipGrid: true });
+        setOverlayMode('ocr', false);
+        await renderImagesText(ids, null, checkOcrNotCancelled);
+        completedOcrPages = 1;
+      } else {
+        for (let idx = 0; idx < ids.length; idx += 1) {
+          checkOcrNotCancelled();
+          const pageId = ids[idx];
+          const isLastPage = idx + 1 >= ids.length;
+          if (!isLastPage) usedKeepEngineLoaded = true;
+          const result = await api(`/api/projects/${state.project.id}/ocr`, {
+            ...jsonOptions('POST', { ...basePayload, image_ids: [pageId], keep_engine_loaded: !isLastPage }),
+            signal: controller.signal,
+          });
+          if (isLastPage) usedKeepEngineLoaded = false;
+          checkOcrNotCancelled();
+          verifyPendingOcrState();
+          adoptProject(result, { skipGrid: true });
+          setOverlayMode('ocr', false);
+          await renderImagesText([pageId], null, checkOcrNotCancelled);
+          completedOcrPages += 1;
+          const p = completedOcrPages / ids.length;
+          setProgress('ocrProgress', p, true);
+          setProgress('jobProgress', p, true);
+          setProgress('dockProgress', p, true);
+        }
       }
-      adoptProject(result); setOverlayMode('ocr', false); await renderImagesText(ids);
     }, 'ocrProgress');
     ocrSucceeded = true; ocrClosingNormally = true;
     clearPendingTranslationOcr(); closeDialog('ocrDialog');
     toast('متن OCR روی تصویر آمد؛ برای بررسی و ویرایش، دکمهٔ ✎ را بزنید');
     if (pending) await runTranslation();
   } catch (error) {
+    if (state.project) renderGrid();
     if (ocrCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
       clearPendingTranslationOcr();
-      toast('پنجرهٔ OCR بسته شد و عملیات متوقف گردید');
+      toast(completedOcrPages ? `پنجرهٔ OCR بسته شد؛ ${completedOcrPages} صفحهٔ تکمیل‌شده حفظ شد و ادامه متوقف گردید` : 'پنجرهٔ OCR بسته شد و عملیات متوقف گردید');
       return;
     }
     reportOcrError(error); if (error.pendingId) openPendingResults(error.pendingId); throw error;
   } finally {
+    if (usedKeepEngineLoaded) {
+      usedKeepEngineLoaded = false;
+      await api('/api/engines/unload', { method: 'POST' }).catch(() => {});
+    }
     if (!ocrSucceeded) setProgress('ocrProgress', 0, false);
     if (ocrAbortController === controller) ocrAbortController = null;
     ocrClosingNormally = false; ocrRunning = false; $('startOcrBtn').disabled = false; $('cancelOcrBtn')?.classList.add('hidden');
@@ -2473,11 +2576,16 @@ async function performContextTranslation(request, preview, ongoing = null, corre
         });
         checkNotCancelled();
         if (correction) { correction = null; clearResponseRepair(); }
-        adoptProject(result.project); run.completed = result.completed ?? run.completed;
+        const hasAffected = Boolean(result.affectedImageIds?.length);
+        adoptProject(result.project, { skipGrid: hasAffected });
+        run.completed = result.completed ?? run.completed;
         phase = 'preview'; setOverlayMode('translation', false);
-        if (result.affectedImageIds?.length) {
+        if (hasAffected) {
           try { await renderImagesText(result.affectedImageIds); }
-          catch (error) { toast(`ترجمه ذخیره شد، اما همگام‌سازی پیش‌نمایش ناموفق بود: ${error.message || error}`, true); }
+          catch (error) {
+            renderGrid();
+            toast(`ترجمه ذخیره شد، اما همگام‌سازی پیش‌نمایش ناموفق بود: ${error.message || error}`, true);
+          }
         }
         if (result.done) break;
       }
@@ -2508,6 +2616,12 @@ async function performContextTranslation(request, preview, ongoing = null, corre
 
 // ---------- Typeset preview and export ----------
 let fontLoadedOnce = false;
+const renderedPageSignatures = new Map();
+function pageRenderSignature(item, mode = currentOverlayMode(), blocksOverride = null) {
+  const blocks = blocksOverride || overlayBlocks(item, mode);
+  const erase = state.project?.settings?.eraseOriginal !== false;
+  return JSON.stringify([mode, erase, blocks]);
+}
 async function ensureFont() {
   if (fontLoadedOnce || !document.fonts?.load) return;
   try {
@@ -2515,28 +2629,62 @@ async function ensureFont() {
     fontLoadedOnce = true;
   } catch { /* fallback */ }
 }
-async function renderAndUploadNow(item, projectId, mode) {
-  const blocks = overlayBlocks(item, mode); const active = blocks.some((block) => block.enabled && hasRenderableText(block));
+async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false } = {}) {
+  const key = `${projectId}:${item.id}`;
+  const blocks = overlayBlocks(item, mode);
+  const active = blocks.some((block) => block.enabled && hasRenderableText(block));
+  const signature = pageRenderSignature(item, mode, blocks);
+  if (skipUnchanged && Boolean(item.edited) === active && renderedPageSignatures.get(key) === signature) {
+    return;
+  }
   if (!active) {
     await api(`/api/projects/${projectId}/images/${item.id}/revert`, { method: 'POST' });
-    imagePreviewVersions.set(`${projectId}:${item.id}`, ++previewRevision);
-    const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null; if (current) current.edited = false; return;
+    imagePreviewVersions.set(key, ++previewRevision);
+    renderedPageSignatures.set(key, signature);
+    const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null;
+    if (current) current.edited = false;
+    return;
   }
-  await ensureFont(); const response = await fetch(`/api/projects/${projectId}/images/${item.id}/content`); if (!response.ok) throw new Error('تصویر اصلی باز نشد');
-  const bitmap = await createImageBitmap(await response.blob()); let canvas;
-  try { canvas = Typeset.render(bitmap, blocks); } finally { bitmap.close(); }
-  let blob;
+  await ensureFont();
+  const response = await fetch(`/api/projects/${projectId}/images/${item.id}/content`);
+  if (!response.ok) throw new Error('تصویر اصلی باز نشد');
+  let rawBlob = await response.blob();
+  let bitmap = null;
   try {
-    blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    bitmap = await createImageBitmap(rawBlob);
   } finally {
-    canvas.width = canvas.height = 0;
+    rawBlob = null;
   }
-  if (!blob) throw new Error(`ساخت PNG برای «${item.name}» ممکن نشد؛ تصویر خیلی بزرگ یا حافظهٔ مرورگر کم است`);
-  await api(`/api/projects/${projectId}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
-  imagePreviewVersions.set(`${projectId}:${item.id}`, ++previewRevision);
-  const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null; if (current) current.edited = true;
+  let canvas = null;
+  let pngBlob = null;
+  try {
+    try {
+      canvas = Typeset.render(bitmap, blocks);
+    } finally {
+      bitmap?.close?.();
+      bitmap = null;
+      Typeset.releaseCaches?.();
+    }
+    pngBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  } finally {
+    if (canvas) {
+      try { canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height); } catch { /* ignore */ }
+      canvas.width = canvas.height = 0;
+      canvas = null;
+    }
+  }
+  if (!pngBlob) throw new Error(`ساخت PNG برای «${item.name}» ممکن نشد؛ تصویر خیلی بزرگ یا حافظهٔ مرورگر کم است`);
+  try {
+    await api(`/api/projects/${projectId}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: pngBlob });
+  } finally {
+    pngBlob = null;
+  }
+  imagePreviewVersions.set(key, ++previewRevision);
+  renderedPageSignatures.set(key, signature);
+  const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null;
+  if (current) current.edited = true;
 }
-function renderAndUpload(item) {
+function renderAndUpload(item, options = {}) {
   const projectId = state.project?.id;
   if (!projectId) return Promise.resolve();
   const key = `${projectId}:${item.id}`;
@@ -2544,17 +2692,19 @@ function renderAndUpload(item) {
   const previous = imageRenderTasks.get(key) || Promise.resolve();
   // A slow older canvas/upload must finish before the newer request for this same image.
   // Other images remain independent, and a failed earlier render does not block later attempts.
-  const task = previous.catch(() => {}).then(() => renderAndUploadNow(item, projectId, mode));
+  const task = previous.catch(() => {}).then(() => renderAndUploadNow(item, projectId, mode, options));
   imageRenderTasks.set(key, task);
   task.finally(() => { if (imageRenderTasks.get(key) === task) imageRenderTasks.delete(key); }).catch(() => {});
   return task;
 }
 function browserRenderConcurrency(totalCount = 1) {
   const hw = Number(globalThis.navigator?.hardwareConcurrency) || 4;
-  const slots = Math.max(2, Math.min(4, Math.floor(hw / 2)));
+  // Cap concurrent full-resolution browser canvases to 2 so multi-page runs release each page's
+  // bitmap/canvas memory before allocating more, preventing browser RAM spikes on large pages.
+  const slots = Math.max(2, Math.min(2, Math.floor(hw / 2)));
   return Math.max(1, Math.min(totalCount, slots));
 }
-async function renderImagesText(ids = null, onStep = null, checkCancel = null) {
+async function renderImagesText(ids = null, onStep = null, checkCancel = null, options = {}) {
   const wanted = ids ? new Set(ids) : null;
   const targets = sortedImages().filter((item) => (!wanted || wanted.has(item.id)) && (hasOverlayText(item) || item.edited));
   if (!targets.length) { renderGrid(); return; }
@@ -2566,7 +2716,7 @@ async function renderImagesText(ids = null, onStep = null, checkCancel = null) {
       if (checkCancel) checkCancel();
       const currentIdx = nextIdx;
       nextIdx += 1;
-      await renderAndUpload(targets[currentIdx]);
+      await renderAndUpload(targets[currentIdx], options);
       completed += 1;
       if (onStep) onStep(completed, targets.length);
     }
@@ -2616,6 +2766,7 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
             setProgress('jobProgress', p, true); setProgress('dockProgress', p, true);
           },
           checkNotCancelled,
+          { skipUnchanged: true },
         );
       } else {
         renderGrid();

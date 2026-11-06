@@ -1955,6 +1955,85 @@ function check(name, condition) {
     check('v3.98 allows opening installed models from the top menu and deleting an installed OCR model via custom Persian appConfirm', v398MenuUninstallOk === true);
   }
 
+  // v3.99: Per-page OCR + immediate per-page text placement + grid <img> reuse + dialog bitmap release
+  {
+    const v399PerPageCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProject = JSON.parse(JSON.stringify(state.project));
+        const sequence = [];
+        try {
+          state.project.images = [
+            { id: 'pg-1', name: 'page-1.png', file: 'pg-1.png', width: 200, height: 120, format: 'PNG', bytes: 100, order: 0, selected: true, approved: false, groupId: null, crop: null, edited: false, blocks: [] },
+            { id: 'pg-2', name: 'page-2.png', file: 'pg-2.png', width: 200, height: 120, format: 'PNG', bytes: 100, order: 1, selected: true, approved: false, groupId: null, crop: null, edited: false, blocks: [] },
+          ];
+          renderGrid();
+          const img1Before = document.querySelector('#grid .item[data-id="pg-1"] .tw > img');
+          const img2Before = document.querySelector('#grid .item[data-id="pg-2"] .tw > img');
+          renderGrid();
+          const img1Reused = document.querySelector('#grid .item[data-id="pg-1"] .tw > img') === img1Before
+            && document.querySelector('#grid .item[data-id="pg-2"] .tw > img') === img2Before;
+
+          window.fetch = async (url, options = {}) => {
+            const u = String(url);
+            if (u.endsWith('/state') && options.method === 'PUT') {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project, text: async () => JSON.stringify(state.project) };
+            }
+            if (u.endsWith('/ocr') && options.method === 'POST') {
+              const req = JSON.parse(options.body);
+              const pid = req.image_ids[0];
+              sequence.push('ocr:' + pid + ':keep=' + String(req.keep_engine_loaded));
+              const nextProj = JSON.parse(JSON.stringify(state.project));
+              const target = nextProj.images.find((im) => im.id === pid);
+              if (target) {
+                target.ocrCompleted = true;
+                target.edited = false;
+                target.blocks = [{ id: 1, text: 'PAGE ' + pid, tr: '', enabled: true, bg: 'white', x0: 10, y0: 10, x1: 150, y1: 45, lineH: 24, dir: 'ltr', align: 'center' }];
+              }
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => nextProj, text: async () => JSON.stringify(nextProj) };
+            }
+            if (u.endsWith('/pg-1/rendered') || u.endsWith('/pg-2/rendered')) {
+              const pid = u.includes('/pg-1/') ? 'pg-1' : 'pg-2';
+              sequence.push('placed:' + pid);
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true }), text: async () => '{"ok":true}' };
+            }
+            if (u.includes('/images/pg-1/content') || u.includes('/images/pg-2/content')) {
+              return origFetch('/api/projects/project-ui/images/image-ui/content');
+            }
+            return origFetch(url, options);
+          };
+
+          $('ocrOnlySelected').checked = true;
+          await runOcr();
+
+          // Open and close previewDialog -> previewImage src must be cleared immediately
+          openPreview(state.project.images[0]);
+          const hadPreviewSrc = Boolean($('previewImage').getAttribute('src'));
+          closeDialog('previewDialog');
+          const clearedPreviewSrc = !$('previewImage').getAttribute('src');
+
+          return {
+            img1Reused,
+            sequence: sequence.join(' -> '),
+            hadPreviewSrc,
+            clearedPreviewSrc,
+          };
+        } finally {
+          window.fetch = origFetch;
+          adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v3.99 processes multi-page OCR strictly page-by-page (placing text & freeing RAM after page 1 before starting page 2), reuses unchanged grid <img> nodes, and clears dialog bitmaps on close',
+      v399PerPageCheck.img1Reused === true
+        && v399PerPageCheck.sequence === 'ocr:pg-1:keep=true -> placed:pg-1 -> ocr:pg-2:keep=false -> placed:pg-2'
+        && v399PerPageCheck.hadPreviewSrc === true
+        && v399PerPageCheck.clearedPreviewSrc === true,
+      JSON.stringify(v399PerPageCheck),
+    );
+  }
+
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));
   window.dispatchEvent(new window.Event('pagehide'));

@@ -2,7 +2,18 @@
 (function (root) {
   const FONT = 'Vazirmatn, Tahoma, sans-serif';
 
-  function median(arr) { arr.sort((a, b) => a - b); return arr[Math.floor(arr.length / 2)]; }
+  const _histR = new Uint32Array(256);
+  const _histG = new Uint32Array(256);
+  const _histB = new Uint32Array(256);
+  function histMedian(hist, total) {
+    const target = Math.floor(total / 2);
+    let acc = 0;
+    for (let v = 0; v < 256; v += 1) {
+      acc += hist[v];
+      if (acc > target) return v;
+    }
+    return 255;
+  }
   const lum = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
   // حاشیهٔ هوشمند داخلی کادر: ۲ درصدِ بُعد کادر با سقف حداکثر ۴ پیکسل تا در پاراگراف‌های
@@ -22,18 +33,23 @@
       [box.x0 - off - t, box.y0, t, box.y1 - box.y0],
       [box.x1 + off, box.y0, t, box.y1 - box.y0]
     ];
-    const R = [], G = [], B = [];
+    _histR.fill(0); _histG.fill(0); _histB.fill(0);
+    let count = 0;
+    const Ls = [];
     strips.forEach(([x, y, w, h]) => {
       x = Math.max(0, Math.round(x)); y = Math.max(0, Math.round(y));
       w = Math.min(W - x, Math.round(w)); h = Math.min(H - y, Math.round(h));
       if (w <= 0 || h <= 0) return;
       const d = ctx.getImageData(x, y, w, h).data;
-      for (let i = 0; i < d.length; i += 4) { R.push(d[i]); G.push(d[i + 1]); B.push(d[i + 2]); }
+      for (let i = 0; i < d.length; i += 4) {
+        const rv = d[i], gv = d[i + 1], bv = d[i + 2];
+        _histR[rv] += 1; _histG[gv] += 1; _histB[bv] += 1;
+        if (count % 3 === 0) Ls.push(lum(rv, gv, bv));
+        count += 1;
+      }
     });
-    if (!R.length) return { r: 255, g: 255, b: 255, uniform: true };
-    const Ls = [];
-    for (let i = 0; i < R.length; i += 3) Ls.push(lum(R[i], G[i], B[i]));
-    const r = median(R), g = median(G), b = median(B);
+    if (!count) return { r: 255, g: 255, b: 255, uniform: true };
+    const r = histMedian(_histR, count), g = histMedian(_histG, count), b = histMedian(_histB, count);
     let s = 0; const L = lum(r, g, b);
     for (let i = 0; i < Ls.length; i++) { const d = Ls[i] - L; s += d * d; }
     return { r, g, b, uniform: Math.sqrt(s / Ls.length) < 28 };
@@ -463,6 +479,33 @@
     return tpl;
   }
 
+  function releaseCaches() {
+    if (!domMeasureState) return;
+    if (domMeasureState.box) {
+      domMeasureState.box.replaceChildren();
+      domMeasureState.box.removeAttribute('style');
+    }
+  }
+
+  function fitDomSizeFast(box, tpl, st, bw, padX, usableW, usableH, startSize, minSize) {
+    const fitsAt = (s) => {
+      applyDomLayoutStyles(box, tpl, st, bw, padX, s);
+      return box.scrollHeight <= usableH + 0.75 && box.scrollWidth <= bw + usableW * 0.04 + 0.5;
+    };
+    const hiStart = Math.max(minSize, startSize);
+    for (let s = hiStart; s >= Math.max(minSize, hiStart - 2); s -= 1) {
+      if (fitsAt(s)) return s;
+    }
+    let lo = minSize, hi = hiStart - 3, best = minSize;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (fitsAt(mid)) { best = mid; lo = mid + 1; }
+      else { hi = mid - 1; }
+    }
+    while (best + 1 <= hiStart - 3 && fitsAt(best + 1)) best += 1;
+    return best;
+  }
+
   function applyDomLayoutStyles(box, tpl, st, bw, padX, size) {
     box.replaceChildren(tpl.content.cloneNode(true));
     box.dir = st.dir;
@@ -555,14 +598,7 @@
       } else {
         const jsEst = computeJsFit(ctx, b, st, bw, bh, richWordsOpt).size;
         const startSize = Math.min(maxSize, jsEst + 2);
-        size = 7;
-        for (let s = startSize; s >= 7; s -= 1) {
-          applyDomLayoutStyles(box, tpl, st, bw, padX, s);
-          if (box.scrollHeight <= usableH + 0.75 && box.scrollWidth <= bw + usableW * 0.04 + 0.5) {
-            size = s;
-            break;
-          }
-        }
+        size = fitDomSizeFast(box, tpl, st, bw, padX, usableW, usableH, startSize, 7);
         if (Number.parseFloat(box.style.fontSize) !== size) applyDomLayoutStyles(box, tpl, st, bw, padX, size);
       }
     } else {
@@ -649,7 +685,10 @@
         }
       }
     }
-    box.textContent = '';
+    r.detach?.();
+    tpl.innerHTML = '';
+    box.replaceChildren();
+    box.removeAttribute('style');
     return { size, topUnscaled, fragments };
   }
 
@@ -667,15 +706,10 @@
         const tpl = buildSafeDomTemplate(rawHtml);
         const jsEst = computeJsFit(ctx, b, st, bw, bh).size;
         const startSize = Math.min(maxSize, jsEst + 2);
-        let chosen = 8;
-        for (let s = startSize; s >= 8; s -= 1) {
-          applyDomLayoutStyles(box, tpl, st, bw, padX, s);
-          if (box.scrollHeight <= usableH + 0.75 && box.scrollWidth <= bw + usableW * 0.04 + 0.5) {
-            chosen = s;
-            break;
-          }
-        }
-        box.textContent = '';
+        const chosen = fitDomSizeFast(box, tpl, st, bw, padX, usableW, usableH, startSize, 8);
+        tpl.innerHTML = '';
+        box.replaceChildren();
+        box.removeAttribute('style');
         return chosen;
       }
     }
@@ -888,7 +922,7 @@
   }
 
   const api = {
-    FONT, render, sampleBg, fit, wrapWords, blockStyle, boxInset, indentGeometry, fitBlockSize,
+    FONT, render, releaseCaches, sampleBg, fit, wrapWords, blockStyle, boxInset, indentGeometry, fitBlockSize,
     hasInlineMarks, tokenizeInline, inlineMarksToHtml, stripInlineMarkers, inlineWords, richHtmlWords, fitInline, visualLineOrder
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Typeset = api;

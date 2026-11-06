@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.98"
+    assert health.json()["version"] == "3.99"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۹۸ · Python</span>' in index_html
+    assert '<span class="ver">۳.۹۹ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -3197,6 +3197,85 @@ def test_v398_uninstall_engine_api_endpoint(client, monkeypatch, tmp_path):
     # Built-in base engine rejects uninstall cleanly
     base_resp = client.post("/api/engines/rapidocr-v6/uninstall")
     assert base_resp.status_code in {400, 422, 500} or base_resp.json().get("ok") is not True
+
+
+def test_v399_per_page_ocr_keep_engine_loaded_and_memory_release(client, monkeypatch):
+    import comic_studio.main as main_mod
+    import comic_studio.ocr as ocr_mod
+    from comic_studio.ocr import EngineRegistry
+
+    project, item1 = make_project(client)
+    pid = project["id"]
+    jbuf = io.BytesIO()
+    Image.new("RGB", (300, 220), "white").save(jbuf, format="JPEG")
+    up2 = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("page2.jpg", jbuf.getvalue(), "image/jpeg"))],
+    )
+    assert up2.status_code == 200
+    item2 = up2.json()["images"][1]
+
+    trim_calls: list[str] = []
+    unload_calls: list[str | None] = []
+    orig_trim = main_mod.trim_process_memory
+    orig_unload_all = EngineRegistry.unload_all
+
+    def spy_trim():
+        trim_calls.append("trim")
+        return orig_trim()
+
+    def spy_unload_all(self, except_engine_id=None):
+        unload_calls.append(except_engine_id)
+        return orig_unload_all(self, except_engine_id)
+
+    monkeypatch.setattr(main_mod, "trim_process_memory", spy_trim)
+    monkeypatch.setattr(EngineRegistry, "unload_all", spy_unload_all)
+    monkeypatch.setattr(
+        ocr_mod,
+        "recognize_image",
+        lambda engine, image, *a, **kw: [{"text": "HELLO", "confidence": 0.96, "polygon": [[10, 10], [90, 10], [90, 36], [10, 36]]}],
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "recognize_image",
+        lambda engine, image, *a, **kw: [{"text": "HELLO", "confidence": 0.96, "polygon": [[10, 10], [90, 10], [90, 36], [10, 36]]}],
+    )
+
+    # 1. Uncropped JPEG /content?cropped=true streams original JPEG directly without transcoding to PNG in RAM
+    uncropped_res = client.get(f"/api/projects/{pid}/images/{item2['id']}/content?cropped=true")
+    assert uncropped_res.status_code == 200
+    assert uncropped_res.content[:3] == b"\xff\xd8\xff"
+
+    # 2. Page 1 OCR with keep_engine_loaded=True trims memory WITHOUT calling unload_all(None) at end
+    unload_calls.clear()
+    trim_calls.clear()
+    r1 = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={"image_ids": [item1["id"]], "engine": "rapidocr-v6", "language": "eng", "keep_engine_loaded": True},
+    )
+    assert r1.status_code == 200
+    assert unload_calls == ["rapidocr-v6"]  # pre-run unload of other engines only; active engine kept warm!
+    assert len(trim_calls) >= 1
+
+    # 3. Saving rendered PNG for page 1 immediately releases RAM via trim_process_memory()
+    trim_before_render = len(trim_calls)
+    r_up = client.post(
+        f"/api/projects/{pid}/images/{item1['id']}/rendered",
+        content=png_bytes((item1["width"], item1["height"]), "white"),
+        headers={"Content-Type": "image/png"},
+    )
+    assert r_up.status_code == 200
+    assert len(trim_calls) >= trim_before_render + 1
+
+    # 4. Final page OCR with keep_engine_loaded=False calls full unload_all(None) at end
+    unload_calls.clear()
+    r2 = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={"image_ids": [item2["id"]], "engine": "rapidocr-v6", "language": "eng", "keep_engine_loaded": False},
+    )
+    assert r2.status_code == 200
+    assert None in unload_calls
+
 
 
 

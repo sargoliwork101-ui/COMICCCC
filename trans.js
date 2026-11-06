@@ -23,9 +23,14 @@ async function renderEdited(it) {
   const w = bmp.width, h = bmp.height;
   let cv;
   try { cv = Typeset.render(bmp, it.ocr.blocks); } finally { bmp.close(); }
-  const blob = await canvasToBlob(cv, 'image/png');
-  cv.width = cv.height = 0;
-  const u8 = new Uint8Array(await blob.arrayBuffer());
+  let blob;
+  try {
+    blob = await canvasToBlob(cv, 'image/png');
+  } finally {
+    cv.width = cv.height = 0;
+    cv = null;
+  }
+  const u8 = new Uint8Array(await blob.slice(0, 64).arrayBuffer());
   it.edited = { i: it.i, blob, info: sniff(u8), w, h };
 }
 
@@ -164,6 +169,11 @@ async function runTranslate() {
     console.error(e);
     setStatus('خطا در راه‌اندازی تشخیص متن: ' + (e && e.message ? e.message : e));
   } finally {
+    if (TR.worker) {
+      try { await TR.worker.terminate(); } catch {}
+      TR.worker = null;
+      TR.lang = null;
+    }
     building = false;
     setJobHint(false);
     setTaskTitle();

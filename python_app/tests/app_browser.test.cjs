@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v3.98: Verify version badge ۳.۹۸, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, clean name-only dropdowns, menu model deletion, and zero idle CPU polling/animations
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۸ · Python', 'header shows version ۳.۹۸');
+      // v3.85–v3.99: Verify version badge ۳.۹۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, clean name-only dropdowns, menu model deletion, per-page RAM release, and zero idle CPU polling/animations
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۹ · Python', 'header shows version ۳.۹۹');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2682,7 +2682,48 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(v398MenuCheck.allCountAfterReset, 14, 'resetting installed-only filter shows all 14 OCR models');
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.getElementById('modelsDialog').open);
-      console.log('PASS: v3.81–v3.98 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, clean dropdowns, menu model deletion, Total Download Size, and Zero Idle CPU optimizations');
+
+      // v3.99: Verify Typeset.sampleBg histogram median accuracy, Typeset.releaseCaches(), and renderGrid() <img> reuse in real Chromium
+      const v399ChromiumCheck = await page.evaluate((realProj) => {
+        const cv = document.createElement('canvas');
+        cv.width = 80; cv.height = 80;
+        const ctx = cv.getContext('2d');
+        ctx.fillStyle = 'rgb(242, 238, 230)';
+        ctx.fillRect(0, 0, 80, 80);
+        const sampled = Typeset.sampleBg(ctx, { x0: 16, y0: 16, x1: 64, y1: 64 }, 80, 80);
+        cv.width = cv.height = 0;
+        Typeset.releaseCaches();
+        const measureBoxEmpty = !document.querySelector('[data-typeset-box]')?.childNodes?.length;
+        const prevId = state.project.id;
+        const prevImgs = [...state.project.images];
+        let reusedDomImg = false;
+        let clearedOnRemove = false;
+        try {
+          state.project.id = realProj.id;
+          state.project.images = [JSON.parse(JSON.stringify(realProj.images[0]))];
+          renderGrid();
+          const firstImg = document.querySelector('#grid .item .tw > img');
+          renderGrid();
+          const secondImg = document.querySelector('#grid .item .tw > img');
+          reusedDomImg = Boolean(firstImg) && firstImg === secondImg;
+          state.project.images = [];
+          renderGrid();
+          clearedOnRemove = !firstImg?.getAttribute('src');
+        } finally {
+          state.project.id = prevId;
+          state.project.images = prevImgs;
+          renderGrid();
+        }
+        return {
+          sampledOk: sampled.r === 242 && sampled.g === 238 && sampled.b === 230 && sampled.uniform === true,
+          measureBoxEmpty,
+          reusedDomImg: reusedDomImg && clearedOnRemove,
+        };
+      }, backupProject);
+      assert.equal(v399ChromiumCheck.sampledOk, true, 'Typeset.sampleBg 256-bin histogram produces exact RGB median');
+      assert.equal(v399ChromiumCheck.measureBoxEmpty, true, 'Typeset.releaseCaches() empties offscreen DOM measurement box');
+      assert.equal(v399ChromiumCheck.reusedDomImg, true, 'renderGrid() reuses unchanged <img> DOM node without re-decoding');
+      console.log('PASS: v3.81–v3.99 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, clean dropdowns, menu model deletion, per-page RAM release, and Zero Idle CPU optimizations');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

@@ -2873,6 +2873,35 @@ def test_v398_uninstall_isolated_and_standard_engines_frees_disk_and_resets_stat
     assert st4["tesseract"]["canUninstall"] is False
 
 
+def test_v399_worker_memory_trim_and_onnx_session_options():
+    import os
+    import tempfile
+    from pathlib import Path
+    import comic_studio.ocr_managed as managed
+    import comic_studio.ocr_worker as worker_mod
+
+    # 1. Both trim_process_memory and _release_worker_caches execute cleanly and configure Paddle eager deletion
+    managed.trim_process_memory()
+    worker_mod._release_worker_caches()
+
+    with tempfile.TemporaryDirectory() as td:
+        worker_mod._configure_cache_dirs(Path(td))
+    assert os.environ.get("FLAGS_eager_delete_tensor_gb") == "0.0"
+    assert os.environ.get("FLAGS_fast_eager_deletion_mode") == "1"
+
+    # 2. RapidEngine._create disables both ONNX CPU arena and variable-shape mem_pattern caching
+    from comic_studio.ocr import RapidEngine
+    eng = RapidEngine("rapidocr-v6", "v6")
+    try:
+        inst = eng._get("eng", allow_download=False)
+        from rapidocr.inference_engine.onnxruntime.main import OrtInferSession
+        assert getattr(OrtInferSession._init_sess_opts, "_comic_no_spin", False) is True
+        _ = inst
+    finally:
+        eng.unload()
+
+
+
 
 
 

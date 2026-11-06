@@ -28,11 +28,11 @@ from starlette.background import BackgroundTask
 from . import APP_NAME, APP_VERSION
 from .activity import ActivityLog, reporting
 from .backup import BackupError, make_backup, restore_backup
-from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, image_payload
+from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, crop_box, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
 from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
 from .ocr_managed import configure_native_runtime, iter_parallel_ordered, trim_process_memory
-from .paths import STATIC_DIR
+from .paths import STATIC_DIR, project_root
 from . import context_run, pending_results
 from .schemas import (
     AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest, OcrRequest, ProjectCreate,
@@ -438,32 +438,49 @@ def create_app() -> FastAPI:
     def image_content(project_id: str, image_id: str, edited: bool = False, cropped: bool = False) -> Response:
         try:
             if cropped:
-                item = store.image(project_id, image_id)
-                data, _, _, _ = image_payload(store, project_id, item, "png")
-                return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
-            path = store.image_path(project_id, image_id, edited)
+                item = store._image_meta(project_id, image_id)
+                if crop_box(item) is not None:
+                    data, _, _, _ = image_payload(store, project_id, item, "png")
+                    return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
+                edited_candidate = project_root(project_id) / "images" / f"{image_id}-edited.png"
+                path = edited_candidate if edited_candidate.exists() else store.image_path(project_id, image_id, False)
+            else:
+                path = store.image_path(project_id, image_id, edited)
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         return FileResponse(path, headers={"Cache-Control": "no-store"})
+
+    def _save_rendered_and_release(project_id: str, image_id: str, content: bytes) -> dict[str, Any]:
+        try:
+            return store.save_rendered(project_id, image_id, content)
+        finally:
+            del content
+            trim_process_memory()
 
     @app.post("/api/projects/{project_id}/images/{image_id}/rendered")
     async def save_rendered(project_id: str, image_id: str, request: Request) -> dict[str, Any]:
         content = await request.body()
         if not content:
             raise HTTPException(400, "تصویر رندرشده خالی است.")
+        payload = content
+        del content
         try:
-            return await run_in_threadpool(store.save_rendered, project_id, image_id, content)
+            return await run_in_threadpool(_save_rendered_and_release, project_id, image_id, payload)
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         except PermissionError as exc:
             raise HTTPException(503, "فایل پروژه موقتاً در حال ذخیره‌سازی است؛ چند لحظه بعد دوباره تلاش کنید.") from exc
         except Exception as exc:
             raise HTTPException(400, f"فایل PNG معتبر نیست: {exc}") from exc
+        finally:
+            payload = b""
 
     @app.post("/api/projects/{project_id}/images/{image_id}/revert")
     def revert_rendered(project_id: str, image_id: str) -> dict[str, Any]:
         try:
-            return store.revert_rendered(project_id, image_id)
+            result = store.revert_rendered(project_id, image_id)
+            trim_process_memory()
+            return result
         except KeyError as exc:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
 
@@ -756,6 +773,7 @@ def create_app() -> FastAPI:
             if hasattr(engine, "configure_batch") and total_targets > 1
             else contextlib.nullcontext(1)
         )
+        keep_loaded_ok = False
         try:
             from PIL import Image
 
@@ -779,6 +797,8 @@ def create_app() -> FastAPI:
                         finally:
                             image.close()
                         _apply_page_ocr_result(item, blocks, page_size, completed)
+                        if completed < total_targets:
+                            await run_in_threadpool(trim_process_memory)
                 else:
                     cancel_event = threading.Event()
 
@@ -806,6 +826,7 @@ def create_app() -> FastAPI:
                                 return blocks, page_size
                             finally:
                                 image.close()
+                                trim_process_memory()
 
                         for idx, item, outcome in iter_parallel_ordered(target_items, _ocr_single_page, max_workers=int(batch_workers)):
                             if cancel_event.is_set() or outcome is None:
@@ -845,11 +866,15 @@ def create_app() -> FastAPI:
                     raise PendingResultConflict(entry['id'], 'ocr')
                 merged = pending_results.resolve(store, project_id, entry['id'], view['revision'], {})
                 state = merged['project']
+            keep_loaded_ok = bool(values.keep_engine_loaded)
         except Exception as exc:
             activity.add(f"خواندن متن ناموفق بود: {exc}", "error")
             raise
         finally:
-            await run_in_threadpool(registry.unload_all)
+            if keep_loaded_ok:
+                await run_in_threadpool(trim_process_memory)
+            else:
+                await run_in_threadpool(registry.unload_all)
         activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
         return state
 
@@ -1154,8 +1179,11 @@ def create_app() -> FastAPI:
                     state = merged['project']; run = state[RUN_KEY]; affected = merged['affectedImageIds']; done = merged['done']
             if values.recovery_token: recoveries.pop(values.recovery_token, None)
             activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] == 'free' else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success', context_progress(run))
+            sent_payload = {'system': request.system, 'user': request.user_message(text), 'characters': request.character_count(text)}
+            if done or affected:
+                await run_in_threadpool(trim_process_memory)
             return {'project': state, 'done': done, 'affectedImageIds': affected, 'completed': run['completed'],
-                    'sent': {'system': request.system, 'user': request.user_message(text), 'characters': request.character_count(text)}}
+                    'sent': sent_payload}
 
     def prepare_context_text(values: ContextTextRequest) -> tuple[dict[str, Any], dict[str, Any], Any, list[dict[str, Any]]]:
         if values.provider not in {'free', 'openai', 'gemini', 'openrouter', 'avalai'}:
@@ -1440,6 +1468,8 @@ def create_app() -> FastAPI:
                     exc.args = (message + str(exc),)
             activity.add(f"ترجمه ناموفق بود: {exc}", "error")
             raise
+        finally:
+            await run_in_threadpool(trim_process_memory)
         if combined_free:
             activity.add(f"همهٔ {len(blocks)} متن OCR با هم و در یک درخواست free ترجمه و در کادرهای خودشان قرار گرفتند", "success", 1.0)
         elif values.provider == "free":

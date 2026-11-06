@@ -16,7 +16,7 @@ from typing import Any
 import pymupdf as fitz
 from PIL import Image
 
-from .ocr_managed import compute_worker_count, iter_parallel_ordered
+from .ocr_managed import compute_worker_count, iter_parallel_ordered, trim_process_memory
 from .paths import data_dir, project_root
 
 Image.MAX_IMAGE_PIXELS = 100_000_000
@@ -94,6 +94,7 @@ def read_json(path: Path, default: Any) -> Any:
 class ProjectStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._image_meta_cache: tuple[str, int, int, dict[str, dict[str, Any]]] | None = None
         (data_dir() / "projects").mkdir(parents=True, exist_ok=True)
 
     def create(self, name: str) -> dict[str, Any]:
@@ -156,7 +157,18 @@ class ProjectStore:
     def save(self, state: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             state["updatedAt"] = utc_now()
-            atomic_json(project_root(state["id"]) / "project.json", state)
+            path = project_root(state["id"]) / "project.json"
+            atomic_json(path, state)
+            try:
+                st = path.stat()
+                meta_map = {
+                    str(img["id"]): {k: v for k, v in img.items() if k != "blocks"}
+                    for img in state.get("images", [])
+                    if isinstance(img, dict) and img.get("id")
+                }
+                self._image_meta_cache = (str(state["id"]), st.st_mtime_ns, st.st_size, meta_map)
+            except OSError:
+                self._image_meta_cache = None
             return state
 
     def save_if_unchanged(self, state: dict[str, Any], expected_updated_at: str) -> dict[str, Any]:
@@ -208,6 +220,32 @@ class ProjectStore:
             current["images"] = merged
             return self.save(current)
 
+    def _image_meta(self, project_id: str, image_id: str) -> dict[str, Any]:
+        if not project_id.isascii() or not project_id.isalnum():
+            raise KeyError(project_id)
+        proj_json = project_root(project_id) / "project.json"
+        try:
+            st = proj_json.stat()
+        except FileNotFoundError as exc:
+            raise KeyError(project_id) from exc
+        cached = self._image_meta_cache
+        if cached is not None and cached[0] == project_id and cached[1] == st.st_mtime_ns and cached[2] == st.st_size:
+            hit = cached[3].get(image_id)
+            if hit is not None:
+                return dict(hit)
+            raise KeyError(image_id)
+        state = self.get(project_id)
+        meta_map = {
+            str(img["id"]): {k: v for k, v in img.items() if k != "blocks"}
+            for img in state.get("images", [])
+            if isinstance(img, dict) and img.get("id")
+        }
+        self._image_meta_cache = (project_id, st.st_mtime_ns, st.st_size, meta_map)
+        hit = meta_map.get(image_id)
+        if hit is not None:
+            return dict(hit)
+        raise KeyError(image_id)
+
     def image(self, project_id: str, image_id: str) -> dict[str, Any]:
         for item in self.get(project_id).get("images", []):
             if item["id"] == image_id:
@@ -215,7 +253,7 @@ class ProjectStore:
         raise KeyError(image_id)
 
     def image_path(self, project_id: str, image_id: str, edited: bool = False) -> Path:
-        item = self.image(project_id, image_id)
+        item = self._image_meta(project_id, image_id)
         path = project_root(project_id) / "images" / (f"{image_id}-edited.png" if edited else item["file"])
         if not path.exists():
             raise FileNotFoundError(path)
@@ -230,25 +268,25 @@ class ProjectStore:
             rendered_size = im.size
             im.verify()
         with self._lock:
-            item = self.image(project_id, image_id)
-            if rendered_size != (item["width"], item["height"]):
+            state = self.get(project_id)
+            target_item = next((item for item in state.get("images", []) if item["id"] == image_id), None)
+            if target_item is None:
+                raise KeyError(image_id)
+            if rendered_size != (target_item["width"], target_item["height"]):
                 raise ValueError("Rendered image dimensions do not match the source")
             path = project_root(project_id) / "images" / f"{image_id}-edited.png"
             atomic_bytes(path, content)
-            state = self.get(project_id)
-            for item in state["images"]:
-                if item["id"] == image_id:
-                    item["edited"] = True
+            target_item["edited"] = True
             return self.save(state)
 
     def revert_rendered(self, project_id: str, image_id: str) -> dict[str, Any]:
         with self._lock:
-            self.image(project_id, image_id)
-            (project_root(project_id) / "images" / f"{image_id}-edited.png").unlink(missing_ok=True)
             state = self.get(project_id)
-            for item in state["images"]:
-                if item["id"] == image_id:
-                    item["edited"] = False
+            target_item = next((item for item in state.get("images", []) if item["id"] == image_id), None)
+            if target_item is None:
+                raise KeyError(image_id)
+            (project_root(project_id) / "images" / f"{image_id}-edited.png").unlink(missing_ok=True)
+            target_item["edited"] = False
             return self.save(state)
 
     @staticmethod
@@ -450,10 +488,12 @@ class ProjectStore:
 
         written_paths: list[Path] = []
         try:
-            for _, page_idx, entry in iter_parallel_ordered(list(range(page_count)), _render_one_page, max_workers=workers):
+            for step_idx, page_idx, entry in iter_parallel_ordered(list(range(page_count)), _render_one_page, max_workers=workers):
                 written_paths.append(slots[page_idx][2])
                 entry["order"] = self._next_order(state)
                 state["images"].append(entry)
+                if (step_idx + 1) % 16 == 0:
+                    trim_process_memory()
         except Exception:
             for _, _, slot_path in slots:
                 slot_path.unlink(missing_ok=True)
@@ -464,6 +504,7 @@ class ProjectStore:
                     doc.close()
                 except Exception:
                     pass
+            trim_process_memory()
 
     def _import_image(self, state: dict[str, Any], filename: str, content: bytes) -> None:
         if len(content) > 150 * 1024 * 1024:
@@ -559,4 +600,6 @@ class ProjectStore:
     def delete_project(self, project_id: str) -> None:
         with self._lock:
             self.get(project_id)  # validates the id and prevents deleting an arbitrary path
+            if self._image_meta_cache is not None and self._image_meta_cache[0] == project_id:
+                self._image_meta_cache = None
             shutil.rmtree(project_root(project_id))

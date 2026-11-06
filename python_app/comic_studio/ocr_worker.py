@@ -47,6 +47,9 @@ def _configure_cache_dirs(models_root: Path) -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     os.environ.setdefault("FLAGS_use_mkldnn", "1")
+    os.environ.setdefault("FLAGS_eager_delete_tensor_gb", "0.0")
+    os.environ.setdefault("FLAGS_fast_eager_deletion_mode", "1")
+    os.environ.setdefault("FLAGS_memory_fraction_of_eager_deletion", "1.0")
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
     os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
@@ -112,13 +115,16 @@ def _configure_torch_runtime(torch_mod: Any) -> str:
 
 
 def _release_worker_caches() -> None:
-    """Release transient CPU/GPU activation buffers after each recognized page."""
+    """Release transient CPU/GPU activation buffers and OS working-set pages after each recognized page."""
+    gc.collect()
     gc.collect()
     torch_mod = sys.modules.get("torch")
     if torch_mod is not None:
         try:
             if hasattr(torch_mod, "cuda") and torch_mod.cuda.is_available():
                 torch_mod.cuda.empty_cache()
+                if hasattr(torch_mod.cuda, "ipc_collect"):
+                    torch_mod.cuda.ipc_collect()
         except Exception:
             pass
         try:
@@ -135,13 +141,27 @@ def _release_worker_caches() -> None:
                     paddle_mod.device.cuda.empty_cache()
         except Exception:
             pass
-    if sys.platform.startswith("linux"):
-        try:
+    try:
+        if os.name == "nt":
+            try:
+                msvcrt = getattr(ctypes, "cdll", None)
+                if msvcrt is not None and hasattr(msvcrt, "msvcrt") and hasattr(msvcrt.msvcrt, "_heapmin"):
+                    msvcrt.msvcrt._heapmin()
+            except Exception:
+                pass
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            try:
+                ctypes.windll.psapi.EmptyWorkingSet(handle)
+            except Exception:
+                ctypes.windll.kernel32.SetProcessWorkingSetSize(
+                    handle, ctypes.c_size_t(-1), ctypes.c_size_t(-1)
+                )
+        elif sys.platform.startswith("linux"):
             libc = ctypes.CDLL("libc.so.6")
             if hasattr(libc, "malloc_trim"):
                 libc.malloc_trim(0)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 _HEADING_LABELS = {
@@ -658,6 +678,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
                 by1 = float(bbox[3]) * scale_y
                 poly = _clamp_polygon(_rect_polygon(bx0, by0, bx1, by1), width, height)
                 lines.append({"text": content, "confidence": max(0.0, min(1.0, score)), "polygon": poly, **hints})
+        del pages
         return lines
 
 
@@ -1696,7 +1717,7 @@ class _TransformersRegionAdapter(_BaseAdapter):
         try:
             boxes = _default_regions(width, height, regions)
             lines: list[dict[str, Any]] = []
-            for x0, y0, x1, y1 in boxes:
+            for idx, (x0, y0, x1, y1) in enumerate(boxes):
                 crop = rgb.crop((int(x0), int(y0), int(x1), int(y1)))
                 try:
                     text = self._infer_crop(crop)
@@ -1705,6 +1726,8 @@ class _TransformersRegionAdapter(_BaseAdapter):
                 if text:
                     poly = _clamp_polygon(_rect_polygon(x0, y0, x1, y1), width, height)
                     lines.append({"text": text, "confidence": 0.88, "polygon": poly})
+                if (idx + 1) % 4 == 0 and (idx + 1) < len(boxes):
+                    _release_worker_caches()
             return lines
         finally:
             rgb.close()
@@ -2185,16 +2208,24 @@ class _HezarOcrAdapter(_BaseAdapter):
         with Image.open(image_path) as im:
             rgb = im.convert("RGB")
             width, height = rgb.size
+        grad_ctx: Any = contextlib.nullcontext
+        torch_mod = sys.modules.get("torch")
+        if torch_mod is None:
+            with contextlib.suppress(Exception):
+                import torch as torch_mod  # type: ignore[no-redef]
+        if torch_mod is not None:
+            grad_ctx = getattr(torch_mod, "inference_mode", None) or getattr(torch_mod, "no_grad", None) or contextlib.nullcontext
         try:
             detector, recognizer = self._ensure_loaded()
-            try:
-                det_outputs = detector.predict(rgb)
-            except Exception:
-                if self._device != "cpu":
-                    detector, recognizer = self._ensure_loaded(force_cpu=True)
+            with grad_ctx():
+                try:
                     det_outputs = detector.predict(rgb)
-                else:
-                    raise
+                except Exception:
+                    if self._device != "cpu":
+                        detector, recognizer = self._ensure_loaded(force_cpu=True)
+                        det_outputs = detector.predict(rgb)
+                    else:
+                        raise
 
             first_det = det_outputs[0] if isinstance(det_outputs, (list, tuple)) and det_outputs else det_outputs
             raw_boxes = (
@@ -2202,8 +2233,9 @@ class _HezarOcrAdapter(_BaseAdapter):
                 if isinstance(first_det, dict)
                 else getattr(first_det, "boxes", [])
             ) or []
+            del det_outputs, first_det
 
-            crop_entries: list[tuple[Any, list[list[float]]]] = []
+            crop_specs: list[tuple[tuple[int, int, int, int], list[list[float]]]] = []
             for raw_box in raw_boxes:
                 if not isinstance(raw_box, (list, tuple)) or len(raw_box) < 4:
                     continue
@@ -2221,40 +2253,41 @@ class _HezarOcrAdapter(_BaseAdapter):
                 if cx1 - cx0 < 4 or cy1 - cy0 < 4:
                     continue
                 poly = _clamp_polygon(_rect_polygon(bx, by, bx + bw, by + bh), width, height)
-                crop_entries.append((rgb.crop((cx0, cy0, cx1, cy1)), poly))
+                crop_specs.append(((cx0, cy0, cx1, cy1), poly))
 
-            if not crop_entries and regions:
+            if not crop_specs and regions:
                 for rx0, ry0, rx1, ry1 in _default_regions(width, height, regions):
                     if rx1 - rx0 >= 4 and ry1 - ry0 >= 4:
                         poly = _clamp_polygon(_rect_polygon(rx0, ry0, rx1, ry1), width, height)
-                        crop_entries.append((rgb.crop((int(rx0), int(ry0), int(rx1), int(ry1))), poly))
+                        crop_specs.append(((int(rx0), int(ry0), int(rx1), int(ry1)), poly))
 
             lines: list[dict[str, Any]] = []
-            try:
-                batch_size = 16
-                for start in range(0, len(crop_entries), batch_size):
-                    batch = crop_entries[start:start + batch_size]
-                    batch_imgs = [item[0] for item in batch]
-                    try:
-                        preds = recognizer.predict(batch_imgs)
-                    except Exception:
+            batch_size = 16
+            for start in range(0, len(crop_specs), batch_size):
+                batch_specs = crop_specs[start:start + batch_size]
+                batch_imgs = [rgb.crop(box_coords) for box_coords, _ in batch_specs]
+                try:
+                    with grad_ctx():
                         try:
-                            preds = [recognizer.predict(img) for img in batch_imgs]
+                            preds = recognizer.predict(batch_imgs)
                         except Exception:
-                            if self._device != "cpu":
-                                _, recognizer = self._ensure_loaded(force_cpu=True)
+                            try:
                                 preds = [recognizer.predict(img) for img in batch_imgs]
-                            else:
-                                raise
+                            except Exception:
+                                if self._device != "cpu":
+                                    _, recognizer = self._ensure_loaded(force_cpu=True)
+                                    preds = [recognizer.predict(img) for img in batch_imgs]
+                                else:
+                                    raise
                     if not isinstance(preds, (list, tuple)):
                         preds = [preds]
-                    for (_, poly), pred in zip(batch, preds):
+                    for (_, poly), pred in zip(batch_specs, preds):
                         txt = _strip_markup(self._extract_text(pred))
                         if txt:
                             lines.append({"text": txt, "confidence": 0.9, "polygon": poly})
-            finally:
-                for crop_img, _ in crop_entries:
-                    crop_img.close()
+                finally:
+                    for crop_img in batch_imgs:
+                        crop_img.close()
             return lines
         finally:
             rgb.close()
