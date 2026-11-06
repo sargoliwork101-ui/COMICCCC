@@ -1093,6 +1093,94 @@ def engine_meta(engine_id: str) -> dict[str, Any]:
     return ISOLATED_ENGINE_SPECS.get(engine_id) or BUILTIN_ENGINE_META.get(engine_id, {})
 
 
+# Realistic component download sizes (GB) so every auto-install/download button can
+# announce the exact total download footprint on the user's current OS/GPU & install state:
+#   (weights_gb, runtime_cpu_gb, runtime_nvidia_gb, per_extra_language_gb)
+_ENGINE_DOWNLOAD_COMPONENTS_GB: dict[str, tuple[float, float, float, float]] = {
+    "rapidocr-v6": (0.015, 0.070, 0.090, 0.0),
+    "rapidocr-v5": (0.020, 0.070, 0.090, 0.018),
+    "easyocr": (0.150, 0.500, 2.700, 0.070),
+    "tesseract": (0.015, 0.075, 0.075, 0.015),
+    "hezar-ocr": (0.250, 0.500, 2.750, 0.0),
+    "paddleocr-vl-1-6": (1.900, 0.550, 1.850, 0.0),
+    "surya": (1.950, 0.650, 0.750, 0.0),
+    "mineru-2-5-pro": (1.350, 0.550, 0.550, 0.0),
+    "got-ocr-2": (1.450, 0.550, 2.800, 0.0),
+    "glm-ocr": (1.900, 0.600, 2.850, 0.0),
+    "dots-ocr": (6.200, 0.600, 2.850, 0.0),
+    "deepseek-ocr-2": (6.800, 0.600, 2.850, 0.0),
+    "olmocr": (15.500, 0.600, 2.850, 0.0),
+    "hunyuan-ocr": (2.200, 0.600, 2.850, 0.0),
+}
+
+
+def format_download_size_fa(size_gb: float) -> str:
+    val = max(0.0, float(size_gb or 0.0))
+    if val <= 0.001:
+        return "کمتر از ۵ مگابایت"
+    if val < 1.0:
+        mb = max(5, int(round(val * 1024 / 5.0) * 5))
+        return f"~{mb} مگابایت"
+    rounded = round(val, 2 if val < 2.0 else 1)
+    text = f"{rounded:g}"
+    return f"~{text} گیگابایت"
+
+
+def compute_engine_download_estimate(
+    engine_id: str,
+    *,
+    runtime_installed: bool = False,
+    model_ready: bool = False,
+    nominal_size_gb: float = 0.0,
+    hw: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    hw_info = hw or inspect_hardware()
+    has_nvidia = bool(hw_info.get("hasNvidiaGpu"))
+    has_gpu = bool(hw_info.get("hasGpu", has_nvidia))
+    comp = _ENGINE_DOWNLOAD_COMPONENTS_GB.get(engine_id)
+    if comp is not None:
+        weights_gb, rt_cpu_gb, rt_nv_gb, per_lang_gb = comp
+    else:
+        meta = engine_meta(engine_id)
+        weights_gb = max(0.02, float(nominal_size_gb or meta.get("download_size_gb") or 0.1))
+        needs_torch = bool(meta.get("needs_torch"))
+        rt_cpu_gb = 0.55 if needs_torch else 0.10
+        rt_nv_gb = 2.80 if needs_torch else rt_cpu_gb
+        per_lang_gb = 0.0
+
+    runtime_gb = rt_nv_gb if has_nvidia else rt_cpu_gb
+    if engine_id in ("rapidocr-v6", "rapidocr-v5") and has_nvidia and sys.platform.startswith("linux"):
+        runtime_gb = 0.220
+    elif engine_id in ("rapidocr-v6", "rapidocr-v5") and has_gpu and os.name == "nt":
+        runtime_gb = 0.090
+    elif engine_id == "easyocr" and not runtime_installed:
+        try:
+            import importlib.util as _ilu
+            if _ilu.find_spec("torch") is not None:
+                runtime_gb = 0.180
+        except Exception:
+            pass
+    elif engine_id == "tesseract" and os.name != "nt":
+        runtime_gb = 0.050
+
+    full_gb = round(runtime_gb + weights_gb, 3)
+    if not runtime_installed:
+        remaining_gb = full_gb
+    elif not model_ready:
+        remaining_gb = round(weights_gb, 3)
+    else:
+        remaining_gb = round(per_lang_gb, 3)
+
+    return {
+        "weightsDownloadGb": round(weights_gb, 3),
+        "runtimeDownloadGb": round(runtime_gb, 3),
+        "perLanguageDownloadGb": round(per_lang_gb, 3),
+        "fullDownloadSizeGb": full_gb,
+        "totalDownloadGb": remaining_gb if remaining_gb > 0 else full_gb,
+        "remainingDownloadGb": remaining_gb,
+    }
+
+
 def evaluate_engine_hardware(engine_id: str, hw: dict[str, Any] | None = None) -> dict[str, Any]:
     hw_info = hw or inspect_hardware()
     meta = engine_meta(engine_id)
@@ -2501,7 +2589,13 @@ class IsolatedOcrEngine:
         self._cancel_install.clear()
         self.close()
         try:
-            emit(f"شروع آماده‌سازی خودکار مدل {self.id}…", progress=0.05)
+            dl_est = compute_engine_download_estimate(
+                self.id,
+                runtime_installed=self.runtime_installed,
+                model_ready=self.model_ready,
+            )
+            dl_label = format_download_size_fa(dl_est["totalDownloadGb"])
+            emit(f"شروع آماده‌سازی خودکار مدل {self.id} (کل حجم دانلود: {dl_label})…", progress=0.05)
             if not self.runtime_installed:
                 self._ensure_isolated_venv(upgrade=False)
             else:

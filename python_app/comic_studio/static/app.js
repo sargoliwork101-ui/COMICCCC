@@ -1559,6 +1559,40 @@ function pickBestEngineForLanguage(language, pageMode = 'comic', preferredEngine
   });
   return ranked[0].id;
 }
+function formatSizeGbFa(sizeGb) {
+  const val = Number(sizeGb);
+  if (!Number.isFinite(val) || val <= 0.001) return '';
+  if (val < 1) {
+    const mb = Math.max(5, Math.round((val * 1024) / 5) * 5);
+    return `~${mb} مگابایت`;
+  }
+  const rounded = Number(val.toFixed(val < 2 ? 2 : 1));
+  return `~${rounded} گیگابایت`;
+}
+function engineDownloadSummary(engine, lang = '') {
+  if (!engine) return { activeGb: 0, fullGb: 0, totalLabel: '', fullLabel: '', detailLabel: '' };
+  const nominalGb = Number(engine.downloadSizeGb ?? 0);
+  const fullGb = Number(engine.fullDownloadSizeGb ?? engine.totalDownloadGb ?? nominalGb ?? 0);
+  const runtimeGb = Number(engine.runtimeDownloadGb ?? 0);
+  const weightsGb = Number(engine.weightsDownloadGb ?? nominalGb ?? 0);
+  const perLangGb = Number(engine.perLanguageDownloadGb ?? 0);
+  const langReady = lang
+    ? Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(lang))
+    : Boolean(engine.runtimeInstalled && engine.modelReady);
+  let activeGb = fullGb;
+  if (engine.runtimeInstalled && !langReady) {
+    activeGb = (engine.modelReady && perLangGb > 0) ? perLangGb : (weightsGb || fullGb);
+  }
+  const totalLabel = formatSizeGbFa(activeGb) || formatSizeGbFa(fullGb);
+  const fullLabel = formatSizeGbFa(fullGb) || totalLabel;
+  let detailLabel = totalLabel;
+  if (!engine.runtimeInstalled && runtimeGb > 0 && weightsGb > 0) {
+    detailLabel = `${totalLabel} (پیش‌نیازها: ${formatSizeGbFa(runtimeGb)} + فایل‌های مدل: ${formatSizeGbFa(weightsGb)})`;
+  } else if (engine.runtimeInstalled && !langReady && totalLabel) {
+    detailLabel = `${totalLabel} (فقط فایل مدل/زبان؛ پیش‌نیازها قبلاً نصب شده)`;
+  }
+  return { activeGb, fullGb, totalLabel, fullLabel, detailLabel };
+}
 function updateEngineOptions(preferredEngine = '') {
   const select = $('ocrEngine'); if (!select) return;
   const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
@@ -1569,6 +1603,9 @@ function updateEngineOptions(preferredEngine = '') {
     const suit = engineSuitability(engine, pageMode, language);
     const execMeta = resolveEngineExecMeta(engine);
     const supported = (engine.languages || []).includes(language);
+    const langReady = Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(language));
+    const dl = engineDownloadSummary(engine, language);
+    const sizeHint = dl.totalLabel ? ` (کل حجم دانلود: ${dl.totalLabel})` : '';
     const option = document.createElement('option');
     option.value = engine.id;
     option.className = `ocr-opt-${suit.tier}`;
@@ -1576,11 +1613,13 @@ function updateEngineOptions(preferredEngine = '') {
     option.dataset.executionMode = execMeta.mode;
     const suffix = !supported
       ? ' · فاقد پشتیبانی از این زبان'
-      : engine.updateAvailable
-        ? ' · نسخهٔ جدید'
-        : engine.runtimeInstalled
-          ? ''
-          : ' · نیازمند نصب خودکار';
+      : !engine.runtimeInstalled
+        ? ` · نیازمند نصب خودکار${sizeHint}`
+        : !langReady
+          ? ` · نیازمند دانلود زبان${sizeHint}`
+          : engine.updateAvailable
+            ? ' · نسخهٔ جدید'
+            : '';
     option.textContent = `${suit.icon} ${engine.name} — ${suit.short} · ${execMeta.short}${suffix}`;
     select.appendChild(option);
   });
@@ -1601,19 +1640,32 @@ function updateOcrEngineStatus() {
     [...select.options].forEach((opt) => {
       const eng = state.engines.find((e) => e.id === opt.value);
       if (!eng) return;
-      const suit = engineSuitability(eng, pageMode, $('ocrLanguage').value);
+      const curLang = $('ocrLanguage').value;
+      const suit = engineSuitability(eng, pageMode, curLang);
       const engExec = resolveEngineExecMeta(eng);
-      const supported = (eng.languages || []).includes($('ocrLanguage').value);
+      const supported = (eng.languages || []).includes(curLang);
+      const engLangReady = Boolean(eng.runtimeInstalled && (eng.readyLanguages || []).includes(curLang));
+      const engDl = engineDownloadSummary(eng, curLang);
+      const engSizeHint = engDl.totalLabel ? ` (کل حجم دانلود: ${engDl.totalLabel})` : '';
       opt.className = `ocr-opt-${suit.tier}`;
       opt.dataset.suitability = suit.tier;
       opt.dataset.executionMode = engExec.mode;
-      const suffix = !supported ? ' · فاقد پشتیبانی از این زبان' : eng.updateAvailable ? ' · نسخهٔ جدید' : eng.runtimeInstalled ? '' : ' · نیازمند نصب خودکار';
+      const suffix = !supported
+        ? ' · فاقد پشتیبانی از این زبان'
+        : !eng.runtimeInstalled
+          ? ` · نیازمند نصب خودکار${engSizeHint}`
+          : !engLangReady
+            ? ` · نیازمند دانلود زبان${engSizeHint}`
+            : eng.updateAvailable
+              ? ' · نسخهٔ جدید'
+              : '';
       opt.textContent = `${suit.icon} ${eng.name} — ${suit.short} · ${engExec.short}${suffix}`;
     });
   }
   const lang = $('ocrLanguage').value;
   const activeSuit = engineSuitability(engine, pageMode, lang);
   const activeExec = resolveEngineExecMeta(engine);
+  const dl = engineDownloadSummary(engine, lang);
   applyExecBadgeElement($('ocrExecBadge'), activeExec.mode, activeExec.headerBadge);
   select.dataset.suitability = activeSuit.tier;
   select.dataset.executionMode = activeExec.mode;
@@ -1621,11 +1673,12 @@ function updateOcrEngineStatus() {
   const langReady = Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(lang));
   const versionLabel = engine.installedVersion ? ` (نسخهٔ ${engine.installedVersion})` : '';
   const suitPrefix = `${activeExec.statusPrefix} · ${activeSuit.reason ? `${activeSuit.icon} عملکرد در «${langLabel} + ${PAGE_MODE_LABELS[pageMode] || pageMode}»: ${activeSuit.reason} · ` : ''}`;
+  const sizeSentence = dl.detailLabel ? ` کل حجم دانلود خودکار: ${dl.detailLabel}.` : '';
   let statusText = engine.runtimeInstalled
     ? (langReady
       ? `${suitPrefix}وضعیت: آمادهٔ اجرا روی همین کامپیوتر${versionLabel}.`
-      : `${suitPrefix}ابزار اجرا نصب است، اما فایل زبان انتخاب‌شده (${langLabel}) هنوز دانلود نشده است.`)
-    : `${suitPrefix}این مدل هنوز روی سیستم شما نصب نشده است؛ با زدن دکمهٔ زیر، نصب و دانلود آن کاملاً خودکار انجام می‌شود.`;
+      : `${suitPrefix}ابزار اجرا نصب است، اما فایل زبان انتخاب‌شده (${langLabel}) هنوز دانلود نشده است.${sizeSentence}`)
+    : `${suitPrefix}این مدل هنوز روی سیستم شما نصب نشده است؛ با زدن دکمهٔ زیر، نصب و دانلود آن کاملاً خودکار انجام می‌شود.${sizeSentence}`;
   if (engine.updateAvailable) {
     statusText += ` · ${engine.updateSummary || 'نسخهٔ جدید برای این مدل منتشر شده است.'}`;
   }
@@ -1636,7 +1689,10 @@ function updateOcrEngineStatus() {
   if (quickWrap && quickPrep && quickUpd) {
     const needPrep = !langReady;
     const hasUpd = Boolean(engine.updateAvailable);
-    quickPrep.textContent = engine.runtimeInstalled ? `دانلود خودکار فایل زبان (${lang})` : 'نصب و دانلود خودکار همین مدل';
+    const btnSizeSuffix = dl.totalLabel ? ` (کل حجم دانلود: ${dl.totalLabel})` : '';
+    quickPrep.textContent = engine.runtimeInstalled
+      ? `دانلود خودکار فایل زبان (${lang})${btnSizeSuffix}`
+      : `نصب و دانلود خودکار همین مدل${btnSizeSuffix}`;
     quickPrep.disabled = Boolean(state.modelBusy || ocrRunning);
     quickUpd.textContent = engine.latestVersion ? `به‌روزرسانی به نسخهٔ ${engine.latestVersion}` : 'به‌روزرسانی به نسخهٔ جدید';
     quickUpd.disabled = Boolean(state.modelBusy || ocrRunning);
@@ -2739,14 +2795,16 @@ function syncEngineUpdateUi() {
   }
 }
 
-async function confirmHardwareIfNeeded(engine, hwOverride = null) {
+async function confirmHardwareIfNeeded(engine, hwOverride = null, language = '') {
   const hw = hwOverride || engine.hardwareCheck;
   if (!hw || hw.compatible !== false) return { ok: true, force: false };
+  const dl = engineDownloadSummary(engine, language);
+  const sizeNotice = dl.detailLabel ? `\n\n📦 کل حجم دانلود خودکار روی این سیستم: ${dl.detailLabel}` : '';
   const warnings = Array.isArray(hw.warnings) && hw.warnings.length
     ? hw.warnings.join('\n\n')
     : `مدل «${engine.name}» به سخت‌افزار قوی‌تری نسبت به سیستم فعلی نیاز دارد.`;
   const confirmed = await appConfirm(
-    `${warnings}\n\nآیا با وجود این محدودیت سخت‌افزاری، باز هم مایل به ادامهٔ نصب و دانلود خودکار این مدل هستید؟`,
+    `${warnings}${sizeNotice}\n\nآیا با وجود این محدودیت سخت‌افزاری، باز هم مایل به ادامهٔ نصب و دانلود خودکار این مدل هستید؟`,
     {
       title: `هشدار پیش‌نیاز سخت‌افزاری — ${engine.name}`,
       hint: 'پیشنهاد می‌شود روی سیستم‌های بدون کارت گرافیک NVIDIA از موتورهای سریع (PP-OCR، EasyOCR، Tesseract) یا مدل‌های سازگار با CPU استفاده کنید.',
@@ -2798,8 +2856,9 @@ function renderModels() {
       const supported = (engine.languages || []).includes(language);
       const effectivePrepareLang = supported ? language : (engine.languages?.[0] || 'eng');
       const ready = supported
-        ? (engine.readyLanguages || []).includes(language)
+        ? Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(language))
         : Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(effectivePrepareLang));
+      const dl = engineDownloadSummary(engine, effectivePrepareLang);
       if (ready && supported) {
         const chip = document.createElement('span'); chip.className = 'engine-chip is-ready'; chip.textContent = 'آمادهٔ استفاده'; badges.appendChild(chip);
       }
@@ -2820,7 +2879,9 @@ function renderModels() {
       }
       head.append(titleEl, badges);
       const family = document.createElement('div'); family.className = 'hint';
-      family.textContent = engine.downloadSizeGb ? `${engine.family} · حجم تقریبی: ${engine.downloadSizeGb} گیگابایت` : engine.family;
+      family.textContent = dl.fullLabel
+        ? `${engine.family} · کل حجم دانلود کامل روی این سیستم: ${dl.fullLabel}`
+        : engine.family;
       const description = document.createElement('p'); description.textContent = engine.description;
       const suitReason = !external && suit.reason ? (() => { const el = document.createElement('div'); el.className = 'engine-suit-reason'; el.textContent = `عملکرد در «${langLabel} + ${PAGE_MODE_LABELS[modelsMode] || modelsMode}»: ${suit.reason}`; return el; })() : null;
       const status = document.createElement('div'); status.className = 'engine-status';
@@ -2829,20 +2890,20 @@ function renderModels() {
       if (external) {
         status.textContent = 'اجرای جداگانه · آداپتور مستقیم OCR کمیک ندارد';
         const requirements = document.createElement('div'); requirements.className = 'engine-limit'; requirements.textContent = engine.requirements || '';
-        const limitations = document.createElement('div'); limitations.className = 'engine-limit'; limitations.textContent = engine.limitations || '';
+        const limitations = document.createElement('div'); limitations.textContent = engine.limitations || '';
         const buttons = document.createElement('div'); buttons.className = 'card-buttons';
         const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'دانلود / راهنمای رسمی';
         buttons.appendChild(guide); card.append(requirements, limitations, buttons);
       } else {
         status.textContent = state.modelBusy === engine.id
-          ? 'در حال نصب خودکار بسته‌ها و دانلود مدل؛ لطفاً صبر کنید…'
+          ? `در حال نصب خودکار بسته‌ها و دانلود مدل${dl.totalLabel ? ` (کل حجم دانلود: ${dl.totalLabel})` : ''}؛ لطفاً صبر کنید…`
           : !supported
-            ? `این موتور زبان «${langLabel}» را پشتیبانی نمی‌کند (زبان‌های مورد پشتیبانی: ${(engine.languages || []).map((l) => OCR_LANGUAGE_LABELS[l] || l).join('، ')}).`
+            ? `این موتور زبان «${langLabel}» را پشتیبانی نمی‌کند (زبان‌های مورد پشتیبانی: ${(engine.languages || []).map((l) => OCR_LANGUAGE_LABELS[l] || l).join('، ')}).${!ready && dl.detailLabel ? ` کل حجم دانلود خودکار: ${dl.detailLabel}.` : ''}`
             : !engine.runtimeInstalled
-              ? 'آمادهٔ نصب خودکار با یک کلیک (بدون نیاز به نصب دستی).'
+              ? `آمادهٔ نصب خودکار با یک کلیک · کل حجم دانلود خودکار: ${dl.detailLabel || 'محاسبهٔ خودکار'}.`
               : ready
                 ? 'مدل زبان انتخاب‌شده آماده و آفلاین است.'
-                : 'ابزار اجرا نصب است؛ برای دریافت خودکار فایل زبان انتخاب‌شده دکمهٔ آماده‌سازی را بزنید.';
+                : `ابزار اجرا نصب است؛ برای دریافت خودکار فایل زبان انتخاب‌شده دکمهٔ زیر را بزنید (کل حجم دانلود: ${dl.detailLabel}).`;
         if (engine.updateAvailable && engine.updateSummary) {
           const updateMsg = document.createElement('div'); updateMsg.className = 'engine-update-msg';
           updateMsg.textContent = engine.updateSummary;
@@ -2884,7 +2945,10 @@ function renderModels() {
         }
         const buttons = document.createElement('div'); buttons.className = 'card-buttons';
         const canPrepare = supported || Boolean(engine.isolated && engine.languages?.length);
-        const prepareLabel = ready ? 'بررسی / آماده‌سازی مجدد' : 'آماده‌سازی / دانلود خودکار';
+        const prepSizeSuffix = dl.totalLabel ? ` (کل حجم دانلود: ${dl.totalLabel})` : '';
+        const prepareLabel = ready
+          ? `بررسی / آماده‌سازی مجدد${dl.fullLabel ? ` (${dl.fullLabel})` : ''}`
+          : `آماده‌سازی / دانلود خودکار${prepSizeSuffix}`;
         const prepare = makeButton(prepareLabel, () => {
           if (!supported && engine.languages?.length) {
             const firstLang = engine.languages[0];
@@ -2927,18 +2991,20 @@ async function downloadEngine(engine, options = {}) {
   if (state.modelBusy) return false;
   const language = options.languageOverride || $('testLanguage').value;
   if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return false; }
-  const precheck = await confirmHardwareIfNeeded(engine);
+  const precheck = await confirmHardwareIfNeeded(engine, null, language);
   if (!precheck.ok) return false;
   ++engineMutationSeq;
   modelFromOcrDialog = Boolean(options.fromOcrDialog);
   const controller = new AbortController();
   modelAbortController = controller; modelCancelledByUser = false;
   state.modelBusy = engine.id;
-  const startMsg = `در حال دانلود و آماده‌سازی خودکار ${engine.name} (${language})…`;
+  const dl = engineDownloadSummary(engine, language);
+  const dlTag = dl.totalLabel ? ` — کل حجم دانلود: ${dl.totalLabel}` : '';
+  const startMsg = `در حال دانلود و آماده‌سازی خودکار ${engine.name} (${language})${dlTag}…`;
   syncModelProgressUi(null, true, startMsg);
   if ($('modelTestResult')) $('modelTestResult').textContent = startMsg;
   if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = startMsg;
-  appendLocalActivity(`آماده‌سازی خودکار ${engine.name} برای ${language} آغاز شد`);
+  appendLocalActivity(`آماده‌سازی خودکار ${engine.name} برای ${language} آغاز شد${dlTag}`);
   renderModels(); updateOcrEngineStatus();
   syncModelProgressUi(null, true, startMsg);
   const pollFast = setInterval(() => { pollActivity().catch(() => {}); }, 350);
@@ -2954,7 +3020,7 @@ async function downloadEngine(engine, options = {}) {
     } catch (firstErr) {
       if (firstErr?.hardwareWarning) {
         syncModelProgressUi(0, false, '');
-        const retryConfirm = await confirmHardwareIfNeeded(engine, firstErr.hardwareCheck);
+        const retryConfirm = await confirmHardwareIfNeeded(engine, firstErr.hardwareCheck, language);
         if (!retryConfirm.ok) {
           if ($('modelTestResult')) $('modelTestResult').textContent = 'نصب مدل به دلیل پیش‌نیاز سخت‌افزاری لغو شد.';
           if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = 'نصب مدل به درخواست شما لغو شد.';

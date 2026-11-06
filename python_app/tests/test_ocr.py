@@ -2278,6 +2278,222 @@ def test_v394_paddleocr_vl_onednn_pir_fix_and_execution_mode_metadata(tmp_path, 
     assert abs(out[0]["polygon"][2][1] - 1600.0) <= 3.0
 
 
+def test_v395_download_size_estimates_cover_all_14_engines():
+    from comic_studio.ocr import ENGINE_INFO, EngineRegistry
+    from comic_studio.ocr_managed import compute_engine_download_estimate, format_download_size_fa
+
+    cpu_hw = {"hasNvidiaGpu": False, "hasGpu": False}
+    nv_hw = {"hasNvidiaGpu": True, "hasGpu": True}
+
+    for eid, info in ENGINE_INFO.items():
+        est_cpu = compute_engine_download_estimate(
+            eid, runtime_installed=False, model_ready=False, nominal_size_gb=info["downloadSizeGb"], hw=cpu_hw,
+        )
+        est_nv = compute_engine_download_estimate(
+            eid, runtime_installed=False, model_ready=False, nominal_size_gb=info["downloadSizeGb"], hw=nv_hw,
+        )
+        est_weights_only = compute_engine_download_estimate(
+            eid, runtime_installed=True, model_ready=False, nominal_size_gb=info["downloadSizeGb"], hw=nv_hw,
+        )
+        assert est_cpu["fullDownloadSizeGb"] == round(est_cpu["runtimeDownloadGb"] + est_cpu["weightsDownloadGb"], 3)
+        assert est_cpu["totalDownloadGb"] == est_cpu["fullDownloadSizeGb"]
+        assert est_nv["fullDownloadSizeGb"] >= est_cpu["fullDownloadSizeGb"]
+        assert est_weights_only["totalDownloadGb"] == est_weights_only["weightsDownloadGb"]
+        assert format_download_size_fa(est_cpu["totalDownloadGb"]).startswith("~")
+
+    statuses = EngineRegistry().status()
+    assert len(statuses) == 14
+    for entry in statuses:
+        assert "fullDownloadSizeGb" in entry
+        assert "totalDownloadGb" in entry
+        assert "runtimeDownloadGb" in entry
+        assert "weightsDownloadGb" in entry
+        assert entry["fullDownloadSizeGb"] > 0
+
+
+def test_v395_all_isolated_and_builtin_runtime_root_cause_fixes(monkeypatch, tmp_path):
+    import sys
+    import types
+    from PIL import Image
+    from comic_studio import ocr as ocr_mod
+    from comic_studio import ocr_worker as worker
+
+    # 1. VLM crop normalizer protects <28px height & extreme aspect ratios from Qwen2.5-VL / GLM-OCR factor:28 crash
+    tiny_rgba = Image.new("RGBA", (240, 14), (255, 255, 255, 0))
+    norm_img, owned = worker._normalize_crop_for_vlm(tiny_rgba)
+    try:
+        assert owned is True
+        assert norm_img.mode == "RGB"
+        assert norm_img.size[0] >= 32 and norm_img.size[1] >= 32
+        assert max(norm_img.size) / min(norm_img.size) <= 160.0
+    finally:
+        norm_img.close()
+        tiny_rgba.close()
+
+    # 2. Nested config attn_implementation sanitizer overrides hardcoded flash_attention_2 inside vision_config
+    vision_cfg = types.SimpleNamespace(attn_implementation="flash_attention_2", _attn_implementation="flash_attention_2")
+    root_cfg = types.SimpleNamespace(attn_implementation="flash_attention_2", vision_config=vision_cfg)
+    worker._sanitize_config_attn(root_cfg, "sdpa")
+    assert root_cfg.attn_implementation == "sdpa"
+    assert root_cfg.vision_config.attn_implementation == "sdpa"
+    assert root_cfg.vision_config._attn_implementation == "sdpa"
+
+    # 3. DeepSeek-OCR-2 transformers 4.48–4.57 compatibility shims (LlamaFlashAttention2 + DynamicCache)
+    fake_llama = types.ModuleType("transformers.models.llama.modeling_llama")
+    fake_llama.LlamaAttention = type("LlamaAttention", (), {})
+
+    class FakeDynamicCache:
+        def get_seq_length(self, layer_idx: int = 0) -> int:
+            return 42
+
+        def get_max_cache_shape(self):
+            return 2048
+
+    fake_cache_utils = types.SimpleNamespace(DynamicCache=FakeDynamicCache)
+    fake_tf = types.SimpleNamespace(cache_utils=fake_cache_utils)
+    monkeypatch.setitem(sys.modules, "transformers.models.llama.modeling_llama", fake_llama)
+    worker._install_transformers_v4_compat_shims(fake_tf)
+    assert getattr(fake_llama, "LlamaFlashAttention2", None) is fake_llama.LlamaAttention
+    dc = FakeDynamicCache()
+    assert dc.seen_tokens == 42
+    assert dc.get_max_length() == 2048
+    assert dc.get_usable_length(10, 0) == 42
+
+    # 4. MinerU 4.1.7 ModelReadyResult(ready=False) dataclass & middle_json unpacking
+    assert worker._MinerUAdapter._mineru_repo_is_ready(types.SimpleNamespace(ready=False, missing_paths=["a.onnx"])) is False
+    assert worker._MinerUAdapter._mineru_repo_is_ready(types.SimpleNamespace(ready=True, missing_paths=[])) is True
+
+    mineru_img = tmp_path / "mineru_page.png"
+    Image.new("RGB", (1000, 2000), "white").save(mineru_img)
+    received_render_arg: list = []
+    fake_middle = types.SimpleNamespace(tag="MIDDLE_JSON_INSTANCE")
+    fake_parse_res = types.SimpleNamespace(middle_json=fake_middle, to_dict=lambda: {})
+    fake_mineru_parser = types.ModuleType("mineru.parser")
+    fake_mineru_parser.parse = lambda *a, **kw: fake_parse_res
+    fake_mineru_render = types.ModuleType("mineru.render")
+
+    def _fake_render_content_list(arg):
+        received_render_arg.append(arg)
+        return [{"type": "text", "text": "MinerU unpacked middle_json", "bbox": [100, 200, 500, 300]}]
+
+    fake_mineru_render.render_content_list = _fake_render_content_list
+    monkeypatch.setitem(sys.modules, "mineru", types.ModuleType("mineru"))
+    monkeypatch.setitem(sys.modules, "mineru.parser", fake_mineru_parser)
+    monkeypatch.setitem(sys.modules, "mineru.render", fake_mineru_render)
+    mineru_lines = worker._MinerUAdapter(tmp_path).recognize(str(mineru_img), "eng", None)
+    assert received_render_arg == [fake_middle]
+    assert len(mineru_lines) == 1 and mineru_lines[0]["text"] == "MinerU unpacked middle_json"
+
+    # 5. olmOCR YAML front-matter, JSON natural_text, figure tags, and "null" cleanup + GLM-OCR prompt
+    glm = worker._create_adapter("glm-ocr", tmp_path)
+    assert glm.prompt == "Text Recognition:"
+    assert glm.repetition_penalty == 1.1
+    olm = worker._create_adapter("olmocr", tmp_path)
+    assert olm.max_crop_long_side == 1288
+    yaml_sample = (
+        "---\nprimary_language: en\nis_rotation_valid: True\nrotation_correction: 0\n"
+        "is_table: False\nis_diagram: False\n---\n![Diagram](page_10_20_100_100.png)\nHello from olmOCR-2!"
+    )
+    assert olm._clean_olmocr_output(yaml_sample) == "Hello from olmOCR-2!"
+    assert olm._clean_olmocr_output('{"primary_language": "en", "natural_text": "JSON body"}') == "JSON body"
+    assert olm._clean_olmocr_output('{"primary_language": null, "natural_text": null}') == ""
+    assert olm._clean_olmocr_output("null") == ""
+
+    # 6. dots.ocr rescales bboxes from resized vision grid (e.g. 500x1000) to original image (1000x2000)
+    dots_img = tmp_path / "dots_page.png"
+    Image.new("RGB", (1000, 2000), "white").save(dots_img)
+    dots = worker._DotsOcrAdapter(tmp_path)
+
+    def _fake_dots_infer_raw(crop_img, *, max_tokens=None, prompt_override=None):
+        dots._last_grid_size = (500, 1000)
+        return '[{"bbox": [50, 100, 250, 200], "category": "Text", "text": "Scaled dots text"}, {"bbox": [0, 0, 100, 100], "category": "Picture", "text": "Ignore pic"}]'
+
+    monkeypatch.setattr(dots, "_infer_raw", _fake_dots_infer_raw)
+    dots_out = dots.recognize(str(dots_img), "eng", None)
+    assert len(dots_out) == 1
+    assert dots_out[0]["text"] == "Scaled dots text"
+    assert dots_out[0]["polygon"][0] == [100.0, 200.0]
+    assert dots_out[0]["polygon"][2] == [500.0, 400.0]
+
+    # 7. HunyuanOCR tokenizer placeholder patch + [0, 1000] spotting_json single-pass parser
+    hy = worker._HunyuanOcrAdapter(tmp_path)
+    fake_tok = types.SimpleNamespace(
+        image_token=None,
+        image_token_id=None,
+        video_token=None,
+        video_token_id=None,
+        unk_token_id=0,
+        convert_tokens_to_ids=lambda t: 102 if "102" in str(t) else 105,
+    )
+    hy._patch_hunyuan_tokenizer(fake_tok)
+    assert fake_tok.image_token == "<｜hy_place▁holder▁no▁102｜>"
+    assert fake_tok.image_token_id == 102
+    assert fake_tok.video_token_id == 105
+    monkeypatch.setattr(
+        hy,
+        "_infer_raw",
+        lambda *a, **kw: '[{"box": [100, 200, 600, 300], "text": "سلام هونیوان"}]',
+    )
+    hy_out = hy.recognize(str(dots_img), "fas", None)
+    assert len(hy_out) == 1 and hy_out[0]["text"] == "سلام هونیوان"
+    assert hy_out[0]["polygon"][0] == [100.0, 400.0]
+    assert hy_out[0]["polygon"][2] == [600.0, 600.0]
+
+    # 8. Surya retains capped blocks (error=True when finish_reason == "length") that still have text
+    surya = worker._SuryaAdapter(tmp_path)
+    surya._predictor = lambda imgs: [
+        types.SimpleNamespace(
+            blocks=[
+                types.SimpleNamespace(
+                    skipped=False,
+                    error=True,
+                    html="<p>Capped &amp; preserved<br/>second line</p>",
+                    label="Text",
+                    bbox=[10, 20, 300, 80],
+                    polygon=None,
+                    confidence=0.91,
+                )
+            ]
+        )
+    ]
+    surya_out = surya.recognize(str(dots_img), "eng", None)
+    assert len(surya_out) == 1
+    assert surya_out[0]["text"] == "Capped & preserved\nsecond line"
+
+    # 9. EasyEngine runtime GPU -> CPU fallback & RGBA normalization
+    easy = ocr_mod.EasyEngine()
+    gpu_calls = {"n": 0}
+
+    class FakeEasyReader:
+        def __init__(self, is_gpu: bool):
+            self.is_gpu = is_gpu
+
+        def readtext(self, arr, **kwargs):
+            assert arr.ndim == 3 and arr.shape[2] == 3, "RGBA image must be normalized to 3-channel RGB"
+            if self.is_gpu:
+                gpu_calls["n"] += 1
+                raise RuntimeError("CUDA error: no kernel image is available for execution on the device")
+            return [([[0, 0], [80, 0], [80, 24], [0, 24]], "CPU fallback succeeded", 0.95)]
+
+    def _fake_easy_reader(language: str, download: bool):
+        if not easy._force_cpu:
+            easy._using_gpu = True
+            return FakeEasyReader(True)
+        easy._using_gpu = False
+        return FakeEasyReader(False)
+
+    monkeypatch.setattr(easy, "_reader", _fake_easy_reader)
+    rgba_sample = Image.new("RGBA", (120, 40), (255, 255, 255, 128))
+    try:
+        easy_lines = easy.recognize(rgba_sample, "eng")
+    finally:
+        rgba_sample.close()
+    assert gpu_calls["n"] == 1
+    assert easy._force_cpu is True
+    assert len(easy_lines) == 1 and easy_lines[0].text == "CPU fallback succeeded"
+
+
+
 
 
 

@@ -549,16 +549,35 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
             try:
                 pages = list(pipeline.predict(target_path))
             except Exception as pred_exc:
-                if not _is_paddle_onednn_pir_error(pred_exc):
+                if not (_is_paddle_onednn_pir_error(pred_exc) or self._device == "gpu"):
                     raise
                 print(
-                    "PaddleOCR-VL encountered PIR/oneDNN CPU worker error; rebuilding with MKLDNN disabled...",
+                    f"PaddleOCR-VL runtime fallback triggered ({pred_exc}); rebuilding CPU pipeline with MKLDNN disabled...",
                     file=sys.stderr,
                     flush=True,
                 )
                 _configure_paddle_cpu_safe_env()
                 self._pipeline = None
                 pipeline = self._get_pipeline(force_cpu=True)
+                if max(width, height) > self._CPU_MAX_SIDE and temp_scaled_path is None:
+                    ratio = float(self._CPU_MAX_SIDE) / float(max(width, height))
+                    scaled_w = max(32, int(round(width * ratio)))
+                    scaled_h = max(32, int(round(height * ratio)))
+                    scale_x = float(width) / float(scaled_w)
+                    scale_y = float(height) / float(scaled_h)
+                    fd, tmp_name = tempfile.mkstemp(prefix="pvl_cpu_", suffix=".png")
+                    os.close(fd)
+                    temp_scaled_path = tmp_name
+                    with Image.open(image_path) as raw_im:
+                        rgb_im = raw_im.convert("RGB")
+                        resized = rgb_im.resize((scaled_w, scaled_h), Image.Resampling.LANCZOS)
+                        try:
+                            resized.save(temp_scaled_path, format="PNG")
+                        finally:
+                            resized.close()
+                            if rgb_im is not raw_im:
+                                rgb_im.close()
+                    target_path = temp_scaled_path
                 pages = list(pipeline.predict(target_path))
         finally:
             if temp_scaled_path:
@@ -633,11 +652,39 @@ class _SuryaAdapter(_BaseAdapter):
         mgr = self._manager
         self._manager = None
         self._predictor = None
-        if mgr is not None and hasattr(mgr, "stop"):
-            try:
-                mgr.stop()
-            except Exception:
-                pass
+        self._legacy = None
+        server_pid: int | None = None
+        if mgr is not None:
+            backend = getattr(mgr, "backend", None)
+            handle = getattr(backend, "handle", None) if backend is not None else None
+            proc = getattr(handle, "process", None) if handle is not None else None
+            if proc is not None and hasattr(proc, "pid"):
+                server_pid = int(proc.pid)
+            elif handle is not None and hasattr(handle, "pid"):
+                try:
+                    server_pid = int(handle.pid)
+                except Exception:
+                    server_pid = None
+            if hasattr(mgr, "stop"):
+                with contextlib.suppress(Exception):
+                    mgr.stop()
+        if server_pid is None:
+            state_json = Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.json"))
+            if state_json.is_file():
+                with contextlib.suppress(Exception):
+                    meta = json.loads(state_json.read_text(encoding="utf-8"))
+                    if isinstance(meta, dict) and meta.get("pid"):
+                        server_pid = int(meta["pid"])
+                with contextlib.suppress(OSError):
+                    state_json.unlink()
+        if server_pid and server_pid > 0 and server_pid != os.getpid():
+            with contextlib.suppress(Exception):
+                if os.name == "nt":
+                    import subprocess as _sp
+                    _sp.run(["taskkill", "/F", "/T", "/PID", str(server_pid)], capture_output=True, timeout=4, check=False)
+                else:
+                    import signal as _sig
+                    os.kill(server_pid, _sig.SIGTERM)
 
     def prepare(self, language: str) -> str:
         _widen_requests_default_timeout(120.0)
@@ -721,14 +768,14 @@ class _SuryaAdapter(_BaseAdapter):
                         raise
                 page = preds[0] if preds else None
                 for block in getattr(page, "blocks", []) or []:
-                    if getattr(block, "skipped", False) or getattr(block, "error", False):
+                    if getattr(block, "skipped", False):
                         continue
                     raw_content = getattr(block, "html", "") or getattr(block, "text", "")
                     label = str(getattr(block, "label", "") or getattr(block, "block_type", "") or "")
                     text = _strip_markup(raw_content)
-                    hints = _extract_markup_hints(raw_content, label)
                     if not text:
                         continue
+                    hints = _extract_markup_hints(raw_content, label)
                     raw_poly = getattr(block, "polygon", None)
                     bbox = getattr(block, "bbox", None)
                     if raw_poly and len(raw_poly) >= 4:
@@ -765,6 +812,14 @@ class _SuryaAdapter(_BaseAdapter):
 
 
 class _MinerUAdapter(_BaseAdapter):
+    @staticmethod
+    def _mineru_repo_is_ready(verify_result: Any) -> bool:
+        if hasattr(verify_result, "ready"):
+            return bool(verify_result.ready)
+        if isinstance(verify_result, dict) and "ready" in verify_result:
+            return bool(verify_result["ready"])
+        return bool(verify_result)
+
     def prepare(self, language: str) -> str:
         _widen_requests_default_timeout(120.0)
         import importlib.metadata
@@ -779,7 +834,7 @@ class _MinerUAdapter(_BaseAdapter):
             total = max(1, len(repos))
             for idx, repo_key in enumerate(repos):
                 pct = int(15 + (idx / total) * 75)
-                if verify_model_repo(repo_key):
+                if self._mineru_repo_is_ready(verify_model_repo(repo_key)):
                     print(f"MinerU {repo_key} already verified ({pct}%).", file=sys.stderr, flush=True)
                     continue
                 print(f"Downloading MinerU {repo_key} ({pct}%)...", file=sys.stderr, flush=True)
@@ -794,7 +849,7 @@ class _MinerUAdapter(_BaseAdapter):
                         if mirror_ep:
                             os.environ["HF_ENDPOINT"] = mirror_ep
                         download_model_repo(repo_key, source=src_name)
-                        if verify_model_repo(repo_key):
+                        if self._mineru_repo_is_ready(verify_model_repo(repo_key)):
                             last_exc = None
                             break
                         last_exc = RuntimeError(f"MinerU model '{repo_key}' incomplete after download from {src_name}")
@@ -918,15 +973,20 @@ class _MinerUAdapter(_BaseAdapter):
         try:
             from mineru.parser import parse as mineru_parse
             parsed = mineru_parse(image_path, tier="basic", ocr_mode="ocr", image_analysis=False)
+            middle_obj = getattr(parsed, "middle_json", parsed)
             try:
                 from mineru.render import render_content_list
-                rendered_list = render_content_list(parsed)
+                rendered_list = render_content_list(middle_obj)
                 cl_lines = self._extract_mineru_payload(rendered_list, width, height, coord_mode="norm1000")
                 if cl_lines:
                     return cl_lines
             except Exception:
                 pass
-            raw_dict = parsed.to_dict() if hasattr(parsed, "to_dict") else parsed
+            raw_dict = (
+                middle_obj.to_dict()
+                if hasattr(middle_obj, "to_dict")
+                else (parsed.to_dict() if hasattr(parsed, "to_dict") else parsed)
+            )
             native_lines = self._extract_mineru_payload(raw_dict, width, height, coord_mode="norm1")
             if native_lines:
                 return native_lines
@@ -943,7 +1003,20 @@ class _MinerUAdapter(_BaseAdapter):
             if kit_bin:
                 json_out = out_dir / "middle.json"
                 proc = subprocess.run(
-                    [kit_bin, "parse", image_path, "-o", str(json_out), "-f", "middle_json", "--ocr-mode", "ocr"],
+                    [
+                        kit_bin,
+                        "parse",
+                        image_path,
+                        "-o",
+                        str(json_out),
+                        "-f",
+                        "middle_json",
+                        "--tier",
+                        "basic",
+                        "--disable-image-analysis",
+                        "--ocr-mode",
+                        "ocr",
+                    ],
                     capture_output=True,
                     text=True,
                     timeout=600,
@@ -988,10 +1061,141 @@ def _has_flash_attn() -> bool:
         return False
 
 
+def _sanitize_config_attn(config: Any, attn_impl: str | None) -> Any:
+    """Override hardcoded nested ``flash_attention_2`` in remote configs (e.g. dots.ocr, DeepSeek-OCR-2)
+    when ``flash_attn`` is unavailable on Windows/CPU."""
+    if config is None or attn_impl is None:
+        return config
+    seen: set[int] = set()
+
+    def _patch(cfg_obj: Any) -> None:
+        if cfg_obj is None or id(cfg_obj) in seen:
+            return
+        seen.add(id(cfg_obj))
+        for attr_name in ("attn_implementation", "_attn_implementation", "_attn_implementation_internal"):
+            if hasattr(cfg_obj, attr_name):
+                with contextlib.suppress(Exception):
+                    setattr(cfg_obj, attr_name, attn_impl)
+        for sub_name in ("vision_config", "text_config", "language_config", "llm_config", "audio_config"):
+            sub_cfg = getattr(cfg_obj, sub_name, None)
+            if sub_cfg is not None and not isinstance(sub_cfg, dict):
+                _patch(sub_cfg)
+            elif isinstance(sub_cfg, dict) and "attn_implementation" in sub_cfg:
+                sub_cfg["attn_implementation"] = attn_impl
+
+    _patch(config)
+    return config
+
+
+def _install_transformers_v4_compat_shims(transformers_mod: Any) -> None:
+    """Restore symbols removed in transformers 4.48–4.57 that remote-code OCR models
+    (notably ``deepseek-ai/DeepSeek-OCR-2``) still import or call."""
+    import importlib
+
+    with contextlib.suppress(Exception):
+        modeling_llama = sys.modules.get("transformers.models.llama.modeling_llama")
+        if modeling_llama is None:
+            modeling_llama = importlib.import_module("transformers.models.llama.modeling_llama")
+        base_attn = getattr(modeling_llama, "LlamaAttention", None)
+        if base_attn is not None:
+            if not hasattr(modeling_llama, "LlamaFlashAttention2"):
+                setattr(modeling_llama, "LlamaFlashAttention2", base_attn)
+            if not hasattr(modeling_llama, "LlamaSdpaAttention"):
+                setattr(modeling_llama, "LlamaSdpaAttention", base_attn)
+    with contextlib.suppress(Exception):
+        cache_utils = getattr(transformers_mod, "cache_utils", None)
+        if cache_utils is None:
+            import transformers.cache_utils as cache_utils  # type: ignore[no-redef]
+        dyn_cache = getattr(cache_utils, "DynamicCache", None)
+        if dyn_cache is not None:
+            if not hasattr(dyn_cache, "seen_tokens"):
+                setattr(
+                    dyn_cache,
+                    "seen_tokens",
+                    property(lambda self: self.get_seq_length() if hasattr(self, "get_seq_length") else 0),
+                )
+            if not hasattr(dyn_cache, "get_max_length"):
+                setattr(
+                    dyn_cache,
+                    "get_max_length",
+                    lambda self: self.get_max_cache_shape() if hasattr(self, "get_max_cache_shape") else None,
+                )
+            if not hasattr(dyn_cache, "get_usable_length"):
+                setattr(
+                    dyn_cache,
+                    "get_usable_length",
+                    lambda self, new_seq_length, layer_idx=0: (
+                        self.get_seq_length(layer_idx) if hasattr(self, "get_seq_length") else 0
+                    ),
+                )
+
+
+def _normalize_crop_for_vlm(crop_img: Any, *, max_long_side: int | None = None) -> tuple[Any, bool]:
+    """Ensure RGB mode, minimum 32x32 size (preventing ``factor:28`` ValueError in Qwen2.5-VL,
+    GLM-OCR, dots.ocr, olmOCR, and HunyuanOCR), and bounded aspect ratio <= 160."""
+    import math
+    from PIL import Image
+
+    owned = False
+    img = crop_img
+    if getattr(img, "mode", "RGB") != "RGB":
+        img = img.convert("RGB")
+        owned = True
+
+    w, h = getattr(img, "size", (0, 0))
+    if w <= 0 or h <= 0:
+        return img, owned
+
+    if max_long_side and max(w, h) > max_long_side:
+        scale = float(max_long_side) / float(max(w, h))
+        nw = max(32, int(round(w * scale)))
+        nh = max(32, int(round(h * scale)))
+        resized = img.resize((nw, nh), Image.Resampling.LANCZOS)
+        if owned:
+            img.close()
+        img = resized
+        owned = True
+        w, h = nw, nh
+
+    target_w = max(32, w, int(math.ceil(h / 160.0)))
+    target_h = max(32, h, int(math.ceil(w / 160.0)))
+    if target_w != w or target_h != h:
+        canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
+        ox = (target_w - w) // 2
+        oy = (target_h - h) // 2
+        canvas.paste(img, (ox, oy))
+        if owned:
+            img.close()
+        img = canvas
+        owned = True
+
+    return img, owned
+
+
+def _clean_repeated_substrings(text: str) -> str:
+    """Trim runaway tail-repetition loops occasionally emitted by greedy VLM decoding."""
+    n = len(text)
+    if n < 600:
+        return text
+    for pat_len in range(2, min(160, n // 10) + 1):
+        candidate = text[-pat_len:]
+        if not candidate.strip():
+            continue
+        repeats = 0
+        pos = n
+        while pos >= pat_len and text[pos - pat_len:pos] == candidate:
+            repeats += 1
+            pos -= pat_len
+        if repeats >= 10:
+            return text[: pos + pat_len].rstrip()
+    return text
+
+
 class _TransformersRegionAdapter(_BaseAdapter):
     preferred_attn: str | None = None
     system_prompt: str | None = None
-    repetition_penalty: float | None = None
+    repetition_penalty: float | None = 1.05
+    max_crop_long_side: int | None = None
 
     def __init__(self, models_root: Path, hf_repo: str, prompt: str) -> None:
         super().__init__(models_root)
@@ -1000,6 +1204,7 @@ class _TransformersRegionAdapter(_BaseAdapter):
         self._model: Any = None
         self._processor: Any = None
         self._device: str = "cpu"
+        self._last_grid_size: tuple[int, int] | None = None
 
     def _candidate_loaders(self, transformers_mod: Any) -> list[Any]:
         loaders: list[Any] = []
@@ -1016,6 +1221,30 @@ class _TransformersRegionAdapter(_BaseAdapter):
             return auto_proc.from_pretrained(model_id, trust_remote_code=True)
         except Exception:
             return auto_tok.from_pretrained(model_id, trust_remote_code=True)
+
+    def _load_sanitized_config(self, transformers_mod: Any, model_id: str, attn_impl: str | None) -> Any:
+        auto_cfg = getattr(transformers_mod, "AutoConfig", None)
+        if auto_cfg is None:
+            return None
+        try:
+            cfg = auto_cfg.from_pretrained(model_id, trust_remote_code=True)
+            return _sanitize_config_attn(cfg, attn_impl)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _instantiate_from_pretrained(loader: Any, model_id: str, dtype: Any, extra_kw: dict[str, Any]) -> Any:
+        for dtype_key in ("dtype", "torch_dtype"):
+            kw_low = {**extra_kw, dtype_key: dtype, "low_cpu_mem_usage": True}
+            try:
+                return loader.from_pretrained(model_id, **kw_low)
+            except TypeError:
+                kw_plain = {**extra_kw, dtype_key: dtype}
+                try:
+                    return loader.from_pretrained(model_id, **kw_plain)
+                except TypeError:
+                    continue
+        return loader.from_pretrained(model_id, **extra_kw)
 
     def _load(self) -> tuple[Any, Any, str]:
         if self._model is not None and self._processor is not None:
@@ -1050,19 +1279,21 @@ class _TransformersRegionAdapter(_BaseAdapter):
                 extra_kw: dict[str, Any] = {"trust_remote_code": True}
                 if attn_impl is not None:
                     extra_kw["attn_implementation"] = attn_impl
+                cfg = self._load_sanitized_config(transformers, model_id, attn_impl)
+                if cfg is not None:
+                    extra_kw["config"] = cfg
                 try:
-                    try:
-                        model = loader.from_pretrained(
-                            model_id,
-                            torch_dtype=dtype,
-                            low_cpu_mem_usage=True,
-                            **extra_kw,
-                        )
-                    except TypeError:
-                        model = loader.from_pretrained(model_id, torch_dtype=dtype, **extra_kw)
+                    model = self._instantiate_from_pretrained(loader, model_id, dtype, extra_kw)
                     break
                 except Exception as exc:
                     last_err = exc
+                    if "config" in extra_kw:
+                        extra_no_cfg = {k: v for k, v in extra_kw.items() if k != "config"}
+                        try:
+                            model = self._instantiate_from_pretrained(loader, model_id, dtype, extra_no_cfg)
+                            break
+                        except Exception as exc2:
+                            last_err = exc2
             if model is not None:
                 break
         if model is None:
@@ -1078,48 +1309,7 @@ class _TransformersRegionAdapter(_BaseAdapter):
         self._model, self._processor, self._device = model, processor, device
         return model, processor, device
 
-    def _infer_crop(self, crop_img: Any, *, max_tokens: int | None = None) -> str:
-        import torch
-        model, processor, device = self._load()
-        cw, ch = getattr(crop_img, "size", (400, 200))
-        if max_tokens is None:
-            area = int(cw) * int(ch)
-            if area >= 600_000:
-                max_tokens = 2048
-            elif area >= 180_000:
-                max_tokens = 1024
-            else:
-                max_tokens = 512
-
-        inputs = None
-        has_chat_tmpl = bool(
-            hasattr(processor, "apply_chat_template")
-            and getattr(processor, "chat_template", None)
-        )
-        if has_chat_tmpl:
-            messages: list[dict[str, Any]] = []
-            if self.system_prompt is not None:
-                messages.append({"role": "system", "content": self.system_prompt})
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": crop_img},
-                        {"type": "text", "text": self.prompt},
-                    ],
-                }
-            )
-            try:
-                text_input = processor.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
-                inputs = processor(text=[text_input], images=[crop_img], return_tensors="pt")
-            except (ValueError, TypeError, AttributeError):
-                inputs = None
-
-        if inputs is None:
-            inputs = processor(images=crop_img, return_tensors="pt")
-
+    def _prepare_model_inputs(self, inputs: Any, model: Any, device: str) -> dict[str, Any]:
         if hasattr(inputs, "pop"):
             inputs.pop("token_type_ids", None)
         model_dtype = getattr(model, "dtype", None)
@@ -1137,20 +1327,101 @@ class _TransformersRegionAdapter(_BaseAdapter):
                     prepared_inputs[k] = v.to(device)
             else:
                 prepared_inputs[k] = v
+        return prepared_inputs
 
-        gen_kwargs: dict[str, Any] = {"max_new_tokens": max_tokens, "do_sample": False}
-        if self.repetition_penalty is not None:
-            gen_kwargs["repetition_penalty"] = self.repetition_penalty
+    def _infer_raw(self, crop_img: Any, *, max_tokens: int | None = None, prompt_override: str | None = None) -> str:
+        import torch
 
-        grad_ctx = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
-        with grad_ctx():
-            generated = model.generate(**prepared_inputs, **gen_kwargs)
-        prompt_len = prepared_inputs["input_ids"].shape[-1] if "input_ids" in prepared_inputs else 0
-        new_tokens = generated[:, prompt_len:] if prompt_len and generated.shape[-1] > prompt_len else generated
-        decoded = processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
-        del inputs, prepared_inputs, generated, new_tokens
-        decoded = re.sub(r"<｜hy_[^｜]*｜>", "", decoded)
-        return _strip_markup(decoded)
+        model, processor, device = self._load()
+        active_prompt = self.prompt if prompt_override is None else prompt_override
+        norm_img, owned_norm = _normalize_crop_for_vlm(crop_img, max_long_side=self.max_crop_long_side)
+        try:
+            cw, ch = getattr(norm_img, "size", (400, 200))
+            if max_tokens is None:
+                area = int(cw) * int(ch)
+                if area >= 600_000:
+                    max_tokens = 2048
+                elif area >= 180_000:
+                    max_tokens = 1024
+                else:
+                    max_tokens = 512
+
+            inputs = None
+            has_chat_tmpl = bool(
+                hasattr(processor, "apply_chat_template")
+                and getattr(processor, "chat_template", None)
+            )
+            if has_chat_tmpl:
+                messages: list[dict[str, Any]] = []
+                if self.system_prompt is not None:
+                    messages.append({"role": "system", "content": self.system_prompt})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": norm_img},
+                            {"type": "text", "text": active_prompt},
+                        ],
+                    }
+                )
+                try:
+                    text_input = processor.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                    inputs = processor(text=[text_input], images=[norm_img], return_tensors="pt")
+                except (ValueError, TypeError, AttributeError):
+                    inputs = None
+
+            if inputs is None:
+                try:
+                    inputs = processor(images=norm_img, return_tensors="pt")
+                except TypeError:
+                    inputs = processor(text=[f"<image>\n{active_prompt}"], images=[norm_img], return_tensors="pt")
+
+            self._last_grid_size = None
+            grid_thw = inputs.get("image_grid_thw") if hasattr(inputs, "get") else None
+            if grid_thw is not None:
+                with contextlib.suppress(Exception):
+                    first_grid = grid_thw[0]
+                    gh = int(first_grid[1]) * 14
+                    gw = int(first_grid[2]) * 14
+                    if gw > 0 and gh > 0:
+                        self._last_grid_size = (gw, gh)
+
+            prepared_inputs = self._prepare_model_inputs(inputs, model, device)
+            gen_kwargs: dict[str, Any] = {"max_new_tokens": max_tokens, "do_sample": False}
+            if self.repetition_penalty is not None:
+                gen_kwargs["repetition_penalty"] = self.repetition_penalty
+
+            grad_ctx = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
+            try:
+                with grad_ctx():
+                    generated = model.generate(**prepared_inputs, **gen_kwargs)
+            except Exception:
+                if device != "cpu":
+                    _release_worker_caches()
+                    device = "cpu"
+                    model = model.to(dtype=torch.float32, device="cpu").eval()
+                    self._model = model
+                    self._device = "cpu"
+                    prepared_inputs = self._prepare_model_inputs(inputs, model, "cpu")
+                    with grad_ctx():
+                        generated = model.generate(**prepared_inputs, **gen_kwargs)
+                else:
+                    raise
+
+            prompt_len = prepared_inputs["input_ids"].shape[-1] if "input_ids" in prepared_inputs else 0
+            new_tokens = generated[:, prompt_len:] if prompt_len and generated.shape[-1] > prompt_len else generated
+            decoded = processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
+            del inputs, prepared_inputs, generated, new_tokens
+            decoded = re.sub(r"<｜hy_[^｜]*｜>", "", decoded)
+            return _clean_repeated_substrings(decoded)
+        finally:
+            if owned_norm:
+                norm_img.close()
+
+    def _infer_crop(self, crop_img: Any, *, max_tokens: int | None = None) -> str:
+        return _strip_markup(self._infer_raw(crop_img, max_tokens=max_tokens))
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         from PIL import Image
@@ -1174,11 +1445,86 @@ class _TransformersRegionAdapter(_BaseAdapter):
             rgb.close()
 
 
+class _GlmOcrAdapter(_TransformersRegionAdapter):
+    repetition_penalty = 1.1
+
+    def __init__(self, models_root: Path) -> None:
+        # Official Zhipu GLM-OCR recognition prompt from zai-org/GLM-OCR config.yaml
+        super().__init__(models_root, "zai-org/GLM-OCR", "Text Recognition:")
+
+    def _candidate_loaders(self, transformers_mod: Any) -> list[Any]:
+        loaders: list[Any] = []
+        glm_cls = getattr(transformers_mod, "GlmOcrForConditionalGeneration", None)
+        if glm_cls is not None:
+            loaders.append(glm_cls)
+        loaders.extend(super()._candidate_loaders(transformers_mod))
+        return loaders
+
+
+class _OlmOcrAdapter(_TransformersRegionAdapter):
+    repetition_penalty = 1.08
+    max_crop_long_side = 1288
+    OLMOCR_PROMPT = (
+        "Attached is one page or region of a document. "
+        "Return the plain text representation of its readable text naturally, reading left to right and top to bottom. "
+        "Do not hallucinate."
+    )
+
+    def __init__(self, models_root: Path) -> None:
+        super().__init__(models_root, "allenai/olmOCR-2-7B-1025", self.OLMOCR_PROMPT)
+
+    def _candidate_loaders(self, transformers_mod: Any) -> list[Any]:
+        loaders: list[Any] = []
+        qwen_cls = getattr(transformers_mod, "Qwen2_5_VLForConditionalGeneration", None)
+        if qwen_cls is not None:
+            loaders.append(qwen_cls)
+        loaders.extend(super()._candidate_loaders(transformers_mod))
+        return loaders
+
+    @staticmethod
+    def _clean_olmocr_output(raw: str) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        # Strip optional ```markdown / ```json fences
+        text = re.sub(r"^\s*```(?:yaml|json|markdown|md)?\s*\n?", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\n?\s*```\s*$", "", text)
+        # Parse JSON {"natural_text": ...} format emitted by olmOCR v1/v2 variants
+        if text.startswith("{") and "natural_text" in text:
+            with contextlib.suppress(Exception):
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    nt = parsed.get("natural_text")
+                    text = "" if nt is None else str(nt).strip()
+        # Strip YAML front matter (--- primary_language: ... ---) emitted by olmOCR-2-7B-1025
+        yaml_match = re.match(
+            r"^\s*---\s*\n(?:[A-Za-z0-9_]+\s*:[^\n]*\n)+\s*---\s*\n?",
+            text,
+        )
+        if yaml_match:
+            text = text[yaml_match.end():].strip()
+        # Remove olmOCR figure crop placeholders ![Alt](page_x_y_w_h.png)
+        text = re.sub(r"!\[[^\]]*\]\([^\)]*\)", "", text)
+        cleaned = _strip_markup(text)
+        if cleaned.strip().lower() in {"null", "none"}:
+            return ""
+        return cleaned
+
+    def _infer_crop(self, crop_img: Any, *, max_tokens: int | None = None) -> str:
+        raw = self._infer_raw(crop_img, max_tokens=max_tokens)
+        return self._clean_olmocr_output(raw)
+
+
 class _DotsOcrAdapter(_TransformersRegionAdapter):
     LAYOUT_PROMPT = (
-        "Please output the layout information from the image as a JSON list of objects with "
-        "'bbox' ([x1, y1, x2, y2]) and 'text' fields. Output JSON only."
+        "Please output the layout information from the PDF image, including each layout element's bbox, "
+        "its category, and the corresponding text content within the bbox.\n"
+        "1. Bbox format: [x1, y1, x2, y2]\n"
+        "2. Layout Categories: ['Caption', 'Footnote', 'Formula', 'List-item', 'Page-footer', "
+        "'Page-header', 'Picture', 'Section-header', 'Table', 'Text', 'Title'].\n"
+        "3. Do not omit or hallucinate text; output a valid JSON list of objects with 'bbox', 'category', and 'text'."
     )
+    REGION_FALLBACK_PROMPT = "Extract all text from this image."
     FALLBACK_HF_REPO = "rednote-hilab/dots.ocr"
 
     def __init__(self, models_root: Path) -> None:
@@ -1235,12 +1581,17 @@ class _DotsOcrAdapter(_TransformersRegionAdapter):
             rgb = im.convert("RGB")
             width, height = rgb.size
         try:
-            raw = self._infer_crop(rgb, max_tokens=2048)
+            raw = self._infer_raw(rgb, max_tokens=4096, prompt_override=self.LAYOUT_PROMPT)
+            grid_size = self._last_grid_size
         finally:
             rgb.close()
         items = self._extract_json_array(raw)
         if items is not None:
             try:
+                # dots.ocr predicts bboxes in the processor's resized (grid_w*14, grid_h*14) pixel space
+                ref_w, ref_h = grid_size if (grid_size and grid_size[0] > 0 and grid_size[1] > 0) else (width, height)
+                sx = float(width) / float(ref_w)
+                sy = float(height) / float(ref_h)
                 lines: list[dict[str, Any]] = []
                 for entry in items:
                     if not isinstance(entry, dict):
@@ -1248,17 +1599,25 @@ class _DotsOcrAdapter(_TransformersRegionAdapter):
                     bbox = entry.get("bbox")
                     raw_content = entry.get("text") or entry.get("content") or ""
                     label = str(entry.get("category") or entry.get("type") or entry.get("label") or "")
+                    if label.strip().lower() in {"picture", "image", "figure"}:
+                        continue
                     text = _strip_markup(raw_content)
                     hints = _extract_markup_hints(raw_content, label)
                     if not text or not bbox or len(bbox) < 4:
                         continue
-                    poly = _clamp_polygon(_rect_polygon(bbox[0], bbox[1], bbox[2], bbox[3]), width, height)
+                    bx0, by0, bx1, by1 = [float(v) for v in bbox[:4]]
+                    poly = _clamp_polygon(_rect_polygon(bx0 * sx, by0 * sy, bx1 * sx, by1 * sy), width, height)
                     lines.append({"text": text, "confidence": 0.9, "polygon": poly, **hints})
                 if lines:
                     return lines
             except Exception:
                 pass
-        return super().recognize(image_path, language, regions)
+        prev_prompt = self.prompt
+        self.prompt = self.REGION_FALLBACK_PROMPT
+        try:
+            return super().recognize(image_path, language, regions)
+        finally:
+            self.prompt = prev_prompt
 
 
 class _DeepSeekOcr2Adapter(_TransformersRegionAdapter):
@@ -1269,39 +1628,90 @@ class _DeepSeekOcr2Adapter(_TransformersRegionAdapter):
     )
 
     def __init__(self, models_root: Path) -> None:
-        super().__init__(models_root, "deepseek-ai/DeepSeek-OCR-2", "Extract all text from this image.")
+        super().__init__(models_root, "deepseek-ai/DeepSeek-OCR-2", "Free OCR.")
+
+    def _load(self) -> tuple[Any, Any, str]:
+        import transformers
+        _install_transformers_v4_compat_shims(transformers)
+        return super()._load()
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
+        import tempfile
         from PIL import Image
+
         with Image.open(image_path) as im:
+            rgb = im.convert("RGB")
             width, height = im.size
-        model, processor, _ = self._load()
-        if hasattr(model, "infer"):
-            import tempfile
-            with tempfile.TemporaryDirectory(prefix="comic-dpsk-") as tmp:
-                res = model.infer(
-                    processor,
-                    prompt="<image>\n<|grounding|>Convert the document to markdown. ",
-                    image_file=image_path,
-                    output_path=tmp,
-                    base_size=1024,
-                    image_size=768,
-                    crop_mode=True,
-                    save_results=False,
-                )
-                raw = str(res or "")
-                grounded: list[dict[str, Any]] = []
-                for match in self.GROUNDING_RE.finditer(raw):
-                    text = _strip_markup(match.group(1))
-                    if not text:
-                        continue
-                    nx0, ny0, nx1, ny1 = [float(match.group(i)) for i in range(2, 6)]
-                    scale_x = width / 1000.0 if max(nx0, nx1) <= 1000.0 else 1.0
-                    scale_y = height / 1000.0 if max(ny0, ny1) <= 1000.0 else 1.0
-                    poly = _clamp_polygon(_rect_polygon(nx0 * scale_x, ny0 * scale_y, nx1 * scale_x, ny1 * scale_y), width, height)
-                    grounded.append({"text": text, "confidence": 0.9, "polygon": poly})
-                if grounded:
-                    return grounded
+        try:
+            model, processor, device = self._load()
+            # ``deepseek-ai/DeepSeek-OCR-2`` remote ``model.infer(...)`` hardcodes ``.cuda()`` internally;
+            # run it on CUDA and fall back cleanly to region crops or processor path otherwise.
+            if hasattr(model, "infer") and device == "cuda":
+                try:
+                    with tempfile.TemporaryDirectory(prefix="comic-dpsk-") as tmp:
+                        res = model.infer(
+                            processor,
+                            prompt="<image>\n<|grounding|>Convert the document to markdown. ",
+                            image_file=image_path,
+                            output_path=tmp,
+                            base_size=1024,
+                            image_size=768,
+                            crop_mode=True,
+                            save_results=False,
+                        )
+                        raw = str(res or "")
+                        grounded: list[dict[str, Any]] = []
+                        for match in self.GROUNDING_RE.finditer(raw):
+                            raw_ref = match.group(1)
+                            if raw_ref.strip().lower() in {"image", "figure", "picture"}:
+                                continue
+                            text = _strip_markup(raw_ref)
+                            if not text:
+                                continue
+                            nx0, ny0, nx1, ny1 = [float(match.group(i)) for i in range(2, 6)]
+                            scale_x = width / 1000.0 if max(nx0, nx1) <= 1000.0 else 1.0
+                            scale_y = height / 1000.0 if max(ny0, ny1) <= 1000.0 else 1.0
+                            poly = _clamp_polygon(_rect_polygon(nx0 * scale_x, ny0 * scale_y, nx1 * scale_x, ny1 * scale_y), width, height)
+                            grounded.append({"text": text, "confidence": 0.9, "polygon": poly})
+                        if grounded:
+                            return grounded
+
+                        # Region-level fallback via ``model.infer(..., prompt="<image>\nFree OCR. ")``
+                        # because ``deepseek-ai/DeepSeek-OCR-2`` ships an AutoTokenizer rather than an AutoProcessor.
+                        boxes = _default_regions(width, height, regions)
+                        region_lines: list[dict[str, Any]] = []
+                        for idx, (x0, y0, x1, y1) in enumerate(boxes):
+                            crop = rgb.crop((int(x0), int(y0), int(x1), int(y1)))
+                            norm_crop, owned_norm = _normalize_crop_for_vlm(crop)
+                            crop_file = Path(tmp) / f"crop_{idx}.png"
+                            try:
+                                norm_crop.save(crop_file, format="PNG")
+                                crop_res = model.infer(
+                                    processor,
+                                    prompt="<image>\nFree OCR. ",
+                                    image_file=str(crop_file),
+                                    output_path=tmp,
+                                    base_size=640,
+                                    image_size=640,
+                                    crop_mode=False,
+                                    save_results=False,
+                                )
+                                txt = _strip_markup(str(crop_res or ""))
+                                if txt:
+                                    poly = _clamp_polygon(_rect_polygon(x0, y0, x1, y1), width, height)
+                                    region_lines.append({"text": txt, "confidence": 0.89, "polygon": poly})
+                            finally:
+                                if owned_norm:
+                                    norm_crop.close()
+                                crop.close()
+                                with contextlib.suppress(OSError):
+                                    crop_file.unlink()
+                        if region_lines:
+                            return region_lines
+                except Exception:
+                    pass
+        finally:
+            rgb.close()
         return super().recognize(image_path, language, regions)
 
 
@@ -1311,12 +1721,20 @@ class _HunyuanOcrAdapter(_TransformersRegionAdapter):
     system_prompt = ""
     repetition_penalty = 1.08
 
+    # Official fixed prompts from Tencent-Hunyuan/HunyuanOCR/inference/tasks.py
+    SPOTTING_JSON_PROMPT = (
+        "Detect and recognize the text in the image, and output the text coordinates in a formatted manner. "
+        'Output format: [{"box": [xmin, ymin, xmax, ymax], "text": "..."}]. '
+        "Coordinates are integers normalized to [0, 1000]."
+    )
+    REGION_OCR_PROMPT = "提取图中的文字。"
+    SPOTTING_TAG_RE = re.compile(
+        r"<ref>(.*?)</ref>\s*<box>\s*\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)\s*,\s*\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)\s*</box>",
+        re.DOTALL,
+    )
+
     def __init__(self, models_root: Path) -> None:
-        super().__init__(
-            models_root,
-            "tencent/HunyuanOCR",
-            "Extract all text from the image accurately, preserving line breaks.",
-        )
+        super().__init__(models_root, "tencent/HunyuanOCR", self.REGION_OCR_PROMPT)
 
     def _candidate_loaders(self, transformers_mod: Any) -> list[Any]:
         loaders: list[Any] = []
@@ -1326,16 +1744,101 @@ class _HunyuanOcrAdapter(_TransformersRegionAdapter):
         loaders.extend(super()._candidate_loaders(transformers_mod))
         return loaders
 
+    @staticmethod
+    def _patch_hunyuan_tokenizer(tokenizer: Any) -> None:
+        token_map = {
+            "image_token": "<｜hy_place▁holder▁no▁102｜>",
+            "boi_token": "<｜hy_place▁holder▁no▁100｜>",
+            "eoi_token": "<｜hy_place▁holder▁no▁101｜>",
+            "video_token": "<｜hy_place▁holder▁no▁105｜>",
+            "bov_token": "<｜hy_place▁holder▁no▁103｜>",
+            "eov_token": "<｜hy_place▁holder▁no▁104｜>",
+        }
+        unk_id = getattr(tokenizer, "unk_token_id", None)
+        for attr, tok in token_map.items():
+            cur = getattr(tokenizer, attr, None)
+            if cur is None:
+                with contextlib.suppress(Exception):
+                    setattr(tokenizer, attr, tok)
+            id_attr = f"{attr}_id"
+            cur_id = getattr(tokenizer, id_attr, None)
+            if cur_id is None and hasattr(tokenizer, "convert_tokens_to_ids"):
+                with contextlib.suppress(Exception):
+                    tid = tokenizer.convert_tokens_to_ids(getattr(tokenizer, attr, tok))
+                    if tid is not None and tid != unk_id:
+                        setattr(tokenizer, id_attr, tid)
+
     def _load_processor(self, transformers_mod: Any, model_id: str) -> Any:
         auto_proc = getattr(transformers_mod, "AutoProcessor")
         try:
             proc = auto_proc.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
         except Exception:
-            proc = super()._load_processor(transformers_mod, model_id)
+            try:
+                auto_tok = getattr(transformers_mod, "AutoTokenizer")
+                auto_img = getattr(transformers_mod, "AutoImageProcessor")
+                tok = auto_tok.from_pretrained(model_id, trust_remote_code=True, use_fast=False)
+                self._patch_hunyuan_tokenizer(tok)
+                img_proc = auto_img.from_pretrained(model_id, trust_remote_code=True)
+                hy_proc_cls = getattr(transformers_mod, "HunYuanVLProcessor", None)
+                if hy_proc_cls is not None:
+                    proc = hy_proc_cls(image_processor=img_proc, tokenizer=tok)
+                else:
+                    proc = super()._load_processor(transformers_mod, model_id)
+            except Exception:
+                proc = super()._load_processor(transformers_mod, model_id)
         if getattr(proc, "video_token", None) is None:
             with contextlib.suppress(Exception):
-                proc.video_token = "<｜hy_video｜>"
+                proc.video_token = "<｜hy_place▁holder▁no▁105｜>"
+        if hasattr(proc, "tokenizer"):
+            self._patch_hunyuan_tokenizer(proc.tokenizer)
         return proc
+
+    def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
+        from PIL import Image
+
+        with Image.open(image_path) as im:
+            rgb = im.convert("RGB")
+            width, height = im.size
+        try:
+            raw = self._infer_raw(rgb, max_tokens=4096, prompt_override=self.SPOTTING_JSON_PROMPT)
+        except Exception:
+            raw = ""
+        finally:
+            rgb.close()
+
+        if raw:
+            items = _DotsOcrAdapter._extract_json_array(raw)
+            if items:
+                spotted: list[dict[str, Any]] = []
+                for entry in items:
+                    if not isinstance(entry, dict):
+                        continue
+                    box = entry.get("box") or entry.get("bbox")
+                    txt = _strip_markup(str(entry.get("text") or entry.get("content") or ""))
+                    if not txt or not isinstance(box, (list, tuple)) or len(box) < 4:
+                        continue
+                    bx0, by0, bx1, by1 = [float(v) for v in box[:4]]
+                    sx = width / 1000.0 if max(bx0, bx1) <= 1000.0 else 1.0
+                    sy = height / 1000.0 if max(by0, by1) <= 1000.0 else 1.0
+                    poly = _clamp_polygon(_rect_polygon(bx0 * sx, by0 * sy, bx1 * sx, by1 * sy), width, height)
+                    spotted.append({"text": txt, "confidence": 0.9, "polygon": poly})
+                if spotted:
+                    return spotted
+
+            tag_lines: list[dict[str, Any]] = []
+            for m in self.SPOTTING_TAG_RE.finditer(raw):
+                txt = _strip_markup(m.group(1))
+                if not txt:
+                    continue
+                bx0, by0, bx1, by1 = [float(m.group(i)) for i in range(2, 6)]
+                sx = width / 1000.0 if max(bx0, bx1) <= 1000.0 else 1.0
+                sy = height / 1000.0 if max(by0, by1) <= 1000.0 else 1.0
+                poly = _clamp_polygon(_rect_polygon(bx0 * sx, by0 * sy, bx1 * sx, by1 * sy), width, height)
+                tag_lines.append({"text": txt, "confidence": 0.9, "polygon": poly})
+            if tag_lines:
+                return tag_lines
+
+        return super().recognize(image_path, language, regions)
 
 
 class _HezarOcrAdapter(_BaseAdapter):
@@ -1435,14 +1938,17 @@ class _HezarOcrAdapter(_BaseAdapter):
             for raw_box in raw_boxes:
                 if not isinstance(raw_box, (list, tuple)) or len(raw_box) < 4:
                     continue
-                # Hezar CRAFT boxes are (x1, y1, width, height).
+                # Hezar CRAFT boxes are (x1, y1, width, height); add generous vertical margin
+                # so Persian upper/lower diacritical dots (پ چ ژ ی ت ث ب ن) are never clipped.
                 bx, by, bw, bh = [float(v) for v in raw_box[:4]]
                 if bw < 4.0 or bh < 4.0:
                     continue
-                cx0 = max(0, int(round(bx - 2.0)))
-                cy0 = max(0, int(round(by - 4.0)))
-                cx1 = min(width, int(round(bx + bw + 2.0)))
-                cy1 = min(height, int(round(by + bh + 4.0)))
+                pad_x = max(3, int(round(bh * 0.10)))
+                pad_y = max(4, int(round(bh * 0.18)))
+                cx0 = max(0, int(round(bx - pad_x)))
+                cy0 = max(0, int(round(by - pad_y)))
+                cx1 = min(width, int(round(bx + bw + pad_x)))
+                cy1 = min(height, int(round(by + bh + pad_y)))
                 if cx1 - cx0 < 4 or cy1 - cy0 < 4:
                     continue
                 poly = _clamp_polygon(_rect_polygon(bx, by, bx + bw, by + bh), width, height)
@@ -1463,7 +1969,14 @@ class _HezarOcrAdapter(_BaseAdapter):
                     try:
                         preds = recognizer.predict(batch_imgs)
                     except Exception:
-                        preds = [recognizer.predict(img) for img in batch_imgs]
+                        try:
+                            preds = [recognizer.predict(img) for img in batch_imgs]
+                        except Exception:
+                            if self._device != "cpu":
+                                _, recognizer = self._ensure_loaded(force_cpu=True)
+                                preds = [recognizer.predict(img) for img in batch_imgs]
+                            else:
+                                raise
                     if not isinstance(preds, (list, tuple)):
                         preds = [preds]
                     for (_, poly), pred in zip(batch, preds):
@@ -1492,9 +2005,9 @@ def _create_adapter(engine_id: str, models_root: Path) -> _BaseAdapter:
     if engine_id == "got-ocr-2":
         return _TransformersRegionAdapter(models_root, "stepfun-ai/GOT-OCR-2.0-hf", "OCR this text accurately.")
     if engine_id == "glm-ocr":
-        return _TransformersRegionAdapter(models_root, "zai-org/GLM-OCR", "Recognize all text in this image region.")
+        return _GlmOcrAdapter(models_root)
     if engine_id == "olmocr":
-        return _TransformersRegionAdapter(models_root, "allenai/olmOCR-2-7B-1025", "Read the exact text in this image.")
+        return _OlmOcrAdapter(models_root)
     if engine_id == "hunyuan-ocr":
         return _HunyuanOcrAdapter(models_root)
     if engine_id == "hezar-ocr":

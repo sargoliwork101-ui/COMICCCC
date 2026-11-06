@@ -27,6 +27,7 @@ from .ocr_managed import (
     check_remote_updates,
     cleanup_superseded_engine_files,
     clear_cached_engine_update,
+    compute_engine_download_estimate,
     compute_engine_update_fields,
     compute_worker_count,
     cpu_core_count,
@@ -34,6 +35,7 @@ from .ocr_managed import (
     engine_meta,
     evaluate_engine_hardware,
     fetch_tessdata_revision,
+    format_download_size_fa,
     inspect_hardware,
     install_tesseract_runtime,
     is_newer_version,
@@ -658,7 +660,13 @@ class RapidEngine:
 
     def download(self, language: str = "eng") -> None:
         _STANDARD_CANCEL_EVENT.clear()
-        emit(f"شروع آماده‌سازی مدل {self.id}…", progress=0.06)
+        dl_est = compute_engine_download_estimate(
+            self.id,
+            runtime_installed=self.runtime_installed,
+            model_ready=self.model_ready,
+        )
+        dl_label = format_download_size_fa(dl_est["totalDownloadGb"])
+        emit(f"شروع آماده‌سازی مدل {self.id} (کل حجم دانلود: {dl_label})…", progress=0.06)
         self._ensure_runtime()
         languages = [language] if self.version == "v5" else ["eng"]
         try:
@@ -724,7 +732,12 @@ class RapidEngine:
             trim_process_memory()
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
-        arr = np.asarray(image)
+        rgb = _to_white_backed_rgb(image) if getattr(image, "mode", "RGB") != "RGB" else image
+        try:
+            arr = np.asarray(rgb)
+        finally:
+            if rgb is not image:
+                rgb.close()
         need_cpu_retry = False
         force_cpu_before = self._force_cpu
         with self._checkout(language) as engine:
@@ -768,6 +781,7 @@ class EasyEngine:
         self._lock = threading.Lock()
         self._infer_lock = threading.Lock()
         self._using_gpu: bool = False
+        self._force_cpu: bool = False
 
     @property
     def runtime_installed(self) -> bool:
@@ -856,8 +870,11 @@ class EasyEngine:
                     except Exception:
                         pass
                     use_gpu = bool(
-                        (hasattr(torch, "cuda") and torch.cuda.is_available())
-                        or (hasattr(torch, "backends") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+                        not self._force_cpu
+                        and (
+                            (hasattr(torch, "cuda") and torch.cuda.is_available())
+                            or (hasattr(torch, "backends") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+                        )
                     )
                 except Exception:
                     use_gpu = False
@@ -885,7 +902,13 @@ class EasyEngine:
 
     def download(self, language: str = "eng") -> None:
         _STANDARD_CANCEL_EVENT.clear()
-        emit(f"شروع آماده‌سازی مدل EasyOCR ({language})…", progress=0.06)
+        dl_est = compute_engine_download_estimate(
+            self.id,
+            runtime_installed=self.runtime_installed,
+            model_ready=self.model_ready,
+        )
+        dl_label = format_download_size_fa(dl_est["totalDownloadGb"])
+        emit(f"شروع آماده‌سازی مدل EasyOCR ({language} — کل حجم دانلود: {dl_label})…", progress=0.06)
         self._ensure_runtime()
         try:
             if _STANDARD_CANCEL_EVENT.is_set():
@@ -943,8 +966,13 @@ class EasyEngine:
             trim_process_memory()
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+        rgb = _to_white_backed_rgb(image) if getattr(image, "mode", "RGB") != "RGB" else image
+        try:
+            arr = np.asarray(rgb)
+        finally:
+            if rgb is not image:
+                rgb.close()
         reader = self._reader(language, False)
-        arr = np.asarray(image)
         batch_sz = 8 if self._using_gpu else 4
         grad_ctx: Any = contextlib.nullcontext
         try:
@@ -959,7 +987,21 @@ class EasyEngine:
                 except TypeError:
                     result = reader.readtext(arr, detail=1, paragraph=False)
         except Exception as exc:
-            raise OcrError(f"EasyOCR failed: {exc}") from exc
+            if self._using_gpu and not self._force_cpu:
+                self._force_cpu = True
+                self._using_gpu = False
+                self.unload()
+                cpu_reader = self._reader(language, False)
+                try:
+                    with self._infer_lock, grad_ctx():
+                        try:
+                            result = cpu_reader.readtext(arr, detail=1, paragraph=False, batch_size=4)
+                        except TypeError:
+                            result = cpu_reader.readtext(arr, detail=1, paragraph=False)
+                except Exception as cpu_exc:
+                    raise OcrError(f"EasyOCR failed: {cpu_exc}") from cpu_exc
+            else:
+                raise OcrError(f"EasyOCR failed: {exc}") from exc
         lines = []
         for box, text, score in result:
             if str(text).strip():
@@ -1174,7 +1216,13 @@ class TesseractEngine:
         if language not in LANGUAGES:
             raise OcrError(f"Unsupported Tesseract language: {language}")
         _STANDARD_CANCEL_EVENT.clear()
-        emit(f"شروع آماده‌سازی Tesseract ({language})…", progress=0.06)
+        dl_est = compute_engine_download_estimate(
+            self.id,
+            runtime_installed=self.runtime_installed,
+            model_ready=self.model_ready,
+        )
+        dl_label = format_download_size_fa(dl_est["totalDownloadGb"])
+        emit(f"شروع آماده‌سازی Tesseract ({language} — کل حجم دانلود: {dl_label})…", progress=0.06)
         if not self.runtime_installed:
             _call_install_tesseract_runtime()
             self._system_languages = None
@@ -1252,11 +1300,14 @@ class TesseractEngine:
             "--dpi", "300",
             "-c", "tessedit_create_tsv=1",
         ]
-        if (self._model_dir() / f"{language}.traineddata").is_file():
+        local_traineddata = (self._model_dir() / f"{language}.traineddata").is_file()
+        if local_traineddata:
             self._ensure_tsv_config()
             command.extend(["--tessdata-dir", str(self._model_dir())])
         command.append("tsv")
         tess_env = dict(os.environ)
+        if local_traineddata:
+            tess_env["TESSDATA_PREFIX"] = str(self._model_dir())
         omp_limit = self._omp_threads if self._omp_threads is not None else min(4, cpu_core_count())
         tess_env["OMP_THREAD_LIMIT"] = str(max(1, omp_limit))
         try:
@@ -2069,13 +2120,23 @@ class EngineRegistry:
                 manifest_entry=manifest.get(engine_id),
                 cached_remote=cached_updates.get(engine_id),
             )
+            rt_installed = engine.runtime_installed
+            m_ready = bool(ready_languages)
+            download_fields = compute_engine_download_estimate(
+                engine_id,
+                runtime_installed=rt_installed,
+                model_ready=m_ready,
+                nominal_size_gb=float(info.get("downloadSizeGb") or 0.0),
+                hw=hw,
+            )
             result.append({
                 "id": engine_id,
                 **info,
-                "runtimeInstalled": engine.runtime_installed,
-                "modelReady": bool(ready_languages),
+                "runtimeInstalled": rt_installed,
+                "modelReady": m_ready,
                 "readyLanguages": ready_languages,
                 "isLoadedInRam": bool(getattr(engine, "is_loaded_in_ram", False)),
+                **download_fields,
                 **update_fields,
                 "hardwareCheck": evaluate_engine_hardware(engine_id, hw),
             })

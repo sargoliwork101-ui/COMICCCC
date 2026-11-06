@@ -1649,6 +1649,101 @@ function check(name, condition) {
       })()
     `, context);
     check('v3.94 clearly indicates On-System (Local/Offline) vs Online execution across #modelsDialog, #ocrDialog, #aiDialog, and #translationPreviewDialog', v394ExecUiCheck === true);
+
+    const v395DownloadSizeUiCheck = await vm.runInContext(`
+      (() => {
+        const prevEngines = state.engines;
+        state.engines = [
+          {
+            id: 'rapidocr-v6',
+            name: 'PP-OCRv6 Small',
+            family: 'RapidOCR / ONNX',
+            description: 'fast',
+            languages: ['eng'],
+            selectable: true,
+            category: 'standard',
+            executionMode: 'local',
+            runtimeInstalled: false,
+            modelReady: false,
+            readyLanguages: [],
+            downloadSizeGb: 0.06,
+            weightsDownloadGb: 0.015,
+            runtimeDownloadGb: 0.070,
+            fullDownloadSizeGb: 0.085,
+            totalDownloadGb: 0.085,
+          },
+          {
+            id: 'glm-ocr',
+            name: 'GLM-OCR',
+            family: 'GLM-V / Transformers',
+            description: 'vlm',
+            languages: ['eng', 'fas'],
+            selectable: true,
+            isolated: true,
+            category: 'advanced',
+            executionMode: 'local',
+            runtimeInstalled: false,
+            modelReady: false,
+            readyLanguages: [],
+            downloadSizeGb: 2.4,
+            weightsDownloadGb: 1.9,
+            runtimeDownloadGb: 2.85,
+            fullDownloadSizeGb: 4.75,
+            totalDownloadGb: 4.75,
+          },
+          {
+            id: 'tesseract',
+            name: 'Tesseract',
+            family: 'Tesseract OCR',
+            description: 'doc',
+            languages: ['eng', 'fas'],
+            selectable: true,
+            category: 'standard',
+            executionMode: 'local',
+            runtimeInstalled: true,
+            modelReady: true,
+            readyLanguages: ['eng'],
+            downloadSizeGb: 0.09,
+            weightsDownloadGb: 0.015,
+            runtimeDownloadGb: 0.075,
+            perLanguageDownloadGb: 0.015,
+            fullDownloadSizeGb: 0.09,
+            totalDownloadGb: 0.015,
+          },
+        ];
+        try {
+          $('ocrLanguage').value = 'eng';
+          updateEngineOptions('glm-ocr');
+          const glmOptText = document.querySelector('#ocrEngine option[value="glm-ocr"]')?.textContent || '';
+          const statusText = $('ocrEngineStatus')?.textContent || '';
+          const quickBtnText = $('ocrQuickPrepareBtn')?.textContent || '';
+
+          renderModels();
+          const glmCard = [...document.querySelectorAll('#engineCards .engine-card')].find((el) => el.querySelector('h3')?.textContent === 'GLM-OCR');
+          const glmPrepBtn = [...(glmCard?.querySelectorAll('.card-buttons button') || [])].find((b) => b.textContent.includes('آماده‌سازی'));
+
+          // Switch to Persian on installed Tesseract where only fas.traineddata (~15 MB) needs downloading
+          $('ocrLanguage').value = 'fas';
+          updateEngineOptions('tesseract');
+          const tessQuickBtn = $('ocrQuickPrepareBtn')?.textContent || '';
+
+          return (
+            glmOptText.includes('کل حجم دانلود:') &&
+            statusText.includes('کل حجم دانلود خودکار:') &&
+            statusText.includes('پیش‌نیازها:') &&
+            quickBtnText.includes('نصب و دانلود خودکار همین مدل (کل حجم دانلود:') &&
+            Boolean(glmPrepBtn && glmPrepBtn.textContent.includes('کل حجم دانلود:')) &&
+            tessQuickBtn.includes('دانلود خودکار فایل زبان (fas) (کل حجم دانلود: ~15 مگابایت)')
+          );
+        } finally {
+          state.engines = prevEngines;
+          $('ocrLanguage').value = 'eng';
+          updateEngineOptions();
+          renderModels();
+        }
+      })()
+    `, context);
+    check('v3.95 announces exact total download size across #ocrEngine options, #ocrEngineStatus, #ocrQuickPrepareBtn, and #modelsDialog prepare buttons', v395DownloadSizeUiCheck === true);
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

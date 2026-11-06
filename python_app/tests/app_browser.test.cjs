@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v3.93: Verify version badge ۳.۹۳, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, and target language menu
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۴ · Python', 'header shows version ۳.۹۴');
+      // v3.85–v3.95: Verify version badge ۳.۹۵, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, and total download size announcements
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۵ · Python', 'header shows version ۳.۹۵');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2583,7 +2583,25 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(v394Exec.ocrLocal, true, '#ocrDialog displays local on-system badge and status');
       assert.equal(v394Exec.geminiOnline, true, 'Cloud AI provider displays online execution badge & banner');
       assert.equal(v394Exec.ollamaLocal, true, 'Localhost OpenAI-compatible endpoint switches badge & banner to on-system local');
-      console.log('PASS: v3.81–v3.94 Persian OCR, Hezar engine, 2D suitability, target language menu, and On-System vs Online badges');
+
+      const v395DlCheck = await page.evaluate(() => {
+        const allHaveSizes = Array.isArray(state.engines) && state.engines.length === 14 && state.engines.every((e) => Number(e.fullDownloadSizeGb) > 0 && Number(e.totalDownloadGb) >= 0);
+        document.getElementById('ocrLanguage').value = 'fas';
+        updateEngineOptions('hezar-ocr');
+        const ocrBtnTxt = document.getElementById('ocrQuickPrepareBtn')?.textContent || '';
+        const ocrStatusTxt = document.getElementById('ocrEngineStatus')?.textContent || '';
+        renderModels();
+        const hezarCard = [...document.querySelectorAll('#engineCards .engine-card')].find((el) => el.querySelector('h3')?.textContent === 'Hezar Persian OCR');
+        const hezarBtnTxt = [...(hezarCard?.querySelectorAll('.card-buttons button') || [])].find((b) => b.textContent.includes('آماده‌سازی'))?.textContent || '';
+        document.getElementById('ocrLanguage').value = 'eng';
+        updateEngineOptions('rapidocr-v6');
+        return { allHaveSizes, ocrBtnTxt, ocrStatusTxt, hezarBtnTxt };
+      });
+      assert.equal(v395DlCheck.allHaveSizes, true, 'All 14 engines report fullDownloadSizeGb and totalDownloadGb');
+      assert.ok(v395DlCheck.ocrBtnTxt.includes('کل حجم دانلود:'), '#ocrQuickPrepareBtn announces total download size');
+      assert.ok(v395DlCheck.ocrStatusTxt.includes('کل حجم دانلود خودکار:'), '#ocrEngineStatus announces total download size');
+      assert.ok(v395DlCheck.hezarBtnTxt.includes('کل حجم دانلود:'), '#modelsDialog prepare button announces total download size');
+      console.log('PASS: v3.81–v3.95 Persian OCR, Hezar engine, 2D suitability, target language menu, On-System vs Online badges, and Total Download Size announcements');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
