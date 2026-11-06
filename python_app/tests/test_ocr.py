@@ -2009,6 +2009,7 @@ def test_tesseract_language_mirror_failover_and_cancel_api_route(monkeypatch, tm
     monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
 
     attempted_urls: list[str] = []
+    attempted_headers: list[dict[str, str]] = []
 
     class GoodResp:
         headers = {"Content-Length": "2048"}
@@ -2023,7 +2024,8 @@ def test_tesseract_language_mirror_failover_and_cancel_api_route(monkeypatch, tm
 
     def flaky_urlopen(req, timeout=180):
         attempted_urls.append(req.full_url)
-        if len(attempted_urls) < 3:
+        attempted_headers.append(dict(req.header_items()))
+        if len(attempted_urls) < 4:
             raise urllib.error.URLError("blocked host")
         return GoodResp()
 
@@ -2032,8 +2034,10 @@ def test_tesseract_language_mirror_failover_and_cancel_api_route(monkeypatch, tm
     monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", flaky_urlopen)
     saved = engine._download_language_file("eng")
     assert saved.stat().st_size == 2048
-    assert len(attempted_urls) == 3
-    assert "cdn.jsdelivr.net" in attempted_urls[-1]
+    assert len(attempted_urls) == 4
+    assert "api.github.com/repos/tesseract-ocr/tessdata_fast/contents/eng.traineddata" in attempted_urls[1]
+    assert attempted_headers[1].get("Accept") == "application/vnd.github.raw"
+    assert "hf-mirror.com" in attempted_urls[3]
 
     # Explicit POST /api/engines/{id}/cancel route works for both built-in and isolated engines
     client = TestClient(create_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
@@ -2491,6 +2495,219 @@ def test_v395_all_isolated_and_builtin_runtime_root_cause_fixes(monkeypatch, tmp
     assert gpu_calls["n"] == 1
     assert easy._force_cpu is True
     assert len(easy_lines) == 1 and easy_lines[0].text == "CPU fallback succeeded"
+
+
+def test_v396_surya_zero_block_root_cause_fixes_and_silent_error_recovery(tmp_path, monkeypatch):
+    import sys
+    import types
+    from types import SimpleNamespace
+    from PIL import Image, ImageDraw
+    import comic_studio.ocr_managed as ocr_managed
+    from comic_studio import ocr_worker
+
+    # 1) _worker_env sets LLAMA_CPP_NGL="0" on non-NVIDIA Intel/AMD GPU and "99" on NVIDIA GPU,
+    #    plus SURYA_MAX_TOKENS_FULL_PAGE="4096" and SURYA_INFERENCE_LOGPROBS="false".
+    monkeypatch.setattr(ocr_managed, "inspect_hardware", lambda: {"hasNvidiaGpu": False, "hasGpu": True, "gpuBackend": "directml", "cpuCores": 8})
+    monkeypatch.setattr(ocr_managed.sys, "platform", "win32")
+    surya_engine = ocr_managed.IsolatedOcrEngine("surya", "Surya", "Datalab", "desc", ("eng", "fas"))
+    env_dml = surya_engine._worker_env()
+    assert env_dml["LLAMA_CPP_NGL"] == "0"
+    assert env_dml["SURYA_MAX_TOKENS_FULL_PAGE"] == "4096"
+    assert env_dml["SURYA_INFERENCE_LOGPROBS"] == "false"
+
+    # 2) _SuryaAdapter._sync_surya_runtime_settings syncs ctx=24576, max_tokens=4096, logprobs=False
+    fake_settings = SimpleNamespace(
+        SURYA_INFERENCE_BACKEND="auto",
+        SURYA_INFERENCE_PARALLEL=4,
+        SURYA_INFERENCE_CTX_SIZE=16384,
+        SURYA_MAX_TOKENS_FULL_PAGE=12288,
+        SURYA_INFERENCE_LOGPROBS=True,
+        LLAMA_CPP_NGL=99,
+        FAST_LAYOUT_MODEL_CHECKPOINT="",
+        FAST_LAYOUT_CONFIDENCE_THRESHOLD=0.35,
+    )
+    fake_surya = types.ModuleType("surya")
+    fake_surya_settings = types.ModuleType("surya.settings")
+    fake_surya_settings.settings = fake_settings
+    monkeypatch.setitem(sys.modules, "surya", fake_surya)
+    monkeypatch.setitem(sys.modules, "surya.settings", fake_surya_settings)
+    monkeypatch.delenv("SURYA_INFERENCE_CTX_SIZE", raising=False)
+    monkeypatch.setenv("SURYA_MAX_TOKENS_FULL_PAGE", "4096")
+    monkeypatch.setenv("SURYA_INFERENCE_LOGPROBS", "false")
+    monkeypatch.setenv("LLAMA_CPP_NGL", "0")
+
+    surya_adapter = ocr_worker._SuryaAdapter(tmp_path)
+    surya_adapter._sync_surya_runtime_settings()
+    assert fake_settings.SURYA_INFERENCE_CTX_SIZE == 24576
+    assert fake_settings.SURYA_MAX_TOKENS_FULL_PAGE == 4096
+    assert fake_settings.SURYA_INFERENCE_LOGPROBS is False
+    assert fake_settings.LLAMA_CPP_NGL == 0
+
+    # Create a non-blank English document page image
+    doc_path = tmp_path / "page_2.png"
+    img = Image.new("RGB", (600, 400), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([40, 60, 520, 95], fill=(15, 15, 15))
+    draw.rectangle([40, 140, 500, 175], fill=(20, 20, 20))
+    img.save(doc_path)
+    img.close()
+
+    # 3) Fast in-process rf-detr layout passes layout_results=[layout_res] to _predictor
+    fake_layout_box = SimpleNamespace(label="Text", polygon=[[40, 60], [520, 60], [520, 95], [40, 95]])
+    fake_fast_layout = SimpleNamespace(bboxes=[fake_layout_box], image_bbox=[0.0, 0.0, 600.0, 400.0])
+    seen_layout_kwargs: list[bool] = []
+
+    def _fast_pred(imgs, layout_results=None):
+        seen_layout_kwargs.append(layout_results is not None)
+        return [
+            SimpleNamespace(
+                error=False,
+                blocks=[
+                    SimpleNamespace(
+                        html="<p>English paragraph recognized via fast block layout.</p>",
+                        label="Text",
+                        bbox=[40, 60, 520, 95],
+                        confidence=0.96,
+                        error=False,
+                    )
+                ],
+            )
+        ]
+
+    surya_adapter._predictor = _fast_pred
+    monkeypatch.setattr(surya_adapter, "_detect_fast_layout_inprocess", lambda rgb: fake_fast_layout)
+    fast_lines = surya_adapter.recognize(str(doc_path), "eng", None)
+    assert seen_layout_kwargs == [True]
+    assert len(fast_lines) == 1 and "English paragraph" in fast_lines[0]["text"]
+
+    # 4) Silent BlockOCRResult(error=True, raw="") with LLAMA_CPP_NGL="99" automatically recovers on CPU ("0")
+    monkeypatch.setattr(surya_adapter, "_detect_fast_layout_inprocess", lambda rgb: None)
+    monkeypatch.setenv("LLAMA_CPP_NGL", "99")
+    ngl_history: list[str] = []
+
+    def _silent_gpu_fail_then_cpu_ok(imgs, layout_results=None):
+        cur_ngl = ocr_worker.os.environ.get("LLAMA_CPP_NGL", "0")
+        ngl_history.append(cur_ngl)
+        if cur_ngl != "0":
+            # Exact upstream openai_client failure mode: no exception raised, 0 valid text, error=True
+            return [SimpleNamespace(error=True, blocks=[SimpleNamespace(html="", text="", label="Full-Page", bbox=[0, 0, 600, 400], error=True)])]
+        return [SimpleNamespace(error=False, blocks=[SimpleNamespace(html="<p>Recovered on CPU</p>", label="Text", bbox=[40, 60, 520, 95], confidence=0.92, error=False)])]
+
+    def _reload_stub():
+        surya_adapter._predictor = _silent_gpu_fail_then_cpu_ok
+
+    monkeypatch.setattr(surya_adapter, "_ensure_loaded", _reload_stub)
+    rec_lines = surya_adapter.recognize(str(doc_path), "eng", None)
+    assert ngl_history == ["99", "0"]
+    assert len(rec_lines) == 1 and rec_lines[0]["text"] == "Recovered on CPU"
+
+    # 5) Persistent silent llama-server error raises clear RuntimeError instead of returning 0 silent blocks
+    def _always_silent_error(imgs, layout_results=None):
+        return [SimpleNamespace(error=True, blocks=[SimpleNamespace(html="", text="", label="Full-Page", bbox=[0, 0, 600, 400], error=True)])]
+
+    surya_adapter._predictor = _always_silent_error
+    monkeypatch.setattr(surya_adapter, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(surya_adapter, "_build_region_layout_fallback", lambda rgb, regs: None)
+    try:
+        surya_adapter.recognize(str(doc_path), "eng", None)
+        raise AssertionError("Expected RuntimeError when Surya llama-server returns error=True with 0 blocks")
+    except RuntimeError as exc:
+        assert "Surya llama-server inference returned an error" in str(exc)
+
+
+def test_v396_persian_download_fixes_across_rapid_hezar_easy_and_bidi_shim(tmp_path, monkeypatch):
+    import io
+    import sys
+    import comic_studio.ocr as ocr_mod
+    from comic_studio import ocr_worker
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+
+    # 1) Pure-Python fallback bidi shim reverses visual RTL runs while preserving embedded English/digits
+    saved_bidi = sys.modules.pop("bidi", None)
+    saved_bidi_alg = sys.modules.pop("bidi.algorithm", None)
+    # Block real python-bidi import briefly so _install_fallback_bidi_shim installs its pure-Python shim
+    sys.modules["bidi"] = None  # type: ignore[assignment]
+    sys.modules["bidi.algorithm"] = None  # type: ignore[assignment]
+    try:
+        ocr_mod._install_fallback_bidi_shim()
+        from bidi.algorithm import get_display as shim_get_display
+        logical = shim_get_display("IPC-610 مالس")
+        assert "سلام" in logical and "IPC-610" in logical
+    finally:
+        if saved_bidi is not None:
+            sys.modules["bidi"] = saved_bidi
+        else:
+            sys.modules.pop("bidi", None)
+        if saved_bidi_alg is not None:
+            sys.modules["bidi.algorithm"] = saved_bidi_alg
+        else:
+            sys.modules.pop("bidi.algorithm", None)
+
+    # 2) RapidEngine ("fas") cleans truncated <10KB .onnx files and falls back to mirrors when modelscope fails
+    ocr_mod._STANDARD_CANCEL_EVENT.clear()
+    rapid = ocr_mod.RapidEngine("rapidocr-v5", "v5")
+    monkeypatch.setattr(rapid, "_ensure_runtime", lambda: None)
+    monkeypatch.setattr(ocr_mod.RapidEngine, "runtime_installed", property(lambda self: True))
+    model_dir = rapid._model_dir()
+    model_dir.mkdir(parents=True, exist_ok=True)
+    # Write a truncated 128-byte partial file that must be purged
+    (model_dir / "arabic_PP-OCRv5_rec_mobile.onnx").write_bytes(b"truncated")
+
+    create_calls = {"n": 0}
+
+    class DownloadFileException(Exception):
+        pass
+
+    def _fake_create(lang: str):
+        create_calls["n"] += 1
+        if create_calls["n"] == 1:
+            raise DownloadFileException("Failed to download from modelscope.cn")
+        assert (model_dir / "ch_PP-OCRv5_det_mobile.onnx").stat().st_size >= 10_000
+        assert (model_dir / "arabic_PP-OCRv5_rec_mobile.onnx").stat().st_size >= 10_000
+        return object()
+
+    class FakeMirrorResp:
+        headers = {"Content-Length": "16384"}
+        def __init__(self):
+            self._buf = io.BytesIO(b"M" * 16384)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self, sz=-1):
+            return self._buf.read(sz)
+
+    mirror_urls: list[str] = []
+
+    def _fake_urlopen(req, timeout=180):
+        mirror_urls.append(req.full_url)
+        return FakeMirrorResp()
+
+    monkeypatch.setattr(rapid, "_create", _fake_create)
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", _fake_urlopen)
+    inst = rapid._get("fas", allow_download=True)
+    assert inst is not None
+    assert create_calls["n"] == 2
+    assert any("huggingface.co/RapidAI/RapidOCR" in u and "arabic_PP-OCRv5_rec_mobile.onnx" in u for u in mirror_urls)
+
+    # 3) _HezarOcrAdapter._local_or_hub rejects partial .cache-only directories lacking model_config.yaml,
+    #    and _is_hf_network_or_hub_error catches HfHubHTTPError / OSError to trigger hf-mirror.com
+    hezar_adapter = ocr_worker._HezarOcrAdapter(tmp_path)
+    partial_dir = tmp_path / "hf-repos" / "hezarai__crnn-base-fa-v2" / ".cache"
+    partial_dir.mkdir(parents=True, exist_ok=True)
+    (partial_dir / "partial.lock").write_text("x", encoding="utf-8")
+    assert hezar_adapter._local_or_hub("hezarai/crnn-base-fa-v2") == "hezarai/crnn-base-fa-v2"
+    (tmp_path / "hf-repos" / "hezarai__crnn-base-fa-v2" / "model_config.yaml").write_text("name: crnn\n", encoding="utf-8")
+    assert hezar_adapter._local_or_hub("hezarai/crnn-base-fa-v2").endswith("hezarai__crnn-base-fa-v2")
+
+    class HfHubHTTPError(Exception):
+        pass
+
+    assert ocr_worker._is_hf_network_or_hub_error(HfHubHTTPError("504 Gateway Timeout")) is True
+    assert ocr_worker._is_hf_network_or_hub_error(OSError("Network is unreachable")) is True
+    assert ocr_worker._is_hf_network_or_hub_error(ValueError("Unrelated invalid argument")) is False
+
 
 
 

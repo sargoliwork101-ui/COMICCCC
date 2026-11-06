@@ -1744,6 +1744,102 @@ function check(name, condition) {
       })()
     `, context);
     check('v3.95 announces exact total download size across #ocrEngine options, #ocrEngineStatus, #ocrQuickPrepareBtn, and #modelsDialog prepare buttons', v395DownloadSizeUiCheck === true);
+
+    const v396SortingAndFrozenOrderCheck = await vm.runInContext(`
+      (() => {
+        const rankMap = { best: 0, medium: 1, weak: 2 };
+        const isMonotonicGreenToRed = (tiers) => {
+          for (let i = 1; i < tiers.length; i += 1) {
+            if ((rankMap[tiers[i]] ?? 1) < (rankMap[tiers[i - 1]] ?? 1)) return false;
+          }
+          return tiers.length > 0;
+        };
+        const prevEngines = state.engines;
+        state.engines = [
+          { id: 'tesseract', name: 'Tesseract 5 LSTM', family: 'Tesseract', description: 'doc', languages: ['eng', 'fas'], selectable: true, category: 'standard', executionMode: 'local', runtimeInstalled: true, modelReady: true, readyLanguages: ['eng', 'fas'], downloadSizeGb: 0.09 },
+          { id: 'rapidocr-v6', name: 'PP-OCRv6 Small', family: 'PaddleOCR', description: 'fast', languages: ['eng', 'jpn', 'chi_sim'], selectable: true, category: 'standard', executionMode: 'local', runtimeInstalled: true, modelReady: true, readyLanguages: ['eng'], downloadSizeGb: 0.03 },
+          { id: 'easyocr', name: 'EasyOCR', family: 'JaidedAI', description: 'comic', languages: ['eng', 'fas', 'kor'], selectable: true, category: 'standard', executionMode: 'local', runtimeInstalled: true, modelReady: true, readyLanguages: ['eng', 'fas'], downloadSizeGb: 0.25 },
+          { id: 'got-ocr-2', name: 'GOT-OCR 2.0', family: 'StepFun', description: 'vlm', languages: ['eng', 'chi_sim'], selectable: true, isolated: true, category: 'advanced', executionMode: 'local', runtimeInstalled: false, modelReady: false, readyLanguages: [], downloadSizeGb: 1.5 },
+          { id: 'surya', name: 'Surya', family: 'Datalab', description: 'layout', languages: ['eng', 'fas'], selectable: true, isolated: true, category: 'advanced', executionMode: 'local', runtimeInstalled: true, modelReady: true, readyLanguages: ['eng', 'fas'], downloadSizeGb: 1.4 },
+          { id: 'hezar-ocr', name: 'Hezar Persian OCR', family: 'Hezar', description: 'fa', languages: ['fas'], selectable: true, isolated: true, category: 'advanced', executionMode: 'local', runtimeInstalled: false, modelReady: false, readyLanguages: [], downloadSizeGb: 0.2 },
+          { id: 'mineru-2-5-pro', name: 'MinerU2.5-Pro', family: 'OpenDataLab', description: 'doc', languages: ['eng', 'chi_sim'], selectable: true, isolated: true, category: 'advanced', executionMode: 'local', runtimeInstalled: false, modelReady: false, readyLanguages: [], downloadSizeGb: 3.1 },
+        ];
+        try {
+          // 1) Check #ocrEngine and #modelsDialog sorting across (eng, comic), (eng, document), (fas, comic), (fas, document)
+          const combos = [
+            ['eng', 'comic'],
+            ['eng', 'document'],
+            ['fas', 'comic'],
+            ['fas', 'document'],
+          ];
+          for (const [lang, mode] of combos) {
+            $('ocrLanguage').value = lang;
+            $('ocrPageMode').value = mode;
+            $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+            $('ocrPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+            const optTiers = [...$('ocrEngine').options].map((o) => o.dataset.suitability);
+            if (!isMonotonicGreenToRed(optTiers)) return { ok: false, stage: 'ocrEngine:' + lang + ':' + mode, optTiers };
+
+            $('modelsLanguage').value = lang;
+            $('modelsPageMode').value = mode;
+            $('modelsLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+            $('modelsPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+            const groups = [...$('engineCards').querySelectorAll('.model-group')];
+            if (groups.length !== 2) return { ok: false, stage: 'groupCount:' + groups.length };
+            for (const g of groups) {
+              const cardTiers = [...g.querySelectorAll('.engine-card')].map((c) => c.dataset.suitability);
+              if (!isMonotonicGreenToRed(cardTiers)) return { ok: false, stage: 'modelsGroup:' + lang + ':' + mode, cardTiers };
+            }
+          }
+
+          // 2) Verify ZERO periodic re-sorting during background refreshes (e.g. pollActivity / status updates):
+          // Mutate an engine's suitabilityMatrix WITHOUT changing language or pageMode and call renderModels() + updateEngineOptions().
+          // Order MUST stay 100% frozen until language or pageMode actually changes!
+          $('modelsLanguage').value = 'eng';
+          $('modelsPageMode').value = 'comic';
+          $('modelsLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          $('modelsPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+          $('ocrLanguage').value = 'eng';
+          $('ocrPageMode').value = 'comic';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          $('ocrPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+
+          const beforeCardTitles = [...$('engineCards').querySelectorAll('.engine-card h3')].map((h) => h.textContent);
+          const beforeOptIds = [...$('ocrEngine').options].map((o) => o.value);
+
+          // Flip tesseract from weak -> best in memory without changing language or pageMode
+          const tess = state.engines.find((e) => e.id === 'tesseract');
+          tess.suitabilityMatrix = { eng: { comic: 'best', document: 'best' } };
+          tess.isLoadedInRam = true;
+          renderModels();
+          updateEngineOptions();
+
+          const duringPollCardTitles = [...$('engineCards').querySelectorAll('.engine-card h3')].map((h) => h.textContent);
+          const duringPollOptIds = [...$('ocrEngine').options].map((o) => o.value);
+          const frozenDuringPoll = JSON.stringify(beforeCardTitles) === JSON.stringify(duringPollCardTitles)
+            && JSON.stringify(beforeOptIds) === JSON.stringify(duringPollOptIds);
+
+          // Now explicitly change pageMode -> must resort immediately!
+          $('modelsPageMode').value = 'document';
+          $('modelsPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const afterModeChangeGroups = [...$('engineCards').querySelectorAll('.model-group')];
+          const resortedOnModeChange = afterModeChangeGroups.every((g) =>
+            isMonotonicGreenToRed([...g.querySelectorAll('.engine-card')].map((c) => c.dataset.suitability))
+          );
+
+          return { ok: frozenDuringPoll && resortedOnModeChange, frozenDuringPoll, resortedOnModeChange };
+        } finally {
+          state.engines = prevEngines;
+          $('ocrLanguage').value = 'eng';
+          $('ocrPageMode').value = 'comic';
+          $('modelsLanguage').value = 'eng';
+          $('modelsPageMode').value = 'comic';
+          updateEngineOptions('', { resort: true });
+          renderModels({ resort: true });
+        }
+      })()
+    `, context);
+    check('v3.96 sorts models Green -> Yellow -> Red on language/pageMode change and keeps order 100% frozen during background refreshes', v396SortingAndFrozenOrderCheck?.ok === true);
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

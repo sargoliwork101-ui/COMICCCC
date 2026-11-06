@@ -419,6 +419,118 @@ def _detect_onnx_acceleration() -> dict[str, Any]:
     return {"mode": "cpu", "gpu": False, "params": {}}
 
 
+def _install_fallback_bidi_shim() -> None:
+    """Provide a pure-Python visual-to-logical RTL `bidi.algorithm.get_display` fallback
+    only if `python-bidi` could not be imported (e.g. offline/air-gapped runtime), so
+    `rapidocr`'s `validate_rtl_dependency()` never aborts Persian (`fas` -> `arabic`) OCR."""
+    import types
+    import unicodedata
+
+    try:
+        from bidi.algorithm import get_display as _gd  # noqa: F401
+        return
+    except Exception:
+        pass
+    try:
+        from bidi import get_display as _top_gd  # type: ignore[import-not-found]
+        alg_mod = types.ModuleType("bidi.algorithm")
+        alg_mod.get_display = _top_gd  # type: ignore[attr-defined]
+        sys.modules["bidi.algorithm"] = alg_mod
+        return
+    except Exception:
+        pass
+
+    _MIRROR = str.maketrans("()[]{}<>«»", ")(][}{><»«")
+
+    def _fallback_get_display(text_or_bytes: str | bytes, *args: Any, **kwargs: Any) -> str | bytes:
+        is_bytes = isinstance(text_or_bytes, bytes)
+        encoding = str(kwargs.get("encoding", "utf-8"))
+        text = text_or_bytes.decode(encoding, errors="replace") if is_bytes else str(text_or_bytes)
+        if not text:
+            return b"" if is_bytes else ""
+        has_rtl = any(unicodedata.bidirectional(ch) in {"R", "AL", "AN"} for ch in text)
+        if not has_rtl:
+            return text.encode(encoding) if is_bytes else text
+        # Reverse visual-order RTL line while keeping contiguous LTR/digit runs forward.
+        tokens: list[tuple[bool, str]] = []
+        for ch in text:
+            bd = unicodedata.bidirectional(ch)
+            is_ltr_tok = bd in {"L", "EN", "ES", "ET"} or ch.isascii() and ch.isalnum()
+            if tokens and tokens[-1][0] == is_ltr_tok:
+                tokens[-1] = (is_ltr_tok, tokens[-1][1] + ch)
+            else:
+                tokens.append((is_ltr_tok, ch))
+        rebuilt: list[str] = []
+        for is_ltr_tok, seg in reversed(tokens):
+            rebuilt.append(seg if is_ltr_tok else seg[::-1].translate(_MIRROR))
+        out = "".join(rebuilt)
+        return out.encode(encoding) if is_bytes else out
+
+    bidi_pkg = sys.modules.get("bidi") or types.ModuleType("bidi")
+    alg_mod = types.ModuleType("bidi.algorithm")
+    bidi_pkg.get_display = _fallback_get_display  # type: ignore[attr-defined]
+    alg_mod.get_display = _fallback_get_display  # type: ignore[attr-defined]
+    bidi_pkg.algorithm = alg_mod  # type: ignore[attr-defined]
+    sys.modules["bidi"] = bidi_pkg
+    sys.modules["bidi.algorithm"] = alg_mod
+
+
+def _stream_download_with_mirrors(
+    urls: list[tuple[str, dict[str, str]]],
+    dest_path: Path,
+    *,
+    label: str,
+    min_bytes: int = 1024,
+    max_bytes: int = 300 * 1024 * 1024,
+    start_p: float = 0.72,
+    span_p: float = 0.18,
+) -> Path:
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    part_path = dest_path.parent / f".{dest_path.name}.part"
+    last_exc: Exception | None = None
+    for idx, (url, extra_headers) in enumerate(urls):
+        if _STANDARD_CANCEL_EVENT.is_set():
+            part_path.unlink(missing_ok=True)
+            raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
+        if idx > 0:
+            emit(f"ادامهٔ دریافت {label} از سرور جایگزین ({idx + 1}/{len(urls)})…", "warning", progress=round(start_p, 3))
+        headers = {"User-Agent": "Comic-OCR-Studio", **extra_headers}
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=180) as resp, part_path.open("wb") as out:
+                hdrs = getattr(resp, "headers", None)
+                raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
+                expected = int(raw_len) if raw_len and str(raw_len).isdigit() else 12 * 1024 * 1024
+                total = 0
+                while True:
+                    if _STANDARD_CANCEL_EVENT.is_set():
+                        raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
+                    chunk = resp.read(512 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise OcrError(f"Downloaded file {dest_path.name} exceeded safe size limit.")
+                    out.write(chunk)
+                    ratio = min(1.0, total / max(1, expected))
+                    emit(
+                        f"دانلود {label}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
+                        progress=round(start_p + span_p * ratio, 3),
+                    )
+            if part_path.stat().st_size < min_bytes:
+                raise OcrError(f"Downloaded file {dest_path.name} is incomplete or empty.")
+            os.replace(part_path, dest_path)
+            return dest_path
+        except OcrError:
+            part_path.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            part_path.unlink(missing_ok=True)
+            last_exc = exc
+            continue
+    raise OcrError(f"Download failed for {label}: {last_exc}") from last_exc
+
+
 class RapidEngine:
     def __init__(self, engine_id: str, version: str) -> None:
         self.id = engine_id
@@ -562,6 +674,54 @@ class RapidEngine:
         except Exception:
             return RapidOCR(params=params)
 
+    def _ensure_rtl_bidi(self, language: str, *, allow_install: bool) -> None:
+        if language != "fas":
+            return
+        try:
+            from bidi.algorithm import get_display as _gd  # noqa: F401
+            return
+        except Exception:
+            pass
+        if allow_install and importlib.util.find_spec("bidi") is None:
+            emit("نصب بستهٔ پشتیبانی راست‌به‌چپ فارسی (python-bidi) برای RapidOCR…", progress=0.68)
+            with contextlib.suppress(OcrError):
+                install_packages(["python-bidi>=0.4.2,<1"])
+        _install_fallback_bidi_shim()
+
+    def _download_v5_models_from_mirrors(self, language: str) -> None:
+        if self.version != "v5":
+            return
+        root = self._model_dir()
+        root.mkdir(parents=True, exist_ok=True)
+        # Copy bundled orientation classifier from installed rapidocr package if present so
+        # RapidOCR never needs a network fetch for `ch_ppocr_mobile_v2.0_cls_mobile.onnx`.
+        with contextlib.suppress(Exception):
+            bundled_cls = self._v6_model_dir() / "ch_ppocr_mobile_v2.0_cls_mobile.onnx"
+            dest_cls = root / bundled_cls.name
+            if bundled_cls.is_file() and not dest_cls.is_file():
+                shutil.copy2(bundled_cls, dest_cls)
+        for fname in self._expected_models(language):
+            target = root / fname
+            if target.is_file() and target.stat().st_size >= 10_000:
+                continue
+            if target.is_file():
+                target.unlink(missing_ok=True)
+            sub = "det" if "_det_" in fname else "rec"
+            rel = f"onnx/PP-OCRv5/{sub}/{fname}"
+            urls = [
+                (f"https://huggingface.co/RapidAI/RapidOCR/resolve/v3.10.0/{rel}", {}),
+                (f"https://hf-mirror.com/RapidAI/RapidOCR/resolve/v3.10.0/{rel}", {}),
+                (f"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/{rel}", {}),
+            ]
+            _stream_download_with_mirrors(
+                urls,
+                target,
+                label=f"{self.id} ({fname})",
+                min_bytes=10_000,
+                start_p=0.74,
+                span_p=0.16,
+            )
+
     def _ensure_runtime(self) -> None:
         if not self.runtime_installed:
             emit("بستهٔ اجرای RapidOCR موجود نیست؛ نصب آگاهانه آغاز می‌شود")
@@ -569,18 +729,18 @@ class RapidEngine:
             installed_gpu = False
             if os.name == "nt" and hw.get("hasGpu"):
                 try:
-                    install_packages(["rapidocr>=3.10,<3.11", "onnxruntime-directml>=1.20,<2"])
+                    install_packages(["rapidocr>=3.10,<3.11", "onnxruntime-directml>=1.20,<2", "python-bidi>=0.4.2,<1"])
                     installed_gpu = self.runtime_installed
                 except OcrError:
                     installed_gpu = False
             elif sys.platform.startswith("linux") and hw.get("hasNvidiaGpu"):
                 try:
-                    install_packages(["rapidocr>=3.10,<3.11", "onnxruntime-gpu>=1.20,<2"])
+                    install_packages(["rapidocr>=3.10,<3.11", "onnxruntime-gpu>=1.20,<2", "python-bidi>=0.4.2,<1"])
                     installed_gpu = self.runtime_installed
                 except OcrError:
                     installed_gpu = False
             if not installed_gpu and not self.runtime_installed:
-                install_packages(["rapidocr>=3.10,<3.11", "onnxruntime>=1.20,<2"])
+                install_packages(["rapidocr>=3.10,<3.11", "onnxruntime>=1.20,<2", "python-bidi>=0.4.2,<1"])
         if not self.runtime_installed:
             raise OcrError("RapidOCR was installed but cannot be imported. Restart the application and try again.")
 
@@ -589,7 +749,7 @@ class RapidEngine:
             raise OcrError("RapidOCR is not installed. Click the explicit preparation button to install it.")
         if not allow_download:
             root = self._model_dir() if self.version == "v5" else self._v6_model_dir()
-            missing = [name for name in self._expected_models(language) if not (root / name).is_file()]
+            missing = [name for name in self._expected_models(language) if not (root / name).is_file() or (root / name).stat().st_size == 0]
             if missing:
                 raise OcrError(f"{self.id} model is not ready. Use the explicit model download button first.")
 
@@ -598,10 +758,35 @@ class RapidEngine:
         with self._lock:
             if language not in self._instances:
                 emit(f"بارگذاری یا دانلود مدل {self.id} برای {language} آغاز شد")
+                self._ensure_rtl_bidi(language, allow_install=allow_download)
+                if allow_download and self.version == "v5":
+                    root = self._model_dir()
+                    for fname in self._expected_models(language):
+                        cand = root / fname
+                        if cand.is_file() and cand.stat().st_size < 10_000:
+                            cand.unlink(missing_ok=True)
                 try:
                     inst = self._create(language)
                 except Exception as exc:
-                    raise OcrError(f"Could not initialize {self.id}: {exc}") from exc
+                    is_dl_fail = (
+                        allow_download
+                        and self.version == "v5"
+                        and (
+                            "download" in type(exc).__name__.lower()
+                            or "failed to download" in str(exc).lower()
+                            or "modelscope" in str(exc).lower()
+                        )
+                    )
+                    if is_dl_fail:
+                        try:
+                            self._download_v5_models_from_mirrors(language)
+                            inst = self._create(language)
+                        except OcrError:
+                            raise
+                        except Exception as mirror_exc:
+                            raise OcrError(f"Could not initialize {self.id}: {mirror_exc}") from mirror_exc
+                    else:
+                        raise OcrError(f"Could not initialize {self.id}: {exc}") from exc
                 self._instances[language] = inst
                 self._idle_pool.setdefault(language, []).append(inst)
                 self._created_counts[language] = max(1, self._created_counts.get(language, 0))
@@ -849,6 +1034,62 @@ class EasyEngine:
         if not self.runtime_installed:
             raise OcrError("EasyOCR was installed but cannot be imported. Restart the application and try again.")
 
+    def _download_easyocr_models_from_mirrors(self, language: str) -> None:
+        import zipfile
+
+        root = self._model_dir()
+        root.mkdir(parents=True, exist_ok=True)
+        zip_map = {
+            "craft_mlt_25k.pth": "craft_mlt_25k.zip",
+            "english_g2.pth": "english_g2.zip",
+            "arabic.pth": "arabic.zip",
+            "korean_g2.pth": "korean_g2.zip",
+            "japanese_g2.pth": "japanese_g2.zip",
+            "zh_sim_g2.pth": "zh_sim_g2.zip",
+        }
+        for pth_name in self._expected_models(language):
+            target_pth = root / pth_name
+            if target_pth.is_file() and target_pth.stat().st_size >= 100_000:
+                continue
+            zip_name = zip_map.get(pth_name)
+            if not zip_name:
+                continue
+            tmp_zip = root / f".{zip_name}.dl"
+            urls = [
+                (f"https://huggingface.co/xiaoyao9184/easyocr/resolve/main/{pth_name}", {}),
+                (f"https://hf-mirror.com/xiaoyao9184/easyocr/resolve/main/{pth_name}", {}),
+                (f"https://github.com/JaidedAI/EasyOCR/releases/download/pre-v1.1.6/{zip_name}", {}),
+            ]
+            last_err: Exception | None = None
+            for url, hdrs in urls:
+                try:
+                    if url.endswith(".zip"):
+                        _stream_download_with_mirrors([(url, hdrs)], tmp_zip, label=f"EasyOCR ({pth_name})", min_bytes=50_000)
+                        with zipfile.ZipFile(tmp_zip) as zf:
+                            for member in zf.namelist():
+                                if Path(member).name == pth_name:
+                                    part_pth = root / f".{pth_name}.part"
+                                    with zf.open(member) as src, part_pth.open("wb") as dst:
+                                        shutil.copyfileobj(src, dst)
+                                    os.replace(part_pth, target_pth)
+                                    break
+                        tmp_zip.unlink(missing_ok=True)
+                    else:
+                        _stream_download_with_mirrors([(url, hdrs)], target_pth, label=f"EasyOCR ({pth_name})", min_bytes=100_000)
+                    if target_pth.is_file() and target_pth.stat().st_size >= 100_000:
+                        last_err = None
+                        break
+                except OcrError as oe:
+                    tmp_zip.unlink(missing_ok=True)
+                    if _STANDARD_CANCEL_EVENT.is_set():
+                        raise
+                    last_err = oe
+                except Exception as exc:
+                    tmp_zip.unlink(missing_ok=True)
+                    last_err = exc
+            if last_err is not None and not target_pth.is_file():
+                raise OcrError(f"Could not download EasyOCR model {pth_name}: {last_err}") from last_err
+
     def _reader(self, language: str, download: bool):
         if not self.runtime_installed:
             raise OcrError("EasyOCR is not installed. Click the explicit preparation button to install it.")
@@ -861,6 +1102,10 @@ class EasyEngine:
         with self._lock:
             if lang not in self._readers:
                 emit(f"بارگذاری یا دانلود مدل EasyOCR برای {language} آغاز شد")
+                if download:
+                    # Clean any leftover temp.zip from an interrupted earlier urlretrieve
+                    with contextlib.suppress(OSError):
+                        (self._model_dir() / "temp.zip").unlink(missing_ok=True)
                 import easyocr
                 use_gpu = False
                 try:
@@ -887,6 +1132,7 @@ class EasyEngine:
                         )
                         self._using_gpu = use_gpu
                     except Exception as exc:
+                        init_err: Exception = exc
                         if use_gpu:
                             try:
                                 self._readers[lang] = easyocr.Reader(
@@ -894,10 +1140,24 @@ class EasyEngine:
                                     download_enabled=download, verbose=False,
                                 )
                                 self._using_gpu = False
+                                return self._readers[lang]
                             except Exception as cpu_exc:
-                                raise OcrError(f"Could not initialize EasyOCR: {cpu_exc}") from cpu_exc
-                        else:
-                            raise OcrError(f"Could not initialize EasyOCR: {exc}") from exc
+                                init_err = cpu_exc
+                        missing_after = [name for name in self._expected_models(language) if not (self._model_dir() / name).is_file()]
+                        if download and missing_after:
+                            try:
+                                self._download_easyocr_models_from_mirrors(language)
+                                self._readers[lang] = easyocr.Reader(
+                                    reader_langs, gpu=False, model_storage_directory=str(self._model_dir()),
+                                    download_enabled=False, verbose=False,
+                                )
+                                self._using_gpu = False
+                                return self._readers[lang]
+                            except OcrError:
+                                raise
+                            except Exception as mirror_exc:
+                                raise OcrError(f"Could not initialize EasyOCR: {mirror_exc}") from mirror_exc
+                        raise OcrError(f"Could not initialize EasyOCR: {init_err}") from init_err
         return self._readers[lang]
 
     def download(self, language: str = "eng") -> None:
@@ -1158,23 +1418,28 @@ class TesseractEngine:
         if _STANDARD_CANCEL_EVENT.is_set():
             raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
         self._model_dir().mkdir(parents=True, exist_ok=True)
-        urls = [
-            f"https://github.com/tesseract-ocr/tessdata_fast/raw/main/{language}.traineddata",
-            f"https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/{language}.traineddata",
-            f"https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_fast@main/{language}.traineddata",
+        sources: list[tuple[str, dict[str, str]]] = [
+            (f"https://github.com/tesseract-ocr/tessdata_fast/raw/main/{language}.traineddata", {}),
+            (
+                f"https://api.github.com/repos/tesseract-ocr/tessdata_fast/contents/{language}.traineddata",
+                {"Accept": "application/vnd.github.raw"},
+            ),
+            (f"https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/{language}.traineddata", {}),
+            (f"https://hf-mirror.com/datasets/tesseract-ocr/tessdata_fast/resolve/main/{language}.traineddata", {}),
+            (f"https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_fast@main/{language}.traineddata", {}),
         ]
         temporary = self._model_dir() / f".{language}.traineddata.part"
         target = self._model_dir() / f"{language}.traineddata"
         emit(f"دانلود فایل زبان Tesseract ({language}) از منبع رسمی آغاز شد", progress=0.20)
         last_exc: Exception | None = None
-        for attempt_idx, url in enumerate(urls):
+        for attempt_idx, (url, extra_headers) in enumerate(sources):
             if _STANDARD_CANCEL_EVENT.is_set():
                 temporary.unlink(missing_ok=True)
                 raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
             if attempt_idx > 0:
                 emit(f"ادامهٔ دانلود فایل زبان Tesseract ({language}) از میرور جایگزین…", "warning", progress=0.22)
             try:
-                request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio"})
+                request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio", **extra_headers})
                 with urllib.request.urlopen(request, timeout=180) as response, temporary.open("wb") as output:
                     hdrs = getattr(response, "headers", None)
                     raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None

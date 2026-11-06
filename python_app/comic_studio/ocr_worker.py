@@ -234,6 +234,44 @@ def _default_regions(width: int, height: int, regions: list[list[float]] | None)
     return [[0.0, 0.0, float(width), float(height)]]
 
 
+def _is_hf_network_or_hub_error(exc: BaseException) -> bool:
+    err_low = f"{type(exc).__name__}: {exc}".lower()
+    if any(fatal in err_low for fatal in ("401 client error", "404 client error", "repository not found", "gatedrepoerror", "entry not found")):
+        return False
+    return any(
+        marker in err_low
+        for marker in (
+            "timed out",
+            "timeout",
+            "connection",
+            "connecterror",
+            "readerror",
+            "ssl",
+            "chunked",
+            "reset",
+            "eof",
+            "getaddrinfo",
+            "name or service not known",
+            "nameresolutionerror",
+            "temporary failure",
+            "unreachable",
+            "remoteprotocolerror",
+            "localentrynotfounderror",
+            "max retries",
+            "maxretryerror",
+            "403",
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+            "bad gateway",
+            "service unavailable",
+            "forbidden",
+        )
+    )
+
+
 class _BaseAdapter:
     hf_repo: str | None = None
     hf_ignore_patterns: tuple[str, ...] | None = None
@@ -272,6 +310,7 @@ class _BaseAdapter:
         *,
         ignore_patterns: tuple[str, ...] | list[str] | None = None,
     ) -> tuple[str, str]:
+        import shutil
         from huggingface_hub import snapshot_download
 
         local_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name(repo_id)
@@ -284,13 +323,17 @@ class _BaseAdapter:
         try:
             snapshot_download(max_workers=3, **dl_kwargs)
         except Exception as first_exc:
-            err_low = str(first_exc).lower()
-            is_net = any(k in err_low for k in ("timed out", "timeout", "connection", "ssl", "chunked", "reset", "eof"))
-            if not is_net or os.environ.get("HF_ENDPOINT"):
+            if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("HF_ENDPOINT"):
                 raise
             used_endpoint = "https://hf-mirror.com"
             print(f"Retrying {repo_id} via hf-mirror.com (30%)...", file=sys.stderr, flush=True)
             snapshot_download(max_workers=2, endpoint=used_endpoint, **dl_kwargs)
+        # Remove huggingface_hub's local_dir `.cache/` metadata tree so libraries like `hezar`
+        # that walk `local_dir` recursively for `*.yaml` never trip on `.cache/huggingface/download/...`
+        dl_cache = local_dir / ".cache"
+        if dl_cache.is_dir():
+            with contextlib.suppress(OSError):
+                shutil.rmtree(dl_cache, ignore_errors=True)
         print(f"Model {repo_id} weights ready (100%).", file=sys.stderr, flush=True)
         rev = self._resolve_hf_repo_revision(repo_id, endpoint=used_endpoint) or "ready"
         return str(local_dir), rev
@@ -489,9 +532,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
         try:
             self._get_pipeline()
         except Exception as first_exc:
-            err_low = str(first_exc).lower()
-            is_net = any(k in err_low for k in ("timed out", "timeout", "connection", "ssl", "chunked", "reset", "eof"))
-            if not is_net or os.environ.get("PADDLE_PDX_HUGGING_FACE_ENDPOINT"):
+            if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("PADDLE_PDX_HUGGING_FACE_ENDPOINT"):
                 raise
             print("Retrying PaddleOCR-VL download via hf-mirror.com (40%)...", file=sys.stderr, flush=True)
             os.environ["PADDLE_PDX_HUGGING_FACE_ENDPOINT"] = "https://hf-mirror.com"
@@ -616,11 +657,32 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
 
 
 class _SuryaAdapter(_BaseAdapter):
+    _SKIP_LABELS = {"Figure", "Image", "Diagram", "Blank-Page"}
+
     def __init__(self, models_root: Path) -> None:
         super().__init__(models_root)
         self._manager: Any = None
         self._predictor: Any = None
         self._legacy: tuple[Any, Any] | None = None
+        self._layout_detector: Any = None
+        self._layout_detector_checked: bool = False
+
+    @staticmethod
+    def _sync_surya_runtime_settings() -> None:
+        try:
+            from surya.settings import settings as _ss
+            ctx_val = int(os.environ.get("SURYA_INFERENCE_CTX_SIZE", "24576") or "24576")
+            max_tok = int(os.environ.get("SURYA_MAX_TOKENS_FULL_PAGE", "4096") or "4096")
+            ngl_val = int(os.environ.get("LLAMA_CPP_NGL", "0") or "0")
+            logprobs_raw = str(os.environ.get("SURYA_INFERENCE_LOGPROBS", "false")).strip().lower()
+            _ss.SURYA_INFERENCE_BACKEND = "llamacpp"
+            _ss.SURYA_INFERENCE_PARALLEL = 1
+            _ss.SURYA_INFERENCE_CTX_SIZE = ctx_val
+            _ss.SURYA_MAX_TOKENS_FULL_PAGE = max_tok
+            _ss.SURYA_INFERENCE_LOGPROBS = logprobs_raw in {"1", "true", "yes"}
+            _ss.LLAMA_CPP_NGL = ngl_val
+        except Exception:
+            pass
 
     def _ensure_loaded(self) -> None:
         if self._predictor is not None or self._legacy is not None:
@@ -631,6 +693,7 @@ class _SuryaAdapter(_BaseAdapter):
             os.environ.setdefault("TORCH_DEVICE", dev)
         except Exception:
             pass
+        self._sync_surya_runtime_settings()
         try:
             from surya.inference import SuryaInferenceManager
             from surya.recognition import RecognitionPredictor
@@ -653,6 +716,8 @@ class _SuryaAdapter(_BaseAdapter):
         self._manager = None
         self._predictor = None
         self._legacy = None
+        self._layout_detector = None
+        self._layout_detector_checked = False
         server_pid: int | None = None
         if mgr is not None:
             backend = getattr(mgr, "backend", None)
@@ -712,9 +777,7 @@ class _SuryaAdapter(_BaseAdapter):
                 try:
                     return hf_hub_download(repo_id=repo_id, filename=filename)
                 except Exception as first_exc:
-                    err_low = str(first_exc).lower()
-                    is_net = any(k in err_low for k in ("timed out", "timeout", "connection", "ssl", "chunked", "reset", "eof"))
-                    if not is_net or os.environ.get("HF_ENDPOINT"):
+                    if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("HF_ENDPOINT"):
                         raise
                     return hf_hub_download(repo_id=repo_id, filename=filename, endpoint="https://hf-mirror.com")
 
@@ -741,6 +804,184 @@ class _SuryaAdapter(_BaseAdapter):
         self._ensure_loaded()
         return importlib.metadata.version("surya-ocr")
 
+    def _detect_fast_layout_inprocess(self, rgb: Any) -> Any:
+        """Run Surya's local rf-detr (`datalab-to/surya_layout2`) in-process (~0.3s on CPU)
+        when already cached on disk so per-block recognition runs with ~10x fewer visual tokens
+        and never depends on llama-server `--special` compact tokens."""
+        try:
+            from surya.common.rfdetr_torch import load_detector
+            from surya.fast_layout import build_layout_result
+            from surya.settings import settings as _ss
+        except Exception:
+            return None
+
+        if not self._layout_detector_checked:
+            self._layout_detector_checked = True
+            ckpt = str(getattr(_ss, "FAST_LAYOUT_MODEL_CHECKPOINT", "") or "")
+            local_dir: str | None = None
+            if ckpt.startswith("hf://"):
+                parts = ckpt[len("hf://"):].split("/")
+                repo_id = "/".join(parts[:2])
+                subfolder = "/".join(parts[2:])
+                try:
+                    from huggingface_hub import snapshot_download
+                    snap = snapshot_download(
+                        repo_id,
+                        local_files_only=True,
+                        allow_patterns=[f"{subfolder}/*"] if subfolder else None,
+                    )
+                    cand = os.path.join(snap, subfolder) if subfolder else snap
+                    if os.path.isdir(cand):
+                        local_dir = cand
+                except Exception:
+                    local_dir = None
+            elif ckpt and os.path.isdir(ckpt):
+                local_dir = ckpt
+            if local_dir:
+                with contextlib.suppress(Exception):
+                    self._layout_detector = load_detector(
+                        local_dir,
+                        num_threads=getattr(_ss, "FAST_LAYOUT_NUM_THREADS", None),
+                        device=getattr(_ss, "FAST_DETECTOR_DEVICE", None),
+                    )
+
+        if self._layout_detector is None:
+            return None
+        try:
+            thresh = float(getattr(_ss, "FAST_LAYOUT_CONFIDENCE_THRESHOLD", 0.35) or 0.35)
+            dets_list = self._layout_detector.detect([rgb], threshold=thresh)
+            if not dets_list:
+                return None
+            layout_res = build_layout_result(rgb, dets_list[0], order=None)
+            text_boxes = [
+                b for b in (getattr(layout_res, "bboxes", None) or [])
+                if str(getattr(b, "label", "")) not in self._SKIP_LABELS
+            ]
+            return layout_res if text_boxes else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _build_region_layout_fallback(rgb: Any, regions: list[list[float]] | None) -> Any:
+        try:
+            from surya.layout.schema import LayoutBox, LayoutResult
+        except Exception:
+            return None
+        width, height = rgb.size
+        candidate_boxes: list[tuple[float, float, float, float]] = []
+        if regions:
+            for item in regions:
+                if isinstance(item, (list, tuple)) and len(item) == 4:
+                    x0, y0, x1, y1 = [float(v) for v in item]
+                    x0 = max(0.0, min(float(width - 1), x0))
+                    y0 = max(0.0, min(float(height - 1), y0))
+                    x1 = max(x0 + 6.0, min(float(width), x1))
+                    y1 = max(y0 + 6.0, min(float(height), y1))
+                    if (x1 - x0) >= 12 and (y1 - y0) >= 10:
+                        candidate_boxes.append((x0, y0, x1, y1))
+        if not candidate_boxes:
+            try:
+                import cv2
+                import numpy as np
+                gray = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2GRAY)
+                _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                if float(np.mean(bw > 0)) > 0.55:
+                    bw = 255 - bw
+                kw = max(15, width // 32)
+                kh = max(5, height // 110)
+                merged = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (kw, kh)))
+                contours, _ = cv2.findContours(merged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                raw_rects: list[tuple[float, float, float, float]] = []
+                for cnt in contours:
+                    rx, ry, rw, rh = cv2.boundingRect(cnt)
+                    if rw >= max(18, width // 50) and rh >= 10 and (rw * rh) <= (width * height * 0.92):
+                        pad_x = max(4, int(rh * 0.18))
+                        pad_y = max(3, int(rh * 0.22))
+                        raw_rects.append((
+                            float(max(0, rx - pad_x)),
+                            float(max(0, ry - pad_y)),
+                            float(min(width, rx + rw + pad_x)),
+                            float(min(height, ry + rh + pad_y)),
+                        ))
+                raw_rects.sort(key=lambda r: (round(r[1] / 24.0), r[0]))
+                candidate_boxes = raw_rects[:48]
+            except Exception:
+                candidate_boxes = []
+        if not candidate_boxes:
+            return None
+        layout_boxes = []
+        for idx, (x0, y0, x1, y1) in enumerate(candidate_boxes):
+            poly = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            try:
+                lb = LayoutBox(polygon=poly, label="Text", raw_label="Text", position=idx, confidence=0.95, count=256)
+            except TypeError:
+                lb = LayoutBox(polygon=poly, label="Text", position=idx, confidence=0.95)
+            layout_boxes.append(lb)
+        return LayoutResult(bboxes=layout_boxes, image_bbox=[0.0, 0.0, float(width), float(height)])
+
+    @staticmethod
+    def _is_blank_image(rgb: Any) -> bool:
+        try:
+            from surya.common.blank import is_blank
+            return bool(is_blank(rgb))
+        except Exception:
+            try:
+                import numpy as np
+                arr = np.asarray(rgb)
+                return bool(arr.std() < 2.0)
+            except Exception:
+                return False
+
+    @staticmethod
+    def _extract_surya_lines(preds: Any, width: int, height: int) -> tuple[list[dict[str, Any]], bool]:
+        lines: list[dict[str, Any]] = []
+        page = preds[0] if preds else None
+        if page is None:
+            return lines, False
+        blocks = list(getattr(page, "blocks", None) or [])
+        had_error = bool(getattr(page, "error", False)) or any(bool(getattr(b, "error", False)) for b in blocks)
+        for block in blocks:
+            if getattr(block, "skipped", False):
+                continue
+            raw_content = getattr(block, "html", "") or getattr(block, "text", "")
+            label = str(getattr(block, "label", "") or getattr(block, "block_type", "") or "")
+            text = _strip_markup(raw_content)
+            if not text:
+                continue
+            hints = _extract_markup_hints(raw_content, label)
+            raw_poly = getattr(block, "polygon", None)
+            bbox = getattr(block, "bbox", None)
+            if raw_poly and len(raw_poly) >= 4:
+                poly = [[float(pt[0]), float(pt[1])] for pt in raw_poly[:4]]
+            elif bbox and len(bbox) >= 4:
+                poly = _rect_polygon(bbox[0], bbox[1], bbox[2], bbox[3])
+            else:
+                continue
+            conf = float(getattr(block, "confidence", 0.9) or 0.9)
+            lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height), **hints})
+        return lines, had_error
+
+    @staticmethod
+    def _read_llama_server_error_tail() -> str:
+        log_path = Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.log"))
+        if not log_path.is_file():
+            return ""
+        try:
+            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-25:]
+            relevant = [ln.strip() for ln in tail if ln.strip()]
+            return " | ".join(relevant[-4:])[-400:]
+        except Exception:
+            return ""
+
+    def _invoke_surya_predictor(self, rgb: Any, layout_res: Any = None) -> Any:
+        assert self._predictor is not None
+        if layout_res is not None:
+            try:
+                return self._predictor([rgb], layout_results=[layout_res])
+            except TypeError:
+                return self._predictor([rgb])
+        return self._predictor([rgb])
+
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         from PIL import Image
         self._ensure_loaded()
@@ -750,42 +991,61 @@ class _SuryaAdapter(_BaseAdapter):
         lines: list[dict[str, Any]] = []
         try:
             if self._predictor is not None:
+                page_blank = self._is_blank_image(rgb)
+                fast_layout = None if page_blank else self._detect_fast_layout_inprocess(rgb)
+                had_error = False
+
+                def _run_pass() -> tuple[list[dict[str, Any]], bool]:
+                    if fast_layout is not None:
+                        p_fast = self._invoke_surya_predictor(rgb, fast_layout)
+                        l_fast, err_fast = self._extract_surya_lines(p_fast, width, height)
+                        if l_fast:
+                            return l_fast, err_fast
+                        if err_fast:
+                            return [], True
+                    p_full = self._invoke_surya_predictor(rgb, None)
+                    return self._extract_surya_lines(p_full, width, height)
+
                 try:
-                    preds = self._predictor([rgb])
+                    lines, had_error = _run_pass()
                 except Exception:
-                    # Fallback to pure CPU layers if GPU Vulkan offload failed on older drivers
                     if os.environ.get("LLAMA_CPP_NGL", "0") != "0":
                         self.close()
                         os.environ["LLAMA_CPP_NGL"] = "0"
-                        try:
-                            from surya.settings import settings as _ss
-                            _ss.LLAMA_CPP_NGL = 0
-                        except Exception:
-                            pass
                         self._ensure_loaded()
-                        preds = self._predictor([rgb])
+                        lines, had_error = _run_pass()
                     else:
                         raise
-                page = preds[0] if preds else None
-                for block in getattr(page, "blocks", []) or []:
-                    if getattr(block, "skipped", False):
-                        continue
-                    raw_content = getattr(block, "html", "") or getattr(block, "text", "")
-                    label = str(getattr(block, "label", "") or getattr(block, "block_type", "") or "")
-                    text = _strip_markup(raw_content)
-                    if not text:
-                        continue
-                    hints = _extract_markup_hints(raw_content, label)
-                    raw_poly = getattr(block, "polygon", None)
-                    bbox = getattr(block, "bbox", None)
-                    if raw_poly and len(raw_poly) >= 4:
-                        poly = [[float(pt[0]), float(pt[1])] for pt in raw_poly[:4]]
-                    elif bbox and len(bbox) >= 4:
-                        poly = _rect_polygon(bbox[0], bbox[1], bbox[2], bbox[3])
-                    else:
-                        continue
-                    conf = float(getattr(block, "confidence", 0.9) or 0.9)
-                    lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height), **hints})
+
+                # Surya's openai_client swallows llama-server HTTP errors into BlockOCRResult(error=True)
+                # without raising an exception! Recover on CPU if GPU offload was active.
+                if not lines and not page_blank and (had_error or os.environ.get("LLAMA_CPP_NGL", "0") != "0"):
+                    if os.environ.get("LLAMA_CPP_NGL", "0") != "0":
+                        self.close()
+                        os.environ["LLAMA_CPP_NGL"] = "0"
+                        self._ensure_loaded()
+                        lines, had_error = _run_pass()
+
+                # If full-page special-token parsing returned 0 blocks on a non-blank page without fast_layout,
+                # run per-block BLOCK_PROMPT on OpenCV/provided text regions.
+                if not lines and not page_blank and fast_layout is None:
+                    region_layout = self._build_region_layout_fallback(rgb, regions)
+                    if region_layout is not None:
+                        try:
+                            p_reg = self._predictor([rgb], layout_results=[region_layout])
+                            reg_lines, reg_err = self._extract_surya_lines(p_reg, width, height)
+                            if reg_lines:
+                                lines = reg_lines
+                                had_error = False
+                            elif reg_err:
+                                had_error = True
+                        except TypeError:
+                            pass
+
+                if not lines and had_error:
+                    log_hint = self._read_llama_server_error_tail()
+                    detail = f" ({log_hint})" if log_hint else ""
+                    raise RuntimeError(f"Surya llama-server inference returned an error{detail}")
             elif self._legacy is not None:
                 rec, det = self._legacy
                 preds = rec([rgb], det_predictor=det)
@@ -1854,16 +2114,20 @@ class _HezarOcrAdapter(_BaseAdapter):
 
     def _local_or_hub(self, repo_id: str) -> str:
         safe_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name(repo_id)
-        if safe_dir.is_dir() and any(safe_dir.iterdir()):
+        if safe_dir.is_dir() and (safe_dir / "model_config.yaml").is_file():
             return str(safe_dir)
         return repo_id
 
     def prepare(self, language: str) -> str:
         _widen_requests_default_timeout(120.0)
         print(f"Downloading Hezar CRAFT detector {self.CRAFT_REPO} (20%)...", file=sys.stderr, flush=True)
-        self._download_hf_repo_resilient(self.CRAFT_REPO)
+        craft_dir, _ = self._download_hf_repo_resilient(self.CRAFT_REPO)
+        if not (Path(craft_dir) / "model_config.yaml").is_file():
+            raise RuntimeError(f"Incomplete Hezar CRAFT download in {craft_dir}: model_config.yaml missing")
         print(f"Downloading Hezar Persian CRNN {self.CRNN_REPO} (60%)...", file=sys.stderr, flush=True)
-        _, rev = self._download_hf_repo_resilient(self.CRNN_REPO)
+        crnn_dir, rev = self._download_hf_repo_resilient(self.CRNN_REPO)
+        if not (Path(crnn_dir) / "model_config.yaml").is_file():
+            raise RuntimeError(f"Incomplete Hezar CRNN download in {crnn_dir}: model_config.yaml missing")
         print("Hezar Persian OCR models ready (100%).", file=sys.stderr, flush=True)
         return rev
 

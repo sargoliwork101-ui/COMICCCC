@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v3.95: Verify version badge ۳.۹۵, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, and total download size announcements
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۵ · Python', 'header shows version ۳.۹۵');
+      // v3.85–v3.96: Verify version badge ۳.۹۶, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, and Green->Red sorting on language/pageMode change
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۶ · Python', 'header shows version ۳.۹۶');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2601,7 +2601,44 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.ok(v395DlCheck.ocrBtnTxt.includes('کل حجم دانلود:'), '#ocrQuickPrepareBtn announces total download size');
       assert.ok(v395DlCheck.ocrStatusTxt.includes('کل حجم دانلود خودکار:'), '#ocrEngineStatus announces total download size');
       assert.ok(v395DlCheck.hezarBtnTxt.includes('کل حجم دانلود:'), '#modelsDialog prepare button announces total download size');
-      console.log('PASS: v3.81–v3.95 Persian OCR, Hezar engine, 2D suitability, target language menu, On-System vs Online badges, and Total Download Size announcements');
+
+      const v396SortCheck = await page.evaluate(() => {
+        const rank = { best: 0, medium: 1, weak: 2 };
+        const isSorted = (tiers) => tiers.length > 0 && tiers.every((t, i) => i === 0 || (rank[t] ?? 1) >= (rank[tiers[i - 1]] ?? 1));
+        document.getElementById('ocrLanguage').value = 'fas';
+        document.getElementById('ocrPageMode').value = 'document';
+        document.getElementById('ocrLanguage').dispatchEvent(new Event('change', { bubbles: true }));
+        document.getElementById('ocrPageMode').dispatchEvent(new Event('change', { bubbles: true }));
+        const fasDocOpts = [...document.getElementById('ocrEngine').options].map((o) => o.dataset.suitability);
+
+        document.getElementById('modelsLanguage').value = 'fas';
+        document.getElementById('modelsPageMode').value = 'document';
+        document.getElementById('modelsLanguage').dispatchEvent(new Event('change', { bubbles: true }));
+        document.getElementById('modelsPageMode').dispatchEvent(new Event('change', { bubbles: true }));
+        const groupsSorted = [...document.querySelectorAll('#engineCards .model-group')].every((g) =>
+          isSorted([...g.querySelectorAll('.engine-card')].map((c) => c.dataset.suitability))
+        );
+        const snapBeforePoll = [...document.querySelectorAll('#engineCards .engine-card h3')].map((h) => h.textContent);
+        // Simulate repeated background renders without changing language or pageMode
+        renderModels();
+        renderModels();
+        const snapAfterPoll = [...document.querySelectorAll('#engineCards .engine-card h3')].map((h) => h.textContent);
+
+        // Restore defaults
+        document.getElementById('ocrLanguage').value = 'eng';
+        document.getElementById('ocrPageMode').value = 'comic';
+        document.getElementById('ocrLanguage').dispatchEvent(new Event('change', { bubbles: true }));
+        document.getElementById('ocrPageMode').dispatchEvent(new Event('change', { bubbles: true }));
+        return {
+          ocrSorted: isSorted(fasDocOpts),
+          groupsSorted,
+          frozenOnPoll: JSON.stringify(snapBeforePoll) === JSON.stringify(snapAfterPoll),
+        };
+      });
+      assert.equal(v396SortCheck.ocrSorted, true, '#ocrEngine sorts Green -> Yellow -> Red on Persian Document');
+      assert.equal(v396SortCheck.groupsSorted, true, '#modelsDialog groups sort Green -> Yellow -> Red on Persian Document');
+      assert.equal(v396SortCheck.frozenOnPoll, true, '#modelsDialog card order stays frozen across repeated background refreshes');
+      console.log('PASS: v3.81–v3.96 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting on mode/language change, On-System vs Online badges, and Total Download Size announcements');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

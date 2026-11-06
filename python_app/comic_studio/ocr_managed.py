@@ -247,7 +247,7 @@ ISOLATED_ENGINE_SPECS: dict[str, dict[str, Any]] = {
             "hezar>=1.0.0",
             "transformers>=4.38.0,<5.0.0",
             "omegaconf>=2.3.0",
-            "huggingface-hub>=0.26.0",
+            "huggingface-hub>=0.26.0,<1.0.0",
             "opencv-python-headless>=4.8.0",
             "pillow>=10.3",
         ],
@@ -255,15 +255,16 @@ ISOLATED_ENGINE_SPECS: dict[str, dict[str, Any]] = {
             "hezar>=1.0.0",
             "transformers>=4.38.0,<5.0.0",
             "omegaconf>=2.3.0",
-            "huggingface-hub>=0.26.0",
+            "huggingface-hub>=0.26.0,<1.0.0",
             "opencv-python-headless>=4.8.0",
             "pillow>=10.3",
         ],
         "pip_packages_fallback": [
-            "hezar>=0.38.0",
+            "hezar>=0.44.0",
+            "torchvision>=0.18.0",
             "transformers>=4.38.0,<5.0.0",
             "omegaconf>=2.3.0",
-            "huggingface-hub>=0.26.0",
+            "huggingface-hub>=0.26.0,<1.0.0",
             "opencv-python-headless>=4.8.0",
             "pillow>=10.3",
         ],
@@ -1955,12 +1956,18 @@ class IsolatedOcrEngine:
             except OSError:
                 pass
             env.setdefault("MODEL_CACHE_DIR", str(surya_cache))
-            # Always use native llama.cpp rather than Surya 2.5's Docker-only vLLM backend
+            # Always use native llama.cpp rather than Surya 2.5's Docker-only vLLM backend.
+            # Context size 24576 + max_tokens 4096 prevents llama-server HTTP 400 context
+            # overflow when scale_to_fit produces ~8k visual tokens on high-res book pages,
+            # and disabling logprobs avoids 152k-vocab softmax overhead on every token.
             env.setdefault("SURYA_INFERENCE_BACKEND", "llamacpp")
             env.setdefault("SURYA_INFERENCE_PARALLEL", "1")
-            env.setdefault("SURYA_INFERENCE_CTX_SIZE", "16384")
+            env.setdefault("SURYA_INFERENCE_CTX_SIZE", "24576")
+            env.setdefault("SURYA_MAX_TOKENS_FULL_PAGE", "4096")
+            env.setdefault("SURYA_INFERENCE_LOGPROBS", "false")
             env.setdefault("SURYA_INFERENCE_KEEP_ALIVE", "false")
-            env.setdefault("LLAMA_CPP_NGL", "99" if hw.get("hasGpu") else "0")
+            use_gpu_layers = bool(hw.get("hasNvidiaGpu")) or sys.platform == "darwin"
+            env.setdefault("LLAMA_CPP_NGL", "99" if use_gpu_layers else "0")
         return env
 
     def _ensure_llama_cpp_for_surya(self) -> None:

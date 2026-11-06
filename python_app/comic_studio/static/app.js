@@ -1593,13 +1593,58 @@ function engineDownloadSummary(engine, lang = '') {
   }
   return { activeGb, fullGb, totalLabel, fullLabel, detailLabel };
 }
-function updateEngineOptions(preferredEngine = '') {
+const SUITABILITY_SORT_RANK = { best: 0, medium: 1, weak: 2 };
+const ocrEngineSortCache = { key: '', ids: [] };
+const modelsGroupSortCache = { key: '', standardIds: [], advancedIds: [], flatIds: [] };
+
+function sortEnginesBySuitability(engines, pageMode, language) {
+  return engines
+    .map((engine, index) => ({
+      engine,
+      index,
+      rank: SUITABILITY_SORT_RANK[engineSuitability(engine, pageMode, language).tier] ?? 1,
+    }))
+    .sort((a, b) => (a.rank - b.rank) || (a.index - b.index))
+    .map((entry) => entry.engine);
+}
+
+function applyCachedEngineOrder(engines, cachedIds) {
+  if (!Array.isArray(cachedIds) || !cachedIds.length) return [...engines];
+  const byId = new Map(engines.map((engine) => [engine.id, engine]));
+  const seen = new Set();
+  const ordered = [];
+  cachedIds.forEach((id) => {
+    const found = byId.get(id);
+    if (found && !seen.has(id)) {
+      seen.add(id);
+      ordered.push(found);
+    }
+  });
+  engines.forEach((engine) => {
+    if (!seen.has(engine.id)) ordered.push(engine);
+  });
+  return ordered;
+}
+
+function updateEngineOptions(preferredEngine = '', options = {}) {
   const select = $('ocrEngine'); if (!select) return;
   const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
   const language = $('ocrLanguage')?.value || state.project?.settings?.ocrLanguage || 'eng';
   const previous = (typeof preferredEngine === 'string' && preferredEngine) || select.value || state.project?.settings?.ocrEngine || 'rapidocr-v6';
+  const selectable = state.engines.filter((engine) => engine.selectable !== false);
+  const idSetSig = selectable.map((engine) => engine.id).slice().sort().join('|');
+  const sortKey = `${language}::${pageMode}::${idSetSig}`;
+  const shouldResort = Boolean(options?.resort) || ocrEngineSortCache.key !== sortKey;
+  let orderedEngines;
+  if (shouldResort) {
+    orderedEngines = sortEnginesBySuitability(selectable, pageMode, language);
+    ocrEngineSortCache.key = sortKey;
+    ocrEngineSortCache.ids = orderedEngines.map((engine) => engine.id);
+  } else {
+    orderedEngines = applyCachedEngineOrder(selectable, ocrEngineSortCache.ids);
+  }
   select.textContent = '';
-  state.engines.filter((engine) => engine.selectable !== false).forEach((engine) => {
+  orderedEngines.forEach((engine) => {
     const suit = engineSuitability(engine, pageMode, language);
     const execMeta = resolveEngineExecMeta(engine);
     const supported = (engine.languages || []).includes(language);
@@ -1634,13 +1679,20 @@ function updateOcrEngineStatus() {
   const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
   [...($('ocrLanguage')?.options || [])].forEach((option) => { option.disabled = false; });
   if (!engine.languages.includes($('ocrLanguage').value)) {
+    const keepSelectedId = select.value;
     $('ocrLanguage').value = engine.languages[0] || 'eng';
     if ($('modelsLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
     if ($('testLanguage')) $('testLanguage').value = $('ocrLanguage').value;
-    [...select.options].forEach((opt) => {
-      const eng = state.engines.find((e) => e.id === opt.value);
-      if (!eng) return;
-      const curLang = $('ocrLanguage').value;
+    const curLang = $('ocrLanguage').value;
+    const selectable = state.engines.filter((e) => e.selectable !== false);
+    const idSetSig = selectable.map((e) => e.id).slice().sort().join('|');
+    const resorted = sortEnginesBySuitability(selectable, pageMode, curLang);
+    ocrEngineSortCache.key = `${curLang}::${pageMode}::${idSetSig}`;
+    ocrEngineSortCache.ids = resorted.map((e) => e.id);
+    const optByValue = new Map([...select.options].map((o) => [o.value, o]));
+    resorted.forEach((eng) => {
+      const opt = optByValue.get(eng.id);
+      if (!opt) return;
       const suit = engineSuitability(eng, pageMode, curLang);
       const engExec = resolveEngineExecMeta(eng);
       const supported = (eng.languages || []).includes(curLang);
@@ -1660,7 +1712,9 @@ function updateOcrEngineStatus() {
               ? ' · نسخهٔ جدید'
               : '';
       opt.textContent = `${suit.icon} ${eng.name} — ${suit.short} · ${engExec.short}${suffix}`;
+      select.appendChild(opt);
     });
+    select.value = keepSelectedId;
   }
   const lang = $('ocrLanguage').value;
   const activeSuit = engineSuitability(engine, pageMode, lang);
@@ -2816,14 +2870,39 @@ async function confirmHardwareIfNeeded(engine, hwOverride = null, language = '')
   return { ok: Boolean(confirmed), force: true };
 }
 
-function renderModels() {
+function renderModels(options = {}) {
   const container = $('engineCards'); if (!container) return;
+  const dialogEl = $('modelsDialog');
+  const prevContainerScroll = container.scrollTop;
+  const prevDialogScroll = dialogEl ? dialogEl.scrollTop : 0;
   container.textContent = '';
   const language = $('modelsLanguage')?.value || $('testLanguage')?.value || $('ocrLanguage')?.value || 'eng';
   if ($('modelsLanguage') && $('modelsLanguage').value !== language) $('modelsLanguage').value = language;
   if ($('testLanguage') && $('testLanguage').value !== language) $('testLanguage').value = language;
   const langLabel = OCR_LANGUAGE_LABELS[language] || language;
   const modelsMode = normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value);
+  const selectable = state.engines.filter((engine) => engine.selectable !== false);
+  const idSetSig = selectable.map((engine) => engine.id).slice().sort().join('|');
+  const sortKey = `${language}::${modelsMode}::${idSetSig}`;
+  const shouldResort = Boolean(options?.resort) || modelsGroupSortCache.key !== sortKey;
+  const rawStandard = selectable.filter((engine) => engine.category !== 'advanced');
+  const rawAdvanced = selectable.filter((engine) => engine.category === 'advanced');
+  let standardEngines;
+  let advancedEngines;
+  let orderedSelectable;
+  if (shouldResort) {
+    standardEngines = sortEnginesBySuitability(rawStandard, modelsMode, language);
+    advancedEngines = sortEnginesBySuitability(rawAdvanced, modelsMode, language);
+    orderedSelectable = sortEnginesBySuitability(selectable, modelsMode, language);
+    modelsGroupSortCache.key = sortKey;
+    modelsGroupSortCache.standardIds = standardEngines.map((engine) => engine.id);
+    modelsGroupSortCache.advancedIds = advancedEngines.map((engine) => engine.id);
+    modelsGroupSortCache.flatIds = orderedSelectable.map((engine) => engine.id);
+  } else {
+    standardEngines = applyCachedEngineOrder(rawStandard, modelsGroupSortCache.standardIds);
+    advancedEngines = applyCachedEngineOrder(rawAdvanced, modelsGroupSortCache.advancedIds);
+    orderedSelectable = applyCachedEngineOrder(selectable, modelsGroupSortCache.flatIds);
+  }
   const addGroup = (title, engines, external = false) => {
     if (!engines.length) return;
     const group = document.createElement('section'); group.className = 'model-group';
@@ -2975,22 +3054,30 @@ function renderModels() {
       cards.appendChild(card);
     });
   };
-  const selectable = state.engines.filter((engine) => engine.selectable !== false);
-  const standardEngines = selectable.filter((engine) => engine.category !== 'advanced');
-  const advancedEngines = selectable.filter((engine) => engine.category === 'advanced');
   if (advancedEngines.length) {
     addGroup('موتورهای سریع و سبک کمیک — نصب خودکار و مناسب همهٔ سیستم‌ها', standardEngines);
     addGroup('مدل‌های هوش مصنوعی پیشرفته — نصب خودکار در محیط ایزوله', advancedEngines);
   } else {
-    addGroup('قابل اجرا در برنامه — خروجی موقعیت‌دار', selectable);
+    addGroup('قابل اجرا در برنامه — خروجی موقعیت‌دار', orderedSelectable);
   }
   addGroup('دانلود و راه‌اندازی جداگانه — فعلاً خارج از OCR داخلی', state.engines.filter((engine) => engine.selectable === false), true);
+  if (!shouldResort) {
+    container.scrollTop = prevContainerScroll;
+    if (dialogEl) dialogEl.scrollTop = prevDialogScroll;
+  }
   syncEngineUpdateUi();
 }
 async function downloadEngine(engine, options = {}) {
   if (state.modelBusy) return false;
-  const language = options.languageOverride || $('testLanguage').value;
+  const rawLang = options.languageOverride || $('modelsLanguage')?.value || $('testLanguage')?.value || $('ocrLanguage')?.value || 'eng';
+  const language = (engine.languages || []).includes(rawLang)
+    ? rawLang
+    : (engine.isolated && engine.languages?.length ? engine.languages[0] : rawLang);
   if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return false; }
+  if (language !== rawLang) {
+    if ($('modelsLanguage')) $('modelsLanguage').value = language;
+    if ($('testLanguage')) $('testLanguage').value = language;
+  }
   const precheck = await confirmHardwareIfNeeded(engine, null, language);
   if (!precheck.ok) return false;
   ++engineMutationSeq;
@@ -5495,17 +5582,17 @@ function bindEvents() {
     const nextLang = $('ocrLanguage').value;
     if ($('modelsLanguage')) $('modelsLanguage').value = nextLang;
     if ($('testLanguage')) $('testLanguage').value = nextLang;
-    updateEngineOptions($('ocrEngine').value);
+    updateEngineOptions($('ocrEngine').value, { resort: true });
     collectOcrSettings();
     scheduleSave();
-    if ($('modelsDialog')?.open) renderModels();
+    if ($('modelsDialog')?.open) renderModels({ resort: true });
   });
   $('ocrPageMode')?.addEventListener('change', () => {
     collectOcrSettings();
     if ($('modelsPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
-    updateEngineOptions();
+    updateEngineOptions('', { resort: true });
     scheduleSave();
-    if ($('modelsDialog')?.open) renderModels();
+    if ($('modelsDialog')?.open) renderModels({ resort: true });
   });
   $('ocrQuickPrepareBtn')?.addEventListener('click', () => {
     const engine = state.engines.find((entry) => entry.id === $('ocrEngine').value);
@@ -5594,13 +5681,13 @@ function bindEvents() {
   });
   $('modelsLanguage')?.addEventListener('change', () => {
     if ($('testLanguage')) $('testLanguage').value = $('modelsLanguage').value;
-    renderModels();
+    renderModels({ resort: true });
   });
   $('testLanguage').addEventListener('change', () => {
     if ($('modelsLanguage')) $('modelsLanguage').value = $('testLanguage').value;
-    renderModels();
+    renderModels({ resort: true });
   });
-  $('modelsPageMode')?.addEventListener('change', renderModels);
+  $('modelsPageMode')?.addEventListener('change', () => renderModels({ resort: true }));
   $('freeModelsRamBtn')?.addEventListener('click', () => freeModelsRam().catch(() => {}));
   $('checkModelUpdatesBtn')?.addEventListener('click', () => checkEngineUpdates({ force: true, silent: false }).catch(() => {}));
   $('updateAllModelsBtn')?.addEventListener('click', () => updateAllEngines().catch(() => {}));
