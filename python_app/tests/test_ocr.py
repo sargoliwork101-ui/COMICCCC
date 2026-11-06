@@ -2168,6 +2168,117 @@ def test_persian_ocr_engines_hezar_adapter_2d_suitability_and_rtl_grouping(tmp_p
     assert "ستون چپ" in grouped[1]["text"] and "ادامهٔ مطالب" in grouped[1]["text"]
 
 
+def test_v394_paddleocr_vl_onednn_pir_fix_and_execution_mode_metadata(tmp_path, monkeypatch):
+    import types
+    import comic_studio.ocr_managed as managed
+    import comic_studio.ocr_worker as worker
+    from comic_studio.ocr import ENGINE_INFO, OcrError, OcrLine
+
+    # 1. All 14 OCR engines declare local on-system execution metadata
+    assert len(ENGINE_INFO) == 14
+    for eid, meta in ENGINE_INFO.items():
+        assert meta["executionMode"] == "local", f"{eid} must declare executionMode='local'"
+        assert meta["requiresInternetForOcr"] is False
+        assert meta["requiresInternetForSetup"] is True
+
+    # 2. _worker_env disables MKLDNN/oneDNN specifically for paddleocr-vl-1-6 while keeping it for other engines
+    monkeypatch.delenv("FLAGS_use_mkldnn", raising=False)
+    monkeypatch.delenv("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", raising=False)
+    pvl_eng = managed.IsolatedOcrEngine("paddleocr-vl-1-6", ["eng", "fas"], threading.Lock(), OcrLine, OcrError)
+    pvl_env = pvl_eng._worker_env()
+    assert pvl_env["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] == "False"
+    assert pvl_env["FLAGS_use_mkldnn"] == "0"
+
+    other_eng = managed.IsolatedOcrEngine("mineru-2-5-pro", ["eng"], threading.Lock(), OcrLine, OcrError)
+    other_env = other_eng._worker_env()
+    assert other_env["FLAGS_use_mkldnn"] == "1"
+
+    # 3. _PaddleOcrVlAdapter disables PaddleX MKLDNN flags before init, reuses cached v1.5 weights if v1.6 is absent,
+    #    downscales oversized CPU pages with exact bbox rescaling, and auto-recovers from oneDNN/PIR worker errors.
+    official_dir = tmp_path / "paddlex" / "official_models"
+    (official_dir / "PaddleOCR-VL-1.5-0.9B").mkdir(parents=True)
+
+    fake_pdx_flags = types.SimpleNamespace(ENABLE_MKLDNN_BYDEFAULT=True)
+    fake_pocr_consts = types.SimpleNamespace(DEFAULT_ENABLE_MKLDNN=True)
+    monkeypatch.setitem(sys.modules, "paddlex.utils.flags", fake_pdx_flags)
+    monkeypatch.setitem(sys.modules, "paddleocr._constants", fake_pocr_consts)
+
+    init_calls: list[dict[str, object]] = []
+    predict_calls: list[str] = []
+
+    class FakePaddleOCRVL:
+        def __init__(self, **kwargs):
+            init_calls.append(dict(kwargs))
+
+        def predict(self, img_path):
+            predict_calls.append(str(img_path))
+            if len(predict_calls) == 1:
+                raise RuntimeError(
+                    "Exception from the 'cv' worker: (Unimplemented) ConvertPirAttribute2RuntimeAttribute "
+                    "not support [pir::ArrayAttribute<pir::DoubleAttribute>] "
+                    "(at ..\\paddle\\fluid\\framework\\new_executor\\instruction\\onednn\\onednn_instruction.cc:118)"
+                )
+            with Image.open(img_path) as seen_im:
+                seen_w, seen_h = seen_im.size
+            assert max(seen_w, seen_h) <= worker._PaddleOcrVlAdapter._CPU_MAX_SIDE
+            return [
+                {
+                    "res": {
+                        "parsing_res_list": [
+                            {
+                                "block_label": "text",
+                                "block_content": "Fixed Windows CPU VL",
+                                "block_bbox": [seen_w * 0.1, seen_h * 0.2, seen_w * 0.5, seen_h * 0.4],
+                                "score": 0.96,
+                            }
+                        ]
+                    }
+                }
+            ]
+
+    fake_pkg = types.ModuleType("paddleocr")
+    fake_pkg.__version__ = "3.7.0"
+    fake_pkg.PaddleOCRVL = FakePaddleOCRVL
+    fake_pipelines = types.ModuleType("paddleocr._pipelines")
+    fake_pvl = types.ModuleType("paddleocr._pipelines.paddleocr_vl")
+    fake_pvl._AVAILABLE_PIPELINE_VERSIONS = ["v1", "v1.5", "v1.6"]
+    fake_pvl._DEFAULT_PIPELINE_VERSION = "v1.6"
+    fake_paddle = types.SimpleNamespace(
+        device=types.SimpleNamespace(
+            is_compiled_with_cuda=lambda: False,
+            cuda=types.SimpleNamespace(device_count=lambda: 0),
+        ),
+        set_flags=lambda flags: None,
+    )
+    monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
+    monkeypatch.setitem(sys.modules, "paddleocr", fake_pkg)
+    monkeypatch.setitem(sys.modules, "paddleocr._pipelines", fake_pipelines)
+    monkeypatch.setitem(sys.modules, "paddleocr._pipelines.paddleocr_vl", fake_pvl)
+
+    big_img = tmp_path / "huge_page.png"
+    Image.new("RGB", (3000, 4000), "white").save(big_img)
+
+    adapter = worker._PaddleOcrVlAdapter(tmp_path)
+    out = adapter.recognize(str(big_img), "eng", None)
+
+    assert os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] == "False"
+    assert os.environ["FLAGS_use_mkldnn"] == "0"
+    assert fake_pdx_flags.ENABLE_MKLDNN_BYDEFAULT is False
+    assert fake_pocr_consts.DEFAULT_ENABLE_MKLDNN is False
+    assert len(init_calls) == 2, "Should rebuild pipeline cleanly after simulated oneDNN/PIR crash"
+    assert init_calls[0]["pipeline_version"] == "v1.5", "Should reuse cached v1.5 weights without forcing v1.6 download"
+    assert init_calls[0]["enable_mkldnn"] is False
+    assert init_calls[0]["use_queues"] is False
+    assert len(out) == 1
+    assert out[0]["text"] == "Fixed Windows CPU VL"
+    # Rescaled bbox must map back to 3000x4000 original page coordinates (300, 800) -> (1500, 1600)
+    assert abs(out[0]["polygon"][0][0] - 300.0) <= 3.0
+    assert abs(out[0]["polygon"][0][1] - 800.0) <= 3.0
+    assert abs(out[0]["polygon"][2][0] - 1500.0) <= 3.0
+    assert abs(out[0]["polygon"][2][1] - 1600.0) <= 3.0
+
+
+
 
 
 

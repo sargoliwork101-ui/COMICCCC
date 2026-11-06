@@ -414,6 +414,19 @@ label.bt,.file-button{display:inline-flex;flex-direction:row;align-items:center;
 label.bt.primary{color:#fff}
 #dock #exportName{direction:unset;unicode-bidi:plaintext;text-align:start}
 
+/* v3.94: Online vs On-System (Local/Offline) execution badges & banners across panels */
+.dialog-title-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.dialog-title-row h2{margin:0}
+.exec-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;font-size:10.5px;font-weight:700;line-height:1.4;white-space:nowrap;border:1px solid var(--line-2);user-select:none}
+.exec-badge.is-local,.engine-chip.is-exec-local{border-color:#14b8a666;background:color-mix(in srgb,#14b8a6 15%,var(--surface-2));color:#5eead4}
+body.light .exec-badge.is-local,body.light .engine-chip.is-exec-local{border-color:#0d948855;background:color-mix(in srgb,#0d9488 12%,var(--surface-2));color:#0f766e}
+.exec-badge.is-online,.engine-chip.is-exec-online{border-color:#38bdf866;background:color-mix(in srgb,#38bdf8 15%,var(--surface-2));color:#7dd3fc}
+body.light .exec-badge.is-online,body.light .engine-chip.is-exec-online{border-color:#0284c755;background:color-mix(in srgb,#0284c7 12%,var(--surface-2));color:#0369a1}
+.exec-mode-banner{margin:8px 0 4px;padding:8px 12px;border-radius:10px;font-size:11.5px;line-height:1.75;font-weight:600;border:1px solid var(--line-2)}
+.exec-mode-banner.is-local{border-color:#14b8a666;background:color-mix(in srgb,#14b8a6 10%,var(--surface-2));color:var(--text)}
+.exec-mode-banner.is-online{border-color:#38bdf866;background:color-mix(in srgb,#38bdf8 10%,var(--surface-2));color:var(--text)}
+
+
 
 
 

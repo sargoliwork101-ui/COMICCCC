@@ -1442,6 +1442,83 @@ const PAGE_MODE_LABELS = {
   comic: 'کمیک و مانگا',
   document: 'کتاب، مقاله و جزوه',
 };
+function isLocalEndpointUrl(rawUrl) {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`);
+    const host = (parsed.hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+    if (!host) return false;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0' || host.endsWith('.local') || host.endsWith('.localhost')) return true;
+    if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+    if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+    if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+    const m172 = host.match(/^172\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+    if (m172 && Number(m172[1]) >= 16 && Number(m172[1]) <= 31) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+function resolveEngineExecMeta(engine) {
+  if (engine?.executionMode === 'online') {
+    return {
+      mode: 'online',
+      short: '🌐 آنلاین',
+      chip: '🌐 سرویس آنلاین (اینترنتی)',
+      headerBadge: '🌐 سرویس آنلاین (اینترنتی)',
+      statusPrefix: '🌐 محل اجرا: آنلاین (نیازمند اینترنت)',
+    };
+  }
+  return {
+    mode: 'local',
+    short: '💻 روی سیستم',
+    chip: '💻 اجرا روی سیستم (آفلاین)',
+    headerBadge: '💻 اجرا روی سیستم شما (آفلاین)',
+    statusPrefix: '💻 محل اجرا: روی سیستم شما (آفلاین)',
+  };
+}
+function resolveTranslationExecMeta(provider, baseUrl = '') {
+  const normProvider = String(provider || 'free').trim() || 'free';
+  const effectiveLocal = normProvider !== 'free' && normProvider !== 'gemini' && isLocalEndpointUrl(baseUrl);
+  if (effectiveLocal) {
+    return {
+      mode: 'local',
+      short: '💻 روی سیستم',
+      badge: '💻 اجرا روی سیستم شما (لوکال / آفلاین)',
+      banner: '💻 محل اجرا: روی سیستم شما (آفلاین / لوکال) — متصل به سرور محلی (مانند Ollama یا LM Studio) بدون ارسال متن به اینترنت.',
+    };
+  }
+  if (normProvider === 'free') {
+    return {
+      mode: 'online',
+      short: '🌐 آنلاین',
+      badge: '🌐 سرویس آنلاین (اینترنتی)',
+      banner: '🌐 محل اجرا: آنلاین (اینترنتی) — نیازمند اتصال اینترنت؛ ترجمه روی سرویس‌های آنلاین Google Translate / MyMemory انجام می‌شود و چیزی روی سیستم شما نصب نمی‌کند.',
+    };
+  }
+  if (normProvider === 'openai') {
+    return {
+      mode: 'online',
+      short: '🌐 آنلاین',
+      badge: '🌐 سرویس آنلاین (اینترنتی)',
+      banner: '🌐 محل اجرا: آنلاین (ابری / اینترنتی) — نیازمند اینترنت و کلید API؛ اگر نشانی یک سرور محلی (مثل http://localhost:11434/v1 برای Ollama یا LM Studio) بدهید، به اجرای روی سیستم (آفلاین) تبدیل می‌شود.',
+    };
+  }
+  return {
+    mode: 'online',
+    short: '🌐 آنلاین',
+    badge: '🌐 سرویس آنلاین (اینترنتی)',
+    banner: '🌐 محل اجرا: آنلاین (ابری / اینترنتی) — نیازمند اینترنت و کلید API؛ مدل روی سرور آنلاین اجرا می‌شود و فشار پردازشی روی سیستم شما ندارد.',
+  };
+}
+function applyExecBadgeElement(el, mode, text) {
+  if (!el) return;
+  el.textContent = text;
+  el.dataset.execMode = mode;
+  el.classList.toggle('is-local', mode === 'local');
+  el.classList.toggle('is-online', mode !== 'local');
+}
 function normalizePageMode(pageMode) {
   return pageMode === 'document' ? 'document' : 'comic';
 }
@@ -1490,11 +1567,13 @@ function updateEngineOptions(preferredEngine = '') {
   select.textContent = '';
   state.engines.filter((engine) => engine.selectable !== false).forEach((engine) => {
     const suit = engineSuitability(engine, pageMode, language);
+    const execMeta = resolveEngineExecMeta(engine);
     const supported = (engine.languages || []).includes(language);
     const option = document.createElement('option');
     option.value = engine.id;
     option.className = `ocr-opt-${suit.tier}`;
     option.dataset.suitability = suit.tier;
+    option.dataset.executionMode = execMeta.mode;
     const suffix = !supported
       ? ' · فاقد پشتیبانی از این زبان'
       : engine.updateAvailable
@@ -1502,7 +1581,7 @@ function updateEngineOptions(preferredEngine = '') {
         : engine.runtimeInstalled
           ? ''
           : ' · نیازمند نصب خودکار';
-    option.textContent = `${suit.icon} ${engine.name} — ${suit.short}${suffix}`;
+    option.textContent = `${suit.icon} ${engine.name} — ${suit.short} · ${execMeta.short}${suffix}`;
     select.appendChild(option);
   });
   const chosenId = pickBestEngineForLanguage(language, pageMode, previous);
@@ -1523,20 +1602,25 @@ function updateOcrEngineStatus() {
       const eng = state.engines.find((e) => e.id === opt.value);
       if (!eng) return;
       const suit = engineSuitability(eng, pageMode, $('ocrLanguage').value);
+      const engExec = resolveEngineExecMeta(eng);
       const supported = (eng.languages || []).includes($('ocrLanguage').value);
       opt.className = `ocr-opt-${suit.tier}`;
       opt.dataset.suitability = suit.tier;
+      opt.dataset.executionMode = engExec.mode;
       const suffix = !supported ? ' · فاقد پشتیبانی از این زبان' : eng.updateAvailable ? ' · نسخهٔ جدید' : eng.runtimeInstalled ? '' : ' · نیازمند نصب خودکار';
-      opt.textContent = `${suit.icon} ${eng.name} — ${suit.short}${suffix}`;
+      opt.textContent = `${suit.icon} ${eng.name} — ${suit.short} · ${engExec.short}${suffix}`;
     });
   }
   const lang = $('ocrLanguage').value;
   const activeSuit = engineSuitability(engine, pageMode, lang);
+  const activeExec = resolveEngineExecMeta(engine);
+  applyExecBadgeElement($('ocrExecBadge'), activeExec.mode, activeExec.headerBadge);
   select.dataset.suitability = activeSuit.tier;
+  select.dataset.executionMode = activeExec.mode;
   const langLabel = OCR_LANGUAGE_LABELS[lang] || lang;
   const langReady = Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(lang));
   const versionLabel = engine.installedVersion ? ` (نسخهٔ ${engine.installedVersion})` : '';
-  const suitPrefix = activeSuit.reason ? `${activeSuit.icon} عملکرد در «${langLabel} + ${PAGE_MODE_LABELS[pageMode] || pageMode}»: ${activeSuit.reason} · ` : '';
+  const suitPrefix = `${activeExec.statusPrefix} · ${activeSuit.reason ? `${activeSuit.icon} عملکرد در «${langLabel} + ${PAGE_MODE_LABELS[pageMode] || pageMode}»: ${activeSuit.reason} · ` : ''}`;
   let statusText = engine.runtimeInstalled
     ? (langReady
       ? `${suitPrefix}وضعیت: آمادهٔ اجرا روی همین کامپیوتر${versionLabel}.`
@@ -1806,29 +1890,31 @@ function renderTranslationServiceSelector(activeProvider, activeProfileId = '') 
     ? `${activeProvider}::${activeProfileId}`
     : (activeProvider || 'free');
   select.textContent = '';
-  const addOpt = (value, label) => {
+  const addOpt = (value, label, execMode = 'online') => {
     const opt = document.createElement('option');
     opt.value = value;
+    opt.dataset.executionMode = execMode;
     opt.textContent = label;
     select.appendChild(opt);
   };
-  addOpt('free', 'سرویس رایگان — Google Translate + MyMemory');
+  addOpt('free', '🌐 آنلاین · سرویس رایگان — Google Translate + MyMemory', 'online');
   AI_PROVIDER_IDS.forEach((providerId) => {
     const info = aiInfo(providerId);
     const label = info.label || AI_FALLBACKS[providerId]?.label || providerId;
     const model = info.model || info.defaultModel || '';
+    const execMeta = resolveTranslationExecMeta(providerId, info.base_url || '');
     const activeProfiles = (info.profiles || []).filter((p) => p.hasApiKey);
     if (activeProfiles.length === 1) {
       const pName = activeProfiles[0].name?.trim() || 'API 1';
-      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (${pName})`);
+      addOpt(providerId, `${execMeta.short} · ${label}${model ? ` — مدل: ${model}` : ''} (${pName})`, execMeta.mode);
     } else if (activeProfiles.length >= 2) {
-      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (همهٔ ${activeProfiles.length} کلید فعال به ترتیب)`);
+      addOpt(providerId, `${execMeta.short} · ${label}${model ? ` — مدل: ${model}` : ''} (همهٔ ${activeProfiles.length} کلید فعال به ترتیب)`, execMeta.mode);
       activeProfiles.forEach((p, idx) => {
         const pName = p.name?.trim() || `API ${idx + 1}`;
-        addOpt(`${providerId}::${p.id}`, `${label}${model ? ` — مدل: ${model}` : ''} · فقط «${pName}»`);
+        addOpt(`${providerId}::${p.id}`, `${execMeta.short} · ${label}${model ? ` — مدل: ${model}` : ''} · فقط «${pName}»`, execMeta.mode);
       });
     } else if (activeProvider === providerId) {
-      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (بدون کلید API ذخیره‌شده)`);
+      addOpt(providerId, `${execMeta.short} · ${label}${model ? ` — مدل: ${model}` : ''} (بدون کلید API ذخیره‌شده)`, execMeta.mode);
     }
   });
   if (![...select.options].some((opt) => opt.value === activeValue)) {
@@ -1993,6 +2079,8 @@ function updateTranslationSkillStatus() {
 function showTranslationRequestPreview(preview, action, refresh = null, switchTarget = null) {
   translationPreviewAction = action; translationPreviewRefresh = refresh; translationPreviewSwitchTarget = switchTarget || translationPreviewSwitchTarget; translationPreviewData = preview;
   renderTranslationServiceSelector(preview.provider, preview.profileId || '');
+  const previewExecMeta = resolveTranslationExecMeta(preview.provider, preview.base_url || aiInfo(preview.provider)?.base_url || '');
+  applyExecBadgeElement($('translationPreviewExecBadge'), previewExecMeta.mode, previewExecMeta.badge);
   if ($('translationPreviewService')) $('translationPreviewService').disabled = false;
   if ($('translationTargetLang')) {
     $('translationTargetLang').disabled = false;
@@ -2685,12 +2773,22 @@ function renderModels() {
     const cards = document.createElement('div'); cards.className = 'model-group-grid'; group.appendChild(cards); container.appendChild(group);
     engines.forEach((engine) => {
       const suit = engineSuitability(engine, modelsMode, language);
+      const execMeta = resolveEngineExecMeta(engine);
       const isBusyThis = state.modelBusy === engine.id;
       const card = document.createElement('section'); card.className = `engine-card${external ? ' external-engine' : ''}${isBusyThis ? ' is-busy-card' : ''}`;
+      card.dataset.executionMode = execMeta.mode;
       if (!external) card.dataset.suitability = suit.tier;
       const head = document.createElement('div'); head.className = 'engine-card-head';
       const titleEl = document.createElement('h3'); titleEl.textContent = engine.name;
       const badges = document.createElement('div'); badges.className = 'engine-badges';
+      const execChip = document.createElement('span');
+      execChip.className = `engine-chip ${execMeta.mode === 'online' ? 'is-exec-online' : 'is-exec-local'}`;
+      execChip.dataset.execMode = execMeta.mode;
+      execChip.textContent = execMeta.chip;
+      execChip.title = execMeta.mode === 'online'
+        ? 'این سرویس برای اجرا به اینترنت نیاز دارد.'
+        : 'این مدل روی سخت‌افزار خود کامپیوتر شما اجرا می‌شود و هنگام خواندن صفحات به اینترنت نیازی ندارد (اینترنت فقط یک‌بار برای دانلود اولیهٔ مدل لازم است).';
+      badges.appendChild(execChip);
       if (!external) {
         const suitChip = document.createElement('span');
         suitChip.className = `engine-chip is-suit-${suit.tier}`;
@@ -3094,12 +3192,25 @@ function captureAiProvider() {
     profiles: aiEditorProfiles.map((profile) => ({ ...profile })),
   });
 }
+function syncAiExecUi() {
+  const baseUrlVal = aiEditorProvider === 'free' ? '' : ($('aiBaseUrl')?.value ?? '');
+  const meta = resolveTranslationExecMeta(aiEditorProvider, baseUrlVal);
+  applyExecBadgeElement($('aiExecBadge'), meta.mode, meta.badge);
+  const banner = $('aiExecBanner');
+  if (banner) {
+    banner.textContent = meta.banner;
+    banner.dataset.execMode = meta.mode;
+    banner.classList.toggle('is-local', meta.mode === 'local');
+    banner.classList.toggle('is-online', meta.mode !== 'local');
+  }
+}
 function updateAiProviderUi() {
   const info = aiInfo();
   $('aiKeyHelp').href = info.keyUrl;
   $('aiKeyHelp').textContent = info.keyLabel;
   $('aiBaseUrlField').classList.toggle('hidden', aiEditorProvider === 'gemini');
   $('aiModel').placeholder = info.defaultModel || info.model || '';
+  syncAiExecUi();
 }
 function renderAiProfiles() {
   const container = $('aiProfiles');
@@ -3183,7 +3294,7 @@ function showAiProvider(provider, capture = true) {
   $('aiProvider').value = aiEditorProvider;
   $('aiFields').classList.toggle('hidden', aiEditorProvider === 'free');
   $('freeFields').classList.toggle('hidden', aiEditorProvider !== 'free');
-  if (aiEditorProvider === 'free') { $('aiStatus').textContent = ''; $('copyAiError').classList.add('hidden'); return; }
+  if (aiEditorProvider === 'free') { syncAiExecUi(); $('aiStatus').textContent = ''; $('copyAiError').classList.add('hidden'); return; }
   const info = aiInfo();
   const draft = aiEditorDrafts.get(aiEditorProvider);
   const sourceProfiles = draft?.profiles || info.profiles || [];
@@ -5444,7 +5555,7 @@ function bindEvents() {
   $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(null));
   $('editorOpenFullHelpBtn')?.addEventListener('click', () => openHelpDialog('visual-editor'));
   $('helpDialogClose')?.addEventListener('click', (event) => { event.preventDefault(); closeDialog('helpDialog'); });
-  $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
+  $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiBaseUrl')?.addEventListener('input', syncAiExecUi); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'visual').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'visual').catch(() => {})); $('docxChoiceFlowingTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'flowing').catch(() => {})); $('docxChoiceFlowingOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'flowing').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {})); $('exportPptxBtn')?.addEventListener('click', () => openPptxExportPrompt()); $('pptxChoiceTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'visual').catch(() => {})); $('pptxChoiceOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'visual').catch(() => {})); $('pptxChoiceFlowingTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'flowing').catch(() => {})); $('pptxChoiceFlowingOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'flowing').catch(() => {})); $('pptxExportCancel')?.addEventListener('click', () => requestCancelExport('pptxExportDialog').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
@@ -5662,6 +5773,7 @@ function bindEvents() {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.editorId) { event.preventDefault(); applyEditor().catch((error) => toast(error.message, true)); }
     if (event.key === 'Enter' && state.cropId && $('cropDialog').open && !event.target.matches('input,select')) { event.preventDefault(); $('cropApply').click(); }
   });
+  syncAiExecUi();
   if (localStorage.getItem('comic-studio-theme') === 'light') document.body.classList.add('light');
 }
 async function init() {

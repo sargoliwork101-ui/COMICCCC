@@ -2009,6 +2009,9 @@ ENGINE_SUITABILITY_BY_LANGUAGE: dict[str, dict[str, dict[str, dict[str, str]]]] 
 for _eng_id, _eng_meta in ENGINE_INFO.items():
     _eng_meta["suitability"] = ENGINE_SUITABILITY.get(_eng_id, {})
     _eng_meta["suitabilityByLanguage"] = ENGINE_SUITABILITY_BY_LANGUAGE.get(_eng_id, {})
+    _eng_meta.setdefault("executionMode", "local")
+    _eng_meta.setdefault("requiresInternetForOcr", False)
+    _eng_meta.setdefault("requiresInternetForSetup", True)
 
 
 class EngineRegistry:

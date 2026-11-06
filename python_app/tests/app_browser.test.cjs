@@ -2474,7 +2474,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
       // v3.85–v3.93: Verify version badge ۳.۹۳, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, and target language menu
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۳ · Python', 'header shows version ۳.۹۳');
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۴ · Python', 'header shows version ۳.۹۴');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2562,7 +2562,28 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       );
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.getElementById('helpDialog').open);
-      console.log('PASS: v3.81–v3.93 Persian OCR, Hezar engine, 2D language+pageMode suitability, target language menu, and UI checks');
+
+      // v3.94: Verify On-System (Local) vs Online execution badges in real Chromium across #modelsDialog, #ocrDialog, and #aiDialog
+      const v394Exec = await page.evaluate(() => {
+        renderModels();
+        const cards = [...document.querySelectorAll('#engineCards .engine-card')];
+        const all14LocalChips = cards.length === 14 && cards.every((c) => c.dataset.executionMode === 'local' && c.querySelector('.engine-chip.is-exec-local')?.textContent.includes('اجرا روی سیستم'));
+        const ocrLocal = document.getElementById('ocrExecBadge')?.classList.contains('is-local') && document.getElementById('ocrEngineStatus')?.textContent.includes('روی سیستم');
+        showAiProvider('gemini', false);
+        const geminiOnline = document.getElementById('aiExecBadge')?.dataset.execMode === 'online' && document.getElementById('aiExecBanner')?.dataset.execMode === 'online';
+        showAiProvider('openai', false);
+        const baseInput = document.getElementById('aiBaseUrl');
+        baseInput.value = 'http://127.0.0.1:11434/v1';
+        baseInput.dispatchEvent(new Event('input', { bubbles: true }));
+        const ollamaLocal = document.getElementById('aiExecBadge')?.dataset.execMode === 'local' && document.getElementById('aiExecBanner')?.dataset.execMode === 'local';
+        showAiProvider('free', false);
+        return { all14LocalChips, ocrLocal, geminiOnline, ollamaLocal };
+      });
+      assert.equal(v394Exec.all14LocalChips, true, 'All 14 OCR engine cards display local on-system execution badge');
+      assert.equal(v394Exec.ocrLocal, true, '#ocrDialog displays local on-system badge and status');
+      assert.equal(v394Exec.geminiOnline, true, 'Cloud AI provider displays online execution badge & banner');
+      assert.equal(v394Exec.ollamaLocal, true, 'Localhost OpenAI-compatible endpoint switches badge & banner to on-system local');
+      console.log('PASS: v3.81–v3.94 Persian OCR, Hezar engine, 2D suitability, target language menu, and On-System vs Online badges');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

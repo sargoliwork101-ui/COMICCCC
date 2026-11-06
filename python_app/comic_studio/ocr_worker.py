@@ -319,9 +319,58 @@ class _BaseAdapter:
         raise NotImplementedError
 
 
-def _select_paddleocr_vl_version(pvl_module: Any) -> str | None:
+def _configure_paddle_cpu_safe_env() -> None:
+    """Disable PaddlePaddle 3.3.x PIR -> oneDNN path before PaddleX/PaddleOCR reads flags.
+
+    In PaddlePaddle 3.3.0/3.3.1, oneDNN's PIR attribute converter lacks support for
+    ``pir::ArrayAttribute<pir::DoubleAttribute>`` (``onednn_instruction.cc:118``), which
+    crashes ``PaddleOCRVL``'s CPU ``'cv'`` layout/preprocess worker when MKLDNN is active.
+    """
+    os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "False"
+    os.environ["FLAGS_use_mkldnn"] = "0"
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+    pdx_flags = sys.modules.get("paddlex.utils.flags")
+    if pdx_flags is not None:
+        with contextlib.suppress(Exception):
+            pdx_flags.ENABLE_MKLDNN_BYDEFAULT = False  # type: ignore[attr-defined]
+    pocr_consts = sys.modules.get("paddleocr._constants")
+    if pocr_consts is not None:
+        with contextlib.suppress(Exception):
+            pocr_consts.DEFAULT_ENABLE_MKLDNN = False  # type: ignore[attr-defined]
+    paddle_mod = sys.modules.get("paddle")
+    if paddle_mod is not None and hasattr(paddle_mod, "set_flags"):
+        with contextlib.suppress(Exception):
+            paddle_mod.set_flags({"FLAGS_use_mkldnn": False})
+
+
+def _is_paddle_onednn_pir_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(
+        marker in msg
+        for marker in (
+            "convertpirattribute2runtimeattribute",
+            "onednn_instruction",
+            "onednn",
+            "mkldnn",
+            "pir::arrayattribute<pir::doubleattribute>",
+        )
+    )
+
+
+def _select_paddleocr_vl_version(pvl_module: Any, models_root: Path | None = None) -> str | None:
     supported = getattr(pvl_module, "_AVAILABLE_PIPELINE_VERSIONS", None)
     if isinstance(supported, (list, tuple, set)) and supported:
+        # If the user already downloaded v1.5 weights locally (and v1.6 is not cached),
+        # prefer the already-cached pipeline version to avoid an unexpected multi-GB re-download.
+        if models_root is not None and "v1.5" in supported:
+            official_dir = models_root / "paddlex" / "official_models"
+            try:
+                has_v15 = any(official_dir.glob("*PaddleOCR-VL-1.5*")) if official_dir.is_dir() else False
+                has_v16 = any(official_dir.glob("*PaddleOCR-VL-1.6*")) if official_dir.is_dir() else False
+                if has_v15 and not has_v16:
+                    return "v1.5"
+            except OSError:
+                pass
         for preferred in ("v1.6", "v1.5", "v1"):
             if preferred in supported:
                 return preferred
@@ -331,19 +380,23 @@ def _select_paddleocr_vl_version(pvl_module: Any) -> str | None:
 
 
 class _PaddleOcrVlAdapter(_BaseAdapter):
+    _CPU_MAX_SIDE = 2200
+
     def __init__(self, models_root: Path) -> None:
         super().__init__(models_root)
         self._pipeline: Any = None
+        self._device: str = "cpu"
 
-    def _get_pipeline(self) -> Any:
+    def _get_pipeline(self, *, force_cpu: bool = False) -> Any:
         if self._pipeline is None:
+            _configure_paddle_cpu_safe_env()
             from paddleocr import PaddleOCRVL
             try:
                 from paddleocr._pipelines import paddleocr_vl as _pvl_mod
             except Exception:
                 _pvl_mod = None
 
-            chosen_ver = _select_paddleocr_vl_version(_pvl_mod) if _pvl_mod is not None else None
+            chosen_ver = _select_paddleocr_vl_version(_pvl_mod, self.models_root) if _pvl_mod is not None else None
             candidates: list[str | None] = []
             if chosen_ver:
                 candidates.append(chosen_ver)
@@ -351,58 +404,87 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
                 if fallback_ver not in candidates:
                     candidates.append(fallback_ver)
 
-            paddle_device: str | None = None
-            try:
-                import paddle
-                if hasattr(paddle, "device") and paddle.device.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
-                    paddle_device = "gpu:0"
-                else:
-                    paddle_device = "cpu"
-            except Exception:
-                paddle_device = None
+            paddle_device: str | None = "cpu" if force_cpu else None
+            if not force_cpu:
+                try:
+                    import paddle
+                    if hasattr(paddle, "set_flags"):
+                        with contextlib.suppress(Exception):
+                            paddle.set_flags({"FLAGS_use_mkldnn": False})
+                    if hasattr(paddle, "device") and paddle.device.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
+                        paddle_device = "gpu:0"
+                    else:
+                        paddle_device = "cpu"
+                except Exception:
+                    paddle_device = None
+            self._device = "gpu" if (paddle_device or "").startswith("gpu") else "cpu"
+            cpu_threads = max(1, min(12, os.cpu_count() or 4))
 
             last_err: Exception | None = None
             for candidate in candidates:
-                kwargs: dict[str, Any] = {}
+                ver_kwargs: dict[str, Any] = {}
                 if candidate is not None:
-                    kwargs["pipeline_version"] = candidate
+                    ver_kwargs["pipeline_version"] = candidate
                 device_kwargs = {"device": paddle_device} if paddle_device else {}
-                try:
-                    self._pipeline = PaddleOCRVL(
-                        use_chart_recognition=False,
-                        use_seal_recognition=False,
+                attempt_kwargs_list: list[dict[str, Any]] = []
+                if self._device == "cpu":
+                    attempt_kwargs_list.append({
+                        "use_chart_recognition": False,
+                        "use_seal_recognition": False,
+                        "enable_mkldnn": False,
+                        "use_queues": False,
+                        "cpu_threads": cpu_threads,
                         **device_kwargs,
-                        **kwargs,
-                    )
-                    break
-                except TypeError:
+                        **ver_kwargs,
+                    })
+                attempt_kwargs_list.extend([
+                    {
+                        "use_chart_recognition": False,
+                        "use_seal_recognition": False,
+                        "enable_mkldnn": False,
+                        **device_kwargs,
+                        **ver_kwargs,
+                    },
+                    {
+                        "use_chart_recognition": False,
+                        "use_seal_recognition": False,
+                        **device_kwargs,
+                        **ver_kwargs,
+                    },
+                    {
+                        "use_chart_recognition": False,
+                        "use_seal_recognition": False,
+                        **ver_kwargs,
+                    },
+                    dict(ver_kwargs),
+                ])
+
+                invalid_ver = False
+                for call_kwargs in attempt_kwargs_list:
                     try:
-                        self._pipeline = PaddleOCRVL(
-                            use_chart_recognition=False,
-                            use_seal_recognition=False,
-                            **kwargs,
-                        )
+                        self._pipeline = PaddleOCRVL(**call_kwargs)
                         break
-                    except TypeError:
-                        try:
-                            self._pipeline = PaddleOCRVL(**kwargs)
-                            break
-                        except ValueError as exc:
+                    except (TypeError, ValueError) as exc:
+                        err_text = str(exc)
+                        if isinstance(exc, ValueError) and "Invalid pipeline version" in err_text:
                             last_err = exc
-                            if "Invalid pipeline version" in str(exc):
-                                continue
+                            invalid_ver = True
+                            break
+                        if isinstance(exc, ValueError) and "Unknown argument:" not in err_text:
                             raise
-                except ValueError as exc:
-                    last_err = exc
-                    if "Invalid pipeline version" in str(exc):
+                        last_err = exc
                         continue
-                    raise
+                if self._pipeline is not None:
+                    break
+                if invalid_ver:
+                    continue
             if self._pipeline is None:
                 raise RuntimeError(f"Could not initialize PaddleOCRVL pipeline: {last_err}")
         return self._pipeline
 
     def prepare(self, language: str) -> str:
         _widen_requests_default_timeout(120.0)
+        _configure_paddle_cpu_safe_env()
         print("Preparing PaddleOCR-VL sub-models (20%)...", file=sys.stderr, flush=True)
         try:
             self._get_pipeline()
@@ -432,13 +514,59 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
             return getattr(paddleocr, "__version__", "ready")
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
+        import tempfile
         from PIL import Image
+
         with Image.open(image_path) as im:
             width, height = im.size
+
         pipeline = self._get_pipeline()
-        output = pipeline.predict(image_path)
+        target_path = image_path
+        scale_x = 1.0
+        scale_y = 1.0
+        temp_scaled_path: str | None = None
+        try:
+            if self._device == "cpu" and max(width, height) > self._CPU_MAX_SIDE:
+                ratio = float(self._CPU_MAX_SIDE) / float(max(width, height))
+                scaled_w = max(32, int(round(width * ratio)))
+                scaled_h = max(32, int(round(height * ratio)))
+                scale_x = float(width) / float(scaled_w)
+                scale_y = float(height) / float(scaled_h)
+                fd, tmp_name = tempfile.mkstemp(prefix="pvl_cpu_", suffix=".png")
+                os.close(fd)
+                temp_scaled_path = tmp_name
+                with Image.open(image_path) as raw_im:
+                    rgb_im = raw_im.convert("RGB")
+                    resized = rgb_im.resize((scaled_w, scaled_h), Image.Resampling.LANCZOS)
+                    try:
+                        resized.save(temp_scaled_path, format="PNG")
+                    finally:
+                        resized.close()
+                        if rgb_im is not raw_im:
+                            rgb_im.close()
+                target_path = temp_scaled_path
+
+            try:
+                pages = list(pipeline.predict(target_path))
+            except Exception as pred_exc:
+                if not _is_paddle_onednn_pir_error(pred_exc):
+                    raise
+                print(
+                    "PaddleOCR-VL encountered PIR/oneDNN CPU worker error; rebuilding with MKLDNN disabled...",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                _configure_paddle_cpu_safe_env()
+                self._pipeline = None
+                pipeline = self._get_pipeline(force_cpu=True)
+                pages = list(pipeline.predict(target_path))
+        finally:
+            if temp_scaled_path:
+                with contextlib.suppress(OSError):
+                    os.remove(temp_scaled_path)
+
         lines: list[dict[str, Any]] = []
-        for page in output:
+        for page in pages:
             data = page.json if hasattr(page, "json") else (page if isinstance(page, dict) else {})
             res = data.get("res", data) if isinstance(data, dict) else {}
             blocks = res.get("parsing_res_list") or getattr(page, "parsing_res_list", None) or []
@@ -459,7 +587,11 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
                     score = float(getattr(block, "score", 0.9) or 0.9)
                 if label in {"image", "figure", "header_image", "footer_image"} or not content or not bbox or len(bbox) < 4:
                     continue
-                poly = _clamp_polygon(_rect_polygon(bbox[0], bbox[1], bbox[2], bbox[3]), width, height)
+                bx0 = float(bbox[0]) * scale_x
+                by0 = float(bbox[1]) * scale_y
+                bx1 = float(bbox[2]) * scale_x
+                by1 = float(bbox[3]) * scale_y
+                poly = _clamp_polygon(_rect_polygon(bx0, by0, bx1, by1), width, height)
                 lines.append({"text": content, "confidence": max(0.0, min(1.0, score)), "polygon": poly, **hints})
         return lines
 

@@ -1836,7 +1836,14 @@ class IsolatedOcrEngine:
             env.setdefault(thread_var, cores_str)
         env.setdefault("TOKENIZERS_PARALLELISM", "true")
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        env.setdefault("FLAGS_use_mkldnn", "1")
+        if self.id == "paddleocr-vl-1-6":
+            # PaddlePaddle 3.3.x PIR -> oneDNN converter throws UnimplementedError on
+            # pir::ArrayAttribute<pir::DoubleAttribute> (onednn_instruction.cc:118)
+            # inside PaddleOCRVL's CPU 'cv' worker unless MKLDNN/oneDNN is disabled.
+            env["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "False"
+            env["FLAGS_use_mkldnn"] = "0"
+        else:
+            env.setdefault("FLAGS_use_mkldnn", "1")
         env.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
         env.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
         env.setdefault("HF_HUB_DISABLE_XET", "1")

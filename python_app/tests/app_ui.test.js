@@ -1613,6 +1613,42 @@ function check(name, condition) {
       })()
     `, context);
     check('v3.93 Persian OCR language, Hezar engine, 2D (language + pageMode) green/yellow/red suitability, and translation target language menu work in UI', v393UiCheck === true);
+
+    const v394ExecUiCheck = vm.runInContext(`
+      (() => {
+        renderModels();
+        updateEngineOptions('rapidocr-v6');
+        const modelsBadgeOk = $('modelsExecSummary')?.dataset.execMode !== 'online' && $('modelsExecSummary')?.classList.contains('is-local');
+        const allCardsMarkedLocal = [...document.querySelectorAll('#engineCards .engine-card')].every((c) => {
+          const chip = c.querySelector('.engine-chip.is-exec-local');
+          return c.dataset.executionMode === 'local' && chip && chip.textContent.includes('اجرا روی سیستم');
+        });
+        const ocrBadgeOk = $('ocrExecBadge')?.dataset.execMode === 'local' && $('ocrEngine')?.dataset.executionMode === 'local' && $('ocrEngineStatus')?.textContent.includes('روی سیستم');
+
+        showAiProvider('free', false);
+        const freeOnlineOk = $('aiExecBadge')?.dataset.execMode === 'online' && $('aiExecBanner')?.dataset.execMode === 'online' && $('aiExecBanner')?.textContent.includes('آنلاین');
+
+        showAiProvider('openai', false);
+        $('aiBaseUrl').value = 'https://api.openai.com/v1';
+        $('aiBaseUrl').dispatchEvent(new Event('input', { bubbles: true }));
+        const remoteOpenaiOnline = $('aiExecBadge')?.dataset.execMode === 'online' && $('aiExecBanner')?.dataset.execMode === 'online';
+
+        $('aiBaseUrl').value = 'http://localhost:11434/v1';
+        $('aiBaseUrl').dispatchEvent(new Event('input', { bubbles: true }));
+        const localOllamaLocal = $('aiExecBadge')?.dataset.execMode === 'local' && $('aiExecBanner')?.dataset.execMode === 'local' && $('aiExecBanner')?.textContent.includes('روی سیستم');
+
+        state.ai.providers = state.ai.providers || {};
+        state.ai.providers.openai = { label: 'OpenAI', model: 'qwen2.5:7b', base_url: 'http://127.0.0.1:11434/v1', profiles: [{ id: 'loc-1', name: 'Ollama', hasApiKey: true }] };
+        renderTranslationServiceSelector('openai', '');
+        const openaiOpt = [...$('translationPreviewService').options].find((o) => o.value === 'openai');
+        const freeOpt = [...$('translationPreviewService').options].find((o) => o.value === 'free');
+        const previewSelectOk = openaiOpt?.dataset.executionMode === 'local' && openaiOpt.textContent.includes('روی سیستم') && freeOpt?.dataset.executionMode === 'online' && freeOpt.textContent.includes('آنلاین');
+
+        showAiProvider('free', false);
+        return modelsBadgeOk && allCardsMarkedLocal && ocrBadgeOk && freeOnlineOk && remoteOpenaiOnline && localOllamaLocal && previewSelectOk;
+      })()
+    `, context);
+    check('v3.94 clearly indicates On-System (Local/Offline) vs Online execution across #modelsDialog, #ocrDialog, #aiDialog, and #translationPreviewDialog', v394ExecUiCheck === true);
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
