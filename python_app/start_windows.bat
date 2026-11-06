@@ -82,7 +82,8 @@ rem Keep this list in sync with pyproject.toml and the [ocr] extra.
     "opencv-python-headless>=4.10,<5" ^
     "httpx>=0.27,<1" ^
     "rapidocr>=3.10,<3.11" ^
-    "onnxruntime>=1.20,<2"
+    "onnxruntime>=1.20,<2" ^
+    "python-bidi>=0.4.2,<1"
 if errorlevel 1 goto update_failed
 
 rem Install the local application without resolving the dependency list twice.

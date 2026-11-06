@@ -236,13 +236,13 @@ async function pollActivity() {
   finally { activityPollInFlight = false; }
 }
 function isActivityHighRate() {
-  return Boolean(jobBusy || state.modelBusy || translationRunning || exportRunning);
+  return Boolean(jobBusy || state.modelBusy || translationRunning || exportRunning || checkingEngineUpdates);
 }
 function scheduleActivityPoll(immediate = false) {
   if (sessionCloseSent) return;
   if (activityPollTimer) { clearTimeout(activityPollTimer); activityPollTimer = null; }
-  if (!isActivityHighRate() && document.hidden) return;
-  const delay = immediate ? 0 : (isActivityHighRate() ? 650 : 2600);
+  if (document.hidden || !isActivityHighRate()) return;
+  const delay = immediate ? 0 : (state.modelBusy ? 350 : 650);
   activityPollTimer = setTimeout(async () => {
     activityPollTimer = null;
     await pollActivity();
@@ -252,9 +252,15 @@ function scheduleActivityPoll(immediate = false) {
 }
 function startActivityFeed() {
   pollActivity().finally(() => scheduleActivityPoll(false));
+  $('activityDetails')?.addEventListener('toggle', (ev) => {
+    if (ev.target?.open && !sessionCloseSent) pollActivity().catch(() => {});
+  });
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) scheduleActivityPoll(true);
-    else if (!isActivityHighRate() && activityPollTimer) { clearTimeout(activityPollTimer); activityPollTimer = null; }
+    if (!document.hidden && isActivityHighRate()) scheduleActivityPoll(true);
+    else if (activityPollTimer && (document.hidden || !isActivityHighRate())) {
+      clearTimeout(activityPollTimer);
+      activityPollTimer = null;
+    }
   });
 }
 async function clearActivity(notify = true) {
@@ -284,7 +290,7 @@ function startSession() {
   sessionCloseSent = false;
   heartbeat();
   if (!sessionTimer) {
-    sessionTimer = setInterval(heartbeat, 15000);
+    sessionTimer = setInterval(heartbeat, 45000);
     sessionTimer.unref?.();
   }
   if (!sessionVisibilityBound) {
@@ -699,6 +705,7 @@ function parseExportFilename(disposition, fallback) {
 function sanitizeHtml(html) { return window.ComicSanitize.sanitize(html); }
 
 function setBusy(message) {
+  const wasBusy = jobBusy;
   jobBusy = !!message;
   $('jobStatus').textContent = message || 'آماده';
   setProgress('jobProgress', null, !!message);
@@ -716,6 +723,7 @@ function setBusy(message) {
     $('translationStatus').textContent = message || 'آماده';
     setProgress('translationProgress', null, !!message);
   }
+  if (wasBusy && !jobBusy) pollActivity().catch(() => {});
   scheduleActivityPoll(!!message);
   document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button:not(#dockCancelJobBtn), #backupProjectBtn, #restoreProjectBtn, #restoreProjectInput, #newProjectBtn, #deleteProjectBtn, #projectSelect, #projectName').forEach((el) => { el.disabled = !!message; });
 }
@@ -1139,8 +1147,9 @@ function drawGroupOutlines() {
 }
 
 // ---------- Projects and settings ----------
-async function refreshProjectList() {
-  const projects = await api('/api/projects'); const select = $('projectSelect'); const current = state.project?.id; select.textContent = '';
+async function refreshProjectList(prefetched = null) {
+  const projects = Array.isArray(prefetched) ? prefetched : await api('/api/projects');
+  const select = $('projectSelect'); const current = state.project?.id; select.textContent = '';
   projects.forEach((project) => { const option = document.createElement('option'); option.value = project.id; option.textContent = `${project.name} (${project.images})`; option.selected = project.id === current; select.appendChild(option); });
 }
 async function loadProject(id) {
@@ -2522,7 +2531,14 @@ async function performContextTranslation(request, preview, ongoing = null, corre
 }
 
 // ---------- Typeset preview and export ----------
-async function ensureFont() { if (document.fonts?.load) { try { await Promise.all([document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'), document.fonts.load('400 16px Vazirmatn', 'ابپتثجچ')]); } catch { /* fallback */ } } }
+let fontLoadedOnce = false;
+async function ensureFont() {
+  if (fontLoadedOnce || !document.fonts?.load) return;
+  try {
+    await Promise.all([document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'), document.fonts.load('400 16px Vazirmatn', 'ابپتثجچ')]);
+    fontLoadedOnce = true;
+  } catch { /* fallback */ }
+}
 async function renderAndUploadNow(item, projectId, mode) {
   const blocks = overlayBlocks(item, mode); const active = blocks.some((block) => block.enabled && hasRenderableText(block));
   if (!active) {
@@ -2533,11 +2549,16 @@ async function renderAndUploadNow(item, projectId, mode) {
   await ensureFont(); const response = await fetch(`/api/projects/${projectId}/images/${item.id}/content`); if (!response.ok) throw new Error('تصویر اصلی باز نشد');
   const bitmap = await createImageBitmap(await response.blob()); let canvas;
   try { canvas = Typeset.render(bitmap, blocks); } finally { bitmap.close(); }
-  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  let blob;
+  try {
+    blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  } finally {
+    canvas.width = canvas.height = 0;
+  }
   if (!blob) throw new Error(`ساخت PNG برای «${item.name}» ممکن نشد؛ تصویر خیلی بزرگ یا حافظهٔ مرورگر کم است`);
   await api(`/api/projects/${projectId}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
   imagePreviewVersions.set(`${projectId}:${item.id}`, ++previewRevision);
-  canvas.width = canvas.height = 0; const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null; if (current) current.edited = true;
+  const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null; if (current) current.edited = true;
 }
 function renderAndUpload(item) {
   const projectId = state.project?.id;
@@ -3094,7 +3115,7 @@ async function downloadEngine(engine, options = {}) {
   appendLocalActivity(`آماده‌سازی خودکار ${engine.name} برای ${language} آغاز شد${dlTag}`);
   renderModels(); updateOcrEngineStatus();
   syncModelProgressUi(null, true, startMsg);
-  const pollFast = setInterval(() => { pollActivity().catch(() => {}); }, 350);
+  scheduleActivityPoll(false);
   const performRequest = (forceFlag) => api(`/api/engines/${engine.id}/download`, {
     ...jsonOptions('POST', forceFlag ? { language, force: true } : { language }),
     signal: controller.signal,
@@ -3149,9 +3170,10 @@ async function downloadEngine(engine, options = {}) {
     }
     return false;
   } finally {
-    clearInterval(pollFast);
     if (modelAbortController === controller) modelAbortController = null;
     state.modelBusy = null;
+    pollActivity().catch(() => {});
+    scheduleActivityPoll(false);
     syncModelProgressUi(succeeded ? 1 : 0, false, '');
     modelFromOcrDialog = false;
     modelCurrentProgress = null;
@@ -3177,7 +3199,7 @@ async function updateEngine(engine, options = {}) {
   appendLocalActivity(`به‌روزرسانی ${engine.name} آغاز شد`);
   renderModels(); updateOcrEngineStatus();
   syncModelProgressUi(null, true, startMsg);
-  const pollFast = setInterval(() => { pollActivity().catch(() => {}); }, 350);
+  scheduleActivityPoll(false);
   let succeeded = false;
   try {
     const result = await api(`/api/engines/${engine.id}/update`, {
@@ -3215,9 +3237,10 @@ async function updateEngine(engine, options = {}) {
     }
     return false;
   } finally {
-    clearInterval(pollFast);
     if (modelAbortController === controller) modelAbortController = null;
     state.modelBusy = null;
+    pollActivity().catch(() => {});
+    scheduleActivityPoll(false);
     syncModelProgressUi(succeeded ? 1 : 0, false, '');
     modelFromOcrDialog = false;
     modelCurrentProgress = null;
@@ -3316,7 +3339,14 @@ async function testEngine(engineId) {
       $('modelTestResult').textContent = error.message; appendLocalActivity(`آزمایش موتور ناموفق بود: ${error.message}`, 'error');
     }
   }
-  finally { if (modelAbortController === controller) modelAbortController = null; state.modelBusy = null; dismissJobCancelModal('model'); renderModels(); }
+  finally {
+    if (modelAbortController === controller) modelAbortController = null;
+    state.modelBusy = null;
+    pollActivity().catch(() => {});
+    scheduleActivityPoll(false);
+    dismissJobCancelModal('model');
+    renderModels();
+  }
 }
 const AI_PROVIDER_IDS = ['gemini', 'openai', 'openrouter', 'avalai'];
 const AI_FALLBACKS = {
@@ -3484,8 +3514,8 @@ function freeSettingsPayload() {
   }
   return result;
 }
-async function loadAiSettings() {
-  state.ai = await api('/api/ai-settings');
+async function loadAiSettings(prefetched = null) {
+  state.ai = (prefetched && typeof prefetched === 'object') ? prefetched : await api('/api/ai-settings');
   aiEditorDrafts.clear();
   renderFreeServices();
   $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false;
@@ -5935,14 +5965,18 @@ async function init() {
     const [projects, engines, ai] = await Promise.all([api('/api/projects'), api('/api/engines'), api('/api/ai-settings')]);
     state.engines = engines; state.ai = ai;
     const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
-    adoptProject(project); await refreshProjectList(); await loadAiSettings();
+    adoptProject(project);
+    await refreshProjectList(projects.length ? projects : null);
+    await loadAiSettings(ai);
     const unrenderedIds = sortedImages().filter((item) => hasOverlayText(item) && !item.edited).map((item) => item.id);
     if (unrenderedIds.length) await renderImagesText(unrenderedIds);
     syncEngineUpdateUi();
-    refreshEngineMemory().catch(() => {});
-    if (!startupUpdateChecked && state.engines.some((entry) => entry.runtimeInstalled)) {
+    const shouldCheckUpdates = !startupUpdateChecked && state.engines.some((entry) => entry.runtimeInstalled);
+    if (shouldCheckUpdates) {
       startupUpdateChecked = true;
       checkEngineUpdates({ force: false, silent: true }).catch(() => {});
+    } else {
+      refreshEngineMemory().catch(() => {});
     }
   } catch (error) { toast(`راه‌اندازی ناموفق: ${error.message}`, true); }
 }

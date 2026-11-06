@@ -36,8 +36,15 @@
       const value = (field.innerText ?? field.textContent ?? '').replace(/\u00a0/g, ' '); if (hidden) field.hidden = true; return value;
     }
     let savedAt = '';
+    const autosaveMs = Math.max(1000, options.autosaveInterval || 3000);
+    function clearDraftTimer() { if (timer) { clearTimeout(timer); timer = null; } }
+    function scheduleDraftSave() {
+      if (!currentKey || !dirty || timer) return;
+      timer = setTimeout(() => { timer = null; saveDraft(); }, autosaveMs);
+      timer.unref?.();
+    }
     function updateStatus(message = '') { const value = text(); const words = value.trim() ? value.trim().split(/\s+/u).length : 0; status.textContent = `${words.toLocaleString('fa-IR')} واژه · ${Array.from(value).length.toLocaleString('fa-IR')} نویسه · ${savedAt ? `ذخیرهٔ پیش‌نویس: ${savedAt}` : 'پیش‌نویس هنوز ذخیره نشده'}${message ? ` · ${message}` : ''}`; }
-    function changed() { dirty = true; if (mode === 'text') { field.innerHTML = html(); } updateStatus(); const value = html(); listeners.forEach((fn) => fn(value)); }
+    function changed() { dirty = true; scheduleDraftSave(); if (mode === 'text') { field.innerHTML = html(); } updateStatus(); const value = html(); listeners.forEach((fn) => fn(value)); }
     function setMode(next) {
       if (next === mode) return;
       if (next === 'text') { closeModal({ restoreFocus: false }); remember(); source.value = sanitize(rawHtml()); field.hidden = true; source.hidden = false; mode = 'text'; source.focus(); }
@@ -110,16 +117,15 @@
     field.addEventListener('input',()=>{remember();changed();}); source.addEventListener('input',changed);
     field.addEventListener('paste',(e)=>{e.preventDefault();const data=e.clipboardData; const rich=data?.getData('text/html'); if(!plainMode&&!plainPaste&&rich) insertHTML(rich); else exec('insertText',data?.getData('text/plain')||'');});
     field.addEventListener('keydown',(e)=>{if(!(e.ctrlKey||e.metaKey))return;const key=e.key.toLowerCase();if(plainMode && ['b','i','u','k'].includes(key)){e.preventDefault();return;}if(key==='k'){e.preventDefault();e.stopPropagation();linkDialog();}else if(['b','i','u'].includes(key)){e.preventDefault();e.stopPropagation();const cmd={b:'bold',i:'italic',u:'underline'}[key];if(options.inlineCommand)options.inlineCommand(cmd,()=>exec(cmd));else exec(cmd);}else if(key==='z'||key==='y'){e.preventDefault();e.stopPropagation();(key==='y'||e.shiftKey?redo:undo)();}});
-    function saveDraft(){if(!currentKey||!dirty)return;try{const at=new Date();localStorage.setItem(currentKey,JSON.stringify({html:html(),base,time:at.toISOString(),meta:options.getDraftMetadata?.() ?? null}));savedAt=at.toLocaleTimeString('fa-IR');dirty=false;updateStatus();}catch{updateStatus('ذخیرهٔ محلی در دسترس نیست');}}
-    timer = setInterval(saveDraft, Math.max(1000, options.autosaveInterval || 3000));
+    function saveDraft(){clearDraftTimer();if(!currentKey||!dirty)return;try{const at=new Date();localStorage.setItem(currentKey,JSON.stringify({html:html(),base,time:at.toISOString(),meta:options.getDraftMetadata?.() ?? null}));savedAt=at.toLocaleTimeString('fa-IR');dirty=false;updateStatus();}catch{updateStatus('ذخیرهٔ محلی در دسترس نیست');}}
     const api = {
       getHTML: html, getText: text, focus(){(mode==='visual'?field:source).focus({ preventScroll: true });},
       setHTML(value){field.innerHTML=sanitize(value);source.value=field.innerHTML;savedRange=null;changed();},
       onChange(fn){listeners.add(fn);return()=>listeners.delete(fn);},
-      setContext(key,value,revision=''){ closeModal({ restoreFocus: false }); currentKey=key||'';base=revision; savedAt=''; dirty=false; savedRange=null; mode='visual';source.hidden=true;field.hidden=false;field.innerHTML=sanitize(value);source.value=field.innerHTML;visualTab.setAttribute('aria-selected','true');textTab.setAttribute('aria-selected','false');toolbar.querySelectorAll('button,select,input').forEach((el)=>{el.disabled=false;});let recovered=false;try{const saved=currentKey?JSON.parse(localStorage.getItem(currentKey)||'null'):null;if(typeof saved?.html === 'string'){const differs=saved.html!==field.innerHTML || JSON.stringify(saved.meta ?? null)!==JSON.stringify(options.getDraftMetadata?.() ?? null);if(!differs){if(currentKey)localStorage.removeItem(currentKey);}else{const msg=saved.base===base ? 'پیش‌نویس ذخیره‌شده‌ای پیدا شد. آیا بازیابی شود؟' : 'این پیش‌نویس متعلق به نسخهٔ قدیمی‌تری از کادر است و بازیابی آن متن فعلی را در ویرایشگر جایگزین می‌کند. آیا بازیابی شود؟';const ask=typeof options.confirmDraft==='function'?options.confirmDraft:confirm;const decision=ask(msg);if(decision&&typeof decision.then==='function'){updateStatus();return decision.then((accepted)=>{if(currentKey!==(key||''))return false;if(accepted){field.innerHTML=sanitize(saved.html);source.value=field.innerHTML;options.onRestore?.(saved.meta);dirty=true;changed();return true;}try{if(key)localStorage.removeItem(key);}catch{}updateStatus();return false;});}if(decision){field.innerHTML=sanitize(saved.html);source.value=field.innerHTML;options.onRestore?.(saved.meta);dirty=true;recovered=true;}else if(currentKey){localStorage.removeItem(currentKey);}}}}catch{}updateStatus();return recovered;},
-      saveDraft, clearDraft(){try{if(currentKey)localStorage.removeItem(currentKey);}catch{}dirty=false;},
+      setContext(key,value,revision=''){ closeModal({ restoreFocus: false }); clearDraftTimer(); currentKey=key||'';base=revision; savedAt=''; dirty=false; savedRange=null; mode='visual';source.hidden=true;field.hidden=false;field.innerHTML=sanitize(value);source.value=field.innerHTML;visualTab.setAttribute('aria-selected','true');textTab.setAttribute('aria-selected','false');toolbar.querySelectorAll('button,select,input').forEach((el)=>{el.disabled=false;});let recovered=false;try{const saved=currentKey?JSON.parse(localStorage.getItem(currentKey)||'null'):null;if(typeof saved?.html === 'string'){const differs=saved.html!==field.innerHTML || JSON.stringify(saved.meta ?? null)!==JSON.stringify(options.getDraftMetadata?.() ?? null);if(!differs){if(currentKey)localStorage.removeItem(currentKey);}else{const msg=saved.base===base ? 'پیش‌نویس ذخیره‌شده‌ای پیدا شد. آیا بازیابی شود؟' : 'این پیش‌نویس متعلق به نسخهٔ قدیمی‌تری از کادر است و بازیابی آن متن فعلی را در ویرایشگر جایگزین می‌کند. آیا بازیابی شود؟';const ask=typeof options.confirmDraft==='function'?options.confirmDraft:confirm;const decision=ask(msg);if(decision&&typeof decision.then==='function'){updateStatus();return decision.then((accepted)=>{if(currentKey!==(key||''))return false;if(accepted){field.innerHTML=sanitize(saved.html);source.value=field.innerHTML;options.onRestore?.(saved.meta);dirty=true;changed();return true;}try{if(key)localStorage.removeItem(key);}catch{}updateStatus();return false;});}if(decision){field.innerHTML=sanitize(saved.html);source.value=field.innerHTML;options.onRestore?.(saved.meta);dirty=true;scheduleDraftSave();recovered=true;}else if(currentKey){localStorage.removeItem(currentKey);}}}}catch{}updateStatus();return recovered;},
+      saveDraft, clearDraft(){clearDraftTimer();try{if(currentKey)localStorage.removeItem(currentKey);}catch{}dirty=false;},
       setPlainMode(enabled){ plainMode=!!enabled; if(plainMode)closeModal({ restoreFocus: false }); shell.classList.toggle('classic-plain-mode', plainMode); if(enabled&&mode==='text')setMode('visual'); field.contentEditable=enabled?'plaintext-only':'true'; },
-      resetToolbar(){ closeModal({ restoreFocus: false }); mode='visual'; source.hidden=true; field.hidden=false; visualTab.setAttribute('aria-selected','true'); textTab.setAttribute('aria-selected','false'); currentKey=''; dirty=false; },
+      resetToolbar(){ closeModal({ restoreFocus: false }); clearDraftTimer(); mode='visual'; source.hidden=true; field.hidden=false; visualTab.setAttribute('aria-selected','true'); textTab.setAttribute('aria-selected','false'); currentKey=''; dirty=false; },
       syncRange(range){ if(range&&field.contains(range.startContainer)&&field.contains(range.endContainer)) savedRange=range.cloneRange(); },
       notifyChange(){ remember(); changed(); },
       attachField(container){ container.append(field, source); },
@@ -127,7 +133,7 @@
       hasOpenModal: () => Boolean(modal),
       closeModal,
       exitFullscreen(){ if(shell.classList.contains('classic-fullscreen')) {shell.classList.remove('classic-fullscreen'); full.setAttribute('aria-pressed','false'); options.onFullscreen?.(false);} },
-      destroy(){ closeModal({ restoreFocus: false }); clearInterval(timer); shell.remove(); }, element: shell, field, colorInput: color,
+      destroy(){ closeModal({ restoreFocus: false }); clearDraftTimer(); shell.remove(); }, element: shell, field, colorInput: color,
     };
     if (options.autosaveKey) api.setContext(options.autosaveKey, options.initialHTML ?? field.innerHTML, options.revision || '');
     updateStatus(); return api;

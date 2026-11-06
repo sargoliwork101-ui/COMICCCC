@@ -1842,6 +1842,22 @@ function check(name, condition) {
     check('v3.96 sorts models Green -> Yellow -> Red on language/pageMode change and keeps order 100% frozen during background refreshes', v396SortingAndFrozenOrderCheck?.ok === true);
   }
 
+  // v3.97: Idle activity polling parks completely (activityPollTimer === null when idle) and resumes only while busy
+  {
+    const idleTimerState = await vm.runInContext(`
+      (() => {
+        scheduleActivityPoll(false);
+        const idleParked = !isActivityHighRate() && activityPollTimer === null;
+        setBusy('در حال پردازش آزمایشی…');
+        const activeArmed = isActivityHighRate() && activityPollTimer !== null;
+        setBusy('');
+        const parkedAgain = !isActivityHighRate() && activityPollTimer === null;
+        return { idleParked, activeArmed, parkedAgain };
+      })()
+    `, context);
+    check('v3.97 parks /api/activity polling at zero timers while idle and arms polling only while busy', idleTimerState.idleParked && idleTimerState.activeArmed && idleTimerState.parkedAgain);
+  }
+
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));
   window.dispatchEvent(new window.Event('pagehide'));

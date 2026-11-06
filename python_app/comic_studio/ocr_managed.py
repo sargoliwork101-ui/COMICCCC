@@ -6,6 +6,7 @@ from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import contextlib
 import contextvars
+import copy
 import ctypes
 from datetime import datetime, timezone
 import hashlib
@@ -27,6 +28,10 @@ from typing import Any, Callable, TypeVar
 import urllib.request
 import zipfile
 
+# Prevent OpenMP / Intel MKL / libiomp / libgomp worker threads from spin-waiting at 100% CPU after inference.
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+os.environ.setdefault("KMP_BLOCKTIME", "0")
+
 import numpy as np
 from PIL import Image
 
@@ -36,9 +41,16 @@ from .paths import models_dir
 _SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 _HW_CACHE_LOCK = threading.Lock()
 _HW_CACHE: tuple[float, dict[str, Any]] | None = None
+_DISK_FREE_CACHE: tuple[str, float, float] | None = None
 _MANIFEST_LOCK = threading.Lock()
+_MANIFEST_MEM_CACHE: tuple[str, int, int, dict[str, dict[str, Any]]] | None = None
 _UPDATE_CACHE_LOCK = threading.Lock()
+_UPDATE_MEM_CACHE: tuple[str, int, int, dict[str, Any]] | None = None
+_PORTABLE_TESS_CACHE: tuple[str, int, str | None] | None = None
+_TESS_VER_CACHE: dict[tuple[str, int, int, int], str | None] = {}
+_VENV_DIST_VER_CACHE: dict[tuple[str, int, str], str | None] = {}
 _UPDATE_CACHE_TTL_SECONDS = 1800
+_WORKER_IDLE_TIMEOUT_SECONDS = 180.0
 
 DEFAULT_TESSERACT_WIN_TAG = "v5.4.0.20240606"
 DEFAULT_TESSERACT_WIN_URL = (
@@ -674,6 +686,8 @@ def configure_native_runtime() -> dict[str, Any]:
     cores = cpu_core_count()
     for env_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ.setdefault(env_key, str(cores))
+    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+    os.environ.setdefault("KMP_BLOCKTIME", "0")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     cv_threads = cores
@@ -1051,10 +1065,12 @@ def inspect_hardware(force_refresh: bool = False) -> dict[str, Any]:
         except Exception:
             pass
 
-    global _HW_CACHE
+    global _HW_CACHE, _DISK_FREE_CACHE
     now = time.monotonic()
     with _HW_CACHE_LOCK:
-        if not force_refresh and _HW_CACHE is not None and (now - _HW_CACHE[0]) < 60.0:
+        # Static CPU/RAM/GPU hardware does not change while the process is running;
+        # caching it for process lifetime avoids repeatedly spawning PowerShell/nvidia-smi/system_profiler.
+        if not force_refresh and _HW_CACHE is not None:
             base = dict(_HW_CACHE[1])
         else:
             has_nvidia, gpu_name, vram_gb = _detect_nvidia_gpu()
@@ -1079,13 +1095,18 @@ def inspect_hardware(force_refresh: bool = False) -> dict[str, Any]:
                 "cpuCores": cores,
             }
             _HW_CACHE = (now, dict(base))
-    base["cpuCores"] = cores
-    target_dir = models_dir()
-    probe = target_dir if target_dir.exists() else (target_dir.parent if target_dir.parent.exists() else Path.home())
-    try:
-        free_disk_gb = round(shutil.disk_usage(probe).free / (1024 ** 3), 1)
-    except Exception:
-        free_disk_gb = 0.0
+        base["cpuCores"] = cores
+        target_dir = models_dir()
+        probe = target_dir if target_dir.exists() else (target_dir.parent if target_dir.parent.exists() else Path.home())
+        probe_key = str(probe)
+        if not force_refresh and _DISK_FREE_CACHE is not None and _DISK_FREE_CACHE[0] == probe_key and (now - _DISK_FREE_CACHE[1]) < 10.0:
+            free_disk_gb = _DISK_FREE_CACHE[2]
+        else:
+            try:
+                free_disk_gb = round(shutil.disk_usage(probe).free / (1024 ** 3), 1)
+            except Exception:
+                free_disk_gb = 0.0
+            _DISK_FREE_CACHE = (probe_key, now, free_disk_gb)
     base["freeDiskGb"] = free_disk_gb
     return base
 
@@ -1228,17 +1249,28 @@ def _manifest_path() -> Path:
 
 
 def read_manifest() -> dict[str, dict[str, Any]]:
+    global _MANIFEST_MEM_CACHE
     path = _manifest_path()
-    if not path.is_file():
+    try:
+        st = path.stat()
+    except OSError:
         return {}
+    path_key = str(path)
+    cached = _MANIFEST_MEM_CACHE
+    if cached is not None and cached[0] == path_key and cached[1] == st.st_mtime_ns and cached[2] == st.st_size:
+        return copy.deepcopy(cached[3])
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
+        if isinstance(payload, dict):
+            _MANIFEST_MEM_CACHE = (path_key, st.st_mtime_ns, st.st_size, copy.deepcopy(payload))
+            return payload
+        return {}
     except Exception:
         return {}
 
 
 def update_manifest_entry(engine_id: str, **fields: Any) -> dict[str, Any]:
+    global _MANIFEST_MEM_CACHE
     with _MANIFEST_LOCK:
         data = read_manifest()
         current = dict(data.get(engine_id) or {})
@@ -1251,6 +1283,9 @@ def update_manifest_entry(engine_id: str, **fields: Any) -> dict[str, Any]:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            st = path.stat()
+            _MANIFEST_MEM_CACHE = (str(path), st.st_mtime_ns, st.st_size, copy.deepcopy(data))
         return current
 
 
@@ -1284,36 +1319,65 @@ def _is_windows() -> bool:
 
 
 def portable_tesseract_executable() -> str | None:
+    global _PORTABLE_TESS_CACHE
     base = models_dir() / "tesseract-bin"
+    try:
+        st = base.stat()
+    except OSError:
+        return None
     if not base.is_dir():
         return None
+    base_key = str(base)
+    cached = _PORTABLE_TESS_CACHE
+    if cached is not None and cached[0] == base_key and cached[1] == st.st_mtime_ns:
+        if cached[2] is None or Path(cached[2]).is_file():
+            return cached[2]
     candidates = (
         [base / "tesseract.exe", base / "Tesseract-OCR" / "tesseract.exe", base / "bin" / "tesseract.exe"]
         if _is_windows()
         else [base / "bin" / "tesseract", base / "tesseract"]
     )
+    resolved: str | None = None
     for candidate in candidates:
         if candidate.is_file():
-            return str(candidate)
-    if _is_windows():
+            resolved = str(candidate)
+            break
+    if resolved is None and _is_windows():
         for found in base.rglob("tesseract.exe"):
             if found.is_file():
-                return str(found)
-    return None
+                resolved = str(found)
+                break
+    if resolved is not None:
+        _PORTABLE_TESS_CACHE = (base_key, st.st_mtime_ns, resolved)
+    return resolved
 
 
 def detect_tesseract_version(executable: str | None) -> str | None:
     if not executable:
         return None
+    cache_key: tuple[str, int, int, int] | None = None
+    try:
+        st = Path(executable).stat()
+        if Path(executable).is_file():
+            cache_key = (str(executable), st.st_mtime_ns, st.st_size, id(subprocess.run))
+    except OSError:
+        cache_key = None
+    if cache_key is not None and cache_key in _TESS_VER_CACHE:
+        return _TESS_VER_CACHE[cache_key]
+    detected: str | None = None
     try:
         proc = _run_Subprocess([executable, "--version"], capture_output=True, text=True, timeout=10, check=False)
         first_line = (proc.stdout or proc.stderr or "").splitlines()[0] if (proc.stdout or proc.stderr) else ""
         match = re.search(r"tesseract\s+v?([0-9][0-9A-Za-z._-]*)", first_line, flags=re.IGNORECASE)
         if match:
-            return match.group(1)
+            detected = match.group(1)
     except Exception:
-        pass
-    return None
+        detected = None
+    if cache_key is not None:
+        if len(_TESS_VER_CACHE) > 32:
+            _TESS_VER_CACHE.clear()
+        _TESS_VER_CACHE[cache_key] = detected
+    return detected
 
 
 def _fetch_json(url: str, timeout: float = 8.0) -> Any:
@@ -1728,8 +1792,19 @@ def _read_dist_version_in_venv(env_dir: Path, dist_name: str) -> str | None:
             candidates.extend(sorted(lib_dir.glob("python*/site-packages")))
     normalized = re.sub(r"[-_.]+", "_", dist_name.lower())
     for sp in candidates:
+        try:
+            st = sp.stat()
+        except OSError:
+            continue
         if not sp.is_dir():
             continue
+        cache_key = (str(sp), st.st_mtime_ns, normalized)
+        if cache_key in _VENV_DIST_VER_CACHE:
+            cached_ver = _VENV_DIST_VER_CACHE[cache_key]
+            if cached_ver is not None:
+                return cached_ver
+            continue
+        found_ver: str | None = None
         for dist_info in sp.glob("*.dist-info"):
             stem = dist_info.name[:-10]
             pkg_part = stem.rsplit("-", 1)[0] if "-" in stem else stem
@@ -1740,9 +1815,17 @@ def _read_dist_version_in_venv(env_dir: Path, dist_name: str) -> str | None:
                 try:
                     for line in meta_file.read_text(encoding="utf-8", errors="replace").splitlines():
                         if line.lower().startswith("version:"):
-                            return line.split(":", 1)[1].strip()
+                            found_ver = line.split(":", 1)[1].strip()
+                            break
                 except Exception:
                     pass
+            if found_ver:
+                break
+        if len(_VENV_DIST_VER_CACHE) > 256:
+            _VENV_DIST_VER_CACHE.clear()
+        _VENV_DIST_VER_CACHE[cache_key] = found_ver
+        if found_ver:
+            return found_ver
     return None
 
 
@@ -1770,6 +1853,10 @@ class IsolatedOcrEngine:
         self._worker_lock = threading.Lock()
         self._worker_proc: subprocess.Popen[str] | None = None
         self._worker_stderr_tail: deque[str] = deque(maxlen=40)
+        self._idle_timer_lock = threading.Lock()
+        self._idle_timer: threading.Timer | None = None
+        self._last_used_mono: float = 0.0
+        self._idle_timeout_sec: float = _WORKER_IDLE_TIMEOUT_SECONDS
         self._cancel_install = threading.Event()
         self._active_procs_lock = threading.Lock()
         self._active_install_procs: set[subprocess.Popen[Any]] = set()
@@ -1862,46 +1949,90 @@ class IsolatedOcrEngine:
             return proc.pid
         return None
 
+    def _cancel_idle_timer(self) -> None:
+        with self._idle_timer_lock:
+            timer = self._idle_timer
+            self._idle_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _arm_idle_timer(self) -> None:
+        self._last_used_mono = time.monotonic()
+        with self._idle_timer_lock:
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
+            if not self.is_loaded_in_ram or self._idle_timeout_sec <= 0:
+                return
+            timer = threading.Timer(self._idle_timeout_sec, self._reap_if_idle)
+            timer.daemon = True
+            self._idle_timer = timer
+            timer.start()
+
+    def _reap_if_idle(self) -> None:
+        with self._idle_timer_lock:
+            self._idle_timer = None
+        if not self._worker_lock.acquire(blocking=False):
+            return
+        reaped = False
+        try:
+            if self._worker_proc is None or self._worker_proc.poll() is not None:
+                self._worker_proc = None
+                return
+            elapsed = time.monotonic() - self._last_used_mono
+            if elapsed + 0.05 < self._idle_timeout_sec:
+                return
+            self._terminate_worker_locked()
+            reaped = True
+        finally:
+            self._worker_lock.release()
+        if reaped:
+            trim_process_memory()
+
+    def _terminate_worker_locked(self) -> None:
+        proc = self._worker_proc
+        self._worker_proc = None
+        if proc is None:
+            return
+        if proc.poll() is None:
+            pid = proc.pid
+            try:
+                if proc.stdin:
+                    proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
+                    proc.stdin.flush()
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+            if proc.poll() is None:
+                if os.name == "nt" and pid:
+                    try:
+                        _run_Subprocess(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            capture_output=True,
+                            timeout=5,
+                            check=False,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
     def unload(self) -> None:
         self.close()
 
     def close(self) -> None:
+        self._cancel_idle_timer()
         with self._worker_lock:
-            proc = self._worker_proc
-            self._worker_proc = None
-            if proc is None:
-                return
-            if proc.poll() is None:
-                pid = proc.pid
-                try:
-                    if proc.stdin:
-                        proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
-                        proc.stdin.flush()
-                    proc.wait(timeout=2)
-                except Exception:
-                    pass
-                if proc.poll() is None:
-                    if os.name == "nt" and pid:
-                        try:
-                            _run_Subprocess(
-                                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                                capture_output=True,
-                                timeout=5,
-                                check=False,
-                            )
-                        except Exception:
-                            pass
-                    try:
-                        proc.kill()
-                        proc.wait(timeout=2)
-                    except Exception:
-                        pass
-            for stream in (proc.stdin, proc.stdout, proc.stderr):
-                if stream is not None:
-                    try:
-                        stream.close()
-                    except Exception:
-                        pass
+            self._terminate_worker_locked()
 
     def _worker_env(self) -> dict[str, str]:
         env = dict(os.environ)
@@ -1923,6 +2054,8 @@ class IsolatedOcrEngine:
         cores_str = str(cpu_core_count())
         for thread_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
             env.setdefault(thread_var, cores_str)
+        env.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+        env.setdefault("KMP_BLOCKTIME", "0")
         env.setdefault("TOKENIZERS_PARALLELISM", "true")
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         if self.id == "paddleocr-vl-1-6":
@@ -2760,7 +2893,13 @@ class IsolatedOcrEngine:
         with tempfile.NamedTemporaryFile(prefix=f"comic-{self.id}-", suffix=".png", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         try:
-            image.convert("RGB").save(tmp_path, "PNG")
+            rgb_img = image if image.mode == "RGB" else image.convert("RGB")
+            try:
+                rgb_img.save(tmp_path, "PNG", compress_level=1)
+            finally:
+                if rgb_img is not image:
+                    rgb_img.close()
+            self._cancel_idle_timer()
             with self._worker_lock:
                 proc = self._ensure_worker()
                 assert proc.stdin is not None and proc.stdout is not None
@@ -2809,6 +2948,8 @@ class IsolatedOcrEngine:
                 return out_lines
         finally:
             tmp_path.unlink(missing_ok=True)
+            if self.is_loaded_in_ram:
+                self._arm_idle_timer()
 
 
 def _update_cache_path() -> Path:
@@ -2816,23 +2957,37 @@ def _update_cache_path() -> Path:
 
 
 def read_update_cache() -> dict[str, Any]:
+    global _UPDATE_MEM_CACHE
     path = _update_cache_path()
-    if not path.is_file():
+    try:
+        st = path.stat()
+    except OSError:
         return {}
+    path_key = str(path)
+    cached = _UPDATE_MEM_CACHE
+    if cached is not None and cached[0] == path_key and cached[1] == st.st_mtime_ns and cached[2] == st.st_size:
+        return copy.deepcopy(cached[3])
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            _UPDATE_MEM_CACHE = (path_key, st.st_mtime_ns, st.st_size, copy.deepcopy(data))
+            return data
+        return {}
     except Exception:
         return {}
 
 
 def write_update_cache(payload: dict[str, Any]) -> None:
+    global _UPDATE_MEM_CACHE
     with _UPDATE_CACHE_LOCK:
         path = _update_cache_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            st = path.stat()
+            _UPDATE_MEM_CACHE = (str(path), st.st_mtime_ns, st.st_size, copy.deepcopy(payload))
 
 
 def _shared_package_siblings(engine_id: str) -> list[str]:

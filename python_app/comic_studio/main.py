@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import functools
 import hmac
 import inspect
 import ipaddress
@@ -47,6 +48,48 @@ from .translation_plan import (
     AI_PAGE_PROGRESS_KEY, AI_PARTS_KEY, AI_REUSE_KEY, build_project_plan, build_single_plan, call_plan, mark_completed_call, mark_reused_translation, part_fingerprint,
     plan_preview, plan_signature, saved_call, effective_ai_limit,
 )
+
+
+@functools.lru_cache(maxsize=64)
+def _is_loopback_peer(host_str: str) -> bool:
+    try:
+        peer = ipaddress.ip_address(host_str)
+        if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
+            peer = peer.ipv4_mapped
+        return bool(peer.is_loopback)
+    except ValueError:
+        return False
+
+
+@functools.lru_cache(maxsize=64)
+def _is_loopback_host_header(raw_host: str) -> bool:
+    try:
+        host = urlsplit("http://" + raw_host)
+        hostname = host.hostname or ""
+        _ = host.port  # Validate even an unused explicit port.
+        if host.username is not None or host.password is not None or host.path or host.query or host.fragment:
+            return False
+        if hostname.lower() == "localhost":
+            return True
+        address = ipaddress.ip_address(hostname)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        return bool(address.is_loopback)
+    except ValueError:
+        return False
+
+
+@functools.lru_cache(maxsize=64)
+def _callable_accepts_kwarg(target: Any, kw_name: str) -> bool:
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        return False
+    return kw_name in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _supports_kwarg(fn: Any, kw_name: str) -> bool:
+    return _callable_accepts_kwarg(getattr(fn, "__func__", fn), kw_name)
 
 from .context_run import RUN_KEY, SUMMARY_KEY, apply_response, build_run_request, create_run, digest, next_request, provider_policy, verify_run
 
@@ -123,33 +166,13 @@ def create_app() -> FastAPI:
                 return JSONResponse({"detail": "Authentication required."}, status_code=401,
                                     headers={"WWW-Authenticate": 'Basic realm="Comic OCR Studio", charset="UTF-8"', "Cache-Control": "no-store"})
         else:
-            try:
-                peer = ipaddress.ip_address(request.client.host if request.client else "")
-                if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
-                    peer = peer.ipv4_mapped
-                local = peer.is_loopback
-            except ValueError:
-                local = False
+            local = _is_loopback_peer(request.client.host if request.client else "")
             if not local:
                 return JSONResponse({"detail": "Remote access is disabled. Configure COMIC_STUDIO_ACCESS_PASSWORD and HTTPS or a trusted VPN."}, status_code=403,
                                     headers={"Cache-Control": "no-store"})
             # Reject arbitrary DNS names on an unauthenticated loopback server;
             # otherwise a malicious site can rebind its hostname to localhost.
-            try:
-                host = urlsplit("http://" + request.headers.get("host", ""))
-                hostname = host.hostname or ""
-                _ = host.port  # Validate even an unused explicit port.
-                if host.username is not None or host.password is not None or host.path or host.query or host.fragment:
-                    local_host = False
-                elif hostname.lower() == "localhost":
-                    local_host = True
-                else:
-                    address = ipaddress.ip_address(hostname)
-                    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-                        address = address.ipv4_mapped
-                    local_host = address.is_loopback
-            except ValueError:
-                local_host = False
+            local_host = _is_loopback_host_header(request.headers.get("host", ""))
             if not local_host:
                 return JSONResponse({"detail": "Unauthenticated access requires a loopback hostname."}, status_code=403,
                                     headers={"Cache-Control": "no-store"})
@@ -590,11 +613,7 @@ def create_app() -> FastAPI:
         min_confidence: float,
         page_mode: str = "auto",
     ) -> list[dict[str, Any]]:
-        try:
-            params = inspect.signature(recognize_image).parameters
-        except (TypeError, ValueError):
-            params = {}
-        if "page_mode" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        if _supports_kwarg(recognize_image, "page_mode"):
             return recognize_image(
                 engine, image, language, contrast, precise, min_confidence, page_mode=page_mode,
             )
@@ -818,11 +837,7 @@ def create_app() -> FastAPI:
         tl = normalize_target_language(target_language)
         if tl == "fa":
             return fn(*args)
-        try:
-            params = inspect.signature(fn).parameters
-        except (TypeError, ValueError):
-            params = {}
-        if "target_language" in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        if _supports_kwarg(fn, "target_language"):
             return fn(*args, target_language=tl)
         return fn(*args)
 

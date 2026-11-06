@@ -76,7 +76,7 @@ def atomic_json(path: Path, value: Any) -> None:
         handle = os.fdopen(descriptor, "w", encoding="utf-8")
         descriptor = -1
         with handle:
-            handle.write(json.dumps(value, ensure_ascii=False, indent=2))
+            handle.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
         _replace_with_retry(temp, path)
     finally:
         if descriptor >= 0:

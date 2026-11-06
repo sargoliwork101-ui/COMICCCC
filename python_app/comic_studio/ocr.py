@@ -632,6 +632,21 @@ class RapidEngine:
         from rapidocr import RapidOCR
         from rapidocr.utils.typings import EngineType, ModelType, OCRVersion
 
+        # Disable ONNX Runtime Eigen threadpool busy-spinning so threads sleep at 0% CPU between inferences.
+        with contextlib.suppress(Exception):
+            from rapidocr.inference_engine.onnxruntime.main import OrtInferSession
+            orig_opts = OrtInferSession._init_sess_opts
+            if not getattr(orig_opts, "_comic_no_spin", False):
+                def _patched_sess_opts(cfg: Any):
+                    so = orig_opts(cfg)
+                    with contextlib.suppress(Exception):
+                        so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+                        so.add_session_config_entry("session.inter_op.allow_spinning", "0")
+                    return so
+
+                _patched_sess_opts._comic_no_spin = True  # type: ignore[attr-defined]
+                OrtInferSession._init_sess_opts = staticmethod(_patched_sess_opts)  # type: ignore[assignment]
+
         det_lang, rec_lang = self._language_names(language)
         if self.version == "v6":
             det_version = rec_version = OCRVersion.PPOCRV6
@@ -745,6 +760,8 @@ class RapidEngine:
             raise OcrError("RapidOCR was installed but cannot be imported. Restart the application and try again.")
 
     def _validate_ready(self, language: str, allow_download: bool = False) -> None:
+        if language not in ENGINE_INFO.get(self.id, {}).get("languages", LANGUAGES):
+            raise OcrError(f"Unsupported {self.id} language: {language}")
         if not self.runtime_installed:
             raise OcrError("RapidOCR is not installed. Click the explicit preparation button to install it.")
         if not allow_download:
@@ -1329,6 +1346,7 @@ class TesseractEngine:
 
     def __init__(self) -> None:
         self._system_languages: set[str] | None = None
+        self._system_languages_exe: str | None = None
         self._lock = threading.Lock()
         self._omp_threads_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
             f"tesseract_omp_threads_{id(self)}", default=None,
@@ -1376,11 +1394,13 @@ class TesseractEngine:
         return [f"{language}.traineddata"]
 
     def _get_system_languages(self) -> set[str]:
-        if self._system_languages is not None:
+        if self._system_languages is not None and self._system_languages_exe is None:
             return self._system_languages
         executable = _tesseract_executable()
         if not executable:
             return set()
+        if self._system_languages is not None and self._system_languages_exe == executable:
+            return self._system_languages
         try:
             result = subprocess.run([executable, "--list-langs"], capture_output=True, text=True, timeout=30, check=False, **_win_subprocess_kwargs())
             if result.returncode == 0:
@@ -1389,6 +1409,7 @@ class TesseractEngine:
                 self._system_languages = set()
         except Exception:
             self._system_languages = set()
+        self._system_languages_exe = executable
         return self._system_languages
 
     @property
@@ -1410,7 +1431,9 @@ class TesseractEngine:
         _STANDARD_CANCEL_EVENT.set()
 
     def unload(self) -> None:
-        self._system_languages = None
+        # Tesseract runs out-of-process per page and holds no resident model weights in RAM;
+        # keep cached _system_languages so status checks do not respawn `tesseract --list-langs`.
+        return None
 
     def _download_language_file(self, language: str) -> Path:
         if language not in LANGUAGES:
@@ -1491,6 +1514,7 @@ class TesseractEngine:
         if not self.runtime_installed:
             _call_install_tesseract_runtime()
             self._system_languages = None
+            self._system_languages_exe = None
         target = self._download_language_file(language)
         ver = detect_builtin_installed_version(self.id, self)
         remote_rev = fetch_tessdata_revision([language])
@@ -1519,11 +1543,13 @@ class TesseractEngine:
                 if needs_win_bin:
                     _call_install_tesseract_runtime()
                     self._system_languages = None
+                    self._system_languages_exe = None
                 else:
                     emit(f"فایل اجرایی Tesseract ({cur_ver or 'نصب‌شده'}) در آخرین نسخه است…", progress=0.45)
             elif not self.runtime_installed:
                 _call_install_tesseract_runtime()
                 self._system_languages = None
+                self._system_languages_exe = None
             local_langs = [lang for lang in LANGUAGES if (self._model_dir() / f"{lang}.traineddata").is_file()]
             target_langs = local_langs or [language if language in LANGUAGES else "eng"]
             last_target: Path | None = None
@@ -1554,7 +1580,7 @@ class TesseractEngine:
         buffer = io.BytesIO()
         rgb = _to_white_backed_rgb(image)
         try:
-            rgb.save(buffer, "PNG", dpi=(300, 300))
+            rgb.save(buffer, "PNG", dpi=(300, 300), compress_level=1)
         finally:
             if rgb is not image:
                 rgb.close()
@@ -2866,7 +2892,8 @@ def analyze_blocks_typography(
         if (iy1 - iy0) < 8 or (ix1 - ix0) < 12:
             continue
         crop = gray[iy0:iy1, ix0:ix1]
-        p1, p99 = float(np.percentile(crop, 1.0)), float(np.percentile(crop, 99.0))
+        pcts = np.percentile(crop, (1.0, 99.0))
+        p1, p99 = float(pcts[0]), float(pcts[1])
         if p99 - p1 < 28.0:
             continue
         border = np.concatenate([crop[0, :], crop[-1, :], crop[:, 0], crop[:, -1]])
@@ -2906,21 +2933,24 @@ def analyze_blocks_typography(
         if alpha_count >= 4 and "\n" not in txt and sh >= 9 and sw >= 16 and not blk.get("italic"):
             edge = np.abs(np.diff((sub >= 0.42).astype(np.float32), axis=1))
             eh, ew = edge.shape
-            if ew >= 8 and float(edge.sum()) >= 8.0:
+            er, ec = np.nonzero(edge > 0.0)
+            if ew >= 8 and er.size >= 8:
                 yc = np.arange(eh, dtype=np.float32) - (eh - 1) * 0.5
+                er_yc = yc[er]
+                ec_i32 = ec.astype(np.int32, copy=False)
                 scores: list[float] = []
                 for tan_a in slant_tans:
                     pad = int(np.ceil(abs(tan_a) * eh)) + 2
-                    acc = np.zeros(ew + 2 * pad, dtype=np.float32)
-                    for r_idx in range(eh):
-                        shift = tan_a * float(yc[r_idx])
-                        s_floor = int(np.floor(shift))
-                        frac = shift - s_floor
-                        base = pad + s_floor
-                        row_val = edge[r_idx]
-                        acc[base:base + ew] += row_val * (1.0 - frac)
-                        acc[base + 1:base + 1 + ew] += row_val * frac
-                    scores.append(float(np.sum(acc * acc)))
+                    acc_len = ew + 2 * pad
+                    shifts = tan_a * er_yc
+                    s_floor = np.floor(shifts).astype(np.int32)
+                    frac = shifts - s_floor
+                    idx0 = pad + s_floor + ec_i32
+                    acc = (
+                        np.bincount(idx0, weights=1.0 - frac, minlength=acc_len)
+                        + np.bincount(idx0 + 1, weights=frac, minlength=acc_len)
+                    )
+                    scores.append(float(np.dot(acc, acc)))
                 best_idx = int(np.argmax(scores))
                 best_deg = slant_angles[best_idx]
                 zero_score = scores[1]  # angle 0.0°

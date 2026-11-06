@@ -2709,6 +2709,96 @@ def test_v396_persian_download_fixes_across_rapid_hezar_easy_and_bidi_shim(tmp_p
     assert ocr_worker._is_hf_network_or_hub_error(ValueError("Unrelated invalid argument")) is False
 
 
+def test_v397_idle_cpu_passive_threads_hardware_cache_and_worker_idle_reaper(tmp_path, monkeypatch):
+    import io
+    import time
+    from comic_studio import ocr_managed, ocr_worker
+    from comic_studio.ocr import TesseractEngine, analyze_blocks_typography
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    monkeypatch.delenv("COMIC_STUDIO_FAKE_HARDWARE_JSON", raising=False)
+
+    # 1) Passive OpenMP / MKL wait policy is configured in main process, worker env, and worker init
+    ocr_managed.configure_native_runtime()
+    assert os.environ.get("OMP_WAIT_POLICY") == "PASSIVE"
+    assert os.environ.get("KMP_BLOCKTIME") == "0"
+    iso = ocr_managed.IsolatedOcrEngine(
+        engine_id="surya",
+        languages=["eng", "fas"],
+        install_lock=threading.Lock(),
+        line_factory=OcrLine,
+        error_cls=OcrError,
+    )
+    w_env = iso._worker_env()
+    assert w_env["OMP_WAIT_POLICY"] == "PASSIVE"
+    assert w_env["KMP_BLOCKTIME"] == "0"
+
+    # 2) inspect_hardware caches static GPU/RAM discovery across >60s without re-probing subprocesses
+    gpu_probes = {"n": 0}
+    monkeypatch.setattr(ocr_managed, "_HW_CACHE", None)
+    monkeypatch.setattr(ocr_managed, "_DISK_FREE_CACHE", None)
+
+    def _fake_nvidia():
+        gpu_probes["n"] += 1
+        return True, "RTX Test", 8.0
+
+    monkeypatch.setattr(ocr_managed, "_detect_nvidia_gpu", _fake_nvidia)
+    hw1 = ocr_managed.inspect_hardware()
+    ocr_managed._HW_CACHE = (ocr_managed._HW_CACHE[0] - 3600.0, ocr_managed._HW_CACHE[1])
+    hw2 = ocr_managed.inspect_hardware()
+    assert hw1["gpuName"] == "RTX Test" and hw2["gpuName"] == "RTX Test"
+    assert gpu_probes["n"] == 1
+
+    # 3) TesseractEngine.unload() keeps cached _system_languages so status() never respawns --list-langs
+    tess = TesseractEngine()
+    list_calls = {"n": 0}
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/mock/tesseract")
+
+    def _fake_list_langs(cmd, **kwargs):
+        list_calls["n"] += 1
+        return subprocess.CompletedProcess(cmd, 0, "List of available languages (2):\neng\nfas\n", "")
+
+    monkeypatch.setattr(subprocess, "run", _fake_list_langs)
+    assert "fas" in tess.ready_languages
+    assert list_calls["n"] == 1
+    tess.unload()
+    assert "fas" in tess.ready_languages
+    assert list_calls["n"] == 1
+
+    # 4) IsolatedOcrEngine idle reaper automatically terminates an idle worker process
+    class _DummyWorker:
+        def __init__(self):
+            self.pid = 999991
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO()
+            self.stderr = io.StringIO()
+            self._exited = False
+        def poll(self):
+            return 0 if self._exited else None
+        def wait(self, timeout=None):
+            self._exited = True
+            return 0
+        def kill(self):
+            self._exited = True
+
+    dummy = _DummyWorker()
+    iso._worker_proc = dummy  # type: ignore[assignment]
+    iso._idle_timeout_sec = 0.04
+    iso._arm_idle_timer()
+    time.sleep(0.12)
+    assert iso._worker_proc is None
+    assert dummy._exited is True
+
+    # 5) Vectorized analyze_blocks_typography runs cleanly and preserves upright non-italic detection
+    canvas = Image.new("RGB", (220, 70), "white")
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(canvas)
+    draw.text((20, 20), "NORMAL TEXT", fill="black")
+    blocks = [{"id": 1, "text": "NORMAL TEXT", "x0": 16, "y0": 16, "x1": 150, "y1": 45}]
+    analyze_blocks_typography(canvas, blocks, page_mode="document")
+    assert blocks[0].get("italic") is not True
+
+
 
 
 

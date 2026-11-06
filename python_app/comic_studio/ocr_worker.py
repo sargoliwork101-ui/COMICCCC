@@ -13,6 +13,9 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+os.environ.setdefault("KMP_BLOCKTIME", "0")
+
 
 def _configure_cache_dirs(models_root: Path) -> None:
     hf_dir = models_root / "hf"
@@ -39,6 +42,8 @@ def _configure_cache_dirs(models_root: Path) -> None:
     cores = str(max(1, int(os.cpu_count() or 1)))
     for thread_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ.setdefault(thread_key, cores)
+    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+    os.environ.setdefault("KMP_BLOCKTIME", "0")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     os.environ.setdefault("FLAGS_use_mkldnn", "1")
@@ -580,7 +585,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
                     rgb_im = raw_im.convert("RGB")
                     resized = rgb_im.resize((scaled_w, scaled_h), Image.Resampling.LANCZOS)
                     try:
-                        resized.save(temp_scaled_path, format="PNG")
+                        resized.save(temp_scaled_path, format="PNG", compress_level=1)
                     finally:
                         resized.close()
                         if rgb_im is not raw_im:
@@ -613,7 +618,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
                         rgb_im = raw_im.convert("RGB")
                         resized = rgb_im.resize((scaled_w, scaled_h), Image.Resampling.LANCZOS)
                         try:
-                            resized.save(temp_scaled_path, format="PNG")
+                            resized.save(temp_scaled_path, format="PNG", compress_level=1)
                         finally:
                             resized.close()
                             if rgb_im is not raw_im:
@@ -1945,7 +1950,7 @@ class _DeepSeekOcr2Adapter(_TransformersRegionAdapter):
                             norm_crop, owned_norm = _normalize_crop_for_vlm(crop)
                             crop_file = Path(tmp) / f"crop_{idx}.png"
                             try:
-                                norm_crop.save(crop_file, format="PNG")
+                                norm_crop.save(crop_file, format="PNG", compress_level=1)
                                 crop_res = model.infer(
                                     processor,
                                     prompt="<image>\nFree OCR. ",
@@ -2338,6 +2343,8 @@ def main() -> int:
                 resp = {"ok": False, "error": str(exc)}
             protocol_out.write(json.dumps(resp, ensure_ascii=False) + "\n")
             protocol_out.flush()
+        with contextlib.suppress(Exception):
+            adapter.close()
         return 0
 
     return 2

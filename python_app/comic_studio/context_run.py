@@ -66,6 +66,29 @@ def build_run_request(run: dict[str, Any], skill: str) -> ContextRequest | FreeR
     )
 
 
+def _max_fitting_candidate(
+    candidates: list[tuple[int, int]],
+    text: str,
+    fits: Any,
+) -> tuple[int, int] | None:
+    text_len = len(text)
+    ordered = sorted({(cut, end) for cut, end in candidates if cut > 0 and end < text_len})
+    if not ordered:
+        return None
+    if not fits(text[:ordered[0][0]]):
+        return None
+    if fits(text[:ordered[-1][0]]):
+        return ordered[-1]
+    lo, hi = 0, len(ordered) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fits(text[:ordered[mid][0]]):
+            lo = mid
+        else:
+            hi = mid - 1
+    return ordered[lo]
+
+
 def safe_prefix(text: str, fits: Any, source_lines: Any = None, *, allow_fallback: bool = False) -> tuple[str, str, str] | None:
     """Find the latest whole-sentence or paragraph line boundary that fits.
 
@@ -101,9 +124,9 @@ def safe_prefix(text: str, fits: Any, source_lines: Any = None, *, allow_fallbac
                 position += len(line)
                 if sentence_end.search(line): candidates.append((position, position + 1))
                 position += 1
-    valid = [(cut, end) for cut, end in candidates if cut > 0 and end < len(text) and fits(text[:cut])]
-    if valid:
-        cut, end = max(valid)
+    best = _max_fitting_candidate(candidates, text, fits)
+    if best is not None:
+        cut, end = best
         return text[:cut], text[end:], text[cut:end]
     if not allow_fallback:
         return None
@@ -120,9 +143,9 @@ def safe_prefix(text: str, fits: Any, source_lines: Any = None, *, allow_fallbac
             position += len(line)
             line_candidates.append((position, position + 1))
             position += 1
-    valid_lines = [(cut, end) for cut, end in line_candidates if cut > 0 and end < len(text) and fits(text[:cut])]
-    if valid_lines:
-        cut, end = max(valid_lines)
+    best_line = _max_fitting_candidate(line_candidates, text, fits)
+    if best_line is not None:
+        cut, end = best_line
         return text[:cut], text[end:], text[cut:end]
     # Tier 3: clause punctuation followed by whitespace.
     clause_candidates: list[tuple[int, int]] = []
@@ -133,14 +156,15 @@ def safe_prefix(text: str, fits: Any, source_lines: Any = None, *, allow_fallbac
             end += 1
         if cut > 0 and end < len(text):
             clause_candidates.append((cut, end))
-    valid_clauses = [(cut, end) for cut, end in clause_candidates if fits(text[:cut])]
-    if valid_clauses:
-        cut, end = max(valid_clauses)
+    best_clause = _max_fitting_candidate(clause_candidates, text, fits)
+    if best_clause is not None:
+        cut, end = best_clause
         return text[:cut], text[end:], text[cut:end]
     # Tier 4: whitespace word boundaries (unspaced single tokens still return None).
-    word_candidates = [(match.start(), match.end()) for match in re.finditer(r"[ \t]+", text) if match.start() > 0 and match.end() < len(text) and fits(text[:match.start()])]
-    if word_candidates:
-        cut, end = max(word_candidates)
+    word_candidates = [(match.start(), match.end()) for match in re.finditer(r"[ \t]+", text) if match.start() > 0 and match.end() < len(text)]
+    best_word = _max_fitting_candidate(word_candidates, text, fits)
+    if best_word is not None:
+        cut, end = best_word
         return text[:cut], text[end:], text[cut:end]
     return None
 
