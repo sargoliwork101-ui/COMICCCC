@@ -1618,12 +1618,16 @@ function check(name, condition) {
       (() => {
         renderModels();
         updateEngineOptions('rapidocr-v6');
-        const modelsBadgeOk = $('modelsExecSummary')?.dataset.execMode !== 'online' && $('modelsExecSummary')?.classList.contains('is-local');
-        const allCardsMarkedLocal = [...document.querySelectorAll('#engineCards .engine-card')].every((c) => {
-          const chip = c.querySelector('.engine-chip.is-exec-local');
-          return c.dataset.executionMode === 'local' && chip && chip.textContent.includes('اجرا روی سیستم');
+        const allCardsDescribeLocal = [...document.querySelectorAll('#engineCards .engine-card')].every((c) => {
+          const desc = c.querySelector('p')?.textContent || '';
+          const noNoisyTitleChip = !c.querySelector('.engine-chip.is-exec-local');
+          return c.dataset.executionMode === 'local' && noNoisyTitleChip && desc.includes('روی سیستم') && !desc.includes('💻');
         });
-        const ocrBadgeOk = $('ocrExecBadge')?.dataset.execMode === 'local' && $('ocrEngine')?.dataset.executionMode === 'local' && $('ocrEngineStatus')?.textContent.includes('روی سیستم');
+        const cleanDropdownNames = [...$('ocrEngine').options].every((o) => {
+          const eng = state.engines.find((e) => e.id === o.value);
+          return eng && o.textContent === eng.name && !o.textContent.includes('💻') && !o.textContent.includes('عالی');
+        });
+        const ocrDescOk = $('ocrEngine')?.dataset.executionMode === 'local' && $('ocrEngineStatus')?.textContent.includes('روی سیستم') && !$('ocrEngineStatus')?.textContent.includes('💻');
 
         showAiProvider('free', false);
         const freeOnlineOk = $('aiExecBadge')?.dataset.execMode === 'online' && $('aiExecBanner')?.dataset.execMode === 'online' && $('aiExecBanner')?.textContent.includes('آنلاین');
@@ -1642,13 +1646,13 @@ function check(name, condition) {
         renderTranslationServiceSelector('openai', '');
         const openaiOpt = [...$('translationPreviewService').options].find((o) => o.value === 'openai');
         const freeOpt = [...$('translationPreviewService').options].find((o) => o.value === 'free');
-        const previewSelectOk = openaiOpt?.dataset.executionMode === 'local' && openaiOpt.textContent.includes('روی سیستم') && freeOpt?.dataset.executionMode === 'online' && freeOpt.textContent.includes('آنلاین');
+        const previewSelectOk = openaiOpt?.dataset.executionMode === 'local' && !openaiOpt.textContent.includes('💻') && freeOpt?.dataset.executionMode === 'online';
 
         showAiProvider('free', false);
-        return modelsBadgeOk && allCardsMarkedLocal && ocrBadgeOk && freeOnlineOk && remoteOpenaiOnline && localOllamaLocal && previewSelectOk;
+        return allCardsDescribeLocal && cleanDropdownNames && ocrDescOk && freeOnlineOk && remoteOpenaiOnline && localOllamaLocal && previewSelectOk;
       })()
     `, context);
-    check('v3.94 clearly indicates On-System (Local/Offline) vs Online execution across #modelsDialog, #ocrDialog, #aiDialog, and #translationPreviewDialog', v394ExecUiCheck === true);
+    check('v3.94/v3.98 keeps dropdown options name-only (no 💻 or عالی clutter) while describing On-System vs Online execution in descriptions', v394ExecUiCheck === true);
 
     const v395DownloadSizeUiCheck = await vm.runInContext(`
       (() => {
@@ -1728,7 +1732,7 @@ function check(name, condition) {
           const tessQuickBtn = $('ocrQuickPrepareBtn')?.textContent || '';
 
           return (
-            glmOptText.includes('کل حجم دانلود:') &&
+            glmOptText === 'GLM-OCR' &&
             statusText.includes('کل حجم دانلود خودکار:') &&
             statusText.includes('پیش‌نیازها:') &&
             quickBtnText.includes('نصب و دانلود خودکار همین مدل (کل حجم دانلود:') &&
@@ -1743,7 +1747,7 @@ function check(name, condition) {
         }
       })()
     `, context);
-    check('v3.95 announces exact total download size across #ocrEngine options, #ocrEngineStatus, #ocrQuickPrepareBtn, and #modelsDialog prepare buttons', v395DownloadSizeUiCheck === true);
+    check('v3.95/v3.98 keeps #ocrEngine option strictly name-only while announcing exact total download size in #ocrEngineStatus, #ocrQuickPrepareBtn, and #modelsDialog buttons', v395DownloadSizeUiCheck === true);
 
     const v396SortingAndFrozenOrderCheck = await vm.runInContext(`
       (() => {
@@ -1856,6 +1860,99 @@ function check(name, condition) {
       })()
     `, context);
     check('v3.97 parks /api/activity polling at zero timers while idle and arms polling only while busy', idleTimerState.idleParked && idleTimerState.activeArmed && idleTimerState.parkedAgain);
+  }
+
+  // v3.98: Menu shortcut (#deleteModelsMenuBtn) + Installed-Only filter + custom Persian appConfirm + /uninstall API
+  {
+    const v398MenuUninstallOk = await vm.runInContext(`
+      (async () => {
+        const prevEngines = state.engines;
+        const origFetch = window.fetch;
+        let uninstallCalls = [];
+        const baseEng = {
+          id: 'rapidocr-v6',
+          name: 'PP-OCRv6 Small',
+          family: 'RapidOCR',
+          description: 'base',
+          languages: ['eng'],
+          selectable: true,
+          category: 'standard',
+          runtimeInstalled: true,
+          modelReady: true,
+          readyLanguages: ['eng'],
+          canUninstall: false,
+          isBuiltinBase: true,
+        };
+        const suryaInstalled = {
+          id: 'surya',
+          name: 'Surya',
+          family: 'Surya VLM',
+          description: 'layout ocr',
+          languages: ['eng', 'fas'],
+          selectable: true,
+          isolated: true,
+          category: 'advanced',
+          runtimeInstalled: true,
+          modelReady: true,
+          readyLanguages: ['eng', 'fas'],
+          canUninstall: true,
+          isBuiltinBase: false,
+        };
+        state.engines = [baseEng, suryaInstalled];
+        const mockJson = (payload) => ({
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => payload,
+        });
+        window.fetch = async (url, opts = {}) => {
+          const parsed = new URL(url, 'http://127.0.0.1:8765');
+          if (parsed.pathname === '/api/engines/surya/uninstall' && opts.method === 'POST') {
+            uninstallCalls.push(parsed.pathname);
+            return mockJson({
+              ok: true,
+              engineId: 'surya',
+              freedMb: 2150,
+              engines: [baseEng, { ...suryaInstalled, runtimeInstalled: false, modelReady: false, readyLanguages: [], canUninstall: false }],
+              memory: { processRamMb: 120, workerRamMb: 0, totalRamMb: 120, loadedEngines: [], loadedCount: 0 },
+              hardware: { hasNvidiaGpu: false, cpuCores: 8, freeDiskGb: 45.2 },
+            });
+          }
+          if (parsed.pathname === '/api/engines/memory') {
+            return mockJson({ processRamMb: 120, workerRamMb: 0, totalRamMb: 120, loadedEngines: [], loadedCount: 0 });
+          }
+          return origFetch(url, opts);
+        };
+        try {
+          setMenuOpen(true);
+          $('deleteModelsMenuBtn').click();
+          const filteredChecked = Boolean($('modelsInstalledOnly')?.checked);
+          const visibleCardsBefore = [...document.querySelectorAll('#engineCards .engine-card h3')].map((h) => h.textContent);
+          const delBtn = document.querySelector('#engineCards .engine-card .engine-delete-btn');
+          const hasOnlySurya = visibleCardsBefore.length === 1 && visibleCardsBefore[0] === 'Surya' && Boolean(delBtn);
+
+          // Click delete -> custom #appModalDialog opens, confirm deletion
+          delBtn.click();
+          await Promise.resolve();
+          const modalOpen = Boolean($('appModalDialog')?.open) && $('appModalTitle')?.textContent.includes('Surya');
+          $('appModalConfirm').click();
+          for (let i = 0; i < 8; i += 1) await Promise.resolve();
+
+          const emptyShownAfterDelete = Boolean(document.querySelector('#engineCards .models-empty-installed'));
+          const resultHasFreedGb = ($('modelTestResult')?.textContent || '').includes('گیگابایت فضا آزاد شد');
+          $('modelsInstalledOnly').checked = false;
+          renderModels();
+          closeDialog('modelsDialog');
+          return filteredChecked && hasOnlySurya && modalOpen && uninstallCalls.length === 1 && emptyShownAfterDelete && resultHasFreedGb;
+        } finally {
+          window.fetch = origFetch;
+          state.engines = prevEngines;
+          if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = false;
+          renderModels();
+        }
+      })()
+    `, context);
+    check('v3.98 allows opening installed models from the top menu and deleting an installed OCR model via custom Persian appConfirm', v398MenuUninstallOk === true);
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

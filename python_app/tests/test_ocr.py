@@ -2799,6 +2799,81 @@ def test_v397_idle_cpu_passive_threads_hardware_cache_and_worker_idle_reaper(tmp
     assert blocks[0].get("italic") is not True
 
 
+def test_v398_uninstall_isolated_and_standard_engines_frees_disk_and_resets_status(monkeypatch, tmp_path):
+    from comic_studio import ocr_managed
+    from comic_studio.ocr import EngineRegistry, OcrError
+
+    models_root = tmp_path / "models"
+    monkeypatch.setattr("comic_studio.ocr.models_dir", lambda: models_root)
+    monkeypatch.setattr("comic_studio.ocr_managed.models_dir", lambda: models_root)
+
+    reg = EngineRegistry()
+
+    # 1) Built-in base engine rapidocr-v6 has canUninstall=False and rejects uninstall
+    st0 = {e["id"]: e for e in reg.status()}
+    assert st0["rapidocr-v6"]["isBuiltinBase"] is True
+    assert st0["rapidocr-v6"]["canUninstall"] is False
+    assert st0["glm-ocr"]["canUninstall"] is False
+    with pytest.raises(OcrError):
+        reg.uninstall("rapidocr-v6")
+
+    # 2) Simulate installed isolated engine (glm-ocr) with venv, state marker, HF repo, and manifest
+    glm_env = models_root / "envs" / "glm-ocr"
+    glm_py = glm_env / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    glm_py.parent.mkdir(parents=True, exist_ok=True)
+    glm_py.write_bytes(b"PY" * 512)
+    (glm_env / ".runtime-ready").write_text("ok", encoding="utf-8")
+    glm_state = models_root / "isolated" / "glm-ocr"
+    glm_state.mkdir(parents=True, exist_ok=True)
+    (glm_state / ".ready-all").write_text("ok", encoding="utf-8")
+    glm_hf = models_root / "hf-repos" / "zai_org__GLM_OCR"
+    glm_hf.mkdir(parents=True, exist_ok=True)
+    (glm_hf / "model.safetensors").write_bytes(b"W" * (256 * 1024))
+    ocr_managed.update_manifest_entry("glm-ocr", installedVersion="0.1.2")
+
+    st1 = {e["id"]: e for e in reg.status()}
+    assert st1["glm-ocr"]["runtimeInstalled"] is True
+    assert st1["glm-ocr"]["modelReady"] is True
+    assert st1["glm-ocr"]["canUninstall"] is True
+
+    res_glm = reg.uninstall("glm-ocr")
+    assert res_glm["freedBytes"] >= 256 * 1024
+    assert not glm_env.exists()
+    assert not glm_state.exists()
+    assert not glm_hf.exists()
+    assert "glm-ocr" not in ocr_managed.read_manifest()
+
+    st2 = {e["id"]: e for e in reg.status()}
+    assert st2["glm-ocr"]["runtimeInstalled"] is False
+    assert st2["glm-ocr"]["modelReady"] is False
+    assert st2["glm-ocr"]["canUninstall"] is False
+
+    # 3) Simulate rapidocr-v5 and tesseract downloaded packs and uninstall both cleanly
+    v5_dir = models_root / "rapidocr"
+    v5_dir.mkdir(parents=True, exist_ok=True)
+    (v5_dir / "ch_PP-OCRv5_det_mobile.onnx").write_bytes(b"D" * 32_768)
+    (v5_dir / "latin_PP-OCRv5_rec_mobile.onnx").write_bytes(b"R" * 32_768)
+    tess_dir = models_root / "tesseract"
+    tess_dir.mkdir(parents=True, exist_ok=True)
+    (tess_dir / "fas.traineddata").write_bytes(b"T" * 16_384)
+
+    st3 = {e["id"]: e for e in reg.status()}
+    assert st3["rapidocr-v5"]["canUninstall"] is True
+    assert st3["tesseract"]["canUninstall"] is True
+
+    res_v5 = reg.uninstall("rapidocr-v5")
+    res_tess = reg.uninstall("tesseract")
+    assert res_v5["freedBytes"] >= 65_536
+    assert res_tess["freedBytes"] >= 16_384
+    assert not v5_dir.exists()
+    assert not tess_dir.exists()
+
+    st4 = {e["id"]: e for e in reg.status()}
+    assert st4["rapidocr-v5"]["canUninstall"] is False
+    assert st4["tesseract"]["canUninstall"] is False
+
+
+
 
 
 

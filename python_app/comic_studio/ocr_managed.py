@@ -710,17 +710,29 @@ def configure_native_runtime() -> dict[str, Any]:
 
 
 def _remove_path_safely(target: Path) -> int:
-    """Delete a file or directory tree best-effort and return approximate bytes freed."""
+    """Delete a file or directory tree best-effort (clearing Windows read-only flags) and return approximate bytes freed."""
     if not target.exists() and not target.is_symlink():
         return 0
     freed = 0
+
+    def _on_rm_error(func: Any, path_str: str, _exc_info: Any) -> None:
+        try:
+            import stat as _stat
+            os.chmod(path_str, _stat.S_IWRITE)
+            func(path_str)
+        except Exception:
+            pass
+
     try:
         if target.is_symlink() or target.is_file():
             try:
                 freed = target.stat().st_size
             except OSError:
                 freed = 0
-            target.unlink(missing_ok=True)
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                _on_rm_error(os.unlink, str(target), None)
             return freed
         if target.is_dir():
             for child in target.rglob("*"):
@@ -729,7 +741,7 @@ def _remove_path_safely(target: Path) -> int:
                         freed += child.stat().st_size
                     except OSError:
                         pass
-            shutil.rmtree(target, ignore_errors=True)
+            shutil.rmtree(target, onerror=_on_rm_error)
             return freed
     except Exception:
         pass
@@ -1287,6 +1299,36 @@ def update_manifest_entry(engine_id: str, **fields: Any) -> dict[str, Any]:
             st = path.stat()
             _MANIFEST_MEM_CACHE = (str(path), st.st_mtime_ns, st.st_size, copy.deepcopy(data))
         return current
+
+
+def remove_manifest_entry(engine_id: str) -> bool:
+    global _MANIFEST_MEM_CACHE
+    with _MANIFEST_LOCK:
+        data = read_manifest()
+        if engine_id not in data:
+            return False
+        data.pop(engine_id, None)
+        path = _manifest_path()
+        if path.parent.exists():
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
+            with contextlib.suppress(OSError):
+                st = path.stat()
+                _MANIFEST_MEM_CACHE = (str(path), st.st_mtime_ns, st.st_size, copy.deepcopy(data))
+        else:
+            _MANIFEST_MEM_CACHE = None
+        return True
+
+
+def invalidate_engine_runtime_caches(*, clear_portable_tess: bool = False) -> None:
+    global _DISK_FREE_CACHE, _PORTABLE_TESS_CACHE
+    with _HW_CACHE_LOCK:
+        _DISK_FREE_CACHE = None
+    _VENV_DIST_VER_CACHE.clear()
+    if clear_portable_tess:
+        _PORTABLE_TESS_CACHE = None
+        _TESS_VER_CACHE.clear()
 
 
 def _version_tuple(raw: str | None) -> tuple[int, ...]:
@@ -2033,6 +2075,15 @@ class IsolatedOcrEngine:
         self._cancel_idle_timer()
         with self._worker_lock:
             self._terminate_worker_locked()
+
+    def uninstall(self) -> int:
+        self.cancel_install()
+        self.close()
+        with self._install_lock:
+            self.close()
+            freed = uninstall_isolated_engine_files(self.id)
+        trim_process_memory()
+        return freed
 
     def _worker_env(self) -> dict[str, str]:
         env = dict(os.environ)
@@ -3015,6 +3066,166 @@ def clear_cached_engine_update(engine_id: str, new_version: str | None, new_revi
             changed = True
     if changed:
         write_update_cache(cache)
+
+
+def remove_cached_engine_update(engine_id: str) -> None:
+    cache = read_update_cache()
+    entries = cache.get("engines")
+    if not isinstance(entries, dict) or engine_id not in entries:
+        return
+    entries.pop(engine_id, None)
+    write_update_cache(cache)
+
+
+_ISOLATED_DEDICATED_DIRS: dict[str, str] = {
+    "paddleocr-vl-1-6": "paddlex",
+    "surya": "surya",
+    "mineru-2-5-pro": "mineru",
+    "hezar-ocr": "hezar",
+}
+
+_ISOLATED_HF_REPOS: dict[str, tuple[str, ...]] = {
+    "paddleocr-vl-1-6": ("PaddlePaddle/PaddleOCR-VL", "PaddlePaddle/PaddleOCR-VL-1.5"),
+    "surya": ("datalab-to/surya-ocr-2.5", "datalab-to/surya-ocr-2.5-gguf", "datalab-to/surya_layout2"),
+    "mineru-2-5-pro": ("opendatalab/PDF-Extract-Kit-1.0", "opendatalab/MinerU2.5-2509-1.2B"),
+    "got-ocr-2": ("stepfun-ai/GOT-OCR-2.0-hf",),
+    "glm-ocr": ("zai-org/GLM-OCR",),
+    "dots-ocr": ("rednote-hilab/dots.mocr", "rednote-hilab/dots.ocr"),
+    "deepseek-ocr-2": ("deepseek-ai/DeepSeek-OCR-2",),
+    "olmocr": ("allenai/olmOCR-2-7B-1025", "allenai/olmOCR-7B-0225-preview"),
+    "hunyuan-ocr": ("tencent/HunyuanOCR",),
+    "hezar-ocr": ("hezarai/crnn-base-fa-v2", "hezarai/CRAFT"),
+}
+
+
+def _isolated_engine_owned_paths(engine_id: str, root: Path | None = None) -> list[Path]:
+    base = root if root is not None else models_dir()
+    paths: list[Path] = [
+        base / "envs" / engine_id,
+        base / "isolated" / engine_id,
+    ]
+    dedicated = _ISOLATED_DEDICATED_DIRS.get(engine_id)
+    if dedicated:
+        paths.append(base / dedicated)
+    spec = ISOLATED_ENGINE_SPECS.get(engine_id) or {}
+    repos = list(_ISOLATED_HF_REPOS.get(engine_id) or ())
+    spec_repo = spec.get("hf_repo")
+    if spec_repo and spec_repo not in repos:
+        repos.append(str(spec_repo))
+    for repo in repos:
+        raw_name = repo.replace("/", "__")
+        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", raw_name)
+        underscore_name = re.sub(r"[^A-Za-z0-9_]+", "_", raw_name)
+        for cand_name in dict.fromkeys((safe_name, underscore_name, raw_name)):
+            paths.append(base / "hf-repos" / cand_name)
+        paths.append(base / "hf" / "hub" / f"models--{repo.replace('/', '--')}")
+    return paths
+
+
+def _dir_has_any_entry(target: Path) -> bool:
+    try:
+        return target.is_dir() and next(target.iterdir(), None) is not None
+    except OSError:
+        return False
+
+
+def engine_has_uninstallable_files(engine_id: str, engine: Any = None) -> bool:
+    """Fast O(1) check returning True when an engine has user-downloaded runtime/weights on disk."""
+    if engine_id == "rapidocr-v6":
+        return False
+    root = models_dir()
+    if engine_id in ISOLATED_ENGINE_SPECS:
+        if engine is not None and (
+            bool(getattr(engine, "runtime_installed", False))
+            or bool(getattr(engine, "model_ready", False))
+        ):
+            return True
+        return any(
+            _dir_has_any_entry(cand) if cand.is_dir() else cand.exists()
+            for cand in _isolated_engine_owned_paths(engine_id, root)
+        )
+    if engine_id == "rapidocr-v5":
+        if engine is not None and bool(getattr(engine, "model_ready", False)):
+            return True
+        return _dir_has_any_entry(root / "rapidocr")
+    if engine_id == "easyocr":
+        if _dir_has_any_entry(root / "easyocr"):
+            return True
+        if engine is not None and bool(getattr(engine, "model_ready", False)):
+            return True
+        try:
+            import importlib.util as _ilu
+            spec = _ilu.find_spec("easyocr")
+            return bool(spec is not None and getattr(spec, "origin", None) and Path(spec.origin).is_file())
+        except Exception:
+            return False
+    if engine_id == "tesseract":
+        if _dir_has_any_entry(root / "tesseract-bin"):
+            return True
+        tess_dir = root / "tesseract"
+        try:
+            if tess_dir.is_dir() and any(child.suffix == ".traineddata" for child in tess_dir.iterdir()):
+                return True
+        except OSError:
+            pass
+        return False
+    return False
+
+
+def _stop_lingering_surya_server() -> None:
+    state_json = Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.json"))
+    if not state_json.is_file():
+        return
+    server_pid: int | None = None
+    with contextlib.suppress(Exception):
+        meta = json.loads(state_json.read_text(encoding="utf-8"))
+        if isinstance(meta, dict) and meta.get("pid"):
+            server_pid = int(meta["pid"])
+    with contextlib.suppress(OSError):
+        state_json.unlink()
+    if server_pid and server_pid > 0 and server_pid != os.getpid():
+        with contextlib.suppress(Exception):
+            if os.name == "nt":
+                _run_Subprocess(["taskkill", "/F", "/T", "/PID", str(server_pid)], capture_output=True, timeout=4, check=False)
+            else:
+                import signal as _sig
+                os.kill(server_pid, _sig.SIGTERM)
+
+
+def uninstall_isolated_engine_files(engine_id: str) -> int:
+    """Completely remove an isolated engine's venv, state markers, and downloaded model weights."""
+    if engine_id == "surya":
+        _stop_lingering_surya_server()
+    root = models_dir()
+    freed = 0
+    seen: set[str] = set()
+    for path in _isolated_engine_owned_paths(engine_id, root):
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        freed += _remove_path_safely(path)
+    # Also remove wildcard HF org folders for multi-repo engines (surya / mineru / hezar)
+    org_prefixes: dict[str, tuple[str, ...]] = {
+        "surya": ("datalab-to", "datalab_to"),
+        "mineru-2-5-pro": ("opendatalab",),
+        "hezar-ocr": ("hezarai",),
+    }
+    for prefix in org_prefixes.get(engine_id, ()):
+        hf_repos_dir = root / "hf-repos"
+        if hf_repos_dir.is_dir():
+            for child in list(hf_repos_dir.iterdir()):
+                if child.name.startswith(f"{prefix}__"):
+                    freed += _remove_path_safely(child)
+        hf_hub_dir = root / "hf" / "hub"
+        if hf_hub_dir.is_dir():
+            for child in list(hf_hub_dir.iterdir()):
+                if child.name.startswith(f"models--{prefix}--"):
+                    freed += _remove_path_safely(child)
+    remove_manifest_entry(engine_id)
+    remove_cached_engine_update(engine_id)
+    invalidate_engine_runtime_caches()
+    return freed
 
 
 def acknowledge_engine_update(

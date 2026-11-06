@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.97"
+    assert health.json()["version"] == "3.98"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۹۷ · Python</span>' in index_html
+    assert '<span class="ver">۳.۹۸ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -3157,6 +3157,47 @@ def test_target_language_settings_persian_and_english_translation_pipeline(clien
     })
     assert single_tr.status_code == 200
     assert single_tr.json()["text"] == "[fas->tr] Merhaba Dunya"
+
+
+def test_v398_uninstall_engine_api_endpoint(client, monkeypatch, tmp_path):
+    import os
+
+    models_root = tmp_path / "models_uninstall_api"
+    monkeypatch.setattr("comic_studio.ocr.models_dir", lambda: models_root)
+    monkeypatch.setattr("comic_studio.ocr_managed.models_dir", lambda: models_root)
+
+    # Create installed Hezar Persian OCR layout in isolated env + HF cache
+    hezar_env = models_root / "envs" / "hezar-ocr"
+    hezar_py = hezar_env / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    hezar_py.parent.mkdir(parents=True, exist_ok=True)
+    hezar_py.write_bytes(b"P" * 2048)
+    (hezar_env / ".runtime-ready").write_text("ready", encoding="utf-8")
+    hezar_state = models_root / "isolated" / "hezar-ocr"
+    hezar_state.mkdir(parents=True, exist_ok=True)
+    (hezar_state / ".ready-fas").write_text("ready", encoding="utf-8")
+    hezar_hf = models_root / "hf-repos" / "hezarai__crnn_base_fa_v2"
+    hezar_hf.mkdir(parents=True, exist_ok=True)
+    (hezar_hf / "model.pt").write_bytes(b"M" * (2 * 1024 * 1024))
+
+    before = {e["id"]: e for e in client.get("/api/engines").json()}
+    assert before["hezar-ocr"]["canUninstall"] is True
+    assert before["hezar-ocr"]["modelReady"] is True
+
+    resp = client.post("/api/engines/hezar-ocr/uninstall")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["engineId"] == "hezar-ocr"
+    assert body["freedMb"] >= 2.0
+    after = {e["id"]: e for e in body["engines"]}
+    assert after["hezar-ocr"]["canUninstall"] is False
+    assert after["hezar-ocr"]["runtimeInstalled"] is False
+    assert after["hezar-ocr"]["modelReady"] is False
+
+    # Built-in base engine rejects uninstall cleanly
+    base_resp = client.post("/api/engines/rapidocr-v6/uninstall")
+    assert base_resp.status_code in {400, 422, 500} or base_resp.json().get("ok") is not True
+
 
 
 

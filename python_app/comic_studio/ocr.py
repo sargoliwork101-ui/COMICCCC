@@ -23,6 +23,7 @@ from .activity import emit
 from .ocr_managed import (
     ISOLATED_ENGINE_SPECS,
     IsolatedOcrEngine,
+    _remove_path_safely,
     acknowledge_engine_update,
     check_remote_updates,
     cleanup_superseded_engine_files,
@@ -32,17 +33,21 @@ from .ocr_managed import (
     compute_worker_count,
     cpu_core_count,
     detect_builtin_installed_version,
+    engine_has_uninstallable_files,
     engine_meta,
     evaluate_engine_hardware,
     fetch_tessdata_revision,
     format_download_size_fa,
     inspect_hardware,
     install_tesseract_runtime,
+    invalidate_engine_runtime_caches,
     is_newer_version,
     portable_tesseract_executable,
     process_rss_mb,
     read_manifest,
     read_update_cache,
+    remove_cached_engine_update,
+    remove_manifest_entry,
     sha256_short,
     trim_process_memory,
     update_manifest_entry,
@@ -586,6 +591,19 @@ class RapidEngine:
             self._created_counts.clear()
             self._pool_cond.notify_all()
 
+    def uninstall(self) -> int:
+        if self.version == "v6":
+            raise OcrError("موتور پایهٔ پیش‌فرض برنامه (PP-OCRv6 Small) همراه محیط اصلی است و نیازی به حذف ندارد.")
+        self.cancel_install()
+        self.unload()
+        with _INSTALL_LOCK:
+            freed = _remove_path_safely(self._model_dir())
+            remove_manifest_entry(self.id)
+            remove_cached_engine_update(self.id)
+            invalidate_engine_runtime_caches()
+        trim_process_memory()
+        return freed
+
     @contextlib.contextmanager
     def configure_batch(self, total_pages: int, threads_per_worker: int | None = None):
         if threads_per_worker is None:
@@ -1028,6 +1046,43 @@ class EasyEngine:
         with self._lock:
             self._readers.clear()
 
+    def uninstall(self) -> int:
+        self.cancel_install()
+        self.unload()
+        freed = 0
+        with _INSTALL_LOCK:
+            freed += _remove_path_safely(self._model_dir())
+            try:
+                spec = importlib.util.find_spec("easyocr")
+                origin = getattr(spec, "origin", None) if spec is not None else None
+                if origin and Path(origin).is_file():
+                    pkg_dir = Path(origin).parent
+                    try:
+                        for child in pkg_dir.rglob("*"):
+                            if child.is_file() and not child.is_symlink():
+                                freed += child.stat().st_size
+                    except OSError:
+                        pass
+                    if subprocess.run is _ORIG_SUBPROCESS_RUN:
+                        subprocess.run(
+                            [sys.executable, "-m", "pip", "uninstall", "-y", "easyocr"],
+                            capture_output=True,
+                            text=True,
+                            timeout=180,
+                            check=False,
+                            **_win_subprocess_kwargs(),
+                        )
+                    for mod_name in [m for m in list(sys.modules) if m == "easyocr" or m.startswith("easyocr.")]:
+                        sys.modules.pop(mod_name, None)
+                    importlib.invalidate_caches()
+            except Exception:
+                pass
+            remove_manifest_entry(self.id)
+            remove_cached_engine_update(self.id)
+            invalidate_engine_runtime_caches()
+        trim_process_memory()
+        return freed
+
     def _ensure_runtime(self) -> None:
         if not self.runtime_installed:
             emit("بستهٔ اجرای EasyOCR موجود نیست؛ نصب آگاهانه آغاز می‌شود")
@@ -1434,6 +1489,22 @@ class TesseractEngine:
         # Tesseract runs out-of-process per page and holds no resident model weights in RAM;
         # keep cached _system_languages so status checks do not respawn `tesseract --list-langs`.
         return None
+
+    def uninstall(self) -> int:
+        self.cancel_install()
+        self.unload()
+        with _INSTALL_LOCK:
+            freed = 0
+            freed += _remove_path_safely(self._model_dir())
+            freed += _remove_path_safely(models_dir() / "tesseract-bin")
+            freed += _remove_path_safely(models_dir() / "tesseract-bin.old-ver")
+            self._system_languages = None
+            self._system_languages_exe = None
+            remove_manifest_entry(self.id)
+            remove_cached_engine_update(self.id)
+            invalidate_engine_runtime_caches(clear_portable_tess=True)
+        trim_process_memory()
+        return freed
 
     def _download_language_file(self, language: str) -> Path:
         if language not in LANGUAGES:
@@ -2427,6 +2498,8 @@ class EngineRegistry:
                 "modelReady": m_ready,
                 "readyLanguages": ready_languages,
                 "isLoadedInRam": bool(getattr(engine, "is_loaded_in_ram", False)),
+                "canUninstall": engine_has_uninstallable_files(engine_id, engine),
+                "isBuiltinBase": engine_id == "rapidocr-v6",
                 **download_fields,
                 **update_fields,
                 "hardwareCheck": evaluate_engine_hardware(engine_id, hw),
@@ -2506,6 +2579,23 @@ class EngineRegistry:
                 engine.download(language)
         finally:
             self.unload_all()
+
+    def uninstall(self, engine_id: str) -> dict[str, Any]:
+        engine = self.get(engine_id)
+        uninstaller = getattr(engine, "uninstall", None)
+        if not callable(uninstaller):
+            raise OcrError(f"Engine {engine_id} cannot be uninstalled from within the application.")
+        emit(f"آزادسازی حافظهٔ رم و حذف فایل‌های مدل {engine_id} از روی دیسک…", progress=0.25)
+        freed_bytes = int(uninstaller() or 0)
+        trim_process_memory()
+        hw = inspect_hardware(force_refresh=True)
+        emit(f"فایل‌های مدل {engine_id} به‌طور کامل حذف شدند.", "success", progress=1.0)
+        return {
+            "engineId": engine_id,
+            "freedBytes": freed_bytes,
+            "freedMb": round(freed_bytes / (1024 * 1024), 1),
+            "hardware": hw,
+        }
 
     def check_updates(self, force: bool = False) -> dict[str, Any]:
         return check_remote_updates(self, force=force)

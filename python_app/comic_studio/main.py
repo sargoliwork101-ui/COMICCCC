@@ -604,6 +604,33 @@ def create_app() -> FastAPI:
         activity.add(f"مدل {info['name']} به آخرین نسخه به‌روزرسانی شد", "success", 1.0)
         return {"ok": True, "language": language, "engines": registry.status(), "memory": registry.memory_status()}
 
+    @app.post("/api/engines/{engine_id}/uninstall")
+    async def uninstall_engine_route(engine_id: str) -> dict[str, Any]:
+        registry.get(engine_id)
+        info = ENGINE_INFO[engine_id]
+        if info.get("action") == "guide":
+            raise HTTPException(400, "این مدل داخل برنامه نصب نشده است.")
+        activity.add(f"حذف کامل مدل {info['name']} از روی سیستم آغاز شد")
+        try:
+            summary = await run_reported(registry.uninstall, engine_id, pulse_label=f"حذف مدل {info['name']}")
+        except Exception as exc:
+            activity.add(f"حذف مدل {info['name']} ناموفق بود: {exc}", "error")
+            raise
+        freed_mb = float(summary.get("freedMb") or 0.0)
+        if freed_mb >= 1024.0:
+            freed_txt = f" ({freed_mb / 1024.0:.2f} گیگابایت فضا آزاد شد)"
+        elif freed_mb >= 1.0:
+            freed_txt = f" ({freed_mb:.0f} مگابایت فضا آزاد شد)"
+        else:
+            freed_txt = ""
+        activity.add(f"مدل {info['name']} به‌طور کامل از سیستم حذف شد{freed_txt}", "success", 1.0)
+        return {
+            "ok": True,
+            **summary,
+            "engines": registry.status(),
+            "memory": registry.memory_status(),
+        }
+
     def _invoke_recognize(
         engine: Any,
         image: Any,

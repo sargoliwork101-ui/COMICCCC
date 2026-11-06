@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v3.97: Verify version badge ۳.۹۷, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, and zero idle CPU polling/animations
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۷ · Python', 'header shows version ۳.۹۷');
+      // v3.85–v3.98: Verify version badge ۳.۹۸, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, clean name-only dropdowns, menu model deletion, and zero idle CPU polling/animations
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۸ · Python', 'header shows version ۳.۹۸');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2563,12 +2563,17 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.getElementById('helpDialog').open);
 
-      // v3.94: Verify On-System (Local) vs Online execution badges in real Chromium across #modelsDialog, #ocrDialog, and #aiDialog
+      // v3.94/v3.98: Verify clean name-only #ocrEngine dropdown options + On-System (Local) description in cards & #ocrEngineStatus + Online vs Local #aiDialog banner
       const v394Exec = await page.evaluate(() => {
+        if (document.getElementById('modelsInstalledOnly')) document.getElementById('modelsInstalledOnly').checked = false;
         renderModels();
         const cards = [...document.querySelectorAll('#engineCards .engine-card')];
-        const all14LocalChips = cards.length === 14 && cards.every((c) => c.dataset.executionMode === 'local' && c.querySelector('.engine-chip.is-exec-local')?.textContent.includes('اجرا روی سیستم'));
-        const ocrLocal = document.getElementById('ocrExecBadge')?.classList.contains('is-local') && document.getElementById('ocrEngineStatus')?.textContent.includes('روی سیستم');
+        const all14LocalDescs = cards.length === 14 && cards.every((c) => c.dataset.executionMode === 'local' && !c.querySelector('.engine-chip.is-exec-local') && (c.querySelector('p')?.textContent || '').includes('روی سیستم'));
+        const cleanOcrOpts = [...document.getElementById('ocrEngine').options].every((o) => {
+          const eng = state.engines.find((e) => e.id === o.value);
+          return eng && o.textContent === eng.name && !o.textContent.includes('💻') && !o.textContent.includes('عالی');
+        });
+        const ocrLocal = document.getElementById('ocrEngineStatus')?.textContent.includes('روی سیستم') && !document.getElementById('ocrEngineStatus')?.textContent.includes('💻');
         showAiProvider('gemini', false);
         const geminiOnline = document.getElementById('aiExecBadge')?.dataset.execMode === 'online' && document.getElementById('aiExecBanner')?.dataset.execMode === 'online';
         showAiProvider('openai', false);
@@ -2577,10 +2582,11 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         baseInput.dispatchEvent(new Event('input', { bubbles: true }));
         const ollamaLocal = document.getElementById('aiExecBadge')?.dataset.execMode === 'local' && document.getElementById('aiExecBanner')?.dataset.execMode === 'local';
         showAiProvider('free', false);
-        return { all14LocalChips, ocrLocal, geminiOnline, ollamaLocal };
+        return { all14LocalDescs, cleanOcrOpts, ocrLocal, geminiOnline, ollamaLocal };
       });
-      assert.equal(v394Exec.all14LocalChips, true, 'All 14 OCR engine cards display local on-system execution badge');
-      assert.equal(v394Exec.ocrLocal, true, '#ocrDialog displays local on-system badge and status');
+      assert.equal(v394Exec.all14LocalDescs, true, 'All 14 OCR engine cards state local execution in description without noisy title chips');
+      assert.equal(v394Exec.cleanOcrOpts, true, '#ocrEngine dropdown options show strictly the model name only');
+      assert.equal(v394Exec.ocrLocal, true, '#ocrEngineStatus describes local execution cleanly without computer emoji');
       assert.equal(v394Exec.geminiOnline, true, 'Cloud AI provider displays online execution badge & banner');
       assert.equal(v394Exec.ollamaLocal, true, 'Localhost OpenAI-compatible endpoint switches badge & banner to on-system local');
 
@@ -2655,7 +2661,28 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       });
       assert.equal(v397IdleCheck.idlePollTimerNull, true, 'activityPollTimer is null while idle in Chromium');
       assert.equal(v397IdleCheck.dockWrapHidden && v397IdleCheck.hiddenAnimPaused, true, 'indeterminate bar inside hidden container has animation: none');
-      console.log('PASS: v3.81–v3.97 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, On-System vs Online badges, Total Download Size, and Zero Idle CPU optimizations');
+
+      // v3.98: Verify opening #menu -> #deleteModelsMenuBtn opens #modelsDialog in installed-only mode and toggles back to all 14 models cleanly
+      await page.click('#menuBtn');
+      await page.waitForSelector('#deleteModelsMenuBtn', { state: 'visible' });
+      await page.click('#deleteModelsMenuBtn');
+      await page.waitForSelector('#modelsDialog[open]');
+      const v398MenuCheck = await page.evaluate(() => {
+        const checkedOnOpen = Boolean(document.getElementById('modelsInstalledOnly')?.checked);
+        const showAllBtn = document.querySelector('#engineCards .models-empty-installed button');
+        if (showAllBtn) showAllBtn.click();
+        else {
+          document.getElementById('modelsInstalledOnly').checked = false;
+          renderModels();
+        }
+        const allCountAfterReset = document.querySelectorAll('#engineCards .engine-card').length;
+        return { checkedOnOpen, allCountAfterReset };
+      });
+      assert.equal(v398MenuCheck.checkedOnOpen, true, '#deleteModelsMenuBtn opens #modelsDialog filtered to installed models');
+      assert.equal(v398MenuCheck.allCountAfterReset, 14, 'resetting installed-only filter shows all 14 OCR models');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.getElementById('modelsDialog').open);
+      console.log('PASS: v3.81–v3.98 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, clean dropdowns, menu model deletion, Total Download Size, and Zero Idle CPU optimizations');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

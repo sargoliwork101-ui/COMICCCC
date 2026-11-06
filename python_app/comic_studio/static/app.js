@@ -1473,18 +1473,20 @@ function resolveEngineExecMeta(engine) {
   if (engine?.executionMode === 'online') {
     return {
       mode: 'online',
-      short: '🌐 آنلاین',
-      chip: '🌐 سرویس آنلاین (اینترنتی)',
-      headerBadge: '🌐 سرویس آنلاین (اینترنتی)',
-      statusPrefix: '🌐 محل اجرا: آنلاین (نیازمند اینترنت)',
+      short: 'آنلاین',
+      chip: 'سرویس آنلاین (اینترنتی)',
+      headerBadge: 'سرویس آنلاین (اینترنتی)',
+      statusPrefix: 'محل اجرا: آنلاین (نیازمند اینترنت)',
+      descriptionNote: 'نیازمند اتصال اینترنت',
     };
   }
   return {
     mode: 'local',
-    short: '💻 روی سیستم',
-    chip: '💻 اجرا روی سیستم (آفلاین)',
-    headerBadge: '💻 اجرا روی سیستم شما (آفلاین)',
-    statusPrefix: '💻 محل اجرا: روی سیستم شما (آفلاین)',
+    short: 'آفلاین',
+    chip: 'اجرای آفلاین روی سیستم',
+    headerBadge: 'اجرای آفلاین روی سیستم شما',
+    statusPrefix: 'اجرای آفلاین روی سیستم شما',
+    descriptionNote: 'اجرا روی سیستم شما به‌صورت آفلاین',
   };
 }
 function resolveTranslationExecMeta(provider, baseUrl = '') {
@@ -1493,32 +1495,32 @@ function resolveTranslationExecMeta(provider, baseUrl = '') {
   if (effectiveLocal) {
     return {
       mode: 'local',
-      short: '💻 روی سیستم',
-      badge: '💻 اجرا روی سیستم شما (لوکال / آفلاین)',
-      banner: '💻 محل اجرا: روی سیستم شما (آفلاین / لوکال) — متصل به سرور محلی (مانند Ollama یا LM Studio) بدون ارسال متن به اینترنت.',
+      short: 'لوکال / آفلاین',
+      badge: 'اجرا روی سیستم شما (لوکال / آفلاین)',
+      banner: 'محل اجرا: روی سیستم شما (آفلاین / لوکال) — متصل به سرور محلی (مانند Ollama یا LM Studio) بدون ارسال متن به اینترنت.',
     };
   }
   if (normProvider === 'free') {
     return {
       mode: 'online',
-      short: '🌐 آنلاین',
-      badge: '🌐 سرویس آنلاین (اینترنتی)',
-      banner: '🌐 محل اجرا: آنلاین (اینترنتی) — نیازمند اتصال اینترنت؛ ترجمه روی سرویس‌های آنلاین Google Translate / MyMemory انجام می‌شود و چیزی روی سیستم شما نصب نمی‌کند.',
+      short: 'آنلاین',
+      badge: 'سرویس آنلاین (اینترنتی)',
+      banner: 'محل اجرا: آنلاین (اینترنتی) — نیازمند اتصال اینترنت؛ ترجمه روی سرویس‌های آنلاین Google Translate / MyMemory انجام می‌شود و چیزی روی سیستم شما نصب نمی‌کند.',
     };
   }
   if (normProvider === 'openai') {
     return {
       mode: 'online',
-      short: '🌐 آنلاین',
-      badge: '🌐 سرویس آنلاین (اینترنتی)',
-      banner: '🌐 محل اجرا: آنلاین (ابری / اینترنتی) — نیازمند اینترنت و کلید API؛ اگر نشانی یک سرور محلی (مثل http://localhost:11434/v1 برای Ollama یا LM Studio) بدهید، به اجرای روی سیستم (آفلاین) تبدیل می‌شود.',
+      short: 'آنلاین',
+      badge: 'سرویس آنلاین (اینترنتی)',
+      banner: 'محل اجرا: آنلاین (ابری / اینترنتی) — نیازمند اینترنت و کلید API؛ اگر نشانی یک سرور محلی (مثل http://localhost:11434/v1 برای Ollama یا LM Studio) بدهید، به اجرای روی سیستم (آفلاین) تبدیل می‌شود.',
     };
   }
   return {
     mode: 'online',
-    short: '🌐 آنلاین',
-    badge: '🌐 سرویس آنلاین (اینترنتی)',
-    banner: '🌐 محل اجرا: آنلاین (ابری / اینترنتی) — نیازمند اینترنت و کلید API؛ مدل روی سرور آنلاین اجرا می‌شود و فشار پردازشی روی سیستم شما ندارد.',
+    short: 'آنلاین',
+    badge: 'سرویس آنلاین (اینترنتی)',
+    banner: 'محل اجرا: آنلاین (ابری / اینترنتی) — نیازمند اینترنت و کلید API؛ مدل روی سرور آنلاین اجرا می‌شود و فشار پردازشی روی سیستم شما ندارد.',
   };
 }
 function applyExecBadgeElement(el, mode, text) {
@@ -1656,25 +1658,12 @@ function updateEngineOptions(preferredEngine = '', options = {}) {
   orderedEngines.forEach((engine) => {
     const suit = engineSuitability(engine, pageMode, language);
     const execMeta = resolveEngineExecMeta(engine);
-    const supported = (engine.languages || []).includes(language);
-    const langReady = Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(language));
-    const dl = engineDownloadSummary(engine, language);
-    const sizeHint = dl.totalLabel ? ` (کل حجم دانلود: ${dl.totalLabel})` : '';
     const option = document.createElement('option');
     option.value = engine.id;
     option.className = `ocr-opt-${suit.tier}`;
     option.dataset.suitability = suit.tier;
     option.dataset.executionMode = execMeta.mode;
-    const suffix = !supported
-      ? ' · فاقد پشتیبانی از این زبان'
-      : !engine.runtimeInstalled
-        ? ` · نیازمند نصب خودکار${sizeHint}`
-        : !langReady
-          ? ` · نیازمند دانلود زبان${sizeHint}`
-          : engine.updateAvailable
-            ? ' · نسخهٔ جدید'
-            : '';
-    option.textContent = `${suit.icon} ${engine.name} — ${suit.short} · ${execMeta.short}${suffix}`;
+    option.textContent = engine.name;
     select.appendChild(option);
   });
   const chosenId = pickBestEngineForLanguage(language, pageMode, previous);
@@ -1704,23 +1693,10 @@ function updateOcrEngineStatus() {
       if (!opt) return;
       const suit = engineSuitability(eng, pageMode, curLang);
       const engExec = resolveEngineExecMeta(eng);
-      const supported = (eng.languages || []).includes(curLang);
-      const engLangReady = Boolean(eng.runtimeInstalled && (eng.readyLanguages || []).includes(curLang));
-      const engDl = engineDownloadSummary(eng, curLang);
-      const engSizeHint = engDl.totalLabel ? ` (کل حجم دانلود: ${engDl.totalLabel})` : '';
       opt.className = `ocr-opt-${suit.tier}`;
       opt.dataset.suitability = suit.tier;
       opt.dataset.executionMode = engExec.mode;
-      const suffix = !supported
-        ? ' · فاقد پشتیبانی از این زبان'
-        : !eng.runtimeInstalled
-          ? ` · نیازمند نصب خودکار${engSizeHint}`
-          : !engLangReady
-            ? ` · نیازمند دانلود زبان${engSizeHint}`
-            : eng.updateAvailable
-              ? ' · نسخهٔ جدید'
-              : '';
-      opt.textContent = `${suit.icon} ${eng.name} — ${suit.short} · ${engExec.short}${suffix}`;
+      opt.textContent = eng.name;
       select.appendChild(opt);
     });
     select.value = keepSelectedId;
@@ -2016,7 +1992,7 @@ function renderTranslationServiceSelector(activeProvider, activeProfileId = '') 
     opt.textContent = label;
     select.appendChild(opt);
   };
-  addOpt('free', '🌐 آنلاین · سرویس رایگان — Google Translate + MyMemory', 'online');
+  addOpt('free', 'سرویس رایگان — Google Translate + MyMemory', 'online');
   AI_PROVIDER_IDS.forEach((providerId) => {
     const info = aiInfo(providerId);
     const label = info.label || AI_FALLBACKS[providerId]?.label || providerId;
@@ -2025,15 +2001,15 @@ function renderTranslationServiceSelector(activeProvider, activeProfileId = '') 
     const activeProfiles = (info.profiles || []).filter((p) => p.hasApiKey);
     if (activeProfiles.length === 1) {
       const pName = activeProfiles[0].name?.trim() || 'API 1';
-      addOpt(providerId, `${execMeta.short} · ${label}${model ? ` — مدل: ${model}` : ''} (${pName})`, execMeta.mode);
+      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (${pName})`, execMeta.mode);
     } else if (activeProfiles.length >= 2) {
-      addOpt(providerId, `${execMeta.short} · ${label}${model ? ` — مدل: ${model}` : ''} (همهٔ ${activeProfiles.length} کلید فعال به ترتیب)`, execMeta.mode);
+      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (همهٔ ${activeProfiles.length} کلید فعال به ترتیب)`, execMeta.mode);
       activeProfiles.forEach((p, idx) => {
         const pName = p.name?.trim() || `API ${idx + 1}`;
-        addOpt(`${providerId}::${p.id}`, `${execMeta.short} · ${label}${model ? ` — مدل: ${model}` : ''} · فقط «${pName}»`, execMeta.mode);
+        addOpt(`${providerId}::${p.id}`, `${label}${model ? ` — مدل: ${model}` : ''} · فقط «${pName}»`, execMeta.mode);
       });
     } else if (activeProvider === providerId) {
-      addOpt(providerId, `${execMeta.short} · ${label}${model ? ` — مدل: ${model}` : ''} (بدون کلید API ذخیره‌شده)`, execMeta.mode);
+      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (بدون کلید API ذخیره‌شده)`, execMeta.mode);
     }
   });
   if (![...select.options].some((opt) => opt.value === activeValue)) {
@@ -2891,12 +2867,20 @@ async function confirmHardwareIfNeeded(engine, hwOverride = null, language = '')
   return { ok: Boolean(confirmed), force: true };
 }
 
+function canUninstallEngine(engine) {
+  if (!engine || engine.selectable === false) return false;
+  if (typeof engine.canUninstall === 'boolean') return engine.canUninstall;
+  if (engine.isBuiltinBase || engine.id === 'rapidocr-v6') return false;
+  return Boolean(engine.modelReady || engine.runtimeInstalled);
+}
+
 function renderModels(options = {}) {
   const container = $('engineCards'); if (!container) return;
   const dialogEl = $('modelsDialog');
   const prevContainerScroll = container.scrollTop;
   const prevDialogScroll = dialogEl ? dialogEl.scrollTop : 0;
   container.textContent = '';
+  const installedOnly = Boolean($('modelsInstalledOnly')?.checked);
   const language = $('modelsLanguage')?.value || $('testLanguage')?.value || $('ocrLanguage')?.value || 'eng';
   if ($('modelsLanguage') && $('modelsLanguage').value !== language) $('modelsLanguage').value = language;
   if ($('testLanguage') && $('testLanguage').value !== language) $('testLanguage').value = language;
@@ -2924,6 +2908,11 @@ function renderModels(options = {}) {
     advancedEngines = applyCachedEngineOrder(rawAdvanced, modelsGroupSortCache.advancedIds);
     orderedSelectable = applyCachedEngineOrder(selectable, modelsGroupSortCache.flatIds);
   }
+  if (installedOnly) {
+    standardEngines = standardEngines.filter(canUninstallEngine);
+    advancedEngines = advancedEngines.filter(canUninstallEngine);
+    orderedSelectable = orderedSelectable.filter(canUninstallEngine);
+  }
   const addGroup = (title, engines, external = false) => {
     if (!engines.length) return;
     const group = document.createElement('section'); group.className = 'model-group';
@@ -2935,18 +2924,11 @@ function renderModels(options = {}) {
       const isBusyThis = state.modelBusy === engine.id;
       const card = document.createElement('section'); card.className = `engine-card${external ? ' external-engine' : ''}${isBusyThis ? ' is-busy-card' : ''}`;
       card.dataset.executionMode = execMeta.mode;
+      card.dataset.engineId = engine.id;
       if (!external) card.dataset.suitability = suit.tier;
       const head = document.createElement('div'); head.className = 'engine-card-head';
       const titleEl = document.createElement('h3'); titleEl.textContent = engine.name;
       const badges = document.createElement('div'); badges.className = 'engine-badges';
-      const execChip = document.createElement('span');
-      execChip.className = `engine-chip ${execMeta.mode === 'online' ? 'is-exec-online' : 'is-exec-local'}`;
-      execChip.dataset.execMode = execMeta.mode;
-      execChip.textContent = execMeta.chip;
-      execChip.title = execMeta.mode === 'online'
-        ? 'این سرویس برای اجرا به اینترنت نیاز دارد.'
-        : 'این مدل روی سخت‌افزار خود کامپیوتر شما اجرا می‌شود و هنگام خواندن صفحات به اینترنت نیازی ندارد (اینترنت فقط یک‌بار برای دانلود اولیهٔ مدل لازم است).';
-      badges.appendChild(execChip);
       if (!external) {
         const suitChip = document.createElement('span');
         suitChip.className = `engine-chip is-suit-${suit.tier}`;
@@ -2982,7 +2964,10 @@ function renderModels(options = {}) {
       family.textContent = dl.fullLabel
         ? `${engine.family} · کل حجم دانلود کامل روی این سیستم: ${dl.fullLabel}`
         : engine.family;
-      const description = document.createElement('p'); description.textContent = engine.description;
+      const description = document.createElement('p');
+      description.textContent = external
+        ? engine.description
+        : `${engine.description} (${execMeta.descriptionNote || 'اجرا روی سیستم شما به‌صورت آفلاین'})`;
       const suitReason = !external && suit.reason ? (() => { const el = document.createElement('div'); el.className = 'engine-suit-reason'; el.textContent = `عملکرد در «${langLabel} + ${PAGE_MODE_LABELS[modelsMode] || modelsMode}»: ${suit.reason}`; return el; })() : null;
       const status = document.createElement('div'); status.className = 'engine-status';
       if (suitReason) card.append(head, family, description, suitReason, status);
@@ -2995,14 +2980,15 @@ function renderModels(options = {}) {
         const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'دانلود / راهنمای رسمی';
         buttons.appendChild(guide); card.append(requirements, limitations, buttons);
       } else {
+        const isBuiltinBase = Boolean(engine.isBuiltinBase || engine.id === 'rapidocr-v6');
         status.textContent = state.modelBusy === engine.id
-          ? `در حال نصب خودکار بسته‌ها و دانلود مدل${dl.totalLabel ? ` (کل حجم دانلود: ${dl.totalLabel})` : ''}؛ لطفاً صبر کنید…`
+          ? `در حال انجام عملیات روی مدل${dl.totalLabel ? ` (کل حجم: ${dl.totalLabel})` : ''}؛ لطفاً صبر کنید…`
           : !supported
             ? `این موتور زبان «${langLabel}» را پشتیبانی نمی‌کند (زبان‌های مورد پشتیبانی: ${(engine.languages || []).map((l) => OCR_LANGUAGE_LABELS[l] || l).join('، ')}).${!ready && dl.detailLabel ? ` کل حجم دانلود خودکار: ${dl.detailLabel}.` : ''}`
             : !engine.runtimeInstalled
               ? `آمادهٔ نصب خودکار با یک کلیک · کل حجم دانلود خودکار: ${dl.detailLabel || 'محاسبهٔ خودکار'}.`
               : ready
-                ? 'مدل زبان انتخاب‌شده آماده و آفلاین است.'
+                ? (isBuiltinBase ? 'موتور پایهٔ پیش‌فرض برنامه — آماده و آفلاین.' : 'مدل زبان انتخاب‌شده آماده و آفلاین است.')
                 : `ابزار اجرا نصب است؛ برای دریافت خودکار فایل زبان انتخاب‌شده دکمهٔ زیر را بزنید (کل حجم دانلود: ${dl.detailLabel}).`;
         if (engine.updateAvailable && engine.updateSummary) {
           const updateMsg = document.createElement('div'); updateMsg.className = 'engine-update-msg';
@@ -3069,19 +3055,38 @@ function renderModels(options = {}) {
         const test = makeButton('آزمایش روی تصویر', () => testEngine(engine.id));
         test.disabled = Boolean(state.modelBusy || !supported);
         buttons.appendChild(test);
+        if (canUninstallEngine(engine)) {
+          const deleteBtn = makeButton('حذف مدل', () => uninstallEngine(engine).catch(() => {}));
+          deleteBtn.classList.add('danger', 'engine-delete-btn');
+          deleteBtn.disabled = Boolean(state.modelBusy);
+          buttons.appendChild(deleteBtn);
+        }
         if (engine.repository) { const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'راهنمای رسمی'; buttons.appendChild(guide); }
         card.appendChild(buttons);
       }
       cards.appendChild(card);
     });
   };
-  if (advancedEngines.length) {
+  if (installedOnly && !orderedSelectable.length) {
+    const emptyBox = document.createElement('div');
+    emptyBox.className = 'models-empty-installed';
+    const emptyMsg = document.createElement('p');
+    emptyMsg.textContent = 'در حال حاضر هیچ مدل اضافه‌ای روی دیسک نصب نشده است (فقط موتور پایهٔ سبک برنامه فعال است).';
+    const showAllBtn = makeButton('نمایش همهٔ ۱۴ مدل', () => {
+      if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = false;
+      renderModels();
+    });
+    emptyBox.append(emptyMsg, showAllBtn);
+    container.appendChild(emptyBox);
+  } else if (rawAdvanced.length) {
     addGroup('موتورهای سریع و سبک کمیک — نصب خودکار و مناسب همهٔ سیستم‌ها', standardEngines);
     addGroup('مدل‌های هوش مصنوعی پیشرفته — نصب خودکار در محیط ایزوله', advancedEngines);
   } else {
     addGroup('قابل اجرا در برنامه — خروجی موقعیت‌دار', orderedSelectable);
   }
-  addGroup('دانلود و راه‌اندازی جداگانه — فعلاً خارج از OCR داخلی', state.engines.filter((engine) => engine.selectable === false), true);
+  if (!installedOnly) {
+    addGroup('دانلود و راه‌اندازی جداگانه — فعلاً خارج از OCR داخلی', state.engines.filter((engine) => engine.selectable === false), true);
+  }
   if (!shouldResort) {
     container.scrollTop = prevContainerScroll;
     if (dialogEl) dialogEl.scrollTop = prevDialogScroll;
@@ -3248,6 +3253,67 @@ async function updateEngine(engine, options = {}) {
     dismissJobCancelModal('model');
     renderModels();
     updateOcrEngineStatus();
+  }
+}
+async function uninstallEngine(engine) {
+  if (state.modelBusy || !engine) return false;
+  const confirmed = await appConfirm(
+    `آیا از حذف کامل مدل «${engine.name}» از روی سیستم مطمئن هستید؟\n\nتمام فایل‌های وزن، بسته‌های کمکی و محیط اجرای این مدل از دیسک پاک می‌شوند تا فضای سیستم شما آزاد شود.`,
+    {
+      title: `حذف کامل مدل — ${engine.name}`,
+      hint: 'هر زمان دوباره به این مدل نیاز داشتید، می‌توانید آن را با یک کلیک دانلود و نصب کنید.',
+      confirmText: 'حذف کامل مدل',
+      cancelText: 'انصراف',
+      danger: true,
+    },
+  );
+  if (!confirmed) return false;
+  ++engineMutationSeq;
+  state.modelBusy = engine.id;
+  const startMsg = `در حال آزادسازی رم و حذف کامل فایل‌های مدل ${engine.name} از روی دیسک…`;
+  syncModelProgressUi(null, true, startMsg);
+  if ($('modelTestResult')) $('modelTestResult').textContent = startMsg;
+  appendLocalActivity(`حذف مدل ${engine.name} آغاز شد`);
+  renderModels();
+  updateOcrEngineStatus();
+  scheduleActivityPoll(false);
+  let succeeded = false;
+  try {
+    const result = await api(`/api/engines/${encodeURIComponent(engine.id)}/uninstall`, jsonOptions('POST', {}));
+    ++engineMutationSeq;
+    if (Array.isArray(result?.engines)) state.engines = result.engines;
+    if (result?.memory) engineMemorySummary = result.memory;
+    if (result?.hardware) engineHardwareSummary = result.hardware;
+    succeeded = true;
+    const freedMb = Number(result?.freedMb || 0);
+    const freedText = freedMb >= 1024
+      ? ` (${(freedMb / 1024).toFixed(2)} گیگابایت فضا آزاد شد)`
+      : freedMb >= 1
+        ? ` (${Math.round(freedMb)} مگابایت فضا آزاد شد)`
+        : '';
+    const doneMsg = `مدل «${engine.name}» به‌طور کامل از روی سیستم حذف شد${freedText}.`;
+    if ($('modelTestResult')) $('modelTestResult').textContent = doneMsg;
+    if ($('jobStatus') && !jobBusy) $('jobStatus').textContent = doneMsg;
+    appendLocalActivity(doneMsg, 'success');
+    updateEngineOptions();
+    toast(`مدل ${engine.name} حذف شد${freedText}`);
+    return true;
+  } catch (error) {
+    const failMsg = `حذف مدل ناموفق بود:\n${error.message}`;
+    if ($('modelTestResult')) $('modelTestResult').textContent = failMsg;
+    appendLocalActivity(`حذف مدل ناموفق بود: ${error.message}`, 'error');
+    toast(error.message, true);
+    return false;
+  } finally {
+    state.modelBusy = null;
+    pollActivity().catch(() => {});
+    scheduleActivityPoll(false);
+    syncModelProgressUi(succeeded ? 1 : 0, false, '');
+    modelCurrentProgress = null;
+    modelCurrentLabel = '';
+    renderModels();
+    updateOcrEngineStatus();
+    syncEngineUpdateUi();
   }
 }
 async function updateAllEngines() {
@@ -5701,6 +5767,7 @@ function bindEvents() {
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewSwitchTarget = null; translationPreviewData = null; } });
   $('modelsBtn').addEventListener('click', () => {
+    if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = false;
     if ($('modelsPageMode') && $('ocrPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
     if ($('modelsLanguage') && $('ocrLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
     if ($('testLanguage') && $('ocrLanguage')) $('testLanguage').value = $('ocrLanguage').value;
@@ -5709,6 +5776,17 @@ function bindEvents() {
     setMenuOpen(false);
     refreshEngineMemory().catch(() => {});
   });
+  $('deleteModelsMenuBtn')?.addEventListener('click', () => {
+    if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = true;
+    if ($('modelsPageMode') && $('ocrPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
+    if ($('modelsLanguage') && $('ocrLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
+    if ($('testLanguage') && $('ocrLanguage')) $('testLanguage').value = $('ocrLanguage').value;
+    renderModels();
+    showDialog('modelsDialog');
+    setMenuOpen(false);
+    refreshEngineMemory().catch(() => {});
+  });
+  $('modelsInstalledOnly')?.addEventListener('change', () => renderModels());
   $('modelsLanguage')?.addEventListener('change', () => {
     if ($('testLanguage')) $('testLanguage').value = $('modelsLanguage').value;
     renderModels({ resort: true });
