@@ -53,6 +53,7 @@ from .ocr_managed import (
     update_manifest_entry,
 )
 from .paths import (
+    bundled_models_dir,
     custom_site_packages_dir,
     ensure_custom_site_packages_on_path,
     is_custom_data_dir_active,
@@ -610,7 +611,10 @@ class RapidEngine:
                 return ["eng", "jpn", "chi_sim"] if ready else []
             return [
                 language for language in LANGUAGES
-                if all((self._model_dir() / name).is_file() for name in self._expected_models(language))
+                if any(
+                    all((cand / name).is_file() for name in self._expected_models(language))
+                    for cand in self._candidate_v5_dirs()
+                )
             ]
         except Exception:
             return []
@@ -676,7 +680,28 @@ class RapidEngine:
     def _model_dir(self) -> Path:
         return models_dir() / "rapidocr"
 
+    def _candidate_v5_dirs(self) -> list[Path]:
+        dirs = [self._model_dir()]
+        bundled = bundled_models_dir()
+        if bundled is not None:
+            b_dir = bundled / "rapidocr"
+            if b_dir.is_dir():
+                dirs.append(b_dir)
+        return dirs
+
+    def _effective_v5_dir(self, language: str) -> Path:
+        expected = self._expected_models(language)
+        for cand in self._candidate_v5_dirs():
+            if all((cand / name).is_file() for name in expected):
+                return cand
+        return self._model_dir()
+
     def _v6_model_dir(self) -> Path:
+        bundled = bundled_models_dir()
+        if bundled is not None:
+            b_v6 = bundled / "rapidocr-v6"
+            if all((b_v6 / name).is_file() for name in ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx")):
+                return b_v6
         import rapidocr
         return Path(rapidocr.__file__).parent / "models"
 
@@ -723,8 +748,8 @@ class RapidEngine:
             "Det.engine_type": EngineType.ONNXRUNTIME, "Rec.engine_type": EngineType.ONNXRUNTIME,
         }
         if self.version == "v5":
-            # Keep user-downloaded models outside the virtual environment.
-            params["Global.model_root_dir"] = str(self._model_dir())
+            # Keep user-downloaded models outside the virtual environment (or use bundled offline models).
+            params["Global.model_root_dir"] = str(self._effective_v5_dir(language))
 
         cores = cpu_core_count()
         intra = max(1, min(cores, int(self._batch_threads))) if self._batch_threads else cores

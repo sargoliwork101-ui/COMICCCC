@@ -921,6 +921,7 @@ function overlayBlock(block, mode = currentOverlayMode()) {
   const effectiveMode = blockOverlayMode(block, mode);
   if (effectiveMode === 'none') return { ...block, tr: '', richHtml: '' };
   if (effectiveMode !== 'ocr') return block;
+  if (block.manual && !String(block.text || '').trim() && String(block.tr || '').trim()) return block;
   const ocrRtl = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(block.text || '') && !/[A-Za-z]{3,}/.test(block.text || '');
   return {
     ...block,
@@ -933,7 +934,14 @@ function overlayBlock(block, mode = currentOverlayMode()) {
 }
 function overlayBlocks(item, mode = currentOverlayMode()) { return (item.blocks || []).map((block) => overlayBlock(block, mode)); }
 function hasRenderableText(block) { return !!block.tr?.trim() || !!(!block._plainText && block.richHtml && Typeset.richHtmlWords(block.richHtml).some((word) => String(word.t || '').trim())); }
-function hasOverlayText(item, mode = currentOverlayMode()) { return overlayBlocks(item, mode).some((block) => block.enabled && hasRenderableText(block)); }
+function hasActiveWatermark(wm) {
+  if (!wm || typeof wm !== 'object' || wm.enabled === false) return false;
+  if (typeof Typeset?.hasActiveWatermark === 'function') return Typeset.hasActiveWatermark(wm);
+  return Boolean(String(wm.text || '').trim() || wm.logoId || wm.logoDataUrl);
+}
+function hasOverlayText(item, mode = currentOverlayMode()) {
+  return overlayBlocks(item, mode).some((block) => block.enabled && hasRenderableText(block)) || hasActiveWatermark(item?.watermark);
+}
 function renderAll() { renderGrid(); updateEngineOptions(); }
 function makeSummaryPill(text, extraClass = '') {
   const pill = document.createElement('span');
@@ -1064,6 +1072,13 @@ function renderGrid() {
       stamp.append(stampCheck, stampText);
       frameShell.appendChild(stamp);
     }
+    if (hasActiveWatermark(item.watermark)) {
+      const wmBadge = document.createElement('div');
+      wmBadge.className = 'watermark-badge';
+      wmBadge.textContent = 'واترمارک';
+      wmBadge.title = 'دارای واترمارک فعال روی این صفحه';
+      frameShell.appendChild(wmBadge);
+    }
     const tick = document.createElement('input'); tick.type = 'checkbox'; tick.className = 'tick'; tick.checked = !!item.selected; tick.setAttribute('aria-label', `انتخاب ${item.name}`);
     tick.addEventListener('click', (event) => {
       // The browser has already applied the new checkbox value; consume this one click without cancelling it.
@@ -1093,7 +1108,7 @@ function renderGrid() {
     });
     name.append(nameText, order, makeButton('↑', () => moveImageBy(item.id, -1), 'bt mini'), makeButton('↓', () => moveImageBy(item.id, 1), 'bt mini'));
     const meta = document.createElement('div'); meta.className = 'meta';
-    meta.textContent = `${item.width}×${item.height} · ${item.blocks?.length || 0} متن${item.crop ? ' · برش' : ''}${item.edited ? ' · ویرایش' : ''}${item.approved ? ' · تأیید ✓' : ''}`;
+    meta.textContent = `${item.width}×${item.height} · ${item.blocks?.length || 0} متن${item.crop ? ' · برش' : ''}${hasActiveWatermark(item.watermark) ? ' · واترمارک' : ''}${item.edited ? ' · ویرایش' : ''}${item.approved ? ' · تأیید ✓' : ''}`;
     card.append(frameShell, tick, act, name, meta);
     if (info) {
       const badge = document.createElement('span'); badge.className = 'grp'; badge.textContent = `گروه ${info.id}`; badge.title = `${info.members.length} عضو`; card.appendChild(badge);
@@ -2960,16 +2975,73 @@ async function performContextTranslation(request, preview, ongoing = null, corre
 // ---------- Typeset preview and export ----------
 let fontLoadedOnce = false;
 const renderedPageSignatures = new Map();
+const watermarkLogoCache = new Map();
+function projectWatermarkLogos() {
+  const logos = state.project?.settings?.watermarkLogos;
+  return logos && typeof logos === 'object' ? logos : {};
+}
+function decodeDataUrlDrawable(dataUrl) {
+  return new Promise((resolve) => {
+    const raw = String(dataUrl || '').trim();
+    if (!raw || !raw.startsWith('data:image/')) { resolve(null); return; }
+    if (typeof Image === 'function') {
+      const img = new Image();
+      let settled = false;
+      const done = (val) => { if (!settled) { settled = true; clearTimeout(timer); resolve(val); } };
+      const timer = setTimeout(() => done(null), 1500);
+      img.onload = () => done(img);
+      img.onerror = () => done(null);
+      img.src = raw;
+      if (img.complete && img.naturalWidth > 0) done(img);
+      return;
+    }
+    resolve(null);
+  });
+}
+async function ensureWatermarkLogoDrawable(logoId, dataUrl) {
+  const key = `${logoId || 'inline'}:${String(dataUrl || '').length}:${String(dataUrl || '').slice(-32)}`;
+  if (watermarkLogoCache.has(key)) return watermarkLogoCache.get(key);
+  const drawable = await decodeDataUrlDrawable(dataUrl);
+  if (drawable) watermarkLogoCache.set(key, drawable);
+  return drawable;
+}
+async function ensureWatermarkLogosReady(wm) {
+  if (!hasActiveWatermark(wm)) return;
+  const logoId = String(wm.logoId || '').trim();
+  const logos = projectWatermarkLogos();
+  if (logoId && logos[logoId]?.dataUrl) {
+    const drawable = await ensureWatermarkLogoDrawable(logoId, logos[logoId].dataUrl);
+    if (drawable) logos[logoId]._drawable = drawable;
+  } else if (wm.logoDataUrl) {
+    const drawable = await ensureWatermarkLogoDrawable('inline', wm.logoDataUrl);
+    if (drawable) wm._logoDrawable = drawable;
+  }
+}
+function buildTypesetRenderOptions(item) {
+  const wm = hasActiveWatermark(item?.watermark) ? item.watermark : null;
+  return {
+    eraseOriginal: state.project?.settings?.eraseOriginal !== false,
+    watermark: wm,
+    watermarkLogos: projectWatermarkLogos(),
+  };
+}
+function watermarkSignaturePart(wm) {
+  if (!hasActiveWatermark(wm)) return null;
+  const logoId = String(wm.logoId || '').trim();
+  const logoEntry = logoId ? projectWatermarkLogos()[logoId] : null;
+  const logoLen = logoEntry?.dataUrl ? logoEntry.dataUrl.length : (wm.logoDataUrl ? String(wm.logoDataUrl).length : 0);
+  return [wm.text || '', wm.position || 'bottom-left', wm.sizePct ?? 3.5, wm.opacity ?? 55, wm.angle ?? '', wm.marginPct ?? 2.5, wm.tileGapPct ?? 22, wm.color || '#ffffff', wm.bold !== false, wm.outline !== false, wm.outlineColor || '#000000', !!wm.bgPill, wm.bgColor || '#000000', logoId, wm.logoScalePct ?? 9, logoLen];
+}
 function pageRenderSignature(item, mode = currentOverlayMode(), blocksOverride = null) {
   const blocks = blocksOverride || overlayBlocks(item, mode);
   const erase = state.project?.settings?.eraseOriginal !== false;
-  return JSON.stringify([mode, erase, blocks]);
+  return JSON.stringify([mode, erase, blocks, watermarkSignaturePart(item?.watermark)]);
 }
 function isPageRenderCurrent(item, mode = currentOverlayMode()) {
   if (!state.project?.id || !item) return false;
   const key = `${state.project.id}:${item.id}`;
   const blocks = overlayBlocks(item, mode);
-  const active = blocks.some((block) => block.enabled && hasRenderableText(block));
+  const active = blocks.some((block) => block.enabled && hasRenderableText(block)) || hasActiveWatermark(item?.watermark);
   return Boolean(item.edited) === active && renderedPageSignatures.get(key) === pageRenderSignature(item, mode, blocks);
 }
 async function ensureFont() {
@@ -3004,7 +3076,7 @@ async function decodeProjectImageBitmap(rawBlob, item) {
 async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false } = {}) {
   const key = `${projectId}:${item.id}`;
   const blocks = overlayBlocks(item, mode);
-  const active = blocks.some((block) => block.enabled && hasRenderableText(block));
+  const active = blocks.some((block) => block.enabled && hasRenderableText(block)) || hasActiveWatermark(item?.watermark);
   const signature = pageRenderSignature(item, mode, blocks);
   if (skipUnchanged && Boolean(item.edited) === active && renderedPageSignatures.get(key) === signature) {
     return;
@@ -3019,6 +3091,7 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
     return;
   }
   await ensureFont();
+  await ensureWatermarkLogosReady(item?.watermark);
   const response = await fetch(`/api/projects/${projectId}/images/${item.id}/content`);
   if (!response.ok) throw new Error('تصویر اصلی باز نشد');
   let rawBlob = await response.blob();
@@ -3032,7 +3105,7 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
   let pngBlob = null;
   try {
     try {
-      canvas = Typeset.render(bitmap, blocks);
+      canvas = Typeset.render(bitmap, blocks, buildTypesetRenderOptions(item));
     } finally {
       bitmap?.close?.();
       bitmap = null;
@@ -4564,6 +4637,7 @@ async function openEditor(imageId) {
     projectId: state.project.id,
     imageId: item.id,
     blocksJson: JSON.stringify(item.blocks || []),
+    watermarkJson: JSON.stringify(item.watermark || null),
     approved: !!item.approved,
     edited: !!item.edited,
     overlayMode: currentOverlayMode(),
@@ -4571,6 +4645,8 @@ async function openEditor(imageId) {
     serverPreviewTouched: false,
     autoSaved: false,
   };
+  await ensureWatermarkLogosReady(item.watermark);
+  if (loadSeq !== editorLoadSeq) return;
   $('editorStage').classList.remove('panning'); syncEditorApprovalHeader(item); $('blockList').textContent = ''; showDialog('editorDialog');
   let bitmap;
   try {
@@ -4688,7 +4764,7 @@ function drawEditorCanvas() {
     }
     return overlayBlock(block);
   });
-  const rendered = Typeset.render(state.editorBitmap, blocks); const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d');
+  const rendered = Typeset.render(state.editorBitmap, blocks, buildTypesetRenderOptions(item)); const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(rendered, 0, 0);
   if (rendered && rendered !== canvas) { rendered.width = 0; rendered.height = 0; }
 }
@@ -6049,7 +6125,12 @@ function applyTranslatedBlockDefaults(block, text, targetLang = null) {
 }
 async function retranslateBlock(block, targetOverride = null) {
   if (inlineDraft?.block === block && !closeInlineEditor()) return;
-  const text = block.text || ''; const snapshot = inlineBlockSnapshot(block);
+  const text = block.text || '';
+  if (!String(text).trim()) {
+    toast('این کادر متن اصلی (OCR) برای ترجمه ندارد؛ مستقیم تایپ کنید یا ابتدا متن اصلی را بنویسید.', true);
+    return;
+  }
+  const snapshot = inlineBlockSnapshot(block);
   const target = resolvePreferredTranslationTarget(targetOverride);
   const provider = target.provider; const profileId = target.profileId; const sourceLanguage = $('ocrLanguage').value;
   const targetLanguage = activeTargetLanguage();
@@ -6112,11 +6193,125 @@ function makeBlockToolButton(svgInner, label, handler, extraClass = '') {
   btn.addEventListener('click', handler);
   return btn;
 }
+function nextEditorBlockId(item) {
+  let maxId = 0;
+  (item?.blocks || []).forEach((b) => {
+    const n = Number.parseInt(b?.id, 10);
+    if (Number.isFinite(n) && n > maxId) maxId = n;
+  });
+  return maxId + 1;
+}
+function addManualEditorBlock(lang = 'fa') {
+  const item = editorItem();
+  if (!item) return null;
+  if (inlineDraft && !closeInlineEditor()) return null;
+  if (currentOverlayMode() === 'none') setOverlayMode('translation', false);
+  item.blocks = Array.isArray(item.blocks) ? item.blocks : [];
+  const scale = state.editorScale || 1;
+  const preview = document.querySelector('.editor-preview');
+  const viewW = preview?.clientWidth || 0;
+  const viewH = preview?.clientHeight || 0;
+  const centerX = viewW > 40 ? ((preview.scrollLeft || 0) + viewW / 2) / scale : item.width / 2;
+  const centerY = viewH > 40 ? ((preview.scrollTop || 0) + viewH / 2) / scale : item.height / 2;
+  const w = Math.max(Math.min(90, item.width), Math.min(420, Math.round(item.width * 0.28)));
+  const h = Math.max(Math.min(44, item.height), Math.min(170, Math.round(item.height * 0.09)));
+  let x0 = Math.round(Math.max(0, Math.min(item.width - w, centerX - w / 2)));
+  let y0 = Math.round(Math.max(0, Math.min(item.height - h, centerY - h / 2)));
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const colliding = item.blocks.some((b) => {
+      const bx = boxOf(b);
+      return Math.abs(bx.x0 - x0) < 12 && Math.abs(bx.y0 - y0) < 12;
+    });
+    if (!colliding) break;
+    x0 = Math.max(0, Math.min(item.width - w, x0 + 18));
+    y0 = Math.max(0, Math.min(item.height - h, y0 + 18));
+  }
+  const isEn = lang === 'en';
+  const newBlock = {
+    id: nextEditorBlockId(item),
+    manual: true,
+    manualLang: isEn ? 'en' : 'fa',
+    text: '',
+    tr: '',
+    richHtml: '',
+    conf: 100,
+    enabled: true,
+    bg: 'none',
+    textMode: 'translation',
+    dir: isEn ? 'ltr' : 'rtl',
+    align: 'center',
+    verticalAlign: 'middle',
+    bold: true,
+    italic: false,
+    size: null,
+    color: null,
+    pageRole: 'paragraph',
+    lineH: Math.max(18, Math.min(38, Math.round(h * 0.42))),
+    x0, y0, x1: x0 + w, y1: y0 + h,
+    tx0: x0, ty0: y0, tx1: x0 + w, ty1: y0 + h,
+  };
+  item.blocks.push(newBlock);
+  state.activeBlockId = String(newBlock.id);
+  state.selectedBlockIds = [String(newBlock.id)];
+  buildBlockList();
+  drawEditor();
+  scheduleSave();
+  openInlineEditor(newBlock);
+  return newBlock;
+}
+async function deleteEditorBlocks(targetBlocks = null) {
+  const item = editorItem();
+  if (!item) return false;
+  const blocksToRemove = Array.isArray(targetBlocks) && targetBlocks.length ? targetBlocks : selectedEditorBlocks();
+  if (!blocksToRemove.length) {
+    toast('ابتدا یک یا چند کادر را برای حذف انتخاب کنید.', true);
+    return false;
+  }
+  if (inlineDraft && blocksToRemove.includes(inlineDraft.block) && !closeInlineEditor()) return false;
+  const hasAnyContent = blocksToRemove.some((b) => String(b.tr || '').trim() || String(b.text || '').trim() || String(b.richHtml || '').trim());
+  if (hasAnyContent) {
+    const label = blocksToRemove.length === 1 ? `کادر شمارهٔ ${blocksToRemove[0].id}` : `${blocksToRemove.length} کادر انتخاب‌شده`;
+    const ok = await appConfirm(`آیا مطمئن هستید که می‌خواهید ${label} را به‌طور کامل از این صفحه حذف کنید؟`, {
+      title: 'حذف کادر متن',
+      confirmText: 'بله، حذف شود',
+      cancelText: 'انصراف',
+      variant: 'danger',
+      destructive: true,
+    });
+    if (!ok) return false;
+  }
+  const removeSet = new Set(blocksToRemove);
+  item.blocks = (item.blocks || []).filter((b) => !removeSet.has(b));
+  const remainingIds = new Set(item.blocks.map((b) => String(b.id)));
+  state.selectedBlockIds = (state.selectedBlockIds || []).filter((id) => remainingIds.has(String(id)));
+  if (!remainingIds.has(String(state.activeBlockId))) state.activeBlockId = state.selectedBlockIds.at(-1) || null;
+  buildBlockList();
+  drawEditor();
+  scheduleSave();
+  toast(blocksToRemove.length === 1 ? 'کادر حذف شد' : `${blocksToRemove.length} کادر حذف شد`);
+  return true;
+}
 function buildBlockList() {
-  const item = editorItem(); const list = $('blockList'); list.textContent = ''; const selected = new Set(editorSelectedKeys()); if (!item?.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; updateEditorSelection(); return; }
+  const item = editorItem(); const list = $('blockList'); list.textContent = ''; const selected = new Set(editorSelectedKeys());
+  if (!item?.blocks?.length) {
+    const emptyWrap = document.createElement('div');
+    emptyWrap.className = 'block-empty-state';
+    const msg = document.createElement('div');
+    msg.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید یا همین حالا با دکمه‌های زیر کادر متن دلخواه (فارسی یا انگلیسی) روی صفحه بگذارید:';
+    const actionsRow = document.createElement('div');
+    actionsRow.className = 'block-empty-actions';
+    actionsRow.append(
+      makeButton('+ متن فارسی', () => addManualEditorBlock('fa'), 'bt primary'),
+      makeButton('+ متن انگلیسی', () => addManualEditorBlock('en'), 'bt'),
+    );
+    emptyWrap.append(msg, actionsRow);
+    list.appendChild(emptyWrap);
+    updateEditorSelection();
+    return;
+  }
   item.blocks.forEach((block) => {
     const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', (event) => { const additive = event.ctrlKey || event.metaKey; if (additive && inlineDraft && !closeInlineEditor()) return; selectEditorBlock(block.id, false, additive); });
-    const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabled.dataset.visibility = 'sidebar'; enabled.setAttribute('aria-label', `نمایش متن ${block.id} روی تصویر`); enabledLabel.append(enabled, document.createTextNode(` نمایش متن ${block.id} روی تصویر · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
+    const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabled.dataset.visibility = 'sidebar'; enabled.setAttribute('aria-label', `نمایش متن ${block.id} روی تصویر`); enabledLabel.append(enabled, document.createTextNode(block.manual ? ` نمایش متن ${block.id} روی تصویر · کادر دستی` : ` نمایش متن ${block.id} روی تصویر · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
     const isHeading = block.pageRole === 'heading';
     const roleBtn = document.createElement('button');
     roleBtn.type = 'button';
@@ -6156,13 +6351,14 @@ function buildBlockList() {
     const languageLabel = document.createElement('label'); languageLabel.className = 'block-language-label'; languageLabel.appendChild(document.createTextNode('نمایش همین متن:'));
     const language = document.createElement('select'); language.dataset.textMode = 'sidebar'; language.setAttribute('aria-label', `زبان نمایش متن ${block.id} روی تصویر`); [['translation', 'فارسی / ترجمه'], ['ocr', 'انگلیسی / OCR']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; language.appendChild(option); }); language.value = blockTextMode(block); languageLabel.appendChild(language); languageRow.appendChild(languageLabel);
     const metaBadges = [];
+    if (block.manual) metaBadges.push(['دستی', 'کادر اضافه‌شدهٔ دستی — در اجرای مجدد OCR حفظ می‌شود', 'block-manual-chip']);
     if (block.bold) metaBadges.push(['B', 'تشخیص/قالب پررنگ (Bold)']);
     if (block.italic) metaBadges.push(['I', 'تشخیص/قالب کج (Italic)']);
     if ((Number(block.firstLineIndent) || 0) >= 0.5 || (!isHeading && (Number(block.sourceIndent) || 0) >= 2)) metaBadges.push(['↳ تورفتگی', 'دارای تورفتگی نسبت به حاشیهٔ ستون']);
     if ((Number(block.hangingIndent) || 0) >= 0.5 || (Number(block.blockOutdent) || 0) >= 0.5) metaBadges.push(['↰ بیرون‌زدگی', 'دارای بیرون‌زدگی خط اول / حاشیه']);
-    metaBadges.forEach(([txt, tip]) => {
+    metaBadges.forEach(([txt, tip, extraCls]) => {
       const chip = document.createElement('span');
-      chip.className = 'block-style-chip';
+      chip.className = `block-style-chip${extraCls ? ` ${extraCls}` : ''}`;
       chip.textContent = txt;
       chip.title = tip;
       languageRow.appendChild(chip);
@@ -6195,6 +6391,9 @@ function buildBlockList() {
         if (!ok) return;
         block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave();
       }, 'block-clear-btn'),
+      makeBlockToolButton('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>', 'حذف کادر', () => {
+        deleteEditorBlocks([block]).catch((e) => toast(e.message, true));
+      }, 'block-clear-btn block-delete-btn'),
     );
     enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; drawEditor(); scheduleSave(); });
     card.append(head, languageRow, source, translation, actions); list.appendChild(card);
@@ -6242,9 +6441,11 @@ async function cancelEditor() {
     editorLoadSeq += 1;
     if (item && snap && state.project?.id === snap.projectId && item.id === snap.imageId) {
       const changedBlocks = JSON.stringify(item.blocks || []) !== snap.blocksJson;
+      const changedWatermark = JSON.stringify(item.watermark || null) !== snap.watermarkJson;
       const changedApproved = !!item.approved !== snap.approved;
       const changedMode = currentOverlayMode() !== snap.overlayMode;
       item.blocks = JSON.parse(snap.blocksJson);
+      item.watermark = JSON.parse(snap.watermarkJson || 'null');
       item.approved = snap.approved;
       restoreProjectImageDrafts(snap.projectId, snap.imageId, snap.draftEntries);
       if (changedMode) {
@@ -6253,7 +6454,7 @@ async function cancelEditor() {
         $('overlayMode').value = snap.overlayMode;
         $('exportOverlayMode').value = snap.overlayMode;
       }
-      if (changedBlocks || changedApproved || changedMode || hadInlineDraft || hadPendingSave || snap.autoSaved || snap.serverPreviewTouched) {
+      if (changedBlocks || changedWatermark || changedApproved || changedMode || hadInlineDraft || hadPendingSave || snap.autoSaved || snap.serverPreviewTouched) {
         await overlayPreviewTask;
         await saveProject();
         if (changedMode) await renderImagesText();
@@ -6321,6 +6522,372 @@ function openPreview(item) { state.previewId = item.id; $('previewImage').src = 
 async function copyPreview() {
   const item = state.project.images.find((entry) => entry.id === state.previewId); if (!item) return;
   try { const response = await fetch(imageUrl(item, !!item.edited, true)); const bitmap = await createImageBitmap(await response.blob()); const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height; canvas.getContext('2d').drawImage(bitmap, 0, 0); bitmap.close(); const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png')); canvas.width = canvas.height = 0; if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') throw new Error('مرورگر اجازهٔ کپی تصویر نمی‌دهد'); await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); toast('تصویر کپی شد'); } catch (error) { toast(error.message || 'کپی تصویر ممکن نبود', true); }
+}
+
+// ---------- Watermark (Text + Transparent Logo) ----------
+let wmPreviewBitmap = null;
+let wmPreviewImageId = null;
+let wmAngleTouched = false;
+
+function defaultWatermarkConfig() {
+  return {
+    enabled: true,
+    text: '',
+    logoId: '',
+    logoScalePct: 9,
+    position: 'bottom-left',
+    sizePct: 3.5,
+    opacity: 55,
+    angle: 0,
+    marginPct: 2.5,
+    tileGapPct: 22,
+    color: '#ffffff',
+    bold: true,
+    outline: true,
+    outlineColor: '#000000',
+    bgPill: false,
+    bgColor: '#000000',
+  };
+}
+
+function watermarkTargetPages(scope = null) {
+  const images = sortedImages();
+  const chosen = scope || $('wmTargetScope')?.value || 'selected';
+  if (chosen === 'editor') {
+    const ed = editorItem();
+    return ed ? [ed] : [];
+  }
+  if (chosen === 'all') return images;
+  const sel = selectedImages();
+  return sel.length ? sel : images;
+}
+
+function populateWatermarkLogoSelect(selectedId = '') {
+  const sel = $('wmLogoSelect');
+  if (!sel) return;
+  const logos = projectWatermarkLogos();
+  sel.textContent = '';
+  const noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = 'بدون لوگو (فقط متن)';
+  sel.appendChild(noneOpt);
+  Object.values(logos).forEach((entry) => {
+    if (!entry || !entry.id) return;
+    const opt = document.createElement('option');
+    opt.value = entry.id;
+    opt.textContent = entry.name || entry.id;
+    sel.appendChild(opt);
+  });
+  sel.value = selectedId && logos[selectedId] ? selectedId : '';
+  if ($('wmLogoDeleteBtn')) $('wmLogoDeleteBtn').disabled = !sel.value;
+}
+
+function readWatermarkDialogForm() {
+  return {
+    enabled: true,
+    text: String($('wmText')?.value || ''),
+    logoId: String($('wmLogoSelect')?.value || ''),
+    logoScalePct: Number($('wmLogoScale')?.value) || 9,
+    position: String($('wmPosition')?.value || 'bottom-left'),
+    sizePct: Number($('wmSize')?.value) || 3.5,
+    opacity: Number($('wmOpacity')?.value) || 55,
+    angle: Number($('wmAngle')?.value) || 0,
+    marginPct: Number($('wmMargin')?.value) || 2.5,
+    tileGapPct: Number($('wmTileGap')?.value) || 22,
+    color: String($('wmColor')?.value || '#ffffff'),
+    bold: Boolean($('wmBold')?.checked),
+    outline: Boolean($('wmOutline')?.checked),
+    outlineColor: String($('wmOutlineColor')?.value || '#000000'),
+    bgPill: Boolean($('wmBgPill')?.checked),
+    bgColor: String($('wmBgColor')?.value || '#000000'),
+  };
+}
+
+function syncWatermarkRangeOutputs() {
+  if ($('wmLogoScaleOut') && $('wmLogoScale')) $('wmLogoScaleOut').textContent = `${$('wmLogoScale').value}%`;
+  if ($('wmSizeOut') && $('wmSize')) $('wmSizeOut').textContent = `${$('wmSize').value}%`;
+  if ($('wmOpacityOut') && $('wmOpacity')) $('wmOpacityOut').textContent = `${$('wmOpacity').value}%`;
+  if ($('wmAngleOut') && $('wmAngle')) $('wmAngleOut').textContent = `${$('wmAngle').value}°`;
+  if ($('wmMarginOut') && $('wmMargin')) $('wmMarginOut').textContent = `${$('wmMargin').value}%`;
+  if ($('wmTileGapOut') && $('wmTileGap')) $('wmTileGapOut').textContent = `${$('wmTileGap').value}%`;
+  const pos = $('wmPosition')?.value || 'bottom-left';
+  $('wmMarginWrap')?.classList.toggle('hidden', pos === 'center' || pos === 'diagonal' || pos === 'tile');
+  $('wmTileGapWrap')?.classList.toggle('hidden', pos !== 'tile');
+  if ($('wmLogoDeleteBtn') && $('wmLogoSelect')) $('wmLogoDeleteBtn').disabled = !$('wmLogoSelect').value;
+}
+
+function fillWatermarkDialogForm(wm) {
+  const cfg = { ...defaultWatermarkConfig(), ...(wm && typeof wm === 'object' ? wm : {}) };
+  if ($('wmText')) $('wmText').value = cfg.text || '';
+  populateWatermarkLogoSelect(cfg.logoId || '');
+  if ($('wmLogoScale')) $('wmLogoScale').value = String(cfg.logoScalePct ?? 9);
+  if ($('wmPosition')) $('wmPosition').value = cfg.position || 'bottom-left';
+  if ($('wmSize')) $('wmSize').value = String(cfg.sizePct ?? 3.5);
+  if ($('wmOpacity')) $('wmOpacity').value = String(cfg.opacity ?? 55);
+  const effectiveAngle = cfg.angle !== undefined && cfg.angle !== null && cfg.angle !== ''
+    ? Number(cfg.angle)
+    : ((cfg.position === 'diagonal' || cfg.position === 'tile') ? -30 : 0);
+  if ($('wmAngle')) $('wmAngle').value = String(Number.isFinite(effectiveAngle) ? effectiveAngle : 0);
+  if ($('wmMargin')) $('wmMargin').value = String(cfg.marginPct ?? 2.5);
+  if ($('wmTileGap')) $('wmTileGap').value = String(cfg.tileGapPct ?? 22);
+  if ($('wmColor')) $('wmColor').value = /^#[0-9a-fA-F]{6}$/.test(String(cfg.color || '')) ? cfg.color : '#ffffff';
+  if ($('wmBold')) $('wmBold').checked = cfg.bold !== false;
+  if ($('wmOutline')) $('wmOutline').checked = cfg.outline !== false;
+  if ($('wmOutlineColor')) $('wmOutlineColor').value = /^#[0-9a-fA-F]{6}$/.test(String(cfg.outlineColor || '')) ? cfg.outlineColor : '#000000';
+  if ($('wmBgPill')) $('wmBgPill').checked = Boolean(cfg.bgPill);
+  if ($('wmBgColor')) $('wmBgColor').value = /^#[0-9a-fA-F]{6}$/.test(String(cfg.bgColor || '')) ? cfg.bgColor : '#000000';
+  wmAngleTouched = Boolean(cfg.angle && Number(cfg.angle) !== 0 && Number(cfg.angle) !== -30);
+  syncWatermarkRangeOutputs();
+}
+
+async function loadWatermarkPreviewBitmap(sampleItem) {
+  if (!sampleItem) return null;
+  if (state.editorId === sampleItem.id && state.editorBitmap) return state.editorBitmap;
+  if (wmPreviewBitmap && wmPreviewImageId === sampleItem.id) return wmPreviewBitmap;
+  try {
+    const res = await fetch(imageUrl(sampleItem, false));
+    if (!res.ok) return null;
+    const bmp = await decodeProjectImageBitmap(await res.blob(), sampleItem);
+    if (wmPreviewBitmap && wmPreviewBitmap !== state.editorBitmap) wmPreviewBitmap.close?.();
+    wmPreviewBitmap = bmp;
+    wmPreviewImageId = sampleItem.id;
+    return bmp;
+  } catch {
+    return null;
+  }
+}
+
+async function drawWatermarkDialogPreview() {
+  const cv = $('wmPreviewCanvas');
+  if (!cv) return;
+  const targets = watermarkTargetPages();
+  const sample = targets[0] || sortedImages()[0] || null;
+  if ($('wmPreviewCaption')) {
+    $('wmPreviewCaption').textContent = sample
+      ? `پیش‌نمایش زنده روی «${sample.name}» (${targets.length.toLocaleString('fa-IR')} صفحهٔ هدف)`
+      : 'پیش‌نمایش زنده';
+  }
+  const wm = readWatermarkDialogForm();
+  await ensureWatermarkLogosReady(wm);
+  const bmp = await loadWatermarkPreviewBitmap(sample);
+  const srcW = bmp?.width || sample?.width || 600;
+  const srcH = bmp?.height || sample?.height || 840;
+  const maxSide = 520;
+  const ratio = Math.min(1, maxSide / Math.max(srcW, srcH, 1));
+  const W = Math.max(180, Math.round(srcW * ratio));
+  const H = Math.max(180, Math.round(srcH * ratio));
+  cv.width = W;
+  cv.height = H;
+  const ctx = cv.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect?.(0, 0, W, H);
+  if (bmp) {
+    ctx.drawImage?.(bmp, 0, 0, W, H);
+  } else if (typeof ctx.fillRect === 'function') {
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (hasActiveWatermark(wm) && typeof Typeset?.drawWatermark === 'function') {
+    Typeset.drawWatermark(ctx, W, H, wm, projectWatermarkLogos());
+  }
+}
+
+function readBlobAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (typeof FileReader === 'function') {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('خواندن فایل لوگو ناموفق بود'));
+      reader.readAsDataURL(file);
+      return;
+    }
+    if (typeof file.arrayBuffer === 'function') {
+      file.arrayBuffer().then((buf) => {
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        bytes.forEach((b) => { bin += String.fromCharCode(b); });
+        resolve(`data:${file.type || 'image/png'};base64,${btoa(bin)}`);
+      }, reject);
+      return;
+    }
+    reject(new Error('خواندن فایل لوگو پشتیبانی نمی‌شود'));
+  });
+}
+
+async function handleWatermarkLogoUpload(file) {
+  if (!file || !state.project) return;
+  if (file.size > 6 * 1024 * 1024) {
+    toast('حجم فایل لوگو نباید بیشتر از ۶ مگابایت باشد.', true);
+    return;
+  }
+  const dataUrl = await readBlobAsDataUrl(file);
+  if (!dataUrl.startsWith('data:image/')) {
+    toast('فقط فایل‌های تصویری (PNG، WebP، SVG، JPG) برای لوگو مجاز هستند.', true);
+    return;
+  }
+  state.project.settings = state.project.settings || {};
+  state.project.settings.watermarkLogos = projectWatermarkLogos();
+  const logoId = `logo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const cleanLabel = String(file.name || 'logo.png').replace(/\.[^.]+$/, '').slice(0, 48) || 'لوگو';
+  state.project.settings.watermarkLogos[logoId] = {
+    id: logoId,
+    name: cleanLabel,
+    dataUrl,
+  };
+  await ensureWatermarkLogoDrawable(logoId, dataUrl);
+  populateWatermarkLogoSelect(logoId);
+  scheduleSave();
+  await drawWatermarkDialogPreview();
+  toast(`لوگوی «${cleanLabel}» اضافه و انتخاب شد`);
+}
+
+async function deleteSelectedWatermarkLogo() {
+  const logoId = String($('wmLogoSelect')?.value || '').trim();
+  if (!logoId || !state.project) return;
+  const logos = projectWatermarkLogos();
+  const entry = logos[logoId];
+  if (!entry) return;
+  const usedCount = (state.project.images || []).filter((img) => img.watermark?.logoId === logoId).length;
+  const msg = usedCount
+    ? `لوگوی «${entry.name}» روی ${usedCount.toLocaleString('fa-IR')} صفحه استفاده شده است. آیا از فهرست لوگوها و آن صفحات حذف شود؟`
+    : `آیا لوگوی «${entry.name}» از فهرست لوگوهای پروژه حذف شود؟`;
+  const ok = await appConfirm(msg, {
+    title: 'حذف لوگوی واترمارک',
+    confirmText: 'بله، حذف شود',
+    cancelText: 'انصراف',
+    variant: 'danger',
+    destructive: true,
+  });
+  if (!ok) return;
+  delete logos[logoId];
+  const affectedIds = [];
+  (state.project.images || []).forEach((img) => {
+    if (img.watermark?.logoId === logoId) {
+      img.watermark.logoId = '';
+      if (!hasActiveWatermark(img.watermark)) img.watermark = null;
+      affectedIds.push(img.id);
+    }
+  });
+  populateWatermarkLogoSelect('');
+  await saveProject();
+  if (affectedIds.length) await renderImagesText(affectedIds);
+  if (state.editorId) drawEditorCanvas();
+  await drawWatermarkDialogPreview();
+  toast('لوگو حذف شد');
+}
+
+async function openWatermarkDialog(fromEditor = false) {
+  if (!state.project?.images?.length) {
+    toast('ابتدا حداقل یک صفحه یا فایل به پروژه وارد کنید.', true);
+    return;
+  }
+  await ensureFont();
+  const scopeSelect = $('wmTargetScope');
+  const totalCount = state.project.images.length;
+  const selCount = selectedImages().length;
+  const inEditor = Boolean(fromEditor && editorItem());
+  if (scopeSelect) {
+    scopeSelect.textContent = '';
+    if (inEditor) {
+      const optEd = document.createElement('option');
+      optEd.value = 'editor';
+      optEd.textContent = `فقط همین صفحهٔ در حال ویرایش (${editorItem().name})`;
+      scopeSelect.appendChild(optEd);
+    }
+    if (selCount > 0) {
+      const optSel = document.createElement('option');
+      optSel.value = 'selected';
+      optSel.textContent = `صفحات انتخاب‌شده (${selCount.toLocaleString('fa-IR')} از ${totalCount.toLocaleString('fa-IR')} صفحه)`;
+      scopeSelect.appendChild(optSel);
+    }
+    const optAll = document.createElement('option');
+    optAll.value = 'all';
+    optAll.textContent = `همهٔ صفحات پروژه (${totalCount.toLocaleString('fa-IR')} صفحه)`;
+    scopeSelect.appendChild(optAll);
+    scopeSelect.value = inEditor ? 'editor' : (selCount > 0 ? 'selected' : 'all');
+  }
+  const initialSource = (inEditor && editorItem()?.watermark)
+    || selectedImages().find((img) => hasActiveWatermark(img.watermark))?.watermark
+    || state.project.images.find((img) => hasActiveWatermark(img.watermark))?.watermark
+    || state.project.settings?.watermarkPreset
+    || defaultWatermarkConfig();
+  fillWatermarkDialogForm(initialSource);
+  showDialog('watermarkDialog');
+  await drawWatermarkDialogPreview();
+}
+
+async function applyWatermarkFromDialog() {
+  if (!state.project) return;
+  const wm = readWatermarkDialogForm();
+  if (!hasActiveWatermark(wm)) {
+    toast('لطفاً متن واترمارک را بنویسید یا یک لوگو انتخاب کنید (برای پاک‌کردن، دکمهٔ «حذف واترمارک» را بزنید).', true);
+    return;
+  }
+  const scope = $('wmTargetScope')?.value || 'selected';
+  const targets = watermarkTargetPages(scope);
+  if (!targets.length) {
+    toast('صفحه‌ای برای اعمال واترمارک انتخاب نشده است.', true);
+    return;
+  }
+  await ensureWatermarkLogosReady(wm);
+  state.project.settings = state.project.settings || {};
+  state.project.settings.watermarkPreset = { ...wm };
+  targets.forEach((img) => {
+    img.watermark = { ...wm, enabled: true };
+  });
+  closeDialog('watermarkDialog');
+  if (scope === 'editor' && editorItem() && targets.length === 1 && targets[0].id === state.editorId) {
+    drawEditorCanvas();
+    scheduleSave();
+    toast('واترمارک روی این صفحه قرار گرفت');
+    return;
+  }
+  if (state.editorId && targets.some((t) => t.id === state.editorId)) {
+    drawEditorCanvas();
+  }
+  await runJob(`در حال اعمال واترمارک روی ${targets.length.toLocaleString('fa-IR')} صفحه…`, async () => {
+    await saveProject();
+    await renderImagesText(targets.map((t) => t.id));
+  }, 'jobProgress');
+  renderGrid();
+  toast(`واترمارک روی ${targets.length.toLocaleString('fa-IR')} صفحه اعمال شد`);
+}
+
+async function removeWatermarkFromDialog() {
+  if (!state.project) return;
+  const scope = $('wmTargetScope')?.value || 'selected';
+  const targets = watermarkTargetPages(scope);
+  const activeTargets = targets.filter((img) => hasActiveWatermark(img.watermark));
+  if (!activeTargets.length) {
+    closeDialog('watermarkDialog');
+    toast('صفحات انتخابی واترمارک فعالی ندارند');
+    return;
+  }
+  const ok = await appConfirm(`آیا واترمارک از ${activeTargets.length.toLocaleString('fa-IR')} صفحه حذف شود؟`, {
+    title: 'حذف واترمارک',
+    confirmText: 'بله، حذف شود',
+    cancelText: 'انصراف',
+    variant: 'danger',
+    destructive: true,
+  });
+  if (!ok) return;
+  activeTargets.forEach((img) => { img.watermark = null; });
+  closeDialog('watermarkDialog');
+  if (scope === 'editor' && editorItem() && activeTargets.length === 1 && activeTargets[0].id === state.editorId) {
+    drawEditorCanvas();
+    scheduleSave();
+    toast('واترمارک این صفحه حذف شد');
+    return;
+  }
+  if (state.editorId && activeTargets.some((t) => t.id === state.editorId)) {
+    drawEditorCanvas();
+  }
+  await runJob(`در حال حذف واترمارک از ${activeTargets.length.toLocaleString('fa-IR')} صفحه…`, async () => {
+    await saveProject();
+    await renderImagesText(activeTargets.map((t) => t.id));
+  }, 'jobProgress');
+  renderGrid();
+  toast(`واترمارک از ${activeTargets.length.toLocaleString('fa-IR')} صفحه حذف شد`);
 }
 
 // ---------- Events and startup ----------
@@ -6862,6 +7429,49 @@ function bindEvents() {
       }
     }).catch((error) => toast(error.message, true));
   });
+  $('ocrErase')?.addEventListener('change', () => {
+    if (!state.project) return;
+    state.project.settings = state.project.settings || {};
+    state.project.settings.eraseOriginal = $('ocrErase').checked;
+    if (state.editorId) { drawEditorCanvas(); scheduleSave(); }
+    else queueOverlayPreviewRefresh();
+  });
+  $('watermarkBtn')?.addEventListener('click', () => openWatermarkDialog(false).catch((e) => toast(e.message, true)));
+  $('editorWatermarkBtn')?.addEventListener('click', () => openWatermarkDialog(true).catch((e) => toast(e.message, true)));
+  $('editorAddFaText')?.addEventListener('click', () => addManualEditorBlock('fa'));
+  $('editorAddEnText')?.addEventListener('click', () => addManualEditorBlock('en'));
+  $('editorDeleteBlock')?.addEventListener('click', () => { deleteEditorBlocks().catch((e) => toast(e.message, true)); });
+  $('wmCancelBtn')?.addEventListener('click', () => closeDialog('watermarkDialog'));
+  $('wmApplyBtn')?.addEventListener('click', () => { applyWatermarkFromDialog().catch((e) => toast(e.message, true)); });
+  $('wmRemoveBtn')?.addEventListener('click', () => { removeWatermarkFromDialog().catch((e) => toast(e.message, true)); });
+  $('wmLogoInput')?.addEventListener('change', (ev) => {
+    const file = ev.target.files?.[0];
+    ev.target.value = '';
+    if (file) handleWatermarkLogoUpload(file).catch((e) => toast(e.message, true));
+  });
+  $('wmLogoDeleteBtn')?.addEventListener('click', () => { deleteSelectedWatermarkLogo().catch((e) => toast(e.message, true)); });
+  $('wmPosition')?.addEventListener('change', () => {
+    const pos = $('wmPosition').value;
+    if (!wmAngleTouched && $('wmAngle')) {
+      $('wmAngle').value = (pos === 'diagonal' || pos === 'tile') ? '-30' : '0';
+    }
+    syncWatermarkRangeOutputs();
+    drawWatermarkDialogPreview().catch(() => {});
+  });
+  $('wmAngle')?.addEventListener('input', () => {
+    wmAngleTouched = true;
+    syncWatermarkRangeOutputs();
+    drawWatermarkDialogPreview().catch(() => {});
+  });
+  ['wmTargetScope', 'wmText', 'wmLogoSelect', 'wmLogoScale', 'wmSize', 'wmOpacity', 'wmMargin', 'wmTileGap', 'wmColor', 'wmBold', 'wmOutline', 'wmOutlineColor', 'wmBgPill', 'wmBgColor'].forEach((id) => {
+    const el = $(id);
+    if (!el) return;
+    const evtName = el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input';
+    el.addEventListener(evtName, () => {
+      syncWatermarkRangeOutputs();
+      drawWatermarkDialogPreview().catch(() => {});
+    });
+  });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'F1') {
       event.preventDefault();
@@ -6882,6 +7492,7 @@ function bindEvents() {
         docxExportDialog: 'exports-docx-pdf',
         pptxExportDialog: 'exports-docx-pdf',
         cropDialog: 'import-grid-crop',
+        watermarkDialog: 'import-grid-crop',
         pendingDialog: 'conflicts-cancel-errors',
         editorDialog: 'visual-editor',
       };
@@ -6914,10 +7525,16 @@ function bindEvents() {
 async function init() {
   bindEvents(); startActivityFeed(); startSession();
   try {
-    const [projects, engines, ai] = await Promise.all([api('/api/projects'), api('/api/engines'), api('/api/ai-settings')]);
-    state.engines = engines; state.ai = ai;
+    const enginesTask = api('/api/engines');
+    const aiTask = api('/api/ai-settings');
+    enginesTask.catch(() => {});
+    aiTask.catch(() => {});
+    const projects = await api('/api/projects');
     const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
     adoptProject(project);
+    const [engines, ai] = await Promise.all([enginesTask, aiTask]);
+    state.engines = engines; state.ai = ai;
+    updateEngineOptions(state.project?.settings?.ocrEngine || 'rapidocr-v6');
     await refreshProjectList(projects.length ? projects : null);
     await loadAiSettings(ai);
     const unrenderedIds = sortedImages().filter((item) => hasOverlayText(item) && !item.edited).map((item) => item.id);
@@ -6925,15 +7542,15 @@ async function init() {
       const startupRenderTask = renderImagesText(unrenderedIds);
       projectLoadTasks.add(startupRenderTask);
       startupRenderTask.finally(() => projectLoadTasks.delete(startupRenderTask)).catch(() => {});
-      await startupRenderTask;
+      startupRenderTask.catch(() => {});
     }
     syncEngineUpdateUi();
     const shouldCheckUpdates = !startupUpdateChecked && state.engines.some((entry) => entry.runtimeInstalled);
     if (shouldCheckUpdates) {
       startupUpdateChecked = true;
-      checkEngineUpdates({ force: false, silent: true }).catch(() => {});
+      setTimeout(() => { checkEngineUpdates({ force: false, silent: true }).catch(() => {}); }, 800);
     } else {
-      refreshEngineMemory().catch(() => {});
+      setTimeout(() => { refreshEngineMemory().catch(() => {}); }, 500);
     }
   } catch (error) { toast(`راه‌اندازی ناموفق: ${error.message}`, true); }
 }

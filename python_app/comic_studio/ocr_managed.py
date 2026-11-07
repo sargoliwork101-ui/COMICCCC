@@ -715,7 +715,7 @@ def iter_parallel_ordered(
                 pending_fut.cancel()
 
 
-def configure_native_runtime() -> dict[str, Any]:
+def configure_native_runtime(eager_cv2: bool = True) -> dict[str, Any]:
     """Configure OpenCV, OpenMP/BLAS, and transparent OpenCL GPU acceleration once per process."""
     global _RUNTIME_CONFIGURED
     cores = cpu_core_count()
@@ -727,20 +727,24 @@ def configure_native_runtime() -> dict[str, Any]:
 
     cv_threads = cores
     opencl_active = False
-    try:
-        import cv2
-        cv2.setUseOptimized(True)
-        cv2.setNumThreads(cores)
-        cv_threads = int(cv2.getNumThreads())
-        if hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
-            hw = inspect_hardware()
-            if hw.get("hasGpu"):
-                cv2.ocl.setUseOpenCL(True)
-                opencl_active = bool(cv2.ocl.useOpenCL())
-    except Exception:
-        pass
-    with _RUNTIME_LOCK:
-        _RUNTIME_CONFIGURED = True
+    if eager_cv2:
+        with _RUNTIME_LOCK:
+            already_configured = _RUNTIME_CONFIGURED
+        if not already_configured:
+            try:
+                import cv2
+                cv2.setUseOptimized(True)
+                cv2.setNumThreads(cores)
+                cv_threads = int(cv2.getNumThreads())
+                if hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
+                    hw = inspect_hardware()
+                    if hw.get("hasGpu"):
+                        cv2.ocl.setUseOpenCL(True)
+                        opencl_active = bool(cv2.ocl.useOpenCL())
+            except Exception:
+                pass
+            with _RUNTIME_LOCK:
+                _RUNTIME_CONFIGURED = True
     return {"cpuCores": cores, "cvThreads": cv_threads, "openclActive": opencl_active}
 
 
@@ -984,6 +988,74 @@ def _detect_other_gpu() -> tuple[bool, str, float, str, str]:
         return False, "", 0.0, "", ""
 
     if os.name == "nt":
+        virtual_tokens = (
+            "microsoft basic",
+            "remote",
+            "hyper-v",
+            "parsec",
+            "indirect",
+            "virtual",
+            "vmware",
+            "vbox",
+            "citrix",
+        )
+        # Fast in-process Windows Registry display-adapter lookup (<1 ms vs 2-4 s cold PowerShell CIM).
+        try:
+            import winreg  # type: ignore[import-not-found]
+
+            reg_path = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+            best_name = ""
+            best_vram_gb = 0.0
+            best_vendor = ""
+            best_score = -1
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as class_key:
+                for sub_idx in range(32):
+                    try:
+                        sub_name = winreg.EnumKey(class_key, sub_idx)
+                    except OSError:
+                        break
+                    if not (len(sub_name) == 4 and sub_name.isdigit()):
+                        continue
+                    try:
+                        with winreg.OpenKey(class_key, sub_name) as dev_key:
+                            desc_val, _ = winreg.QueryValueEx(dev_key, "DriverDesc")
+                            name = str(desc_val or "").strip()
+                            lower = name.lower()
+                            if not name or any(tok in lower for tok in virtual_tokens):
+                                continue
+                            ram_bytes = 0
+                            for mem_key in ("HardwareInformation.qwMemorySize", "HardwareInformation.MemorySize"):
+                                try:
+                                    raw_mem, _ = winreg.QueryValueEx(dev_key, mem_key)
+                                    if isinstance(raw_mem, int):
+                                        ram_bytes = raw_mem
+                                    elif isinstance(raw_mem, (bytes, bytearray)) and raw_mem:
+                                        ram_bytes = int.from_bytes(raw_mem, "little", signed=False)
+                                    if ram_bytes > 0:
+                                        break
+                                except OSError:
+                                    continue
+                            vram_gb = round(max(0, ram_bytes) / (1024 ** 3), 1) if ram_bytes > 0 else 0.0
+                            if "nvidia" in lower or "geforce" in lower or "rtx" in lower or "quadro" in lower:
+                                vendor, score = "nvidia", 3
+                            elif "amd" in lower or "radeon" in lower:
+                                vendor, score = "amd", 2
+                            elif "intel" in lower or "arc" in lower or "iris" in lower:
+                                vendor, score = "intel", 1
+                            else:
+                                vendor, score = "other", 1
+                            if score > best_score or (score == best_score and vram_gb >= best_vram_gb):
+                                best_name = name
+                                best_vram_gb = vram_gb
+                                best_vendor = vendor
+                                best_score = score
+                    except OSError:
+                        continue
+            if best_name:
+                return True, best_name, best_vram_gb, best_vendor, "directml"
+        except Exception:
+            pass
+
         ps = shutil.which("powershell.exe") or shutil.which("powershell")
         if ps:
             try:
@@ -1006,17 +1078,6 @@ def _detect_other_gpu() -> tuple[bool, str, float, str, str]:
                 if proc.returncode == 0 and proc.stdout.strip():
                     raw = json.loads(proc.stdout.strip())
                     adapters = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
-                    virtual_tokens = (
-                        "microsoft basic",
-                        "remote",
-                        "hyper-v",
-                        "parsec",
-                        "indirect",
-                        "virtual",
-                        "vmware",
-                        "vbox",
-                        "citrix",
-                    )
                     best_name = ""
                     best_vram_gb = 0.0
                     best_vendor = ""

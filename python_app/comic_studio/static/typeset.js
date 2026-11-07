@@ -914,7 +914,217 @@
     const paintRect = ([style, x, y, width, height]) => { ctx.fillStyle = style; ctx.fillRect(x, y, width, height); };
     targetFills.forEach(paintRect);
     textJobs.forEach((paintText) => paintText());
+    if (hasActiveWatermark(o.watermark)) {
+      drawWatermark(ctx, W, H, o.watermark, o.watermarkLogos);
+    }
     return cv;
+  }
+
+  const RTL_WM_RE = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
+
+  function hasActiveWatermark(wm) {
+    if (!wm || typeof wm !== 'object' || wm.enabled === false) return false;
+    const text = String(wm.text || '').trim();
+    const hasLogo = Boolean((wm.logoId && String(wm.logoId).trim()) || (wm.logoDataUrl && String(wm.logoDataUrl).trim()));
+    return Boolean(text || hasLogo);
+  }
+
+  function roundedRectPath(ctx, x, y, w, h, r) {
+    const rad = Math.max(0, Math.min(r, w / 2, h / 2));
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(x, y, w, h, rad);
+      return;
+    }
+    if (typeof ctx.moveTo === 'function' && typeof ctx.arcTo === 'function') {
+      ctx.moveTo(x + rad, y);
+      ctx.arcTo(x + w, y, x + w, y + h, rad);
+      ctx.arcTo(x + w, y + h, x, y + h, rad);
+      ctx.arcTo(x, y + h, x, y, rad);
+      ctx.arcTo(x, y, x + w, y, rad);
+      if (typeof ctx.closePath === 'function') ctx.closePath();
+      return;
+    }
+  }
+
+  function resolveLogoDrawable(wm, logosMap) {
+    if (!wm || typeof wm !== 'object') return null;
+    const map = logosMap && typeof logosMap === 'object' ? logosMap : null;
+    if (wm._logoDrawable) return wm._logoDrawable;
+    const logoId = String(wm.logoId || '').trim();
+    if (logoId && map) {
+      const entry = map instanceof Map ? map.get(logoId) : map[logoId];
+      if (!entry) return null;
+      if (entry._drawable) return entry._drawable;
+      if (typeof entry.width === 'number' && typeof entry.height === 'number' && !entry.dataUrl) return entry;
+    }
+    return null;
+  }
+
+  function drawWatermarkStamp(ctx, W, H, wm, logoImg, stampOpts) {
+    const textRaw = String(wm.text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+    const lines = textRaw ? textRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+    if (!lines.length && !logoImg) return null;
+    const minDim = Math.max(200, Math.min(W, H));
+    const scalePct = Math.max(1.0, Math.min(25.0, Number(wm.sizePct) || 3.5));
+    const fontPx = Math.max(12, Math.round(minDim * (scalePct / 100)));
+    const bold = wm.bold !== false;
+    const color = /^#[0-9a-fA-F]{6}$/.test(String(wm.color || '').trim()) ? String(wm.color).trim() : '#ffffff';
+    const outline = wm.outline !== false;
+    const outlineColor = /^#[0-9a-fA-F]{6}$/.test(String(wm.outlineColor || '').trim()) ? String(wm.outlineColor).trim() : '#000000';
+    const bgPill = Boolean(wm.bgPill);
+    const bgColor = /^#[0-9a-fA-F]{6}$/.test(String(wm.bgColor || '').trim()) ? String(wm.bgColor).trim() : '#000000';
+    const fontSpec = `${bold ? '700' : '400'} ${fontPx}px ${FONT}`;
+
+    ctx.font = fontSpec;
+    const lh = Math.max(fontPx + 4, Math.round(fontPx * 1.32));
+    const lineWidths = lines.map((ln) => Math.max(1, Math.ceil((typeof ctx.measureText === 'function' ? ctx.measureText(ln)?.width : 0) || (ln.length * fontPx * 0.55))));
+    const textW = lineWidths.length ? Math.max(...lineWidths) : 0;
+    const textH = lines.length ? lines.length * lh : 0;
+
+    let logoW = 0, logoH = 0;
+    if (logoImg) {
+      const srcW = Math.max(1, Number(logoImg.naturalWidth || logoImg.width || 64));
+      const srcH = Math.max(1, Number(logoImg.naturalHeight || logoImg.height || 64));
+      const logoScalePct = Math.max(2.0, Math.min(45.0, Number(wm.logoScalePct) || Math.max(6.0, scalePct * 2.2)));
+      const targetMax = Math.max(20, Math.round(minDim * (logoScalePct / 100)));
+      const ratio = Math.min(targetMax / srcW, targetMax / srcH);
+      logoW = Math.max(12, Math.round(srcW * ratio));
+      logoH = Math.max(12, Math.round(srcH * ratio));
+    }
+
+    const gap = (logoW && textW) ? Math.max(6, Math.round(fontPx * 0.42)) : 0;
+    const padX = bgPill ? Math.max(10, Math.round(fontPx * 0.58)) : Math.max(4, Math.round(fontPx * 0.2));
+    const padY = bgPill ? Math.max(6, Math.round(fontPx * 0.36)) : Math.max(4, Math.round(fontPx * 0.2));
+    const contentW = logoW + gap + textW;
+    const contentH = Math.max(logoH, textH, 1);
+    const boxW = contentW + padX * 2;
+    const boxH = contentH + padY * 2;
+
+    if (stampOpts?.measureOnly) {
+      return { boxW, boxH, fontPx };
+    }
+
+    const cx = Number(stampOpts?.cx) || W / 2;
+    const cy = Number(stampOpts?.cy) || H / 2;
+    const angleDeg = Number(stampOpts?.angleDeg) || 0;
+    const opacity = Math.max(0.05, Math.min(1.0, (Number(wm.opacity) || 55) / 100));
+    const isRtl = lines.some((ln) => RTL_WM_RE.test(ln));
+
+    ctx.save?.();
+    ctx.globalAlpha = opacity;
+    if (typeof ctx.translate === 'function') ctx.translate(cx, cy);
+    if (angleDeg && typeof ctx.rotate === 'function') ctx.rotate((angleDeg * Math.PI) / 180);
+
+    const x0 = typeof ctx.translate === 'function' ? -boxW / 2 : cx - boxW / 2;
+    const y0 = typeof ctx.translate === 'function' ? -boxH / 2 : cy - boxH / 2;
+
+    if (bgPill) {
+      ctx.save?.();
+      ctx.globalAlpha = opacity * 0.58;
+      ctx.fillStyle = bgColor;
+      if ((typeof ctx.roundRect === 'function' || typeof ctx.arcTo === 'function') && typeof ctx.fill === 'function') {
+        roundedRectPath(ctx, x0, y0, boxW, boxH, Math.max(6, Math.round(fontPx * 0.42)));
+        ctx.fill();
+      } else {
+        ctx.fillRect?.(x0, y0, boxW, boxH);
+      }
+      ctx.restore?.();
+    }
+
+    // In RTL, place logo on the right side of text (or left in LTR) for natural reading order.
+    let logoX = x0 + padX;
+    let textLeft = x0 + padX + (logoW ? logoW + gap : 0);
+    if (isRtl && logoW && textW) {
+      textLeft = x0 + padX;
+      logoX = x0 + padX + textW + gap;
+    }
+
+    if (logoImg && logoW > 0 && logoH > 0) {
+      const logoY = y0 + Math.round((boxH - logoH) / 2);
+      ctx.drawImage?.(logoImg, logoX, logoY, logoW, logoH);
+    }
+
+    if (lines.length) {
+      ctx.font = fontSpec;
+      ctx.textBaseline = 'middle';
+      if ('direction' in ctx) ctx.direction = isRtl ? 'rtl' : 'ltr';
+      ctx.textAlign = 'center';
+      const textCenterX = textLeft + textW / 2;
+      let curY = y0 + (boxH - textH) / 2 + lh / 2;
+      const strokeW = Math.max(2, Math.round(fontPx * 0.14));
+      lines.forEach((ln) => {
+        if (outline && typeof ctx.strokeText === 'function') {
+          ctx.lineWidth = strokeW;
+          ctx.strokeStyle = outlineColor;
+          ctx.lineJoin = 'round';
+          ctx.strokeText(ln, textCenterX, curY);
+        }
+        ctx.fillStyle = color;
+        ctx.fillText?.(ln, textCenterX, curY);
+        curY += lh;
+      });
+    }
+    ctx.restore?.();
+    return { boxW, boxH, fontPx };
+  }
+
+  function drawWatermark(ctx, W, H, wm, logosMap) {
+    if (!hasActiveWatermark(wm) || !ctx || W <= 0 || H <= 0) return false;
+    const logoImg = resolveLogoDrawable(wm, logosMap);
+    const measured = drawWatermarkStamp(ctx, W, H, wm, logoImg, { measureOnly: true });
+    if (!measured) return false;
+
+    const position = ['bottom-left', 'bottom-right', 'top-left', 'top-right', 'center', 'diagonal', 'tile'].includes(String(wm.position || ''))
+      ? String(wm.position)
+      : 'bottom-left';
+    const minDim = Math.max(200, Math.min(W, H));
+    const marginPct = Math.max(0.5, Math.min(20.0, Number(wm.marginPct ?? 2.5)));
+    const marginPx = Math.max(8, Math.round(minDim * (marginPct / 100)));
+    const rawAngle = wm.angle !== undefined && wm.angle !== null && wm.angle !== ''
+      ? Number(wm.angle)
+      : (position === 'diagonal' || position === 'tile' ? -30 : 0);
+    const angleDeg = Math.max(-90, Math.min(90, Number.isFinite(rawAngle) ? rawAngle : 0));
+
+    if (position === 'tile') {
+      const tileGapPct = Math.max(6.0, Math.min(60.0, Number(wm.tileGapPct) || 22.0));
+      const rad = Math.abs((angleDeg * Math.PI) / 180);
+      const rotW = Math.abs(measured.boxW * Math.cos(rad)) + Math.abs(measured.boxH * Math.sin(rad));
+      const rotH = Math.abs(measured.boxW * Math.sin(rad)) + Math.abs(measured.boxH * Math.cos(rad));
+      const stepX = Math.max(Math.round(rotW) + 28, Math.round(W * (tileGapPct / 100)) + Math.round(rotW * 0.55));
+      const stepY = Math.max(Math.round(rotH) + 24, Math.round(H * (tileGapPct / 100) * 0.85) + Math.round(rotH * 0.55));
+      let rowIdx = 0;
+      for (let cy = Math.round(-rotH / 2); cy < H + Math.round(rotH); cy += stepY) {
+        const offsetX = rowIdx % 2 === 1 ? Math.round(stepX / 2) : 0;
+        for (let cx = Math.round(-rotW / 2) + offsetX; cx < W + Math.round(rotW); cx += stepX) {
+          drawWatermarkStamp(ctx, W, H, wm, logoImg, { cx, cy, angleDeg });
+        }
+        rowIdx += 1;
+      }
+      return true;
+    }
+
+    const rad = Math.abs((angleDeg * Math.PI) / 180);
+    const effW = angleDeg ? Math.abs(measured.boxW * Math.cos(rad)) + Math.abs(measured.boxH * Math.sin(rad)) : measured.boxW;
+    const effH = angleDeg ? Math.abs(measured.boxW * Math.sin(rad)) + Math.abs(measured.boxH * Math.cos(rad)) : measured.boxH;
+    let cx = W / 2, cy = H / 2;
+    if (position === 'bottom-left') {
+      cx = marginPx + effW / 2;
+      cy = H - marginPx - effH / 2;
+    } else if (position === 'bottom-right') {
+      cx = W - marginPx - effW / 2;
+      cy = H - marginPx - effH / 2;
+    } else if (position === 'top-left') {
+      cx = marginPx + effW / 2;
+      cy = marginPx + effH / 2;
+    } else if (position === 'top-right') {
+      cx = W - marginPx - effW / 2;
+      cy = marginPx + effH / 2;
+    }
+    cx = Math.max(effW / 2, Math.min(W - effW / 2, cx));
+    cy = Math.max(effH / 2, Math.min(H - effH / 2, cy));
+    drawWatermarkStamp(ctx, W, H, wm, logoImg, { cx, cy, angleDeg });
+    return true;
   }
 
   function lineAnchorCenter(layoutBox) {
@@ -923,7 +1133,8 @@
 
   const api = {
     FONT, render, releaseCaches, sampleBg, fit, wrapWords, blockStyle, boxInset, indentGeometry, fitBlockSize,
-    hasInlineMarks, tokenizeInline, inlineMarksToHtml, stripInlineMarkers, inlineWords, richHtmlWords, fitInline, visualLineOrder
+    hasInlineMarks, tokenizeInline, inlineMarksToHtml, stripInlineMarkers, inlineWords, richHtmlWords, fitInline, visualLineOrder,
+    hasActiveWatermark, drawWatermark
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Typeset = api;
 })(typeof window !== 'undefined' ? window : globalThis);

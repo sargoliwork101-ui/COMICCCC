@@ -13,3 +13,6 @@ python_app/exports/
 
 python_app/build/
 python_app/dist/
+python_app/wheelhouse/
+python_app/*.spec
+

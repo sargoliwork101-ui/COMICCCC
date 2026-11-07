@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape as xml_escape
 
-import pymupdf as fitz
 from PIL import Image, ImageDraw
 
 from .activity import emit
 from .ocr_managed import compute_worker_count, iter_parallel_ordered
 from .paths import project_root
 from .store import ProjectStore
+from .watermark_render import apply_watermark_pil, has_active_watermark
 
 SAFE_PT = 14300.0
 HARD_PT = 14400.0
@@ -90,16 +90,24 @@ def crop_box(item: dict[str, Any]) -> tuple[int, int, int, int] | None:
         return None
 
 
-def image_payload(store: ProjectStore, project_id: str, item: dict[str, Any], image_format: str = "orig") -> tuple[bytes, str, int, int]:
+def image_payload(
+    store: ProjectStore,
+    project_id: str,
+    item: dict[str, Any],
+    image_format: str = "orig",
+    *,
+    logos_map: dict[str, Any] | None = None,
+) -> tuple[bytes, str, int, int]:
     """Return final bytes without recompressing an untouched original or uncropped PNG render."""
     edited_path = project_root(project_id) / "images" / f"{item['id']}-edited.png"
     has_edited = edited_path.exists()
     source_path = edited_path if has_edited else project_root(project_id) / "images" / item["file"]
     content = source_path.read_bytes()
     crop = crop_box(item)
+    needs_backend_wm = (not has_edited) and has_active_watermark(item.get("watermark"))
     target = image_format if image_format in {"png", "jpg"} else "orig"
     original_format = "png" if has_edited else ("jpg" if item["format"] == "JPEG" else "png")
-    if not crop:
+    if not crop and not needs_backend_wm:
         if has_edited and target in {"orig", "png"}:
             with Image.open(io.BytesIO(content)) as opened:
                 return content, "png", opened.width, opened.height
@@ -108,10 +116,19 @@ def image_payload(store: ProjectStore, project_id: str, item: dict[str, Any], im
             or (item["format"] == "JPEG" and target in {"orig", "jpg"})
         ):
             return content, original_format, item["width"], item["height"]
+    resolved_logos = logos_map
+    if needs_backend_wm and resolved_logos is None and isinstance(item.get("watermark"), dict) and item["watermark"].get("logoId"):
+        with contextlib.suppress(Exception):
+            resolved_logos = ((store.get(project_id).get("settings") or {}).get("watermarkLogos") or {})
     with Image.open(io.BytesIO(content)) as opened:
         image = opened.convert("RGB") if target == "jpg" or original_format == "jpg" else opened.convert("RGBA")
         if crop:
             image = image.crop(crop)
+        if needs_backend_wm:
+            watermarked = apply_watermark_pil(image, item.get("watermark"), resolved_logos)
+            if watermarked is not image:
+                image.close()
+                image = watermarked
         output_format = "JPEG" if (target == "jpg" or (target == "orig" and original_format == "jpg")) else "PNG"
         buffer = io.BytesIO()
         if output_format == "JPEG":
@@ -217,8 +234,9 @@ def _iter_pdf_entries(
     def _render_unit(_idx: int, unit: tuple[list[dict[str, Any]], bool]) -> dict[str, Any]:
         members, should_compose = unit
         member_entries: list[dict[str, Any]] = []
+        logos_map = ((state.get("settings") or {}).get("watermarkLogos") or {})
         for item in members:
-            data, _, width, height = image_payload(store, project_id, item)
+            data, _, width, height = image_payload(store, project_id, item, logos_map=logos_map)
             member_entries.append({
                 "data": data,
                 "w": width,
@@ -250,7 +268,9 @@ def _page_scale(width: float, height: float) -> float:
     return min(0.75, HARD_PT / max(width, 1), SAFE_PT / max(height, 1))
 
 
-def _insert(document: fitz.Document, width: float, height: float, entries: list[dict[str, Any]], stacked: bool = False) -> None:
+def _insert(document: Any, width: float, height: float, entries: list[dict[str, Any]], stacked: bool = False) -> None:
+    import pymupdf as fitz
+
     scale = _page_scale(width, height)
     page = document.new_page(width=width * scale, height=height * scale)
     if not stacked:
@@ -269,6 +289,8 @@ def _insert(document: fitz.Document, width: float, height: float, entries: list[
 
 
 def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any]) -> Path:
+    import pymupdf as fitz
+
     images = selected_images(state, request.get("image_ids", []))
     if not images:
         raise ValueError("No images selected")
@@ -336,8 +358,10 @@ def build_images_zip(store: ProjectStore, state: dict[str, Any], request: dict[s
     total = max(1, len(images))
     workers, _ = compute_worker_count(len(images), per_worker_mb=130, max_cap=8)
 
+    logos_map = ((state.get("settings") or {}).get("watermarkLogos") or {})
+
     def _prepare_zip_item(_idx: int, item: dict[str, Any]) -> tuple[bytes, str]:
-        data, extension, _, _ = image_payload(store, project_id, item, target_format)
+        data, extension, _, _ = image_payload(store, project_id, item, target_format, logos_map=logos_map)
         return data, extension
 
     with _atomic_export_path(output) as tmp_output:
@@ -383,6 +407,14 @@ def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
             hang_extra = " " * (round(float(block.get("hangingIndent") or 0) * 2) if role != "heading" else 0)
             ocr_text = _strip_inline_markers(_clean_text(block.get("text") or "")).strip("\r\n")
             tr_text = _block_translation_plain(block).strip("\r\n")
+            if block.get("manual") is True and not ocr_text and tr_text:
+                id_prefix = f"[{block.get('id', '-')}] "
+                tr_lines = tr_text.split("\n")
+                chunks.append(f"{id_prefix}(متن دستی): {tr_lines[0]}")
+                for tln in tr_lines[1:]:
+                    chunks.append(f"{' ' * len(id_prefix)}             {tln}")
+                chunks[-1] = chunks[-1] + "\n"
+                continue
 
             ocr_lines = ocr_text.split("\n") if ocr_text else [""]
             id_prefix = f"[{block.get('id', '-')}] "
@@ -529,6 +561,14 @@ def _block_translation_plain(block: dict[str, Any]) -> str:
 
 
 def _effective_docx_block_mode(block: dict[str, Any], docx_mode: str) -> str:
+    if block.get("manual") is True:
+        has_tr = bool(_block_translation_plain(block).strip())
+        has_ocr = bool(_strip_inline_markers(_clean_text(block.get("text") or "")).strip())
+        if docx_mode == "ocr":
+            return "ocr" if has_ocr else ("translation" if has_tr else "ocr")
+        if str(block.get("textMode") or "").lower() == "ocr":
+            return "ocr" if has_ocr else ("translation" if has_tr else "ocr")
+        return "translation" if has_tr else ("ocr" if has_ocr else "translation")
     if docx_mode == "ocr":
         return "ocr"
     return "ocr" if str(block.get("textMode") or "").lower() == "ocr" else "translation"
@@ -859,6 +899,7 @@ def _prepare_docx_pages(
     *,
     target_label: str = "فایل Word",
     spool_dir: Path | None = None,
+    project_settings: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build per-page cleaned background images and scaled block specs (supporting page groups).
 
@@ -887,6 +928,9 @@ def _prepare_docx_pages(
 
     total_units = max(1, len(grouped_units))
     workers, _ = compute_worker_count(len(grouped_units), per_worker_mb=180, max_cap=8)
+    settings_dict = project_settings if isinstance(project_settings, dict) else {}
+    erase_original = settings_dict.get("eraseOriginal", True) is not False
+    watermark_logos = settings_dict.get("watermarkLogos") if isinstance(settings_dict.get("watermarkLogos"), dict) else {}
 
     def _render_unit(unit_zero_idx: int, item_members: list[dict[str, Any]]) -> dict[str, Any]:
         page_idx = unit_zero_idx + 1
@@ -903,6 +947,11 @@ def _prepare_docx_pages(
                     cropped = im.crop(crop)
                     im.close()
                     im = cropped
+                if has_active_watermark(item.get("watermark")):
+                    wm_im = apply_watermark_pil(im, item.get("watermark"), watermark_logos)
+                    if wm_im is not im:
+                        im.close()
+                        im = wm_im
                 loaded_members.append({
                     "image": im,
                     "w": im.width,
@@ -970,7 +1019,7 @@ def _prepare_docx_pages(
                 bg_mode = str(spec["block"].get("bg") or "auto")
                 ix0, iy0 = int(round(spec["x0"])), int(round(spec["y0"]))
                 ix1, iy1 = int(round(spec["x1"])), int(round(spec["y1"]))
-                if bg_mode == "none":
+                if bg_mode == "none" or (not erase_original and bg_mode in {"", "auto"}):
                     spec["bg_rgb"] = _sample_box_bg(canvas, ix0, iy0, ix1, iy1)
                     continue
                 if bg_mode == "white":
@@ -1246,7 +1295,14 @@ def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
     if request.get("docx_layout") == "flowing":
         return _build_flowing_docx(store, state, images, request, docx_mode)
     with tempfile.TemporaryDirectory(prefix="comic-docx-") as spool_raw:
-        pages = _prepare_docx_pages(store, state["id"], images, docx_mode, spool_dir=Path(spool_raw))
+        pages = _prepare_docx_pages(
+            store,
+            state["id"],
+            images,
+            docx_mode,
+            spool_dir=Path(spool_raw),
+            project_settings=state.get("settings") or {},
+        )
         return _finalize_visual_docx(state, request, docx_mode, pages)
 
 
@@ -2049,7 +2105,13 @@ def build_pptx(store: ProjectStore, state: dict[str, Any], request: dict[str, An
 
     with tempfile.TemporaryDirectory(prefix="comic-pptx-") as spool_raw:
         pages = _prepare_docx_pages(
-            store, state["id"], images, pptx_mode, target_label="فایل PowerPoint", spool_dir=Path(spool_raw),
+            store,
+            state["id"],
+            images,
+            pptx_mode,
+            target_label="فایل PowerPoint",
+            spool_dir=Path(spool_raw),
+            project_settings=state.get("settings") or {},
         )
         return _finalize_visual_pptx(state, request, pptx_mode, pages)
 

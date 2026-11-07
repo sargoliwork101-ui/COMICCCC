@@ -67,6 +67,9 @@ def _validate_state(state: Any) -> dict[str, Any]:
         blocks = item.get('blocks', [])
         if not isinstance(blocks, list) or any(not isinstance(block, dict) for block in blocks):
             raise BackupError('متن‌های تصویر در بک‌آپ معتبر نیستند.')
+        wm = item.get('watermark')
+        if wm is not None and not isinstance(wm, dict):
+            raise BackupError('اطلاعات واترمارک تصویر در بک‌آپ معتبر نیست.')
         seen.add(image_id); names.add(name)
     return state
 

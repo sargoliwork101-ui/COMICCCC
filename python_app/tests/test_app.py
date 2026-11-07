@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.04"
+    assert health.json()["version"] == "4.05"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۰۴ · Python</span>' in index_html
+    assert '<span class="ver">۴.۰۵ · Python</span>' in index_html
     assert "مدیریت مدل‌های OCR" in index_html
     assert "مدیریت ترجمه‌ها" in index_html
     assert 'id="deleteModelsMenuBtn"' not in index_html
@@ -3291,7 +3291,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.04"
+    assert APP_VERSION == "4.05"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -3707,6 +3707,207 @@ def test_v403_backup_prepare_stream_cleanup_restore_empty_projects_office_locks_
     with scoped_client(create_app()):
         assert not orphan_zip.exists()
         assert not orphan_stage.exists()
+
+
+def test_v405_manual_blocks_watermarks_erase_original_and_bundled_models(client, tmp_path, monkeypatch):
+    import base64
+    import io
+    import zipfile
+    from PIL import Image
+    import comic_studio.paths as paths_mod
+    import comic_studio.main as main_mod
+    from comic_studio.local_nmt import LocalNmtManager
+    from comic_studio.ocr import RapidEngine
+    from comic_studio.watermark_render import apply_watermark_pil, has_active_watermark, shape_visual_text
+
+    # 1. Persian shaping + PIL watermark rendering (Text + Transparent PNG Logo across corner & tile)
+    shaped = shape_visual_text("سلام دنیا 123")
+    assert shaped and len(shaped) >= 8
+    logo_buf = io.BytesIO()
+    Image.new("RGBA", (32, 32), (255, 40, 40, 210)).save(logo_buf, "PNG")
+    logo_data_url = "data:image/png;base64," + base64.b64encode(logo_buf.getvalue()).decode("ascii")
+    logos_map = {"logo-1": {"id": "logo-1", "name": "قرمز", "dataUrl": logo_data_url}}
+    base_img = Image.new("RGB", (320, 240), (245, 245, 245))
+    wm_cfg = {
+        "enabled": True,
+        "text": "ترجمه اختصاصی",
+        "logoId": "logo-1",
+        "logoScalePct": 12,
+        "position": "bottom-left",
+        "sizePct": 5,
+        "opacity": 85,
+        "outline": True,
+        "bgPill": True,
+    }
+    assert has_active_watermark(wm_cfg)
+    stamped = apply_watermark_pil(base_img, wm_cfg, logos_map)
+    assert stamped.size == base_img.size
+    assert stamped.tobytes() != base_img.tobytes()
+
+    tiled = apply_watermark_pil(base_img, {**wm_cfg, "position": "tile", "tileGapPct": 25}, logos_map)
+    assert tiled.tobytes() != base_img.tobytes()
+
+    # 2. Create a dark-patterned page and save manual blocks + watermark + eraseOriginal=False
+    project = client.post("/api/projects", json={"name": "آزمون ۴.۰۵"}).json()
+    pid = project["id"]
+    dark_page = Image.new("RGB", (300, 220), (20, 30, 45))
+    img_buf = io.BytesIO()
+    dark_page.save(img_buf, "PNG")
+    uploaded = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("cover.png", img_buf.getvalue(), "image/png"))],
+    )
+    assert uploaded.status_code == 200
+    proj_state = uploaded.json()
+    img_item = proj_state["images"][0]
+
+    proj_state["settings"]["eraseOriginal"] = False
+    proj_state["settings"]["watermarkLogos"] = logos_map
+    img_item["watermark"] = wm_cfg
+    img_item["blocks"] = [
+        {
+            "id": 1,
+            "manual": True,
+            "manualLang": "fa",
+            "text": "",
+            "tr": "متن دستی فارسی روی جلد",
+            "richHtml": "",
+            "conf": 100,
+            "enabled": True,
+            "bg": "auto",
+            "textMode": "translation",
+            "dir": "rtl",
+            "align": "center",
+            "x0": 30, "y0": 25, "x1": 240, "y1": 85,
+            "tx0": 30, "ty0": 25, "tx1": 240, "ty1": 85,
+            "lineH": 26,
+        },
+        {
+            "id": 2,
+            "manual": True,
+            "manualLang": "en",
+            "text": "",
+            "tr": "Special Edition",
+            "richHtml": "",
+            "conf": 100,
+            "enabled": True,
+            "bg": "none",
+            "textMode": "translation",
+            "dir": "ltr",
+            "align": "center",
+            "x0": 40, "y0": 100, "x1": 220, "y1": 145,
+            "tx0": 40, "ty0": 100, "tx1": 220, "ty1": 145,
+            "lineH": 22,
+        },
+    ]
+    saved = client.put(f"/api/projects/{pid}/state", json={"state": proj_state})
+    assert saved.status_code == 200
+    reloaded = saved.json()
+    assert reloaded["images"][0]["watermark"]["text"] == "ترجمه اختصاصی"
+    assert reloaded["images"][0]["blocks"][0]["manual"] is True
+
+    # 3. Backup + Restore preserves watermark and manual blocks
+    backup_zip = client.post(f"/api/projects/{pid}/backup", json={})
+    assert backup_zip.status_code == 200
+    restored = client.post(
+        "/api/projects/restore",
+        files={"file": ("wm-backup.zip", backup_zip.content, "application/zip")},
+    )
+    assert restored.status_code == 201
+    restored_img = restored.json()["project"]["images"][0]
+    assert restored_img["watermark"]["logoId"] == "logo-1"
+    assert len(restored_img["blocks"]) == 2
+
+    # 4. Exports (TXT, Visual DOCX, Visual PPTX, ZIP, PDF) include manual blocks & watermark, and honor eraseOriginal=False
+    img_ids = [img_item["id"]]
+    txt_res = client.post(f"/api/projects/{pid}/export", json={"kind": "txt", "name": "out", "image_ids": img_ids})
+    assert txt_res.status_code == 200
+    txt_body = txt_res.content.decode("utf-8")
+    assert "(متن دستی): متن دستی فارسی روی جلد" in txt_body
+    assert "Special Edition" in txt_body
+
+    docx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "docx", "name": "out", "image_ids": img_ids, "docx_layout": "visual", "overlay_mode": "translation"},
+    )
+    assert docx_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(docx_res.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "متن دستی فارسی روی جلد" in doc_xml
+        assert "Special Edition" in doc_xml
+        bg_media = [n for n in zf.namelist() if n.startswith("word/media/")]
+        assert bg_media
+        with Image.open(io.BytesIO(zf.read(bg_media[0]))) as doc_bg:
+            # With eraseOriginal=False and bg="auto", pixel (60, 50) inside block 1 keeps original dark (20,30,45) color
+            r, g, b = doc_bg.convert("RGB").getpixel((60, 50))
+            assert r < 60 and g < 70 and b < 80
+
+    pptx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "pptx", "name": "out", "image_ids": img_ids, "pptx_layout": "visual", "overlay_mode": "ocr"},
+    )
+    assert pptx_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(pptx_res.content)) as zf:
+        slide_xml = zf.read("ppt/slides/slide1.xml").decode("utf-8")
+        # Even in OCR mode, manual blocks with empty source text still export their custom text
+        assert "متن دستی فارسی روی جلد" in slide_xml
+
+    zip_res = client.post(f"/api/projects/{pid}/export", json={"kind": "images", "name": "out", "image_ids": img_ids, "image_format": "png"})
+    assert zip_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(zip_res.content)) as zf:
+        exported_png = zf.read(zf.namelist()[0])
+        with Image.open(io.BytesIO(exported_png)) as exp_im:
+            assert exp_im.convert("RGB").tobytes() != dark_page.tobytes()
+
+    pdf_res = client.post(f"/api/projects/{pid}/export", json={"kind": "pdf", "name": "out", "image_ids": img_ids})
+    assert pdf_res.status_code == 200 and pdf_res.content.startswith(b"%PDF")
+
+    # 5. Re-running OCR via HTTP endpoint preserves manual blocks with fresh non-colliding IDs
+    monkeypatch.setattr(
+        main_mod,
+        "recognize_image",
+        lambda *_a, **_kw: [
+            {"id": 1, "text": "Detected Bubble", "tr": "", "conf": 95.0, "x0": 10, "y0": 10, "x1": 120, "y1": 45, "lineH": 22, "enabled": True}
+        ],
+    )
+    ocr_res = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={"engine": "rapidocr-v6", "language": "eng", "image_ids": [img_item["id"]], "page_mode": "comic"},
+    )
+    assert ocr_res.status_code == 200
+    after_ocr_blocks = ocr_res.json()["images"][0]["blocks"]
+    assert len(after_ocr_blocks) == 3
+    ids = [b["id"] for b in after_ocr_blocks]
+    assert len(ids) == len(set(ids))
+    manual_preserved = [b for b in after_ocr_blocks if b.get("manual") is True]
+    assert len(manual_preserved) == 2
+
+    # 6. Bundled offline models directory is discovered by RapidEngine & LocalNmtManager while keeping model_dir writable
+    bundled_root = tmp_path / "frozen_bundle" / "bundled_models"
+    (bundled_root / "rapidocr").mkdir(parents=True)
+    for fname in ("ch_PP-OCRv5_det_mobile.onnx", "latin_PP-OCRv5_rec_mobile.onnx", "arabic_PP-OCRv5_rec_mobile.onnx"):
+        (bundled_root / "rapidocr" / fname).write_bytes(b"fake-onnx")
+    nmt_bundle = bundled_root / "local-nmt" / "nllb-600m"
+    nmt_bundle.mkdir(parents=True)
+    (nmt_bundle / "model.bin").write_bytes(b"x" * 2048)
+    (nmt_bundle / "config.json").write_text("{}", encoding="utf-8")
+    (nmt_bundle / "sentencepiece.bpe.model").write_bytes(b"sp" * 600)
+    (nmt_bundle / "shared_vocabulary.txt").write_text("a\nb\n", encoding="utf-8")
+
+    empty_user_models = tmp_path / "empty_user_models"
+    monkeypatch.setattr(paths_mod, "bundled_models_dir", lambda: bundled_root)
+    monkeypatch.setattr("comic_studio.ocr.bundled_models_dir", lambda: bundled_root)
+    monkeypatch.setattr("comic_studio.local_nmt.bundled_models_dir", lambda: bundled_root)
+    monkeypatch.setattr("comic_studio.local_nmt.models_dir", lambda: empty_user_models)
+
+    rapid_eng = RapidEngine("rapidocr-v5", "v5")
+    assert "eng" in rapid_eng.ready_languages and "fas" in rapid_eng.ready_languages
+    assert rapid_eng.model_ready is True
+    nmt_mgr = LocalNmtManager()
+    assert nmt_mgr.is_model_files_present("nllb-600m") is True
+    assert nmt_mgr.resolved_model_dir("nllb-600m") == nmt_bundle
+    assert nmt_mgr.model_dir("nllb-600m") == empty_user_models / "local-nmt" / "nllb-600m"
+
 
 
 

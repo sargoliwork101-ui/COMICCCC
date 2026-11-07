@@ -103,3 +103,80 @@ def test_windows_launcher_repairs_relocated_app_folder_offline_without_deleting_
     assert (fake_sp / "comic_ocr_studio_local.pth").read_text(encoding="utf-8").strip() == moved_app
 
 
+def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
+    import sys
+    import zipfile
+    from PIL import Image
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from offline_packaging.build_offline_package import (
+        SFX_MAGIC,
+        append_sfx_zip_payload,
+        generate_windows_ico,
+        pyinstaller_command,
+        read_sfx_trailer,
+        zip_directory,
+    )
+
+    assert 'ComicOCRStudio.exe' in NORMAL
+    assert ':fast_spec_check' in NORMAL
+    assert 'wheelhouse' in NORMAL.lower()
+    assert 'ctranslate2' in NORMAL and 'sentencepiece' in NORMAL
+
+    offline_bat = (ROOT / "build_windows_offline.bat").read_text(encoding="utf-8")
+    assert "offline_packaging.build_offline_package" in offline_bat
+    assert "--with-nmt" in offline_bat
+    assert "ComicOCRStudio-Offline-Setup-4.05" in offline_bat
+
+    iss_text = (ROOT / "offline_packaging" / "ComicOCRStudio.iss").read_text(encoding="utf-8")
+    assert "PrivilegesRequired=lowest" in iss_text
+    assert "ComicOCRStudio.exe" in iss_text
+
+    # Verify multi-resolution .ico generation from static/assets/icon128.png
+    ico_out = generate_windows_ico(
+        ROOT / "comic_studio" / "static" / "assets" / "icon128.png",
+        tmp_path / "ComicOCRStudio.ico",
+    )
+    assert ico_out.is_file() and ico_out.stat().st_size > 1000
+    with Image.open(ico_out) as ico_img:
+        assert ico_img.format == "ICO"
+
+    # Verify PyInstaller command includes bundled_models when staged models exist
+    staged = tmp_path / "bundled_models"
+    (staged / "rapidocr").mkdir(parents=True)
+    (staged / "rapidocr" / "dummy.onnx").write_bytes(b"onnx")
+    cmd = pyinstaller_command(
+        entry_script=ROOT / "run.py",
+        dist_dir=tmp_path / "dist",
+        work_dir=tmp_path / "work",
+        spec_dir=tmp_path,
+        icon_path=ico_out,
+        static_dir=ROOT / "comic_studio" / "static",
+        staged_models_dir=staged,
+    )
+    joined = " ".join(cmd)
+    assert "--onedir" in cmd and "--windowed" in cmd
+    assert "bundled_models" in joined
+    assert "ctranslate2" in joined and "sentencepiece" in joined
+
+    # Verify SFX self-extracting installer binary layout & trailer validation
+    sample_app = tmp_path / "app_dir"
+    sample_app.mkdir()
+    (sample_app / "ComicOCRStudio.exe").write_bytes(b"MZ-MOCK-EXE")
+    (sample_app / "README-OFFLINE-FA.txt").write_text("سلام", encoding="utf-8")
+    payload_zip = zip_directory(sample_app, tmp_path / "payload.zip")
+    stub_exe = tmp_path / "stub.exe"
+    stub_exe.write_bytes(b"MZ-STUB-INSTALLER-HEADER" * 8)
+    setup_exe = append_sfx_zip_payload(stub_exe, payload_zip, tmp_path / "Setup.exe")
+    offset, length = read_sfx_trailer(setup_exe)
+    assert offset == stub_exe.stat().st_size
+    assert length == payload_zip.stat().st_size
+    raw = setup_exe.read_bytes()
+    assert raw[-8:] == SFX_MAGIC
+    import io
+    with zipfile.ZipFile(io.BytesIO(raw[offset : offset + length])) as zf:
+        assert "ComicOCRStudio.exe" in zf.namelist()
+        assert "README-OFFLINE-FA.txt" in zf.namelist()
+
+
+

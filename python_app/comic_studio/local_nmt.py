@@ -21,7 +21,7 @@ from typing import Any, Callable
 import httpx
 
 from .ocr import emit, ensure_custom_site_packages_on_path, install_packages, trim_process_memory
-from .paths import models_dir
+from .paths import bundled_models_dir, models_dir
 
 DEFAULT_LOCAL_NMT_MODEL = "nllb-600m"
 DEFAULT_LOCAL_BEAM_SIZE = 2
@@ -372,15 +372,8 @@ class LocalNmtManager:
     def model_dir(self, model_id: str) -> Path:
         return self.root_dir / normalize_local_nmt_model(model_id)
 
-    def runtime_installed(self) -> bool:
-        ensure_custom_site_packages_on_path()
-        return (
-            importlib.util.find_spec("ctranslate2") is not None
-            and importlib.util.find_spec("sentencepiece") is not None
-        )
-
-    def is_model_files_present(self, model_id: str) -> bool:
-        mdir = self.model_dir(model_id)
+    @staticmethod
+    def _dir_has_valid_nmt_files(mdir: Path) -> bool:
         if not mdir.is_dir():
             return False
         model_bin = mdir / "model.bin"
@@ -401,6 +394,28 @@ class LocalNmtManager:
         except OSError:
             return False
 
+    def resolved_model_dir(self, model_id: str) -> Path:
+        norm_id = normalize_local_nmt_model(model_id)
+        primary = self.root_dir / norm_id
+        if self._dir_has_valid_nmt_files(primary):
+            return primary
+        bundled = bundled_models_dir()
+        if bundled is not None:
+            b_cand = bundled / "local-nmt" / norm_id
+            if self._dir_has_valid_nmt_files(b_cand):
+                return b_cand
+        return primary
+
+    def runtime_installed(self) -> bool:
+        ensure_custom_site_packages_on_path()
+        return (
+            importlib.util.find_spec("ctranslate2") is not None
+            and importlib.util.find_spec("sentencepiece") is not None
+        )
+
+    def is_model_files_present(self, model_id: str) -> bool:
+        return self._dir_has_valid_nmt_files(self.resolved_model_dir(model_id))
+
     def is_ready(self, model_id: str) -> bool:
         return self.runtime_installed() and self.is_model_files_present(model_id)
 
@@ -414,8 +429,8 @@ class LocalNmtManager:
             busy_progress = round(self._busy_progress, 4)
         cards: list[dict[str, Any]] = []
         for mid, meta in LOCAL_NMT_MODELS.items():
-            mdir = self.model_dir(mid)
-            files_ok = self.is_model_files_present(mid)
+            mdir = self.resolved_model_dir(mid)
+            files_ok = self._dir_has_valid_nmt_files(mdir)
             disk_bytes = _dir_size_bytes(mdir) if mdir.is_dir() else 0
             cards.append({
                 "id": mid,
@@ -575,7 +590,7 @@ class LocalNmtManager:
         last_exc: Exception | None = None
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        headers = {"User-Agent": "ComicOCRStudio/4.04"}
+        headers = {"User-Agent": "ComicOCRStudio/4.05"}
         with httpx.Client(headers=headers, follow_redirects=True, transport=self._transport) as client:
             selected_manifest: list[tuple[str, int]] | None = None
             selected_endpoint = endpoints[0]
@@ -762,7 +777,7 @@ class LocalNmtManager:
 
     def _ensure_loaded(self, model_id: str) -> tuple[Any, Any]:
         target_id = normalize_local_nmt_model(model_id)
-        mdir = self.model_dir(target_id)
+        mdir = self.resolved_model_dir(target_id)
         with self._lock:
             if (
                 self._translator is not None

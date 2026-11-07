@@ -3,14 +3,16 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem Comic OCR Studio 4.04 - Windows setup and launcher.
+rem Comic OCR Studio 4.05 - Windows setup and launcher.
 rem Dependencies are installed in .venv during setup; later launches reuse that local environment.
 rem Existing supported system Python installations are never modified or removed.
 
 set "APP_DIR=%CD%"
 set "VENV_DIR=%APP_DIR%\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
-set "READY=%VENV_DIR%\.comic-ocr-studio-4.04.ready"
+set "READY=%VENV_DIR%\.comic-ocr-studio-4.05.ready"
+set "OFFLINE_WHEELS=%APP_DIR%\wheelhouse"
+set "OFFLINE_PYTHON_EXE=%APP_DIR%\offline_python\python-3.13.17-amd64.exe"
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 set "PYTHONNOUSERSITE=1"
 rem Detection must not cause the new Python Install Manager to auto-install runtimes.
@@ -19,12 +21,18 @@ set "PIP_RETRIES=1"
 set "PIP_TIMEOUT=15"
 set "COMIC_MANAGED_PYTHON=%LocalAppData%\Programs\ComicOCRStudio\Python313\python.exe"
 
+rem Fast path: if a standalone packaged ComicOCRStudio.exe sits next to this launcher, run it directly.
+if exist "%APP_DIR%\ComicOCRStudio.exe" (
+    start "" "%APP_DIR%\ComicOCRStudio.exe"
+    exit /b 0
+)
+
 rem A broken or unsupported existing environment is preserved before rebuilding.
 if not exist "%VENV_PYTHON%" goto prepare_python
 "%VENV_PYTHON%" -c "import sys,struct; sys.exit(0 if (3,11) <= sys.version_info[:2] < (3,14) and struct.calcsize('P') == 8 else 1)" >nul 2>&1
 if errorlevel 1 goto unsupported_venv
 if not exist "%READY%" goto have_venv
-"%VENV_PYTHON%" -c "import os,sys,comic_studio; a=os.path.normcase(os.path.realpath(sys.argv[1])); p=os.path.normcase(os.path.realpath(os.path.dirname(os.path.dirname(comic_studio.__file__)))); sys.exit(0 if a==p else 1)" "%APP_DIR%" >nul 2>&1
+"%VENV_PYTHON%" -c "import os,sys,importlib.util as u; s=u.find_spec('comic_studio'); sys.exit(1 if not s or not s.origin else (0 if os.path.normcase(os.path.realpath(sys.argv[1]))==os.path.normcase(os.path.realpath(os.path.dirname(os.path.dirname(s.origin)))) else 1))" "%APP_DIR%" >nul 2>&1
 if errorlevel 1 call :repair_relocated_venv
 echo [Comic OCR Studio] Using the installed packages in this folder's .venv.
 goto run_app
@@ -57,6 +65,15 @@ if errorlevel 1 goto failed
 :have_venv
 set "HAD_READY="
 if exist "%VENV_DIR%\.comic-ocr-studio-*.ready" set "HAD_READY=1"
+if defined HAD_READY (
+    rem Fast version-bump check: if all required packages are already present, avoid slow network pip upgrades.
+    call :fast_spec_check
+    if not errorlevel 1 (
+        call :repair_relocated_venv
+        type nul > "%READY%"
+        goto run_app
+    )
+)
 if not defined HAD_READY (
     set "PIP_RETRIES=5"
     set "PIP_TIMEOUT=90"
@@ -68,6 +85,23 @@ echo [Comic OCR Studio] Restoring pip using Python ensurepip...
 if errorlevel 1 goto failed
 
 :update_tools
+set "PIP_FIND_LINKS="
+if exist "%OFFLINE_WHEELS%\*.whl" set "PIP_FIND_LINKS=--find-links=%OFFLINE_WHEELS%"
+if exist "%OFFLINE_WHEELS%\*.whl" (
+    echo [Comic OCR Studio] Installing packages from local offline wheelhouse...
+    "%VENV_PYTHON%" -m pip install --no-index --find-links="%OFFLINE_WHEELS%" ^
+        "fastapi>=0.115,<1" "uvicorn>=0.30,<1" "python-multipart>=0.0.9,<1" "Pillow>=11,<13" ^
+        "PyMuPDF>=1.24,<2" "numpy>=2,<3" "opencv-python-headless>=4.10,<5" "httpx>=0.27,<1" ^
+        "ctranslate2>=4.0,<5" "sentencepiece>=0.2,<1" "rapidocr>=3.10,<3.11" "onnxruntime>=1.20,<2" "python-bidi>=0.4.2,<1" >nul 2>&1
+    if not errorlevel 1 (
+        call :repair_relocated_venv
+        call :check_imports
+        if not errorlevel 1 (
+            type nul > "%READY%"
+            goto run_app
+        )
+    )
+)
 echo [Comic OCR Studio] Checking pip and Python installation tools...
 "%VENV_PYTHON%" -m pip install --upgrade pip setuptools wheel
 if errorlevel 1 echo [Comic OCR Studio] Could not update installation tools; continuing with the installed tools.
@@ -83,6 +117,8 @@ rem Keep this list in sync with pyproject.toml and the [ocr] extra.
     "numpy>=2,<3" ^
     "opencv-python-headless>=4.10,<5" ^
     "httpx>=0.27,<1" ^
+    "ctranslate2>=4.0,<5" ^
+    "sentencepiece>=0.2,<1" ^
     "rapidocr>=3.10,<3.11" ^
     "onnxruntime>=1.20,<2" ^
     "python-bidi>=0.4.2,<1"
@@ -165,12 +201,20 @@ if not defined LocalAppData exit /b 1
 if not defined TEMP exit /b 1
 if /i "%PROCESSOR_ARCHITECTURE%"=="x86" if not defined PROCESSOR_ARCHITEW6432 exit /b 1
 echo [Comic OCR Studio] No compatible 64-bit Python was found.
-echo [Comic OCR Studio] Downloading the official Python 3.13.17 installer from python.org.
-echo [Comic OCR Studio] It will be installed for this user without changing PATH.
 set "COMIC_PY_INSTALLER=%TEMP%\ComicOCR-Python313-%RANDOM%-%RANDOM%.exe"
 set "COMIC_PY_TARGET=%LocalAppData%\Programs\ComicOCRStudio\Python313"
+if exist "%OFFLINE_PYTHON_EXE%" (
+    echo [Comic OCR Studio] Found bundled offline Python 3.13.17 installer; verifying SHA-256...
+    copy /y "%OFFLINE_PYTHON_EXE%" "%COMIC_PY_INSTALLER%" >nul
+    powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "if ((Get-FileHash -Algorithm SHA256 -LiteralPath $env:COMIC_PY_INSTALLER).Hash -ne '5DA012101BA2E17113A9A1CD901E9CE1441086F2B7ECB5DE06EC94163899A190') { exit 1 }; exit 0"
+    if not errorlevel 1 goto run_py_installer
+    del /q "%COMIC_PY_INSTALLER%" >nul 2>&1
+)
+echo [Comic OCR Studio] Downloading the official Python 3.13.17 installer from python.org.
+echo [Comic OCR Studio] It will be installed for this user without changing PATH.
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "try { $ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri 'https://www.python.org/ftp/python/3.13.17/python-3.13.17-amd64.exe' -OutFile $env:COMIC_PY_INSTALLER; if ((Get-FileHash -Algorithm SHA256 -LiteralPath $env:COMIC_PY_INSTALLER).Hash -ne '5DA012101BA2E17113A9A1CD901E9CE1441086F2B7ECB5DE06EC94163899A190') { throw 'Python installer checksum mismatch.' }; exit 0 } catch { Write-Error $_; exit 1 }"
 if errorlevel 1 goto installer_failed
+:run_py_installer
 echo [Comic OCR Studio] Installing Python for this user...
 start "" /wait "%COMIC_PY_INSTALLER%" /quiet InstallAllUsers=0 "TargetDir=%COMIC_PY_TARGET%" Include_launcher=0 Include_pip=1 Include_test=0 PrependPath=0 AppendPath=0 Shortcuts=0
 set "INSTALL_RESULT=%ERRORLEVEL%"
@@ -186,8 +230,12 @@ if defined COMIC_PY_INSTALLER del /q "%COMIC_PY_INSTALLER%" >nul 2>&1
 echo [Comic OCR Studio] Python download or checksum verification failed.
 exit /b 1
 
+:fast_spec_check
+"%VENV_PYTHON%" -c "import sys,importlib.util as u; pkgs=('fastapi','uvicorn','multipart','PIL','fitz','numpy','cv2','httpx','ctranslate2','sentencepiece','rapidocr','onnxruntime','bidi'); sys.exit(0 if all(u.find_spec(m) is not None for m in pkgs) else 1)" >nul 2>&1
+exit /b %ERRORLEVEL%
+
 :check_imports
-"%VENV_PYTHON%" -c "import fastapi,uvicorn,multipart,PIL,fitz,numpy,cv2,httpx,rapidocr,onnxruntime"
+"%VENV_PYTHON%" -c "import fastapi,uvicorn,multipart,PIL,fitz,numpy,cv2,httpx,ctranslate2,sentencepiece,rapidocr,onnxruntime,bidi"
 exit /b %ERRORLEVEL%
 
 :repair_relocated_venv

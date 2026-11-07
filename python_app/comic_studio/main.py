@@ -136,7 +136,7 @@ class _CleanupFileResponse(FileResponse):
 
 
 def create_app() -> FastAPI:
-    configure_native_runtime()
+    configure_native_runtime(eager_cv2=False)
     cleanup_backup_temp(max_age_seconds=0.0)
     app = FastAPI(title=APP_NAME, version=APP_VERSION)
     store = ProjectStore()
@@ -783,6 +783,7 @@ def create_app() -> FastAPI:
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         from PIL import Image
+        await run_in_threadpool(configure_native_runtime, True)
         await run_in_threadpool(registry.unload_all, engine_id)
         with Image.open(path) as im:
             image = im.copy()
@@ -828,6 +829,7 @@ def create_app() -> FastAPI:
                 entry = pending_results.load(store, project_id, pending['id'])
                 if set(ids).intersection(output['id'] for output in entry['outputs']):
                     raise PendingResultConflict(pending['id'], 'ocr')
+        await run_in_threadpool(configure_native_runtime, True)
         await run_in_threadpool(registry.unload_all, values.engine)
         target_items = [item for item in state["images"] if item["id"] in ids]
         total_targets = len(target_items)
@@ -848,6 +850,11 @@ def create_app() -> FastAPI:
             return round(lo, 4), round(hi, 4)
 
         def _apply_page_ocr_result(item: dict[str, Any], raw_blocks: list[dict[str, Any]], page_size: tuple[int, int], step: int) -> None:
+            preserved_manual = [
+                copy.deepcopy(b)
+                for b in item.get("blocks", [])
+                if isinstance(b, dict) and b.get("manual") is True
+            ]
             for block in raw_blocks:
                 block["bg"] = "auto" if erase_original else "none"
             organized, resolved_mode = organize_ocr_blocks(
@@ -856,6 +863,19 @@ def create_app() -> FastAPI:
                 group_lines=values.group_lines,
                 page_size=page_size,
             )
+            if preserved_manual:
+                next_manual_id = max(
+                    (
+                        int(b["id"])
+                        for b in organized
+                        if isinstance(b.get("id"), int) or (isinstance(b.get("id"), str) and b["id"].isdigit())
+                    ),
+                    default=0,
+                ) + 1
+                for mb in preserved_manual:
+                    mb["id"] = next_manual_id
+                    next_manual_id += 1
+                    organized.append(mb)
             item["blocks"] = organized
             item["pageMode"] = resolved_mode
             item["ocrCompleted"] = True
@@ -2002,4 +2022,13 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
+_default_app: FastAPI | None = None
+
+
+def __getattr__(name: str) -> Any:
+    global _default_app
+    if name == "app":
+        if _default_app is None:
+            _default_app = create_app()
+        return _default_app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

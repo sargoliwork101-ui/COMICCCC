@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pymupdf as fitz
 from PIL import Image, ImageOps
 
 from .activity import emit
@@ -96,11 +95,13 @@ class ProjectStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._image_meta_cache: tuple[str, int, int, dict[str, dict[str, Any]]] | None = None
+        self._list_summary_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
         (data_dir() / "projects").mkdir(parents=True, exist_ok=True)
 
     def reset_caches(self) -> None:
         with self._lock:
             self._image_meta_cache = None
+            self._list_summary_cache.clear()
             (data_dir() / "projects").mkdir(parents=True, exist_ok=True)
 
     def create(self, name: str) -> dict[str, Any]:
@@ -143,13 +144,30 @@ class ProjectStore:
 
     def list(self) -> list[dict[str, Any]]:
         result = []
+        active_keys: set[str] = set()
         for path in (data_dir() / "projects").glob("*/project.json"):
+            key = str(path)
+            active_keys.add(key)
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            cached = self._list_summary_cache.get(key)
+            if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+                result.append(dict(cached[2]))
+                continue
             state = read_json(path, {})
             if state.get("id"):
-                result.append({
+                summary = {
                     "id": state["id"], "name": state.get("name", "پروژه"),
                     "updatedAt": state.get("updatedAt", ""), "images": len(state.get("images", [])),
-                })
+                }
+                self._list_summary_cache[key] = (st.st_mtime_ns, st.st_size, summary)
+                result.append(dict(summary))
+        if len(self._list_summary_cache) > len(active_keys) + 8:
+            for stale_key in list(self._list_summary_cache):
+                if stale_key not in active_keys:
+                    self._list_summary_cache.pop(stale_key, None)
         return sorted(result, key=lambda item: item["updatedAt"], reverse=True)
 
     def get(self, project_id: str) -> dict[str, Any]:
@@ -173,6 +191,16 @@ class ProjectStore:
                     if isinstance(img, dict) and img.get("id")
                 }
                 self._image_meta_cache = (str(state["id"]), st.st_mtime_ns, st.st_size, meta_map)
+                self._list_summary_cache[str(path)] = (
+                    st.st_mtime_ns,
+                    st.st_size,
+                    {
+                        "id": state["id"],
+                        "name": state.get("name", "پروژه"),
+                        "updatedAt": state.get("updatedAt", ""),
+                        "images": len(state.get("images", [])),
+                    },
+                )
             except OSError:
                 self._image_meta_cache = None
             return state
@@ -217,7 +245,7 @@ class ProjectStore:
                 seen.add(image_id)
                 old = existing[image_id]
                 item = dict(old)
-                for key in ("order", "selected", "groupId", "crop", "blocks", "pageMode", "approved"):
+                for key in ("order", "selected", "groupId", "crop", "blocks", "pageMode", "approved", "watermark"):
                     if key in candidate:
                         item[key] = bool(candidate[key]) if key == "approved" else candidate[key]
                 item["edited"] = (project_root(project_id) / "images" / f"{image_id}-edited.png").exists()
@@ -484,6 +512,8 @@ class ProjectStore:
     ) -> None:
         if len(content) > 500 * 1024 * 1024:
             raise ValueError("PDF is too large")
+        import pymupdf as fitz
+
         scale = max(1.0, min(4.0, float(scale)))
         with fitz.open(stream=content, filetype="pdf") as check_doc:
             if check_doc.needs_pass:

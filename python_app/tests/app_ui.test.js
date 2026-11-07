@@ -33,6 +33,7 @@ let imageGate = null;
 let aiSaveFailure = false;
 let activityFeed = { entries: [], next: 0 };
 let renderedBlocks = null;
+let renderedOptions = null;
 let canvasRenderCount = 0;
 let renderedUploads = 0;
 let saveGate = null;
@@ -200,10 +201,13 @@ window.Typeset = {
   indentGeometry: realTypeset.indentGeometry,
   hasInlineMarks: realTypeset.hasInlineMarks,
   inlineMarksToHtml: realTypeset.inlineMarksToHtml,
+  hasActiveWatermark: realTypeset.hasActiveWatermark,
+  drawWatermark: realTypeset.drawWatermark,
   richHtmlWords(html) { return String(html || '').includes('<hr>') ? [{ t: '────────' }] : []; },
-  render(bitmap, blocks) {
+  render(bitmap, blocks, opts) {
     canvasRenderCount += 1;
     renderedBlocks = blocks;
+    renderedOptions = opts || null;
     return { width: 320, height: 200, toBlob(callback) { callback(new window.Blob(['png'], { type: 'image/png' })); } };
   },
 };
@@ -2125,7 +2129,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas404: verText.includes('۴.۰۴'),
+            verHas405: verText.includes('۴.۰۵'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2144,8 +2148,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.04 displays version 4.04 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas404 === true
+      'v4.00/v4.05 displays version 4.05 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas405 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -2711,6 +2715,178 @@ function check(name, condition) {
         && v404LocalNmtCheck.deleteUsedAppModal === true
         && v404LocalNmtCheck.deletedModel === 'nllb-600m',
       JSON.stringify(v404LocalNmtCheck),
+    );
+
+    // v4.05: Verify custom Persian (RTL) & English (LTR) manual text boxes in #editorDialog, empty-source retranslate guard, appConfirm block deletion, Watermark (Text + Transparent Logo) apply/remove, and eraseOriginal=false forwarding
+    let drawnWatermarkFillCalls = 0;
+    let drawnWatermarkLogoCalls = 0;
+    const mockWmCtx = {
+      font: '',
+      fillStyle: '',
+      strokeStyle: '',
+      lineWidth: 1,
+      globalAlpha: 1,
+      textAlign: 'center',
+      textBaseline: 'middle',
+      save() {},
+      restore() {},
+      translate() {},
+      rotate() {},
+      beginPath() {},
+      roundRect() {},
+      fill() {},
+      fillRect() {},
+      measureText(t) { return { width: String(t || '').length * 8 }; },
+      strokeText() {},
+      fillText() { drawnWatermarkFillCalls += 1; },
+      drawImage() { drawnWatermarkLogoCalls += 1; },
+    };
+    const wmDrawnCorner = realTypeset.drawWatermark(
+      mockWmCtx,
+      400,
+      600,
+      { enabled: true, text: 'ترجمه اختصاصی', logoId: 'lg1', position: 'bottom-left', bgPill: true, outline: true },
+      { lg1: { _drawable: { width: 48, height: 48 } } },
+    );
+    const wmDrawnTile = realTypeset.drawWatermark(
+      mockWmCtx,
+      400,
+      600,
+      { enabled: true, text: 'TILE', position: 'tile', tileGapPct: 30 },
+      {},
+    );
+    const previewCallsBeforeManual = translationPreviewCalls.length;
+    const v405Check = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProject = state.project;
+        try {
+          window.fetch = async (url, options = {}) => {
+            const u = String(url);
+            if (u.includes('/content')) return { ok: true, status: 200, blob: async () => new Blob(['img'], { type: 'image/png' }) };
+            if (u.endsWith('/rendered') || u.endsWith('/revert')) return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true, updatedAt: '2026-11-07T12:00:00Z' }) };
+            if (u.endsWith('/state') && options.method === 'PUT') {
+              const saved = JSON.parse(options.body).state;
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => saved };
+            }
+            return origFetch(url, options);
+          };
+          adoptProject({
+            id: 'proj-v405',
+            name: 'پروژه ۴.۰۵',
+            updatedAt: '',
+            images: [{ id: 'img-v405', name: 'cover.png', file: 'cover.png', width: 320, height: 200, order: 0, selected: true, groupId: null, crop: null, blocks: [], watermark: null, edited: false }],
+            settings: { eraseOriginal: false, output: {} },
+          });
+          const img = state.project.images[0];
+
+        await openEditor(img.id);
+        const emptyHasQuickBtns = document.querySelectorAll('#blockList .block-empty-actions button').length === 2;
+
+        // Add Persian (RTL) & English (LTR) manual text boxes
+        $('editorAddFaText').click();
+        if (classicEditor) classicEditor.setHTML('<p>سلام کمیک</p>');
+        closeInlineEditor();
+
+        $('editorAddEnText').click();
+        if (classicEditor) classicEditor.setHTML('<p>BOOM!</p>');
+        closeInlineEditor();
+
+        const addedCount = img.blocks.length;
+        const faBlock = img.blocks[0];
+        const enBlock = img.blocks[1];
+        const manualBadgeShown = Boolean(document.querySelector('#blockList .block-manual-chip'));
+
+        // Empty OCR source text on manual block must guard retranslateBlock without hitting preview endpoint
+        await retranslateBlock(faBlock);
+
+        // Delete populated English manual block via appConfirm (#appModalDialog)
+        selectEditorBlock(enBlock.id, false, false);
+        const delTask = deleteEditorBlocks();
+        await new Promise((r) => setTimeout(r, 15));
+        const deleteUsedModal = $('appModalDialog').open === true;
+        $('appModalConfirm').click();
+        await delTask;
+        const countAfterDelete = img.blocks.length;
+
+        await closeEditor(false);
+
+        // Open Watermark dialog, upload a transparent PNG logo, set text + position, and apply
+        await openWatermarkDialog(false);
+        const wmDialogOpened = $('watermarkDialog').open === true;
+        const fakeLogoFile = new Blob([Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10])], { type: 'image/png' });
+        fakeLogoFile.name = 'team-logo.png';
+        await handleWatermarkLogoUpload(fakeLogoFile);
+        const uploadedLogoId = $('wmLogoSelect').value;
+        $('wmText').value = 'کانال کمیک‌ستان';
+        $('wmPosition').value = 'diagonal';
+        $('wmPosition').dispatchEvent(new Event('change'));
+        const autoDiagonalAngle = $('wmAngle').value;
+        await applyWatermarkFromDialog();
+
+        const hasWmOnPage = Boolean(img.watermark && img.watermark.text === 'کانال کمیک‌ستان' && img.watermark.logoId === uploadedLogoId);
+        const cardHasWmBadge = Boolean(document.querySelector('#grid .item .watermark-badge'));
+
+        // Remove watermark via appConfirm
+        await openWatermarkDialog(false);
+        const rmTask = removeWatermarkFromDialog();
+        await new Promise((r) => setTimeout(r, 15));
+        const removeUsedModal = $('appModalDialog').open === true;
+        $('appModalConfirm').click();
+        await rmTask;
+        const wmCleared = img.watermark === null;
+
+          return {
+            emptyHasQuickBtns,
+            addedCount,
+            faDir: faBlock?.dir,
+            faManual: faBlock?.manual === true,
+            enDir: enBlock?.dir,
+            enManual: enBlock?.manual === true,
+            manualBadgeShown,
+            deleteUsedModal,
+            countAfterDelete,
+            wmDialogOpened,
+            uploadedLogoOk: Boolean(uploadedLogoId && state.project.settings.watermarkLogos?.[uploadedLogoId]),
+            autoDiagonalAngle,
+            hasWmOnPage,
+            cardHasWmBadge,
+            removeUsedModal,
+            wmCleared,
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('watermarkDialog')?.open) closeDialog('watermarkDialog');
+          if ($('editorDialog')?.open) closeDialog('editorDialog');
+          if (prevProject) adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.05 supports custom Persian/English manual text boxes, appConfirm deletion, empty-source guard, Watermark (text + transparent logo), and eraseOriginal=false forwarding',
+      wmDrawnCorner === true
+        && wmDrawnTile === true
+        && drawnWatermarkFillCalls >= 5
+        && drawnWatermarkLogoCalls === 1
+        && translationPreviewCalls.length === previewCallsBeforeManual
+        && renderedOptions?.eraseOriginal === false
+        && v405Check.emptyHasQuickBtns === true
+        && v405Check.addedCount === 2
+        && v405Check.faDir === 'rtl'
+        && v405Check.faManual === true
+        && v405Check.enDir === 'ltr'
+        && v405Check.enManual === true
+        && v405Check.manualBadgeShown === true
+        && v405Check.deleteUsedModal === true
+        && v405Check.countAfterDelete === 1
+        && v405Check.wmDialogOpened === true
+        && v405Check.uploadedLogoOk === true
+        && v405Check.autoDiagonalAngle === '-30'
+        && v405Check.hasWmOnPage === true
+        && v405Check.cardHasWmBadge === true
+        && v405Check.removeUsedModal === true
+        && v405Check.wmCleared === true,
+      JSON.stringify({ v405Check, renderedOptions, drawnWatermarkFillCalls, drawnWatermarkLogoCalls }),
     );
   }
 

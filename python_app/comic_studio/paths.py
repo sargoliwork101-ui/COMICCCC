@@ -16,9 +16,19 @@ import uuid
 from typing import Any
 
 
-PACKAGE_DIR = Path(__file__).resolve().parent
-APP_DIR = PACKAGE_DIR.parent
-STATIC_DIR = PACKAGE_DIR / "static"
+def _resolve_runtime_dirs() -> tuple[Path, Path, Path]:
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        meipass = Path(getattr(sys, "_MEIPASS", exe_dir)).resolve()
+        pkg_candidate = meipass / "comic_studio"
+        pkg_dir = pkg_candidate if (pkg_candidate / "static").is_dir() else Path(__file__).resolve().parent
+        static_dir = pkg_dir / "static" if (pkg_dir / "static").is_dir() else (meipass / "static")
+        return pkg_dir, exe_dir, static_dir
+    pkg_dir = Path(__file__).resolve().parent
+    return pkg_dir, pkg_dir.parent, pkg_dir / "static"
+
+
+PACKAGE_DIR, APP_DIR, STATIC_DIR = _resolve_runtime_dirs()
 STORAGE_CONFIG_FILENAME = "storage-config.json"
 _HostPath = type(PACKAGE_DIR)
 
@@ -159,6 +169,24 @@ def models_dir() -> Path:
     path = data_dir() / "models"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def bundled_models_dir() -> Path | None:
+    """Optional read-only offline model bundle shipped next to ComicOCRStudio.exe or python_app."""
+    raw_env = os.environ.get("COMIC_STUDIO_BUNDLED_MODELS")
+    candidates: list[Path] = []
+    if raw_env and raw_env.strip():
+        candidates.append(_HostPath(raw_env.strip()))
+    candidates.append(APP_DIR / "bundled-models")
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(_HostPath(str(meipass)) / "bundled-models")
+    for cand in candidates:
+        with contextlib.suppress(OSError):
+            if cand.is_dir():
+                return cand
+    return None
 
 
 def custom_site_packages_dir() -> Path:
@@ -678,6 +706,20 @@ def pick_folder_dialog(initial_dir: str | None = None) -> str | None:
     # Generic Tkinter fallback when display is available
     if os.name == "nt" or sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
         try:
+            if getattr(sys, "frozen", False):
+                import tkinter as tk
+                from tkinter import filedialog
+
+                root = tk.Tk()
+                try:
+                    root.withdraw()
+                    with contextlib.suppress(Exception):
+                        root.attributes("-topmost", True)
+                    picked = filedialog.askdirectory(initialdir=start_dir or "")
+                    return str(picked or "").strip()
+                finally:
+                    with contextlib.suppress(Exception):
+                        root.destroy()
             tk_code = (
                 "import os, sys, tkinter as tk; from tkinter import filedialog; "
                 "root = tk.Tk(); root.withdraw(); "
