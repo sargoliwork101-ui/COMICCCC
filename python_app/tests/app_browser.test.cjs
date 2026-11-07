@@ -2214,7 +2214,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert.equal(await page.$('#menu .hint'), null);
     await page.click('#helpTopBtn');
     await page.waitForSelector('#helpDialog[open]');
-    assert.equal(await page.$$eval('#helpNavList .help-nav-item', (els) => els.length), 13);
+    assert.equal(await page.$$eval('#helpNavList .help-nav-item', (els) => els.length), 14);
     assert.ok((await page.$eval('#helpContentArea', (el) => el.textContent)).includes('مثال عملی'));
     await page.type('#helpSearchInput', 'API Key');
     await page.waitForFunction(() => document.getElementById('helpContentArea').textContent.includes('Multi-Key Profiles'));
@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v4.01: Verify version badge ۴.۰۱, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, menu model deletion, per-page RAM release, zero idle CPU, and optional storage settings
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۰۱ · Python', 'header shows version ۴.۰۱');
+      // v3.85–v4.02: Verify version badge ۴.۰۲, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, and optional storage settings
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۰۲ · Python', 'header shows version ۴.۰۲');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2663,23 +2663,28 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(v397IdleCheck.idlePollTimerNull, true, 'activityPollTimer is null while idle in Chromium');
       assert.equal(v397IdleCheck.dockWrapHidden && v397IdleCheck.hiddenAnimPaused, true, 'indeterminate bar inside hidden container has animation: none');
 
-      // v3.98: Verify opening #menu -> #deleteModelsMenuBtn opens #modelsDialog in installed-only mode and toggles back to all 14 models cleanly
+      // v3.98 / v4.02: Verify single unified #modelsBtn ("مدیریت مدل‌های OCR"), #aiBtn ("مدیریت ترجمه‌ها"), no duplicate #deleteModelsMenuBtn, and installed-only toggle inside #modelsDialog
       await page.click('#menuBtn');
-      await page.waitForSelector('#deleteModelsMenuBtn', { state: 'visible' });
-      await page.click('#deleteModelsMenuBtn');
+      assert.equal(await page.$('#deleteModelsMenuBtn'), null, 'no duplicate #deleteModelsMenuBtn in menu');
+      assert.equal(await page.$eval('#modelsBtn span', (el) => el.textContent.trim()), 'مدیریت مدل‌های OCR');
+      assert.equal(await page.$eval('#aiBtn', (el) => el.textContent.trim()), 'مدیریت ترجمه‌ها');
+      await page.click('#modelsBtn');
       await page.waitForSelector('#modelsDialog[open]');
       const v398MenuCheck = await page.evaluate(() => {
-        const checkedOnOpen = Boolean(document.getElementById('modelsInstalledOnly')?.checked);
+        const installedCb = document.getElementById('modelsInstalledOnly');
+        installedCb.checked = true;
+        installedCb.dispatchEvent(new Event('change', { bubbles: true }));
+        const checkedOnToggle = Boolean(installedCb.checked);
         const showAllBtn = document.querySelector('#engineCards .models-empty-installed button');
         if (showAllBtn) showAllBtn.click();
         else {
-          document.getElementById('modelsInstalledOnly').checked = false;
+          installedCb.checked = false;
           renderModels();
         }
         const allCountAfterReset = document.querySelectorAll('#engineCards .engine-card').length;
-        return { checkedOnOpen, allCountAfterReset };
+        return { checkedOnToggle, allCountAfterReset };
       });
-      assert.equal(v398MenuCheck.checkedOnOpen, true, '#deleteModelsMenuBtn opens #modelsDialog filtered to installed models');
+      assert.equal(v398MenuCheck.checkedOnToggle, true, '#modelsInstalledOnly filters #modelsDialog to installed models');
       assert.equal(v398MenuCheck.allCountAfterReset, 14, 'resetting installed-only filter shows all 14 OCR models');
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.getElementById('modelsDialog').open);

@@ -6150,16 +6150,6 @@ function bindEvents() {
     setMenuOpen(false);
     refreshEngineMemory().catch(() => {});
   });
-  $('deleteModelsMenuBtn')?.addEventListener('click', () => {
-    if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = true;
-    if ($('modelsPageMode') && $('ocrPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
-    if ($('modelsLanguage') && $('ocrLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
-    if ($('testLanguage') && $('ocrLanguage')) $('testLanguage').value = $('ocrLanguage').value;
-    renderModels();
-    showDialog('modelsDialog');
-    setMenuOpen(false);
-    refreshEngineMemory().catch(() => {});
-  });
   $('modelsInstalledOnly')?.addEventListener('change', () => renderModels());
   $('modelsLanguage')?.addEventListener('change', () => {
     if ($('testLanguage')) $('testLanguage').value = $('modelsLanguage').value;
@@ -6393,8 +6383,26 @@ function bindEvents() {
     if (event.key === 'F1') {
       event.preventDefault();
       event.stopPropagation();
-      if ($('helpDialog')?.open) closeDialog('helpDialog');
-      else openHelpDialog($('editorDialog')?.open ? 'visual-editor' : null);
+      if ($('helpDialog')?.open) {
+        closeDialog('helpDialog');
+        return;
+      }
+      const topDlg = [...openDialogStack].reverse().find((id) => $(id)?.open);
+      const sectionByDialog = {
+        storageDialog: 'storage-memory-network',
+        modelsDialog: 'ocr-models',
+        ocrDialog: 'ocr-modes',
+        aiDialog: 'ai-translation-settings',
+        translationPreviewDialog: 'translation-preview-context',
+        translationDialog: 'translation-preview-context',
+        exportDialog: 'exports-docx-pdf',
+        docxExportDialog: 'exports-docx-pdf',
+        pptxExportDialog: 'exports-docx-pdf',
+        cropDialog: 'import-grid-crop',
+        pendingDialog: 'conflicts-cancel-errors',
+        editorDialog: 'visual-editor',
+      };
+      openHelpDialog((topDlg && sectionByDialog[topDlg]) || ($('editorDialog')?.open ? 'visual-editor' : null));
       return;
     }
     if (event.key === 'Escape') {

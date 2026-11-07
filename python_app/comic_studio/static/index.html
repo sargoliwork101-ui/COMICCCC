@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.01">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.01">
+  <link rel="stylesheet" href="/style.css?v=4.02">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.02">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۰۱ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۰۲ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h11"/></svg><span>پروژه و تنظیمات</span></button>
@@ -24,9 +24,8 @@
       <div class="menu-actions"><button id="backupProjectBtn" class="bt" type="button">بک‌آپ پروژه (ZIP)</button><button id="restoreProjectBtn" class="bt" type="button">بازیابی بک‌آپ</button><input id="restoreProjectInput" type="file" accept=".zip,application/zip" hidden></div>
       <a id="backupDownloadLink" class="bt hidden" href="#" download>دانلود دوبارهٔ بک‌آپ</a>
     </div>
-    <button id="modelsBtn" class="mi"><span>مدل‌های OCR و آزمایش</span><span id="modelsBtnBadge" class="menu-update-badge hidden"></span></button>
-    <button id="deleteModelsMenuBtn" class="mi"><span>حذف مدل‌های OCR نصب‌شده</span></button>
-    <button id="aiBtn" class="mi">ترجمهٔ رایگان / AI</button>
+    <button id="modelsBtn" class="mi"><span>مدیریت مدل‌های OCR</span><span id="modelsBtnBadge" class="menu-update-badge hidden"></span></button>
+    <button id="aiBtn" class="mi">مدیریت ترجمه‌ها</button>
     <button id="storageBtn" class="mi"><span>مسیر ذخیره‌سازی و دانلودها (اختیاری)</span></button>
     <button id="themeBtn" class="mi">تغییر تم روشن / تیره</button>
     <div class="mi save-line"><span id="saveState">آماده</span><span>ذخیرهٔ خودکار روی همین کامپیوتر</span></div>
@@ -272,7 +271,7 @@
   </dialog>
 
   <dialog id="modelsDialog" class="dlg wide-dialog">
-    <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>مدل‌های OCR و آزمایش</h2><span id="modelsExecSummary" class="exec-badge is-local hidden" title="همهٔ ۱۴ مدل پس از یک‌بار دانلود اولیه، ۱۰۰٪ آفلاین روی پردازنده یا کارت گرافیک سیستم خودتان اجرا می‌شوند">همهٔ ۱۴ مدل: اجرا روی سیستم شما (آفلاین)</span></div><button class="icon" value="cancel">×</button></form>
+    <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>مدیریت مدل‌های OCR</h2><span id="modelsExecSummary" class="exec-badge is-local hidden" title="همهٔ ۱۴ مدل پس از یک‌بار دانلود اولیه، ۱۰۰٪ آفلاین روی پردازنده یا کارت گرافیک سیستم خودتان اجرا می‌شوند">همهٔ ۱۴ مدل: اجرا روی سیستم شما (آفلاین)</span></div><button class="icon" value="cancel">×</button></form>
     <p class="hint">هیچ مدلی بدون کلیک شما دانلود نمی‌شود. همهٔ ۱۴ مدل OCR (ازجمله مدل بومی فارسی Hezar) پس از یک‌بار دانلود اولیه <strong>۱۰۰٪ روی خود سیستم شما (آفلاین)</strong> اجرا می‌شوند و برای خواندن تصاویر به اینترنت نیاز ندارند؛ هر مدلی را هم که دیگر نیاز نداشتید می‌توانید با دکمهٔ «حذف مدل» روی کارت آن به طور کامل از دیسک پاک کنید. رنگ‌بندی سبز، زرد و قرمز هر موتور بر اساس ترکیب هم‌زمان «زبان متن» و «نوع صفحه» محاسبه می‌شود. <a href="https://github.com/sargoliwork101-ui/COMICCCC/blob/main/python_app/README.md" target="_blank" rel="noopener noreferrer">راهنمای نصب برنامه از GitHub</a>.</p>
     <p class="hint">فقط اگر نصب در ویندوز خطای دسترسی داد، برنامه را ببندید و فایل <bdi dir="ltr">start_windows_admin.bat</bdi> را اجرا کنید.</p>
     <div id="modelsToolbar" class="models-toolbar">
@@ -309,7 +308,7 @@
   </dialog>
 
   <dialog id="aiDialog" class="dlg ai-dialog">
-    <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>ترجمه و AI</h2><span id="aiExecBadge" class="exec-badge is-online">سرویس آنلاین (اینترنتی)</span></div><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>مدیریت ترجمه‌ها</h2><span id="aiExecBadge" class="exec-badge is-online">سرویس آنلاین (اینترنتی)</span></div><button class="icon" value="cancel" aria-label="بستن">×</button></form>
     <div class="form-grid">
       <label>روش ترجمه<select id="aiProvider"><option value="free">سرویس رایگان فعلی</option><option value="gemini">Google Gemini</option><option value="openai">OpenAI / سرویس سازگار</option><option value="openrouter">OpenRouter</option><option value="avalai">AvalAI</option></select></label>
       <label>زبان مقصد ترجمه<select id="aiTargetLanguage"><option value="fa">فارسی (Persian)</option><option value="en">انگلیسی (English)</option><option value="ar">عربی (Arabic)</option><option value="tr">ترکی استانبولی (Turkish)</option><option value="de">آلمانی (German)</option><option value="fr">فرانسوی (French)</option><option value="ru">روسی (Russian)</option><option value="es">اسپانیایی (Spanish)</option><option value="ja">ژاپنی (Japanese)</option><option value="ko">کره‌ای (Korean)</option><option value="zh-CN">چینی (Chinese)</option></select></label>
@@ -584,7 +583,7 @@
           <option value="zh-CN">چینی (Chinese)</option>
         </select>
       </label>
-      <button id="openAiSettingsFromPreview" class="bt" type="button" title="افزودن کلید جدید یا ویرایش تنظیمات سرویس‌های ترجمه">تنظیمات سرویس‌ها…</button>
+      <button id="openAiSettingsFromPreview" class="bt" type="button" title="افزودن کلید جدید یا ویرایش تنظیمات در مدیریت ترجمه‌ها">مدیریت ترجمه‌ها…</button>
     </div>
     <p id="translationPreviewSummary" class="payload-summary"></p>
     <p id="translationPreviewDestination" class="hint" dir="auto"></p>
@@ -636,19 +635,19 @@
         <span class="help-head-icon" aria-hidden="true">؟</span>
         <div>
           <h2 id="helpDialogTitle">راهنمای کامل Comic OCR Studio <span class="ver" dir="ltr">Help · F1</span></h2>
-          <span id="helpSearchCount" class="muted">۱۳ بخش کامل · آموزش گام‌به‌گام + مثال عملی برای تک‌تک قسمت‌ها</span>
+          <span id="helpSearchCount" class="muted">۱۴ بخش کامل · آموزش گام‌به‌گام + مثال عملی برای تک‌تک قسمت‌ها</span>
         </div>
       </div>
       <button id="helpDialogClose" class="icon" value="cancel" aria-label="بستن راهنما">×</button>
     </form>
     <div class="help-toolbar">
       <div class="help-search-wrap">
-        <input id="helpSearchInput" type="search" dir="auto" placeholder="جست‌وجو در راهنما... (مثلاً: Word، ستون، GPU، Merge، API Key، Crop، Backup)" aria-label="جست‌وجو در راهنما">
+        <input id="helpSearchInput" type="search" dir="auto" placeholder="جست‌وجو در راهنما... (مثلاً: Word، درایو، GPU، Merge، API Key، Crop، Backup)" aria-label="جست‌وجو در راهنما">
         <button id="helpSearchClear" class="bt hidden" type="button">پاک‌کردن</button>
       </div>
       <div class="help-view-modes" role="group" aria-label="حالت نمایش راهنما">
         <button id="helpViewChapterBtn" class="bt primary" type="button" aria-pressed="true">بخش‌به‌بخش</button>
-        <button id="helpViewAllBtn" class="bt" type="button" aria-pressed="false">نمایش یکجای همهٔ ۱۳ بخش</button>
+        <button id="helpViewAllBtn" class="bt" type="button" aria-pressed="false">نمایش یکجای همهٔ ۱۴ بخش</button>
       </div>
     </div>
     <div class="help-layout">
@@ -677,12 +676,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-  <script src="/typeset.js?v=4.01"></script>
-  <script src="/groups.js?v=4.01"></script>
-  <script src="/rich-sanitize.js?v=4.01"></script>
-  <script src="/rich-editor.js?v=4.01"></script>
-  <script src="/inline-edit-session.js?v=4.01"></script>
-  <script src="/help-guide.js?v=4.01"></script>
-  <script src="/app.js?v=4.01"></script>
+  <script src="/typeset.js?v=4.02"></script>
+  <script src="/groups.js?v=4.02"></script>
+  <script src="/rich-sanitize.js?v=4.02"></script>
+  <script src="/rich-editor.js?v=4.02"></script>
+  <script src="/inline-edit-session.js?v=4.02"></script>
+  <script src="/help-guide.js?v=4.02"></script>
+  <script src="/app.js?v=4.02"></script>
 </body>
 </html>

@@ -1025,14 +1025,14 @@ function check(name, condition) {
     window.fetch = origFetchV369;
   }
 
-  // v3.71: Interactive section-by-section Help Center (#helpDialog, #helpTopBtn, #helpMenuBtn, F1, search, examples)
+  // v3.71 / v4.02: Interactive section-by-section Help Center (#helpDialog, #helpTopBtn, F1, 14 sections, search, examples)
   {
-    check('all 13 Help sections include practical examples and untranslated terms', window.ComicHelpGuide.HELP_SECTIONS.length === 13 && window.ComicHelpGuide.HELP_SECTIONS.every((s) => s.example && s.example.title.includes('مثال عملی') && s.example.body.length > 60 && s.features?.length >= 3 && s.steps?.length >= 3));
+    check('all 14 Help sections include practical examples and untranslated terms', window.ComicHelpGuide.HELP_SECTIONS.length === 14 && window.ComicHelpGuide.HELP_SECTIONS.every((s) => s.example && s.example.title.includes('مثال عملی') && s.example.body.length > 60 && s.features?.length >= 3 && s.steps?.length >= 3));
     $('helpTopBtn').click();
-    check('clicking topbar Help button opens #helpDialog with 13 chapter nav items', $('helpDialog').open === true && window.document.querySelectorAll('#helpNavList .help-nav-item').length === 13);
+    check('clicking topbar Help button opens #helpDialog with 14 chapter nav items', $('helpDialog').open === true && window.document.querySelectorAll('#helpNavList .help-nav-item').length === 14);
     check('chapter mode renders active chapter with practical example box', window.document.querySelectorAll('#helpContentArea .help-article').length === 1 && $('helpContentArea').textContent.includes('مثال عملی'));
     $('helpViewAllBtn').click();
-    check('view-all mode renders all 13 sections simultaneously', window.document.querySelectorAll('#helpContentArea .help-article').length === 13);
+    check('view-all mode renders all 14 sections simultaneously', window.document.querySelectorAll('#helpContentArea .help-article').length === 14);
     $('helpSearchInput').value = 'Flowing Book';
     $('helpSearchInput').dispatchEvent(new window.Event('input', { bubbles: true }));
     check('searching untranslated term Flowing Book filters matching Help section', window.document.querySelectorAll('#helpContentArea .help-article').length >= 1 && $('helpContentArea').textContent.includes('Flowing Book Layout'));
@@ -1926,7 +1926,10 @@ function check(name, condition) {
         };
         try {
           setMenuOpen(true);
-          $('deleteModelsMenuBtn').click();
+          const noDuplicateDeleteMenuBtn = !$('deleteModelsMenuBtn');
+          $('modelsBtn').click();
+          $('modelsInstalledOnly').checked = true;
+          $('modelsInstalledOnly').dispatchEvent(new window.Event('change', { bubbles: true }));
           const filteredChecked = Boolean($('modelsInstalledOnly')?.checked);
           const visibleCardsBefore = [...document.querySelectorAll('#engineCards .engine-card h3')].map((h) => h.textContent);
           const delBtn = document.querySelector('#engineCards .engine-card .engine-delete-btn');
@@ -1944,7 +1947,7 @@ function check(name, condition) {
           $('modelsInstalledOnly').checked = false;
           renderModels();
           closeDialog('modelsDialog');
-          return filteredChecked && hasOnlySurya && modalOpen && uninstallCalls.length === 1 && emptyShownAfterDelete && resultHasFreedGb;
+          return noDuplicateDeleteMenuBtn && filteredChecked && hasOnlySurya && modalOpen && uninstallCalls.length === 1 && emptyShownAfterDelete && resultHasFreedGb;
         } finally {
           window.fetch = origFetch;
           state.engines = prevEngines;
@@ -2122,7 +2125,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas401: verText.includes('۴.۰۱'),
+            verHas402: verText.includes('۴.۰۲'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2141,8 +2144,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.01 displays version 4.01 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas401 === true
+      'v4.00/v4.02 displays version 4.02 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas402 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -2266,6 +2269,69 @@ function check(name, condition) {
       'v4.01 renders single install/readiness icon (✓ ready, ◐ missing language file, ⬇ uninstalled) in #ocrEngine and scales multi-phase progress monotonically without backward jumps',
       v401UiCheck.engIconsOk === true && v401UiCheck.fasIconsOk === true && v401UiCheck.exportStayedAbove45 === true,
       JSON.stringify(v401UiCheck),
+    );
+
+    // v4.02: Verify unified "مدیریت مدل‌های OCR", "مدیریت ترجمه‌ها", zero duplicate menu items, 14-section Help guide with Storage/RAM chapter, and contextual F1 across dialogs
+    const v402Check = await vm.runInContext(`
+      (async () => {
+        const modelsMenuText = ($('modelsBtn')?.querySelector('span')?.textContent || '').trim();
+        const modelsDlgTitle = ($('modelsDialog')?.querySelector('h2')?.textContent || '').trim();
+        const noDuplicateMenu = !$('deleteModelsMenuBtn');
+        const aiMenuText = ($('aiBtn')?.textContent || '').trim();
+        const aiDlgTitle = ($('aiDialog')?.querySelector('h2')?.textContent || '').trim();
+        const previewAiShortcut = ($('openAiSettingsFromPreview')?.textContent || '').trim();
+
+        const storageChapter = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'storage-memory-network');
+        const hasStorageChapter = Boolean(storageChapter)
+          && storageChapter.num === '۱۳'
+          && storageChapter.features.some((f) => f.includes('python_app') && f.includes('start_windows.bat'));
+
+        // Contextual F1 on #modelsDialog -> 'ocr-models', #aiDialog -> 'ai-translation-settings', #storageDialog -> 'storage-memory-network'
+        showDialog('modelsDialog');
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+        const f1ModelsArticle = document.querySelector('#helpContentArea [data-help-article]')?.dataset.helpArticle;
+        closeDialog('helpDialog');
+        closeDialog('modelsDialog');
+
+        showDialog('aiDialog');
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+        const f1AiArticle = document.querySelector('#helpContentArea [data-help-article]')?.dataset.helpArticle;
+        closeDialog('helpDialog');
+        closeDialog('aiDialog');
+
+        showDialog('storageDialog');
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+        const f1StorageArticle = document.querySelector('#helpContentArea [data-help-article]')?.dataset.helpArticle;
+        closeDialog('helpDialog');
+        closeDialog('storageDialog');
+
+        return {
+          modelsMenuText,
+          modelsDlgTitle,
+          noDuplicateMenu,
+          aiMenuText,
+          aiDlgTitle,
+          previewAiShortcut,
+          hasStorageChapter,
+          f1ModelsArticle,
+          f1AiArticle,
+          f1StorageArticle,
+        };
+      })()
+    `, context);
+    check(
+      'v4.02 unifies menu into single مدیریت مدل‌های OCR and مدیریت ترجمه‌ها, expands Help to 14 complete chapters, and supports contextual F1 across dialogs',
+      v402Check.modelsMenuText === 'مدیریت مدل‌های OCR'
+        && v402Check.modelsDlgTitle === 'مدیریت مدل‌های OCR'
+        && v402Check.noDuplicateMenu === true
+        && v402Check.aiMenuText === 'مدیریت ترجمه‌ها'
+        && v402Check.aiDlgTitle === 'مدیریت ترجمه‌ها'
+        && v402Check.previewAiShortcut === 'مدیریت ترجمه‌ها…'
+        && v402Check.hasStorageChapter === true
+        && v402Check.f1ModelsArticle === 'ocr-models'
+        && v402Check.f1AiArticle === 'ai-translation-settings'
+        && v402Check.f1StorageArticle === 'storage-memory-network',
+      JSON.stringify(v402Check),
     );
   }
 
