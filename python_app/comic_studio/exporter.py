@@ -636,6 +636,158 @@ def _xml_attr(value: Any) -> str:
     return xml_escape(_clean_text(value).replace("\n", " "), {'"': "&quot;", "'": "&apos;"})
 
 
+_ALLOWED_EXPORT_FONTS: dict[str, str] = {
+    "vazirmatn": "Vazirmatn",
+    "tahoma": "Tahoma",
+    "segoe ui": "Segoe UI",
+    "arial": "Arial",
+    "times new roman": "Times New Roman",
+    "georgia": "Georgia",
+    "impact": "Impact",
+    "comic sans ms": "Comic Sans MS",
+    "courier new": "Courier New",
+    "trebuchet ms": "Trebuchet MS",
+    "verdana": "Verdana",
+}
+
+
+def _clean_font_family(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    primary = raw.split(",", 1)[0].strip().strip("\"'").strip()
+    if not primary:
+        return None
+    mapped = _ALLOWED_EXPORT_FONTS.get(primary.lower())
+    if mapped:
+        return mapped
+    if re.fullmatch(r"[A-Za-z0-9 \-_.]{1,64}", primary):
+        return primary
+    return None
+
+
+def _normalize_box_shape(value: Any) -> str:
+    s = str(value or "rect").strip().lower()
+    return s if s in {"rect", "ellipse", "pill", "diamond", "hexagon", "cloud"} else "rect"
+
+
+def _normalize_corner_radius_pct(value: Any) -> float:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(n):
+        return 0.0
+    return max(0.0, min(100.0, n))
+
+
+def _normalize_angle_deg(value: Any) -> float:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(n):
+        return 0.0
+    wrapped = ((n + 180.0) % 360.0) - 180.0
+    return 0.0 if abs(wrapped) < 0.05 else round(wrapped, 2)
+
+
+def _pptx_prst_geom_xml(shape: str, corner_radius_pct: float) -> str:
+    if shape == "ellipse":
+        return '<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>'
+    if shape == "pill":
+        return '<a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 50000"/></a:avLst></a:prstGeom>'
+    if shape == "diamond":
+        return '<a:prstGeom prst="diamond"><a:avLst/></a:prstGeom>'
+    if shape == "hexagon":
+        return '<a:prstGeom prst="hexagon"><a:avLst/></a:prstGeom>'
+    if shape == "cloud":
+        return '<a:prstGeom prst="cloud"><a:avLst/></a:prstGeom>'
+    if corner_radius_pct > 0.0:
+        adj = max(0, min(50000, int(round(corner_radius_pct * 500.0))))
+        return f'<a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val {adj}"/></a:avLst></a:prstGeom>'
+    return '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+
+
+def _draw_shaped_box_pil(
+    canvas: Image.Image,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    fill_rgb: tuple[int, int, int],
+    *,
+    shape: str = "rect",
+    corner_radius_pct: float = 0.0,
+    angle_deg: float = 0.0,
+) -> None:
+    ix0, iy0 = int(round(x0)), int(round(y0))
+    ix1, iy1 = int(round(x1)), int(round(y1))
+    bw = max(1, ix1 - ix0)
+    bh = max(1, iy1 - iy0)
+    if shape == "rect" and corner_radius_pct <= 0.0 and abs(angle_deg) <= 0.05:
+        ImageDraw.Draw(canvas).rectangle([ix0, iy0, max(ix0, ix1 - 1), max(iy0, iy1 - 1)], fill=fill_rgb)
+        return
+    ss = 2
+    pw, ph = max(2, bw * ss), max(2, bh * ss)
+    mask = Image.new("L", (pw, ph), 0)
+    mdraw = ImageDraw.Draw(mask)
+    if shape == "ellipse":
+        mdraw.ellipse([0, 0, pw - 1, ph - 1], fill=255)
+    elif shape == "pill":
+        rad = max(1, min(pw, ph) // 2)
+        mdraw.rounded_rectangle([0, 0, pw - 1, ph - 1], radius=rad, fill=255)
+    elif shape == "diamond":
+        mdraw.polygon([(pw / 2.0, 0.0), (pw - 1.0, ph / 2.0), (pw / 2.0, ph - 1.0), (0.0, ph / 2.0)], fill=255)
+    elif shape == "hexagon":
+        cut = min(pw * 0.22, ph * 0.5)
+        mdraw.polygon(
+            [(cut, 0.0), (pw - cut, 0.0), (pw - 1.0, ph / 2.0), (pw - cut, ph - 1.0), (cut, ph - 1.0), (0.0, ph / 2.0)],
+            fill=255,
+        )
+    elif shape == "cloud":
+        mdraw.ellipse([pw * 0.08, ph * 0.14, pw * 0.92, ph * 0.86], fill=255)
+        lobes = [
+            (0.22, 0.26, 0.22, 0.24),
+            (0.50, 0.19, 0.26, 0.22),
+            (0.78, 0.26, 0.22, 0.24),
+            (0.86, 0.52, 0.18, 0.26),
+            (0.76, 0.76, 0.23, 0.23),
+            (0.50, 0.81, 0.26, 0.22),
+            (0.24, 0.76, 0.23, 0.23),
+            (0.14, 0.52, 0.18, 0.26),
+        ]
+        for cx_f, cy_f, rx_f, ry_f in lobes:
+            lcx, lcy = pw * cx_f, ph * cy_f
+            lrx, lry = pw * rx_f, ph * ry_f
+            mdraw.ellipse([lcx - lrx, lcy - lry, lcx + lrx, lcy + lry], fill=255)
+    else:
+        rad = max(0, int(round((corner_radius_pct / 100.0) * (min(pw, ph) / 2.0))))
+        if rad > 0:
+            mdraw.rounded_rectangle([0, 0, pw - 1, ph - 1], radius=rad, fill=255)
+        else:
+            mdraw.rectangle([0, 0, pw - 1, ph - 1], fill=255)
+    mask_1x = mask.resize((bw, bh), Image.Resampling.LANCZOS)
+    mask.close()
+    patch = Image.new("RGBA", (bw, bh), (*fill_rgb, 0))
+    patch.putalpha(mask_1x)
+    mask_1x.close()
+    if abs(angle_deg) > 0.05:
+        rotated = patch.rotate(-angle_deg, resample=Image.Resampling.BICUBIC, expand=True)
+        patch.close()
+        patch = rotated
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+    px = int(round(cx - patch.width / 2.0))
+    py = int(round(cy - patch.height / 2.0))
+    rgb_patch = patch.convert("RGB")
+    alpha_patch = patch.getchannel("A")
+    canvas.paste(rgb_patch, (px, py), alpha_patch)
+    rgb_patch.close()
+    alpha_patch.close()
+    patch.close()
+
+
 def _parse_css_color(value: str | None) -> str | None:
     if not value:
         return None
@@ -721,6 +873,9 @@ class _RichHtmlToDocxParser(HTMLParser):
         col = _parse_css_color(css.get("color") or attr_map.get("color"))
         if col:
             cur["color"] = col
+        ff = _clean_font_family(css.get("font-family") or attr_map.get("face"))
+        if ff:
+            cur["font_family"] = ff
         fs_match = re.match(r"^(\d+(?:\.\d+)?)px$", css.get("font-size", ""))
         if fs_match:
             cur["px_size"] = max(8.0, min(160.0, float(fs_match.group(1))))
@@ -878,6 +1033,7 @@ def _build_textbox_paragraphs_xml(
         "underline": bool(block.get("underline")),
         "strike": False,
         "color": default_color,
+        "font_family": _clean_font_family(block.get("fontFamily")),
         "px_size": base_px,
         "rtl": rtl_default,
         "align": align_default,
@@ -927,19 +1083,24 @@ def _build_textbox_paragraphs_xml(
         for run in para["runs"]:
             pt_size = max(5.5, min(72.0, float(run["px_size"]) * scale_pt * 0.78))
             half_pt = max(11, min(144, round(pt_size * 2)))
-            rpr = [f'<w:sz w:val="{half_pt}"/><w:szCs w:val="{half_pt}"/>']
+            rpr: list[str] = []
+            run_ff = _clean_font_family(run.get("font_family"))
+            if run_ff:
+                safe_ff = _xml_attr(run_ff)
+                rpr.append(f'<w:rFonts w:ascii="{safe_ff}" w:hAnsi="{safe_ff}" w:cs="{safe_ff}" w:eastAsia="{safe_ff}"/>')
             if run.get("bold"):
                 rpr.append("<w:b/><w:bCs/>")
             if run.get("italic"):
                 rpr.append("<w:i/><w:iCs/>")
-            if run.get("underline"):
-                rpr.append('<w:u w:val="single"/>')
             if run.get("strike"):
                 rpr.append("<w:strike/>")
-            if run.get("rtl"):
-                rpr.append("<w:rtl/>")
             if run.get("color"):
                 rpr.append(f'<w:color w:val="{run["color"]}"/>')
+            rpr.append(f'<w:sz w:val="{half_pt}"/><w:szCs w:val="{half_pt}"/>')
+            if run.get("underline"):
+                rpr.append('<w:u w:val="single"/>')
+            if run.get("rtl"):
+                rpr.append("<w:rtl/>")
             rpr_xml = f"<w:rPr>{''.join(rpr)}</w:rPr>"
             if run.get("br"):
                 r_xml_list.append(f"<w:r>{rpr_xml}<w:br/></w:r>")
@@ -1063,6 +1224,12 @@ def _prepare_docx_pages(
                     bx0, by0, bx1, by1 = _block_box(blk, m["off_x"], m["off_y"], m_scale, canvas_w, mh)
                     if bx1 - bx0 < 2 or by1 - by0 < 2:
                         continue
+                    blk_shape = _normalize_box_shape(blk.get("shape"))
+                    blk_radius_pct = _normalize_corner_radius_pct(blk.get("cornerRadius"))
+                    blk_angle_deg = _normalize_angle_deg(blk.get("angle"))
+                    needs_uncovered_erase = (
+                        blk_shape != "rect" or blk_radius_pct > 0.0 or abs(blk_angle_deg) > 0.05
+                    )
                     if erase_original and not blk.get("manual") and str(blk.get("bg") or "auto") != "none":
                         srx0 = float(blk.get("x0", 0) or 0) - m["off_x"]
                         sry0 = float(blk.get("y0", 0) or 0) - m["off_y"]
@@ -1073,7 +1240,11 @@ def _prepare_docx_pages(
                         sx1 = max(sx0, min(float(canvas_w), max(srx0, srx1) * m_scale))
                         sy1 = max(sy0, min(float(mh), max(sry0, sry1) * m_scale))
                         if sx1 - sx0 >= 2 and sy1 - sy0 >= 2 and (
-                            abs(sx0 - bx0) > 1.0 or abs(sy0 - by0) > 1.0 or abs(sx1 - bx1) > 1.0 or abs(sy1 - by1) > 1.0
+                            needs_uncovered_erase
+                            or abs(sx0 - bx0) > 1.0
+                            or abs(sy0 - by0) > 1.0
+                            or abs(sx1 - bx1) > 1.0
+                            or abs(sy1 - by1) > 1.0
                         ):
                             source_erase_rects.append((
                                 int(round(sx0)),
@@ -1096,7 +1267,8 @@ def _prepare_docx_pages(
                 src_fill = _sample_box_bg(canvas, sx0_i, sy0_i, sx1_i, sy1_i)
                 draw.rectangle([sx0_i, sy0_i, max(sx0_i, sx1_i - 1), max(sy0_i, sy1_i - 1)], fill=src_fill)
             for spec in page_blocks:
-                bg_mode = str(spec["block"].get("bg") or "auto")
+                blk_spec = spec["block"]
+                bg_mode = str(blk_spec.get("bg") or "auto")
                 ix0, iy0 = int(round(spec["x0"])), int(round(spec["y0"]))
                 ix1, iy1 = int(round(spec["x1"])), int(round(spec["y1"]))
                 if bg_mode == "none" or (not erase_original and bg_mode in {"", "auto"}):
@@ -1116,7 +1288,17 @@ def _prepare_docx_pages(
                 else:
                     fill_rgb = _sample_box_bg(canvas, ix0, iy0, ix1, iy1)
                 spec["bg_rgb"] = fill_rgb
-                draw.rectangle([ix0, iy0, max(ix0, ix1 - 1), max(iy0, iy1 - 1)], fill=fill_rgb)
+                _draw_shaped_box_pil(
+                    canvas,
+                    spec["x0"],
+                    spec["y0"],
+                    spec["x1"],
+                    spec["y1"],
+                    fill_rgb,
+                    shape=_normalize_box_shape(blk_spec.get("shape")),
+                    corner_radius_pct=_normalize_corner_radius_pct(blk_spec.get("cornerRadius")),
+                    angle_deg=_normalize_angle_deg(blk_spec.get("angle")),
+                )
 
             canvas_w_final, canvas_h_final = canvas.width, canvas.height
             if spool_dir is not None:
@@ -1188,6 +1370,7 @@ def _build_flowing_paragraphs_xml(block: dict[str, Any], *, docx_mode: str) -> s
         "underline": bool(block.get("underline")),
         "strike": False,
         "color": explicit_color,
+        "font_family": _clean_font_family(block.get("fontFamily")),
         "px_size": base_pt,
         "rtl": rtl_default,
         "align": align_default,
@@ -1251,19 +1434,24 @@ def _build_flowing_paragraphs_xml(block: dict[str, Any], *, docx_mode: str) -> s
             raw_run_sz = float(run.get("px_size") or base_pt)
             pt_size = max(8.0, min(48.0, raw_run_sz))
             half_pt = max(16, min(96, round(pt_size * 2)))
-            rpr = [f'<w:sz w:val="{half_pt}"/><w:szCs w:val="{half_pt}"/>']
+            rpr: list[str] = []
+            run_ff = _clean_font_family(run.get("font_family"))
+            if run_ff:
+                safe_ff = _xml_attr(run_ff)
+                rpr.append(f'<w:rFonts w:ascii="{safe_ff}" w:hAnsi="{safe_ff}" w:cs="{safe_ff}" w:eastAsia="{safe_ff}"/>')
             if run.get("bold"):
                 rpr.append("<w:b/><w:bCs/>")
             if run.get("italic"):
                 rpr.append("<w:i/><w:iCs/>")
-            if run.get("underline"):
-                rpr.append('<w:u w:val="single"/>')
             if run.get("strike"):
                 rpr.append("<w:strike/>")
-            if run.get("rtl"):
-                rpr.append("<w:rtl/>")
             if run.get("color"):
                 rpr.append(f'<w:color w:val="{run["color"]}"/>')
+            rpr.append(f'<w:sz w:val="{half_pt}"/><w:szCs w:val="{half_pt}"/>')
+            if run.get("underline"):
+                rpr.append('<w:u w:val="single"/>')
+            if run.get("rtl"):
+                rpr.append("<w:rtl/>")
             rpr_xml = f"<w:rPr>{''.join(rpr)}</w:rPr>"
             if run.get("br"):
                 r_xml_list.append(f"<w:r>{rpr_xml}<w:br/></w:r>")
@@ -1478,9 +1666,11 @@ def _finalize_visual_docx(
                 blk, docx_mode=eff_mode, bw_px=eff_bw_px, bh_px=eff_bh_px,
                 scale_pt=font_scale_pt, bg_rgb=spec.get("bg_rgb"),
             )
+            angle_deg = _normalize_angle_deg(blk.get("angle"))
+            rot_css = f"rotation:{angle_deg:.2f};" if abs(angle_deg) > 0.05 else ""
             shape_style = (
                 f"position:absolute;margin-left:{left_pt:.2f}pt;margin-top:{top_pt:.2f}pt;"
-                f"width:{bw_pt:.2f}pt;height:{bh_pt:.2f}pt;z-index:{shape_serial + 10};"
+                f"width:{bw_pt:.2f}pt;height:{bh_pt:.2f}pt;{rot_css}z-index:{shape_serial + 10};"
                 f"v-text-anchor:{v_anchor};mso-position-horizontal-relative:page;mso-position-vertical-relative:page"
             )
             inset_str = f"{inset_x:.2f}pt,{inset_y:.2f}pt,{inset_x:.2f}pt,{inset_y:.2f}pt"
@@ -1692,13 +1882,16 @@ def _pptx_rpr_xml(run: dict[str, Any], pt_size: float) -> str:
     color = str(run.get("color") or "141414").upper()
     if not re.fullmatch(r"[0-9A-F]{6}", color):
         color = "141414"
+    run_ff = _clean_font_family(run.get("font_family"))
+    latin_ff = _xml_attr(run_ff) if run_ff else "Segoe UI"
+    cs_ff = _xml_attr(run_ff) if run_ff else "Vazirmatn"
     # Strictly follow ECMA-376 CT_TextCharacterProperties sequence: fill BEFORE font elements!
     return (
         f'<a:rPr {" ".join(attrs)}>'
         f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
-        '<a:latin typeface="Segoe UI"/>'
-        '<a:ea typeface="Segoe UI"/>'
-        '<a:cs typeface="Vazirmatn"/>'
+        f'<a:latin typeface="{latin_ff}"/>'
+        f'<a:ea typeface="{latin_ff}"/>'
+        f'<a:cs typeface="{cs_ff}"/>'
         "</a:rPr>"
     )
 
@@ -1761,6 +1954,7 @@ def _build_pptx_textbox_paragraphs_xml(
         "underline": bool(block.get("underline")),
         "strike": False,
         "color": default_color,
+        "font_family": _clean_font_family(block.get("fontFamily")),
         "px_size": base_px,
         "rtl": rtl_default,
         "align": align_default,
@@ -2031,6 +2225,7 @@ def _build_flowing_pptx(
                     "underline": bool(blk.get("underline")),
                     "strike": False,
                     "color": default_color,
+                    "font_family": _clean_font_family(blk.get("fontFamily")),
                     "px_size": base_pt,
                     "rtl": rtl_default,
                     "align": align_default,
@@ -2266,11 +2461,19 @@ def _finalize_visual_pptx(
                 scale_pt=font_scale_pt,
                 bg_rgb=spec.get("bg_rgb"),
             )
+            blk_shape = _normalize_box_shape(blk.get("shape"))
+            blk_radius_pct = _normalize_corner_radius_pct(blk.get("cornerRadius"))
+            blk_angle_deg = _normalize_angle_deg(blk.get("angle"))
+            rot_emu_attr = ""
+            if abs(blk_angle_deg) > 0.05:
+                rot_units = int(round((blk_angle_deg % 360.0) * 60000.0)) % 21_600_000
+                rot_emu_attr = f' rot="{rot_units}"'
+            prst_geom_xml = _pptx_prst_geom_xml(blk_shape, blk_radius_pct)
             shapes_xml.append(
                 "      <p:sp>\n"
                 f'        <p:nvSpPr><p:cNvPr id="{next_shape_id}" name="TextBox {next_shape_id - 2}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>\n'
-                f'        <p:spPr><a:xfrm><a:off x="{bx_emu}" y="{by_emu}"/><a:ext cx="{bcx_emu}" cy="{bcy_emu}"/></a:xfrm>'
-                '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\n'
+                f'        <p:spPr><a:xfrm{rot_emu_attr}><a:off x="{bx_emu}" y="{by_emu}"/><a:ext cx="{bcx_emu}" cy="{bcy_emu}"/></a:xfrm>'
+                f'{prst_geom_xml}<a:noFill/></p:spPr>\n'
                 "        <p:txBody>\n"
                 f'          <a:bodyPr wrap="square" rtlCol="{"1" if is_rtl else "0"}" lIns="{ins_x}" tIns="{ins_y}" rIns="{ins_x}" bIns="{ins_y}" anchor="{anchor}"><a:normAutofit/></a:bodyPr>\n'
                 "          <a:lstStyle/>\n"

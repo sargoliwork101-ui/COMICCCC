@@ -2129,7 +2129,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas411: verText.includes('۴.۱۱'),
+            verHas412: verText.includes('۴.۱۲'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2148,8 +2148,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.11 displays version 4.11 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas411 === true
+      'v4.00/v4.12 displays version 4.12 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas412 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3462,6 +3462,199 @@ function check(name, condition) {
         && v411ExportStreamCheck.deletedPreparedToken === true
         && v411ExportStreamCheck.zeroErrHasEmptyMsg === true
         && v411ExportStreamCheck.ch11MentionsStream === true,
+    );
+  }
+
+  // v4.12: Verify full formatting on manually added boxes (even empty & in OCR mode), font family, non-rect shapes, interactive corner rounding, interactive rotation + Shift snap, single-box translation, and grid scroll restoration
+  {
+    const v412Check = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProject = state.project;
+        let singlePreviewText = null;
+        try {
+          window.fetch = async (url, options = {}) => {
+            const u = String(url);
+            if (u.includes('/content')) return { ok: true, status: 200, blob: async () => new Blob(['img'], { type: 'image/png' }) };
+            if (u.endsWith('/rendered') || u.endsWith('/revert')) return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true, updatedAt: '2026-11-07T14:00:00Z' }) };
+            if (u.endsWith('/state') && options.method === 'PUT') {
+              const saved = JSON.parse(options.body).state;
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => saved };
+            }
+            if (u.endsWith('/api/translate-text/context-preview') && options.method === 'POST') {
+              const body = JSON.parse(options.body);
+              singlePreviewText = body.text;
+              return {
+                ok: true, status: 200, headers: { get: () => 'application/json' },
+                json: async () => ({
+                  provider: 'free', providerLabel: 'Google Translate', model: '', base_url: '',
+                  blockCount: 1, requestCount: 1, requests: [{ index: 1, characters: body.text.length, text: body.text }],
+                  systemPrompt: '', signature: 'sig-v412', note: '', rollingMode: true, contextMode: false, skill: '', summary: '', resume: false, singleContext: true,
+                }),
+              };
+            }
+            if (u.endsWith('/api/translate-text/context') && options.method === 'POST') {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ text: 'ترجمهٔ تکی ۴.۱۲', summary: '' }) };
+            }
+            return origFetch(url, options);
+          };
+
+          adoptProject({
+            id: 'proj-v412',
+            name: 'پروژه ۴.۱۲',
+            updatedAt: '',
+            images: Array.from({ length: 6 }, (_, idx) => ({
+              id: 'img-v412-' + (idx + 1),
+              name: 'page-' + (idx + 1) + '.png',
+              file: 'page-' + (idx + 1) + '.png',
+              width: 320, height: 220, order: idx, selected: true, groupId: null, crop: null,
+              blocks: idx === 4 ? [{ id: 1, text: 'SINGLE BOX SOURCE', tr: '', enabled: true, bg: 'white', x0: 20, y0: 20, x1: 220, y1: 70, lineH: 30, dir: 'rtl', align: 'right' }] : [],
+              watermark: null, edited: false,
+            })),
+            settings: { eraseOriginal: true, output: {} },
+          });
+
+          // 1. Scroll position preserved across openEditor -> closeEditor, cancelEditor, and Esc
+          document.documentElement.scrollTop = 640;
+          if ($('mainwrap')) $('mainwrap').scrollTop = 280;
+          await openEditor('img-v412-5');
+
+          // 2. Manual Persian box in OCR mode & while STILL EMPTY supports font, size, bold, italic, underline, color, custom bg, shape, cornerRadius, and angle
+          setOverlayMode('ocr', false);
+          $('editorAddFaText').click();
+          const manualFa = state.project.images[4].blocks.at(-1);
+          const richEnabledOnManualInOcr = !$('inlineEditor').querySelector('.re-toolbar')?.classList.contains('is-disabled');
+          $('inlineFontFamily').value = 'Tahoma';
+          $('inlineFontFamily').dispatchEvent(new Event('change', { bubbles: true }));
+          $('inlineLineSize').value = '24';
+          $('inlineLineSize').dispatchEvent(new Event('input', { bubbles: true }));
+          $('inlineSizeUp').click();
+          toggleInlineCommand('bold');
+          toggleInlineCommand('italic');
+          toggleInlineCommand('underline');
+          $('inlineEditorColor').value = '#dd2255';
+          $('inlineEditorColor').dispatchEvent(new Event('input', { bubbles: true }));
+          classicEditor.setHTML('<p>متن دستی فرمت‌شده</p>');
+          closeInlineEditor();
+          setOverlayMode('translation', false);
+
+          // 3. Idle-selected box formatting (without opening inline editor) + shape, corner-radius drag, and Shift-snapped rotation drag
+          selectEditorBlock(manualFa.id, false, false);
+          $('editorBoxBg').value = 'custom';
+          $('editorBoxBg').dispatchEvent(new Event('change', { bubbles: true }));
+          $('editorBoxBgColor').value = '#fff3b0';
+          $('editorBoxBgColor').dispatchEvent(new Event('input', { bubbles: true }));
+
+          const mkPtr = (type, x, y, shiftKey = false) => {
+            const ev = new window.Event(type, { bubbles: true, cancelable: true });
+            Object.defineProperties(ev, { clientX: { value: x }, clientY: { value: y }, pointerId: { value: 7 }, button: { value: 0 }, shiftKey: { value: shiftKey } });
+            return ev;
+          };
+          const manualBoxEl = $('editorBoxes').querySelector('.editor-box[data-id="' + manualFa.id + '"]');
+          const seCorner = manualBoxEl.querySelector('[data-radius-corner="se"]');
+          const scale = state.editorScale || 1;
+          const bRect = boxOf(manualFa);
+          seCorner.dispatchEvent(mkPtr('pointerdown', bRect.x1 * scale, bRect.y1 * scale));
+          manualBoxEl.dispatchEvent(mkPtr('pointermove', (bRect.x1 - 14) * scale, (bRect.y1 - 14) * scale));
+          manualBoxEl.dispatchEvent(mkPtr('pointerup', (bRect.x1 - 14) * scale, (bRect.y1 - 14) * scale));
+          const draggedRadiusPct = manualFa.cornerRadius;
+
+          const rotHandle = manualBoxEl.querySelector('[data-rotate-handle]');
+          const cx = ((bRect.x0 + bRect.x1) / 2) * scale;
+          const cy = ((bRect.y0 + bRect.y1) / 2) * scale;
+          rotHandle.dispatchEvent(mkPtr('pointerdown', cx, cy - 40, true));
+          manualBoxEl.dispatchEvent(mkPtr('pointermove', cx + 40, cy, true));
+          manualBoxEl.dispatchEvent(mkPtr('pointerup', cx + 40, cy, true));
+          const snappedAngle90 = manualFa.angle;
+
+          $('editorBoxShape').value = 'cloud';
+          $('editorBoxShape').dispatchEvent(new Event('change', { bubbles: true }));
+          const chosenShape = manualFa.shape;
+
+          // 4. Single-box translation on English manual box directly from #editorTranslateBlock
+          $('editorAddEnText').click();
+          const manualEn = state.project.images[4].blocks.at(-1);
+          classicEditor.setHTML('<p>WATCH OUT!</p>');
+          closeInlineEditor();
+          selectEditorBlock(manualEn.id, false, false);
+          $('editorTranslateBlock').click();
+          await new Promise((r) => setTimeout(r, 25));
+          const previewOpened = $('translationPreviewDialog').open === true;
+          $('translationPreviewConfirm').click();
+          await new Promise((r) => setTimeout(r, 35));
+          const translatedSingleTr = manualEn.tr;
+
+          await closeEditor(true);
+          const scrollAfterApproveClose = document.documentElement.scrollTop;
+          const mainScrollAfterApproveClose = $('mainwrap')?.scrollTop || 0;
+          const cardHighlighted = Boolean(document.querySelector('#grid .item[data-id="img-v412-5"].just-edited'));
+
+          // Also verify cancelEditor restores scroll position
+          document.documentElement.scrollTop = 510;
+          await openEditor('img-v412-5');
+          document.documentElement.scrollTop = 0;
+          await cancelEditor();
+          const scrollAfterCancel = document.documentElement.scrollTop;
+
+          openHelpDialog('import-grid-crop');
+          const ch3Text = $('helpContentArea').textContent;
+          openHelpDialog('visual-editor');
+          const ch9Text = $('helpContentArea').textContent;
+          openHelpDialog('shortcuts');
+          const ch14Text = $('helpContentArea').textContent;
+          closeDialog('helpDialog');
+
+          return {
+            richEnabledOnManualInOcr,
+            manualFont: manualFa.fontFamily,
+            manualSize: manualFa.size,
+            manualBold: manualFa.bold,
+            manualItalic: manualFa.italic,
+            manualUnderline: manualFa.underline,
+            manualColor: manualFa.color,
+            manualBg: manualFa.bg,
+            draggedRadiusOk: draggedRadiusPct > 0 && draggedRadiusPct <= 100,
+            snappedAngle90,
+            chosenShape,
+            previewOpened,
+            singlePreviewText,
+            translatedSingleTr,
+            scrollAfterApproveClose,
+            mainScrollAfterApproveClose,
+            cardHighlighted,
+            scrollAfterCancel,
+            helpSynced: ch3Text.includes('اسکرول') && ch9Text.includes('ابر کمیک') && ch9Text.includes('ترجمهٔ کادر') && ch14Text.includes('Shift'),
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+          if ($('translationPreviewDialog')?.open) closeDialog('translationPreviewDialog');
+          if ($('editorDialog')?.open) closeDialog('editorDialog');
+          if (prevProject) adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.12 supports manual-box full formatting & fonts, shapes, corner-radius & Shift-rotation handles, single-box translation, and grid scroll restoration',
+      v412Check.richEnabledOnManualInOcr === true
+        && v412Check.manualFont === 'Tahoma'
+        && v412Check.manualSize === 26
+        && v412Check.manualBold === false
+        && v412Check.manualItalic === true
+        && v412Check.manualUnderline === true
+        && v412Check.manualColor === '#dd2255'
+        && v412Check.manualBg === '#fff3b0'
+        && v412Check.draggedRadiusOk === true
+        && v412Check.snappedAngle90 === 90
+        && v412Check.chosenShape === 'cloud'
+        && v412Check.previewOpened === true
+        && v412Check.singlePreviewText === 'WATCH OUT!'
+        && v412Check.translatedSingleTr === 'ترجمهٔ تکی ۴.۱۲'
+        && v412Check.scrollAfterApproveClose === 640
+        && v412Check.mainScrollAfterApproveClose === 280
+        && v412Check.cardHighlighted === true
+        && v412Check.scrollAfterCancel === 510
+        && v412Check.helpSynced === true,
     );
   }
 

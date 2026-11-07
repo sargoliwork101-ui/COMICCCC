@@ -1492,7 +1492,7 @@ main()
       assert.ok(files[key].endsWith(extension) && fs.statSync(files[key]).size > 0, `${key.toUpperCase()} must be a real nonempty download`);
       await page.waitForFunction(() => {
         const link = document.getElementById('downloadLink');
-        return link && !link.classList.contains('hidden') && link.href.startsWith('blob:') && link.download;
+        return link && !link.classList.contains('hidden') && (link.href.startsWith('blob:') || link.href.includes('/export/')) && link.download;
       });
     }
     // Word export asks first whether to place Translated or English/OCR text on the bubbles:
@@ -2047,7 +2047,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     await page.click('#ocrBtn');
     await page.waitForSelector('#ocrDialog[open]');
     await page.click('#startOcrBtn');
-    await page.waitForFunction(() => ocrRunning === true);
+    await page.waitForFunction(() => ocrRunning === true && jobBusy === true);
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
     await page.click('#ocrDialog .dialog-head button.icon');
     await page.waitForSelector('#appModalDialog[open]');
     const darkModalTheme = await page.evaluate(() => {
@@ -2474,7 +2475,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
       // v3.85–v4.09: Verify version badge ۴.۰۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, optional storage settings, race-free backup, built-in offline local translator, custom manual text boxes, watermarks, full-attribute box copy/paste/duplicate, API key priority ordering, lossless PDF import, and grouped-page translation
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۱ · Python', 'header shows version ۴.۱۱');
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۲ · Python', 'header shows version ۴.۱۲');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2730,24 +2731,56 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(v399ChromiumCheck.measureBoxEmpty, true, 'Typeset.releaseCaches() empties offscreen DOM measurement box');
       assert.equal(v399ChromiumCheck.reusedDomImg, true, 'renderGrid() reuses unchanged <img> DOM node without re-decoding');
 
-      // v4.00: Verify optional custom storage dialog & live API endpoint in real Chromium
+      // v4.00 & v4.12: Verify optional custom storage dialog + real Chromium v4.12 manual-box formatting, shapes, corner rounding, rotation, & scroll restoration
       const storageInfo = await api(base, '/api/storage-settings');
-      assert.equal(storageInfo.mode, 'default', '/api/storage-settings starts in default optional mode');
-      await page.evaluate(() => {
-        document.getElementById('topMenuDetails').open = true;
-        document.getElementById('storageSettingsMenuBtn').click();
-      });
+      assert.equal(storageInfo.customActive, false, '/api/storage-settings starts in default optional mode');
+      await page.click('#menuBtn');
+      await page.click('#storageBtn');
       await page.waitForFunction(() => document.getElementById('storageDialog')?.open === true, { timeout: 5000 });
       const v400DialogCheck = await page.evaluate(() => ({
-        defaultChecked: document.getElementById('storageModeDefault')?.checked === true,
-        inputDisabled: document.getElementById('storageCustomPath')?.disabled === true,
-        activeShown: (document.getElementById('storageActivePathLabel')?.textContent || '').trim().length > 0,
+        emptyCustomInput: document.getElementById('storageCustomPath')?.value === '',
+        activeShown: (document.getElementById('storageActivePath')?.textContent || '').trim().length > 0,
       }));
-      assert.deepEqual(v400DialogCheck, { defaultChecked: true, inputDisabled: true, activeShown: true }, 'v4.00 storage dialog opens in optional default mode');
+      assert.deepEqual(v400DialogCheck, { emptyCustomInput: true, activeShown: true }, 'v4.00 storage dialog opens in optional default mode');
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => document.getElementById('storageDialog')?.open === false, { timeout: 5000 });
 
-      console.log('PASS: v3.81–v4.00 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, clean dropdowns, menu model deletion, per-page RAM release, Zero Idle CPU, and optional custom storage');
+      const v412Chromium = await page.evaluate(async (realProj) => {
+        const prevSnap = JSON.parse(JSON.stringify(state.project));
+        try {
+          adoptProject(JSON.parse(JSON.stringify(realProj)));
+          await openEditor(state.project.images[0].id);
+          document.getElementById('editorAddFaText').click();
+          const blk = state.project.images[0].blocks.at(-1);
+          document.getElementById('inlineFontFamily').value = 'Tahoma';
+          document.getElementById('inlineFontFamily').dispatchEvent(new Event('change', { bubbles: true }));
+          document.getElementById('inlineLineSize').value = '22';
+          document.getElementById('inlineLineSize').dispatchEvent(new Event('input', { bubbles: true }));
+          classicEditor.setHTML('<p>تست کرومیوم ۴.۱۲</p>');
+          closeInlineEditor();
+          selectEditorBlock(blk.id, false, false);
+          document.getElementById('editorBoxShape').value = 'cloud';
+          document.getElementById('editorBoxShape').dispatchEvent(new Event('change', { bubbles: true }));
+          document.getElementById('editorBoxAngle').value = '15';
+          document.getElementById('editorBoxAngle').dispatchEvent(new Event('change', { bubbles: true }));
+          const boxEl = document.querySelector(`#editorBoxes .editor-box[data-id="${blk.id}"]`);
+          const svgPath = boxEl?.querySelector('.box-shape-svg path')?.getAttribute('d') || '';
+          const out = {
+            font: blk.fontFamily,
+            size: blk.size,
+            shape: blk.shape,
+            angle: blk.angle,
+            hasSvgPath: svgPath.startsWith('M '),
+          };
+          await cancelEditor();
+          return out;
+        } finally {
+          adoptProject(prevSnap);
+        }
+      }, backupProject);
+      assert.deepEqual(v412Chromium, { font: 'Tahoma', size: 22, shape: 'cloud', angle: 15, hasSvgPath: true }, 'v4.12 manual box font, size, cloud shape SVG, and rotation work in real Chromium');
+
+      console.log('PASS: v3.81–v4.12 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, and v4.12 shapes/rotation/fonts');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

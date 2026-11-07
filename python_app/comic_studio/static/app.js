@@ -32,6 +32,8 @@ let sessionVisibilityBound = false;
 let localActivityId = 0;
 let editorCloseTask = null;
 let editorSessionSnapshot = null;
+let editorReturnScroll = null;
+let justEditedHighlightTimer = null;
 let savePending = false;
 let editorCanvasFrame = 0;
 let editorLoadSeq = 0;
@@ -1036,16 +1038,109 @@ function setSelected(item, value, event = null) {
   state.lastSelectedId = item.id; updateSelectionDisplay(); scheduleSave();
 }
 
+function getWindowScrollPosition() {
+  const docEl = document.documentElement;
+  const body = document.body;
+  return {
+    x: Number(window.scrollX) || Number(window.pageXOffset) || Number(docEl?.scrollLeft) || Number(body?.scrollLeft) || 0,
+    y: Number(window.scrollY) || Number(window.pageYOffset) || Number(docEl?.scrollTop) || Number(body?.scrollTop) || 0,
+  };
+}
+function applyWindowScrollPosition(x, y) {
+  const tx = Math.max(0, Math.round(Number(x) || 0));
+  const ty = Math.max(0, Math.round(Number(y) || 0));
+  if (document.documentElement) {
+    document.documentElement.scrollTop = ty;
+    document.documentElement.scrollLeft = tx;
+  }
+  const isDefaultJsdomScroll = /jsdom/i.test(window.navigator?.userAgent || '')
+    && typeof window.scrollTo === 'function'
+    && String(window.scrollTo).includes('notImplemented');
+  if (!isDefaultJsdomScroll && typeof window.scrollTo === 'function') {
+    try {
+      window.scrollTo({ left: tx, top: ty, behavior: 'instant' });
+    } catch {
+      try { window.scrollTo(tx, ty); } catch { /* non-scrolling env */ }
+    }
+  }
+}
+function findGridCardById(imageId) {
+  const grid = $('grid');
+  if (!grid || imageId == null) return null;
+  const key = String(imageId);
+  return [...grid.querySelectorAll('.item')].find((c) => c.dataset?.id === key) || null;
+}
+function captureEditorReturnScroll(imageId) {
+  const pos = getWindowScrollPosition();
+  const mainWrap = $('mainwrap');
+  const card = findGridCardById(imageId);
+  const rect = card?.getBoundingClientRect?.();
+  return {
+    projectId: state.project?.id || null,
+    imageId: String(imageId),
+    scrollX: pos.x,
+    scrollY: pos.y,
+    mainScrollTop: Number(mainWrap?.scrollTop || 0) || 0,
+    mainScrollLeft: Number(mainWrap?.scrollLeft || 0) || 0,
+    cardTop: rect && Number.isFinite(rect.top) ? rect.top : null,
+    cardHeight: rect && Number.isFinite(rect.height) ? rect.height : 0,
+  };
+}
+function restoreEditorReturnScroll(saved) {
+  if (!saved || (saved.projectId && state.project?.id && saved.projectId !== state.project.id)) return;
+  const applyOnce = () => {
+    const mainWrap = $('mainwrap');
+    if (mainWrap) {
+      if (saved.mainScrollTop > 0 || mainWrap.scrollTop !== saved.mainScrollTop) mainWrap.scrollTop = saved.mainScrollTop;
+      if (saved.mainScrollLeft > 0 || mainWrap.scrollLeft !== saved.mainScrollLeft) mainWrap.scrollLeft = saved.mainScrollLeft;
+    }
+    applyWindowScrollPosition(saved.scrollX, saved.scrollY);
+    const card = findGridCardById(saved.imageId);
+    if (!card) return;
+    if (saved.cardTop !== null && saved.cardHeight > 0) {
+      const nowRect = card.getBoundingClientRect?.();
+      if (nowRect && nowRect.height > 0) {
+        const drift = nowRect.top - saved.cardTop;
+        if (Math.abs(drift) > 2) {
+          applyWindowScrollPosition(saved.scrollX, Math.max(0, saved.scrollY + drift));
+        }
+      }
+    }
+    const editBtn = card.querySelector('.act button:nth-child(2)') || card.querySelector('.act button');
+    if (editBtn?.focus) {
+      try { editBtn.focus({ preventScroll: true }); } catch { /* ignore */ }
+    }
+    clearTimeout(justEditedHighlightTimer);
+    document.querySelectorAll('#grid .item.just-edited').forEach((el) => el.classList.remove('just-edited'));
+    card.classList.add('just-edited');
+    justEditedHighlightTimer = setTimeout(() => { card.classList.remove('just-edited'); }, 1800);
+  };
+  applyOnce();
+  requestAnimationFrame(() => {
+    if ($('editorDialog')?.open) return;
+    const mainWrap = $('mainwrap');
+    if (mainWrap && saved.mainScrollTop > 0 && mainWrap.scrollTop !== saved.mainScrollTop) mainWrap.scrollTop = saved.mainScrollTop;
+    const cur = getWindowScrollPosition();
+    if (Math.abs(cur.y - saved.scrollY) > 2 || Math.abs(cur.x - saved.scrollX) > 2) {
+      applyWindowScrollPosition(saved.scrollX, saved.scrollY);
+    }
+  });
+}
+
 // ---------- Grid, group manager, and drag/drop ----------
 function renderGrid() {
   const grid = $('grid'); if (!state.project) return;
+  const savedWinScroll = getWindowScrollPosition();
+  const mainWrap = $('mainwrap');
+  const savedMainTop = Number(mainWrap?.scrollTop || 0) || 0;
+  const savedMainLeft = Number(mainWrap?.scrollLeft || 0) || 0;
   G.normalizeLayout(state.project.images);
   const prevImages = new Map();
   grid.querySelectorAll('.item').forEach((oldCard) => {
     const oldImg = oldCard.querySelector('.tw > img');
     if (oldCard.dataset?.id && oldImg) prevImages.set(oldCard.dataset.id, oldImg);
   });
-  grid.textContent = '';
+  const frag = document.createDocumentFragment();
   const infos = G.info(state.project.images); const byId = new Map(infos.map((info) => [info.key, info]));
   sortedImages().forEach((item, index) => {
     const info = G.validId(item.groupId) ? byId.get(G.idKey(item.groupId)) : null;
@@ -1145,11 +1240,20 @@ function renderGrid() {
       event.dataTransfer?.setData('text/plain', item.id); if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
     });
     card.addEventListener('dragend', clearDrag);
-    grid.appendChild(card);
+    frag.appendChild(card);
   });
+  grid.replaceChildren(frag);
   prevImages.forEach((staleImg) => releaseImgElement(staleImg));
   prevImages.clear();
   renderGroupPanel(); updateSummary(); scheduleOutlines();
+  if (mainWrap) {
+    if (savedMainTop > 0 && mainWrap.scrollTop !== savedMainTop) mainWrap.scrollTop = savedMainTop;
+    if (savedMainLeft > 0 && mainWrap.scrollLeft !== savedMainLeft) mainWrap.scrollLeft = savedMainLeft;
+  }
+  const afterScroll = getWindowScrollPosition();
+  if ((savedWinScroll.y > 0 || savedWinScroll.x > 0) && (afterScroll.y !== savedWinScroll.y || afterScroll.x !== savedWinScroll.x)) {
+    applyWindowScrollPosition(savedWinScroll.x, savedWinScroll.y);
+  }
 }
 function moveImageBy(imageId, delta) { G.moveUnit(state.project.images, imageId, delta); renderGrid(); scheduleSave(); }
 async function duplicateImages(ids) { if (!ids.length) return; await saveProject(); adoptProject(await api(`/api/projects/${state.project.id}/duplicate`, jsonOptions('POST', ids))); }
@@ -4820,6 +4924,11 @@ async function openEditor(imageId) {
   const item = state.project?.images.find((entry) => entry.id === imageId);
   if (!item) return;
   if (inlineDraft) closeInlineEditor(true); else syncInlineDockIdleState();
+  if (!$('editorDialog')?.open) {
+    editorReturnScroll = captureEditorReturnScroll(imageId);
+  } else if (editorReturnScroll) {
+    editorReturnScroll.imageId = String(imageId);
+  }
   state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null;
   editorSessionSnapshot = {
     projectId: state.project.id,
@@ -4995,11 +5104,68 @@ function overlaySize(block, width, height) {
     return Math.max(8, Math.min(160, Number(block.size) || Math.min(42, Math.max(10, height / Math.max(1.8, String(block.tr || '').split('\n').length * 1.65)))));
   }
 }
+const EDITOR_FONT_OPTIONS = Object.freeze([
+  ['vazirmatn', 'Vazirmatn'],
+  ['tahoma', 'Tahoma'],
+  ['segoe ui', 'Segoe UI'],
+  ['arial', 'Arial'],
+  ['times new roman', 'Times New Roman'],
+  ['impact', 'Impact'],
+  ['comic sans ms', 'Comic Sans MS'],
+  ['courier new', 'Courier New'],
+]);
+function canonicalFontOption(raw) {
+  const clean = String(raw || '').split(',')[0].trim().replace(/^['"]+|['"]+$/g, '').replace(/\s+/g, ' ').toLowerCase();
+  const hit = EDITOR_FONT_OPTIONS.find(([key]) => key === clean);
+  return hit ? hit[1] : 'Vazirmatn';
+}
+function resolveBlockFontStack(fontFamily) {
+  if (typeof Typeset?.resolveFontStack === 'function') return Typeset.resolveFontStack(fontFamily);
+  const opt = canonicalFontOption(fontFamily);
+  if (opt === 'Vazirmatn') return 'Vazirmatn, Tahoma, sans-serif';
+  return `${/\s/.test(opt) ? `"${opt}"` : opt}, Vazirmatn, Tahoma, sans-serif`;
+}
+function normalizeShapeKey(shape) {
+  if (typeof Typeset?.normalizeBoxShape === 'function') return Typeset.normalizeBoxShape(shape);
+  const s = String(shape || '').trim().toLowerCase();
+  return ['rect', 'ellipse', 'pill', 'diamond', 'hexagon', 'cloud'].includes(s) ? s : 'rect';
+}
+function normalizeRadiusPct(value) {
+  if (typeof Typeset?.normalizeCornerRadius === 'function') return Typeset.normalizeCornerRadius(value);
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.max(0, Math.min(100, Math.round(n))) : 0;
+}
+function normalizeAngleDeg(value) {
+  if (typeof Typeset?.normalizeBoxAngle === 'function') return Typeset.normalizeBoxAngle(value);
+  const n = Number(value);
+  if (!Number.isFinite(n) || Math.abs(n) < 0.05) return 0;
+  let wrapped = ((n + 180) % 360 + 360) % 360 - 180;
+  if (wrapped === -180 && n > 0) wrapped = 180;
+  return Math.round(wrapped * 10) / 10;
+}
+function boxShapeInsets(bw, bh, block) {
+  const sh = normalizeShapeKey(block?.shape);
+  const cr = normalizeRadiusPct(block?.cornerRadius);
+  if (typeof Typeset?.shapeInsets === 'function') return Typeset.shapeInsets(bw, bh, sh, cr);
+  const baseX = Typeset?.boxInset ? Typeset.boxInset(bw) : Math.min(4, Math.max(0, bw * 0.02));
+  const baseY = Typeset?.boxInset ? Typeset.boxInset(bh) : Math.min(4, Math.max(0, bh * 0.02));
+  return { padX: baseX, padY: baseY };
+}
+function shapeSvgPathForBox(w, h, shape, cornerRadius) {
+  if (typeof Typeset?.shapeSvgPath === 'function') return Typeset.shapeSvgPath(w, h, shape, cornerRadius);
+  const bw = Math.max(1, Number(w) || 1), bh = Math.max(1, Number(h) || 1);
+  const sh = normalizeShapeKey(shape);
+  if (sh === 'ellipse') return `M ${bw / 2} 0 A ${bw / 2} ${bh / 2} 0 1 1 ${bw / 2} ${bh} A ${bw / 2} ${bh / 2} 0 1 1 ${bw / 2} 0 Z`;
+  if (sh === 'diamond') return `M ${bw / 2} 0 L ${bw} ${bh / 2} L ${bw / 2} ${bh} L 0 ${bh / 2} Z`;
+  if (sh === 'hexagon') { const dx = bw * 0.18; return `M ${dx} 0 L ${bw - dx} 0 L ${bw} ${bh / 2} L ${bw - dx} ${bh} L ${dx} ${bh} L 0 ${bh / 2} Z`; }
+  return `M 0 0 H ${bw} V ${bh} H 0 Z`;
+}
 function styleRichElement(element, block, scale = 1, preview = false) {
   const box = clampedBoxOf(block); const style = Typeset.blockStyle(block);
   element.dir = style.dir; element.style.direction = style.dir; element.style.textAlign = style.align;
   element.style.justifyContent = style.verticalAlign === 'top' ? 'flex-start' : style.verticalAlign === 'bottom' ? 'flex-end' : 'center';
   // The sidebar is an editing surface, not the output: output size and colour affect only the image.
+  element.style.fontFamily = resolveBlockFontStack(block.fontFamily);
   element.style.fontSize = preview ? `${overlaySize(block, box.x1 - box.x0, box.y1 - box.y0) * scale}px` : '';
   element.style.fontWeight = style.bold ? '700' : '400'; element.style.fontStyle = style.italic ? 'italic' : 'normal';
   element.style.color = preview ? (style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff')) : '';
@@ -5068,6 +5234,7 @@ function refreshInlineTypography() {
   const layoutZoom = 1;
   field.dataset.layoutZoom = '1';
   field.dataset.visualFontSize = String(baseSize * scale);
+  field.style.fontFamily = resolveBlockFontStack(draft.fontFamily);
   field.style.fontSize = `${baseSize}px`;
   field.style.lineHeight = '1.55'; field.style.fontWeight = style.bold ? '700' : '400';
   field.style.fontStyle = style.italic ? 'italic' : 'normal'; field.style.textDecoration = style.underline ? 'underline' : '';
@@ -5084,7 +5251,8 @@ function refreshInlineTypography() {
     const eff = Math.max(8, Math.min(160, Math.round(baseSize * logical / ref)));
     el.style.fontSize = `${eff * layoutZoom}px`;
   });
-  const insetX = (Typeset.boxInset ? Typeset.boxInset(bw) : Math.min(4, Math.max(0, bw * 0.02))) * layoutZoom;
+  const shapePad = boxShapeInsets(bw, bh, draft);
+  const insetX = shapePad.padX * layoutZoom;
   const ind = Typeset.indentGeometry ? Typeset.indentGeometry(style, insetX, baseSize * layoutZoom) : { textIndentPx: 0, padLeft: insetX, padRight: insetX };
   field.style.right = 'auto'; field.style.bottom = 'auto';
   field.style.width = `${bw * layoutZoom}px`;
@@ -5096,7 +5264,7 @@ function refreshInlineTypography() {
   field.style.transform = `scale(${scale / layoutZoom})`;
   const rawScrollH = field.scrollHeight;
   const contentH = (rawScrollH > 0 ? rawScrollH : baseSize * layoutZoom * 1.55) / layoutZoom;
-  const insetY = Typeset.boxInset ? Typeset.boxInset(bh) : Math.min(4, Math.max(0, bh * 0.02));
+  const insetY = shapePad.padY;
   const topUnscaled = style.verticalAlign === 'top' ? insetY : style.verticalAlign === 'bottom' ? bh - insetY - contentH : (bh - contentH) / 2;
   field.style.left = `${-(host.clientLeft || 0)}px`;
   field.style.top = `${-(host.clientTop || 0) + topUnscaled * scale}px`;
@@ -5159,13 +5327,65 @@ function setVerticalPlacement(value) {
   drawEditor();
   scheduleSave();
 }
+function syncEditorShapeControls() {
+  const selected = selectedEditorBlocks();
+  const target = inlineDraft?.block || selected[0] || null;
+  const hasTarget = Boolean(target);
+  ['editorBoxShape', 'editorBoxRadius', 'editorBoxAngle', 'editorRotateReset', 'editorBoxBg', 'editorBoxBgColor', 'editorTranslateBlock'].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = !hasTarget;
+  });
+  const fontSel = $('inlineFontFamily');
+  const sizeInp = $('inlineLineSize');
+  const sizeUp = $('inlineSizeUp');
+  const sizeDown = $('inlineSizeDown');
+  if (!inlineDraft) {
+    if (fontSel) {
+      fontSel.disabled = !hasTarget;
+      fontSel.value = hasTarget ? canonicalFontOption(target.fontFamily) : 'Vazirmatn';
+    }
+    if (sizeInp) {
+      sizeInp.disabled = !hasTarget;
+      if (document.activeElement !== sizeInp) {
+        sizeInp.value = hasTarget && Number(target.size) > 0 ? String(Math.round(Number(target.size))) : '';
+      }
+    }
+    if (sizeUp) sizeUp.disabled = !hasTarget;
+    if (sizeDown) sizeDown.disabled = !hasTarget;
+  }
+  if (!hasTarget) {
+    if ($('editorBoxShape')) $('editorBoxShape').value = 'rect';
+    if ($('editorBoxRadius') && document.activeElement !== $('editorBoxRadius')) $('editorBoxRadius').value = '0';
+    if ($('editorBoxAngle') && document.activeElement !== $('editorBoxAngle')) $('editorBoxAngle').value = '0';
+    if ($('editorBoxBg')) $('editorBoxBg').value = 'auto';
+    $('editorBoxBgColor')?.classList.add('hidden');
+    $('editorBoxRadiusWrap')?.classList.remove('hidden');
+    return;
+  }
+  const shape = normalizeShapeKey(target.shape);
+  const radius = normalizeRadiusPct(target.cornerRadius);
+  const angle = normalizeAngleDeg(target.angle);
+  const bgRaw = String(target.bg || 'auto');
+  const isCustomBg = /^#[0-9a-fA-F]{6}$/.test(bgRaw);
+  if ($('editorBoxShape')) $('editorBoxShape').value = shape;
+  if ($('editorBoxRadiusWrap')) $('editorBoxRadiusWrap').classList.toggle('hidden', shape !== 'rect');
+  if ($('editorBoxRadius') && document.activeElement !== $('editorBoxRadius')) $('editorBoxRadius').value = String(radius);
+  if ($('editorBoxAngle') && document.activeElement !== $('editorBoxAngle')) $('editorBoxAngle').value = String(angle);
+  if ($('editorBoxBg')) $('editorBoxBg').value = isCustomBg ? 'custom' : (['auto', 'white', 'black', 'none'].includes(bgRaw) ? bgRaw : 'auto');
+  const bgColorEl = $('editorBoxBgColor');
+  if (bgColorEl) {
+    bgColorEl.classList.toggle('hidden', !isCustomBg);
+    if (isCustomBg) bgColorEl.value = bgRaw.toLowerCase();
+  }
+}
 function setInlineDockDisabled(disabled) {
-  ['inlinePreview', 'inlineEditorApply', 'inlineVerticalAlign', 'inlineLineSize', 'inlineSizeUp', 'inlineSizeDown', 'inlineLineReset',
-    'inlineEditorDirection', 'inlineEditorAlign', 'inlineEditorSize', 'inlineEditorColor', 'inlineEditorAutoColor']
+  ['inlinePreview', 'inlineEditorApply', 'inlineVerticalAlign', 'inlineFontFamily', 'inlineLineSize', 'inlineSizeUp', 'inlineSizeDown', 'inlineLineReset',
+    'inlineEditorDirection', 'inlineEditorAlign', 'inlineEditorSize', 'inlineEditorFont', 'inlineEditorColor', 'inlineEditorAutoColor']
     .forEach((id) => { const el = $(id); if (el) el.disabled = disabled; });
   document.querySelectorAll('#inlineEditor .classic-toolbar button, #inlineEditor .classic-toolbar select, #inlineEditor .classic-toolbar input, #inlineEditor .classic-tabs button')
     .forEach((el) => { el.disabled = disabled; });
   syncVerticalAlignButtons();
+  syncEditorShapeControls();
 }
 function syncInlineDockIdleState() {
   const dock = $('inlineEditor');
@@ -5179,6 +5399,7 @@ function syncInlineDockIdleState() {
   const badge = $('inlineTargetBadge');
   if (badge) { badge.textContent = ''; badge.classList.add('hidden'); badge.classList.remove('is-word'); }
   if ($('inlineLineSize')) $('inlineLineSize').value = '';
+  if ($('inlineFontFamily')) $('inlineFontFamily').value = 'Vazirmatn';
   setButtonLabel($('inlinePreview'), 'پیش‌نمایش دقیق');
   $('inlinePreview').setAttribute('aria-pressed', 'false');
   $('inlineEditorCancel').classList.add('hidden');
@@ -5203,7 +5424,11 @@ function setInlineOutputPreview(enabled) {
 }
 // A draft belongs to one image box; the docked toolbar stays permanently open at the top.
 function inlineBlockSnapshot(block) {
-  return JSON.stringify([block.text || '', block.tr || '', block.richHtml || '', block.dir || '', block.align || '', block.size ?? null, block.color || null, block.verticalAlign || '']);
+  return JSON.stringify([
+    block.text || '', block.tr || '', block.richHtml || '', block.dir || '', block.align || '',
+    block.size ?? null, block.color || null, block.verticalAlign || '',
+    block.fontFamily || '', block.bold !== false, !!block.italic, !!block.underline,
+  ]);
 }
 function inlineDraftChanged() { return !!inlineEditSession?.isDirty(); }
 function closeInlineEditor(force = false) {
@@ -5347,6 +5572,7 @@ function inlineSelectionStyleState(range) {
 function syncInlineLineControls() {
   const badge = $('inlineTargetBadge');
   const sizeInput = $('inlineLineSize');
+  const fontSelect = $('inlineFontFamily');
   const typingSize = document.activeElement === sizeInput;
   updateInlineSelectionHighlight();
   if (!inlineDraft || inlineDraft.mode === 'ocr') {
@@ -5355,26 +5581,49 @@ function syncInlineLineControls() {
       badge.classList.toggle('hidden', !inlineDraft);
       badge.classList.remove('is-word');
     }
-    if (inlineDraft?.mode === 'ocr' && !typingSize && sizeInput) {
-      sizeInput.value = inlineDraft.initialAutoSize && !inlineDraft.sizeTouched ? '' : $('inlineEditorSize').value;
+    if (inlineDraft?.mode === 'ocr') {
+      if (!typingSize && sizeInput) {
+        sizeInput.value = inlineDraft.initialAutoSize && !inlineDraft.sizeTouched ? '' : $('inlineEditorSize').value;
+      }
+      if (fontSelect) fontSelect.value = canonicalFontOption($('inlineEditorFont')?.value || inlineDraft.block?.fontFamily);
     }
     return;
   }
+  const field = $('inlineEditorField');
+  const fieldIsEmpty = !String(field?.textContent || '').trim() && !field?.querySelector?.('div,p');
   if (hasInlineWordSelection()) {
     const raw = inlineDraft.range.toString().trim().replace(/\s+/g, ' ');
     const snippet = Array.from(raw).length > 18 ? `${Array.from(raw).slice(0, 18).join('')}…` : raw;
     if (badge) { badge.textContent = `بخش انتخابی: «${snippet}»`; badge.classList.remove('hidden'); badge.classList.add('is-word'); }
     const span = inlineSelectionSpan(inlineDraft.range) || (inlineDraft.range.startContainer.nodeType === Node.ELEMENT_NODE ? inlineDraft.range.startContainer : inlineDraft.range.startContainer.parentElement);
     const sizeVal = inlineInheritedLogicalSize(span);
-    if (!typingSize) sizeInput.value = sizeVal != null ? String(sizeVal) : '';
+    if (!typingSize && sizeInput) sizeInput.value = sizeVal != null ? String(sizeVal) : '';
+    if (fontSelect) {
+      const spanFont = inlineInheritedStyle(span, 'fontFamily');
+      fontSelect.value = canonicalFontOption(spanFont || $('inlineEditorFont')?.value || inlineDraft.block?.fontFamily);
+    }
     const hex = normalizeHexColor(inlineInheritedStyle(span, 'color'));
     if (hex && classicEditor?.colorInput) classicEditor.colorInput.value = hex;
+    return;
+  }
+  if (fieldIsEmpty) {
+    if (badge) { badge.textContent = 'هدف: کل کادر'; badge.classList.remove('hidden', 'is-word'); }
+    if (!typingSize && sizeInput) {
+      sizeInput.value = inlineDraft.initialAutoSize && !inlineDraft.sizeTouched ? '' : $('inlineEditorSize').value;
+    }
+    if (fontSelect) fontSelect.value = canonicalFontOption($('inlineEditorFont')?.value || inlineDraft.block?.fontFamily);
+    const boxHex = inlineDraft.color || effectiveInlineColor(inlineDraft.block);
+    if (boxHex && classicEditor?.colorInput) classicEditor.colorInput.value = boxHex;
     return;
   }
   if (badge) { badge.textContent = 'هدف: خط فعلی'; badge.classList.remove('hidden', 'is-word'); }
   const line = inlineParagraphFrom(inlineDraft.range?.startContainer);
   const lineSize = logicalFontSizeOf(line);
-  if (!typingSize) sizeInput.value = lineSize != null ? String(Math.round(lineSize)) : '';
+  if (!typingSize && sizeInput) sizeInput.value = lineSize != null ? String(Math.round(lineSize)) : (inlineDraft.sizeTouched ? $('inlineEditorSize').value : '');
+  if (fontSelect) {
+    const lineFont = line?.style?.fontFamily || '';
+    fontSelect.value = canonicalFontOption(lineFont || $('inlineEditorFont')?.value || inlineDraft.block?.fontFamily);
+  }
   const lineHex = normalizeHexColor(line?.style.color) || effectiveInlineColor(inlineDraft.block);
   if (lineHex && classicEditor?.colorInput) classicEditor.colorInput.value = lineHex;
 }
@@ -5501,9 +5750,52 @@ function setInlineLineStyle(property, value, options = {}) {
   if (options.restoreFocus !== false) rememberInlineRange();
   recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
 }
+function isInlineFieldEmpty() {
+  const field = $('inlineEditorField');
+  return !String(field?.textContent || '').trim() && !field?.querySelector?.('div,p');
+}
+function setSelectionOrBlockFont(fontValue, options = {}) {
+  const chosen = canonicalFontOption(fontValue);
+  const storedValue = chosen === 'Vazirmatn' ? '' : chosen;
+  if (!inlineDraft) {
+    const selected = selectedEditorBlocks();
+    if (!selected.length) return;
+    selected.forEach((b) => { b.fontFamily = storedValue || null; });
+    syncEditorShapeControls();
+    buildBlockList();
+    drawEditor();
+    scheduleSave();
+    return;
+  }
+  if (inlineDraft.mode !== 'ocr' && hasInlineWordSelection()) {
+    applyInlineWordStyle({ fontFamily: storedValue ? (/\s/.test(chosen) ? `'${chosen}'` : chosen) : '' }, options);
+    return;
+  }
+  if ($('inlineEditorFont')) $('inlineEditorFont').value = storedValue;
+  inlineDraft.fontFamily = storedValue || null;
+  if (inlineDraft.mode !== 'ocr' && !isInlineFieldEmpty()) {
+    const field = $('inlineEditorField');
+    field?.querySelectorAll?.('[style]').forEach((el) => { if (el.style?.fontFamily) el.style.fontFamily = ''; });
+  }
+  recordInlineHistory();
+  syncInlineLineControls();
+  refreshInlineTypography();
+  classicEditor.notifyChange();
+}
 function setSelectionOrLineSize(value, options = {}) {
-  if (!inlineDraft) return;
-  if (inlineDraft.mode === 'ocr') {
+  if (!inlineDraft) {
+    const selected = selectedEditorBlocks();
+    if (!selected.length) return;
+    const parsed = Number.parseFloat(value || '');
+    const nextSize = value && Number.isFinite(parsed) && parsed >= 8 ? Math.max(8, Math.min(160, Math.round(parsed))) : null;
+    selected.forEach((b) => { b.size = nextSize; });
+    syncEditorShapeControls();
+    buildBlockList();
+    drawEditor();
+    scheduleSave();
+    return;
+  }
+  if (inlineDraft.mode === 'ocr' || isInlineFieldEmpty()) {
     const parsed = Number.parseFloat(value || '');
     if (value && Number.isFinite(parsed) && parsed >= 8) {
       $('inlineEditorSize').value = String(Math.round(parsed));
@@ -5521,8 +5813,16 @@ function setSelectionOrLineSize(value, options = {}) {
   setInlineLineStyle('fontSize', value, options);
 }
 function stepSelectionOrLineSize(delta) {
-  if (!inlineDraft) return;
-  if (inlineDraft.mode === 'ocr') {
+  if (!inlineDraft) {
+    const selected = selectedEditorBlocks();
+    if (!selected.length) return;
+    const base = Number($('inlineLineSize')?.value) || effectiveInlineSize(selected[0]);
+    const next = Math.max(8, Math.min(160, Math.round(base + delta)));
+    if ($('inlineLineSize')) $('inlineLineSize').value = String(next);
+    setSelectionOrLineSize(`${next}px`);
+    return;
+  }
+  if (inlineDraft.mode === 'ocr' || isInlineFieldEmpty()) {
     const cur = Number($('inlineEditorSize').value) || effectiveInlineSize(inlineDraft.block);
     const next = Math.max(8, Math.min(160, Math.round(cur + delta)));
     $('inlineLineSize').value = String(next);
@@ -5547,6 +5847,13 @@ function toggleInlineCommand(cmd) {
       const nextStrike = cmd === 'strikeThrough' ? !cur.strike : cur.strike;
       applyInlineWordStyle({ textDecoration: [nextUnderline ? 'underline' : '', nextStrike ? 'line-through' : ''].filter(Boolean).join(' ') });
     }
+    return;
+  }
+  if (isInlineFieldEmpty()) {
+    if (cmd === 'bold') inlineDraft.bold = !inlineDraft.bold;
+    else if (cmd === 'italic') inlineDraft.italic = !inlineDraft.italic;
+    else if (cmd === 'underline') inlineDraft.underline = !inlineDraft.underline;
+    syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
     return;
   }
   const line = ensureInlineParagraph(); if (!line) return;
@@ -5795,12 +6102,19 @@ function openInlineEditor(block, clickEvent = null) {
   const initialAutoSize = !(Number.isFinite(+block.size) && +block.size > 0);
   const initialSizeValue = String(effectiveInlineSize(block));
   $('inlineEditorSize').value = initialSizeValue;
+  if ($('inlineEditorFont')) $('inlineEditorFont').value = block.fontFamily ? canonicalFontOption(block.fontFamily) : '';
+  if ($('inlineFontFamily')) {
+    $('inlineFontFamily').disabled = false;
+    $('inlineFontFamily').value = canonicalFontOption(block.fontFamily);
+  }
   $('inlineEditorColor').value = effectiveInlineColor(block);
 
   inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: originalHtml,
     dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
     verticalAlign: $('inlineVerticalAlign').value, verticalAlignTouched, size: initialSizeValue,
     initialAutoSize, initialSizeValue, sizeTouched: false,
+    fontFamily: block.fontFamily || null,
+    bold: block.bold !== false, italic: !!block.italic, underline: !!block.underline,
     color: block.color || null, originalColor: block.color || null,
     range: null, history: [], historyIndex: -1, muteHistory: false, conflictReported: false };
   const draftRestore = classicEditor.setContext(draftKey, originalHtml, inlineDraft.snapshot);
@@ -5827,10 +6141,16 @@ function openInlineEditor(block, clickEvent = null) {
       const rawSize = $('inlineEditorSize').value.trim();
       const keepAuto = !!(inlineDraft?.initialAutoSize && !inlineDraft?.sizeTouched && rawSize === inlineDraft?.initialSizeValue);
       const keepLegacyVertical = !inlineDraft?.verticalAlignTouched && !['top', 'middle', 'bottom'].includes(block.verticalAlign);
+      const rawFont = ($('inlineEditorFont')?.value || '').trim();
+      const storedFont = rawFont && rawFont !== 'Vazirmatn' ? rawFont : null;
       return { text: textVal, richHtml: plainEquiv ? '' : htmlVal,
         dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
         verticalAlign: keepLegacyVertical ? undefined : $('inlineVerticalAlign').value,
-        size: keepAuto ? null : (rawSize ? Number(rawSize) : null), color: inlineDraft?.color ?? null };
+        size: keepAuto ? null : (rawSize ? Number(rawSize) : null), color: inlineDraft?.color ?? null,
+        fontFamily: storedFont,
+        bold: inlineDraft ? inlineDraft.bold : block.bold !== false,
+        italic: inlineDraft ? inlineDraft.italic : !!block.italic,
+        underline: inlineDraft ? inlineDraft.underline : !!block.underline };
     },
     onCommit: (savedBlock, revision) => {
       inlineDraft.snapshot = revision;
@@ -5844,6 +6164,10 @@ function openInlineEditor(block, clickEvent = null) {
         inlineDraft.initialSizeValue = nextShown;
       }
       inlineDraft.size = $('inlineEditorSize').value;
+      inlineDraft.fontFamily = savedBlock.fontFamily || null;
+      inlineDraft.bold = savedBlock.bold !== false;
+      inlineDraft.italic = !!savedBlock.italic;
+      inlineDraft.underline = !!savedBlock.underline;
       inlineDraft.originalColor = inlineDraft.color = savedBlock.color || null; inlineDraft.conflictReported = false;
       $('inlineEditorCancel').classList.add('hidden');
       buildBlockList(); scheduleEditorCanvasDraw(); scheduleSave();
@@ -5907,6 +6231,7 @@ function updateEditorSelection() {
   if ($('editorSelectionStatus')) $('editorSelectionStatus').textContent = selected.size ? `${selected.size.toLocaleString('fa-IR')} متن انتخاب شده · مرجع: متن ${state.selectedBlockIds[0]}` : 'متنی انتخاب نشده';
   syncEditorClipboardButtons();
   syncVerticalAlignButtons();
+  syncEditorShapeControls();
 }
 function selectEditorBlock(blockId, scroll = true, additive = false) {
   const key = String(blockId); const selected = new Set(editorSelectedKeys());
@@ -6120,6 +6445,90 @@ function setBlockTextMode(block, mode) {
   const selector = card?.querySelector('[data-text-mode]'); if (selector) selector.value = block.textMode;
   renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
 }
+function syncEditorBoxVisualGeometry(el, block, box, scale) {
+  const wPx = Math.max(1, (box.x1 - box.x0) * scale);
+  const hPx = Math.max(1, (box.y1 - box.y0) * scale);
+  const shape = normalizeShapeKey(block?.shape);
+  const radiusPct = normalizeRadiusPct(block?.cornerRadius);
+  const angle = normalizeAngleDeg(block?.angle);
+  el.style.left = `${box.x0 * scale}px`;
+  el.style.top = `${box.y0 * scale}px`;
+  el.style.width = `${wPx}px`;
+  el.style.height = `${hPx}px`;
+  el.dataset.shape = shape;
+  el.dataset.boxAngle = String(angle);
+  el.dataset.boxRadius = String(radiusPct);
+  const item = editorItem();
+  el.classList.toggle('compact-box', wPx < 155);
+  el.classList.toggle('edge-right', Boolean(item && ((item.width - box.x1) * scale) < 24));
+  el.style.transformOrigin = '50% 50%';
+  el.style.transform = angle ? `rotate(${angle}deg)` : '';
+  const halfShort = Math.min(wPx, hPx) / 2;
+  if (shape === 'pill') {
+    el.style.borderRadius = `${halfShort.toFixed(1)}px`;
+  } else if (shape === 'ellipse') {
+    el.style.borderRadius = '50%';
+  } else if (shape === 'rect' && radiusPct > 0) {
+    el.style.borderRadius = `${((radiusPct / 100) * halfShort).toFixed(1)}px`;
+  } else {
+    el.style.borderRadius = '';
+  }
+  const svg = el.querySelector('.box-shape-svg');
+  if (svg && shape !== 'rect') {
+    svg.setAttribute('viewBox', `0 0 ${Math.max(1, Math.round(wPx))} ${Math.max(1, Math.round(hPx))}`);
+    const pathEl = svg.querySelector('path');
+    if (pathEl) pathEl.setAttribute('d', shapeSvgPathForBox(Math.max(1, Math.round(wPx)), Math.max(1, Math.round(hPx)), shape, radiusPct));
+  }
+  const tooSmallForCornerHandles = wPx < 24 || hPx < 22 || shape !== 'rect';
+  const maxInset = Math.max(6, halfShort - 2);
+  const insetPx = Math.min(maxInset, Math.max(6, (radiusPct / 100) * halfShort));
+  el.querySelectorAll('.corner-radius-handle').forEach((handle) => {
+    if (tooSmallForCornerHandles) {
+      handle.style.visibility = 'hidden';
+      return;
+    }
+    handle.style.visibility = '';
+    const corner = handle.dataset.radiusCorner || '';
+    const off = `${Math.max(2, Math.round(insetPx - 4))}px`;
+    handle.style.top = corner.startsWith('n') ? off : '';
+    handle.style.bottom = corner.startsWith('s') ? off : '';
+    handle.style.left = corner.endsWith('w') ? off : '';
+    handle.style.right = corner.endsWith('e') ? off : '';
+  });
+}
+function applyBoxShapeSettings(patch) {
+  const targets = selectedEditorBlocks();
+  const singleTarget = inlineDraft?.block ? [inlineDraft.block] : [];
+  const blocks = targets.length ? targets : singleTarget;
+  if (!blocks.length) {
+    toast('ابتدا یک کادر را روی تصویر انتخاب کنید.', true);
+    return;
+  }
+  blocks.forEach((b) => {
+    if ('shape' in patch) {
+      b.shape = normalizeShapeKey(patch.shape);
+      if (b.manual && (!b.bg || b.bg === 'none') && b.shape !== 'rect') b.bg = 'white';
+    }
+    if ('cornerRadius' in patch) {
+      b.cornerRadius = normalizeRadiusPct(patch.cornerRadius);
+      if (b.manual && (!b.bg || b.bg === 'none') && b.cornerRadius > 0) b.bg = 'white';
+    }
+    if ('angle' in patch) b.angle = normalizeAngleDeg(patch.angle);
+    if ('bg' in patch) b.bg = patch.bg;
+  });
+  buildBlockList();
+  drawEditor();
+  syncEditorShapeControls();
+  scheduleSave();
+}
+function translateSelectedEditorBlock() {
+  const target = inlineDraft?.block || selectedEditorBlocks()[0] || null;
+  if (!target) {
+    toast('ابتدا کادر موردنظر را روی تصویر انتخاب کنید تا برای ترجمه ارسال شود.', true);
+    return;
+  }
+  retranslateBlock(target).catch((err) => toast(err?.message || String(err), true));
+}
 function renderEditorBoxes() {
   const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return;
   const mode = currentOverlayMode(); const selected = new Set(editorSelectedKeys());
@@ -6138,12 +6547,31 @@ function renderEditorBoxes() {
       const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('pointerdown', (event) => event.stopPropagation()); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(el._block, false); });
       const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('pointerdown', (event) => event.stopPropagation()); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(el._block, el.dataset.mode === 'ocr' ? 'translation' : 'ocr'); });
       const copyBtn = document.createElement('button'); copyBtn.type = 'button'; copyBtn.className = 'box-copy'; copyBtn.textContent = '⧉'; copyBtn.title = 'کپی و تکثیر فوری همین کادر با تمام ویژگی‌ها (یا نگه داشتن Ctrl+Shift و کشیدن/کلیک)'; copyBtn.setAttribute('aria-label', `کپی و تکثیر کادر متن ${block.id}`); copyBtn.addEventListener('pointerdown', (event) => event.stopPropagation()); copyBtn.addEventListener('click', (event) => { event.stopPropagation(); duplicateEditorBlocks([el._block]); });
-      el.append(move, visibility, language, copyBtn);
+      const translateBtn = document.createElement('button'); translateBtn.type = 'button'; translateBtn.className = 'box-translate'; translateBtn.textContent = '🌐'; translateBtn.title = 'ارسال همین کادر برای ترجمهٔ تکی'; translateBtn.setAttribute('aria-label', `ترجمهٔ تکی کادر متن ${block.id}`); translateBtn.addEventListener('pointerdown', (event) => event.stopPropagation()); translateBtn.addEventListener('click', (event) => { event.stopPropagation(); retranslateBlock(el._block); });
+      const rotateHandle = document.createElement('i'); rotateHandle.className = 'rotate-handle'; rotateHandle.dataset.rotateHandle = '1'; rotateHandle.textContent = '↻'; rotateHandle.title = 'برای چرخاندن کادر بکشید (Shift = مضرب ۱۵ درجه · دابل‌کلیک = بازنشانی به ۰ درجه)'; rotateHandle.setAttribute('aria-label', `چرخاندن کادر متن ${block.id}`);
+      rotateHandle.addEventListener('dblclick', (event) => { event.preventDefault(); event.stopPropagation(); if (el._block) { el._block.angle = 0; buildBlockList(); drawEditor(); syncEditorShapeControls(); scheduleSave(); } });
+      const shapeSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      shapeSvg.setAttribute('class', 'box-shape-svg');
+      shapeSvg.setAttribute('preserveAspectRatio', 'none');
+      shapeSvg.setAttribute('aria-hidden', 'true');
+      shapeSvg.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'path'));
+      el.append(move, visibility, language, copyBtn, translateBtn, rotateHandle, shapeSvg);
+      ['nw', 'ne', 'se', 'sw'].forEach((corner) => {
+        const crHandle = document.createElement('i');
+        crHandle.className = `corner-radius-handle ${corner}`;
+        crHandle.dataset.radiusCorner = corner;
+        crHandle.title = 'برای گرد کردن گوشه‌های مستطیل بکشید (دابل‌کلیک برای تیز کردن گوشه‌ها)';
+        crHandle.addEventListener('dblclick', (event) => {
+          event.preventDefault(); event.stopPropagation();
+          if (el._block) { el._block.cornerRadius = 0; buildBlockList(); drawEditor(); syncEditorShapeControls(); scheduleSave(); }
+        });
+        el.appendChild(crHandle);
+      });
       ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
       el.addEventListener('pointerdown', (event) => {
         const activeBlock = el._block;
         const isCtrlOrMeta = event.ctrlKey || event.metaKey;
-        const isCloneGesture = isCtrlOrMeta && event.shiftKey && event.button === 0 && !event.target.closest('.box-visibility,.box-language,.box-copy,[data-dir]');
+        const isCloneGesture = isCtrlOrMeta && event.shiftKey && event.button === 0 && !event.target.closest('.box-visibility,.box-language,.box-copy,.box-translate,[data-dir],[data-rotate-handle],[data-radius-corner]');
         if (isCloneGesture) {
           if (inlineDraft && !closeInlineEditor()) return;
           if (!editorSelectedKeys().includes(String(activeBlock.id))) {
@@ -6152,7 +6580,7 @@ function renderEditorBoxes() {
           startBoxCloneGesture(event, activeBlock);
           return;
         }
-        const additive = isCtrlOrMeta; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
+        const additive = isCtrlOrMeta; const dragTarget = event.target.closest('[data-move],[data-dir],[data-rotate-handle],[data-radius-corner]') || event.target === el;
         if (inlineDraft && additive) {
           if (!closeInlineEditor()) return;
         } else if (inlineDraft && inlineDraft.block !== activeBlock && !additive) {
@@ -6166,7 +6594,7 @@ function renderEditorBoxes() {
     // Reuse the actual editing node so zoom, redraw and other controls do not destroy the caret or undo history.
     el._block = block;
     el.classList.toggle('selected', selected.has(key)); el.classList.toggle('active', String(state.activeBlockId) === key); el.classList.toggle('empty', !hasRenderableText(display));
-    el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
+    syncEditorBoxVisualGeometry(el, block, box, scale);
     const language = el.querySelector('.box-language'); language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید';
     let text = el.querySelector('.editor-box-text');
     if (!text || el.dataset.mode !== displayMode || text._block !== block) {
@@ -6236,25 +6664,81 @@ function renderEditorBoxes() {
 }
 function startBoxDrag(event, block, el) {
   if (event.button !== 0) return;
-  const resize = event.target.closest('[data-dir]'); const moveHandle = event.target.closest('[data-move]');
+  const rotateTarget = event.target.closest('[data-rotate-handle]');
+  const radiusTarget = event.target.closest('[data-radius-corner]');
+  const resize = event.target.closest('[data-dir]');
+  const moveHandle = event.target.closest('[data-move]');
   // Text remains editable: dragging starts on the visible handle or the box border, not inside the text itself.
-  if (!resize && !moveHandle && event.target !== el) return;
+  if (!rotateTarget && !radiusTarget && !resize && !moveHandle && event.target !== el) return;
   const item = editorItem(); if (!item) return;
   event.preventDefault(); event.stopPropagation();
-  const direction = resize?.dataset.dir || 'move'; const start = boxOf(block); const origin = { x: event.clientX, y: event.clientY }; const scale = state.editorScale || 1;
+  const mode = rotateTarget ? 'rotate' : radiusTarget ? 'corner-radius' : (resize?.dataset.dir || 'move');
+  const cornerKey = radiusTarget?.dataset.radiusCorner || '';
+  const start = boxOf(block);
+  const origin = { x: event.clientX, y: event.clientY };
+  const scale = state.editorScale || 1;
+  const stageRect = $('editorStage')?.getBoundingClientRect?.() || { left: 0, top: 0 };
+  const centerImgX = (start.x0 + start.x1) / 2;
+  const centerImgY = (start.y0 + start.y1) / 2;
+  const centerClientX = stageRect.left + centerImgX * scale;
+  const centerClientY = stageRect.top + centerImgY * scale;
+  const initialAngle = normalizeAngleDeg(block.angle);
+  const initialRadius = normalizeRadiusPct(block.cornerRadius);
+  const startPointerRad = Math.atan2(origin.y - centerClientY, origin.x - centerClientX);
   const selected = selectedEditorBlocks();
-  const movingBlocks = direction === 'move' && selected.includes(block) ? selected : [block];
+  const movingBlocks = mode === 'move' && selected.includes(block) ? selected : [block];
   const movingStarts = movingBlocks.map((movingBlock) => ({ block: movingBlock, start: boxOf(movingBlock) }));
   let changed = false; let finished = false;
   el.setPointerCapture(event.pointerId); el.classList.add('dragging');
+  if (radiusTarget) radiusTarget.classList.add('dragging');
   const move = (ev) => {
-    const dx = (ev.clientX - origin.x) / scale; const dy = (ev.clientY - origin.y) / scale;
-    if (direction === 'move') {
+    if (mode === 'rotate') {
+      const curPointerRad = Math.atan2(ev.clientY - centerClientY, ev.clientX - centerClientX);
+      let deltaDeg = ((curPointerRad - startPointerRad) * 180) / Math.PI;
+      while (deltaDeg > 180) deltaDeg -= 360;
+      while (deltaDeg < -180) deltaDeg += 360;
+      let rawDeg = initialAngle + deltaDeg;
+      while (rawDeg > 180) rawDeg -= 360;
+      while (rawDeg < -180) rawDeg += 360;
+      const snapped = ev.shiftKey ? Math.round(rawDeg / 15) * 15 : rawDeg;
+      block.angle = normalizeAngleDeg(snapped);
+      syncEditorBoxVisualGeometry(el, block, boxOf(block), scale);
+      syncEditorShapeControls();
+      if (inlineDraft?.block === block) positionInlineEditor();
+      scheduleEditorCanvasDraw();
+      changed = true;
+      return;
+    }
+    if (mode === 'corner-radius') {
+      const bw = Math.max(2, start.x1 - start.x0);
+      const bh = Math.max(2, start.y1 - start.y0);
+      const halfShort = Math.max(1, Math.min(bw, bh) / 2);
+      const relScreenX = (ev.clientX - centerClientX) / scale;
+      const relScreenY = (ev.clientY - centerClientY) / scale;
+      const rad = -(initialAngle * Math.PI) / 180;
+      const localX = (relScreenX * Math.cos(rad) - relScreenY * Math.sin(rad)) + bw / 2;
+      const localY = (relScreenX * Math.sin(rad) + relScreenY * Math.cos(rad)) + bh / 2;
+      const distX = cornerKey.endsWith('e') ? (bw - localX) : localX;
+      const distY = cornerKey.startsWith('s') ? (bh - localY) : localY;
+      const inward = Math.max(0, Math.min(halfShort, (Math.max(0, distX) + Math.max(0, distY)) / 2));
+      const pct = normalizeRadiusPct((inward / halfShort) * 100);
+      block.shape = 'rect';
+      block.cornerRadius = pct;
+      if (block.manual && (!block.bg || block.bg === 'none') && pct > 0) block.bg = 'white';
+      syncEditorBoxVisualGeometry(el, block, boxOf(block), scale);
+      syncEditorShapeControls();
+      if (inlineDraft?.block === block) positionInlineEditor();
+      scheduleEditorCanvasDraw();
+      changed = true;
+      return;
+    }
+    const rawDx = (ev.clientX - origin.x) / scale; const rawDy = (ev.clientY - origin.y) / scale;
+    if (mode === 'move') {
       const minDx = Math.max(...movingStarts.map((entry) => -entry.start.x0));
       const maxDx = Math.min(...movingStarts.map((entry) => item.width - entry.start.x1));
       const minDy = Math.max(...movingStarts.map((entry) => -entry.start.y0));
       const maxDy = Math.min(...movingStarts.map((entry) => item.height - entry.start.y1));
-      const groupDx = Math.max(minDx, Math.min(maxDx, dx)); const groupDy = Math.max(minDy, Math.min(maxDy, dy));
+      const groupDx = Math.max(minDx, Math.min(maxDx, rawDx)); const groupDy = Math.max(minDy, Math.min(maxDy, rawDy));
       movingStarts.forEach((entry) => {
         const moving = entry.block; const initial = entry.start; const width = initial.x1 - initial.x0; const height = initial.y1 - initial.y0;
         moving.tx0 = initial.x0 + groupDx; moving.tx1 = moving.tx0 + width; moving.ty0 = initial.y0 + groupDy; moving.ty1 = moving.ty0 + height;
@@ -6262,22 +6746,32 @@ function startBoxDrag(event, block, el) {
         if (boxEl) { boxEl.style.left = `${moving.tx0 * scale}px`; boxEl.style.top = `${moving.ty0 * scale}px`; }
       });
     } else {
+      const rad = -(initialAngle * Math.PI) / 180;
+      const dx = initialAngle ? (rawDx * Math.cos(rad) - rawDy * Math.sin(rad)) : rawDx;
+      const dy = initialAngle ? (rawDx * Math.sin(rad) + rawDy * Math.cos(rad)) : rawDy;
       let { x0, y0, x1, y1 } = start; const minW = Math.min(20, item.width); const minH = Math.min(16, item.height);
-      if (direction.includes('w')) x0 = Math.max(0, Math.min(start.x1 - minW, start.x0 + dx));
-      if (direction.includes('e')) x1 = Math.min(item.width, Math.max(start.x0 + minW, start.x1 + dx));
-      if (direction.includes('n')) y0 = Math.max(0, Math.min(start.y1 - minH, start.y0 + dy));
-      if (direction.includes('s')) y1 = Math.min(item.height, Math.max(start.y0 + minH, start.y1 + dy));
+      if (mode.includes('w')) x0 = Math.max(0, Math.min(start.x1 - minW, start.x0 + dx));
+      if (mode.includes('e')) x1 = Math.min(item.width, Math.max(start.x0 + minW, start.x1 + dx));
+      if (mode.includes('n')) y0 = Math.max(0, Math.min(start.y1 - minH, start.y0 + dy));
+      if (mode.includes('s')) y1 = Math.min(item.height, Math.max(start.y0 + minH, start.y1 + dy));
       block.tx0 = x0; block.tx1 = x1; block.ty0 = y0; block.ty1 = y1;
     }
-    el.style.left = `${block.tx0 * scale}px`; el.style.top = `${block.ty0 * scale}px`; el.style.width = `${(block.tx1 - block.tx0) * scale}px`; el.style.height = `${(block.ty1 - block.ty0) * scale}px`;
+    syncEditorBoxVisualGeometry(el, block, boxOf(block), scale);
     if (inlineDraft?.block === block) positionInlineEditor();
     scheduleEditorCanvasDraw(); changed = true;
   };
   const stop = () => {
     if (finished) return; finished = true;
     el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', stop); el.removeEventListener('pointercancel', stop); el.removeEventListener('lostpointercapture', stop);
-    el.classList.remove('dragging'); if (el.hasPointerCapture?.(event.pointerId)) el.releasePointerCapture(event.pointerId);
-    if (changed) { if (inlineDraft?.block === block) refreshInlineTypography(); drawEditor(); scheduleSave(); }
+    el.classList.remove('dragging');
+    if (radiusTarget) radiusTarget.classList.remove('dragging');
+    if (el.hasPointerCapture?.(event.pointerId)) el.releasePointerCapture(event.pointerId);
+    if (changed) {
+      if (initialRadius !== normalizeRadiusPct(block.cornerRadius) || initialAngle !== normalizeAngleDeg(block.angle)) buildBlockList();
+      if (inlineDraft?.block === block) refreshInlineTypography();
+      drawEditor();
+      scheduleSave();
+    }
   };
   el.addEventListener('pointermove', move); el.addEventListener('pointerup', stop); el.addEventListener('pointercancel', stop); el.addEventListener('lostpointercapture', stop);
 }
@@ -6310,6 +6804,11 @@ function applyTranslatedBlockDefaults(block, text, targetLang = null) {
   block.richHtml = '';
   const resolvedDir = targetLang ? targetLanguageDir(targetLang) : (block.dir === 'ltr' ? 'ltr' : 'rtl');
   block.dir = resolvedDir;
+  if (block.textMode === 'ocr') block.textMode = 'translation';
+  if (block.manual) {
+    if (!['left', 'center', 'right', 'justify'].includes(block.align)) block.align = 'center';
+    return;
+  }
   if (block.pageRole === 'heading') {
     const rawLh = Number(block.lineH) || Math.max(16, (Number(block.y1) || 0) - (Number(block.y0) || 0)) || 22;
     block.align = resolvedDir === 'ltr' ? 'left' : 'right';
@@ -6325,10 +6824,17 @@ function applyTranslatedBlockDefaults(block, text, targetLang = null) {
   if (block._detectedItalic) block.italic = true;
 }
 async function retranslateBlock(block, targetOverride = null) {
+  if (!block) return;
   if (inlineDraft?.block === block && !closeInlineEditor()) return;
-  const text = block.text || '';
-  if (!String(text).trim()) {
-    toast('این کادر متن اصلی (OCR) برای ترجمه ندارد؛ مستقیم تایپ کنید یا ابتدا متن اصلی را بنویسید.', true);
+  let text = String(block.text || '').trim();
+  const canUseManualTypedSource = Boolean(block.manual && (block.manualLang === 'en' || block.dir === 'ltr'));
+  if (!text && canUseManualTypedSource && String(block.tr || '').trim()) {
+    text = String(block.tr || '').trim();
+    block.text = text;
+    scheduleSave();
+  }
+  if (!text) {
+    toast('این کادر متن اصلی (OCR) برای ترجمه ندارد.', true);
     return;
   }
   const snapshot = inlineBlockSnapshot(block);
@@ -6758,12 +7264,25 @@ function buildBlockList() {
       scheduleSave();
     });
     head.appendChild(roleBtn);
-    const bg = document.createElement('select'); [['auto', 'پس‌زمینه خودکار'], ['white', 'سفید'], ['black', 'مشکی'], ['none', 'بدون پاک‌کردن']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; bg.appendChild(option); }); bg.value = block.bg || 'auto'; head.appendChild(bg);
+    const bg = document.createElement('select'); [['auto', 'پس‌زمینه خودکار'], ['white', 'سفید'], ['black', 'مشکی'], ['none', 'بدون پاک‌کردن']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; bg.appendChild(option); });
+    if (/^#[0-9a-fA-F]{6}$/.test(String(block.bg || ''))) {
+      const customOpt = document.createElement('option');
+      customOpt.value = String(block.bg);
+      customOpt.textContent = `رنگ ${String(block.bg).toUpperCase()}`;
+      bg.appendChild(customOpt);
+    }
+    bg.value = block.bg || 'auto'; head.appendChild(bg);
     const languageRow = document.createElement('div'); languageRow.className = 'block-tools block-language-tools';
     const languageLabel = document.createElement('label'); languageLabel.className = 'block-language-label'; languageLabel.appendChild(document.createTextNode('نمایش همین متن:'));
     const language = document.createElement('select'); language.dataset.textMode = 'sidebar'; language.setAttribute('aria-label', `زبان نمایش متن ${block.id} روی تصویر`); [['translation', 'فارسی / ترجمه'], ['ocr', 'انگلیسی / OCR']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; language.appendChild(option); }); language.value = blockTextMode(block); languageLabel.appendChild(language); languageRow.appendChild(languageLabel);
     const metaBadges = [];
     if (block.manual) metaBadges.push(['دستی', 'کادر اضافه‌شدهٔ دستی — در اجرای مجدد OCR حفظ می‌شود', 'block-manual-chip']);
+    if (block.fontFamily && canonicalFontOption(block.fontFamily) !== 'Vazirmatn') metaBadges.push([canonicalFontOption(block.fontFamily), `فونت انتخابی کادر: ${canonicalFontOption(block.fontFamily)}`]);
+    const shKey = normalizeShapeKey(block.shape);
+    const shapeNames = { ellipse: 'بیضی', pill: 'کپسولی', diamond: 'لوزی', hexagon: 'شش‌ضلعی', cloud: 'ابر کمیک' };
+    if (shKey !== 'rect' && shapeNames[shKey]) metaBadges.push([shapeNames[shKey], `شکل کادر: ${shapeNames[shKey]}`]);
+    else if (shKey === 'rect' && normalizeRadiusPct(block.cornerRadius) > 0) metaBadges.push([`گوشه ${normalizeRadiusPct(block.cornerRadius)}٪`, 'گوشه‌های گرد مستطیل']);
+    if (normalizeAngleDeg(block.angle) !== 0) metaBadges.push([`↻ ${normalizeAngleDeg(block.angle)}°`, `زاویهٔ چرخش کادر: ${normalizeAngleDeg(block.angle)} درجه`]);
     if (block.bold) metaBadges.push(['B', 'تشخیص/قالب پررنگ (Bold)']);
     if (block.italic) metaBadges.push(['I', 'تشخیص/قالب کج (Italic)']);
     if ((Number(block.firstLineIndent) || 0) >= 0.5 || (!isHeading && (Number(block.sourceIndent) || 0) >= 2)) metaBadges.push(['↳ تورفتگی', 'دارای تورفتگی نسبت به حاشیهٔ ستون']);
@@ -6788,10 +7307,11 @@ function buildBlockList() {
     translation.addEventListener('click', openBlockTranslation);
     translation.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openBlockTranslation(); } });
     const actions = document.createElement('div'); actions.className = 'block-tools block-card-actions';
+    const trBtnLabel = String(block.tr || '').trim() && String(block.text || '').trim() ? 'ترجمهٔ دوباره' : 'ترجمهٔ این کادر';
     actions.append(
       makeBlockToolButton('<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V5a2 2 0 0 1 2-2h11"/><path d="M14.5 11.5v6"/><path d="M11.5 14.5h6"/>', 'تکثیر کادر', () => duplicateEditorBlocks([block]), 'block-duplicate-btn'),
       makeBlockToolButton('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', 'کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))),
-      makeBlockToolButton('<path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"/><path d="M16 16h5v5"/>', 'ترجمهٔ دوباره', () => retranslateBlock(block), 'block-retranslate-btn'),
+      makeBlockToolButton('<path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"/><path d="M16 16h5v5"/>', trBtnLabel, () => retranslateBlock(block), 'block-retranslate-btn'),
       makeBlockToolButton('<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>', 'پاک‌کردن ترجمه', async () => {
         if (inlineDraft?.block === block && !closeInlineEditor()) return;
         const ok = await appConfirm('آیا مطمئن هستید که می‌خواهید ترجمهٔ این کادر را پاک کنید؟', {
@@ -6826,17 +7346,20 @@ async function closeEditor(markApproved = false) {
   editorCloseTask = (async () => {
     const item = editorItem();
     if (item ? !applyInlineEditor() : !!inlineDraft) return;
+    const returnScroll = editorReturnScroll ? { ...editorReturnScroll } : (item ? captureEditorReturnScroll(item.id) : null);
     editorLoadSeq += 1;
     if (item) {
       if (markApproved === true) item.approved = true;
       await overlayPreviewTask;
       await saveProject();
       await renderAndUpload(item);
-      renderGrid();
     }
     editorSessionSnapshot = null;
+    editorReturnScroll = null;
     if (editorCanvasFrame) { cancelAnimationFrame(editorCanvasFrame); editorCanvasFrame = 0; }
     closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; $('editorCanvas').width = $('editorCanvas').height = 0; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
+    if (item) renderGrid();
+    restoreEditorReturnScroll(returnScroll);
     if (item && markApproved === true) toast('تغییرات ذخیره شد و مهر تأیید نهایی روی صفحه ثبت گردید');
   })();
   try { await editorCloseTask; } finally { editorCloseTask = null; }
@@ -6847,11 +7370,13 @@ async function cancelEditor() {
   editorCloseTask = (async () => {
     const item = editorItem();
     const snap = editorSessionSnapshot;
+    const returnScroll = editorReturnScroll ? { ...editorReturnScroll } : (item ? captureEditorReturnScroll(item.id) : null);
     const hadInlineDraft = !!inlineDraft;
     const hadPendingSave = savePending;
     discardInlineEditorForCancel();
     clearTimeout(saveTimer); savePending = false;
     editorLoadSeq += 1;
+    let shouldRenderGrid = false;
     if (item && snap && state.project?.id === snap.projectId && item.id === snap.imageId) {
       const changedBlocks = JSON.stringify(item.blocks || []) !== snap.blocksJson;
       const changedWatermark = JSON.stringify(item.watermark || null) !== snap.watermarkJson;
@@ -6873,11 +7398,14 @@ async function cancelEditor() {
         if (changedMode) await renderImagesText();
         else await renderAndUpload(item);
       }
-      renderGrid();
+      shouldRenderGrid = true;
     }
     editorSessionSnapshot = null;
+    editorReturnScroll = null;
     if (editorCanvasFrame) { cancelAnimationFrame(editorCanvasFrame); editorCanvasFrame = 0; }
     closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; $('editorCanvas').width = $('editorCanvas').height = 0; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
+    if (shouldRenderGrid) renderGrid();
+    restoreEditorReturnScroll(returnScroll);
     toast('ویرایش این صفحه بدون ذخیرهٔ تغییرات بسته شد');
   })();
   try { await editorCloseTask; } finally { editorCloseTask = null; }
@@ -7693,6 +8221,12 @@ function bindEvents() {
     direction: (value) => setInlineLineStyle('direction', value),
     color: (value) => {
       if (hasInlineWordSelection()) return applyInlineWordStyle({ color: value }, { restoreFocus: false });
+      if (inlineDraft && (inlineDraft.mode === 'ocr' || isInlineFieldEmpty())) {
+        inlineDraft.color = value;
+        if ($('inlineEditorColor')) $('inlineEditorColor').value = value;
+        syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+        return true;
+      }
       if (inlineDraft?.range?.collapsed) { setInlineLineStyle('color', value, { restoreFocus: false }); return true; }
       return false;
     },
@@ -7759,6 +8293,9 @@ function bindEvents() {
   $('inlineEditor').addEventListener('click', () => requestAnimationFrame(positionInlineEditor));
   $('inlineEditor').querySelector('details')?.addEventListener('toggle', () => requestAnimationFrame(positionInlineEditor));
   syncInlineDockIdleState();
+  $('inlineFontFamily')?.addEventListener('change', () => {
+    setSelectionOrBlockFont($('inlineFontFamily').value, { restoreFocus: false });
+  });
   $('inlineLineSize').addEventListener('input', () => {
     const value = $('inlineLineSize').value.trim(); const size = Number(value);
     if (value && Number.isFinite(size) && size >= 8 && size <= 160) setSelectionOrLineSize(`${Math.round(size)}px`, { restoreFocus: false });
@@ -7853,10 +8390,50 @@ function bindEvents() {
   $('editorWatermarkBtn')?.addEventListener('click', () => openWatermarkDialog(true).catch((e) => toast(e.message, true)));
   $('editorAddFaText')?.addEventListener('click', () => addManualEditorBlock('fa'));
   $('editorAddEnText')?.addEventListener('click', () => addManualEditorBlock('en'));
+  $('editorTranslateBlock')?.addEventListener('click', () => translateSelectedEditorBlock());
   $('editorCopyBlock')?.addEventListener('click', () => copyEditorBlocks());
   $('editorPasteBlock')?.addEventListener('click', () => pasteCopiedEditorBlocks());
   $('editorDuplicateBlock')?.addEventListener('click', () => duplicateEditorBlocks());
   $('editorDeleteBlock')?.addEventListener('click', () => { deleteEditorBlocks().catch((e) => toast(e.message, true)); });
+  $('editorBoxShape')?.addEventListener('change', () => {
+    applyBoxShapeSettings({ shape: $('editorBoxShape').value });
+  });
+  $('editorBoxRadius')?.addEventListener('input', () => {
+    const raw = $('editorBoxRadius').value.trim();
+    if (raw === '') return;
+    applyBoxShapeSettings({ cornerRadius: normalizeRadiusPct(raw) });
+  });
+  $('editorBoxRadius')?.addEventListener('change', () => {
+    applyBoxShapeSettings({ cornerRadius: normalizeRadiusPct($('editorBoxRadius').value) });
+  });
+  $('editorBoxAngle')?.addEventListener('input', () => {
+    const raw = $('editorBoxAngle').value.trim();
+    if (raw === '' || raw === '-') return;
+    const n = Number(raw);
+    if (Number.isFinite(n)) applyBoxShapeSettings({ angle: normalizeAngleDeg(n) });
+  });
+  $('editorBoxAngle')?.addEventListener('change', () => {
+    applyBoxShapeSettings({ angle: normalizeAngleDeg($('editorBoxAngle').value) });
+  });
+  $('editorRotateReset')?.addEventListener('click', () => {
+    applyBoxShapeSettings({ angle: 0 });
+  });
+  $('editorBoxBg')?.addEventListener('change', () => {
+    const val = $('editorBoxBg').value;
+    if (val === 'custom') {
+      const hex = ($('editorBoxBgColor')?.value || '#ffffff').toLowerCase();
+      $('editorBoxBgColor')?.classList.remove('hidden');
+      applyBoxShapeSettings({ bg: hex });
+      return;
+    }
+    $('editorBoxBgColor')?.classList.add('hidden');
+    applyBoxShapeSettings({ bg: val });
+  });
+  $('editorBoxBgColor')?.addEventListener('input', () => {
+    const hex = ($('editorBoxBgColor')?.value || '#ffffff').toLowerCase();
+    if ($('editorBoxBg')) $('editorBoxBg').value = 'custom';
+    applyBoxShapeSettings({ bg: hex });
+  });
   $('wmCancelBtn')?.addEventListener('click', () => closeDialog('watermarkDialog'));
   $('wmApplyBtn')?.addEventListener('click', () => { applyWatermarkFromDialog().catch((e) => toast(e.message, true)); });
   $('wmRemoveBtn')?.addEventListener('click', () => { removeWatermarkFromDialog().catch((e) => toast(e.message, true)); });

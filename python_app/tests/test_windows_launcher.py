@@ -126,7 +126,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     offline_bat = (ROOT / "build_windows_offline.bat").read_text(encoding="utf-8")
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
-    assert "ComicOCRStudio-Offline-Setup-4.11" in offline_bat
+    assert "ComicOCRStudio-Offline-Setup-4.12" in offline_bat
     assert 'start_windows.bat" --setup-only' in offline_bat
     assert '"%~1"=="--setup-only"' in NORMAL
     assert 'if defined SETUP_ONLY' in NORMAL

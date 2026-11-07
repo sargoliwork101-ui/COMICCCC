@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.11"
+    assert health.json()["version"] == "4.12"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۱۱ · Python</span>' in index_html
+    assert '<span class="ver">۴.۱۲ · Python</span>' in index_html
     assert "مدیریت مدل‌های OCR" in index_html
     assert "مدیریت ترجمه‌ها" in index_html
     assert 'id="deleteModelsMenuBtn"' not in index_html
@@ -3291,7 +3291,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.11"
+    assert APP_VERSION == "4.12"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -4588,6 +4588,88 @@ def test_v411_export_prepare_stream_non_empty_guard_pdf_fallback_moved_box_erase
     data_bytes, ext_str, w_out, h_out = exp_mod.image_payload(client.app.state if hasattr(client.app.state, "get") else exp_mod.ProjectStore(), pid, proj["images"][0])
     assert len(data_bytes) > 100 and ext_str == "png" and (w_out, h_out) == (240, 240)
     stale_edited.unlink(missing_ok=True)
+
+
+def test_v412_exporter_shapes_rotation_corner_radius_and_font_family(client):
+    """v4.12 regression test for custom fontFamily, box shapes, cornerRadius, and angle in Visual & Flowing DOCX/PPTX."""
+    import zipfile
+
+    proj = client.post("/api/projects", json={"name": "پروژه ۴.۱۲"}).json()
+    pid = proj["id"]
+    big_img = Image.new("RGB", (260, 220), (255, 255, 255))
+    img_buf = io.BytesIO()
+    big_img.save(img_buf, "PNG")
+    state = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("page412.png", img_buf.getvalue(), "image/png"))],
+    ).json()
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1,
+            "x0": 20, "y0": 20, "x1": 220, "y1": 80,
+            "tx0": 25, "ty0": 25, "tx1": 225, "ty1": 85,
+            "text": "HELLO HERO",
+            "tr": "سلام قهرمان",
+            "richHtml": '<p><span style="font-family:Tahoma">سلام</span> قهرمان</p>',
+            "enabled": True,
+            "bg": "#fff3b0",
+            "color": "#dd2255",
+            "fontFamily": "Impact",
+            "shape": "rect",
+            "cornerRadius": 40,
+            "angle": 30,
+            "dir": "rtl",
+            "align": "center",
+        },
+        {
+            "id": 2,
+            "x0": 30, "y0": 100, "x1": 210, "y1": 160,
+            "text": "",
+            "tr": "فکر عمیق!",
+            "richHtml": "",
+            "enabled": True,
+            "manual": True,
+            "manualLang": "fa",
+            "bg": "white",
+            "fontFamily": "Comic Sans MS",
+            "shape": "cloud",
+            "cornerRadius": 0,
+            "angle": -15,
+            "dir": "rtl",
+            "align": "center",
+        },
+    ]
+    iid = state["images"][0]["id"]
+    put_res = client.put(f"/api/projects/{pid}/state", json={"state": state})
+    assert put_res.status_code == 200
+
+    docx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "docx", "image_ids": [iid], "docx_layout": "visual", "docx_mode": "translation"},
+    )
+    assert docx_res.status_code == 200, docx_res.text
+    with zipfile.ZipFile(io.BytesIO(docx_res.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert 'w:ascii="Tahoma"' in doc_xml
+        assert 'w:ascii="Impact"' in doc_xml
+        assert 'w:ascii="Comic Sans MS"' in doc_xml
+        assert "rotation:30.00;" in doc_xml
+        assert "rotation:-15.00;" in doc_xml
+
+    pptx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "pptx", "image_ids": [iid], "pptx_layout": "visual", "pptx_mode": "translation"},
+    )
+    assert pptx_res.status_code == 200, pptx_res.text
+    with zipfile.ZipFile(io.BytesIO(pptx_res.content)) as zf:
+        slide_xml = zf.read("ppt/slides/slide1.xml").decode("utf-8")
+        assert 'rot="1800000"' in slide_xml  # +30 deg * 60000
+        assert 'rot="20700000"' in slide_xml  # -15 deg -> 345 deg * 60000
+        assert 'prst="roundRect"' in slide_xml and 'val 20000' in slide_xml  # 40% * 500
+        assert 'prst="cloud"' in slide_xml
+        assert 'typeface="Tahoma"' in slide_xml
+        assert 'typeface="Comic Sans MS"' in slide_xml
+
 
 
 

@@ -24,6 +24,13 @@
         next.size = value.size === null ? null : Math.round(value.size);
       }
       if (value.color === null || /^#[0-9a-f]{6}$/i.test(value.color || '')) next.color = value.color;
+      if ('fontFamily' in value) {
+        const ff = String(value.fontFamily ?? '').trim();
+        next.fontFamily = ff ? ff.slice(0, 80) : null;
+      }
+      if ('bold' in value && typeof value.bold === 'boolean') next.bold = value.bold;
+      if ('italic' in value && typeof value.italic === 'boolean') next.italic = value.italic;
+      if ('underline' in value && typeof value.underline === 'boolean') next.underline = value.underline;
       return next;
     }
 
@@ -44,6 +51,10 @@
         if (mode === 'ocr') block.text = next.text;
         else { block.tr = next.tr; block.richHtml = next.richHtml; if ('dir' in next) block.dir = next.dir; }
         block.align = next.align; block.verticalAlign = next.verticalAlign; block.size = next.size; block.color = next.color;
+        if ('fontFamily' in next) block.fontFamily = next.fontFamily;
+        if ('bold' in next) block.bold = next.bold;
+        if ('italic' in next) block.italic = next.italic;
+        if ('underline' in next) block.underline = next.underline;
         conflictReported = false;
         onCommit?.(block, snapshot(block));
       }

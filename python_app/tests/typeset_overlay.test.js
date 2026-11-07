@@ -209,5 +209,56 @@ assert(hrOnly.some((point) => point.text.includes('─')), 'separator-only block
   assert.equal(Typeset.boxInset(500), 4, '10-line tall/wide boxes cap inset at 4px');
   console.log('PASS: v3.63 inlineMarksToHtml and bidirectional visualLineOrder');
 }
+{
+  assert.ok(Typeset.FONT_STACKS && Typeset.FONT_STACKS.tahoma.includes('Tahoma'), 'FONT_STACKS exposes curated font families');
+  assert.match(Typeset.resolveFontStack('Comic Sans MS'), /Comic Sans MS/, 'resolveFontStack resolves Comic Sans MS');
+  assert.deepStrictEqual(Typeset.BOX_SHAPES, ['rect', 'ellipse', 'pill', 'diamond', 'hexagon', 'cloud'], 'BOX_SHAPES exposes all 6 shapes');
+  assert.equal(Typeset.normalizeBoxShape('cloud'), 'cloud');
+  assert.equal(Typeset.normalizeBoxShape('unknown'), 'rect');
+  assert.equal(Typeset.normalizeCornerRadius(145), 100);
+  assert.equal(Typeset.normalizeBoxAngle(375), 15);
+
+  const shapeOps = [];
+  const savedCreate = global.document.createElement;
+  global.document.createElement = (tag) => {
+    if (String(tag).toLowerCase() !== 'canvas') return savedCreate.call(global.document, tag);
+    return {
+      width: 0, height: 0,
+      getContext() {
+        return {
+          font: '', fillStyle: '', strokeStyle: '', lineWidth: 1, textAlign: 'start', textBaseline: 'alphabetic', direction: 'rtl',
+          drawImage() { shapeOps.push(['drawImage']); },
+          getImageData(_x, _y, w, h) { return { data: new Uint8ClampedArray(w * h * 4).fill(255) }; },
+          fillRect(x, y, w, h) { shapeOps.push(['fillRect', x, y, w, h, this.fillStyle]); },
+          save() { shapeOps.push(['save']); },
+          restore() { shapeOps.push(['restore']); },
+          translate(x, y) { shapeOps.push(['translate', x, y]); },
+          rotate(r) { shapeOps.push(['rotate', Number(r.toFixed(4))]); },
+          beginPath() { shapeOps.push(['beginPath']); },
+          moveTo() {}, lineTo() {}, quadraticCurveTo() {}, arc() {},
+          ellipse(cx, cy, rx, ry) { shapeOps.push(['ellipse', cx, cy, rx, ry]); },
+          closePath() {},
+          fill() { shapeOps.push(['fill', this.fillStyle]); },
+          clip() { shapeOps.push(['clip']); },
+          stroke() {},
+          measureText(s) { return { width: [...String(s)].length * 7 }; },
+          fillText(s) { shapeOps.push(['fillText', s, this.font]); },
+        };
+      },
+    };
+  };
+  Typeset.render({ width: 200, height: 120 }, [{
+    id: 1, x0: 20, y0: 20, x1: 140, y1: 80,
+    tr: 'سلام کمیک', richHtml: '<span style="font-family:Tahoma">سلام کمیک</span>',
+    enabled: true, bg: '#ffeeaa', shape: 'ellipse', angle: 30, fontFamily: 'Impact',
+  }]);
+  global.document.createElement = savedCreate;
+  assert.ok(shapeOps.some((op) => op[0] === 'fillRect' && op[1] === 20 && op[2] === 20), 'rotated non-rect box erases original source rect first');
+  assert.ok(shapeOps.some((op) => op[0] === 'rotate' && Math.abs(op[1] - 0.5236) < 0.01), '30deg box rotates canvas context around box center');
+  assert.ok(shapeOps.some((op) => op[0] === 'ellipse' && op[3] === 60 && op[4] === 30), 'ellipse shape builds exact half-width/half-height path');
+  assert.ok(shapeOps.some((op) => op[0] === 'fill' && op[1] === '#ffeeaa'), 'custom hex bg fills shaped path');
+  assert.ok(shapeOps.some((op) => op[0] === 'fillText' && String(op[2]).includes('Tahoma')), 'inline span font-family reaches fillText font');
+  console.log('PASS: v4.12 font stacks, shapes, corner radius, rotation, and custom hex bg in Typeset');
+}
 delete global.document;
 console.log('PASS: rich text justifies and list markers survive output rendering');

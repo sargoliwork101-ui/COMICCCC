@@ -1,6 +1,158 @@
 // جای‌گذاری متن فارسی روی تصویر (پاک کردن متن قدیمی + نوشتن ترجمه)
 (function (root) {
   const FONT = 'Vazirmatn, Tahoma, sans-serif';
+  const FONT_STACKS = Object.freeze({
+    vazirmatn: FONT,
+    tahoma: 'Tahoma, Vazirmatn, sans-serif',
+    'segoe ui': '"Segoe UI", Vazirmatn, sans-serif',
+    arial: 'Arial, Vazirmatn, sans-serif',
+    'times new roman': '"Times New Roman", Georgia, Vazirmatn, serif',
+    impact: 'Impact, "Arial Black", Vazirmatn, sans-serif',
+    'comic sans ms': '"Comic Sans MS", cursive, Vazirmatn, sans-serif',
+    'courier new': '"Courier New", monospace, Vazirmatn',
+  });
+  const BOX_SHAPES = Object.freeze(['rect', 'ellipse', 'pill', 'diamond', 'hexagon', 'cloud']);
+
+  function resolveFontStack(fontFamily) {
+    const raw = String(fontFamily || '').trim();
+    if (!raw) return FONT;
+    const primary = raw.split(',')[0].trim().replace(/^['"]+|['"]+$/g, '').replace(/\s+/g, ' ').toLowerCase();
+    return FONT_STACKS[primary] || FONT;
+  }
+
+  function normalizeBoxShape(shape) {
+    const key = String(shape || '').trim().toLowerCase();
+    return BOX_SHAPES.includes(key) ? key : 'rect';
+  }
+
+  function normalizeCornerRadius(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.max(0, Math.min(100, Math.round(n)));
+  }
+
+  function normalizeBoxAngle(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || Math.abs(n) < 0.05) return 0;
+    let wrapped = ((n + 180) % 360 + 360) % 360 - 180;
+    if (wrapped === -180 && n > 0) wrapped = 180;
+    return Math.round(wrapped * 10) / 10;
+  }
+
+  function shapeInsets(bw, bh, shape, cornerRadius) {
+    const baseX = boxInset(bw), baseY = boxInset(bh);
+    const sh = normalizeBoxShape(shape);
+    const cr = normalizeCornerRadius(cornerRadius);
+    if (sh === 'rect') {
+      if (cr <= 0) return { padX: baseX, padY: baseY };
+      const rPx = (cr / 100) * (Math.min(bw, bh) / 2);
+      const diag = rPx * 0.293;
+      return { padX: Math.max(baseX, diag), padY: Math.max(baseY, diag) };
+    }
+    if (sh === 'pill') {
+      const rPx = Math.min(bw, bh) / 2;
+      return { padX: Math.max(baseX, rPx * 0.32), padY: Math.max(baseY, rPx * 0.16) };
+    }
+    if (sh === 'ellipse') return { padX: Math.max(baseX, bw * 0.12), padY: Math.max(baseY, bh * 0.12) };
+    if (sh === 'diamond') return { padX: Math.max(baseX, bw * 0.18), padY: Math.max(baseY, bh * 0.18) };
+    if (sh === 'hexagon') return { padX: Math.max(baseX, bw * 0.11), padY: Math.max(baseY, bh * 0.08) };
+    if (sh === 'cloud') return { padX: Math.max(baseX, bw * 0.12), padY: Math.max(baseY, bh * 0.12) };
+    return { padX: baseX, padY: baseY };
+  }
+
+  function cloudContourBumps() {
+    return [
+      [0.14, 0.18, 0.30, 0.01, 0.50, 0.05],
+      [0.70, 0.01, 0.86, 0.18, 0.90, 0.30],
+      [1.02, 0.38, 0.97, 0.62, 0.90, 0.72],
+      [0.86, 0.86, 0.70, 0.99, 0.50, 0.95],
+      [0.30, 0.99, 0.14, 0.86, 0.10, 0.72],
+      [0.02, 0.62, 0.02, 0.38, 0.10, 0.30],
+    ];
+  }
+
+  function shapeSvgPath(w, h, shape, cornerRadius) {
+    const bw = Math.max(1, Number(w) || 1), bh = Math.max(1, Number(h) || 1);
+    const sh = normalizeBoxShape(shape);
+    if (sh === 'ellipse') {
+      const rx = bw / 2, ry = bh / 2;
+      return `M ${rx} 0 A ${rx} ${ry} 0 1 1 ${rx} ${bh} A ${rx} ${ry} 0 1 1 ${rx} 0 Z`;
+    }
+    if (sh === 'diamond') {
+      return `M ${bw / 2} 0 L ${bw} ${bh / 2} L ${bw / 2} ${bh} L 0 ${bh / 2} Z`;
+    }
+    if (sh === 'hexagon') {
+      const dx = bw * 0.18;
+      return `M ${dx} 0 L ${bw - dx} 0 L ${bw} ${bh / 2} L ${bw - dx} ${bh} L ${dx} ${bh} L 0 ${bh / 2} Z`;
+    }
+    if (sh === 'cloud') {
+      const bumps = cloudContourBumps();
+      let d = `M ${(0.10 * bw).toFixed(1)} ${(0.30 * bh).toFixed(1)}`;
+      bumps.forEach(([cx1, cy1, cx2, cy2, ex, ey]) => {
+        d += ` C ${(cx1 * bw).toFixed(1)} ${(cy1 * bh).toFixed(1)}, ${(cx2 * bw).toFixed(1)} ${(cy2 * bh).toFixed(1)}, ${(ex * bw).toFixed(1)} ${(ey * bh).toFixed(1)}`;
+      });
+      return `${d} Z`;
+    }
+    const r = sh === 'pill'
+      ? Math.min(bw, bh) / 2
+      : (normalizeCornerRadius(cornerRadius) / 100) * (Math.min(bw, bh) / 2);
+    if (r <= 0.5) return `M 0 0 H ${bw} V ${bh} H 0 Z`;
+    const cr = Math.min(r, bw / 2, bh / 2);
+    return `M ${cr} 0 H ${bw - cr} A ${cr} ${cr} 0 0 1 ${bw} ${cr} V ${bh - cr} A ${cr} ${cr} 0 0 1 ${bw - cr} ${bh} H ${cr} A ${cr} ${cr} 0 0 1 0 ${bh - cr} V ${cr} A ${cr} ${cr} 0 0 1 ${cr} 0 Z`;
+  }
+
+  function drawBoxShapePath(ctx, x, y, w, h, shape, cornerRadius) {
+    const sh = normalizeBoxShape(shape);
+    const cr = normalizeCornerRadius(cornerRadius);
+    if (sh === 'rect' && cr <= 0) {
+      if (typeof ctx.beginPath === 'function') ctx.beginPath();
+      if (typeof ctx.rect === 'function') ctx.rect(x, y, w, h);
+      return;
+    }
+    if (sh === 'rect' || sh === 'pill') {
+      const rad = sh === 'pill' ? Math.min(w, h) / 2 : (cr / 100) * (Math.min(w, h) / 2);
+      roundedRectPath(ctx, x, y, w, h, rad);
+      return;
+    }
+    if (typeof ctx.beginPath === 'function') ctx.beginPath();
+    if (sh === 'ellipse') {
+      if (typeof ctx.ellipse === 'function') {
+        ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+      } else if (typeof ctx.rect === 'function') {
+        ctx.rect(x, y, w, h);
+      }
+      if (typeof ctx.closePath === 'function') ctx.closePath();
+      return;
+    }
+    if (sh === 'diamond' && typeof ctx.moveTo === 'function' && typeof ctx.lineTo === 'function') {
+      ctx.moveTo(x + w / 2, y);
+      ctx.lineTo(x + w, y + h / 2);
+      ctx.lineTo(x + w / 2, y + h);
+      ctx.lineTo(x, y + h / 2);
+      if (typeof ctx.closePath === 'function') ctx.closePath();
+      return;
+    }
+    if (sh === 'hexagon' && typeof ctx.moveTo === 'function' && typeof ctx.lineTo === 'function') {
+      const dx = w * 0.18;
+      ctx.moveTo(x + dx, y);
+      ctx.lineTo(x + w - dx, y);
+      ctx.lineTo(x + w, y + h / 2);
+      ctx.lineTo(x + w - dx, y + h);
+      ctx.lineTo(x + dx, y + h);
+      ctx.lineTo(x, y + h / 2);
+      if (typeof ctx.closePath === 'function') ctx.closePath();
+      return;
+    }
+    if (sh === 'cloud' && typeof ctx.moveTo === 'function' && typeof ctx.bezierCurveTo === 'function') {
+      ctx.moveTo(x + 0.10 * w, y + 0.30 * h);
+      cloudContourBumps().forEach(([cx1, cy1, cx2, cy2, ex, ey]) => {
+        ctx.bezierCurveTo(x + cx1 * w, y + cy1 * h, x + cx2 * w, y + cy2 * h, x + ex * w, y + ey * h);
+      });
+      if (typeof ctx.closePath === 'function') ctx.closePath();
+      return;
+    }
+    if (typeof ctx.rect === 'function') ctx.rect(x, y, w, h);
+  }
 
   const _histR = new Uint32Array(256);
   const _histG = new Uint32Array(256);
@@ -227,6 +379,7 @@
       const size = Number.parseFloat(style.fontSize);
       if (Number.isFinite(size)) next.size = Math.max(8, Math.min(160, size));
       if (style.color) next.color = style.color;
+      if (style.fontFamily) next.fontFamily = style.fontFamily;
       if (isBlock && !String(node.textContent || '').trim() && !node.querySelector('img')) {
         words.push({ t: '', ...next, spaceBefore: false, lineBreakBefore: words.length > 0 });
         pendingLineBreak = true; pendingSpace = false; return;
@@ -261,12 +414,14 @@
 
   // عرض هر کلمه با فونت خودش + عرض فاصله با فونت پایهٔ بلوک
   function measureLine(ctx, line, st, size) {
-    const baseFont = `${baseFontPrefix(st)}${size}px ${FONT}`;
+    const blockFont = resolveFontStack(st?.fontFamily);
+    const baseFont = `${baseFontPrefix(st)}${size}px ${blockFont}`;
     let curFont = baseFont;
     ctx.font = baseFont;
     const spaceW = ctx.measureText(' ').width;
     const widths = line.map((w) => {
-      const nextFont = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${FONT}`;
+      const wFont = w.fontFamily ? resolveFontStack(w.fontFamily) : blockFont;
+      const nextFont = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${wFont}`;
       if (nextFont !== curFont) { curFont = nextFont; ctx.font = nextFont; }
       return ctx.measureText(w.t).width;
     });
@@ -336,12 +491,14 @@
   }
 
   function wrapInlineMeasured(ctx, words, maxW, st, size) {
-    const baseFont = `${baseFontPrefix(st)}${size}px ${FONT}`;
+    const blockFont = resolveFontStack(st?.fontFamily);
+    const baseFont = `${baseFontPrefix(st)}${size}px ${blockFont}`;
     let curFont = baseFont;
     ctx.font = baseFont;
     const spaceW = ctx.measureText(' ').width;
     const widthOf = (w) => {
-      const nextFont = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${FONT}`;
+      const wFont = w.fontFamily ? resolveFontStack(w.fontFamily) : blockFont;
+      const nextFont = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${wFont}`;
       if (nextFont !== curFont) { curFont = nextFont; ctx.font = nextFont; }
       return ctx.measureText(w.t).width;
     };
@@ -387,21 +544,22 @@
     return { size: minSize, lines, lh: minSize * 1.55, lineLh: lineHeightsFor(lines, st, minSize) };
   }
 
-  function fit(ctx, text, boxW, boxH, maxSize, minSize, fontPrefix = '700 ') {
+  function fit(ctx, text, boxW, boxH, maxSize, minSize, fontPrefix = '700 ', fontStack = FONT) {
     const paragraphs = splitParagraphWords(text);
     for (let s = maxSize; s >= minSize; s--) {
-      ctx.font = `${fontPrefix}${s}px ${FONT}`;
+      ctx.font = `${fontPrefix}${s}px ${fontStack}`;
       const { lines, widest } = wrapParagraphWords(ctx, paragraphs, boxW);
       const lh = s * 1.55;
       if (lines.length * lh <= boxH && widest <= boxW * 1.04) return { size: s, lines, lh };
     }
-    ctx.font = `${fontPrefix}${minSize}px ${FONT}`;
+    ctx.font = `${fontPrefix}${minSize}px ${fontStack}`;
     return { size: minSize, lines: wrapParagraphWords(ctx, paragraphs, boxW).lines, lh: minSize * 1.55 };
   }
 
   // قالب‌بندی هر بلوک با پیش‌فرض‌های ایمن برای بلوک‌های قدیمی (ذخیره‌شده قبل از نسخهٔ ۲.۲۸)
   function blockStyle(b) {
     const isHeading = b.pageRole === 'heading';
+    const rawFf = String(b.fontFamily || '').trim();
     return {
       dir: b.dir === 'ltr' ? 'ltr' : 'rtl',       // جهت متن: پیش‌فرض راست‌به‌چپ
       align: ['center', 'left', 'justify'].includes(b.align) ? b.align : 'right', // physical alignment; old projects default right
@@ -411,6 +569,10 @@
       underline: !!b.underline,
       size: Number.isFinite(+b.size) && +b.size > 0 ? +b.size : null,
       color: /^#[0-9a-fA-F]{6}$/.test(b.color) ? b.color : null, // null = رنگ خودکار بر اساس پس‌زمینه
+      fontFamily: rawFf || null,
+      shape: normalizeBoxShape(b.shape),
+      cornerRadius: normalizeCornerRadius(b.cornerRadius),
+      angle: normalizeBoxAngle(b.angle),
       firstLineIndent: !isHeading && Number.isFinite(+b.firstLineIndent) && +b.firstLineIndent > 0 ? Math.min(4, +b.firstLineIndent) : 0,
       hangingIndent: !isHeading && Number.isFinite(+b.hangingIndent) && +b.hangingIndent > 0 ? Math.min(4, +b.hangingIndent) : 0,
     };
@@ -510,10 +672,11 @@
     box.replaceChildren(tpl.content.cloneNode(true));
     box.dir = st.dir;
     const ind = indentGeometry(st, padX, size);
+    const blockFont = resolveFontStack(st?.fontFamily);
     box.style.cssText = [
       'position:absolute', 'left:0', 'top:0', 'box-sizing:border-box',
       `width:${bw}px`, `padding:0px ${ind.padRight}px 0px ${ind.padLeft}px`, 'margin:0', 'border:0',
-      `font-family:${FONT}`, `font-size:${size}px`, 'line-height:1.55',
+      `font-family:${blockFont}`, `font-size:${size}px`, 'line-height:1.55',
       `font-weight:${st.bold ? '700' : '400'}`, `font-style:${st.italic ? 'italic' : 'normal'}`,
       'white-space:pre-line', 'text-justify:inter-word',
       `text-indent:${ind.textIndentPx}px`,
@@ -530,13 +693,14 @@
   }
 
   function computeJsFit(ctx, b, st, bw, bh, richWordsOpt = null) {
-    const padX = boxInset(bw), padY = boxInset(bh);
+    const { padX, padY } = shapeInsets(bw, bh, st.shape, st.cornerRadius);
     const usableW = Math.max(1, bw - 2 * padX), usableH = Math.max(1, bh - 2 * padY);
     const sourceText = String(b.tr || '').trim();
     const richWords = richWordsOpt !== null ? richWordsOpt : (!b._plainText && b.richHtml ? richHtmlWords(b.richHtml) : null);
     const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
     const inline = st.align === 'justify' || (!b._plainText && (!!b.richHtml || hasInlineMarks(sourceText)));
     const fontPrefix = `${st.italic ? 'italic ' : ''}${st.bold ? '700' : '400'} `;
+    const blockFont = resolveFontStack(st?.fontFamily);
     if (inline) {
       const inWords = b._plainText ? plainWords(sourceText) : (richWords || inlineWords(sourceText));
       if (st.size) {
@@ -546,15 +710,15 @@
       return Object.assign({ inline: true }, fitInline(ctx, inWords, usableW, usableH, maxSize, 7, st));
     }
     if (st.size) {
-      ctx.font = `${fontPrefix}${st.size}px ${FONT}`;
+      ctx.font = `${fontPrefix}${st.size}px ${blockFont}`;
       return { inline: false, size: st.size, lines: wrapWords(ctx, sourceText, usableW), lh: st.size * 1.55 };
     }
-    return Object.assign({ inline: false }, fit(ctx, sourceText, usableW, usableH, maxSize, 7, fontPrefix));
+    return Object.assign({ inline: false }, fit(ctx, sourceText, usableW, usableH, maxSize, 7, fontPrefix, blockFont));
   }
 
   function resolveDomNodeStyle(node, rootBox, st, baseSize) {
     let bold = st.bold !== false, italic = !!st.italic, underline = !!st.underline, strike = false;
-    let size = baseSize, color = null, dir = st.dir;
+    let size = baseSize, color = null, dir = st.dir, fontFamily = st.fontFamily || null;
     const chain = [];
     let cur = node?.parentElement;
     while (cur && cur !== rootBox) { chain.unshift(cur); cur = cur.parentElement; }
@@ -575,10 +739,11 @@
       const fs = Number.parseFloat(el.style?.fontSize || '');
       if (Number.isFinite(fs) && fs > 0) size = fs;
       if (el.style?.color) color = el.style.color;
+      if (el.style?.fontFamily) fontFamily = el.style.fontFamily;
       const d = el.style?.direction || el.getAttribute('dir');
       if (d === 'ltr' || d === 'rtl') dir = d;
     });
-    return { bold, italic, underline, strike, size, color, dir };
+    return { bold, italic, underline, strike, size, color, dir, fontFamily };
   }
 
   function domLayoutBlock(ctx, b, st, bw, bh, richWordsOpt = null) {
@@ -586,7 +751,7 @@
     if (hasSpecialRichElements(rawHtml)) return null;
     const box = getDomMeasureBox();
     if (!box) return null;
-    const padX = boxInset(bw), padY = boxInset(bh);
+    const { padX, padY } = shapeInsets(bw, bh, st.shape, st.cornerRadius);
     const usableW = Math.max(1, bw - 2 * padX), usableH = Math.max(1, bh - 2 * padY);
     const tpl = buildSafeDomTemplate(rawHtml);
     let size = st.size;
@@ -643,7 +808,7 @@
             text: val.slice(s, e),
             left: rb.left - boxRect.left, right: rb.right - boxRect.left,
             top: rb.top - boxRect.top, bottom: rb.bottom - boxRect.top,
-            dir, bold: ns.bold, italic: ns.italic, underline: ns.underline, strike: ns.strike, size: ns.size, color: ns.color
+            dir, bold: ns.bold, italic: ns.italic, underline: ns.underline, strike: ns.strike, size: ns.size, color: ns.color, fontFamily: ns.fontFamily
           });
           continue;
         }
@@ -679,7 +844,7 @@
             right: Math.max(...group.map((x) => x.right)) - boxRect.left,
             top: Math.min(...group.map((x) => x.top)) - boxRect.top,
             bottom: Math.max(...group.map((x) => x.bottom)) - boxRect.top,
-            dir, bold: ns.bold, italic: ns.italic, underline: ns.underline, strike: ns.strike, size: ns.size, color: ns.color
+            dir, bold: ns.bold, italic: ns.italic, underline: ns.underline, strike: ns.strike, size: ns.size, color: ns.color, fontFamily: ns.fontFamily
           });
           i = j;
         }
@@ -701,7 +866,7 @@
       if (box) {
         const maxSize = Math.max(12, Math.min(64, Math.round(b.lineH * 1.1)));
         if (!Number.isFinite(maxSize)) return 8;
-        const padX = boxInset(bw), padY = boxInset(bh);
+        const { padX, padY } = shapeInsets(bw, bh, st.shape, st.cornerRadius);
         const usableW = Math.max(1, bw - 2 * padX), usableH = Math.max(1, bh - 2 * padY);
         const tpl = buildSafeDomTemplate(rawHtml);
         const jsEst = computeJsFit(ctx, b, st, bw, bh).size;
@@ -716,6 +881,13 @@
     return computeJsFit(ctx, b, st, bw, bh).size;
   }
 
+  function applyBoxRotationTransform(ctx, cx, cy, angleDeg) {
+    if (!angleDeg || typeof ctx.translate !== 'function' || typeof ctx.rotate !== 'function') return;
+    ctx.translate(cx, cy);
+    ctx.rotate((angleDeg * Math.PI) / 180);
+    ctx.translate(-cx, -cy);
+  }
+
   // bmp: تصویر اصلی؛ blocks: بلوک‌ها؛ برمی‌گرداند canvas نهایی
   function render(bmp, blocks, opts) {
     const o = Object.assign({ createCanvas: null, eraseOriginal: true }, opts);
@@ -725,7 +897,7 @@
     const ctx = cv.getContext('2d');
     ctx.drawImage(bmp, 0, 0);
     // Paint box backgrounds first so no later box fill can cover an earlier translation's text.
-    const targetFills = [], textJobs = [];
+    const sourceErases = [], targetFills = [], textJobs = [];
     const ascentCache = new Map();
 
     blocks.forEach((b) => {
@@ -742,20 +914,38 @@
       };
       const bw = layoutBox.x1 - layoutBox.x0, bh = layoutBox.y1 - layoutBox.y0;
       if (bw <= 0 || bh <= 0) return;
+      const cx = layoutBox.x0 + bw / 2, cy = layoutBox.y0 + bh / 2;
+      const isPlainAxisRect = st.shape === 'rect' && st.cornerRadius <= 0 && !st.angle;
+      const blockFont = resolveFontStack(st.fontFamily);
 
       let targetFill = null, txt = '#0b0b0b', stroke = null;
       if (b.bg === 'none' || (o.eraseOriginal === false && (!b.bg || b.bg === 'auto'))) {
         txt = '#ffffff'; stroke = '#000000';
       } else if (b.bg === 'white') { targetFill = '#ffffff'; }
       else if (b.bg === 'black') { targetFill = '#000000'; txt = '#fafafa'; }
-      else {
+      else if (/^#[0-9a-fA-F]{6}$/.test(String(b.bg || ''))) {
+        const hex = String(b.bg);
+        targetFill = hex;
+        const rv = parseInt(hex.slice(1, 3), 16), gv = parseInt(hex.slice(3, 5), 16), bv = parseInt(hex.slice(5, 7), 16);
+        txt = lum(rv, gv, bv) > 150 ? '#0b0b0b' : '#fafafa';
+      } else {
         const targetBg = sampleBg(ctx, layoutBox, W, H);
         targetFill = `rgb(${targetBg.r},${targetBg.g},${targetBg.b})`;
         txt = lum(targetBg.r, targetBg.g, targetBg.b) > 150 ? '#0b0b0b' : '#fafafa';
       }
+      // If an OCR box was rotated or reshaped (ellipse/diamond/rounded), erase the original source
+      // text rectangle underneath with sampled bubble background so old corners don't peek out.
+      if (!isPlainAxisRect && !b.manual && o.eraseOriginal !== false && b.bg !== 'none') {
+        const ox0 = Math.max(0, Number(b.x0) || 0), oy0 = Math.max(0, Number(b.y0) || 0);
+        const ox1 = Math.min(W, Number(b.x1) || 0), oy1 = Math.min(H, Number(b.y1) || 0);
+        if (ox1 > ox0 && oy1 > oy0) {
+          const origBg = sampleBg(ctx, { x0: ox0, y0: oy0, x1: ox1, y1: oy1 }, W, H);
+          sourceErases.push([`rgb(${origBg.r},${origBg.g},${origBg.b})`, ox0, oy0, ox1 - ox0, oy1 - oy0]);
+        }
+      }
       // رنگ دستی کاربر بر انتخاب خودکار اولویت دارد (زیرخط هم با همین رنگ رسم می‌شود)
       if (st.color) txt = st.color;
-      if (targetFill) targetFills.push([targetFill, layoutBox.x0, layoutBox.y0, bw, bh]);
+      if (targetFill) targetFills.push({ style: targetFill, x: layoutBox.x0, y: layoutBox.y0, w: bw, h: bh, cx, cy, st, isPlainAxisRect });
 
       // در مرورگر واقعی، جایگاه دقیق کلمه‌ها مستقیماً از همان جعبهٔ چیدمان DOM خوانده می‌شود
       // تا متنِ زمان تایپ، مکان‌نما و خروجی نهایی روی عکس از یک موتور واحد و بدون حتی ۱ پیکسل اختلاف بیایند.
@@ -763,12 +953,13 @@
       if (domLayout) {
         textJobs.push(() => {
           ctx.save();
-          ctx.beginPath();
-          ctx.rect(layoutBox.x0, layoutBox.y0, bw, bh);
+          if (st.angle) applyBoxRotationTransform(ctx, cx, cy, st.angle);
+          drawBoxShapePath(ctx, layoutBox.x0, layoutBox.y0, bw, bh, st.shape, st.cornerRadius);
           ctx.clip();
           ctx.textAlign = 'left';
           domLayout.fragments.forEach((frag) => {
-            const fontSpec = `${frag.italic ? 'italic ' : ''}${frag.bold ? '700' : '400'} ${frag.size}px ${FONT}`;
+            const fragFont = frag.fontFamily ? resolveFontStack(frag.fontFamily) : blockFont;
+            const fontSpec = `${frag.italic ? 'italic ' : ''}${frag.bold ? '700' : '400'} ${frag.size}px ${fragFont}`;
             ctx.font = fontSpec;
             let ascent = ascentCache.get(fontSpec);
             if (ascent === undefined) {
@@ -808,15 +999,15 @@
         return;
       }
 
-      const padX = boxInset(bw), padY = boxInset(bh);
+      const { padX, padY } = shapeInsets(bw, bh, st.shape, st.cornerRadius);
       const usableW = Math.max(1, bw - 2 * padX);
       const f = computeJsFit(ctx, b, st, bw, bh, richWords);
       const inline = f.inline;
       textJobs.push(() => {
       // Keep the actual output inside the editable translation box, even for manually enlarged text.
       ctx.save();
-      ctx.beginPath();
-      ctx.rect(layoutBox.x0, layoutBox.y0, bw, bh);
+      if (st.angle) applyBoxRotationTransform(ctx, cx, cy, st.angle);
+      drawBoxShapePath(ctx, layoutBox.x0, layoutBox.y0, bw, bh, st.shape, st.cornerRadius);
       ctx.clip();
       if ('direction' in ctx) ctx.direction = st.dir;
       ctx.textBaseline = 'middle';
@@ -856,7 +1047,8 @@
           visual.forEach(({ idx, hasGapAfter }) => {
             const w = line[idx];
             const wSize = effWordSize(w, f.size, st);
-            ctx.font = `${inlineFontPrefix(st, w)}${wSize}px ${FONT}`;
+            const wFont = w.fontFamily ? resolveFontStack(w.fontFamily) : blockFont;
+            ctx.font = `${inlineFontPrefix(st, w)}${wSize}px ${wFont}`;
             const wColor = w.color || txt;
             if (stroke) { ctx.lineWidth = Math.max(3, wSize / 5); ctx.strokeStyle = stroke; ctx.lineJoin = 'round'; ctx.strokeText(w.t, x, y); }
             ctx.fillStyle = wColor;
@@ -890,6 +1082,7 @@
         ctx.restore();
         return;
       }
+      ctx.font = `${baseFontPrefix(st)}${f.size}px ${blockFont}`;
       ctx.textAlign = st.align;
       f.lines.forEach((ln) => {
         if (stroke) { ctx.lineWidth = Math.max(3, f.size / 5); ctx.strokeStyle = stroke; ctx.lineJoin = 'round'; ctx.strokeText(ln, anchorX, y); }
@@ -911,8 +1104,21 @@
       ctx.restore();
       });
     });
-    const paintRect = ([style, x, y, width, height]) => { ctx.fillStyle = style; ctx.fillRect(x, y, width, height); };
-    targetFills.forEach(paintRect);
+    sourceErases.forEach(([style, x, y, width, height]) => { ctx.fillStyle = style; ctx.fillRect(x, y, width, height); });
+    targetFills.forEach((item) => {
+      if (item.isPlainAxisRect) {
+        ctx.fillStyle = item.style;
+        ctx.fillRect(item.x, item.y, item.w, item.h);
+        return;
+      }
+      ctx.save();
+      if (item.st.angle) applyBoxRotationTransform(ctx, item.cx, item.cy, item.st.angle);
+      drawBoxShapePath(ctx, item.x, item.y, item.w, item.h, item.st.shape, item.st.cornerRadius);
+      ctx.fillStyle = item.style;
+      if (typeof ctx.fill === 'function') ctx.fill();
+      else ctx.fillRect(item.x, item.y, item.w, item.h);
+      ctx.restore();
+    });
     textJobs.forEach((paintText) => paintText());
     if (hasActiveWatermark(o.watermark)) {
       drawWatermark(ctx, W, H, o.watermark, o.watermarkLogos);
@@ -1132,7 +1338,10 @@
   }
 
   const api = {
-    FONT, render, releaseCaches, sampleBg, fit, wrapWords, blockStyle, boxInset, indentGeometry, fitBlockSize,
+    FONT, FONT_STACKS, BOX_SHAPES,
+    resolveFontStack, normalizeBoxShape, normalizeCornerRadius, normalizeBoxAngle,
+    shapeInsets, shapeSvgPath, drawBoxShapePath,
+    render, releaseCaches, sampleBg, fit, wrapWords, blockStyle, boxInset, indentGeometry, fitBlockSize,
     hasInlineMarks, tokenizeInline, inlineMarksToHtml, stripInlineMarkers, inlineWords, richHtmlWords, fitInline, visualLineOrder,
     hasActiveWatermark, drawWatermark
   };
