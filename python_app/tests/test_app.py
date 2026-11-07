@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.08"
+    assert health.json()["version"] == "4.09"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۰۸ · Python</span>' in index_html
+    assert '<span class="ver">۴.۰۹ · Python</span>' in index_html
     assert "مدیریت مدل‌های OCR" in index_html
     assert "مدیریت ترجمه‌ها" in index_html
     assert 'id="deleteModelsMenuBtn"' not in index_html
@@ -2766,7 +2766,7 @@ def test_v385_parallel_pdf_import_multi_page_ocr_and_low_ram_spooled_exports(cli
     imported_images = imp.json()["images"]
     assert len(imported_images) == 5
     assert [im["name"] for im in imported_images] == [f"chapter — صفحهٔ {i}.png" for i in range(1, 6)]
-    assert all(im["width"] == 480 and im["height"] == 320 for im in imported_images)
+    assert all(im["width"] == 960 and im["height"] == 640 for im in imported_images)
 
     # 2) Run multi-page OCR across all 5 pages using a multi-worker batch engine
     seen_threads: set[int] = set()
@@ -2795,7 +2795,7 @@ def test_v385_parallel_pdf_import_multi_page_ocr_and_low_ram_spooled_exports(cli
     )
     assert ocr_resp.status_code == 200, ocr_resp.text
     ocr_images = ocr_resp.json()["images"]
-    assert all(im["ocrCompleted"] is True and im["blocks"][0]["text"] == "OCR-480x320" for im in ocr_images)
+    assert all(im["ocrCompleted"] is True and im["blocks"][0]["text"] == "OCR-960x640" for im in ocr_images)
     assert len(seen_threads) >= 2
 
     # Memory endpoint confirms 0 models remain resident in RAM after parallel OCR
@@ -3291,7 +3291,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.08"
+    assert APP_VERSION == "4.09"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -4054,6 +4054,266 @@ def test_v408_api_key_priority_reorder_preserves_secrets_and_changes_failover_or
         ("k-gamma", "sk-gamma-secret-003", "کلید گاما"),
         ("k-alpha", "sk-alpha-secret-001", "کلید آلفا"),
     ]
+
+
+def test_v409_lossless_pdf_import_native_embedded_resolution_and_export_roundtrip(client):
+    import io
+    import zipfile
+    import pymupdf as fitz
+    from PIL import Image, ImageChops
+
+    # 1. High-DPI (~450 DPI) detailed raster image embedded inside a compact PDF page (288x400 pt -> 1800x2500 px = 6.25x scale)
+    src_img = Image.effect_mandelbrot((1800, 2500), (-2.1, -1.5, 0.9, 1.5), 36).convert("RGB")
+    src_buf = io.BytesIO()
+    src_img.save(src_buf, "PNG")
+    src_png = src_buf.getvalue()
+
+    pdf_doc = fitz.open()
+    p1 = pdf_doc.new_page(width=288.0, height=400.0)
+    p1.insert_image(fitz.Rect(0.0, 0.0, 288.0, 400.0), stream=src_png)
+
+    # Page 2: Rotated 90° page with native 900x1400 image -> rotated view is 1400x900
+    rot_img = Image.effect_mandelbrot((900, 1400), (-1.8, -1.2, 0.8, 1.2), 24).convert("RGB")
+    rot_buf = io.BytesIO()
+    rot_img.save(rot_buf, "PNG")
+    p2 = pdf_doc.new_page(width=450.0, height=700.0)
+    p2.insert_image(fitz.Rect(0.0, 0.0, 450.0, 700.0), stream=rot_buf.getvalue())
+    p2.set_rotation(90)
+
+    # Page 3: Pure vector text page (200x300 pt -> 4.0x = 800x1200 px archival quality)
+    p3 = pdf_doc.new_page(width=200.0, height=300.0)
+    p3.insert_text((24, 90), "Crisp Vector Typography", fontsize=18)
+
+    raw_pdf = pdf_doc.tobytes()
+    pdf_doc.close()
+
+    proj = client.post("/api/projects", json={"name": "v4.09 Lossless PDF"}).json()
+    pid = proj["id"]
+    imp = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("highres.pdf", raw_pdf, "application/pdf"))],
+    )
+    assert imp.status_code == 200, imp.text
+    imgs = imp.json()["images"]
+    assert len(imgs) == 3
+
+    # Page 1 must keep exact 1800x2500 native dimensions (NOT downscaled to 576x800 or 1152x1600) with ZERO pixel loss
+    assert (imgs[0]["width"], imgs[0]["height"]) == (1800, 2500)
+    p1_content = client.get(f"/api/projects/{pid}/images/{imgs[0]['id']}/content").content
+    with Image.open(io.BytesIO(p1_content)) as imported_p1:
+        assert ImageChops.difference(src_img, imported_p1.convert("RGB")).getbbox() is None
+
+    # Page 2 (rotated 90°) must keep exact 1400x900 rotated dimensions with ZERO pixel loss
+    assert (imgs[1]["width"], imgs[1]["height"]) == (1400, 900)
+    p2_content = client.get(f"/api/projects/{pid}/images/{imgs[1]['id']}/content").content
+    expected_rot = rot_img.rotate(-90, expand=True)
+    with Image.open(io.BytesIO(p2_content)) as imported_p2:
+        assert ImageChops.difference(expected_rot, imported_p2.convert("RGB")).getbbox() is None
+
+    # Page 3 (vector text) must render at crisp 4.0x (800x1200)
+    assert (imgs[2]["width"], imgs[2]["height"]) == (800, 1200)
+
+    # 2. Export Page 1 back to PDF & ZIP and verify ZERO pixel loss in both exports, plus re-importing the exported PDF!
+    exp_pdf = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "pdf", "image_ids": [imgs[0]["id"]], "name": "roundtrip-hq"},
+    )
+    assert exp_pdf.status_code == 200, exp_pdf.text
+    exported_pdf_bytes = exp_pdf.content
+    with fitz.open(stream=exported_pdf_bytes, filetype="pdf") as out_doc:
+        assert len(out_doc) == 1
+        out_info = out_doc[0].get_image_info(xrefs=True)[0]
+        assert (out_info["width"], out_info["height"]) == (1800, 2500)
+        extracted = out_doc.extract_image(out_info["xref"])
+        with Image.open(io.BytesIO(extracted["image"])) as out_im:
+            assert ImageChops.difference(src_img, out_im.convert("RGB")).getbbox() is None
+
+    # Re-import that exported PDF into a fresh project -> still exact 1800x2500 with ZERO pixel loss!
+    proj2 = client.post("/api/projects", json={"name": "v4.09 Roundtrip 2"}).json()
+    imp2 = client.post(
+        f"/api/projects/{proj2['id']}/files",
+        files=[("files", ("roundtrip-hq.pdf", exported_pdf_bytes, "application/pdf"))],
+    )
+    assert imp2.status_code == 200, imp2.text
+    re_img = imp2.json()["images"][0]
+    assert (re_img["width"], re_img["height"]) == (1800, 2500)
+    re_content = client.get(f"/api/projects/{proj2['id']}/images/{re_img['id']}/content").content
+    with Image.open(io.BytesIO(re_content)) as re_opened:
+        assert ImageChops.difference(src_img, re_opened.convert("RGB")).getbbox() is None
+
+    exp_zip = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "images", "image_ids": [imgs[0]["id"]], "name": "roundtrip-zip", "image_format": "png"},
+    )
+    assert exp_zip.status_code == 200, exp_zip.text
+    zip_bytes = exp_zip.content
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        names = zf.namelist()
+        assert len(names) == 1
+        with Image.open(io.BytesIO(zf.read(names[0]))) as zip_im:
+            assert zip_im.size == (1800, 2500)
+            assert ImageChops.difference(src_img, zip_im.convert("RGB")).getbbox() is None
+
+
+def test_v409_grouped_pages_translated_as_single_logical_page(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+
+    # Create project with 4 images: images 0, 1, 2 grouped in Group 1; image 3 ungrouped
+    proj = client.post("/api/projects", json={"name": "v4.09 Grouped Translation"}).json()
+    pid = proj["id"]
+    up = client.post(
+        f"/api/projects/{pid}/files",
+        files=[
+            ("files", ("slice-1.png", png_bytes(), "image/png")),
+            ("files", ("slice-2.png", png_bytes(), "image/png")),
+            ("files", ("slice-3.png", png_bytes(), "image/png")),
+            ("files", ("page-4.png", png_bytes(), "image/png")),
+        ],
+    )
+    assert up.status_code == 200, up.text
+    state = up.json()
+    for idx, text in enumerate([
+        "Wait, look at",
+        "that glowing door!",
+        "Let us open it together.",
+        "Meanwhile outside the castle...",
+    ]):
+        state["images"][idx]["groupId"] = 1 if idx < 3 else None
+        state["images"][idx]["ocrCompleted"] = True
+        state["images"][idx]["blocks"] = [{"id": 1, "text": text, "tr": "", "enabled": True}]
+    saved_state = client.put(f"/api/projects/{pid}/state", json={"state": state})
+    assert saved_state.status_code == 200, saved_state.text
+    all_ids = [im["id"] for im in saved_state.json()["images"]]
+
+    # Configure AI provider with ample source_limit so Group 1 fits in a single page request
+    assert client.put(
+        "/api/ai-settings",
+        json={
+            "provider": "openai",
+            "providers": {
+                "openai": {
+                    "model": "gpt-4o-mini",
+                    "profiles": [{"id": "g-key", "name": "Main", "api_key": "sk-group-test", "source_limit": 2000}],
+                }
+            },
+        },
+    ).status_code == 200
+
+    # 1. Direct plan preview (/translation-preview) must combine Group 1 (3 images) into Call 1 and ungrouped Page 4 into Call 2
+    plan_prev = client.post(
+        f"/api/projects/{pid}/translation-preview",
+        json={"image_ids": all_ids, "provider": "openai", "source_language": "eng"},
+    )
+    assert plan_prev.status_code == 200, plan_prev.text
+    plan_json = plan_prev.json()
+    assert plan_json["requestCount"] == 2
+    assert "گروه 1" in plan_json["requests"][0]["imageName"]
+    assert "Wait, look at\nthat glowing door!\nLet us open it together." in plan_json["requests"][0]["text"]
+    assert plan_json["requests"][1]["imageName"] == "page-4.png"
+
+    # 2. Rolling context engine (/context-preview -> /context-start -> /context-step) must send all 3 Group 1 slices in Step 1!
+    ctx_prev = client.post(
+        f"/api/projects/{pid}/context-preview",
+        json={
+            "image_ids": all_ids,
+            "provider": "openai",
+            "source_language": "eng",
+            "skill": "",
+            "summary": "",
+            "reuse_repeated": True,
+        },
+    )
+    assert ctx_prev.status_code == 200, ctx_prev.text
+    ctx_json = ctx_prev.json()
+    assert "گروه 1" in ctx_json["requests"][0]["imageName"]
+    assert "صفحات هم‌گروه" in ctx_json["note"]
+    assert "Wait, look at\nthat glowing door!\nLet us open it together." in ctx_json["requests"][0]["text"]
+    assert "Meanwhile outside" not in ctx_json["requests"][0]["text"]
+
+    sent_batches: list[list[str]] = []
+
+    def fake_translate_context(self, request, text, source_texts, provider, policy, **kwargs):
+        sent_batches.append(list(source_texts))
+        if len(sent_batches) == 1:
+            return ("صبر کن، نگاه کن به\nآن درِ درخشان!\nبیا با هم بازش کنیم.", "قهرمانان جلوی درِ درخشان ایستادند.")
+        return ("در همین حال بیرون قلعه...", "صحنه به بیرون قلعه منتقل شد.")
+
+    monkeypatch.setattr(TranslationService, "translate_context", fake_translate_context)
+
+    started = client.post(
+        f"/api/projects/{pid}/context-start",
+        json={
+            "image_ids": all_ids,
+            "provider": "openai",
+            "source_language": "eng",
+            "skill": "",
+            "summary": "",
+            "reuse_repeated": True,
+            "confirmation": ctx_json["signature"],
+        },
+    )
+    assert started.status_code == 200, started.text
+    run_id = started.json()["runId"]
+
+    # Step 1 translates ALL 3 grouped images together in ONE request and distributes back to each image!
+    step1 = client.post(
+        f"/api/projects/{pid}/context-step",
+        json={"run_id": run_id, "completed": 0, "skill": ""},
+    )
+    assert step1.status_code == 200, step1.text
+    s1 = step1.json()
+    assert s1["done"] is False
+    assert sorted(s1["affectedImageIds"]) == sorted(all_ids[:3])
+    assert sent_batches == [["Wait, look at", "that glowing door!", "Let us open it together."]]
+    imgs_after_s1 = s1["project"]["images"]
+    assert [imgs_after_s1[i]["blocks"][0]["tr"] for i in range(4)] == [
+        "صبر کن، نگاه کن به",
+        "آن درِ درخشان!",
+        "بیا با هم بازش کنیم.",
+        "",
+    ]
+
+    # Step 2 translates ungrouped image 4 using Group 1's rolling summary
+    step2 = client.post(
+        f"/api/projects/{pid}/context-step",
+        json={"run_id": run_id, "completed": 1, "skill": ""},
+    )
+    assert step2.status_code == 200, step2.text
+    s2 = step2.json()
+    assert s2["done"] is True
+    assert s2["affectedImageIds"] == [all_ids[3]]
+    assert s2["project"]["images"][3]["blocks"][0]["tr"] == "در همین حال بیرون قلعه..."
+
+    # 3. Changing group membership after preview invalidates stale confirmation signature cleanly (409)
+    fresh_prev = client.post(
+        f"/api/projects/{pid}/context-preview",
+        json={
+            "image_ids": all_ids,
+            "provider": "openai",
+            "source_language": "eng",
+            "skill": "",
+            "summary": "",
+            "reuse_repeated": True,
+        },
+    )
+    assert fresh_prev.status_code == 200
+    cur_proj = client.get(f"/api/projects/{pid}").json()
+    cur_proj["images"][2]["groupId"] = None
+    assert client.put(f"/api/projects/{pid}/state", json={"state": cur_proj}).status_code == 200
+    stale_start = client.post(
+        f"/api/projects/{pid}/context-start",
+        json={
+            "image_ids": all_ids,
+            "provider": "openai",
+            "source_language": "eng",
+            "skill": "",
+            "summary": "",
+            "reuse_repeated": True,
+            "confirmation": fresh_prev.json()["signature"],
+        },
+    )
+    assert stale_start.status_code == 409
+
 
 
 

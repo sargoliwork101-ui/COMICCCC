@@ -156,6 +156,48 @@ def mark_completed_call(call: dict[str, Any], plan: dict[str, Any], provider: st
         item.pop(AI_PAGE_PROGRESS_KEY, None)
 
 
+def logical_page_units(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group selected ordered images sharing a groupId (2+ members) into one logical page unit."""
+    by_group: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        raw_gid = item.get("groupId")
+        gid = str(raw_gid).strip() if raw_gid is not None else ""
+        if gid:
+            by_group.setdefault(gid, []).append(item)
+
+    units: list[dict[str, Any]] = []
+    consumed: set[str] = set()
+    for item in items:
+        raw_gid = item.get("groupId")
+        gid = str(raw_gid).strip() if raw_gid is not None else ""
+        members = by_group.get(gid)
+        if not gid or not members or len(members) < 2:
+            units.append({
+                "unit_id": str(item["id"]),
+                "unit_name": str(item.get("name") or ""),
+                "group_id": None,
+                "grouped": False,
+                "members": [item],
+            })
+            continue
+        if gid in consumed:
+            continue
+        consumed.add(gid)
+        names = [str(m.get("name") or m["id"]) for m in members]
+        if len(names) <= 3:
+            unit_name = f"گروه {gid} ({' + '.join(names)})"
+        else:
+            unit_name = f"گروه {gid} ({len(names)} تصویر: {names[0]} تا {names[-1]})"
+        units.append({
+            "unit_id": f"group:{gid}",
+            "unit_name": unit_name,
+            "group_id": gid,
+            "grouped": True,
+            "members": members,
+        })
+    return units
+
+
 def call_plan(plan: dict[str, Any], call: dict[str, Any]) -> dict[str, Any]:
     # All duplicate destinations are confirmed too, so a concurrent edit cannot
     # silently be overwritten by propagation of a reused translation.
@@ -170,7 +212,9 @@ def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: st
                        settings: dict[str, Any] | None = None) -> dict[str, Any]:
     ids = set(image_ids); settings = settings or {}
     limit = effective_ai_limit(provider, settings)
-    items = [item for item in sorted(state["images"], key=lambda entry: entry.get("order", 0)) if item["id"] in ids]
+    raw_items = [item for item in sorted(state["images"], key=lambda entry: entry.get("order", 0)) if item["id"] in ids]
+    units = logical_page_units(raw_items)
+    items = [member for unit in units for member in unit["members"]]
     entries = [(item, block, block_index) for item in items for block_index, block in enumerate(item.get("blocks", []))
                if block.get("enabled", True) and str(block.get("text", "")).strip()]
     blocks = [block for _, block, _ in entries]
@@ -201,31 +245,45 @@ def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: st
         calls: list[dict[str, Any]] = []
     elif provider != "free":
         calls = []
-        for item in items:
-            indices = [i for i in sorted(groups) if owners[i] == item["id"]]
+        for unit in units:
+            member_ids = {m["id"] for m in unit["members"]}
+            lead_item = unit["members"][0]
+            indices = [i for i in sorted(groups) if owners[i] in member_ids]
             if not indices:
                 continue
-            common = {"image_id": item["id"], "image_name": item.get("name", "")}
+            common: dict[str, Any] = {
+                "image_id": lead_item["id"],
+                "image_name": unit["unit_name"],
+                **({"group_id": unit["group_id"], "member_ids": [m["id"] for m in unit["members"]]} if unit["grouped"] else {}),
+            }
             page_text = combine_translation_texts([source_texts[i] for i in indices])
             if len(page_text) <= limit:
                 calls.append({**common, "text": page_text, "indices": indices, "targets": [groups[i] for i in indices], "combined": True, "call_id": "page"})
                 continue
+            unit_block_positions = {
+                idx: pos
+                for pos, idx in enumerate(i for i in range(len(entries)) if owners[i] in member_ids)
+            }
+            def _para_pos(idx: int) -> int:
+                return unit_block_positions[idx] if unit["grouped"] else entries[idx][2]
             pending: list[int] = []
             def flush() -> None:
                 if not pending:
                     return
                 chunk = list(pending); pending.clear()
+                pos0 = _para_pos(chunk[0])
                 calls.append({**common, "text": combine_translation_texts([source_texts[i] for i in chunk]),
                               "indices": chunk, "targets": [groups[i] for i in chunk], "combined": True,
-                              "call_id": f"b{entries[chunk[0]][2]}", "paragraph": entries[chunk[0]][2] + 1})
+                              "call_id": f"b{pos0}", "paragraph": pos0 + 1})
             for index in indices:
                 source = source_texts[index]
                 if len(source) > limit:
                     flush()
+                    pos_idx = _para_pos(index)
                     parts, joins = split_ai_paragraph(source, limit, blocks[index].get("sourceLines"))
                     for part_index, part in enumerate(parts):
                         calls.append({**common, "text": part, "indices": [index], "targets": [groups[index]], "combined": False,
-                                      "call_id": f"p{entries[index][2]}.{part_index}", "paragraph": entries[index][2] + 1,
+                                      "call_id": f"p{pos_idx}.{part_index}", "paragraph": pos_idx + 1,
                                       "part_index": part_index, "part_count": len(parts), "joins": joins})
                 elif pending and len(combine_translation_texts([source_texts[i] for i in pending] + [source])) > limit:
                     flush(); pending.append(index)
@@ -333,16 +391,22 @@ def plan_preview(
     pages = []
     tasks = []
     if provider != "free":
-        for item in plan["items"]:
-            page_calls = [call for call in plan["calls"] if call.get("image_id") == item["id"]]
+        for unit in logical_page_units(plan["items"]):
+            lead_item = unit["members"][0]
+            page_calls = [call for call in plan["calls"] if call.get("image_id") == lead_item["id"]]
             if not page_calls:
                 continue
-            # A standalone page signature must describe that page on its own,
+            # A standalone page/group signature must describe that logical page unit on its own,
             # not the cross-page duplicate map used by the multi-page tasks.
-            page_plan = build_project_plan({"images": [item]}, [item["id"]], provider,
+            unit_ids = [m["id"] for m in unit["members"]]
+            page_plan = build_project_plan({"images": unit["members"]}, unit_ids, provider,
                                            plan.get("reuse_repeated", False), source_language, public_settings)
-            pages.append({"imageId": item["id"], "imageName": item.get("name", ""),
-                          "signature": plan_signature(page_plan, provider, source_language, public_settings)})
+            pages.append({
+                "imageId": lead_item["id"],
+                "imageName": unit["unit_name"],
+                **({"groupId": unit["group_id"], "imageIds": unit_ids} if unit["grouped"] else {}),
+                "signature": plan_signature(page_plan, provider, source_language, public_settings),
+            })
         for call in plan["calls"]:
             if "image_id" not in call or saved_call(call, plan, provider, source_language, public_settings):
                 continue

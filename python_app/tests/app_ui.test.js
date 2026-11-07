@@ -2129,7 +2129,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas408: verText.includes('۴.۰۸'),
+            verHas409: verText.includes('۴.۰۹'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2148,8 +2148,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.08 displays version 4.08 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas408 === true
+      'v4.00/v4.09 displays version 4.09 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas409 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3212,6 +3212,74 @@ function check(name, condition) {
         && v408Check.headingHintOk === true
         && v408Check.helpSynced === true,
       JSON.stringify(v408Check),
+    );
+  }
+
+  // v4.09: Verify Help Guide Chapters 3, 4, and 8 document lossless native-resolution PDF import and grouped-page unified translation, and preview displays group page label
+  {
+    const v409Check = await vm.runInContext(`
+      (async () => {
+        try {
+          openHelpDialog('import-grid-crop');
+          const ch3Text = $('helpContentArea')?.textContent || '';
+          openHelpDialog('page-groups');
+          const ch4Text = $('helpContentArea')?.textContent || '';
+          openHelpDialog('translation-preview-context');
+          const ch8Text = $('helpContentArea')?.textContent || '';
+          closeDialog('helpDialog');
+
+          showTranslationRequestPreview(
+            {
+              provider: 'openai',
+              providerLabel: 'OpenAI',
+              model: 'gpt-4o-mini',
+              base_url: 'https://api.openai.com/v1',
+              rollingMode: true,
+              contextMode: true,
+              blockCount: 3,
+              requestCount: 1,
+              skillLimit: 300,
+              contextLimit: 300,
+              totalLimit: 2000,
+              skill: '',
+              summary: '',
+              systemPrompt: 'Translate line by line.',
+              note: 'زبان مقصد: فارسی. صفحات هم‌گروه (1 گروه) به‌عنوان یک صفحهٔ یکپارچه ارسال می‌شوند.',
+              requests: [
+                {
+                  index: 1,
+                  imageName: 'گروه 1 (slice-1.png + slice-2.png)',
+                  characters: 58,
+                  text: 'Wait, look at\\nthat glowing door!',
+                },
+              ],
+            },
+            async () => {},
+            null,
+            null,
+          );
+          const summaryTitle = document.querySelector('#translationPreviewRequests .payload-request summary')?.textContent || '';
+          const noteText = $('translationPreviewNote')?.textContent || '';
+          cancelTranslationRequestPreview();
+
+          return {
+            ch3HasLosslessPdf: ch3Text.includes('Lossless Native-Resolution PDF Import') && ch3Text.includes('600 DPI'),
+            ch4HasGroupTranslate: ch4Text.includes('ارسال یکپارچه به ترجمه به‌عنوان یک صفحهٔ واحد') && ch4Text.includes('گروه ۱'),
+            ch8HasGroupTranslate: ch8Text.includes('تجمیع خودکار صفحات هم‌گروه به‌عنوان یک صفحهٔ واحد'),
+            previewShowsGroupHeader: summaryTitle.includes('گروه 1 (slice-1.png + slice-2.png)') && noteText.includes('صفحات هم‌گروه'),
+          };
+        } finally {
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+          if ($('translationPreviewDialog')?.open) cancelTranslationRequestPreview();
+        }
+      })()
+    `, context);
+    check(
+      'v4.09 displays unified group page headers in translation preview and documents lossless PDF import & grouped-page translation in Help Chapters 3, 4, and 8',
+      v409Check.ch3HasLosslessPdf === true
+        && v409Check.ch4HasGroupTranslate === true
+        && v409Check.ch8HasGroupTranslate === true
+        && v409Check.previewShowsGroupHeader === true,
     );
   }
 

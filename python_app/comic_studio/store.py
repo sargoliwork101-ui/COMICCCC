@@ -20,6 +20,9 @@ from .ocr_managed import compute_worker_count, iter_parallel_ordered, trim_proce
 from .paths import data_dir, project_root
 
 Image.MAX_IMAGE_PIXELS = 100_000_000
+DEFAULT_PDF_IMPORT_SCALE = 4.0
+MAX_PDF_RENDER_SIDE_PX = 16_000.0
+MAX_PDF_RENDER_PIXELS = 96_000_000.0
 ALLOWED_IMAGES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 
 
@@ -412,7 +415,12 @@ class ProjectStore:
             "edited": False,
         })
 
-    def import_files(self, project_id: str, files: list[tuple[str, bytes]], pdf_scale: float = 2.0) -> dict[str, Any]:
+    def import_files(
+        self,
+        project_id: str,
+        files: list[tuple[str, bytes]],
+        pdf_scale: float = DEFAULT_PDF_IMPORT_SCALE,
+    ) -> dict[str, Any]:
         state = self.get(project_id)
         original_count = len(state["images"])
         try:
@@ -501,6 +509,73 @@ class ProjectStore:
                 return image_id, file_name, image_path
         raise ValueError("Could not allocate a unique image ID")
 
+    @staticmethod
+    def _compute_pdf_page_scales(page: Any, base_scale: float) -> tuple[float, float]:
+        """Compute lossless per-axis render scales for a PDF page.
+
+        - Pure full-page raster pages (comics, scans, exported image PDFs) render at exact 1:1
+          native embedded pixel dimensions so round-trip import -> export has zero pixel loss.
+        - Vector / text / hybrid pages render at `base_scale` (default 4.0x = 288 DPI) or higher
+          if an embedded figure on the page has even finer native pixel density.
+        """
+        rect = page.rect
+        rw = max(float(rect.width), 1.0)
+        rh = max(float(rect.height), 1.0)
+        rot90 = (int(getattr(page, "rotation", 0) or 0) % 180) == 90
+
+        valid_imgs: list[tuple[float, float, float, int, int]] = []
+        try:
+            raw_infos = page.get_image_info() or []
+        except Exception:
+            raw_infos = []
+
+        page_area = rw * rh
+        for info in raw_infos:
+            bbox = info.get("bbox")
+            if not bbox or len(bbox) < 4:
+                continue
+            bw = abs(float(bbox[2]) - float(bbox[0]))
+            bh = abs(float(bbox[3]) - float(bbox[1]))
+            iw = int(info.get("width") or 0)
+            ih = int(info.get("height") or 0)
+            if bw < 4.0 or bh < 4.0 or iw < 8 or ih < 8:
+                continue
+            tr = info.get("transform") or (bw, 0.0, 0.0, bh, 0.0, 0.0)
+            if len(tr) >= 4 and abs(float(tr[1])) > abs(float(tr[0])) and abs(float(tr[2])) > abs(float(tr[3])):
+                unrot_sx, unrot_sy = ih / bw, iw / bh
+            else:
+                unrot_sx, unrot_sy = iw / bw, ih / bh
+            img_sx, img_sy = (unrot_sy, unrot_sx) if rot90 else (unrot_sx, unrot_sy)
+            area_ratio = (bw * bh) / max(1.0, page_area)
+            valid_imgs.append((img_sx, img_sy, area_ratio, iw, ih))
+
+        has_vector_text = False
+        has_drawings = False
+        if len(valid_imgs) == 1 and valid_imgs[0][2] >= 0.90 and valid_imgs[0][3] >= 64 and valid_imgs[0][4] >= 64:
+            try:
+                has_vector_text = bool(page.get_text("text").strip())
+                if not has_vector_text:
+                    has_drawings = bool(page.get_drawings())
+            except Exception:
+                has_vector_text = True
+
+        if len(valid_imgs) == 1 and valid_imgs[0][2] >= 0.90 and valid_imgs[0][3] >= 64 and valid_imgs[0][4] >= 64 and not has_vector_text and not has_drawings:
+            sx, sy = valid_imgs[0][0], valid_imgs[0][1]
+        else:
+            max_embedded = max((max(ix, iy) for ix, iy, _, _, _ in valid_imgs), default=0.0)
+            uniform = max(float(base_scale), max_embedded)
+            sx = sy = uniform
+
+        cap = min(
+            1.0,
+            MAX_PDF_RENDER_SIDE_PX / max(rw * sx, 1.0),
+            MAX_PDF_RENDER_SIDE_PX / max(rh * sy, 1.0),
+            math.sqrt(MAX_PDF_RENDER_PIXELS / max((rw * sx) * (rh * sy), 1.0)),
+        )
+        sx = max(0.1, sx * cap)
+        sy = max(0.1, sy * cap)
+        return sx, sy
+
     def _import_pdf(
         self,
         state: dict[str, Any],
@@ -514,7 +589,7 @@ class ProjectStore:
             raise ValueError("PDF is too large")
         import pymupdf as fitz
 
-        scale = max(1.0, min(4.0, float(scale)))
+        scale = max(1.0, min(8.5, float(scale)))
         with fitz.open(stream=content, filetype="pdf") as check_doc:
             if check_doc.needs_pass:
                 raise ValueError("Password-protected PDF is not supported")
@@ -529,7 +604,7 @@ class ProjectStore:
         known = {item["id"] for item in state["images"]}
         slots = [self._allocate_image_slot(project_id, known, ".png") for _ in range(page_count)]
         stem = Path(filename).stem
-        workers, _ = compute_worker_count(page_count, per_worker_mb=140, max_cap=8)
+        workers, _ = compute_worker_count(page_count, per_worker_mb=240, max_cap=6)
 
         tls = threading.local()
         opened_docs: list[fitz.Document] = []
@@ -548,13 +623,8 @@ class ProjectStore:
             image_id, file_name, image_path = slots[page_index]
             doc = _get_thread_doc()
             page = doc[page_index]
-            rect = page.rect
-            page_scale = min(
-                scale, 16000.0 / max(rect.width, 1), 16000.0 / max(rect.height, 1),
-                math.sqrt(48_000_000.0 / max(rect.width * rect.height, 1)),
-            )
-            page_scale = max(0.1, page_scale)
-            pix = page.get_pixmap(matrix=fitz.Matrix(page_scale, page_scale), alpha=False)
+            scale_x, scale_y = self._compute_pdf_page_scales(page, scale)
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale_x, scale_y), alpha=False)
             width, height = int(pix.width), int(pix.height)
             if width < 1 or height < 1 or width * height > 100_000_000:
                 del pix

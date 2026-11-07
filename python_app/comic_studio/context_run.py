@@ -17,7 +17,7 @@ from .translation import (
     normalize_target_language,
     target_language_direction,
 )
-from .translation_plan import split_ai_paragraph, target_snapshot
+from .translation_plan import logical_page_units, split_ai_paragraph, target_snapshot
 
 RUN_KEY = '_aiContextRun'
 SUMMARY_KEY = '_aiStorySummary'
@@ -55,10 +55,15 @@ def provider_policy(settings: dict[str, Any], provider: str, profile_id: str | N
 
 def source_layout(state: dict[str, Any], image_ids: list[str]) -> str:
     chosen = set(image_ids)
-    items = [item for item in sorted(state.get('images', []), key=lambda item: item.get('order', 0)) if item['id'] in chosen]
-    return digest([{'id': item['id'], 'blocks': [{'id': block.get('id'), 'text': block.get('text'),
-                    'enabled': block.get('enabled', True), 'sourceLines': block.get('sourceLines')}
-                   for block in item.get('blocks', [])]} for item in items])
+    raw_items = [item for item in sorted(state.get('images', []), key=lambda item: item.get('order', 0)) if item['id'] in chosen]
+    units = logical_page_units(raw_items)
+    ordered_items = [member for unit in units for member in unit['members']]
+    unit_by_image = {member['id']: unit['unit_id'] for unit in units if unit['grouped'] for member in unit['members']}
+    return digest([{'id': item['id'],
+                    **({'groupUnit': unit_by_image[item['id']]} if item['id'] in unit_by_image else {}),
+                    'blocks': [{'id': block.get('id'), 'text': block.get('text'),
+                                'enabled': block.get('enabled', True), 'sourceLines': block.get('sourceLines')}
+                               for block in item.get('blocks', [])]} for item in ordered_items])
 
 
 def build_run_request(run: dict[str, Any], skill: str) -> ContextRequest | FreeRequest | LocalRequest:
@@ -198,30 +203,41 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
         build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, context, target_language=tl)
         maximum_request = build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, '', target_language=tl)
     selected = set(image_ids)
-    items = [i for i in sorted(state.get('images', []), key=lambda i: i.get('order', 0)) if i['id'] in selected]
+    raw_items = [i for i in sorted(state.get('images', []), key=lambda i: i.get('order', 0)) if i['id'] in selected]
+    units = logical_page_units(raw_items)
+    items = [member for unit in units for member in unit['members']]
     jobs: list[dict[str, Any]] = []
     by_text: dict[str, dict[str, Any]] = {}
     seen: set[tuple[str, str]] = set()
-    for item in items:
-        for block in item.get('blocks', []):
-            source = str(block.get('text') or '').replace('\r\n', '\n').replace('\r', '\n').strip()
-            if not block.get('enabled', True) or not source:
-                continue
-            if block.get('id') is None:
-                raise TranslationError('شناسهٔ یکی از کادرها وجود ندارد؛ ابتدا آن را ویرایش و ذخیره کنید.')
-            key = (str(item['id']), str(block['id']))
-            if key in seen:
-                raise TranslationError('شناسهٔ کادرها یکتا نیست؛ ابتدا آن‌ها را اصلاح کنید.')
-            seen.add(key)
-            ref = {'imageId': item['id'], 'blockId': block['id'], 'snapshot': target_snapshot(block)}
-            if reuse and source in by_text:
-                by_text[source]['refs'].append(ref)
-                continue
-            job = {'imageId': item['id'], 'imageName': item.get('name', ''), 'source': source,
-                   'sourceLines': block.get('sourceLines'), 'remaining': source, 'accumulated': '', 'refs': [ref]}
-            jobs.append(job)
-            if reuse:
-                by_text[source] = job
+    for unit in units:
+        for item in unit['members']:
+            for block in item.get('blocks', []):
+                source = str(block.get('text') or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+                if not block.get('enabled', True) or not source:
+                    continue
+                if block.get('id') is None:
+                    raise TranslationError('شناسهٔ یکی از کادرها وجود ندارد؛ ابتدا آن را ویرایش و ذخیره کنید.')
+                key = (str(item['id']), str(block['id']))
+                if key in seen:
+                    raise TranslationError('شناسهٔ کادرها یکتا نیست؛ ابتدا آن‌ها را اصلاح کنید.')
+                seen.add(key)
+                ref = {'imageId': item['id'], 'blockId': block['id'], 'snapshot': target_snapshot(block)}
+                if reuse and source in by_text:
+                    by_text[source]['refs'].append(ref)
+                    continue
+                job = {
+                    'imageId': item['id'],
+                    'imageName': item.get('name', ''),
+                    **({'unitId': unit['unit_id'], 'unitName': unit['unit_name']} if unit['grouped'] else {}),
+                    'source': source,
+                    'sourceLines': block.get('sourceLines'),
+                    'remaining': source,
+                    'accumulated': '',
+                    'refs': [ref],
+                }
+                jobs.append(job)
+                if reuse:
+                    by_text[source] = job
     # Keep the established rejection for free services. For AI, surface budget
     # failures in the editable preview dialog so guidance and limits are visible.
     if provider == 'free':
@@ -295,10 +311,10 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
     pending = [(i, job) for i, job in enumerate(run['jobs']) if job['remaining']]
     if not pending:
         return request, []
-    image_id = pending[0][1]['imageId']
+    current_unit = pending[0][1].get('unitId') or pending[0][1]['imageId']
     chosen: list[dict[str, Any]] = []
     for index, job in pending:
-        if job['imageId'] != image_id:
+        if (job.get('unitId') or job['imageId']) != current_unit:
             break
         remaining = job['remaining']
         prefix = combine_translation_texts([c['text'] for c in chosen])

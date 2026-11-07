@@ -1140,6 +1140,9 @@ def create_app() -> FastAPI:
     def context_view(run: dict[str, Any], request: Any, chosen: list[dict[str, Any]], provider: str) -> dict[str, Any]:
         text = combine_translation_texts([entry['text'] for entry in chosen])
         first = run['jobs'][chosen[0]['job']] if chosen else {}
+        first_page_name = first.get('unitName') or first.get('imageName', '')
+        grouped_unit_ids = {job['unitId'] for job in run.get('jobs', []) if job.get('unitId')}
+        group_notice = f" صفحات هم‌گروه ({len(grouped_unit_ids)} گروه) به‌عنوان یک صفحهٔ یکپارچه ارسال می‌شوند." if grouped_unit_ids else ''
         selected_profile_id = run.get('profileId') or None
         public_cfg = translations.public_settings()
         policy = provider_policy(public_cfg, provider, selected_profile_id)
@@ -1153,10 +1156,10 @@ def create_app() -> FastAPI:
             return {'provider':'free', 'profileId': '', 'targetLanguage': target_lang, 'targetLanguageLabel': target_label,
                     'rollingMode':True, 'contextMode':False, 'skill':'', 'summary':'', 'defaultSkill':'',
                     'blockCount':len(run['jobs']), 'requestCount':1 if chosen else 0, 'systemPrompt':'',
-                    'requests':[{'index':1, 'text':text, 'characters':request.character_count(text), 'imageName':first.get('imageName','')}] if chosen else [],
+                    'requests':[{'index':1, 'text':text, 'characters':request.character_count(text), 'imageName':first_page_name}] if chosen else [],
                     'providerLabel':'Google Translate؛ در صورت خطا MyMemory', 'base_url':'https://translate.googleapis.com/translate_a/single',
                     'fallback_url':'https://api.mymemory.translated.net/get', 'model':'',
-                    'note':f"زبان مقصد: {target_label}. متن صفحه‌ها جداگانه و ترتیبی ارسال و ذخیره می‌شود؛ تأیید یک‌بار برای کل نوبت است. سقف مؤثر {run['limit']} نویسه و برای MyMemory حداکثر ۵۰۰ بایت UTF-8 است. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری. خلاصه و اسکیل AI در حالت رایگان استفاده نمی‌شوند. تنظیمات: {limits}.",
+                    'note':f"زبان مقصد: {target_label}.{group_notice} متن صفحه‌ها جداگانه و ترتیبی ارسال و ذخیره می‌شود؛ تأیید یک‌بار برای کل نوبت است. سقف مؤثر {run['limit']} نویسه و برای MyMemory حداکثر ۵۰۰ بایت UTF-8 است. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری. خلاصه و اسکیل AI در حالت رایگان استفاده نمی‌شوند. تنظیمات: {limits}.",
                     'signature':digest(run), 'totalLimit':run['limit'], 'resume':bool(run.get('id'))}
         if provider == 'local':
             model_id = str(policy.get('model') or DEFAULT_LOCAL_NMT_MODEL)
@@ -1164,11 +1167,11 @@ def create_app() -> FastAPI:
             return {'provider': 'local', 'profileId': '', 'targetLanguage': target_lang, 'targetLanguageLabel': target_label,
                     'rollingMode': True, 'contextMode': False, 'skill': '', 'summary': '', 'defaultSkill': '',
                     'blockCount': len(run['jobs']), 'requestCount': 1 if chosen else 0, 'systemPrompt': '',
-                    'requests': [{'index': 1, 'text': text, 'characters': request.character_count(text), 'imageName': first.get('imageName', '')}] if chosen else [],
+                    'requests': [{'index': 1, 'text': text, 'characters': request.character_count(text), 'imageName': first_page_name}] if chosen else [],
                     'providerLabel': f"مترجم آفلاین داخلی — {model_info['short_label']} (بدون اینترنت)",
                     'base_url': '', 'fallback_url': '', 'model': model_id,
                     'note': (
-                        f"زبان مقصد: {target_label}. ترجمه ۱۰۰٪ آفلاین و رایگان روی سیستم خودتان با مدل «{model_info['label']}» "
+                        f"زبان مقصد: {target_label}.{group_notice} ترجمه ۱۰۰٪ آفلاین و رایگان روی سیستم خودتان با مدل «{model_info['label']}» "
                         f"(دقت جست‌وجو Beam={policy.get('beam_size', 2)}، سقف هر گام {run['limit']} نویسه) انجام می‌شود و هیچ متنی به اینترنت فرستاده نمی‌شود. "
                         f"{sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری."
                     ),
@@ -1187,9 +1190,9 @@ def create_app() -> FastAPI:
                 'skill': '', 'defaultSkill': '', 'blockCount': len(run['jobs']),
                 'requestCount': 1 if chosen else 0, 'systemPrompt': request.system,
                 'requests': [{'index': 1, 'text': request.user_message(text), 'characters': request.character_count(text),
-                              'imageName': first.get('imageName', '')}] if chosen else [],
+                              'imageName': first_page_name}] if chosen else [],
                 'providerLabel': provider_title, 'model': policy['model'], 'base_url': policy['base_url'],
-                'note': f"زبان مقصد: {target_label}. درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.{trim_notice}",
+                'note': f"زبان مقصد: {target_label}.{group_notice} درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.{trim_notice}",
                 'signature': digest(run), 'rollingMode': True, 'contextMode': True, 'summary': run['context'], 'skillLimit': request.skill_limit,
                 'contextLimit': request.context_limit, 'totalLimit': run['limit'], 'contextPercent': run['contextPercent'], 'skillPercent': run['skillPercent'], 'previewError': run.get('previewError', ''), 'resume': bool(run.get('id'))}
 
@@ -1302,7 +1305,9 @@ def create_app() -> FastAPI:
                 return {'project': state, 'done': True, 'affectedImageIds': []}
             source_texts = [entry['text'] for entry in chosen]
             text = combine_translation_texts(source_texts)
-            label = f"درخواست {run['completed'] + 1} برای «{run['jobs'][chosen[0]['job']]['imageName']}»؛ {request.character_count(text)} از {run['limit']} نویسه"
+            first_job = run['jobs'][chosen[0]['job']]
+            step_page_name = first_job.get('unitName') or first_job['imageName']
+            label = f"درخواست {run['completed'] + 1} برای «{step_page_name}»؛ {request.character_count(text)} از {run['limit']} نویسه"
             if run['provider'] == 'free':
                 label += f"؛ {len(text.encode('utf-8'))} از ۵۰۰ بایت"
             elif run['provider'] == 'local':
