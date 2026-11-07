@@ -6,6 +6,7 @@ const G = window.StudioGroups;
 const GROUP_COLORS = ['#34d399', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa', '#2dd4bf', '#fb923c', '#e879f9'];
 const state = {
   project: null, engines: [], ai: null, storage: null, editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
+  copiedEditorBlocks: [], copiedEditorPasteStep: 0, copiedEditorSourceImageId: null,
   cropId: null, crop: null, cropPointer: null, modelBusy: null, dragId: null, dragIds: [],
   dragMode: null, groupEditId: null, groupSnapshot: null, lastSelectedId: null,
   previewId: null,
@@ -4647,7 +4648,7 @@ async function openEditor(imageId) {
   };
   await ensureWatermarkLogosReady(item.watermark);
   if (loadSeq !== editorLoadSeq) return;
-  $('editorStage').classList.remove('panning'); syncEditorApprovalHeader(item); $('blockList').textContent = ''; showDialog('editorDialog');
+  $('editorStage').classList.remove('panning'); syncEditorApprovalHeader(item); syncEditorClipboardButtons(); $('blockList').textContent = ''; showDialog('editorDialog');
   let bitmap;
   try {
     const response = await fetch(imageUrl(item));
@@ -5717,6 +5718,7 @@ function updateEditorSelection() {
   $('editorMergeText')?.classList.toggle('is-ready', selectedBlocks.length >= 2);
   $('editorSplitText')?.classList.toggle('is-ready', selectedBlocks.some((block) => isBlockSplittable(block)));
   if ($('editorSelectionStatus')) $('editorSelectionStatus').textContent = selected.size ? `${selected.size.toLocaleString('fa-IR')} متن انتخاب شده · مرجع: متن ${state.selectedBlockIds[0]}` : 'متنی انتخاب نشده';
+  syncEditorClipboardButtons();
   syncVerticalAlignButtons();
 }
 function selectEditorBlock(blockId, scroll = true, additive = false) {
@@ -5945,13 +5947,25 @@ function renderEditorBoxes() {
     let el = existing.get(key);
     if (!el) {
       el = document.createElement('div'); el.className = 'editor-box'; el.dataset.id = key;
-      const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
+      const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید (با نگه داشتن Ctrl+Shift از کادر کپی بگیرید)'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
       const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('pointerdown', (event) => event.stopPropagation()); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(el._block, false); });
       const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('pointerdown', (event) => event.stopPropagation()); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(el._block, el.dataset.mode === 'ocr' ? 'translation' : 'ocr'); });
-      el.append(move, visibility, language);
+      const copyBtn = document.createElement('button'); copyBtn.type = 'button'; copyBtn.className = 'box-copy'; copyBtn.textContent = '⧉'; copyBtn.title = 'کپی و تکثیر فوری همین کادر با تمام ویژگی‌ها (یا نگه داشتن Ctrl+Shift و کشیدن/کلیک)'; copyBtn.setAttribute('aria-label', `کپی و تکثیر کادر متن ${block.id}`); copyBtn.addEventListener('pointerdown', (event) => event.stopPropagation()); copyBtn.addEventListener('click', (event) => { event.stopPropagation(); duplicateEditorBlocks([el._block]); });
+      el.append(move, visibility, language, copyBtn);
       ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
       el.addEventListener('pointerdown', (event) => {
-        const activeBlock = el._block; const additive = event.ctrlKey || event.metaKey; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
+        const activeBlock = el._block;
+        const isCtrlOrMeta = event.ctrlKey || event.metaKey;
+        const isCloneGesture = isCtrlOrMeta && event.shiftKey && event.button === 0 && !event.target.closest('.box-visibility,.box-language,.box-copy,[data-dir]');
+        if (isCloneGesture) {
+          if (inlineDraft && !closeInlineEditor()) return;
+          if (!editorSelectedKeys().includes(String(activeBlock.id))) {
+            selectEditorBlock(activeBlock.id, true, false);
+          }
+          startBoxCloneGesture(event, activeBlock);
+          return;
+        }
+        const additive = isCtrlOrMeta; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
         if (inlineDraft && additive) {
           if (!closeInlineEditor()) return;
         } else if (inlineDraft && inlineDraft.block !== activeBlock && !additive) {
@@ -6201,6 +6215,217 @@ function nextEditorBlockId(item) {
   });
   return maxId + 1;
 }
+function syncEditorClipboardButtons() {
+  const hasSelection = selectedEditorBlocks().length > 0;
+  const clipCount = Array.isArray(state.copiedEditorBlocks) ? state.copiedEditorBlocks.length : 0;
+  $('editorCopyBlock')?.classList.toggle('is-ready', hasSelection);
+  $('editorDuplicateBlock')?.classList.toggle('is-ready', hasSelection);
+  const pasteBtn = $('editorPasteBlock');
+  if (pasteBtn) {
+    pasteBtn.disabled = clipCount === 0;
+    pasteBtn.classList.toggle('is-ready', clipCount > 0);
+    pasteBtn.title = clipCount > 0
+      ? `چسباندن ${clipCount.toLocaleString('fa-IR')} کادر کپی‌شده با تمام ویژگی‌ها روی این صفحه (Ctrl+V)`
+      : 'ابتدا یک یا چند کادر را کپی کنید (Ctrl+C)';
+  }
+}
+function cloneBlockForClipboard(block) {
+  const raw = JSON.parse(JSON.stringify(block));
+  const box = boxOf(block);
+  const w = Math.max(16, (Number(box.x1) || 0) - (Number(box.x0) || 0));
+  const h = Math.max(16, (Number(box.y1) || 0) - (Number(box.y0) || 0));
+  delete raw.id;
+  delete raw.polygon;
+  delete raw.mergedFrom;
+  raw._clipBox = { x0: Number(box.x0) || 0, y0: Number(box.y0) || 0, w, h };
+  return raw;
+}
+function instantiateClonedBlocksOnItem(item, templates, { dx = 0, dy = 0, clampGroup = true } = {}) {
+  if (!item || !Array.isArray(templates) || !templates.length) return [];
+  if (currentOverlayMode() === 'none') setOverlayMode('translation', false);
+  item.blocks = Array.isArray(item.blocks) ? item.blocks : [];
+  const pageW = Math.max(20, Number(item.width) || 800);
+  const pageH = Math.max(20, Number(item.height) || 1000);
+  const sized = templates.map((tpl) => {
+    const cb = tpl._clipBox || { x0: Number(tpl.tx0 ?? tpl.x0) || 0, y0: Number(tpl.ty0 ?? tpl.y0) || 0, w: 120, h: 48 };
+    const w = Math.max(Math.min(16, pageW), Math.min(pageW, Math.round(cb.w)));
+    const h = Math.max(Math.min(16, pageH), Math.min(pageH, Math.round(cb.h)));
+    const baseX0 = Math.max(0, Math.min(pageW - w, Math.round(cb.x0)));
+    const baseY0 = Math.max(0, Math.min(pageH - h, Math.round(cb.y0)));
+    return { tpl, baseX0, baseY0, w, h };
+  });
+  let effDx = dx;
+  let effDy = dy;
+  if (clampGroup) {
+    const minAllowedDx = Math.max(...sized.map((s) => -s.baseX0));
+    const maxAllowedDx = Math.min(...sized.map((s) => pageW - (s.baseX0 + s.w)));
+    const minAllowedDy = Math.max(...sized.map((s) => -s.baseY0));
+    const maxAllowedDy = Math.min(...sized.map((s) => pageH - (s.baseY0 + s.h)));
+    effDx = Math.max(minAllowedDx, Math.min(maxAllowedDx, dx));
+    effDy = Math.max(minAllowedDy, Math.min(maxAllowedDy, dy));
+  }
+  const created = sized.map(({ tpl, baseX0, baseY0, w, h }) => {
+    const copy = JSON.parse(JSON.stringify(tpl));
+    delete copy._clipBox;
+    delete copy.polygon;
+    delete copy.mergedFrom;
+    const x0 = Math.max(0, Math.min(pageW - w, Math.round(baseX0 + effDx)));
+    const y0 = Math.max(0, Math.min(pageH - h, Math.round(baseY0 + effDy)));
+    copy.id = nextEditorBlockId(item);
+    copy.manual = true;
+    copy.manualLang = copy.manualLang || (copy.dir === 'ltr' ? 'en' : 'fa');
+    copy.enabled = true;
+    copy.x0 = x0;
+    copy.y0 = y0;
+    copy.x1 = x0 + w;
+    copy.y1 = y0 + h;
+    copy.tx0 = x0;
+    copy.ty0 = y0;
+    copy.tx1 = x0 + w;
+    copy.ty1 = y0 + h;
+    item.blocks.push(copy);
+    return copy;
+  });
+  state.selectedBlockIds = created.map((b) => String(b.id));
+  state.activeBlockId = String(created.at(-1).id);
+  buildBlockList();
+  drawEditor();
+  scheduleSave();
+  return created;
+}
+function copyEditorBlocks(targetBlocks = null, { silent = false } = {}) {
+  const item = editorItem();
+  if (!item) return false;
+  if (inlineDraft && !closeInlineEditor()) return false;
+  const blocks = Array.isArray(targetBlocks) && targetBlocks.length ? targetBlocks : selectedEditorBlocks();
+  if (!blocks.length) {
+    if (!silent) toast('ابتدا یک یا چند کادر را برای کپی انتخاب کنید.', true);
+    return false;
+  }
+  state.copiedEditorBlocks = blocks.map(cloneBlockForClipboard);
+  state.copiedEditorPasteStep = 0;
+  state.copiedEditorSourceImageId = item.id;
+  syncEditorClipboardButtons();
+  if (!silent) {
+    toast(blocks.length === 1
+      ? 'کادر با تمام ویژگی‌ها کپی شد (با Ctrl+V یا دکمهٔ «چسباندن» قرار دهید)'
+      : `${blocks.length.toLocaleString('fa-IR')} کادر با تمام ویژگی‌ها کپی شد (Ctrl+V برای چسباندن)`);
+  }
+  return true;
+}
+function pasteCopiedEditorBlocks() {
+  const item = editorItem();
+  if (!item) return [];
+  if (!Array.isArray(state.copiedEditorBlocks) || !state.copiedEditorBlocks.length) {
+    toast('هنوز کادری کپی نشده است؛ ابتدا یک کادر را انتخاب و کپی (Ctrl+C) کنید.', true);
+    return [];
+  }
+  if (inlineDraft && !closeInlineEditor()) return [];
+  const samePage = state.copiedEditorSourceImageId === item.id;
+  if (samePage) {
+    state.copiedEditorPasteStep = (state.copiedEditorPasteStep % 8) + 1;
+  } else {
+    // First paste onto another page keeps exact coordinates; subsequent pastes on that page step +22px.
+    state.copiedEditorSourceImageId = item.id;
+    state.copiedEditorPasteStep = 0;
+  }
+  const offset = state.copiedEditorPasteStep * 22;
+  const created = instantiateClonedBlocksOnItem(item, state.copiedEditorBlocks, { dx: offset, dy: offset });
+  if (created.length) {
+    toast(created.length === 1 ? 'کادر با تمام ویژگی‌ها چسبانده شد' : `${created.length.toLocaleString('fa-IR')} کادر چسبانده شد`);
+  }
+  return created;
+}
+function duplicateEditorBlocks(targetBlocks = null) {
+  const item = editorItem();
+  if (!item) return [];
+  if (inlineDraft && !closeInlineEditor()) return [];
+  const blocks = Array.isArray(targetBlocks) && targetBlocks.length ? targetBlocks : selectedEditorBlocks();
+  if (!blocks.length) {
+    toast('ابتدا یک یا چند کادر را برای تکثیر انتخاب کنید.', true);
+    return [];
+  }
+  copyEditorBlocks(blocks, { silent: true });
+  state.copiedEditorPasteStep = 1;
+  const created = instantiateClonedBlocksOnItem(item, state.copiedEditorBlocks, { dx: 22, dy: 22 });
+  if (created.length) {
+    toast(created.length === 1 ? 'یک نسخهٔ کپی از کادر ساخته شد' : `کپی ${created.length.toLocaleString('fa-IR')} کادر ساخته شد`);
+  }
+  return created;
+}
+function startBoxCloneGesture(event, activeBlock) {
+  const item = editorItem();
+  if (!item) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const currentSelected = selectedEditorBlocks();
+  const sourceBlocks = currentSelected.includes(activeBlock) ? currentSelected : [activeBlock];
+  const templates = sourceBlocks.map(cloneBlockForClipboard);
+  const origin = { x: event.clientX, y: event.clientY };
+  const scale = state.editorScale || 1;
+  let clonedEntries = null;
+  let finished = false;
+
+  const onMove = (ev) => {
+    const dist = Math.hypot(ev.clientX - origin.x, ev.clientY - origin.y);
+    if (!clonedEntries) {
+      if (dist < 3) return;
+      state.copiedEditorBlocks = templates;
+      state.copiedEditorPasteStep = 0;
+      state.copiedEditorSourceImageId = item.id;
+      syncEditorClipboardButtons();
+      const created = instantiateClonedBlocksOnItem(item, templates, { dx: 0, dy: 0 });
+      if (!created.length) return;
+      clonedEntries = created.map((blk) => ({ block: blk, start: boxOf(blk) }));
+    }
+    const dx = (ev.clientX - origin.x) / scale;
+    const dy = (ev.clientY - origin.y) / scale;
+    const minDx = Math.max(...clonedEntries.map((entry) => -entry.start.x0));
+    const maxDx = Math.min(...clonedEntries.map((entry) => item.width - entry.start.x1));
+    const minDy = Math.max(...clonedEntries.map((entry) => -entry.start.y0));
+    const maxDy = Math.min(...clonedEntries.map((entry) => item.height - entry.start.y1));
+    const groupDx = Math.max(minDx, Math.min(maxDx, dx));
+    const groupDy = Math.max(minDy, Math.min(maxDy, dy));
+    clonedEntries.forEach((entry) => {
+      const moving = entry.block;
+      const initial = entry.start;
+      const width = initial.x1 - initial.x0;
+      const height = initial.y1 - initial.y0;
+      const nx0 = Math.round(initial.x0 + groupDx);
+      const ny0 = Math.round(initial.y0 + groupDy);
+      moving.x0 = nx0; moving.x1 = nx0 + width; moving.y0 = ny0; moving.y1 = ny0 + height;
+      moving.tx0 = nx0; moving.tx1 = nx0 + width; moving.ty0 = ny0; moving.ty1 = ny0 + height;
+      const boxEl = [...document.querySelectorAll('#editorBoxes .editor-box')].find((candidate) => candidate.dataset.id === String(moving.id));
+      if (boxEl) {
+        boxEl.classList.add('dragging');
+        boxEl.style.left = `${nx0 * scale}px`;
+        boxEl.style.top = `${ny0 * scale}px`;
+      }
+    });
+    scheduleEditorCanvasDraw();
+  };
+
+  const onStop = () => {
+    if (finished) return;
+    finished = true;
+    window.removeEventListener('pointermove', onMove, true);
+    window.removeEventListener('pointerup', onStop, true);
+    window.removeEventListener('pointercancel', onStop, true);
+    document.querySelectorAll('#editorBoxes .editor-box.dragging').forEach((el) => el.classList.remove('dragging'));
+    if (!clonedEntries) {
+      duplicateEditorBlocks(sourceBlocks);
+    } else {
+      buildBlockList();
+      drawEditor();
+      scheduleSave();
+      toast(clonedEntries.length === 1 ? 'کپی کادر با تمام ویژگی‌ها در محل جدید قرار گرفت' : `کپی ${clonedEntries.length.toLocaleString('fa-IR')} کادر در محل جدید قرار گرفت`);
+    }
+  };
+
+  window.addEventListener('pointermove', onMove, true);
+  window.addEventListener('pointerup', onStop, true);
+  window.addEventListener('pointercancel', onStop, true);
+}
 function addManualEditorBlock(lang = 'fa') {
   const item = editorItem();
   if (!item) return null;
@@ -6377,6 +6602,7 @@ function buildBlockList() {
     translation.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openBlockTranslation(); } });
     const actions = document.createElement('div'); actions.className = 'block-tools block-card-actions';
     actions.append(
+      makeBlockToolButton('<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V5a2 2 0 0 1 2-2h11"/><path d="M14.5 11.5v6"/><path d="M11.5 14.5h6"/>', 'تکثیر کادر', () => duplicateEditorBlocks([block]), 'block-duplicate-btn'),
       makeBlockToolButton('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', 'کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))),
       makeBlockToolButton('<path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"/><path d="M16 16h5v5"/>', 'ترجمهٔ دوباره', () => retranslateBlock(block), 'block-retranslate-btn'),
       makeBlockToolButton('<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>', 'پاک‌کردن ترجمه', async () => {
@@ -7440,6 +7666,9 @@ function bindEvents() {
   $('editorWatermarkBtn')?.addEventListener('click', () => openWatermarkDialog(true).catch((e) => toast(e.message, true)));
   $('editorAddFaText')?.addEventListener('click', () => addManualEditorBlock('fa'));
   $('editorAddEnText')?.addEventListener('click', () => addManualEditorBlock('en'));
+  $('editorCopyBlock')?.addEventListener('click', () => copyEditorBlocks());
+  $('editorPasteBlock')?.addEventListener('click', () => pasteCopiedEditorBlocks());
+  $('editorDuplicateBlock')?.addEventListener('click', () => duplicateEditorBlocks());
   $('editorDeleteBlock')?.addEventListener('click', () => { deleteEditorBlocks().catch((e) => toast(e.message, true)); });
   $('wmCancelBtn')?.addEventListener('click', () => closeDialog('watermarkDialog'));
   $('wmApplyBtn')?.addEventListener('click', () => { applyWatermarkFromDialog().catch((e) => toast(e.message, true)); });
@@ -7516,7 +7745,32 @@ function bindEvents() {
       else setMenuOpen(false);
       return;
     }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.editorId) { event.preventDefault(); applyEditor().catch((error) => toast(error.message, true)); }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && state.editorId && $('editorDialog')?.open) {
+      const rawKey = (event.key || '').toLowerCase();
+      const isSaveKey = event.code === 'KeyS' || rawKey === 's';
+      if (isSaveKey) { event.preventDefault(); applyEditor().catch((error) => toast(error.message, true)); return; }
+      const isCopyKey = event.code === 'KeyC' || rawKey === 'c';
+      const isPasteKey = event.code === 'KeyV' || rawKey === 'v';
+      if (isCopyKey || isPasteKey) {
+        const topDlg = [...openDialogStack].reverse().find((id) => $(id)?.open);
+        const editorIsTop = (!topDlg || topDlg === 'editorDialog') && !$('appModalDialog')?.open && !classicEditor?.hasOpenModal?.();
+        const targetEl = event.target && typeof event.target.closest === 'function' ? event.target : null;
+        const inEditable = Boolean(inlineDraft) || Boolean(targetEl?.closest('input, textarea, select, [contenteditable="true"]'));
+        const hasDomTextSelection = Boolean(window.getSelection?.()?.toString?.()?.trim());
+        if (editorIsTop && !inEditable && !(isCopyKey && hasDomTextSelection)) {
+          if (isCopyKey && selectedEditorBlocks().length) {
+            event.preventDefault();
+            copyEditorBlocks();
+            return;
+          }
+          if (isPasteKey && state.copiedEditorBlocks?.length) {
+            event.preventDefault();
+            pasteCopiedEditorBlocks();
+            return;
+          }
+        }
+      }
+    }
     if (event.key === 'Enter' && state.cropId && $('cropDialog').open && !event.target.matches('input,select')) { event.preventDefault(); $('cropApply').click(); }
   });
   syncAiExecUi();

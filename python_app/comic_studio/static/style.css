@@ -89,7 +89,7 @@ body.light{color-scheme:light;--bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--
 #inlineEditor .classic-editor:not(.classic-fullscreen)>.classic-content,#inlineEditor .classic-editor:not(.classic-fullscreen)>.classic-source,#inlineEditor .classic-editor:not(.classic-fullscreen)>.classic-status{display:none!important}
 .inline-rich-slot>.classic-editor.classic-plain-mode:not(.classic-fullscreen)>.classic-toolbar,.inline-rich-slot>.classic-editor.classic-plain-mode:not(.classic-fullscreen)>.classic-tabs{visibility:hidden;pointer-events:none}
 .inline-editor.plain-mode .inline-rich-slot>.classic-editor:not(.classic-fullscreen)::after{content:'حالت متن ساده (OCR) — قالب‌بندی پیشرفته غیرفعال است';position:absolute;inset:0;display:flex;align-items:center;padding:0 12px;font-size:10px;color:var(--muted);pointer-events:none}
-.editor-box.editing{z-index:20;border:2px solid var(--a1);box-shadow:0 0 0 1px color-mix(in srgb,var(--a1) 40%,transparent)}.editor-box.editing.show-output{border-color:transparent;box-shadow:none}.editor-box.editing>.editor-box-text{visibility:hidden}.editor-box.editing>.box-move,.editor-box.editing>.box-visibility,.editor-box.editing>.box-language{display:none}
+.editor-box.editing{z-index:20;border:2px solid var(--a1);box-shadow:0 0 0 1px color-mix(in srgb,var(--a1) 40%,transparent)}.editor-box.editing.show-output{border-color:transparent;box-shadow:none}.editor-box.editing>.editor-box-text{visibility:hidden}.editor-box.editing>.box-move,.editor-box.editing>.box-visibility,.editor-box.editing>.box-language,.editor-box.editing>.box-copy{display:none}
 .editor-box.editing>#inlineEditorField,.editor-box.editing>.classic-source{position:absolute;inset:0;z-index:3;display:block;width:100%;height:100%;min-width:0;min-height:0;max-width:none;max-height:none;margin:0;padding:3px;resize:none;overflow:auto;border:0!important;border-radius:0!important;background:var(--editing-bg,var(--surface));color:var(--editing-fg,var(--text));font:15px/1.55 Vazirmatn,Tahoma,sans-serif;white-space:pre-wrap;overflow-wrap:normal;word-break:normal;outline:none}
 .editor-box.editing>#inlineEditorField{overflow:hidden;padding:0;background:transparent;box-shadow:none;white-space:pre-line;text-justify:inter-word;letter-spacing:0;word-spacing:0;font-kerning:auto}
 .editor-box.editing>#inlineEditorField *{color:transparent!important;-webkit-text-fill-color:transparent!important;text-decoration-color:transparent!important}
@@ -463,8 +463,10 @@ body.light .exec-badge.is-online,body.light .engine-chip.is-exec-online{border-c
 .local-nmt-test-row input{flex:1 1 220px;min-width:0}
 .local-nmt-test-row .bt{flex-shrink:0;white-space:nowrap}
 
-/* v4.05: Custom manual text boxes in #editorDialog & Watermark (Text + Transparent Logo) dialog */
+/* v4.05–v4.07: Custom manual text boxes, full-attribute box copy/paste/duplicate & Watermark dialog */
 .inline-add-text-tools{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap}
+.box-copy{position:absolute;top:-20px;left:54px;min-width:22px;min-height:18px;padding:1px 4px;background:#10131ae6;color:#a7f3d0;border:1px solid #fff8;border-radius:5px;font:700 10.5px/1.2 Vazirmatn,sans-serif;cursor:pointer;touch-action:manipulation;user-select:none;z-index:4}
+.box-copy:hover{background:#263149;color:#fff}
 .block-empty-state{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:10px;border:1px dashed var(--line-2);background:var(--surface-2);font-size:11.8px;line-height:1.75;color:var(--muted)}
 .block-empty-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px}
 .block-manual-chip{border-color:#8b5cf688 !important;background:color-mix(in srgb,#8b5cf6 16%,var(--surface-2)) !important;color:#c4b5fd !important}

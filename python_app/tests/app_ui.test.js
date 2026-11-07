@@ -2129,7 +2129,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas406: verText.includes('۴.۰۶'),
+            verHas407: verText.includes('۴.۰۷'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2148,8 +2148,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.06 displays version 4.06 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas406 === true
+      'v4.00/v4.07 displays version 4.07 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas407 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -2887,6 +2887,198 @@ function check(name, condition) {
         && v405Check.removeUsedModal === true
         && v405Check.wmCleared === true,
       JSON.stringify({ v405Check, renderedOptions, drawnWatermarkFillCalls, drawnWatermarkLogoCalls }),
+    );
+
+    // v4.07: Verify full-attribute box copy/paste/duplicate via toolbar icons, on-box ⧉ icon, sidebar button, Ctrl+C / Ctrl+V (EN & FA keyboard layouts + cross-page paste + inline typing guard), Ctrl+Shift+Drag / Click cloning, and Help Guide documentation
+    const v407Check = await vm.runInContext(`
+      (async () => {
+        const prevProject = state.project ? JSON.parse(JSON.stringify(state.project)) : null;
+        const origFetch = window.fetch;
+        window.fetch = async (url, options = {}) => {
+          const u = String(url);
+          if (u.includes('/content')) {
+            return { ok: true, status: 200, blob: async () => new Blob(['img'], { type: 'image/png' }) };
+          }
+          if (u.endsWith('/state') && options.method === 'PUT') {
+            return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => JSON.parse(options.body).state };
+          }
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => 'application/json' },
+            json: async () => ({ ok: true, updatedAt: '2026-11-07T14:00:00Z' }),
+          };
+        };
+        try {
+          state.copiedEditorBlocks = [];
+          state.copiedEditorPasteStep = 0;
+          state.copiedEditorSourceImageId = null;
+          adoptProject({
+            id: 'proj-v407',
+            name: 'پروژه ۴.۰۷',
+            updatedAt: '2026-11-07T14:00:00Z',
+            groups: [],
+            settings: {
+              ocrEngine: 'rapidocr-v6',
+              ocrLanguage: 'eng',
+              ocrPageMode: 'comic',
+              eraseOriginal: true,
+              overlayMode: 'translation',
+            },
+            images: [
+              {
+                id: 'img-copy-1',
+                name: 'p1.png',
+                file: 'p1.png',
+                width: 320,
+                height: 200,
+                selected: true,
+                edited: false,
+                approved: false,
+                blocks: [
+                  {
+                    id: 1,
+                    text: 'BOOM!',
+                    tr: 'بوم بزرگ!',
+                    richHtml: '<span style="color:#ff2244;font-weight:bold">بوم بزرگ!</span>',
+                    conf: 98,
+                    enabled: true,
+                    bg: 'black',
+                    color: '#ff2244',
+                    bold: true,
+                    italic: true,
+                    size: 26,
+                    align: 'center',
+                    verticalAlign: 'bottom',
+                    dir: 'rtl',
+                    textMode: 'translation',
+                    pageRole: 'heading',
+                    lineH: 30,
+                    x0: 20, y0: 20, x1: 140, y1: 70,
+                    tx0: 20, ty0: 20, tx1: 140, ty1: 70,
+                  },
+                ],
+              },
+              {
+                id: 'img-copy-2',
+                name: 'p2.png',
+                file: 'p2.png',
+                width: 320,
+                height: 200,
+                selected: true,
+                edited: false,
+                approved: false,
+                blocks: [],
+              },
+            ],
+          });
+
+          await openEditor('img-copy-1');
+          const pasteDisabledInitially = $('editorPasteBlock').disabled === true;
+          selectEditorBlock(1, false, false);
+
+          // 1. Typing guard: while inline editor is open, Ctrl+C / Ctrl+V must NOT hijack text editing
+          openInlineEditor(state.project.images[0].blocks[0]);
+          const keyWhenTyping = new window.KeyboardEvent('keydown', { key: 'v', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true });
+          $('inlineEditorField').dispatchEvent(keyWhenTyping);
+          const countWhileTyping = state.project.images[0].blocks.length;
+          closeInlineEditor();
+
+          // 2. Persian keyboard layout Ctrl+C ('ز' + KeyC) & Ctrl+V ('ر' + KeyV) copies & pastes all attributes
+          document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ز', code: 'KeyC', ctrlKey: true, bubbles: true, cancelable: true }));
+          const pasteEnabledAfterCopy = $('editorPasteBlock').disabled === false;
+          document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ر', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true }));
+          const pastedSamePage = state.project.images[0].blocks[1];
+          const samePageAttrsMatch = Boolean(
+            pastedSamePage
+            && pastedSamePage.id === 2
+            && pastedSamePage.tr === 'بوم بزرگ!'
+            && pastedSamePage.richHtml.includes('#ff2244')
+            && pastedSamePage.bg === 'black'
+            && pastedSamePage.color === '#ff2244'
+            && pastedSamePage.bold === true
+            && pastedSamePage.italic === true
+            && pastedSamePage.size === 26
+            && pastedSamePage.align === 'center'
+            && pastedSamePage.verticalAlign === 'bottom'
+            && pastedSamePage.pageRole === 'heading'
+            && (pastedSamePage.tx1 - pastedSamePage.tx0) === 120
+            && (pastedSamePage.ty1 - pastedSamePage.ty0) === 50
+            && pastedSamePage.tx0 === 42
+            && pastedSamePage.ty0 === 42
+          );
+
+          // 3. On-box mini icon (.box-copy ⧉) duplicates immediately without disturbing original
+          const box1CopyIcon = $('editorBoxes').querySelector('.editor-box[data-id="1"] .box-copy');
+          box1CopyIcon.click();
+          const countAfterOnBoxIcon = state.project.images[0].blocks.length;
+
+          // 4. Ctrl+Shift+Drag pulls out a live copy to exact target spot while keeping original box 1 at (20, 20)
+          const box1El = $('editorBoxes').querySelector('.editor-box[data-id="1"]');
+          const mkPtr = (type, x, y, opts = {}) => {
+            const ev = new window.Event(type, { bubbles: true, cancelable: true });
+            Object.defineProperties(ev, {
+              clientX: { value: x },
+              clientY: { value: y },
+              pointerId: { value: 9 },
+              button: { value: 0 },
+              ctrlKey: { value: Boolean(opts.ctrlKey) },
+              shiftKey: { value: Boolean(opts.shiftKey) },
+            });
+            return ev;
+          };
+          const scale = state.editorScale || 1;
+          box1El.dispatchEvent(mkPtr('pointerdown', 40, 40, { ctrlKey: true, shiftKey: true }));
+          window.dispatchEvent(mkPtr('pointermove', 40 + Math.round(90 * scale), 40 + Math.round(60 * scale), { ctrlKey: true, shiftKey: true }));
+          window.dispatchEvent(mkPtr('pointerup', 40 + Math.round(90 * scale), 40 + Math.round(60 * scale), { ctrlKey: true, shiftKey: true }));
+          const origStillIntact = state.project.images[0].blocks[0].tx0 === 20 && state.project.images[0].blocks[0].ty0 === 20;
+          const draggedClone = state.project.images[0].blocks.at(-1);
+          const draggedCloneAtTarget = draggedClone.tx0 === 110 && draggedClone.ty0 === 80 && draggedClone.size === 26 && draggedClone.color === '#ff2244';
+
+          // 5. Cross-page paste: open page 2 and click #editorPasteBlock -> lands at exact source coordinates (20, 20)
+          await openEditor('img-copy-2');
+          $('editorPasteBlock').click();
+          const page2Block = state.project.images[1].blocks[0];
+          const crossPageExact = Boolean(page2Block && page2Block.tx0 === 20 && page2Block.ty0 === 20 && page2Block.tr === 'بوم بزرگ!' && page2Block.bg === 'black');
+
+          // 6. Help guide documents Ctrl + C, Ctrl + V, and Ctrl + Shift box copying in Chapters 9 & 14
+          openHelpDialog('visual-editor');
+          const visualHelpText = $('helpContentArea').textContent;
+          openHelpDialog('shortcuts');
+          const shortcutsHelpText = $('helpContentArea').textContent;
+          closeDialog('helpDialog');
+
+          return {
+            pasteDisabledInitially,
+            countWhileTyping,
+            pasteEnabledAfterCopy,
+            samePageAttrsMatch,
+            countAfterOnBoxIcon,
+            origStillIntact,
+            draggedCloneAtTarget,
+            crossPageExact,
+            helpHasCopyDocs: visualHelpText.includes('Ctrl + Shift') && visualHelpText.includes('کپی کادر') && shortcutsHelpText.includes('Ctrl + C') && shortcutsHelpText.includes('Ctrl + Shift'),
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+          if ($('editorDialog')?.open) closeDialog('editorDialog');
+          if (prevProject) adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.07 supports full-attribute box copy/paste/duplicate via toolbar & on-box icons, Ctrl+C/Ctrl+V (EN/FA layouts + cross-page + typing guard), Ctrl+Shift+Drag cloning, and Help documentation',
+      v407Check.pasteDisabledInitially === true
+        && v407Check.countWhileTyping === 1
+        && v407Check.pasteEnabledAfterCopy === true
+        && v407Check.samePageAttrsMatch === true
+        && v407Check.countAfterOnBoxIcon === 3
+        && v407Check.origStillIntact === true
+        && v407Check.draggedCloneAtTarget === true
+        && v407Check.crossPageExact === true
+        && v407Check.helpHasCopyDocs === true,
+      JSON.stringify(v407Check),
     );
   }
 

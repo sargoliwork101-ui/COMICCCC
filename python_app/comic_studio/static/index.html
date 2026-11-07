@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.06">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.06">
+  <link rel="stylesheet" href="/style.css?v=4.07">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.07">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۰۶ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۰۷ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h11"/></svg><span>پروژه و تنظیمات</span></button>
@@ -542,10 +542,13 @@
         </div>
         <hr class="inline-section-divider" aria-label="جداکنندهٔ ابزارهای چیدمان و هم‌اندازه‌سازی کادرها">
         <div class="inline-box-ops-row">
-          <div id="inlineAddTextTools" class="editor-multi-tools inline-add-text-tools" role="group" aria-label="افزودن یا حذف کادر متن دستی روی تصویر">
-            <span class="box-capsule-title">کادر جدید</span>
+          <div id="inlineAddTextTools" class="editor-multi-tools inline-add-text-tools" role="group" aria-label="افزودن، کپی، چسباندن یا حذف کادر متن روی تصویر">
+            <span class="box-capsule-title">کادر</span>
             <button id="editorAddFaText" class="bt primary" type="button" title="افزودن کادر متن فارسی (راست‌به‌چپ) در وسط نمای فعلی تصویر و بازکردن فوری ویرایشگر"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 8v8"/><path d="M8 12h8"/></svg><span>+ متن فارسی</span></button>
             <button id="editorAddEnText" class="bt" type="button" title="افزودن کادر متن انگلیسی (چپ‌به‌راست) در وسط نمای فعلی تصویر و بازکردن فوری ویرایشگر"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9 15l3-6 3 6"/><path d="M10 13h4"/></svg><span>+ متن انگلیسی</span></button>
+            <button id="editorCopyBlock" class="bt" type="button" title="کپی کادر(های) انتخاب‌شده با تمام ویژگی‌ها و قالب‌بندی (Ctrl+C)"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><span>کپی کادر</span></button>
+            <button id="editorPasteBlock" class="bt" type="button" disabled title="چسباندن کادر(های) کپی‌شده با تمام ویژگی‌ها روی این صفحه (Ctrl+V)"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg><span>چسباندن</span></button>
+            <button id="editorDuplicateBlock" class="bt" type="button" title="تکثیر فوری کادر(های) انتخاب‌شده با تمام ویژگی‌ها روی همین صفحه (یا نگه داشتن Ctrl+Shift و کشیدن/کلیک روی کادر)"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V5a2 2 0 0 1 2-2h11"/><path d="M14.5 11.5v6"/><path d="M11.5 14.5h6"/></svg><span>تکثیر کادر</span></button>
             <button id="editorDeleteBlock" class="bt danger" type="button" title="حذف کامل کادر(های) انتخاب‌شده از این صفحه"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg><span>حذف کادر</span></button>
           </div>
           <div id="inlineMergeSplitTools" class="editor-multi-tools inline-merge-split-tools" role="group" aria-label="ادغام و تفکیک کادرهای متن">
@@ -590,7 +593,7 @@
       </section>
     <div class="editor-body"><div class="editor-view"><div class="editor-preview"><div id="editorStage" title="فضای خالی تصویر را بکشید تا جابه‌جا شود"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div>
 
-    </div><div class="editor-side"><details class="editor-help-details"><summary><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg><span>راهنمای کوتاه ویرایش</span></summary><div class="editor-help">روی هر کادر در تصویر کلیک کنید و مستقیم تایپ یا بخشی از متن را انتخاب و قالب‌بندی کنید؛ تغییرها خودکار ذخیره می‌شوند. با Ctrl/⌘ + کلیک روی کادرها (یا ⠿) چند کادر را انتخاب کنید تا با کپسول‌های ردیف پایینِ نوار ابزار، آن‌ها را هم‌اندازه یا هم‌تراز کنید (اولین کادر انتخابی مرجع هم‌اندازه‌سازی است). چرخ ماوس صفحه را اسکرول می‌کند و با نگه داشتن Ctrl بزرگ‌نمایی را تغییر می‌دهد. <button id="editorOpenFullHelpBtn" class="bt editor-open-help-btn" type="button"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><span>بازکردن راهنمای کامل ویرایشگر (F1)</span></button></div></details><div id="blockList"></div></div></div>
+    </div><div class="editor-side"><details class="editor-help-details"><summary><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg><span>راهنمای کوتاه ویرایش</span></summary><div class="editor-help">روی هر کادر در تصویر کلیک کنید و مستقیم تایپ یا بخشی از متن را انتخاب و قالب‌بندی کنید؛ تغییرها خودکار ذخیره می‌شوند. برای کپی کادر با تمام ویژگی‌ها از آیکون کپی/تکثیر، کلیدهای Ctrl+C و Ctrl+V (حتی بین صفحات مختلف) یا نگه داشتن هم‌زمان Ctrl+Shift و کشیدن/کلیک روی کادر استفاده کنید. با Ctrl/⌘ + کلیک روی کادرها چند کادر را انتخاب کنید تا هم‌اندازه یا هم‌تراز شوند. چرخ ماوس اسکرول و Ctrl+Wheel بزرگ‌نمایی را تغییر می‌دهد. <button id="editorOpenFullHelpBtn" class="bt editor-open-help-btn" type="button"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><span>بازکردن راهنمای کامل ویرایشگر (F1)</span></button></div></details><div id="blockList"></div></div></div>
   </dialog>
 
   <dialog id="cropDialog" class="dlg crop-dialog">
@@ -808,12 +811,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-  <script src="/typeset.js?v=4.06"></script>
-  <script src="/groups.js?v=4.06"></script>
-  <script src="/rich-sanitize.js?v=4.06"></script>
-  <script src="/rich-editor.js?v=4.06"></script>
-  <script src="/inline-edit-session.js?v=4.06"></script>
-  <script src="/help-guide.js?v=4.06"></script>
-  <script src="/app.js?v=4.06"></script>
+  <script src="/typeset.js?v=4.07"></script>
+  <script src="/groups.js?v=4.07"></script>
+  <script src="/rich-sanitize.js?v=4.07"></script>
+  <script src="/rich-editor.js?v=4.07"></script>
+  <script src="/inline-edit-session.js?v=4.07"></script>
+  <script src="/help-guide.js?v=4.07"></script>
+  <script src="/app.js?v=4.07"></script>
 </body>
 </html>
