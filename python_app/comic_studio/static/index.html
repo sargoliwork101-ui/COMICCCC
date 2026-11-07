@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.03">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.03">
+  <link rel="stylesheet" href="/style.css?v=4.04">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.04">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۰۳ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۰۴ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h11"/></svg><span>پروژه و تنظیمات</span></button>
@@ -310,13 +310,43 @@
   <dialog id="aiDialog" class="dlg ai-dialog">
     <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>مدیریت ترجمه‌ها</h2><span id="aiExecBadge" class="exec-badge is-online">سرویس آنلاین (اینترنتی)</span></div><button class="icon" value="cancel" aria-label="بستن">×</button></form>
     <div class="form-grid">
-      <label>روش ترجمه<select id="aiProvider"><option value="free">سرویس رایگان فعلی</option><option value="gemini">Google Gemini</option><option value="openai">OpenAI / سرویس سازگار</option><option value="openrouter">OpenRouter</option><option value="avalai">AvalAI</option></select></label>
+      <label>روش ترجمه<select id="aiProvider"><option value="free">سرویس رایگان فعلی</option><option value="local">مترجم آفلاین داخلی (NLLB — بدون اینترنت)</option><option value="gemini">Google Gemini</option><option value="openai">OpenAI / سرویس سازگار</option><option value="openrouter">OpenRouter</option><option value="avalai">AvalAI</option></select></label>
       <label>زبان مقصد ترجمه<select id="aiTargetLanguage"><option value="fa">فارسی (Persian)</option><option value="en">انگلیسی (English)</option><option value="ar">عربی (Arabic)</option><option value="tr">ترکی استانبولی (Turkish)</option><option value="de">آلمانی (German)</option><option value="fr">فرانسوی (French)</option><option value="ru">روسی (Russian)</option><option value="es">اسپانیایی (Spanish)</option><option value="ja">ژاپنی (Japanese)</option><option value="ko">کره‌ای (Korean)</option><option value="zh-CN">چینی (Chinese)</option></select></label>
     </div>
     <div id="aiExecBanner" class="exec-mode-banner is-online" role="status" aria-live="polite"></div>
     <div id="freeFields" class="hidden">
       <div id="freeServices"></div>
       <p class="hint">ابتدا Google Translate و پس از شکست تلاش‌های آن MyMemory امتحان می‌شود. سقف مؤثر کمترین سقف دو سرویس است و هر درخواست علاوه بر آن حداکثر ۵۰۰ بایت UTF-8 دارد. بدون کلید، سرویس‌ها ممکن است سهمیه یا محدودیت‌های دیگری داشته باشند. تکرار یا تغییر سرویس پس از خطای شبکه ممکن است متن را دوباره ارسال کند.</p>
+    </div>
+    <div id="localNmtFields" class="local-nmt-panel hidden">
+      <p class="hint">هیچ فایلی بدون کلیک شما دانلود نمی‌شود. با یک‌بار دانلود یکی از دو مدل زیر، <strong>هم ترجمهٔ یک جمله / یک کادر تکی و هم ترجمهٔ صفحه‌های کامل</strong> به شکل <strong>۱۰۰٪ آفلاین و رایگان روی پردازندهٔ سیستم شما (بدون نیاز به اینترنت و بدون نیاز به کارت گرافیک)</strong> انجام می‌شود. تمام فایل‌ها داخل پوشهٔ ذخیره‌سازی فعال برنامه قرار می‌گیرند و هر زمان بخواهید با یک کلیک قابل حذف کامل از دیسک هستند.</p>
+      <div id="localNmtProgressWrap" class="model-live-progress hidden" aria-live="polite">
+        <div class="model-live-progress-head">
+          <span id="localNmtProgressLabel">در حال دانلود و آماده‌سازی مدل آفلاین…</span>
+          <div class="model-live-progress-meta">
+            <strong id="localNmtProgressPercent" dir="ltr">0%</strong>
+            <button id="localNmtCancelBtn" class="bt danger dock-cancel-btn" type="button">لغو دانلود</button>
+          </div>
+        </div>
+        <div class="bar" role="progressbar" aria-label="پیشرفت دانلود مدل مترجم آفلاین" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="localNmtProgressFill" class="fill"></div></div>
+      </div>
+      <div id="localNmtCards" class="local-nmt-cards"></div>
+      <div class="form-grid local-nmt-options-grid">
+        <label>مدل آفلاین فعال<select id="localNmtModelSelect"><option value="nllb-600m">NLLB-200 سبک و سریع (600M · ~630 MB)</option><option value="nllb-1.3b">NLLB-200 دقیق‌تر (1.3B · ~1.35 GB)</option></select></label>
+        <label>دقت جست‌وجوی جمله‌بندی (۱ سریع‌ترین تا ۴ دقیق‌تر)<input id="localNmtBeamSize" type="number" dir="ltr" min="1" max="4" step="1" value="2"></label>
+        <label>سقف نویسه در هر گام صفحه (۲۰۰ تا ۲۰۰۰۰)<input id="localNmtSourceLimit" type="number" dir="ltr" min="200" max="20000" step="100" value="4000"></label>
+      </div>
+      <div class="local-nmt-ram-row">
+        <label class="reuse-setting"><input id="localNmtKeepLoaded" type="checkbox"> نگه‌داشتن مدل در رم برای ترجمهٔ فوریِ جملاتِ پشت‌سرهم (در صورت خاموش‌بودن، رم بلافاصله پس از پایان ترجمه آزاد می‌شود)</label>
+        <button id="localNmtUnloadBtn" class="bt" type="button" title="خالی‌کردن فوری مدل مترجم آفلاین از حافظهٔ رم">آزادسازی فوری از رم</button>
+      </div>
+      <div class="local-nmt-test-box">
+        <label for="localNmtTestSample">آزمایش فوری ترجمهٔ آفلاین یک جمله (بدون نیاز به بازکردن پروژه)</label>
+        <div class="local-nmt-test-row">
+          <input id="localNmtTestSample" type="text" dir="auto" maxlength="1000" value="Hello! Wait a second, where are we going today?" placeholder="یک جمله برای آزمایش ترجمهٔ آفلاین بنویسید…">
+          <button id="localNmtTestBtn" class="bt" type="button">تست ترجمهٔ یک جمله</button>
+        </div>
+      </div>
     </div>
     <label class="reuse-setting"><input id="aiReuseRepeated" type="checkbox" checked> استفادهٔ مجدد از ترجمهٔ کادرهای دقیقاً یکسان در صفحات انتخاب‌شده</label>
     <p class="hint">بافت متفاوت ممکن است ترجمهٔ متفاوت بخواهد؛ برای ترجمهٔ مستقل این گزینه را خاموش کنید.</p>
@@ -676,12 +706,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-  <script src="/typeset.js?v=4.03"></script>
-  <script src="/groups.js?v=4.03"></script>
-  <script src="/rich-sanitize.js?v=4.03"></script>
-  <script src="/rich-editor.js?v=4.03"></script>
-  <script src="/inline-edit-session.js?v=4.03"></script>
-  <script src="/help-guide.js?v=4.03"></script>
-  <script src="/app.js?v=4.03"></script>
+  <script src="/typeset.js?v=4.04"></script>
+  <script src="/groups.js?v=4.04"></script>
+  <script src="/rich-sanitize.js?v=4.04"></script>
+  <script src="/rich-editor.js?v=4.04"></script>
+  <script src="/inline-edit-session.js?v=4.04"></script>
+  <script src="/help-guide.js?v=4.04"></script>
+  <script src="/app.js?v=4.04"></script>
 </body>
 </html>

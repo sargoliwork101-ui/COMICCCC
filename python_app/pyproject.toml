@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comic-ocr-studio"
-version = "4.0.3"
+version = "4.0.4"
 description = "Standalone local OCR, translation and comic editing studio"
 requires-python = ">=3.11"
 dependencies = [
@@ -34,6 +34,10 @@ ocr-gpu = [
 easyocr = [
   "easyocr>=1.7,<2",
   "torch>=2.2,<3",
+]
+local-nmt = [
+  "ctranslate2>=4.0,<5",
+  "sentencepiece>=0.2,<1",
 ]
 dev = [
   "pytest>=8,<10",

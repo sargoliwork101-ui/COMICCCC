@@ -12,6 +12,13 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from .activity import emit
+from .local_nmt import (
+    DEFAULT_LOCAL_NMT_MODEL,
+    LOCAL_NMT_MODELS,
+    LocalNmtError,
+    local_nmt_manager,
+    normalize_local_nmt_settings,
+)
 from .ocr import LANGUAGES
 from .paths import data_dir
 from .store import atomic_json, read_json
@@ -306,7 +313,7 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
             target["profiles"] = [{"id": "legacy", "name": "کلید اصلی", "api_key": key, **_profile_policy({})}]
 
     provider = str(raw.get("provider") or "free").strip().lower()
-    if provider not in {"free", *AI_PROVIDERS}:
+    if provider not in {"free", "local", *AI_PROVIDERS}:
         provider = "free"
     if not isinstance(stored_providers, dict) and provider == "openai":
         # Old AvalAI-default settings were labelled openai even though they used
@@ -320,6 +327,7 @@ def _normalize_settings(raw: dict[str, Any]) -> dict[str, Any]:
         "context_percent": _setting_int(raw.get("context_percent"), 15, 0, 100),
         "skill_percent": _setting_int(raw.get("skill_percent"), 15, 0, 100),
         "free_services": _free_settings(raw.get("free_services")),
+        "local_nmt": normalize_local_nmt_settings(raw.get("local_nmt")),
     }
 
 
@@ -527,6 +535,8 @@ def translation_request_view(
     clean = str(text or "").strip()
     if provider == "free":
         return {"texts": split_free_query(clean), "systemPrompt": ""}
+    if provider == "local":
+        return {"texts": [clean] if clean else [], "systemPrompt": ""}
     if provider not in AI_PROVIDERS:
         raise TranslationError("Unknown translation provider")
     system_prompt, source = _ai_prompt(source_language, skill, target_language=target_language)
@@ -536,6 +546,7 @@ def translation_request_view(
 class TranslationService:
     def __init__(self, path: Path | None = None) -> None:
         self._explicit_path: Path | None = Path(path) if path is not None else None
+        self.local_nmt = local_nmt_manager
         # Harden pre-existing settings and the old fixed-name temporary file
         # without deleting data or following a potentially unsafe symlink.
         if os.name == "posix" and hasattr(os, "O_NOFOLLOW"):
@@ -591,12 +602,15 @@ class TranslationService:
                     for profile in config["profiles"]
                 ],
             }
+        local_cfg = secret["local_nmt"]
         return {
             "provider": provider,
             "reuse_repeated": secret["reuse_repeated"],
             "target_language": secret["target_language"],
             "target_languages": TARGET_LANGUAGES,
             "context_percent": secret["context_percent"], "skill_percent": secret["skill_percent"], "free_services": secret["free_services"],
+            "local_nmt": local_cfg,
+            "local_nmt_status": self.local_nmt.status(local_cfg.get("model", DEFAULT_LOCAL_NMT_MODEL)),
             "base_url": active["base_url"],
             "model": active["model"],
             "hasApiKey": any(profile["api_key"] for profile in active["profiles"]),
@@ -606,7 +620,7 @@ class TranslationService:
     def save_settings(self, values: dict[str, Any]) -> dict[str, Any]:
         current = _normalize_settings(read_json(self.path, {}))
         provider = str(values.get("provider", current["provider"]) or "free").strip().lower()
-        if provider not in {"free", *AI_PROVIDERS}:
+        if provider not in {"free", "local", *AI_PROVIDERS}:
             raise ValueError("Unknown translation provider")
         context_percent = _setting_int(values.get("context_percent", current["context_percent"]), 15, 0, 100, strict=True)
         skill_percent = _setting_int(values.get("skill_percent", current["skill_percent"]), 15, 0, 100, strict=True)
@@ -692,10 +706,15 @@ class TranslationService:
             target_language = normalize_target_language(values.get("target_language"), strict=True)
         else:
             target_language = normalize_target_language(current.get("target_language"))
+        raw_local = values.get("local_nmt")
+        local_nmt_cfg = normalize_local_nmt_settings(
+            {**current["local_nmt"], **(raw_local if isinstance(raw_local, dict) else {})}
+        )
         next_value = {
             "provider": provider, "providers": providers, "reuse_repeated": reuse_repeated,
             "target_language": target_language,
             "context_percent": context_percent, "skill_percent": skill_percent, "free_services": free_services,
+            "local_nmt": local_nmt_cfg,
             # Legacy top-level fields keep older local API clients and backups readable.
             "base_url": active["base_url"], "model": active["model"], "api_key": active_key,
         }
@@ -736,6 +755,27 @@ class TranslationService:
         selected = provider or settings.get("provider", "free")
         if selected == "free":
             translated = self._free(text, source_language) if tl == "fa" else self._free(text, source_language, target_language=tl)
+        elif selected == "local":
+            local_cfg = settings["local_nmt"]
+            blocks = source_texts if source_texts else [text]
+            try:
+                out_blocks = self.local_nmt.translate_blocks(
+                    blocks,
+                    source_language,
+                    tl,
+                    model_id=local_cfg["model"],
+                    beam_size=local_cfg["beam_size"],
+                    keep_loaded=bool(local_cfg.get("keep_loaded", False)),
+                )
+            except LocalNmtError as exc:
+                raise TranslationError(str(exc)) from exc
+            translated = "\n".join(out_blocks).strip()
+            if not translated:
+                raise TranslationError("مترجم آفلاین پاسخ خالی برگرداند.")
+            normalized = normalize_translation_text(translated)
+            if source_texts is not None:
+                distribute_translation(source_texts, normalized)
+            return normalized
         elif selected in AI_PROVIDERS:
             profiles = self._profiles(settings, selected)
             skill = normalize_ai_skill(skill)
@@ -1005,6 +1045,45 @@ class TranslationService:
                     time.sleep(wait)
         raise TranslationError('ترجمهٔ رایگان ناموفق بود: ' + '؛ '.join(failures))
 
+    def translate_local_batch(
+        self,
+        request: Any,
+        text: str,
+        source_texts: list[str],
+        source_language: str,
+        expected_policy: dict[str, Any],
+        target_language: str = "fa",
+        *,
+        keep_loaded_override: bool | None = None,
+    ) -> str:
+        """Translate one bounded page-local or single-block request 100% offline via local NLLB."""
+        from .context_run import provider_policy
+        from .store import ProjectChangedError
+        request.user_message(text)
+        settings = self._secret()
+        if provider_policy(settings, "local") != expected_policy:
+            raise ProjectChangedError("تنظیمات مترجم آفلاین پس از تأیید تغییر کرده است؛ پیش‌نمایش تازه بگیرید.")
+        local_cfg = settings["local_nmt"]
+        tl = normalize_target_language(target_language)
+        model_id = local_cfg["model"]
+        model_label = LOCAL_NMT_MODELS.get(model_id, LOCAL_NMT_MODELS[DEFAULT_LOCAL_NMT_MODEL])["short_label"]
+        keep_loaded = bool(local_cfg.get("keep_loaded", False)) if keep_loaded_override is None else bool(keep_loaded_override)
+        emit(f"ترجمهٔ آفلاین روی سیستم شما با {model_label} (بدون اینترنت)…")
+        try:
+            out_blocks = self.local_nmt.translate_blocks(
+                source_texts,
+                source_language,
+                tl,
+                model_id=model_id,
+                beam_size=local_cfg["beam_size"],
+                keep_loaded=keep_loaded,
+            )
+        except LocalNmtError as exc:
+            raise TranslationError(str(exc)) from exc
+        translated = normalize_translation_text("\n".join(out_blocks))
+        distribute_translation(source_texts, translated)
+        return translated
+
     def _free(self, text: str, source_language: str, target_language: str = "fa") -> str:
         source = LANGUAGES.get(source_language, LANGUAGES["eng"])["source"]
         tl = normalize_target_language(target_language)
@@ -1116,6 +1195,19 @@ class TranslationService:
         provider = str(overrides.get("provider") or settings.get("provider", "free"))
         if provider == "free":
             return {"ok": True, "message": "سرویس ترجمهٔ رایگان انتخاب است؛ هنگام ترجمه به اینترنت نیاز دارد."}
+        if provider == "local":
+            local_cfg = settings["local_nmt"]
+            model_id = str(overrides.get("model") or local_cfg["model"])
+            try:
+                return self.local_nmt.test_translation(
+                    model_id=model_id,
+                    source_language="eng",
+                    target_language=settings.get("target_language", "fa"),
+                    beam_size=local_cfg["beam_size"],
+                    keep_loaded=bool(local_cfg.get("keep_loaded", False)),
+                )
+            except LocalNmtError as exc:
+                raise TranslationError(str(exc)) from exc
         if provider not in AI_PROVIDERS:
             raise TranslationError("Unknown translation provider")
         config = dict(settings["providers"][provider])

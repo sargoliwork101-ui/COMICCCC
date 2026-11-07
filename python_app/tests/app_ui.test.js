@@ -2125,7 +2125,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas403: verText.includes('۴.۰۳'),
+            verHas404: verText.includes('۴.۰۴'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2144,8 +2144,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.03 displays version 4.03 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas403 === true
+      'v4.00/v4.04 displays version 4.04 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas404 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -2504,6 +2504,213 @@ function check(name, condition) {
         && v403BackupCheck.restoredProjectId === 'projrestored9'
         && v403BackupCheck.restoredRenderedCount === 1,
       JSON.stringify(v403BackupCheck),
+    );
+
+    // v4.04: Verify built-in offline local NMT translator UI (download, test, unload, delete via appConfirm, save settings, and single-sentence + page preview)
+    const v404LocalNmtCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevAi = state.ai ? JSON.parse(JSON.stringify(state.ai)) : null;
+        let preparedModel = null;
+        let testedPayload = null;
+        let unloadedCount = 0;
+        let deletedModel = null;
+        let savedAiPayload = null;
+        let singlePreviewReq = null;
+        let singleExecReq = null;
+        let modelReady = false;
+
+        const buildStatus = () => ({
+          runtimeInstalled: modelReady,
+          activeModel: 'nllb-600m',
+          loadedModel: modelReady ? 'nllb-600m' : null,
+          busyModel: null,
+          busyStage: '',
+          busyProgress: 0,
+          models: [
+            {
+              id: 'nllb-600m',
+              label: 'NLLB-200 سبک و سریع (600M · ~630 MB)',
+              shortLabel: 'NLLB-200 (600M)',
+              description: 'سبک و قابل اجرا روی CPU بدون اینترنت.',
+              approxSize: '~630 MB',
+              ramHint: '~750 MB',
+              ready: modelReady,
+              filesPresent: modelReady,
+              diskBytes: modelReady ? 655000000 : 0,
+              diskSizeLabel: modelReady ? '625 MB' : '',
+            },
+            {
+              id: 'nllb-1.3b',
+              label: 'NLLB-200 دقیق‌تر (1.3B · ~1.35 GB)',
+              shortLabel: 'NLLB-200 (1.3B)',
+              description: 'دقیق‌تر روی CPU.',
+              approxSize: '~1.35 GB',
+              ramHint: '~1.6 GB',
+              ready: false,
+              filesPresent: false,
+              diskBytes: 0,
+              diskSizeLabel: '',
+            },
+          ],
+        });
+
+        try {
+          const okJson = (payload) => ({
+            ok: true,
+            status: 200,
+            headers: { get: () => 'application/json' },
+            text: async () => JSON.stringify(payload),
+            json: async () => payload,
+          });
+          window.fetch = async (url, opts = {}) => {
+            const u = String(url);
+            const method = (opts.method || 'GET').toUpperCase();
+            if (u.endsWith('/api/local-nmt/status')) {
+              return okJson(buildStatus());
+            }
+            if (u.endsWith('/api/local-nmt/prepare') && method === 'POST') {
+              const body = JSON.parse(opts.body || '{}');
+              preparedModel = body.model;
+              modelReady = true;
+              return okJson({ ok: true, status: buildStatus() });
+            }
+            if (u.endsWith('/api/local-nmt/test') && method === 'POST') {
+              testedPayload = JSON.parse(opts.body || '{}');
+              return okJson({
+                ok: true,
+                model: testedPayload.model,
+                sourceText: testedPayload.sample_text,
+                translatedText: 'سلام! یک لحظه صبر کن.',
+                message: 'مترجم آفلاین «NLLB-200 (600M)» آماده است ✓ — نمونهٔ ترجمه: «سلام! یک لحظه صبر کن.»',
+              });
+            }
+            if (u.endsWith('/api/local-nmt/unload') && method === 'POST') {
+              unloadedCount += 1;
+              return okJson({ ok: true, status: { ...buildStatus(), loadedModel: null } });
+            }
+            if (u.endsWith('/api/local-nmt/delete') && method === 'POST') {
+              const body = JSON.parse(opts.body || '{}');
+              deletedModel = body.model;
+              modelReady = false;
+              return okJson({ ok: true, freedBytes: 655000000, status: buildStatus() });
+            }
+            if (u.endsWith('/api/ai-settings') && method === 'PUT') {
+              savedAiPayload = JSON.parse(opts.body || '{}');
+              return okJson({ ...state.ai, ...savedAiPayload, local_nmt_status: buildStatus() });
+            }
+            if (u.endsWith('/api/translate-text/context-preview') && method === 'POST') {
+              singlePreviewReq = JSON.parse(opts.body || '{}');
+              return okJson({
+                provider: 'local',
+                providerLabel: 'مترجم آفلاین داخلی — NLLB-200 سبک و سریع (600M · ~630 MB)',
+                model: 'nllb-600m',
+                base_url: '',
+                fallback_url: '',
+                previewError: '',
+                note: 'ترجمه ۱۰۰٪ آفلاین روی سیستم شما انجام می‌شود.',
+                requestCount: 1,
+                blockCount: 1,
+                requests: [{ index: 1, call: 1, text: singlePreviewReq.text, characters: singlePreviewReq.text.length }],
+                signature: 'sig-local-single-1',
+              });
+            }
+            if (u.endsWith('/api/translate-text/context') && method === 'POST') {
+              singleExecReq = JSON.parse(opts.body || '{}');
+              return okJson({ text: 'سلام دنیا آفلاین!' });
+            }
+            return origFetch(url, opts);
+          };
+
+          await loadAiSettings({ ...state.ai, local_nmt: { model: 'nllb-600m', beam_size: 2, source_limit: 4000, keep_loaded: false }, local_nmt_status: buildStatus() });
+          showDialog('aiDialog');
+          showAiProvider('local');
+          const localFieldsVisible = !$('localNmtFields').classList.contains('hidden')
+            && $('freeFields').classList.contains('hidden')
+            && $('aiFields').classList.contains('hidden');
+          const execIsLocal = $('aiExecBadge').classList.contains('is-local');
+          const cardCount = document.querySelectorAll('#localNmtCards .local-nmt-card').length;
+
+          // 1-click download
+          await prepareLocalNmtModel('nllb-600m');
+          // 1-sentence offline sample test
+          $('localNmtTestSample').value = 'Hello! Wait a second.';
+          await testLocalNmtSample();
+          const testStatusHasFa = $('aiStatus').textContent.includes('سلام');
+          // RAM unload
+          await unloadLocalNmtRam();
+          // Save settings with provider='local'
+          await saveAiSettings();
+
+          // Single-sentence / single-block translation via retranslateBlock
+          const sampleBlock = state.project.images[0].blocks[0];
+          const prevTr = sampleBlock.tr;
+          sampleBlock.text = 'Offline single sentence!';
+          await retranslateBlock(sampleBlock);
+          const previewServiceValue = $('translationPreviewService')?.value;
+          const previewSkillHidden = $('translationSkillWrap')?.classList.contains('hidden');
+          const previewExecIsLocal = $('translationPreviewExecBadge')?.classList.contains('is-local');
+          await confirmTranslationRequestPreview();
+          const translatedSingle = sampleBlock.tr;
+          sampleBlock.tr = prevTr;
+
+          // Delete model via custom Persian appConfirm (zero native confirm)
+          modelReady = true;
+          state.ai.local_nmt_status = buildStatus();
+          renderLocalNmtPanel();
+          const delPromise = deleteLocalNmtModel('nllb-600m', 'NLLB-200 (600M)');
+          await new Promise((r) => setTimeout(r, 15));
+          const deleteUsedAppModal = $('appModalDialog').open === true;
+          $('appModalConfirm').click();
+          await delPromise;
+
+          return {
+            localFieldsVisible,
+            execIsLocal,
+            cardCount,
+            preparedModel,
+            testedModel: testedPayload?.model,
+            testStatusHasFa,
+            unloadedCount,
+            savedProvider: savedAiPayload?.provider,
+            savedModel: savedAiPayload?.local_nmt?.model,
+            previewServiceValue,
+            previewSkillHidden,
+            previewExecIsLocal,
+            singlePreviewProvider: singlePreviewReq?.provider,
+            singleExecProvider: singleExecReq?.provider,
+            translatedSingle,
+            deleteUsedAppModal,
+            deletedModel,
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('aiDialog')?.open) closeDialog('aiDialog');
+          if ($('translationPreviewDialog')?.open) closeDialog('translationPreviewDialog');
+          if (prevAi) state.ai = prevAi;
+        }
+      })()
+    `, context);
+    check(
+      'v4.04 built-in offline local NMT manages download/test/unload/delete via appConfirm and translates single sentences offline',
+      v404LocalNmtCheck.localFieldsVisible === true
+        && v404LocalNmtCheck.execIsLocal === true
+        && v404LocalNmtCheck.cardCount === 2
+        && v404LocalNmtCheck.preparedModel === 'nllb-600m'
+        && v404LocalNmtCheck.testedModel === 'nllb-600m'
+        && v404LocalNmtCheck.testStatusHasFa === true
+        && v404LocalNmtCheck.unloadedCount === 1
+        && v404LocalNmtCheck.savedProvider === 'local'
+        && v404LocalNmtCheck.savedModel === 'nllb-600m'
+        && v404LocalNmtCheck.previewServiceValue === 'local'
+        && v404LocalNmtCheck.previewSkillHidden === true
+        && v404LocalNmtCheck.previewExecIsLocal === true
+        && v404LocalNmtCheck.singlePreviewProvider === 'local'
+        && v404LocalNmtCheck.singleExecProvider === 'local'
+        && v404LocalNmtCheck.translatedSingle === 'سلام دنیا آفلاین!'
+        && v404LocalNmtCheck.deleteUsedAppModal === true
+        && v404LocalNmtCheck.deletedModel === 'nllb-600m',
+      JSON.stringify(v404LocalNmtCheck),
     );
   }
 

@@ -303,3 +303,24 @@ class FreeRequest:
 
     def character_count(self, text: str) -> int:
         return len(self.user_message(text))
+
+
+@dataclass(frozen=True)
+class LocalRequest:
+    """Plain source-only request for offline local NMT (character-bounded, no 500-byte MyMemory cap)."""
+    source_capacity: int
+    system: str = ''
+    context_limit: int = 0
+    skill_limit: int = 0
+
+    def fits(self, text: str) -> bool:
+        return isinstance(text, str) and len(text) <= self.source_capacity
+
+    def user_message(self, text: str) -> str:
+        if not isinstance(text, str) or not text.strip() or not self.fits(text):
+            raise TranslationError('متن از سقف نویسهٔ مترجم آفلاین بیشتر است.')
+        return text
+
+    def character_count(self, text: str) -> int:
+        return len(self.user_message(text))
+

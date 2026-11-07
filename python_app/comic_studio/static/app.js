@@ -1590,8 +1590,19 @@ function resolveEngineExecMeta(engine) {
     descriptionNote: 'اجرا روی سیستم شما به‌صورت آفلاین',
   };
 }
+function isDirectMtProvider(provider) {
+  return provider === 'free' || provider === 'local';
+}
 function resolveTranslationExecMeta(provider, baseUrl = '') {
   const normProvider = String(provider || 'free').trim() || 'free';
+  if (normProvider === 'local') {
+    return {
+      mode: 'local',
+      short: 'آفلاین داخلی',
+      badge: 'اجرا روی سیستم شما (آفلاین — بدون اینترنت)',
+      banner: 'محل اجرا: ۱۰۰٪ روی سیستم شما (آفلاین و رایگان) — پس از یک‌بار دانلود اولیه، ترجمهٔ یک جمله، یک کادر یا صفحه‌های کامل بدون نیاز به اینترنت و بدون نیاز به کارت گرافیک روی پردازنده (CPU) انجام می‌شود.',
+    };
+  }
   const effectiveLocal = normProvider !== 'free' && normProvider !== 'gemini' && isLocalEndpointUrl(baseUrl);
   if (effectiveLocal) {
     return {
@@ -2196,7 +2207,7 @@ function savedTranslationSkill(projectId) {
   try { return localStorage.getItem(`comic-studio-ai-skill:${projectId}`); } catch { return null; }
 }
 function rememberTranslationSkill(projectId, preview) {
-  if (preview.provider === 'free') return;
+  if (isDirectMtProvider(preview.provider)) return;
   try { localStorage.setItem(`comic-studio-ai-skill:${projectId}`, preview.skill ?? ''); } catch { /* the next preview can still use the default */ }
 }
 function saveDraftTranslationSkill(projectId) {
@@ -2206,6 +2217,7 @@ function saveDraftTranslationSkill(projectId) {
 function parseTranslationTarget(raw) {
   const value = String(raw || '').trim();
   if (!value || value === 'free') return { provider: 'free', profileId: '', value: 'free' };
+  if (value === 'local') return { provider: 'local', profileId: '', value: 'local' };
   const sep = value.indexOf('::');
   const provider = sep >= 0 ? value.slice(0, sep) : value;
   const profileId = sep >= 0 ? value.slice(sep + 2) : '';
@@ -2224,7 +2236,7 @@ function resolvePreferredTranslationTarget(overrideTarget = null) {
     return parsedOverride;
   }
   const candidate = parseTranslationTarget(preferredTranslationTarget || currentAiProvider);
-  if (candidate.provider === 'free') return candidate;
+  if (isDirectMtProvider(candidate.provider)) return candidate;
   const profiles = state.ai?.providers?.[candidate.provider]?.profiles || [];
   if (candidate.profileId) {
     if (profiles.some((p) => p.hasApiKey && String(p.id) === candidate.profileId)) return candidate;
@@ -2241,7 +2253,7 @@ function resolvePreferredTranslationTarget(overrideTarget = null) {
 function renderTranslationServiceSelector(activeProvider, activeProfileId = '') {
   const select = $('translationPreviewService');
   if (!select) return;
-  const activeValue = activeProvider && activeProvider !== 'free' && activeProfileId
+  const activeValue = activeProvider && !isDirectMtProvider(activeProvider) && activeProfileId
     ? `${activeProvider}::${activeProfileId}`
     : (activeProvider || 'free');
   select.textContent = '';
@@ -2249,10 +2261,18 @@ function renderTranslationServiceSelector(activeProvider, activeProfileId = '') 
     const opt = document.createElement('option');
     opt.value = value;
     opt.dataset.executionMode = execMode;
-    opt.textContent = label;
+    textLabel: {
+      opt.textContent = label;
+    }
     select.appendChild(opt);
   };
   addOpt('free', 'سرویس رایگان — Google Translate + MyMemory', 'online');
+  const localCfgModel = state.ai?.local_nmt?.model || 'nllb-600m';
+  const localModels = state.ai?.local_nmt_status?.models || [];
+  const activeLocalMeta = localModels.find((m) => m.id === localCfgModel);
+  const localShort = activeLocalMeta?.shortLabel || (localCfgModel === 'nllb-1.3b' ? 'NLLB-200 (1.3B)' : 'NLLB-200 (600M)');
+  const localReadySuffix = activeLocalMeta?.ready ? '✓ آماده بدون اینترنت' : (localModels.length ? '⬇ نیازمند دانلود اولیه' : 'آفلاین بدون اینترنت');
+  addOpt('local', `مترجم آفلاین داخلی — ${localShort} (${localReadySuffix})`, 'local');
   AI_PROVIDER_IDS.forEach((providerId) => {
     const info = aiInfo(providerId);
     const label = info.label || AI_FALLBACKS[providerId]?.label || providerId;
@@ -2304,7 +2324,7 @@ async function switchTranslationPreviewService(nextTargetValue) {
         ...(translationPreviewData || {}),
         provider: parsed.provider,
         profileId: parsed.profileId,
-        contextMode: parsed.provider !== 'free',
+        contextMode: !isDirectMtProvider(parsed.provider),
         requests: [],
         previewError: errMsg,
       };
@@ -2357,7 +2377,7 @@ function openAiSettingsFromPreviewDialog() {
   if (state.project?.id) saveDraftTranslationSkill(state.project.id);
   cancelTranslationRequestPreview();
   loadAiSettings().then(() => {
-    if (activeProv && AI_PROVIDER_IDS.includes(activeProv)) showAiProvider(activeProv, false);
+    if (activeProv && (activeProv === 'local' || AI_PROVIDER_IDS.includes(activeProv))) showAiProvider(activeProv, false);
     showDialog('aiDialog');
   }).catch((error) => toast(error.message, true));
 }
@@ -2576,12 +2596,16 @@ function updateTranslationSkillStatus() {
   };
   updateBudgetCounter('translationSkill', 'translationSkillCounter', skillCount, preview?.skillLimit ?? 0, !!preview?.contextMode);
   updateBudgetCounter('translationContext', 'translationContextCounter', contextCount, preview?.contextLimit ?? 0, !!preview?.contextMode);
-  const changed = preview && ((preview.provider !== 'free' && (skill !== (preview.skill ?? '') || (preview.contextMode && context !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume));
+  const changed = preview && ((!isDirectMtProvider(preview.provider) && (skill !== (preview.skill ?? '') || (preview.contextMode && context !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume));
   const message = skillTooLong ? `متن راهنمای ترجمه (${skillCount} نویسه) بیش از سقف مجاز ${preview.skillLimit} نویسه است؛ پیش از ارسال کوتاه کنید یا سقف نویسه را افزایش دهید.` :
     contextTooLong ? `خلاصه (${contextCount} نویسه) بیش از سقف مجاز ${preview.contextLimit} نویسه است؛ پیش از ارسال کوتاه کنید یا سقف نویسه را افزایش دهید.` :
     changed ? 'اطلاعات تغییر کرد؛ ابتدا پیش‌نمایش تازه را بازبینی کنید.' : '';
   $('translationSkillStatus').textContent = message;
-  $('openAiLimitFromPreview')?.classList.toggle('hidden', !((preview?.previewError || overBudget) && preview?.provider !== 'free'));
+  const openLimitBtn = $('openAiLimitFromPreview');
+  if (openLimitBtn) {
+    openLimitBtn.classList.toggle('hidden', !((preview?.previewError || overBudget) && preview?.provider !== 'free'));
+    openLimitBtn.textContent = preview?.provider === 'local' ? 'دانلود و مدیریت مترجم آفلاین…' : 'تغییر سقف نویسه در تنظیمات AI';
+  }
   $('translationPreviewConfirm').textContent = overBudget ? 'تأیید و ارسال برای ترجمه' : (changed ? 'به‌روزرسانی پیش‌نمایش' : 'تأیید و ارسال برای ترجمه');
   $('translationPreviewConfirm').classList.toggle('over-budget-blocked', overBudget && !preview?.previewError);
   $('translationPreviewConfirm').setAttribute('aria-disabled', overBudget ? 'true' : 'false');
@@ -2597,7 +2621,7 @@ function showTranslationRequestPreview(preview, action, refresh = null, switchTa
     $('translationTargetLang').disabled = false;
     $('translationTargetLang').value = normalizeTargetLanguage(preview.targetLanguage || activeTargetLanguage());
   }
-  $('translationSkillWrap').classList.toggle('hidden', preview.provider === 'free');
+  $('translationSkillWrap').classList.toggle('hidden', isDirectMtProvider(preview.provider));
   $('translationContextWrap').classList.toggle('hidden', !preview.rollingMode);
   $('translationContextHead')?.classList.toggle('hidden', !preview.contextMode);
   $('translationContextClipActions')?.classList.toggle('hidden', !preview.contextMode);
@@ -2696,7 +2720,7 @@ async function confirmTranslationRequestPreview() {
     return;
   }
   $('translationPreviewConfirm').disabled = true;
-  const changed = (preview.provider !== 'free' && (skillText !== (preview.skill ?? '') || (preview.contextMode && contextText !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume);
+  const changed = (!isDirectMtProvider(preview.provider) && (skillText !== (preview.skill ?? '') || (preview.contextMode && contextText !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume);
   if (changed) {
     $('translationSkill').disabled = true; $('translationSkillReset').disabled = true; $('translationContext').disabled = true; $('translationContextResume').disabled = true;
     setProgress('previewPrepProgress', null, true);
@@ -2799,7 +2823,7 @@ async function runTranslation(targetOverride = null) {
       }
     };
     const switchTarget = (nextVal) => runTranslation(nextVal);
-    if (provider === 'free') {
+    if (isDirectMtProvider(provider)) {
       const previous = previousRun;
       const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && (previous.targetLanguage || 'fa') === targetLanguage && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
       const refresh = async (_skill, _summary, nextResume) => { await confirmRestart(nextResume); return api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: '', summary: '', resume: nextResume })); };
@@ -2810,7 +2834,7 @@ async function runTranslation(targetOverride = null) {
         preview = await refresh('', '', false);
         preview.note += ' نوبت ناتمام با تنظیمات فعلی سازگار نیست؛ تأیید نوبت تازه‌ای شروع می‌کند.';
       }
-      if (!preview.requests?.length) throw new Error('هیچ درخواست ترجمه‌ای ساخته نشد؛ کادرهای فعال و انتخاب تصاویر را بررسی کنید.');
+      if (!preview.requests?.length && !preview.previewError) throw new Error('هیچ درخواست ترجمه‌ای ساخته نشد؛ کادرهای فعال و انتخاب تصاویر را بررسی کنید.');
       const emptyPages = selected.filter(item => !(item.blocks || []).some(block => block.enabled !== false && String(block.text || '').trim()));
       if (emptyPages.length) preview.note += ` ${emptyPages.length} تصویر بدون متن فعال از ترجمه کنار گذاشته می‌شوند.`;
       showTranslationRequestPreview(preview, accepted => performContextTranslation(request, accepted), refresh, switchTarget);
@@ -2871,7 +2895,10 @@ async function performContextTranslation(request, preview, ongoing = null, corre
     }
   };
   try {
-    await runJob(request.provider === 'free' ? 'در حال ترجمهٔ رایگان…' : 'در حال ترجمه با حافظهٔ داستان…', async () => {
+    const jobTitle = request.provider === 'local'
+      ? 'در حال ترجمهٔ آفلاین روی سیستم شما…'
+      : (request.provider === 'free' ? 'در حال ترجمهٔ رایگان…' : 'در حال ترجمه با حافظهٔ داستان…');
+    await runJob(jobTitle, async () => {
       if (!run) {
         const started = await api(`/api/projects/${projectId}/context-start`, {
           ...jsonOptions('POST', { ...request, skill: preview.skill, summary: preview.summary, resume: preview.resume, confirmation: preview.signature }),
@@ -2882,7 +2909,10 @@ async function performContextTranslation(request, preview, ongoing = null, corre
       }
       while (true) {
         checkNotCancelled();
-        phase = 'translation'; $('translationStatus').textContent = request.provider === 'free' ? `در حال ترجمهٔ درخواست ${run.completed + 1}…` : `در حال ترجمهٔ درخواست ${run.completed + 1} با خلاصهٔ قبلی…`;
+        phase = 'translation';
+        $('translationStatus').textContent = request.provider === 'local'
+          ? `در حال ترجمهٔ آفلاین بخش ${run.completed + 1} روی سیستم شما…`
+          : (request.provider === 'free' ? `در حال ترجمهٔ درخواست ${run.completed + 1}…` : `در حال ترجمهٔ درخواست ${run.completed + 1} با خلاصهٔ قبلی…`);
         const result = await api(`/api/projects/${projectId}/context-step`, {
           ...jsonOptions('POST', {run_id: run.id, completed: run.completed, skill: preview.skill, ...(correction || {})}),
           signal: controller.signal,
@@ -2905,7 +2935,7 @@ async function performContextTranslation(request, preview, ongoing = null, corre
       phase = 'save'; setOverlayMode('translation', false);
     }, 'translationProgress');
     translationClosingNormally = true;
-    closeDialog('translationDialog'); toast(request.provider === 'free' ? 'ترجمه ذخیره شد' : 'ترجمه و خلاصه ذخیره شد');
+    closeDialog('translationDialog'); toast(isDirectMtProvider(request.provider) ? 'ترجمه ذخیره شد' : 'ترجمه و خلاصه ذخیره شد');
   } catch (error) {
     if (translationCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
       toast(run?.completed ? `پنجره بسته شد؛ ${run.completed} بخش ذخیره‌شده باقی ماند و ادامهٔ ترجمه متوقف شد` : 'پنجرهٔ ترجمه بسته شد و عملیات متوقف گردید');
@@ -3956,7 +3986,7 @@ function captureAiProvider() {
   });
 }
 function syncAiExecUi() {
-  const baseUrlVal = aiEditorProvider === 'free' ? '' : ($('aiBaseUrl')?.value ?? '');
+  const baseUrlVal = isDirectMtProvider(aiEditorProvider) ? '' : ($('aiBaseUrl')?.value ?? '');
   const meta = resolveTranslationExecMeta(aiEditorProvider, baseUrlVal);
   applyExecBadgeElement($('aiExecBadge'), meta.mode, meta.badge);
   const banner = $('aiExecBanner');
@@ -4051,13 +4081,300 @@ function renderAiProfiles() {
     row.append(name, key, test, remove, options, status); container.appendChild(row);
   });
 }
+const LOCAL_NMT_FALLBACK_MODELS = [
+  {
+    id: 'nllb-600m',
+    label: 'NLLB-200 سبک و سریع (600M · ~630 MB)',
+    shortLabel: 'NLLB-200 (600M)',
+    description: 'پیشنهادی برای همهٔ لپ‌تاپ‌ها و سیستم‌های معمولی روی پردازنده (CPU) بدون نیاز به کارت گرافیک؛ سریع و مناسب ترجمهٔ تک‌جمله و صفحه‌های کامل.',
+    approxSize: '~630 MB',
+    ramHint: '~750 MB',
+    ready: false,
+    filesPresent: false,
+    diskBytes: 0,
+    diskSizeLabel: '',
+  },
+  {
+    id: 'nllb-1.3b',
+    label: 'NLLB-200 دقیق‌تر (1.3B · ~1.35 GB)',
+    shortLabel: 'NLLB-200 (1.3B)',
+    description: 'جمله‌بندی دقیق‌تر برای جملات طولانی‌تر؛ قابل اجرا روی پردازنده (CPU) با حدود ۱.۶ گیگابایت رم آزاد در زمان ترجمه.',
+    approxSize: '~1.35 GB',
+    ramHint: '~1.6 GB',
+    ready: false,
+    filesPresent: false,
+    diskBytes: 0,
+    diskSizeLabel: '',
+  },
+];
+let localNmtBusyModel = null;
+let localNmtAbortController = null;
+let localNmtPollTimer = null;
+
+function currentLocalNmtStatus() {
+  const st = state.ai?.local_nmt_status;
+  const selectedModel = $('localNmtModelSelect')?.value || state.ai?.local_nmt?.model || 'nllb-600m';
+  const rawModels = Array.isArray(st?.models) && st.models.length ? st.models : LOCAL_NMT_FALLBACK_MODELS;
+  return {
+    runtimeInstalled: !!st?.runtimeInstalled,
+    loadedModel: st?.loadedModel || null,
+    busyModel: localNmtBusyModel || st?.busyModel || null,
+    busyStage: st?.busyStage || '',
+    busyProgress: Number(st?.busyProgress || 0),
+    models: rawModels.map((m) => ({
+      ...m,
+      selected: m.id === selectedModel,
+      loaded: m.id === (st?.loadedModel || null),
+    })),
+  };
+}
+
+function updateLocalNmtProgressUi(visible, label = '', progress = 0) {
+  const wrap = $('localNmtProgressWrap');
+  if (!wrap) return;
+  wrap.classList.toggle('hidden', !visible);
+  if (!visible) {
+    setProgress('localNmtProgressFill', 0, false);
+    if ($('localNmtProgressPercent')) $('localNmtProgressPercent').textContent = '0%';
+    return;
+  }
+  const clamped = Math.max(0, Math.min(1, Number(progress) || 0));
+  if ($('localNmtProgressLabel') && label) $('localNmtProgressLabel').textContent = label;
+  if ($('localNmtProgressPercent')) $('localNmtProgressPercent').textContent = `${Math.round(clamped * 100)}%`;
+  setProgress('localNmtProgressFill', clamped > 0 ? clamped : null, clamped <= 0);
+}
+
+function renderLocalNmtPanel() {
+  const cardsEl = $('localNmtCards');
+  if (!cardsEl) return;
+  const info = currentLocalNmtStatus();
+  const busy = Boolean(info.busyModel);
+  if ($('localNmtUnloadBtn')) {
+    $('localNmtUnloadBtn').disabled = busy;
+    $('localNmtUnloadBtn').textContent = info.loadedModel ? 'آزادسازی فوری از رم (در رم فعال)' : 'آزادسازی فوری از رم';
+  }
+  if ($('localNmtTestBtn')) $('localNmtTestBtn').disabled = busy;
+  cardsEl.textContent = '';
+  info.models.forEach((model) => {
+    const card = document.createElement('div');
+    card.className = `local-nmt-card${model.selected ? ' is-selected' : ''}`;
+    card.dataset.modelId = model.id;
+
+    const head = document.createElement('div');
+    head.className = 'local-nmt-card-head';
+    const title = document.createElement('strong');
+    title.className = 'local-nmt-card-title';
+    title.textContent = model.label;
+    const badge = document.createElement('span');
+    badge.className = `exec-badge ${model.ready ? 'is-local' : 'is-online'}`;
+    badge.textContent = model.ready
+      ? (model.loaded ? '✓ آماده · فعال در رم' : '✓ نصب‌شده (آمادهٔ کار آفلاین)')
+      : `⬇ نصب‌نشده (${model.approxSize})`;
+    head.append(title, badge);
+
+    const desc = document.createElement('p');
+    desc.className = 'local-nmt-card-desc';
+    desc.textContent = model.description;
+
+    const meta = document.createElement('div');
+    meta.className = 'local-nmt-card-meta';
+    meta.textContent = [
+      `حجم دانلود: ${model.approxSize}`,
+      model.ramHint ? `رم مصرفی حین کار: ${model.ramHint}` : '',
+      model.diskSizeLabel ? `حجم فعلی روی دیسک: ${model.diskSizeLabel}` : '',
+    ].filter(Boolean).join(' · ');
+
+    const actions = document.createElement('div');
+    actions.className = 'local-nmt-card-actions';
+
+    if (!model.ready) {
+      const dlBtn = document.createElement('button');
+      dlBtn.type = 'button';
+      dlBtn.className = 'bt primary local-nmt-download-btn';
+      dlBtn.disabled = busy;
+      dlBtn.textContent = info.busyModel === model.id ? 'در حال دانلود…' : 'دانلود و نصب خودکار';
+      dlBtn.addEventListener('click', () => { prepareLocalNmtModel(model.id).catch(() => {}); });
+      actions.appendChild(dlBtn);
+    } else {
+      const pickBtn = document.createElement('button');
+      pickBtn.type = 'button';
+      pickBtn.className = `bt ${model.selected ? 'primary' : ''} local-nmt-select-btn`.trim();
+      pickBtn.disabled = busy || model.selected;
+      pickBtn.textContent = model.selected ? '✓ مدل آفلاین فعال' : 'انتخاب این مدل';
+      pickBtn.addEventListener('click', () => {
+        if ($('localNmtModelSelect')) $('localNmtModelSelect').value = model.id;
+        renderLocalNmtPanel();
+      });
+      actions.appendChild(pickBtn);
+    }
+
+    if (model.filesPresent || model.diskBytes > 0) {
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'bt danger local-nmt-delete-btn';
+      delBtn.disabled = busy;
+      delBtn.textContent = 'حذف مدل از دیسک';
+      delBtn.addEventListener('click', () => { deleteLocalNmtModel(model.id, model.shortLabel || model.label).catch(() => {}); });
+      actions.appendChild(delBtn);
+    }
+
+    card.append(head, desc, meta, actions);
+    cardsEl.appendChild(card);
+  });
+}
+
+async function refreshLocalNmtStatusSilently() {
+  try {
+    const status = await api('/api/local-nmt/status');
+    if (state.ai && status && typeof status === 'object') {
+      state.ai.local_nmt_status = status;
+    }
+    renderLocalNmtPanel();
+    return status;
+  } catch {
+    return null;
+  }
+}
+
+async function prepareLocalNmtModel(modelId) {
+  if (localNmtBusyModel) return;
+  localNmtBusyModel = modelId;
+  if ($('localNmtModelSelect')) $('localNmtModelSelect').value = modelId;
+  $('aiStatus').textContent = 'آماده‌سازی و دانلود مدل آفلاین آغاز شد…';
+  $('copyAiError').classList.add('hidden');
+  updateLocalNmtProgressUi(true, 'در حال بررسی پیش‌نیازها و اتصال…', 0.02);
+  renderLocalNmtPanel();
+
+  const controller = new AbortController();
+  localNmtAbortController = controller;
+  localNmtPollTimer = setInterval(() => {
+    refreshLocalNmtStatusSilently().then((st) => {
+      if (st && st.busyModel) {
+        updateLocalNmtProgressUi(true, st.busyStage || 'در حال دانلود مدل آفلاین…', st.busyProgress || 0.05);
+      }
+    }).catch(() => {});
+    pollActivity().catch(() => {});
+  }, 400);
+
+  try {
+    const res = await api('/api/local-nmt/prepare', {
+      ...jsonOptions('POST', { model: modelId }),
+      signal: controller.signal,
+    });
+    if (state.ai && res?.status) state.ai.local_nmt_status = res.status;
+    updateLocalNmtProgressUi(true, 'مدل آفلاین آماده شد ✓', 1);
+    $('aiStatus').textContent = 'مدل مترجم آفلاین با موفقیت دانلود و آماده شد؛ از این پس ۱۰۰٪ بدون اینترنت کار می‌کند.';
+    toast('مدل مترجم آفلاین آمادهٔ استفاده است');
+  } catch (error) {
+    const cancelled = error?.name === 'AbortError' || String(error?.message || '').includes('لغو');
+    $('aiStatus').textContent = cancelled
+      ? 'دانلود مترجم آفلاین به درخواست شما لغو شد.'
+      : (error.message || String(error));
+    if (!cancelled) {
+      $('copyAiError').classList.remove('hidden');
+      toast(error.message || 'دانلود مدل آفلاین ناموفق بود', true);
+    }
+  } finally {
+    if (localNmtPollTimer) { clearInterval(localNmtPollTimer); localNmtPollTimer = null; }
+    if (localNmtAbortController === controller) localNmtAbortController = null;
+    localNmtBusyModel = null;
+    updateLocalNmtProgressUi(false);
+    await refreshLocalNmtStatusSilently();
+    pollActivity().catch(() => {});
+  }
+}
+
+async function cancelLocalNmtPrepare() {
+  try { await api('/api/local-nmt/cancel', jsonOptions('POST', {})); } catch { /* ignore */ }
+  if (localNmtAbortController) localNmtAbortController.abort();
+}
+
+async function deleteLocalNmtModel(modelId, label) {
+  const ok = await appConfirm(`آیا مطمئن هستید که می‌خواهید فایل‌های مدل آفلاین «${label}» به‌طور کامل از روی دیسک پاک شوند؟`, {
+    title: 'حذف مدل مترجم آفلاین از دیسک',
+    confirmText: 'بله، حذف شود',
+    cancelText: 'انصراف',
+    variant: 'danger',
+    destructive: true,
+  });
+  if (!ok) return;
+  $('aiStatus').textContent = 'در حال آزادسازی از رم و حذف فایل‌های مدل از دیسک…';
+  try {
+    const res = await api('/api/local-nmt/delete', jsonOptions('POST', { model: modelId }));
+    if (state.ai && res?.status) state.ai.local_nmt_status = res.status;
+    renderLocalNmtPanel();
+    const freedText = res?.freedBytes ? ` (${formatStorageBytesFa(res.freedBytes)} آزاد شد)` : '';
+    $('aiStatus').textContent = `مدل «${label}» از دیسک حذف شد${freedText}.`;
+    toast(`مدل آفلاین حذف شد${freedText}`);
+  } catch (error) {
+    $('aiStatus').textContent = error.message || String(error);
+    $('copyAiError').classList.remove('hidden');
+    toast(error.message || 'حذف مدل ناموفق بود', true);
+  }
+}
+
+async function unloadLocalNmtRam() {
+  try {
+    const res = await api('/api/local-nmt/unload', jsonOptions('POST', {}));
+    if (state.ai && res?.status) state.ai.local_nmt_status = res.status;
+    renderLocalNmtPanel();
+    $('aiStatus').textContent = 'مدل مترجم آفلاین از حافظهٔ رم آزاد شد.';
+    toast('حافظهٔ رم مترجم آفلاین آزاد شد');
+  } catch (error) {
+    toast(error.message || 'آزادسازی رم ناموفق بود', true);
+  }
+}
+
+async function testLocalNmtSample() {
+  const modelId = $('localNmtModelSelect')?.value || state.ai?.local_nmt?.model || 'nllb-600m';
+  const sampleText = ($('localNmtTestSample')?.value || '').trim();
+  const targetLang = normalizeTargetLanguage($('aiTargetLanguage')?.value || activeTargetLanguage());
+  const sourceLang = $('ocrLanguage')?.value || 'eng';
+  const beamSize = Math.max(1, Math.min(4, Number($('localNmtBeamSize')?.value) || 2));
+  const keepLoaded = Boolean($('localNmtKeepLoaded')?.checked);
+  const btn = $('localNmtTestBtn');
+  if (btn) btn.disabled = true;
+  $('copyAiError').classList.add('hidden');
+  $('aiStatus').textContent = 'در حال ترجمهٔ آفلاین جملهٔ نمونه روی پردازندهٔ سیستم…';
+  setProgress('aiProgress', null, true);
+  try {
+    const res = await api('/api/local-nmt/test', jsonOptions('POST', {
+      model: modelId,
+      source_language: sourceLang,
+      target_language: targetLang,
+      sample_text: sampleText,
+      beam_size: beamSize,
+      keep_loaded: keepLoaded,
+    }));
+    setProgress('aiProgress', 1, false);
+    $('aiStatus').textContent = res.message || `نمونهٔ ترجمه: ${res.translatedText}`;
+    await refreshLocalNmtStatusSilently();
+  } catch (error) {
+    setProgress('aiProgress', 0, false);
+    $('aiStatus').textContent = error.message || String(error);
+    $('copyAiError').classList.remove('hidden');
+    toast(error.message || 'تست ترجمهٔ آفلاین ناموفق بود', true);
+  } finally {
+    if (btn) btn.disabled = Boolean(localNmtBusyModel);
+  }
+}
+
 function showAiProvider(provider, capture = true) {
   if (capture && provider !== aiEditorProvider) captureAiProvider();
-  aiEditorProvider = AI_PROVIDER_IDS.includes(provider) ? provider : 'free';
+  aiEditorProvider = (provider === 'local' || AI_PROVIDER_IDS.includes(provider)) ? provider : 'free';
   $('aiProvider').value = aiEditorProvider;
-  $('aiFields').classList.toggle('hidden', aiEditorProvider === 'free');
+  $('aiFields').classList.toggle('hidden', isDirectMtProvider(aiEditorProvider));
   $('freeFields').classList.toggle('hidden', aiEditorProvider !== 'free');
+  $('localNmtFields')?.classList.toggle('hidden', aiEditorProvider !== 'local');
   if (aiEditorProvider === 'free') { syncAiExecUi(); $('aiStatus').textContent = ''; $('copyAiError').classList.add('hidden'); return; }
+  if (aiEditorProvider === 'local') {
+    syncAiExecUi();
+    $('aiStatus').textContent = '';
+    $('copyAiError').classList.add('hidden');
+    renderLocalNmtPanel();
+    refreshLocalNmtStatusSilently().catch(() => {});
+    return;
+  }
   const info = aiInfo();
   const draft = aiEditorDrafts.get(aiEditorProvider);
   const sourceProfiles = draft?.profiles || info.profiles || [];
@@ -4094,10 +4411,35 @@ function freeSettingsPayload() {
   }
   return result;
 }
+function localNmtSettingsPayload() {
+  const model = $('localNmtModelSelect')?.value || state.ai?.local_nmt?.model || 'nllb-600m';
+  const rawBeam = ($('localNmtBeamSize')?.value ?? '2').trim();
+  const rawLimit = ($('localNmtSourceLimit')?.value ?? '4000').trim();
+  const beam = Number(rawBeam);
+  const limit = Number(rawLimit);
+  if (!/^\d+$/.test(rawBeam) || !Number.isSafeInteger(beam) || beam < 1 || beam > 4) {
+    throw new Error('دقت جست‌وجوی مترجم آفلاین (Beam) باید عدد صحیح بین ۱ تا ۴ باشد.');
+  }
+  if (!/^\d+$/.test(rawLimit) || !Number.isSafeInteger(limit) || limit < 200 || limit > 20000) {
+    throw new Error('سقف نویسهٔ مترجم آفلاین باید عدد صحیح بین ۲۰۰ تا ۲۰۰۰۰ باشد.');
+  }
+  return {
+    model,
+    beam_size: beam,
+    source_limit: limit,
+    keep_loaded: Boolean($('localNmtKeepLoaded')?.checked),
+  };
+}
 async function loadAiSettings(prefetched = null) {
   state.ai = (prefetched && typeof prefetched === 'object') ? prefetched : await api('/api/ai-settings');
   aiEditorDrafts.clear();
   renderFreeServices();
+  const localCfg = state.ai.local_nmt || {};
+  if ($('localNmtModelSelect')) $('localNmtModelSelect').value = localCfg.model || 'nllb-600m';
+  if ($('localNmtBeamSize')) $('localNmtBeamSize').value = localCfg.beam_size ?? 2;
+  if ($('localNmtSourceLimit')) $('localNmtSourceLimit').value = localCfg.source_limit ?? 4000;
+  if ($('localNmtKeepLoaded')) $('localNmtKeepLoaded').checked = Boolean(localCfg.keep_loaded);
+  renderLocalNmtPanel();
   $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false;
   $('aiContextPercent').value = state.ai.context_percent ?? 15;
   $('aiSkillPercent').value = state.ai.skill_percent ?? 15;
@@ -4139,6 +4481,7 @@ function aiSettingsPayload() {
     provider: aiEditorProvider,
     target_language: normalizeTargetLanguage($('aiTargetLanguage')?.value || state.ai?.target_language || 'fa'),
     free_services: freeSettingsPayload(),
+    local_nmt: localNmtSettingsPayload(),
     reuse_repeated: $('aiReuseRepeated').checked,
     context_percent: contextPercent,
     skill_percent: skillPercent,
@@ -5714,7 +6057,7 @@ async function retranslateBlock(block, targetOverride = null) {
     const projectId = state.project.id;
     const request = { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, target_language: targetLanguage, provider, ...(profileId ? { profile_id: profileId } : {}) };
     const switchTarget = (nextVal) => retranslateBlock(block, nextVal);
-    if (provider === 'free') {
+    if (isDirectMtProvider(provider)) {
       const refresh = () => api('/api/translate-text/context-preview', jsonOptions('POST', { ...request, skill: '', summary: '' }));
       const preview = await refresh();
       showTranslationRequestPreview(preview, async accepted => {
@@ -6329,7 +6672,7 @@ function bindEvents() {
   $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(null));
   $('editorOpenFullHelpBtn')?.addEventListener('click', () => openHelpDialog('visual-editor'));
   $('helpDialogClose')?.addEventListener('click', (event) => { event.preventDefault(); closeDialog('helpDialog'); });
-  $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiBaseUrl')?.addEventListener('input', syncAiExecUi); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
+  $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiBaseUrl')?.addEventListener('input', syncAiExecUi); $('localNmtModelSelect')?.addEventListener('change', () => renderLocalNmtPanel()); $('localNmtCancelBtn')?.addEventListener('click', () => cancelLocalNmtPrepare().catch(() => {})); $('localNmtUnloadBtn')?.addEventListener('click', () => unloadLocalNmtRam().catch(() => {})); $('localNmtTestBtn')?.addEventListener('click', () => testLocalNmtSample().catch(() => {})); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'visual').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'visual').catch(() => {})); $('docxChoiceFlowingTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'flowing').catch(() => {})); $('docxChoiceFlowingOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'flowing').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {})); $('exportPptxBtn')?.addEventListener('click', () => openPptxExportPrompt()); $('pptxChoiceTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'visual').catch(() => {})); $('pptxChoiceOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'visual').catch(() => {})); $('pptxChoiceFlowingTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'flowing').catch(() => {})); $('pptxChoiceFlowingOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'flowing').catch(() => {})); $('pptxExportCancel')?.addEventListener('click', () => requestCancelExport('pptxExportDialog').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);

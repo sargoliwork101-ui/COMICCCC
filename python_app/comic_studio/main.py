@@ -49,8 +49,10 @@ from .paths import (
     project_root,
 )
 from . import context_run, pending_results
+from .local_nmt import DEFAULT_LOCAL_NMT_MODEL, LOCAL_NMT_MODELS, LocalNmtError
 from .schemas import (
-    AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest, OcrRequest, ProjectCreate,
+    AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest,
+    LocalNmtModelActionRequest, LocalNmtTestRequest, OcrRequest, ProjectCreate,
     SessionRequest, StateUpdate, StorageFolderPickRequest, StorageSettingsUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .sessions import SessionManager
@@ -612,6 +614,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engines/unload")
     async def unload_engines_memory() -> dict[str, Any]:
+        await run_in_threadpool(translations.local_nmt.unload)
         summary = await run_in_threadpool(registry.unload_all)
         freed = float(summary.get("freedRamMb") or 0.0)
         unloaded_count = len(summary.get("unloadedEngines") or [])
@@ -1014,7 +1017,7 @@ def create_app() -> FastAPI:
     def translation_settings(provider: str, skill: str | None, target_language: str = "fa") -> dict[str, Any]:
         return {
             **translations.public_settings(),
-            "_translation_skill": normalize_ai_skill(skill) if provider != "free" else "",
+            "_translation_skill": normalize_ai_skill(skill) if provider not in {"free", "local"} else "",
             "_target_language": normalize_target_language(target_language),
         }
 
@@ -1026,23 +1029,43 @@ def create_app() -> FastAPI:
             return fn(*args, target_language=tl)
         return fn(*args)
 
+    def _direct_mt_limit(provider: str, settings: dict[str, Any], selected_profile_id: str | None = None) -> int:
+        if provider == 'free':
+            return min(s['source_limit'] for s in settings['free_services'].values())
+        if provider == 'local':
+            return int(settings.get('local_nmt', {}).get('source_limit', 4000))
+        return effective_ai_limit(provider, settings, selected_profile_id)
+
+    def _local_nmt_missing_message(settings: dict[str, Any]) -> str:
+        model_id = str(settings.get('local_nmt', {}).get('model') or DEFAULT_LOCAL_NMT_MODEL)
+        model_label = LOCAL_NMT_MODELS.get(model_id, LOCAL_NMT_MODELS[DEFAULT_LOCAL_NMT_MODEL])['short_label']
+        if not translations.local_nmt.is_ready(model_id):
+            return (
+                f"مدل آفلاین «{model_label}» هنوز روی سیستم آماده نشده است. "
+                "از دکمهٔ «مدیریت ترجمه‌ها…» در همین نوار بالا یک‌بار روی «دانلود و نصب خودکار» کلیک کنید تا پس از آن همیشه بدون اینترنت کار کند."
+            )
+        return ''
+
     def context_preparation(state: dict[str, Any], values: ContextPreviewRequest) -> tuple[dict[str, Any], Any, list[dict[str, Any]]]:
-        if values.provider not in {'free', 'openai', 'gemini', 'openrouter', 'avalai'}:
+        if values.provider not in {'free', 'local', 'openai', 'gemini', 'openrouter', 'avalai'}:
             raise HTTPException(400, "سرویس ترجمه معتبر نیست.")
         if values.provider == 'free' and (values.skill or values.summary):
             raise TranslationError('مترجم رایگان از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
+        if values.provider == 'local' and (values.skill or values.summary):
+            raise TranslationError('مترجم آفلاین داخلی از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
         target_lang = normalize_target_language(values.target_language)
         selected_ids = set(image_ids(state, values.image_ids))
         ids = [item['id'] for item in sorted(state['images'], key=lambda item: item.get('order', 0)) if item['id'] in selected_ids]
         if not ids:
             raise HTTPException(400, "حداقل یک تصویر را انتخاب کنید.")
         settings = translations.public_settings()
-        selected_profile_id = (values.profile_id or '').strip() if values.provider != 'free' else ''
+        selected_profile_id = (values.profile_id or '').strip() if values.provider not in {'free', 'local'} else ''
         if selected_profile_id:
             configured_profiles = settings.get('providers', {}).get(values.provider, {}).get('profiles', [])
             if not any(str(p.get('id') or '') == selected_profile_id and p.get('hasApiKey') for p in configured_profiles):
                 raise HTTPException(400, "کلید API انتخاب‌شده در تنظیمات این سرویس ثبت یا فعال نیست.")
         policy = provider_policy(settings, values.provider, selected_profile_id or None)
+        is_direct_mt = values.provider in {'free', 'local'}
         if values.resume:
             run = state.get(RUN_KEY)
             if not isinstance(run, dict) or not any(j.get('remaining') for j in run.get('jobs', [])):
@@ -1057,8 +1080,8 @@ def create_app() -> FastAPI:
             run = copy.deepcopy(run)
             run['baseResumeRunHash'] = digest(state.get(RUN_KEY))
             run['context'] = values.summary; run['skillHash'] = digest(values.skill); run['policyHash'] = digest(policy)
-            run['limit'] = min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None)
-            run['contextPercent'] = 0 if values.provider == 'free' else settings['context_percent']; run['skillPercent'] = 0 if values.provider == 'free' else settings['skill_percent']
+            run['limit'] = _direct_mt_limit(values.provider, settings, selected_profile_id or None)
+            run['contextPercent'] = 0 if is_direct_mt else settings['context_percent']; run['skillPercent'] = 0 if is_direct_mt else settings['skill_percent']
         else:
             previous = state.get(RUN_KEY)
             if isinstance(previous, dict) and any(job.get('remaining') for job in previous.get('jobs', []) if isinstance(job, dict)) and not values.restart_existing:
@@ -1068,13 +1091,17 @@ def create_app() -> FastAPI:
             if legacy and not values.restart_legacy:
                 raise HTTPException(409, 'پیشرفت ناتمام نسخهٔ قبلی وجود دارد. برای جلوگیری از ارسال تکراری، ادامه را با نسخهٔ قبلی انجام دهید یا صریحاً شروع دوباره را تأیید کنید.')
             run = create_run(state, ids, values.provider, values.source_language, values.skill, values.summary,
-                             min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None),
-                             0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
+                             _direct_mt_limit(values.provider, settings, selected_profile_id or None),
+                             0 if is_direct_mt else settings['context_percent'], 0 if is_direct_mt else settings['skill_percent'],
                              values.reuse_repeated, policy, profile_id=selected_profile_id or None, target_language=target_lang)
             run['legacyRestart'] = values.restart_legacy
             run['legacyHash'] = digest([{'imageId': item['id'], 'page': item.get(AI_PAGE_PROGRESS_KEY),
                                          'parts': [block.get(AI_PARTS_KEY) for block in item.get('blocks', [])]}
                                         for item in selected])
+        if values.provider == 'local' and not run.get('previewError'):
+            missing_msg = _local_nmt_missing_message(settings)
+            if missing_msg:
+                run['previewError'] = missing_msg
         # A summary changed by another request after preview must not be
         # silently replaced by the stale summary accepted in this tab.
         run['baseSummaryHash'] = digest(state.get(SUMMARY_KEY, ''))
@@ -1111,6 +1138,22 @@ def create_app() -> FastAPI:
                     'fallback_url':'https://api.mymemory.translated.net/get', 'model':'',
                     'note':f"زبان مقصد: {target_label}. متن صفحه‌ها جداگانه و ترتیبی ارسال و ذخیره می‌شود؛ تأیید یک‌بار برای کل نوبت است. سقف مؤثر {run['limit']} نویسه و برای MyMemory حداکثر ۵۰۰ بایت UTF-8 است. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری. خلاصه و اسکیل AI در حالت رایگان استفاده نمی‌شوند. تنظیمات: {limits}.",
                     'signature':digest(run), 'totalLimit':run['limit'], 'resume':bool(run.get('id'))}
+        if provider == 'local':
+            model_id = str(policy.get('model') or DEFAULT_LOCAL_NMT_MODEL)
+            model_info = LOCAL_NMT_MODELS.get(model_id, LOCAL_NMT_MODELS[DEFAULT_LOCAL_NMT_MODEL])
+            return {'provider': 'local', 'profileId': '', 'targetLanguage': target_lang, 'targetLanguageLabel': target_label,
+                    'rollingMode': True, 'contextMode': False, 'skill': '', 'summary': '', 'defaultSkill': '',
+                    'blockCount': len(run['jobs']), 'requestCount': 1 if chosen else 0, 'systemPrompt': '',
+                    'requests': [{'index': 1, 'text': text, 'characters': request.character_count(text), 'imageName': first.get('imageName', '')}] if chosen else [],
+                    'providerLabel': f"مترجم آفلاین داخلی — {model_info['short_label']} (بدون اینترنت)",
+                    'base_url': '', 'fallback_url': '', 'model': model_id,
+                    'note': (
+                        f"زبان مقصد: {target_label}. ترجمه ۱۰۰٪ آفلاین و رایگان روی سیستم خودتان با مدل «{model_info['label']}» "
+                        f"(دقت جست‌وجو Beam={policy.get('beam_size', 2)}، سقف هر گام {run['limit']} نویسه) انجام می‌شود و هیچ متنی به اینترنت فرستاده نمی‌شود. "
+                        f"{sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری."
+                    ),
+                    'previewError': run.get('previewError', ''),
+                    'signature': digest(run), 'totalLimit': run['limit'], 'resume': bool(run.get('id'))}
         active = [profile for profile in policy['profiles'] if profile['hasApiKey']]
         mode_label = 'حالت JSON سرویس' if context_uses_json(provider, policy['base_url'], policy.get('response_mode', 'auto')) else 'متن معمولی'
         policies = '؛ '.join(f"API {index}: زمان انتظار {p['timeout_seconds']}، تکرار {p['retry_count']}، فاصله {p['retry_wait_seconds']} ثانیه، سقف {p['source_limit']}" for index, p in enumerate(active, 1))
@@ -1154,7 +1197,7 @@ def create_app() -> FastAPI:
             nonlocal state, expected
             if latest.get('updatedAt', '') == expected:
                 return
-            policy_now = provider_policy(translations.public_settings(), values.provider, (values.profile_id or '').strip() or None if values.provider != 'free' else None)
+            policy_now = provider_policy(translations.public_settings(), values.provider, (values.profile_id or '').strip() or None if values.provider not in {'free', 'local'} else None)
             verify_run(latest, run, values.skill, policy_now)
             if digest(latest.get(SUMMARY_KEY, '')) != run.get('baseSummaryHash'):
                 raise ProjectChangedError('خلاصهٔ پروژه پس از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی کنید.')
@@ -1179,7 +1222,7 @@ def create_app() -> FastAPI:
                         item.pop(AI_PAGE_PROGRESS_KEY, None)
                         for block in item.get('blocks', []): block.pop(AI_PARTS_KEY, None)
         state[RUN_KEY] = run
-        if run['provider'] != 'free' and run['context']: state[SUMMARY_KEY] = run['context']
+        if run['provider'] not in {'free', 'local'} and run['context']: state[SUMMARY_KEY] = run['context']
         try:
             store.save_if_unchanged(state, expected)
         except ProjectChangedError:
@@ -1192,7 +1235,7 @@ def create_app() -> FastAPI:
                         item.pop(AI_PAGE_PROGRESS_KEY, None)
                         for block in item.get('blocks', []): block.pop(AI_PARTS_KEY, None)
             state[RUN_KEY] = run
-            if run['provider'] != 'free' and run['context']: state[SUMMARY_KEY] = run['context']
+            if run['provider'] not in {'free', 'local'} and run['context']: state[SUMMARY_KEY] = run['context']
             store.save_if_unchanged(state, expected)
         return {'project': state, 'runId': run['id'], 'completed': run['completed']}
 
@@ -1208,7 +1251,7 @@ def create_app() -> FastAPI:
                 if pending['kind'] == 'translation':
                     raise PendingResultConflict(pending['id'], 'translation')
             settings = translations.public_settings()
-            if run['provider'] != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
+            if run['provider'] not in {'free', 'local'} and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
                 raise ProjectChangedError('درصدهای خلاصه یا اسکیل تغییر کرده‌اند؛ نوبت متوقف شد.')
             policy = provider_policy(settings, run['provider'], run.get('profileId') or None)
             verify_run(state, run, values.skill, policy)
@@ -1240,7 +1283,12 @@ def create_app() -> FastAPI:
             source_texts = [entry['text'] for entry in chosen]
             text = combine_translation_texts(source_texts)
             label = f"درخواست {run['completed'] + 1} برای «{run['jobs'][chosen[0]['job']]['imageName']}»؛ {request.character_count(text)} از {run['limit']} نویسه"
-            label += f"؛ {len(text.encode('utf-8'))} از ۵۰۰ بایت" if run['provider'] == 'free' else f"؛ خلاصه {len(run['context'])} از {request.context_limit} نویسه"
+            if run['provider'] == 'free':
+                label += f"؛ {len(text.encode('utf-8'))} از ۵۰۰ بایت"
+            elif run['provider'] == 'local':
+                label += "؛ اجرای ۱۰۰٪ آفلاین روی سیستم شما"
+            else:
+                label += f"؛ خلاصه {len(run['context'])} از {request.context_limit} نویسه"
             cur_cp = context_progress(run)
             step_start_prog = cur_cp if cur_cp > 0 else None
             if values.recovery_token is not None:
@@ -1252,7 +1300,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, 'نشانه و متن پاسخ اصلاح‌شده باید همراه هم ارسال شوند.')
             if values.recovery_token is not None:
                 entry = recovery_get(values.recovery_token, 'project')
-                if run['provider'] == 'free' or (entry['project_id'], entry['run_id'], entry['completed'], entry['updated_at']) != (project_id, values.run_id, values.completed, expected):
+                if run['provider'] in {'free', 'local'} or (entry['project_id'], entry['run_id'], entry['completed'], entry['updated_at']) != (project_id, values.run_id, values.completed, expected):
                     raise ProjectChangedError('پروژه یا نوبت پس از دریافت پاسخ تغییر کرده است؛ اصلاح اعمال نشد.')
                 from .context_budget import parse_context_response
                 try:
@@ -1262,6 +1310,8 @@ def create_app() -> FastAPI:
                     error.recovery_token = values.recovery_token
                     raise error from exc
             elif await http_request.is_disconnected():
+                if run['provider'] == 'local' and not settings.get('local_nmt', {}).get('keep_loaded', False):
+                    await run_in_threadpool(translations.local_nmt.unload)
                 activity.add("ادامهٔ ترجمه با بستن پنجره متوقف شد.", "warning")
                 return {'project': state, 'done': False, 'affectedImageIds': [], 'completed': run['completed']}
             elif run['provider'] == 'free':
@@ -1271,6 +1321,26 @@ def create_app() -> FastAPI:
                     target_language=run.get('targetLanguage', 'fa'),
                     pulse_label='ترجمهٔ رایگان',
                 )
+                summary = ''
+            elif run['provider'] == 'local':
+                try:
+                    translated = await run_reported(
+                        functools.partial(
+                            translations.translate_local_batch,
+                            request,
+                            text,
+                            source_texts,
+                            run['language'],
+                            policy,
+                            target_language=run.get('targetLanguage', 'fa'),
+                            keep_loaded_override=True,
+                        ),
+                        pulse_label='ترجمهٔ آفلاین داخلی',
+                    )
+                except Exception:
+                    if not settings.get('local_nmt', {}).get('keep_loaded', False):
+                        await run_in_threadpool(translations.local_nmt.unload)
+                    raise
                 summary = ''
             else:
                 try:
@@ -1313,29 +1383,36 @@ def create_app() -> FastAPI:
                 else:
                     state = merged['project']; run = state[RUN_KEY]; affected = merged['affectedImageIds']; done = merged['done']
             if values.recovery_token: recoveries.pop(values.recovery_token, None)
-            activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] == 'free' else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success', context_progress(run))
+            activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] in {'free', 'local'} else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success', context_progress(run))
             sent_payload = {'system': request.system, 'user': request.user_message(text), 'characters': request.character_count(text)}
-            if done or affected:
+            if done and run['provider'] == 'local' and not settings.get('local_nmt', {}).get('keep_loaded', False):
+                await run_in_threadpool(translations.local_nmt.unload)
+            elif done or affected:
                 await run_in_threadpool(trim_process_memory)
             return {'project': state, 'done': done, 'affectedImageIds': affected, 'completed': run['completed'],
                     'sent': sent_payload}
 
     def prepare_context_text(values: ContextTextRequest) -> tuple[dict[str, Any], dict[str, Any], Any, list[dict[str, Any]]]:
-        if values.provider not in {'free', 'openai', 'gemini', 'openrouter', 'avalai'}:
+        if values.provider not in {'free', 'local', 'openai', 'gemini', 'openrouter', 'avalai'}:
             raise HTTPException(400, 'سرویس ترجمه معتبر نیست.')
         state = {'images': [{'id': 'single', 'name': 'بازترجمهٔ یک کادر', 'order': 0,
                             'blocks': [{'id': 1, 'text': values.text, 'enabled': True, 'sourceLines': values.source_lines}]}]}
         settings = translations.public_settings()
-        selected_profile_id = (values.profile_id or '').strip() if values.provider != 'free' else ''
+        is_direct_mt = values.provider in {'free', 'local'}
+        selected_profile_id = (values.profile_id or '').strip() if not is_direct_mt else ''
         if selected_profile_id:
             configured_profiles = settings.get('providers', {}).get(values.provider, {}).get('profiles', [])
             if not any(str(p.get('id') or '') == selected_profile_id and p.get('hasApiKey') for p in configured_profiles):
                 raise HTTPException(400, 'کلید API انتخاب‌شده در تنظیمات این سرویس ثبت یا فعال نیست.')
         run = create_run(state, ['single'], values.provider, values.source_language, values.skill, values.summary,
-                         min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None),
-                         0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
+                         _direct_mt_limit(values.provider, settings, selected_profile_id or None),
+                         0 if is_direct_mt else settings['context_percent'], 0 if is_direct_mt else settings['skill_percent'],
                          False, provider_policy(settings, values.provider, selected_profile_id or None),
                          profile_id=selected_profile_id or None, target_language=values.target_language)
+        if values.provider == 'local' and not run.get('previewError'):
+            missing_msg = _local_nmt_missing_message(settings)
+            if missing_msg:
+                run['previewError'] = missing_msg
         if values.provider != 'free':
             try:
                 if run.get('previewError'):
@@ -1355,7 +1432,8 @@ def create_app() -> FastAPI:
         result['skill'] = values.skill; result['singleContext'] = True
         from .translation import DEFAULT_AI_SKILL
         result['defaultSkill'] = DEFAULT_AI_SKILL
-        if values.provider != 'free': result['note'] += ' خلاصهٔ بازترجمهٔ تکی در حافظهٔ اصلی داستان ذخیره نمی‌شود.'
+        if values.provider not in {'free', 'local'}: result['note'] += ' خلاصهٔ بازترجمهٔ تکی در حافظهٔ اصلی داستان ذخیره نمی‌شود.'
+        elif values.provider == 'local': result['note'] += ' ترجمهٔ این تک‌جمله / تک‌کادر مستقیماً روی سیستم شما (آفلاین) انجام می‌شود.'
         else: result['note'] += ' بازترجمهٔ تکی پس از پایان همهٔ بخش‌ها ذخیره می‌شود؛ تکرار پس از خطا از ابتداست.'
         return result
 
@@ -1382,7 +1460,7 @@ def create_app() -> FastAPI:
                 settings = translations.public_settings()
                 policy = provider_policy(settings, values.provider, run.get('profileId') or None)
                 verify_run(state, run, values.skill, policy)
-                if values.provider != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
+                if values.provider not in {'free', 'local'} and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
                     raise ProjectChangedError('درصدها پس از تأیید تغییر کرده‌اند.')
                 sources = [item['text'] for item in chosen]
                 text = combine_translation_texts(sources)
@@ -1402,6 +1480,20 @@ def create_app() -> FastAPI:
                             request, text, sources, values.source_language, policy,
                             target_language=values.target_language,
                             pulse_label='بازترجمهٔ رایگان',
+                        )
+                        summary = ''
+                    elif values.provider == 'local':
+                        translated = await run_reported(
+                            functools.partial(
+                                translations.translate_local_batch,
+                                request,
+                                text,
+                                sources,
+                                values.source_language,
+                                policy,
+                                target_language=values.target_language,
+                            ),
+                            pulse_label='بازترجمهٔ آفلاین داخلی',
                         )
                         summary = ''
                     else:
@@ -1426,10 +1518,10 @@ def create_app() -> FastAPI:
                     if values.recovery_token not in recoveries: recovery_locks.pop(values.recovery_token, None)
         return await execute()
 
-    def legacy_free_context(values: TranslateRequest) -> ContextPreviewRequest:
+    def legacy_direct_context(values: TranslateRequest) -> ContextPreviewRequest:
         return ContextPreviewRequest(
             image_ids=values.image_ids,
-            provider='free',
+            provider=values.provider,
             source_language=values.source_language,
             target_language=values.target_language,
             reuse_repeated=values.reuse_repeated if values.reuse_repeated is not None else translations.public_settings()['reuse_repeated'],
@@ -1437,8 +1529,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/translation-preview")
     def translation_preview(project_id: str, values: TranslateRequest) -> dict[str, Any]:
-        if values.provider == 'free':
-            return context_preview(project_id, legacy_free_context(values))
+        if values.provider in {'free', 'local'}:
+            return context_preview(project_id, legacy_direct_context(values))
         state = project(project_id)
         ids = image_ids(state, values.image_ids)
         settings = translation_settings(values.provider, values.skill, values.target_language)
@@ -1450,9 +1542,11 @@ def create_app() -> FastAPI:
     async def run_translation(project_id: str, values: TranslateRequest, http_request: Request) -> dict[str, Any]:
         if await http_request.is_disconnected():
             raise HTTPException(499, "عملیات ترجمه توسط کاربر لغو شد.")
-        if values.provider == 'free':
-            options = legacy_free_context(values)
+        if values.provider in {'free', 'local'}:
+            options = legacy_direct_context(values)
             run, request, chosen = context_preparation(project(project_id), options)
+            if run.get('previewError'):
+                raise HTTPException(400, run['previewError'])
             if not chosen:
                 return project(project_id)
             signature = digest(run)
@@ -1615,13 +1709,13 @@ def create_app() -> FastAPI:
 
     @app.post("/api/translate-text/preview")
     def translate_text_preview(values: TextTranslateRequest) -> dict[str, Any]:
-        if values.provider == 'free':
+        if values.provider in {'free', 'local'}:
             return context_text_preview(ContextTextRequest(
                 text=values.text,
                 source_lines=values.source_lines,
                 source_language=values.source_language,
                 target_language=values.target_language,
-                provider='free',
+                provider=values.provider,
             ))
         settings = translation_settings(values.provider, values.skill, values.target_language)
         plan = build_single_plan(values.text, values.provider, settings, values.source_lines)
@@ -1629,15 +1723,17 @@ def create_app() -> FastAPI:
 
     @app.post("/api/translate-text")
     async def translate_text(values: TextTranslateRequest) -> dict[str, str]:
-        if values.provider == 'free':
+        if values.provider in {'free', 'local'}:
             request = ContextTextRequest(
                 text=values.text,
                 source_lines=values.source_lines,
                 source_language=values.source_language,
                 target_language=values.target_language,
-                provider='free',
+                provider=values.provider,
             )
             preview = context_text_preview(request)
+            if preview.get('previewError'):
+                raise HTTPException(400, preview['previewError'])
             if values.confirmation and values.confirmation != preview['signature']:
                 raise HTTPException(409, 'متن یا تنظیمات پس از پیش‌نمایش تغییر کرده است.')
             result = await context_text_translate(request.model_copy(update={'confirmation': preview['signature']}))
@@ -1690,6 +1786,89 @@ def create_app() -> FastAPI:
         overrides = values.model_dump(exclude_none=True) if values else {}
         return await run_in_threadpool(translations.test_connection, overrides)
 
+    @app.get("/api/local-nmt/status")
+    def local_nmt_status() -> dict[str, Any]:
+        cfg = translations.public_settings().get("local_nmt", {})
+        return translations.local_nmt.status(cfg.get("model", DEFAULT_LOCAL_NMT_MODEL))
+
+    @app.post("/api/local-nmt/prepare")
+    async def prepare_local_nmt(request: Request, values: LocalNmtModelActionRequest | None = None) -> dict[str, Any]:
+        model_id = values.model if values else DEFAULT_LOCAL_NMT_MODEL
+        done_ev = asyncio.Event()
+
+        async def _watch_nmt_disconnect() -> None:
+            while not done_ev.is_set():
+                try:
+                    await asyncio.wait_for(done_ev.wait(), timeout=0.6)
+                    return
+                except asyncio.TimeoutError:
+                    try:
+                        if await request.is_disconnected():
+                            translations.local_nmt.cancel_prepare()
+                            return
+                    except Exception:
+                        return
+
+        watch_task = asyncio.create_task(_watch_nmt_disconnect())
+        try:
+            status_payload = await run_reported(
+                translations.local_nmt.prepare,
+                model_id,
+                pulse_label="دانلود و آماده‌سازی مترجم آفلاین",
+            )
+            return {"ok": True, "status": status_payload, "memory": registry.memory_status()}
+        except LocalNmtError as exc:
+            activity.add(f"آماده‌سازی مترجم آفلاین متوقف شد: {exc}", "warning" if "لغو" in str(exc) else "error")
+            raise HTTPException(400, str(exc)) from exc
+        finally:
+            done_ev.set()
+            watch_task.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await watch_task
+
+    @app.post("/api/local-nmt/cancel")
+    def cancel_local_nmt_prepare() -> dict[str, Any]:
+        result = translations.local_nmt.cancel_prepare()
+        activity.add("درخواست لغو دانلود مترجم آفلاین ثبت شد.", "warning")
+        return result
+
+    @app.post("/api/local-nmt/delete")
+    async def delete_local_nmt_model(values: LocalNmtModelActionRequest) -> dict[str, Any]:
+        try:
+            summary = await run_reported(
+                translations.local_nmt.delete_model,
+                values.model,
+                pulse_label="حذف مدل مترجم آفلاین",
+            )
+            return {**summary, "memory": registry.memory_status()}
+        except LocalNmtError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/local-nmt/unload")
+    async def unload_local_nmt() -> dict[str, Any]:
+        summary = await run_in_threadpool(translations.local_nmt.unload)
+        activity.add("مدل مترجم آفلاین از حافظهٔ رم آزاد شد.", "success")
+        return {**summary, "status": translations.local_nmt.status(), "memory": registry.memory_status()}
+
+    @app.post("/api/local-nmt/test")
+    async def test_local_nmt(values: LocalNmtTestRequest | None = None) -> dict[str, Any]:
+        req = values or LocalNmtTestRequest()
+        try:
+            return await run_reported(
+                functools.partial(
+                    translations.local_nmt.test_translation,
+                    model_id=req.model,
+                    source_language=req.source_language,
+                    target_language=req.target_language,
+                    sample_text=req.sample_text,
+                    beam_size=req.beam_size,
+                    keep_loaded=req.keep_loaded,
+                ),
+                pulse_label="تست ترجمهٔ آفلاین یک جمله",
+            )
+        except LocalNmtError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
     def _require_local_storage_admin(request: Request) -> None:
         peer_host = request.client.host if request.client else ""
         if not (_is_loopback_peer(peer_host) or peer_host == "testclient"):
@@ -1731,6 +1910,7 @@ def create_app() -> FastAPI:
                 )
 
             def _perform_switch() -> dict[str, Any]:
+                translations.local_nmt.unload()
                 registry.unload_all()
                 _stop_lingering_surya_server()
                 result = apply_storage_directory(

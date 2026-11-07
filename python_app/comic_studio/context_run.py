@@ -6,7 +6,8 @@ import json
 import re
 from typing import Any
 
-from .context_budget import ContextBudget, ContextRequest, FreeRequest, build_context_request
+from .context_budget import ContextBudget, ContextRequest, FreeRequest, LocalRequest, build_context_request
+from .local_nmt import normalize_local_nmt_settings
 from .ocr import LANGUAGES
 from .store import ProjectChangedError
 from .translation import (
@@ -29,6 +30,13 @@ def digest(value: Any) -> str:
 def provider_policy(settings: dict[str, Any], provider: str, profile_id: str | None = None) -> dict[str, Any]:
     if provider == 'free':
         return {'services': settings.get('free_services', {})}
+    if provider == 'local':
+        local_cfg = normalize_local_nmt_settings(settings.get('local_nmt'))
+        return {
+            'model': local_cfg['model'],
+            'beam_size': local_cfg['beam_size'],
+            'source_limit': local_cfg['source_limit'],
+        }
     config = settings.get('providers', {}).get(provider, {})
     mode = config.get('response_mode', 'auto')
     chosen_id = (profile_id or '').strip()
@@ -53,9 +61,11 @@ def source_layout(state: dict[str, Any], image_ids: list[str]) -> str:
                    for block in item.get('blocks', [])]} for item in items])
 
 
-def build_run_request(run: dict[str, Any], skill: str) -> ContextRequest | FreeRequest:
+def build_run_request(run: dict[str, Any], skill: str) -> ContextRequest | FreeRequest | LocalRequest:
     if run['provider'] == 'free':
         return FreeRequest(run['limit'])
+    if run['provider'] == 'local':
+        return LocalRequest(run['limit'])
     budget = ContextBudget(run['limit'], run['contextPercent'], run['skillPercent'])
     return build_context_request(
         budget,
@@ -179,6 +189,10 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
         if skill or context:
             raise TranslationError('مترجم رایگان از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
         maximum_request = FreeRequest(limit)
+    elif provider == 'local':
+        if skill or context:
+            raise TranslationError('مترجم آفلاین داخلی از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
+        maximum_request = LocalRequest(limit)
     else:
         budget = ContextBudget(limit, context_percent, skill_percent)
         build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, context, target_language=tl)
@@ -233,7 +247,7 @@ def create_run(state: dict[str, Any], image_ids: list[str], provider: str, langu
                 lines = matching_source_lines(lines, remaining)
             if preview_error:
                 break
-    chosen_profile = (profile_id or '').strip() if provider != 'free' else ''
+    chosen_profile = (profile_id or '').strip() if provider not in {'free', 'local'} else ''
     return {'provider': provider, **({'profileId': chosen_profile} if chosen_profile else {}),
             **({'targetLanguage': tl} if tl != 'fa' else {}),
             'language': language, 'skillHash': digest(skill), 'context': context, 'previewError': preview_error if provider != 'free' else '',
@@ -412,6 +426,6 @@ def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict
                 image['approved'] = False
     run['context'] = summary
     run['completed'] += 1
-    if run['provider'] != 'free':
+    if run['provider'] not in {'free', 'local'}:
         state[SUMMARY_KEY] = summary
     return sorted(affected)

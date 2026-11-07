@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from .local_nmt import DEFAULT_LOCAL_NMT_MODEL, LOCAL_NMT_MODELS, normalize_local_nmt_settings
 from .translation import (
     AI_PROVIDERS, DEFAULT_AI_SKILL, DEFAULT_AI_SOURCE_LIMIT, MAX_FREE_QUERY_CHARS, TranslationError, combine_translation_texts,
     normalize_ai_skill, normalize_target_language, translation_request_view,
@@ -19,6 +20,8 @@ AI_REUSE_KEY = "_aiReusedTranslation"
 
 
 def effective_ai_limit(provider: str, settings: dict[str, Any], profile_id: str | None = None) -> int:
+    if provider == "local":
+        return normalize_local_nmt_settings(settings.get("local_nmt"))["source_limit"]
     profiles = settings.get("providers", {}).get(provider, {}).get("profiles", [])
     chosen_id = (profile_id or "").strip()
     limits = [
@@ -75,8 +78,9 @@ def target_snapshot(block: dict[str, Any]) -> str:
 
 def reuse_fingerprint(block: dict[str, Any], source: str, provider: str, language: str, settings: dict[str, Any]) -> str:
     config = settings.get("providers", {}).get(provider, {})
+    model_id = normalize_local_nmt_settings(settings.get("local_nmt")).get("model", "") if provider == "local" else config.get("model", "")
     tl = normalize_target_language(settings.get("_target_language", "fa"))
-    value = [provider, language, config.get("model", ""), config.get("base_url", ""), settings.get("_translation_skill", normalize_ai_skill(None)), source, target_snapshot(block)]
+    value = [provider, language, model_id, config.get("base_url", ""), settings.get("_translation_skill", normalize_ai_skill(None)), source, target_snapshot(block)]
     if tl != "fa":
         value.append(tl)
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -258,16 +262,18 @@ def plan_signature(
     public_settings: dict[str, Any],
 ) -> str:
     config = public_settings.get("providers", {}).get(provider, {})
+    local_cfg = normalize_local_nmt_settings(public_settings.get("local_nmt")) if provider == "local" else {}
     tl = normalize_target_language(public_settings.get("_target_language", "fa"))
     canonical = {
         "provider": provider,
         "source_language": source_language,
         **({"target_language": tl} if tl != "fa" else {}),
-        "skill": public_settings.get("_translation_skill", normalize_ai_skill(None)) if provider != "free" else "",
-        "model": config.get("model", "") if provider != "free" else "",
-        "base_url": config.get("base_url", "") if provider != "free" else "",
+        "skill": public_settings.get("_translation_skill", normalize_ai_skill(None)) if provider not in {"free", "local"} else "",
+        "model": (local_cfg.get("model", "") if provider == "local" else (config.get("model", "") if provider != "free" else "")),
+        "base_url": config.get("base_url", "") if provider not in {"free", "local"} else "",
+        **({"local_policy": {"beam_size": local_cfg["beam_size"], "source_limit": local_cfg["source_limit"]}} if provider == "local" else {}),
         # Confirm retry/cost and timeout policy as well as the text and destination.
-        "profile_policy": [{"id": p.get("id", ""), "timeout_seconds": p.get("timeout_seconds", 90), "retry_count": p.get("retry_count", 0), "retry_wait_seconds": p.get("retry_wait_seconds", 20), "source_limit": p.get("source_limit", 1000), "hasApiKey": p.get("hasApiKey", False)} for p in config.get("profiles", [])] if provider != "free" else [],
+        "profile_policy": [{"id": p.get("id", ""), "timeout_seconds": p.get("timeout_seconds", 90), "retry_count": p.get("retry_count", 0), "retry_wait_seconds": p.get("retry_wait_seconds", 20), "source_limit": p.get("source_limit", 1000), "hasApiKey": p.get("hasApiKey", False)} for p in config.get("profiles", [])] if provider not in {"free", "local"} else [],
         "reuse_repeated": plan.get("reuse_repeated", False),
         "keys": plan["keys"],
         # Equal joined payloads can have different per-box line boundaries.
@@ -302,9 +308,15 @@ def plan_preview(
                     "part": call.get("part_index", 0) + 1, "partCount": call.get("part_count", 1)} if "image_id" in call else {}),
             })
     config = public_settings.get("providers", {}).get(provider, {})
+    local_cfg = normalize_local_nmt_settings(public_settings.get("local_nmt")) if provider == "local" else {}
     if provider == "free":
         label = "سرویس رایگان — Google Translate؛ هنگام خطا MyMemory"
         note = "هر query ابتدا به Google Translate می‌رود؛ فقط اگر خطا بدهد، همان query به MyMemory فرستاده می‌شود."
+    elif provider == "local":
+        model_id = local_cfg.get("model", DEFAULT_LOCAL_NMT_MODEL)
+        model_label = LOCAL_NMT_MODELS.get(model_id, LOCAL_NMT_MODELS[DEFAULT_LOCAL_NMT_MODEL])["label"]
+        label = f"مترجم آفلاین داخلی — {model_label}"
+        note = "ترجمه ۱۰۰٪ آفلاین و رایگان روی پردازندهٔ سیستم شما (بدون ارسال هیچ متنی به اینترنت) انجام می‌شود."
     else:
         label = AI_PROVIDERS.get(provider, {}).get("label", provider)
         note = (f"کادرهای همان صفحه تا سقف {plan.get('source_limit', MAX_AI_SOURCE_CHARS)} نویسه در هر درخواست تجمیع می‌شوند؛ تقسیم کادر بلند فقط در پایان خط و جمله یا بند انجام می‌شود. "
@@ -346,11 +358,11 @@ def plan_preview(
         "duplicateCount": plan.get("duplicate_count", 0),
         "sourceLimit": plan.get("source_limit", MAX_AI_SOURCE_CHARS) if provider != "free" else None,
         "provider": provider,
-        "skill": public_settings.get("_translation_skill", normalize_ai_skill(None)) if provider != "free" else "",
-        "defaultSkill": DEFAULT_AI_SKILL if provider != "free" else "",
+        "skill": public_settings.get("_translation_skill", normalize_ai_skill(None)) if provider not in {"free", "local"} else "",
+        "defaultSkill": DEFAULT_AI_SKILL if provider not in {"free", "local"} else "",
         "providerLabel": label,
-        "model": config.get("model", "") if provider != "free" else "",
-        "base_url": config.get("base_url", "") if provider != "free" else "https://translate.googleapis.com/translate_a/single",
+        "model": local_cfg.get("model", "") if provider == "local" else (config.get("model", "") if provider != "free" else ""),
+        "base_url": "" if provider == "local" else (config.get("base_url", "") if provider != "free" else "https://translate.googleapis.com/translate_a/single"),
         "fallback_url": "https://api.mymemory.translated.net/get" if provider == "free" else "",
         "blockCount": len(plan["source_texts"]),
         "requestCount": len(requests),

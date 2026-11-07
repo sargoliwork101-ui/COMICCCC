@@ -52,8 +52,29 @@ class TextTranslateRequest(BaseModel):
     confirmation: str | None = None
 
 
+class LocalNmtSettingsPayload(BaseModel):
+    model: str = Field(default="nllb-600m", max_length=60)
+    beam_size: int = Field(default=2, ge=1, le=4)
+    source_limit: int = Field(default=4000, ge=200, le=20_000)
+    keep_loaded: bool = False
+
+
+class LocalNmtModelActionRequest(BaseModel):
+    model: str = Field(default="nllb-600m", min_length=1, max_length=60)
+
+
+class LocalNmtTestRequest(BaseModel):
+    model: str = Field(default="nllb-600m", max_length=60)
+    source_language: str = Field(default="eng", max_length=20)
+    target_language: str = Field(default="fa", max_length=16)
+    sample_text: str = Field(default="", max_length=2000)
+    beam_size: int = Field(default=2, ge=1, le=4)
+    keep_loaded: bool = False
+
+
 class AiSettings(BaseModel):
     free_services: dict[str, dict[str, Any]] | None = None
+    local_nmt: LocalNmtSettingsPayload | None = None
     context_percent: int | None = Field(default=None, ge=0, le=100)
     skill_percent: int | None = Field(default=None, ge=0, le=100)
     reuse_repeated: bool | None = None
