@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.12"
+    assert health.json()["version"] == "4.13"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۱۲ · Python</span>' in index_html
+    assert '<span class="ver">۴.۱۳ · Python</span>' in index_html
     assert "مدیریت مدل‌های OCR" in index_html
     assert "مدیریت ترجمه‌ها" in index_html
     assert 'id="deleteModelsMenuBtn"' not in index_html
@@ -3291,7 +3291,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.12"
+    assert APP_VERSION == "4.13"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -4669,6 +4669,106 @@ def test_v412_exporter_shapes_rotation_corner_radius_and_font_family(client):
         assert 'prst="cloud"' in slide_xml
         assert 'typeface="Tahoma"' in slide_xml
         assert 'typeface="Comic Sans MS"' in slide_xml
+
+
+def test_v413_full_audit_backend_fixes(client, tmp_path, monkeypatch):
+    """v4.13 regression test covering bundled rapidocr-v5 validation, frozen PyInstaller anti-recursion,
+    manual-box styling preservation in context_run, 0-byte edited PNG guards, browser preferences, and data-font export."""
+    import sys
+    from PIL import Image
+    import comic_studio.browser as browser_mod
+    import comic_studio.context_run as context_run_mod
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_managed as managed_mod
+    from comic_studio.paths import project_root
+
+    # 1. Bundled rapidocr-v5 validates against _effective_v5_dir (offline .exe) & hides non-functional uninstall
+    bundled = tmp_path / "bundled_models"
+    (bundled / "rapidocr").mkdir(parents=True)
+    (bundled / "rapidocr" / "ch_PP-OCRv5_det_mobile.onnx").write_bytes(b"ONNX-DET-WEIGHTS")
+    (bundled / "rapidocr" / "latin_PP-OCRv5_rec_mobile.onnx").write_bytes(b"ONNX-REC-WEIGHTS")
+    monkeypatch.setenv("COMIC_STUDIO_BUNDLED_MODELS", str(bundled))
+    v5 = ocr_mod.RapidEngine("rapidocr-v5", "v5")
+    monkeypatch.setattr(ocr_mod.RapidEngine, "runtime_installed", property(lambda _self: True))
+    assert "eng" in v5.ready_languages
+    # Must NOT raise OcrError when user writable models/rapidocr is empty!
+    v5._validate_ready("eng", allow_download=False)
+    assert managed_mod.engine_has_uninstallable_files("rapidocr-v5", v5) is False
+    monkeypatch.delenv("COMIC_STUDIO_BUNDLED_MODELS", raising=False)
+
+    # 2. Frozen PyInstaller mode never spawns sys.executable as python -m pip / venv
+    fake_exe = tmp_path / "ComicOCRStudio.exe"
+    fake_exe.write_bytes(b"MZ")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(fake_exe))
+    monkeypatch.setattr(ocr_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "no_py"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "no_py2"))
+    try:
+        ocr_mod._resolve_pip_python_executable(match_current_minor=True)
+        raise AssertionError("Expected OcrError when frozen without host Python")
+    except ocr_mod.OcrError as exc:
+        assert ".exe" in str(exc)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+    # 3. context_run.apply_translated_block_defaults preserves manual/cloned box custom size, align, bold, verticalAlign
+    manual_blk = {
+        "id": 1, "manual": True, "manualLang": "en", "textMode": "ocr",
+        "size": 28, "align": "center", "verticalAlign": "middle", "bold": True,
+    }
+    context_run_mod.apply_translated_block_defaults(manual_blk, "fa")
+    assert manual_blk["dir"] == "rtl"
+    assert manual_blk["textMode"] == "translation"
+    assert manual_blk["size"] == 28
+    assert manual_blk["align"] == "center"
+    assert manual_blk["verticalAlign"] == "middle"
+    assert manual_blk["bold"] is True
+
+    # 4. browser.save_preferences creates missing parent directories & writes atomically
+    pref_data = tmp_path / "fresh_prefs_dir"
+    monkeypatch.setattr(browser_mod, "data_dir", lambda: pref_data)
+    browser_mod.save_preferences("edge", "new")
+    assert browser_mod.load_preferences() == ("edge", "new")
+
+    # 5. store.py ignores 0-byte -edited.png and exporter.py supports data-font + Arial Black + manual box in OCR mode
+    proj = client.post("/api/projects", json={"name": "پروژه ۴.۱۳"}).json()
+    pid = proj["id"]
+    buf = io.BytesIO()
+    Image.new("RGB", (280, 220), (245, 245, 250)).save(buf, format="PNG")
+    up = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("page1.png", buf.getvalue(), "image/png"))],
+    )
+    assert up.status_code == 200
+    state = up.json()
+    iid = state["images"][0]["id"]
+    zero_edited = project_root(pid) / "images" / f"{iid}-edited.png"
+    zero_edited.write_bytes(b"")
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1, "x0": 20, "y0": 20, "x1": 240, "y1": 110,
+            "text": "", "tr": "کادر دستی فارسی در حالت OCR",
+            "richHtml": '<p><span data-font="Arial Black">کادر دستی فارسی در حالت OCR</span></p>',
+            "manual": True, "manualLang": "fa", "enabled": True, "dir": "rtl", "align": "center",
+        }
+    ]
+    saved_state = client.put(f"/api/projects/{pid}/state", json={"state": state}).json()
+    assert saved_state["images"][0]["edited"] is False
+    assert client.get(f"/api/projects/{pid}/images/{iid}/content?edited=true").status_code == 404
+    dup_state = client.post(f"/api/projects/{pid}/duplicate", json=[iid]).json()
+    assert len(dup_state["images"]) == 2
+    assert dup_state["images"][1]["edited"] is False
+
+    docx_ocr = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "docx", "image_ids": [iid], "docx_layout": "flowing", "docx_mode": "ocr"},
+    )
+    assert docx_ocr.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(docx_ocr.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "کادر دستی فارسی در حالت OCR" in doc_xml
+        assert 'w:ascii="Arial Black"' in doc_xml
+
 
 
 

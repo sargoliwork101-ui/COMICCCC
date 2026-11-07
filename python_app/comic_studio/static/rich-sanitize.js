@@ -33,7 +33,7 @@
     const s = node.style; if (!s) return '';
     const out = []; const size = parseFloat(s.fontSize);
     if (Number.isFinite(size) && /px$/i.test(s.fontSize)) out.push(`font-size:${Math.max(8, Math.min(160, size))}px`);
-    const ff = safeFontFamily(s.fontFamily);
+    const ff = safeFontFamily(s.fontFamily || node.getAttribute?.('data-font') || '');
     if (ff) out.push(`font-family:${ff}`);
     const color = s.color;
     if (/^#[0-9a-f]{6}$/i.test(color)) out.push(`color:${color}`);

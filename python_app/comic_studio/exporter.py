@@ -619,7 +619,7 @@ def _block_translation_plain(block: dict[str, Any]) -> str:
 
 
 def _effective_docx_block_mode(block: dict[str, Any], docx_mode: str) -> str:
-    if block.get("manual") is True:
+    if bool(block.get("manual")):
         has_tr = bool(_block_translation_plain(block).strip())
         has_ocr = bool(_strip_inline_markers(_clean_text(block.get("text") or "")).strip())
         if docx_mode == "ocr":
@@ -641,6 +641,7 @@ _ALLOWED_EXPORT_FONTS: dict[str, str] = {
     "tahoma": "Tahoma",
     "segoe ui": "Segoe UI",
     "arial": "Arial",
+    "arial black": "Arial Black",
     "times new roman": "Times New Roman",
     "georgia": "Georgia",
     "impact": "Impact",
@@ -873,7 +874,7 @@ class _RichHtmlToDocxParser(HTMLParser):
         col = _parse_css_color(css.get("color") or attr_map.get("color"))
         if col:
             cur["color"] = col
-        ff = _clean_font_family(css.get("font-family") or attr_map.get("face"))
+        ff = _clean_font_family(css.get("font-family") or attr_map.get("data-font") or attr_map.get("face"))
         if ff:
             cur["font_family"] = ff
         fs_match = re.match(r"^(\d+(?:\.\d+)?)px$", css.get("font-size", ""))

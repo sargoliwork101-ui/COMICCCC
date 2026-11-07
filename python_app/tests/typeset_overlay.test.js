@@ -253,12 +253,14 @@ assert(hrOnly.some((point) => point.text.includes('─')), 'separator-only block
     enabled: true, bg: '#ffeeaa', shape: 'ellipse', angle: 30, fontFamily: 'Impact',
   }]);
   global.document.createElement = savedCreate;
+  assert.ok(Typeset.resolveFontStack('Georgia').startsWith('Georgia,'), 'Georgia resolves to dedicated serif stack');
+  assert.ok(Typeset.resolveFontStack('Arial Black').includes('Arial Black'), 'Arial Black resolves to dedicated display stack');
   assert.ok(shapeOps.some((op) => op[0] === 'fillRect' && op[1] === 20 && op[2] === 20), 'rotated non-rect box erases original source rect first');
   assert.ok(shapeOps.some((op) => op[0] === 'rotate' && Math.abs(op[1] - 0.5236) < 0.01), '30deg box rotates canvas context around box center');
   assert.ok(shapeOps.some((op) => op[0] === 'ellipse' && op[3] === 60 && op[4] === 30), 'ellipse shape builds exact half-width/half-height path');
   assert.ok(shapeOps.some((op) => op[0] === 'fill' && op[1] === '#ffeeaa'), 'custom hex bg fills shaped path');
   assert.ok(shapeOps.some((op) => op[0] === 'fillText' && String(op[2]).includes('Tahoma')), 'inline span font-family reaches fillText font');
-  console.log('PASS: v4.12 font stacks, shapes, corner radius, rotation, and custom hex bg in Typeset');
+  console.log('PASS: v4.12–v4.13 font stacks, shapes, corner radius, rotation, and custom hex bg in Typeset');
 }
 delete global.document;
 console.log('PASS: rich text justifies and list markers survive output rendering');

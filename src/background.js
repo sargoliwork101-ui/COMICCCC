@@ -231,7 +231,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   if (msg && msg.type === 'WTPDF_GBOOKS_PAGE') {
-    resolveGoogleBooksPage(msg.pageUrl || (sender.tab && sender.tab.url) || '', String(msg.pid || '1'))
+    resolveGoogleBooksPage(
+      msg.pageUrl || (sender.tab && sender.tab.url) || '',
+      String(msg.pid || '1'),
+      msg.lpgPid ? String(msg.lpgPid) : undefined
+    )
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, error: error && error.message ? error.message : String(error) }));
     return true;

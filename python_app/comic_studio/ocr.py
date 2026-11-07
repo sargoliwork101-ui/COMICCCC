@@ -290,6 +290,56 @@ def _run_standard_pip_streaming(
     return subprocess.CompletedProcess(cmd, rc, joined if rc == 0 else "", "" if rc == 0 else joined)
 
 
+def _resolve_pip_python_executable(*, match_current_minor: bool = False) -> str:
+    """Return a real Python interpreter for `-m pip` / `-m venv`, avoiding PyInstaller `.exe` self-recursion."""
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    frozen_exe = os.path.abspath(sys.executable)
+    cur_major, cur_minor = sys.version_info[:2]
+    candidates: list[str] = []
+    for name in (f"python{cur_major}.{cur_minor}", "python", "python3"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    if os.name == "nt":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        prog_files = os.environ.get("ProgramFiles", "")
+        ordered_vers = [f"Python{cur_major}{cur_minor}", "Python313", "Python312", "Python311"]
+        for base in (local_app, prog_files):
+            if not base:
+                continue
+            for ver in dict.fromkeys(ordered_vers):
+                candidates.append(os.path.join(base, "Programs", "Python", ver, "python.exe"))
+                candidates.append(os.path.join(base, ver, "python.exe"))
+    check_expr = (
+        f"import sys; raise SystemExit(0 if sys.version_info[:2] == ({cur_major}, {cur_minor}) else 1)"
+        if match_current_minor
+        else "import sys; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 14) else 1)"
+    )
+    seen: set[str] = set()
+    for cand in candidates:
+        if not cand or "windowsapps" in cand.lower():
+            continue
+        abs_cand = os.path.abspath(cand)
+        key = abs_cand.lower() if os.name == "nt" else abs_cand
+        if key in seen or abs_cand == frozen_exe or not os.path.isfile(abs_cand):
+            continue
+        seen.add(key)
+        try:
+            probe = _ORIG_SUBPROCESS_RUN(
+                [abs_cand, "-c", check_expr],
+                capture_output=True, text=True, timeout=10, check=False, **_win_subprocess_kwargs(),
+            )
+            if probe.returncode == 0:
+                return abs_cand
+        except Exception:
+            continue
+    ver_hint = f"Python {cur_major}.{cur_minor}" if match_current_minor else "Python 3.11 تا 3.13"
+    raise OcrError(
+        f"در نسخهٔ نصبی آفلاین (.exe)، برای نصب بسته‌های پایتونی جدید نیاز به نصب بودن {ver_hint} روی ویندوز یا استفاده از پوشهٔ start_windows.bat است."
+    )
+
+
 def install_packages(
     packages: list[str],
     *,
@@ -314,10 +364,11 @@ def install_packages(
         sync_local_wheelhouse,
     )
 
+    py_exe = _resolve_pip_python_executable(match_current_minor=True)
     cdir = pip_cache_dir()
     wh = sync_local_wheelhouse()
     target_site: Path | None = None
-    if is_custom_data_dir_active():
+    if is_custom_data_dir_active() or getattr(sys, "frozen", False):
         target_site = custom_site_packages_dir()
         with contextlib.suppress(OSError):
             target_site.mkdir(parents=True, exist_ok=True)
@@ -325,7 +376,7 @@ def install_packages(
 
     def _build_cmd(mirror_url: str | None = None) -> list[str]:
         cmd = [
-            sys.executable, "-m", "pip", "install",
+            py_exe, "-m", "pip", "install",
             "--timeout", "120",
             "--retries", "10",
             "--prefer-binary",
@@ -727,7 +778,11 @@ class RapidEngine:
 
     def _effective_v5_dir(self, language: str) -> Path:
         expected = self._expected_models(language)
-        for cand in self._candidate_v5_dirs():
+        cands = self._candidate_v5_dirs()
+        for cand in cands:
+            if all((cand / name).is_file() and (cand / name).stat().st_size > 0 for name in expected):
+                return cand
+        for cand in cands:
             if all((cand / name).is_file() for name in expected):
                 return cand
         return self._model_dir()
@@ -736,7 +791,7 @@ class RapidEngine:
         bundled = bundled_models_dir()
         if bundled is not None:
             b_v6 = bundled / "rapidocr-v6"
-            if all((b_v6 / name).is_file() for name in ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx")):
+            if all((b_v6 / name).is_file() and (b_v6 / name).stat().st_size > 0 for name in ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx")):
                 return b_v6
         import rapidocr
         return Path(rapidocr.__file__).parent / "models"
@@ -888,7 +943,7 @@ class RapidEngine:
         if not self.runtime_installed:
             raise OcrError("RapidOCR is not installed. Click the explicit preparation button to install it.")
         if not allow_download:
-            root = self._model_dir() if self.version == "v5" else self._v6_model_dir()
+            root = self._effective_v5_dir(language) if self.version == "v5" else self._v6_model_dir()
             missing = [name for name in self._expected_models(language) if not (root / name).is_file() or (root / name).stat().st_size == 0]
             if missing:
                 raise OcrError(f"{self.id} model is not ready. Use the explicit model download button first.")

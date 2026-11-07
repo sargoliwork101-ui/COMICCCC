@@ -210,6 +210,19 @@ function bootBackground(fetchImpl) {
     await waitFor(() => renamed !== null);
     check('single page: pid rename tolerated via first src entry',
       renamed && renamed.ok === true && renamed.src.includes('pg=PA1') && /w=10000/.test(renamed.src), renamed);
+
+    // v2.67: lpgPid forwarded by WTPDF_GBOOKS_PAGE reaches the click3 request URL
+    const beforeCalls = bp.fetchCalls.length;
+    let withLpg = null;
+    bp.listeners.message(
+      { type: 'WTPDF_GBOOKS_PAGE', pageUrl: 'https://books.google.com/books?id=B1', pid: 'PA2', lpgPid: 'PP1' },
+      { tab: { id: 22 } },
+      (r) => { withLpg = r; }
+    );
+    await waitFor(() => withLpg !== null);
+    const lpgUrl = bp.fetchCalls.slice(beforeCalls).find((u) => u.includes('pg=PA2')) || '';
+    check('single page: lpgPid forwarded to click3 lpg query parameter',
+      withLpg && withLpg.ok === true && lpgUrl.includes('lpg=PP1'), lpgUrl);
   }
 
   // 6. message handler: SCAN responds via sendResponse with the url list

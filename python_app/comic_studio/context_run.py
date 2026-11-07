@@ -398,6 +398,12 @@ def apply_translated_block_defaults(block: dict[str, Any], target_language: str 
     if target_language is not None:
         dir_val, _ = target_language_direction(target_language)
         block['dir'] = dir_val
+    if str(block.get('textMode') or '').lower() == 'ocr':
+        block['textMode'] = 'translation'
+    if block.get('manual'):
+        if block.get('align') not in ('left', 'center', 'right', 'justify'):
+            block['align'] = 'center'
+        return
     if block.get('pageRole') == 'heading':
         raw_lh = float(block.get('lineH') or (float(block.get('y1', 0)) - float(block.get('y0', 0))) or 22.0)
         block['align'] = 'left' if str(block.get('dir') or '').lower() == 'ltr' else 'right'

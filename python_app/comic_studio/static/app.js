@@ -614,6 +614,15 @@ function releaseImgElement(img) {
   img.removeAttribute('src');
   img.src = '';
 }
+function releaseWatermarkPreviewResources() {
+  if (wmPreviewBitmap && wmPreviewBitmap !== state.editorBitmap) {
+    try { wmPreviewBitmap.close?.(); } catch { /* ignore */ }
+  }
+  wmPreviewBitmap = null;
+  wmPreviewImageId = null;
+  const cv = $('wmPreviewCanvas');
+  if (cv) { cv.width = 0; cv.height = 0; }
+}
 function closeDialog(id) {
   const idx = openDialogStack.indexOf(id);
   if (idx >= 0) openDialogStack.splice(idx, 1);
@@ -623,6 +632,8 @@ function closeDialog(id) {
     state.previewId = null;
   } else if (id === 'cropDialog') {
     releaseImgElement($('cropImage'));
+  } else if (id === 'watermarkDialog') {
+    releaseWatermarkPreviewResources();
   }
 }
 function openHelpDialog(sectionId = null) {
@@ -2916,6 +2927,15 @@ async function runTranslation(targetOverride = null) {
       $('ocrTranslationNotice').classList.remove('hidden'); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden');
       $('ocrOnlySelected').disabled = true; updateEngineOptions(); showDialog('ocrDialog'); return;
     }
+    selected.forEach((item) => {
+      (item.blocks || []).forEach((block) => {
+        if (block.enabled === false) return;
+        const canPromoteManualSource = Boolean(block.manual && (block.manualLang === 'en' || block.dir === 'ltr'));
+        if (canPromoteManualSource && !String(block.text || '').trim() && String(block.tr || '').trim()) {
+          block.text = String(block.tr || '').trim();
+        }
+      });
+    });
     if (!selected.some(item => (item.blocks || []).some(block => block.enabled !== false && String(block.text || '').trim()))) {
       throw new Error('هیچ کادر فعال دارای متن در تصاویر انتخاب‌شده نیست. اگر OCR متنی پیدا نکرده، تنظیمات یا تصویر را بررسی و OCR را دوباره اجرا کنید.');
     }
@@ -4040,7 +4060,8 @@ async function uninstallEngine(engine) {
       hint: 'هر زمان دوباره به این مدل نیاز داشتید، می‌توانید آن را با یک کلیک دانلود و نصب کنید.',
       confirmText: 'حذف کامل مدل',
       cancelText: 'انصراف',
-      danger: true,
+      variant: 'danger',
+      destructive: true,
     },
   );
   if (!confirmed) return false;
@@ -5904,7 +5925,7 @@ function resetInlineLineStyle() {
   }
   const line = ensureInlineParagraph(); if (!line) return;
   delete line.dataset.logicalSize;
-  ['textAlign', 'direction', 'fontSize', 'color', 'fontWeight', 'fontStyle', 'textDecoration'].forEach((key) => { line.style[key] = ''; });
+  ['textAlign', 'direction', 'fontSize', 'fontFamily', 'color', 'fontWeight', 'fontStyle', 'textDecoration'].forEach((key) => { line.style[key] = ''; });
   [...line.querySelectorAll('span,b,strong,i,em,u,s,strike,del')].reverse().forEach((el) => el.replaceWith(...el.childNodes));
   rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
 }
@@ -6279,6 +6300,8 @@ function mergeSelectedText() {
     : '';
   const merged = { ...snapshots[0], text: joinedOcrText(snapshots), tr: mergedTr, richHtml: mergedRichHtml, x0, y0, x1, y1,
     polygon: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], sourceLines: snapshots };
+  const normAngles = snapshots.map((b) => normalizeAngleDeg(b.angle));
+  if (normAngles.some((ang) => ang !== normAngles[0])) merged.angle = 0;
   if (ordered.some((b) => Number.isFinite(b.tx0) || Number.isFinite(b.ty0) || Number.isFinite(b.tx1) || Number.isFinite(b.ty1))) {
     merged.tx0 = Math.min(...ordered.map((b) => boxOf(b).x0));
     merged.ty0 = Math.min(...ordered.map((b) => boxOf(b).y0));
@@ -6334,8 +6357,9 @@ function splitSingleEditorBlock(block, item, nextIdRef) {
   }
   if (hasSource && trLines.length === block.sourceLines.length) {
     const originals = JSON.parse(JSON.stringify(block.sourceLines));
+    const inheritedKeys = ['dir', 'align', 'size', 'verticalAlign', 'color', 'bg', 'fontFamily', 'bold', 'italic', 'underline', 'shape', 'cornerRadius', 'angle'];
     originals.forEach((entry, idx) => {
-      ['dir', 'align', 'size', 'verticalAlign', 'color', 'bg'].forEach((k) => { if (entry[k] === undefined && block[k] !== undefined) entry[k] = block[k]; });
+      inheritedKeys.forEach((k) => { if (entry[k] === undefined && block[k] !== undefined) entry[k] = block[k]; });
       const prevTr = String(entry.tr || '').trim();
       entry.tr = trLines[idx];
       if (prevTr !== trLines[idx]) entry.richHtml = '';
@@ -7701,6 +7725,12 @@ async function deleteSelectedWatermarkLogo() {
   });
   if (!ok) return;
   delete logos[logoId];
+  for (const [cacheKey, drawable] of [...watermarkLogoCache.entries()]) {
+    if (cacheKey === logoId || cacheKey.startsWith(`${logoId}:`)) {
+      try { drawable?.close?.(); } catch { /* ignore */ }
+      watermarkLogoCache.delete(cacheKey);
+    }
+  }
   const affectedIds = [];
   (state.project.images || []).forEach((img) => {
     if (img.watermark?.logoId === logoId) {
@@ -8237,8 +8267,40 @@ function bindEvents() {
       else if (box) { classicEditor.attachField(box); refreshInlineTypography(); }
     },
     onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); autoApplyInlineDraft(); updateEditorSelection(); } },
-    getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && $('inlineEditorSize').value.trim() === inlineDraft.initialSizeValue) ? '' : $('inlineEditorSize').value, color: inlineDraft.color } : null,
-    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) { inlineDraft.verticalAlignTouched = true; $('inlineVerticalAlign').value = meta.verticalAlign; } if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; } else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; } if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; syncVerticalAlignButtons(); },
+    getDraftMetadata: () => inlineDraft ? {
+      dir: $('inlineEditorDirection').value,
+      align: $('inlineEditorAlign').value,
+      verticalAlign: $('inlineVerticalAlign').value,
+      size: (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && $('inlineEditorSize').value.trim() === inlineDraft.initialSizeValue) ? '' : $('inlineEditorSize').value,
+      color: inlineDraft.color,
+      fontFamily: ($('inlineEditorFont')?.value || '').trim() || inlineDraft.fontFamily || '',
+      bold: inlineDraft.bold,
+      italic: inlineDraft.italic,
+      underline: inlineDraft.underline,
+    } : null,
+    onRestore: (meta) => {
+      if (!inlineDraft || !meta) return;
+      if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir;
+      if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align;
+      if (['top','middle','bottom'].includes(meta.verticalAlign)) { inlineDraft.verticalAlignTouched = true; $('inlineVerticalAlign').value = meta.verticalAlign; }
+      if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; }
+      else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; }
+      if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); }
+      if (typeof meta.fontFamily === 'string') {
+        const canon = meta.fontFamily ? canonicalFontOption(meta.fontFamily) : '';
+        const stored = canon && canon !== 'Vazirmatn' ? canon : '';
+        inlineDraft.fontFamily = stored || null;
+        if ($('inlineEditorFont')) $('inlineEditorFont').value = stored;
+        if ($('inlineFontFamily')) $('inlineFontFamily').value = canon || 'Vazirmatn';
+      }
+      if (typeof meta.bold === 'boolean') inlineDraft.bold = meta.bold;
+      if (typeof meta.italic === 'boolean') inlineDraft.italic = meta.italic;
+      if (typeof meta.underline === 'boolean') inlineDraft.underline = meta.underline;
+      $('inlineEditorField').dir = $('inlineEditorDirection').value;
+      $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value;
+      syncVerticalAlignButtons();
+      refreshInlineTypography();
+    },
   });
   const inlineField = $('inlineEditorField');
   inlineField.addEventListener('scroll', () => {
@@ -8435,6 +8497,7 @@ function bindEvents() {
     applyBoxShapeSettings({ bg: hex });
   });
   $('wmCancelBtn')?.addEventListener('click', () => closeDialog('watermarkDialog'));
+  $('watermarkDialog')?.addEventListener('close', () => releaseWatermarkPreviewResources());
   $('wmApplyBtn')?.addEventListener('click', () => { applyWatermarkFromDialog().catch((e) => toast(e.message, true)); });
   $('wmRemoveBtn')?.addEventListener('click', () => { removeWatermarkFromDialog().catch((e) => toast(e.message, true)); });
   $('wmLogoInput')?.addEventListener('change', (ev) => {

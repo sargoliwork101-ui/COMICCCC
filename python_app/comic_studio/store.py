@@ -251,7 +251,8 @@ class ProjectStore:
                 for key in ("order", "selected", "groupId", "crop", "blocks", "pageMode", "approved", "watermark"):
                     if key in candidate:
                         item[key] = bool(candidate[key]) if key == "approved" else candidate[key]
-                item["edited"] = (project_root(project_id) / "images" / f"{image_id}-edited.png").exists()
+                edited_file = project_root(project_id) / "images" / f"{image_id}-edited.png"
+                item["edited"] = bool(edited_file.is_file() and edited_file.stat().st_size > 0)
                 merged.append(item)
             # An image omitted by the UI is deliberately removed from the project, not from source files on disk.
             current["images"] = merged
@@ -292,7 +293,7 @@ class ProjectStore:
     def image_path(self, project_id: str, image_id: str, edited: bool = False) -> Path:
         item = self._image_meta(project_id, image_id)
         path = project_root(project_id) / "images" / (f"{image_id}-edited.png" if edited else item["file"])
-        if not path.exists():
+        if not path.is_file() or (edited and path.stat().st_size == 0):
             raise FileNotFoundError(path)
         return path
 
@@ -708,7 +709,7 @@ class ProjectStore:
                 new["approved"] = False
                 shutil.copyfile(project_root(project_id) / "images" / old["file"], project_root(project_id) / "images" / new["file"])
                 old_edited = project_root(project_id) / "images" / f"{old['id']}-edited.png"
-                has_edited = old_edited.exists()
+                has_edited = bool(old.get("edited") is not False and old_edited.is_file() and old_edited.stat().st_size > 0)
                 if has_edited:
                     shutil.copyfile(old_edited, project_root(project_id) / "images" / f"{new['id']}-edited.png")
                 new["edited"] = has_edited

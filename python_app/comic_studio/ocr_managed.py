@@ -36,7 +36,7 @@ import numpy as np
 from PIL import Image
 
 from .activity import emit
-from .paths import is_custom_data_dir_active, models_dir
+from .paths import bundled_models_dir, is_custom_data_dir_active, models_dir
 
 _SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 _HW_CACHE_LOCK = threading.Lock()
@@ -2641,9 +2641,16 @@ class IsolatedOcrEngine:
             except OSError:
                 pass
 
-            base_py = getattr(sys, "_base_executable", None) or sys.executable
-            if not base_py or not os.path.isfile(base_py):
-                base_py = sys.executable
+            if getattr(sys, "frozen", False):
+                from .ocr import _resolve_pip_python_executable
+                try:
+                    base_py = _resolve_pip_python_executable(match_current_minor=False)
+                except Exception as exc:
+                    raise self._error_cls(str(exc)) from exc
+            else:
+                base_py = getattr(sys, "_base_executable", None) or sys.executable
+                if not base_py or not os.path.isfile(base_py):
+                    base_py = sys.executable
 
             rt_pair = getattr(self, "_active_rt_span", None) or (0.06, 0.72)
             r_lo, r_hi = float(rt_pair[0]), float(rt_pair[1])
@@ -3355,6 +3362,8 @@ def engine_has_uninstallable_files(engine_id: str, engine: Any = None) -> bool:
             for cand in _isolated_engine_owned_paths(engine_id, root)
         )
     if engine_id == "rapidocr-v5":
+        if bundled_models_dir() is not None:
+            return _dir_has_any_entry(root / "rapidocr")
         if engine is not None and bool(getattr(engine, "model_ready", False)):
             return True
         return _dir_has_any_entry(root / "rapidocr")

@@ -796,7 +796,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
         const res = transport === 'inpage'
           ? await resolveGoogleBooksPageInPage(pid, startupPid)
           : await chrome.runtime.sendMessage({
-            type: 'WTPDF_GBOOKS_PAGE', pageUrl: location.href, pid
+            type: 'WTPDF_GBOOKS_PAGE', pageUrl: location.href, pid, lpgPid: startupPid
           });
         if (cancelled) return;
         if (res && res.ok && res.src) {

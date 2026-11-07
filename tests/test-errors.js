@@ -1080,6 +1080,24 @@ prepare = async (it, r) => {
     } finally {
       h.window.Blob.prototype.slice = origSlice;
     }
+
+    // v2.67: Failed chrome.downloads.download revokes blob: URL immediately without leaking
+    const revokedUrls = [];
+    const origRevoke = h.window.URL.revokeObjectURL;
+    const origDownload = h.window.chrome.downloads && h.window.chrome.downloads.download;
+    h.window.URL.revokeObjectURL = (u) => { revokedUrls.push(u); return origRevoke ? origRevoke.call(h.window.URL, u) : undefined; };
+    h.window.chrome.downloads = { download: async () => { throw new Error('disk full'); } };
+    const origPicker = h.window.showDirectoryPicker;
+    delete h.window.showDirectoryPicker;
+    try {
+      await h.ev('onSaveImages()');
+      check('v2.67 failed chrome.downloads.download immediately revokes temporary blob URL',
+        revokedUrls.length >= 1, revokedUrls);
+    } finally {
+      h.window.URL.revokeObjectURL = origRevoke;
+      if (origDownload) h.window.chrome.downloads = { download: origDownload };
+      if (origPicker) h.window.showDirectoryPicker = origPicker;
+    }
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL EDGE-CASE TESTS PASSED');

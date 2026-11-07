@@ -47,7 +47,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.1.2.0")]
+[assembly: System.Reflection.AssemblyVersion("4.1.3.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -424,6 +424,7 @@ def pyinstaller_command(
         "uvicorn.lifespan.on",
         "multipart",
         "python_multipart",
+        "cv2",
         "tkinter",
         "tkinter.filedialog",
     ):

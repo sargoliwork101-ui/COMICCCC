@@ -2129,7 +2129,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas412: verText.includes('۴.۱۲'),
+            verHas413: verText.includes('۴.۱۳'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2148,8 +2148,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.12 displays version 4.12 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas412 === true
+      'v4.00/v4.13 displays version 4.13 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas413 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3655,6 +3655,129 @@ function check(name, condition) {
         && v412Check.cardHighlighted === true
         && v412Check.scrollAfterCancel === 510
         && v412Check.helpSynced === true,
+    );
+
+    // v4.13: Verify manual EN box promotion in batch runTranslation(), splitSingleEditorBlock full attribute inheritance,
+    // mergeSelectedText mismatched-angle reset, uninstallEngine danger modal styling, data-font sanitization, and watermark cleanup
+    const v413Check = await vm.runInContext(`
+      (async () => {
+        const prevProject = state.project ? JSON.parse(JSON.stringify(state.project)) : null;
+        const origFetch = window.fetch;
+        let batchPreviewOpened = false;
+        let batchPreviewText = '';
+        try {
+          window.fetch = async (url, opts) => {
+            const u = String(url);
+            if (u.endsWith('/state') && opts?.method === 'PUT') {
+              const body = JSON.parse(opts.body);
+              body.state.version = (body.state.version || 1) + 1;
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => body.state };
+            }
+            if (u.endsWith('/context-preview') && opts?.method === 'POST') {
+              return {
+                ok: true, status: 200, headers: { get: () => 'application/json' },
+                json: async () => ({
+                  provider: 'free', providerLabel: 'Google Translate', model: '', base_url: '',
+                  blockCount: 1, requestCount: 1, requests: [{ index: 1, characters: 20, text: 'BATCH MANUAL ENGLISH' }],
+                  systemPrompt: '', signature: 'sig-v413', note: '', rollingMode: true, contextMode: false, skill: '', summary: '', resume: false,
+                }),
+              };
+            }
+            return origFetch(url, opts);
+          };
+
+          adoptProject({
+            id: 'projv413',
+            version: 1,
+            name: 'پروژه ۴.۱۳',
+            settings: { pageMode: 'comic', overlayTextMode: 'translation', targetLanguage: 'fa' },
+            images: [{
+              id: 'img413', name: 'page-1.png', file: 'img413.png', format: 'PNG',
+              width: 500, height: 700, order: 0, selected: true, ocrCompleted: false,
+              blocks: [{
+                id: 1, x0: 40, y0: 40, x1: 260, y1: 120,
+                text: '', tr: 'BATCH MANUAL ENGLISH', richHtml: '',
+                manual: true, manualLang: 'en', dir: 'ltr', align: 'center', size: 24,
+                enabled: true, eraseOriginal: false,
+              }],
+            }],
+          });
+
+          const runTrPromise = runTranslation({ provider: 'free', profileId: '' });
+          await new Promise((r) => setTimeout(r, 40));
+          batchPreviewOpened = $('translationPreviewDialog')?.open === true;
+          batchPreviewText = $('translationPreviewRequests')?.textContent || '';
+          const promotedText = state.project.images[0].blocks[0].text;
+          cancelTranslationRequestPreview();
+          await runTrPromise.catch(() => {});
+
+          // Test mergeSelectedText angle normalization & splitSingleEditorBlock full attribute inheritance
+          const mergedSample = {
+            id: 10, x0: 20, y0: 20, x1: 200, y1: 140,
+            text: 'Line A\\nLine B', tr: 'خط اول\\nخط دوم', richHtml: '',
+            fontFamily: 'Impact', bold: false, italic: true, underline: true,
+            shape: 'cloud', cornerRadius: 35, angle: 25, color: '#112233', bg: '#ddeeff',
+            sourceLines: [
+              { id: 10, x0: 20, y0: 20, x1: 200, y1: 75, text: 'Line A', tr: '' },
+              { id: 11, x0: 20, y0: 85, x1: 200, y1: 140, text: 'Line B', tr: '' },
+            ],
+          };
+          const splitParts = splitSingleEditorBlock(mergedSample, state.project.images[0], { maxId: 20 });
+
+          // Test uninstallEngine danger modal variant & destructive flag
+          let dangerModalCheck = false;
+          const uninstPromise = uninstallEngine({ id: 'easyocr', name: 'EasyOCR' });
+          await new Promise((r) => setTimeout(r, 20));
+          dangerModalCheck = $('appModalDialog')?.open === true && $('appModalConfirm')?.classList.contains('danger-solid') === true;
+          $('appModalCancel')?.click();
+          await uninstPromise;
+
+          // Test data-font sanitization
+          const sanHtml = window.ComicSanitize.sanitize('<span data-font="Georgia">متن تست</span>');
+
+          // Test watermark preview cleanup on closeDialog
+          let bmpClosed = false;
+          wmPreviewBitmap = { close() { bmpClosed = true; } };
+          wmPreviewImageId = 'other-img';
+          closeDialog('watermarkDialog');
+
+          return {
+            batchPreviewOpened,
+            batchPreviewHasManual: batchPreviewText.includes('BATCH MANUAL ENGLISH'),
+            promotedText,
+            splitCount: splitParts?.length || 0,
+            splitInheritedOk: Boolean(
+              splitParts?.[1]?.fontFamily === 'Impact'
+              && splitParts?.[1]?.shape === 'cloud'
+              && splitParts?.[1]?.cornerRadius === 35
+              && splitParts?.[1]?.angle === 25
+              && splitParts?.[1]?.italic === true
+              && splitParts?.[1]?.underline === true
+            ),
+            dangerModalCheck,
+            sanHtmlHasGeorgia: sanHtml.includes('font-family:Georgia'),
+            bmpClosed,
+            wmCleared: wmPreviewBitmap === null,
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('translationPreviewDialog')?.open) closeDialog('translationPreviewDialog');
+          if (prevProject) adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.13 promotes manual EN boxes in batch runTranslation(), inherits shape/font/angle on Split, styles uninstallEngine modal as danger, sanitizes data-font, and frees watermark preview bitmap',
+      v413Check.batchPreviewOpened === true
+        && v413Check.batchPreviewHasManual === true
+        && v413Check.promotedText === 'BATCH MANUAL ENGLISH'
+        && v413Check.splitCount === 2
+        && v413Check.splitInheritedOk === true
+        && v413Check.dangerModalCheck === true
+        && v413Check.sanHtmlHasGeorgia === true
+        && v413Check.bmpClosed === true
+        && v413Check.wmCleared === true,
+      JSON.stringify(v413Check),
     );
   }
 
