@@ -5,7 +5,7 @@ const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
-const html = fs.readFileSync(path.join(ROOT, 'viewer.html'), 'utf8')
+const html = fs.readFileSync(path.join(ROOT, 'src/viewer/viewer.html'), 'utf8')
   .replace(/<script[\s\S]*?<\/script>/g, ''); // scripts evaluated manually in the window realm
 
 const dom = new JSDOM(html, {
@@ -54,7 +54,7 @@ window.chrome = {
     set: async (obj) => { Object.entries(obj).forEach(([k, v]) => storageMap.set(k, v)); },
     remove: async (key) => { storageMap.delete(key); }
   } },
-  declarativeNetRequest: { updateSessionRules: async () => {} },
+  declarativeNetRequest: { updateSessionRules: async (options) => { window.__lastSessionRuleUpdate = options; } },
   tabs: {
     getCurrent: async () => ({ id: 17 }),
     create: async (options) => { window.__openedPdfImportUrl = options.url; return { id: 18 }; },
@@ -90,9 +90,9 @@ window.scrollTo = () => {};
 window.HTMLElement.prototype.scrollIntoView = () => {};
 window.requestAnimationFrame = (cb) => setTimeout(cb, 0);
 
-const scripts = ['jspdf.umd.min.js', 'pdfbuilder.js', 'tesseract.min.js', 'ocr.js', 'typeset.js', 'translate.js', 'pdf-import-store.js', 'viewer.js', 'trans.js'];
+const scripts = ['../vendor/jspdf.umd.min.js', '../src/core/pdfbuilder.js', '../vendor/tesseract.min.js', '../src/core/ocr.js', '../src/core/typeset.js', '../src/core/translate.js', '../src/core/ai-translate.js', '../src/core/pdf-import-store.js', '../src/viewer/viewer.js', '../src/viewer/trans.js'];
 for (const f of scripts) {
-  const code = fs.readFileSync(path.join(ROOT, f), 'utf8');
+  const code = fs.readFileSync(path.join(__dirname, f), 'utf8');
   try {
     vm.runInContext(code, ctx, { filename: f });
   } catch (e) {
@@ -124,19 +124,26 @@ const $ = (id) => window.document.getElementById(id);
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.61', manifest.version === '2.61' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۶۱'));
-  check('viewer.css contains no literal escaped newline token before .blk-copy-orig.copied',
-    !fs.readFileSync(path.join(ROOT, 'viewer.css'), 'utf8').includes('\\n.blk-copy-orig.copied'));
+  check('manifest and viewer version badge are synchronized at 2.65', manifest.version === '2.65' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۶۵'));
+  const viewerCss = fs.readFileSync(path.join(ROOT, 'src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
-    /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(fs.readFileSync(path.join(ROOT, 'viewer.css'), 'utf8')));
+    /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
+  check('stylesheet has no literal newline escape that breaks a selector', !viewerCss.includes('\\n'));
+  const hasZeroRadius = (block) => /border-radius:\s*0(?:\D|$)/.test(block);
+  const thumbFrame = viewerCss.match(/(?:^|\n)\.tw\s*\{([^}]*)\}/);
+  check('thumbnail frame does not round off image corners', !!thumbFrame && hasZeroRadius(thumbFrame[1]));
+  const lightboxImage = viewerCss.match(/\.lbscroll img\s*\{([^}]*)\}/);
+  const editorImage = viewerCss.match(/\.ed-stage img\s*\{([^}]*)\}/);
+  check('large and editor previews keep square image corners',
+    !!lightboxImage && !!editorImage && hasZeroRadius(lightboxImage[1]) && hasZeroRadius(editorImage[1]));
   check('PDF-to-image import opens the dedicated converter tab',
     !!window.document.getElementById('btnImportPdf') &&
     /زبانهٔ جدا/.test(window.document.getElementById('btnImportPdf').title));
-  check('manifest icon files declared', [16, 32, 48, 128].every((s) => manifest.icons[String(s)] === `icon${s}.png`) &&
-    manifest.action.default_icon['128'] === 'icon128.png');
+  check('manifest icon files declared', [16, 32, 48, 128].every((s) => manifest.icons[String(s)] === `assets/icons/icon${s}.png`) &&
+    manifest.action.default_icon['128'] === 'assets/icons/icon128.png');
   check('brand logo points at the new icon file',
-    window.document.querySelector('.brand-logo img').getAttribute('src') === 'icon128.png');
+    window.document.querySelector('.brand-logo img').getAttribute('src') === '../../assets/icons/icon128.png');
   check('footer grouped shell present', !!window.document.querySelector('.dock .dock-side') &&
     !!window.document.querySelector('.dock .dock-center') && !!window.document.querySelector('.dock .dock-actions'));
   for (const id of ['selCount', 'modePdf', 'modeImg', 'outputSettings', 'buildBtn', 'saveImgBtn']) {
@@ -156,6 +163,33 @@ const $ = (id) => window.document.getElementById(id);
     /فقط برای OCR/.test($('trContrast').parentElement.textContent));
   check('OCR uses one local Tesseract page-segmentation method',
     !$('trOcrProfile') && /یک روش صفحه‌بندی/.test($('ocrMethodNote').textContent));
+  check('optional AI settings stay collapsed to avoid clutter', $('aiSettings') && $('aiSettings').tagName === 'DETAILS' && !$('aiSettings').open);
+  check('AI translation is opt-in and defaults off', $('trAiEnabled') && !$('trAiEnabled').checked);
+  check('named multi-key controls stay inside the collapsed settings',
+    $('aiProfileList') && $('trAiAddProfile') && $('aiSettings').contains($('aiProfileList')) &&
+    $('aiSettings').contains($('trAiAddProfile')));
+  await ev('aiSettingsReady');
+  check('each API profile has a name, private key field, and its own connection test',
+    $('aiProfileList').children.length === 1 &&
+    $('aiProfileList').querySelector('input[type="text"]') &&
+    $('aiProfileList').querySelector('input[type="password"]') &&
+    $('aiProfileList').querySelector('.ai-profile-test'));
+  check('provider selector offers Gemini, OpenAI, OpenRouter, and AvalAI',
+    ['gemini', 'openai', 'openrouter', 'avalai'].every((id) => $('trAiProvider').querySelector(`option[value="${id}"]`)));
+  check('editable Skill and reset action are available',
+    $('aiSettings').contains($('trAiSkill')) && $('aiSettings').contains($('trAiSkillReset')));
+  check('AI key help starts with the official Google AI Studio link',
+    window.document.querySelector('#aiSettings a[href="https://aistudio.google.com/apikey"][rel="noopener noreferrer"]') !== null);
+  $('trAiProvider').value = 'openrouter';
+  $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('switching provider updates the model and official key link',
+    $('trAiModel').value === 'openai/gpt-4o-mini' && $('trAiKeyHelp').href === 'https://openrouter.ai/settings/keys');
+  $('trAiProvider').value = 'avalai';
+  $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  check('AvalAI uses its own default model and documentation link',
+    $('trAiModel').value === 'gpt-6-luna' && $('trAiKeyHelp').href === 'https://docs.avalai.ir/en/quickstart');
+  $('trAiProvider').value = 'gemini';
+  $('trAiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
 
   // 2.21: ESC cancellation affordances exist in the shell
   const jobHint = $('jobHint');
@@ -173,13 +207,19 @@ const $ = (id) => window.document.getElementById(id);
   }
   const items = ev('items');
   check('all 3 images loaded ok', items.length === 3 && items.every((it) => it.state === 'ok'), items.map((i) => i.state));
+  const sessionRule = window.__lastSessionRuleUpdate && window.__lastSessionRuleUpdate.addRules[0];
+  const refererExclusions = sessionRule && sessionRule.condition.excludedRequestDomains || [];
+  check('image Referer rule never rewrites AI provider requests',
+    ['translate.googleapis.com', 'api.mymemory.translated.net', 'generativelanguage.googleapis.com',
+      'api.openai.com', 'openrouter.ai', 'api.avalai.ir'].every((host) => refererExclusions.includes(host)),
+    refererExclusions);
   check('cards rendered', $('grid').children.length === 3);
   $('btnImportPdf').click();
   await sleep(20);
   check('PDF converter opens in a separate extension tab',
     /pdf-import\.html\?/.test(window.__openedPdfImportUrl || '') && /returnTab=17/.test(window.__openedPdfImportUrl || ''),
     window.__openedPdfImportUrl);
-  const pdfImportHtml = fs.readFileSync(path.join(ROOT, 'pdf-import.html'), 'utf8');
+  const pdfImportHtml = fs.readFileSync(path.join(ROOT, 'src/pdf-import/pdf-import.html'), 'utf8');
   check('pdf-import keeps single-PDF chooser and removes repeat retryButton',
     pdfImportHtml.includes('id="choosePdf"') && !pdfImportHtml.includes('retryButton') && !pdfImportHtml.includes('انتخاب PDF دیگری'));
   check('PDFImportStore exposes pruneStaleSessions helper',

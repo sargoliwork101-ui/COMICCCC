@@ -4,7 +4,7 @@ if (pdfConvertBtn) {
   pdfConvertBtn.addEventListener('click', async () => {
     pdfConvertBtn.disabled = true;
     try {
-      await chrome.tabs.create({ url: chrome.runtime.getURL('viewer.html?pdfWorkspace=1'), active: true });
+      await chrome.tabs.create({ url: chrome.runtime.getURL('src/viewer/viewer.html?pdfWorkspace=1'), active: true });
     } catch (error) {
       showError('بازکردن فضای تبدیل PDF ناموفق بود: ' + (error && error.message ? error.message : error));
       pdfConvertBtn.disabled = false;
@@ -127,7 +127,8 @@ async function probeBookFrame() {
   try {
     const u = new URL(location.href);
     const id = u.searchParams.get('id') || u.searchParams.get('nid') || '';
-    return { isReader: u.hostname.startsWith('books.google.') && !!id, href: location.href, id };
+    const isBooksPath = u.pathname.split('/').filter(Boolean)[0] === 'books';
+    return { isReader: u.hostname.startsWith('books.google.') && isBooksPath && !!id, href: location.href, id };
   } catch {
     return { isReader: false, href: '', id: '' };
   }
@@ -175,8 +176,9 @@ async function scrapeAndSend(pdfName, mode, opts) {
     let u;
     try { u = new URL(href); } catch { return null; }
     const inFrame = u.hostname.startsWith('books.google.');
+    const isBooksPath = u.pathname.split('/').filter(Boolean)[0] === 'books';
     const byId = u.searchParams.get('id');
-    if (byId && /^[\w-]+$/.test(byId) && /(^|\.)google\./i.test(u.hostname)) {
+    if (byId && /^[\w-]+$/.test(byId) && /(^|\.)google\./i.test(u.hostname) && isBooksPath) {
       return { id: byId, origin: inFrame ? u.origin : 'https://books.google.com', inFrame, embedded: false };
     }
     if (/(^|\.)google\.[a-z.]+$/i.test(u.hostname) && u.pathname.includes('/books/edition/')) {
@@ -189,7 +191,8 @@ async function scrapeAndSend(pdfName, mode, opts) {
       try {
         const fu = new URL(frame.src);
         const fid = fu.searchParams.get('id');
-        if (fid && /^[\w-]+$/.test(fid)) return { id: fid, origin: fu.origin, inFrame: false, embedded: true };
+        const isBooksPath = fu.pathname.split('/').filter(Boolean)[0] === 'books';
+        if (fid && /^[\w-]+$/.test(fid) && isBooksPath) return { id: fid, origin: fu.origin, inFrame: false, embedded: true };
       } catch { /* قاب نامعتبر */ }
     }
     return null;
@@ -275,12 +278,15 @@ async function scrapeAndSend(pdfName, mode, opts) {
       pictureSources.forEach((source) => parseSet(source.srcset || source.getAttribute('data-srcset'), 1));
     }
 
-    // Lazy source URLs are common on comic sites; retain them as candidates rather than ignoring them
-    // merely because a lower-resolution placeholder has already loaded.
-    for (const name of ['data-src', 'data-lazy-src', 'data-url']) {
+    // آدرس‌های lazy معتبر نباید به thumbnailِ لودشده ببازند. اگر تصویر فعلی واقعاً وضوح بیشتری دارد، همان حفظ می‌شود.
+    for (const name of ['data-src', 'data-lazy-src']) {
       const lazy = img.getAttribute(name);
-      addCandidate(lazy, urlResolution(toAbsolute(lazy)), 4);
+      const lazyUrl = toAbsolute(lazy);
+      addCandidate(lazy, urlResolution(lazyUrl) || renderedWidth + 1, 4);
     }
+    // data-url روی بعضی سایت‌ها نشانی صفحه است، نه لزوماً تصویر؛ اولویت تشخیصی آن را بالا نمی‌بریم.
+    const dataUrl = img.getAttribute('data-url');
+    addCandidate(dataUrl, urlResolution(toAbsolute(dataUrl)), 4);
     addCandidate(img.getAttribute('src'), urlResolution(toAbsolute(img.getAttribute('src'))), 2);
     addCandidate(active, Math.max(urlResolution(active), img.complete && img.naturalWidth > 0 ? img.naturalWidth : 0), 5);
 
@@ -306,12 +312,19 @@ async function scrapeAndSend(pdfName, mode, opts) {
   let inlineDataBytes = 0, skippedInline = 0;
   const add = (src) => {
     if (!src) return;
+    // سقف حالت دستی در اسکن نهایی و MutationObserver هم حفظ شود؛ Google Books کنترل جداگانهٔ خودش را دارد.
+    if (mode === 'manual' && !gbook && pageLimit > 0 && urls.length >= pageLimit) return;
     let abs;
     if (/^data:image\//i.test(src)) {
       abs = src;
       if (seen.has(abs)) return;
       const bytes = Math.ceil(src.length * 0.75);
-      if (inlineDataBytes + bytes > INLINE_DATA_BUDGET) { skippedInline++; return; }
+      if (inlineDataBytes + bytes > INLINE_DATA_BUDGET) {
+        // همان data URI در اسکن‌های بعدی دوباره شمرده نشود.
+        seen.add(abs);
+        skippedInline++;
+        return;
+      }
       inlineDataBytes += bytes;
     } else if (/^blob:/i.test(src)) abs = src;
     else {
@@ -823,10 +836,10 @@ async function scrapeAndSend(pdfName, mode, opts) {
     };
 
     // سیگنال ۱: هوک pushState/replaceState (readerهای SPA بدون رفرش)
-    const origPush = history.pushState.bind(history);
-    const origReplace = history.replaceState.bind(history);
-    history.pushState = function (...args) { const r = origPush(...args); scheduleSignal(); return r; };
-    history.replaceState = function (...args) { const r = origReplace(...args); scheduleSignal(); return r; };
+    const origPush = history.pushState;
+    const origReplace = history.replaceState;
+    history.pushState = function (...args) { const r = origPush.apply(history, args); scheduleSignal(); return r; };
+    history.replaceState = function (...args) { const r = origReplace.apply(history, args); scheduleSignal(); return r; };
     // سیگنال ۲: رویدادهای مرورگر
     window.addEventListener('popstate', scheduleSignal);
     window.addEventListener('hashchange', scheduleSignal);
@@ -1009,6 +1022,10 @@ async function scrapeAndSend(pdfName, mode, opts) {
     say(`ورق‌زدن خودکار — صفحهٔ ${page} — ${urls.length} تصویر`);
 
     while (page < T.maxPages && !cancelled) {
+      if (pageLimit > 0 && page >= pageLimit) {
+        say(`به سقف ${pageLimit} صفحه رسیدیم؛ جمع‌آوری متوقف شد.\nدر مجموع ${urls.length} تصویر.`);
+        return;
+      }
       const btn = findNextButton();
       if (!btn) {
         say(`دکمهٔ «بعدی» پیدا نشد؛ به پایان رسیدیم.\nدر مجموع ${urls.length} تصویر جمع شد.`);
@@ -1043,7 +1060,9 @@ async function scrapeAndSend(pdfName, mode, opts) {
     const refreshCount = () => {
       if (urls.length !== lastCount) {
         lastCount = urls.length;
-        countEl.textContent = `${urls.length} تصویر جمع شد`;
+        countEl.textContent = pageLimit > 0 && urls.length >= pageLimit
+          ? `${urls.length} تصویر (به سقف ${pageLimit} رسیدی)`
+          : `${urls.length} تصویر جمع شد`;
       }
     };
     scanImages();
