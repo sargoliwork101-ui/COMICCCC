@@ -527,6 +527,31 @@ def _run_Subprocess(command: list[str] | str, **kwargs: Any) -> subprocess.Compl
     return subprocess.run(command, **kwargs)
 
 
+def _kill_process_tree(proc: subprocess.Popen[Any]) -> None:
+    """Terminate `proc` and any child processes cleanly across Windows and POSIX."""
+    if proc.poll() is not None:
+        return
+    pid = proc.pid
+    if os.name == "nt" and pid:
+        try:
+            _run_Subprocess(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=3)
+    except Exception:
+        pass
+
+
 def process_rss_mb(pid: int | None = None) -> float:
     """Return Resident Set Size / Working Set in MB for `pid` (defaults to current process)."""
     target_pid = os.getpid() if pid is None else int(pid)
@@ -2015,27 +2040,7 @@ class IsolatedOcrEngine:
             self._active_install_procs.discard(proc)
 
     def _kill_proc_tree(self, proc: subprocess.Popen[Any]) -> None:
-        if proc.poll() is not None:
-            return
-        pid = proc.pid
-        if _is_windows() and pid:
-            try:
-                _run_Subprocess(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
-                    capture_output=True,
-                    timeout=5,
-                    check=False,
-                )
-            except Exception:
-                pass
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=3)
-        except Exception:
-            pass
+        _kill_process_tree(proc)
 
     def cancel_install(self) -> None:
         self._cancel_install.set()

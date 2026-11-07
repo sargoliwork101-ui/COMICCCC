@@ -6,12 +6,14 @@ import csv
 import importlib.util
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -173,6 +175,8 @@ def _run_standard_pip_streaming(
     stall_timeout: float = 180.0,
     start_p: float = 0.18,
     end_p: float = 0.66,
+    progress_cb: Callable[[str, float], None] | None = None,
+    label: str = "OCR",
 ) -> subprocess.CompletedProcess[str]:
     from .ocr_managed import _dir_bytes_fast, _kill_process_tree, _parse_size_to_bytes
 
@@ -194,22 +198,28 @@ def _run_standard_pip_streaming(
     stalled = [False]
     done = threading.Event()
     cur_p = [start_p]
-    span = max(0.05, end_p - start_p)
+    span = max(0.03, end_p - start_p)
     has_torch = any("torch" in str(part).lower() for part in cmd)
-    expected_bytes = [float((2550 if has_torch else 120) * (1024 ** 2))]
+    has_ct2 = any("ctranslate2" in str(part).lower() for part in cmd)
+    expected_bytes = [float((2550 if has_torch else (45 if has_ct2 else 120)) * (1024 ** 2))]
     announced_bytes = [0.0]
     completed_wheel_bytes = [0.0]
     active_wheel_bytes = [0.0]
     collect_steps = [0]
 
+    def _is_cancelled() -> bool:
+        return cancel_event.is_set() or _STANDARD_CANCEL_EVENT.is_set()
+
     def _emit_std(msg: str, ratio: float) -> None:
         clamped = max(0.0, min(0.98, ratio))
         cur_p[0] = max(cur_p[0], round(start_p + span * clamped, 3))
         emit(msg, progress=cur_p[0])
+        if progress_cb is not None:
+            progress_cb(msg, cur_p[0])
 
     def _watchdog() -> None:
         while not done.wait(1.0):
-            if cancel_event.is_set():
+            if _is_cancelled():
                 _kill_process_tree(proc)
                 return
             now = time.monotonic()
@@ -222,7 +232,7 @@ def _run_standard_pip_streaming(
                     mb = max(0.1, gained_b / (1024 * 1024))
                     denom = max(expected_bytes[0], announced_bytes[0] * 1.05, gained_b * 1.06)
                     dl_ratio = min(1.0, max(gained_b, completed_wheel_bytes[0]) / max(1.0, denom))
-                    _emit_std(f"در حال دریافت بسته‌های OCR ({mb:.1f} مگابایت)…", 0.06 + 0.80 * dl_ratio)
+                    _emit_std(f"در حال دریافت بسته‌های {label} ({mb:.1f} مگابایت)…", 0.06 + 0.80 * dl_ratio)
                     continue
             if now - last_activity_at[0] >= stall_timeout:
                 stalled[0] = True
@@ -235,7 +245,7 @@ def _run_standard_pip_streaming(
         assert proc.stdout is not None
         for raw_line in proc.stdout:
             last_activity_at[0] = time.monotonic()
-            if cancel_event.is_set():
+            if _is_cancelled():
                 _kill_process_tree(proc)
                 return subprocess.CompletedProcess(cmd, 130, "", "Cancelled by user")
             line = raw_line.strip()
@@ -262,7 +272,7 @@ def _run_standard_pip_streaming(
             elif low.startswith("installing collected packages"):
                 completed_wheel_bytes[0] += active_wheel_bytes[0]
                 active_wheel_bytes[0] = 0.0
-                _emit_std("در حال نصب بسته‌های دریافت‌شده روی سیستم…", 0.90)
+                _emit_std(f"در حال نصب بسته‌های {label} روی سیستم…", 0.90)
         rc = proc.wait(timeout=30)
     except Exception:
         _kill_process_tree(proc)
@@ -272,7 +282,7 @@ def _run_standard_pip_streaming(
         watcher.join(timeout=2.0)
 
     joined = "\n".join(tail)
-    if cancel_event.is_set():
+    if _is_cancelled():
         return subprocess.CompletedProcess(cmd, 130, "", "Cancelled by user")
     if stalled[0]:
         joined = (joined + f"\nOperation timed out during pip installation (stalled >{int(stall_timeout)}s).").strip()
@@ -280,11 +290,21 @@ def _run_standard_pip_streaming(
     return subprocess.CompletedProcess(cmd, rc, joined if rc == 0 else "", "" if rc == 0 else joined)
 
 
-def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
+def install_packages(
+    packages: list[str],
+    *,
+    upgrade: bool = False,
+    cancel_event: threading.Event | None = None,
+    progress_cb: Callable[[str, float], None] | None = None,
+    start_p: float = 0.18,
+    end_p: float = 0.66,
+    label: str = "OCR",
+) -> None:
     """Install a whitelisted runtime only after an explicit user preparation click."""
     if not packages:
         return
-    if _STANDARD_CANCEL_EVENT.is_set():
+    eff_cancel = cancel_event if cancel_event is not None else _STANDARD_CANCEL_EVENT
+    if eff_cancel.is_set() or _STANDARD_CANCEL_EVENT.is_set():
         raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
     from .ocr_managed import (
         PYPI_FALLBACK_MIRRORS,
@@ -326,21 +346,30 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
         return cmd
 
     action_label = "به‌روزرسانی" if upgrade else "نصب"
-    emit(f"{action_label} بسته‌های OCR آغاز شد: {', '.join(packages)}", progress=0.18)
-    attempts: list[tuple[str | None, str | None]] = [(None, None), (None, "تلاش مجدد برای دریافت بسته‌های OCR از کش محلی…")]
+    start_msg = f"{action_label} بسته‌های {label} آغاز شد: {', '.join(packages)}"
+    emit(start_msg, progress=start_p)
+    if progress_cb is not None:
+        progress_cb(start_msg, start_p)
+    attempts: list[tuple[str | None, str | None]] = [
+        (None, None),
+        (None, f"تلاش مجدد برای دریافت بسته‌های {label} از کش محلی…"),
+    ]
     if not has_custom_index:
         for mirror_name, mirror_url in PYPI_FALLBACK_MIRRORS:
-            attempts.append((mirror_url, f"ادامهٔ نصب بسته‌های OCR از میرور جایگزین ({mirror_name})…"))
+            attempts.append((mirror_url, f"ادامهٔ نصب بسته‌های {label} از میرور جایگزین ({mirror_name})…"))
 
     result: subprocess.CompletedProcess[str] | None = None
     try:
         with _INSTALL_LOCK:
             for idx, (mirror_url, notice) in enumerate(attempts):
-                if _STANDARD_CANCEL_EVENT.is_set():
+                if eff_cancel.is_set() or _STANDARD_CANCEL_EVENT.is_set():
                     raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
                 if idx > 0:
                     if notice:
-                        emit(notice, "warning", progress=0.25)
+                        retry_p = round(start_p + (end_p - start_p) * 0.15, 3)
+                        emit(notice, "warning", progress=retry_p)
+                        if progress_cb is not None:
+                            progress_cb(notice, retry_p)
                     time.sleep(1.0)
                     wh = sync_local_wheelhouse()
                 built_cmd = _build_cmd(mirror_url)
@@ -354,9 +383,13 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
                         built_cmd,
                         env=clean_pip_env(),
                         cdir=cdir,
-                        cancel_event=_STANDARD_CANCEL_EVENT,
+                        cancel_event=eff_cancel,
+                        start_p=start_p,
+                        end_p=end_p,
+                        progress_cb=progress_cb,
+                        label=label,
                     )
-                if _STANDARD_CANCEL_EVENT.is_set() or (result is not None and result.returncode == 130):
+                if eff_cancel.is_set() or _STANDARD_CANCEL_EVENT.is_set() or (result is not None and result.returncode == 130):
                     raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
                 if result.returncode == 0:
                     if target_site is not None:
@@ -370,7 +403,7 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
     except OcrError:
         raise
     except Exception as exc:
-        emit(f"نصب بسته‌های OCR ناموفق بود: {exc}", "error")
+        emit(f"نصب بسته‌های {label} ناموفق بود: {exc}", "error")
         raise OcrError(f"Could not install the OCR runtime: {exc}") from exc
     assert result is not None
     if result.returncode:
@@ -381,10 +414,13 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
         if "WinError 5" in details or "Access is denied" in details:
             details += ("\nComic OCR Studio: Windows denied write access. Close the app, start start_windows_admin.bat, "
                         "approve the UAC prompt, and retry the explicit OCR installation.")
-        emit(f"نصب بسته‌های OCR ناموفق بود: {details}", "error")
+        emit(f"نصب بسته‌های {label} ناموفق بود: {details}", "error")
         raise OcrError(f"OCR runtime installation failed: {details}")
     importlib.invalidate_caches()
-    emit("نصب بسته‌های OCR تمام شد", "success", progress=0.68)
+    done_p = round(min(0.99, end_p + 0.02), 3)
+    emit(f"نصب بسته‌های {label} تمام شد", "success", progress=done_p)
+    if progress_cb is not None:
+        progress_cb(f"نصب بسته‌های {label} تمام شد", done_p)
 
 
 def _lines_from_rapid(result: Any) -> list[OcrLine]:

@@ -1,4 +1,4 @@
-# Comic OCR Studio 4.05
+# Comic OCR Studio 4.06
 
 برنامهٔ مستقل Python برای کار روی کمیک، مانگا، کتاب، مقاله و جزوه: **PDF یا تصویر ورودی → OCR هوشمند (کمیک و کتاب) → ترجمه (رایگان آنلاین، مترجم آفلاین داخلی NLLB-200 بدون اینترنت یا AI) → ویرایش → PDF، ZIP تصویر، TXT، Word (DOCX تصویری و کتابی پیوسته) یا PowerPoint (PPTX تصویری و اسلاید ارائه ۱۶:۹)**.
 
@@ -60,7 +60,7 @@ cd COMICCCC\python_app
 ### ساخت فایل اجرایی مستقل یک‌کلیکی (`.exe`) و نصاب آفلاین ویندوز
 
 اگر می‌خواهید برنامه را بدون نیاز به نصب پایتون و بدون نیاز به اینترنت (مثلاً روی سیستم دیگر یا از روی فلش) با یک کلیک اجرا یا نصب کنید، داخل پوشهٔ `python_app` فایل **`build_windows_offline.bat`** را اجرا کنید:
-- **حالت ۱ (`Standard Offline Setup`):** ساخت `dist\ComicOCRStudio\ComicOCRStudio.exe` و نصاب یک‌کلیکی `dist\ComicOCRStudio-Offline-Setup-4.05.exe` همراه با مدل‌های پایهٔ OCR آفلاین.
+- **حالت ۱ (`Standard Offline Setup`):** ساخت `dist\ComicOCRStudio\ComicOCRStudio.exe` و نصاب یک‌کلیکی `dist\ComicOCRStudio-Offline-Setup-4.06.exe` همراه با مدل‌های پایهٔ OCR آفلاین.
 - **حالت ۲ (`Full Offline Setup --with-nmt`):** علاوه بر برنامه و OCR آفلاین، مدل مترجم آفلاین ۶۰۰ میلیون پارامتری `NLLB-200` نیز داخل نصاب بسته‌بندی می‌شود تا هم OCR و هم ترجمهٔ فارسی/انگلیسی از لحظهٔ اول ۱۰۰٪ بدون اینترنت کار کنند.
 - **حالت ۳ (`Full + wheelhouse`):** علاوه بر نصاب کامل، پوشهٔ `wheelhouse\` نیز برای نصب آفلاین با `start_windows.bat` دانلود و آماده می‌شود.
 

@@ -3,14 +3,14 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem Comic OCR Studio 4.05 - Windows setup and launcher.
+rem Comic OCR Studio 4.06 - Windows setup and launcher.
 rem Dependencies are installed in .venv during setup; later launches reuse that local environment.
 rem Existing supported system Python installations are never modified or removed.
 
 set "APP_DIR=%CD%"
 set "VENV_DIR=%APP_DIR%\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
-set "READY=%VENV_DIR%\.comic-ocr-studio-4.05.ready"
+set "READY=%VENV_DIR%\.comic-ocr-studio-4.06.ready"
 set "OFFLINE_WHEELS=%APP_DIR%\wheelhouse"
 set "OFFLINE_PYTHON_EXE=%APP_DIR%\offline_python\python-3.13.17-amd64.exe"
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
@@ -74,10 +74,9 @@ if defined HAD_READY (
         goto run_app
     )
 )
-if not defined HAD_READY (
-    set "PIP_RETRIES=5"
-    set "PIP_TIMEOUT=90"
-)
+rem Reaching here means either first-time setup or a new required package is missing: allow generous download timeouts.
+set "PIP_RETRIES=5"
+set "PIP_TIMEOUT=90"
 "%VENV_PYTHON%" -m pip --version >nul 2>&1
 if not errorlevel 1 goto update_tools
 echo [Comic OCR Studio] Restoring pip using Python ensurepip...

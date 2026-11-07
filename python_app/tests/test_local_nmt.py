@@ -468,3 +468,138 @@ def test_full_offline_single_sentence_and_multipage_routes_plus_custom_storage(t
         )
         assert missing_prev.status_code == 200
         assert "دانلود" in (missing_prev.json()["previewError"] or "")
+
+
+def test_v406_real_pip_streaming_kill_process_tree_and_ast_imports(tmp_path, monkeypatch):
+    """v4.06 regression: verify _run_standard_pip_streaming, _kill_process_tree, LocalNmtManager runtime install, and all lazy imports."""
+    import ast
+    import importlib
+    import os
+    import sys
+    import threading
+    import time
+
+    from comic_studio.local_nmt import LocalNmtError, LocalNmtManager
+    from comic_studio.ocr import OcrError, _run_standard_pip_streaming
+
+    # 1. Real subprocess streaming progress (exercises `from .ocr_managed import ..., _kill_process_tree, ...`)
+    seen_progress: list[tuple[str, float]] = []
+    cancel_ev = threading.Event()
+    sim_script = (
+        "import sys; "
+        "print('Collecting ctranslate2>=4.0,<5', flush=True); "
+        "print('Downloading ctranslate2-4.8.5-cp311-cp311-win_amd64.whl (35.2 MB)', flush=True); "
+        "print('Installing collected packages: sentencepiece, ctranslate2', flush=True)"
+    )
+    res = _run_standard_pip_streaming(
+        [sys.executable, "-c", sim_script],
+        env=dict(os.environ),
+        cdir=tmp_path / "pip_cache",
+        cancel_event=cancel_ev,
+        start_p=0.06,
+        end_p=0.16,
+        progress_cb=lambda msg, p: seen_progress.append((msg, p)),
+        label="مترجم آفلاین",
+    )
+    assert res.returncode == 0
+    assert len(seen_progress) >= 3
+    assert all(0.06 <= p <= 0.16 for _, p in seen_progress)
+    assert any("مترجم آفلاین" in msg for msg, _ in seen_progress)
+
+    # 2. Real subprocess cancellation exercises `_kill_process_tree(proc)` on a live child process
+    cancel_ev2 = threading.Event()
+    slow_script = (
+        "import time; "
+        "print('Downloading ctranslate2-4.8.5.whl (35.2 MB)', flush=True); "
+        "time.sleep(30)"
+    )
+    threading.Timer(0.25, cancel_ev2.set).start()
+    t0 = time.monotonic()
+    res_cancel = _run_standard_pip_streaming(
+        [sys.executable, "-c", slow_script],
+        env=dict(os.environ),
+        cdir=tmp_path / "pip_cache2",
+        cancel_event=cancel_ev2,
+        start_p=0.06,
+        end_p=0.16,
+        label="مترجم آفلاین",
+    )
+    assert res_cancel.returncode == 130
+    assert (time.monotonic() - t0) < 8.0
+
+    # 3. LocalNmtManager.prepare translates OcrError from runtime installation into a clear Persian LocalNmtError (HTTP 400, not 503)
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path / "nmt_data"))
+    import comic_studio.paths as paths_mod
+
+    paths_mod._CONFIG_CACHE = None
+    mgr = LocalNmtManager()
+    monkeypatch.setattr(mgr, "runtime_installed", lambda: False)
+
+    def _failing_install(*_args, **_kwargs):
+        raise OcrError("simulated network failure")
+
+    monkeypatch.setattr("comic_studio.local_nmt.install_packages", _failing_install)
+    try:
+        mgr.prepare("nllb-600m")
+        raise AssertionError("Expected LocalNmtError")
+    except LocalNmtError as exc:
+        assert "نصب موتور اجرایی مترجم آفلاین" in str(exc)
+
+    # 4. AST audit across every production module in comic_studio/ and offline_packaging/ (imports + undefined names)
+    import builtins
+
+    builtin_names = set(dir(builtins)) | {
+        "__file__", "__name__", "__doc__", "__package__", "__spec__", "__all__", "__annotations__",
+    }
+    app_root = paths_mod.PACKAGE_DIR.parent
+    missing_imports: list[str] = []
+    undefined_globals: list[str] = []
+    for py_file in sorted(app_root.rglob("*.py")):
+        if ".venv" in py_file.parts or "tests" in py_file.parts:
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        defined = set(builtin_names)
+        pkg = "comic_studio" if "comic_studio" in py_file.parts else None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.add(node.name)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+                    defined.add(arg.arg)
+                if node.args.vararg:
+                    defined.add(node.args.vararg.arg)
+                if node.args.kwarg:
+                    defined.add(node.args.kwarg.arg)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    defined.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                defined.add(node.id)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(node.name)
+            elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+                defined.add(node.target.id)
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            mod_name = node.module or ""
+            if node.level > 0 and pkg:
+                target = pkg + ("." + mod_name if mod_name else "")
+            elif mod_name.startswith(("comic_studio", "offline_packaging")):
+                target = mod_name
+            else:
+                continue
+            mod = importlib.import_module(target)
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if not hasattr(mod, alias.name):
+                    try:
+                        importlib.import_module(f"{target}.{alias.name}")
+                    except Exception:
+                        missing_imports.append(f"{py_file.name}:{node.lineno} -> {target}.{alias.name}")
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in defined:
+                undefined_globals.append(f"{py_file.name}:{node.lineno} -> {node.id}")
+    assert missing_imports == [], f"Broken internal imports detected: {missing_imports}"
+    assert undefined_globals == [], f"Undefined globals detected: {undefined_globals}"
+

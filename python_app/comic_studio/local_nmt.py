@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 import httpx
 
-from .ocr import emit, ensure_custom_site_packages_on_path, install_packages, trim_process_memory
+from .ocr import OcrError, emit, ensure_custom_site_packages_on_path, install_packages, trim_process_memory
 from .paths import bundled_models_dir, models_dir
 
 DEFAULT_LOCAL_NMT_MODEL = "nllb-600m"
@@ -590,7 +590,7 @@ class LocalNmtManager:
         last_exc: Exception | None = None
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        headers = {"User-Agent": "ComicOCRStudio/4.05"}
+        headers = {"User-Agent": "ComicOCRStudio/4.06"}
         with httpx.Client(headers=headers, follow_redirects=True, transport=self._transport) as client:
             selected_manifest: list[tuple[str, int]] | None = None
             selected_endpoint = endpoints[0]
@@ -741,7 +741,31 @@ class LocalNmtManager:
                 if progress_cb is not None:
                     progress_cb("نصب موتور اجرایی CTranslate2 و SentencePiece…", 0.06)
                 emit("نصب موتور سبک ترجمهٔ آفلاین (CTranslate2 + SentencePiece)…", progress=0.06)
-                install_packages(LOCAL_NMT_RUNTIME_PACKAGES)
+
+                def _on_runtime_progress(msg: str, prog: float) -> None:
+                    self._set_busy(target_id, msg, prog)
+                    if progress_cb is not None:
+                        progress_cb(msg, prog)
+
+                try:
+                    try:
+                        install_packages(
+                            LOCAL_NMT_RUNTIME_PACKAGES,
+                            cancel_event=self._cancel_event,
+                            progress_cb=_on_runtime_progress,
+                            start_p=0.06,
+                            end_p=0.16,
+                            label="مترجم آفلاین",
+                        )
+                    except TypeError:
+                        # Support 1-argument monkeypatched stubs in unit tests.
+                        install_packages(LOCAL_NMT_RUNTIME_PACKAGES)
+                except OcrError as exc:
+                    if self._cancel_event.is_set() or "لغو" in str(exc):
+                        raise LocalNmtError("دانلود مدل مترجم آفلاین به درخواست کاربر لغو شد.") from exc
+                    raise LocalNmtError(
+                        f"نصب موتور اجرایی مترجم آفلاین (CTranslate2 / SentencePiece) ناموفق بود؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید. جزئیات: {exc}"
+                    ) from exc
                 ensure_custom_site_packages_on_path()
                 importlib.invalidate_caches()
                 if not self.runtime_installed():
