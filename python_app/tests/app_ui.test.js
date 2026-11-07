@@ -2129,7 +2129,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas407: verText.includes('۴.۰۷'),
+            verHas408: verText.includes('۴.۰۸'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2148,8 +2148,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.07 displays version 4.07 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas407 === true
+      'v4.00/v4.08 displays version 4.08 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas408 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3079,6 +3079,139 @@ function check(name, condition) {
         && v407Check.crossPageExact === true
         && v407Check.helpHasCopyDocs === true,
       JSON.stringify(v407Check),
+    );
+  }
+
+  // v4.08: Verify API key priority controls (↑ بالاتر, ↓ پایین‌تر, ⇈ اولویت اول, drag-and-drop badge, preserved secrets & limits, #translationPreviewService priority ranks, and Help Guide Chapter 7 & 8 documentation)
+  {
+    const v408Check = await vm.runInContext(`
+      (async () => {
+        const prevAi = JSON.parse(JSON.stringify(state.ai || {}));
+        try {
+          $('aiBtn').click();
+          $('aiProvider').value = 'openrouter';
+          $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+          // Step A: Save 2 keys on the server with actual secrets so stored secrets exist on backend
+          aiEditorProfiles = [
+            { id: 'prio-k1', name: 'کلید اول قدیمی', hasApiKey: false, apiKey: 'sk-saved-k1', timeout_seconds: '30', retry_count: '1', retry_wait_seconds: '10', source_limit: '1100' },
+            { id: 'prio-k2', name: 'کلید دوم پشتیبان', hasApiKey: false, apiKey: 'sk-saved-k2', timeout_seconds: '60', retry_count: '2', retry_wait_seconds: '15', source_limit: '2200' },
+          ];
+          renderAiProfiles();
+          await saveAiSettings();
+
+          // Step B: Reopen #aiDialog (password inputs are now empty "", hasApiKey === true) and add a 3rd fresh key
+          $('aiBtn').click();
+          $('aiProvider').value = 'openrouter';
+          $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+          aiEditorProfiles[0]._lastStatus = 'اتصال برقرار است ✓';
+          aiEditorProfiles.push({
+            id: 'prio-k3', name: 'کلید سوم پرسرعت', hasApiKey: false, apiKey: 'sk-fresh-k3', timeout_seconds: '90', retry_count: '0', retry_wait_seconds: '20', source_limit: '3300',
+          });
+          renderAiProfiles();
+
+          let rows = [...document.querySelectorAll('#aiProfiles .ai-profile-row')];
+          const initialBadges = rows.map((r) => r.querySelector('.ai-priority-badge')?.textContent || '');
+          const initialReadyChips = rows.map((r) => r.querySelector('.ai-key-ready-chip')?.textContent || '');
+          const firstRowUpDisabled = rows[0].querySelector('.ai-profile-up')?.disabled === true
+            && rows[0].querySelector('.ai-profile-top')?.disabled === true
+            && rows[0].querySelector('.ai-profile-down')?.disabled === false;
+          const lastRowDownDisabled = rows[2].querySelector('.ai-profile-down')?.disabled === true
+            && rows[2].querySelector('.ai-profile-up')?.disabled === false
+            && rows[2].querySelector('.ai-profile-top')?.disabled === false;
+
+          // 1. Click "⇈ اولویت اول" on row 3 (prio-k3) -> jumps straight to index 0!
+          rows[2].querySelector('.ai-profile-top').click();
+          rows = [...document.querySelectorAll('#aiProfiles .ai-profile-row')];
+          const orderAfterTop = rows.map((r) => r.dataset.profileId);
+
+          // 2. Click "↓ پایین‌تر" on row 2 (prio-k1) -> swaps with prio-k2 -> [prio-k3, prio-k2, prio-k1]
+          rows[1].querySelector('.ai-profile-down').click();
+          rows = [...document.querySelectorAll('#aiProfiles .ai-profile-row')];
+          const orderAfterDown = rows.map((r) => r.dataset.profileId);
+          const preservedStatusMovedToRow3 = rows[2].querySelector('.ai-profile-status')?.textContent === 'اتصال برقرار است ✓';
+
+          // 3. Click "↑ بالاتر" on row 3 (prio-k1) -> moves back to middle -> [prio-k3, prio-k1, prio-k2]
+          rows[2].querySelector('.ai-profile-up').click();
+          rows = [...document.querySelectorAll('#aiProfiles .ai-profile-row')];
+          const orderAfterUp = rows.map((r) => r.dataset.profileId);
+
+          // 4. Test HTML5 drag-and-drop on .ai-priority-badge: drag row 2 (index 2: prio-k2) onto row 1 (index 1: prio-k1) -> [prio-k3, prio-k2, prio-k1]
+          rows[2].querySelector('.ai-priority-badge').dispatchEvent(new window.Event('dragstart', { bubbles: true }));
+          const dropEv = new window.Event('drop', { bubbles: true, cancelable: true });
+          rows[1].dispatchEvent(dropEv);
+          rows[2]?.querySelector('.ai-priority-badge')?.dispatchEvent(new window.Event('dragend', { bubbles: true }));
+          rows = [...document.querySelectorAll('#aiProfiles .ai-profile-row')];
+          const orderAfterDrag = rows.map((r) => r.dataset.profileId);
+
+          // 5. Save AI settings and verify PUT payload order + preserved secrets + #translationPreviewService priority rank labels
+          await saveAiSettings();
+          const savedProfiles = state.ai?.providers?.openrouter?.profiles || [];
+          const savedIds = savedProfiles.map((p) => p.id);
+          const allSavedHaveKeys = savedProfiles.length === 3 && savedProfiles.every((p) => p.hasApiKey === true);
+          const savedTimeouts = savedProfiles.map((p) => Number(p.timeout_seconds));
+
+          renderTranslationServiceSelector('openrouter', '');
+          const previewOptions = [...$('translationPreviewService').options]
+            .filter((o) => o.value === 'openrouter' || o.value.startsWith('openrouter::'))
+            .map((o) => ({ value: o.value, text: o.textContent }));
+
+          // 6. Verify Help Guide Chapter 7 & Chapter 8 document API key priority clearly
+          openHelpDialog('ai-translation-settings');
+          const ch7Html = $('helpContentArea')?.textContent || '';
+          openHelpDialog('translation-preview-context');
+          const ch8Html = $('helpContentArea')?.textContent || '';
+          const headingHintOk = ($('aiDialog')?.innerHTML || '').includes('اولویت ۱ ابتدا امتحان می‌شود')
+            && ($('aiDialog')?.innerHTML || '').includes('⇈ اولویت اول');
+          const helpSynced = ch7Html.includes('⇈ اولویت اول')
+            && ch7Html.includes('↑ بالاتر')
+            && ch7Html.includes('↓ پایین‌تر')
+            && ch8Html.includes('به ترتیب اولویت');
+
+          return {
+            initialPrimaryBadgeOk: initialBadges[0].includes('اولویت ۱') && initialBadges[1].includes('اولویت ۲') && initialBadges[2].includes('اولویت ۳'),
+            readyChipsOk: initialReadyChips[0].includes('کلید ذخیره‌شده') && initialReadyChips[2].includes('کلید جدید آمادهٔ ذخیره'),
+            boundaryBtnsOk: firstRowUpDisabled && lastRowDownDisabled,
+            orderAfterTopOk: JSON.stringify(orderAfterTop) === JSON.stringify(['prio-k3', 'prio-k1', 'prio-k2']),
+            orderAfterDownOk: JSON.stringify(orderAfterDown) === JSON.stringify(['prio-k3', 'prio-k2', 'prio-k1']),
+            preservedStatusMovedToRow3,
+            orderAfterUpOk: JSON.stringify(orderAfterUp) === JSON.stringify(['prio-k3', 'prio-k1', 'prio-k2']),
+            orderAfterDragOk: JSON.stringify(orderAfterDrag) === JSON.stringify(['prio-k3', 'prio-k2', 'prio-k1']),
+            savedOrderOk: JSON.stringify(savedIds) === JSON.stringify(['prio-k3', 'prio-k2', 'prio-k1']),
+            allSavedHaveKeys,
+            savedTimeoutsOk: JSON.stringify(savedTimeouts) === JSON.stringify([90, 60, 30]),
+            previewRanksOk: previewOptions.length === 4
+              && previewOptions[0].text.includes('به ترتیب اولویت')
+              && previewOptions[1].value === 'openrouter::prio-k3' && previewOptions[1].text.includes('اولویت ۱')
+              && previewOptions[2].value === 'openrouter::prio-k2' && previewOptions[2].text.includes('اولویت ۲')
+              && previewOptions[3].value === 'openrouter::prio-k1' && previewOptions[3].text.includes('اولویت ۳'),
+            headingHintOk,
+            helpSynced,
+          };
+        } finally {
+          state.ai = prevAi;
+          aiEditorDrafts.clear();
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+          if ($('aiDialog')?.open) closeDialog('aiDialog');
+        }
+      })()
+    `, context);
+    check(
+      'v4.08 supports API key priority ordering via ⇈ اولویت اول / ↑ بالاتر / ↓ پایین‌تر & drag-and-drop while preserving saved secrets, updating #translationPreviewService ranks, and syncing Help Chapters 7 & 8',
+      v408Check.initialPrimaryBadgeOk === true
+        && v408Check.readyChipsOk === true
+        && v408Check.boundaryBtnsOk === true
+        && v408Check.orderAfterTopOk === true
+        && v408Check.orderAfterDownOk === true
+        && v408Check.preservedStatusMovedToRow3 === true
+        && v408Check.orderAfterUpOk === true
+        && v408Check.orderAfterDragOk === true
+        && v408Check.savedOrderOk === true
+        && v408Check.allSavedHaveKeys === true
+        && v408Check.savedTimeoutsOk === true
+        && v408Check.previewRanksOk === true
+        && v408Check.headingHintOk === true
+        && v408Check.helpSynced === true,
+      JSON.stringify(v408Check),
     );
   }
 

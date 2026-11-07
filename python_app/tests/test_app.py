@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.07"
+    assert health.json()["version"] == "4.08"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۰۷ · Python</span>' in index_html
+    assert '<span class="ver">۴.۰۸ · Python</span>' in index_html
     assert "مدیریت مدل‌های OCR" in index_html
     assert "مدیریت ترجمه‌ها" in index_html
     assert 'id="deleteModelsMenuBtn"' not in index_html
@@ -3291,7 +3291,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.07"
+    assert APP_VERSION == "4.08"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -3907,6 +3907,154 @@ def test_v405_manual_blocks_watermarks_erase_original_and_bundled_models(client,
     assert nmt_mgr.is_model_files_present("nllb-600m") is True
     assert nmt_mgr.resolved_model_dir("nllb-600m") == nmt_bundle
     assert nmt_mgr.model_dir("nllb-600m") == empty_user_models / "local-nmt" / "nllb-600m"
+
+
+def test_v408_api_key_priority_reorder_preserves_secrets_and_changes_failover_order(client, monkeypatch):
+    from comic_studio.translation import TranslationError, TranslationService
+
+    # 1. Save 3 named API keys with distinct secrets and per-key network policies
+    initial_save = client.put(
+        "/api/ai-settings",
+        json={
+            "provider": "openrouter",
+            "providers": {
+                "openrouter": {
+                    "model": "openai/gpt-4o-mini",
+                    "profiles": [
+                        {
+                            "id": "k-alpha",
+                            "name": "کلید آلفا",
+                            "api_key": "sk-alpha-secret-001",
+                            "timeout_seconds": 30,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 1200,
+                        },
+                        {
+                            "id": "k-beta",
+                            "name": "کلید بتا",
+                            "api_key": "sk-beta-secret-002",
+                            "timeout_seconds": 45,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 1600,
+                        },
+                        {
+                            "id": "k-gamma",
+                            "name": "کلید گاما",
+                            "api_key": "sk-gamma-secret-003",
+                            "timeout_seconds": 75,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 2400,
+                        },
+                    ],
+                }
+            },
+        },
+    )
+    assert initial_save.status_code == 200, initial_save.text
+    for raw_secret in ("sk-alpha-secret-001", "sk-beta-secret-002", "sk-gamma-secret-003"):
+        assert raw_secret not in initial_save.text
+
+    # Capture context-preview signature BEFORE reordering priority
+    project, item = make_project(client)
+    project["images"][0]["blocks"] = [{"id": 1, "text": "Hello priority world", "tr": "", "enabled": True}]
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    pre_preview = client.post(
+        f"/api/projects/{project['id']}/context-preview",
+        json={"image_ids": [item["id"]], "provider": "openrouter", "source_language": "eng"},
+    )
+    assert pre_preview.status_code == 200, pre_preview.text
+    old_signature = pre_preview.json()["signature"]
+
+    # 2. Reorder priority in UI payload to [k-gamma, k-alpha, k-beta] WITHOUT re-sending stored secrets
+    reordered_save = client.put(
+        "/api/ai-settings",
+        json={
+            "provider": "openrouter",
+            "providers": {
+                "openrouter": {
+                    "model": "openai/gpt-4o-mini",
+                    "profiles": [
+                        {
+                            "id": "k-gamma",
+                            "name": "کلید گاما",
+                            "api_key": "",
+                            "timeout_seconds": 75,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 2400,
+                        },
+                        {
+                            "id": "k-alpha",
+                            "name": "کلید آلفا",
+                            "api_key": "",
+                            "timeout_seconds": 30,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 1200,
+                        },
+                        {
+                            "id": "k-beta",
+                            "name": "کلید بتا",
+                            "api_key": "",
+                            "timeout_seconds": 45,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 1600,
+                        },
+                    ],
+                }
+            },
+        },
+    )
+    assert reordered_save.status_code == 200, reordered_save.text
+    public_profiles = reordered_save.json()["providers"]["openrouter"]["profiles"]
+    assert [p["id"] for p in public_profiles] == ["k-gamma", "k-alpha", "k-beta"]
+    assert [p["hasApiKey"] for p in public_profiles] == [True, True, True]
+    assert [p["timeout_seconds"] for p in public_profiles] == [75, 30, 45]
+    assert [p["source_limit"] for p in public_profiles] == [2400, 1200, 1600]
+
+    # 3. Changing priority refreshes context-preview signature so stale order is detected cleanly
+    post_preview = client.post(
+        f"/api/projects/{project['id']}/context-preview",
+        json={"image_ids": [item["id"]], "provider": "openrouter", "source_language": "eng"},
+    )
+    assert post_preview.status_code == 200, post_preview.text
+    assert post_preview.json()["signature"] != old_signature
+
+    # 4. Verify live failover tries k-gamma FIRST (priority 1), then falls back to k-alpha (priority 2)
+    tried_profiles: list[tuple[str, str, str]] = []
+
+    def fake_openai(self, text, source_language, profile, **kwargs):
+        tried_profiles.append((profile["profile_id"], profile["api_key"], profile["profile_name"]))
+        if profile["profile_id"] == "k-gamma":
+            raise TranslationError("سهمیهٔ کلید گاما تمام شده است (429).")
+        return "سلام دنیای اولویت"
+
+    monkeypatch.setattr(TranslationService, "_openai", fake_openai)
+    single_prev = client.post(
+        "/api/translate-text/preview",
+        json={"text": "Hello priority world", "provider": "openrouter", "source_language": "eng"},
+    )
+    assert single_prev.status_code == 200, single_prev.text
+    translated = client.post(
+        "/api/translate-text",
+        json={
+            "text": "Hello priority world",
+            "provider": "openrouter",
+            "source_language": "eng",
+            "confirmation": single_prev.json()["signature"],
+        },
+    )
+    assert translated.status_code == 200, translated.text
+    assert translated.json() == {"text": "سلام دنیای اولویت"}
+    assert tried_profiles == [
+        ("k-gamma", "sk-gamma-secret-003", "کلید گاما"),
+        ("k-alpha", "sk-alpha-secret-001", "کلید آلفا"),
+    ]
+
 
 
 

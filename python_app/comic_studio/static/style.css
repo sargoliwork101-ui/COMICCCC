@@ -463,7 +463,22 @@ body.light .exec-badge.is-online,body.light .engine-chip.is-exec-online{border-c
 .local-nmt-test-row input{flex:1 1 220px;min-width:0}
 .local-nmt-test-row .bt{flex-shrink:0;white-space:nowrap}
 
-/* v4.05–v4.07: Custom manual text boxes, full-attribute box copy/paste/duplicate & Watermark dialog */
+/* v4.05–v4.08: Custom manual text boxes, full-attribute box copy/paste/duplicate, Watermark dialog & API key priority controls */
+.ai-priority-hint{margin:0 0 8px}
+.ai-profile-row.is-dragging{opacity:.62;border-style:dashed}
+.ai-profile-row.is-drop-target{border-color:var(--a2);box-shadow:0 0 0 2px color-mix(in srgb,var(--a2) 28%,transparent)}
+.ai-profile-order{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.ai-profile-order-meta{display:inline-flex;align-items:center;gap:7px;flex-wrap:wrap}
+.ai-priority-badge{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;background:color-mix(in srgb,var(--a2) 15%,var(--surface));color:var(--text);border:1px solid color-mix(in srgb,var(--a2) 38%,var(--line));user-select:none}
+.ai-priority-badge[draggable="true"]{cursor:grab}
+.ai-priority-badge[draggable="true"]:active{cursor:grabbing}
+.ai-priority-badge.is-primary{background:color-mix(in srgb,#10b981 18%,var(--surface));color:#6ee7b7;border-color:color-mix(in srgb,#10b981 52%,var(--line))}
+body.light .ai-priority-badge.is-primary{color:#047857}
+.ai-key-ready-chip{display:inline-flex;align-items:center;padding:2px 7px;border-radius:999px;font-size:10.5px;color:var(--muted);border:1px solid var(--line);background:var(--surface)}
+.ai-key-ready-chip.is-ready{color:#34d399;border-color:color-mix(in srgb,#34d399 42%,var(--line))}
+body.light .ai-key-ready-chip.is-ready{color:#047857}
+.ai-profile-order-actions{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap}
+.ai-profile-order-actions .bt{padding:3px 8px;min-width:auto;font-size:10.8px}
 .inline-add-text-tools{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap}
 .box-copy{position:absolute;top:-20px;left:54px;min-width:22px;min-height:18px;padding:1px 4px;background:#10131ae6;color:#a7f3d0;border:1px solid #fff8;border-radius:5px;font:700 10.5px/1.2 Vazirmatn,sans-serif;cursor:pointer;touch-action:manipulation;user-select:none;z-index:4}
 .box-copy:hover{background:#263149;color:#fff}

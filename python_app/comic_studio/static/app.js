@@ -2299,10 +2299,11 @@ function renderTranslationServiceSelector(activeProvider, activeProfileId = '') 
       const pName = activeProfiles[0].name?.trim() || 'API 1';
       addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (${pName})`, execMeta.mode);
     } else if (activeProfiles.length >= 2) {
-      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (همهٔ ${activeProfiles.length} کلید فعال به ترتیب)`, execMeta.mode);
+      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (همهٔ ${activeProfiles.length} کلید فعال به ترتیب اولویت)`, execMeta.mode);
       activeProfiles.forEach((p, idx) => {
         const pName = p.name?.trim() || `API ${idx + 1}`;
-        addOpt(`${providerId}::${p.id}`, `${label}${model ? ` — مدل: ${model}` : ''} · فقط «${pName}»`, execMeta.mode);
+        const faRank = (idx + 1).toLocaleString('fa-IR');
+        addOpt(`${providerId}::${p.id}`, `${label}${model ? ` — مدل: ${model}` : ''} · اولویت ${faRank}: «${pName}»`, execMeta.mode);
       });
     } else if (activeProvider === providerId) {
       addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (بدون کلید API ذخیره‌شده)`, execMeta.mode);
@@ -4079,12 +4080,139 @@ function updateAiProviderUi() {
   $('aiModel').placeholder = info.defaultModel || info.model || '';
   syncAiExecUi();
 }
+let aiDragProfileIndex = -1;
+function moveAiProfile(fromIndex, toIndex, focusSelector = '') {
+  if (
+    fromIndex < 0 ||
+    fromIndex >= aiEditorProfiles.length ||
+    toIndex < 0 ||
+    toIndex >= aiEditorProfiles.length ||
+    fromIndex === toIndex
+  ) {
+    return false;
+  }
+  const [moved] = aiEditorProfiles.splice(fromIndex, 1);
+  aiEditorProfiles.splice(toIndex, 0, moved);
+  renderAiProfiles();
+  if ($('aiStatus')) {
+    $('aiStatus').textContent = 'اولویت کلیدهای API تغییر کرد؛ برای ثبت نهایی روی «ذخیره» بزنید.';
+  }
+  if (focusSelector) {
+    const container = $('aiProfiles');
+    const movedRow = [...(container?.querySelectorAll('.ai-profile-row') || [])].find((item) => item.dataset.profileId === moved.id);
+    const targetBtn = movedRow?.querySelector(focusSelector);
+    if (targetBtn && !targetBtn.disabled) targetBtn.focus?.();
+  }
+  return true;
+}
 function renderAiProfiles() {
   const container = $('aiProfiles');
   container.textContent = '';
+  const total = aiEditorProfiles.length;
   aiEditorProfiles.forEach((profile, index) => {
     const row = document.createElement('div');
-    row.className = 'ai-profile-row'; row.dataset.profileId = profile.id;
+    row.className = 'ai-profile-row';
+    row.dataset.profileId = profile.id;
+    row.dataset.priorityRank = String(index + 1);
+
+    const orderBar = document.createElement('div');
+    orderBar.className = 'ai-profile-order';
+    const orderMeta = document.createElement('div');
+    orderMeta.className = 'ai-profile-order-meta';
+    const faRank = (index + 1).toLocaleString('fa-IR');
+    const faFallback = index.toLocaleString('fa-IR');
+    const priorityBadge = document.createElement('span');
+    priorityBadge.className = `ai-priority-badge${index === 0 ? ' is-primary' : ''}`;
+    const rankLabel = index === 0 ? 'اولویت ۱ (کلید اصلی)' : `اولویت ${faRank} (جایگزین ${faFallback})`;
+    priorityBadge.textContent = total > 1 ? `⠿ ${rankLabel}` : rankLabel;
+    priorityBadge.title = index === 0
+      ? 'این کلید به‌عنوان اولویت اول برای ترجمه امتحان می‌شود'
+      : `در صورت خطا یا اتمام سهمیهٔ کلیدهای قبلی، این کلید در اولویت ${faRank} امتحان می‌شود`;
+    if (total > 1) {
+      priorityBadge.draggable = true;
+      priorityBadge.addEventListener('dragstart', (e) => {
+        aiDragProfileIndex = index;
+        row.classList.add('is-dragging');
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'move';
+          try { e.dataTransfer.setData('text/plain', profile.id); } catch (_) {}
+        }
+      });
+      priorityBadge.addEventListener('dragend', () => {
+        aiDragProfileIndex = -1;
+        container.querySelectorAll('.ai-profile-row').forEach((item) => {
+          item.classList.remove('is-dragging', 'is-drop-target');
+        });
+      });
+      row.addEventListener('dragover', (e) => {
+        if (aiDragProfileIndex < 0 || aiDragProfileIndex === index) return;
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+        row.classList.add('is-drop-target');
+      });
+      row.addEventListener('dragleave', (e) => {
+        if (!row.contains(e.relatedTarget)) row.classList.remove('is-drop-target');
+      });
+      row.addEventListener('drop', (e) => {
+        if (aiDragProfileIndex < 0) return;
+        e.preventDefault();
+        const fromIdx = aiDragProfileIndex;
+        aiDragProfileIndex = -1;
+        row.classList.remove('is-drop-target');
+        moveAiProfile(fromIdx, index);
+      });
+    }
+
+    const readyChip = document.createElement('span');
+    const syncReadyChip = () => {
+      const hasTyped = Boolean(profile.apiKey && profile.apiKey.trim());
+      const isReady = hasTyped || profile.hasApiKey === true;
+      readyChip.className = `ai-key-ready-chip${isReady ? ' is-ready' : ''}`;
+      readyChip.textContent = hasTyped
+        ? 'کلید جدید آمادهٔ ذخیره'
+        : (profile.hasApiKey ? 'کلید ذخیره‌شده ✓' : 'کلید وارد نشده');
+    };
+    syncReadyChip();
+    orderMeta.append(priorityBadge, readyChip);
+
+    const orderActions = document.createElement('div');
+    orderActions.className = 'ai-profile-order-actions';
+    const moveTopBtn = document.createElement('button');
+    moveTopBtn.type = 'button';
+    moveTopBtn.className = 'bt ai-profile-top';
+    moveTopBtn.textContent = '⇈ اولویت اول';
+    moveTopBtn.title = 'قرار دادن مستقیم این کلید در اولویت ۱ (کلید اصلی)';
+    moveTopBtn.setAttribute('aria-label', `انتقال API ${index + 1} به اولویت اول`);
+    moveTopBtn.disabled = index === 0;
+    moveTopBtn.addEventListener('click', () => {
+      moveAiProfile(index, 0, '.ai-profile-down');
+    });
+
+    const moveUpBtn = document.createElement('button');
+    moveUpBtn.type = 'button';
+    moveUpBtn.className = 'bt ai-profile-up';
+    moveUpBtn.textContent = '↑ بالاتر';
+    moveUpBtn.title = 'افزایش اولویت استفاده از این کلید';
+    moveUpBtn.setAttribute('aria-label', `افزایش اولویت API ${index + 1}`);
+    moveUpBtn.disabled = index === 0;
+    moveUpBtn.addEventListener('click', () => {
+      moveAiProfile(index, index - 1, index - 1 === 0 ? '.ai-profile-down' : '.ai-profile-up');
+    });
+
+    const moveDownBtn = document.createElement('button');
+    moveDownBtn.type = 'button';
+    moveDownBtn.className = 'bt ai-profile-down';
+    moveDownBtn.textContent = '↓ پایین‌تر';
+    moveDownBtn.title = 'کاهش اولویت استفاده از این کلید';
+    moveDownBtn.setAttribute('aria-label', `کاهش اولویت API ${index + 1}`);
+    moveDownBtn.disabled = index >= total - 1;
+    moveDownBtn.addEventListener('click', () => {
+      moveAiProfile(index, index + 1, index + 1 >= total - 1 ? '.ai-profile-up' : '.ai-profile-down');
+    });
+
+    orderActions.append(moveTopBtn, moveUpBtn, moveDownBtn);
+    orderBar.append(orderMeta, orderActions);
+
     const name = document.createElement('input');
     name.type = 'text'; name.className = 'ai-profile-name'; name.value = profile.name;
     name.placeholder = `API ${index + 1}`; name.setAttribute('aria-label', `نام دلخواه API ${index + 1}`);
@@ -4094,7 +4222,7 @@ function renderAiProfiles() {
     key.autocomplete = 'off'; key.spellcheck = false; key.value = profile.apiKey;
     key.placeholder = profile.hasApiKey ? 'کلید ذخیره شده؛ برای تغییر، کلید تازه بدهید' : 'کلید API';
     key.setAttribute('aria-label', `کلید API ${index + 1}`);
-    key.addEventListener('input', () => { profile.apiKey = key.value; $('aiStatus').textContent = ''; });
+    key.addEventListener('input', () => { profile.apiKey = key.value; syncReadyChip(); $('aiStatus').textContent = ''; });
     const test = document.createElement('button');
     test.type = 'button'; test.className = 'bt ai-profile-test'; test.textContent = 'تست';
     test.title = 'تست همین کلید و مدل بدون ارسال متن کمیک';
@@ -4110,13 +4238,15 @@ function renderAiProfiles() {
     });
     const status = document.createElement('span');
     status.className = 'ai-profile-status'; status.setAttribute('role', 'status');
+    status.textContent = profile._lastStatus || '';
     test.addEventListener('click', async () => {
       const provider = aiEditorProvider;
       const profileId = profile.id;
       const model = $('aiModel').value.trim();
       const baseUrl = $('aiBaseUrl').value.trim();
       if (!profile.apiKey.trim() && !profile.hasApiKey) {
-        status.textContent = 'ابتدا کلید API را وارد کنید.'; key.focus(); return;
+        profile._lastStatus = 'ابتدا کلید API را وارد کنید.';
+        status.textContent = profile._lastStatus; key.focus(); return;
       }
       test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی…'; $('copyAiError').classList.add('hidden'); setProgress('aiProgress', null, true);
       try {
@@ -4127,11 +4257,15 @@ function renderAiProfiles() {
         }));
         setProgress('aiProgress', 1, false);
         $('aiStatus').textContent = result.message;
+        const currentObj = aiEditorProfiles.find((item) => item.id === profileId);
+        if (currentObj) currentObj._lastStatus = 'اتصال برقرار است ✓';
         const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
         if (currentRow) currentRow.querySelector('.ai-profile-status').textContent = 'اتصال برقرار است ✓';
       } catch (error) {
         setProgress('aiProgress', 0, false);
         $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden');
+        const currentObj = aiEditorProfiles.find((item) => item.id === profileId);
+        if (currentObj) currentObj._lastStatus = error.message;
         const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
         (currentRow?.querySelector('.ai-profile-status') || status).textContent = error.message;
       } finally {
@@ -4152,7 +4286,7 @@ function renderAiProfiles() {
     addSetting('تکرار اضافی (۰ تا ۵)', 'retry_count', 0, 5);
     addSetting('فاصلهٔ تلاش مجدد (ثانیه، ۰ تا ۳۰۰)', 'retry_wait_seconds', 0, 300);
     addSetting('سقف نویسهٔ کل درخواست AI (۱ تا ۱۰۰۰۰۰)', 'source_limit', 1, 100000);
-    row.append(name, key, test, remove, options, status); container.appendChild(row);
+    row.append(orderBar, name, key, test, remove, options, status); container.appendChild(row);
   });
 }
 const LOCAL_NMT_FALLBACK_MODELS = [
