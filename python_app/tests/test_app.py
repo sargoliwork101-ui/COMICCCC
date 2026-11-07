@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.00"
+    assert health.json()["version"] == "4.01"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۰۰ · Python</span>' in index_html
+    assert '<span class="ver">۴.۰۱ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -3288,7 +3288,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.00"
+    assert APP_VERSION == "4.01"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -3496,6 +3496,120 @@ def test_v400_unplugged_custom_drive_fallback_remote_guard_and_app_relocation(tm
         sys.meta_path[:] = old_meta_path
         if old_pkg is not None:
             sys.modules["comic_studio"] = old_pkg
+
+
+def test_v401_real_progress_bars_across_paged_ocr_import_backup_and_weight_download(client, tmp_path, monkeypatch):
+    import threading
+    from comic_studio.activity import reporting
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_managed as managed_mod
+
+    # 1. File import emits real monotonic per-file progress in (0, 1]
+    client.post("/api/activity/clear")
+    pid = client.post("/api/projects", json={"name": "پروژهٔ پیشرفت واقعی"}).json()["id"]
+    files = [
+        ("files", ("p1.png", png_bytes((240, 160), "white"), "image/png")),
+        ("files", ("p2.png", png_bytes((240, 160), "white"), "image/png")),
+        ("files", ("p3.png", png_bytes((240, 160), "white"), "image/png")),
+    ]
+    r_imp = client.post(f"/api/projects/{pid}/files", files=files)
+    assert r_imp.status_code == 200
+    images = r_imp.json()["images"]
+    assert len(images) == 3
+
+    imp_entries = client.get("/api/activity").json()["entries"]
+    imp_progs = [e["progress"] for e in imp_entries if isinstance(e.get("progress"), (int, float))]
+    assert len(imp_progs) >= 3
+    assert imp_progs == sorted(imp_progs), f"import progress must be monotonic: {imp_progs}"
+    assert any(0.25 <= p <= 0.40 for p in imp_progs)
+    assert imp_progs[-1] == pytest.approx(1.0)
+
+    # 2. Multi-page UI OCR (batch_index / batch_total) NEVER emits 1.0 on page 1 or 2 of 3
+    monkeypatch.setattr(
+        ocr_mod,
+        "recognize_image",
+        lambda *_a, **_kw: [{"id": 1, "text": "HELLO", "confidence": 0.92, "x0": 10, "y0": 10, "x1": 90, "y1": 35}],
+    )
+    client.post("/api/activity/clear")
+    r_ocr1 = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={
+            "image_ids": [images[0]["id"]],
+            "engine": "rapidocr-v6",
+            "language": "eng",
+            "keep_engine_loaded": True,
+            "batch_index": 1,
+            "batch_total": 3,
+        },
+    )
+    assert r_ocr1.status_code == 200
+    p1_entries = client.get("/api/activity").json()["entries"]
+    p1_progs = [e["progress"] for e in p1_entries if isinstance(e.get("progress"), (int, float))]
+    assert p1_progs and max(p1_progs) <= 0.30, f"page 1 of 3 must never report 100%: {p1_progs}"
+    assert not any("OCR تمام شد" in e["message"] for e in p1_entries)
+
+    r_ocr2 = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={
+            "image_ids": [images[1]["id"]],
+            "engine": "rapidocr-v6",
+            "language": "eng",
+            "keep_engine_loaded": True,
+            "batch_index": 2,
+            "batch_total": 3,
+        },
+    )
+    assert r_ocr2.status_code == 200
+    p2_entries = client.get("/api/activity").json()["entries"]
+    p2_progs = [e["progress"] for e in p2_entries if isinstance(e.get("progress"), (int, float))]
+    assert max(p2_progs) <= 0.62, f"page 2 of 3 must stay within ~60%: {p2_progs}"
+
+    r_ocr3 = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={
+            "image_ids": [images[2]["id"]],
+            "engine": "rapidocr-v6",
+            "language": "eng",
+            "keep_engine_loaded": False,
+            "batch_index": 3,
+            "batch_total": 3,
+        },
+    )
+    assert r_ocr3.status_code == 200
+    all_ocr_entries = client.get("/api/activity").json()["entries"]
+    all_ocr_progs = [e["progress"] for e in all_ocr_entries if isinstance(e.get("progress"), (int, float))]
+    assert all_ocr_progs == sorted(all_ocr_progs), f"paged OCR progress must never go backwards: {all_ocr_progs}"
+    assert 0.85 <= all_ocr_progs[-1] < 1.0, f"server leaves final slice for browser text placement: {all_ocr_progs}"
+    assert sum(1 for e in all_ocr_entries if "OCR تمام شد" in e["message"]) == 1
+
+    # 3. Backup & Restore emit real per-file monotonic progress
+    client.post("/api/activity/clear")
+    b_res = client.post(f"/api/projects/{pid}/backup", json={"drafts": []})
+    assert b_res.status_code == 200
+    bk_progs = [e["progress"] for e in client.get("/api/activity").json()["entries"] if isinstance(e.get("progress"), (int, float))]
+    assert len(bk_progs) >= 3 and bk_progs == sorted(bk_progs) and bk_progs[-1] == pytest.approx(1.0)
+
+    # 4. IsolatedOcrEngine weight-only download does NOT jump falsely to 65%/80% at 0 MB downloaded
+    fake_models = tmp_path / "models_test"
+    monkeypatch.setattr(managed_mod, "models_dir", lambda: fake_models)
+    eng = managed_mod.IsolatedOcrEngine("glm-ocr", ["eng"], threading.Lock(), ocr_mod.OcrLine, ocr_mod.OcrError)
+    monkeypatch.setattr(type(eng), "runtime_installed", property(lambda self: True))
+    monkeypatch.setattr(type(eng), "model_ready", property(lambda self: False))
+    monkeypatch.setattr(type(eng), "installed_version", property(lambda self: "0.1.5"))
+    seen_dl_progs: list[float] = []
+
+    def _fake_prepare_weights(_lang: str) -> str:
+        w_lo, w_hi = eng._active_wt_span
+        assert w_lo <= 0.10, f"weight-only download must start near 8%, not jump to 80%: {w_lo}"
+        assert w_hi == pytest.approx(0.96)
+        return "rev-v401"
+
+    monkeypatch.setattr(eng, "_prepare_weights", _fake_prepare_weights)
+    with reporting(lambda _m, _k="info", p=None: seen_dl_progs.append(p) if isinstance(p, (int, float)) else None):
+        eng.download("eng")
+    assert seen_dl_progs[0] == pytest.approx(0.04)
+    assert seen_dl_progs[1] == pytest.approx(0.08)
+    assert seen_dl_progs[-1] == pytest.approx(1.0)
 
 
 

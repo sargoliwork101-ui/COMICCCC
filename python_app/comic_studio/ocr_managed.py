@@ -415,6 +415,19 @@ def is_pip_network_or_index_error(output: str) -> bool:
     return False
 
 
+def _parse_size_to_bytes(text: str) -> float:
+    """Parse human size token such as '245.3 MB', '2.65G', or '512 kB' into bytes."""
+    m = re.search(r"([\d.]+)\s*([kKmMgGtT])i?[bB]?", str(text or ""))
+    if not m:
+        return 0.0
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return 0.0
+    mult = {"k": 1024.0, "m": 1024.0 ** 2, "g": 1024.0 ** 3, "t": 1024.0 ** 4}.get(m.group(2).lower(), 1.0)
+    return max(0.0, val * mult)
+
+
 def _dir_bytes_fast(root: Path, max_files: int = 8000) -> int:
     """Fast non-throwing byte sum of files under `root` for live download progress & stall detection."""
     total = 0
@@ -2309,12 +2322,25 @@ class IsolatedOcrEngine:
         tail_lines: list[str] = []
         started = time.monotonic()
         last_activity_ts = started
-        step_count = 0.0
         current_pkg_label = ""
         cdir = pip_cache_dir()
         env_dir = self._env_dir()
-        base_dl_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
-        last_bytes = base_dl_bytes
+        initial_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
+        last_bytes = initial_bytes
+        prof_rt_gb = float(compute_engine_download_estimate(self.id).get("runtimeDownloadGb") or 0.5)
+        span_p = max(0.02, end_p - start_p)
+        expected_bytes = max(35 * (1024 ** 2), prof_rt_gb * (1024 ** 3) * min(1.0, span_p / 0.50))
+        announced_bytes = 0.0
+        completed_wheel_bytes = 0.0
+        active_wheel_bytes = 0.0
+        collect_steps = 0
+        best_p = start_p
+
+        def _emit_bounded(msg: str, ratio: float) -> None:
+            nonlocal best_p
+            clamped = max(0.0, min(0.98, ratio))
+            best_p = max(best_p, round(start_p + span_p * clamped, 3))
+            emit(msg, progress=best_p)
 
         proc = subprocess.Popen(
             full_cmd,
@@ -2352,7 +2378,7 @@ class IsolatedOcrEngine:
                     self._kill_proc_tree(proc)
                     return 1, "Operation timed out during pip installation."
                 try:
-                    raw_line = line_q.get(timeout=2.5)
+                    raw_line = line_q.get(timeout=2.0)
                 except queue.Empty:
                     if proc.poll() is not None and line_q.empty():
                         break
@@ -2360,15 +2386,15 @@ class IsolatedOcrEngine:
                     if now_bytes > last_bytes:
                         last_bytes = now_bytes
                         last_activity_ts = time.monotonic()
-                        gained_mb = (now_bytes - base_dl_bytes) / (1024 * 1024)
+                        gained_bytes = max(0.0, float(now_bytes - initial_bytes))
+                        gained_mb = gained_bytes / (1024 * 1024)
                         if gained_mb >= 0.8:
-                            step_count += 0.35
-                            ratio = min(0.86, 1.0 - (1.0 / (1.0 + step_count * 0.14)))
-                            cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                            denom = max(expected_bytes, announced_bytes * 1.04, gained_bytes * 1.06)
+                            dl_ratio = min(1.0, max(gained_bytes, completed_wheel_bytes) / max(1.0, denom))
                             pkg_note = f" ({current_pkg_label})" if current_pkg_label else ""
-                            emit(
+                            _emit_bounded(
                                 f"{label_prefix}: در حال دانلود{pkg_note} — {gained_mb:.1f} مگابایت دریافت شد…",
-                                progress=cur_p,
+                                0.08 + 0.78 * dl_ratio,
                             )
                     elif time.monotonic() - last_activity_ts > stall_timeout:
                         self._kill_proc_tree(proc)
@@ -2389,34 +2415,48 @@ class IsolatedOcrEngine:
                     tail_lines.pop(0)
                 lower = line.lower()
                 if lower.startswith("downloading "):
-                    step_count += 1.0
-                    ratio = min(0.82, 1.0 - (1.0 / (1.0 + step_count * 0.14)))
-                    cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                    completed_wheel_bytes += active_wheel_bytes
                     wheel_part = line.split("/")[-1].split(" ")[0][:48]
                     size_m = re.search(r"\(([\d.]+\s*[kKmMgG][bB])\)", line)
                     size_str = size_m.group(1) if size_m else ""
+                    active_wheel_bytes = _parse_size_to_bytes(size_str)
+                    announced_bytes += active_wheel_bytes
+                    expected_bytes = max(expected_bytes, announced_bytes * 1.05)
                     current_pkg_label = f"{wheel_part} · {size_str}" if size_str else wheel_part
-                    base_dl_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
-                    last_bytes = base_dl_bytes
+                    now_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
+                    last_bytes = max(last_bytes, now_bytes)
+                    gained_bytes = max(0.0, float(now_bytes - initial_bytes), completed_wheel_bytes)
+                    dl_ratio = min(1.0, gained_bytes / max(1.0, expected_bytes))
                     size_suffix = f" ({size_str})" if size_str else ""
-                    emit(f"{label_prefix}: دانلود بستهٔ {wheel_part}{size_suffix}…", progress=cur_p)
+                    _emit_bounded(
+                        f"{label_prefix}: دانلود بستهٔ {wheel_part}{size_suffix}…",
+                        0.08 + 0.78 * dl_ratio,
+                    )
                 elif lower.startswith("using cached "):
-                    step_count += 0.5
-                    ratio = min(0.80, 1.0 - (1.0 / (1.0 + step_count * 0.12)))
-                    cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                    completed_wheel_bytes += active_wheel_bytes
+                    active_wheel_bytes = 0.0
                     wheel_part = line.split("/")[-1].split(" ")[0][:44]
-                    emit(f"{label_prefix}: استفاده از فایل کش‌شدهٔ {wheel_part}…", progress=cur_p)
+                    dl_ratio = min(1.0, completed_wheel_bytes / max(1.0, expected_bytes))
+                    _emit_bounded(
+                        f"{label_prefix}: استفاده از فایل کش‌شدهٔ {wheel_part}…",
+                        0.08 + 0.78 * dl_ratio,
+                    )
                 elif lower.startswith("collecting "):
-                    step_count += 0.8
-                    ratio = min(0.75, 1.0 - (1.0 / (1.0 + step_count * 0.10)))
-                    cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                    collect_steps += 1
                     pkg_part = line[11:].split()[0][:40]
                     current_pkg_label = pkg_part
-                    emit(f"{label_prefix}: بررسی بستهٔ {pkg_part}…", progress=cur_p)
+                    _emit_bounded(
+                        f"{label_prefix}: بررسی بستهٔ {pkg_part}…",
+                        min(0.08, collect_steps * 0.008),
+                    )
                 elif lower.startswith("installing collected packages"):
+                    completed_wheel_bytes += active_wheel_bytes
+                    active_wheel_bytes = 0.0
                     current_pkg_label = "ثبت بسته‌ها روی دیسک"
-                    cur_p = round(start_p + (end_p - start_p) * 0.88, 3)
-                    emit(f"{label_prefix}: در حال بازگشایی و ثبت بسته‌ها روی دیسک…", progress=cur_p)
+                    _emit_bounded(
+                        f"{label_prefix}: در حال بازگشایی و ثبت بسته‌ها روی دیسک…",
+                        0.90,
+                    )
             rc = proc.wait(timeout=120)
             if self._cancel_install.is_set():
                 return 130, "عملیات آماده‌سازی مدل لغو شد."
@@ -2539,13 +2579,18 @@ class IsolatedOcrEngine:
             if not base_py or not os.path.isfile(base_py):
                 base_py = sys.executable
 
+            rt_pair = getattr(self, "_active_rt_span", None) or (0.06, 0.72)
+            r_lo, r_hi = float(rt_pair[0]), float(rt_pair[1])
+            r_span = max(0.04, r_hi - r_lo)
+            rp = lambda frac: round(r_lo + r_span * max(0.0, min(1.0, frac)), 3)
+
             if not py.is_file():
-                emit(f"ساخت پوشه و محیط مستقل برای مدل {self.id}…", progress=0.08)
+                emit(f"ساخت پوشه و محیط مستقل برای مدل {self.id}…", progress=rp(0.03))
                 env_dir.parent.mkdir(parents=True, exist_ok=True)
                 res = _run_Subprocess([str(base_py), "-m", "venv", str(env_dir)], capture_output=True, text=True, timeout=300, check=False)
                 if res.returncode != 0 or not py.is_file():
                     raise self._error_cls(f"ساخت محیط مستقل برای {self.id} ناموفق بود: {(res.stderr or res.stdout)[-800:]}")
-                emit(f"آماده‌سازی ابزار نصب در محیط مستقل {self.id}…", progress=0.14)
+                emit(f"آماده‌سازی ابزار نصب در محیط مستقل {self.id}…", progress=rp(0.10))
                 _run_Subprocess([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300, check=False)
                 _run_Subprocess(
                     [str(py), "-m", "pip", "install", "--timeout", "90", "--retries", "5", "--prefer-binary", "--cache-dir", str(cdir), *find_links_args, "--upgrade", "pip", "setuptools", "wheel"],
@@ -2577,7 +2622,7 @@ class IsolatedOcrEngine:
                 )
                 if not torch_ready:
                     if repair_cpu_torch_on_nvidia:
-                        emit(f"جایگزینی نسخهٔ CPU زیرساخت PyTorch با نسخهٔ شتاب‌دهندهٔ NVIDIA برای {self.id}…", progress=0.19)
+                        emit(f"جایگزینی نسخهٔ CPU زیرساخت PyTorch با نسخهٔ شتاب‌دهندهٔ NVIDIA برای {self.id}…", progress=rp(0.18))
                         _run_Subprocess(
                             [str(py), "-m", "pip", "uninstall", "-y", "torch", "torchvision"],
                             capture_output=True, text=True, timeout=180, check=False, env=clean_pip_env(),
@@ -2597,11 +2642,11 @@ class IsolatedOcrEngine:
                     else:
                         torch_candidates.append(list(base_torch_pkgs))
 
-                    emit(f"نصب زیرساخت PyTorch برای {self.id}…", progress=0.20)
+                    emit(f"نصب زیرساخت PyTorch برای {self.id}…", progress=rp(0.20))
                     t_rc, t_out = 1, ""
                     for cand_args in torch_candidates:
                         t_rc, t_out = self._run_pip_resilient(
-                            py, cand_args, upgrade=False, start_p=0.20, end_p=0.45, label_prefix=f"زیرساخت {self.id}"
+                            py, cand_args, upgrade=False, start_p=rp(0.20), end_p=rp(0.68), label_prefix=f"زیرساخت {self.id}"
                         )
                         if t_rc == 0 or self._cancel_install.is_set() or t_rc == 130:
                             break
@@ -2616,13 +2661,13 @@ class IsolatedOcrEngine:
             ):
                 # Pre-install lightweight CPU PyTorch on Linux CPU machines so surya-ocr's layout detector
                 # does not pull 4.5 GB of Linux CUDA 13 packages from default PyPI.
-                emit("نصب نسخهٔ سبک پردازنده (CPU) زیرساخت Surya…", progress=0.18)
+                emit("نصب نسخهٔ سبک پردازنده (CPU) زیرساخت Surya…", progress=rp(0.16))
                 self._run_pip_resilient(
                     py,
                     ["torch>=2.7.0,<3", "torchvision>=0.20.0,<1", "--index-url", "https://download.pytorch.org/whl/cpu"],
                     upgrade=False,
-                    start_p=0.18,
-                    end_p=0.34,
+                    start_p=rp(0.16),
+                    end_p=rp(0.46),
                     label_prefix="زیرساخت سبک Surya",
                 )
 
@@ -2630,7 +2675,8 @@ class IsolatedOcrEngine:
             extra_flags: list[str] = []
             # Neither Surya 2.5 (native llama-server) nor MinerU 4.x (ONNX DirectML + llama-cpp) uses PyTorch CUDA wheels.
             action_word = "به‌روزرسانی" if upgrade else "نصب"
-            p_start = 0.46 if self._spec.get("needs_torch") else 0.18
+            p_start = rp(0.69) if self._spec.get("needs_torch") else rp(0.16)
+            p_end = rp(0.96)
             emit(f"{action_word} بسته‌های اختصاصی مدل {self.id} آغاز شد…", progress=p_start)
             if self.id == "paddleocr-vl-1-6" and hw.get("hasNvidiaGpu") and sys.platform.startswith("linux"):
                 gpu_paddle_pkgs = [
@@ -2641,7 +2687,7 @@ class IsolatedOcrEngine:
                     py, [*extra_flags, *gpu_paddle_pkgs],
                     upgrade=upgrade,
                     start_p=p_start,
-                    end_p=0.70,
+                    end_p=p_end,
                     label_prefix=f"{action_word} GPU {self.id}",
                 )
                 if p_rc != 0:
@@ -2649,7 +2695,7 @@ class IsolatedOcrEngine:
                         py, [*extra_flags, *packages],
                         upgrade=upgrade,
                         start_p=p_start,
-                        end_p=0.70,
+                        end_p=p_end,
                         label_prefix=f"{action_word} {self.id}",
                     )
             else:
@@ -2657,24 +2703,25 @@ class IsolatedOcrEngine:
                     py, [*extra_flags, *packages],
                     upgrade=upgrade,
                     start_p=p_start,
-                    end_p=0.70,
+                    end_p=p_end,
                     label_prefix=f"{action_word} {self.id}",
                 )
             fallback_pkgs = self._spec.get("pip_packages_fallback")
             if p_rc != 0 and fallback_pkgs:
-                emit(f"تنظیم نسخهٔ سازگار بسته‌های {self.id} برای سیستم شما…", progress=round((p_start + 0.70) / 2, 2))
+                mid_p = round((p_start + p_end) / 2, 3)
+                emit(f"تنظیم نسخهٔ سازگار بسته‌های {self.id} برای سیستم شما…", progress=mid_p)
                 p_rc, p_out = self._run_pip_resilient(
                     py, [*extra_flags, *fallback_pkgs],
                     upgrade=upgrade,
-                    start_p=round((p_start + 0.70) / 2, 2),
-                    end_p=0.70,
+                    start_p=mid_p,
+                    end_p=p_end,
                     label_prefix=f"{action_word} سازگار {self.id}",
                 )
             if p_rc != 0:
                 details = (p_out or "pip failed")[-1500:].strip()
                 raise self._error_cls(f"نصب بسته‌های مدل {self.id} ناموفق بود: {details}")
 
-            emit(f"بسته‌های اجرایی مدل {self.id} آماده شد", progress=0.72)
+            emit(f"بسته‌های اجرایی مدل {self.id} آماده شد", progress=rp(0.98))
             self._ensure_llama_cpp_for_surya()
             (env_dir / ".runtime-ready").write_text(_now_iso(), encoding="utf-8")
 
@@ -2696,7 +2743,13 @@ class IsolatedOcrEngine:
 
         base_weight_bytes = _tracked_weight_bytes()
         last_weight_bytes = base_weight_bytes
-        emit(f"دریافت و آماده‌سازی فایل‌های مدل {self.id}…", progress=0.80)
+        wt_span_pair = getattr(self, "_active_wt_span", None) or (0.74, 0.96)
+        w_lo, w_hi = float(wt_span_pair[0]), float(wt_span_pair[1])
+        w_span = max(0.02, w_hi - w_lo)
+        prof_wt_gb = float(compute_engine_download_estimate(self.id).get("weightsDownloadGb") or 0.5)
+        expected_wt_bytes = max(15 * (1024 ** 2), prof_wt_gb * (1024 ** 3))
+        best_wt_p = [round(w_lo, 3)]
+        emit(f"دریافت و آماده‌سازی فایل‌های مدل {self.id}…", progress=best_wt_p[0])
         proc = subprocess.Popen(
             [
                 str(self._env_python()),
@@ -2717,8 +2770,15 @@ class IsolatedOcrEngine:
         self._register_install_proc(proc)
         stderr_tail: list[str] = []
         stdout_chunks: list[str] = []
-        weight_steps = [0.0]
         last_activity_at = [time.monotonic()]
+        stderr_byte_ratio = [0.0]
+
+        def _emit_weight_progress(msg: str, ratio: float) -> None:
+            clamped = max(0.0, min(0.98, ratio))
+            cand_p = round(w_lo + w_span * clamped, 3)
+            if cand_p > best_wt_p[0]:
+                best_wt_p[0] = cand_p
+            emit(msg, progress=best_wt_p[0])
 
         def _drain_stderr() -> None:
             if proc.stderr is None:
@@ -2736,19 +2796,32 @@ class IsolatedOcrEngine:
                         if len(stderr_tail) > 60:
                             stderr_tail.pop(0)
                         now_t = time.monotonic()
-                        if now_t - last_emit_at >= 1.5:
-                            weight_steps[0] += 1.0
-                            ratio = min(0.92, 1.0 - (1.0 / (1.0 + weight_steps[0] * 0.18)))
-                            cur_p = round(0.80 + 0.14 * ratio, 3)
+                        if now_t - last_emit_at >= 1.2:
+                            cur_b = _tracked_weight_bytes()
+                            dl_b = max(0.0, float(cur_b - base_weight_bytes))
+                            frac_match = re.search(
+                                r"([\d.]+\s*[kKmMgGtT]i?[bB]?)\s*/\s*([\d.]+\s*[kKmMgGtT]i?[bB]?)",
+                                s,
+                            )
+                            if frac_match:
+                                done_f = _parse_size_to_bytes(frac_match.group(1))
+                                tot_f = _parse_size_to_bytes(frac_match.group(2))
+                                if tot_f > 0:
+                                    denom = max(expected_wt_bytes, tot_f)
+                                    stderr_byte_ratio[0] = max(stderr_byte_ratio[0], min(0.97, max(dl_b, done_f) / denom))
+                            disk_ratio = min(0.97, dl_b / max(1.0, expected_wt_bytes))
+                            ratio = max(disk_ratio, stderr_byte_ratio[0])
                             pct_match = re.search(r"(\d{1,3})%", s)
                             if pct_match:
                                 sub_pct = min(100, max(0, int(pct_match.group(1))))
-                                emit(
+                                if expected_wt_bytes <= 250 * (1024 ** 2):
+                                    ratio = max(ratio, (sub_pct / 100.0) * 0.96)
+                                _emit_weight_progress(
                                     f"دانلود فایل‌های مدل {self.id} ({sub_pct}٪ از فایل جاری)…",
-                                    progress=cur_p,
+                                    ratio,
                                 )
                             else:
-                                emit(f"در حال آماده‌سازی وزن‌های مدل {self.id}…", progress=cur_p)
+                                _emit_weight_progress(f"در حال آماده‌سازی وزن‌های مدل {self.id}…", ratio)
                             last_emit_at = now_t
             except Exception:
                 pass
@@ -2768,6 +2841,7 @@ class IsolatedOcrEngine:
         err_thread.start()
         out_thread.start()
         started_w = time.monotonic()
+        last_disk_emit_at = started_w
         try:
             while proc.poll() is None:
                 if self._cancel_install.is_set():
@@ -2777,19 +2851,21 @@ class IsolatedOcrEngine:
                     self._kill_proc_tree(proc)
                     raise self._error_cls(f"مهلت آماده‌سازی فایل‌های مدل {self.id} به پایان رسید.")
                 time.sleep(0.5)
-                if time.monotonic() - last_activity_at[0] >= 3.0:
+                now_loop = time.monotonic()
+                if now_loop - last_disk_emit_at >= 1.2:
                     cur_bytes = _tracked_weight_bytes()
                     if cur_bytes > last_weight_bytes:
                         last_weight_bytes = cur_bytes
-                        last_activity_at[0] = time.monotonic()
-                        dl_mb = (cur_bytes - base_weight_bytes) / (1024 * 1024)
+                        last_activity_at[0] = now_loop
+                        last_disk_emit_at = now_loop
+                        dl_bytes = max(0.0, float(cur_bytes - base_weight_bytes))
+                        dl_mb = dl_bytes / (1024 * 1024)
                         if dl_mb >= 1.0:
-                            weight_steps[0] += 0.4
-                            ratio = min(0.92, 1.0 - (1.0 / (1.0 + weight_steps[0] * 0.18)))
-                            cur_p = round(0.80 + 0.14 * ratio, 3)
-                            emit(
+                            denom = max(expected_wt_bytes, dl_bytes * 1.04)
+                            ratio = max(stderr_byte_ratio[0], min(0.97, dl_bytes / denom))
+                            _emit_weight_progress(
                                 f"دانلود وزن‌های مدل {self.id} — {dl_mb:.1f} مگابایت ذخیره شد…",
-                                progress=cur_p,
+                                ratio,
                             )
         except Exception:
             self._kill_proc_tree(proc)
@@ -2822,24 +2898,41 @@ class IsolatedOcrEngine:
         state.mkdir(parents=True, exist_ok=True)
         (state / ".ready-all").write_text(_now_iso(), encoding="utf-8")
         (state / f".ready-{language}").write_text(_now_iso(), encoding="utf-8")
-        emit(f"فایل‌های مدل {self.id} ذخیره و تایید شد", progress=0.96)
+        emit(f"فایل‌های مدل {self.id} ذخیره و تایید شد", progress=round(w_hi, 3))
         return str(last_json.get("modelRevision") or "ready")
 
     def download(self, language: str = "eng") -> None:
         self._cancel_install.clear()
         self.close()
         try:
+            rt_already = self.runtime_installed
+            wt_already = self.model_ready
             dl_est = compute_engine_download_estimate(
                 self.id,
-                runtime_installed=self.runtime_installed,
-                model_ready=self.model_ready,
+                runtime_installed=rt_already,
+                model_ready=wt_already,
             )
             dl_label = format_download_size_fa(dl_est["totalDownloadGb"])
-            emit(f"شروع آماده‌سازی خودکار مدل {self.id} (کل حجم دانلود: {dl_label})…", progress=0.05)
-            if not self.runtime_installed:
+            rt_gb = float(dl_est["runtimeDownloadGb"])
+            wt_gb = float(dl_est["weightsDownloadGb"])
+            if not rt_already and not wt_already:
+                tot_gb = max(0.05, rt_gb + wt_gb)
+                rt_share = max(0.14, min(0.84, rt_gb / tot_gb))
+                rt_end = round(0.04 + 0.92 * rt_share, 3)
+                self._active_rt_span = (0.04, rt_end)
+                self._active_wt_span = (rt_end, 0.96)
+            elif not rt_already:
+                self._active_rt_span = (0.04, 0.92)
+                self._active_wt_span = (0.92, 0.96)
+            else:
+                self._active_rt_span = (0.04, 0.08)
+                self._active_wt_span = (0.08, 0.96)
+
+            emit(f"شروع آماده‌سازی خودکار مدل {self.id} (کل حجم دانلود: {dl_label})…", progress=0.04)
+            if not rt_already:
                 self._ensure_isolated_venv(upgrade=False)
             else:
-                emit(f"محیط اجرایی {self.id} از قبل آماده است؛ بررسی ابزارها و فایل‌های مدل…", progress=0.65)
+                emit(f"محیط اجرایی {self.id} از قبل آماده است؛ بررسی ابزارها و فایل‌های مدل…", progress=0.08)
                 self._ensure_llama_cpp_for_surya()
             revision = self._prepare_weights(language)
             hf_repo = self._spec.get("hf_repo")
@@ -2857,6 +2950,8 @@ class IsolatedOcrEngine:
             )
             emit(f"مدل {self.id} آماده و قابل استفاده است", "success", progress=1.0)
         finally:
+            self._active_rt_span = None
+            self._active_wt_span = None
             self.close()
             trim_process_memory()
 

@@ -16,6 +16,7 @@ from typing import Any
 import pymupdf as fitz
 from PIL import Image
 
+from .activity import emit
 from .ocr_managed import compute_worker_count, iter_parallel_ordered, trim_process_memory
 from .paths import data_dir, project_root
 
@@ -353,14 +354,22 @@ class ProjectStore:
                 if suffix != ".pdf" and suffix not in ALLOWED_IMAGES:
                     raise ValueError(f"Unsupported file: {filename}")
 
+            total_inputs = max(1, len(files))
+            completed_inputs = 0
             image_batch: list[tuple[str, bytes]] = []
 
             def _flush_image_batch() -> None:
+                nonlocal completed_inputs
                 if not image_batch:
                     return
                 if len(image_batch) == 1:
                     fn, raw = image_batch[0]
                     self._import_image(state, fn, raw)
+                    completed_inputs += 1
+                    emit(
+                        f"آماده‌سازی تصویر {completed_inputs} از {total_inputs}: {Path(fn).name}",
+                        progress=round(completed_inputs / total_inputs * 0.96, 4),
+                    )
                 else:
                     workers, _ = compute_worker_count(len(image_batch), per_worker_mb=120, max_cap=8)
                     for _, (fn, raw), (fmt, w, h) in iter_parallel_ordered(
@@ -369,13 +378,21 @@ class ProjectStore:
                         max_workers=workers,
                     ):
                         self._commit_validated_image(state, fn, raw, fmt, w, h)
+                        completed_inputs += 1
+                        emit(
+                            f"آماده‌سازی تصویر {completed_inputs} از {total_inputs}: {Path(fn).name}",
+                            progress=round(completed_inputs / total_inputs * 0.96, 4),
+                        )
                 image_batch.clear()
 
             for filename, content in files:
                 suffix = Path(filename).suffix.lower()
                 if suffix == ".pdf":
                     _flush_image_batch()
-                    self._import_pdf(state, filename, content, pdf_scale)
+                    p_lo = completed_inputs / total_inputs * 0.96
+                    p_hi = (completed_inputs + 1) / total_inputs * 0.96
+                    self._import_pdf(state, filename, content, pdf_scale, progress_span=(p_lo, p_hi))
+                    completed_inputs += 1
                 else:
                     image_batch.append((filename, content))
             _flush_image_batch()
@@ -417,7 +434,15 @@ class ProjectStore:
                 return image_id, file_name, image_path
         raise ValueError("Could not allocate a unique image ID")
 
-    def _import_pdf(self, state: dict[str, Any], filename: str, content: bytes, scale: float) -> None:
+    def _import_pdf(
+        self,
+        state: dict[str, Any],
+        filename: str,
+        content: bytes,
+        scale: float,
+        *,
+        progress_span: tuple[float, float] = (0.0, 0.96),
+    ) -> None:
         if len(content) > 500 * 1024 * 1024:
             raise ValueError("PDF is too large")
         scale = max(1.0, min(4.0, float(scale)))
@@ -492,12 +517,18 @@ class ProjectStore:
             }
 
         written_paths: list[Path] = []
+        p_lo, p_hi = progress_span
         try:
             for step_idx, page_idx, entry in iter_parallel_ordered(list(range(page_count)), _render_one_page, max_workers=workers):
                 written_paths.append(slots[page_idx][2])
                 entry["order"] = self._next_order(state)
                 state["images"].append(entry)
-                if (step_idx + 1) % 16 == 0:
+                done_pages = step_idx + 1
+                emit(
+                    f"تبدیل صفحهٔ {done_pages} از {page_count} فایل PDF ({Path(filename).name})…",
+                    progress=round(p_lo + (p_hi - p_lo) * (done_pages / max(1, page_count)), 4),
+                )
+                if done_pages % 16 == 0:
                     trim_process_memory()
         except Exception:
             for _, _, slot_path in slots:

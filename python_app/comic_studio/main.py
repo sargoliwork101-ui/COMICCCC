@@ -8,6 +8,7 @@ import functools
 import hmac
 import inspect
 import ipaddress
+import math
 import os
 import re
 import traceback
@@ -215,7 +216,13 @@ def create_app() -> FastAPI:
             response.headers["Cache-Control"] = "no-store"
         return response
 
-    async def run_reported(function: Any, *args: Any, pulse_label: str | None = None, **kwargs: Any) -> Any:
+    async def run_reported(
+        function: Any,
+        *args: Any,
+        pulse_label: str | None = None,
+        progress_span: tuple[float, float] | None = None,
+        **kwargs: Any,
+    ) -> Any:
         nonlocal active_jobs_count
         stop_pulse = threading.Event()
         started = time.monotonic()
@@ -224,14 +231,24 @@ def create_app() -> FastAPI:
         with active_jobs_lock:
             active_jobs_count += 1
 
+        def _map_progress(raw_p: float | None) -> float | None:
+            if raw_p is None or not isinstance(raw_p, (int, float)) or not math.isfinite(float(raw_p)):
+                return raw_p
+            clamped = max(0.0, min(1.0, float(raw_p)))
+            if progress_span is not None:
+                lo, hi = progress_span
+                return round(lo + (hi - lo) * clamped, 4)
+            return clamped
+
         def tracked_report(message: str, kind: str = "info", progress: float | None = None) -> None:
             last_state["ts"] = time.monotonic()
-            if progress is not None:
-                last_state["progress"] = progress
+            mapped_p = _map_progress(progress)
+            if mapped_p is not None:
+                last_state["progress"] = mapped_p
             cleaned_msg = str(message or "").strip().rstrip("….")
             if cleaned_msg and "همچنان در حال انجام است" not in cleaned_msg:
                 last_state["detail"] = cleaned_msg[:90]
-            activity.add(message, kind, progress)
+            activity.add(message, kind, mapped_p)
 
         if pulse_label:
             def report_alive() -> None:
@@ -240,9 +257,6 @@ def create_app() -> FastAPI:
                     if now - float(last_state["ts"]) < 4.2:
                         continue
                     cur_p = last_state["progress"]
-                    if isinstance(cur_p, (int, float)) and 0.0 < cur_p < 0.93:
-                        cur_p = round(min(0.93, float(cur_p) + 0.008), 3)
-                        last_state["progress"] = cur_p
                     detail = str(last_state.get("detail") or "").strip()
                     detail_part = f" ({detail})" if detail and detail != pulse_label else ""
                     activity.add(
@@ -745,8 +759,21 @@ def create_app() -> FastAPI:
         await run_in_threadpool(registry.unload_all, values.engine)
         target_items = [item for item in state["images"] if item["id"] in ids]
         total_targets = len(target_items)
+        is_ui_paged_batch = values.batch_index is not None and values.batch_total is not None
+        ui_batch_total = max(1, int(values.batch_total)) if is_ui_paged_batch else total_targets
+        ui_batch_index = min(ui_batch_total, max(1, int(values.batch_index))) if is_ui_paged_batch else 1
         erase_original = bool(state.get("settings", {}).get("eraseOriginal", True))
-        activity.add(f"خواندن متن در {total_targets} تصویر آغاز شد")
+        if not is_ui_paged_batch or ui_batch_index == 1:
+            activity.add(f"خواندن متن در {ui_batch_total} تصویر آغاز شد", progress=0.0 if is_ui_paged_batch else None)
+
+        def _page_progress_bounds(step: int) -> tuple[float, float]:
+            if is_ui_paged_batch:
+                lo = (ui_batch_index - 1) / ui_batch_total
+                hi = (ui_batch_index - 0.20) / ui_batch_total
+                return round(lo, 4), round(hi, 4)
+            lo = (step - 1) / max(1, total_targets)
+            hi = step / max(1, total_targets)
+            return round(lo, 4), round(hi, 4)
 
         def _apply_page_ocr_result(item: dict[str, Any], raw_blocks: list[dict[str, Any]], page_size: tuple[int, int], step: int) -> None:
             for block in raw_blocks:
@@ -763,9 +790,10 @@ def create_app() -> FastAPI:
             item["edited"] = False
             item["approved"] = False
             mode_label = "کتاب/مقاله" if resolved_mode == "document" else "کمیک/حباب"
+            _, done_p = _page_progress_bounds(step)
             activity.add(
                 f"در «{item['name']}» {len(organized)} تکه متن ({mode_label}) پیدا شد",
-                progress=step / total_targets,
+                progress=done_p,
             )
             def _format_ocr_log_entry(blk: dict[str, Any]) -> str:
                 raw_txt = str(blk.get("text") or "").strip("\r\n")
@@ -804,7 +832,14 @@ def create_app() -> FastAPI:
                         if await http_request.is_disconnected():
                             activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
                             return store.get(project_id)
-                        activity.add(f"در حال خواندن تصویر {completed} از {total_targets}: {item['name']}")
+                        disp_idx = ui_batch_index if is_ui_paged_batch else completed
+                        disp_tot = ui_batch_total if is_ui_paged_batch else total_targets
+                        p_lo, p_hi = _page_progress_bounds(completed)
+                        start_page_p = round(p_lo + (p_hi - p_lo) * 0.06, 4)
+                        activity.add(
+                            f"در حال خواندن تصویر {disp_idx} از {disp_tot}: {item['name']}",
+                            progress=start_page_p,
+                        )
                         path = store.image_path(project_id, item["id"])
                         with Image.open(path) as im:
                             image = im.copy()
@@ -813,6 +848,7 @@ def create_app() -> FastAPI:
                                 _invoke_recognize, engine, image, values.language,
                                 values.contrast, values.precise, values.min_confidence, values.page_mode,
                                 pulse_label=f"در حال خواندن {item['name']}",
+                                progress_span=(start_page_p, round(p_lo + (p_hi - p_lo) * 0.92, 4)),
                             )
                             page_size = image.size
                         finally:
@@ -896,7 +932,14 @@ def create_app() -> FastAPI:
                 await run_in_threadpool(trim_process_memory)
             else:
                 await run_in_threadpool(registry.unload_all)
-        activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
+        if not is_ui_paged_batch:
+            activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
+        elif ui_batch_index >= ui_batch_total:
+            activity.add(
+                "OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است",
+                "success",
+                round((ui_batch_index - 0.18) / ui_batch_total, 4),
+            )
         return state
 
     def translation_settings(provider: str, skill: str | None, target_language: str = "fa") -> dict[str, Any]:
@@ -1129,10 +1172,12 @@ def create_app() -> FastAPI:
             text = combine_translation_texts(source_texts)
             label = f"درخواست {run['completed'] + 1} برای «{run['jobs'][chosen[0]['job']]['imageName']}»؛ {request.character_count(text)} از {run['limit']} نویسه"
             label += f"؛ {len(text.encode('utf-8'))} از ۵۰۰ بایت" if run['provider'] == 'free' else f"؛ خلاصه {len(run['context'])} از {request.context_limit} نویسه"
+            cur_cp = context_progress(run)
+            step_start_prog = cur_cp if cur_cp > 0 else None
             if values.recovery_token is not None:
-                activity.add(f"بررسی محلی پاسخ اصلاح‌شده برای درخواست {run['completed'] + 1}، بدون ارسال مجدد به AI.", progress=context_progress(run))
+                activity.add(f"بررسی محلی پاسخ اصلاح‌شده برای درخواست {run['completed'] + 1}، بدون ارسال مجدد به AI.", progress=step_start_prog)
             else:
-                activity.add(label + '.', progress=context_progress(run))
+                activity.add(label + '.', progress=step_start_prog)
                 activity.add(f"متن دقیق درخواست {run['completed'] + 1} (بدون هدر احراز هویت):\nدستور سیستم:\n{request.system}\nپیام کاربر:\n{request.user_message(text)}")
             if (values.recovery_token is None) != (values.corrected_response is None):
                 raise HTTPException(400, 'نشانه و متن پاسخ اصلاح‌شده باید همراه هم ارسال شوند.')

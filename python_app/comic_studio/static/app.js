@@ -23,6 +23,7 @@ let activityPollTimer = null;
 let activityPollInFlight = false;
 let activityGeneration = 0;
 let activeProgressId = null;
+let jobProgressTransform = null;
 let sessionTimer = null;
 let sessionCloseSent = false;
 let heartbeatInFlight = false;
@@ -218,17 +219,27 @@ async function pollActivity() {
       if (modelFromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = latest.message;
       syncModelProgressUi(modelCurrentProgress, true, latest.message);
     }
+    if (storageSwitchBusy && latest?.message && $('storageStatus')) {
+      $('storageStatus').textContent = latest.message;
+    }
     if (latestWithProgress) {
-      const progVal = latestWithProgress.progress;
-      if (jobBusy) {
-        setProgress('jobProgress', progVal, true);
-        setProgress('dockProgress', progVal, true);
-        if ($('editorDialog')?.open) setProgress('editorProgress', progVal, true);
+      const rawProg = Math.max(0, Math.min(1, latestWithProgress.progress));
+      let jobProg = rawProg;
+      if (jobProgressTransform) {
+        const scaled = jobProgressTransform.offset + rawProg * jobProgressTransform.scale;
+        jobProg = Math.max(jobProgressTransform.floor || 0, Math.min(1, scaled));
+        jobProgressTransform.floor = Math.max(jobProgressTransform.floor || 0, jobProg);
       }
-      if (activeProgressId) setProgress(activeProgressId, progVal, true);
-      if (translationRunning) setProgress('translationProgress', progVal, true);
+      if (jobBusy) {
+        setProgress('jobProgress', jobProg, true);
+        setProgress('dockProgress', jobProg, true);
+        if ($('editorDialog')?.open) setProgress('editorProgress', jobProg, true);
+      }
+      if (activeProgressId) setProgress(activeProgressId, jobProg, true);
+      if (translationRunning) setProgress('translationProgress', jobProg, true);
+      if (storageSwitchBusy) setProgress('storageProgress', rawProg, true);
       if (state.modelBusy) {
-        const monotonic = typeof modelCurrentProgress === 'number' ? Math.max(modelCurrentProgress, progVal) : progVal;
+        const monotonic = typeof modelCurrentProgress === 'number' ? Math.max(modelCurrentProgress, rawProg) : rawProg;
         syncModelProgressUi(monotonic, true, latest?.message || latestWithProgress.message || modelCurrentLabel);
       }
     }
@@ -237,7 +248,7 @@ async function pollActivity() {
   finally { activityPollInFlight = false; }
 }
 function isActivityHighRate() {
-  return Boolean(jobBusy || state.modelBusy || translationRunning || exportRunning || checkingEngineUpdates);
+  return Boolean(jobBusy || state.modelBusy || translationRunning || exportRunning || checkingEngineUpdates || storageSwitchBusy);
 }
 function scheduleActivityPoll(immediate = false) {
   if (sessionCloseSent) return;
@@ -746,6 +757,7 @@ async function runJob(message, task, progressId = null) {
   await clearActivity(false);
   const jobController = new AbortController();
   currentJobAbortController = jobController;
+  jobProgressTransform = { offset: 0, scale: 1, floor: 0 };
   setBusy(message); activeProgressId = progressId;
   if (progressId) setProgress(progressId, null, true);
   appendLocalActivity(message); $('activityDetails').open = true;
@@ -761,6 +773,7 @@ async function runJob(message, task, progressId = null) {
   }
   finally {
     if (currentJobAbortController === jobController) currentJobAbortController = null;
+    jobProgressTransform = null;
     dismissJobCancelModal('job');
     if (progressId) setProgress(progressId, completed ? 1 : 0, false);
     setProgress('dockProgress', completed ? 1 : 0, false);
@@ -1690,6 +1703,22 @@ function applyCachedEngineOrder(engines, cachedIds) {
   return ordered;
 }
 
+function engineInstallState(engine, language) {
+  if (!engine?.runtimeInstalled) {
+    return { state: 'uninstalled', icon: '⬇' };
+  }
+  const readyLangs = Array.isArray(engine.readyLanguages) ? engine.readyLanguages : [];
+  if (language && readyLangs.includes(language)) {
+    return { state: 'ready', icon: '✓' };
+  }
+  return { state: 'partial', icon: '◐' };
+}
+
+function formatOcrEngineOptionLabel(engine, language) {
+  const inst = engineInstallState(engine, language);
+  return `${inst.icon} ${engine.name}`;
+}
+
 function updateEngineOptions(preferredEngine = '', options = {}) {
   const select = $('ocrEngine'); if (!select) return;
   const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
@@ -1711,12 +1740,14 @@ function updateEngineOptions(preferredEngine = '', options = {}) {
   orderedEngines.forEach((engine) => {
     const suit = engineSuitability(engine, pageMode, language);
     const execMeta = resolveEngineExecMeta(engine);
+    const inst = engineInstallState(engine, language);
     const option = document.createElement('option');
     option.value = engine.id;
     option.className = `ocr-opt-${suit.tier}`;
     option.dataset.suitability = suit.tier;
     option.dataset.executionMode = execMeta.mode;
-    option.textContent = engine.name;
+    option.dataset.installState = inst.state;
+    option.textContent = `${inst.icon} ${engine.name}`;
     select.appendChild(option);
   });
   const chosenId = pickBestEngineForLanguage(language, pageMode, previous);
@@ -1746,10 +1777,12 @@ function updateOcrEngineStatus() {
       if (!opt) return;
       const suit = engineSuitability(eng, pageMode, curLang);
       const engExec = resolveEngineExecMeta(eng);
+      const inst = engineInstallState(eng, curLang);
       opt.className = `ocr-opt-${suit.tier}`;
       opt.dataset.suitability = suit.tier;
       opt.dataset.executionMode = engExec.mode;
-      opt.textContent = eng.name;
+      opt.dataset.installState = inst.state;
+      opt.textContent = `${inst.icon} ${eng.name}`;
       select.appendChild(opt);
     });
     select.value = keepSelectedId;
@@ -1976,39 +2009,47 @@ async function runOcr() {
           throw new Error('OCR در سرور ذخیره شد، اما پروژه یا انتخاب تغییر کرد؛ ترجمه ادامه نیافت. برای دیدن نتیجه پروژه را دوباره باز کنید.');
         }
       };
-      if (ids.length === 1) {
+      const applyActiveJobProgress = (p) => {
+        const clamped = Math.max(0, Math.min(1, p));
+        if (jobProgressTransform) {
+          jobProgressTransform.floor = Math.max(jobProgressTransform.floor || 0, clamped);
+        }
+        const effective = jobProgressTransform ? Math.max(jobProgressTransform.floor, clamped) : clamped;
+        setProgress('ocrProgress', effective, true);
+        setProgress('jobProgress', effective, true);
+        setProgress('dockProgress', effective, true);
+        if ($('editorDialog')?.open) setProgress('editorProgress', effective, true);
+      };
+      const totalPages = ids.length;
+      for (let idx = 0; idx < totalPages; idx += 1) {
+        checkOcrNotCancelled();
+        const pageId = ids[idx];
+        const isLastPage = idx + 1 >= totalPages;
+        if (!isLastPage) usedKeepEngineLoaded = true;
+        if (idx > 0) applyActiveJobProgress(idx / totalPages);
         const result = await api(`/api/projects/${state.project.id}/ocr`, {
-          ...jsonOptions('POST', { ...basePayload, image_ids: ids, keep_engine_loaded: false }),
+          ...jsonOptions('POST', {
+            ...basePayload,
+            image_ids: [pageId],
+            keep_engine_loaded: !isLastPage,
+            batch_index: idx + 1,
+            batch_total: totalPages,
+          }),
           signal: controller.signal,
         });
+        if (isLastPage) usedKeepEngineLoaded = false;
         checkOcrNotCancelled();
         verifyPendingOcrState();
         adoptProject(result, { skipGrid: true });
         setOverlayMode('ocr', false);
-        await renderImagesText(ids, null, checkOcrNotCancelled);
-        completedOcrPages = 1;
-      } else {
-        for (let idx = 0; idx < ids.length; idx += 1) {
-          checkOcrNotCancelled();
-          const pageId = ids[idx];
-          const isLastPage = idx + 1 >= ids.length;
-          if (!isLastPage) usedKeepEngineLoaded = true;
-          const result = await api(`/api/projects/${state.project.id}/ocr`, {
-            ...jsonOptions('POST', { ...basePayload, image_ids: [pageId], keep_engine_loaded: !isLastPage }),
-            signal: controller.signal,
-          });
-          if (isLastPage) usedKeepEngineLoaded = false;
-          checkOcrNotCancelled();
-          verifyPendingOcrState();
-          adoptProject(result, { skipGrid: true });
-          setOverlayMode('ocr', false);
-          await renderImagesText([pageId], null, checkOcrNotCancelled);
-          completedOcrPages += 1;
-          const p = completedOcrPages / ids.length;
-          setProgress('ocrProgress', p, true);
-          setProgress('jobProgress', p, true);
-          setProgress('dockProgress', p, true);
-        }
+        applyActiveJobProgress((idx + 0.80) / totalPages);
+        await renderImagesText(
+          [pageId],
+          (done, tot) => applyActiveJobProgress((idx + 0.80 + 0.20 * (done / Math.max(1, tot))) / totalPages),
+          checkOcrNotCancelled,
+        );
+        completedOcrPages += 1;
+        applyActiveJobProgress(completedOcrPages / totalPages);
       }
     }, 'ocrProgress');
     ocrSucceeded = true; ocrClosingNormally = true;
@@ -2319,7 +2360,8 @@ async function submitStorageSettings(overrideCustomPath = null) {
 
   storageSwitchBusy = true;
   setStorageControlsDisabled(true);
-  setProgress('storageProgress', null, true);
+  setProgress('storageProgress', migrateExisting ? 0 : null, true);
+  scheduleActivityPoll(true);
   if ($('storageStatus')) {
     $('storageStatus').textContent = migrateExisting
       ? 'در حال انتقال امن فایل‌ها و فعال‌سازی مسیر جدید… لطفاً تا پایان عملیات صبر کنید.'
@@ -2356,6 +2398,7 @@ async function submitStorageSettings(overrideCustomPath = null) {
     toast(msg, true);
   } finally {
     storageSwitchBusy = false;
+    scheduleActivityPoll(false);
     setStorageControlsDisabled(false);
   }
 }
@@ -2777,6 +2820,13 @@ function pageRenderSignature(item, mode = currentOverlayMode(), blocksOverride =
   const erase = state.project?.settings?.eraseOriginal !== false;
   return JSON.stringify([mode, erase, blocks]);
 }
+function isPageRenderCurrent(item, mode = currentOverlayMode()) {
+  if (!state.project?.id || !item) return false;
+  const key = `${state.project.id}:${item.id}`;
+  const blocks = overlayBlocks(item, mode);
+  const active = blocks.some((block) => block.enabled && hasRenderableText(block));
+  return Boolean(item.edited) === active && renderedPageSignatures.get(key) === pageRenderSignature(item, mode, blocks);
+}
 async function ensureFont() {
   if (fontLoadedOnce || !document.fonts?.load) return;
   try {
@@ -2912,23 +2962,41 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
     const pptxLayout = layoutOverride || $('exportPptxLayout')?.value || 'visual';
     if (exportKind !== 'txt' && exportKind !== 'docx' && exportKind !== 'pptx') {
       const targets = selectedImages().filter((item) => hasOverlayText(item) || item.edited);
-      if (targets.length) {
+      const staleTargets = targets.filter((item) => !isPageRenderCurrent(item));
+      if (staleTargets.length) {
+        const renderShare = 0.45;
         await renderImagesText(
-          targets.map((item) => item.id),
+          staleTargets.map((item) => item.id),
           (done, total) => {
-            const p = (done / Math.max(1, total)) * 0.5;
+            const p = (done / Math.max(1, total)) * renderShare;
+            if (jobProgressTransform) jobProgressTransform.floor = Math.max(jobProgressTransform.floor || 0, p);
             if (activeProgressId) setProgress(activeProgressId, p, true);
             setProgress('jobProgress', p, true); setProgress('dockProgress', p, true);
           },
           checkNotCancelled,
           { skipUnchanged: true },
         );
+        if (jobProgressTransform) {
+          jobProgressTransform.offset = renderShare;
+          jobProgressTransform.scale = 1 - renderShare - 0.02;
+          jobProgressTransform.floor = renderShare;
+        }
       } else {
-        renderGrid();
+        if (targets.length) {
+          await renderImagesText(targets.map((item) => item.id), null, checkNotCancelled, { skipUnchanged: true });
+        } else {
+          renderGrid();
+        }
+        if (jobProgressTransform) {
+          jobProgressTransform.offset = 0;
+          jobProgressTransform.scale = 0.98;
+          jobProgressTransform.floor = 0;
+        }
       }
-    } else {
-      if (activeProgressId) setProgress(activeProgressId, 0.18, true);
-      setProgress('jobProgress', 0.18, true); setProgress('dockProgress', 0.18, true);
+    } else if (jobProgressTransform) {
+      jobProgressTransform.offset = 0;
+      jobProgressTransform.scale = 0.98;
+      jobProgressTransform.floor = 0;
     }
     checkNotCancelled();
     const baseExportName = safeName($('exportName').value, safeName(state.project?.name || '', 'comic-translated'));
@@ -3809,7 +3877,7 @@ function renderAiProfiles() {
       test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی…'; $('copyAiError').classList.add('hidden'); setProgress('aiProgress', null, true);
       try {
         await saveAiSettings({ quiet: true });
-        setProgress('aiProgress', 0.45, true);
+        setProgress('aiProgress', 0.5, true);
         const result = await api('/api/ai-settings/test', jsonOptions('POST', {
           provider, profile_id: profileId, model, base_url: baseUrl,
         }));

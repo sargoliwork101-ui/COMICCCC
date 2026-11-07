@@ -24,6 +24,8 @@ class OcrRequest(BaseModel):
     page_mode: Literal["auto", "comic", "document"] = "auto"
     min_confidence: float = Field(default=0.35, ge=0.0, le=1.0)
     keep_engine_loaded: bool = False
+    batch_index: int | None = Field(default=None, ge=1)
+    batch_total: int | None = Field(default=None, ge=1)
 
 
 class TranslateRequest(BaseModel):

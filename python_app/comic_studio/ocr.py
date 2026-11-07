@@ -173,7 +173,7 @@ def _run_standard_pip_streaming(
     start_p: float = 0.18,
     end_p: float = 0.66,
 ) -> subprocess.CompletedProcess[str]:
-    from .ocr_managed import _dir_bytes_fast, _kill_process_tree
+    from .ocr_managed import _dir_bytes_fast, _kill_process_tree, _parse_size_to_bytes
 
     proc = subprocess.Popen(
         cmd,
@@ -194,6 +194,17 @@ def _run_standard_pip_streaming(
     done = threading.Event()
     cur_p = [start_p]
     span = max(0.05, end_p - start_p)
+    has_torch = any("torch" in str(part).lower() for part in cmd)
+    expected_bytes = [float((2550 if has_torch else 120) * (1024 ** 2))]
+    announced_bytes = [0.0]
+    completed_wheel_bytes = [0.0]
+    active_wheel_bytes = [0.0]
+    collect_steps = [0]
+
+    def _emit_std(msg: str, ratio: float) -> None:
+        clamped = max(0.0, min(0.98, ratio))
+        cur_p[0] = max(cur_p[0], round(start_p + span * clamped, 3))
+        emit(msg, progress=cur_p[0])
 
     def _watchdog() -> None:
         while not done.wait(1.0):
@@ -201,14 +212,16 @@ def _run_standard_pip_streaming(
                 _kill_process_tree(proc)
                 return
             now = time.monotonic()
-            if now - last_activity_at[0] >= 3.0:
+            if now - last_activity_at[0] >= 1.5:
                 b_now = _dir_bytes_fast(cdir)
                 if b_now > last_bytes[0]:
                     last_bytes[0] = b_now
                     last_activity_at[0] = now
-                    mb = max(0.1, (b_now - base_bytes) / (1024 * 1024))
-                    cur_p[0] = min(end_p - 0.02, cur_p[0] + span * 0.03)
-                    emit(f"در حال دریافت بسته‌های OCR ({mb:.1f} مگابایت)…", progress=round(cur_p[0], 3))
+                    gained_b = max(0.0, float(b_now - base_bytes))
+                    mb = max(0.1, gained_b / (1024 * 1024))
+                    denom = max(expected_bytes[0], announced_bytes[0] * 1.05, gained_b * 1.06)
+                    dl_ratio = min(1.0, max(gained_b, completed_wheel_bytes[0]) / max(1.0, denom))
+                    _emit_std(f"در حال دریافت بسته‌های OCR ({mb:.1f} مگابایت)…", 0.06 + 0.80 * dl_ratio)
                     continue
             if now - last_activity_at[0] >= stall_timeout:
                 stalled[0] = True
@@ -231,12 +244,24 @@ def _run_standard_pip_streaming(
             if len(tail) > 120:
                 tail.pop(0)
             low = line.lower()
-            if low.startswith("downloading ") or low.startswith("collecting "):
-                cur_p[0] = min(end_p - 0.03, cur_p[0] + span * 0.06)
-                emit(f"دریافت بسته: {line[:95]}", progress=round(cur_p[0], 3))
+            if low.startswith("downloading "):
+                completed_wheel_bytes[0] += active_wheel_bytes[0]
+                size_m = re.search(r"\(([\d.]+\s*[kKmMgG][bB])\)", line)
+                active_wheel_bytes[0] = _parse_size_to_bytes(size_m.group(1)) if size_m else 0.0
+                announced_bytes[0] += active_wheel_bytes[0]
+                expected_bytes[0] = max(expected_bytes[0], announced_bytes[0] * 1.05)
+                b_now = _dir_bytes_fast(cdir)
+                last_bytes[0] = max(last_bytes[0], b_now)
+                gained_b = max(0.0, float(b_now - base_bytes), completed_wheel_bytes[0])
+                dl_ratio = min(1.0, gained_b / max(1.0, expected_bytes[0]))
+                _emit_std(f"دریافت بسته: {line[:95]}", 0.06 + 0.80 * dl_ratio)
+            elif low.startswith("collecting "):
+                collect_steps[0] += 1
+                _emit_std(f"بررسی بسته: {line[:95]}", min(0.06, collect_steps[0] * 0.008))
             elif low.startswith("installing collected packages"):
-                cur_p[0] = max(cur_p[0], start_p + span * 0.85)
-                emit("در حال نصب بسته‌های دریافت‌شده روی سیستم…", progress=round(cur_p[0], 3))
+                completed_wheel_bytes[0] += active_wheel_bytes[0]
+                active_wheel_bytes[0] = 0.0
+                _emit_std("در حال نصب بسته‌های دریافت‌شده روی سیستم…", 0.90)
         rc = proc.wait(timeout=30)
     except Exception:
         _kill_process_tree(proc)
@@ -1260,18 +1285,20 @@ class EasyEngine:
 
     def download(self, language: str = "eng") -> None:
         _STANDARD_CANCEL_EVENT.clear()
+        had_runtime = self.runtime_installed
         dl_est = compute_engine_download_estimate(
             self.id,
-            runtime_installed=self.runtime_installed,
+            runtime_installed=had_runtime,
             model_ready=self.model_ready,
         )
         dl_label = format_download_size_fa(dl_est["totalDownloadGb"])
-        emit(f"شروع آماده‌سازی مدل EasyOCR ({language} — کل حجم دانلود: {dl_label})…", progress=0.06)
+        emit(f"شروع آماده‌سازی مدل EasyOCR ({language} — کل حجم دانلود: {dl_label})…", progress=0.05)
         self._ensure_runtime()
         try:
             if _STANDARD_CANCEL_EVENT.is_set():
                 raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
-            emit(f"آماده‌سازی EasyOCR برای {language}؛ فقط مدل همین زبان دریافت می‌شود", progress=0.62)
+            wt_start_p = 0.12 if had_runtime else 0.70
+            emit(f"آماده‌سازی EasyOCR برای {language}؛ فقط مدل همین زبان دریافت می‌شود", progress=wt_start_p)
             self._reader(language, True)
             self._model_dir().mkdir(parents=True, exist_ok=True)
             (self._model_dir() / f".ready-{language}").write_text("downloaded by user request\n", encoding="utf-8")

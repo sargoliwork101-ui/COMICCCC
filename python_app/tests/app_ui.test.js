@@ -1625,7 +1625,8 @@ function check(name, condition) {
         });
         const cleanDropdownNames = [...$('ocrEngine').options].every((o) => {
           const eng = state.engines.find((e) => e.id === o.value);
-          return eng && o.textContent === eng.name && !o.textContent.includes('💻') && !o.textContent.includes('عالی');
+          const validIcon = ['✓', '◐', '⬇'].some((ico) => o.textContent === ico + ' ' + (eng ? eng.name : ''));
+          return eng && validIcon && !o.textContent.includes('💻') && !o.textContent.includes('عالی');
         });
         const ocrDescOk = $('ocrEngine')?.dataset.executionMode === 'local' && $('ocrEngineStatus')?.textContent.includes('روی سیستم') && !$('ocrEngineStatus')?.textContent.includes('💻');
 
@@ -1732,7 +1733,7 @@ function check(name, condition) {
           const tessQuickBtn = $('ocrQuickPrepareBtn')?.textContent || '';
 
           return (
-            glmOptText === 'GLM-OCR' &&
+            glmOptText === '⬇ GLM-OCR' &&
             statusText.includes('کل حجم دانلود خودکار:') &&
             statusText.includes('پیش‌نیازها:') &&
             quickBtnText.includes('نصب و دانلود خودکار همین مدل (کل حجم دانلود:') &&
@@ -2121,7 +2122,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas400: verText.includes('۴.۰۰'),
+            verHas401: verText.includes('۴.۰۱'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2140,8 +2141,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00 displays version 4.00 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas400 === true
+      'v4.00/v4.01 displays version 4.01 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas401 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -2154,6 +2155,117 @@ function check(name, condition) {
         && v400StorageCheck.switchedProjectId === 'projd1'
         && v400StorageCheck.customActiveAfter === true,
       JSON.stringify(v400StorageCheck),
+    );
+
+    // v4.01: Verify #ocrEngine install/readiness icons (✓ ready, ◐ installed runtime missing language, ⬇ uninstalled) + monotonic real progress bars
+    const v401UiCheck = await vm.runInContext(`
+      (async () => {
+        const prevEngines = state.engines;
+        try {
+          state.engines = [
+            {
+              id: 'rapidocr-v6',
+              name: 'PP-OCRv6 Small',
+              family: 'RapidOCR / ONNX',
+              selectable: true,
+              isolated: false,
+              languages: ['eng', 'chi_sim', 'jpn'],
+              runtimeInstalled: true,
+              modelReady: true,
+              readyLanguages: ['eng'],
+              totalDownloadGb: 0,
+              fullDownloadSizeGb: 0.04,
+            },
+            {
+              id: 'tesseract',
+              name: 'Tesseract 5 LSTM',
+              family: 'Tesseract',
+              selectable: true,
+              isolated: false,
+              languages: ['eng', 'fas'],
+              runtimeInstalled: true,
+              modelReady: true,
+              readyLanguages: ['eng'],
+              totalDownloadGb: 0.015,
+              fullDownloadSizeGb: 0.09,
+            },
+            {
+              id: 'glm-ocr',
+              name: 'GLM-OCR',
+              family: 'VLM',
+              selectable: true,
+              isolated: true,
+              languages: ['eng', 'fas'],
+              runtimeInstalled: false,
+              modelReady: false,
+              readyLanguages: [],
+              totalDownloadGb: 4.55,
+              fullDownloadSizeGb: 4.55,
+            },
+          ];
+
+          $('ocrLanguage').value = 'eng';
+          updateEngineOptions('rapidocr-v6', { resort: true });
+          const optRapidEng = document.querySelector('#ocrEngine option[value="rapidocr-v6"]');
+          const optTessEng = document.querySelector('#ocrEngine option[value="tesseract"]');
+          const optGlmEng = document.querySelector('#ocrEngine option[value="glm-ocr"]');
+          const engIconsOk = optRapidEng?.textContent === '✓ PP-OCRv6 Small' && optRapidEng?.dataset.installState === 'ready'
+            && optTessEng?.textContent === '✓ Tesseract 5 LSTM' && optTessEng?.dataset.installState === 'ready'
+            && optGlmEng?.textContent === '⬇ GLM-OCR' && optGlmEng?.dataset.installState === 'uninstalled';
+
+          // Switch language to Persian ('fas'): Tesseract has runtimeInstalled=true but 'fas' not in readyLanguages -> ◐
+          $('ocrLanguage').value = 'fas';
+          updateEngineOptions('tesseract', { resort: true });
+          const optTessFas = document.querySelector('#ocrEngine option[value="tesseract"]');
+          const optGlmFas = document.querySelector('#ocrEngine option[value="glm-ocr"]');
+          const fasIconsOk = optTessFas?.textContent === '◐ Tesseract 5 LSTM' && optTessFas?.dataset.installState === 'partial'
+            && optGlmFas?.textContent === '⬇ GLM-OCR' && optGlmFas?.dataset.installState === 'uninstalled';
+
+          // Verify jobProgressTransform prevents backward jumps when export transitions from 45% client render to 10% server build
+          jobBusy = true;
+          activeProgressId = 'exportProgress';
+          jobProgressTransform = { offset: 0.45, scale: 0.53, floor: 0.45 };
+          const origFetch = window.fetch;
+          let exportWidth = 0;
+          try {
+            window.fetch = async (url, opts) => {
+              if (String(url).startsWith('/api/activity')) {
+                const body = {
+                  entries: [{ id: 999001, message: 'چیدمان صفحهٔ ۱ از ۱۰ در PDF', kind: 'info', progress: 0.1, time: new Date().toISOString() }],
+                  next: 999001,
+                };
+                return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+              }
+              return origFetch(url, opts);
+            };
+            await pollActivity();
+            exportWidth = parseInt($('exportProgress').closest('.bar').getAttribute('aria-valuenow') || '0', 10);
+          } finally {
+            window.fetch = origFetch;
+            jobProgressTransform = null;
+            activeProgressId = null;
+            jobBusy = false;
+            setProgress('exportProgress', 0, false);
+            setProgress('jobProgress', 0, false);
+            setProgress('dockProgress', 0, false);
+          }
+
+          return {
+            engIconsOk,
+            fasIconsOk,
+            exportStayedAbove45: exportWidth === 50,
+          };
+        } finally {
+          state.engines = prevEngines;
+          $('ocrLanguage').value = 'eng';
+          updateEngineOptions('rapidocr-v6', { resort: true });
+        }
+      })()
+    `, context);
+    check(
+      'v4.01 renders single install/readiness icon (✓ ready, ◐ missing language file, ⬇ uninstalled) in #ocrEngine and scales multi-phase progress monotonically without backward jumps',
+      v401UiCheck.engIconsOk === true && v401UiCheck.fasIconsOk === true && v401UiCheck.exportStayedAbove45 === true,
+      JSON.stringify(v401UiCheck),
     );
   }
 

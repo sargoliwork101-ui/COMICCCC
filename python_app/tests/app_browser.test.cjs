@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v4.00: Verify version badge ۴.۰۰, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, clean name-only dropdowns, menu model deletion, per-page RAM release, zero idle CPU, and optional storage settings
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۰۰ · Python', 'header shows version ۴.۰۰');
+      // v3.85–v4.01: Verify version badge ۴.۰۱, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, menu model deletion, per-page RAM release, zero idle CPU, and optional storage settings
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۰۱ · Python', 'header shows version ۴.۰۱');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2571,7 +2571,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         const all14LocalDescs = cards.length === 14 && cards.every((c) => c.dataset.executionMode === 'local' && !c.querySelector('.engine-chip.is-exec-local') && (c.querySelector('p')?.textContent || '').includes('روی سیستم'));
         const cleanOcrOpts = [...document.getElementById('ocrEngine').options].every((o) => {
           const eng = state.engines.find((e) => e.id === o.value);
-          return eng && o.textContent === eng.name && !o.textContent.includes('💻') && !o.textContent.includes('عالی');
+          const hasIcon = ['✓', '◐', '⬇'].some((ico) => o.textContent === `${ico} ${eng?.name}`);
+          return eng && hasIcon && ['ready', 'partial', 'uninstalled'].includes(o.dataset.installState) && !o.textContent.includes('💻') && !o.textContent.includes('عالی');
         });
         const ocrLocal = document.getElementById('ocrEngineStatus')?.textContent.includes('روی سیستم') && !document.getElementById('ocrEngineStatus')?.textContent.includes('💻');
         showAiProvider('gemini', false);

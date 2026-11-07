@@ -15,6 +15,7 @@ from typing import Any, BinaryIO
 from PIL import Image, UnidentifiedImageError
 
 from . import APP_VERSION
+from .activity import emit
 from .paths import data_dir, project_root
 from .store import ALLOWED_IMAGES, ProjectChangedError, ProjectStore, atomic_json, new_id, utc_now
 
@@ -131,17 +132,25 @@ def make_backup(store: ProjectStore, project_id: str, drafts: Any, expected_upda
             manifest_data = _json(manifest, 4096); project_data = _json(state, MAX_JSON); draft_data = _json(drafts, MAX_DRAFTS)
             if len(files) + 3 > MAX_FILES or sum(path.stat().st_size for path, _, _ in files) + len(manifest_data) + len(project_data) + len(draft_data) > MAX_TOTAL:
                 raise BackupError('حجم یا تعداد فایل‌های پروژه برای بک‌آپ بیش از حد مجاز است.')
+            total_backup_bytes = max(1, sum(path.stat().st_size for path, _, _ in files))
+            written_backup_bytes = 0
             with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=3, allowZip64=True) as archive:
                 archive.writestr('manifest.json', manifest_data)
                 archive.writestr('project.json', project_data)
                 archive.writestr('browser-drafts.json', draft_data)
-                for path, name, _ in files:
+                total_files_count = max(1, len(files))
+                for f_idx, (path, name, _) in enumerate(files, start=1):
                     before = path.stat()
                     compress_type = zipfile.ZIP_STORED if path.suffix.lower() in STORED_ARCHIVE_SUFFIXES else zipfile.ZIP_DEFLATED
                     archive.write(path, name, compress_type=compress_type)
                     after = path.stat()
                     if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
                         raise BackupError(f'فایل {path.name} هنگام ساخت بک‌آپ تغییر کرد؛ دوباره تلاش کنید.')
+                    written_backup_bytes += before.st_size
+                    emit(
+                        f"افزودن فایل {f_idx} از {total_files_count} به بستهٔ بک‌آپ…",
+                        progress=round(min(0.96, written_backup_bytes / total_backup_bytes * 0.96), 4),
+                    )
         if target.stat().st_size > MAX_ZIP:
             raise BackupError('حجم ZIP بیش از حد مجاز است.')
         return target
@@ -244,7 +253,10 @@ def restore_backup(store: ProjectStore, upload: BinaryIO) -> tuple[dict[str, Any
                     raise BackupError('بک‌آپ شامل فایل غیرمجاز است.')
             stage = Path(tempfile.mkdtemp(prefix='project-', dir=staging_root))
             (stage / 'images').mkdir(); (stage / 'exports').mkdir()
-            for name in names - {'manifest.json', 'project.json', 'browser-drafts.json'}:
+            payload_names = sorted(names - {'manifest.json', 'project.json', 'browser-drafts.json'})
+            total_payload_bytes = max(1, sum(archive.getinfo(n).file_size for n in payload_names))
+            extracted_payload_bytes = 0
+            for f_idx, name in enumerate(payload_names, start=1):
                 info = archive.getinfo(name)
                 limit = MAX_EXPORT if name.startswith('exports/') else (MAX_EDITED if name.endswith('-edited.png') else MAX_IMAGE)
                 if info.file_size > limit or info.file_size > MAX_TOTAL - total_extracted:
@@ -261,6 +273,11 @@ def restore_backup(store: ProjectStore, upload: BinaryIO) -> tuple[dict[str, Any
                             raise BackupError('یکی از فایل‌های بک‌آپ بیش از حد بزرگ است.')
                         destination.write(chunk)
                 total_extracted += written
+                extracted_payload_bytes += written
+                emit(
+                    f"بازیابی فایل {f_idx} از {max(1, len(payload_names))} از بستهٔ بک‌آپ…",
+                    progress=round(min(0.95, extracted_payload_bytes / total_payload_bytes * 0.95), 4),
+                )
             for item in state['images']:
                 _verify_image(stage / 'images' / item['file'], item, False)
                 edited = stage / 'images' / f"{item['id']}-edited.png"
