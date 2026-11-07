@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const G = window.StudioGroups;
 const GROUP_COLORS = ['#34d399', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa', '#2dd4bf', '#fb923c', '#e879f9'];
 const state = {
-  project: null, engines: [], ai: null, editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
+  project: null, engines: [], ai: null, storage: null, editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
   cropId: null, crop: null, cropPointer: null, modelBusy: null, dragId: null, dragIds: [],
   dragMode: null, groupEditId: null, groupSnapshot: null, lastSelectedId: null,
   previewId: null,
@@ -41,6 +41,7 @@ let classicEditor = null;
 let helpController = null;
 let imageOverview = null;
 let jobBusy = false;
+let storageSwitchBusy = false;
 let translationRunning = false;
 let ocrRunning = false;
 let exportRunning = false;
@@ -2203,6 +2204,160 @@ function openAiSettingsFromPreviewDialog() {
     if (activeProv && AI_PROVIDER_IDS.includes(activeProv)) showAiProvider(activeProv, false);
     showDialog('aiDialog');
   }).catch((error) => toast(error.message, true));
+}
+function formatStorageBytesFa(bytes) {
+  const n = Number(bytes || 0);
+  if (!Number.isFinite(n) || n <= 0) return 'کمتر از ۱ مگابایت';
+  if (n < 1024 * 1024) return 'کمتر از ۱ مگابایت';
+  if (n < 1024 ** 3) return `${Math.max(1, Math.round(n / (1024 * 1024)))} مگابایت`;
+  return `${(n / (1024 ** 3)).toFixed(2)} گیگابایت`;
+}
+function syncStorageCheckboxState() {
+  const mig = $('storageMigrateExisting');
+  const clean = $('storageCleanupOld');
+  const wrap = $('storageCleanupOldWrap');
+  if (!mig || !clean) return;
+  clean.disabled = !mig.checked || storageSwitchBusy;
+  if (wrap) wrap.style.opacity = mig.checked ? '1' : '0.55';
+}
+function renderStorageSettings(info) {
+  if (!info) return;
+  state.storage = info;
+  if ($('storageModeBadge')) {
+    $('storageModeBadge').textContent = info.customActive ? 'مسیر سفارشی فعال' : 'اختیاری · پیش‌فرض خودکار';
+  }
+  if ($('storageActivePath')) $('storageActivePath').textContent = info.activePath || '—';
+  if ($('storageAppDir')) $('storageAppDir').textContent = info.appDir || '—';
+  if ($('storageDiskStats')) {
+    const usedLabel = formatStorageBytesFa(info.usedBytes || 0);
+    const freeLabel = typeof info.freeDiskGb === 'number' ? `${info.freeDiskGb} گیگابایت` : 'نامشخص';
+    $('storageDiskStats').textContent = `حجم مصرفی فعلی: ${usedLabel} · فضای آزاد درایو فعلی: ${freeLabel}`;
+  }
+  if ($('storageCustomPath')) $('storageCustomPath').value = info.customPath || '';
+  if ($('storageWarningBanner')) {
+    const warn = String(info.fallbackWarning || '').trim();
+    $('storageWarningBanner').textContent = warn;
+    $('storageWarningBanner').classList.toggle('hidden', !warn);
+  }
+  if ($('storageResetDefaultBtn')) {
+    $('storageResetDefaultBtn').classList.toggle('hidden', !info.customPath);
+  }
+  syncStorageCheckboxState();
+}
+async function openStorageDialog() {
+  if (!$('storageDialog')) return;
+  setProgress('storageProgress', 0, false);
+  if ($('storageStatus')) $('storageStatus').textContent = '';
+  const info = await api('/api/storage-settings');
+  renderStorageSettings(info);
+  showDialog('storageDialog');
+  setMenuOpen(false);
+}
+async function browseStorageFolder() {
+  if (storageSwitchBusy) return;
+  const btn = $('storageBrowseBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const currentInput = $('storageCustomPath')?.value?.trim() || state.storage?.activePath || '';
+    const res = await api('/api/storage-settings/pick-folder', jsonOptions('POST', { initial_dir: currentInput }));
+    if (res && !res.cancelled && res.path) {
+      if ($('storageCustomPath')) $('storageCustomPath').value = res.path;
+      if ($('storageStatus')) $('storageStatus').textContent = 'پوشه انتخاب شد؛ برای ثبت نهایی روی «ذخیره و اعمال مسیر» کلیک کنید.';
+    }
+  } catch (error) {
+    const msg = error?.message || String(error);
+    if ($('storageStatus')) $('storageStatus').textContent = msg;
+    toast(msg, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+function setStorageControlsDisabled(disabled) {
+  ['storageCustomPath', 'storageBrowseBtn', 'storageMigrateExisting', 'storageSaveBtn', 'storageResetDefaultBtn'].forEach((id) => {
+    if ($(id)) $(id).disabled = disabled;
+  });
+  syncStorageCheckboxState();
+}
+async function submitStorageSettings(overrideCustomPath = null) {
+  if (storageSwitchBusy) return;
+  if (jobBusy || ocrRunning || translationRunning || exportRunning || state.modelBusy) {
+    toast('در حال حاضر عملیات دیگری فعال است؛ پس از پایان آن مسیر ذخیره‌سازی را تغییر دهید.', true);
+    return;
+  }
+  const nextPath = String(overrideCustomPath !== null ? overrideCustomPath : ($('storageCustomPath')?.value || '')).trim();
+  const migrateExisting = Boolean($('storageMigrateExisting')?.checked);
+  const cleanupSource = migrateExisting && Boolean($('storageCleanupOld')?.checked);
+  const currentCustom = String(state.storage?.customPath || '').trim();
+  if (nextPath === currentCustom && !(nextPath === '' && state.storage?.customActive)) {
+    if (!nextPath) {
+      toast('برنامه هم‌اکنون روی مسیر پیش‌فرض قرار دارد.');
+      closeDialog('storageDialog');
+      return;
+    }
+  }
+
+  const targetDisplay = nextPath || state.storage?.defaultPath || 'مسیر پیش‌فرض';
+  const modeExplain = migrateExisting
+    ? (cleanupSource
+      ? 'فایل‌ها، پروژه‌ها و مدل‌های فعلی به‌صورت امن کپی و تأیید سلامت می‌شوند و سپس فضای مسیر قبلی آزاد خواهد شد.'
+      : 'یک کپی کامل از فایل‌ها، پروژه‌ها و مدل‌های فعلی به مسیر جدید منتقل می‌شود و فایل‌های مسیر قبلی نیز حفظ می‌شوند.')
+    : 'فایل‌های قبلی جابه‌جا نمی‌شوند و فقط از این لحظه به بعد دانلودها و پروژه‌های جدید در مسیر انتخابی ذخیره می‌شوند.';
+
+  const confirmed = await appConfirm(
+    nextPath
+      ? `آیا می‌خواهید مسیر ذخیره‌سازی و دانلودها روی پوشهٔ زیر تنظیم شود؟\n${targetDisplay}`
+      : `آیا می‌خواهید به مسیر پیش‌فرض برنامه برگردید؟\n${targetDisplay}`,
+    {
+      title: nextPath ? 'تأیید تغییر مسیر ذخیره‌سازی' : 'بازگشت به مسیر پیش‌فرض',
+      hint: modeExplain,
+      confirmText: 'بله، اعمال شود',
+      cancelText: 'انصراف',
+      variant: 'confirm',
+    },
+  );
+  if (!confirmed) return;
+
+  storageSwitchBusy = true;
+  setStorageControlsDisabled(true);
+  setProgress('storageProgress', null, true);
+  if ($('storageStatus')) {
+    $('storageStatus').textContent = migrateExisting
+      ? 'در حال انتقال امن فایل‌ها و فعال‌سازی مسیر جدید… لطفاً تا پایان عملیات صبر کنید.'
+      : 'در حال بررسی و فعال‌سازی مسیر جدید…';
+  }
+  try {
+    if (state.project) await saveProject();
+    const result = await api('/api/storage-settings', jsonOptions('PUT', {
+      custom_path: nextPath,
+      migrate_existing: migrateExisting,
+      cleanup_source: cleanupSource,
+    }));
+    if (result?.storage) renderStorageSettings(result.storage);
+    renderedPageSignatures.clear();
+    imagePreviewVersions.clear();
+    if (Array.isArray(result?.engines)) state.engines = result.engines;
+    if (result?.ai) state.ai = result.ai;
+    if (result?.activeProject) adoptProject(result.activeProject);
+    if (Array.isArray(result?.projects)) await refreshProjectList(result.projects);
+    if (state.ai) await loadAiSettings(state.ai);
+    updateEngineOptions();
+    syncEngineUpdateUi();
+    if ($('modelsDialog')?.open) renderModels();
+    refreshEngineMemory().catch(() => {});
+    setProgress('storageProgress', 1, false);
+    const freedBytes = Number(result?.storage?.freedSourceBytes || 0);
+    const freedMsg = freedBytes >= 1024 * 1024 ? ` (${formatStorageBytesFa(freedBytes)} از مسیر قبلی آزاد شد)` : '';
+    toast(`مسیر ذخیره‌سازی با موفقیت اعمال شد${freedMsg}`);
+    closeDialog('storageDialog');
+  } catch (error) {
+    setProgress('storageProgress', 0, false);
+    const msg = error?.message || String(error);
+    if ($('storageStatus')) $('storageStatus').textContent = msg;
+    toast(msg, true);
+  } finally {
+    storageSwitchBusy = false;
+    setStorageControlsDisabled(false);
+  }
 }
 async function copyFieldText(inputEl, fieldLabel) {
   if (!inputEl) return;
@@ -5948,6 +6103,15 @@ function bindEvents() {
   });
   $('modelsPageMode')?.addEventListener('change', () => renderModels({ resort: true }));
   $('freeModelsRamBtn')?.addEventListener('click', () => freeModelsRam().catch(() => {}));
+  $('modelsStorageBtn')?.addEventListener('click', () => openStorageDialog().catch((error) => toast(error.message || String(error), true)));
+  $('storageBtn')?.addEventListener('click', () => openStorageDialog().catch((error) => toast(error.message || String(error), true)));
+  $('storageBrowseBtn')?.addEventListener('click', () => browseStorageFolder().catch(() => {}));
+  $('storageMigrateExisting')?.addEventListener('change', syncStorageCheckboxState);
+  $('storageSaveBtn')?.addEventListener('click', () => submitStorageSettings(null).catch(() => {}));
+  $('storageResetDefaultBtn')?.addEventListener('click', () => submitStorageSettings('').catch(() => {}));
+  $('storageDialog')?.addEventListener('cancel', (event) => {
+    if (storageSwitchBusy) event.preventDefault();
+  });
   $('checkModelUpdatesBtn')?.addEventListener('click', () => checkEngineUpdates({ force: true, silent: false }).catch(() => {}));
   $('updateAllModelsBtn')?.addEventListener('click', () => updateAllEngines().catch(() => {}));
   $('modelsActiveCancelBtn')?.addEventListener('click', () => requestCancelModelJob().catch(() => {}));

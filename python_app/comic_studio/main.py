@@ -29,14 +29,27 @@ from . import APP_NAME, APP_VERSION
 from .activity import ActivityLog, reporting
 from .backup import BackupError, make_backup, restore_backup
 from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, crop_box, image_payload
-from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
+from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
 from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
-from .ocr_managed import configure_native_runtime, iter_parallel_ordered, trim_process_memory
-from .paths import STATIC_DIR, project_root
+from .ocr_managed import (
+    _stop_lingering_surya_server,
+    configure_native_runtime,
+    invalidate_engine_runtime_caches,
+    iter_parallel_ordered,
+    reset_disk_free_cache,
+    trim_process_memory,
+)
+from .paths import (
+    STATIC_DIR,
+    apply_storage_directory,
+    inspect_storage_status,
+    pick_folder_dialog,
+    project_root,
+)
 from . import context_run, pending_results
 from .schemas import (
     AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest, OcrRequest, ProjectCreate,
-    SessionRequest, StateUpdate, TextTranslateRequest, TranslateRequest,
+    SessionRequest, StateUpdate, StorageFolderPickRequest, StorageSettingsUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .sessions import SessionManager
 from .store import ProjectChangedError, ProjectStore
@@ -116,6 +129,9 @@ def create_app() -> FastAPI:
     activity = ActivityLog()
     sessions = SessionManager()
     context_locks: dict[str, asyncio.Lock] = {}
+    storage_switch_lock = asyncio.Lock()
+    active_jobs_lock = threading.Lock()
+    active_jobs_count = 0
     # Recovery state is short-lived, process-local and never contains the raw response.
     recoveries: dict[str, dict[str, Any]] = {}
     recovery_locks: dict[str, asyncio.Lock] = {}
@@ -200,10 +216,13 @@ def create_app() -> FastAPI:
         return response
 
     async def run_reported(function: Any, *args: Any, pulse_label: str | None = None, **kwargs: Any) -> Any:
+        nonlocal active_jobs_count
         stop_pulse = threading.Event()
         started = time.monotonic()
         last_state: dict[str, Any] = {"ts": started, "progress": None, "detail": ""}
         pulse = None
+        with active_jobs_lock:
+            active_jobs_count += 1
 
         def tracked_report(message: str, kind: str = "info", progress: float | None = None) -> None:
             last_state["ts"] = time.monotonic()
@@ -239,6 +258,8 @@ def create_app() -> FastAPI:
             stop_pulse.set()
             if pulse:
                 pulse.join(timeout=0.1)
+            with active_jobs_lock:
+                active_jobs_count = max(0, active_jobs_count - 1)
 
     def context_progress(run: dict[str, Any]) -> float:
         jobs = run.get('jobs', [])
@@ -1554,6 +1575,91 @@ def create_app() -> FastAPI:
     async def test_ai_settings(values: AiConnectionTest | None = None) -> dict[str, Any]:
         overrides = values.model_dump(exclude_none=True) if values else {}
         return await run_in_threadpool(translations.test_connection, overrides)
+
+    def _require_local_storage_admin(request: Request) -> None:
+        peer_host = request.client.host if request.client else ""
+        if not (_is_loopback_peer(peer_host) or peer_host == "testclient"):
+            raise HTTPException(403, "تغییر مسیر ذخیره‌سازی فقط از روی همین کامپیوتر مجاز است.")
+
+    @app.get("/api/storage-settings")
+    def storage_settings() -> dict[str, Any]:
+        return inspect_storage_status()
+
+    @app.post("/api/storage-settings/pick-folder")
+    async def pick_storage_folder(
+        request: Request,
+        values: StorageFolderPickRequest | None = None,
+    ) -> dict[str, Any]:
+        _require_local_storage_admin(request)
+        init_dir = (values.initial_dir or "").strip() if values else ""
+        try:
+            chosen = await run_in_threadpool(pick_folder_dialog, init_dir or None)
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        clean = str(chosen or "").strip()
+        return {"cancelled": not bool(clean), "path": clean}
+
+    @app.put("/api/storage-settings")
+    async def update_storage_settings(
+        request: Request,
+        values: StorageSettingsUpdate,
+    ) -> dict[str, Any]:
+        _require_local_storage_admin(request)
+        if storage_switch_lock.locked():
+            raise HTTPException(409, "تغییر مسیر ذخیره‌سازی هم‌اکنون در حال انجام است.")
+        async with storage_switch_lock:
+            with active_jobs_lock:
+                jobs_busy = active_jobs_count > 0
+            if jobs_busy or _INSTALL_LOCK.locked() or any(lock.locked() for lock in context_locks.values()):
+                raise HTTPException(
+                    409,
+                    "در حال حاضر یک عملیات (دانلود مدل، OCR، ترجمه یا خروجی) فعال است؛ پس از پایان یا لغو آن مسیر ذخیره‌سازی را تغییر دهید.",
+                )
+
+            def _perform_switch() -> dict[str, Any]:
+                registry.unload_all()
+                _stop_lingering_surya_server()
+                result = apply_storage_directory(
+                    values.custom_path,
+                    migrate_existing=values.migrate_existing,
+                    cleanup_source=values.cleanup_source,
+                    progress_cb=lambda msg, prog: activity.add(msg, progress=prog),
+                )
+                store.reset_caches()
+                invalidate_engine_runtime_caches()
+                reset_disk_free_cache()
+                recoveries.clear()
+                trim_process_memory()
+                return result
+
+            try:
+                storage_result = await run_reported(
+                    _perform_switch,
+                    pulse_label="انتقال و تنظیم مسیر ذخیره‌سازی",
+                )
+            except ValueError as exc:
+                activity.add(f"تغییر مسیر ذخیره‌سازی ناموفق بود: {exc}", "error")
+                raise HTTPException(400, str(exc)) from exc
+            except OSError as exc:
+                activity.add(f"خطا در انتقال یا ذخیرهٔ مسیر جدید: {exc}", "error")
+                raise HTTPException(500, f"تغییر مسیر ذخیره‌سازی با خطای فایل مواجه شد: {exc}") from exc
+
+            projects_list = store.list()
+            active_project = store.get(projects_list[0]["id"]) if projects_list else store.create("پروژهٔ کمیک")
+            if not projects_list:
+                projects_list = store.list()
+            activity.add(
+                f"مسیر ذخیره‌سازی فعال: {storage_result['activePath']}",
+                "success",
+                1.0,
+            )
+            return {
+                "storage": storage_result,
+                "projects": projects_list,
+                "activeProject": active_project,
+                "engines": registry.status(),
+                "ai": translations.public_settings(),
+            }
 
     @app.post("/api/projects/{project_id}/export")
     async def export(project_id: str, values: ExportRequest) -> FileResponse:

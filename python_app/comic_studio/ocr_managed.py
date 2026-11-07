@@ -36,7 +36,7 @@ import numpy as np
 from PIL import Image
 
 from .activity import emit
-from .paths import models_dir
+from .paths import is_custom_data_dir_active, models_dir
 
 _SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 _HW_CACHE_LOCK = threading.Lock()
@@ -373,7 +373,8 @@ def sync_local_wheelhouse() -> Path:
 
 
 def clean_pip_env() -> dict[str, str]:
-    """Build a sanitized environment for pip subprocesses so launcher vars like PIP_RETRIES=1 or PIP_TIMEOUT=15 never throttle model installs."""
+    """Build a sanitized environment for pip subprocesses so launcher vars like PIP_RETRIES=1 or PIP_TIMEOUT=15 never throttle model installs,
+    and route pip cache + temporary wheel unpack folders into `models_dir()` so multi-GB installs never fill Drive C."""
     env = dict(os.environ)
     for blocked in ("PIP_NO_CACHE_DIR",):
         env.pop(blocked, None)
@@ -383,6 +384,19 @@ def clean_pip_env() -> dict[str, str]:
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    with contextlib.suppress(OSError):
+        if is_custom_data_dir_active() or bool((os.environ.get("COMIC_STUDIO_DATA") or "").strip()):
+            m_root = models_dir()
+            cdir = m_root / "pip-cache"
+            tdir = m_root / "tmp"
+            xdg_dir = m_root / "cache"
+            for directory in (cdir, tdir, xdg_dir):
+                directory.mkdir(parents=True, exist_ok=True)
+            env["PIP_CACHE_DIR"] = str(cdir)
+            env["TMPDIR"] = str(tdir)
+            env["TEMP"] = str(tdir)
+            env["TMP"] = str(tdir)
+            env["XDG_CACHE_HOME"] = str(xdg_dir)
     return env
 
 
@@ -1129,6 +1143,12 @@ def inspect_hardware(force_refresh: bool = False) -> dict[str, Any]:
             _DISK_FREE_CACHE = (probe_key, now, free_disk_gb)
     base["freeDiskGb"] = free_disk_gb
     return base
+
+
+def reset_disk_free_cache() -> None:
+    global _DISK_FREE_CACHE
+    with _HW_CACHE_LOCK:
+        _DISK_FREE_CACHE = None
 
 
 def engine_meta(engine_id: str) -> dict[str, Any]:
@@ -2130,24 +2150,36 @@ class IsolatedOcrEngine:
         env.setdefault("HF_HUB_DISABLE_XET", "1")
         env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
         env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        m_root = models_dir()
+        for sub_name in ("hf", "paddlex", "torch", "cache", "tmp"):
+            with contextlib.suppress(OSError):
+                (m_root / sub_name).mkdir(parents=True, exist_ok=True)
+        env["HF_HOME"] = str(m_root / "hf")
+        env["HUGGINGFACE_HUB_CACHE"] = str(m_root / "hf" / "hub")
+        env["PADDLE_PDX_CACHE_HOME"] = str(m_root / "paddlex")
+        env["TORCH_HOME"] = str(m_root / "torch")
+        env["XDG_CACHE_HOME"] = str(m_root / "cache")
+        env["TMPDIR"] = str(m_root / "tmp")
+        env["TEMP"] = str(m_root / "tmp")
+        env["TMP"] = str(m_root / "tmp")
         if self.id == "mineru-2-5-pro":
-            mineru_home = models_dir() / "mineru"
+            mineru_home = m_root / "mineru"
             with contextlib.suppress(OSError):
                 mineru_home.mkdir(parents=True, exist_ok=True)
-            env.setdefault("MINERU_HOME", str(mineru_home))
+            env["MINERU_HOME"] = str(mineru_home)
         if self.id == "hezar-ocr":
-            hezar_home = models_dir() / "hezar"
+            hezar_home = m_root / "hezar"
             with contextlib.suppress(OSError):
                 hezar_home.mkdir(parents=True, exist_ok=True)
-            env.setdefault("HEZAR_CACHE_DIR", str(hezar_home))
+            env["HEZAR_CACHE_DIR"] = str(hezar_home)
         if self.id == "surya":
             hw = inspect_hardware()
-            surya_cache = models_dir() / "surya"
+            surya_cache = m_root / "surya"
             try:
                 surya_cache.mkdir(parents=True, exist_ok=True)
             except OSError:
                 pass
-            env.setdefault("MODEL_CACHE_DIR", str(surya_cache))
+            env["MODEL_CACHE_DIR"] = str(surya_cache)
             # Always use native llama.cpp rather than Surya 2.5's Docker-only vLLM backend.
             # Context size 24576 + max_tokens 4096 prevents llama-server HTTP 400 context
             # overflow when scale_to_fit produces ~8k visual tokens on high-res book pages,
@@ -2503,10 +2535,14 @@ class IsolatedOcrEngine:
             except OSError:
                 pass
 
+            base_py = getattr(sys, "_base_executable", None) or sys.executable
+            if not base_py or not os.path.isfile(base_py):
+                base_py = sys.executable
+
             if not py.is_file():
                 emit(f"ساخت پوشه و محیط مستقل برای مدل {self.id}…", progress=0.08)
                 env_dir.parent.mkdir(parents=True, exist_ok=True)
-                res = _run_Subprocess([sys.executable, "-m", "venv", str(env_dir)], capture_output=True, text=True, timeout=300, check=False)
+                res = _run_Subprocess([str(base_py), "-m", "venv", str(env_dir)], capture_output=True, text=True, timeout=300, check=False)
                 if res.returncode != 0 or not py.is_file():
                     raise self._error_cls(f"ساخت محیط مستقل برای {self.id} ناموفق بود: {(res.stderr or res.stdout)[-800:]}")
                 emit(f"آماده‌سازی ابزار نصب در محیط مستقل {self.id}…", progress=0.14)
@@ -2517,6 +2553,9 @@ class IsolatedOcrEngine:
                 )
             else:
                 self._clean_broken_venv_artifacts()
+                py_probe = _run_Subprocess([str(py), "-c", "import sys"], capture_output=True, text=True, timeout=30, check=False)
+                if py_probe.returncode != 0:
+                    _run_Subprocess([str(base_py), "-m", "venv", "--upgrade", str(env_dir)], capture_output=True, text=True, timeout=180, check=False)
                 pip_probe = _run_Subprocess([str(py), "-m", "pip", "--version"], capture_output=True, text=True, timeout=60, check=False)
                 if pip_probe.returncode != 0:
                     _run_Subprocess([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300, check=False)
@@ -2651,6 +2690,8 @@ class IsolatedOcrEngine:
                 + _dir_bytes_fast(m_root / "paddlex")
                 + _dir_bytes_fast(m_root / "surya")
                 + _dir_bytes_fast(m_root / "mineru")
+                + _dir_bytes_fast(m_root / "hezar")
+                + _dir_bytes_fast(m_root / "torch")
             )
 
         base_weight_bytes = _tracked_weight_bytes()
@@ -3157,7 +3198,7 @@ def engine_has_uninstallable_files(engine_id: str, engine: Any = None) -> bool:
             return True
         return _dir_has_any_entry(root / "rapidocr")
     if engine_id == "easyocr":
-        if _dir_has_any_entry(root / "easyocr"):
+        if _dir_has_any_entry(root / "easyocr") or _dir_has_any_entry(root / "site-packages"):
             return True
         if engine is not None and bool(getattr(engine, "model_ready", False)):
             return True
@@ -3181,23 +3222,27 @@ def engine_has_uninstallable_files(engine_id: str, engine: Any = None) -> bool:
 
 
 def _stop_lingering_surya_server() -> None:
-    state_json = Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.json"))
-    if not state_json.is_file():
-        return
-    server_pid: int | None = None
-    with contextlib.suppress(Exception):
-        meta = json.loads(state_json.read_text(encoding="utf-8"))
-        if isinstance(meta, dict) and meta.get("pid"):
-            server_pid = int(meta["pid"])
-    with contextlib.suppress(OSError):
-        state_json.unlink()
-    if server_pid and server_pid > 0 and server_pid != os.getpid():
+    candidates = [
+        models_dir() / "cache" / "datalab" / "surya" / "llamacpp_server.json",
+        Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.json")),
+    ]
+    for state_json in candidates:
+        if not state_json.is_file():
+            continue
+        server_pid: int | None = None
         with contextlib.suppress(Exception):
-            if os.name == "nt":
-                _run_Subprocess(["taskkill", "/F", "/T", "/PID", str(server_pid)], capture_output=True, timeout=4, check=False)
-            else:
-                import signal as _sig
-                os.kill(server_pid, _sig.SIGTERM)
+            meta = json.loads(state_json.read_text(encoding="utf-8"))
+            if isinstance(meta, dict) and meta.get("pid"):
+                server_pid = int(meta["pid"])
+        with contextlib.suppress(OSError):
+            state_json.unlink()
+        if server_pid and server_pid > 0 and server_pid != os.getpid():
+            with contextlib.suppress(Exception):
+                if os.name == "nt":
+                    _run_Subprocess(["taskkill", "/F", "/T", "/PID", str(server_pid)], capture_output=True, timeout=4, check=False)
+                else:
+                    import signal as _sig
+                    os.kill(server_pid, _sig.SIGTERM)
 
 
 def uninstall_isolated_engine_files(engine_id: str) -> int:

@@ -97,6 +97,11 @@ class ProjectStore:
         self._image_meta_cache: tuple[str, int, int, dict[str, dict[str, Any]]] | None = None
         (data_dir() / "projects").mkdir(parents=True, exist_ok=True)
 
+    def reset_caches(self) -> None:
+        with self._lock:
+            self._image_meta_cache = None
+            (data_dir() / "projects").mkdir(parents=True, exist_ok=True)
+
     def create(self, name: str) -> dict[str, Any]:
         project_id = new_id()
         now = utc_now()

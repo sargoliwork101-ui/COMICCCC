@@ -2034,6 +2034,129 @@ function check(name, condition) {
     );
   }
 
+  // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
+  {
+    const v400StorageCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProject = state.project;
+        const verText = document.querySelector('.topbar .ver')?.textContent || '';
+        let putPayload = null;
+        let pickCalled = false;
+        const mockJson = (payload) => ({
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => payload,
+        });
+        window.fetch = async (url, opts = {}) => {
+          const parsed = new URL(url, 'http://127.0.0.1:8765');
+          if (parsed.pathname === '/api/storage-settings' && (!opts.method || opts.method === 'GET')) {
+            return mockJson({
+              mode: 'default',
+              activePath: 'C:\\\\Users\\\\User\\\\.comic-ocr-studio',
+              defaultPath: 'C:\\\\Users\\\\User\\\\.comic-ocr-studio',
+              customPath: '',
+              customActive: false,
+              fallbackWarning: '',
+              appDir: 'D:\\\\ComicApp\\\\python_app',
+              usedBytes: 1500 * 1024 * 1024,
+              freeDiskGb: 18.5,
+            });
+          }
+          if (parsed.pathname === '/api/storage-settings/pick-folder' && opts.method === 'POST') {
+            pickCalled = true;
+            return mockJson({ cancelled: false, path: 'D:\\\\ComicOCRData' });
+          }
+          if (parsed.pathname === '/api/storage-settings' && opts.method === 'PUT') {
+            putPayload = JSON.parse(opts.body || '{}');
+            return mockJson({
+              storage: {
+                mode: 'custom',
+                activePath: 'D:\\\\ComicOCRData',
+                defaultPath: 'C:\\\\Users\\\\User\\\\.comic-ocr-studio',
+                customPath: 'D:\\\\ComicOCRData',
+                customActive: true,
+                fallbackWarning: '',
+                appDir: 'D:\\\\ComicApp\\\\python_app',
+                usedBytes: 1500 * 1024 * 1024,
+                freeDiskGb: 420.0,
+                migratedBytes: 1500 * 1024 * 1024,
+                freedSourceBytes: 1500 * 1024 * 1024,
+              },
+              projects: [{ id: 'projd1', name: 'پروژهٔ منتقل‌شده', updatedAt: '2026-11-07T00:00:00Z', images: 0 }],
+              activeProject: {
+                id: 'projd1',
+                name: 'پروژهٔ منتقل‌شده',
+                images: [],
+                settings: { ocrEngine: 'rapidocr-v6', ocrLanguage: 'eng', ocrPageMode: 'comic', provider: 'free', targetLanguage: 'fa', output: {} },
+              },
+              engines: state.engines,
+              ai: state.ai,
+            });
+          }
+          if (parsed.pathname.startsWith('/api/projects/') && opts.method === 'PUT') {
+            return mockJson(state.project);
+          }
+          if (parsed.pathname === '/api/engines/memory') {
+            return mockJson({ processRamMb: 110, workerRamMb: 0, totalRamMb: 110, loadedEngines: [], loadedCount: 0 });
+          }
+          return origFetch(url, opts);
+        };
+        try {
+          $('storageBtn').click();
+          await new Promise((r) => setTimeout(r, 20));
+          const openedOk = $('storageDialog').open === true
+            && $('storageActivePath').textContent === 'C:\\\\Users\\\\User\\\\.comic-ocr-studio'
+            && $('storageAppDir').textContent === 'D:\\\\ComicApp\\\\python_app';
+
+          $('storageBrowseBtn').click();
+          await new Promise((r) => setTimeout(r, 20));
+          const pickedPath = $('storageCustomPath').value;
+
+          const savePromise = submitStorageSettings(null);
+          await new Promise((r) => setTimeout(r, 15));
+          const usedAppModal = $('appModalDialog').open === true;
+          $('appModalConfirm').click();
+          await savePromise;
+
+          return {
+            verHas400: verText.includes('۴.۰۰'),
+            hasModelsShortcut: Boolean($('modelsStorageBtn')),
+            openedOk,
+            pickCalled,
+            pickedPath,
+            usedAppModal,
+            putPayload,
+            closedAfterSave: $('storageDialog').open === false,
+            switchedProjectId: state.project?.id,
+            customActiveAfter: state.storage?.customActive === true,
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('storageDialog')?.open) closeDialog('storageDialog');
+          if (prevProject) adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.00 displays version 4.00 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas400 === true
+        && v400StorageCheck.hasModelsShortcut === true
+        && v400StorageCheck.openedOk === true
+        && v400StorageCheck.pickCalled === true
+        && v400StorageCheck.pickedPath === 'D:\\ComicOCRData'
+        && v400StorageCheck.usedAppModal === true
+        && v400StorageCheck.putPayload?.custom_path === 'D:\\ComicOCRData'
+        && v400StorageCheck.putPayload?.migrate_existing === true
+        && v400StorageCheck.putPayload?.cleanup_source === true
+        && v400StorageCheck.closedAfterSave === true
+        && v400StorageCheck.switchedProjectId === 'projd1'
+        && v400StorageCheck.customActiveAfter === true,
+      JSON.stringify(v400StorageCheck),
+    );
+  }
+
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));
   window.dispatchEvent(new window.Event('pagehide'));

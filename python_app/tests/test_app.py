@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.99"
+    assert health.json()["version"] == "4.00"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۹۹ · Python</span>' in index_html
+    assert '<span class="ver">۴.۰۰ · Python</span>' in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -3275,6 +3275,227 @@ def test_v399_per_page_ocr_keep_engine_loaded_and_memory_release(client, monkeyp
     )
     assert r2.status_code == 200
     assert None in unload_calls
+
+
+def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_path, monkeypatch):
+    import json
+    import os
+    from pathlib import Path
+    import shutil
+    from comic_studio import APP_VERSION
+    import comic_studio.paths as paths_mod
+    import comic_studio.ocr_managed as managed_mod
+    import comic_studio.ocr_worker as worker_mod
+    import comic_studio.ocr as ocr_mod
+
+    assert APP_VERSION == "4.00"
+
+    default_root = tmp_path / "default_c_drive"
+    custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(default_root))
+    monkeypatch.delenv("COMIC_STUDIO_CONFIG", raising=False)
+    paths_mod._CONFIG_CACHE = None
+
+    local_client = TestClient(create_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+
+    # 1. Default behavior is 100% optional and unchanged
+    st0 = local_client.get("/api/storage-settings")
+    assert st0.status_code == 200
+    info0 = st0.json()
+    assert info0["mode"] == "default"
+    assert info0["customActive"] is False
+    assert info0["customPath"] == ""
+    assert Path(info0["activePath"]).resolve() == default_root.resolve()
+
+    # Seed project + AI settings + downloaded OCR model files in default_root
+    proj, item = make_project(local_client)
+    pid = proj["id"]
+    ai_res = local_client.put(
+        "/api/ai-settings",
+        json={"provider": "gemini", "target_language": "en", "reuse_repeated": False},
+    )
+    assert ai_res.status_code == 200
+    fake_weight = default_root / "models" / "hezar" / "crnn_fa_v2.safetensors"
+    fake_weight.parent.mkdir(parents=True, exist_ok=True)
+    fake_weight.write_bytes(b"PERSIAN-MODEL-WEIGHTS" * 120)
+    (default_root / "models" / "isolated" / "hezar-ocr").mkdir(parents=True, exist_ok=True)
+    (default_root / "models" / "isolated" / "hezar-ocr" / ".ready-all").write_text("ok", encoding="utf-8")
+
+    # 2. Invalid/unsafe paths are rejected before touching storage-config.json
+    bad_rel = local_client.put("/api/storage-settings", json={"custom_path": "relative/folder"})
+    assert bad_rel.status_code == 400
+    bad_nested = local_client.put("/api/storage-settings", json={"custom_path": str(default_root / "nested_inside")})
+    assert bad_nested.status_code == 400
+    bad_app = local_client.put("/api/storage-settings", json={"custom_path": str(paths_mod.APP_DIR)})
+    assert bad_app.status_code == 400
+    bad_pkg = local_client.put("/api/storage-settings", json={"custom_path": str(paths_mod.PACKAGE_DIR / "sub")})
+    assert bad_pkg.status_code == 400
+
+    # 3. Insufficient destination disk space aborts cleanly BEFORE deleting or changing anything
+    def _tiny_disk_usage(_p):
+        return shutil._ntuple_diskusage(1024 * 1024, 1020 * 1024, 4096)
+
+    monkeypatch.setattr(paths_mod.shutil, "disk_usage", _tiny_disk_usage)
+    low_space_res = local_client.put(
+        "/api/storage-settings",
+        json={"custom_path": str(custom_root), "migrate_existing": True, "cleanup_source": True},
+    )
+    assert low_space_res.status_code == 400
+    assert "فضای خالی" in low_space_res.json()["detail"]
+    assert fake_weight.is_file()  # Source untouched!
+    assert paths_mod.is_custom_data_dir_active() is False
+    monkeypatch.undo()
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(default_root))
+    monkeypatch.delenv("COMIC_STUDIO_CONFIG", raising=False)
+    paths_mod._CONFIG_CACHE = None
+
+    # 4. Full migration + verification + source space cleanup onto custom_root
+    sw_res = local_client.put(
+        "/api/storage-settings",
+        json={"custom_path": str(custom_root), "migrate_existing": True, "cleanup_source": True},
+    )
+    assert sw_res.status_code == 200
+    sw_body = sw_res.json()
+    assert sw_body["storage"]["mode"] == "custom"
+    assert sw_body["storage"]["customActive"] is True
+    assert Path(sw_body["storage"]["activePath"]).resolve() == custom_root.resolve()
+    assert sw_body["storage"]["migratedBytes"] >= fake_weight.stat().st_size if fake_weight.exists() else 2000
+    assert sw_body["ai"]["provider"] == "gemini"
+    assert sw_body["ai"]["target_language"] == "en"
+    assert any(p["id"] == pid for p in sw_body["projects"])
+
+    # Verify files exist in custom_root AND were freed from default_root (except storage-config.json)
+    assert (custom_root / "models" / "hezar" / "crnn_fa_v2.safetensors").read_bytes() == b"PERSIAN-MODEL-WEIGHTS" * 120
+    assert (custom_root / "projects" / pid / "project.json").is_file()
+    assert (custom_root / "ai-settings.json").is_file()
+    assert (default_root / "storage-config.json").is_file()
+    assert not (default_root / "models").exists()
+    assert not (default_root / "projects").exists()
+
+    # 5. Zero-C:-leak check: pip env, worker env, worker cache dirs, and EasyOCR install_packages all route to custom_root
+    pip_env = managed_mod.clean_pip_env()
+    assert Path(pip_env["PIP_CACHE_DIR"]).resolve() == (custom_root / "models" / "pip-cache").resolve()
+    assert Path(pip_env["TEMP"]).resolve() == (custom_root / "models" / "tmp").resolve()
+    assert Path(pip_env["TMP"]).resolve() == (custom_root / "models" / "tmp").resolve()
+    assert Path(pip_env["XDG_CACHE_HOME"]).resolve() == (custom_root / "models" / "cache").resolve()
+
+    iso_eng = managed_mod.IsolatedOcrEngine("surya", ["eng", "fas"], ocr_mod._INSTALL_LOCK, ocr_mod.OcrLine, ocr_mod.OcrError)
+    w_env = iso_eng._worker_env()
+    assert Path(w_env["HF_HOME"]).resolve() == (custom_root / "models" / "hf").resolve()
+    assert Path(w_env["MODEL_CACHE_DIR"]).resolve() == (custom_root / "models" / "surya").resolve()
+    assert Path(w_env["TEMP"]).resolve() == (custom_root / "models" / "tmp").resolve()
+
+    # Even if user had a stale HF_HOME on C:\, ocr_worker._configure_cache_dirs overrides it to models_root!
+    old_hf = os.environ.get("HF_HOME")
+    try:
+        os.environ["HF_HOME"] = "/stale/c_drive/hf"
+        worker_mod._configure_cache_dirs(custom_root / "models")
+        assert Path(os.environ["HF_HOME"]).resolve() == (custom_root / "models" / "hf").resolve()
+    finally:
+        if old_hf is None:
+            os.environ.pop("HF_HOME", None)
+        else:
+            os.environ["HF_HOME"] = old_hf
+
+    # Standard install_packages routes --target into <custom_root>/models/site-packages when custom dir is active
+    pip_cmds: list[list[str]] = []
+    monkeypatch.setattr(
+        ocr_mod.subprocess,
+        "run",
+        lambda cmd, **kw: (pip_cmds.append(list(cmd)), type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())[1],
+    )
+    ocr_mod.install_packages(["easyocr>=1.7,<2"])
+    assert "--target" in pip_cmds[0]
+    target_idx = pip_cmds[0].index("--target")
+    assert Path(pip_cmds[0][target_idx + 1]).resolve() == (custom_root / "models" / "site-packages").resolve()
+
+    # 6. Active job lock blocks directory switch with HTTP 409
+    with ocr_mod._INSTALL_LOCK:
+        busy_res = local_client.put("/api/storage-settings", json={"custom_path": ""})
+        assert busy_res.status_code == 409
+
+    # 7. Switch back to default path with migration restores everything back cleanly
+    back_res = local_client.put(
+        "/api/storage-settings",
+        json={"custom_path": "", "migrate_existing": True, "cleanup_source": True},
+    )
+    assert back_res.status_code == 200
+    assert back_res.json()["storage"]["mode"] == "default"
+    assert (default_root / "projects" / pid / "project.json").is_file()
+    assert (default_root / "models" / "hezar" / "crnn_fa_v2.safetensors").is_file()
+
+
+def test_v400_unplugged_custom_drive_fallback_remote_guard_and_app_relocation(tmp_path, monkeypatch):
+    import base64
+    import importlib.util
+    import json
+    from pathlib import Path
+    import shutil
+    import sys
+    import comic_studio.paths as paths_mod
+
+    default_root = tmp_path / "default_home"
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(default_root))
+    monkeypatch.delenv("COMIC_STUDIO_CONFIG", raising=False)
+    paths_mod._CONFIG_CACHE = None
+
+    # 1. Simulate unplugged/unavailable custom drive: app starts safely on default_root & preserves custom_data_dir!
+    blocking_file = tmp_path / "not_a_directory_file"
+    blocking_file.write_text("blocks mkdir", encoding="utf-8")
+    unplugged_path = blocking_file / "ComicOCROnUnpluggedDrive"
+    default_root.mkdir(parents=True, exist_ok=True)
+    (default_root / "storage-config.json").write_text(
+        json.dumps({"custom_data_dir": str(unplugged_path)}),
+        encoding="utf-8",
+    )
+    paths_mod._CONFIG_CACHE = None
+
+    local_client = TestClient(create_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+    st = local_client.get("/api/storage-settings")
+    assert st.status_code == 200
+    st_json = st.json()
+    assert st_json["mode"] == "default"
+    assert st_json["customPath"] == str(unplugged_path)
+    assert "در دسترس نیست" in st_json["fallbackWarning"]
+
+    # 2. Remote LAN client cannot mutate host storage settings or open native folder picker even with valid password
+    pw = "S" * 24
+    monkeypatch.setenv("COMIC_STUDIO_ACCESS_PASSWORD", pw)
+    auth_hdr = {"Authorization": "Basic " + base64.b64encode(f"comic:{pw}".encode()).decode()}
+    lan_client = TestClient(create_app(), base_url="http://192.168.1.10:8765", client=("192.168.1.55", 51000))
+    r_put = lan_client.put("/api/storage-settings", json={"custom_path": ""}, headers=auth_hdr)
+    assert r_put.status_code == 403
+    r_pick = lan_client.post("/api/storage-settings/pick-folder", json={}, headers=auth_hdr)
+    assert r_pick.status_code == 403
+    monkeypatch.delenv("COMIC_STUDIO_ACCESS_PASSWORD", raising=False)
+
+    # 3. Relocating `python_app` to another directory self-heals stale editable finders in `run.py`
+    relocated_app = tmp_path / "DriveD" / "MovedComicApp" / "python_app"
+    (relocated_app / "comic_studio").mkdir(parents=True)
+    shutil.copy2(paths_mod.APP_DIR / "run.py", relocated_app / "run.py")
+    (relocated_app / "comic_studio" / "__init__.py").write_text('MARKER = "FROM_MOVED_DRIVE_D"\n', encoding="utf-8")
+
+    spec = importlib.util.spec_from_file_location("relocated_run_mod", relocated_app / "run.py")
+    assert spec and spec.loader
+    relocated_run = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(relocated_run)
+
+    class _StaleEditableFinder:
+        MAPPING = {"comic_studio": str(tmp_path / "OldDeletedDriveC" / "python_app" / "comic_studio")}
+
+    old_sys_path = list(sys.path)
+    old_meta_path = list(sys.meta_path)
+    old_pkg = sys.modules.get("comic_studio")
+    try:
+        sys.meta_path.insert(0, _StaleEditableFinder())
+        relocated_run._ensure_local_package_resolution()
+        assert not any(isinstance(f, _StaleEditableFinder) for f in sys.meta_path)
+        assert Path(sys.path[0]).resolve() == relocated_app.resolve()
+    finally:
+        sys.path[:] = old_sys_path
+        sys.meta_path[:] = old_meta_path
+        if old_pkg is not None:
+            sys.modules["comic_studio"] = old_pkg
 
 
 

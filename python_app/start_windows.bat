@@ -3,14 +3,14 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem Comic OCR Studio 3.46 - Windows setup and launcher.
+rem Comic OCR Studio 4.00 - Windows setup and launcher.
 rem Dependencies are installed in .venv during setup; later launches reuse that local environment.
 rem Existing supported system Python installations are never modified or removed.
 
 set "APP_DIR=%CD%"
 set "VENV_DIR=%APP_DIR%\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
-set "READY=%VENV_DIR%\.comic-ocr-studio-3.46.ready"
+set "READY=%VENV_DIR%\.comic-ocr-studio-4.00.ready"
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 set "PYTHONNOUSERSITE=1"
 rem Detection must not cause the new Python Install Manager to auto-install runtimes.
@@ -24,6 +24,8 @@ if not exist "%VENV_PYTHON%" goto prepare_python
 "%VENV_PYTHON%" -c "import sys,struct; sys.exit(0 if (3,11) <= sys.version_info[:2] < (3,14) and struct.calcsize('P') == 8 else 1)" >nul 2>&1
 if errorlevel 1 goto unsupported_venv
 if not exist "%READY%" goto have_venv
+"%VENV_PYTHON%" -c "import os,sys,comic_studio; a=os.path.normcase(os.path.realpath(sys.argv[1])); p=os.path.normcase(os.path.realpath(os.path.dirname(os.path.dirname(comic_studio.__file__)))); sys.exit(0 if a==p else 1)" "%APP_DIR%" >nul 2>&1
+if errorlevel 1 call :repair_relocated_venv
 echo [Comic OCR Studio] Using the installed packages in this folder's .venv.
 goto run_app
 
@@ -187,6 +189,12 @@ exit /b 1
 :check_imports
 "%VENV_PYTHON%" -c "import fastapi,uvicorn,multipart,PIL,fitz,numpy,cv2,httpx,rapidocr,onnxruntime"
 exit /b %ERRORLEVEL%
+
+:repair_relocated_venv
+echo [Comic OCR Studio] App folder location changed; updating local environment paths...
+"%VENV_PYTHON%" -c "import os,site; sp=[p for p in site.getsitepackages() if os.path.isdir(p)][0]; app=os.environ['APP_DIR']; [os.remove(os.path.join(sp,f)) for f in os.listdir(sp) if f.startswith('__editable__') and 'comic_ocr_studio' in f and os.path.isfile(os.path.join(sp,f))]; open(os.path.join(sp,'comic_ocr_studio_local.pth'),'w',encoding='utf-8').write(app+'\n')" >nul 2>&1
+"%VENV_PYTHON%" -m pip install -e "%APP_DIR%" --no-deps --no-build-isolation --no-index >nul 2>&1
+exit /b 0
 
 :failed_preserve
 echo.

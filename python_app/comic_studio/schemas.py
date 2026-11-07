@@ -152,3 +152,13 @@ class ContextTextRequest(BaseModel):
     skill: str = Field(default='', max_length=100000)
     summary: str = Field(default='', max_length=100000)
     confirmation: str | None = None
+
+
+class StorageSettingsUpdate(BaseModel):
+    custom_path: str = Field(default="", max_length=2048)
+    migrate_existing: bool = True
+    cleanup_source: bool = True
+
+
+class StorageFolderPickRequest(BaseModel):
+    initial_dir: str | None = Field(default=None, max_length=2048)

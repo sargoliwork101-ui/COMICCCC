@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=3.99">
-  <link rel="stylesheet" href="/rich-editor.css?v=3.99">
+  <link rel="stylesheet" href="/style.css?v=4.00">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.00">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۹۹ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۰۰ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h11"/></svg><span>پروژه و تنظیمات</span></button>
@@ -27,6 +27,7 @@
     <button id="modelsBtn" class="mi"><span>مدل‌های OCR و آزمایش</span><span id="modelsBtnBadge" class="menu-update-badge hidden"></span></button>
     <button id="deleteModelsMenuBtn" class="mi"><span>حذف مدل‌های OCR نصب‌شده</span></button>
     <button id="aiBtn" class="mi">ترجمهٔ رایگان / AI</button>
+    <button id="storageBtn" class="mi"><span>مسیر ذخیره‌سازی و دانلودها (اختیاری)</span></button>
     <button id="themeBtn" class="mi">تغییر تم روشن / تیره</button>
     <div class="mi save-line"><span id="saveState">آماده</span><span>ذخیرهٔ خودکار روی همین کامپیوتر</span></div>
   </div>
@@ -272,7 +273,7 @@
 
   <dialog id="modelsDialog" class="dlg wide-dialog">
     <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>مدل‌های OCR و آزمایش</h2><span id="modelsExecSummary" class="exec-badge is-local hidden" title="همهٔ ۱۴ مدل پس از یک‌بار دانلود اولیه، ۱۰۰٪ آفلاین روی پردازنده یا کارت گرافیک سیستم خودتان اجرا می‌شوند">همهٔ ۱۴ مدل: اجرا روی سیستم شما (آفلاین)</span></div><button class="icon" value="cancel">×</button></form>
-    <p class="hint">هیچ مدلی بدون کلیک شما دانلود نمی‌شود. همهٔ ۱۴ مدل OCR (ازجمله مدل بومی فارسی Hezar) پس از یک‌بار دانلود اولیه <strong>۱۰۰٪ روی خود سیستم شما (آفلاین)</strong> اجرا می‌شوند و برای خواندن تصاویر به اینترنت نیاز ندارند؛ هر مدلی را هم که دیگر نیاز نداشتید می‌توانید با دکمهٔ «حذف مدل» روی کارت آن به طور کامل از دیسک پاک کنید. رنگ‌بندی سبز، زرد و قرمز هر موتور بر اساس ترکیب هم‌زمان «زبان متن» و «نوع صفحه» محاسبه می‌شود. <a href="https://github.com/sargoliwork101-ui/COMICCCC/blob/arena/6cac229a-comicccc/python_app/README.md" target="_blank" rel="noopener noreferrer">راهنمای نصب برنامه از همین شاخهٔ GitHub</a>.</p>
+    <p class="hint">هیچ مدلی بدون کلیک شما دانلود نمی‌شود. همهٔ ۱۴ مدل OCR (ازجمله مدل بومی فارسی Hezar) پس از یک‌بار دانلود اولیه <strong>۱۰۰٪ روی خود سیستم شما (آفلاین)</strong> اجرا می‌شوند و برای خواندن تصاویر به اینترنت نیاز ندارند؛ هر مدلی را هم که دیگر نیاز نداشتید می‌توانید با دکمهٔ «حذف مدل» روی کارت آن به طور کامل از دیسک پاک کنید. رنگ‌بندی سبز، زرد و قرمز هر موتور بر اساس ترکیب هم‌زمان «زبان متن» و «نوع صفحه» محاسبه می‌شود. <a href="https://github.com/sargoliwork101-ui/COMICCCC/blob/main/python_app/README.md" target="_blank" rel="noopener noreferrer">راهنمای نصب برنامه از GitHub</a>.</p>
     <p class="hint">فقط اگر نصب در ویندوز خطای دسترسی داد، برنامه را ببندید و فایل <bdi dir="ltr">start_windows_admin.bat</bdi> را اجرا کنید.</p>
     <div id="modelsToolbar" class="models-toolbar">
       <div class="models-toolbar-info">
@@ -283,6 +284,7 @@
         <label class="models-mode-filter"><span>نوع صفحه:</span><select id="modelsPageMode" aria-label="نوع صفحه برای رنگ‌بندی عملکرد مدل‌ها"><option value="comic">کمیک و مانگا</option><option value="document">کتاب، مقاله و جزوه</option></select></label>
         <label class="models-mode-filter"><span>زبان متن:</span><select id="modelsLanguage" aria-label="زبان متن برای رنگ‌بندی عملکرد مدل‌ها"><option value="eng">English</option><option value="fas">فارسی</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label>
         <label class="models-mode-filter models-installed-filter" title="نمایش فقط مدل‌هایی که دانلود و نصب شده‌اند برای مدیریت یا حذف سریع"><input id="modelsInstalledOnly" type="checkbox"><span>فقط نصب‌شده‌ها</span></label>
+        <button id="modelsStorageBtn" class="bt" type="button" title="تغییر اختیاری درایو و پوشهٔ دانلود مدل‌های OCR و اطلاعات برنامه">مسیر دانلودها…</button>
         <button id="freeModelsRamBtn" class="bt" type="button" title="خالی‌سازی فوری مدل‌های OCR و حافظهٔ موقت از رم">آزادسازی فوری رم</button>
         <button id="checkModelUpdatesBtn" class="bt" type="button">بررسی نسخهٔ جدید</button>
         <button id="updateAllModelsBtn" class="bt primary hidden" type="button">به‌روزرسانی همهٔ مدل‌ها</button>
@@ -335,6 +337,39 @@
     <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت بررسی و ذخیرهٔ تنظیمات AI" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="aiProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
     <button id="copyAiError" class="bt hidden" type="button">کپی پیام خطا</button>
     <div class="dialog-actions"><button id="saveAiBtn" class="bt primary" type="button">ذخیره</button></div>
+  </dialog>
+
+  <dialog id="storageDialog" class="dlg small-dialog storage-dialog">
+    <form method="dialog" class="dialog-head">
+      <div class="dialog-title-row">
+        <h2>مسیر ذخیره‌سازی و دانلودها</h2>
+        <span id="storageModeBadge" class="exec-badge is-local">اختیاری · پیش‌فرض خودکار</span>
+      </div>
+      <button class="icon" value="cancel" aria-label="بستن">×</button>
+    </form>
+    <p class="hint">این بخش کاملاً <strong>اختیاری</strong> است. اگر فضای درایو <bdi dir="ltr">C</bdi> شما کم است، می‌توانید یک پوشه در هر درایو دلخواه (مثلاً <bdi dir="ltr">D:\ComicOCRStudio</bdi>) انتخاب کنید تا <strong>تمام دانلودهای موتورهای OCR، کش‌های نصب، پروژه‌ها و تنظیمات</strong> مستقیماً در همان پوشه قرار بگیرند.</p>
+    <div id="storageWarningBanner" class="exec-mode-banner storage-warning-banner hidden" role="status" aria-live="polite"></div>
+    <div class="storage-summary-box">
+      <div class="storage-summary-row"><span>پوشهٔ فعال فعلی:</span><code id="storageActivePath" dir="ltr">—</code></div>
+      <div class="storage-summary-row"><span>وضعیت فضا و حجم فایل‌ها:</span><strong id="storageDiskStats">—</strong></div>
+      <div class="storage-summary-row"><span>محل فعلی پوشهٔ خود برنامه:</span><code id="storageAppDir" dir="ltr">—</code></div>
+    </div>
+    <label for="storageCustomPath">پوشهٔ دلخواه جدید (اختیاری — خالی = مسیر پیش‌فرض)</label>
+    <div class="storage-path-row">
+      <input id="storageCustomPath" type="text" dir="ltr" spellcheck="false" autocomplete="off" placeholder="مثال: D:\ComicOCRStudio">
+      <button id="storageBrowseBtn" class="bt" type="button" title="بازکردن پنجرهٔ انتخاب پوشه در سیستم‌عامل">انتخاب پوشه…</button>
+    </div>
+    <div class="checks storage-checks">
+      <label><input id="storageMigrateExisting" type="checkbox" checked> انتقال خودکار پروژه‌ها، تنظیمات و مدل‌های OCR دانلودشدهٔ فعلی به مسیر جدید</label>
+      <label id="storageCleanupOldWrap"><input id="storageCleanupOld" type="checkbox" checked> آزادسازی فضای مسیر قبلی پس از کپی و تأیید کامل سلامت فایل‌ها (برای خالی‌شدن درایو قبلی)</label>
+    </div>
+    <p class="hint"><strong>نکتهٔ جابه‌جایی کل پوشهٔ برنامه:</strong> پوشهٔ اصلی برنامه (<bdi dir="ltr">python_app</bdi>) نیز قابل انتقال از درایو <bdi dir="ltr">C</bdi> به هر درایو دیگر است؛ کافی است برنامه را ببندید، کل پوشه را به درایو جدید منتقل کنید و از همان‌جا <bdi dir="ltr">start_windows.bat</bdi> را اجرا کنید تا مسیر داخلی خودکار تنظیم شود.</p>
+    <p id="storageStatus" class="hint diagnostic-message" role="status" aria-live="polite"></p>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت انتقال و تنظیم مسیر ذخیره‌سازی" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="storageProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+    <div class="dialog-actions">
+      <button id="storageResetDefaultBtn" class="bt hidden" type="button">بازگشت به مسیر پیش‌فرض</button>
+      <button id="storageSaveBtn" class="bt primary" type="button">ذخیره و اعمال مسیر</button>
+    </div>
   </dialog>
 
   <dialog id="exportDialog" class="dlg small-dialog">
@@ -642,12 +677,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-  <script src="/typeset.js?v=3.99"></script>
-  <script src="/groups.js?v=3.99"></script>
-  <script src="/rich-sanitize.js?v=3.99"></script>
-  <script src="/rich-editor.js?v=3.99"></script>
-  <script src="/inline-edit-session.js?v=3.99"></script>
-  <script src="/help-guide.js?v=3.99"></script>
-  <script src="/app.js?v=3.99"></script>
+  <script src="/typeset.js?v=4.00"></script>
+  <script src="/groups.js?v=4.00"></script>
+  <script src="/rich-sanitize.js?v=4.00"></script>
+  <script src="/rich-editor.js?v=4.00"></script>
+  <script src="/inline-edit-session.js?v=4.00"></script>
+  <script src="/help-guide.js?v=4.00"></script>
+  <script src="/app.js?v=4.00"></script>
 </body>
 </html>

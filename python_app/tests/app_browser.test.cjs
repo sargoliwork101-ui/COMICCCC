@@ -2473,8 +2473,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v3.99: Verify version badge ۳.۹۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, clean name-only dropdowns, menu model deletion, per-page RAM release, and zero idle CPU polling/animations
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۹ · Python', 'header shows version ۳.۹۹');
+      // v3.85–v4.00: Verify version badge ۴.۰۰, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, clean name-only dropdowns, menu model deletion, per-page RAM release, zero idle CPU, and optional storage settings
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۰۰ · Python', 'header shows version ۴.۰۰');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2723,7 +2723,25 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(v399ChromiumCheck.sampledOk, true, 'Typeset.sampleBg 256-bin histogram produces exact RGB median');
       assert.equal(v399ChromiumCheck.measureBoxEmpty, true, 'Typeset.releaseCaches() empties offscreen DOM measurement box');
       assert.equal(v399ChromiumCheck.reusedDomImg, true, 'renderGrid() reuses unchanged <img> DOM node without re-decoding');
-      console.log('PASS: v3.81–v3.99 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, clean dropdowns, menu model deletion, per-page RAM release, and Zero Idle CPU optimizations');
+
+      // v4.00: Verify optional custom storage dialog & live API endpoint in real Chromium
+      const storageInfo = await api(base, '/api/storage-settings');
+      assert.equal(storageInfo.mode, 'default', '/api/storage-settings starts in default optional mode');
+      await page.evaluate(() => {
+        document.getElementById('topMenuDetails').open = true;
+        document.getElementById('storageSettingsMenuBtn').click();
+      });
+      await page.waitForFunction(() => document.getElementById('storageDialog')?.open === true, { timeout: 5000 });
+      const v400DialogCheck = await page.evaluate(() => ({
+        defaultChecked: document.getElementById('storageModeDefault')?.checked === true,
+        inputDisabled: document.getElementById('storageCustomPath')?.disabled === true,
+        activeShown: (document.getElementById('storageActivePathLabel')?.textContent || '').trim().length > 0,
+      }));
+      assert.deepEqual(v400DialogCheck, { defaultChecked: true, inputDisabled: true, activeShown: true }, 'v4.00 storage dialog opens in optional default mode');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => document.getElementById('storageDialog')?.open === false, { timeout: 5000 });
+
+      console.log('PASS: v3.81–v4.00 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, clean dropdowns, menu model deletion, per-page RAM release, Zero Idle CPU, and optional custom storage');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

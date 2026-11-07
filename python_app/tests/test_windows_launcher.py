@@ -74,3 +74,32 @@ def test_windows_launcher_clears_pip_timeout_before_starting_server():
     assert run_app_section.index('set "PIP_TIMEOUT="') < run_app_section.index('"%VENV_PYTHON%" "%APP_DIR%\\run.py"')
 
 
+def test_windows_launcher_repairs_relocated_app_folder_offline_without_deleting_venv(tmp_path, monkeypatch):
+    import os
+    import site
+
+    assert "call :repair_relocated_venv" in NORMAL
+    repair_section = NORMAL.split("\n:repair_relocated_venv\n", 1)[1].split("\nexit /b 0", 1)[0]
+    assert "comic_ocr_studio_local.pth" in repair_section
+    assert '"%VENV_PYTHON%" -m pip install -e "%APP_DIR%" --no-deps --no-build-isolation --no-index' in repair_section
+    assert not re.search(r'(?im)^\s*(?:rmdir|rd)\s', NORMAL)
+
+    # Execute the stdlib relocation snippet against a simulated site-packages with stale Drive-C editable hooks
+    fake_sp = tmp_path / "site-packages"
+    fake_sp.mkdir()
+    stale_pth = fake_sp / "__editable__.comic_ocr_studio-3.0.99.pth"
+    stale_finder = fake_sp / "__editable___comic_ocr_studio_3_0_99_finder.py"
+    stale_pth.write_text("import __editable___comic_ocr_studio_3_0_99_finder", encoding="utf-8")
+    stale_finder.write_text("MAPPING = {'comic_studio': 'C:/OldPath/python_app/comic_studio'}", encoding="utf-8")
+    moved_app = str(tmp_path / "DriveD" / "python_app")
+
+    monkeypatch.setattr(site, "getsitepackages", lambda: [str(fake_sp)])
+    monkeypatch.setenv("APP_DIR", moved_app)
+    snippet = repair_section.split('"%VENV_PYTHON%" -c "', 1)[1].split('" >nul', 1)[0]
+    exec(snippet, {})
+
+    assert not stale_pth.exists()
+    assert not stale_finder.exists()
+    assert (fake_sp / "comic_ocr_studio_local.pth").read_text(encoding="utf-8").strip() == moved_app
+
+

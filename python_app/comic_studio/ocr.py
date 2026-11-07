@@ -52,7 +52,12 @@ from .ocr_managed import (
     trim_process_memory,
     update_manifest_entry,
 )
-from .paths import models_dir
+from .paths import (
+    custom_site_packages_dir,
+    ensure_custom_site_packages_on_path,
+    is_custom_data_dir_active,
+    models_dir,
+)
 
 # Optional bright-white-text fallback. The original OCR path always runs first.
 EXTRA_PREPROCESS_SCALE = 3
@@ -265,6 +270,11 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
 
     cdir = pip_cache_dir()
     wh = sync_local_wheelhouse()
+    target_site: Path | None = None
+    if is_custom_data_dir_active():
+        target_site = custom_site_packages_dir()
+        with contextlib.suppress(OSError):
+            target_site.mkdir(parents=True, exist_ok=True)
     has_custom_index = bool(os.environ.get("PIP_INDEX_URL")) or ("--index-url" in packages) or ("-i" in packages)
 
     def _build_cmd(mirror_url: str | None = None) -> list[str]:
@@ -282,7 +292,9 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
             pass
         if mirror_url:
             cmd.extend(["--index-url", mirror_url])
-        if upgrade:
+        if target_site is not None:
+            cmd.extend(["--target", str(target_site), "--upgrade"])
+        elif upgrade:
             cmd.append("--upgrade")
         cmd.extend(packages)
         return cmd
@@ -321,6 +333,9 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
                 if _STANDARD_CANCEL_EVENT.is_set() or (result is not None and result.returncode == 130):
                     raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
                 if result.returncode == 0:
+                    if target_site is not None:
+                        ensure_custom_site_packages_on_path()
+                    importlib.invalidate_caches()
                     sync_local_wheelhouse()
                     break
                 combined_err = f"{result.stderr or ''}\n{result.stdout or ''}"
@@ -1009,6 +1024,7 @@ class EasyEngine:
 
     @property
     def runtime_installed(self) -> bool:
+        ensure_custom_site_packages_on_path()
         return bool(importlib.util.find_spec("easyocr"))
 
     def _model_dir(self) -> Path:
@@ -1056,10 +1072,16 @@ class EasyEngine:
         freed = 0
         with _INSTALL_LOCK:
             freed += _remove_path_safely(self._model_dir())
+            custom_site = models_dir() / "site-packages"
+            removed_from_custom_site = False
+            if custom_site.is_dir():
+                freed += _remove_path_safely(custom_site)
+                ensure_custom_site_packages_on_path()
+                removed_from_custom_site = True
             try:
                 spec = importlib.util.find_spec("easyocr")
                 origin = getattr(spec, "origin", None) if spec is not None else None
-                if origin and Path(origin).is_file():
+                if origin and Path(origin).is_file() and not removed_from_custom_site:
                     pkg_dir = Path(origin).parent
                     try:
                         for child in pkg_dir.rglob("*"):
@@ -1076,9 +1098,9 @@ class EasyEngine:
                             check=False,
                             **_win_subprocess_kwargs(),
                         )
-                    for mod_name in [m for m in list(sys.modules) if m == "easyocr" or m.startswith("easyocr.")]:
-                        sys.modules.pop(mod_name, None)
-                    importlib.invalidate_caches()
+                for mod_name in [m for m in list(sys.modules) if m == "easyocr" or m.startswith("easyocr.")]:
+                    sys.modules.pop(mod_name, None)
+                importlib.invalidate_caches()
             except Exception:
                 pass
             remove_manifest_entry(self.id)

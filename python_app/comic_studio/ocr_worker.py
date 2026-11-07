@@ -24,15 +24,21 @@ def _configure_cache_dirs(models_root: Path) -> None:
     surya_dir = models_root / "surya"
     mineru_dir = models_root / "mineru"
     hezar_dir = models_root / "hezar"
-    for directory in (hf_dir, paddlex_dir, torch_dir, surya_dir, mineru_dir, hezar_dir):
+    cache_dir = models_root / "cache"
+    tmp_dir = models_root / "tmp"
+    for directory in (hf_dir, paddlex_dir, torch_dir, surya_dir, mineru_dir, hezar_dir, cache_dir, tmp_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("HF_HOME", str(hf_dir))
-    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_dir / "hub"))
-    os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(paddlex_dir))
-    os.environ.setdefault("TORCH_HOME", str(torch_dir))
-    os.environ.setdefault("MODEL_CACHE_DIR", str(surya_dir))
-    os.environ.setdefault("MINERU_HOME", str(mineru_dir))
-    os.environ.setdefault("HEZAR_CACHE_DIR", str(hezar_dir))
+    os.environ["HF_HOME"] = str(hf_dir)
+    os.environ["HUGGINGFACE_HUB_CACHE"] = str(hf_dir / "hub")
+    os.environ["PADDLE_PDX_CACHE_HOME"] = str(paddlex_dir)
+    os.environ["TORCH_HOME"] = str(torch_dir)
+    os.environ["MODEL_CACHE_DIR"] = str(surya_dir)
+    os.environ["MINERU_HOME"] = str(mineru_dir)
+    os.environ["HEZAR_CACHE_DIR"] = str(hezar_dir)
+    os.environ["XDG_CACHE_HOME"] = str(cache_dir)
+    os.environ["TMPDIR"] = str(tmp_dir)
+    os.environ["TEMP"] = str(tmp_dir)
+    os.environ["TMP"] = str(tmp_dir)
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
     os.environ.setdefault("SURYA_INFERENCE_BACKEND", "llamacpp")
