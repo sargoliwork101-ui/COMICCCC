@@ -11,6 +11,7 @@ import ipaddress
 import math
 import os
 import re
+import secrets
 import traceback
 import copy
 import threading
@@ -28,8 +29,8 @@ from starlette.background import BackgroundTask
 
 from . import APP_NAME, APP_VERSION
 from .activity import ActivityLog, reporting
-from .backup import BackupError, make_backup, restore_backup
-from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, crop_box, image_payload
+from .backup import BackupError, cleanup_backup_temp, make_backup, restore_backup
+from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, clean_name, crop_box, image_payload
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
 from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
 from .ocr_managed import (
@@ -121,8 +122,20 @@ class PendingResultConflict(Exception):
         self.kind = kind
 
 
+class _CleanupFileResponse(FileResponse):
+    """Stream a temporary file and guarantee deletion even if the client disconnects mid-download."""
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with contextlib.suppress(OSError):
+                Path(self.path).unlink(missing_ok=True)
+
+
 def create_app() -> FastAPI:
     configure_native_runtime()
+    cleanup_backup_temp(max_age_seconds=0.0)
     app = FastAPI(title=APP_NAME, version=APP_VERSION)
     store = ProjectStore()
     registry = EngineRegistry()
@@ -133,6 +146,20 @@ def create_app() -> FastAPI:
     storage_switch_lock = asyncio.Lock()
     active_jobs_lock = threading.Lock()
     active_jobs_count = 0
+    prepared_backups_lock = threading.Lock()
+    prepared_backups: dict[str, dict[str, Any]] = {}
+
+    def _clear_prepared_backups(target_project_id: str | None = None, token: str | None = None) -> None:
+        with prepared_backups_lock:
+            keys = [
+                k for k, entry in prepared_backups.items()
+                if (token is None or k == token)
+                and (target_project_id is None or entry.get("project_id") == target_project_id)
+            ]
+            paths = [prepared_backups.pop(k)["path"] for k in keys]
+        for p in paths:
+            with contextlib.suppress(OSError):
+                Path(p).unlink(missing_ok=True)
     # Recovery state is short-lived, process-local and never contains the raw response.
     recoveries: dict[str, dict[str, Any]] = {}
     recovery_locks: dict[str, asyncio.Lock] = {}
@@ -381,8 +408,8 @@ def create_app() -> FastAPI:
         return {"project": state, "drafts": drafts}
 
     @app.post("/api/projects/{project_id}/backup")
-    async def backup_project(project_id: str, values: BackupRequest) -> FileResponse:
-        project(project_id)
+    async def backup_project(project_id: str, values: BackupRequest, prepare: bool = False) -> Response:
+        proj = project(project_id)
         activity.add("ساخت بک‌آپ پروژه آغاز شد")
         try:
             path = await run_reported(make_backup, store, project_id, values.drafts, values.expected_updated_at, pulse_label="ساخت بک‌آپ")
@@ -390,7 +417,48 @@ def create_app() -> FastAPI:
             activity.add(f"ساخت بک‌آپ ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
         activity.add("بک‌آپ پروژه آماده است", "success", 1.0)
-        return FileResponse(path, media_type="application/zip", filename="comic-studio-project-backup.zip", background=BackgroundTask(path.unlink, missing_ok=True))
+        download_name = f"{clean_name(str(proj.get('name') or ''), 'comic-studio')}-backup.zip"
+        if prepare:
+            token = secrets.token_hex(16)
+            size = path.stat().st_size
+            with prepared_backups_lock:
+                stale_paths = [entry["path"] for entry in prepared_backups.values()]
+                prepared_backups.clear()
+                prepared_backups[token] = {
+                    "project_id": project_id,
+                    "path": path,
+                    "filename": download_name,
+                    "created": time.monotonic(),
+                }
+            for old_path in stale_paths:
+                if old_path != path:
+                    with contextlib.suppress(OSError):
+                        Path(old_path).unlink(missing_ok=True)
+            return JSONResponse({"token": token, "filename": download_name, "size": size}, headers={"Cache-Control": "no-store"})
+        return _CleanupFileResponse(path, media_type="application/zip", filename="comic-studio-project-backup.zip")
+
+    @app.get("/api/projects/{project_id}/backup/{token}")
+    def download_prepared_backup(project_id: str, token: str) -> FileResponse:
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise HTTPException(404, "فایل بک‌آپ آماده پیدا نشد؛ دوباره بک‌آپ بگیرید.")
+        with prepared_backups_lock:
+            entry = prepared_backups.get(token)
+            if not entry or entry.get("project_id") != project_id:
+                entry = None
+            elif time.monotonic() - float(entry.get("created", 0.0)) > 3600.0:
+                prepared_backups.pop(token, None)
+                with contextlib.suppress(OSError):
+                    Path(entry["path"]).unlink(missing_ok=True)
+                entry = None
+        if not entry or not Path(entry["path"]).is_file():
+            raise HTTPException(404, "فایل بک‌آپ منقضی یا پاک شده است؛ دوباره بک‌آپ بگیرید.")
+        return FileResponse(entry["path"], media_type="application/zip", filename=entry["filename"])
+
+    @app.delete("/api/projects/{project_id}/backup/{token}", status_code=204)
+    def discard_prepared_backup(project_id: str, token: str) -> Response:
+        if re.fullmatch(r"[0-9a-f]{32}", token):
+            _clear_prepared_backups(target_project_id=project_id, token=token)
+        return Response(status_code=204)
 
     @app.get("/api/projects/{project_id}")
     def get_project(project_id: str) -> dict[str, Any]:
@@ -402,6 +470,7 @@ def create_app() -> FastAPI:
             store.delete_project(project_id)
         except KeyError as exc:
             raise HTTPException(404, "پروژهٔ موردنظر پیدا نشد.") from exc
+        _clear_prepared_backups(target_project_id=project_id)
         if project_id in context_locks and not context_locks[project_id].locked():
             context_locks.pop(project_id, None)
         return Response(status_code=204)
@@ -1673,6 +1742,8 @@ def create_app() -> FastAPI:
                 store.reset_caches()
                 invalidate_engine_runtime_caches()
                 reset_disk_free_cache()
+                _clear_prepared_backups()
+                cleanup_backup_temp(max_age_seconds=0.0)
                 recoveries.clear()
                 trim_process_memory()
                 return result

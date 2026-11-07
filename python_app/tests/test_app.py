@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.02"
+    assert health.json()["version"] == "4.03"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۰۲ · Python</span>' in index_html
+    assert '<span class="ver">۴.۰۳ · Python</span>' in index_html
     assert "مدیریت مدل‌های OCR" in index_html
     assert "مدیریت ترجمه‌ها" in index_html
     assert 'id="deleteModelsMenuBtn"' not in index_html
@@ -3291,7 +3291,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.02"
+    assert APP_VERSION == "4.03"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -3613,6 +3613,101 @@ def test_v401_real_progress_bars_across_paged_ocr_import_backup_and_weight_downl
     assert seen_dl_progs[0] == pytest.approx(0.04)
     assert seen_dl_progs[1] == pytest.approx(0.08)
     assert seen_dl_progs[-1] == pytest.approx(1.0)
+
+
+def test_v403_backup_prepare_stream_cleanup_restore_empty_projects_office_locks_and_exif(client, tmp_path):
+    import shutil
+    from comic_studio.paths import data_dir, project_root
+
+    # 1. EXIF-rotated phone JPEG (raw 120x80 with Orientation=6 -> normalized upright 80x120)
+    proj = client.post("/api/projects", json={"name": "پروژهٔ بک‌آپ ریشه‌ای"}).json()
+    pid = proj["id"]
+    raw_sensor = Image.new("RGB", (120, 80), "navy")
+    exif = raw_sensor.getexif()
+    exif[0x0112] = 6  # Rotate 90 CW -> upright 80x120
+    jbuf = io.BytesIO()
+    raw_sensor.save(jbuf, format="JPEG", exif=exif.tobytes())
+
+    imp = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("phone-vertical.jpg", jbuf.getvalue(), "image/jpeg"))],
+    )
+    assert imp.status_code == 200, imp.text
+    img_item = imp.json()["images"][0]
+    assert (img_item["width"], img_item["height"]) == (80, 120)
+
+    rendered_upright = png_bytes((80, 120), "white")
+    ren_res = client.post(
+        f"/api/projects/{pid}/images/{img_item['id']}/rendered",
+        content=rendered_upright,
+        headers={"Content-Type": "image/png"},
+    )
+    assert ren_res.status_code == 200, ren_res.text
+    latest_updated_at = ren_res.json()["updatedAt"]
+
+    # 2. Office lock files (~$*.docx / ~$*.pptx) and dot-temp files in exports/ are ignored during backup
+    exports_dir = project_root(pid) / "exports"
+    (exports_dir / "clean-doc.txt").write_text("متن خروجی واقعی", encoding="utf-8")
+    (exports_dir / "~$clean-doc.docx").write_bytes(b"office-lock-junk")
+    (exports_dir / ".clean-doc.pdf.999.tmp").write_bytes(b"partial-temp")
+
+    # 3. Prepared zero-RAM streaming backup mode (?prepare=true -> GET & re-download -> DELETE cleanup)
+    prep = client.post(
+        f"/api/projects/{pid}/backup?prepare=true",
+        json={"drafts": [], "expected_updated_at": latest_updated_at},
+    )
+    assert prep.status_code == 200, prep.text
+    prep_json = prep.json()
+    token = prep_json["token"]
+    assert prep_json["filename"].endswith("-backup.zip")
+    assert prep_json["size"] > 0
+
+    dl1 = client.get(f"/api/projects/{pid}/backup/{token}")
+    dl2 = client.get(f"/api/projects/{pid}/backup/{token}")
+    assert dl1.status_code == 200 and dl2.status_code == 200
+    assert dl1.content == dl2.content
+
+    with zipfile.ZipFile(io.BytesIO(dl1.content)) as zf:
+        names = set(zf.namelist())
+        assert "exports/clean-doc.txt" in names
+        assert "exports/~$clean-doc.docx" not in names
+        assert "exports/.clean-doc.pdf.999.tmp" not in names
+        assert f"images/{img_item['id']}-edited.png" in names
+
+    del_tok = client.delete(f"/api/projects/{pid}/backup/{token}")
+    assert del_tok.status_code == 204
+    assert client.get(f"/api/projects/{pid}/backup/{token}").status_code == 404
+    assert not list((data_dir() / "backup-temp").glob("*.zip"))
+
+    # 4. Restore works cleanly even if <data_dir>/projects was removed on disk
+    fresh_drive = tmp_path / "empty_drive_without_projects"
+    r_sw = client.put(
+        "/api/storage-settings",
+        json={"custom_path": str(fresh_drive), "migrate_existing": False, "cleanup_source": False},
+    )
+    assert r_sw.status_code == 200
+    shutil.rmtree(fresh_drive / "projects", ignore_errors=True)
+    assert not (fresh_drive / "projects").exists()
+
+    restored = client.post(
+        "/api/projects/restore",
+        files={"file": ("backup.zip", dl1.content, "application/zip")},
+    )
+    assert restored.status_code == 201, restored.text
+    restored_proj = restored.json()["project"]
+    assert (fresh_drive / "projects" / restored_proj["id"] / "project.json").is_file()
+    assert (restored_proj["images"][0]["width"], restored_proj["images"][0]["height"]) == (80, 120)
+
+    # 5. Startup sweeps orphan files in backup-temp/ and restore-staging/
+    orphan_zip = fresh_drive / "backup-temp" / "project-orphan.zip"
+    orphan_zip.parent.mkdir(parents=True, exist_ok=True)
+    orphan_zip.write_bytes(b"stale")
+    orphan_stage = fresh_drive / "restore-staging" / "project-orphan"
+    orphan_stage.mkdir(parents=True, exist_ok=True)
+    with scoped_client(create_app()):
+        assert not orphan_zip.exists()
+        assert not orphan_stage.exists()
+
 
 
 

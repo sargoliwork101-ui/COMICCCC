@@ -2125,7 +2125,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas402: verText.includes('۴.۰۲'),
+            verHas403: verText.includes('۴.۰۳'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2144,8 +2144,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.02 displays version 4.02 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas402 === true
+      'v4.00/v4.03 displays version 4.03 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas403 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -2332,6 +2332,178 @@ function check(name, condition) {
         && v402Check.f1AiArticle === 'ai-translation-settings'
         && v402Check.f1StorageArticle === 'storage-memory-network',
       JSON.stringify(v402Check),
+    );
+
+    // v4.03: Verify backup awaits in-flight imageRenderTasks, syncs updatedAt from /rendered, uses ?prepare=true streaming link, tolerates corrupt draft, clears link on project switch, and restores safely even on 404 prior project
+    const v403BackupCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProj = state.project;
+        let backupReqBody = null;
+        let backupUrlCalled = '';
+        let deletedBackupUrl = '';
+        let renderFinishedBeforeBackup = false;
+        let releaseSlowRender = null;
+        const slowRenderGate = new Promise((r) => { releaseSlowRender = r; });
+        let restoredRenderedCount = 0;
+
+        try {
+          const testProj = {
+            id: 'projbkp1',
+            name: 'پروژه تست بک‌آپ',
+            updatedAt: '2026-11-07T08:00:00Z',
+            settings: { overlayMode: 'translation', output: {} },
+            images: [
+              {
+                id: 'imgbkp1',
+                name: 'p1.png',
+                file: 'imgbkp1.png',
+                width: 120,
+                height: 80,
+                format: 'PNG',
+                order: 0,
+                selected: true,
+                edited: false,
+                blocks: [{ id: 1, text: 'HI', tr: 'سلام', richHtml: '', enabled: true, bg: 'white', x0: 5, y0: 5, x1: 80, y1: 35, lineH: 30, dir: 'rtl', align: 'right' }],
+              },
+            ],
+          };
+          adoptProject(testProj);
+
+          // One valid draft + one corrupted draft in localStorage
+          localStorage.setItem('comic-studio-draft:projbkp1:imgbkp1:1:translation', JSON.stringify({ html: '<p>پیش‌نویس سالم</p>' }));
+          localStorage.setItem('comic-studio-draft:projbkp1:imgbkp1:1:ocr', '{corrupt-json');
+
+          window.fetch = async (url, opts = {}) => {
+            const u = String(url);
+            const method = (opts.method || 'GET').toUpperCase();
+            if (u === '/api/activity/clear' || u.startsWith('/api/activity')) {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify({ entries: [], next: 0 }), json: async () => ({ entries: [], next: 0 }) };
+            }
+            if (u === '/api/projects') {
+              const payload = [{ id: state.project.id, name: state.project.name, updatedAt: state.project.updatedAt, images: 1 }];
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            if (u.includes('/images/imgbkp1/content')) {
+              return { ok: true, status: 200, blob: async () => new window.Blob(['png']) };
+            }
+            if (u.includes('/images/imgbkp1/rendered') && method === 'POST') {
+              await slowRenderGate;
+              renderFinishedBeforeBackup = true;
+              const payload = { ok: true, updatedAt: '2026-11-07T08:01:00Z' };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            if (u === '/api/projects/projbkp1/state' && method === 'PUT') {
+              const body = JSON.parse(opts.body);
+              const nextTs = renderFinishedBeforeBackup ? '2026-11-07T08:02:00Z' : '2026-11-07T08:00:30Z';
+              const payload = Object.assign({}, body.state, { updatedAt: nextTs });
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            if (u.startsWith('/api/projects/projbkp1/backup') && method === 'POST') {
+              backupUrlCalled = u;
+              backupReqBody = JSON.parse(opts.body);
+              const payload = { token: '0123456789abcdef0123456789abcdef', filename: 'پروژه تست بک‌آپ-backup.zip', size: 4096 };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            if (u.startsWith('/api/projects/projbkp1/backup/') && method === 'DELETE') {
+              deletedBackupUrl = u;
+              return { ok: true, status: 204, headers: { get: () => '' }, text: async () => '' };
+            }
+            if (u === '/api/projects/missing404/state' && method === 'PUT') {
+              return { ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => JSON.stringify({ detail: 'پروژه پیدا نشد' }), json: async () => ({ detail: 'پروژه پیدا نشد' }) };
+            }
+            if (u === '/api/projects/restore' && method === 'POST') {
+              const restoredProj = {
+                id: 'projrestored9',
+                name: 'پروژه بازیابی‌شده',
+                updatedAt: '2026-11-07T09:00:00Z',
+                settings: { overlayMode: 'translation', output: {} },
+                images: [
+                  {
+                    id: 'imgrest1',
+                    name: 'r1.png',
+                    file: 'imgrest1.png',
+                    width: 120,
+                    height: 80,
+                    format: 'PNG',
+                    order: 0,
+                    selected: true,
+                    edited: false,
+                    blocks: [{ id: 5, text: 'R', tr: 'ترجمه بازیابی', richHtml: '', enabled: true, bg: 'white', x0: 5, y0: 5, x1: 80, y1: 35, lineH: 30, dir: 'rtl', align: 'right' }],
+                  },
+                ],
+              };
+              const payload = { project: restoredProj, drafts: [] };
+              return { ok: true, status: 201, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            if (u.includes('/images/imgrest1/content')) {
+              return { ok: true, status: 200, blob: async () => new window.Blob(['png']) };
+            }
+            if (u.includes('/images/imgrest1/rendered') && method === 'POST') {
+              restoredRenderedCount += 1;
+              const payload = { ok: true, updatedAt: '2026-11-07T09:00:05Z' };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            return origFetch(url, opts);
+          };
+
+          // Start an in-flight background render BEFORE clicking backup
+          const bgRender = renderAndUpload(state.project.images[0]);
+          const backupTask = backupCurrentProject();
+          await new Promise((r) => setTimeout(r, 20));
+          const waitedForInFlightRender = backupReqBody === null;
+          releaseSlowRender();
+          await bgRender;
+          await backupTask;
+
+          const linkVisibleDuringProj = !$('backupDownloadLink').classList.contains('hidden');
+          const linkHrefDuringProj = $('backupDownloadLink').getAttribute('href');
+
+          // Simulate switching to a missing/deleted project (404 on save) and restoring backup
+          adoptProject({ id: 'missing404', name: 'حذف‌شده', updatedAt: 'old', settings: { output: {} }, images: [] });
+          await new Promise((r) => setTimeout(r, 10));
+          const linkHiddenAfterSwitch = $('backupDownloadLink').classList.contains('hidden');
+
+          const restoreTask = restoreProjectBackup(new window.Blob(['zip']));
+          await new Promise((r) => setTimeout(r, 15));
+          $('appModalConfirm').click();
+          await restoreTask;
+
+          return {
+            waitedForInFlightRender,
+            renderFinishedBeforeBackup,
+            usedPrepareQuery: backupUrlCalled.includes('prepare=true'),
+            expectedUpdatedAtSynced: backupReqBody?.expected_updated_at === '2026-11-07T08:02:00Z',
+            validDraftCount: backupReqBody?.drafts?.length,
+            linkVisibleDuringProj,
+            linkPointsToToken: String(linkHrefDuringProj || '').includes('/api/projects/projbkp1/backup/0123456789abcdef0123456789abcdef'),
+            linkHiddenAfterSwitch,
+            deletedPreparedOnSwitch: deletedBackupUrl.includes('/api/projects/projbkp1/backup/0123456789abcdef0123456789abcdef'),
+            restoredProjectId: state.project?.id,
+            restoredRenderedCount,
+          };
+        } finally {
+          localStorage.removeItem('comic-studio-draft:projbkp1:imgbkp1:1:translation');
+          localStorage.removeItem('comic-studio-draft:projbkp1:imgbkp1:1:ocr');
+          window.fetch = origFetch;
+          if (prevProj) adoptProject(prevProj);
+        }
+      })()
+    `, context);
+    check(
+      'v4.03 backup awaits in-flight renders, syncs updatedAt, streams via prepared token, skips corrupt localStorage draft, cleans up link on switch, and restores even if prior project 404s',
+      v403BackupCheck.waitedForInFlightRender === true
+        && v403BackupCheck.renderFinishedBeforeBackup === true
+        && v403BackupCheck.usedPrepareQuery === true
+        && v403BackupCheck.expectedUpdatedAtSynced === true
+        && v403BackupCheck.validDraftCount === 1
+        && v403BackupCheck.linkVisibleDuringProj === true
+        && v403BackupCheck.linkPointsToToken === true
+        && v403BackupCheck.linkHiddenAfterSwitch === true
+        && v403BackupCheck.deletedPreparedOnSwitch === true
+        && v403BackupCheck.restoredProjectId === 'projrestored9'
+        && v403BackupCheck.restoredRenderedCount === 1,
+      JSON.stringify(v403BackupCheck),
     );
   }
 

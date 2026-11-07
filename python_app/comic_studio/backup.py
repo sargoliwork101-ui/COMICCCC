@@ -7,6 +7,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -27,7 +28,7 @@ MAX_ZIP = 5 * 1024**3
 MAX_JSON = 256 * 1024**2
 MAX_DRAFTS = 10 * 1024**2
 MAX_IMAGE = 150 * 1024**2
-MAX_EDITED = 100 * 1024**2
+MAX_EDITED = 150 * 1024**2
 MAX_EXPORT = 2 * 1024**3
 ID_RE = re.compile(r'^[A-Za-z0-9]{1,64}$')
 EXPORT_SUFFIXES = {'.pdf', '.zip', '.txt', '.docx', '.pptx'}
@@ -101,7 +102,36 @@ def _check_regular(path: Path, limit: int) -> None:
         raise BackupError(f'فایل پروژه موجود نیست یا بیش از حد بزرگ است: {path.name}')
 
 
+def cleanup_backup_temp(max_age_seconds: float = 3600.0, *, protected: set[Path] | None = None) -> None:
+    """Remove stale temporary backup archives and interrupted restore staging folders."""
+    now = time.time()
+    keep = {p.resolve() for p in (protected or set())}
+    for folder_name in ('backup-temp', 'restore-staging'):
+        folder = data_dir() / folder_name
+        if not folder.exists() or folder.is_symlink() or not folder.is_dir():
+            continue
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if keep and entry.resolve() in keep:
+                    continue
+                if max_age_seconds > 0:
+                    st = entry.lstat()
+                    if (now - st.st_mtime) < max_age_seconds:
+                        continue
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+
 def make_backup(store: ProjectStore, project_id: str, drafts: Any, expected_updated_at: str | None = None) -> Path:
+    cleanup_backup_temp(max_age_seconds=3600.0)
     tmpdir = data_dir() / 'backup-temp'; tmpdir.mkdir(parents=True, exist_ok=True)
     fd, filename = tempfile.mkstemp(prefix='project-', suffix='.zip', dir=tmpdir); os.close(fd)
     target = Path(filename)
@@ -126,6 +156,8 @@ def make_backup(store: ProjectStore, project_id: str, drafts: Any, expected_upda
                 if exports.is_symlink() or not exports.is_dir():
                     raise BackupError('پوشهٔ خروجی پروژه معتبر نیست.')
                 for path in sorted(exports.iterdir()):
+                    if path.name.startswith(('~$', '.')) or (path.is_dir() and not path.is_symlink()):
+                        continue
                     if path.suffix.lower() in EXPORT_SUFFIXES:
                         _name(path.name); _check_regular(path, MAX_EXPORT); files.append((path, f'exports/{path.name}', MAX_EXPORT))
             manifest = {'format': FORMAT, 'version': VERSION, 'appVersion': APP_VERSION, 'createdAt': utc_now(), 'apiKeysIncluded': False}
@@ -285,10 +317,14 @@ def restore_backup(store: ProjectStore, upload: BinaryIO) -> tuple[dict[str, Any
                 item['edited'] = edited.exists()
             with store._lock:
                 project_id = new_id()
-                while project_root(project_id).exists(): project_id = new_id()
+                dest = project_root(project_id)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                while dest.exists():
+                    project_id = new_id()
+                    dest = project_root(project_id)
                 state['id'] = project_id; state['updatedAt'] = utc_now()
                 atomic_json(stage / 'project.json', state)
-                os.replace(stage, project_root(project_id)); stage = None
+                os.replace(stage, dest); stage = None
             return state, drafts
     except BackupError:
         raise

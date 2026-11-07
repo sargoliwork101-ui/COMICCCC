@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pymupdf as fitz
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .activity import emit
 from .ocr_managed import compute_worker_count, iter_parallel_ordered, trim_process_memory
@@ -266,7 +266,7 @@ class ProjectStore:
         return path
 
     def save_rendered(self, project_id: str, image_id: str, content: bytes) -> dict[str, Any]:
-        if len(content) > 100 * 1024 * 1024:
+        if len(content) > 150 * 1024 * 1024:
             raise ValueError("Rendered image is too large")
         with Image.open(io.BytesIO(content)) as im:
             if (im.format or "").upper() != "PNG":
@@ -296,7 +296,7 @@ class ProjectStore:
             return self.save(state)
 
     @staticmethod
-    def _validate_image_bytes(filename: str, content: bytes) -> tuple[str, int, int]:
+    def _normalize_and_validate_image_bytes(filename: str, content: bytes) -> tuple[bytes, str, int, int]:
         if len(content) > 150 * 1024 * 1024:
             raise ValueError(f"Image is too large: {filename}")
         try:
@@ -307,8 +307,47 @@ class ProjectStore:
                 if width < 1 or height < 1 or width * height > 100_000_000:
                     raise ValueError(f"Invalid image dimensions: {filename}")
                 im.load()
+                try:
+                    orientation = int(im.getexif().get(0x0112, 1) or 1)
+                except Exception:
+                    orientation = 1
+                if orientation in {2, 3, 4, 5, 6, 7, 8}:
+                    transposed = ImageOps.exif_transpose(im)
+                    try:
+                        width, height = transposed.size
+                        if width < 1 or height < 1 or width * height > 100_000_000:
+                            raise ValueError(f"Invalid image dimensions: {filename}")
+                        out = io.BytesIO()
+                        save_fmt = image_format if image_format in {"JPEG", "PNG", "WEBP", "BMP", "GIF"} else "PNG"
+                        exif_bytes = transposed.info.get("exif")
+                        save_kwargs: dict[str, Any] = {}
+                        if exif_bytes:
+                            save_kwargs["exif"] = exif_bytes
+                        if save_fmt == "JPEG":
+                            rgb = transposed if transposed.mode in {"RGB", "L", "CMYK"} else transposed.convert("RGB")
+                            try:
+                                rgb.save(out, format="JPEG", quality=95, subsampling=0, **save_kwargs)
+                            finally:
+                                if rgb is not transposed:
+                                    rgb.close()
+                        elif save_fmt == "WEBP":
+                            transposed.save(out, format="WEBP", quality=95, **save_kwargs)
+                        else:
+                            transposed.save(out, format=save_fmt, **save_kwargs)
+                        content = out.getvalue()
+                        image_format = save_fmt
+                    finally:
+                        if transposed is not im:
+                            transposed.close()
         except (OSError, Image.DecompressionBombError) as exc:
             raise ValueError(f"Invalid or unsupported image: {filename}") from exc
+        if len(content) > 150 * 1024 * 1024:
+            raise ValueError(f"Image is too large: {filename}")
+        return content, image_format, width, height
+
+    @classmethod
+    def _validate_image_bytes(cls, filename: str, content: bytes) -> tuple[str, int, int]:
+        _, image_format, width, height = cls._normalize_and_validate_image_bytes(filename, content)
         return image_format, width, height
 
     def _commit_validated_image(
@@ -372,12 +411,12 @@ class ProjectStore:
                     )
                 else:
                     workers, _ = compute_worker_count(len(image_batch), per_worker_mb=120, max_cap=8)
-                    for _, (fn, raw), (fmt, w, h) in iter_parallel_ordered(
+                    for _, (fn, _raw), (norm_bytes, fmt, w, h) in iter_parallel_ordered(
                         image_batch,
-                        lambda _i, pair: self._validate_image_bytes(pair[0], pair[1]),
+                        lambda _i, pair: self._normalize_and_validate_image_bytes(pair[0], pair[1]),
                         max_workers=workers,
                     ):
-                        self._commit_validated_image(state, fn, raw, fmt, w, h)
+                        self._commit_validated_image(state, fn, norm_bytes, fmt, w, h)
                         completed_inputs += 1
                         emit(
                             f"آماده‌سازی تصویر {completed_inputs} از {total_inputs}: {Path(fn).name}",
@@ -543,42 +582,8 @@ class ProjectStore:
             trim_process_memory()
 
     def _import_image(self, state: dict[str, Any], filename: str, content: bytes) -> None:
-        if len(content) > 150 * 1024 * 1024:
-            raise ValueError(f"Image is too large: {filename}")
-        try:
-            with Image.open(io.BytesIO(content)) as im:
-                raw_format = (im.format or "PNG").upper()
-                image_format = "JPEG" if raw_format == "MPO" else raw_format
-                width, height = im.size
-                if width < 1 or height < 1 or width * height > 100_000_000:
-                    raise ValueError(f"Invalid image dimensions: {filename}")
-                im.load()
-        except (OSError, Image.DecompressionBombError) as exc:
-            raise ValueError(f"Invalid or unsupported image: {filename}") from exc
-        extension = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "BMP": ".bmp", "GIF": ".gif"}.get(image_format, ".png")
-        known = {item['id'] for item in state['images']}
-        image_id, file_name, image_path = self._allocate_image_slot(state["id"], known, extension)
-        try:
-            image_path.write_bytes(content)
-        except OSError:
-            image_path.unlink(missing_ok=True)
-            raise
-        state["images"].append({
-            "id": image_id,
-            "name": Path(filename).name,
-            "file": file_name,
-            "width": width,
-            "height": height,
-            "format": image_format,
-            "bytes": len(content),
-            "order": self._next_order(state),
-            "selected": True,
-            "approved": False,
-            "groupId": None,
-            "crop": None,
-            "blocks": [],
-            "edited": False,
-        })
+        norm_bytes, image_format, width, height = self._normalize_and_validate_image_bytes(filename, content)
+        self._commit_validated_image(state, filename, norm_bytes, image_format, width, height)
 
     def duplicate(self, project_id: str, image_ids: list[str]) -> dict[str, Any]:
         with self._lock:

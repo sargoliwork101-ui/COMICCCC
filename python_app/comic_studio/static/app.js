@@ -74,9 +74,27 @@ let translationPreviewTask = Promise.resolve();
 let overlayPreviewTask = Promise.resolve();
 let downloadUrl = null;
 let backupDownloadUrl = null;
+let activeBackupPrepared = null;
 let previewRevision = 0;
 const imageRenderTasks = new Map();
 const imagePreviewVersions = new Map();
+
+function clearBackupDownloadLink() {
+  if (backupDownloadUrl) {
+    URL.revokeObjectURL(backupDownloadUrl);
+    backupDownloadUrl = null;
+  }
+  if (activeBackupPrepared) {
+    const { projectId, token } = activeBackupPrepared;
+    activeBackupPrepared = null;
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/backup/${encodeURIComponent(token)}`, { method: 'DELETE' }).catch(() => {});
+  }
+  const link = $('backupDownloadLink');
+  if (link) {
+    link.href = '#';
+    link.classList.add('hidden');
+  }
+}
 
 function browserTabId() {
   try {
@@ -809,6 +827,10 @@ async function saveProject() {
   return task;
 }
 function adoptProject(project, options = {}) {
+  const prevProjectId = state.project?.id || null;
+  if (prevProjectId && prevProjectId !== project?.id) {
+    clearBackupDownloadLink();
+  }
   state.project = project;
   state.project.images = project.images || [];
   G.normalizeLayout(state.project.images);
@@ -1242,6 +1264,19 @@ function requestProjectLoad(id) {
 }
 async function waitForProjectLoads() {
   while (projectLoadTasks.size) await Promise.all([...projectLoadTasks]);
+}
+async function waitForPendingRenders(projectId = null) {
+  await waitForProjectLoads();
+  if (editorCloseTask) await editorCloseTask.catch(() => {});
+  await overlayPreviewTask.catch(() => {});
+  const prefix = projectId ? `${projectId}:` : '';
+  while (true) {
+    const pending = [...imageRenderTasks.entries()]
+      .filter(([key]) => !prefix || key.startsWith(prefix))
+      .map(([, task]) => task);
+    if (!pending.length) break;
+    await Promise.allSettled(pending);
+  }
 }
 function collectOutputSettings() {
   if (!state.project) return; state.project.settings = state.project.settings || {};
@@ -1830,35 +1865,103 @@ function projectBrowserDrafts(project) {
   const prefix = `comic-studio-draft:${encodeURIComponent(project.id)}:`;
   const valid = new Set(project.images.flatMap((image) => (image.blocks || []).filter((block) => block.id !== undefined).map((block) => `${image.id}\0${String(block.id)}`)));
   const drafts = [];
+  let keys = [];
   try {
     for (let index = 0; index < localStorage.length; index += 1) {
-      const key = localStorage.key(index); if (!key?.startsWith(prefix)) continue;
-      const parts = key.slice(prefix.length).split(':'); if (parts.length !== 3) continue;
-      const [imageId, blockId] = parts.slice(0, 2).map(decodeURIComponent); const mode = parts[2];
-      if (!valid.has(`${imageId}\0${blockId}`) || !['ocr', 'translation'].includes(mode)) continue;
-      const value = JSON.parse(localStorage.getItem(key));
-      if (!value || typeof value.html !== 'string') throw new Error('پیش‌نویس مرورگر نامعتبر است');
-      drafts.push({ imageId, blockId, mode, value });
+      const key = localStorage.key(index);
+      if (key?.startsWith(prefix)) keys.push(key);
     }
-  } catch { throw new Error('خواندن پیش‌نویس‌های این مرورگر ممکن نبود؛ بک‌آپ ناقص ساخته نشد.'); }
+  } catch {
+    return drafts;
+  }
+  for (const key of keys) {
+    const parts = key.slice(prefix.length).split(':');
+    if (parts.length !== 3) continue;
+    let imageId;
+    let blockId;
+    try {
+      [imageId, blockId] = parts.slice(0, 2).map(decodeURIComponent);
+    } catch {
+      continue;
+    }
+    const mode = parts[2];
+    if (!valid.has(`${imageId}\0${blockId}`) || !['ocr', 'translation'].includes(mode)) continue;
+    try {
+      const value = JSON.parse(localStorage.getItem(key));
+      if (value && typeof value.html === 'string') {
+        drafts.push({ imageId, blockId, mode, value });
+      }
+    } catch {
+      /* ignore unreadable/corrupted stale draft entry */
+    }
+  }
   return drafts;
 }
 async function backupCurrentProject() {
   if (!state.project) return;
   await runJob('در حال ساخت بک‌آپ پروژه…', async (signal) => {
-    await overlayPreviewTask;
-    const project = state.project; let revision;
-    do { const saving = saveProject(); revision = saveRevision; await saving; } while (state.project === project && revision !== saveRevision);
+    const checkNotCancelled = () => {
+      if (signal?.aborted) {
+        throw Object.assign(new Error('عملیات به درخواست شما لغو شد.'), { name: 'AbortError', cancelled: true });
+      }
+    };
+    await waitForPendingRenders(state.project?.id);
+    checkNotCancelled();
+    const project = state.project;
+    if (!project) return;
+    const mismatchedIds = sortedImages().filter((item) => hasOverlayText(item) !== !!item.edited).map((item) => item.id);
+    if (mismatchedIds.length) {
+      await renderImagesText(mismatchedIds, null, checkNotCancelled);
+    }
+    let revision;
+    do {
+      await waitForPendingRenders(project.id);
+      checkNotCancelled();
+      const saving = saveProject();
+      revision = saveRevision;
+      await saving;
+    } while (
+      state.project === project &&
+      (revision !== saveRevision || [...imageRenderTasks.keys()].some((k) => k.startsWith(`${project.id}:`)))
+    );
     if (state.project !== project) throw new Error('پروژه تغییر کرد؛ دوباره بک‌آپ بگیرید.');
     const drafts = projectBrowserDrafts(project);
-    const response = await fetch(`/api/projects/${project.id}/backup`, { ...jsonOptions('POST', { drafts, expected_updated_at: project.updatedAt }), signal });
-    if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `ساخت بک‌آپ ممکن نشد (HTTP ${response.status})`); }
-    const blob = await response.blob(); if (!blob.size) throw new Error('فایل بک‌آپ خالی است');
-    if (state.project !== project || revision !== saveRevision) throw new Error('پروژه هنگام ساخت بک‌آپ تغییر کرد؛ برای ثبت آخرین تغییرها دوباره بک‌آپ بگیرید.');
-    if (backupDownloadUrl) URL.revokeObjectURL(backupDownloadUrl);
-    backupDownloadUrl = URL.createObjectURL(blob);
-    const link = $('backupDownloadLink'); link.href = backupDownloadUrl;
-    link.download = `${safeName(project.name) || 'comic-studio'}-backup.zip`; link.textContent = 'دانلود دوبارهٔ بک‌آپ'; link.classList.remove('hidden'); link.click();
+    const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}/backup?prepare=true`, {
+      ...jsonOptions('POST', { drafts, expected_updated_at: project.updatedAt }),
+      signal,
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.detail || `ساخت بک‌آپ ممکن نشد (HTTP ${response.status})`);
+    }
+    const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
+    const fallbackName = `${safeName(project.name) || 'comic-studio'}-backup.zip`;
+    const link = $('backupDownloadLink');
+    if (contentType.includes('application/json')) {
+      const payload = await response.json();
+      if (!payload?.token) throw new Error('فایل بک‌آپ آماده نشد.');
+      if (state.project !== project || revision !== saveRevision) {
+        fetch(`/api/projects/${encodeURIComponent(project.id)}/backup/${encodeURIComponent(payload.token)}`, { method: 'DELETE' }).catch(() => {});
+        throw new Error('پروژه هنگام ساخت بک‌آپ تغییر کرد؛ برای ثبت آخرین تغییرها دوباره بک‌آپ بگیرید.');
+      }
+      clearBackupDownloadLink();
+      activeBackupPrepared = { projectId: project.id, token: payload.token };
+      link.href = `/api/projects/${encodeURIComponent(project.id)}/backup/${encodeURIComponent(payload.token)}`;
+      link.download = payload.filename || fallbackName;
+    } else {
+      const blob = await response.blob();
+      if (!blob.size) throw new Error('فایل بک‌آپ خالی است');
+      if (state.project !== project || revision !== saveRevision) {
+        throw new Error('پروژه هنگام ساخت بک‌آپ تغییر کرد؛ برای ثبت آخرین تغییرها دوباره بک‌آپ بگیرید.');
+      }
+      clearBackupDownloadLink();
+      backupDownloadUrl = URL.createObjectURL(blob);
+      link.href = backupDownloadUrl;
+      link.download = fallbackName;
+    }
+    link.textContent = 'دانلود دوبارهٔ بک‌آپ';
+    link.classList.remove('hidden');
+    link.click();
     toast('بک‌آپ پروژه آماده شد؛ کلیدهای API داخل آن نیستند.');
   });
 }
@@ -1872,7 +1975,12 @@ async function restoreProjectBackup(file) {
   });
   if (!ok) return;
   await runJob('در حال بازیابی بک‌آپ…', async (signal) => {
-    await saveProject(); const previous = state.project;
+    await waitForPendingRenders(state.project?.id);
+    const saveExistingSafely = () => saveProject().catch((err) => {
+      if (err?.status !== 404) throw err;
+    });
+    await saveExistingSafely();
+    const previous = state.project;
     const form = new FormData(); form.append('file', file);
     const result = await api('/api/projects/restore', { method: 'POST', body: form, signal });
     let failedDrafts = 0;
@@ -1883,10 +1991,17 @@ async function restoreProjectBackup(file) {
     // Flush any edits made while the upload ran; never overwrite another opened project.
     let opened = false;
     while (state.project === previous) {
-      const saving = saveProject(); const revision = saveRevision; await saving;
+      const saving = saveExistingSafely();
+      const revision = saveRevision;
+      await saving;
       if (state.project === previous && revision === saveRevision) { adoptProject(result.project); opened = true; break; }
     }
-    await refreshProjectList(); setMenuOpen(false);
+    await refreshProjectList();
+    if (opened) {
+      const mismatchedIds = sortedImages().filter((item) => hasOverlayText(item) !== !!item.edited).map((item) => item.id);
+      if (mismatchedIds.length) await renderImagesText(mismatchedIds);
+    }
+    setMenuOpen(false);
     if (failedDrafts) toast(`پروژه بازیابی شد، ولی ${failedDrafts} پیش‌نویس در حافظهٔ مرورگر ذخیره نشد؛ فایل ZIP را نگه دارید.`, true);
     else toast(opened ? 'بک‌آپ به‌صورت پروژهٔ جدید بازیابی شد.' : 'بک‌آپ بازیابی شد؛ پروژهٔ جدید را از فهرست پروژه‌ها باز کنید.');
   });
@@ -2834,6 +2949,28 @@ async function ensureFont() {
     fontLoadedOnce = true;
   } catch { /* fallback */ }
 }
+async function decodeProjectImageBitmap(rawBlob, item) {
+  let bitmap = await createImageBitmap(rawBlob);
+  if (
+    bitmap &&
+    bitmap.width &&
+    bitmap.height &&
+    item?.width &&
+    item?.height &&
+    (bitmap.width !== item.width || bitmap.height !== item.height)
+  ) {
+    try {
+      const unoriented = await createImageBitmap(rawBlob, { imageOrientation: 'none' });
+      if (unoriented && unoriented.width === item.width && unoriented.height === item.height) {
+        bitmap.close?.();
+        bitmap = unoriented;
+      } else {
+        unoriented?.close?.();
+      }
+    } catch { /* fallback if imageOrientation option is unsupported */ }
+  }
+  return bitmap;
+}
 async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false } = {}) {
   const key = `${projectId}:${item.id}`;
   const blocks = overlayBlocks(item, mode);
@@ -2843,11 +2980,12 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
     return;
   }
   if (!active) {
-    await api(`/api/projects/${projectId}/images/${item.id}/revert`, { method: 'POST' });
+    const reverted = await api(`/api/projects/${projectId}/images/${item.id}/revert`, { method: 'POST' });
     imagePreviewVersions.set(key, ++previewRevision);
     renderedPageSignatures.set(key, signature);
     const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null;
     if (current) current.edited = false;
+    if (state.project?.id === projectId && reverted?.updatedAt) state.project.updatedAt = reverted.updatedAt;
     return;
   }
   await ensureFont();
@@ -2856,7 +2994,7 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
   let rawBlob = await response.blob();
   let bitmap = null;
   try {
-    bitmap = await createImageBitmap(rawBlob);
+    bitmap = await decodeProjectImageBitmap(rawBlob, item);
   } finally {
     rawBlob = null;
   }
@@ -2879,8 +3017,9 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
     }
   }
   if (!pngBlob) throw new Error(`ساخت PNG برای «${item.name}» ممکن نشد؛ تصویر خیلی بزرگ یا حافظهٔ مرورگر کم است`);
+  let uploaded = null;
   try {
-    await api(`/api/projects/${projectId}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: pngBlob });
+    uploaded = await api(`/api/projects/${projectId}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: pngBlob });
   } finally {
     pngBlob = null;
   }
@@ -2888,6 +3027,7 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
   renderedPageSignatures.set(key, signature);
   const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null;
   if (current) current.edited = true;
+  if (state.project?.id === projectId && uploaded?.updatedAt) state.project.updatedAt = uploaded.updatedAt;
 }
 function renderAndUpload(item, options = {}) {
   const projectId = state.project?.id;
@@ -4093,7 +4233,7 @@ async function openEditor(imageId) {
   try {
     const response = await fetch(imageUrl(item));
     if (response.ok === false) throw new Error('تصویر اصلی باز نشد');
-    bitmap = await createImageBitmap(await response.blob());
+    bitmap = await decodeProjectImageBitmap(await response.blob(), item);
   } catch (error) {
     if (loadSeq === editorLoadSeq && state.editorId === imageId) {
       state.editorId = null;
@@ -6438,7 +6578,12 @@ async function init() {
     await refreshProjectList(projects.length ? projects : null);
     await loadAiSettings(ai);
     const unrenderedIds = sortedImages().filter((item) => hasOverlayText(item) && !item.edited).map((item) => item.id);
-    if (unrenderedIds.length) await renderImagesText(unrenderedIds);
+    if (unrenderedIds.length) {
+      const startupRenderTask = renderImagesText(unrenderedIds);
+      projectLoadTasks.add(startupRenderTask);
+      startupRenderTask.finally(() => projectLoadTasks.delete(startupRenderTask)).catch(() => {});
+      await startupRenderTask;
+    }
     syncEngineUpdateUi();
     const shouldCheckUpdates = !startupUpdateChecked && state.engines.some((entry) => entry.runtimeInstalled);
     if (shouldCheckUpdates) {
