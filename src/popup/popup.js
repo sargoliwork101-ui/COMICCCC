@@ -61,13 +61,14 @@ startBtn.addEventListener('click', async () => {
   if (!pdfName.toLowerCase().endsWith('.pdf')) pdfName += '.pdf';
 
   // سقف صفحات Google Books: صفر/خالی یعنی بدون محدودیت
-  const parsedLimit = Number.parseInt(document.getElementById('pageLimit').value, 10);
+  const isPagedMode = collectMode !== 'scroll';
+  const parsedLimit = isPagedMode ? Number.parseInt(document.getElementById('pageLimit').value, 10) : 0;
   const pageLimit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 0;
   const options = {
     pageLimit,
-    nextSelector: document.getElementById('nextSelector').value.trim(),
-    imageSelector: document.getElementById('imageSelector').value.trim(),
-    deepSearch: document.getElementById('deepSearch').checked === true
+    nextSelector: isPagedMode ? document.getElementById('nextSelector').value.trim() : '',
+    imageSelector: isPagedMode ? document.getElementById('imageSelector').value.trim() : '',
+    deepSearch: !isPagedMode && document.getElementById('deepSearch').checked === true
   };
 
   startBtn.disabled = true;
@@ -434,7 +435,11 @@ async function scrapeAndSend(pdfName, mode, opts) {
   };
 
   // حالت اسکرول: پیش‌فرض سخت‌گیر (فقط تصاویر کمیک)؛ تیک «جستجوی عمیق» همهٔ تصاویر ریز و درشت را می‌آورد
-  const scanScrollMode = () => (deepSearch ? scanAllImages() : scanScrollImages());
+  const scanScrollMode = () => {
+    const before = urls.length;
+    if (imageSelector && scanImagesBySelector()) return urls.length - before;
+    return deepSearch ? scanAllImages() : scanScrollImages();
+  };
 
   // ---------- رابط کاربری روی صفحه ----------
   const styleTag = document.createElement('style');

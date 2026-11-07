@@ -17,7 +17,7 @@
         </div>
       </div>
       <div class="topbar-side">
-        <span class="version-pill">نسخهٔ ۲.۶۴</span>
+        <span class="version-pill">نسخهٔ ۲.۶۵</span>
         <details class="top-menu" id="topMenu">
           <summary aria-label="منوی ابزارها" title="پروفایل، OCR و ترجمه">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
@@ -276,6 +276,17 @@
       <button class="mini accent" id="lbCopy">کپی تصویر</button>
     </div>
     <div class="lbscroll"><img id="lbImg" alt=""></div>
+  </div>
+
+  <div id="extModal" class="ext-modal hidden" role="dialog" aria-modal="true" aria-labelledby="extModalTitle" aria-describedby="extModalMsg">
+    <div class="ext-modal-card">
+      <h3 id="extModalTitle" class="ext-modal-title">تأیید عملیات</h3>
+      <p id="extModalMsg" class="ext-modal-msg"></p>
+      <div class="ext-modal-actions">
+        <button type="button" id="extModalCancel" class="btn ghost">انصراف</button>
+        <button type="button" id="extModalOk" class="btn">تأیید</button>
+      </div>
+    </div>
   </div>
 
   <script src="../../vendor/jspdf.umd.min.js"></script>

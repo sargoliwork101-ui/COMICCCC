@@ -98,7 +98,7 @@ for (const resource of [
 
 const channel = fs.readFileSync(path.join(ROOT, 'src/popup/update-channel.js'), 'utf8');
 const updater = fs.readFileSync(path.join(ROOT, 'src/popup/update.js'), 'utf8');
-check('updater targets this build branch', channel.includes("window.PIC_TO_PDF_UPDATE_BRANCH = 'arena/7f84304a-comicccc';"));
+check('updater targets this build branch', channel.includes("window.PIC_TO_PDF_UPDATE_BRANCH = 'main';"));
 check('updater targets the correct repository', updater.includes("const REPO = 'sargoliwork101-ui/COMICCCC';"));
 check('updater reads the root manifest', updater.includes('/contents/manifest.json?ref='));
 check('updater downloads from GitHub codeload', updater.includes('https://codeload.github.com/${REPO}/zip/refs/heads/'));

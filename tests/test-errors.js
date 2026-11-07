@@ -1,5 +1,7 @@
 // Adversarial / edge-case tests for viewer flows.
 const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -554,6 +556,66 @@ prepare = async (it, r) => {
     check('in-flight render still updated the item blob', !!target.edited);
     check('busy flag released after render settles', h.ev('edBusy') === false);
     h.ev('renderEdited = globalThis.__origRE;');
+  }
+
+  // ---------- 18a. ESC during tall-image multi-slice OCR aborts immediately ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.window.createImageBitmap = async () => ({ width: 800, height: 8800, close() {} });
+    h.ctx.__recCount = 0;
+    h.ev(`OcrTools.createOcrWorker = async () => ({
+      recognize: async () => {
+        globalThis.__recCount++;
+        if (globalThis.__recCount === 1) {
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        }
+        return { data: { blocks: [] } };
+      },
+      setParameters: async () => {},
+      terminate: async () => {}
+    });`);
+    h.$('trOnlySel').checked = false;
+    h.$('btnTranslate').click();
+    h.$('trStart').click();
+    for (let i = 0; i < 80; i++) { await sleep(60); if (!h.ev('building')) break; }
+    check('tall-image OCR stopped after first pass instead of all 12+ slice passes', h.ctx.__recCount === 1, h.ctx.__recCount);
+    check('partial OCR not attached on cancelled image', h.ev('items.every((it) => !it.ocr && !it.edited)'));
+    check('cancelled tall-image status reports 0 translated', /متوقف شد\.\s*0 متن/.test(h.$('statusText').textContent), h.$('statusText').textContent);
+  }
+
+  // ---------- 18b. ESC mid-translation counts only actually translated blocks ----------
+  {
+    const h = makeHarness();
+    for (let i = 0; i < 60; i++) { await sleep(80); if (!h.ev('loading')) break; }
+    h.ctx.__trCalls = 0;
+    h.ev(`OcrTools.createOcrWorker = async () => ({ recognize: async () => ({ data: { blocks: [] } }), setParameters: async () => {}, terminate: async () => {} });
+    OcrTools.ocrBitmap = async () => [{ text: 'A', conf: 90, x0: 10, x1: 90, y0: 10, y1: 30 }];
+    OcrTools.groupLines = () => [
+      { id: 1, enabled: true, bg: 'auto', tr: '', text: 'B1', x0: 10, x1: 90, y0: 10, y1: 30, lineH: 16 },
+      { id: 2, enabled: true, bg: 'auto', tr: '', text: 'B2', x0: 10, x1: 90, y0: 40, y1: 60, lineH: 16 },
+      { id: 3, enabled: true, bg: 'auto', tr: '', text: 'B3', x0: 10, x1: 90, y0: 70, y1: 90, lineH: 16 },
+      { id: 4, enabled: true, bg: 'auto', tr: '', text: 'B4', x0: 10, x1: 90, y0: 100, y1: 120, lineH: 16 },
+      { id: 5, enabled: true, bg: 'auto', tr: '', text: 'B5', x0: 10, x1: 90, y0: 130, y1: 150, lineH: 16 }
+    ];
+    TranslateTools.translate = async (txt) => {
+      const callNo = ++globalThis.__trCalls;
+      await new Promise((r) => setTimeout(r, 25 * callNo));
+      if (callNo === 3) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return { text: 'نباید ثبت شود', ok: true };
+      }
+      if (callNo === 1) return { text: 'ترجمه ۱', ok: true };
+      if (callNo === 2) return { text: 'ترجمه ۲', ok: true };
+      return { text: 'نباید ثبت شود', ok: true };
+    };`);
+    h.$('trOnlySel').checked = false;
+    h.$('btnTranslate').click();
+    h.$('trStart').click();
+    for (let i = 0; i < 80; i++) { await sleep(60); if (!h.ev('building')) break; }
+    check('summary sPages counts only 2 translated blocks (not all 5)', h.$('sPages').textContent.trim() === '2', h.$('sPages').textContent);
+    check('status text reports 2 translated blocks in 1 image', /متوقف شد\.\s*2 متن در 1 تصویر ترجمه شد/.test(h.$('statusText').textContent), h.$('statusText').textContent);
+    check('blocks 4 and 5 remained untranslated', h.ev('items[0].ocr.blocks.filter((b) => b.tr).length') === 2);
   }
 
   // ---------- 18. duplicate numbers stay unique after an older copy is removed ----------

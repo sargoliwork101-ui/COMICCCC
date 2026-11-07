@@ -1,0 +1,417 @@
+"""Incremental page-local translation plans with a bounded rolling summary."""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from typing import Any
+
+from .context_budget import ContextBudget, ContextRequest, FreeRequest, build_context_request
+from .ocr import LANGUAGES
+from .store import ProjectChangedError
+from .translation import (
+    TranslationError,
+    combine_translation_texts,
+    distribute_translation,
+    normalize_target_language,
+    target_language_direction,
+)
+from .translation_plan import split_ai_paragraph, target_snapshot
+
+RUN_KEY = '_aiContextRun'
+SUMMARY_KEY = '_aiStorySummary'
+
+
+def digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def provider_policy(settings: dict[str, Any], provider: str, profile_id: str | None = None) -> dict[str, Any]:
+    if provider == 'free':
+        return {'services': settings.get('free_services', {})}
+    config = settings.get('providers', {}).get(provider, {})
+    mode = config.get('response_mode', 'auto')
+    chosen_id = (profile_id or '').strip()
+    source_profiles = [
+        p for p in config.get('profiles', [])
+        if not chosen_id or str(p.get('id', '')) == chosen_id
+    ]
+    return {**({'response_mode': mode} if mode != 'auto' else {}),
+            **({'profile_id': chosen_id} if chosen_id else {}),
+            'model': config.get('model', ''), 'base_url': config.get('base_url', ''),
+            'profiles': [{'id': p.get('id', ''), 'hasApiKey': bool(p.get('hasApiKey', p.get('api_key', ''))),
+                          'timeout_seconds': p.get('timeout_seconds', 90), 'retry_count': p.get('retry_count', 0),
+                          'retry_wait_seconds': p.get('retry_wait_seconds', 20), 'source_limit': p.get('source_limit', 1000)}
+                         for p in source_profiles]}
+
+
+def source_layout(state: dict[str, Any], image_ids: list[str]) -> str:
+    chosen = set(image_ids)
+    items = [item for item in sorted(state.get('images', []), key=lambda item: item.get('order', 0)) if item['id'] in chosen]
+    return digest([{'id': item['id'], 'blocks': [{'id': block.get('id'), 'text': block.get('text'),
+                    'enabled': block.get('enabled', True), 'sourceLines': block.get('sourceLines')}
+                   for block in item.get('blocks', [])]} for item in items])
+
+
+def build_run_request(run: dict[str, Any], skill: str) -> ContextRequest | FreeRequest:
+    if run['provider'] == 'free':
+        return FreeRequest(run['limit'])
+    budget = ContextBudget(run['limit'], run['contextPercent'], run['skillPercent'])
+    return build_context_request(
+        budget,
+        LANGUAGES.get(run['language'], LANGUAGES['eng'])['name'],
+        skill,
+        run['context'],
+        target_language=run.get('targetLanguage', 'fa'),
+    )
+
+
+def _max_fitting_candidate(
+    candidates: list[tuple[int, int]],
+    text: str,
+    fits: Any,
+) -> tuple[int, int] | None:
+    text_len = len(text)
+    ordered = sorted({(cut, end) for cut, end in candidates if cut > 0 and end < text_len})
+    if not ordered:
+        return None
+    if not fits(text[:ordered[0][0]]):
+        return None
+    if fits(text[:ordered[-1][0]]):
+        return ordered[-1]
+    lo, hi = 0, len(ordered) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fits(text[:ordered[mid][0]]):
+            lo = mid
+        else:
+            hi = mid - 1
+    return ordered[lo]
+
+
+def safe_prefix(text: str, fits: Any, source_lines: Any = None, *, allow_fallback: bool = False) -> tuple[str, str, str] | None:
+    """Find the latest whole-sentence or paragraph line boundary that fits.
+
+    Return the first part, remainder and intervening whitespace. The remainder
+    need not fit the current space: it will be planned again next request.
+    When allow_fallback is True (used for AI bubbles without sentence-ending
+    punctuation), fall back cleanly to line breaks, clause punctuation, or
+    word boundaries rather than failing preflight.
+    """
+    sentence_end = re.compile(r"[.!?…。！？؟][\"'”’»）)\]]*\s*$")
+    candidates: list[tuple[int, int]] = []
+    # Sentence boundaries can occur inside a single OCR line. The previous
+    # implementation only inspected newline boundaries, so long OCR blocks
+    # containing several sentences were incorrectly treated as indivisible.
+    for match in re.finditer(r"[.!?…。！？؟][\"'”’»）)\]]*(?=[ \t\n])", text):
+        cut = match.end()
+        end = cut
+        while end < len(text) and text[end] in " \t\n":
+            end += 1
+        candidates.append((cut, end))
+    for match in re.finditer(r"\n(?:[ \t]*\n)*", text):
+        prefix = text[:match.start()].rstrip()
+        if prefix and "\n" in match.group(0)[1:]:
+            candidates.append((len(prefix), match.end()))
+    normalized_lines: list[str] | None = None
+    if isinstance(source_lines, list) and all(isinstance(line, dict) for line in source_lines):
+        lines = [' '.join(str(line.get('text') or '').split()) for line in source_lines]
+        lines = [line for line in lines if line]
+        if len(lines) > 1 and ' '.join(lines) == text:
+            normalized_lines = lines
+            position = 0
+            for line in lines[:-1]:
+                position += len(line)
+                if sentence_end.search(line): candidates.append((position, position + 1))
+                position += 1
+    best = _max_fitting_candidate(candidates, text, fits)
+    if best is not None:
+        cut, end = best
+        return text[:cut], text[end:], text[cut:end]
+    if not allow_fallback:
+        return None
+    # Tier 2: single OCR line breaks or merged source_lines boundaries.
+    line_candidates: list[tuple[int, int]] = []
+    for match in re.finditer(r"[ \t]*\n[ \t]*", text):
+        cut = match.start()
+        end = match.end()
+        if cut > 0 and end < len(text):
+            line_candidates.append((cut, end))
+    if normalized_lines:
+        position = 0
+        for line in normalized_lines[:-1]:
+            position += len(line)
+            line_candidates.append((position, position + 1))
+            position += 1
+    best_line = _max_fitting_candidate(line_candidates, text, fits)
+    if best_line is not None:
+        cut, end = best_line
+        return text[:cut], text[end:], text[cut:end]
+    # Tier 3: clause punctuation followed by whitespace.
+    clause_candidates: list[tuple[int, int]] = []
+    for match in re.finditer(r"[,;:،؛—–-]+[\"'”’»）)\]]*(?=[ \t\n])", text):
+        cut = match.end()
+        end = cut
+        while end < len(text) and text[end] in " \t\n":
+            end += 1
+        if cut > 0 and end < len(text):
+            clause_candidates.append((cut, end))
+    best_clause = _max_fitting_candidate(clause_candidates, text, fits)
+    if best_clause is not None:
+        cut, end = best_clause
+        return text[:cut], text[end:], text[cut:end]
+    # Tier 4: whitespace word boundaries (unspaced single tokens still return None).
+    word_candidates = [(match.start(), match.end()) for match in re.finditer(r"[ \t]+", text) if match.start() > 0 and match.end() < len(text)]
+    best_word = _max_fitting_candidate(word_candidates, text, fits)
+    if best_word is not None:
+        cut, end = best_word
+        return text[:cut], text[end:], text[cut:end]
+    return None
+
+
+def create_run(state: dict[str, Any], image_ids: list[str], provider: str, language: str,
+               skill: str, context: str, limit: int, context_percent: int,
+               skill_percent: int, reuse: bool, policy: dict[str, Any],
+               profile_id: str | None = None, target_language: str = 'fa') -> dict[str, Any]:
+    """Snapshot source and target references; no secret or skill is persisted."""
+    tl = normalize_target_language(target_language)
+    if provider == 'free':
+        if skill or context:
+            raise TranslationError('مترجم رایگان از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
+        maximum_request = FreeRequest(limit)
+    else:
+        budget = ContextBudget(limit, context_percent, skill_percent)
+        build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, context, target_language=tl)
+        maximum_request = build_context_request(budget, LANGUAGES.get(language, LANGUAGES['eng'])['name'], skill, '', target_language=tl)
+    selected = set(image_ids)
+    items = [i for i in sorted(state.get('images', []), key=lambda i: i.get('order', 0)) if i['id'] in selected]
+    jobs: list[dict[str, Any]] = []
+    by_text: dict[str, dict[str, Any]] = {}
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        for block in item.get('blocks', []):
+            source = str(block.get('text') or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+            if not block.get('enabled', True) or not source:
+                continue
+            if block.get('id') is None:
+                raise TranslationError('شناسهٔ یکی از کادرها وجود ندارد؛ ابتدا آن را ویرایش و ذخیره کنید.')
+            key = (str(item['id']), str(block['id']))
+            if key in seen:
+                raise TranslationError('شناسهٔ کادرها یکتا نیست؛ ابتدا آن‌ها را اصلاح کنید.')
+            seen.add(key)
+            ref = {'imageId': item['id'], 'blockId': block['id'], 'snapshot': target_snapshot(block)}
+            if reuse and source in by_text:
+                by_text[source]['refs'].append(ref)
+                continue
+            job = {'imageId': item['id'], 'imageName': item.get('name', ''), 'source': source,
+                   'sourceLines': block.get('sourceLines'), 'remaining': source, 'accumulated': '', 'refs': [ref]}
+            jobs.append(job)
+            if reuse:
+                by_text[source] = job
+    # Keep the established rejection for free services. For AI, surface budget
+    # failures in the editable preview dialog so guidance and limits are visible.
+    if provider == 'free':
+        for job in jobs:
+            remaining = job['source']; lines = job.get('sourceLines')
+            while not maximum_request.fits(remaining):
+                chunk = safe_prefix(remaining, maximum_request.fits, lines)
+                if not chunk:
+                    raise TranslationError('یک خط یا جمله در سقف مؤثر درخواست جا نمی‌شود؛ سقف یا متن OCR را در مرز مناسب اصلاح کنید. در حالت رایگان محدودیت ۵۰۰ بایت MyMemory نیز برقرار است. هیچ متنی ارسال نشد.')
+                _, remaining, _ = chunk
+                lines = matching_source_lines(lines, remaining)
+    else:
+        preview_error = ''
+        for job in jobs:
+            remaining = job['source']; lines = job.get('sourceLines')
+            while not maximum_request.fits(remaining):
+                chunk = safe_prefix(remaining, maximum_request.fits, lines, allow_fallback=True)
+                if not chunk:
+                    preview_error = (f"در صفحهٔ «{job['imageName']}»، متن کاملِ کادر جا نمی‌شود؛ فضای متن پس از دستور، اسکیل و خلاصهٔ مجاز "
+                                     f"{maximum_request.source_capacity} نویسه است. سقف را تغییر دهید یا متن OCR را بررسی کنید. هیچ متنی ارسال نشد.")
+                    break
+                _, remaining, _ = chunk
+                lines = matching_source_lines(lines, remaining)
+            if preview_error:
+                break
+    chosen_profile = (profile_id or '').strip() if provider != 'free' else ''
+    return {'provider': provider, **({'profileId': chosen_profile} if chosen_profile else {}),
+            **({'targetLanguage': tl} if tl != 'fa' else {}),
+            'language': language, 'skillHash': digest(skill), 'context': context, 'previewError': preview_error if provider != 'free' else '',
+            'limit': limit, 'contextPercent': context_percent, 'skillPercent': skill_percent,
+            'reuse': reuse, 'policyHash': digest(policy), 'imageIds': [i['id'] for i in items], 'sourceLayout': source_layout(state, [i['id'] for i in items]), 'jobs': jobs,
+            'completed': 0}
+
+
+def _block_lookup(state: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    result: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in state.get('images', []):
+        for block in item.get('blocks', []):
+            key = (str(item['id']), str(block.get('id')))
+            if key in result:
+                raise ProjectChangedError('شناسهٔ کادرهای تصویر یکتا نیست؛ برای جلوگیری از بازنویسی ترجمه متوقف شد.')
+            result[key] = block
+    return result
+
+
+def verify_run(state: dict[str, Any], run: dict[str, Any], skill: str, policy: dict[str, Any] | None,
+               check_skill: bool = True) -> None:
+    if (check_skill and run['skillHash'] != digest(skill)) or (policy is not None and run['policyHash'] != digest(policy)):
+        raise ProjectChangedError('راهنما یا تنظیمات API تغییر کرده است؛ پیش‌نمایش تازه را بررسی کنید.')
+    if source_layout(state, run['imageIds']) != run['sourceLayout']:
+        raise ProjectChangedError('متن یا ترتیب صفحه‌ها تغییر کرده است؛ پیش‌نمایش تازه لازم است.')
+    lookup = _block_lookup(state)
+    for job in run['jobs']:
+        for ref in job['refs']:
+            block = lookup.get((str(ref['imageId']), str(ref['blockId'])))
+            if block is None or target_snapshot(block) != ref['snapshot']:
+                raise ProjectChangedError('متن یا ترجمهٔ پروژه از زمان تأیید تغییر کرده است؛ برای جلوگیری از بازنویسی، ترجمه متوقف شد.')
+
+
+def matching_source_lines(lines: Any, remaining: str) -> Any:
+    if isinstance(lines, list) and all(isinstance(line, dict) for line in lines):
+        for index in range(len(lines)):
+            suffix = ' '.join(' '.join(str(line.get('text') or '').split()) for line in lines[index:] if str(line.get('text') or '').strip())
+            if suffix == remaining:
+                return lines[index:]
+    return None
+
+
+def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | FreeRequest, list[dict[str, Any]]]:
+    request = build_run_request(run, skill)
+    pending = [(i, job) for i, job in enumerate(run['jobs']) if job['remaining']]
+    if not pending:
+        return request, []
+    image_id = pending[0][1]['imageId']
+    chosen: list[dict[str, Any]] = []
+    for index, job in pending:
+        if job['imageId'] != image_id:
+            break
+        remaining = job['remaining']
+        prefix = combine_translation_texts([c['text'] for c in chosen])
+        def fits_next(part: str) -> bool:
+            return request.fits((prefix + '\n' if prefix else '') + part)
+        if fits_next(remaining):
+            chosen.append({'job': index, 'text': remaining, 'rest': '', 'join': ''})
+            continue
+        # If the next bubble has a safe sentence/line boundary, fill the
+        # current request with that whole prefix rather than sending a tiny
+        # previous bubble alone. Never cross a page or cut a line.
+        split = safe_prefix(remaining, fits_next, job.get('sourceLines'))
+        if split:
+            first, rest, join = split
+            chosen.append({'job': index, 'text': first, 'rest': rest, 'join': join})
+        elif not chosen:
+            # A rolling summary can grow after many successful requests and
+            # crowd out the next whole sentence. Reduce only its tail, keeping
+            # as much context as possible, until a safe source boundary fits.
+            original_context = run.get('context', '')
+            tried: set[str] = set()
+            fitted = False
+            for keep in range(len(original_context) - 1, -1, -1):
+                candidate = original_context[:keep].rstrip()
+                if keep < len(original_context) and candidate:
+                    boundary = candidate.rfind(' ')
+                    if boundary >= max(0, keep * 0.7): candidate = candidate[:boundary].rstrip()
+                if candidate in tried: continue
+                tried.add(candidate)
+                trial_run = {**run, 'context': candidate}
+                trial_request = build_run_request(trial_run, skill)
+                trial_split = safe_prefix(remaining, trial_request.fits, job.get('sourceLines'))
+                if trial_request.fits(remaining):
+                    chosen.append({'job': index, 'text': remaining, 'rest': '', 'join': ''})
+                elif trial_split:
+                    first, rest, join = trial_split
+                    chosen.append({'job': index, 'text': first, 'rest': rest, 'join': join})
+                else:
+                    continue
+                request = trial_request
+                run['contextToCondense'] = original_context
+                run['context'] = candidate
+                run['contextAutoShortened'] = True
+                fitted = True
+                break
+            if not fitted and run['provider'] != 'free':
+                fallback_split = safe_prefix(remaining, fits_next, job.get('sourceLines'), allow_fallback=True)
+                if fallback_split:
+                    first, rest, join = fallback_split
+                    chosen.append({'job': index, 'text': first, 'rest': rest, 'join': join})
+                    fitted = True
+                else:
+                    tried_fb: set[str] = set()
+                    for keep in range(len(original_context) - 1, -1, -1):
+                        candidate = original_context[:keep].rstrip()
+                        if keep < len(original_context) and candidate:
+                            boundary = candidate.rfind(' ')
+                            if boundary >= max(0, keep * 0.7): candidate = candidate[:boundary].rstrip()
+                        if candidate in tried_fb: continue
+                        tried_fb.add(candidate)
+                        trial_run = {**run, 'context': candidate}
+                        trial_request = build_run_request(trial_run, skill)
+                        trial_fb = safe_prefix(remaining, trial_request.fits, job.get('sourceLines'), allow_fallback=True)
+                        if not trial_fb:
+                            continue
+                        first, rest, join = trial_fb
+                        chosen.append({'job': index, 'text': first, 'rest': rest, 'join': join})
+                        request = trial_request
+                        run['contextToCondense'] = original_context
+                        run['context'] = candidate
+                        run['contextAutoShortened'] = True
+                        fitted = True
+                        break
+            if not fitted:
+                raise TranslationError('خط یا جمله حتی با خلاصهٔ خالی در سقف جا نمی‌شود؛ سقف را افزایش دهید یا متن OCR را در مرز جمله اصلاح کنید. این درخواست ارسال نشد.')
+        break
+    return request, chosen
+
+
+def apply_translated_block_defaults(block: dict[str, Any], target_language: str | None = None) -> None:
+    if target_language is not None:
+        dir_val, _ = target_language_direction(target_language)
+        block['dir'] = dir_val
+    if block.get('pageRole') == 'heading':
+        raw_lh = float(block.get('lineH') or (float(block.get('y1', 0)) - float(block.get('y0', 0))) or 22.0)
+        block['align'] = 'left' if str(block.get('dir') or '').lower() == 'ltr' else 'right'
+        block['size'] = max(14, min(36, round(raw_lh * 0.78)))
+        block['verticalAlign'] = 'middle'
+        block['bold'] = True
+    else:
+        block['align'] = 'justify'
+        block['size'] = 12
+        block['verticalAlign'] = 'top'
+        block['bold'] = bool(block.get('_detectedBold'))
+    if block.get('_detectedItalic'):
+        block['italic'] = True
+
+
+def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict[str, Any]],
+                   translated: str, summary: str) -> list[str]:
+    results = distribute_translation([entry['text'] for entry in chosen], translated)
+    lookup = _block_lookup(state)
+    affected: set[str] = set()
+    target_lang = run.get('targetLanguage', 'fa')
+    for entry, result in zip(chosen, results):
+        job = run['jobs'][entry['job']]
+        job['accumulated'] += result + entry['join']
+        job['remaining'] = entry['rest']
+        if job['remaining']:
+            # Preserve the still-valid original OCR line boundaries after a
+            # split of a merged, space-joined OCR block.
+            job['sourceLines'] = matching_source_lines(job.get('sourceLines'), job['remaining'])
+            continue
+        for ref in job['refs']:
+            block = lookup[(str(ref['imageId']), str(ref['blockId']))]
+            block['tr'] = job['accumulated']; block['richHtml'] = ''
+            apply_translated_block_defaults(block, target_language=target_lang)
+            # Old checkpoints describe different payloads, not this context run.
+            block.pop('_aiTranslationParts', None); block.pop('_aiReusedTranslation', None)
+            ref['snapshot'] = target_snapshot(block)
+            affected.add(ref['imageId'])
+    if affected:
+        for image in state.get('images', []):
+            if str(image.get('id')) in affected:
+                image['approved'] = False
+    run['context'] = summary
+    run['completed'] += 1
+    if run['provider'] != 'free':
+        state[SUMMARY_KEY] = summary
+    return sorted(affected)

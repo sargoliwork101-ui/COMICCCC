@@ -1,5 +1,7 @@
 // Tests for the Google Books jscmd=click3 walker in background.js (mocked chrome.* + fetch).
 const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 
 let failures = 0;
@@ -69,7 +71,7 @@ function bootBackground(fetchImpl) {
     AbortController, fetch: fetchMock
   };
   vm.createContext(ctx);
-  vm.runInContext(fs.readFileSync(__dirname + '/../src/background.js', 'utf8'), ctx, { filename: 'background.js' });
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'src/background.js'), 'utf8'), ctx, { filename: 'background.js' });
   return { ctx, listeners, fetchCalls };
 }
 

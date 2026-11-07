@@ -1,5 +1,7 @@
 // Tests for the MV3 service worker (background.js) with mocked chrome.* APIs.
 const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 
 let failures = 0;
@@ -33,7 +35,7 @@ function bootBackground(initialStorage) {
   };
   const ctx = { chrome, console, URL, setTimeout, Math, Date, Promise };
   vm.createContext(ctx);
-  vm.runInContext(fs.readFileSync(__dirname + '/../src/background.js', 'utf8'), ctx, { filename: 'background.js' });
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'src/background.js'), 'utf8'), ctx, { filename: 'background.js' });
   return { chrome, listeners, store, ctx };
 }
 

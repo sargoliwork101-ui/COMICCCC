@@ -1,7 +1,7 @@
 export default [
   {
     files: ['**/*.js'],
-    ignores: ['node_modules/**', 'tests/**', 'debug*.js', 'vendor/**'],
+    ignores: ['node_modules/**', 'tests/**', 'debug*.js', 'vendor/**', 'python_app/**'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
@@ -20,7 +20,7 @@ export default [
         createImageBitmap: 'readonly', HTMLCanvasElement: 'readonly', HTMLElement: 'readonly',
         globalThis: 'readonly', module: 'readonly', exports: 'writable', self: 'readonly',
         getComputedStyle: 'readonly', URLSearchParams: 'readonly',
-        AbortController: 'readonly', ResizeObserver: 'readonly',
+        AbortController: 'readonly', ResizeObserver: 'readonly', TextDecoder: 'readonly',
         atob: 'readonly', btoa: 'readonly',
         // globals shared across the extension's classic scripts
         PdfBuilder: 'readonly', OcrTools: 'readonly', Typeset: 'readonly', TranslateTools: 'readonly', AiTranslateTools: 'readonly',
@@ -30,7 +30,8 @@ export default [
         setStatus: 'readonly', setTaskTitle: 'readonly', setJobHint: 'readonly',
         refreshAll: 'readonly',
         refreshCard: 'readonly', refreshSummary: 'readonly', drawThumb: 'readonly',
-        openEditor: 'readonly', PDFImportStore: 'readonly'
+        openEditor: 'readonly', PDFImportStore: 'readonly',
+        extConfirm: 'readonly', extAlert: 'readonly'
       }
     },
     rules: {

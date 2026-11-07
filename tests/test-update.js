@@ -1,5 +1,7 @@
 // Tests for the in-extension GitHub update check (update.js)
 const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
@@ -106,6 +108,15 @@ const jsonResponse = (manifest) => ({
     h.btn.click();
     await sleep(10);
     check('malformed manifest: graceful error', h.status.classList.contains('err'), h.status.textContent);
+  }
+
+  // 6. UTF-8 manifest payload containing Persian description parses cleanly via base64 UTF-8 decoding
+  {
+    const utf8B64 = Buffer.from(JSON.stringify({ version: '2.59', description: 'دانلود کمیک و وب‌تون به‌صورت PDF' }), 'utf8').toString('base64');
+    const h = boot(async () => ({ ok: true, status: 200, json: async () => ({ content: utf8B64 }) }), null, '2.59');
+    h.btn.click();
+    await sleep(10);
+    check('UTF-8 Persian manifest decoded without mojibake or JSON error', h.status.classList.contains('ok'), h.status.textContent);
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL UPDATE TESTS PASSED');

@@ -1,0 +1,77 @@
+import json
+
+import pytest
+
+from comic_studio.context_budget import ContextBudget, build_context_request, parse_context_response
+from comic_studio.translation import TranslationError
+
+
+def test_default_percentages_are_independent_caps_and_actual_space_is_reused():
+    budget = ContextBudget(1000)
+    assert budget.skill_limit == 150
+    assert budget.context_limit == 150
+    empty = build_context_request(budget, 'English', '', '')
+    partial = build_context_request(budget, 'English', 'a' * 10, 'b' * 20)
+    full = build_context_request(budget, 'English', 'a' * 150, 'b' * 150)
+    assert 'max 150 chars incl spaces; shorten to fit' in full.system
+    assert 'line count/order must exactly match Text' in full.system
+    assert 'one output line per input line' in full.system
+    assert 'Add no lines, breaks, headings or commentary' in full.system
+    assert empty.source_capacity > partial.source_capacity > full.source_capacity
+    payload_capacity = full.source_capacity - len(full.line_count_instruction('x'))
+    assert full.fits('x' * payload_capacity)
+    assert full.character_count('x' * payload_capacity) == 1000
+    assert full.character_count('x') <= 1000
+    with pytest.raises(TranslationError):
+        full.user_message('x' * (payload_capacity + 1))
+
+
+def test_missing_summary_does_not_consume_its_budget():
+    budget = ContextBudget(1000, context_percent=15, skill_percent=15)
+    first = build_context_request(budget, 'English', 'راهنما', '')
+    later = build_context_request(budget, 'English', 'راهنما', 'الف')
+    assert first.source_capacity - later.source_capacity == len('Context: الف\n')
+
+
+def test_existing_overlong_values_cause_errors_not_truncation():
+    budget = ContextBudget(1000)
+    with pytest.raises(TranslationError, match='راهنمای ترجمه'):
+        build_context_request(budget, 'English', 'a' * 151, '')
+    with pytest.raises(TranslationError, match='خلاصهٔ قبلی'):
+        build_context_request(budget, 'English', '', 'b' * 151)
+    with pytest.raises(TranslationError, match='یک خط'):
+        build_context_request(budget, 'English', '', 'old\ncontext')
+    with pytest.raises(TranslationError, match='فضایی'):
+        build_context_request(ContextBudget(10), 'English', '', '')
+
+
+def test_percentages_and_counts_use_unicode_codepoints_and_validate_input():
+    budget = ContextBudget(1000, context_percent=20, skill_percent=5)
+    assert (budget.context_limit, budget.skill_limit) == (200, 50)
+    result = build_context_request(budget, 'English', 'ا' * 50, '🙂' * 200)
+    assert result.character_count('سلام🙂') == len(result.system) + len(result.user_message('سلام🙂'))
+    assert 'Source has 1 line; output exactly 1 line.' in result.user_message('سلام🙂')
+    with pytest.raises(TranslationError):
+        build_context_request(budget, 'English', 'ا' * 51, '')
+    with pytest.raises(ValueError):
+        ContextBudget(1000, 80, 30)
+    with pytest.raises(ValueError):
+        ContextBudget(1000, True, 15)
+
+
+def test_result_requires_both_fields_caps_summary_and_checks_line_mapping():
+    good = json.dumps({'translation': 'اول\nدوم', 'summary': 'جان دوست مری است'}, ensure_ascii=False)
+    assert parse_context_response(good, ['one', 'two'], 150) == ('اول\nدوم', 'جان دوست مری است')
+    clipped_translation, clipped_summary = parse_context_response(
+        json.dumps({'translation': 'اول\nدوم', 'summary': 'واژه ' * 40}, ensure_ascii=False),
+        ['one', 'two'], 90)
+    assert clipped_translation == 'اول\nدوم' and len(clipped_summary) <= 90
+    folded_translation, folded_summary = parse_context_response(
+        json.dumps({'translation': 'اول\nدوم', 'summary': 'خلاصهٔ اول\nخلاصهٔ دوم'}, ensure_ascii=False),
+        ['one', 'two'], 90)
+    assert folded_translation == 'اول\nدوم' and '\\n' not in folded_summary
+    for data in ('not json', '{}', '{"translation":"ok","summary":1}',
+                 json.dumps({'translation': 'first\\nsecond', 'summary': 'first\\nsecond'}),
+                 json.dumps({'translation': 'only one line', 'summary': 'valid'})):
+        with pytest.raises(TranslationError):
+            parse_context_response(data, ['one', 'two'], 150)

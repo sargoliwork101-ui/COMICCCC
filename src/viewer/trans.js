@@ -184,9 +184,14 @@ async function renderEdited(it) {
   const w = bmp.width, h = bmp.height;
   let cv;
   try { cv = Typeset.render(bmp, it.ocr.blocks); } finally { bmp.close(); }
-  const blob = await canvasToBlob(cv, 'image/png');
-  cv.width = cv.height = 0;
-  const u8 = new Uint8Array(await blob.arrayBuffer());
+  let blob;
+  try {
+    blob = await canvasToBlob(cv, 'image/png');
+  } finally {
+    cv.width = cv.height = 0;
+    cv = null;
+  }
+  const u8 = new Uint8Array(await blob.slice(0, 64).arrayBuffer());
   it.edited = { i: it.i, blob, info: sniff(u8), w, h };
 }
 
@@ -236,7 +241,7 @@ async function runTranslate() {
   $('progressBar').style.width = '0';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
-  let totalBlocks = 0, doneImgs = 0, trFail = 0, noText = 0, rawTotal = 0, keptTotal = 0;
+  let totalBlocks = 0, attemptedBlocks = 0, doneImgs = 0, trFail = 0, noText = 0, rawTotal = 0, keptTotal = 0;
   const passes = ['gray', ...($('trContrast').checked ? ['adaptive'] : []), 'bubbles', ...($('trPrecise').checked ? ['wmask'] : [])];
   const errs = [], aiItems = [];
   let aiNotice = '';
@@ -251,6 +256,7 @@ async function runTranslate() {
     for (let k = 0; k < list.length; k++) {
       if (TR.cancel) break;
       const it = list[k];
+      const prevOcr = it.ocr, prevEdited = it.edited;
       const base = k / list.length, span = 1 / list.length;
       const prog = (f) => {
         const ratio = aiMode ? (k + f) / list.length * 0.55 : base + span * f;
@@ -263,13 +269,21 @@ async function runTranslate() {
         let lines;
         const stats = { raw: 0, kept: 0 };
         try {
-          lines = await OcrTools.ocrBitmap(bmp, TR.worker, { cjk: L.cjk, lang, passes, stats, onSlice: (f) => prog(f * 0.6) });
+          lines = await OcrTools.ocrBitmap(bmp, TR.worker, {
+            cjk: L.cjk,
+            lang,
+            passes,
+            stats,
+            isCancelled: () => TR.cancel || !$('ocrEnabled').checked,
+            onSlice: (f) => prog(f * 0.6)
+          });
         } finally { bmp.close(); }
         if (!$('ocrEnabled').checked) {
           it.ocr = null; it.edited = null;
           refreshCard(it); drawThumb(it);
           break;
         }
+        if (TR.cancel) break;
         rawTotal += stats.raw; keptTotal += stats.kept;
 
         const blocks = OcrTools.groupLines(lines, L.cjk);
@@ -283,13 +297,15 @@ async function runTranslate() {
         }
         else {
           setStatus(`در حال ترجمهٔ ${blocks.length} متن در تصویر ${k + 1} از ${list.length}...`);
-          let next = 0, n = 0;
+          let next = 0, n = 0, translatedHere = 0;
           await Promise.all(Array.from({ length: Math.min(3, blocks.length) }, async () => {
             while (next < blocks.length && !TR.cancel) {
               const b = blocks[next++];
               const r = await TranslateTools.translate(b.text, L.sl);
+              if (TR.cancel) break;
               b.tr = r.text;
-              if (!r.ok) trFail++;
+              if (r.ok) translatedHere++;
+              else trFail++;
               n++;
               prog(0.6 + 0.35 * (n / blocks.length));
             }
@@ -299,14 +315,19 @@ async function runTranslate() {
             refreshCard(it); drawThumb(it);
             break;
           }
+          attemptedBlocks += n;
+          totalBlocks += translatedHere;
+          if (TR.cancel && translatedHere === 0) {
+            it.ocr = prevOcr; it.edited = prevEdited;
+            break;
+          }
           await renderEdited(it);
           if (!$('ocrEnabled').checked) {
             it.ocr = null; it.edited = null;
             refreshCard(it); drawThumb(it);
             break;
           }
-          totalBlocks += blocks.length;
-          doneImgs++;
+          if (translatedHere > 0) doneImgs++;
           $('sPages').innerText = totalBlocks;
         }
       } catch (e) {
@@ -315,6 +336,7 @@ async function runTranslate() {
       }
       refreshCard(it);
       drawThumb(it);
+      if (TR.cancel) break;
     }
 
     // در حالت اختیاری AI، همهٔ صفحه‌ها اول OCR می‌شوند و کل متن در یک بسته برای هر کلید لازم ارسال می‌شود.
@@ -347,6 +369,7 @@ async function runTranslate() {
       }
 
       if (!TR.cancel && $('ocrEnabled').checked) {
+        attemptedBlocks += entries.length;
         const missing = [];
         entries.forEach((entry) => {
           const translated = translations.get(entry.id);
@@ -397,13 +420,13 @@ async function runTranslate() {
 
     result.classList.add('done');
     $('progressBar').style.width = '100%';
-    if (errs.length && !doneImgs) {
+    if (errs.length && !doneImgs && !TR.cancel) {
       setStatus(aiMode ? 'ترجمه کامل نشد؛ جزئیات خطا در پایین آمده است.'
         : 'ترجمه انجام نشد. اگر خطا مربوط به موتور OCR است، اکستنشن را Reload کنید.');
-    } else if (!totalBlocks && !TR.cancel) {
+    } else if (!attemptedBlocks && !TR.cancel) {
       setStatus(`متنی پیدا نشد. موتور OCR کار کرد (${rawTotal} خط خام، ${keptTotal} خط معتبر) ولی متن قابل‌قبولی نبود. ` +
         `مطمئن شوید زبان درست انتخاب شده (الان: ${L.name}) و گزینهٔ «دقت بالاتر» روشن است.`);
-    } else if (totalBlocks && trFail >= totalBlocks) {
+    } else if (!TR.cancel && attemptedBlocks && trFail >= attemptedBlocks) {
       setStatus('متن‌ها خوانده شد ولی ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید. (متن اصلی در ویرایشگر موجود است)');
     } else {
       setStatus(`${TR.cancel ? 'متوقف شد. ' : ''}${totalBlocks} متن در ${doneImgs} تصویر ترجمه شد` +
@@ -417,6 +440,11 @@ async function runTranslate() {
     console.error(e);
     setStatus('خطا در راه‌اندازی تشخیص متن: ' + (e && e.message ? e.message : e));
   } finally {
+    if (TR.worker) {
+      try { await TR.worker.terminate(); } catch {}
+      TR.worker = null;
+      TR.lang = null;
+    }
     building = false;
     TR.aiController = null;
     setJobHint(false);
@@ -454,6 +482,7 @@ async function retranslateBlock(item, block, originalField, editor, overlay, but
   try {
     const result = await TranslateTools.translate(source.trim(), lang.sl);
     if (!result.ok || !result.text) throw new Error('ترجمه انجام نشد؛ اتصال اینترنت را بررسی کنید.');
+    if (!$('ocrEnabled').checked || !item.ocr || !items.includes(item)) return;
     block.tr = result.text;
     block.richHtml = safeEditorHtml(escapeEditorText(result.text).replace(/\n/g, '<br>'));
     if (EDI === item) {
@@ -866,7 +895,7 @@ async function applyEditor() {
     drawThumb(item);
   } catch (e) {
     console.warn(e);
-    alert('خطا در ساخت تصویر: ' + (e && e.message ? e.message : e));
+    extAlert('خطا در ساخت تصویر: ' + (e && e.message ? e.message : e), { title: 'خطا در ساخت تصویر' });
   } finally {
     edBusy = false;
     if (edPending) { edPending = false; applyEditor(); }
@@ -971,7 +1000,8 @@ function buildEditor() {
     });
     box.querySelectorAll('.ed-resize').forEach((handle) => handle.addEventListener('pointerdown', (event) => {
       event.preventDefault(); event.stopPropagation();
-      const stageRect = document.querySelector('.ed-stage').getBoundingClientRect();
+      const stageRect = document.querySelector('.ed-stage')?.getBoundingClientRect();
+      if (!stageRect || !stageRect.width || !stageRect.height) return;
       const sx = it.w / stageRect.width, sy = it.h / stageRect.height;
       const dir = handle.dataset.dir;
       let x0 = Number.isFinite(b.tx0) ? b.tx0 : b.x0, y0 = Number.isFinite(b.ty0) ? b.ty0 : b.y0;
@@ -1078,6 +1108,7 @@ function buildEditor() {
       syncBlockTextStyles(b, editor, overlay);
       scheduleApply();
     });
+    row.querySelector('.blk-color').value = b.color || '#0b0b0b';
     row.querySelector('.blk-color').addEventListener('input', (event) => {
       const selection = activeRichEditor && String(activeRichEditor.dataset.id) === String(b.id) && hasRichSelection(activeRichEditor);
       if (selection && applyRichStyle('color', event.target.value)) return;
@@ -1149,7 +1180,7 @@ async function closeEditor() {
 // ---------- خروجی متنی قابل ویرایش ----------
 function exportText() {
   const done = items.filter((it) => it.ocr && it.ocr.blocks.length);
-  if (!done.length) { alert('هنوز متنی استخراج نشده است. ابتدا «ترجمهٔ متن تصاویر» را اجرا کنید.'); return; }
+  if (!done.length) { extAlert('هنوز متنی استخراج نشده است. ابتدا «ترجمهٔ متن تصاویر» را اجرا کنید.', { title: 'متنی برای خروجی وجود ندارد' }); return; }
   const pad = Math.max(3, String(items.length).length);
   let out = '';
   done.forEach((it) => {
@@ -1175,8 +1206,15 @@ function exportText() {
 $('ocrEnabled').addEventListener('change', async () => {
   if (!$('ocrEnabled').checked) {
     cancelTranslation();
+    clearTimeout(edTimer);
+    edDirty = false;
+    edFieldFocused = false;
+    activeRichEditor = null;
+    richSelectionRange = null;
+    if (EDI) await closeEditor();
+    if (!$('trDialog').classList.contains('hidden')) closeTrDialog();
     // خاموش‌کردن سراسری OCR، ترجمه‌های موقت را کنار می‌گذارد و تصویر اصلی را برمی‌گرداند.
-    items.forEach((it) => { it.ocr = null; it.edited = null; });
+    items.forEach((it) => { it.ocr = null; it.edited = null; it.cropCache = null; });
     refreshAll();
     items.filter((it) => it.state === 'ok').forEach((it) => drawThumb(it));
     if (TR.worker) {
@@ -1260,6 +1298,8 @@ $('editor').addEventListener('focusout', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  const extModal = $('extModal');
+  if (extModal && !extModal.classList.contains('hidden')) return;
   if (!$('editor').classList.contains('hidden')) closeEditor();
   else if (!$('trDialog').classList.contains('hidden')) closeTrDialog();
 });

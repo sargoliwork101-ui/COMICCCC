@@ -1,0 +1,6212 @@
+/* global Typeset, createImageBitmap, StudioGroups, ClipboardItem */
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const G = window.StudioGroups;
+const GROUP_COLORS = ['#34d399', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa', '#2dd4bf', '#fb923c', '#e879f9'];
+const state = {
+  project: null, engines: [], ai: null, editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
+  cropId: null, crop: null, cropPointer: null, modelBusy: null, dragId: null, dragIds: [],
+  dragMode: null, groupEditId: null, groupSnapshot: null, lastSelectedId: null,
+  previewId: null,
+};
+let saveTimer = null;
+let saveTask = Promise.resolve();
+let saveRevision = 0;
+let projectLoadRevision = 0;
+const projectLoadTasks = new Set();
+let toastTimer = null;
+let outlineFrame = null;
+let activityAfter = 0;
+let activityEntries = [];
+let activityPollTimer = null;
+let activityPollInFlight = false;
+let activityGeneration = 0;
+let activeProgressId = null;
+let sessionTimer = null;
+let sessionCloseSent = false;
+let heartbeatInFlight = false;
+let sessionVisibilityBound = false;
+let localActivityId = 0;
+let editorCloseTask = null;
+let editorSessionSnapshot = null;
+let savePending = false;
+let editorCanvasFrame = 0;
+let editorLoadSeq = 0;
+let overlayMeasureCtx = null;
+let sampleScratchCanvas = null;
+let inlineDraft = null;
+let inlineEditSession = null;
+let classicEditor = null;
+let helpController = null;
+let imageOverview = null;
+let jobBusy = false;
+let translationRunning = false;
+let ocrRunning = false;
+let exportRunning = false;
+const openDialogStack = [];
+let ocrAbortController = null;
+let ocrCancelledByUser = false;
+let ocrClosingNormally = false;
+let translationAbortController = null;
+let translationCancelledByUser = false;
+let translationClosingNormally = false;
+let exportAbortController = null;
+let exportCancelledByUser = false;
+let modelAbortController = null;
+let modelCancelledByUser = false;
+let currentJobAbortController = null;
+let activeModalState = null;
+let modalQueue = Promise.resolve();
+let pendingTranslationAfterOcr = null;
+let translationRetryAction = null;
+let translationRepairAction = null;
+let translationDecisionBusy = false;
+let translationPreviewAction = null;
+let translationPreviewRefresh = null;
+let translationPreviewSwitchTarget = null;
+let translationPreviewData = null;
+let preferredTranslationTarget = null;
+let lastSyncedAiProvider = null;
+let translationPreviewTask = Promise.resolve();
+let overlayPreviewTask = Promise.resolve();
+let downloadUrl = null;
+let backupDownloadUrl = null;
+let previewRevision = 0;
+const imageRenderTasks = new Map();
+const imagePreviewVersions = new Map();
+
+function browserTabId() {
+  try {
+    const existing = sessionStorage.getItem('comic-studio-tab-id');
+    if (existing) return existing;
+  } catch { /* storage can be unavailable in private contexts */ }
+  const id = globalThis.crypto?.randomUUID?.() || `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try { sessionStorage.setItem('comic-studio-tab-id', id); } catch { /* keep the in-memory id */ }
+  return id;
+}
+const TAB_ID = browserTabId();
+
+function renderActivity() {
+  document.querySelectorAll('.activity-log').forEach((target) => {
+    target.textContent = '';
+    activityEntries.slice(-100).forEach((entry) => {
+      const line = document.createElement('div'); line.className = `activity-line ${entry.kind || 'info'}`;
+      const time = document.createElement('span'); time.className = 'activity-time';
+      const date = new Date(entry.time || Date.now()); time.textContent = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const message = document.createElement('span'); message.className = 'activity-message'; message.textContent = entry.message;
+      line.append(time, message); target.appendChild(line);
+    });
+    target.scrollTop = target.scrollHeight;
+  });
+}
+function setProgress(id, progress = null, active = false) {
+  const fill = $(id); if (!fill) return;
+  const bar = fill.closest('.bar'); if (!bar) return;
+  const determinate = typeof progress === 'number' && Number.isFinite(progress);
+  const percentage = determinate ? Math.round(Math.max(0, Math.min(1, progress)) * 100) : (active ? 30 : 0);
+  fill.style.width = `${percentage}%`;
+  bar.classList.toggle('indeterminate', active && !determinate);
+  if (determinate) {
+    bar.setAttribute('aria-valuenow', String(percentage));
+    bar.removeAttribute('aria-valuetext');
+  } else {
+    bar.removeAttribute('aria-valuenow');
+    if (active) bar.setAttribute('aria-valuetext', 'در حال انجام');
+    else bar.removeAttribute('aria-valuetext');
+  }
+  const pctEl = bar.parentElement?.querySelector?.('.bar-percent');
+  if (pctEl) pctEl.textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
+  if (id === 'dockProgress' && $('dockProgressPercent')) {
+    $('dockProgressPercent').textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
+  }
+  if (id === 'modelsActiveProgress' && $('modelsActiveProgressPercent')) {
+    $('modelsActiveProgressPercent').textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
+  }
+  if (id === 'ocrQuickProgress' && $('ocrQuickProgressPercent')) {
+    $('ocrQuickProgressPercent').textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
+  }
+  if (id === 'engineNoticeProgress' && $('engineNoticeProgressPercent')) {
+    $('engineNoticeProgressPercent').textContent = determinate ? `${percentage}%` : (active ? '…' : '0%');
+  }
+}
+let modelFromOcrDialog = false;
+let modelCurrentProgress = null;
+let modelCurrentLabel = '';
+let engineMutationSeq = 0;
+
+function syncModelProgressUi(progress = modelCurrentProgress, active = Boolean(state.modelBusy), labelText = modelCurrentLabel) {
+  modelCurrentProgress = progress;
+  if (labelText !== undefined && labelText !== null) modelCurrentLabel = String(labelText);
+  const determinate = typeof progress === 'number' && Number.isFinite(progress);
+  const pctStr = determinate ? `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%` : (active ? '…' : '0%');
+
+  setProgress('modelProgress', progress, active);
+  if ($('modelsActiveProgressWrap')) {
+    $('modelsActiveProgressWrap').classList.toggle('hidden', !active);
+    if (modelCurrentLabel && $('modelsActiveProgressLabel')) $('modelsActiveProgressLabel').textContent = modelCurrentLabel;
+    setProgress('modelsActiveProgress', progress, active);
+  }
+  if ($('ocrQuickProgressWrap')) {
+    const showQuick = active && modelFromOcrDialog;
+    $('ocrQuickProgressWrap').classList.toggle('hidden', !showQuick);
+    if (showQuick && modelCurrentLabel && $('ocrQuickProgressLabel')) $('ocrQuickProgressLabel').textContent = modelCurrentLabel;
+    setProgress('ocrQuickProgress', showQuick ? progress : 0, showQuick);
+  }
+  if ($('engineNoticeProgressWrap')) {
+    const showNoticeProg = active && $('engineUpdateNotice') && !$('engineUpdateNotice').classList.contains('hidden');
+    $('engineNoticeProgressWrap').classList.toggle('hidden', !showNoticeProg);
+    if (showNoticeProg && modelCurrentLabel && $('engineNoticeProgressLabel')) $('engineNoticeProgressLabel').textContent = modelCurrentLabel;
+    setProgress('engineNoticeProgress', showNoticeProg ? progress : 0, showNoticeProg);
+  }
+  if (modelFromOcrDialog) {
+    setProgress('ocrProgress', progress, active);
+  }
+  if (!jobBusy && $('dockProgressWrap')) {
+    $('dockProgressWrap').classList.toggle('hidden', !active);
+    if ($('dockProgressStatus')) $('dockProgressStatus').textContent = active ? (modelCurrentLabel || 'در حال آماده‌سازی مدل…') : 'آماده';
+    setProgress('dockProgress', active ? progress : 0, active);
+    setProgress('jobProgress', active ? progress : (progress === 1 ? 1 : 0), active);
+    if ($('jobStatus') && active && modelCurrentLabel) $('jobStatus').textContent = modelCurrentLabel;
+  }
+  document.querySelectorAll('#engineCards .engine-card-progress').forEach((wrap) => {
+    const fill = wrap.querySelector('.engine-card-progress-fill');
+    const bar = wrap.querySelector('.bar');
+    const pct = wrap.querySelector('.engine-card-progress-pct');
+    const txt = wrap.querySelector('.engine-card-progress-text');
+    const widthPct = determinate ? Math.round(Math.max(0, Math.min(1, progress)) * 100) : (active ? 30 : 0);
+    if (fill) fill.style.width = `${widthPct}%`;
+    if (bar) {
+      bar.classList.toggle('indeterminate', active && !determinate);
+      if (determinate) bar.setAttribute('aria-valuenow', String(widthPct));
+      else bar.removeAttribute('aria-valuenow');
+    }
+    if (pct) pct.textContent = pctStr;
+    if (txt && modelCurrentLabel) txt.textContent = modelCurrentLabel;
+  });
+}
+function appendLocalActivity(message, kind = 'info') {
+  if (!message) return;
+  activityEntries.push({ id: --localActivityId, message: String(message), kind, time: new Date().toISOString() });
+  activityEntries = activityEntries.slice(-100); renderActivity();
+}
+async function pollActivity() {
+  if (activityPollInFlight) return;
+  activityPollInFlight = true;
+  const generation = activityGeneration;
+  try {
+    const response = await fetch(`/api/activity?after=${activityAfter}`, { cache: 'no-store' });
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (generation !== activityGeneration) return;
+    activityAfter = Math.max(activityAfter, Number(payload.next) || 0);
+    (payload.entries || []).forEach((entry) => {
+      if (!activityEntries.some((existing) => existing.id === entry.id)) activityEntries.push(entry);
+    });
+    activityEntries = activityEntries.slice(-100);
+    const entries = payload.entries || [];
+    const latest = entries.at(-1);
+    const latestWithProgress = [...entries].reverse().find((e) => typeof e?.progress === 'number' && Number.isFinite(e.progress));
+    if (jobBusy && latest) {
+      $('jobStatus').textContent = latest.message;
+      if ($('dockProgressStatus')) $('dockProgressStatus').textContent = latest.message;
+      if (translationRunning) $('translationStatus').textContent = latest.message;
+    }
+    if (state.modelBusy && latest?.message) {
+      if ($('modelTestResult')) $('modelTestResult').textContent = latest.message;
+      if (modelFromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = latest.message;
+      syncModelProgressUi(modelCurrentProgress, true, latest.message);
+    }
+    if (latestWithProgress) {
+      const progVal = latestWithProgress.progress;
+      if (jobBusy) {
+        setProgress('jobProgress', progVal, true);
+        setProgress('dockProgress', progVal, true);
+        if ($('editorDialog')?.open) setProgress('editorProgress', progVal, true);
+      }
+      if (activeProgressId) setProgress(activeProgressId, progVal, true);
+      if (translationRunning) setProgress('translationProgress', progVal, true);
+      if (state.modelBusy) {
+        const monotonic = typeof modelCurrentProgress === 'number' ? Math.max(modelCurrentProgress, progVal) : progVal;
+        syncModelProgressUi(monotonic, true, latest?.message || latestWithProgress.message || modelCurrentLabel);
+      }
+    }
+    if (payload.entries?.length) renderActivity();
+  } catch { /* the server may be shutting down; do not create a toast loop */ }
+  finally { activityPollInFlight = false; }
+}
+function isActivityHighRate() {
+  return Boolean(jobBusy || state.modelBusy || translationRunning || exportRunning || checkingEngineUpdates);
+}
+function scheduleActivityPoll(immediate = false) {
+  if (sessionCloseSent) return;
+  if (activityPollTimer) { clearTimeout(activityPollTimer); activityPollTimer = null; }
+  if (document.hidden || !isActivityHighRate()) return;
+  const delay = immediate ? 0 : (state.modelBusy ? 350 : 650);
+  activityPollTimer = setTimeout(async () => {
+    activityPollTimer = null;
+    await pollActivity();
+    scheduleActivityPoll(false);
+  }, delay);
+  activityPollTimer.unref?.();
+}
+function startActivityFeed() {
+  pollActivity().finally(() => scheduleActivityPoll(false));
+  $('activityDetails')?.addEventListener('toggle', (ev) => {
+    if (ev.target?.open && !sessionCloseSent) pollActivity().catch(() => {});
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && isActivityHighRate()) scheduleActivityPoll(true);
+    else if (activityPollTimer && (document.hidden || !isActivityHighRate())) {
+      clearTimeout(activityPollTimer);
+      activityPollTimer = null;
+    }
+  });
+}
+async function clearActivity(notify = true) {
+  ++activityGeneration; activityEntries = []; renderActivity();
+  let succeeded = false;
+  try {
+    const result = await api('/api/activity/clear', { method: 'POST' });
+    activityAfter = Math.max(activityAfter, Number(result?.next) || 0); succeeded = true;
+  } catch (error) {
+    if (notify) toast(error.message || 'پاک‌کردن گزارش ممکن نبود', true);
+  } finally {
+    // Invalidate polls that began before or during the clear so old entries cannot reappear.
+    ++activityGeneration; activityEntries = []; renderActivity();
+    if (!jobBusy) { $('jobStatus').textContent = 'آماده'; setProgress('jobProgress', 0, false); }
+  }
+  if (notify && succeeded) toast('گزارش کارها پاک شد');
+}
+async function heartbeat() {
+  if (sessionCloseSent || heartbeatInFlight) return;
+  heartbeatInFlight = true;
+  try {
+    await fetch('/api/session/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: TAB_ID }), cache: 'no-store' });
+  } catch { /* a closed server needs no further browser-side error */ }
+  finally { heartbeatInFlight = false; }
+}
+function startSession() {
+  sessionCloseSent = false;
+  heartbeat();
+  if (!sessionTimer) {
+    sessionTimer = setInterval(heartbeat, 45000);
+    sessionTimer.unref?.();
+  }
+  if (!sessionVisibilityBound) {
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) heartbeat(); });
+    sessionVisibilityBound = true;
+  }
+}
+function closeSession() {
+  if (sessionCloseSent) return;
+  sessionCloseSent = true;
+  if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
+  if (activityPollTimer) { clearTimeout(activityPollTimer); activityPollTimer = null; }
+  if (downloadUrl) { URL.revokeObjectURL(downloadUrl); downloadUrl = null; }
+  if (backupDownloadUrl) { URL.revokeObjectURL(backupDownloadUrl); backupDownloadUrl = null; }
+  const body = JSON.stringify({ client_id: TAB_ID });
+  try {
+    if (navigator.sendBeacon?.('/api/session/close', new Blob([body], { type: 'application/json' }))) return;
+  } catch { /* use the keepalive fallback below */ }
+  fetch('/api/session/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
+}
+
+function localizeToastMessage(raw) {
+  return String(raw || '')
+    .replace(/\bFailed to fetch\b/gi, 'عدم برقراری ارتباط با سرور')
+    .replace(/\bNetworkError when attempting to fetch resource\.?\b/gi, 'خطای شبکه هنگام ارتباط با سرور')
+    .replace(/\bLoad failed\b/gi, 'دریافت اطلاعات از سرور ناموفق بود');
+}
+function toast(message, error = false) {
+  const el = $('toast');
+  if (!el) return;
+  const text = localizeToastMessage(message);
+  el.textContent = text;
+  el.classList.toggle('toast-error', !!error);
+  el.classList.toggle('toast-warn', !error && /متوقف|لغو/.test(text));
+  el.style.borderColor = error ? 'var(--danger)' : '';
+  try { el.hidePopover?.(); el.showPopover?.(); } catch { /* non-popover fallback */ }
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => {
+      if (!el.classList.contains('show')) {
+        try { el.hidePopover?.(); } catch { /* ignore */ }
+      }
+    }, 220);
+  }, error ? 7000 : 3400);
+}
+async function api(url, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  let path = '';
+  try { path = new URL(url, location.href).pathname; } catch { path = '(نشانی نامعتبر)'; }
+  let response;
+  try { response = await fetch(url, options); }
+  catch (cause) {
+    if (cause?.name === 'AbortError' || options.signal?.aborted) {
+      const abortErr = new Error('عملیات توسط کاربر لغو شد.');
+      abortErr.name = 'AbortError'; abortErr.cancelled = true;
+      throw abortErr;
+    }
+    const error = new Error(`خطای ارتباط با برنامه (${method} ${path})؛ ${cause?.name || 'Error'}: ${cause?.message || cause}. سرور و اتصال را بررسی کنید.`);
+    error.status = 0; throw error;
+  }
+  const type = response.headers.get('content-type') || '';
+  let payload = null, parseError = '';
+  if (type.includes('json')) {
+    try { payload = await response.json(); } catch (cause) { parseError = `پاسخ JSON نامعتبر: ${cause?.message || cause}`; }
+  } else if (!response.ok && type.includes('text/plain') && response.text) {
+    try { parseError = (await response.text()).slice(0, 1000); } catch { /* status remains available */ }
+  }
+  if (!response.ok || parseError) {
+    const raw = payload && (payload.detail || payload.message);
+    const detail = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.map(item => `${(item.loc || []).join('.')}: ${item.msg || item.type || 'خطای اعتبارسنجی'}`).join('؛ ') : raw ? JSON.stringify(raw) : parseError || 'سرور جزئیاتی برنگرداند.';
+    const error = new Error(`${method} ${path} — HTTP ${response.status}: ${detail}`);
+    error.status = response.status; error.errorId = payload?.error_id;
+    if (payload?.kind === 'invalid_context_response') { error.responseText = payload.response_text; error.recoveryToken = payload.recovery_token; error.responseTruncated = payload.response_truncated; }
+    if (payload?.kind === 'pending_result') { error.pendingId = payload.pending_id; error.pendingKind = payload.pending_kind; }
+    if (payload?.kind === 'unstored_result') error.unstoredResult = `${payload.translation || ''}\nخلاصه: ${payload.summary || ''}`;
+    if (payload?.kind === 'hardware_warning') { error.hardwareWarning = true; error.warnings = payload.warnings || []; error.hardwareCheck = payload.hardwareCheck || null; }
+    throw error;
+  }
+  return payload;
+}
+function jsonOptions(method, value) { return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }; }
+function setMenuOpen(open) {
+  const menu = $('menu');
+  if (!menu) return;
+  menu.classList.toggle('hidden', !open);
+  $('menuBtn')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+const pendingCancelModals = new Map();
+function resolveActiveModal(result) {
+  if (!activeModalState) return;
+  const current = activeModalState;
+  activeModalState = null;
+  if (current.cancelJobKind) pendingCancelModals.delete(current.cancelJobKind);
+  const inputVal = $('appModalInput')?.value ?? '';
+  if ($('appModalInputWrap')) $('appModalInputWrap').classList.add('hidden');
+  closeDialog('appModalDialog');
+  try { current.returnFocus?.focus?.({ preventScroll: true }); } catch { /* ignore */ }
+  if (current.promptMode) {
+    if (!result) current.resolve(null);
+    else current.resolve(inputVal.trim() || current.fallbackValue || '');
+  } else {
+    current.resolve(Boolean(result));
+  }
+}
+function dismissJobCancelModal(kind) {
+  if (activeModalState && (!kind || activeModalState.cancelJobKind === kind)) resolveActiveModal(false);
+}
+function showAppModal(options = {}) {
+  const {
+    title = 'تأیید عملیات',
+    message = '',
+    hint = '',
+    confirmText = 'تأیید',
+    cancelText = 'انصراف',
+    variant = 'confirm',
+    destructive = false,
+    alertOnly = false,
+    cancelJobKind = null,
+    promptMode = false,
+    inputLabel = 'نام پروژه',
+    placeholder = '',
+    defaultValue = '',
+    fallbackValue = '',
+  } = options;
+  if (cancelJobKind && pendingCancelModals.has(cancelJobKind)) return pendingCancelModals.get(cancelJobKind);
+  const dlg = $('appModalDialog');
+  if (!dlg) return Promise.resolve(promptMode ? (defaultValue || fallbackValue || null) : !alertOnly);
+  let queued = null;
+  const run = () => new Promise((resolve) => {
+    const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dlg.dataset.variant = variant;
+    const badgeMap = { confirm: '؟', warning: '!', danger: '!', info: 'ℹ' };
+    if ($('appModalBadge')) $('appModalBadge').textContent = badgeMap[variant] || '؟';
+    if ($('appModalTitle')) $('appModalTitle').textContent = title;
+    if ($('appModalMessage')) $('appModalMessage').textContent = localizeToastMessage(message);
+    const hintEl = $('appModalHint');
+    if (hintEl) {
+      hintEl.textContent = hint || '';
+      hintEl.classList.toggle('hidden', !hint);
+    }
+    const inputWrap = $('appModalInputWrap');
+    const inputEl = $('appModalInput');
+    if (inputWrap && inputEl) {
+      inputWrap.classList.toggle('hidden', !promptMode);
+      if ($('appModalInputLabel')) $('appModalInputLabel').textContent = inputLabel;
+      inputEl.placeholder = placeholder;
+      inputEl.value = promptMode ? defaultValue : '';
+    }
+    const cancelBtn = $('appModalCancel');
+    const confirmBtn = $('appModalConfirm');
+    if (cancelBtn) {
+      cancelBtn.textContent = cancelText;
+      cancelBtn.classList.toggle('hidden', !!alertOnly);
+    }
+    if (confirmBtn) {
+      confirmBtn.textContent = confirmText;
+      confirmBtn.classList.toggle('danger-solid', !!destructive);
+      confirmBtn.classList.toggle('primary', !destructive);
+    }
+    activeModalState = { resolve, returnFocus, cancelJobKind, alertOnly, promptMode, fallbackValue, promise: queued };
+    showDialog('appModalDialog');
+    queueMicrotask(() => {
+      if (promptMode && inputEl) {
+        try { inputEl.focus({ preventScroll: true }); inputEl.select(); } catch { /* ignore */ }
+        return;
+      }
+      const target = (destructive && !alertOnly ? cancelBtn : confirmBtn) || confirmBtn;
+      try { target?.focus?.({ preventScroll: true }); } catch { /* ignore */ }
+    });
+  });
+  queued = modalQueue.then(run, run);
+  if (cancelJobKind) {
+    pendingCancelModals.set(cancelJobKind, queued);
+    queued.finally(() => {
+      if (pendingCancelModals.get(cancelJobKind) === queued) pendingCancelModals.delete(cancelJobKind);
+    });
+  }
+  modalQueue = queued.then(() => {}, () => {});
+  return queued;
+}
+function appConfirm(message, options = {}) {
+  return showAppModal({
+    title: options.title || 'تأیید عملیات',
+    message,
+    hint: options.hint || '',
+    confirmText: options.confirmText || 'بله، انجام شود',
+    cancelText: options.cancelText || 'انصراف',
+    variant: options.variant || 'confirm',
+    destructive: !!options.destructive,
+    alertOnly: false,
+    cancelJobKind: options.cancelJobKind || null,
+  });
+}
+function appPrompt(message, options = {}) {
+  return showAppModal({
+    title: options.title || 'ورود نام',
+    message,
+    hint: options.hint || '',
+    confirmText: options.confirmText || 'ثبت',
+    cancelText: options.cancelText || 'انصراف',
+    variant: options.variant || 'confirm',
+    destructive: false,
+    alertOnly: false,
+    promptMode: true,
+    inputLabel: options.inputLabel || 'نام',
+    placeholder: options.placeholder || '',
+    defaultValue: options.defaultValue ?? '',
+    fallbackValue: options.fallbackValue ?? '',
+  });
+}
+function appAlert(message, options = {}) {
+  return showAppModal({
+    title: options.title || 'اعلان برنامه',
+    message,
+    hint: options.hint || '',
+    confirmText: options.confirmText || 'متوجه شدم',
+    variant: options.variant || 'warning',
+    destructive: false,
+    alertOnly: true,
+  });
+}
+window.appConfirm = appConfirm;
+window.appPrompt = appPrompt;
+window.appAlert = appAlert;
+window.alert = (msg) => { appAlert(String(msg ?? ''), { title: 'اعلان برنامه', variant: 'warning' }); };
+
+function abortRunningOcr() {
+  if (!ocrRunning) return;
+  ocrCancelledByUser = true;
+  clearPendingTranslationOcr();
+  try { ocrAbortController?.abort(); } catch { /* ignore */ }
+}
+function abortRunningTranslation() {
+  if (!translationRunning && !translationDecisionBusy) return;
+  translationCancelledByUser = true;
+  try { translationAbortController?.abort(); } catch { /* ignore */ }
+}
+function abortRunningExport() {
+  if (!exportRunning) return;
+  exportCancelledByUser = true;
+  try { exportAbortController?.abort(); } catch { /* ignore */ }
+}
+function abortRunningModelJob() {
+  if (!state.modelBusy) return;
+  const busyId = state.modelBusy;
+  modelCancelledByUser = true;
+  try {
+    if (typeof fetch === 'function') {
+      Promise.resolve(fetch(`/api/engines/${encodeURIComponent(busyId)}/cancel`, { method: 'POST' })).catch(() => {});
+    }
+  } catch { /* ignore */ }
+  try { modelAbortController?.abort(); } catch { /* ignore */ }
+}
+function showDialog(id) {
+  setMenuOpen(false);
+  const dlg = $(id);
+  if (!dlg) return;
+  const idx = openDialogStack.indexOf(id);
+  if (idx >= 0) openDialogStack.splice(idx, 1);
+  openDialogStack.push(id);
+  if (!dlg.open) dlg.showModal();
+}
+function releaseImgElement(img) {
+  if (!img) return;
+  img.onload = null;
+  img.onclick = null;
+  if (img.dataset) delete img.dataset.renderedSrc;
+  img.removeAttribute('src');
+  img.src = '';
+}
+function closeDialog(id) {
+  const idx = openDialogStack.indexOf(id);
+  if (idx >= 0) openDialogStack.splice(idx, 1);
+  if ($(id)?.open) $(id).close();
+  if (id === 'previewDialog') {
+    releaseImgElement($('previewImage'));
+    state.previewId = null;
+  } else if (id === 'cropDialog') {
+    releaseImgElement($('cropImage'));
+  }
+}
+function openHelpDialog(sectionId = null) {
+  if (!helpController && window.ComicHelpGuide?.createHelpController) {
+    helpController = window.ComicHelpGuide.createHelpController();
+  }
+  if (sectionId && helpController?.selectSection) {
+    helpController.selectSection(sectionId);
+  }
+  showDialog('helpDialog');
+}
+async function requestCancelOcrDialog() {
+  if (!ocrRunning || ocrClosingNormally) { closeDialog('ocrDialog'); return true; }
+  const ok = await appConfirm('عملیات خواندن متن (OCR) در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف عملیات در حال اجرا',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    cancelJobKind: 'ocr',
+  });
+  if (!ok) return false;
+  if (ocrRunning && !ocrClosingNormally) abortRunningOcr();
+  closeDialog('ocrDialog');
+  return true;
+}
+async function requestCancelTranslationDialog() {
+  if ((!translationRunning && !translationDecisionBusy) || translationClosingNormally) { closeDialog('translationDialog'); return true; }
+  const ok = await appConfirm('عملیات ترجمه در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف عملیات در حال اجرا',
+    hint: 'بخش‌هایی که تا این لحظه ذخیره شده‌اند در پروژه حفظ می‌شوند و ادامهٔ ارسال متوقف خواهد شد.',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    cancelJobKind: 'translation',
+  });
+  if (!ok) return false;
+  if ((translationRunning || translationDecisionBusy) && !translationClosingNormally) abortRunningTranslation();
+  closeDialog('translationDialog');
+  return true;
+}
+async function requestCancelExport(dialogId = null) {
+  if (!exportRunning) { if (dialogId) closeDialog(dialogId); return true; }
+  const ok = await appConfirm('ساخت فایل خروجی در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف ساخت خروجی',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    cancelJobKind: 'export',
+  });
+  if (!ok) return false;
+  if (exportRunning) abortRunningExport();
+  if (dialogId) closeDialog(dialogId);
+  return true;
+}
+async function requestCancelModelJob() {
+  if (!state.modelBusy) { closeDialog('modelsDialog'); return true; }
+  const ok = await appConfirm('عملیات آماده‌سازی یا آزمایش مدل OCR در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف عملیات مدل OCR',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    cancelJobKind: 'model',
+  });
+  if (!ok) return false;
+  if (state.modelBusy) abortRunningModelJob();
+  closeDialog('modelsDialog');
+  return true;
+}
+async function requestCancelActiveJob() {
+  if (ocrRunning) return requestCancelOcrDialog();
+  if (translationRunning || translationDecisionBusy) return requestCancelTranslationDialog();
+  if (exportRunning) {
+    const activeExportDlg = $('pptxExportDialog')?.open ? 'pptxExportDialog' : ($('docxExportDialog')?.open ? 'docxExportDialog' : ($('exportDialog')?.open ? 'exportDialog' : null));
+    return requestCancelExport(activeExportDlg);
+  }
+  if (state.modelBusy) return requestCancelModelJob();
+  if (!jobBusy) return false;
+  const ok = await appConfirm('عملیات در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف عملیات در حال اجرا',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    cancelJobKind: 'job',
+  });
+  if (!ok) return false;
+  try { currentJobAbortController?.abort(); } catch { /* ignore */ }
+  return true;
+}
+function closeTopDialog() {
+  if ($('appModalDialog')?.open) { resolveActiveModal(false); return true; }
+  const stackedId = [...openDialogStack].reverse().find((id) => $(id)?.open);
+  const dialog = stackedId ? $(stackedId) : [...document.querySelectorAll('dialog[open]')].at(-1);
+  if (!dialog) {
+    if (jobBusy || state.modelBusy) { requestCancelActiveJob().catch(() => {}); return true; }
+    return false;
+  }
+  if (dialog.id === 'editorDialog') closeEditor().catch((error) => toast(error.message, true));
+  else if (dialog.id === 'ocrDialog') requestCancelOcrDialog().catch(() => {});
+  else if (dialog.id === 'translationDialog') requestCancelTranslationDialog().catch(() => {});
+  else if (dialog.id === 'exportDialog') requestCancelExport('exportDialog').catch(() => {});
+  else if (dialog.id === 'docxExportDialog') requestCancelExport('docxExportDialog').catch(() => {});
+  else if (dialog.id === 'pptxExportDialog') requestCancelExport('pptxExportDialog').catch(() => {});
+  else if (dialog.id === 'modelsDialog') requestCancelModelJob().catch(() => {});
+  else if (dialog.id === 'translationPreviewDialog') cancelTranslationRequestPreview();
+  else closeDialog(dialog.id);
+  return true;
+}
+function sortedImages() { return G.byOrder(state.project?.images || []); }
+function selectedImages() { return sortedImages().filter((item) => item.selected); }
+function imageUrl(item, edited = false, cropped = false) {
+  const query = new URLSearchParams();
+  if (edited) query.set('edited', 'true');
+  if (cropped) query.set('cropped', 'true');
+  if (edited || cropped) {
+    const version = imagePreviewVersions.get(`${state.project?.id}:${item.id}`);
+    if (version) query.set('v', String(version));
+  }
+  return `/api/projects/${state.project.id}/images/${item.id}/content${query.toString() ? `?${query}` : ''}`;
+}
+function escapeHtml(value) { const el = document.createElement('div'); el.textContent = String(value ?? ''); return el.innerHTML; }
+function plainToHtml(value) { return escapeHtml(value).replace(/\n/g, '<br>'); }
+function safeName(value, fallback = 'comic-translated') {
+  const raw = String(value || '').trim();
+  return (raw || fallback).replace(/[<>:\"/\\|?*]/g, '-');
+}
+function parseExportFilename(disposition, fallback) {
+  const header = String(disposition || '');
+  const starMatch = header.match(/filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;\r\n]+)/);
+  if (starMatch?.[1]) {
+    const raw = starMatch[1].trim().replace(/^"(.*)"$/, '$1');
+    try { return decodeURIComponent(raw); } catch { return raw; }
+  }
+  const plainMatch = header.match(/filename\s*=\s*(?:"([^"]+)"|([^;\r\n]+))/i);
+  const plain = (plainMatch?.[1] || plainMatch?.[2] || '').trim();
+  if (plain) {
+    try { return decodeURIComponent(plain); } catch { return plain; }
+  }
+  return fallback;
+}
+function sanitizeHtml(html) { return window.ComicSanitize.sanitize(html); }
+
+function setBusy(message) {
+  const wasBusy = jobBusy;
+  jobBusy = !!message;
+  $('jobStatus').textContent = message || 'آماده';
+  setProgress('jobProgress', null, !!message);
+  if ($('dockProgressWrap')) {
+    $('dockProgressWrap').classList.toggle('hidden', !message);
+    if ($('dockProgressStatus')) $('dockProgressStatus').textContent = message || 'آماده';
+    setProgress('dockProgress', null, !!message);
+  }
+  if ($('editorProgressWrap')) {
+    const showEditorBar = !!message && !!$('editorDialog')?.open;
+    $('editorProgressWrap').classList.toggle('hidden', !showEditorBar);
+    setProgress('editorProgress', null, showEditorBar);
+  }
+  if (translationRunning) {
+    $('translationStatus').textContent = message || 'آماده';
+    setProgress('translationProgress', null, !!message);
+  }
+  if (wasBusy && !jobBusy) pollActivity().catch(() => {});
+  scheduleActivityPoll(!!message);
+  document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button:not(#dockCancelJobBtn), #backupProjectBtn, #restoreProjectBtn, #restoreProjectInput, #newProjectBtn, #deleteProjectBtn, #projectSelect, #projectName').forEach((el) => { el.disabled = !!message; });
+}
+async function runJob(message, task, progressId = null) {
+  await clearActivity(false);
+  const jobController = new AbortController();
+  currentJobAbortController = jobController;
+  setBusy(message); activeProgressId = progressId;
+  if (progressId) setProgress(progressId, null, true);
+  appendLocalActivity(message); $('activityDetails').open = true;
+  let completed = false;
+  try { const result = await task(jobController.signal); completed = true; return result; }
+  catch (error) {
+    if (error?.cancelled || error?.name === 'AbortError' || jobController.signal.aborted) {
+      appendLocalActivity('عملیات به درخواست شما لغو و متوقف شد.', 'warning');
+      const abortErr = error?.cancelled ? error : Object.assign(new Error('عملیات به درخواست شما لغو شد.'), { name: 'AbortError', cancelled: true });
+      throw abortErr;
+    }
+    console.error(error); appendLocalActivity(`خطا: ${error.message || error}`, 'error'); toast(error.message || error, true); throw error;
+  }
+  finally {
+    if (currentJobAbortController === jobController) currentJobAbortController = null;
+    dismissJobCancelModal('job');
+    if (progressId) setProgress(progressId, completed ? 1 : 0, false);
+    setProgress('dockProgress', completed ? 1 : 0, false);
+    if ($('editorDialog')?.open) setProgress('editorProgress', completed ? 1 : 0, false);
+    activeProgressId = null; setBusy('');
+    setProgress('jobProgress', completed ? 1 : 0, false);
+  }
+}
+function scheduleSave() {
+  clearTimeout(saveTimer); savePending = true;
+  if (editorSessionSnapshot && state.editorId === editorSessionSnapshot.imageId) editorSessionSnapshot.autoSaved = true;
+  ++saveRevision; $('saveState').textContent = 'در حال ذخیره…';
+  saveTimer = setTimeout(() => saveProject().catch((error) => toast(error.message, true)), 350);
+}
+async function saveProject() {
+  clearTimeout(saveTimer); savePending = false;
+  if (!state.project) return;
+  const project = state.project;
+  G.normalizeLayout(project.images);
+  const revision = ++saveRevision;
+  // Capture the state now, but serialize requests so a slow older save cannot overwrite a newer one.
+  const options = jsonOptions('PUT', { state: project });
+  const task = saveTask.catch(() => {}).then(async () => {
+    const result = await api(`/api/projects/${project.id}/state`, options);
+    // Keep the live object identity: cards and editor fields must never point at a detached snapshot.
+    if (state.project === project) {
+      project.updatedAt = result.updatedAt || project.updatedAt;
+      if (revision === saveRevision) $('saveState').textContent = 'ذخیره شد';
+    }
+    refreshProjectList().catch(() => {});
+  });
+  saveTask = task;
+  return task;
+}
+function adoptProject(project, options = {}) {
+  state.project = project;
+  state.project.images = project.images || [];
+  G.normalizeLayout(state.project.images);
+  state.groupEditId = null; state.groupSnapshot = null;
+  const projName = String(project.name || '').trim() || 'پروژهٔ کمیک';
+  $('projectName').value = projName;
+  const settings = project.settings || {};
+  const pageMode = settings.ocrPageMode === 'document' ? 'document' : 'comic';
+  if ($('ocrPageMode')) $('ocrPageMode').value = pageMode;
+  if ($('modelsPageMode')) $('modelsPageMode').value = pageMode;
+  const ocrLang = settings.ocrLanguage || 'eng';
+  $('ocrLanguage').value = ocrLang;
+  if ($('modelsLanguage')) $('modelsLanguage').value = ocrLang;
+  if ($('testLanguage')) $('testLanguage').value = ocrLang;
+  const targetLang = normalizeTargetLanguage(settings.targetLanguage || state.ai?.target_language || 'fa');
+  if ($('translationTargetLang')) $('translationTargetLang').value = targetLang;
+  if (state.engines.length) {
+    updateEngineOptions(settings.ocrEngine || 'rapidocr-v6');
+  } else {
+    $('ocrEngine').value = settings.ocrEngine || 'rapidocr-v6';
+  }
+  $('ocrContrast').checked = settings.contrast !== false;
+  $('ocrPrecise').checked = settings.precise !== false;
+  $('ocrGroupLines').checked = settings.groupOcrLines !== false;
+  $('ocrErase').checked = settings.eraseOriginal !== false;
+  const output = settings.output || {};
+  const rawOutName = String(output.name || '').trim();
+  const hasCustomizedFlag = typeof output.nameCustomized === 'boolean';
+  const isCustomExportName = hasCustomizedFlag
+    ? Boolean(output.nameCustomized && rawOutName && rawOutName !== projName)
+    : Boolean(rawOutName && rawOutName !== 'comic-translated' && rawOutName !== projName);
+  const effectiveOutName = isCustomExportName ? rawOutName : projName;
+  output.nameCustomized = isCustomExportName;
+  output.name = effectiveOutName;
+  settings.output = output;
+  project.settings = settings;
+  $('exportName').value = effectiveOutName;
+  $('exportSeamless').checked = !!output.seamless;
+  $('exportUniform').checked = !!output.uniformSize;
+  $('exportTwo').checked = !!output.twoPerPage;
+  $('exportFormat').value = output.imageFormat || 'orig';
+  $('exportFolder').value = output.folderName || '';
+  if ($('exportDocxLayout')) $('exportDocxLayout').value = output.docxLayout === 'flowing' ? 'flowing' : 'visual';
+  if ($('exportPptxLayout')) $('exportPptxLayout').value = output.pptxLayout === 'flowing' ? 'flowing' : 'visual';
+  setOverlayMode(settings.overlayMode || 'translation', false);
+  if (options.skipGrid) updateEngineOptions();
+  else renderAll();
+}
+function normalizeOverlayMode(mode) { return mode === 'ocr' || mode === 'none' ? mode : 'translation'; }
+function currentOverlayMode() { return normalizeOverlayMode(state.project?.settings?.overlayMode); }
+function queueOverlayPreviewRefresh() {
+  // Serialize rapid selector changes so an older render can never replace the final choice.
+  overlayPreviewTask = overlayPreviewTask.catch(() => {}).then(async () => {
+    await saveProject();
+    await renderImagesText();
+  });
+  overlayPreviewTask.catch((error) => toast(`به‌روزرسانی متن روی تصویر ممکن نبود: ${error.message || error}`, true));
+  return overlayPreviewTask;
+}
+function setOverlayMode(mode, redraw = true) {
+  if (!state.project) return overlayPreviewTask;
+  if (inlineDraft && normalizeOverlayMode(mode) !== currentOverlayMode() && !closeInlineEditor()) {
+    $('overlayMode').value = currentOverlayMode(); $('exportOverlayMode').value = currentOverlayMode(); return overlayPreviewTask;
+  }
+  state.project.settings = state.project.settings || {};
+  state.project.settings.overlayMode = normalizeOverlayMode(mode);
+  $('overlayMode').value = state.project.settings.overlayMode;
+  $('exportOverlayMode').value = state.project.settings.overlayMode;
+  const item = state.project.images.find((entry) => entry.id === state.editorId);
+  const cards = [...document.querySelectorAll('#blockList .block-card')];
+  (item?.blocks || []).forEach((block) => {
+    const selector = cards.find((card) => card.dataset.id === String(block.id))?.querySelector('[data-text-mode]');
+    if (selector) selector.value = blockTextMode(block);
+  });
+  if (redraw && state.editorId) { drawEditor(); scheduleSave(); }
+  else if (redraw) queueOverlayPreviewRefresh();
+  return overlayPreviewTask;
+}
+function normalizeBlockTextMode(mode) { return mode === 'ocr' ? 'ocr' : 'translation'; }
+function blockTextMode(block, mode = currentOverlayMode()) {
+  if (block.textMode === 'ocr' || block.textMode === 'translation') return block.textMode;
+  return mode === 'ocr' ? 'ocr' : 'translation';
+}
+function blockOverlayMode(block, mode = currentOverlayMode()) {
+  return mode === 'none' ? 'none' : blockTextMode(block, mode);
+}
+function overlayBlock(block, mode = currentOverlayMode()) {
+  const effectiveMode = blockOverlayMode(block, mode);
+  if (effectiveMode === 'none') return { ...block, tr: '', richHtml: '' };
+  if (effectiveMode !== 'ocr') return block;
+  const ocrRtl = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(block.text || '') && !/[A-Za-z]{3,}/.test(block.text || '');
+  return {
+    ...block,
+    tr: block.text || '',
+    richHtml: '',
+    dir: ocrRtl ? 'rtl' : 'ltr',
+    align: ['center', 'justify'].includes(block.align) ? block.align : (ocrRtl ? 'right' : 'left'),
+    _plainText: true,
+  };
+}
+function overlayBlocks(item, mode = currentOverlayMode()) { return (item.blocks || []).map((block) => overlayBlock(block, mode)); }
+function hasRenderableText(block) { return !!block.tr?.trim() || !!(!block._plainText && block.richHtml && Typeset.richHtmlWords(block.richHtml).some((word) => String(word.t || '').trim())); }
+function hasOverlayText(item, mode = currentOverlayMode()) { return overlayBlocks(item, mode).some((block) => block.enabled && hasRenderableText(block)); }
+function renderAll() { renderGrid(); updateEngineOptions(); }
+function makeSummaryPill(text, extraClass = '') {
+  const pill = document.createElement('span');
+  pill.className = `summary-pill${extraClass ? ` ${extraClass}` : ''}`;
+  const dot = document.createElement('span');
+  dot.className = 'summary-pill-dot';
+  dot.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span');
+  label.textContent = text;
+  pill.append(dot, label);
+  return pill;
+}
+function updateSummary() {
+  const images = state.project?.images || [];
+  const total = images.length;
+  const selected = selectedImages().length;
+  const approved = images.filter((item) => item.approved).length;
+  const groups = G.info(images).length;
+  const summaryEl = $('selectionSummary');
+  if (summaryEl) {
+    summaryEl.textContent = '';
+    if (!total) {
+      const empty = document.createElement('span');
+      empty.className = 'summary-empty';
+      empty.textContent = 'هنوز فایلی وارد نشده است';
+      summaryEl.appendChild(empty);
+    } else {
+      summaryEl.append(
+        makeSummaryPill(`${selected} از ${total} انتخاب شده`, 'pill-select'),
+        makeSummaryPill(`${approved} از ${total} تأیید شده`, `pill-approve${approved ? ' has-approved' : ''}`),
+        makeSummaryPill(`${groups} گروه`, `pill-group${groups ? ' has-groups' : ''}`),
+      );
+    }
+  }
+  $('emptyState').classList.toggle('hidden', total > 0);
+  $('ocrBtn').disabled = !total; $('translateBtn').disabled = !total;
+  $('exportBtn').disabled = !total;
+  ['selectAllBtn', 'selectNoneBtn', 'invertBtn', 'groupBtn', 'ungroupBtn', 'duplicateBtn', 'deleteBtn',
+    'approveSelectedBtn', 'unapproveSelectedBtn', 'selectApprovedBtn', 'selectUnapprovedBtn'].forEach((id) => {
+    const btn = $(id);
+    if (btn) btn.disabled = !total;
+  });
+}
+function toggleImageApproved(imageId, nextValue = null) {
+  const item = state.project?.images.find((entry) => entry.id === imageId);
+  if (!item) return;
+  item.approved = nextValue === null ? !item.approved : !!nextValue;
+  if (state.editorId === item.id) syncEditorApprovalHeader(item);
+  renderGrid();
+  scheduleSave();
+}
+function makeButton(label, handler, className = 'bt') {
+  const button = document.createElement('button'); button.type = 'button'; button.textContent = label; button.className = className;
+  button.addEventListener('click', (event) => { event.stopPropagation(); const result = handler(event); if (result?.catch) result.catch((error) => toast(error.message, true)); });
+  return button;
+}
+function groupColor(groupId) { return GROUP_COLORS[(Math.max(1, Number(groupId) || 1) - 1) % GROUP_COLORS.length]; }
+function updateSelectionDisplay() {
+  const byId = new Map((state.project?.images || []).map((item) => [item.id, item]));
+  document.querySelectorAll('#grid .item').forEach((card) => {
+    const item = byId.get(card.dataset.id); if (!item) return;
+    card.classList.toggle('selected', !!item.selected);
+    const tick = card.querySelector('.tick'); if (tick) tick.checked = !!item.selected;
+  });
+  updateSummary();
+}
+function setSelected(item, value, event = null) {
+  if (event?.shiftKey && state.lastSelectedId) {
+    const ordered = sortedImages(); const a = ordered.findIndex((entry) => entry.id === state.lastSelectedId); const b = ordered.findIndex((entry) => entry.id === item.id);
+    if (a >= 0 && b >= 0) ordered.slice(Math.min(a, b), Math.max(a, b) + 1).forEach((entry) => { entry.selected = value; });
+  } else item.selected = value;
+  state.lastSelectedId = item.id; updateSelectionDisplay(); scheduleSave();
+}
+
+// ---------- Grid, group manager, and drag/drop ----------
+function renderGrid() {
+  const grid = $('grid'); if (!state.project) return;
+  G.normalizeLayout(state.project.images);
+  const prevImages = new Map();
+  grid.querySelectorAll('.item').forEach((oldCard) => {
+    const oldImg = oldCard.querySelector('.tw > img');
+    if (oldCard.dataset?.id && oldImg) prevImages.set(oldCard.dataset.id, oldImg);
+  });
+  grid.textContent = '';
+  const infos = G.info(state.project.images); const byId = new Map(infos.map((info) => [info.key, info]));
+  sortedImages().forEach((item, index) => {
+    const info = G.validId(item.groupId) ? byId.get(G.idKey(item.groupId)) : null;
+    const card = document.createElement('article');
+    card.className = `item${item.selected ? ' selected' : ''}${item.approved ? ' approved' : ''}${info ? ' in-group' : ''}${item.crop ? ' cropped' : ''}${state.groupEditId && info && G.idKey(state.groupEditId) === info.key ? ' group-focus' : ''}`;
+    card.dataset.id = item.id; card.draggable = true;
+    if (info) card.style.setProperty('--group-color', groupColor(info.id));
+    const frameShell = document.createElement('div'); frameShell.className = 'tw-shell';
+    const frame = document.createElement('div'); frame.className = 'tw';
+    const nextSrc = imageUrl(item, !!item.edited, Boolean(item.crop));
+    const reusable = prevImages.get(item.id);
+    let image;
+    if (reusable && reusable.dataset?.renderedSrc === nextSrc) {
+      prevImages.delete(item.id);
+      image = reusable;
+      image.alt = item.name;
+    } else {
+      if (reusable) {
+        prevImages.delete(item.id);
+        releaseImgElement(reusable);
+      }
+      image = document.createElement('img');
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      image.alt = item.name;
+      image.draggable = false;
+      image.dataset.renderedSrc = nextSrc;
+      image.src = nextSrc;
+    }
+    image.onload = scheduleOutlines;
+    image.onclick = (event) => {
+      event.stopPropagation();
+      const live = state.project?.images.find((entry) => entry.id === item.id) || item;
+      setSelected(live, !live.selected, event);
+    };
+    frame.appendChild(image);
+    frameShell.appendChild(frame);
+    if (item.approved) {
+      const stamp = document.createElement('div');
+      stamp.className = 'approval-stamp';
+      stamp.setAttribute('aria-label', 'تأیید نهایی شده');
+      const stampCheck = document.createElement('span'); stampCheck.className = 'approval-stamp-check'; stampCheck.textContent = '✓';
+      const stampText = document.createElement('span'); stampText.className = 'approval-stamp-text'; stampText.textContent = 'تأیید شد';
+      stamp.append(stampCheck, stampText);
+      frameShell.appendChild(stamp);
+    }
+    const tick = document.createElement('input'); tick.type = 'checkbox'; tick.className = 'tick'; tick.checked = !!item.selected; tick.setAttribute('aria-label', `انتخاب ${item.name}`);
+    tick.addEventListener('click', (event) => {
+      // The browser has already applied the new checkbox value; consume this one click without cancelling it.
+      event.stopPropagation(); setSelected(item, tick.checked, event);
+    });
+    const act = document.createElement('div'); act.className = 'act';
+    const approveBtn = makeButton('✓', () => toggleImageApproved(item.id), `bt approve-mark${item.approved ? ' is-approved' : ''}`);
+    approveBtn.title = item.approved ? 'برداشتن مهر تأیید نهایی این صفحه' : 'زدن مهر تأیید نهایی (آمادهٔ خروجی)';
+    approveBtn.setAttribute('aria-label', approveBtn.title);
+    approveBtn.setAttribute('aria-pressed', String(!!item.approved));
+    act.append(
+      makeButton('👁', () => openPreview(item), 'bt'),
+      makeButton('✎', () => openEditor(item.id), 'bt'),
+      makeButton('✂', () => openCrop(item.id), 'bt crop-mark'),
+      makeButton('⧉', () => duplicateImages([item.id]), 'bt'),
+      makeButton('🗑', () => deleteImages([item.id]), 'bt danger'),
+      approveBtn,
+    );
+    const name = document.createElement('div'); name.className = 'name';
+    const nameText = document.createElement('span'); nameText.className = 'name-text'; nameText.textContent = item.name; nameText.title = item.name; nameText.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:10px';
+    const order = document.createElement('input'); order.type = 'number'; order.min = '1'; order.value = String(index + 1); order.className = 'mini'; order.title = 'ترتیب'; order.setAttribute('aria-label', 'ترتیب تصویر');
+    order.addEventListener('click', (event) => event.stopPropagation());
+    order.addEventListener('change', () => {
+      const target = Math.max(0, Math.min(state.project.images.length - 1, Number(order.value) - 1));
+      const current = state.project.images.indexOf(item); state.project.images.splice(current, 1); state.project.images.splice(target, 0, item);
+      G.normalizeLayout(state.project.images); renderGrid(); scheduleSave();
+    });
+    name.append(nameText, order, makeButton('↑', () => moveImageBy(item.id, -1), 'bt mini'), makeButton('↓', () => moveImageBy(item.id, 1), 'bt mini'));
+    const meta = document.createElement('div'); meta.className = 'meta';
+    meta.textContent = `${item.width}×${item.height} · ${item.blocks?.length || 0} متن${item.crop ? ' · برش' : ''}${item.edited ? ' · ویرایش' : ''}${item.approved ? ' · تأیید ✓' : ''}`;
+    card.append(frameShell, tick, act, name, meta);
+    if (info) {
+      const badge = document.createElement('span'); badge.className = 'grp'; badge.textContent = `گروه ${info.id}`; badge.title = `${info.members.length} عضو`; card.appendChild(badge);
+    }
+    card.addEventListener('click', (event) => {
+      if (event.target.closest('button,input,img')) return;
+      setSelected(item, !item.selected, event);
+    });
+    card.addEventListener('dragstart', (event) => {
+      if (event.target.closest('button,input,select,textarea')) { event.preventDefault(); return; }
+      state.dragId = item.id; state.dragIds = info ? info.members.map((entry) => entry.id) : [item.id];
+      card.classList.add('dragging');
+      if (info) info.members.forEach((entry) => grid.querySelector(`[data-id="${entry.id}"]`)?.classList.add('group-moving'));
+      event.dataTransfer?.setData('text/plain', item.id); if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    });
+    card.addEventListener('dragend', clearDrag);
+    grid.appendChild(card);
+  });
+  prevImages.forEach((staleImg) => releaseImgElement(staleImg));
+  prevImages.clear();
+  renderGroupPanel(); updateSummary(); scheduleOutlines();
+}
+function moveImageBy(imageId, delta) { G.moveUnit(state.project.images, imageId, delta); renderGrid(); scheduleSave(); }
+async function duplicateImages(ids) { if (!ids.length) return; await saveProject(); adoptProject(await api(`/api/projects/${state.project.id}/duplicate`, jsonOptions('POST', ids))); }
+async function deleteImages(ids) {
+  if (!ids.length) return;
+  const ok = await appConfirm(`آیا مطمئن هستید که می‌خواهید ${ids.length} تصویر انتخاب‌شده را از پروژه حذف کنید؟`, {
+    title: 'حذف تصاویر',
+    confirmText: 'بله، حذف شود',
+    cancelText: 'انصراف',
+    variant: 'danger',
+    destructive: true,
+  });
+  if (!ok) return;
+  const deletingProjectId = state.project?.id;
+  await saveProject();
+  if (deletingProjectId) ids.forEach((imgId) => renderedPageSignatures.delete(`${deletingProjectId}:${imgId}`));
+  adoptProject(await api(`/api/projects/${state.project.id}/delete`, jsonOptions('POST', ids)));
+}
+function renderGroupPanel() {
+  const infos = G.info(state.project?.images || []); const panel = $('groupPanel');
+  panel.classList.toggle('hidden', !infos.length && !state.groupEditId);
+  $('cancelGroupEdit').classList.toggle('hidden', !state.groupEditId);
+  const list = $('groupList'); list.textContent = '';
+  infos.forEach((info) => {
+    const chip = document.createElement('div'); chip.className = `group-chip${state.groupEditId && G.idKey(state.groupEditId) === info.key ? ' active' : ''}`; chip.style.setProperty('--group-color', groupColor(info.id));
+    const dot = document.createElement('span'); dot.className = 'dot';
+    const label = document.createElement('strong'); label.textContent = `گروه ${info.id} · ${info.members.length} عضو`;
+    chip.append(dot, label,
+      makeButton('انتخاب', () => selectGroup(info.id), 'bt'),
+      makeButton(state.groupEditId && G.idKey(state.groupEditId) === info.key ? 'ذخیره' : 'ویرایش', () => state.groupEditId && G.idKey(state.groupEditId) === info.key ? finishGroupEdit(false) : startGroupEdit(info.id), 'bt'),
+      makeButton('حذف', () => { G.removeGroup(state.project.images, info.id); renderGrid(); scheduleSave(); }, 'bt danger'));
+    list.appendChild(chip);
+  });
+  $('groupEditStatus').textContent = state.groupEditId ? `در حال ویرایش گروه ${state.groupEditId}: کارت‌ها را انتخاب/لغو انتخاب کنید؛ ذخیره، اعضای انتخاب‌شده را به گروه برمی‌گرداند.` : 'برای ویرایش اعضا، «ویرایش» یک گروه را بزنید و سپس کارت‌ها را انتخاب یا لغو انتخاب کنید.';
+}
+function selectGroup(groupId) {
+  const info = G.info(state.project.images).find((entry) => G.idKey(entry.id) === G.idKey(groupId)); if (!info) return;
+  const ids = new Set(info.members.map((item) => item.id)); state.project.images.forEach((item) => { item.selected = ids.has(item.id); });
+  state.lastSelectedId = info.members[0]?.id || null; renderGrid(); scheduleSave();
+  document.querySelector(`#grid [data-id="${info.members[0]?.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function startGroupEdit(groupId) {
+  const info = G.info(state.project.images).find((entry) => G.idKey(entry.id) === G.idKey(groupId)); if (!info) return;
+  state.groupSnapshot = new Map(state.project.images.map((item) => [item.id, { selected: item.selected, groupId: item.groupId }]));
+  state.groupEditId = info.id; selectGroup(info.id); renderGroupPanel();
+}
+function finishGroupEdit(cancel) {
+  if (!state.groupEditId) return;
+  if (cancel && state.groupSnapshot) {
+    state.project.images.forEach((item) => { const old = state.groupSnapshot.get(item.id); if (old) { item.selected = old.selected; item.groupId = old.groupId; } });
+  } else if (!cancel) {
+    const ids = selectedImages().map((item) => item.id);
+    if (ids.length >= 2) { G.create(state.project.images, ids); }
+    else { toast('یک گروه دست‌کم دو عضو لازم دارد؛ ویرایش لغو شد', true); return finishGroupEdit(true); }
+  }
+  state.groupEditId = null; state.groupSnapshot = null; G.cleanup(state.project.images); renderGrid(); scheduleSave();
+}
+function clearDrag() {
+  state.dragId = null; state.dragIds = []; state.dragMode = null; state.dragTarget = null; state.dragAfter = false;
+  document.querySelectorAll('.item').forEach((el) => el.classList.remove('dragging', 'group-moving', 'drag-insert-before', 'drag-insert-after', 'drag-group-target'));
+  $('grid').classList.remove('extract-zone');
+}
+function nearestGridIndex(event) {
+  const cards = [...document.querySelectorAll('#grid .item')]; let best = cards.length; let distance = Infinity;
+  cards.forEach((card, index) => { const r = card.getBoundingClientRect(); const d = Math.hypot(event.clientX - (r.left + r.width / 2), event.clientY - (r.top + r.height / 2)); if (d < distance) { distance = d; best = index + (event.clientX > r.left + r.width / 2 ? 1 : 0); } });
+  return best;
+}
+function bindGridDrop() {
+  const grid = $('grid');
+  grid.addEventListener('dragover', (event) => {
+    if (!state.dragId) return; event.preventDefault();
+    document.querySelectorAll('.item').forEach((el) => el.classList.remove('drag-insert-before', 'drag-insert-after', 'drag-group-target'));
+    const card = event.target.closest('.item');
+    if (!card) { state.dragMode = 'extract'; state.dragTarget = null; grid.classList.add('extract-zone'); return; }
+    if (card.dataset.id === state.dragId) { state.dragMode = null; state.dragTarget = null; grid.classList.remove('extract-zone'); return; }
+    grid.classList.remove('extract-zone'); const r = card.getBoundingClientRect();
+    const band = r.width ? (event.clientX - r.left) / r.width : 0;
+    const targetItem = state.project.images.find((item) => item.id === card.dataset.id);
+    const sameGroup = targetItem && state.dragIds.includes(targetItem.id) && state.dragIds.length > 1;
+    if (band > .28 && band < .72) { state.dragMode = 'group'; state.dragTarget = card.dataset.id; card.classList.add('drag-group-target'); }
+    else {
+      state.dragMode = sameGroup ? 'internal' : 'move'; state.dragTarget = card.dataset.id;
+      // RTL: the right half inserts before the target, just as in the extension.
+      state.dragAfter = event.clientX <= r.left + r.width / 2;
+      card.classList.add(state.dragAfter ? 'drag-insert-after' : 'drag-insert-before');
+    }
+  });
+  grid.addEventListener('drop', (event) => {
+    event.preventDefault(); if (!state.dragId) return;
+    const target = state.dragTarget; const mode = state.dragMode;
+    if (mode === 'group' && target) G.dropToGroup(state.project.images, state.dragIds, target);
+    else if (mode === 'internal' && target) G.move(state.project.images, [state.dragId], target, state.dragAfter);
+    else if (mode === 'move' && target) G.move(state.project.images, state.dragIds, target, state.dragAfter);
+    else if (mode === 'extract') G.extract(state.project.images, state.dragId, nearestGridIndex(event));
+    clearDrag(); renderGrid(); scheduleSave();
+  });
+  grid.addEventListener('dragleave', (event) => { if (!grid.contains(event.relatedTarget)) { grid.classList.remove('extract-zone'); document.querySelectorAll('.item').forEach((el) => el.classList.remove('drag-insert-before', 'drag-insert-after', 'drag-group-target')); } });
+}
+function scheduleOutlines() { cancelAnimationFrame(outlineFrame); outlineFrame = requestAnimationFrame(drawGroupOutlines); }
+function drawGroupOutlines() {
+  const layer = $('groupOutlines'); if (!layer || !state.project) return; layer.textContent = '';
+  const wrap = $('mainwrap').getBoundingClientRect();
+  G.info(state.project.images).forEach((info) => {
+    const cards = info.members.map((item) => document.querySelector(`#grid .item[data-id="${item.id}"]`)).filter(Boolean);
+    const rows = new Map();
+    cards.forEach((card) => { const r = card.getBoundingClientRect(); const key = Math.round(r.top); if (!rows.has(key)) rows.set(key, []); rows.get(key).push(r); });
+    rows.forEach((rects) => {
+      const left = Math.min(...rects.map((r) => r.left)) - 7 - wrap.left; const top = Math.min(...rects.map((r) => r.top)) - 7 - wrap.top;
+      const right = Math.max(...rects.map((r) => r.right)) + 7 - wrap.left; const bottom = Math.max(...rects.map((r) => r.bottom)) + 7 - wrap.top;
+      const outline = document.createElement('div'); outline.className = 'group-outline'; outline.style.setProperty('--group-color', groupColor(info.id));
+      outline.style.cssText += `left:${left}px;top:${top}px;width:${right - left}px;height:${bottom - top}px`;
+      const label = document.createElement('span'); label.className = 'group-outline-label'; label.textContent = `گروه ${info.id} · ${info.members.length} عضو`; outline.appendChild(label); layer.appendChild(outline);
+    });
+  });
+}
+
+// ---------- Projects and settings ----------
+async function refreshProjectList(prefetched = null) {
+  const projects = Array.isArray(prefetched) ? prefetched : await api('/api/projects');
+  const select = $('projectSelect'); const current = state.project?.id; select.textContent = '';
+  projects.forEach((project) => { const option = document.createElement('option'); option.value = project.id; option.textContent = `${project.name} (${project.images})`; option.selected = project.id === current; select.appendChild(option); });
+}
+async function loadProject(id) {
+  const revision = ++projectLoadRevision;
+  const previous = state.project;
+  // Flush edits before switching. If another edit arrives while saving/loading, flush it too.
+  while (state.project === previous && revision === projectLoadRevision) {
+    const saving = saveProject();
+    const savedRevision = saveRevision;
+    await saving;
+    if (state.project !== previous || revision !== projectLoadRevision) return;
+    const project = await api(`/api/projects/${id}`);
+    if (state.project !== previous || revision !== projectLoadRevision) return;
+    if (savedRevision !== saveRevision) continue;
+    adoptProject(project);
+    await refreshProjectList();
+    const mismatchedIds = sortedImages().filter((item) => hasOverlayText(item) !== !!item.edited).map((item) => item.id);
+    if (mismatchedIds.length) await renderImagesText(mismatchedIds);
+    return;
+  }
+}
+function requestProjectLoad(id) {
+  const task = loadProject(id);
+  projectLoadTasks.add(task);
+  task.finally(() => projectLoadTasks.delete(task)).catch(() => {});
+  return task;
+}
+async function waitForProjectLoads() {
+  while (projectLoadTasks.size) await Promise.all([...projectLoadTasks]);
+}
+function collectOutputSettings() {
+  if (!state.project) return; state.project.settings = state.project.settings || {};
+  const projName = String(state.project.name || '').trim() || 'پروژهٔ کمیک';
+  const rawExport = $('exportName').value.trim();
+  const nameCustomized = Boolean(rawExport && rawExport !== projName);
+  const effectiveName = rawExport || projName;
+  state.project.settings.output = { name: effectiveName, nameCustomized, seamless: $('exportSeamless').checked, uniformSize: $('exportUniform').checked, twoPerPage: $('exportTwo').checked, imageFormat: $('exportFormat').value, folderName: $('exportFolder').value, docxLayout: $('exportDocxLayout')?.value || 'visual', pptxLayout: $('exportPptxLayout')?.value || 'visual' };
+}
+function collectOcrSettings() {
+  if (!state.project) return;
+  state.project.settings = state.project.settings || {};
+  Object.assign(state.project.settings, {
+    ocrEngine: $('ocrEngine').value,
+    ocrLanguage: $('ocrLanguage').value,
+    ocrPageMode: normalizePageMode($('ocrPageMode')?.value),
+    contrast: $('ocrContrast').checked,
+    precise: $('ocrPrecise').checked,
+    groupOcrLines: $('ocrGroupLines').checked,
+    eraseOriginal: $('ocrErase').checked,
+  });
+}
+const OCR_LANGUAGE_LABELS = {
+  eng: 'English',
+  fas: 'فارسی',
+  kor: '한국어',
+  jpn: '日本語',
+  chi_sim: '中文',
+};
+const TARGET_LANGUAGE_META = {
+  fa: { label: 'فارسی (Persian)', dir: 'rtl', align: 'right' },
+  en: { label: 'انگلیسی (English)', dir: 'ltr', align: 'left' },
+  ar: { label: 'عربی (Arabic)', dir: 'rtl', align: 'right' },
+  tr: { label: 'ترکی استانبولی (Turkish)', dir: 'ltr', align: 'left' },
+  de: { label: 'آلمانی (German)', dir: 'ltr', align: 'left' },
+  fr: { label: 'فرانسوی (French)', dir: 'ltr', align: 'left' },
+  ru: { label: 'روسی (Russian)', dir: 'ltr', align: 'left' },
+  es: { label: 'اسپانیایی (Spanish)', dir: 'ltr', align: 'left' },
+  ja: { label: 'ژاپنی (Japanese)', dir: 'ltr', align: 'left' },
+  ko: { label: 'کره‌ای (Korean)', dir: 'ltr', align: 'left' },
+  'zh-CN': { label: 'چینی (Chinese)', dir: 'ltr', align: 'left' },
+};
+function normalizeTargetLanguage(value) {
+  const raw = String(value || '').trim();
+  if (raw && Object.prototype.hasOwnProperty.call(TARGET_LANGUAGE_META, raw)) return raw;
+  const lower = raw.toLowerCase();
+  if (lower === 'fas' || lower === 'per') return 'fa';
+  if (lower === 'eng') return 'en';
+  if (lower === 'zh' || lower === 'zh-cn' || lower === 'chi_sim') return 'zh-CN';
+  const match = Object.keys(TARGET_LANGUAGE_META).find((key) => key.toLowerCase() === lower);
+  return match || 'fa';
+}
+function activeTargetLanguage() {
+  return normalizeTargetLanguage(
+    $('translationTargetLang')?.value
+    || state.project?.settings?.targetLanguage
+    || state.ai?.target_language
+    || 'fa',
+  );
+}
+function targetLanguageDir(lang) {
+  const code = normalizeTargetLanguage(lang);
+  return TARGET_LANGUAGE_META[code]?.dir || 'rtl';
+}
+const DEFAULT_ENGINE_SUITABILITY = {
+  'rapidocr-v6': {
+    comic: { tier: 'best', reason: 'تشخیص سریع و دقیق حباب‌های گفتگوی کمیک و مانگا روی هر سیستمی (بدون نیاز به GPU).' },
+    document: { tier: 'medium', reason: 'خط‌خوانی سریع روی CPU؛ برای چیدمان پیچیدهٔ کتاب و مقاله موتورهای سبز (مثل Surya، PaddleOCR-VL یا Tesseract) دقیق‌ترند.' },
+    auto: { tier: 'best', reason: 'سریع‌ترین انتخاب متعادل برای صفحات ترکیبی کمیک و متن روزمره روی همهٔ سیستم‌ها.' },
+  },
+  'rapidocr-v5': {
+    comic: { tier: 'best', reason: 'عالی برای کمیک، مانگا و به‌ویژه مانهوای کره‌ای با سرعت بالا روی هر سیستمی.' },
+    document: { tier: 'medium', reason: 'سبک و چندزبانه (شامل کره‌ای و فارسی)، اما روی فونت‌های ریز و متراکم کتاب متوسط است.' },
+    auto: { tier: 'medium', reason: 'گزینهٔ سبک چندزبانه؛ در انگلیسی دقت PP-OCRv6 و مدل‌های چیدمان بالاتر است.' },
+  },
+  easyocr: {
+    comic: { tier: 'best', reason: 'تشخیص بسیار خوب حروف و حباب‌های منحنی یا پراکندهٔ کمیک در زبان‌های مختلف (شامل فارسی).' },
+    document: { tier: 'weak', reason: 'فاقد تحلیل ساختار پاراگراف و ستون؛ در صفحات پُرمتن کتاب کند است و فاصلهٔ کلمات ریز را گاهی اشتباه می‌گیرد.' },
+    auto: { tier: 'medium', reason: 'مناسب حباب‌های کمیک است اما برای صفحات متراکم کتاب و مقاله توصیه نمی‌شود.' },
+  },
+  tesseract: {
+    comic: { tier: 'weak', reason: 'طراحی‌شده برای اسناد مسطح؛ روی فونت‌های فانتزی کمیک، حباب‌های منحنی و پس‌زمینهٔ نقاشی عملکرد ضعیفی دارد.' },
+    document: { tier: 'best', reason: 'عملکرد عالی، سریع و کم‌مصرف برای کتاب، مقاله و جزوه‌های چاپی یا اسکن‌شدهٔ تمیز با صفحه‌بندی خودکار ستون‌ها.' },
+    auto: { tier: 'medium', reason: 'عالی برای صفحات کتاب و مقاله، ولی اگر صفحه کمیک باشد روی حباب‌ها ضعیف عمل می‌کند.' },
+  },
+  'hezar-ocr': {
+    comic: { tier: 'weak', reason: 'مدل بومی تخصصی زبان فارسی است؛ زبان را روی «فارسی» قرار دهید تا در حالت عالی (سبز) اجرا شود.' },
+    document: { tier: 'weak', reason: 'مدل بومی تخصصی زبان فارسی است؛ زبان را روی «فارسی» قرار دهید تا با بالاترین دقت اجرا شود.' },
+    auto: { tier: 'weak', reason: 'مخصوص متون فارسی (CRAFT + CRNN-fa-v2).' },
+  },
+  'paddleocr-vl-1-6': {
+    comic: { tier: 'medium', reason: 'دقت خواندن متن بالاست اما بیشتر برای چیدمان اسناد ساخته شده و از موتورهای کمیک سنگین‌تر است.' },
+    document: { tier: 'best', reason: 'فوق‌العاده برای کتاب، مقالات چندستونی، تیترها و جداول با تشخیص هوشمند ساختار صفحه.' },
+    auto: { tier: 'best', reason: 'تشخیص هوشمند چیدمان برای پروژه‌های ترکیبی، کتاب‌های مصور و مقالات.' },
+  },
+  surya: {
+    comic: { tier: 'medium', reason: 'حباب‌های ساده را می‌خواند اما برای فونت‌های دفرمه و جلوه‌های صوتی کمیک بهینه نشده است.' },
+    document: { tier: 'best', reason: 'یکی از بهترین موتورها برای کتاب، مقالهٔ علمی، جزوه و تشخیص دقیق ترتیب سطرها و ستون‌ها.' },
+    auto: { tier: 'best', reason: 'عملکرد قوی و چندزبانه روی صفحات کتاب، جزوه و کتاب‌های مصور.' },
+  },
+  'mineru-2-5-pro': {
+    comic: { tier: 'weak', reason: 'مخصوص مقالات و اسناد علمی است؛ پنل‌های نقاشی کمیک را به‌عنوان تصویر غیرمتنی رد یا ناقص بخش‌بندی می‌کند.' },
+    document: { tier: 'best', reason: 'تخصصی‌ترین موتور برای کتاب‌های درسی، مقالات دانشگاهی چندستونی، جداول و جزوه‌های پیچیده.' },
+    auto: { tier: 'weak', reason: 'تک‌منظوره برای کتاب و مقاله است و روی کمیک ضعیف عمل می‌کند؛ برای کتاب، نوع صفحه را روی «کتاب و مقاله» بگذارید.' },
+  },
+  'got-ocr-2': {
+    comic: { tier: 'best', reason: 'مدل بینایی دقیق برای خواندن فونت‌های خاص داخل حباب‌های برش‌خوردهٔ کمیک و مانگا.' },
+    document: { tier: 'medium', reason: 'متن پاراگراف‌ها را خوب می‌خواند اما تحلیل مستقیم ستون‌بندی کل صفحه را ندارد و کندتر از Surya است.' },
+    auto: { tier: 'medium', reason: 'دقت خوب روی برش‌های متنی کمیک و پاراگراف‌های کوتاه، با سرعت متوسط روی CPU.' },
+  },
+  'glm-ocr': {
+    comic: { tier: 'best', reason: 'مدل بینایی‌ـ‌زبان قدرتمند در خواندن دیالوگ‌های کمیک، مانگا و فونت‌های دشوار.' },
+    document: { tier: 'medium', reason: 'کیفیت خوانش خوب روی بلوک‌های متن، ولی در صفحات خیلی پُرمتن کندتر از موتورهای تخصصی چیدمان سند است.' },
+    auto: { tier: 'best', reason: 'انعطاف‌پذیری بالا هم روی حباب‌های کمیک و هم روی پاراگراف‌های کتاب.' },
+  },
+  'dots-ocr': {
+    comic: { tier: 'medium', reason: 'قادر به خواندن کادرهاست اما نیازمند GPU قوی است و تمرکز اصلی آن روی اسناد است.' },
+    document: { tier: 'best', reason: 'عالی برای تشخیص هم‌زمان مختصات کادرها، ستون‌ها و متن در کتاب و مقاله (نیازمند NVIDIA GPU ≥ 8GB).' },
+    auto: { tier: 'medium', reason: 'دقیق ولی سنگین (نیازمند کارت گرافیک NVIDIA)؛ بیشتر مناسب اسناد و کتاب است.' },
+  },
+  'deepseek-ocr-2': {
+    comic: { tier: 'medium', reason: 'متن را دقیق می‌خواند ولی برای صفحات کمیک بسیار سنگین است (نیازمند GPU ≥ 12GB).' },
+    document: { tier: 'best', reason: 'دقت بسیار بالا در مکان‌یابی و استخراج متون متراکم کتاب، مقاله و جداول (روی NVIDIA GPU ≥ 12GB).' },
+    auto: { tier: 'medium', reason: 'مدل سنگین مخصوص سیستم‌های دارای GPU قوی؛ در اسناد و کتاب درخشان‌تر از کمیک است.' },
+  },
+  olmocr: {
+    comic: { tier: 'weak', reason: 'صرفاً روی مقالات و کتاب‌های PDF آموزش دیده و برای حباب‌های کمیک و مانگا نامناسب و بسیار سنگین است.' },
+    document: { tier: 'best', reason: 'فوق‌العاده برای کتاب‌های اسکن‌شدهٔ قدیمی، مقالات علمی و متون دشوار چاپی (نیازمند NVIDIA GPU ≥ 16GB).' },
+    auto: { tier: 'weak', reason: 'مدل ۷ میلیارد پارامتری مخصوص کتاب و اسناد روی GPU سنگین؛ برای حالت عمومی یا کمیک مناسب نیست.' },
+  },
+  'hunyuan-ocr': {
+    comic: { tier: 'medium', reason: 'تشخیص متن قوی دارد اما به دلیل نیاز به ۲۴ گیگابایت VRAM برای کمیک بیش‌ازحد سنگین است.' },
+    document: { tier: 'medium', reason: 'خوانش دقیق متن‌های چندزبانه، اما نیازمند کارت گرافیک حرفه‌ای ۲۴ گیگابایتی و کندتر از مدل‌های تخصصی سند است.' },
+    auto: { tier: 'weak', reason: 'صرفاً مناسب ایستگاه‌های کاری دارای GPU حرفه‌ای (24GB VRAM) در موارد خاص.' },
+  },
+};
+const DEFAULT_LANGUAGE_SUITABILITY_OVERRIDES = {
+  fas: {
+    'hezar-ocr': {
+      comic: { tier: 'best', reason: 'مدل بومی آموزش‌دیده روی فونت‌های فارسی؛ عالی و سبک برای حباب‌های کمیک و متون فارسی روی CPU و GPU.' },
+      document: { tier: 'best', reason: 'تشخیص بسیار دقیق حروف و کلمات چاپی فارسی (فونت‌های وزیر، نازنین، میترا، یکان و کتاب) با مصرف کم حافظه.' },
+      auto: { tier: 'best', reason: 'بهترین انتخاب تخصصی و سبک برای صفحات فارسی (هم کمیک و هم کتاب و جزوه).' },
+    },
+    'rapidocr-v6': {
+      comic: { tier: 'weak', reason: 'این مدل از الفبای فارسی پشتیبانی نمی‌کند (فقط انگلیسی، چینی و ژاپنی).' },
+      document: { tier: 'weak', reason: 'این مدل از الفبای فارسی پشتیبانی نمی‌کند (فقط انگلیسی، چینی و ژاپنی).' },
+      auto: { tier: 'weak', reason: 'عدم پشتیبانی از زبان فارسی.' },
+    },
+    'rapidocr-v5': {
+      comic: { tier: 'medium', reason: 'حروف فارسی را سریع می‌خواند ولی مدل عربی‌ـ‌فارسی آن روی فونت کمیک دقت متوسط دارد؛ Hezar و EasyOCR دقیق‌ترند.' },
+      document: { tier: 'medium', reason: 'سبک و سریع برای متون سادهٔ فارسی، اما در کتاب‌های متراکم فارسی دقت Hezar، Tesseract و Surya بالاتر است.' },
+      auto: { tier: 'medium', reason: 'گزینهٔ سبک کمکی برای فارسی روی سیستم‌های ضعیف.' },
+    },
+    easyocr: {
+      comic: { tier: 'best', reason: 'پشتیبانی بومی هم‌زمان از فارسی و انگلیسی؛ بسیار مناسب دیالوگ‌های کمیک فارسی.' },
+      document: { tier: 'weak', reason: 'در صفحات پُرمتن کتاب فارسی کند است و ستون‌بندی ندارد.' },
+      auto: { tier: 'medium', reason: 'عالی برای حباب‌های کمیک فارسی، اما برای کتاب و مقالهٔ فارسی مناسب نیست.' },
+    },
+    tesseract: {
+      comic: { tier: 'weak', reason: 'روی حباب‌های منحنی و فونت‌های فانتزی کمیک فارسی ضعیف عمل می‌کند.' },
+      document: { tier: 'best', reason: 'فایل رسمی fas.traineddata روی کتاب‌ها، مقالات و جزوه‌های چاپی فارسی بسیار سریع و دقیق است.' },
+      auto: { tier: 'medium', reason: 'فوق‌العاده برای کتاب و مقالهٔ فارسی، ولی روی کمیک فارسی ضعیف است.' },
+    },
+    surya: {
+      comic: { tier: 'medium', reason: 'خط فارسی را می‌شناسد اما برای فونت‌های فانتزی حباب کمیک ساخته نشده است.' },
+      document: { tier: 'best', reason: 'پشتیبانی رسمی از فارسی و چیدمان راست‌به‌چپ (RTL)؛ عالی برای مقالات چندستونی و کتاب فارسی.' },
+      auto: { tier: 'best', reason: 'تشخیص قدرتمند خط فارسی و ترتیب ستون‌های راست‌به‌چپ در کتاب و اسناد.' },
+    },
+    'paddleocr-vl-1-6': {
+      comic: { tier: 'medium', reason: 'پشتیبانی رسمی از فارسی، اما سنگین‌تر از Hezar و EasyOCR برای کمیک است.' },
+      document: { tier: 'best', reason: 'تشخیص دقیق چیدمان صفحه، تیترها و پاراگراف‌های فارسی در کتاب و مقاله.' },
+      auto: { tier: 'best', reason: 'مدل چندزبانهٔ قوی برای استخراج ساختاریافتهٔ کتاب و مقالهٔ فارسی.' },
+    },
+    'mineru-2-5-pro': {
+      comic: { tier: 'weak', reason: 'از خط فارسی و صفحات کمیک پشتیبانی نمی‌کند.' },
+      document: { tier: 'weak', reason: 'موتور پیش‌فرض MinerU از خط فارسی پشتیبانی مستقیم ندارد؛ از Hezar، Tesseract یا Surya استفاده کنید.' },
+      auto: { tier: 'weak', reason: 'عدم پشتیبانی مستقیم از خط فارسی.' },
+    },
+    'got-ocr-2': {
+      comic: { tier: 'weak', reason: 'فقط روی انگلیسی و چینی آموزش دیده و قادر به خواندن خط فارسی نیست.' },
+      document: { tier: 'weak', reason: 'فقط روی انگلیسی و چینی آموزش دیده و قادر به خواندن خط فارسی نیست.' },
+      auto: { tier: 'weak', reason: 'عدم پشتیبانی از الفبای فارسی.' },
+    },
+    'glm-ocr': {
+      comic: { tier: 'medium', reason: 'فارسی را تا حدی می‌خواند اما روی فونت کمیک فارسی به دقت Hezar و EasyOCR نمی‌رسد.' },
+      document: { tier: 'medium', reason: 'خوانش متوسط متن فارسی؛ Hezar، Surya و Tesseract روی کتاب فارسی دقیق‌ترند.' },
+      auto: { tier: 'medium', reason: 'عملکرد متوسط روی متن فارسی.' },
+    },
+    'dots-ocr': {
+      comic: { tier: 'medium', reason: 'از فارسی پشتیبانی می‌کند اما نیازمند GPU قوی است و تمرکز آن روی اسناد است.' },
+      document: { tier: 'best', reason: 'مدل ۱۰۰ زبانه با تشخیص هم‌زمان کادر و متن فارسی در کتاب و مقاله (نیازمند NVIDIA GPU ≥ 8GB).' },
+      auto: { tier: 'medium', reason: 'دقیق برای اسناد فارسی روی کارت گرافیک NVIDIA.' },
+    },
+    'deepseek-ocr-2': {
+      comic: { tier: 'weak', reason: 'بسیار سنگین و غیربهینه برای کمیک فارسی.' },
+      document: { tier: 'medium', reason: 'از فارسی پشتیبانی می‌کند اما بیشترین دقت آن روی انگلیسی و چینی است و به GPU قوی نیاز دارد.' },
+      auto: { tier: 'weak', reason: 'برای متن فارسی گزینه‌های سبک‌تر و دقیق‌تری مثل Hezar و Surya وجود دارد.' },
+    },
+    olmocr: {
+      comic: { tier: 'weak', reason: 'مخصوص مقالات PDF است و برای کمیک فارسی کاربردی ندارد.' },
+      document: { tier: 'medium', reason: 'متن چاپی فارسی را می‌خواند ولی عمدتاً روی انگلیسی تنظیم شده و نیازمند GPU ≥ 16GB است.' },
+      auto: { tier: 'weak', reason: 'سنگین؛ برای فارسی اولویت با Hezar و Surya است.' },
+    },
+  },
+  kor: {
+    'rapidocr-v6': {
+      comic: { tier: 'weak', reason: 'مدل PP-OCRv6 Small از زبان کره‌ای پشتیبانی نمی‌کند.' },
+      document: { tier: 'weak', reason: 'مدل PP-OCRv6 Small از زبان کره‌ای پشتیبانی نمی‌کند.' },
+      auto: { tier: 'weak', reason: 'عدم پشتیبانی از زبان کره‌ای.' },
+    },
+    'rapidocr-v5': {
+      comic: { tier: 'best', reason: 'دارای مدل اختصاصی کره‌ای؛ سریع‌ترین و دقیق‌ترین موتور سبک برای مانهوا و وبتون کره‌ای.' },
+      document: { tier: 'best', reason: 'تشخیص دقیق و سبک خط هانگول کره‌ای روی CPU و GPU.' },
+      auto: { tier: 'best', reason: 'بهترین انتخاب سبک برای صفحات کره‌ای.' },
+    },
+    tesseract: {
+      comic: { tier: 'weak', reason: 'روی فونت‌های مانهوای کره‌ای ضعیف است.' },
+      document: { tier: 'medium', reason: 'در فاصله‌گذاری هجاهای کره‌ای ضعیف‌تر از Surya، PaddleOCR-VL و PP-OCRv5 است.' },
+      auto: { tier: 'weak', reason: 'برای کره‌ای PP-OCRv5، EasyOCR و Surya دقیق‌ترند.' },
+    },
+    'got-ocr-2': {
+      comic: { tier: 'weak', reason: 'فقط روی انگلیسی و چینی آموزش دیده است.' },
+      document: { tier: 'weak', reason: 'فقط روی انگلیسی و چینی آموزش دیده است.' },
+      auto: { tier: 'weak', reason: 'فاقد آموزش کافی روی خط کره‌ای.' },
+    },
+  },
+  jpn: {
+    'rapidocr-v5': {
+      comic: { tier: 'medium', reason: 'در نسخهٔ v5 از مدل مشترک چینی استفاده می‌شود؛ برای ژاپنی PP-OCRv6 یا EasyOCR دقیق‌ترند.' },
+      document: { tier: 'medium', reason: 'برای کتاب ژاپنی Surya، PaddleOCR-VL یا PP-OCRv6 دقیق‌ترند.' },
+      auto: { tier: 'medium', reason: 'عملکرد متوسط در ژاپنی.' },
+    },
+    tesseract: {
+      comic: { tier: 'weak', reason: 'روی مانگای ژاپنی و متن عمودی ضعیف است.' },
+      document: { tier: 'medium', reason: 'در متون عمودی و فوریگانا ضعیف‌تر از PaddleOCR-VL و Surya است.' },
+      auto: { tier: 'weak', reason: 'برای ژاپنی PP-OCRv6 و PaddleOCR-VL توصیه می‌شوند.' },
+    },
+    'got-ocr-2': {
+      comic: { tier: 'weak', reason: 'عمدتاً روی انگلیسی و چینی آموزش دیده است.' },
+      document: { tier: 'weak', reason: 'برای کتاب‌های ژاپنی دقت کافی روی کانا ندارد.' },
+      auto: { tier: 'weak', reason: 'برای ژاپنی مناسب نیست.' },
+    },
+  },
+  chi_sim: {
+    tesseract: {
+      comic: { tier: 'weak', reason: 'روی مانهوای چینی ضعیف است.' },
+      document: { tier: 'medium', reason: 'ضعیف‌تر از موتورهای بومی چینی (PP-OCRv6، PaddleOCR-VL و MinerU).' },
+      auto: { tier: 'weak', reason: 'برای چینی موتورهای خانوادهٔ PP-OCR و GOT-OCR بسیار دقیق‌ترند.' },
+    },
+    'got-ocr-2': {
+      comic: { tier: 'best', reason: 'آموزش‌دیده تخصصی روی چینی و انگلیسی؛ عالی برای مانهوا و کمیک چینی.' },
+      document: { tier: 'best', reason: 'تشخیص بسیار دقیق نویسه‌های چاپی چینی در پاراگراف‌ها.' },
+      auto: { tier: 'best', reason: 'عملکرد عالی روی هر دو حالت کمیک و کتاب به زبان چینی.' },
+    },
+    'glm-ocr': {
+      comic: { tier: 'best', reason: 'مدل بومی چینی‌ـ‌انگلیسی با دقت عالی روی دیالوگ‌های مانهوا.' },
+      document: { tier: 'best', reason: 'عملکرد بسیار دقیق در خواندن متون چاپی چینی.' },
+      auto: { tier: 'best', reason: 'انتخاب درجهٔ یک برای صفحات چینی.' },
+    },
+    'rapidocr-v5': {
+      comic: { tier: 'best', reason: 'بسیار سریع و دقیق برای مانهوا و کمیک چینی.' },
+      document: { tier: 'best', reason: 'مدل پایهٔ چینی PP-OCRv5 با دقت بالا روی اسناد چینی.' },
+      auto: { tier: 'best', reason: 'عملکرد عالی و سبک برای متون چینی.' },
+    },
+  },
+};
+const SUITABILITY_META = {
+  best: { icon: '🟢', short: 'عالی', badge: 'بهترین عملکرد', cardBadge: 'عملکرد عالی' },
+  medium: { icon: '🟡', short: 'متوسط', badge: 'عملکرد متوسط', cardBadge: 'عملکرد متوسط' },
+  weak: { icon: '🔴', short: 'ضعیف', badge: 'عملکرد ضعیف', cardBadge: 'عملکرد ضعیف' },
+};
+const PAGE_MODE_LABELS = {
+  comic: 'کمیک و مانگا',
+  document: 'کتاب، مقاله و جزوه',
+};
+function isLocalEndpointUrl(rawUrl) {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`);
+    const host = (parsed.hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+    if (!host) return false;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0' || host.endsWith('.local') || host.endsWith('.localhost')) return true;
+    if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+    if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+    if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+    const m172 = host.match(/^172\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+    if (m172 && Number(m172[1]) >= 16 && Number(m172[1]) <= 31) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+function resolveEngineExecMeta(engine) {
+  if (engine?.executionMode === 'online') {
+    return {
+      mode: 'online',
+      short: 'آنلاین',
+      chip: 'سرویس آنلاین (اینترنتی)',
+      headerBadge: 'سرویس آنلاین (اینترنتی)',
+      statusPrefix: 'محل اجرا: آنلاین (نیازمند اینترنت)',
+      descriptionNote: 'نیازمند اتصال اینترنت',
+    };
+  }
+  return {
+    mode: 'local',
+    short: 'آفلاین',
+    chip: 'اجرای آفلاین روی سیستم',
+    headerBadge: 'اجرای آفلاین روی سیستم شما',
+    statusPrefix: 'اجرای آفلاین روی سیستم شما',
+    descriptionNote: 'اجرا روی سیستم شما به‌صورت آفلاین',
+  };
+}
+function resolveTranslationExecMeta(provider, baseUrl = '') {
+  const normProvider = String(provider || 'free').trim() || 'free';
+  const effectiveLocal = normProvider !== 'free' && normProvider !== 'gemini' && isLocalEndpointUrl(baseUrl);
+  if (effectiveLocal) {
+    return {
+      mode: 'local',
+      short: 'لوکال / آفلاین',
+      badge: 'اجرا روی سیستم شما (لوکال / آفلاین)',
+      banner: 'محل اجرا: روی سیستم شما (آفلاین / لوکال) — متصل به سرور محلی (مانند Ollama یا LM Studio) بدون ارسال متن به اینترنت.',
+    };
+  }
+  if (normProvider === 'free') {
+    return {
+      mode: 'online',
+      short: 'آنلاین',
+      badge: 'سرویس آنلاین (اینترنتی)',
+      banner: 'محل اجرا: آنلاین (اینترنتی) — نیازمند اتصال اینترنت؛ ترجمه روی سرویس‌های آنلاین Google Translate / MyMemory انجام می‌شود و چیزی روی سیستم شما نصب نمی‌کند.',
+    };
+  }
+  if (normProvider === 'openai') {
+    return {
+      mode: 'online',
+      short: 'آنلاین',
+      badge: 'سرویس آنلاین (اینترنتی)',
+      banner: 'محل اجرا: آنلاین (ابری / اینترنتی) — نیازمند اینترنت و کلید API؛ اگر نشانی یک سرور محلی (مثل http://localhost:11434/v1 برای Ollama یا LM Studio) بدهید، به اجرای روی سیستم (آفلاین) تبدیل می‌شود.',
+    };
+  }
+  return {
+    mode: 'online',
+    short: 'آنلاین',
+    badge: 'سرویس آنلاین (اینترنتی)',
+    banner: 'محل اجرا: آنلاین (ابری / اینترنتی) — نیازمند اینترنت و کلید API؛ مدل روی سرور آنلاین اجرا می‌شود و فشار پردازشی روی سیستم شما ندارد.',
+  };
+}
+function applyExecBadgeElement(el, mode, text) {
+  if (!el) return;
+  el.textContent = text;
+  el.dataset.execMode = mode;
+  el.classList.toggle('is-local', mode === 'local');
+  el.classList.toggle('is-online', mode !== 'local');
+}
+function normalizePageMode(pageMode) {
+  return pageMode === 'document' ? 'document' : 'comic';
+}
+function engineSuitability(engine, pageMode = 'comic', language = 'eng') {
+  const mode = normalizePageMode(pageMode);
+  const normLang = OCR_LANGUAGE_LABELS[language] ? language : 'eng';
+  const byLangEntry = engine?.suitabilityByLanguage?.[normLang]?.[mode]
+    || DEFAULT_LANGUAGE_SUITABILITY_OVERRIDES[normLang]?.[engine?.id]?.[mode];
+  let entry = byLangEntry;
+  if (!entry) {
+    const langs = Array.isArray(engine?.languages) ? engine.languages : [];
+    if (langs.length && !langs.includes(normLang)) {
+      entry = { tier: 'weak', reason: `این مدل از زبان «${OCR_LANGUAGE_LABELS[normLang] || normLang}» پشتیبانی نمی‌کند.` };
+    } else {
+      entry = engine?.suitability?.[mode] || DEFAULT_ENGINE_SUITABILITY[engine?.id]?.[mode] || { tier: 'medium', reason: '' };
+    }
+  }
+  const tier = ['best', 'medium', 'weak'].includes(entry.tier) ? entry.tier : 'medium';
+  return { tier, reason: entry.reason || '', ...SUITABILITY_META[tier] };
+}
+function pickBestEngineForLanguage(language, pageMode = 'comic', preferredEngine = '') {
+  const selectable = state.engines.filter((engine) => engine.selectable !== false);
+  const current = selectable.find((engine) => engine.id === preferredEngine);
+  if (current && (current.languages || []).includes(language)) return current.id;
+  const supporting = selectable.filter((engine) => (engine.languages || []).includes(language));
+  if (!supporting.length) return selectable[0]?.id || 'rapidocr-v6';
+  const tierScore = { best: 3, medium: 2, weak: 1 };
+  const ranked = [...supporting].sort((a, b) => {
+    const aReady = Boolean(a.runtimeInstalled && (a.readyLanguages || []).includes(language)) ? 1 : 0;
+    const bReady = Boolean(b.runtimeInstalled && (b.readyLanguages || []).includes(language)) ? 1 : 0;
+    if (bReady !== aReady) return bReady - aReady;
+    const aTier = tierScore[engineSuitability(a, pageMode, language).tier] || 0;
+    const bTier = tierScore[engineSuitability(b, pageMode, language).tier] || 0;
+    if (bTier !== aTier) return bTier - aTier;
+    const aCpu = a.requiresNvidiaGpu ? 0 : 1;
+    const bCpu = b.requiresNvidiaGpu ? 0 : 1;
+    return bCpu - aCpu;
+  });
+  return ranked[0].id;
+}
+function formatSizeGbFa(sizeGb) {
+  const val = Number(sizeGb);
+  if (!Number.isFinite(val) || val <= 0.001) return '';
+  if (val < 1) {
+    const mb = Math.max(5, Math.round((val * 1024) / 5) * 5);
+    return `~${mb} مگابایت`;
+  }
+  const rounded = Number(val.toFixed(val < 2 ? 2 : 1));
+  return `~${rounded} گیگابایت`;
+}
+function engineDownloadSummary(engine, lang = '') {
+  if (!engine) return { activeGb: 0, fullGb: 0, totalLabel: '', fullLabel: '', detailLabel: '' };
+  const nominalGb = Number(engine.downloadSizeGb ?? 0);
+  const fullGb = Number(engine.fullDownloadSizeGb ?? engine.totalDownloadGb ?? nominalGb ?? 0);
+  const runtimeGb = Number(engine.runtimeDownloadGb ?? 0);
+  const weightsGb = Number(engine.weightsDownloadGb ?? nominalGb ?? 0);
+  const perLangGb = Number(engine.perLanguageDownloadGb ?? 0);
+  const langReady = lang
+    ? Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(lang))
+    : Boolean(engine.runtimeInstalled && engine.modelReady);
+  let activeGb = fullGb;
+  if (engine.runtimeInstalled && !langReady) {
+    activeGb = (engine.modelReady && perLangGb > 0) ? perLangGb : (weightsGb || fullGb);
+  }
+  const totalLabel = formatSizeGbFa(activeGb) || formatSizeGbFa(fullGb);
+  const fullLabel = formatSizeGbFa(fullGb) || totalLabel;
+  let detailLabel = totalLabel;
+  if (!engine.runtimeInstalled && runtimeGb > 0 && weightsGb > 0) {
+    detailLabel = `${totalLabel} (پیش‌نیازها: ${formatSizeGbFa(runtimeGb)} + فایل‌های مدل: ${formatSizeGbFa(weightsGb)})`;
+  } else if (engine.runtimeInstalled && !langReady && totalLabel) {
+    detailLabel = `${totalLabel} (فقط فایل مدل/زبان؛ پیش‌نیازها قبلاً نصب شده)`;
+  }
+  return { activeGb, fullGb, totalLabel, fullLabel, detailLabel };
+}
+const SUITABILITY_SORT_RANK = { best: 0, medium: 1, weak: 2 };
+const ocrEngineSortCache = { key: '', ids: [] };
+const modelsGroupSortCache = { key: '', standardIds: [], advancedIds: [], flatIds: [] };
+
+function sortEnginesBySuitability(engines, pageMode, language) {
+  return engines
+    .map((engine, index) => ({
+      engine,
+      index,
+      rank: SUITABILITY_SORT_RANK[engineSuitability(engine, pageMode, language).tier] ?? 1,
+    }))
+    .sort((a, b) => (a.rank - b.rank) || (a.index - b.index))
+    .map((entry) => entry.engine);
+}
+
+function applyCachedEngineOrder(engines, cachedIds) {
+  if (!Array.isArray(cachedIds) || !cachedIds.length) return [...engines];
+  const byId = new Map(engines.map((engine) => [engine.id, engine]));
+  const seen = new Set();
+  const ordered = [];
+  cachedIds.forEach((id) => {
+    const found = byId.get(id);
+    if (found && !seen.has(id)) {
+      seen.add(id);
+      ordered.push(found);
+    }
+  });
+  engines.forEach((engine) => {
+    if (!seen.has(engine.id)) ordered.push(engine);
+  });
+  return ordered;
+}
+
+function updateEngineOptions(preferredEngine = '', options = {}) {
+  const select = $('ocrEngine'); if (!select) return;
+  const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
+  const language = $('ocrLanguage')?.value || state.project?.settings?.ocrLanguage || 'eng';
+  const previous = (typeof preferredEngine === 'string' && preferredEngine) || select.value || state.project?.settings?.ocrEngine || 'rapidocr-v6';
+  const selectable = state.engines.filter((engine) => engine.selectable !== false);
+  const idSetSig = selectable.map((engine) => engine.id).slice().sort().join('|');
+  const sortKey = `${language}::${pageMode}::${idSetSig}`;
+  const shouldResort = Boolean(options?.resort) || ocrEngineSortCache.key !== sortKey;
+  let orderedEngines;
+  if (shouldResort) {
+    orderedEngines = sortEnginesBySuitability(selectable, pageMode, language);
+    ocrEngineSortCache.key = sortKey;
+    ocrEngineSortCache.ids = orderedEngines.map((engine) => engine.id);
+  } else {
+    orderedEngines = applyCachedEngineOrder(selectable, ocrEngineSortCache.ids);
+  }
+  select.textContent = '';
+  orderedEngines.forEach((engine) => {
+    const suit = engineSuitability(engine, pageMode, language);
+    const execMeta = resolveEngineExecMeta(engine);
+    const option = document.createElement('option');
+    option.value = engine.id;
+    option.className = `ocr-opt-${suit.tier}`;
+    option.dataset.suitability = suit.tier;
+    option.dataset.executionMode = execMeta.mode;
+    option.textContent = engine.name;
+    select.appendChild(option);
+  });
+  const chosenId = pickBestEngineForLanguage(language, pageMode, previous);
+  select.value = state.engines.some((engine) => engine.id === chosenId) ? chosenId : 'rapidocr-v6';
+  updateOcrEngineStatus();
+  syncEngineUpdateUi();
+}
+function updateOcrEngineStatus() {
+  const select = $('ocrEngine');
+  const engine = state.engines.find((entry) => entry.id === select?.value); if (!engine) return;
+  const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
+  [...($('ocrLanguage')?.options || [])].forEach((option) => { option.disabled = false; });
+  if (!engine.languages.includes($('ocrLanguage').value)) {
+    const keepSelectedId = select.value;
+    $('ocrLanguage').value = engine.languages[0] || 'eng';
+    if ($('modelsLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
+    if ($('testLanguage')) $('testLanguage').value = $('ocrLanguage').value;
+    const curLang = $('ocrLanguage').value;
+    const selectable = state.engines.filter((e) => e.selectable !== false);
+    const idSetSig = selectable.map((e) => e.id).slice().sort().join('|');
+    const resorted = sortEnginesBySuitability(selectable, pageMode, curLang);
+    ocrEngineSortCache.key = `${curLang}::${pageMode}::${idSetSig}`;
+    ocrEngineSortCache.ids = resorted.map((e) => e.id);
+    const optByValue = new Map([...select.options].map((o) => [o.value, o]));
+    resorted.forEach((eng) => {
+      const opt = optByValue.get(eng.id);
+      if (!opt) return;
+      const suit = engineSuitability(eng, pageMode, curLang);
+      const engExec = resolveEngineExecMeta(eng);
+      opt.className = `ocr-opt-${suit.tier}`;
+      opt.dataset.suitability = suit.tier;
+      opt.dataset.executionMode = engExec.mode;
+      opt.textContent = eng.name;
+      select.appendChild(opt);
+    });
+    select.value = keepSelectedId;
+  }
+  const lang = $('ocrLanguage').value;
+  const activeSuit = engineSuitability(engine, pageMode, lang);
+  const activeExec = resolveEngineExecMeta(engine);
+  const dl = engineDownloadSummary(engine, lang);
+  applyExecBadgeElement($('ocrExecBadge'), activeExec.mode, activeExec.headerBadge);
+  select.dataset.suitability = activeSuit.tier;
+  select.dataset.executionMode = activeExec.mode;
+  const langLabel = OCR_LANGUAGE_LABELS[lang] || lang;
+  const langReady = Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(lang));
+  const versionLabel = engine.installedVersion ? ` (نسخهٔ ${engine.installedVersion})` : '';
+  const suitPrefix = `${activeExec.statusPrefix} · ${activeSuit.reason ? `${activeSuit.icon} عملکرد در «${langLabel} + ${PAGE_MODE_LABELS[pageMode] || pageMode}»: ${activeSuit.reason} · ` : ''}`;
+  const sizeSentence = dl.detailLabel ? ` کل حجم دانلود خودکار: ${dl.detailLabel}.` : '';
+  let statusText = engine.runtimeInstalled
+    ? (langReady
+      ? `${suitPrefix}وضعیت: آمادهٔ اجرا روی همین کامپیوتر${versionLabel}.`
+      : `${suitPrefix}ابزار اجرا نصب است، اما فایل زبان انتخاب‌شده (${langLabel}) هنوز دانلود نشده است.${sizeSentence}`)
+    : `${suitPrefix}این مدل هنوز روی سیستم شما نصب نشده است؛ با زدن دکمهٔ زیر، نصب و دانلود آن کاملاً خودکار انجام می‌شود.${sizeSentence}`;
+  if (engine.updateAvailable) {
+    statusText += ` · ${engine.updateSummary || 'نسخهٔ جدید برای این مدل منتشر شده است.'}`;
+  }
+  $('ocrEngineStatus').textContent = statusText;
+  const quickWrap = $('ocrEngineQuickActions');
+  const quickPrep = $('ocrQuickPrepareBtn');
+  const quickUpd = $('ocrQuickUpdateBtn');
+  if (quickWrap && quickPrep && quickUpd) {
+    const needPrep = !langReady;
+    const hasUpd = Boolean(engine.updateAvailable);
+    const btnSizeSuffix = dl.totalLabel ? ` (کل حجم دانلود: ${dl.totalLabel})` : '';
+    quickPrep.textContent = engine.runtimeInstalled
+      ? `دانلود خودکار فایل زبان (${lang})${btnSizeSuffix}`
+      : `نصب و دانلود خودکار همین مدل${btnSizeSuffix}`;
+    quickPrep.disabled = Boolean(state.modelBusy || ocrRunning);
+    quickUpd.textContent = engine.latestVersion ? `به‌روزرسانی به نسخهٔ ${engine.latestVersion}` : 'به‌روزرسانی به نسخهٔ جدید';
+    quickUpd.disabled = Boolean(state.modelBusy || ocrRunning);
+    quickPrep.classList.toggle('hidden', !needPrep);
+    quickUpd.classList.toggle('hidden', !hasUpd);
+    quickWrap.classList.toggle('hidden', !needPrep && !hasUpd);
+  }
+}
+function projectBrowserDrafts(project) {
+  const prefix = `comic-studio-draft:${encodeURIComponent(project.id)}:`;
+  const valid = new Set(project.images.flatMap((image) => (image.blocks || []).filter((block) => block.id !== undefined).map((block) => `${image.id}\0${String(block.id)}`)));
+  const drafts = [];
+  try {
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index); if (!key?.startsWith(prefix)) continue;
+      const parts = key.slice(prefix.length).split(':'); if (parts.length !== 3) continue;
+      const [imageId, blockId] = parts.slice(0, 2).map(decodeURIComponent); const mode = parts[2];
+      if (!valid.has(`${imageId}\0${blockId}`) || !['ocr', 'translation'].includes(mode)) continue;
+      const value = JSON.parse(localStorage.getItem(key));
+      if (!value || typeof value.html !== 'string') throw new Error('پیش‌نویس مرورگر نامعتبر است');
+      drafts.push({ imageId, blockId, mode, value });
+    }
+  } catch { throw new Error('خواندن پیش‌نویس‌های این مرورگر ممکن نبود؛ بک‌آپ ناقص ساخته نشد.'); }
+  return drafts;
+}
+async function backupCurrentProject() {
+  if (!state.project) return;
+  await runJob('در حال ساخت بک‌آپ پروژه…', async (signal) => {
+    await overlayPreviewTask;
+    const project = state.project; let revision;
+    do { const saving = saveProject(); revision = saveRevision; await saving; } while (state.project === project && revision !== saveRevision);
+    if (state.project !== project) throw new Error('پروژه تغییر کرد؛ دوباره بک‌آپ بگیرید.');
+    const drafts = projectBrowserDrafts(project);
+    const response = await fetch(`/api/projects/${project.id}/backup`, { ...jsonOptions('POST', { drafts, expected_updated_at: project.updatedAt }), signal });
+    if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `ساخت بک‌آپ ممکن نشد (HTTP ${response.status})`); }
+    const blob = await response.blob(); if (!blob.size) throw new Error('فایل بک‌آپ خالی است');
+    if (state.project !== project || revision !== saveRevision) throw new Error('پروژه هنگام ساخت بک‌آپ تغییر کرد؛ برای ثبت آخرین تغییرها دوباره بک‌آپ بگیرید.');
+    if (backupDownloadUrl) URL.revokeObjectURL(backupDownloadUrl);
+    backupDownloadUrl = URL.createObjectURL(blob);
+    const link = $('backupDownloadLink'); link.href = backupDownloadUrl;
+    link.download = `${safeName(project.name) || 'comic-studio'}-backup.zip`; link.textContent = 'دانلود دوبارهٔ بک‌آپ'; link.classList.remove('hidden'); link.click();
+    toast('بک‌آپ پروژه آماده شد؛ کلیدهای API داخل آن نیستند.');
+  });
+}
+async function restoreProjectBackup(file) {
+  if (!file) return;
+  const ok = await appConfirm('بک‌آپ به‌صورت یک پروژهٔ جدید بازیابی شود؟ پروژه‌های فعلی شما حذف یا جایگزین نمی‌شوند.', {
+    title: 'بازیابی بک‌آپ پروژه',
+    confirmText: 'بله، بازیابی شود',
+    cancelText: 'انصراف',
+    variant: 'confirm',
+  });
+  if (!ok) return;
+  await runJob('در حال بازیابی بک‌آپ…', async (signal) => {
+    await saveProject(); const previous = state.project;
+    const form = new FormData(); form.append('file', file);
+    const result = await api('/api/projects/restore', { method: 'POST', body: form, signal });
+    let failedDrafts = 0;
+    for (const draft of result.drafts || []) {
+      const key = `comic-studio-draft:${encodeURIComponent(result.project.id)}:${encodeURIComponent(draft.imageId)}:${encodeURIComponent(draft.blockId)}:${draft.mode}`;
+      try { localStorage.setItem(key, JSON.stringify(draft.value)); } catch { failedDrafts += 1; }
+    }
+    // Flush any edits made while the upload ran; never overwrite another opened project.
+    let opened = false;
+    while (state.project === previous) {
+      const saving = saveProject(); const revision = saveRevision; await saving;
+      if (state.project === previous && revision === saveRevision) { adoptProject(result.project); opened = true; break; }
+    }
+    await refreshProjectList(); setMenuOpen(false);
+    if (failedDrafts) toast(`پروژه بازیابی شد، ولی ${failedDrafts} پیش‌نویس در حافظهٔ مرورگر ذخیره نشد؛ فایل ZIP را نگه دارید.`, true);
+    else toast(opened ? 'بک‌آپ به‌صورت پروژهٔ جدید بازیابی شد.' : 'بک‌آپ بازیابی شد؛ پروژهٔ جدید را از فهرست پروژه‌ها باز کنید.');
+  });
+}
+async function importFiles(files) {
+  if (!files.length) return;
+  await runJob('در حال خواندن فایل‌ها…', async (signal) => { await saveProject(); const form = new FormData(); [...files].forEach((file) => form.append('files', file)); const result = await api(`/api/projects/${state.project.id}/files`, { method: 'POST', body: form, signal }); adoptProject(result); toast(`${files.length} فایل وارد شد`); });
+}
+let pendingReview = null;
+async function openPendingResults(token = null) {
+  if (!state.project) return;
+  const projectId = state.project.id; pendingReview = null;
+  $('pendingList').textContent = ''; $('pendingDetail').textContent = ''; $('pendingDetail').classList.add('hidden');
+  $('pendingStatus').textContent = ''; for (const id of ['pendingCopy','pendingDiscard','pendingApply']) $(id).classList.add('hidden');
+  showDialog('pendingDialog');
+  try {
+    if (!token) {
+      const items = await api(`/api/projects/${projectId}/pending`);
+      if (state.project?.id !== projectId || !$('pendingDialog').open) return;
+      if (!items.length) { $('pendingList').textContent = 'نتیجهٔ منتظری وجود ندارد.'; return; }
+      items.forEach(item => { const button = document.createElement('button'); button.className = 'bt'; button.type = 'button'; button.textContent = `${item.kind === 'ocr' ? 'OCR' : 'ترجمه'} · ${item.createdAt}`; button.addEventListener('click', () => openPendingResults(item.id)); $('pendingList').append(button); });
+      return;
+    }
+    const view = await api(`/api/projects/${projectId}/pending/${token}`);
+    if (state.project?.id !== projectId || !$('pendingDialog').open) return;
+    pendingReview = {projectId, view}; $('pendingDetail').classList.remove('hidden');
+    const heading = document.createElement('p'); heading.textContent = view.canApply ? 'برای موارد دارای تعارض، انتخاب خود را مشخص کنید؛ سایر موارد به‌طور خودکار حفظ و ثبت می‌شوند.' : 'نوبت ترجمه تغییر کرده است؛ نتیجه قابل اعمال خودکار نیست. می‌توانید آن را کپی کنید.'; $('pendingDetail').append(heading);
+    view.rows.forEach((row, index) => {
+      const box = document.createElement('section'); box.className = 'block-card';
+      const title = document.createElement('strong'); title.textContent = `${index + 1}. ${row.name || 'تصویر'} — ${row.missing ? 'حذف‌شده' : row.conflict ? 'تعارض' : 'بدون تعارض'}`; box.append(title);
+      for (const [label, value] of [['متن مبدأ ارسال‌شده', row.source], ['متن مبدأ فعلی', row.currentSource], ['متن قبلی', row.original], ['متن فعلی', row.current], ['نتیجهٔ آماده', row.result]]) {
+        if (value == null) continue; const heading = document.createElement('p'); heading.textContent = label; const pre = document.createElement('pre'); pre.className = 'diagnostic-message'; pre.dir = 'auto'; pre.textContent = value || '—'; box.append(heading, pre);
+      }
+      if (row.conflict && !row.missing && view.canApply) {
+        const label = document.createElement('label'); label.textContent = 'انتخاب شما';
+        const select = document.createElement('select'); select.dataset.pendingKey = row.key;
+        for (const [value, text] of [['keep','حفظ ویرایش فعلی'],['apply','استفاده از نتیجهٔ آماده']]) { const option = document.createElement('option'); option.value = value; option.textContent = text; select.append(option); }
+        label.append(select); box.append(label);
+      }
+      $('pendingDetail').append(box);
+    });
+    if (view.summary) { const p = document.createElement('p'); p.className = 'diagnostic-message'; p.textContent = `خلاصهٔ آماده: ${view.summary}`; $('pendingDetail').append(p); }
+    $('pendingCopy').classList.remove('hidden'); $('pendingDiscard').classList.remove('hidden'); $('pendingApply').classList.toggle('hidden', !view.canApply);
+  } catch (error) { $('pendingStatus').textContent = error.message || String(error); }
+}
+async function applyPendingResult() {
+  const review = pendingReview; if (!review || state.project?.id !== review.projectId) return;
+  const choices = Object.fromEntries([...$('pendingDetail').querySelectorAll('[data-pending-key]')].map(el => [el.dataset.pendingKey, el.value]));
+  review.view.rows.filter(row => row.missing).forEach(row => { choices[row.key] = 'keep'; });
+  $('pendingApply').disabled = true; $('pendingDiscard').disabled = true;
+  let committed = false;
+  try {
+    const result = await api(`/api/projects/${review.projectId}/pending/${review.view.id}/resolve`, jsonOptions('POST', {revision:review.view.revision, choices}));
+    committed = true;
+    if (state.project?.id !== review.projectId) throw new Error('نتیجه ثبت شد اما پروژهٔ باز تغییر کرد؛ برای دیدن نتیجه پروژه را دوباره باز کنید.');
+    const afterOcr = result.kind === 'ocr' ? pendingTranslationAfterOcr : null;
+    adoptProject(result.project); setOverlayMode(result.kind === 'ocr' ? 'ocr' : 'translation', false);
+    let previewError = null;
+    try { if (result.affectedImageIds?.length) await renderImagesText(result.affectedImageIds); } catch (error) { previewError = error; }
+    closeDialog('pendingDialog'); closeDialog('translationDialog'); closeDialog('ocrDialog'); clearPendingTranslationOcr();
+    toast(previewError ? `نتیجه ثبت شد اما پیش‌نمایش خطا داشت: ${previewError.message || previewError}` : result.done ? 'نتیجهٔ ذخیره‌شده اعمال شد.' : 'نتیجه ثبت شد؛ برای ادامهٔ ترجمه پیش‌نمایش تازه را بررسی کنید.', !!previewError);
+    if (afterOcr && state.project?.id === afterOcr.projectId && JSON.stringify(selectedImages().map(item => item.id)) === JSON.stringify(afterOcr.imageIds) && !selectedImages().some(item => !item.ocrCompleted && !(item.blocks || []).length)) await runTranslation();
+  } catch (error) { const message = committed ? `نتیجه ثبت شد؛ ${error.message || error}` : `${error.message || error}؛ نتیجه همچنان نگهداری می‌شود.`; $('pendingStatus').textContent = message; if (committed) toast(message, true); }
+  finally { $('pendingApply').disabled = false; $('pendingDiscard').disabled = false; }
+}
+
+function clearPendingTranslationOcr() {
+  pendingTranslationAfterOcr = null;
+  $('ocrTranslationNotice').classList.add('hidden');
+  $('ocrOnlySelected').disabled = false;
+}
+function reportOcrError(error) {
+  const message = `فرایند OCR/ترجمه متوقف شد؛ ترجمه هنوز ارسال نشده است. ${error.message || error}`;
+  $('ocrStatus').textContent = message; $('copyOcrError').classList.remove('hidden');
+  appendLocalActivity(message, 'error'); toast(message, true);
+}
+async function runOcr() {
+  if (ocrRunning) return;
+  const pending = pendingTranslationAfterOcr;
+  const controller = new AbortController();
+  ocrAbortController = controller; ocrCancelledByUser = false; ocrClosingNormally = false;
+  ocrRunning = true; setProgress('ocrProgress', null, true); $('startOcrBtn').disabled = true; $('cancelOcrBtn')?.classList.remove('hidden');
+  $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden');
+  let ocrSucceeded = false;
+  let usedKeepEngineLoaded = false;
+  let completedOcrPages = 0;
+  try {
+    if (pending && (state.project?.id !== pending.projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(pending.imageIds))) {
+      throw new Error('پروژه یا تصاویر انتخاب‌شده تغییر کردند؛ پنجره را ببندید و دوباره ترجمه را شروع کنید.');
+    }
+    collectOcrSettings(); await saveProject();
+    if (ocrCancelledByUser || controller.signal.aborted) { const e = new Error('لغو شد'); e.cancelled = true; throw e; }
+    if (pending && (state.project?.id !== pending.projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(pending.imageIds))) {
+      throw new Error('پروژه یا تصاویر انتخاب‌شده تغییر کردند؛ پنجره را ببندید و دوباره ترجمه را شروع کنید.');
+    }
+    const ids = pending ? pending.missingIds : ($('ocrOnlySelected').checked ? selectedImages().map((item) => item.id) : sortedImages().map((item) => item.id));
+    if (!ids.length) throw new Error('حداقل یک تصویر را انتخاب کنید.');
+    if (pending && ids.some(id => {
+      const item = state.project.images.find(image => image.id === id);
+      return !item || item.ocrCompleted || (item.blocks || []).length;
+    })) throw new Error('متن یا وضعیت یکی از تصاویر تغییر کرده است؛ برای جلوگیری از بازنویسی OCR انجام نشد.');
+    await runJob('OCR محلی در حال اجراست…', async () => {
+      const confidence = $('ocrConfidence').value.trim();
+      const basePayload = {
+        engine: $('ocrEngine').value,
+        language: $('ocrLanguage').value,
+        page_mode: normalizePageMode($('ocrPageMode')?.value),
+        contrast: $('ocrContrast').checked,
+        precise: $('ocrPrecise').checked,
+        group_lines: $('ocrGroupLines').checked,
+        min_confidence: confidence === '' ? .35 : Number(confidence),
+      };
+      const checkOcrNotCancelled = () => {
+        if (ocrCancelledByUser || controller.signal.aborted) {
+          const e = new Error('لغو شد'); e.cancelled = true; throw e;
+        }
+      };
+      const verifyPendingOcrState = () => {
+        if (pending && (state.project?.id !== pending.projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(pending.imageIds))) {
+          throw new Error('OCR در سرور ذخیره شد، اما پروژه یا انتخاب تغییر کرد؛ ترجمه ادامه نیافت. برای دیدن نتیجه پروژه را دوباره باز کنید.');
+        }
+      };
+      if (ids.length === 1) {
+        const result = await api(`/api/projects/${state.project.id}/ocr`, {
+          ...jsonOptions('POST', { ...basePayload, image_ids: ids, keep_engine_loaded: false }),
+          signal: controller.signal,
+        });
+        checkOcrNotCancelled();
+        verifyPendingOcrState();
+        adoptProject(result, { skipGrid: true });
+        setOverlayMode('ocr', false);
+        await renderImagesText(ids, null, checkOcrNotCancelled);
+        completedOcrPages = 1;
+      } else {
+        for (let idx = 0; idx < ids.length; idx += 1) {
+          checkOcrNotCancelled();
+          const pageId = ids[idx];
+          const isLastPage = idx + 1 >= ids.length;
+          if (!isLastPage) usedKeepEngineLoaded = true;
+          const result = await api(`/api/projects/${state.project.id}/ocr`, {
+            ...jsonOptions('POST', { ...basePayload, image_ids: [pageId], keep_engine_loaded: !isLastPage }),
+            signal: controller.signal,
+          });
+          if (isLastPage) usedKeepEngineLoaded = false;
+          checkOcrNotCancelled();
+          verifyPendingOcrState();
+          adoptProject(result, { skipGrid: true });
+          setOverlayMode('ocr', false);
+          await renderImagesText([pageId], null, checkOcrNotCancelled);
+          completedOcrPages += 1;
+          const p = completedOcrPages / ids.length;
+          setProgress('ocrProgress', p, true);
+          setProgress('jobProgress', p, true);
+          setProgress('dockProgress', p, true);
+        }
+      }
+    }, 'ocrProgress');
+    ocrSucceeded = true; ocrClosingNormally = true;
+    clearPendingTranslationOcr(); closeDialog('ocrDialog');
+    toast('متن OCR روی تصویر آمد؛ برای بررسی و ویرایش، دکمهٔ ✎ را بزنید');
+    if (pending) await runTranslation();
+  } catch (error) {
+    if (state.project) renderGrid();
+    if (ocrCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      clearPendingTranslationOcr();
+      toast(completedOcrPages ? `پنجرهٔ OCR بسته شد؛ ${completedOcrPages} صفحهٔ تکمیل‌شده حفظ شد و ادامه متوقف گردید` : 'پنجرهٔ OCR بسته شد و عملیات متوقف گردید');
+      return;
+    }
+    reportOcrError(error); if (error.pendingId) openPendingResults(error.pendingId); throw error;
+  } finally {
+    if (usedKeepEngineLoaded) {
+      usedKeepEngineLoaded = false;
+      await api('/api/engines/unload', { method: 'POST' }).catch(() => {});
+    }
+    if (!ocrSucceeded) setProgress('ocrProgress', 0, false);
+    if (ocrAbortController === controller) ocrAbortController = null;
+    ocrClosingNormally = false; ocrRunning = false; $('startOcrBtn').disabled = false; $('cancelOcrBtn')?.classList.add('hidden');
+    dismissJobCancelModal('ocr');
+    refreshEngineMemory().catch(() => {});
+  }
+}
+
+function savedTranslationSkill(projectId) {
+  try { return localStorage.getItem(`comic-studio-ai-skill:${projectId}`); } catch { return null; }
+}
+function rememberTranslationSkill(projectId, preview) {
+  if (preview.provider === 'free') return;
+  try { localStorage.setItem(`comic-studio-ai-skill:${projectId}`, preview.skill ?? ''); } catch { /* the next preview can still use the default */ }
+}
+function saveDraftTranslationSkill(projectId) {
+  if (!projectId || !$('translationSkillWrap') || $('translationSkillWrap').classList.contains('hidden')) return;
+  try { localStorage.setItem(`comic-studio-ai-skill:${projectId}`, $('translationSkill').value); } catch { /* ignore */ }
+}
+function parseTranslationTarget(raw) {
+  const value = String(raw || '').trim();
+  if (!value || value === 'free') return { provider: 'free', profileId: '', value: 'free' };
+  const sep = value.indexOf('::');
+  const provider = sep >= 0 ? value.slice(0, sep) : value;
+  const profileId = sep >= 0 ? value.slice(sep + 2) : '';
+  if (!AI_PROVIDER_IDS.includes(provider)) return { provider: 'free', profileId: '', value: 'free' };
+  return { provider, profileId, value: profileId ? `${provider}::${profileId}` : provider };
+}
+function resolvePreferredTranslationTarget(overrideTarget = null) {
+  const currentAiProvider = state.ai?.provider || 'free';
+  if (lastSyncedAiProvider !== currentAiProvider) {
+    lastSyncedAiProvider = currentAiProvider;
+    preferredTranslationTarget = currentAiProvider;
+  }
+  if (overrideTarget) {
+    const parsedOverride = parseTranslationTarget(overrideTarget);
+    preferredTranslationTarget = parsedOverride.value;
+    return parsedOverride;
+  }
+  const candidate = parseTranslationTarget(preferredTranslationTarget || currentAiProvider);
+  if (candidate.provider === 'free') return candidate;
+  const profiles = state.ai?.providers?.[candidate.provider]?.profiles || [];
+  if (candidate.profileId) {
+    if (profiles.some((p) => p.hasApiKey && String(p.id) === candidate.profileId)) return candidate;
+    if (profiles.some((p) => p.hasApiKey)) {
+      const fallbackProvider = { provider: candidate.provider, profileId: '', value: candidate.provider };
+      preferredTranslationTarget = fallbackProvider.value;
+      return fallbackProvider;
+    }
+    preferredTranslationTarget = 'free';
+    return { provider: 'free', profileId: '', value: 'free' };
+  }
+  return candidate;
+}
+function renderTranslationServiceSelector(activeProvider, activeProfileId = '') {
+  const select = $('translationPreviewService');
+  if (!select) return;
+  const activeValue = activeProvider && activeProvider !== 'free' && activeProfileId
+    ? `${activeProvider}::${activeProfileId}`
+    : (activeProvider || 'free');
+  select.textContent = '';
+  const addOpt = (value, label, execMode = 'online') => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.dataset.executionMode = execMode;
+    opt.textContent = label;
+    select.appendChild(opt);
+  };
+  addOpt('free', 'سرویس رایگان — Google Translate + MyMemory', 'online');
+  AI_PROVIDER_IDS.forEach((providerId) => {
+    const info = aiInfo(providerId);
+    const label = info.label || AI_FALLBACKS[providerId]?.label || providerId;
+    const model = info.model || info.defaultModel || '';
+    const execMeta = resolveTranslationExecMeta(providerId, info.base_url || '');
+    const activeProfiles = (info.profiles || []).filter((p) => p.hasApiKey);
+    if (activeProfiles.length === 1) {
+      const pName = activeProfiles[0].name?.trim() || 'API 1';
+      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (${pName})`, execMeta.mode);
+    } else if (activeProfiles.length >= 2) {
+      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (همهٔ ${activeProfiles.length} کلید فعال به ترتیب)`, execMeta.mode);
+      activeProfiles.forEach((p, idx) => {
+        const pName = p.name?.trim() || `API ${idx + 1}`;
+        addOpt(`${providerId}::${p.id}`, `${label}${model ? ` — مدل: ${model}` : ''} · فقط «${pName}»`, execMeta.mode);
+      });
+    } else if (activeProvider === providerId) {
+      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (بدون کلید API ذخیره‌شده)`, execMeta.mode);
+    }
+  });
+  if (![...select.options].some((opt) => opt.value === activeValue)) {
+    addOpt(activeValue, activeValue);
+  }
+  select.value = activeValue;
+}
+async function switchTranslationPreviewService(nextTargetValue) {
+  const switcher = translationPreviewSwitchTarget;
+  const select = $('translationPreviewService');
+  if (!switcher || !select) return;
+  const parsed = parseTranslationTarget(nextTargetValue);
+  preferredTranslationTarget = parsed.value;
+  if (state.project?.id) saveDraftTranslationSkill(state.project.id);
+  select.disabled = true;
+  $('translationPreviewConfirm').disabled = true;
+  $('translationPreviewError').classList.add('hidden');
+  $('copyTranslationPreviewError').classList.add('hidden');
+  setProgress('previewPrepProgress', null, true);
+  try {
+    await switcher(parsed.value);
+  } catch (error) {
+    if (error?.cancelled || error?.name === 'AbortError') return;
+    setProgress('previewPrepProgress', 0, false);
+    if ($('translationPreviewDialog').open) {
+      const errMsg = error.message || String(error);
+      $('translationPreviewError').textContent = `${errMsg} هیچ متنی ارسال نشده است؛ می‌توانید سرویس دیگری انتخاب کنید یا تنظیمات را تغییر دهید.`;
+      $('translationPreviewError').classList.remove('hidden');
+      $('copyTranslationPreviewError').classList.remove('hidden');
+      $('openAiLimitFromPreview')?.classList.toggle('hidden', parsed.provider === 'free');
+      translationPreviewData = {
+        ...(translationPreviewData || {}),
+        provider: parsed.provider,
+        profileId: parsed.profileId,
+        contextMode: parsed.provider !== 'free',
+        requests: [],
+        previewError: errMsg,
+      };
+      renderTranslationServiceSelector(parsed.provider, parsed.profileId);
+      updateTranslationSkillStatus();
+      toast(errMsg, true);
+    }
+  } finally {
+    if (select) select.disabled = false;
+  }
+}
+async function switchTranslationTargetLanguage(nextLang) {
+  const switcher = translationPreviewSwitchTarget;
+  const langSelect = $('translationTargetLang');
+  const normLang = normalizeTargetLanguage(nextLang);
+  if (langSelect) langSelect.value = normLang;
+  if (state.project) {
+    state.project.settings = state.project.settings || {};
+    state.project.settings.targetLanguage = normLang;
+    scheduleSave();
+  }
+  if ($('aiTargetLanguage')) $('aiTargetLanguage').value = normLang;
+  if (!switcher || !$('translationPreviewDialog')?.open) return;
+  if (state.project?.id) saveDraftTranslationSkill(state.project.id);
+  if (langSelect) langSelect.disabled = true;
+  if ($('translationPreviewService')) $('translationPreviewService').disabled = true;
+  $('translationPreviewConfirm').disabled = true;
+  $('translationPreviewError').classList.add('hidden');
+  $('copyTranslationPreviewError').classList.add('hidden');
+  setProgress('previewPrepProgress', null, true);
+  try {
+    await switcher($('translationPreviewService')?.value || null);
+  } catch (error) {
+    if (error?.cancelled || error?.name === 'AbortError') return;
+    setProgress('previewPrepProgress', 0, false);
+    if ($('translationPreviewDialog').open) {
+      const errMsg = error.message || String(error);
+      $('translationPreviewError').textContent = `${errMsg} هیچ متنی ارسال نشده است؛ می‌توانید زبان مقصد یا سرویس دیگری انتخاب کنید.`;
+      $('translationPreviewError').classList.remove('hidden');
+      $('copyTranslationPreviewError').classList.remove('hidden');
+      toast(errMsg, true);
+    }
+  } finally {
+    if (langSelect) langSelect.disabled = false;
+    if ($('translationPreviewService')) $('translationPreviewService').disabled = false;
+  }
+}
+function openAiSettingsFromPreviewDialog() {
+  const activeProv = translationPreviewData?.provider;
+  if (state.project?.id) saveDraftTranslationSkill(state.project.id);
+  cancelTranslationRequestPreview();
+  loadAiSettings().then(() => {
+    if (activeProv && AI_PROVIDER_IDS.includes(activeProv)) showAiProvider(activeProv, false);
+    showDialog('aiDialog');
+  }).catch((error) => toast(error.message, true));
+}
+async function copyFieldText(inputEl, fieldLabel) {
+  if (!inputEl) return;
+  const hasSelection = typeof inputEl.selectionStart === 'number' && typeof inputEl.selectionEnd === 'number' && inputEl.selectionStart !== inputEl.selectionEnd;
+  const text = hasSelection ? inputEl.value.slice(inputEl.selectionStart, inputEl.selectionEnd) : inputEl.value;
+  if (!text) {
+    toast(`${fieldLabel} خالی است.`, true);
+    return;
+  }
+  await copyBlockText(text);
+  inputEl.focus();
+}
+async function pasteIntoField(inputEl) {
+  if (!inputEl || inputEl.disabled) return;
+  if (!navigator.clipboard?.readText) {
+    inputEl.focus();
+    toast('مرورگر اجازهٔ خواندن مستقیم کلیپ‌بورد را نداد؛ کادر فعال شد، با Ctrl+V یا کلیک‌راست و Paste بچسبانید.', true);
+    return;
+  }
+  let clip = '';
+  try {
+    clip = await navigator.clipboard.readText();
+  } catch {
+    inputEl.focus();
+    toast('دسترسی مستقیم به کلیپ‌بورد مسدود است؛ کادر فعال شد، با Ctrl+V یا کلیک‌راست و Paste بچسبانید.', true);
+    return;
+  }
+  const start = typeof inputEl.selectionStart === 'number' ? inputEl.selectionStart : inputEl.value.length;
+  const end = typeof inputEl.selectionEnd === 'number' ? inputEl.selectionEnd : inputEl.value.length;
+  inputEl.value = inputEl.value.slice(0, start) + clip + inputEl.value.slice(end);
+  const cursor = start + clip.length;
+  inputEl.focus();
+  try { inputEl.setSelectionRange(cursor, cursor); } catch { /* ignore */ }
+  inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+  toast('متن از کلیپ‌بورد پیست شد');
+}
+function clearFieldText(inputEl) {
+  if (!inputEl || inputEl.disabled) return;
+  inputEl.value = '';
+  inputEl.focus();
+  inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+}
+function updateTranslationSkillStatus() {
+  const preview = translationPreviewData;
+  const skill = $('translationSkill').value.trim();
+  const context = $('translationContext').value.trim();
+  const skillCount = Array.from(skill).length;
+  const contextCount = Array.from(context).length;
+  const skillTooLong = !!(preview?.contextMode && skillCount > preview.skillLimit);
+  const contextTooLong = !!(preview?.contextMode && contextCount > preview.contextLimit);
+  const overBudget = skillTooLong || contextTooLong;
+  const updateBudgetCounter = (inputId, counterId, count, limit, visible) => {
+    const input = $(inputId); const counter = $(counterId);
+    input.classList.toggle('budget-over-limit', !!visible && count > limit);
+    counter.classList.toggle('over-budget', !!visible && count > limit);
+    counter.classList.toggle('hidden', !visible);
+    counter.textContent = visible ? `${count} / ${limit} نویسه` : '';
+  };
+  updateBudgetCounter('translationSkill', 'translationSkillCounter', skillCount, preview?.skillLimit ?? 0, !!preview?.contextMode);
+  updateBudgetCounter('translationContext', 'translationContextCounter', contextCount, preview?.contextLimit ?? 0, !!preview?.contextMode);
+  const changed = preview && ((preview.provider !== 'free' && (skill !== (preview.skill ?? '') || (preview.contextMode && context !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume));
+  const message = skillTooLong ? `متن راهنمای ترجمه (${skillCount} نویسه) بیش از سقف مجاز ${preview.skillLimit} نویسه است؛ پیش از ارسال کوتاه کنید یا سقف نویسه را افزایش دهید.` :
+    contextTooLong ? `خلاصه (${contextCount} نویسه) بیش از سقف مجاز ${preview.contextLimit} نویسه است؛ پیش از ارسال کوتاه کنید یا سقف نویسه را افزایش دهید.` :
+    changed ? 'اطلاعات تغییر کرد؛ ابتدا پیش‌نمایش تازه را بازبینی کنید.' : '';
+  $('translationSkillStatus').textContent = message;
+  $('openAiLimitFromPreview')?.classList.toggle('hidden', !((preview?.previewError || overBudget) && preview?.provider !== 'free'));
+  $('translationPreviewConfirm').textContent = overBudget ? 'تأیید و ارسال برای ترجمه' : (changed ? 'به‌روزرسانی پیش‌نمایش' : 'تأیید و ارسال برای ترجمه');
+  $('translationPreviewConfirm').classList.toggle('over-budget-blocked', overBudget && !preview?.previewError);
+  $('translationPreviewConfirm').setAttribute('aria-disabled', overBudget ? 'true' : 'false');
+  $('translationPreviewConfirm').disabled = !preview || Boolean(preview.previewError) || (!overBudget && (changed ? !translationPreviewRefresh : !preview.requests?.length));
+}
+function showTranslationRequestPreview(preview, action, refresh = null, switchTarget = null) {
+  translationPreviewAction = action; translationPreviewRefresh = refresh; translationPreviewSwitchTarget = switchTarget || translationPreviewSwitchTarget; translationPreviewData = preview;
+  renderTranslationServiceSelector(preview.provider, preview.profileId || '');
+  const previewExecMeta = resolveTranslationExecMeta(preview.provider, preview.base_url || aiInfo(preview.provider)?.base_url || '');
+  applyExecBadgeElement($('translationPreviewExecBadge'), previewExecMeta.mode, previewExecMeta.badge);
+  if ($('translationPreviewService')) $('translationPreviewService').disabled = false;
+  if ($('translationTargetLang')) {
+    $('translationTargetLang').disabled = false;
+    $('translationTargetLang').value = normalizeTargetLanguage(preview.targetLanguage || activeTargetLanguage());
+  }
+  $('translationSkillWrap').classList.toggle('hidden', preview.provider === 'free');
+  $('translationContextWrap').classList.toggle('hidden', !preview.rollingMode);
+  $('translationContextHead')?.classList.toggle('hidden', !preview.contextMode);
+  $('translationContextClipActions')?.classList.toggle('hidden', !preview.contextMode);
+  $('translationContextLabel').classList.toggle('hidden', !preview.contextMode); $('translationContext').classList.toggle('hidden', !preview.contextMode); $('translationContextHelp').classList.toggle('hidden', !preview.contextMode);
+  $('translationContext').value = preview.displaySummary ?? preview.summary ?? '';
+  $('translationContext').maxLength = 100000;
+  $('translationContextResume').checked = !!preview.resume; $('translationContextResume').parentElement.classList.toggle('hidden', !!preview.singleContext);
+  $('translationContextHelp').textContent = preview.contextMode ? `سهم خلاصه ${preview.contextPercent ?? 15}٪ (حداکثر ${preview.contextLimit} نویسه) · سهم اسکیل ${preview.skillPercent ?? 15}٪ (حداکثر ${preview.skillLimit} نویسه) از سقف کل ${preview.totalLimit} نویسه؛ سهم استفاده‌نشده به متن می‌رسد.` : '';
+  $('translationSkill').maxLength = 100000;
+  $('translationSkill').disabled = false; $('translationSkillReset').disabled = false; $('translationContext').disabled = false; $('translationContextResume').disabled = false;
+  $('translationSkill').value = preview.displaySkill ?? preview.skill ?? '';
+  $('translationPreviewSummary').textContent = preview.rollingMode ? `${preview.blockCount} متن · پیش‌نمایش درخواست اول${preview.contextMode ? ' (تعداد درخواست‌های بعدی وابسته به خلاصه است)' : ''}` : `${preview.blockCount} متن · ${preview.requestCount} درخواست پایه برای بررسی (بدون تکرار)`;
+  const destination = [preview.providerLabel, preview.model && `مدل: ${preview.model}`, preview.base_url && `نشانی: ${preview.base_url}`, preview.fallback_url && `فقط هنگام خطا: ${preview.fallback_url}`].filter(Boolean).join(' · ');
+  $('translationPreviewDestination').textContent = destination;
+  $('translationPreviewNote').textContent = preview.note || ''; $('translationPreviewError').textContent = preview.previewError ? `${preview.previewError} هیچ متنی ارسال نشده است؛ سقف کل یا متن/راهنما را اصلاح و پیش‌نمایش را تازه کنید.` : ''; $('translationPreviewError').classList.toggle('hidden', !preview.previewError); $('copyTranslationPreviewError').classList.toggle('hidden', !preview.previewError);
+  updateTranslationSkillStatus();
+  setProgress('previewPrepProgress', preview.previewError ? 0 : 1, false);
+  const container = $('translationPreviewRequests'); container.textContent = '';
+  (preview.requests || []).forEach((request, index) => {
+    const details = document.createElement('details'); details.className = 'payload-request'; details.open = (preview.requests.length === 1 || index === 0);
+    const summary = document.createElement('summary'); summary.textContent = `درخواست ${request.index}${request.imageName ? ` · صفحه: ${request.imageName}` : ''}${request.paragraph ? ` · بند ${request.paragraph}${request.partCount > 1 ? `، بخش ${request.part} از ${request.partCount}` : ''}` : ''} · ${request.characters} نویسه`;
+    const text = document.createElement('pre'); text.dir = 'auto'; text.textContent = request.text;
+    details.append(summary, text); container.appendChild(details);
+  });
+  const hasSystemPrompt = !!preview.systemPrompt;
+  $('translationPreviewSystemWrap').classList.toggle('hidden', !hasSystemPrompt);
+  $('translationPreviewSystem').textContent = preview.systemPrompt || '';
+  showDialog('translationPreviewDialog');
+}
+function cancelTranslationRequestPreview() { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewSwitchTarget = null; translationPreviewData = null; closeDialog('translationPreviewDialog'); }
+function clearResponseRepair() {
+  translationRepairAction = null; $('responseRepair').classList.add('hidden'); $('responseRepairText').value = ''; $('repairTranslation').value = ''; $('repairSummary').value = ''; $('responseRepairStatus').textContent = '';
+}
+function offerResponseRepair(error, action) {
+  if (!error.recoveryToken || typeof error.responseText !== 'string') return;
+  $('responseRepairText').value = error.responseText;
+  let prefillTranslation = '';
+  let prefillSummary = '';
+  try {
+    const cleaned = error.responseText.replace(/<(?:think|thinking)\b[^>]*>[\s\S]*?<\/(?:think|thinking)\s*>/gi, '').trim();
+    const fenceMatch = cleaned.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(fenceMatch ? fenceMatch[0] : cleaned);
+    const rawTr = parsed.translation ?? parsed.Translation ?? parsed.translations ?? parsed.translated_text;
+    const rawSum = parsed.summary ?? parsed.Summary ?? parsed.story_summary ?? parsed.context;
+    if (typeof rawTr === 'string') prefillTranslation = rawTr;
+    else if (Array.isArray(rawTr) && rawTr.every((x) => typeof x === 'string')) prefillTranslation = rawTr.join('\n');
+    if (typeof rawSum === 'string') prefillSummary = rawSum;
+  } catch { /* raw text remains editable in responseRepairText */ }
+  $('repairTranslation').value = prefillTranslation;
+  $('repairSummary').value = prefillSummary;
+  $('responseRepairStatus').textContent = error.responseTruncated ? 'پاسخ بزرگ‌تر از حد مجاز بود و فقط ۲۰۰٬۰۰۰ نویسهٔ اول نمایش داده شده است.' : '';
+  $('responseRepair').classList.remove('hidden');
+  translationRepairAction = value => action({recovery_token: error.recoveryToken, corrected_response: value});
+}
+function showSingleTranslationError(error, action) {
+  $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message || error}`;
+  translationRetryAction = error.status === 409 ? null : async () => {
+    try { await action(); closeDialog('translationDialog'); }
+    catch (nextError) { showSingleTranslationError(nextError, action); throw nextError; }
+  };
+  $('retryTranslation').classList.toggle('hidden', !translationRetryAction);
+  offerResponseRepair(error, async repair => {
+    try { await action(repair); clearResponseRepair(); closeDialog('translationDialog'); }
+    catch (nextError) { showSingleTranslationError(nextError, action); throw nextError; }
+  });
+  $('copyTranslationError').classList.remove('hidden'); $('translationErrorChoice').classList.remove('hidden'); showDialog('translationDialog');
+}
+async function confirmTranslationRequestPreview() {
+  const action = translationPreviewAction; const preview = translationPreviewData; const refresh = translationPreviewRefresh; const switchTarget = translationPreviewSwitchTarget;
+  if (!action || !preview) return;
+  const skillText = $('translationSkill').value.trim();
+  const contextText = $('translationContext').value.trim();
+  const skillCount = Array.from(skillText).length;
+  const contextCount = Array.from(contextText).length;
+  const skillTooLong = !!(preview.contextMode && skillCount > preview.skillLimit);
+  const contextTooLong = !!(preview.contextMode && contextCount > preview.contextLimit);
+  if (skillTooLong || contextTooLong) {
+    const lines = [];
+    if (skillTooLong) {
+      lines.push(`متن «راهنمای ترجمهٔ AI برای این نوبت» ${skillCount} نویسه است که ${skillCount - preview.skillLimit} نویسه از سقف مجاز (${preview.skillLimit} نویسه) بیشتر است.`);
+    }
+    if (contextTooLong) {
+      lines.push(`متن «خلاصهٔ زمینه / داستان» ${contextCount} نویسه است که ${contextCount - preview.contextLimit} نویسه از سقف مجاز (${preview.contextLimit} نویسه) بیشتر است.`);
+    }
+    const targetInput = skillTooLong ? $('translationSkill') : $('translationContext');
+    await appAlert(
+      `${lines.join('\n')}\nتا زمانی که تعداد نویسه‌ها بیش از سقف مجاز است، متن برای ترجمه ارسال نمی‌شود.`,
+      {
+        title: 'تعداد نویسه‌ها بیش از سقف مجاز است',
+        confirmText: 'متوجه شدم',
+        variant: 'warning',
+        hint: 'لطفاً متن داخل کادر را کوتاه کنید یا با دکمهٔ «تغییر سقف نویسه در تنظیمات AI» سهم اسکیل / سقف کل نویسه‌ها را افزایش دهید.',
+      },
+    );
+    targetInput?.focus();
+    return;
+  }
+  $('translationPreviewConfirm').disabled = true;
+  const changed = (preview.provider !== 'free' && (skillText !== (preview.skill ?? '') || (preview.contextMode && contextText !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume);
+  if (changed) {
+    $('translationSkill').disabled = true; $('translationSkillReset').disabled = true; $('translationContext').disabled = true; $('translationContextResume').disabled = true;
+    setProgress('previewPrepProgress', null, true);
+    try {
+      if (!refresh) throw new Error('به‌روزرسانی پیش‌نمایش ممکن نیست؛ دوباره ترجمه را شروع کنید.');
+      const updated = await refresh(skillText, contextText, $('translationContextResume').checked);
+      // Cancel/close during the local preview request must not reopen it or send.
+      if ($('translationPreviewDialog').open && translationPreviewAction === action) showTranslationRequestPreview(updated, action, refresh, switchTarget);
+    } catch (error) {
+      setProgress('previewPrepProgress', 0, false);
+      if ($('translationPreviewDialog').open && translationPreviewAction === action) { $('translationSkillStatus').textContent = `به‌روزرسانی ممکن نبود: ${error.message || error}`; $('translationPreviewError').textContent = `${$('translationSkillStatus').textContent}\nپیش از ارسال گزارش، اطلاعات محرمانه را بررسی کنید.`; $('translationPreviewError').classList.remove('hidden'); $('copyTranslationPreviewError').classList.remove('hidden'); toast(error.message || 'پیش‌نمایش ناموفق بود', true); }
+    } finally {
+      if ($('translationPreviewDialog').open && translationPreviewAction === action) {
+        $('translationSkill').disabled = false; $('translationSkillReset').disabled = false; $('translationContext').disabled = false; $('translationContextResume').disabled = false;
+        const message = $('translationSkillStatus').textContent; updateTranslationSkillStatus();
+        if (message.startsWith('به‌روزرسانی ممکن نبود:')) $('translationSkillStatus').textContent = message;
+      }
+    }
+    return;
+  }
+  translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewSwitchTarget = null; translationPreviewData = null;
+  closeDialog('translationPreviewDialog');
+  try { translationPreviewTask = action(preview); await translationPreviewTask; }
+  catch (error) {
+    if (error?.cancelled || error?.name === 'AbortError' || translationCancelledByUser) return;
+    if (!$('translationDialog').open) showSingleTranslationError(error, repair => action(preview, repair));
+    toast(error.message || 'ترجمه ناموفق بود', true);
+  }
+  finally { $('translationPreviewConfirm').disabled = false; }
+}
+async function runTranslation(targetOverride = null) {
+  if (translationRunning) return;
+  try {
+    // Loading a project also uploads previews; do not race those writes against
+    // the translation's optimistic version check or snapshot the old selection.
+    await waitForProjectLoads();
+    const selected = selectedImages(); const ids = selected.map((item) => item.id);
+    if (!ids.length) throw new Error('حداقل یک تصویر را انتخاب کنید.');
+    const missing = selected.filter(item => !item.ocrCompleted && !(item.blocks || []).length);
+    if (missing.length) {
+      const old = state.project._aiContextRun;
+      if (old?.jobs?.some(job => job.remaining)) {
+        const proceed = await appConfirm('نوبت ترجمهٔ ناتمام وجود دارد. اجرای OCR روی تصاویر جدید می‌تواند ادامهٔ آن را نامعتبر کند و ممکن است برای نوبت تازه تأیید و ارسال دوباره لازم شود. آیا ادامه می‌دهید؟', {
+          title: 'هشدار نوبت ترجمهٔ ناتمام',
+          confirmText: 'بله، ادامه بده',
+          cancelText: 'انصراف',
+          variant: 'warning',
+        });
+        if (!proceed) return;
+      }
+      pendingTranslationAfterOcr = {projectId: state.project.id, imageIds: ids, missingIds: missing.map(item => item.id)};
+      $('ocrTranslationNotice').textContent = `${missing.length} تصویر انتخاب‌شده هنوز OCR نشده‌اند. پس از تنظیم موتور و شروع OCR، فقط همین تصاویر خوانده می‌شوند و سپس پیش‌نمایش ترجمه باز خواهد شد؛ متن‌های موجود بازنویسی نمی‌شوند.`;
+      $('ocrTranslationNotice').classList.remove('hidden'); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden');
+      $('ocrOnlySelected').disabled = true; updateEngineOptions(); showDialog('ocrDialog'); return;
+    }
+    if (!selected.some(item => (item.blocks || []).some(block => block.enabled !== false && String(block.text || '').trim()))) {
+      throw new Error('هیچ کادر فعال دارای متن در تصاویر انتخاب‌شده نیست. اگر OCR متنی پیدا نکرده، تنظیمات یا تصویر را بررسی و OCR را دوباره اجرا کنید.');
+    }
+    await saveProject();
+    const target = resolvePreferredTranslationTarget(targetOverride);
+    const provider = target.provider; const profileId = target.profileId; const projectId = state.project.id;
+    const targetLanguage = activeTargetLanguage();
+    state.project.settings = state.project.settings || {};
+    state.project.settings.targetLanguage = targetLanguage;
+    const request = {
+      image_ids: ids,
+      provider,
+      ...(profileId ? { profile_id: profileId } : {}),
+      source_language: $('ocrLanguage').value,
+      target_language: targetLanguage,
+      reuse_repeated: state.ai?.reuse_repeated !== false,
+    };
+    if (state.project.images.some(item => ids.includes(item.id) && (item._aiPageProgress || item.blocks?.some(block => block._aiTranslationParts)))) {
+      const okLegacy = await appConfirm('پیشرفت ناتمام ترجمه از نسخهٔ قبلی وجود دارد و با حافظهٔ جدید سازگار نیست. برای جلوگیری از ارسال دوباره می‌توانید در نسخهٔ قبلی ادامه دهید. آیا با حذف پیشرفت ناتمام و شروع ترجمهٔ تازه موافقید؟', {
+        title: 'هشدار پیشرفت ناتمام قبلی',
+        confirmText: 'بله، شروع تازه',
+        cancelText: 'انصراف',
+        variant: 'warning',
+        destructive: true,
+      });
+      if (!okLegacy) return;
+      request.restart_legacy = true;
+    }
+    const previousRun = state.project._aiContextRun;
+    const confirmRestart = async (nextResume) => {
+      if (!nextResume && previousRun?.jobs?.some(job => job.remaining) && !request.restart_existing) {
+        const okRestart = await appConfirm('نوبت ترجمهٔ ناتمام وجود دارد. آیا با شروع نوبت تازه و جایگزینی پیشرفت ناتمام موافقید؟ ممکن است متن دوباره ارسال شود.', {
+          title: 'شروع نوبت تازهٔ ترجمه',
+          confirmText: 'بله، نوبت تازه شروع شود',
+          cancelText: 'انصراف',
+          variant: 'warning',
+          destructive: true,
+        });
+        if (!okRestart) {
+          const cancelledErr = new Error('شروع نوبت تازه لغو شد.');
+          cancelledErr.cancelled = true;
+          throw cancelledErr;
+        }
+        request.restart_existing = true;
+      }
+    };
+    const switchTarget = (nextVal) => runTranslation(nextVal);
+    if (provider === 'free') {
+      const previous = previousRun;
+      const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && (previous.targetLanguage || 'fa') === targetLanguage && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
+      const refresh = async (_skill, _summary, nextResume) => { await confirmRestart(nextResume); return api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: '', summary: '', resume: nextResume })); };
+      let preview;
+      try { preview = await refresh('', '', resume); }
+      catch (error) {
+        if (!resume || error.status !== 409) throw error;
+        preview = await refresh('', '', false);
+        preview.note += ' نوبت ناتمام با تنظیمات فعلی سازگار نیست؛ تأیید نوبت تازه‌ای شروع می‌کند.';
+      }
+      if (!preview.requests?.length) throw new Error('هیچ درخواست ترجمه‌ای ساخته نشد؛ کادرهای فعال و انتخاب تصاویر را بررسی کنید.');
+      const emptyPages = selected.filter(item => !(item.blocks || []).some(block => block.enabled !== false && String(block.text || '').trim()));
+      if (emptyPages.length) preview.note += ` ${emptyPages.length} تصویر بدون متن فعال از ترجمه کنار گذاشته می‌شوند.`;
+      showTranslationRequestPreview(preview, accepted => performContextTranslation(request, accepted), refresh, switchTarget);
+      return;
+    }
+    const allActiveProfiles = state.ai?.providers?.[provider]?.profiles?.filter(p => p.hasApiKey) || [];
+    const profiles = profileId ? allActiveProfiles.filter(p => String(p.id) === profileId) : allActiveProfiles;
+    const limit = profiles.length ? Math.min(...profiles.map(p => p.source_limit ?? 1000)) : 1000;
+    const skillLimit = Math.floor(limit * (state.ai?.skill_percent ?? 15) / 100);
+    const contextLimit = Math.floor(limit * (state.ai?.context_percent ?? 15) / 100);
+    const oldSkill = savedTranslationSkill(projectId);
+    const defaultTargetLabel = TARGET_LANGUAGE_META[targetLanguage]?.label || targetLanguage;
+    const fallbackSkill = targetLanguage === 'fa'
+      ? 'ترجمه را روان و متناسب با لحن کمیک یا کتاب بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.'
+      : `ترجمه را روان، طبیعی و متناسب با لحن کمیک یا کتاب به زبان ${defaultTargetLabel} بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.`;
+    const skill = oldSkill ?? fallbackSkill;
+    const previous = previousRun;
+    const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && (previous.profileId || '') === profileId && (previous.targetLanguage || 'fa') === targetLanguage && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
+    // A new translation starts without stale story context; only an explicit
+    // resume carries the previous run's rolling summary into its first request.
+    const summary = resume ? (previous.context || '') : '';
+    const refresh = async (nextSkill, nextSummary, nextResume) => { await confirmRestart(nextResume); return api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: nextSkill, summary: nextSummary, resume: nextResume })); };
+    const safeSkill = Array.from(skill).length <= skillLimit ? skill : '';
+    const safeSummary = Array.from(summary).length <= contextLimit ? summary : '';
+    let preview;
+    try { preview = await refresh(safeSkill, safeSummary, resume && safeSkill === skill); }
+    catch (error) {
+      if (!resume || error.status !== 409) throw error;
+      preview = await refresh(safeSkill, safeSummary, false);
+      preview.note += ' نوبت ناتمام با تنظیمات فعلی سازگار نیست؛ تأیید، نوبت تازه‌ای شروع می‌کند.';
+    }
+    if (!preview.requests?.length && !preview.previewError) throw new Error('هیچ درخواست ترجمه‌ای ساخته نشد؛ کادرهای فعال و انتخاب تصاویر را بررسی کنید.');
+    const emptyPages = selected.filter(item => !(item.blocks || []).some(block => block.enabled !== false && String(block.text || '').trim()));
+    if (emptyPages.length) preview.note += ` ${emptyPages.length} تصویر بدون متن فعال از ترجمه کنار گذاشته می‌شوند.`;
+    if (safeSkill !== skill) preview.displaySkill = skill;
+    if (safeSummary !== summary) preview.displaySummary = summary;
+    showTranslationRequestPreview(preview, accepted => { rememberTranslationSkill(projectId, accepted); return performContextTranslation(request, accepted); }, refresh, switchTarget);
+  } catch (error) {
+    if (error?.cancelled || error?.name === 'AbortError') return;
+    if (targetOverride && $('translationPreviewDialog').open) throw error;
+    const message = `مرحلهٔ آماده‌سازی یا پیش‌نمایش ترجمه ناموفق بود؛ هیچ درخواست ترجمه‌ای ارسال نشد. ${error.message || error}`;
+    $('translationStatus').textContent = message; appendLocalActivity(message, 'error');
+    translationRetryAction = async () => { closeDialog('translationDialog'); await runTranslation(); };
+    $('retryTranslation').classList.remove('hidden'); $('copyTranslationError').classList.remove('hidden'); $('translationErrorChoice').classList.remove('hidden');
+    showDialog('translationDialog'); toast(message, true);
+  }
+}
+async function performContextTranslation(request, preview, ongoing = null, correction = null) {
+  translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
+  $('copyUnstoredResult').classList.add('hidden'); $('copyUnstoredResult').dataset.result = '';
+  const controller = new AbortController();
+  translationAbortController = controller; translationCancelledByUser = false; translationClosingNormally = false;
+  translationRunning = true; $('cancelTranslationBtn')?.classList.remove('hidden'); showDialog('translationDialog'); $('copyTranslationError').classList.add('hidden');
+  const projectId = state.project.id; let run = ongoing; let phase = 'start';
+  const checkNotCancelled = () => {
+    if (translationCancelledByUser || controller.signal.aborted) {
+      const err = new Error('عملیات توسط کاربر لغو شد.'); err.name = 'AbortError'; err.cancelled = true; throw err;
+    }
+  };
+  try {
+    await runJob(request.provider === 'free' ? 'در حال ترجمهٔ رایگان…' : 'در حال ترجمه با حافظهٔ داستان…', async () => {
+      if (!run) {
+        const started = await api(`/api/projects/${projectId}/context-start`, {
+          ...jsonOptions('POST', { ...request, skill: preview.skill, summary: preview.summary, resume: preview.resume, confirmation: preview.signature }),
+          signal: controller.signal,
+        });
+        checkNotCancelled();
+        adoptProject(started.project); run = {id: started.runId, completed: started.completed};
+      }
+      while (true) {
+        checkNotCancelled();
+        phase = 'translation'; $('translationStatus').textContent = request.provider === 'free' ? `در حال ترجمهٔ درخواست ${run.completed + 1}…` : `در حال ترجمهٔ درخواست ${run.completed + 1} با خلاصهٔ قبلی…`;
+        const result = await api(`/api/projects/${projectId}/context-step`, {
+          ...jsonOptions('POST', {run_id: run.id, completed: run.completed, skill: preview.skill, ...(correction || {})}),
+          signal: controller.signal,
+        });
+        checkNotCancelled();
+        if (correction) { correction = null; clearResponseRepair(); }
+        const hasAffected = Boolean(result.affectedImageIds?.length);
+        adoptProject(result.project, { skipGrid: hasAffected });
+        run.completed = result.completed ?? run.completed;
+        phase = 'preview'; setOverlayMode('translation', false);
+        if (hasAffected) {
+          try { await renderImagesText(result.affectedImageIds); }
+          catch (error) {
+            renderGrid();
+            toast(`ترجمه ذخیره شد، اما همگام‌سازی پیش‌نمایش ناموفق بود: ${error.message || error}`, true);
+          }
+        }
+        if (result.done) break;
+      }
+      phase = 'save'; setOverlayMode('translation', false);
+    }, 'translationProgress');
+    translationClosingNormally = true;
+    closeDialog('translationDialog'); toast(request.provider === 'free' ? 'ترجمه ذخیره شد' : 'ترجمه و خلاصه ذخیره شد');
+  } catch (error) {
+    if (translationCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      toast(run?.completed ? `پنجره بسته شد؛ ${run.completed} بخش ذخیره‌شده باقی ماند و ادامهٔ ترجمه متوقف شد` : 'پنجرهٔ ترجمه بسته شد و عملیات متوقف گردید');
+      api(`/api/projects/${projectId}`).then((fresh) => { if (state.project?.id === projectId && !inlineDraft) adoptProject(fresh); }).catch(() => {});
+      return;
+    }
+    const uncertainty = phase === 'translation' ? 'وضعیت درخواست جاری در قطع ارتباط ممکن است نامشخص باشد و تکرار هزینه داشته باشد.' : 'درخواست‌های موفق ذخیره شده‌اند؛ پروژه را بررسی کنید.';
+    error.message = `${run?.completed || 0} درخواست ذخیره شد؛ ترجمه متوقف شد. ${uncertainty} ${error.message || ''}`;
+    $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message}`;
+    if (run) offerResponseRepair(error, repair => performContextTranslation(request, preview, run, repair));
+    if (error.pendingId) openPendingResults(error.pendingId);
+    if (error.unstoredResult) { $('copyUnstoredResult').dataset.result = error.unstoredResult; $('copyUnstoredResult').classList.remove('hidden'); }
+    translationRetryAction = phase === 'translation' && error.status !== 409 && !error.unstoredResult && run ? () => performContextTranslation(request, preview, run) : null;
+    $('retryTranslation').classList.toggle('hidden', !translationRetryAction); $('translationErrorChoice').classList.remove('hidden'); $('copyTranslationError').classList.remove('hidden'); throw error;
+  } finally {
+    if (translationAbortController === controller) translationAbortController = null;
+    translationClosingNormally = false; translationRunning = false; $('cancelTranslationBtn')?.classList.add('hidden');
+    dismissJobCancelModal('translation');
+  }
+}
+
+// ---------- Typeset preview and export ----------
+let fontLoadedOnce = false;
+const renderedPageSignatures = new Map();
+function pageRenderSignature(item, mode = currentOverlayMode(), blocksOverride = null) {
+  const blocks = blocksOverride || overlayBlocks(item, mode);
+  const erase = state.project?.settings?.eraseOriginal !== false;
+  return JSON.stringify([mode, erase, blocks]);
+}
+async function ensureFont() {
+  if (fontLoadedOnce || !document.fonts?.load) return;
+  try {
+    await Promise.all([document.fonts.load('700 24px Vazirmatn', 'ابپتثجچ'), document.fonts.load('400 16px Vazirmatn', 'ابپتثجچ')]);
+    fontLoadedOnce = true;
+  } catch { /* fallback */ }
+}
+async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false } = {}) {
+  const key = `${projectId}:${item.id}`;
+  const blocks = overlayBlocks(item, mode);
+  const active = blocks.some((block) => block.enabled && hasRenderableText(block));
+  const signature = pageRenderSignature(item, mode, blocks);
+  if (skipUnchanged && Boolean(item.edited) === active && renderedPageSignatures.get(key) === signature) {
+    return;
+  }
+  if (!active) {
+    await api(`/api/projects/${projectId}/images/${item.id}/revert`, { method: 'POST' });
+    imagePreviewVersions.set(key, ++previewRevision);
+    renderedPageSignatures.set(key, signature);
+    const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null;
+    if (current) current.edited = false;
+    return;
+  }
+  await ensureFont();
+  const response = await fetch(`/api/projects/${projectId}/images/${item.id}/content`);
+  if (!response.ok) throw new Error('تصویر اصلی باز نشد');
+  let rawBlob = await response.blob();
+  let bitmap = null;
+  try {
+    bitmap = await createImageBitmap(rawBlob);
+  } finally {
+    rawBlob = null;
+  }
+  let canvas = null;
+  let pngBlob = null;
+  try {
+    try {
+      canvas = Typeset.render(bitmap, blocks);
+    } finally {
+      bitmap?.close?.();
+      bitmap = null;
+      Typeset.releaseCaches?.();
+    }
+    pngBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  } finally {
+    if (canvas) {
+      try { canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height); } catch { /* ignore */ }
+      canvas.width = canvas.height = 0;
+      canvas = null;
+    }
+  }
+  if (!pngBlob) throw new Error(`ساخت PNG برای «${item.name}» ممکن نشد؛ تصویر خیلی بزرگ یا حافظهٔ مرورگر کم است`);
+  try {
+    await api(`/api/projects/${projectId}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: pngBlob });
+  } finally {
+    pngBlob = null;
+  }
+  imagePreviewVersions.set(key, ++previewRevision);
+  renderedPageSignatures.set(key, signature);
+  const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null;
+  if (current) current.edited = true;
+}
+function renderAndUpload(item, options = {}) {
+  const projectId = state.project?.id;
+  if (!projectId) return Promise.resolve();
+  const key = `${projectId}:${item.id}`;
+  const mode = currentOverlayMode();
+  const previous = imageRenderTasks.get(key) || Promise.resolve();
+  // A slow older canvas/upload must finish before the newer request for this same image.
+  // Other images remain independent, and a failed earlier render does not block later attempts.
+  const task = previous.catch(() => {}).then(() => renderAndUploadNow(item, projectId, mode, options));
+  imageRenderTasks.set(key, task);
+  task.finally(() => { if (imageRenderTasks.get(key) === task) imageRenderTasks.delete(key); }).catch(() => {});
+  return task;
+}
+function browserRenderConcurrency(totalCount = 1) {
+  const hw = Number(globalThis.navigator?.hardwareConcurrency) || 4;
+  // Cap concurrent full-resolution browser canvases to 2 so multi-page runs release each page's
+  // bitmap/canvas memory before allocating more, preventing browser RAM spikes on large pages.
+  const slots = Math.max(2, Math.min(2, Math.floor(hw / 2)));
+  return Math.max(1, Math.min(totalCount, slots));
+}
+async function renderImagesText(ids = null, onStep = null, checkCancel = null, options = {}) {
+  const wanted = ids ? new Set(ids) : null;
+  const targets = sortedImages().filter((item) => (!wanted || wanted.has(item.id)) && (hasOverlayText(item) || item.edited));
+  if (!targets.length) { renderGrid(); return; }
+  const concurrency = browserRenderConcurrency(targets.length);
+  let nextIdx = 0;
+  let completed = 0;
+  const runWorker = async () => {
+    while (nextIdx < targets.length) {
+      if (checkCancel) checkCancel();
+      const currentIdx = nextIdx;
+      nextIdx += 1;
+      await renderAndUpload(targets[currentIdx], options);
+      completed += 1;
+      if (onStep) onStep(completed, targets.length);
+    }
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
+  renderGrid();
+}
+function updateExportFields() {
+  const kind = $('exportKind').value;
+  $('pdfExportFields').classList.toggle('hidden', kind !== 'pdf');
+  $('imageExportFields').classList.toggle('hidden', kind !== 'images');
+  $('docxExportFields')?.classList.toggle('hidden', kind !== 'docx');
+  $('pptxExportFields')?.classList.toggle('hidden', kind !== 'pptx');
+  $('exportOverlayModeWrap')?.classList.toggle('hidden', kind === 'txt' || kind === 'docx' || kind === 'pptx');
+}
+async function exportResult(kind = null, modeOverride = null, layoutOverride = null) {
+  if (kind) { $('exportKind').value = kind; updateExportFields(); }
+  if (!selectedImages().length) throw new Error('حداقل یک تصویر را برای خروجی انتخاب کنید');
+  const controller = new AbortController();
+  exportAbortController = controller; exportCancelledByUser = false; exportRunning = true;
+  const checkNotCancelled = () => {
+    if (exportCancelledByUser || controller.signal.aborted) {
+      const err = new Error('ساخت خروجی لغو شد.'); err.name = 'AbortError'; err.cancelled = true; throw err;
+    }
+  };
+  try {
+    await overlayPreviewTask;
+    checkNotCancelled();
+    const exportKind = $('exportKind').value;
+    if (layoutOverride) {
+      if (exportKind === 'pptx' && $('exportPptxLayout')) $('exportPptxLayout').value = layoutOverride;
+      else if ($('exportDocxLayout')) $('exportDocxLayout').value = layoutOverride;
+    }
+    collectOutputSettings(); await saveProject();
+    const docxMode = modeOverride || $('exportDocxMode')?.value || 'translation';
+    const docxLayout = layoutOverride || $('exportDocxLayout')?.value || 'visual';
+    const pptxMode = modeOverride || $('exportPptxMode')?.value || 'translation';
+    const pptxLayout = layoutOverride || $('exportPptxLayout')?.value || 'visual';
+    if (exportKind !== 'txt' && exportKind !== 'docx' && exportKind !== 'pptx') {
+      const targets = selectedImages().filter((item) => hasOverlayText(item) || item.edited);
+      if (targets.length) {
+        await renderImagesText(
+          targets.map((item) => item.id),
+          (done, total) => {
+            const p = (done / Math.max(1, total)) * 0.5;
+            if (activeProgressId) setProgress(activeProgressId, p, true);
+            setProgress('jobProgress', p, true); setProgress('dockProgress', p, true);
+          },
+          checkNotCancelled,
+          { skipUnchanged: true },
+        );
+      } else {
+        renderGrid();
+      }
+    } else {
+      if (activeProgressId) setProgress(activeProgressId, 0.18, true);
+      setProgress('jobProgress', 0.18, true); setProgress('dockProgress', 0.18, true);
+    }
+    checkNotCancelled();
+    const baseExportName = safeName($('exportName').value, safeName(state.project?.name || '', 'comic-translated'));
+    const activeDocMode = exportKind === 'pptx' ? pptxMode : docxMode;
+    const layoutExportName = exportKind === 'docx' && docxLayout === 'flowing' && !/-book$/i.test(baseExportName)
+      ? `${baseExportName}-book`
+      : exportKind === 'pptx' && pptxLayout === 'flowing' && !/-slides$/i.test(baseExportName)
+        ? `${baseExportName}-slides`
+        : baseExportName;
+    const finalExportName = (exportKind === 'docx' || exportKind === 'pptx') && activeDocMode === 'ocr' && !/-(?:en|ocr)$/i.test(layoutExportName)
+      ? `${layoutExportName}-en`
+      : layoutExportName;
+    let response;
+    try {
+      response = await fetch(`/api/projects/${state.project.id}/export`, {
+        ...jsonOptions('POST', {
+          kind: exportKind,
+          image_ids: selectedImages().map((item) => item.id),
+          name: finalExportName,
+          seamless: $('exportSeamless').checked,
+          uniform_size: $('exportUniform').checked,
+          two_per_page: $('exportTwo').checked,
+          image_format: $('exportFormat').value,
+          folder_name: $('exportFolder').value,
+          docx_mode: docxMode,
+          docx_layout: docxLayout,
+          pptx_mode: pptxMode,
+          pptx_layout: pptxLayout,
+        }),
+        signal: controller.signal,
+      });
+    } catch (cause) {
+      if (cause?.name === 'AbortError' || controller.signal.aborted) checkNotCancelled();
+      throw cause;
+    }
+    if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `خروجی ساخته نشد (HTTP ${response.status})`); }
+    const blob = await response.blob();
+    checkNotCancelled();
+    if (!blob.size) throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
+    if (activeProgressId) setProgress(activeProgressId, 1, false);
+    const disposition = response.headers.get('content-disposition') || '';
+    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+    downloadUrl = URL.createObjectURL(blob);
+    const link = $('downloadLink'); link.href = downloadUrl; link.download = parseExportFilename(disposition, `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`);
+    const linkLabel = link.querySelector('span');
+    if (linkLabel) linkLabel.textContent = `دانلود ${link.download}`;
+    else link.textContent = `دانلود ${link.download}`;
+    link.classList.remove('hidden'); link.click();
+    closeDialog('exportDialog'); closeDialog('docxExportDialog'); closeDialog('pptxExportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
+  } catch (error) {
+    if (exportCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      toast('ساخت خروجی به درخواست شما متوقف شد');
+      throw error;
+    }
+    throw error;
+  } finally {
+    if (exportAbortController === controller) exportAbortController = null;
+    exportRunning = false;
+    dismissJobCancelModal('export');
+  }
+}
+function openDocxExportPrompt() {
+  if (!selectedImages().length) { toast('حداقل یک تصویر را برای خروجی انتخاب کنید', true); return; }
+  setProgress('docxProgress', 0, false);
+  showDialog('docxExportDialog');
+}
+async function runDocxChoiceExport(mode, layout = 'visual') {
+  const buttons = ['docxChoiceTranslation', 'docxChoiceOcr', 'docxChoiceFlowingTranslation', 'docxChoiceFlowingOcr'].map((id) => $(id)).filter(Boolean);
+  buttons.forEach((btn) => { btn.disabled = true; });
+  if ($('exportDocxMode')) $('exportDocxMode').value = mode;
+  if ($('exportDocxLayout')) $('exportDocxLayout').value = layout;
+  const layoutText = layout === 'flowing' ? 'متن پیوستهٔ کتابی' : 'تصویری';
+  const modeText = mode === 'ocr' ? 'متن اصلی / OCR' : 'متن ترجمه‌شده';
+  const label = `در حال ساخت فایل Word (${layoutText} — ${modeText})…`;
+  try { await runJob(label, () => exportResult('docx', mode, layout), 'docxProgress'); }
+  finally { buttons.forEach((btn) => { btn.disabled = false; }); }
+}
+function openPptxExportPrompt() {
+  if (!selectedImages().length) { toast('حداقل یک تصویر را برای خروجی انتخاب کنید', true); return; }
+  setProgress('pptxProgress', 0, false);
+  showDialog('pptxExportDialog');
+}
+async function runPptxChoiceExport(mode, layout = 'visual') {
+  const buttons = ['pptxChoiceTranslation', 'pptxChoiceOcr', 'pptxChoiceFlowingTranslation', 'pptxChoiceFlowingOcr'].map((id) => $(id)).filter(Boolean);
+  buttons.forEach((btn) => { btn.disabled = true; });
+  if ($('exportPptxMode')) $('exportPptxMode').value = mode;
+  if ($('exportPptxLayout')) $('exportPptxLayout').value = layout;
+  const layoutText = layout === 'flowing' ? 'اسلاید ارائه' : 'اسلاید تصویری';
+  const modeText = mode === 'ocr' ? 'متن اصلی / OCR' : 'متن ترجمه‌شده';
+  const label = `در حال ساخت فایل PowerPoint (${layoutText} — ${modeText})…`;
+  try { await runJob(label, () => exportResult('pptx', mode, layout), 'pptxProgress'); }
+  finally { buttons.forEach((btn) => { btn.disabled = false; }); }
+}
+
+// ---------- Models and AI (explicit downloads remain user initiated) ----------
+let engineUpdateNoticeDismissed = false;
+let engineHardwareSummary = null;
+let engineMemorySummary = null;
+let checkingEngineUpdates = false;
+let freeingModelsRam = false;
+let startupUpdateChecked = false;
+
+function outdatedEngines() {
+  return (state.engines || []).filter((engine) => engine.updateAvailable === true);
+}
+
+function formatHardwareSummary() {
+  const hw = engineHardwareSummary || state.engines.find((entry) => entry.hardwareCheck)?.hardwareCheck;
+  if (!hw) return 'وضعیت سخت‌افزار سیستم به همراه هر مدل بررسی می‌شود.';
+  const gpuLabel = hw.gpuName || hw.gpuNames?.[0] || '';
+  const diskGb = hw.freeDiskGb ?? hw.diskFreeGb ?? 0;
+  const cores = Number(hw.cpuCores || 0);
+  let gpuPart;
+  if (hw.hasNvidiaGpu) {
+    gpuPart = `کارت گرافیک NVIDIA${gpuLabel ? ` (${gpuLabel})` : ''}${hw.vramGb ? ` · حافظهٔ گرافیکی: ${hw.vramGb} گیگابایت` : ''} (شتاب‌دهی خودکار GPU فعال)`;
+  } else if (hw.hasGpu) {
+    const backendLabel = hw.gpuBackend === 'mps' ? 'Apple Metal' : hw.gpuBackend === 'directml' ? 'DirectML' : 'GPU';
+    gpuPart = `شتاب‌دهی گرافیکی ${backendLabel}${gpuLabel ? ` (${gpuLabel})` : ''} فعال · بدون کارت گرافیک مجزای NVIDIA`;
+  } else {
+    gpuPart = 'بدون کارت گرافیک مجزای NVIDIA (اجرا روی پردازندهٔ چند‌هسته‌ای CPU)';
+  }
+  const cpuPart = cores > 0 ? ` · پردازنده: ${cores} هسته` : '';
+  const diskPart = diskGb ? ` · فضای خالی دیسک: ${diskGb} گیگابایت` : '';
+  return `وضعیت سیستم شما: ${gpuPart}${cpuPart}${diskPart}`;
+}
+
+function formatRamSummary() {
+  if (!engineMemorySummary || typeof engineMemorySummary.totalRamMb !== 'number') {
+    const loadedFromEngines = (state.engines || []).filter((item) => item.isLoadedInRam).length;
+    return `مدیریت خودکار رم فعال · مدل مقیم در رم: ${loadedFromEngines}`;
+  }
+  const totalMb = Math.round(engineMemorySummary.totalRamMb);
+  const loadedCount = Number(engineMemorySummary.loadedCount || 0);
+  const loadedNames = Array.isArray(engineMemorySummary.loadedEngines) && engineMemorySummary.loadedEngines.length
+    ? ` (${engineMemorySummary.loadedEngines.map((item) => item.name).join('، ')})`
+    : '';
+  return `رم مصرفی برنامه: ${totalMb} مگابایت · مدل مقیم در رم: ${loadedCount}${loadedNames}`;
+}
+
+async function refreshEngineMemory() {
+  try {
+    const mem = await api('/api/engines/memory');
+    if (mem && typeof mem === 'object') {
+      engineMemorySummary = mem;
+      syncEngineUpdateUi();
+    }
+  } catch {}
+}
+
+async function freeModelsRam() {
+  if (freeingModelsRam || state.modelBusy || ocrRunning) return;
+  freeingModelsRam = true;
+  syncEngineUpdateUi();
+  try {
+    const res = await api('/api/engines/unload', jsonOptions('POST', {}));
+    if (Array.isArray(res?.engines)) state.engines = res.engines;
+    if (res?.memory) engineMemorySummary = res.memory;
+    renderModels();
+    const totalMb = Math.round(res?.memory?.totalRamMb ?? 0);
+    const freedMb = Math.round(res?.memory?.freedRamMb ?? 0);
+    const msg = freedMb > 0
+      ? `حافظهٔ رم مدل‌ها آزاد شد (${freedMb} مگابایت آزاد شد · مصرف فعلی: ${totalMb} مگابایت).`
+      : `حافظهٔ رم بهینه شد؛ هیچ مدلی در رم باقی نمانده است (مصرف فعلی: ${totalMb} مگابایت).`;
+    if ($('modelTestResult')) $('modelTestResult').textContent = msg;
+    toast('حافظهٔ رم مدل‌های OCR آزاد شد');
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    freeingModelsRam = false;
+    syncEngineUpdateUi();
+  }
+}
+
+function syncEngineUpdateUi() {
+  const updates = outdatedEngines();
+  const hwEl = $('modelsHardwareSummary');
+  if (hwEl) hwEl.textContent = formatHardwareSummary();
+  const ramEl = $('modelsRamStatus');
+  if (ramEl) ramEl.textContent = formatRamSummary();
+  const freeRamBtn = $('freeModelsRamBtn');
+  if (freeRamBtn) freeRamBtn.disabled = Boolean(freeingModelsRam || state.modelBusy || ocrRunning);
+  const badge = $('modelsBtnBadge');
+  if (badge) {
+    badge.textContent = updates.length ? `${updates.length} جدید` : '';
+    badge.classList.toggle('hidden', updates.length === 0);
+  }
+  const updateAllBtn = $('updateAllModelsBtn');
+  if (updateAllBtn) {
+    updateAllBtn.textContent = updates.length > 1 ? `به‌روزرسانی همه (${updates.length} مدل)` : 'به‌روزرسانی مدل به نسخهٔ جدید';
+    updateAllBtn.disabled = Boolean(state.modelBusy);
+    updateAllBtn.classList.toggle('hidden', updates.length === 0);
+  }
+  const checkBtn = $('checkModelUpdatesBtn');
+  if (checkBtn) checkBtn.disabled = Boolean(state.modelBusy || checkingEngineUpdates);
+  const dialogBanner = $('modelsUpdateBanner');
+  if (dialogBanner) {
+    if (updates.length) {
+      dialogBanner.textContent = updates.map((engine) => `• ${engine.updateSummary || `نسخهٔ جدید برای «${engine.name}» در دسترس است.`}`).join('\n');
+      dialogBanner.classList.remove('hidden');
+    } else {
+      dialogBanner.textContent = '';
+      dialogBanner.classList.add('hidden');
+    }
+  }
+  const topNotice = $('engineUpdateNotice');
+  const topText = $('engineUpdateNoticeText');
+  const topBtn = $('engineUpdateNowBtn');
+  if (topNotice && topText) {
+    if (updates.length && !engineUpdateNoticeDismissed) {
+      topText.textContent = updates.length === 1
+        ? (updates[0].updateSummary || `نسخهٔ جدید مدل OCR «${updates[0].name}» آمادهٔ دریافت است.`)
+        : `نسخهٔ جدید برای ${updates.length} مدل نصب‌شدهٔ OCR (${updates.map((item) => item.name).join('، ')}) منتشر شده است و با یک کلیک قابل دریافت است.`;
+      if (topBtn) {
+        topBtn.textContent = updates.length > 1 ? `به‌روزرسانی همه (${updates.length})` : 'به‌روزرسانی خودکار';
+        topBtn.disabled = Boolean(state.modelBusy);
+      }
+      topNotice.classList.remove('hidden');
+    } else {
+      topNotice.classList.add('hidden');
+    }
+  }
+}
+
+async function confirmHardwareIfNeeded(engine, hwOverride = null, language = '') {
+  const hw = hwOverride || engine.hardwareCheck;
+  if (!hw || hw.compatible !== false) return { ok: true, force: false };
+  const dl = engineDownloadSummary(engine, language);
+  const sizeNotice = dl.detailLabel ? `\n\n📦 کل حجم دانلود خودکار روی این سیستم: ${dl.detailLabel}` : '';
+  const warnings = Array.isArray(hw.warnings) && hw.warnings.length
+    ? hw.warnings.join('\n\n')
+    : `مدل «${engine.name}» به سخت‌افزار قوی‌تری نسبت به سیستم فعلی نیاز دارد.`;
+  const confirmed = await appConfirm(
+    `${warnings}${sizeNotice}\n\nآیا با وجود این محدودیت سخت‌افزاری، باز هم مایل به ادامهٔ نصب و دانلود خودکار این مدل هستید؟`,
+    {
+      title: `هشدار پیش‌نیاز سخت‌افزاری — ${engine.name}`,
+      hint: 'پیشنهاد می‌شود روی سیستم‌های بدون کارت گرافیک NVIDIA از موتورهای سریع (PP-OCR، EasyOCR، Tesseract) یا مدل‌های سازگار با CPU استفاده کنید.',
+      confirmText: 'بله، با همین سیستم نصب شود',
+      cancelText: 'انصراف',
+      variant: 'warning',
+    },
+  );
+  return { ok: Boolean(confirmed), force: true };
+}
+
+function canUninstallEngine(engine) {
+  if (!engine || engine.selectable === false) return false;
+  if (typeof engine.canUninstall === 'boolean') return engine.canUninstall;
+  if (engine.isBuiltinBase || engine.id === 'rapidocr-v6') return false;
+  return Boolean(engine.modelReady || engine.runtimeInstalled);
+}
+
+function renderModels(options = {}) {
+  const container = $('engineCards'); if (!container) return;
+  const dialogEl = $('modelsDialog');
+  const prevContainerScroll = container.scrollTop;
+  const prevDialogScroll = dialogEl ? dialogEl.scrollTop : 0;
+  container.textContent = '';
+  const installedOnly = Boolean($('modelsInstalledOnly')?.checked);
+  const language = $('modelsLanguage')?.value || $('testLanguage')?.value || $('ocrLanguage')?.value || 'eng';
+  if ($('modelsLanguage') && $('modelsLanguage').value !== language) $('modelsLanguage').value = language;
+  if ($('testLanguage') && $('testLanguage').value !== language) $('testLanguage').value = language;
+  const langLabel = OCR_LANGUAGE_LABELS[language] || language;
+  const modelsMode = normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value);
+  const selectable = state.engines.filter((engine) => engine.selectable !== false);
+  const idSetSig = selectable.map((engine) => engine.id).slice().sort().join('|');
+  const sortKey = `${language}::${modelsMode}::${idSetSig}`;
+  const shouldResort = Boolean(options?.resort) || modelsGroupSortCache.key !== sortKey;
+  const rawStandard = selectable.filter((engine) => engine.category !== 'advanced');
+  const rawAdvanced = selectable.filter((engine) => engine.category === 'advanced');
+  let standardEngines;
+  let advancedEngines;
+  let orderedSelectable;
+  if (shouldResort) {
+    standardEngines = sortEnginesBySuitability(rawStandard, modelsMode, language);
+    advancedEngines = sortEnginesBySuitability(rawAdvanced, modelsMode, language);
+    orderedSelectable = sortEnginesBySuitability(selectable, modelsMode, language);
+    modelsGroupSortCache.key = sortKey;
+    modelsGroupSortCache.standardIds = standardEngines.map((engine) => engine.id);
+    modelsGroupSortCache.advancedIds = advancedEngines.map((engine) => engine.id);
+    modelsGroupSortCache.flatIds = orderedSelectable.map((engine) => engine.id);
+  } else {
+    standardEngines = applyCachedEngineOrder(rawStandard, modelsGroupSortCache.standardIds);
+    advancedEngines = applyCachedEngineOrder(rawAdvanced, modelsGroupSortCache.advancedIds);
+    orderedSelectable = applyCachedEngineOrder(selectable, modelsGroupSortCache.flatIds);
+  }
+  if (installedOnly) {
+    standardEngines = standardEngines.filter(canUninstallEngine);
+    advancedEngines = advancedEngines.filter(canUninstallEngine);
+    orderedSelectable = orderedSelectable.filter(canUninstallEngine);
+  }
+  const addGroup = (title, engines, external = false) => {
+    if (!engines.length) return;
+    const group = document.createElement('section'); group.className = 'model-group';
+    const heading = document.createElement('h3'); heading.className = 'model-group-title'; heading.textContent = title; group.appendChild(heading);
+    const cards = document.createElement('div'); cards.className = 'model-group-grid'; group.appendChild(cards); container.appendChild(group);
+    engines.forEach((engine) => {
+      const suit = engineSuitability(engine, modelsMode, language);
+      const execMeta = resolveEngineExecMeta(engine);
+      const isBusyThis = state.modelBusy === engine.id;
+      const card = document.createElement('section'); card.className = `engine-card${external ? ' external-engine' : ''}${isBusyThis ? ' is-busy-card' : ''}`;
+      card.dataset.executionMode = execMeta.mode;
+      card.dataset.engineId = engine.id;
+      if (!external) card.dataset.suitability = suit.tier;
+      const head = document.createElement('div'); head.className = 'engine-card-head';
+      const titleEl = document.createElement('h3'); titleEl.textContent = engine.name;
+      const badges = document.createElement('div'); badges.className = 'engine-badges';
+      if (!external) {
+        const suitChip = document.createElement('span');
+        suitChip.className = `engine-chip is-suit-${suit.tier}`;
+        suitChip.textContent = `${suit.cardBadge} (${langLabel} · ${PAGE_MODE_LABELS[modelsMode] || modelsMode})`;
+        badges.appendChild(suitChip);
+      }
+      const supported = (engine.languages || []).includes(language);
+      const effectivePrepareLang = supported ? language : (engine.languages?.[0] || 'eng');
+      const ready = supported
+        ? Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(language))
+        : Boolean(engine.runtimeInstalled && (engine.readyLanguages || []).includes(effectivePrepareLang));
+      const dl = engineDownloadSummary(engine, effectivePrepareLang);
+      if (ready && supported) {
+        const chip = document.createElement('span'); chip.className = 'engine-chip is-ready'; chip.textContent = 'آمادهٔ استفاده'; badges.appendChild(chip);
+      }
+      if (engine.installedVersion) {
+        const chip = document.createElement('span'); chip.className = 'engine-chip'; chip.dir = 'ltr'; chip.textContent = `v${engine.installedVersion}`; badges.appendChild(chip);
+      }
+      if (engine.updateAvailable) {
+        const chip = document.createElement('span'); chip.className = 'engine-chip is-update';
+        chip.textContent = engine.latestVersion ? `نسخهٔ جدید: ${engine.latestVersion}` : 'نسخهٔ جدید موجود است';
+        badges.appendChild(chip);
+      }
+      if (engine.requiresNvidiaGpu) {
+        const chip = document.createElement('span'); chip.className = 'engine-chip is-gpu';
+        chip.textContent = engine.minVramGb ? `NVIDIA ≥ ${engine.minVramGb}GB` : 'نیازمند NVIDIA GPU';
+        badges.appendChild(chip);
+      } else if (engine.isolated) {
+        const chip = document.createElement('span'); chip.className = 'engine-chip'; chip.textContent = 'محیط ایزولهٔ خودکار'; badges.appendChild(chip);
+      }
+      head.append(titleEl, badges);
+      const family = document.createElement('div'); family.className = 'hint';
+      family.textContent = dl.fullLabel
+        ? `${engine.family} · کل حجم دانلود کامل روی این سیستم: ${dl.fullLabel}`
+        : engine.family;
+      const description = document.createElement('p');
+      description.textContent = external
+        ? engine.description
+        : `${engine.description} (${execMeta.descriptionNote || 'اجرا روی سیستم شما به‌صورت آفلاین'})`;
+      const suitReason = !external && suit.reason ? (() => { const el = document.createElement('div'); el.className = 'engine-suit-reason'; el.textContent = `عملکرد در «${langLabel} + ${PAGE_MODE_LABELS[modelsMode] || modelsMode}»: ${suit.reason}`; return el; })() : null;
+      const status = document.createElement('div'); status.className = 'engine-status';
+      if (suitReason) card.append(head, family, description, suitReason, status);
+      else card.append(head, family, description, status);
+      if (external) {
+        status.textContent = 'اجرای جداگانه · آداپتور مستقیم OCR کمیک ندارد';
+        const requirements = document.createElement('div'); requirements.className = 'engine-limit'; requirements.textContent = engine.requirements || '';
+        const limitations = document.createElement('div'); limitations.textContent = engine.limitations || '';
+        const buttons = document.createElement('div'); buttons.className = 'card-buttons';
+        const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'دانلود / راهنمای رسمی';
+        buttons.appendChild(guide); card.append(requirements, limitations, buttons);
+      } else {
+        const isBuiltinBase = Boolean(engine.isBuiltinBase || engine.id === 'rapidocr-v6');
+        status.textContent = state.modelBusy === engine.id
+          ? `در حال انجام عملیات روی مدل${dl.totalLabel ? ` (کل حجم: ${dl.totalLabel})` : ''}؛ لطفاً صبر کنید…`
+          : !supported
+            ? `این موتور زبان «${langLabel}» را پشتیبانی نمی‌کند (زبان‌های مورد پشتیبانی: ${(engine.languages || []).map((l) => OCR_LANGUAGE_LABELS[l] || l).join('، ')}).${!ready && dl.detailLabel ? ` کل حجم دانلود خودکار: ${dl.detailLabel}.` : ''}`
+            : !engine.runtimeInstalled
+              ? `آمادهٔ نصب خودکار با یک کلیک · کل حجم دانلود خودکار: ${dl.detailLabel || 'محاسبهٔ خودکار'}.`
+              : ready
+                ? (isBuiltinBase ? 'موتور پایهٔ پیش‌فرض برنامه — آماده و آفلاین.' : 'مدل زبان انتخاب‌شده آماده و آفلاین است.')
+                : `ابزار اجرا نصب است؛ برای دریافت خودکار فایل زبان انتخاب‌شده دکمهٔ زیر را بزنید (کل حجم دانلود: ${dl.detailLabel}).`;
+        if (engine.updateAvailable && engine.updateSummary) {
+          const updateMsg = document.createElement('div'); updateMsg.className = 'engine-update-msg';
+          updateMsg.textContent = engine.updateSummary;
+          card.appendChild(updateMsg);
+        }
+        if (engine.hardwareCheck && engine.hardwareCheck.compatible === false && Array.isArray(engine.hardwareCheck.warnings) && engine.hardwareCheck.warnings.length) {
+          const hwWarn = document.createElement('div'); hwWarn.className = 'engine-hw-warn';
+          hwWarn.textContent = engine.hardwareCheck.warnings[0];
+          card.appendChild(hwWarn);
+        }
+        if (engine.requirements) { const requirements = document.createElement('div'); requirements.className = 'engine-limit'; requirements.textContent = engine.requirements; card.appendChild(requirements); }
+        if (isBusyThis) {
+          const progWrap = document.createElement('div');
+          progWrap.className = 'engine-card-progress';
+          const progHead = document.createElement('div');
+          progHead.className = 'engine-card-progress-head';
+          const progTxt = document.createElement('span');
+          progTxt.className = 'engine-card-progress-text';
+          progTxt.textContent = modelCurrentLabel || `در حال آماده‌سازی ${engine.name}…`;
+          const progPct = document.createElement('span');
+          progPct.className = 'engine-card-progress-pct';
+          const isDet = typeof modelCurrentProgress === 'number' && Number.isFinite(modelCurrentProgress);
+          const pctNum = isDet ? Math.round(Math.max(0, Math.min(1, modelCurrentProgress)) * 100) : 30;
+          progPct.textContent = isDet ? `${pctNum}%` : '…';
+          progHead.append(progTxt, progPct);
+          const bar = document.createElement('div');
+          bar.className = `bar${isDet ? '' : ' indeterminate'}`;
+          bar.setAttribute('role', 'progressbar');
+          bar.setAttribute('aria-label', `پیشرفت ${engine.name}`);
+          bar.setAttribute('aria-valuemin', '0');
+          bar.setAttribute('aria-valuemax', '100');
+          if (isDet) bar.setAttribute('aria-valuenow', String(pctNum));
+          const fill = document.createElement('div');
+          fill.className = 'fill engine-card-progress-fill';
+          fill.style.width = `${pctNum}%`;
+          bar.appendChild(fill);
+          progWrap.append(progHead, bar);
+          card.appendChild(progWrap);
+        }
+        const buttons = document.createElement('div'); buttons.className = 'card-buttons';
+        const canPrepare = supported || Boolean(engine.isolated && engine.languages?.length);
+        const prepSizeSuffix = dl.totalLabel ? ` (کل حجم دانلود: ${dl.totalLabel})` : '';
+        const prepareLabel = ready
+          ? `بررسی / آماده‌سازی مجدد${dl.fullLabel ? ` (${dl.fullLabel})` : ''}`
+          : `آماده‌سازی / دانلود خودکار${prepSizeSuffix}`;
+        const prepare = makeButton(prepareLabel, () => {
+          if (!supported && engine.languages?.length) {
+            const firstLang = engine.languages[0];
+            if ($('modelsLanguage')) $('modelsLanguage').value = firstLang;
+            if ($('testLanguage')) $('testLanguage').value = firstLang;
+          }
+          downloadEngine(engine, { languageOverride: effectivePrepareLang }).catch(() => {});
+        });
+        prepare.classList.toggle('primary', !ready && !engine.updateAvailable && canPrepare);
+        prepare.disabled = Boolean(state.modelBusy || !canPrepare);
+        buttons.appendChild(prepare);
+        if (engine.updateAvailable || engine.runtimeInstalled) {
+          const updateBtn = makeButton(engine.updateAvailable ? 'به‌روزرسانی به نسخهٔ جدید' : 'به‌روزرسانی مدل', () => updateEngine(engine));
+          if (engine.updateAvailable) updateBtn.classList.add('primary');
+          updateBtn.disabled = Boolean(state.modelBusy);
+          buttons.appendChild(updateBtn);
+        }
+        const test = makeButton('آزمایش روی تصویر', () => testEngine(engine.id));
+        test.disabled = Boolean(state.modelBusy || !supported);
+        buttons.appendChild(test);
+        if (canUninstallEngine(engine)) {
+          const deleteBtn = makeButton('حذف مدل', () => uninstallEngine(engine).catch(() => {}));
+          deleteBtn.classList.add('danger', 'engine-delete-btn');
+          deleteBtn.disabled = Boolean(state.modelBusy);
+          buttons.appendChild(deleteBtn);
+        }
+        if (engine.repository) { const guide = document.createElement('a'); guide.className = 'bt'; guide.href = engine.repository; guide.target = '_blank'; guide.rel = 'noopener noreferrer'; guide.textContent = 'راهنمای رسمی'; buttons.appendChild(guide); }
+        card.appendChild(buttons);
+      }
+      cards.appendChild(card);
+    });
+  };
+  if (installedOnly && !orderedSelectable.length) {
+    const emptyBox = document.createElement('div');
+    emptyBox.className = 'models-empty-installed';
+    const emptyMsg = document.createElement('p');
+    emptyMsg.textContent = 'در حال حاضر هیچ مدل اضافه‌ای روی دیسک نصب نشده است (فقط موتور پایهٔ سبک برنامه فعال است).';
+    const showAllBtn = makeButton('نمایش همهٔ ۱۴ مدل', () => {
+      if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = false;
+      renderModels();
+    });
+    emptyBox.append(emptyMsg, showAllBtn);
+    container.appendChild(emptyBox);
+  } else if (rawAdvanced.length) {
+    addGroup('موتورهای سریع و سبک کمیک — نصب خودکار و مناسب همهٔ سیستم‌ها', standardEngines);
+    addGroup('مدل‌های هوش مصنوعی پیشرفته — نصب خودکار در محیط ایزوله', advancedEngines);
+  } else {
+    addGroup('قابل اجرا در برنامه — خروجی موقعیت‌دار', orderedSelectable);
+  }
+  if (!installedOnly) {
+    addGroup('دانلود و راه‌اندازی جداگانه — فعلاً خارج از OCR داخلی', state.engines.filter((engine) => engine.selectable === false), true);
+  }
+  if (!shouldResort) {
+    container.scrollTop = prevContainerScroll;
+    if (dialogEl) dialogEl.scrollTop = prevDialogScroll;
+  }
+  syncEngineUpdateUi();
+}
+async function downloadEngine(engine, options = {}) {
+  if (state.modelBusy) return false;
+  const rawLang = options.languageOverride || $('modelsLanguage')?.value || $('testLanguage')?.value || $('ocrLanguage')?.value || 'eng';
+  const language = (engine.languages || []).includes(rawLang)
+    ? rawLang
+    : (engine.isolated && engine.languages?.length ? engine.languages[0] : rawLang);
+  if (!engine.languages.includes(language)) { toast('این موتور زبان انتخاب‌شده را پشتیبانی نمی‌کند', true); return false; }
+  if (language !== rawLang) {
+    if ($('modelsLanguage')) $('modelsLanguage').value = language;
+    if ($('testLanguage')) $('testLanguage').value = language;
+  }
+  const precheck = await confirmHardwareIfNeeded(engine, null, language);
+  if (!precheck.ok) return false;
+  ++engineMutationSeq;
+  modelFromOcrDialog = Boolean(options.fromOcrDialog);
+  const controller = new AbortController();
+  modelAbortController = controller; modelCancelledByUser = false;
+  state.modelBusy = engine.id;
+  const dl = engineDownloadSummary(engine, language);
+  const dlTag = dl.totalLabel ? ` — کل حجم دانلود: ${dl.totalLabel}` : '';
+  const startMsg = `در حال دانلود و آماده‌سازی خودکار ${engine.name} (${language})${dlTag}…`;
+  syncModelProgressUi(null, true, startMsg);
+  if ($('modelTestResult')) $('modelTestResult').textContent = startMsg;
+  if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = startMsg;
+  appendLocalActivity(`آماده‌سازی خودکار ${engine.name} برای ${language} آغاز شد${dlTag}`);
+  renderModels(); updateOcrEngineStatus();
+  syncModelProgressUi(null, true, startMsg);
+  scheduleActivityPoll(false);
+  const performRequest = (forceFlag) => api(`/api/engines/${engine.id}/download`, {
+    ...jsonOptions('POST', forceFlag ? { language, force: true } : { language }),
+    signal: controller.signal,
+  });
+  let succeeded = false;
+  try {
+    let result;
+    try {
+      result = await performRequest(precheck.force);
+    } catch (firstErr) {
+      if (firstErr?.hardwareWarning) {
+        syncModelProgressUi(0, false, '');
+        const retryConfirm = await confirmHardwareIfNeeded(engine, firstErr.hardwareCheck, language);
+        if (!retryConfirm.ok) {
+          if ($('modelTestResult')) $('modelTestResult').textContent = 'نصب مدل به دلیل پیش‌نیاز سخت‌افزاری لغو شد.';
+          if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = 'نصب مدل به درخواست شما لغو شد.';
+          return false;
+        }
+        syncModelProgressUi(null, true, startMsg);
+        result = await performRequest(true);
+      } else {
+        throw firstErr;
+      }
+    }
+    ++engineMutationSeq;
+    state.engines = result.engines;
+    if (result?.memory) engineMemorySummary = result.memory;
+    succeeded = true;
+    syncModelProgressUi(1, false, `مدل ${engine.name} آماده شد.`);
+    const doneMsg = `مدل ${engine.name} برای زبان ${language} به‌طور کامل نصب و آماده شد.`;
+    if ($('modelTestResult')) $('modelTestResult').textContent = doneMsg;
+    if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = doneMsg;
+    if ($('jobStatus') && !jobBusy) $('jobStatus').textContent = doneMsg;
+    appendLocalActivity(`مدل ${engine.name} آماده شد`, 'success');
+    updateEngineOptions();
+    toast(`مدل ${engine.name} آمادهٔ استفاده است`);
+    return true;
+  } catch (error) {
+    syncModelProgressUi(0, false, '');
+    if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      const cancelMsg = 'عملیات آماده‌سازی مدل به درخواست شما لغو شد.';
+      if ($('modelTestResult')) $('modelTestResult').textContent = cancelMsg;
+      if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = cancelMsg;
+      appendLocalActivity('آماده‌سازی مدل لغو شد', 'warning');
+      toast('آماده‌سازی مدل متوقف شد');
+    } else {
+      const failMsg = `آماده‌سازی ناموفق بود:\n${error.message}\n\nاتصال اینترنت و فضای دیسک را بررسی کنید.`;
+      if ($('modelTestResult')) $('modelTestResult').textContent = failMsg;
+      if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = failMsg;
+      appendLocalActivity(`آماده‌سازی ناموفق بود: ${error.message}`, 'error');
+      toast(error.message, true);
+    }
+    return false;
+  } finally {
+    if (modelAbortController === controller) modelAbortController = null;
+    state.modelBusy = null;
+    pollActivity().catch(() => {});
+    scheduleActivityPoll(false);
+    syncModelProgressUi(succeeded ? 1 : 0, false, '');
+    modelFromOcrDialog = false;
+    modelCurrentProgress = null;
+    modelCurrentLabel = '';
+    dismissJobCancelModal('model');
+    renderModels();
+    updateOcrEngineStatus();
+  }
+}
+async function updateEngine(engine, options = {}) {
+  if (state.modelBusy) return false;
+  const targetLang = options.languageOverride || (engine.languages?.includes($('testLanguage')?.value) ? $('testLanguage').value : (engine.languages?.[0] || 'eng'));
+  ++engineMutationSeq;
+  modelFromOcrDialog = Boolean(options.fromOcrDialog);
+  const controller = new AbortController();
+  modelAbortController = controller; modelCancelledByUser = false;
+  state.modelBusy = engine.id;
+  const batchPrefix = options.batchIndex && options.batchTotal > 1 ? `(${options.batchIndex}/${options.batchTotal}) ` : '';
+  const startMsg = `${batchPrefix}در حال دریافت و نصب نسخهٔ جدید ${engine.name}…`;
+  syncModelProgressUi(null, true, startMsg);
+  if ($('modelTestResult')) $('modelTestResult').textContent = startMsg;
+  if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = startMsg;
+  appendLocalActivity(`به‌روزرسانی ${engine.name} آغاز شد`);
+  renderModels(); updateOcrEngineStatus();
+  syncModelProgressUi(null, true, startMsg);
+  scheduleActivityPoll(false);
+  let succeeded = false;
+  try {
+    const result = await api(`/api/engines/${engine.id}/update`, {
+      ...jsonOptions('POST', { language: targetLang }),
+      signal: controller.signal,
+    });
+    ++engineMutationSeq;
+    state.engines = result.engines;
+    if (result?.memory) engineMemorySummary = result.memory;
+    succeeded = true;
+    syncModelProgressUi(1, false, `مدل ${engine.name} به‌روزرسانی شد.`);
+    const updatedEntry = state.engines.find((entry) => entry.id === engine.id);
+    const verLabel = updatedEntry?.installedVersion ? ` (نسخهٔ ${updatedEntry.installedVersion})` : '';
+    const doneMsg = `مدل ${engine.name}${verLabel} با موفقیت به آخرین نسخه به‌روزرسانی شد.`;
+    if ($('modelTestResult')) $('modelTestResult').textContent = doneMsg;
+    if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = doneMsg;
+    if ($('jobStatus') && !jobBusy) $('jobStatus').textContent = doneMsg;
+    appendLocalActivity(doneMsg, 'success');
+    updateEngineOptions();
+    if (!options.batchSilentToast) toast(`مدل ${engine.name} به‌روزرسانی شد`);
+    return true;
+  } catch (error) {
+    syncModelProgressUi(0, false, '');
+    if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      const cancelMsg = 'به‌روزرسانی مدل به درخواست شما لغو شد.';
+      if ($('modelTestResult')) $('modelTestResult').textContent = cancelMsg;
+      appendLocalActivity(cancelMsg, 'warning');
+      toast('به‌روزرسانی مدل متوقف شد');
+    } else {
+      const failMsg = `به‌روزرسانی ${engine.name} ناموفق بود:\n${error.message}`;
+      if ($('modelTestResult')) $('modelTestResult').textContent = failMsg;
+      if (options.fromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = failMsg;
+      appendLocalActivity(`به‌روزرسانی ${engine.name} ناموفق بود: ${error.message}`, 'error');
+      toast(error.message, true);
+    }
+    return false;
+  } finally {
+    if (modelAbortController === controller) modelAbortController = null;
+    state.modelBusy = null;
+    pollActivity().catch(() => {});
+    scheduleActivityPoll(false);
+    syncModelProgressUi(succeeded ? 1 : 0, false, '');
+    modelFromOcrDialog = false;
+    modelCurrentProgress = null;
+    modelCurrentLabel = '';
+    dismissJobCancelModal('model');
+    renderModels();
+    updateOcrEngineStatus();
+  }
+}
+async function uninstallEngine(engine) {
+  if (state.modelBusy || !engine) return false;
+  const confirmed = await appConfirm(
+    `آیا از حذف کامل مدل «${engine.name}» از روی سیستم مطمئن هستید؟\n\nتمام فایل‌های وزن، بسته‌های کمکی و محیط اجرای این مدل از دیسک پاک می‌شوند تا فضای سیستم شما آزاد شود.`,
+    {
+      title: `حذف کامل مدل — ${engine.name}`,
+      hint: 'هر زمان دوباره به این مدل نیاز داشتید، می‌توانید آن را با یک کلیک دانلود و نصب کنید.',
+      confirmText: 'حذف کامل مدل',
+      cancelText: 'انصراف',
+      danger: true,
+    },
+  );
+  if (!confirmed) return false;
+  ++engineMutationSeq;
+  state.modelBusy = engine.id;
+  const startMsg = `در حال آزادسازی رم و حذف کامل فایل‌های مدل ${engine.name} از روی دیسک…`;
+  syncModelProgressUi(null, true, startMsg);
+  if ($('modelTestResult')) $('modelTestResult').textContent = startMsg;
+  appendLocalActivity(`حذف مدل ${engine.name} آغاز شد`);
+  renderModels();
+  updateOcrEngineStatus();
+  scheduleActivityPoll(false);
+  let succeeded = false;
+  try {
+    const result = await api(`/api/engines/${encodeURIComponent(engine.id)}/uninstall`, jsonOptions('POST', {}));
+    ++engineMutationSeq;
+    if (Array.isArray(result?.engines)) state.engines = result.engines;
+    if (result?.memory) engineMemorySummary = result.memory;
+    if (result?.hardware) engineHardwareSummary = result.hardware;
+    succeeded = true;
+    const freedMb = Number(result?.freedMb || 0);
+    const freedText = freedMb >= 1024
+      ? ` (${(freedMb / 1024).toFixed(2)} گیگابایت فضا آزاد شد)`
+      : freedMb >= 1
+        ? ` (${Math.round(freedMb)} مگابایت فضا آزاد شد)`
+        : '';
+    const doneMsg = `مدل «${engine.name}» به‌طور کامل از روی سیستم حذف شد${freedText}.`;
+    if ($('modelTestResult')) $('modelTestResult').textContent = doneMsg;
+    if ($('jobStatus') && !jobBusy) $('jobStatus').textContent = doneMsg;
+    appendLocalActivity(doneMsg, 'success');
+    updateEngineOptions();
+    toast(`مدل ${engine.name} حذف شد${freedText}`);
+    return true;
+  } catch (error) {
+    const failMsg = `حذف مدل ناموفق بود:\n${error.message}`;
+    if ($('modelTestResult')) $('modelTestResult').textContent = failMsg;
+    appendLocalActivity(`حذف مدل ناموفق بود: ${error.message}`, 'error');
+    toast(error.message, true);
+    return false;
+  } finally {
+    state.modelBusy = null;
+    pollActivity().catch(() => {});
+    scheduleActivityPoll(false);
+    syncModelProgressUi(succeeded ? 1 : 0, false, '');
+    modelCurrentProgress = null;
+    modelCurrentLabel = '';
+    renderModels();
+    updateOcrEngineStatus();
+    syncEngineUpdateUi();
+  }
+}
+async function updateAllEngines() {
+  if (state.modelBusy) return;
+  const targets = outdatedEngines();
+  if (!targets.length) { toast('همهٔ مدل‌های نصب‌شده به‌روز هستند'); return; }
+  let succeeded = 0;
+  for (let i = 0; i < targets.length; i += 1) {
+    const engine = targets[i];
+    const ok = await updateEngine(engine, {
+      batchSilentToast: targets.length > 1,
+      batchIndex: i + 1,
+      batchTotal: targets.length,
+    });
+    if (!ok) break;
+    succeeded += 1;
+  }
+  if (targets.length > 1 && succeeded === targets.length) {
+    toast(`همهٔ ${succeeded} مدل OCR با موفقیت به‌روزرسانی شدند`);
+  }
+}
+async function checkEngineUpdates({ force = false, silent = false } = {}) {
+  if (checkingEngineUpdates || state.modelBusy) return;
+  const seqAtStart = engineMutationSeq;
+  checkingEngineUpdates = true;
+  syncEngineUpdateUi();
+  if (!silent) {
+    syncModelProgressUi(null, true, 'در حال بررسی انتشار نسخهٔ جدید برای مدل‌های نصب‌شده…');
+    if ($('modelTestResult')) $('modelTestResult').textContent = 'در حال بررسی انتشار نسخهٔ جدید برای مدل‌های نصب‌شده…';
+  }
+  try {
+    const report = await api('/api/engines/check-updates', jsonOptions('POST', { force }));
+    // Ignore stale check-updates responses if a model download/update started or finished meanwhile.
+    if (seqAtStart !== engineMutationSeq || state.modelBusy) return;
+    if (Array.isArray(report?.engines)) state.engines = report.engines;
+    if (report?.hardware) engineHardwareSummary = report.hardware;
+    if (report?.memory) engineMemorySummary = report.memory;
+    const updates = outdatedEngines();
+    if (updates.length && force) engineUpdateNoticeDismissed = false;
+    updateEngineOptions();
+    renderModels();
+    if (!silent) {
+      syncModelProgressUi(1, false, '');
+      const summary = updates.length
+        ? `نسخهٔ جدید برای ${updates.length} مدل در دسترس است:\n${updates.map((item) => `• ${item.updateSummary || item.name}`).join('\n')}`
+        : 'بررسی انجام شد؛ همهٔ مدل‌های نصب‌شدهٔ شما آخرین نسخه هستند.';
+      if ($('modelTestResult')) $('modelTestResult').textContent = summary;
+      toast(updates.length ? `نسخهٔ جدید برای ${updates.length} مدل OCR پیدا شد` : 'همهٔ مدل‌های نصب‌شده به‌روز هستند');
+    }
+  } catch (error) {
+    if (!silent && seqAtStart === engineMutationSeq) {
+      syncModelProgressUi(0, false, '');
+      if ($('modelTestResult')) $('modelTestResult').textContent = `بررسی نسخهٔ جدید ممکن نشد:\n${error.message}`;
+      toast(error.message, true);
+    }
+  } finally {
+    checkingEngineUpdates = false;
+    if (!state.modelBusy && !silent) syncModelProgressUi(modelCurrentProgress === 1 ? 1 : 0, false, '');
+    syncEngineUpdateUi();
+  }
+}
+async function testEngine(engineId) {
+  if (state.modelBusy) return; const item = selectedImages()[0] || sortedImages()[0]; if (!item) { toast('ابتدا یک تصویر وارد کنید', true); return; }
+  const controller = new AbortController();
+  modelAbortController = controller; modelCancelledByUser = false;
+  state.modelBusy = engineId; scheduleActivityPoll(true); setProgress('modelProgress', null, true); renderModels(); $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
+  try {
+    const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value, page_mode: normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value) }), signal: controller.signal });
+    if (result?.memory) engineMemorySummary = result.memory;
+    setProgress('modelProgress', 1, false);
+    $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => {
+      const pad = ' '.repeat(Math.max(0, Math.min(24, Number(block.sourceIndent) || 0)));
+      const firstExtra = Number(block.firstLineIndent) >= 0.75 ? '  ' : '';
+      const hangExtra = Number(block.hangingIndent) >= 0.75 ? '  ' : '';
+      const roleTag = block.pageRole === 'heading' ? '[تیتر] ' : '';
+      const styleTag = [block.bold ? 'B' : '', block.italic ? 'I' : ''].filter(Boolean).join('+');
+      const suffix = `  (${block.conf}%${styleTag ? ` · ${styleTag}` : ''})`;
+      const lines = String(block.text || '').split(/\r?\n/);
+      return lines.map((ln, idx) => (idx === 0 ? `${pad}${firstExtra}${roleTag}${ln}` : `${pad}${hangExtra}${ln}`)).join('\n') + suffix;
+    }).join('\n') : 'متنی تشخیص داده نشد.';
+    appendLocalActivity('آزمایش موتور تمام شد', 'success');
+  }
+  catch (error) {
+    setProgress('modelProgress', 0, false);
+    if (modelCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      $('modelTestResult').textContent = 'آزمایش موتور به درخواست شما لغو شد.';
+      appendLocalActivity('آزمایش موتور لغو شد', 'warning');
+    } else {
+      $('modelTestResult').textContent = error.message; appendLocalActivity(`آزمایش موتور ناموفق بود: ${error.message}`, 'error');
+    }
+  }
+  finally {
+    if (modelAbortController === controller) modelAbortController = null;
+    state.modelBusy = null;
+    pollActivity().catch(() => {});
+    scheduleActivityPoll(false);
+    dismissJobCancelModal('model');
+    renderModels();
+  }
+}
+const AI_PROVIDER_IDS = ['gemini', 'openai', 'openrouter', 'avalai'];
+const AI_FALLBACKS = {
+  gemini: { label: 'Google Gemini', model: 'gemini-2.5-flash', defaultModel: 'gemini-2.5-flash', base_url: 'https://generativelanguage.googleapis.com/v1beta', keyUrl: 'https://aistudio.google.com/apikey', keyLabel: 'ساخت کلید در Google AI Studio', profiles: [] },
+  openai: { label: 'OpenAI', model: 'gpt-4o-mini', defaultModel: 'gpt-4o-mini', base_url: 'https://api.openai.com/v1', keyUrl: 'https://platform.openai.com/api-keys', keyLabel: 'ساخت کلید در OpenAI', profiles: [] },
+  openrouter: { label: 'OpenRouter', model: 'openai/gpt-4o-mini', defaultModel: 'openai/gpt-4o-mini', base_url: 'https://openrouter.ai/api/v1', keyUrl: 'https://openrouter.ai/settings/keys', keyLabel: 'ساخت کلید در OpenRouter', profiles: [] },
+  avalai: { label: 'AvalAI', model: 'gpt-6-luna', defaultModel: 'gpt-6-luna', base_url: 'https://api.avalai.ir/v1', keyUrl: 'https://docs.avalai.ir/en/quickstart', keyLabel: 'راهنمای AvalAI', profiles: [] },
+};
+let aiEditorProvider = 'free';
+let aiEditorProfiles = [];
+let aiProfileSerial = 0;
+const aiEditorDrafts = new Map();
+function aiInfo(provider = aiEditorProvider) { return state.ai?.providers?.[provider] || AI_FALLBACKS[provider] || AI_FALLBACKS.avalai; }
+function makeAiProfile(profile = {}, index = 0) {
+  aiProfileSerial += 1;
+  return {
+    id: String(profile.id || `api-${Date.now().toString(36)}-${aiProfileSerial}`),
+    name: String(profile.name || ''), hasApiKey: profile.hasApiKey === true,
+    apiKey: String(profile.apiKey || ''), timeout_seconds: String(profile.timeout_seconds ?? 90), retry_count: String(profile.retry_count ?? 0), retry_wait_seconds: String(profile.retry_wait_seconds ?? 20), source_limit: String(profile.source_limit ?? 1000),
+  };
+}
+function captureAiProvider() {
+  if (!AI_PROVIDER_IDS.includes(aiEditorProvider)) return;
+  aiEditorDrafts.set(aiEditorProvider, {
+    model: $('aiModel').value.trim(), base_url: $('aiBaseUrl').value.trim(), response_mode: $('aiResponseMode').value,
+    profiles: aiEditorProfiles.map((profile) => ({ ...profile })),
+  });
+}
+function syncAiExecUi() {
+  const baseUrlVal = aiEditorProvider === 'free' ? '' : ($('aiBaseUrl')?.value ?? '');
+  const meta = resolveTranslationExecMeta(aiEditorProvider, baseUrlVal);
+  applyExecBadgeElement($('aiExecBadge'), meta.mode, meta.badge);
+  const banner = $('aiExecBanner');
+  if (banner) {
+    banner.textContent = meta.banner;
+    banner.dataset.execMode = meta.mode;
+    banner.classList.toggle('is-local', meta.mode === 'local');
+    banner.classList.toggle('is-online', meta.mode !== 'local');
+  }
+}
+function updateAiProviderUi() {
+  const info = aiInfo();
+  $('aiKeyHelp').href = info.keyUrl;
+  $('aiKeyHelp').textContent = info.keyLabel;
+  $('aiBaseUrlField').classList.toggle('hidden', aiEditorProvider === 'gemini');
+  $('aiModel').placeholder = info.defaultModel || info.model || '';
+  syncAiExecUi();
+}
+function renderAiProfiles() {
+  const container = $('aiProfiles');
+  container.textContent = '';
+  aiEditorProfiles.forEach((profile, index) => {
+    const row = document.createElement('div');
+    row.className = 'ai-profile-row'; row.dataset.profileId = profile.id;
+    const name = document.createElement('input');
+    name.type = 'text'; name.className = 'ai-profile-name'; name.value = profile.name;
+    name.placeholder = `API ${index + 1}`; name.setAttribute('aria-label', `نام دلخواه API ${index + 1}`);
+    name.addEventListener('input', () => { profile.name = name.value; });
+    const key = document.createElement('input');
+    key.type = 'password'; key.className = 'ai-profile-key'; key.dir = 'ltr';
+    key.autocomplete = 'off'; key.spellcheck = false; key.value = profile.apiKey;
+    key.placeholder = profile.hasApiKey ? 'کلید ذخیره شده؛ برای تغییر، کلید تازه بدهید' : 'کلید API';
+    key.setAttribute('aria-label', `کلید API ${index + 1}`);
+    key.addEventListener('input', () => { profile.apiKey = key.value; $('aiStatus').textContent = ''; });
+    const test = document.createElement('button');
+    test.type = 'button'; test.className = 'bt ai-profile-test'; test.textContent = 'تست';
+    test.title = 'تست همین کلید و مدل بدون ارسال متن کمیک';
+    test.setAttribute('aria-label', `تست اتصال API ${index + 1}`);
+    const remove = document.createElement('button');
+    remove.type = 'button'; remove.className = 'bt danger ai-profile-remove'; remove.textContent = '×';
+    remove.title = 'حذف این API'; remove.setAttribute('aria-label', `حذف API ${index + 1}`);
+    remove.disabled = aiEditorProfiles.length === 1;
+    remove.addEventListener('click', () => {
+      aiEditorProfiles.splice(index, 1);
+      if (!aiEditorProfiles.length) aiEditorProfiles.push(makeAiProfile());
+      renderAiProfiles();
+    });
+    const status = document.createElement('span');
+    status.className = 'ai-profile-status'; status.setAttribute('role', 'status');
+    test.addEventListener('click', async () => {
+      const provider = aiEditorProvider;
+      const profileId = profile.id;
+      const model = $('aiModel').value.trim();
+      const baseUrl = $('aiBaseUrl').value.trim();
+      if (!profile.apiKey.trim() && !profile.hasApiKey) {
+        status.textContent = 'ابتدا کلید API را وارد کنید.'; key.focus(); return;
+      }
+      test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی…'; $('copyAiError').classList.add('hidden'); setProgress('aiProgress', null, true);
+      try {
+        await saveAiSettings({ quiet: true });
+        setProgress('aiProgress', 0.45, true);
+        const result = await api('/api/ai-settings/test', jsonOptions('POST', {
+          provider, profile_id: profileId, model, base_url: baseUrl,
+        }));
+        setProgress('aiProgress', 1, false);
+        $('aiStatus').textContent = result.message;
+        const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
+        if (currentRow) currentRow.querySelector('.ai-profile-status').textContent = 'اتصال برقرار است ✓';
+      } catch (error) {
+        setProgress('aiProgress', 0, false);
+        $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden');
+        const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
+        (currentRow?.querySelector('.ai-profile-status') || status).textContent = error.message;
+      } finally {
+        const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
+        const currentTest = currentRow?.querySelector('.ai-profile-test') || test;
+        currentTest.disabled = false; currentTest.textContent = 'تست';
+      }
+    });
+    const options = document.createElement('div'); options.className = 'ai-profile-options';
+    const addSetting = (labelText, field, min, max) => {
+      const label = document.createElement('label'); label.textContent = labelText;
+      const input = document.createElement('input'); input.type = 'number'; input.dir = 'ltr';
+      input.className = `ai-profile-${field}`; input.min = String(min); input.max = String(max); input.step = '1';
+      input.value = profile[field]; input.setAttribute('aria-label', `${labelText} API ${index + 1}`);
+      input.addEventListener('input', () => { profile[field] = input.value; }); label.appendChild(input); options.appendChild(label);
+    };
+    addSetting('زمان انتظار (ثانیه، ۵ تا ۶۰۰)', 'timeout_seconds', 5, 600);
+    addSetting('تکرار اضافی (۰ تا ۵)', 'retry_count', 0, 5);
+    addSetting('فاصلهٔ تلاش مجدد (ثانیه، ۰ تا ۳۰۰)', 'retry_wait_seconds', 0, 300);
+    addSetting('سقف نویسهٔ کل درخواست AI (۱ تا ۱۰۰۰۰۰)', 'source_limit', 1, 100000);
+    row.append(name, key, test, remove, options, status); container.appendChild(row);
+  });
+}
+function showAiProvider(provider, capture = true) {
+  if (capture && provider !== aiEditorProvider) captureAiProvider();
+  aiEditorProvider = AI_PROVIDER_IDS.includes(provider) ? provider : 'free';
+  $('aiProvider').value = aiEditorProvider;
+  $('aiFields').classList.toggle('hidden', aiEditorProvider === 'free');
+  $('freeFields').classList.toggle('hidden', aiEditorProvider !== 'free');
+  if (aiEditorProvider === 'free') { syncAiExecUi(); $('aiStatus').textContent = ''; $('copyAiError').classList.add('hidden'); return; }
+  const info = aiInfo();
+  const draft = aiEditorDrafts.get(aiEditorProvider);
+  const sourceProfiles = draft?.profiles || info.profiles || [];
+  aiEditorProfiles = sourceProfiles.map((profile, index) => makeAiProfile(profile, index));
+  if (!aiEditorProfiles.length) aiEditorProfiles.push(makeAiProfile({ name: 'کلید اول' }));
+  $('aiModel').value = draft?.model || info.model || info.defaultModel || '';
+  $('aiBaseUrl').value = draft?.base_url || info.base_url || ''; $('aiResponseMode').value = draft?.response_mode || info.response_mode || 'auto';
+  updateAiProviderUi(); renderAiProfiles(); $('aiStatus').textContent = ''; $('copyAiError').classList.add('hidden');
+}
+const FREE_FIELDS = [['timeout_seconds','زمان انتظار (ثانیه، ۵ تا ۶۰۰)',5,600,90], ['retry_count','تکرار اضافی (۰ تا ۵)',0,5,0], ['retry_wait_seconds','فاصلهٔ تکرار (ثانیه، ۰ تا ۳۰۰)',0,300,20], ['source_limit','سقف نویسه (۱ تا ۱۰۰۰۰۰)',1,100000,1000]];
+function renderFreeServices() {
+  const container = $('freeServices'); container.textContent = '';
+  for (const [name, title] of [['google','Google Translate'],['mymemory','MyMemory']]) {
+    const heading = document.createElement('h3'); heading.textContent = title;
+    const row = document.createElement('div'); row.className = 'form-grid';
+    for (const [field, labelText, min, max, fallback] of FREE_FIELDS) {
+      const label = document.createElement('label'); label.textContent = labelText;
+      const input = document.createElement('input'); input.id = `free-${name}-${field}`; input.type = 'number'; input.dir = 'ltr'; input.min = min; input.max = max; input.step = '1';
+      input.value = state.ai?.free_services?.[name]?.[field] ?? (name === 'mymemory' && field === 'source_limit' ? 500 : fallback);
+      label.appendChild(input); row.appendChild(label);
+    }
+    container.append(heading,row);
+  }
+}
+function freeSettingsPayload() {
+  const result = {};
+  for (const name of ['google','mymemory']) {
+    result[name] = {};
+    for (const [field, label, min, max] of FREE_FIELDS) {
+      const raw = $(`free-${name}-${field}`).value.trim(), value = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) throw new Error(`${name}: ${label} باید عدد صحیح معتبر باشد.`);
+      result[name][field] = value;
+    }
+  }
+  return result;
+}
+async function loadAiSettings(prefetched = null) {
+  state.ai = (prefetched && typeof prefetched === 'object') ? prefetched : await api('/api/ai-settings');
+  aiEditorDrafts.clear();
+  renderFreeServices();
+  $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false;
+  $('aiContextPercent').value = state.ai.context_percent ?? 15;
+  $('aiSkillPercent').value = state.ai.skill_percent ?? 15;
+  const defaultTargetLang = normalizeTargetLanguage(state.ai.target_language || 'fa');
+  if ($('aiTargetLanguage')) $('aiTargetLanguage').value = defaultTargetLang;
+  if ($('translationTargetLang') && !state.project?.settings?.targetLanguage) {
+    $('translationTargetLang').value = defaultTargetLang;
+  }
+  showAiProvider(state.ai.provider || 'free', false);
+}
+function aiSettingsPayload() {
+  captureAiProvider();
+  const providers = {};
+  AI_PROVIDER_IDS.forEach((provider) => {
+    const info = aiInfo(provider);
+    const draft = aiEditorDrafts.get(provider);
+    const profiles = draft?.profiles || info.profiles || [];
+    const intSetting = (profile, key, min, max) => {
+      const raw = String(profile[key] ?? (key === 'timeout_seconds' ? 90 : key === 'retry_wait_seconds' ? 20 : key === 'source_limit' ? 1000 : 0));
+      const value = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min || value > max) throw new Error(`تنظیم ${profile.name || 'API'}: ${key === 'timeout_seconds' ? 'زمان انتظار باید بین ۵ تا ۶۰۰' : key === 'retry_wait_seconds' ? 'فاصلهٔ تکرار باید بین ۰ تا ۳۰۰' : key === 'source_limit' ? 'سقف نویسه باید بین ۱ تا ۱۰۰۰۰۰' : 'تکرار باید بین ۰ تا ۵'} و عدد صحیح باشد.`);
+      return value;
+    };
+    providers[provider] = {
+      model: draft?.model || info.model || info.defaultModel,
+      base_url: draft?.base_url || info.base_url,
+      response_mode: draft?.response_mode || info.response_mode || 'auto',
+      profiles: profiles.map((profile) => ({
+        id: profile.id, name: profile.name || '',
+        timeout_seconds: intSetting(profile, 'timeout_seconds', 5, 600), retry_count: intSetting(profile, 'retry_count', 0, 5), retry_wait_seconds: intSetting(profile, 'retry_wait_seconds', 0, 300), source_limit: intSetting(profile, 'source_limit', 1, 100000),
+        ...(profile.apiKey?.trim() ? { api_key: profile.apiKey.trim() } : {}),
+      })),
+    };
+  });
+  const active = providers[aiEditorProvider];
+  const contextPercent = Number($('aiContextPercent').value), skillPercent = Number($('aiSkillPercent').value);
+  if ($('aiContextPercent').value.trim() === '' || $('aiSkillPercent').value.trim() === '' || !Number.isInteger(contextPercent) || !Number.isInteger(skillPercent) || contextPercent < 0 || skillPercent < 0 || contextPercent + skillPercent > 100) throw new Error('درصدهای خلاصه و اسکیل باید عدد صحیح غیرمنفی و جمع آن‌ها حداکثر ۱۰۰ باشد.');
+  return {
+    provider: aiEditorProvider,
+    target_language: normalizeTargetLanguage($('aiTargetLanguage')?.value || state.ai?.target_language || 'fa'),
+    free_services: freeSettingsPayload(),
+    reuse_repeated: $('aiReuseRepeated').checked,
+    context_percent: contextPercent,
+    skill_percent: skillPercent,
+    model: active?.model || null,
+    base_url: active?.base_url || null,
+    providers,
+  };
+}
+async function saveAiSettings(options = {}) {
+  state.ai = await api('/api/ai-settings', jsonOptions('PUT', aiSettingsPayload()));
+  lastSyncedAiProvider = state.ai.provider || 'free';
+  preferredTranslationTarget = lastSyncedAiProvider;
+  const savedTargetLang = normalizeTargetLanguage(state.ai.target_language || 'fa');
+  if ($('aiTargetLanguage')) $('aiTargetLanguage').value = savedTargetLang;
+  if ($('translationTargetLang')) $('translationTargetLang').value = savedTargetLang;
+  if (state.project) {
+    state.project.settings = state.project.settings || {};
+    state.project.settings.targetLanguage = savedTargetLang;
+    scheduleSave();
+  }
+  aiEditorDrafts.clear(); $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false; showAiProvider(state.ai.provider || 'free', false);
+  if (!options.quiet) toast('تنظیمات ترجمه ذخیره شد');
+  return state.ai;
+}
+
+// ---------- Full-page translation editor ----------
+function editorItem() { return state.project?.images.find((item) => item.id === state.editorId); }
+function syncEditorApprovalHeader(item = editorItem()) {
+  if (!item) return;
+  $('editorTitle').textContent = `ویرایش — ${item.name}${item.approved ? ' (✓ تأییدشده)' : ''}`;
+  $('editorUnapproveBtn')?.classList.toggle('hidden', !item.approved);
+}
+function readProjectImageDrafts(projectId, imageId) {
+  const entries = [];
+  if (!projectId || !imageId || typeof localStorage === 'undefined') return entries;
+  const prefix = `comic-studio-draft:${encodeURIComponent(projectId)}:${encodeURIComponent(imageId)}:`;
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith(prefix)) entries.push([key, localStorage.getItem(key)]);
+  }
+  return entries;
+}
+function restoreProjectImageDrafts(projectId, imageId, entries) {
+  if (!projectId || !imageId || typeof localStorage === 'undefined') return;
+  const prefix = `comic-studio-draft:${encodeURIComponent(projectId)}:${encodeURIComponent(imageId)}:`;
+  const toRemove = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith(prefix)) toRemove.push(key);
+  }
+  toRemove.forEach((key) => localStorage.removeItem(key));
+  (entries || []).forEach(([key, value]) => {
+    if (value !== null && value !== undefined) localStorage.setItem(key, value);
+  });
+}
+function discardInlineEditorForCancel() {
+  if (!inlineDraft) return;
+  if (document.activeElement === $('inlineLineSize')) $('inlineLineSize').blur();
+  classicEditor.clearDraft();
+  classicEditor.closeModal?.({ restoreFocus: false });
+  classicEditor.exitFullscreen();
+  classicEditor.detachField();
+  const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
+  box?.classList.remove('editing', 'show-output');
+  inlineDraft = null; inlineEditSession = null;
+  updateInlineSelectionHighlight();
+  syncInlineDockIdleState();
+  document.querySelector('.editor-preview').style.paddingTop = '';
+}
+function boxOf(block) { return { x0: Number.isFinite(block.tx0) ? block.tx0 : block.x0, y0: Number.isFinite(block.ty0) ? block.ty0 : block.y0, x1: Number.isFinite(block.tx1) ? block.tx1 : block.x1, y1: Number.isFinite(block.ty1) ? block.ty1 : block.y1 }; }
+async function openEditor(imageId) {
+  const loadSeq = ++editorLoadSeq;
+  await ensureFont();
+  if (loadSeq !== editorLoadSeq) return;
+  const item = state.project?.images.find((entry) => entry.id === imageId);
+  if (!item) return;
+  if (inlineDraft) closeInlineEditor(true); else syncInlineDockIdleState();
+  state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null;
+  editorSessionSnapshot = {
+    projectId: state.project.id,
+    imageId: item.id,
+    blocksJson: JSON.stringify(item.blocks || []),
+    approved: !!item.approved,
+    edited: !!item.edited,
+    overlayMode: currentOverlayMode(),
+    draftEntries: readProjectImageDrafts(state.project.id, item.id),
+    serverPreviewTouched: false,
+    autoSaved: false,
+  };
+  $('editorStage').classList.remove('panning'); syncEditorApprovalHeader(item); $('blockList').textContent = ''; showDialog('editorDialog');
+  let bitmap;
+  try {
+    const response = await fetch(imageUrl(item));
+    if (response.ok === false) throw new Error('تصویر اصلی باز نشد');
+    bitmap = await createImageBitmap(await response.blob());
+  } catch (error) {
+    if (loadSeq === editorLoadSeq && state.editorId === imageId) {
+      state.editorId = null;
+      editorSessionSnapshot = null;
+      closeDialog('editorDialog');
+    }
+    throw error;
+  }
+  if (loadSeq !== editorLoadSeq || state.editorId !== imageId) { bitmap.close?.(); return; }
+  state.editorBitmap?.close?.(); state.editorBitmap = bitmap; $('editorCanvas').width = state.editorBitmap.width; $('editorCanvas').height = state.editorBitmap.height; buildBlockList(); fitEditor(); drawEditor();
+}
+function resizeEditorStage() {
+  const item = editorItem(); if (!item) return;
+  const scale = state.editorScale || 1; const w = item.width * scale; const h = item.height * scale; const preview = document.querySelector('.editor-preview');
+  $('editorStage').style.width = `${w}px`; $('editorStage').style.height = `${h}px`; $('editorCanvas').style.width = `${w}px`; $('editorCanvas').style.height = `${h}px`;
+  preview.classList.toggle('oversized', w > Math.max(0, preview.clientWidth - 30) + 1);
+  $('editorZoomLabel').textContent = `${Math.round(scale * 100)}٪`;
+  renderEditorBoxes();
+}
+function fitEditor() {
+  const item = editorItem(); if (!item) return;
+  const available = Math.max(250, document.querySelector('.editor-preview').clientWidth - 35); state.editorFitScale = Math.min(1, available / item.width); setEditorZoom(state.editorFitScale);
+}
+function setEditorZoom(value, anchor = null) {
+  const item = editorItem(); if (!item) return;
+  const preview = document.querySelector('.editor-preview'); const stage = $('editorStage'); const oldScale = state.editorScale || 1;
+  const minScale = imageOverview ? Math.min(.01, imageOverview.fitScale || .01) : Math.min(.1, state.editorFitScale || .1); const scale = Math.max(minScale, Math.min(4, Number(value) || oldScale));
+  const viewportX = anchor?.x ?? preview.clientWidth / 2; const viewportY = anchor?.y ?? preview.clientHeight / 2;
+  const imageX = (preview.scrollLeft + viewportX - stage.offsetLeft) / oldScale; const imageY = (preview.scrollTop + viewportY - stage.offsetTop) / oldScale;
+  state.editorScale = scale; resizeEditorStage();
+  preview.scrollLeft = Math.max(0, stage.offsetLeft + imageX * scale - viewportX); preview.scrollTop = Math.max(0, stage.offsetTop + imageY * scale - viewportY);
+  positionInlineEditor();
+}
+// Fit both dimensions; unlike the existing width-fit this shows a tall page in full.
+function fitWholeEditorImage() {
+  const item = editorItem(); if (!item || !imageOverview) return;
+  const preview = document.querySelector('.editor-preview');
+  const width = Math.max(1, preview.clientWidth - 30); const height = Math.max(1, preview.clientHeight - 30);
+  imageOverview.fitScale = Math.min(4, width / item.width, height / item.height);
+  setEditorZoom(imageOverview.fitScale); preview.scrollLeft = 0; preview.scrollTop = 0;
+}
+function setButtonLabel(el, text) {
+  if (!el) return;
+  const label = el.querySelector('.btn-label');
+  if (label) label.textContent = text;
+  else el.textContent = text;
+}
+async function enterImageOverview() {
+  if (imageOverview || !editorItem()) return;
+  const preview = document.querySelector('.editor-preview'); const dialog = $('editorDialog');
+  // Capture the draft before its field is hidden; the project itself remains untouched.
+  imageOverview = { scale: state.editorScale, fitScaleBefore: state.editorFitScale,
+    left: preview.scrollLeft, top: preview.scrollTop, draft: inlineDraft ? draftBlockForPreview() : null, native: false };
+  dialog.classList.add('image-fullscreen'); setButtonLabel($('editorImageFullscreen'), 'خروج از تمام‌صفحه');
+  $('editorImageFullscreen').setAttribute('aria-pressed', 'true'); $('editorImageFullscreen').setAttribute('aria-label', 'خروج از تمام‌صفحهٔ تصویر');
+  drawEditorCanvas(); fitWholeEditorImage();
+  if (dialog.requestFullscreen && !document.fullscreenElement) {
+    try { await dialog.requestFullscreen(); if (imageOverview) imageOverview.native = true; }
+    catch { /* Embedded browsers can deny fullscreen; the viewport-sized fallback remains usable. */ }
+  }
+  if (imageOverview) requestAnimationFrame(fitWholeEditorImage);
+}
+async function exitImageOverview(fromBrowser = false) {
+  if (!imageOverview) return;
+  const previous = imageOverview; imageOverview = null;
+  const dialog = $('editorDialog'); dialog.classList.remove('image-fullscreen');
+  setButtonLabel($('editorImageFullscreen'), 'تمام‌صفحه تصویر'); $('editorImageFullscreen').setAttribute('aria-pressed', 'false');
+  $('editorImageFullscreen').setAttribute('aria-label', 'تمام‌صفحهٔ تصویر');
+  if (!fromBrowser && document.fullscreenElement === dialog && document.exitFullscreen) {
+    try { await document.exitFullscreen(); } catch { /* The browser may already have exited. */ }
+  }
+  state.editorFitScale = previous.fitScaleBefore; setEditorZoom(previous.scale);
+  const preview = document.querySelector('.editor-preview'); preview.scrollLeft = previous.left; preview.scrollTop = previous.top;
+  drawEditorCanvas(); positionInlineEditor();
+}
+function startEditorPan(event) {
+  if (!state.editorId || (event.button !== 0 && event.button !== 1) || event.target.closest('.editor-box')) return;
+  const preview = document.querySelector('.editor-preview'); const stage = $('editorStage');
+  state.editorPan = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: preview.scrollLeft, top: preview.scrollTop };
+  stage.setPointerCapture(event.pointerId); stage.classList.add('panning'); event.preventDefault();
+}
+function moveEditorPan(event) {
+  const pan = state.editorPan; if (!pan || pan.pointerId !== event.pointerId) return;
+  const preview = document.querySelector('.editor-preview'); preview.scrollLeft = pan.left - (event.clientX - pan.x); preview.scrollTop = pan.top - (event.clientY - pan.y); event.preventDefault();
+}
+function stopEditorPan(event) {
+  const pan = state.editorPan; if (!pan || (event.pointerId !== undefined && pan.pointerId !== event.pointerId)) return;
+  const stage = $('editorStage'); state.editorPan = null; stage.classList.remove('panning'); if (stage.hasPointerCapture?.(pan.pointerId)) stage.releasePointerCapture(pan.pointerId);
+}
+function handleEditorWheel(event) {
+  if (!state.editorId || !event.ctrlKey) return;
+  event.preventDefault(); const rect = document.querySelector('.editor-preview').getBoundingClientRect();
+  setEditorZoom(state.editorScale * (event.deltaY < 0 ? 1.15 : 1 / 1.15), { x: event.clientX - rect.left, y: event.clientY - rect.top });
+}
+// The session is the single source of truth for both live output and persistence.
+function draftBlockForPreview() {
+  return inlineEditSession?.previewBlock() || null;
+}
+function drawEditorCanvas() {
+  const item = editorItem(); if (!item || !state.editorBitmap) return;
+  // Keep the committed renderer live while typing: the editable DOM is only an
+  // interaction layer; the canvas beneath it always shows the exact draft output.
+  const draft = imageOverview ? imageOverview.draft : (inlineDraft ? draftBlockForPreview() : null);
+  const liveHtml = inlineDraft && !imageOverview && inlineDraft.mode !== 'ocr' && classicEditor?.field ? classicEditor.getHTML() : null;
+  const blocks = item.blocks.map((block) => {
+    if (draft && block === inlineDraft?.block) {
+      const ov = overlayBlock(draft);
+      return liveHtml !== null ? { ...ov, _liveHtml: liveHtml } : ov;
+    }
+    return overlayBlock(block);
+  });
+  const rendered = Typeset.render(state.editorBitmap, blocks); const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(rendered, 0, 0);
+  if (rendered && rendered !== canvas) { rendered.width = 0; rendered.height = 0; }
+}
+function scheduleEditorCanvasDraw() {
+  if (editorCanvasFrame) return;
+  editorCanvasFrame = requestAnimationFrame(() => { editorCanvasFrame = 0; drawEditorCanvas(); });
+}
+function drawEditor() { drawEditorCanvas(); renderEditorBoxes(); positionInlineEditor(); }
+function clampedBoxOf(block) {
+  const raw = boxOf(block);
+  const item = editorItem();
+  const maxW = state.editorBitmap?.width || item?.width;
+  const maxH = state.editorBitmap?.height || item?.height;
+  if (!(maxW > 0 && maxH > 0)) return raw;
+  return { x0: Math.max(0, raw.x0), y0: Math.max(0, raw.y0), x1: Math.min(maxW, raw.x1), y1: Math.min(maxH, raw.y1) };
+}
+function overlaySize(block, width, height) {
+  try {
+    overlayMeasureCtx = overlayMeasureCtx || document.createElement('canvas').getContext('2d');
+    if (typeof Typeset.fitBlockSize === 'function') {
+      return Typeset.fitBlockSize(overlayMeasureCtx, block, width, height);
+    }
+    const style = Typeset.blockStyle(block);
+    if (style.size) return style.size;
+    const sourceText = String(block.tr || '').trim();
+    const richWords = !block._plainText && block.richHtml ? Typeset.richHtmlWords(block.richHtml) : null;
+    const maxSize = Math.max(12, Math.min(64, Math.round(block.lineH * 1.1)));
+    const ctx = overlayMeasureCtx;
+    const padX = Typeset.boxInset ? Typeset.boxInset(width) : Math.min(4, Math.max(0, width * 0.02));
+    const padY = Typeset.boxInset ? Typeset.boxInset(height) : Math.min(4, Math.max(0, height * 0.02));
+    const usableW = Math.max(1, width - 2 * padX), usableH = Math.max(1, height - 2 * padY);
+    const inline = style.align === 'justify' || (!block._plainText && (!!block.richHtml || Typeset.hasInlineMarks(sourceText)));
+    if (inline) {
+      const words = block._plainText ? Typeset.richHtmlWords(plainToHtml(sourceText)) : (richWords || Typeset.inlineWords(sourceText));
+      return Typeset.fitInline(ctx, words, usableW, usableH, maxSize, 8, style).size;
+    }
+    const prefix = `${style.italic ? 'italic ' : ''}${style.bold ? '700' : '400'} `;
+    return Typeset.fit(ctx, sourceText, usableW, usableH, maxSize, 8, prefix).size;
+  } catch {
+    return Math.max(8, Math.min(160, Number(block.size) || Math.min(42, Math.max(10, height / Math.max(1.8, String(block.tr || '').split('\n').length * 1.65)))));
+  }
+}
+function styleRichElement(element, block, scale = 1, preview = false) {
+  const box = clampedBoxOf(block); const style = Typeset.blockStyle(block);
+  element.dir = style.dir; element.style.direction = style.dir; element.style.textAlign = style.align;
+  element.style.justifyContent = style.verticalAlign === 'top' ? 'flex-start' : style.verticalAlign === 'bottom' ? 'flex-end' : 'center';
+  // The sidebar is an editing surface, not the output: output size and colour affect only the image.
+  element.style.fontSize = preview ? `${overlaySize(block, box.x1 - box.x0, box.y1 - box.y0) * scale}px` : '';
+  element.style.fontWeight = style.bold ? '700' : '400'; element.style.fontStyle = style.italic ? 'italic' : 'normal';
+  element.style.color = preview ? (style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff')) : '';
+  element.style.caretColor = preview ? (style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff')) : '';
+  element.style.textDecoration = style.underline ? 'underline' : '';
+}
+function logicalFontSizeOf(element) {
+  if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+  const stored = Number.parseFloat(element.dataset?.logicalSize || '');
+  if (Number.isFinite(stored) && stored > 0) return Math.max(8, Math.min(160, stored));
+  const raw = Number.parseFloat(element.style?.fontSize || '');
+  if (Number.isFinite(raw) && raw > 0) return Math.max(8, Math.min(160, raw));
+  return null;
+}
+function applyLogicalFontSize(element, cssValue) {
+  if (!element || element.nodeType !== Node.ELEMENT_NODE) return;
+  const parsed = Number.parseFloat(cssValue || '');
+  if (cssValue && Number.isFinite(parsed) && parsed > 0) {
+    const clamped = Math.max(8, Math.min(160, Math.round(parsed)));
+    element.dataset.logicalSize = String(clamped);
+    element.style.fontSize = `${clamped}px`;
+  } else {
+    delete element.dataset.logicalSize;
+    element.style.fontSize = '';
+  }
+}
+function serializeInlineFieldHtml(field) {
+  if (!field?.querySelector?.('[data-logical-size]')) return field?.innerHTML || '';
+  const clone = field.cloneNode(true);
+  clone.querySelectorAll('[data-logical-size]').forEach((el) => {
+    const n = Number.parseFloat(el.dataset.logicalSize || '');
+    if (Number.isFinite(n) && n > 0) el.style.fontSize = `${Math.max(8, Math.min(160, Math.round(n)))}px`;
+    el.removeAttribute('data-logical-size');
+  });
+  return clone.innerHTML;
+}
+function updateInlineSelectionHighlight() {
+  if (!window.CSS?.highlights || typeof window.Highlight !== 'function') return;
+  const field = $('inlineEditorField');
+  if (hasInlineWordSelection() && document.activeElement !== field) {
+    window.CSS.highlights.set('comic-inline-selection', new window.Highlight(inlineDraft.range));
+  } else {
+    window.CSS.highlights.delete('comic-inline-selection');
+  }
+}
+// Keep the transparent caret layer aligned over the exact live canvas output.
+function refreshInlineTypography() {
+  if (!inlineDraft || !classicEditor) return;
+  const field = classicEditor.field; const previewBlock = draftBlockForPreview(); if (!previewBlock) return;
+  const draft = overlayBlock(previewBlock); const style = Typeset.blockStyle(draft);
+  const host = field.parentElement?.classList.contains('editor-box') ? field.parentElement : null;
+  if (!host) {
+    field.removeAttribute('style');
+    delete field.dataset.layoutZoom; delete field.dataset.visualFontSize;
+    field.dir = style.dir; field.style.direction = style.dir; field.style.textAlign = style.align;
+    field.querySelectorAll?.('[data-logical-size]').forEach((el) => { el.style.fontSize = `${el.dataset.logicalSize}px`; });
+    scheduleEditorCanvasDraw();
+    return;
+  }
+  const box = clampedBoxOf(draft); const scale = state.editorScale || 1;
+  const bw = Math.max(1, box.x1 - box.x0); const bh = Math.max(1, box.y1 - box.y0);
+  const baseSize = overlaySize(draft, bw, bh);
+  // Lay out at the exact unscaled logical font size used by Typeset.render so
+  // per-glyph hinting advances and line-wrap break points match Canvas 1:1, then
+  // scale visually via CSS transform to match the zoomed image stage.
+  const layoutZoom = 1;
+  field.dataset.layoutZoom = '1';
+  field.dataset.visualFontSize = String(baseSize * scale);
+  field.style.fontSize = `${baseSize}px`;
+  field.style.lineHeight = '1.55'; field.style.fontWeight = style.bold ? '700' : '400';
+  field.style.fontStyle = style.italic ? 'italic' : 'normal'; field.style.textDecoration = style.underline ? 'underline' : '';
+  field.style.whiteSpace = 'pre-line'; field.style.textJustify = 'inter-word';
+  field.style.letterSpacing = '0px'; field.style.wordSpacing = '0px'; field.style.fontKerning = 'auto';
+  field.style.background = 'transparent'; field.style.color = 'transparent'; field.style.webkitTextFillColor = 'transparent'; field.style.caretColor = 'var(--a1)';
+  field.dir = style.dir; field.style.direction = style.dir; field.style.textAlign = style.align;
+  field.querySelectorAll?.('[style],[data-logical-size]').forEach((el) => {
+    if (!el.style?.fontSize && el.dataset?.logicalSize) { delete el.dataset.logicalSize; return; }
+    const logical = logicalFontSizeOf(el);
+    if (logical == null) return;
+    el.dataset.logicalSize = String(Math.round(logical));
+    const ref = style.size || baseSize;
+    const eff = Math.max(8, Math.min(160, Math.round(baseSize * logical / ref)));
+    el.style.fontSize = `${eff * layoutZoom}px`;
+  });
+  const insetX = (Typeset.boxInset ? Typeset.boxInset(bw) : Math.min(4, Math.max(0, bw * 0.02))) * layoutZoom;
+  const ind = Typeset.indentGeometry ? Typeset.indentGeometry(style, insetX, baseSize * layoutZoom) : { textIndentPx: 0, padLeft: insetX, padRight: insetX };
+  field.style.right = 'auto'; field.style.bottom = 'auto';
+  field.style.width = `${bw * layoutZoom}px`;
+  field.style.paddingLeft = `${ind.padLeft}px`; field.style.paddingRight = `${ind.padRight}px`;
+  field.style.textIndent = `${ind.textIndentPx}px`;
+  field.style.paddingTop = '0px'; field.style.paddingBottom = '0px';
+  field.style.minHeight = '0px'; field.style.height = 'auto';
+  field.style.transformOrigin = '0 0';
+  field.style.transform = `scale(${scale / layoutZoom})`;
+  const rawScrollH = field.scrollHeight;
+  const contentH = (rawScrollH > 0 ? rawScrollH : baseSize * layoutZoom * 1.55) / layoutZoom;
+  const insetY = Typeset.boxInset ? Typeset.boxInset(bh) : Math.min(4, Math.max(0, bh * 0.02));
+  const topUnscaled = style.verticalAlign === 'top' ? insetY : style.verticalAlign === 'bottom' ? bh - insetY - contentH : (bh - contentH) / 2;
+  field.style.left = `${-(host.clientLeft || 0)}px`;
+  field.style.top = `${-(host.clientTop || 0) + topUnscaled * scale}px`;
+  const fieldHLayout = Math.max(Math.max(1, bh - topUnscaled) * layoutZoom, rawScrollH + 4);
+  field.style.height = `${fieldHLayout}px`;
+  const clipTop = Math.max(0, -topUnscaled) * layoutZoom;
+  const clipBottom = Math.max(0, topUnscaled + fieldHLayout / layoutZoom - bh) * layoutZoom;
+  field.style.clipPath = (clipTop > 0.5 || clipBottom > 0.5) ? `inset(${clipTop}px 0px ${clipBottom}px 0px)` : 'none';
+  if (field.scrollTop) field.scrollTop = 0;
+  if (field.scrollLeft) field.scrollLeft = 0;
+  scheduleEditorCanvasDraw();
+}
+function syncVerticalAlignButtons() {
+  const dock = $('inlineEditor');
+  const buttons = document.querySelectorAll('.inline-valign-btn');
+  if (!buttons.length) return;
+  const selected = selectedEditorBlocks();
+  const multiSelected = selected.length > 1 || (selected.length === 1 && (!inlineDraft || selected[0] !== inlineDraft.block));
+  let activeValue = null;
+  let enabled = false;
+  if (inlineDraft && !multiSelected) {
+    enabled = true;
+    activeValue = ['top', 'bottom'].includes($('inlineVerticalAlign')?.value) ? $('inlineVerticalAlign').value : 'middle';
+    dock?.classList.remove('has-selection');
+  } else {
+    enabled = selected.length > 0 || !!inlineDraft;
+    if (!inlineDraft) dock?.classList.toggle('has-selection', selected.length > 0);
+    else dock?.classList.remove('has-selection');
+    if (selected.length > 0) {
+      const values = new Set(selected.map((b) => (b === inlineDraft?.block
+        ? (['top', 'bottom'].includes($('inlineVerticalAlign')?.value) ? $('inlineVerticalAlign').value : 'middle')
+        : (['top', 'bottom'].includes(b.verticalAlign) ? b.verticalAlign : 'middle'))));
+      activeValue = values.size === 1 ? [...values][0] : null;
+      if (!inlineDraft && $('inlineVerticalAlign') && activeValue) $('inlineVerticalAlign').value = activeValue;
+    }
+  }
+  buttons.forEach((btn) => {
+    btn.disabled = !enabled;
+    btn.setAttribute('aria-pressed', String(enabled && btn.dataset.valign === activeValue));
+  });
+}
+function setVerticalPlacement(value) {
+  if (!['top', 'middle', 'bottom'].includes(value)) return;
+  const selected = selectedEditorBlocks();
+  let updatedOther = false;
+  selected.forEach((block) => {
+    if (block !== inlineDraft?.block) { block.verticalAlign = value; updatedOther = true; }
+  });
+  if (inlineDraft) {
+    inlineDraft.verticalAlignTouched = true;
+    $('inlineVerticalAlign').value = value;
+    syncVerticalAlignButtons();
+    classicEditor.notifyChange();
+    if (updatedOther) { drawEditor(); scheduleSave(); }
+    return;
+  }
+  if (!selected.length) return;
+  if ($('inlineVerticalAlign')) $('inlineVerticalAlign').value = value;
+  syncVerticalAlignButtons();
+  drawEditor();
+  scheduleSave();
+}
+function setInlineDockDisabled(disabled) {
+  ['inlinePreview', 'inlineEditorApply', 'inlineVerticalAlign', 'inlineLineSize', 'inlineSizeUp', 'inlineSizeDown', 'inlineLineReset',
+    'inlineEditorDirection', 'inlineEditorAlign', 'inlineEditorSize', 'inlineEditorColor', 'inlineEditorAutoColor']
+    .forEach((id) => { const el = $(id); if (el) el.disabled = disabled; });
+  document.querySelectorAll('#inlineEditor .classic-toolbar button, #inlineEditor .classic-toolbar select, #inlineEditor .classic-toolbar input, #inlineEditor .classic-tabs button')
+    .forEach((el) => { el.disabled = disabled; });
+  syncVerticalAlignButtons();
+}
+function syncInlineDockIdleState() {
+  const dock = $('inlineEditor');
+  if (!dock) return;
+  classicEditor?.setPlainMode(false);
+  classicEditor?.resetToolbar?.();
+  dock.classList.remove('hidden', 'show-output', 'plain-mode');
+  dock.classList.add('is-idle');
+  dock.querySelector('.inline-box-settings')?.removeAttribute('open');
+  $('inlineEditorTitle').textContent = 'ویرایشگر متن آماده است · برای ویرایش، روی هر کادر متن در تصویر کلیک کنید';
+  const badge = $('inlineTargetBadge');
+  if (badge) { badge.textContent = ''; badge.classList.add('hidden'); badge.classList.remove('is-word'); }
+  if ($('inlineLineSize')) $('inlineLineSize').value = '';
+  setButtonLabel($('inlinePreview'), 'پیش‌نمایش دقیق');
+  $('inlinePreview').setAttribute('aria-pressed', 'false');
+  $('inlineEditorCancel').classList.add('hidden');
+  $('inlineLineTools').classList.remove('hidden');
+  setInlineDockDisabled(true);
+}
+function setInlineOutputPreview(enabled) {
+  if (!inlineDraft) return;
+  inlineDraft.showOutput = !!enabled;
+  $('inlineEditor').classList.toggle('show-output', inlineDraft.showOutput);
+  const activeBox = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
+  activeBox?.classList.toggle('show-output', inlineDraft.showOutput);
+  const button = $('inlinePreview'); button.setAttribute('aria-pressed', String(inlineDraft.showOutput));
+  setButtonLabel(button, inlineDraft.showOutput ? 'ادامهٔ ویرایش' : 'پیش‌نمایش دقیق');
+  drawEditorCanvas();
+  if (!enabled) {
+    const range = inlineDraft.range; classicEditor.focus();
+    if (range && classicEditor.field.contains(range.startContainer) && classicEditor.field.contains(range.endContainer)) {
+      const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    }
+  } else classicEditor.field.blur();
+}
+// A draft belongs to one image box; the docked toolbar stays permanently open at the top.
+function inlineBlockSnapshot(block) {
+  return JSON.stringify([block.text || '', block.tr || '', block.richHtml || '', block.dir || '', block.align || '', block.size ?? null, block.color || null, block.verticalAlign || '']);
+}
+function inlineDraftChanged() { return !!inlineEditSession?.isDirty(); }
+function closeInlineEditor(force = false) {
+  if (!inlineDraft) return true;
+  if (!force && document.activeElement === $('inlineLineSize')) $('inlineLineSize').blur();
+  const committed = inlineEditSession?.close({ discardConflict: force }) ?? false;
+  if (!committed && !force) return false;
+  if (committed) classicEditor.clearDraft(); else classicEditor.saveDraft();
+  classicEditor.closeModal?.({ restoreFocus: false });
+  classicEditor.exitFullscreen(); classicEditor.detachField();
+  const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
+  box?.classList.remove('editing', 'show-output');
+  inlineDraft = null; inlineEditSession = null;
+  updateInlineSelectionHighlight();
+  syncInlineDockIdleState();
+  if (!imageOverview) drawEditorCanvas();
+  document.querySelector('.editor-preview').style.paddingTop = '';
+  if (!committed && force) toast('تغییر هم‌زمان بود؛ متن پروژه حفظ شد و نسخهٔ محلی برای بازیابی نگه داشته شد.', true);
+  return true;
+}
+function positionInlineEditor() {
+  // The editor toolbar is docked under the filename/title now, not positioned
+  // over the page. Keep this hook for resize/scroll calls that refresh preview typography.
+  if (!inlineDraft || imageOverview) return;
+  refreshInlineTypography();
+}
+function rememberInlineRange() {
+  if (!inlineDraft) return;
+  const field = $('inlineEditorField'); const selection = window.getSelection?.();
+  if (selection?.rangeCount && field.contains(selection.anchorNode) && field.contains(selection.focusNode)) {
+    inlineDraft.range = selection.getRangeAt(0).cloneRange();
+    classicEditor?.syncRange?.(inlineDraft.range);
+  }
+}
+function inlineRangePath(node, root) {
+  const path = []; while (node && node !== root) { const parent = node.parentNode; if (!parent) return null; path.unshift([...parent.childNodes].indexOf(node)); node = parent; }
+  return node === root ? path : null;
+}
+function inlineHistoryEntry() {
+  const field = $('inlineEditorField'); const selection = window.getSelection();
+  const range = selection?.rangeCount && field.contains(selection.anchorNode) && field.contains(selection.focusNode) ? selection.getRangeAt(0) : inlineDraft?.range;
+  return { html: field.innerHTML, start: range ? inlineRangePath(range.startContainer, field) : null, startOffset: range?.startOffset || 0,
+    end: range ? inlineRangePath(range.endContainer, field) : null, endOffset: range?.endOffset || 0 };
+}
+function recordInlineHistory() {
+  if (!inlineDraft || inlineDraft.muteHistory) return;
+  const entry = inlineHistoryEntry(); const history = inlineDraft.history;
+  if (history[inlineDraft.historyIndex]?.html === entry.html) { history[inlineDraft.historyIndex] = entry; return; }
+  history.splice(inlineDraft.historyIndex + 1); history.push(entry);
+  if (history.length > 100) history.shift();
+  inlineDraft.historyIndex = history.length - 1;
+}
+function restoreInlineHistory(step) {
+  if (!inlineDraft) return;
+  const index = inlineDraft.historyIndex + step;
+  if (index < 0 || index >= inlineDraft.history.length) return;
+  inlineDraft.historyIndex = index; const entry = inlineDraft.history[index]; const field = $('inlineEditorField');
+  field.innerHTML = entry.html; field.focus();
+  const resolve = (path) => Array.isArray(path) ? path.reduce((node, i) => node?.childNodes[i], field) : null;
+  const start = resolve(entry.start); const end = resolve(entry.end);
+  const maxOffset = (node) => node.nodeType === Node.TEXT_NODE ? node.length : node.childNodes.length;
+  if (start && end) {
+    const range = document.createRange(); range.setStart(start, Math.min(entry.startOffset, maxOffset(start))); range.setEnd(end, Math.min(entry.endOffset, maxOffset(end)));
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  }
+  rememberInlineRange(); syncInlineLineControls(); classicEditor.notifyChange();
+}
+function inlineParagraphFrom(node) {
+  const field = $('inlineEditorField');
+  let element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  while (element && element !== field) {
+    if (['DIV', 'P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'PRE', 'BLOCKQUOTE'].includes(element.tagName)) return element;
+    element = element.parentElement;
+  }
+  return null;
+}
+function hasInlineWordSelection() {
+  const field = $('inlineEditorField'); const range = inlineDraft?.range;
+  return !!(inlineDraft && inlineDraft.mode !== 'ocr' && range && !range.collapsed && field.contains(range.startContainer) && field.contains(range.endContainer) && String(range.toString() || '').trim());
+}
+function inlineSelectionSpan(range) {
+  if (!range || range.collapsed) return null;
+  const field = $('inlineEditorField'); const selected = range.toString();
+  let node = range.commonAncestorContainer;
+  if (node?.nodeType === Node.TEXT_NODE) node = node.parentElement;
+  while (node && node !== field) {
+    if (node.tagName === 'SPAN' && node.textContent === selected) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+function normalizeHexColor(raw) {
+  if (!raw) return '';
+  if (/^#[0-9a-f]{6}$/i.test(raw)) return raw.toLowerCase();
+  const rgb = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i.exec(raw);
+  return rgb ? `#${rgb.slice(1).map((x) => Math.min(255, Number(x)).toString(16).padStart(2, '0')).join('')}` : '';
+}
+function inlineInheritedStyle(node, prop) {
+  const field = $('inlineEditorField');
+  let cur = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  while (cur && cur !== field) {
+    if (cur.style?.[prop]) return cur.style[prop];
+    cur = cur.parentElement;
+  }
+  return '';
+}
+function inlineInheritedLogicalSize(node) {
+  const field = $('inlineEditorField');
+  let cur = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  while (cur && cur !== field) {
+    const val = logicalFontSizeOf(cur);
+    if (val != null) return Math.round(val);
+    cur = cur.parentElement;
+  }
+  return null;
+}
+function inlineSelectionStyleState(range) {
+  const field = $('inlineEditorField');
+  const base = Typeset.blockStyle(overlayBlock(inlineDraft.block));
+  let bold = base.bold !== false, italic = !!base.italic, underline = !!base.underline, strike = false;
+  const chain = [];
+  let cur = inlineSelectionSpan(range) || (range?.startContainer?.nodeType === Node.ELEMENT_NODE ? range.startContainer : range?.startContainer?.parentElement);
+  while (cur && cur !== field) { chain.unshift(cur); cur = cur.parentElement; }
+  chain.forEach((el) => {
+    const tag = el.tagName;
+    if (['B', 'STRONG', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'TH'].includes(tag)) bold = true;
+    if (tag === 'I' || tag === 'EM') italic = true;
+    if (tag === 'U') underline = true;
+    if (['S', 'STRIKE', 'DEL'].includes(tag)) strike = true;
+    const fw = el.style?.fontWeight || '';
+    if (fw === 'bold' || Number(fw) >= 600) bold = true;
+    else if (fw === 'normal' || fw === '400') bold = false;
+    if (el.style?.fontStyle === 'italic') italic = true;
+    else if (el.style?.fontStyle === 'normal') italic = false;
+    const deco = el.style?.textDecorationLine || el.style?.textDecoration || '';
+    if (deco.includes('underline')) underline = true;
+    if (deco.includes('line-through')) strike = true;
+  });
+  return { bold, italic, underline, strike };
+}
+function syncInlineLineControls() {
+  const badge = $('inlineTargetBadge');
+  const sizeInput = $('inlineLineSize');
+  const typingSize = document.activeElement === sizeInput;
+  updateInlineSelectionHighlight();
+  if (!inlineDraft || inlineDraft.mode === 'ocr') {
+    if (badge) {
+      badge.textContent = inlineDraft?.mode === 'ocr' ? 'متن سادهٔ OCR' : '';
+      badge.classList.toggle('hidden', !inlineDraft);
+      badge.classList.remove('is-word');
+    }
+    if (inlineDraft?.mode === 'ocr' && !typingSize && sizeInput) {
+      sizeInput.value = inlineDraft.initialAutoSize && !inlineDraft.sizeTouched ? '' : $('inlineEditorSize').value;
+    }
+    return;
+  }
+  if (hasInlineWordSelection()) {
+    const raw = inlineDraft.range.toString().trim().replace(/\s+/g, ' ');
+    const snippet = Array.from(raw).length > 18 ? `${Array.from(raw).slice(0, 18).join('')}…` : raw;
+    if (badge) { badge.textContent = `بخش انتخابی: «${snippet}»`; badge.classList.remove('hidden'); badge.classList.add('is-word'); }
+    const span = inlineSelectionSpan(inlineDraft.range) || (inlineDraft.range.startContainer.nodeType === Node.ELEMENT_NODE ? inlineDraft.range.startContainer : inlineDraft.range.startContainer.parentElement);
+    const sizeVal = inlineInheritedLogicalSize(span);
+    if (!typingSize) sizeInput.value = sizeVal != null ? String(sizeVal) : '';
+    const hex = normalizeHexColor(inlineInheritedStyle(span, 'color'));
+    if (hex && classicEditor?.colorInput) classicEditor.colorInput.value = hex;
+    return;
+  }
+  if (badge) { badge.textContent = 'هدف: خط فعلی'; badge.classList.remove('hidden', 'is-word'); }
+  const line = inlineParagraphFrom(inlineDraft.range?.startContainer);
+  const lineSize = logicalFontSizeOf(line);
+  if (!typingSize) sizeInput.value = lineSize != null ? String(Math.round(lineSize)) : '';
+  const lineHex = normalizeHexColor(line?.style.color) || effectiveInlineColor(inlineDraft.block);
+  if (lineHex && classicEditor?.colorInput) classicEditor.colorInput.value = lineHex;
+}
+function applyStylePatchToElement(element, styles) {
+  Object.entries(styles).forEach(([key, val]) => {
+    if (key === 'fontSize') applyLogicalFontSize(element, val);
+    else element.style[key] = val;
+  });
+}
+function applyInlineWordStyle(styles, options = {}) {
+  const { restoreFocus = true } = options;
+  const field = $('inlineEditorField');
+  if (!hasInlineWordSelection()) return false;
+  const range = inlineDraft.range.cloneRange();
+  if (restoreFocus) field.focus({ preventScroll: true });
+  let nextRange = null;
+  let target = inlineSelectionSpan(range);
+  if (target) {
+    applyStylePatchToElement(target, styles);
+    if (!target.getAttribute('style')?.trim()) {
+      const parent = target.parentNode; const first = target.firstChild; const last = target.lastChild;
+      while (target.firstChild) parent.insertBefore(target.firstChild, target);
+      target.remove();
+      if (first && last) {
+        nextRange = document.createRange(); nextRange.setStartBefore(first); nextRange.setEndAfter(last);
+      }
+    } else {
+      nextRange = document.createRange(); nextRange.selectNodeContents(target);
+    }
+  } else {
+    const fragment = range.extractContents();
+    const unwrapTags = [];
+    if ('fontWeight' in styles) unwrapTags.push('b', 'strong');
+    if ('fontStyle' in styles) unwrapTags.push('i', 'em');
+    if ('textDecoration' in styles) unwrapTags.push('u', 's', 'strike', 'del');
+    if (unwrapTags.length) {
+      [...fragment.querySelectorAll(unwrapTags.join(','))].reverse().forEach((el) => el.replaceWith(...el.childNodes));
+    }
+    fragment.querySelectorAll('span').forEach((child) => {
+      Object.keys(styles).forEach((key) => {
+        if (key === 'fontSize') applyLogicalFontSize(child, '');
+        else child.style[key] = '';
+      });
+      if (!child.getAttribute('style')?.trim()) child.replaceWith(...child.childNodes);
+    });
+    const wrapper = document.createElement('span');
+    applyStylePatchToElement(wrapper, styles);
+    if (wrapper.getAttribute('style')?.trim()) {
+      wrapper.appendChild(fragment);
+      range.insertNode(wrapper);
+      nextRange = document.createRange(); nextRange.selectNodeContents(wrapper);
+    } else {
+      const nodes = [...fragment.childNodes];
+      range.insertNode(fragment);
+      if (nodes.length) {
+        nextRange = document.createRange(); nextRange.setStartBefore(nodes[0]); nextRange.setEndAfter(nodes.at(-1));
+      }
+    }
+  }
+  if (nextRange) {
+    inlineDraft.range = nextRange.cloneRange();
+    classicEditor.syncRange?.(inlineDraft.range);
+    if (restoreFocus) {
+      const selection = window.getSelection();
+      selection.removeAllRanges(); selection.addRange(nextRange);
+    }
+  }
+  recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+  return true;
+}
+function ensureInlineParagraph(options = {}) {
+  const { restoreFocus = true } = options;
+  const field = $('inlineEditorField'); const range = inlineDraft?.range;
+  if (!inlineDraft || inlineDraft.mode === 'ocr' || !range || !field.contains(range.startContainer)) {
+    toast('ابتدا داخل خط موردنظر کلیک کنید.', true); return null;
+  }
+  let existing = inlineParagraphFrom(range.startContainer);
+  if (existing && !restoreFocus) return existing;
+  const activeControl = !restoreFocus && document.activeElement && document.activeElement !== field
+    ? { el: document.activeElement, start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd }
+    : null;
+  field.focus(); const selection = window.getSelection(); const cursor = range.cloneRange(); cursor.collapse(true);
+  selection.removeAllRanges(); selection.addRange(cursor);
+  let line = inlineParagraphFrom(selection.anchorNode);
+  if (!line) {
+    // Browser paragraph boundaries include existing BRs, so only the chosen logical line is wrapped.
+    inlineDraft.muteHistory = true;
+    try { document.execCommand('formatBlock', false, 'div'); } finally { inlineDraft.muteHistory = false; }
+    line = inlineParagraphFrom(selection.anchorNode);
+    // Chromium leaves the BR immediately before its new DIV, which otherwise
+    // turns one legacy line break into two in innerText and saved translations.
+    if (line?.previousSibling?.nodeName === 'BR') line.previousSibling.remove();
+  }
+  if (!line) { toast('انتخاب این خط ممکن نشد؛ دوباره داخل متن کلیک کنید.', true); return null; }
+  rememberInlineRange();
+  if (activeControl?.el) {
+    activeControl.el.focus();
+    if (typeof activeControl.start === 'number' && activeControl.el.setSelectionRange) {
+      try { activeControl.el.setSelectionRange(activeControl.start, activeControl.end); } catch {}
+    }
+  }
+  return line;
+}
+function setInlineLineStyle(property, value, options = {}) {
+  const field = $('inlineEditorField');
+  const fullBoxSelected = hasInlineWordSelection()
+    && inlineDraft.range.toString().trim() === field.textContent.trim()
+    && field.textContent.trim().length > 0;
+  if (inlineDraft && inlineDraft.mode !== 'ocr' && (fullBoxSelected || (!field.textContent && !field.querySelector('div,p')))) {
+    if (property === 'textAlign') {
+      $('inlineEditorAlign').value = value; field.style.textAlign = value;
+      field.querySelectorAll('div,p').forEach((el) => { el.style.textAlign = ''; });
+      recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange(); return;
+    }
+    if (property === 'direction') {
+      $('inlineEditorDirection').value = value; field.dir = value; field.style.direction = value;
+      field.querySelectorAll('div,p').forEach((el) => { el.style.direction = ''; });
+      recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange(); return;
+    }
+  }
+  const line = ensureInlineParagraph(options); if (!line) return;
+  if (property === 'fontSize') applyLogicalFontSize(line, value);
+  else line.style[property] = value;
+  if (options.restoreFocus !== false) rememberInlineRange();
+  recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+}
+function setSelectionOrLineSize(value, options = {}) {
+  if (!inlineDraft) return;
+  if (inlineDraft.mode === 'ocr') {
+    const parsed = Number.parseFloat(value || '');
+    if (value && Number.isFinite(parsed) && parsed >= 8) {
+      $('inlineEditorSize').value = String(Math.round(parsed));
+      inlineDraft.sizeTouched = true;
+      inlineDraft.initialAutoSize = false;
+    } else {
+      inlineDraft.sizeTouched = false;
+      inlineDraft.initialAutoSize = true;
+      $('inlineEditorSize').value = String(effectiveInlineSize({ ...inlineDraft.block, size: null }));
+    }
+    syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+    return;
+  }
+  if (hasInlineWordSelection()) { applyInlineWordStyle({ fontSize: value }, options); return; }
+  setInlineLineStyle('fontSize', value, options);
+}
+function stepSelectionOrLineSize(delta) {
+  if (!inlineDraft) return;
+  if (inlineDraft.mode === 'ocr') {
+    const cur = Number($('inlineEditorSize').value) || effectiveInlineSize(inlineDraft.block);
+    const next = Math.max(8, Math.min(160, Math.round(cur + delta)));
+    $('inlineLineSize').value = String(next);
+    setSelectionOrLineSize(`${next}px`);
+    return;
+  }
+  const currentInput = Number($('inlineLineSize').value);
+  const inherited = inlineInheritedLogicalSize(inlineSelectionSpan(inlineDraft.range) || inlineDraft.range?.startContainer);
+  const base = Number.isFinite(currentInput) && currentInput >= 8 ? currentInput : (inherited ?? effectiveInlineSize(inlineDraft.block));
+  const next = Math.max(8, Math.min(160, Math.round(base + delta)));
+  $('inlineLineSize').value = String(next);
+  setSelectionOrLineSize(`${next}px`);
+}
+function toggleInlineCommand(cmd) {
+  if (!inlineDraft || inlineDraft.mode === 'ocr') return;
+  if (hasInlineWordSelection()) {
+    const cur = inlineSelectionStyleState(inlineDraft.range);
+    if (cmd === 'bold') applyInlineWordStyle({ fontWeight: cur.bold ? 'normal' : 'bold' });
+    else if (cmd === 'italic') applyInlineWordStyle({ fontStyle: cur.italic ? 'normal' : 'italic' });
+    else if (cmd === 'underline' || cmd === 'strikeThrough') {
+      const nextUnderline = cmd === 'underline' ? !cur.underline : cur.underline;
+      const nextStrike = cmd === 'strikeThrough' ? !cur.strike : cur.strike;
+      applyInlineWordStyle({ textDecoration: [nextUnderline ? 'underline' : '', nextStrike ? 'line-through' : ''].filter(Boolean).join(' ') });
+    }
+    return;
+  }
+  const line = ensureInlineParagraph(); if (!line) return;
+  if (cmd === 'bold') {
+    const defaultBold = Typeset.blockStyle(overlayBlock(inlineDraft.block)).bold !== false;
+    const isNormal = line.style.fontWeight === 'normal' || line.style.fontWeight === '400';
+    const isBold = line.style.fontWeight === 'bold' || Number(line.style.fontWeight) >= 600;
+    line.style.fontWeight = defaultBold ? (isNormal ? 'bold' : 'normal') : (isBold ? 'normal' : 'bold');
+  } else if (cmd === 'italic') {
+    line.style.fontStyle = line.style.fontStyle === 'italic' ? 'normal' : 'italic';
+  } else if (cmd === 'underline' || cmd === 'strikeThrough') {
+    const token = cmd === 'underline' ? 'underline' : 'line-through';
+    const parts = new Set((line.style.textDecoration || '').split(/\s+/).filter((x) => x === 'underline' || x === 'line-through'));
+    if (parts.has(token)) parts.delete(token); else parts.add(token);
+    line.style.textDecoration = [...parts].join(' ');
+  }
+  rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+}
+function resetInlineLineStyle() {
+  if (hasInlineWordSelection()) {
+    const field = $('inlineEditorField'); field.focus();
+    const range = inlineDraft.range.cloneRange(); const selection = window.getSelection();
+    selection.removeAllRanges(); selection.addRange(range);
+    const span = inlineSelectionSpan(range);
+    if (span) {
+      const parent = span.parentNode; const first = span.firstChild; const last = span.lastChild;
+      while (span.firstChild) parent.insertBefore(span.firstChild, span);
+      span.remove();
+      if (first && last) {
+        const nextRange = document.createRange(); nextRange.setStartBefore(first); nextRange.setEndAfter(last);
+        selection.removeAllRanges(); selection.addRange(nextRange);
+      }
+    } else {
+      const fragment = range.extractContents();
+      const unwrap = (rootNode) => {
+        [...rootNode.querySelectorAll('span,b,strong,i,em,u,s,strike,del')].reverse().forEach((el) => el.replaceWith(...el.childNodes));
+      };
+      unwrap(fragment);
+      const nodes = [...fragment.childNodes];
+      range.insertNode(fragment);
+      if (nodes.length) {
+        const nextRange = document.createRange(); nextRange.setStartBefore(nodes[0]); nextRange.setEndAfter(nodes.at(-1));
+        selection.removeAllRanges(); selection.addRange(nextRange);
+      }
+    }
+    rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+    return;
+  }
+  const line = ensureInlineParagraph(); if (!line) return;
+  delete line.dataset.logicalSize;
+  ['textAlign', 'direction', 'fontSize', 'color', 'fontWeight', 'fontStyle', 'textDecoration'].forEach((key) => { line.style[key] = ''; });
+  [...line.querySelectorAll('span,b,strong,i,em,u,s,strike,del')].reverse().forEach((el) => el.replaceWith(...el.childNodes));
+  rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+}
+function effectiveInlineSize(block) {
+  const output = overlayBlock(block);
+  if (Number(block.size) > 0) return Number(block.size);
+  const bounds = clampedBoxOf(output);
+  if (!hasRenderableText(output)) return 24;
+  const base = overlaySize(output, bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
+  if (!output._plainText && output.richHtml) {
+    const words = Typeset.richHtmlWords(output.richHtml).filter((w) => String(w.t || '').trim());
+    if (words.length && words.every((w) => Number.isFinite(w.size) && w.size === words[0].size)) {
+      return Math.round(words[0].size);
+    }
+  }
+  return base;
+}
+function effectiveInlineColor(block) {
+  const output = overlayBlock(block); const style = Typeset.blockStyle(output);
+  if (style.color) return style.color.toLowerCase();
+  if (block.bg === 'none') return '#ffffff';
+  if (block.bg === 'white') return '#0b0b0b';
+  if (block.bg === 'black') return '#fafafa';
+  try {
+    const bitmap = state.editorBitmap;
+    if (!bitmap?.width || !bitmap?.height) return '#ffffff';
+    const bounds = boxOf(output);
+    const sx = Math.max(0, Math.floor(bounds.x0) - 8); const sy = Math.max(0, Math.floor(bounds.y0) - 8);
+    const ex = Math.min(bitmap.width, Math.ceil(bounds.x1) + 8); const ey = Math.min(bitmap.height, Math.ceil(bounds.y1) + 8);
+    if (ex <= sx || ey <= sy) return '#0b0b0b';
+    const sw = ex - sx; const sh = ey - sy;
+    sampleScratchCanvas = sampleScratchCanvas || document.createElement('canvas');
+    sampleScratchCanvas.width = sw; sampleScratchCanvas.height = sh;
+    const context = sampleScratchCanvas.getContext('2d', { willReadFrequently: true }) || sampleScratchCanvas.getContext('2d');
+    context.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+    const localBounds = { x0: bounds.x0 - sx, y0: bounds.y0 - sy, x1: bounds.x1 - sx, y1: bounds.y1 - sy };
+    const bg = Typeset.sampleBg(context, localBounds, sw, sh);
+    return 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b > 150 ? '#0b0b0b' : '#fafafa';
+  } catch { return '#ffffff'; }
+}
+let lastInlineOpenClick = null;
+function resolveVisualInlineCaret(field, clientX, clientY) {
+  if (!field || typeof document.createTreeWalker !== 'function' || typeof document.createRange !== 'function') return null;
+  const walker = document.createTreeWalker(field, NodeFilter.SHOW_TEXT);
+  const r = document.createRange();
+  const lines = [];
+  const addLineItem = (item) => {
+    let line = lines.find((ln) => item.top < ln.bottom - 2 && item.bottom > ln.top + 2);
+    if (!line) { line = { top: item.top, bottom: item.bottom, items: [] }; lines.push(line); }
+    line.top = Math.min(line.top, item.top);
+    line.bottom = Math.max(line.bottom, item.bottom);
+    line.items.push(item);
+  };
+  let tn;
+  while ((tn = walker.nextNode())) {
+    const value = tn.nodeValue || '';
+    if (!value.length) continue;
+    const parent = tn.parentElement || field;
+    const defaultRtl = (window.getComputedStyle?.(parent)?.direction || field.dir || 'rtl') === 'rtl';
+    for (let k = 0; k < value.length; k += 1) {
+      const ch = value[k];
+      if (ch === '\r' || ch === '\u200c') continue;
+      if (ch === '\n') {
+        if (k === 0 || value[k - 1] === '\n') {
+          r.setStart(tn, k); r.collapse(true);
+          const cr = r.getClientRects?.()?.[0];
+          if (cr && cr.height > 0 && !lines.some((ln) => cr.top < ln.bottom - 2 && cr.bottom > ln.top + 2)) {
+            addLineItem({ node: tn, k, endK: k, left: cr.left, right: cr.right, top: cr.top, bottom: cr.bottom, startEdge: cr.left, endEdge: cr.right });
+          }
+        }
+        continue;
+      }
+      r.setStart(tn, k); r.setEnd(tn, k + 1);
+      const rr = r.getBoundingClientRect?.();
+      if (!rr || !(rr.width > 0 && rr.height > 0)) continue;
+      const isRtlChar = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(ch) && !/[\u0660-\u0669\u06f0-\u06f9]/.test(ch) ? true
+        : /[A-Za-z0-9\u0660-\u0669\u06f0-\u06f9\u00c0-\u02af\u0370-\u052f]/.test(ch) ? false : defaultRtl;
+      addLineItem({
+        node: tn, k, endK: (k + 1 < value.length && value[k + 1] === '\u200c') ? k + 2 : k + 1,
+        left: rr.left, right: rr.right, top: rr.top, bottom: rr.bottom,
+        startEdge: isRtlChar ? rr.right : rr.left,
+        endEdge: isRtlChar ? rr.left : rr.right,
+      });
+    }
+    if (value.endsWith('\n')) {
+      r.setStart(tn, value.length); r.collapse(true);
+      const cr = r.getClientRects?.()?.[0];
+      if (cr && cr.height > 0 && !lines.some((ln) => cr.top < ln.bottom - 2 && cr.bottom > ln.top + 2)) {
+        addLineItem({ node: tn, k: value.length, endK: value.length, left: cr.left, right: cr.right, top: cr.top, bottom: cr.bottom, startEdge: cr.left, endEdge: cr.right });
+      }
+    }
+  }
+  (field.querySelectorAll ? [...field.querySelectorAll('br')] : []).forEach((br) => {
+    const parent = br.parentNode;
+    if (!parent) return;
+    const idx = [...parent.childNodes].indexOf(br);
+    if (idx < 0) return;
+    r.setStart(parent, idx); r.collapse(true);
+    const cr = r.getClientRects?.()?.[0] || br.getBoundingClientRect?.();
+    if (cr && cr.height > 0 && !lines.some((ln) => cr.top < ln.bottom - 2 && cr.bottom > ln.top + 2)) {
+      addLineItem({ node: parent, k: idx, endK: idx, left: cr.left, right: cr.right, top: cr.top, bottom: cr.bottom, startEdge: cr.left, endEdge: cr.right });
+    }
+  });
+  if (!lines.length) return null;
+  let bestLine = lines[0], bestYDist = Infinity;
+  for (const ln of lines) {
+    const yDist = clientY < ln.top ? ln.top - clientY : clientY > ln.bottom ? clientY - ln.bottom : 0;
+    if (yDist < bestYDist) { bestYDist = yDist; bestLine = ln; }
+  }
+  const direct = bestLine.items.filter((it) => clientX >= it.left - 0.5 && clientX <= it.right + 0.5);
+  const pool = direct.length ? direct : bestLine.items;
+  let bestHit = null, bestXDist = Infinity;
+  for (const it of pool) {
+    const dStart = Math.abs(clientX - it.startEdge);
+    if (dStart < bestXDist) { bestXDist = dStart; bestHit = { node: it.node, offset: it.k }; }
+    const dEnd = Math.abs(clientX - it.endEdge);
+    if (dEnd < bestXDist) { bestXDist = dEnd; bestHit = { node: it.node, offset: it.endK }; }
+  }
+  return bestHit;
+}
+function inlineCaretPoint(field, clientX, clientY) {
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  const visual = resolveVisualInlineCaret(field, clientX, clientY);
+  if (visual) return visual;
+  const position = document.caretPositionFromPoint?.(clientX, clientY);
+  if (position && field.contains(position.offsetNode)) return { node: position.offsetNode, offset: position.offset };
+  const range = document.caretRangeFromPoint?.(clientX, clientY) || null;
+  if (range && field.contains(range.startContainer)) return { node: range.startContainer, offset: range.startOffset };
+  return null;
+}
+function expandInlineWordAtPoint(field, clientX, clientY) {
+  const pt = inlineCaretPoint(field, clientX, clientY);
+  if (!pt) return false;
+  let { node, offset } = pt;
+  while (node && node.nodeType === Node.ELEMENT_NODE && node.childNodes.length) {
+    const idxChild = Math.min(Math.max(0, offset), node.childNodes.length - 1);
+    node = node.childNodes[idxChild];
+    offset = 0;
+  }
+  if (!node || node.nodeType !== Node.TEXT_NODE) return false;
+  const value = node.nodeValue || '';
+  if (!value.trim()) return false;
+  const isWordChar = (ch) => !!ch && /[\p{L}\p{N}\u200c_]/u.test(ch);
+  let idx = Math.min(Math.max(0, offset), value.length);
+  if (idx === value.length || !isWordChar(value[idx])) {
+    if (idx > 0 && isWordChar(value[idx - 1])) idx -= 1;
+    else return false;
+  }
+  let start = idx, end = idx + 1;
+  while (start > 0 && isWordChar(value[start - 1])) start -= 1;
+  while (end < value.length && isWordChar(value[end])) end += 1;
+  const range = document.createRange();
+  range.setStart(node, start); range.setEnd(node, end);
+  const selection = window.getSelection?.();
+  if (selection) { selection.removeAllRanges(); selection.addRange(range); }
+  rememberInlineRange(); syncInlineLineControls();
+  return true;
+}
+function placeInlineCaret(field, event) {
+  if (!event || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+  const pt = inlineCaretPoint(field, event.clientX, event.clientY);
+  if (!pt) return;
+  const range = document.createRange(); range.setStart(pt.node, pt.offset); range.collapse(true);
+  const selection = window.getSelection?.();
+  if (selection) { selection.removeAllRanges(); selection.addRange(range); }
+}
+function openInlineEditor(block, clickEvent = null) {
+  if (!block || !editorItem()) return;
+  if (inlineDraft?.block === block && inlineDraft.mode === blockOverlayMode(block)) { classicEditor.focus(); return; }
+  if (document.activeElement === $('inlineLineSize')) $('inlineLineSize').blur();
+  if (!closeInlineEditor()) return;
+  const mode = blockOverlayMode(block);
+  if (mode === 'none') return;
+  selectEditorBlock(block.id, true);
+  const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((entry) => entry.dataset.id === String(block.id));
+  if (!box) { toast('ابتدا نمایش این کادر را فعال کنید.', true); return; }
+
+  const field = $('inlineEditorField'); const direction = mode === 'ocr' ? 'ltr' : (block.dir === 'ltr' ? 'ltr' : 'rtl');
+  const hasMarks = mode !== 'ocr' && !block.richHtml && !!Typeset.hasInlineMarks?.(block.tr || '') && typeof Typeset.inlineMarksToHtml === 'function';
+  const originalHtml = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || (hasMarks ? sanitizeHtml(Typeset.inlineMarksToHtml(block.tr || '')) : plainToHtml(block.tr || '')));
+  const draftKey = `comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(block.id)}:${mode}`;
+  setInlineDockDisabled(false);
+  classicEditor.setPlainMode(mode === 'ocr');
+  field.removeAttribute('style'); field.dir = direction; field.style.direction = direction;
+  $('inlineEditorTitle').textContent = `کادر ${block.id} · ویرایش مستقیم ${mode === 'ocr' ? 'متن اصلی' : 'ترجمه'} · ذخیرهٔ خودکار`;
+  $('inlineEditorCancel').classList.add('hidden');
+  $('inlineLineTools').classList.remove('hidden');
+  if ($('inlineLineSize')) $('inlineLineSize').value = '';
+  ['inlineLineSize', 'inlineSizeUp', 'inlineSizeDown'].forEach((id) => { const el = $(id); if (el) el.disabled = false; });
+  if ($('inlineLineReset')) $('inlineLineReset').disabled = mode === 'ocr';
+  $('inlineEditorDirection').value = direction; $('inlineEditorDirection').disabled = mode === 'ocr';
+  $('inlineEditorAlign').value = mode === 'ocr' ? overlayBlock(block).align : (block.align || 'right');
+  const verticalAlignTouched = ['top', 'middle', 'bottom'].includes(block.verticalAlign);
+  $('inlineVerticalAlign').value = ['top', 'bottom'].includes(block.verticalAlign) ? block.verticalAlign : 'middle';
+  const initialAutoSize = !(Number.isFinite(+block.size) && +block.size > 0);
+  const initialSizeValue = String(effectiveInlineSize(block));
+  $('inlineEditorSize').value = initialSizeValue;
+  $('inlineEditorColor').value = effectiveInlineColor(block);
+
+  inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: originalHtml,
+    dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
+    verticalAlign: $('inlineVerticalAlign').value, verticalAlignTouched, size: initialSizeValue,
+    initialAutoSize, initialSizeValue, sizeTouched: false,
+    color: block.color || null, originalColor: block.color || null,
+    range: null, history: [], historyIndex: -1, muteHistory: false, conflictReported: false };
+  const draftRestore = classicEditor.setContext(draftKey, originalHtml, inlineDraft.snapshot);
+  if (draftRestore && typeof draftRestore.then === 'function') {
+    draftRestore.then((restored) => {
+      if (inlineDraft?.block !== block) return;
+      if (restored) { recordInlineHistory(); syncInlineLineControls(); }
+      classicEditor.focus();
+    }).catch(() => {});
+  }
+  const background = block.bg || 'auto';
+  box.style.setProperty('--editing-bg', background === 'white' ? '#fff' : background === 'black' ? '#101010' : 'var(--surface)');
+  box.style.setProperty('--editing-fg', background === 'white' ? '#202020' : background === 'black' ? '#fff' : 'var(--text)');
+  box.classList.add('editing'); classicEditor.attachField(box);
+
+  inlineEditSession = window.createInlineEditSession({
+    block, mode, snapshot: inlineBlockSnapshot, getBaseline: () => inlineDraft?.snapshot,
+    read: () => {
+      const textVal = classicEditor.getText();
+      const htmlVal = mode === 'ocr' ? '' : classicEditor.getHTML();
+      const normNbsp = (s) => String(s || '').replace(/&nbsp;|\u00a0/g, ' ');
+      const hasMultiSpace = /(?: |&nbsp;|\u00a0){2,}/.test(htmlVal);
+      const plainEquiv = mode !== 'ocr' && !block.richHtml && !hasMarks && !hasMultiSpace && normNbsp(htmlVal) === normNbsp(sanitizeHtml(plainToHtml(textVal)));
+      const rawSize = $('inlineEditorSize').value.trim();
+      const keepAuto = !!(inlineDraft?.initialAutoSize && !inlineDraft?.sizeTouched && rawSize === inlineDraft?.initialSizeValue);
+      const keepLegacyVertical = !inlineDraft?.verticalAlignTouched && !['top', 'middle', 'bottom'].includes(block.verticalAlign);
+      return { text: textVal, richHtml: plainEquiv ? '' : htmlVal,
+        dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
+        verticalAlign: keepLegacyVertical ? undefined : $('inlineVerticalAlign').value,
+        size: keepAuto ? null : (rawSize ? Number(rawSize) : null), color: inlineDraft?.color ?? null };
+    },
+    onCommit: (savedBlock, revision) => {
+      inlineDraft.snapshot = revision;
+      inlineDraft.html = mode === 'ocr' ? plainToHtml(savedBlock.text || '') : (savedBlock.richHtml || plainToHtml(savedBlock.tr || ''));
+      inlineDraft.dir = $('inlineEditorDirection').value; inlineDraft.align = $('inlineEditorAlign').value;
+      inlineDraft.verticalAlign = $('inlineVerticalAlign').value;
+      inlineDraft.initialAutoSize = !(Number.isFinite(+savedBlock.size) && +savedBlock.size > 0);
+      if (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && document.activeElement !== $('inlineEditorSize')) {
+        const nextShown = String(effectiveInlineSize(savedBlock));
+        $('inlineEditorSize').value = nextShown;
+        inlineDraft.initialSizeValue = nextShown;
+      }
+      inlineDraft.size = $('inlineEditorSize').value;
+      inlineDraft.originalColor = inlineDraft.color = savedBlock.color || null; inlineDraft.conflictReported = false;
+      $('inlineEditorCancel').classList.add('hidden');
+      buildBlockList(); scheduleEditorCanvasDraw(); scheduleSave();
+    },
+    onConflict: () => {
+      if (!inlineDraft.conflictReported) toast('این کادر هم‌زمان در جای دیگری تغییر کرده؛ نسخهٔ پروژه حفظ شد.', true);
+      inlineDraft.conflictReported = true; $('inlineEditorCancel').classList.remove('hidden');
+    },
+  });
+  $('inlineEditor').classList.remove('hidden', 'is-idle');
+  $('inlineEditor').classList.toggle('plain-mode', mode === 'ocr');
+  syncVerticalAlignButtons();
+  positionInlineEditor(); classicEditor.focus();
+  placeInlineCaret(field, clickEvent); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+}
+function autoApplyInlineDraft() {
+  if (!inlineDraft || !inlineEditSession) return true;
+  const committed = inlineEditSession.commit();
+  if (!committed) $('inlineEditorCancel').classList.remove('hidden');
+  return committed;
+}
+function applyInlineEditor() { return closeInlineEditor(); }
+
+function editorSelectedKeys() {
+  const item = editorItem(); const valid = new Set((item?.blocks || []).map((block) => String(block.id)));
+  return (state.selectedBlockIds || []).map(String).filter((key) => valid.has(key));
+}
+function selectedEditorBlocks() {
+  const item = editorItem(); if (!item) return [];
+  const byId = new Map((item.blocks || []).map((block) => [String(block.id), block]));
+  return editorSelectedKeys().map((key) => byId.get(key)).filter(Boolean);
+}
+function nonEmptyLines(value) {
+  return String(value || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+function isBlockSplittable(block) {
+  if (!block) return false;
+  const liveText = inlineDraft?.block === block && inlineDraft.mode === 'ocr' ? (classicEditor?.getText?.() ?? block.text) : block.text;
+  const liveTr = inlineDraft?.block === block && inlineDraft.mode !== 'ocr' ? (classicEditor?.getText?.() ?? block.tr) : block.tr;
+  const hasSource = Array.isArray(block.sourceLines) && block.sourceLines.length >= 2;
+  const hasTr = Boolean(String(liveTr || '').trim() || String(block.richHtml || '').trim());
+  if (!hasTr) {
+    return (hasSource && String(liveText || '') === joinedOcrText(block.sourceLines)) || nonEmptyLines(liveText).length >= 2;
+  }
+  if (nonEmptyLines(liveTr).length >= 2) return true;
+  return hasSource && block.sourceLines.every((s) => String(s.tr || '').trim())
+    && String(liveTr || '').trim() === block.sourceLines.map((s) => String(s.tr || '').trim()).join(' ');
+}
+function updateEditorSelection() {
+  const selected = new Set(editorSelectedKeys()); state.selectedBlockIds = [...selected];
+  if (!selected.has(String(state.activeBlockId))) state.activeBlockId = [...selected].at(-1) || null;
+  document.querySelectorAll('#editorBoxes .editor-box').forEach((box) => {
+    box.classList.toggle('selected', selected.has(box.dataset.id)); box.classList.toggle('active', box.dataset.id === String(state.activeBlockId));
+  });
+  document.querySelectorAll('#blockList .block-card').forEach((card) => {
+    card.classList.toggle('selected', selected.has(card.dataset.id)); card.classList.toggle('active', card.dataset.id === String(state.activeBlockId));
+  });
+  const selectedBlocks = selectedEditorBlocks();
+  $('editorMergeText')?.classList.toggle('is-ready', selectedBlocks.length >= 2);
+  $('editorSplitText')?.classList.toggle('is-ready', selectedBlocks.some((block) => isBlockSplittable(block)));
+  if ($('editorSelectionStatus')) $('editorSelectionStatus').textContent = selected.size ? `${selected.size.toLocaleString('fa-IR')} متن انتخاب شده · مرجع: متن ${state.selectedBlockIds[0]}` : 'متنی انتخاب نشده';
+  syncVerticalAlignButtons();
+}
+function selectEditorBlock(blockId, scroll = true, additive = false) {
+  const key = String(blockId); const selected = new Set(editorSelectedKeys());
+  const alreadyActive = selected.size === 1 && selected.has(key) && String(state.activeBlockId) === key;
+  if (additive) { if (selected.has(key)) selected.delete(key); else selected.add(key); }
+  else { selected.clear(); selected.add(key); }
+  state.selectedBlockIds = [...selected]; state.activeBlockId = selected.has(key) ? key : [...selected].at(-1) || null;
+  updateEditorSelection();
+  const selectedCard = [...document.querySelectorAll('#blockList .block-card')].find((card) => card.dataset.id === String(state.activeBlockId));
+  // Do not focus the sidebar field: the user can keep typing exactly where they clicked on the image.
+  if (scroll && selectedCard && !alreadyActive) {
+    // Scroll only the sidebar, not the dialog/page or the image underneath the pointer.
+    const side = document.querySelector('.editor-side');
+    if (side) {
+      const viewport = side.getBoundingClientRect(); const card = selectedCard.getBoundingClientRect();
+      if (card.top < viewport.top) side.scrollTop -= viewport.top - card.top;
+      else if (card.bottom > viewport.bottom) side.scrollTop += card.bottom - viewport.bottom;
+    }
+  }
+}
+function selectAllEditorBlocks() {
+  if (inlineDraft && !closeInlineEditor()) return;
+  const item = editorItem(); if (!item) return;
+  state.selectedBlockIds = (item.blocks || []).map((block) => String(block.id));
+  if (!state.selectedBlockIds.includes(String(state.activeBlockId))) state.activeBlockId = state.selectedBlockIds.at(-1) || null;
+  updateEditorSelection();
+}
+function clearEditorSelection() { if (inlineDraft && !closeInlineEditor()) return; state.selectedBlockIds = []; state.activeBlockId = null; updateEditorSelection(); }
+function joinedOcrText(blocks) {
+  return blocks.map((block) => String(block.text || '').trim().replace(/\s+/g, ' ')).filter(Boolean).join(' ');
+}
+function mergeSelectedText() {
+  if (inlineDraft && !closeInlineEditor()) return;
+  const item = editorItem(); const blocks = selectedEditorBlocks();
+  if (!item || blocks.length < 2) { toast('برای ادغام، حداقل دو کادر را انتخاب کنید (با Ctrl+کلیک روی کادرها)', true); return; }
+  const ordered = [...blocks].sort((a, b) => boxOf(a).y0 - boxOf(b).y0 || boxOf(a).x0 - boxOf(b).x0);
+  const x0 = Math.min(...ordered.map((b) => b.x0)); const y0 = Math.min(...ordered.map((b) => b.y0));
+  const x1 = Math.max(...ordered.map((b) => b.x1)); const y1 = Math.max(...ordered.map((b) => b.y1));
+  const snapshots = JSON.parse(JSON.stringify(ordered));
+  const hasTr = snapshots.some((b) => String(b.tr || '').trim() || String(b.richHtml || '').trim());
+  const mergedTr = hasTr ? snapshots.map((b) => String(b.tr || '').trim()).filter(Boolean).join('\n') : '';
+  const mergedRichHtml = hasTr && snapshots.some((b) => String(b.richHtml || '').trim())
+    ? sanitizeHtml(snapshots.filter((b) => String(b.tr || '').trim() || String(b.richHtml || '').trim())
+      .map((b) => String(b.richHtml || '').trim() || plainToHtml(String(b.tr || '').trim())).join('<br>'))
+    : '';
+  const merged = { ...snapshots[0], text: joinedOcrText(snapshots), tr: mergedTr, richHtml: mergedRichHtml, x0, y0, x1, y1,
+    polygon: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], sourceLines: snapshots };
+  if (ordered.some((b) => Number.isFinite(b.tx0) || Number.isFinite(b.ty0) || Number.isFinite(b.tx1) || Number.isFinite(b.ty1))) {
+    merged.tx0 = Math.min(...ordered.map((b) => boxOf(b).x0));
+    merged.ty0 = Math.min(...ordered.map((b) => boxOf(b).y0));
+    merged.tx1 = Math.max(...ordered.map((b) => boxOf(b).x1));
+    merged.ty1 = Math.max(...ordered.map((b) => boxOf(b).y1));
+  } else {
+    delete merged.tx0; delete merged.ty0; delete merged.tx1; delete merged.ty1;
+  }
+  const selected = new Set(blocks.map((block) => String(block.id)));
+  const firstIndex = item.blocks.findIndex((block) => selected.has(String(block.id)));
+  item.blocks = item.blocks.filter((block) => !selected.has(String(block.id)));
+  item.blocks.splice(firstIndex, 0, merged);
+  state.selectedBlockIds = [String(merged.id)]; state.activeBlockId = String(merged.id);
+  buildBlockList(); drawEditor(); scheduleSave();
+  toast('کادرهای انتخابی ادغام شدند');
+}
+function buildProportionalSplitBlocks(block, item, ocrLines, trLines, nextIdRef) {
+  const count = trLines.length >= 2 ? trLines.length : ocrLines.length;
+  const b = boxOf(block);
+  const totalH = Math.max(count * 16, b.y1 - b.y0);
+  const gap = totalH >= count * 26 ? 2 : 0;
+  return Array.from({ length: count }, (_, idx) => {
+    const sy0 = Math.round(b.y0 + (totalH * idx) / count + (idx > 0 ? gap / 2 : 0));
+    const sy1 = Math.max(sy0 + 12, Math.round(b.y0 + (totalH * (idx + 1)) / count - (idx + 1 < count ? gap / 2 : 0)));
+    const clone = JSON.parse(JSON.stringify(block));
+    clone.id = idx === 0 ? block.id : ++nextIdRef.maxId;
+    clone.text = ocrLines.length === count ? ocrLines[idx] : (idx === 0 ? String(block.text || '') : '');
+    clone.tr = trLines.length === count ? trLines[idx] : '';
+    clone.richHtml = '';
+    clone.x0 = b.x0; clone.y0 = sy0; clone.x1 = b.x1; clone.y1 = sy1;
+    clone.polygon = [[b.x0, sy0], [b.x1, sy0], [b.x1, sy1], [b.x0, sy1]];
+    clone.lineH = Math.max(14, Math.min(block.lineH || 24, Math.round((sy1 - sy0) * 0.8)));
+    delete clone.tx0; delete clone.ty0; delete clone.tx1; delete clone.ty1; delete clone.sourceLines;
+    return clone;
+  });
+}
+function splitSingleEditorBlock(block, item, nextIdRef) {
+  const hasSource = Array.isArray(block.sourceLines) && block.sourceLines.length >= 2;
+  const hasTr = Boolean(String(block.tr || '').trim() || String(block.richHtml || '').trim());
+  const trLines = nonEmptyLines(block.tr);
+  const ocrLines = nonEmptyLines(block.text);
+  if (!hasTr) {
+    if (hasSource && String(block.text || '') === joinedOcrText(block.sourceLines)) {
+      return JSON.parse(JSON.stringify(block.sourceLines));
+    }
+    if (hasSource && ocrLines.length === block.sourceLines.length) {
+      const originals = JSON.parse(JSON.stringify(block.sourceLines));
+      originals.forEach((entry, idx) => { entry.text = ocrLines[idx]; entry.tr = ''; entry.richHtml = ''; });
+      return originals;
+    }
+    if (ocrLines.length >= 2) return buildProportionalSplitBlocks(block, item, ocrLines, [], nextIdRef);
+    return null;
+  }
+  if (hasSource && trLines.length === block.sourceLines.length) {
+    const originals = JSON.parse(JSON.stringify(block.sourceLines));
+    originals.forEach((entry, idx) => {
+      ['dir', 'align', 'size', 'verticalAlign', 'color', 'bg'].forEach((k) => { if (entry[k] === undefined && block[k] !== undefined) entry[k] = block[k]; });
+      const prevTr = String(entry.tr || '').trim();
+      entry.tr = trLines[idx];
+      if (prevTr !== trLines[idx]) entry.richHtml = '';
+      if (ocrLines.length === originals.length) entry.text = ocrLines[idx];
+    });
+    return originals;
+  }
+  if (hasSource && trLines.length === 1 && block.sourceLines.every((s) => String(s.tr || '').trim())
+    && trLines[0] === block.sourceLines.map((s) => String(s.tr || '').trim()).join(' ')) {
+    return JSON.parse(JSON.stringify(block.sourceLines));
+  }
+  if (trLines.length >= 2) return buildProportionalSplitBlocks(block, item, ocrLines, trLines, nextIdRef);
+  return null;
+}
+function splitSelectedText() {
+  if (inlineDraft && !closeInlineEditor()) return;
+  const item = editorItem(); const blocks = selectedEditorBlocks();
+  if (!item || !blocks.length) { toast('ابتدا کادر موردنظر برای جداکردن را انتخاب کنید', true); return; }
+  const nextIdRef = { maxId: Math.max(0, ...(item.blocks || []).map((entry) => Number(entry.id) || 0)) };
+  const newSelection = [];
+  let splitCount = 0;
+  blocks.forEach((block) => {
+    const replacements = splitSingleEditorBlock(block, item, nextIdRef);
+    if (!replacements) { newSelection.push(String(block.id)); return; }
+    const index = item.blocks.indexOf(block);
+    if (index < 0) return;
+    item.blocks.splice(index, 1, ...replacements);
+    replacements.forEach((entry) => newSelection.push(String(entry.id)));
+    splitCount += 1;
+  });
+  if (!splitCount) {
+    const hasOneLineTr = blocks.some((b) => String(b.tr || '').trim() && nonEmptyLines(b.tr).length < 2);
+    toast(hasOneLineTr
+      ? 'متن ترجمه یک‌خطی است؛ ابتدا در جای موردنظر با کلید Enter خط را بشکنید و سپس «جداکردن خط‌ها» را بزنید'
+      : 'این کادر خط جداشدنی ندارد؛ برای جداکردن، ابتدا با Enter خط‌ها را جدا کنید', true);
+    return;
+  }
+  state.selectedBlockIds = newSelection; state.activeBlockId = newSelection[0] || null;
+  buildBlockList(); drawEditor(); scheduleSave();
+  toast('خط‌های کادر با موفقیت به کادرهای جداگانه تبدیل شدند');
+}
+function sameSizeSelectedBoxes() {
+  const item = editorItem(); const blocks = selectedEditorBlocks();
+  if (!item || blocks.length < 2) { toast('اول یک کادر مرجع و سپس حداقل یک کادر دیگر را انتخاب کنید', true); return; }
+  const [reference, ...targets] = blocks; const referenceBox = boxOf(reference);
+  const width = referenceBox.x1 - referenceBox.x0, height = referenceBox.y1 - referenceBox.y0;
+  targets.forEach((block) => {
+    const box = boxOf(block); const centerX = (box.x0 + box.x1) / 2, centerY = (box.y0 + box.y1) / 2;
+    const x0 = Math.max(0, Math.min(item.width - width, centerX - width / 2));
+    const y0 = Math.max(0, Math.min(item.height - height, centerY - height / 2));
+    block.tx0 = x0; block.tx1 = x0 + width; block.ty0 = y0; block.ty1 = y0 + height;
+  });
+  drawEditor(); scheduleSave();
+}
+function alignSelectedBoxes(direction) {
+  const item = editorItem(); const blocks = selectedEditorBlocks();
+  if (!item || blocks.length < 2) { toast('برای تراز گروهی حداقل دو متن را انتخاب کنید', true); return; }
+  const entries = blocks.map((block) => { const box = boxOf(block); return { block, box, width: box.x1 - box.x0, height: box.y1 - box.y0 }; });
+  const W = item.width, H = item.height;
+  const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+  let reference;
+  if (direction === 'left') reference = clamp(Math.min(...entries.map((entry) => entry.box.x0)), 0, Math.min(...entries.map((entry) => W - entry.width)));
+  if (direction === 'right') reference = clamp(Math.max(...entries.map((entry) => entry.box.x1)), Math.max(...entries.map((entry) => entry.width)), W);
+  if (direction === 'center') reference = clamp((Math.min(...entries.map((entry) => entry.box.x0)) + Math.max(...entries.map((entry) => entry.box.x1))) / 2, Math.max(...entries.map((entry) => entry.width / 2)), Math.min(...entries.map((entry) => W - entry.width / 2)));
+  if (direction === 'top') reference = clamp(Math.min(...entries.map((entry) => entry.box.y0)), 0, Math.min(...entries.map((entry) => H - entry.height)));
+  if (direction === 'bottom') reference = clamp(Math.max(...entries.map((entry) => entry.box.y1)), Math.max(...entries.map((entry) => entry.height)), H);
+  if (direction === 'middle') reference = clamp((Math.min(...entries.map((entry) => entry.box.y0)) + Math.max(...entries.map((entry) => entry.box.y1))) / 2, Math.max(...entries.map((entry) => entry.height / 2)), Math.min(...entries.map((entry) => H - entry.height / 2)));
+  entries.forEach(({ block, box, width, height }) => {
+    let x0 = box.x0, y0 = box.y0;
+    if (direction === 'left') x0 = reference;
+    if (direction === 'right') x0 = reference - width;
+    if (direction === 'center') x0 = reference - width / 2;
+    if (direction === 'top') y0 = reference;
+    if (direction === 'bottom') y0 = reference - height;
+    if (direction === 'middle') y0 = reference - height / 2;
+    block.tx0 = x0; block.tx1 = x0 + width; block.ty0 = y0; block.ty1 = y0 + height;
+  });
+  drawEditor(); scheduleSave();
+}
+function setBlockVisibility(block, visible) {
+  if (inlineDraft?.block === block && !closeInlineEditor()) {
+    const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
+    const toggle = card?.querySelector('[data-visibility]');
+    if (toggle) toggle.checked = !!block.enabled;
+    return;
+  }
+  block.enabled = !!visible;
+  const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
+  card?.classList.toggle('disabled', !block.enabled);
+  const toggle = card?.querySelector('[data-visibility]'); if (toggle) toggle.checked = block.enabled;
+  renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
+}
+function editOcrText(block) {
+  if (!block?.enabled) { toast('برای ویرایش متن انگلیسی، ابتدا نمایش همان کادر را فعال کنید.', true); return; }
+  if (currentOverlayMode() === 'none') setOverlayMode('ocr');
+  if (blockTextMode(block) !== 'ocr') setBlockTextMode(block, 'ocr');
+  openInlineEditor(block);
+}
+function setBlockTextMode(block, mode) {
+  if (inlineDraft?.block === block && !closeInlineEditor()) {
+    const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
+    const selector = card?.querySelector('[data-text-mode]'); if (selector) selector.value = blockTextMode(block);
+    return;
+  }
+  block.textMode = normalizeBlockTextMode(mode);
+  const card = [...document.querySelectorAll('#blockList .block-card')].find((entry) => entry.dataset.id === String(block.id));
+  const selector = card?.querySelector('[data-text-mode]'); if (selector) selector.value = block.textMode;
+  renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
+}
+function renderEditorBoxes() {
+  const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return;
+  const mode = currentOverlayMode(); const selected = new Set(editorSelectedKeys());
+  const existing = new Map([...layer.children].map((element) => [element.dataset.id, element]));
+  const visible = new Set();
+  (item.blocks || []).forEach((block) => {
+    const display = overlayBlock(block, mode); const displayMode = blockOverlayMode(block, mode);
+    const key = String(block.id);
+    if (!display.enabled || displayMode === 'none') return;
+    visible.add(key);
+    const box = clampedBoxOf(display); const scale = state.editorScale;
+    let el = existing.get(key);
+    if (!el) {
+      el = document.createElement('div'); el.className = 'editor-box'; el.dataset.id = key;
+      const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
+      const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('pointerdown', (event) => event.stopPropagation()); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(el._block, false); });
+      const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('pointerdown', (event) => event.stopPropagation()); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(el._block, el.dataset.mode === 'ocr' ? 'translation' : 'ocr'); });
+      el.append(move, visibility, language);
+      ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
+      el.addEventListener('pointerdown', (event) => {
+        const activeBlock = el._block; const additive = event.ctrlKey || event.metaKey; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
+        if (inlineDraft && additive) {
+          if (!closeInlineEditor()) return;
+        } else if (inlineDraft && inlineDraft.block !== activeBlock && !additive) {
+          if (!dragTarget || !closeInlineEditor()) return;
+        }
+        if (!(dragTarget && !additive && editorSelectedKeys().includes(String(activeBlock.id)))) selectEditorBlock(activeBlock.id, true, additive);
+        startBoxDrag(event, activeBlock, el);
+      });
+      layer.appendChild(el);
+    }
+    // Reuse the actual editing node so zoom, redraw and other controls do not destroy the caret or undo history.
+    el._block = block;
+    el.classList.toggle('selected', selected.has(key)); el.classList.toggle('active', String(state.activeBlockId) === key); el.classList.toggle('empty', !hasRenderableText(display));
+    el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
+    const language = el.querySelector('.box-language'); language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید';
+    let text = el.querySelector('.editor-box-text');
+    if (!text || el.dataset.mode !== displayMode || text._block !== block) {
+      if (text) text.remove();
+      text = document.createElement('div'); text.className = 'editor-box-text'; text.contentEditable = 'false'; text._block = block;
+      text.setAttribute('aria-label', `ویرایش متن ${block.id} روی تصویر`); text.setAttribute('role', 'button'); text.tabIndex = 0;
+      text.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 || event.ctrlKey || event.metaKey) return;
+        event.preventDefault(); event.stopPropagation();
+        const beforeBox = el.getBoundingClientRect();
+        openInlineEditor(el._block, null);
+        const field = $('inlineEditorField');
+        if (!inlineDraft || inlineDraft.block !== el._block || !el.contains(field)) return;
+        const afterBox = el.getBoundingClientRect();
+        const adjX = event.clientX + (afterBox.left - beforeBox.left);
+        const adjY = event.clientY + (afterBox.top - beforeBox.top);
+        placeInlineCaret(field, { clientX: adjX, clientY: adjY });
+        rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+        if (event.detail >= 2) {
+          lastInlineOpenClick = null;
+          expandInlineWordAtPoint(field, adjX, adjY);
+          return;
+        }
+        lastInlineOpenClick = { time: performance.now(), x: adjX, y: adjY };
+        const originX = adjX, originY = adjY;
+        const start = inlineCaretPoint(field, originX, originY);
+        if (!start || !window.addEventListener) return;
+        const onMove = (moveEvent) => {
+          if (moveEvent.buttons !== undefined && !(moveEvent.buttons & 1)) { cleanup(); return; }
+          if (Math.hypot(moveEvent.clientX - originX, moveEvent.clientY - originY) < 2) return;
+          const cur = inlineCaretPoint(field, moveEvent.clientX, moveEvent.clientY);
+          if (!cur) return;
+          const sel = window.getSelection?.();
+          if (sel?.setBaseAndExtent) sel.setBaseAndExtent(start.node, start.offset, cur.node, cur.offset);
+          else if (sel) {
+            const r = document.createRange();
+            try { r.setStart(start.node, start.offset); r.setEnd(cur.node, cur.offset); } catch {}
+            if (r.collapsed && (cur.node !== start.node || cur.offset !== start.offset)) {
+              try { r.setStart(cur.node, cur.offset); r.setEnd(start.node, start.offset); } catch {}
+            }
+            sel.removeAllRanges(); sel.addRange(r);
+          }
+          rememberInlineRange(); syncInlineLineControls();
+        };
+        const cleanup = () => {
+          window.removeEventListener('pointermove', onMove, true);
+          window.removeEventListener('pointerup', cleanup, true);
+          window.removeEventListener('pointercancel', cleanup, true);
+          rememberInlineRange(); syncInlineLineControls();
+        };
+        window.addEventListener('pointermove', onMove, true);
+        window.addEventListener('pointerup', cleanup, true);
+        window.addEventListener('pointercancel', cleanup, true);
+      });
+      text.addEventListener('click', (event) => { event.preventDefault(); if (!event.ctrlKey && !event.metaKey) { event.stopPropagation(); openInlineEditor(el._block, event); } });
+      text.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openInlineEditor(el._block); } });
+      text.innerHTML = plainToHtml(display.tr || '');
+      el.insertBefore(text, el.querySelector('.resize-handle')); el.dataset.mode = displayMode;
+    } else if (document.activeElement !== text) {
+      const html = plainToHtml(display.tr || '');
+      if (text.innerHTML !== html) text.innerHTML = html;
+    }
+    styleRichElement(text, display, scale, true);
+  });
+  existing.forEach((el, key) => { if (!visible.has(key)) el.remove(); });
+  updateEditorSelection();
+}
+function startBoxDrag(event, block, el) {
+  if (event.button !== 0) return;
+  const resize = event.target.closest('[data-dir]'); const moveHandle = event.target.closest('[data-move]');
+  // Text remains editable: dragging starts on the visible handle or the box border, not inside the text itself.
+  if (!resize && !moveHandle && event.target !== el) return;
+  const item = editorItem(); if (!item) return;
+  event.preventDefault(); event.stopPropagation();
+  const direction = resize?.dataset.dir || 'move'; const start = boxOf(block); const origin = { x: event.clientX, y: event.clientY }; const scale = state.editorScale || 1;
+  const selected = selectedEditorBlocks();
+  const movingBlocks = direction === 'move' && selected.includes(block) ? selected : [block];
+  const movingStarts = movingBlocks.map((movingBlock) => ({ block: movingBlock, start: boxOf(movingBlock) }));
+  let changed = false; let finished = false;
+  el.setPointerCapture(event.pointerId); el.classList.add('dragging');
+  const move = (ev) => {
+    const dx = (ev.clientX - origin.x) / scale; const dy = (ev.clientY - origin.y) / scale;
+    if (direction === 'move') {
+      const minDx = Math.max(...movingStarts.map((entry) => -entry.start.x0));
+      const maxDx = Math.min(...movingStarts.map((entry) => item.width - entry.start.x1));
+      const minDy = Math.max(...movingStarts.map((entry) => -entry.start.y0));
+      const maxDy = Math.min(...movingStarts.map((entry) => item.height - entry.start.y1));
+      const groupDx = Math.max(minDx, Math.min(maxDx, dx)); const groupDy = Math.max(minDy, Math.min(maxDy, dy));
+      movingStarts.forEach((entry) => {
+        const moving = entry.block; const initial = entry.start; const width = initial.x1 - initial.x0; const height = initial.y1 - initial.y0;
+        moving.tx0 = initial.x0 + groupDx; moving.tx1 = moving.tx0 + width; moving.ty0 = initial.y0 + groupDy; moving.ty1 = moving.ty0 + height;
+        const boxEl = moving === block ? el : [...document.querySelectorAll('#editorBoxes .editor-box')].find((candidate) => candidate.dataset.id === String(moving.id));
+        if (boxEl) { boxEl.style.left = `${moving.tx0 * scale}px`; boxEl.style.top = `${moving.ty0 * scale}px`; }
+      });
+    } else {
+      let { x0, y0, x1, y1 } = start; const minW = Math.min(20, item.width); const minH = Math.min(16, item.height);
+      if (direction.includes('w')) x0 = Math.max(0, Math.min(start.x1 - minW, start.x0 + dx));
+      if (direction.includes('e')) x1 = Math.min(item.width, Math.max(start.x0 + minW, start.x1 + dx));
+      if (direction.includes('n')) y0 = Math.max(0, Math.min(start.y1 - minH, start.y0 + dy));
+      if (direction.includes('s')) y1 = Math.min(item.height, Math.max(start.y0 + minH, start.y1 + dy));
+      block.tx0 = x0; block.tx1 = x1; block.ty0 = y0; block.ty1 = y1;
+    }
+    el.style.left = `${block.tx0 * scale}px`; el.style.top = `${block.ty0 * scale}px`; el.style.width = `${(block.tx1 - block.tx0) * scale}px`; el.style.height = `${(block.ty1 - block.ty0) * scale}px`;
+    if (inlineDraft?.block === block) positionInlineEditor();
+    scheduleEditorCanvasDraw(); changed = true;
+  };
+  const stop = () => {
+    if (finished) return; finished = true;
+    el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', stop); el.removeEventListener('pointercancel', stop); el.removeEventListener('lostpointercapture', stop);
+    el.classList.remove('dragging'); if (el.hasPointerCapture?.(event.pointerId)) el.releasePointerCapture(event.pointerId);
+    if (changed) { if (inlineDraft?.block === block) refreshInlineTypography(); drawEditor(); scheduleSave(); }
+  };
+  el.addEventListener('pointermove', move); el.addEventListener('pointerup', stop); el.addEventListener('pointercancel', stop); el.addEventListener('lostpointercapture', stop);
+}
+async function runSingleBlockTranslation(task) {
+  const controller = new AbortController();
+  translationAbortController = controller; translationCancelledByUser = false; translationClosingNormally = false;
+  translationRunning = true; $('cancelTranslationBtn')?.classList.remove('hidden');
+  $('translationStatus').textContent = 'در حال ترجمهٔ دوبارهٔ یک کادر…';
+  $('copyTranslationError').classList.add('hidden');
+  showDialog('translationDialog');
+  try {
+    const out = await runJob('در حال ترجمهٔ دوبارهٔ یک کادر…', () => task(controller.signal), 'translationProgress');
+    translationClosingNormally = true;
+    return out;
+  } catch (error) {
+    if (translationCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      toast('پنجرهٔ ترجمه بسته شد و عملیات متوقف گردید');
+      return { cancelled: true };
+    }
+    throw error;
+  } finally {
+    if (translationAbortController === controller) translationAbortController = null;
+    translationClosingNormally = false; translationRunning = false; $('cancelTranslationBtn')?.classList.add('hidden');
+    dismissJobCancelModal('translation');
+    if ($('translationDialog').open) closeDialog('translationDialog');
+  }
+}
+function applyTranslatedBlockDefaults(block, text, targetLang = null) {
+  block.tr = text;
+  block.richHtml = '';
+  const resolvedDir = targetLang ? targetLanguageDir(targetLang) : (block.dir === 'ltr' ? 'ltr' : 'rtl');
+  block.dir = resolvedDir;
+  if (block.pageRole === 'heading') {
+    const rawLh = Number(block.lineH) || Math.max(16, (Number(block.y1) || 0) - (Number(block.y0) || 0)) || 22;
+    block.align = resolvedDir === 'ltr' ? 'left' : 'right';
+    block.size = Math.max(14, Math.min(36, Math.round(rawLh * 0.78)));
+    block.verticalAlign = 'middle';
+    block.bold = true;
+  } else {
+    block.align = 'justify';
+    block.size = 12;
+    block.verticalAlign = 'top';
+    block.bold = !!block._detectedBold;
+  }
+  if (block._detectedItalic) block.italic = true;
+}
+async function retranslateBlock(block, targetOverride = null) {
+  if (inlineDraft?.block === block && !closeInlineEditor()) return;
+  const text = block.text || ''; const snapshot = inlineBlockSnapshot(block);
+  const target = resolvePreferredTranslationTarget(targetOverride);
+  const provider = target.provider; const profileId = target.profileId; const sourceLanguage = $('ocrLanguage').value;
+  const targetLanguage = activeTargetLanguage();
+  try {
+    const projectId = state.project.id;
+    const request = { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, target_language: targetLanguage, provider, ...(profileId ? { profile_id: profileId } : {}) };
+    const switchTarget = (nextVal) => retranslateBlock(block, nextVal);
+    if (provider === 'free') {
+      const refresh = () => api('/api/translate-text/context-preview', jsonOptions('POST', { ...request, skill: '', summary: '' }));
+      const preview = await refresh();
+      showTranslationRequestPreview(preview, async accepted => {
+        if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
+        const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill:'', summary:'', confirmation: accepted.signature }), signal }));
+        if (!result || result.cancelled) return;
+        if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
+        applyTranslatedBlockDefaults(block, result.text, targetLanguage); buildBlockList(); drawEditor(); scheduleSave();
+      }, refresh, switchTarget);
+      return;
+    }
+    const allActiveProfiles = state.ai?.providers?.[provider]?.profiles?.filter(p => p.hasApiKey) || [];
+    const profiles = profileId ? allActiveProfiles.filter(p => String(p.id) === profileId) : allActiveProfiles;
+    const limit = profiles.length ? Math.min(...profiles.map(p => p.source_limit ?? 1000)) : 1000;
+    const skillLimit = Math.floor(limit * (state.ai?.skill_percent ?? 15) / 100);
+    const contextLimit = Math.floor(limit * (state.ai?.context_percent ?? 15) / 100);
+    const defaultTargetLabel = TARGET_LANGUAGE_META[targetLanguage]?.label || targetLanguage;
+    const fallbackSkill = targetLanguage === 'fa'
+      ? 'ترجمه را روان و متناسب با لحن کمیک یا کتاب بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.'
+      : `ترجمه را روان، طبیعی و متناسب با لحن کمیک یا کتاب به زبان ${defaultTargetLabel} بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن.`;
+    const skill = savedTranslationSkill(projectId) ?? fallbackSkill;
+    const summary = state.project._aiStorySummary || '';
+    const safeSkill = Array.from(skill).length <= skillLimit ? skill : '';
+    const safeSummary = Array.from(summary).length <= contextLimit ? summary : '';
+    const refresh = (nextSkill, nextSummary) => api('/api/translate-text/context-preview', jsonOptions('POST', { ...request, skill: nextSkill, summary: nextSummary }));
+    const preview = await refresh(safeSkill, safeSummary);
+    if (safeSkill !== skill) preview.displaySkill = skill;
+    if (safeSummary !== summary) preview.displaySummary = summary;
+    showTranslationRequestPreview(preview, async (accepted, repair = null) => {
+      if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('این کادر تغییر کرده است؛ ترجمهٔ قبلی حفظ شد. دوباره تلاش کنید.', true); return; }
+      rememberTranslationSkill(projectId, accepted);
+      const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) }), signal }));
+      if (!result || result.cancelled) return;
+      if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
+      applyTranslatedBlockDefaults(block, result.text, targetLanguage); buildBlockList(); drawEditor(); scheduleSave();
+    }, refresh, switchTarget);
+  } catch (error) {
+    if (targetOverride && $('translationPreviewDialog').open) throw error;
+    toast(`ساخت پیش‌نمایش ترجمه ممکن نبود: ${error.message || error}`, true);
+  }
+}
+async function copyBlockText(text) {
+  if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+  else { const temp = document.createElement('textarea'); temp.value = text; temp.style.position = 'fixed'; temp.style.opacity = '0'; document.body.appendChild(temp); try { temp.select(); if (!document.execCommand('copy')) throw new Error('مرورگر اجازهٔ کپی نداد'); } finally { temp.remove(); } }
+  toast('کپی شد');
+}
+function makeBlockToolButton(svgInner, label, handler, extraClass = '') {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `bt${extraClass ? ` ${extraClass}` : ''}`;
+  btn.innerHTML = `<svg class="btn-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${svgInner}</svg><span>${escapeHtml(label)}</span>`;
+  btn.addEventListener('click', handler);
+  return btn;
+}
+function buildBlockList() {
+  const item = editorItem(); const list = $('blockList'); list.textContent = ''; const selected = new Set(editorSelectedKeys()); if (!item?.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; updateEditorSelection(); return; }
+  item.blocks.forEach((block) => {
+    const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', (event) => { const additive = event.ctrlKey || event.metaKey; if (additive && inlineDraft && !closeInlineEditor()) return; selectEditorBlock(block.id, false, additive); });
+    const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabled.dataset.visibility = 'sidebar'; enabled.setAttribute('aria-label', `نمایش متن ${block.id} روی تصویر`); enabledLabel.append(enabled, document.createTextNode(` نمایش متن ${block.id} روی تصویر · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
+    const isHeading = block.pageRole === 'heading';
+    const roleBtn = document.createElement('button');
+    roleBtn.type = 'button';
+    roleBtn.className = `block-role-pill${isHeading ? ' is-heading' : ''}`;
+    roleBtn.dataset.roleToggle = String(block.id);
+    roleBtn.textContent = isHeading ? 'تیتر' : 'متن';
+    roleBtn.setAttribute('aria-pressed', isHeading ? 'true' : 'false');
+    roleBtn.setAttribute('aria-label', `تغییر نقش کادر ${block.id} بین تیتر و متن معمولی`);
+    roleBtn.title = isHeading
+      ? 'این کادر «تیتر» است؛ برای تبدیل به «متن معمولی» کلیک کنید'
+      : 'این کادر «متن معمولی» است؛ برای تبدیل به «تیتر» (بولد و درشت‌تر) کلیک کنید';
+    roleBtn.addEventListener('pointerdown', (ev) => ev.stopPropagation());
+    roleBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (inlineDraft?.block === block && !closeInlineEditor()) return;
+      const nextHeading = block.pageRole !== 'heading';
+      block.pageRole = nextHeading ? 'heading' : 'paragraph';
+      if (nextHeading) {
+        const rawLh = Number(block.lineH) || Math.max(16, (Number(block.y1) || 0) - (Number(block.y0) || 0)) || 22;
+        block.bold = true;
+        block.size = Math.max(14, Math.min(36, Math.round(rawLh * 0.78)));
+        block.align = block.dir === 'ltr' ? 'left' : 'right';
+        block.verticalAlign = 'middle';
+      } else {
+        block.bold = !!block._detectedBold;
+        block.size = block.tr ? 12 : null;
+        block.align = block.tr ? 'justify' : 'right';
+        block.verticalAlign = 'top';
+      }
+      buildBlockList();
+      drawEditor();
+      scheduleSave();
+    });
+    head.appendChild(roleBtn);
+    const bg = document.createElement('select'); [['auto', 'پس‌زمینه خودکار'], ['white', 'سفید'], ['black', 'مشکی'], ['none', 'بدون پاک‌کردن']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; bg.appendChild(option); }); bg.value = block.bg || 'auto'; head.appendChild(bg);
+    const languageRow = document.createElement('div'); languageRow.className = 'block-tools block-language-tools';
+    const languageLabel = document.createElement('label'); languageLabel.className = 'block-language-label'; languageLabel.appendChild(document.createTextNode('نمایش همین متن:'));
+    const language = document.createElement('select'); language.dataset.textMode = 'sidebar'; language.setAttribute('aria-label', `زبان نمایش متن ${block.id} روی تصویر`); [['translation', 'فارسی / ترجمه'], ['ocr', 'انگلیسی / OCR']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; language.appendChild(option); }); language.value = blockTextMode(block); languageLabel.appendChild(language); languageRow.appendChild(languageLabel);
+    const metaBadges = [];
+    if (block.bold) metaBadges.push(['B', 'تشخیص/قالب پررنگ (Bold)']);
+    if (block.italic) metaBadges.push(['I', 'تشخیص/قالب کج (Italic)']);
+    if ((Number(block.firstLineIndent) || 0) >= 0.5 || (!isHeading && (Number(block.sourceIndent) || 0) >= 2)) metaBadges.push(['↳ تورفتگی', 'دارای تورفتگی نسبت به حاشیهٔ ستون']);
+    if ((Number(block.hangingIndent) || 0) >= 0.5 || (Number(block.blockOutdent) || 0) >= 0.5) metaBadges.push(['↰ بیرون‌زدگی', 'دارای بیرون‌زدگی خط اول / حاشیه']);
+    metaBadges.forEach(([txt, tip]) => {
+      const chip = document.createElement('span');
+      chip.className = 'block-style-chip';
+      chip.textContent = txt;
+      chip.title = tip;
+      languageRow.appendChild(chip);
+    });
+    const source = document.createElement('p'); source.className = 'block-readonly block-source-edit'; source.dir = 'auto'; source.textContent = `متن اصلی: ${block.text || '—'}`; source.tabIndex = 0; source.setAttribute('role', 'button'); source.setAttribute('aria-label', `ویرایش متن انگلیسی/OCR کادر ${block.id}`); source.title = 'برای ویرایش متن اصلی کلیک کنید';
+    if (block.bold) source.style.fontWeight = '700';
+    if (block.italic) source.style.fontStyle = 'italic';
+    if (!isHeading && (Number(block.sourceIndent) || 0) > 0) source.style.paddingInlineStart = `${Math.min(36, Math.round((Number(block.sourceIndent) || 0) * 3.5))}px`;
+    source.addEventListener('click', () => editOcrText(block));
+    source.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); editOcrText(block); } });
+    const translation = document.createElement('p'); translation.className = 'block-readonly block-tr-edit'; translation.dir = 'auto'; translation.textContent = `ترجمه: ${block.tr || '—'}`; translation.tabIndex = 0; translation.setAttribute('role', 'button'); translation.setAttribute('aria-label', `ویرایش ترجمهٔ کادر ${block.id} روی تصویر`); translation.title = 'برای ویرایش ترجمه روی تصویر کلیک کنید';
+    if (block.bold) translation.style.fontWeight = '700';
+    if (block.italic) translation.style.fontStyle = 'italic';
+    const openBlockTranslation = () => { if (!block.enabled || blockOverlayMode(block) === 'none') { toast('ابتدا نمایش متن روی تصویر را فعال کنید.', true); return; } if (blockTextMode(block) === 'ocr') setBlockTextMode(block, 'translation'); openInlineEditor(block); };
+    translation.addEventListener('click', openBlockTranslation);
+    translation.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openBlockTranslation(); } });
+    const actions = document.createElement('div'); actions.className = 'block-tools block-card-actions';
+    actions.append(
+      makeBlockToolButton('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', 'کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))),
+      makeBlockToolButton('<path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"/><path d="M16 16h5v5"/>', 'ترجمهٔ دوباره', () => retranslateBlock(block), 'block-retranslate-btn'),
+      makeBlockToolButton('<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>', 'پاک‌کردن ترجمه', async () => {
+        if (inlineDraft?.block === block && !closeInlineEditor()) return;
+        const ok = await appConfirm('آیا مطمئن هستید که می‌خواهید ترجمهٔ این کادر را پاک کنید؟', {
+          title: 'پاک‌کردن ترجمهٔ کادر',
+          confirmText: 'بله، پاک شود',
+          cancelText: 'انصراف',
+          variant: 'danger',
+          destructive: true,
+        });
+        if (!ok) return;
+        block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave();
+      }, 'block-clear-btn'),
+    );
+    enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; drawEditor(); scheduleSave(); });
+    card.append(head, languageRow, source, translation, actions); list.appendChild(card);
+  });
+  updateEditorSelection();
+}
+async function applyEditor() {
+  const item = editorItem(); if (!item) return !inlineDraft; if (!applyInlineEditor()) return false;
+  if (editorSessionSnapshot && editorSessionSnapshot.imageId === item.id) editorSessionSnapshot.serverPreviewTouched = true;
+  $('editorProgressWrap')?.classList.remove('hidden'); setProgress('editorProgress', 0.25, true);
+  try { await overlayPreviewTask; setProgress('editorProgress', 0.55, true); await saveProject(); await renderAndUpload(item); renderGrid(); setProgress('editorProgress', 1, false); return true; }
+  finally { $('editorProgressWrap')?.classList.add('hidden'); }
+}
+async function closeEditor(markApproved = false) {
+  if (imageOverview) await exitImageOverview();
+  if (editorCloseTask) return editorCloseTask;
+  editorCloseTask = (async () => {
+    const item = editorItem();
+    if (item ? !applyInlineEditor() : !!inlineDraft) return;
+    editorLoadSeq += 1;
+    if (item) {
+      if (markApproved === true) item.approved = true;
+      await overlayPreviewTask;
+      await saveProject();
+      await renderAndUpload(item);
+      renderGrid();
+    }
+    editorSessionSnapshot = null;
+    if (editorCanvasFrame) { cancelAnimationFrame(editorCanvasFrame); editorCanvasFrame = 0; }
+    closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; $('editorCanvas').width = $('editorCanvas').height = 0; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
+    if (item && markApproved === true) toast('تغییرات ذخیره شد و مهر تأیید نهایی روی صفحه ثبت گردید');
+  })();
+  try { await editorCloseTask; } finally { editorCloseTask = null; }
+}
+async function cancelEditor() {
+  if (imageOverview) await exitImageOverview();
+  if (editorCloseTask) return editorCloseTask;
+  editorCloseTask = (async () => {
+    const item = editorItem();
+    const snap = editorSessionSnapshot;
+    const hadInlineDraft = !!inlineDraft;
+    const hadPendingSave = savePending;
+    discardInlineEditorForCancel();
+    clearTimeout(saveTimer); savePending = false;
+    editorLoadSeq += 1;
+    if (item && snap && state.project?.id === snap.projectId && item.id === snap.imageId) {
+      const changedBlocks = JSON.stringify(item.blocks || []) !== snap.blocksJson;
+      const changedApproved = !!item.approved !== snap.approved;
+      const changedMode = currentOverlayMode() !== snap.overlayMode;
+      item.blocks = JSON.parse(snap.blocksJson);
+      item.approved = snap.approved;
+      restoreProjectImageDrafts(snap.projectId, snap.imageId, snap.draftEntries);
+      if (changedMode) {
+        state.project.settings = state.project.settings || {};
+        state.project.settings.overlayMode = snap.overlayMode;
+        $('overlayMode').value = snap.overlayMode;
+        $('exportOverlayMode').value = snap.overlayMode;
+      }
+      if (changedBlocks || changedApproved || changedMode || hadInlineDraft || hadPendingSave || snap.autoSaved || snap.serverPreviewTouched) {
+        await overlayPreviewTask;
+        await saveProject();
+        if (changedMode) await renderImagesText();
+        else await renderAndUpload(item);
+      }
+      renderGrid();
+    }
+    editorSessionSnapshot = null;
+    if (editorCanvasFrame) { cancelAnimationFrame(editorCanvasFrame); editorCanvasFrame = 0; }
+    closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; $('editorCanvas').width = $('editorCanvas').height = 0; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
+    toast('ویرایش این صفحه بدون ذخیرهٔ تغییرات بسته شد');
+  })();
+  try { await editorCloseTask; } finally { editorCloseTask = null; }
+}
+async function revertEditor() {
+  const item = editorItem(); if (!item || !closeInlineEditor()) return;
+  if (editorSessionSnapshot && editorSessionSnapshot.imageId === item.id) editorSessionSnapshot.serverPreviewTouched = true;
+  item.blocks.forEach((block) => { block.enabled = false; }); await saveProject(); await renderAndUpload(item); drawEditor(); buildBlockList(); renderGrid(); toast('تصویر اصلی بازیابی شد؛ متن‌ها برای استفادهٔ بعدی باقی ماندند');
+}
+
+// ---------- Crop with aspect ratio, moving, and eight handles ----------
+function cropItem() { return state.project?.images.find((item) => item.id === state.cropId); }
+function openCrop(imageId) {
+  const item = state.project?.images.find((entry) => entry.id === imageId);
+  if (!item) return;
+  state.cropId = imageId;
+  state.crop = item.crop ? { ...item.crop } : null;
+  $('cropRatio').value = String(item.crop?.ratio || 0);
+  const img = $('cropImage');
+  img.onload = () => { normalizeCropInputs(); drawCropRect(); };
+  img.src = imageUrl(item, !!item.edited);
+  showDialog('cropDialog');
+  if (img.complete && img.naturalWidth) { normalizeCropInputs(); drawCropRect(); }
+}
+function normalizeCropInputs() { const item = cropItem(); if (!item) return; const crop = state.crop || { x: 0, y: 0, w: item.width, h: item.height }; $('cropX').value = Math.round(crop.x); $('cropY').value = Math.round(crop.y); $('cropW').value = Math.round(crop.w); $('cropH').value = Math.round(crop.h); }
+function readCropInputs(event) { const item = cropItem(); if (!item) return; const x = Math.max(0, Math.min(item.width - 1, Number($('cropX').value) || 0)); const y = Math.max(0, Math.min(item.height - 1, Number($('cropY').value) || 0)); let w = Math.max(1, Math.min(item.width - x, Number($('cropW').value) || 1)); let h = Math.max(1, Math.min(item.height - y, Number($('cropH').value) || 1)); const ratio = Number($('cropRatio').value); if (ratio > 0) { if (event?.target?.id === 'cropH') { w = Math.min(item.width - x, h * ratio); h = w / ratio; } else { h = Math.min(item.height - y, w / ratio); w = h * ratio; } } state.crop = { x, y, w, h, ratio: ratio || 0 }; drawCropRect(); }
+function drawCropRect() { const item = cropItem(); const rect = $('cropRect'); if (!item || !state.crop || !$('cropImage').clientWidth) { rect.style.display = 'none'; return; } const sx = $('cropImage').clientWidth / item.width; const sy = $('cropImage').clientHeight / item.height; rect.style.display = 'block'; rect.style.left = `${state.crop.x * sx}px`; rect.style.top = `${state.crop.y * sy}px`; rect.style.width = `${state.crop.w * sx}px`; rect.style.height = `${state.crop.h * sy}px`; }
+function changeCropRatio() { const item = cropItem(); const ratio = Number($('cropRatio').value); if (!item || !ratio) { if (state.crop) state.crop.ratio = 0; return; } const old = state.crop || { x: 0, y: 0, w: item.width, h: item.height }; const cx = old.x + old.w / 2; const cy = old.y + old.h / 2; let w = Math.min(item.width, old.w); let h = w / ratio; if (h > item.height) { h = item.height; w = h * ratio; } state.crop = { x: Math.max(0, Math.min(item.width - w, cx - w / 2)), y: Math.max(0, Math.min(item.height - h, cy - h / 2)), w, h, ratio }; normalizeCropInputs(); drawCropRect(); }
+function cropPointerDown(event) {
+  const item = cropItem(); if (!item) return; const bounds = $('cropImage').getBoundingClientRect(); if (bounds.width <= 0 || bounds.height <= 0) return; const handle = event.target.closest('#cropRect i'); const inside = event.target.closest('#cropRect');
+  let mode = 'draw'; let dir = ''; if (handle) { mode = 'resize'; dir = handle.dataset.dir; } else if (inside && state.crop) mode = 'move';
+  state.cropPointer = { mode, dir, x: event.clientX, y: event.clientY, bounds, original: state.crop ? { ...state.crop } : null }; $('cropStage').setPointerCapture(event.pointerId); event.preventDefault();
+}
+function cropPointerMove(event) {
+  const start = state.cropPointer; const item = cropItem(); if (!start || !item) return; const b = start.bounds; if (b.width <= 0 || b.height <= 0) return; const sx = item.width / b.width; const sy = item.height / b.height; const dx = (event.clientX - start.x) * sx; const dy = (event.clientY - start.y) * sy; const ratio = Number($('cropRatio').value) || 0;
+  if (start.mode === 'draw') {
+    const ax = (Math.max(b.left, Math.min(b.right, start.x)) - b.left) * sx;
+    const ay = (Math.max(b.top, Math.min(b.bottom, start.y)) - b.top) * sy;
+    const bx = (Math.max(b.left, Math.min(b.right, event.clientX)) - b.left) * sx;
+    const by = (Math.max(b.top, Math.min(b.bottom, event.clientY)) - b.top) * sy;
+    let w = Math.max(1, Math.abs(bx - ax)); let h = Math.max(1, Math.abs(by - ay));
+    if (ratio) { if (w / ratio >= h) h = w / ratio; else w = h * ratio; }
+    w = Math.min(item.width, w); h = Math.min(item.height, h);
+    let x = bx < ax ? ax - w : ax; let y = by < ay ? ay - h : ay;
+    x = Math.max(0, Math.min(item.width - w, x)); y = Math.max(0, Math.min(item.height - h, y));
+    state.crop = { x, y, w, h, ratio };
+  }
+  else if (start.mode === 'move') { const old = start.original; state.crop = { ...old, x: Math.max(0, Math.min(item.width - old.w, old.x + dx)), y: Math.max(0, Math.min(item.height - old.h, old.y + dy)) }; }
+  else { const old = start.original; let { x, y, w, h } = old; if (start.dir.includes('w')) { x = old.x + dx; w = old.w - dx; } if (start.dir.includes('e')) w = old.w + dx; if (start.dir.includes('n')) { y = old.y + dy; h = old.h - dy; } if (start.dir.includes('s')) h = old.h + dy; if (w < 8) w = 8; if (h < 8) h = 8; if (ratio) { if (start.dir === 'n' || start.dir === 's') w = h * ratio; else h = w / ratio; } if (start.dir.includes('w')) x = old.x + old.w - w; if (start.dir.includes('n')) y = old.y + old.h - h; x = Math.max(0, Math.min(item.width - w, x)); y = Math.max(0, Math.min(item.height - h, y)); state.crop = { x, y, w: Math.min(item.width, w), h: Math.min(item.height, h), ratio }; }
+  normalizeCropInputs(); drawCropRect();
+}
+
+// ---------- Preview ----------
+function openPreview(item) { state.previewId = item.id; $('previewImage').src = imageUrl(item, !!item.edited, true); showDialog('previewDialog'); }
+async function copyPreview() {
+  const item = state.project.images.find((entry) => entry.id === state.previewId); if (!item) return;
+  try { const response = await fetch(imageUrl(item, !!item.edited, true)); const bitmap = await createImageBitmap(await response.blob()); const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height; canvas.getContext('2d').drawImage(bitmap, 0, 0); bitmap.close(); const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png')); canvas.width = canvas.height = 0; if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') throw new Error('مرورگر اجازهٔ کپی تصویر نمی‌دهد'); await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); toast('تصویر کپی شد'); } catch (error) { toast(error.message || 'کپی تصویر ممکن نبود', true); }
+}
+
+// ---------- Events and startup ----------
+function bindEvents() {
+  const finishBrowserSession = () => { if (inlineDraft && !sessionCloseSent) classicEditor.saveDraft(); closeSession(); };
+  window.addEventListener('pagehide', finishBrowserSession);
+  window.addEventListener('beforeunload', finishBrowserSession);
+  window.addEventListener('pageshow', (event) => { if (event.persisted) startSession(); });
+  bindGridDrop();
+  $('menuBtn').addEventListener('click', () => setMenuOpen($('menu').classList.contains('hidden')));
+  const closeMenuOutside = (event) => {
+    if ($('menu')?.classList.contains('hidden')) return;
+    if (event.target?.closest?.('#menu, #menuBtn')) return;
+    setMenuOpen(false);
+  };
+  document.addEventListener('pointerdown', closeMenuOutside, true);
+  document.addEventListener('click', closeMenuOutside, true);
+  let lastEscapeKeyAt = -1000;
+  document.addEventListener('keyup', (event) => {
+    if (event.key === 'Escape') lastEscapeKeyAt = performance.now();
+  }, true);
+  document.querySelectorAll('dialog').forEach((dlg) => {
+    dlg.addEventListener('cancel', (event) => {
+      if (performance.now() - lastEscapeKeyAt < 400) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    }, true);
+    dlg.addEventListener('close', () => {
+      if (dlg.open) return;
+      const idx = openDialogStack.indexOf(dlg.id);
+      if (idx >= 0) openDialogStack.splice(idx, 1);
+    });
+    dlg.querySelectorAll('form[method="dialog"] button.icon').forEach((closeBtn) => {
+      closeBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        if (dlg.id === 'ocrDialog') requestCancelOcrDialog().catch(() => {});
+        else if (dlg.id === 'translationDialog') requestCancelTranslationDialog().catch(() => {});
+        else if (dlg.id === 'exportDialog') requestCancelExport('exportDialog').catch(() => {});
+        else if (dlg.id === 'docxExportDialog') requestCancelExport('docxExportDialog').catch(() => {});
+        else if (dlg.id === 'pptxExportDialog') requestCancelExport('pptxExportDialog').catch(() => {});
+        else if (dlg.id === 'modelsDialog') requestCancelModelJob().catch(() => {});
+        else if (dlg.id === 'translationPreviewDialog') cancelTranslationRequestPreview();
+        else closeDialog(dlg.id);
+      });
+    });
+  });
+  $('appModalConfirm')?.addEventListener('click', () => resolveActiveModal(true));
+  $('appModalCancel')?.addEventListener('click', () => resolveActiveModal(false));
+  $('appModalClose')?.addEventListener('click', () => resolveActiveModal(false));
+  $('appModalInput')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && activeModalState?.promptMode) {
+      event.preventDefault();
+      resolveActiveModal(true);
+    }
+  });
+  $('appModalDialog')?.addEventListener('cancel', (event) => { event.preventDefault(); resolveActiveModal(false); });
+  $('appModalDialog')?.addEventListener('close', () => { if (activeModalState && !$('appModalDialog')?.open) resolveActiveModal(false); });
+  $('dockCancelJobBtn')?.addEventListener('click', () => requestCancelActiveJob().catch(() => {}));
+  $('themeBtn').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('comic-studio-theme', document.body.classList.contains('light') ? 'light' : 'dark'); });
+  $('backupProjectBtn').addEventListener('click', () => backupCurrentProject().catch(() => {}));
+  $('restoreProjectBtn').addEventListener('click', () => $('restoreProjectInput').click());
+  $('restoreProjectInput').addEventListener('change', () => restoreProjectBackup($('restoreProjectInput').files?.[0]).catch(() => {}).finally(() => { $('restoreProjectInput').value = ''; }));
+  $('newProjectBtn').addEventListener('click', async () => {
+    const projectName = await appPrompt('نام پروژهٔ جدید را وارد کنید (پروژهٔ فعلی شما ذخیره و محفوظ می‌ماند):', {
+      title: 'ساخت پروژهٔ جدید',
+      inputLabel: 'نام پروژهٔ جدید',
+      placeholder: 'مثلاً: جلد اول تن‌تن یا فصل ۳ کتاب زیست',
+      defaultValue: '',
+      fallbackValue: 'پروژهٔ کمیک',
+      confirmText: 'ساخت پروژه',
+      cancelText: 'انصراف',
+      variant: 'confirm',
+    });
+    if (projectName === null) return;
+    await saveProject(); await clearActivity(false);
+    adoptProject(await api('/api/projects', jsonOptions('POST', { name: projectName })));
+    await refreshProjectList(); setMenuOpen(false);
+  });
+  $('clearActivityBtn').addEventListener('click', () => clearActivity());
+  $('copyUnstoredResult').addEventListener('click', () => copyBlockText($('copyUnstoredResult').dataset.result || '').catch(error => toast(error.message || String(error), true)));
+  $('pendingResultsBtn').addEventListener('click', () => openPendingResults());
+  $('pendingApply').addEventListener('click', () => applyPendingResult());
+  $('pendingCopy').addEventListener('click', () => { if (pendingReview) copyBlockText(pendingReview.view.rows.map(row => `${row.name}: ${row.result}`).join('\n') + (pendingReview.view.summary ? `\nخلاصه: ${pendingReview.view.summary}` : '')).catch(error => toast(error.message || String(error), true)); });
+  $('pendingDiscard').addEventListener('click', async () => {
+    const review = pendingReview; if (!review) return;
+    const ok = await appConfirm('آیا مطمئن هستید که این نتیجهٔ ذخیره‌شده برای همیشه حذف شود؟', {
+      title: 'حذف نتیجهٔ منتظر بررسی',
+      confirmText: 'بله، حذف شود',
+      cancelText: 'انصراف',
+      variant: 'danger',
+      destructive: true,
+    });
+    if (!ok) return;
+    try { await api(`/api/projects/${review.projectId}/pending/${review.view.id}`, {method:'DELETE'}); await openPendingResults(); }
+    catch (error) { $('pendingStatus').textContent = error.message || String(error); }
+  });
+  $('deleteProjectBtn').addEventListener('click', async () => {
+    if (!state.project) return;
+    const ok = await appConfirm('آیا مطمئن هستید که این پروژه و تمام تصاویر آن برای همیشه حذف شوند؟', {
+      title: 'حذف کامل پروژه',
+      confirmText: 'بله، حذف شود',
+      cancelText: 'انصراف',
+      variant: 'danger',
+      destructive: true,
+    });
+    if (!ok) return;
+    await api(`/api/projects/${state.project.id}`, { method: 'DELETE' });
+    const projects = await api('/api/projects');
+    const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
+    adoptProject(project); await refreshProjectList(); setMenuOpen(false);
+  });
+  $('projectSelect').addEventListener('change', () => requestProjectLoad($('projectSelect').value).catch((error) => toast(error.message, true)));
+  $('projectName').addEventListener('input', () => {
+    if (!state.project) return;
+    const nextProjName = $('projectName').value.trim();
+    const out = state.project.settings?.output;
+    if ((!out || !out.nameCustomized) && nextProjName) $('exportName').value = nextProjName;
+  });
+  $('projectName').addEventListener('change', () => {
+    if (!state.project) return;
+    const nextName = $('projectName').value.trim() || state.project.name || 'پروژهٔ کمیک';
+    $('projectName').value = nextName;
+    state.project.name = nextName;
+    state.project.settings = state.project.settings || {};
+    const out = state.project.settings.output || {};
+    if (!out.nameCustomized) {
+      $('exportName').value = nextName;
+      out.name = nextName;
+      out.nameCustomized = false;
+      state.project.settings.output = out;
+    }
+    scheduleSave();
+    refreshProjectList().catch(() => {});
+  });
+  $('exportName').addEventListener('input', () => {
+    if (!state.project) return;
+    state.project.settings = state.project.settings || {};
+    const projName = String(state.project.name || '').trim() || 'پروژهٔ کمیک';
+    const trimmed = $('exportName').value.trim();
+    state.project.settings.output = {
+      ...(state.project.settings.output || {}),
+      name: trimmed || projName,
+      nameCustomized: Boolean(trimmed && trimmed !== projName),
+    };
+    scheduleSave();
+  });
+  $('exportName').addEventListener('change', () => {
+    if (!state.project) return;
+    const projName = String(state.project.name || '').trim() || 'پروژهٔ کمیک';
+    if (!$('exportName').value.trim()) $('exportName').value = projName;
+    collectOutputSettings();
+    scheduleSave();
+  });
+  $('fileInput').addEventListener('change', () => importFiles($('fileInput').files).catch(() => {}).finally(() => { $('fileInput').value = ''; }));
+  $('selectAllBtn').addEventListener('click', () => { state.project.images.forEach((item) => { item.selected = true; }); renderGrid(); scheduleSave(); });
+  $('selectNoneBtn').addEventListener('click', () => { state.project.images.forEach((item) => { item.selected = false; }); renderGrid(); scheduleSave(); });
+  $('invertBtn').addEventListener('click', () => { state.project.images.forEach((item) => { item.selected = !item.selected; }); renderGrid(); scheduleSave(); });
+  $('groupBtn').addEventListener('click', () => { if (state.groupEditId) return finishGroupEdit(false); const ids = selectedImages().map((item) => item.id); if (ids.length < 2) { toast('برای گروه‌سازی حداقل دو تصویر انتخاب کنید', true); return; } const id = G.create(state.project.images, ids); renderGrid(); scheduleSave(); toast(`گروه ${id} ساخته یا ادغام شد`); });
+  $('ungroupBtn').addEventListener('click', () => { const ids = selectedImages().map((item) => item.id); G.ungroup(state.project.images, ids); renderGrid(); scheduleSave(); });
+  $('cancelGroupEdit').addEventListener('click', () => finishGroupEdit(true));
+  $('duplicateBtn').addEventListener('click', () => duplicateImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
+  $('deleteBtn').addEventListener('click', () => deleteImages(selectedImages().map((item) => item.id)).catch((error) => toast(error.message, true)));
+  $('approveSelectedBtn')?.addEventListener('click', () => {
+    const items = selectedImages();
+    if (!items.length) { toast('ابتدا حداقل یک صفحه را انتخاب کنید', true); return; }
+    items.forEach((item) => { item.approved = true; });
+    renderGrid(); scheduleSave();
+    toast(`مهر تأیید روی ${items.length} صفحه ثبت شد`);
+  });
+  $('unapproveSelectedBtn')?.addEventListener('click', () => {
+    const items = selectedImages();
+    if (!items.length) { toast('ابتدا حداقل یک صفحه را انتخاب کنید', true); return; }
+    items.forEach((item) => { item.approved = false; });
+    renderGrid(); scheduleSave();
+    toast(`مهر تأیید از ${items.length} صفحه برداشته شد`);
+  });
+  $('selectApprovedBtn')?.addEventListener('click', () => {
+    const images = state.project?.images || [];
+    const approvedCount = images.filter((item) => item.approved).length;
+    if (!approvedCount) { toast('هنوز هیچ صفحه‌ای تأیید نهایی نشده است', true); return; }
+    images.forEach((item) => { item.selected = !!item.approved; });
+    renderGrid(); scheduleSave();
+    toast(`${approvedCount} صفحهٔ تأییدشده انتخاب شد (آمادهٔ خروجی گرفتن)`);
+  });
+  $('selectUnapprovedBtn')?.addEventListener('click', () => {
+    const images = state.project?.images || [];
+    const unapprovedCount = images.filter((item) => !item.approved).length;
+    if (!unapprovedCount) { toast('همهٔ صفحات پروژه تأیید نهایی شده‌اند'); return; }
+    images.forEach((item) => { item.selected = !item.approved; });
+    renderGrid(); scheduleSave();
+    toast(`${unapprovedCount} صفحهٔ تأییدنشده انتخاب شد`);
+  });
+  $('dragGuideBtn')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const wrap = $('dragGuideBtn').closest('.drag-guide-wrap');
+    if (!wrap) return;
+    const nextOpen = !wrap.classList.contains('is-open');
+    wrap.classList.toggle('is-open', nextOpen);
+    $('dragGuideBtn').setAttribute('aria-expanded', String(nextOpen));
+  });
+  document.addEventListener('click', (event) => {
+    const wrap = $('dragGuideBtn')?.closest('.drag-guide-wrap');
+    if (wrap?.classList.contains('is-open') && !wrap.contains(event.target)) {
+      wrap.classList.remove('is-open');
+      $('dragGuideBtn')?.setAttribute('aria-expanded', 'false');
+    }
+  });
+  $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); });
+  $('ocrEngine').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); scheduleSave(); });
+  $('ocrLanguage').addEventListener('change', () => {
+    const nextLang = $('ocrLanguage').value;
+    if ($('modelsLanguage')) $('modelsLanguage').value = nextLang;
+    if ($('testLanguage')) $('testLanguage').value = nextLang;
+    updateEngineOptions($('ocrEngine').value, { resort: true });
+    collectOcrSettings();
+    scheduleSave();
+    if ($('modelsDialog')?.open) renderModels({ resort: true });
+  });
+  $('ocrPageMode')?.addEventListener('change', () => {
+    collectOcrSettings();
+    if ($('modelsPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
+    updateEngineOptions('', { resort: true });
+    scheduleSave();
+    if ($('modelsDialog')?.open) renderModels({ resort: true });
+  });
+  $('ocrQuickPrepareBtn')?.addEventListener('click', () => {
+    const engine = state.engines.find((entry) => entry.id === $('ocrEngine').value);
+    if (engine) downloadEngine(engine, { languageOverride: $('ocrLanguage').value, fromOcrDialog: true }).catch(() => {});
+  });
+  $('ocrQuickUpdateBtn')?.addEventListener('click', () => {
+    const engine = state.engines.find((entry) => entry.id === $('ocrEngine').value);
+    if (engine) updateEngine(engine, { languageOverride: $('ocrLanguage').value, fromOcrDialog: true }).catch(() => {});
+  });
+  $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('cancelOcrBtn')?.addEventListener('click', () => requestCancelOcrDialog().catch(() => {})); $('cancelTranslationBtn')?.addEventListener('click', () => requestCancelTranslationDialog().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
+  $('ocrDialog').addEventListener('cancel', (event) => {
+    if (ocrRunning && !ocrClosingNormally) { event.preventDefault(); requestCancelOcrDialog().catch(() => {}); }
+  });
+  $('ocrDialog').addEventListener('close', () => {
+    if (ocrRunning && !ocrClosingNormally) abortRunningOcr();
+    if (!$('ocrDialog').open) clearPendingTranslationOcr();
+  });
+  $('copyOcrError').addEventListener('click', () => copyBlockText($('ocrStatus').textContent).catch(error => toast(`کپی ممکن نبود: ${error.message || error}`, true)));
+  $('copyTranslationPreviewError').addEventListener('click', () => copyBlockText($('translationPreviewError').textContent).catch(error => toast(`کپی ممکن نبود: ${error.message || error}`, true)));
+  $('openAiLimitFromPreview')?.addEventListener('click', openAiSettingsFromPreviewDialog);
+  $('openAiSettingsFromPreview')?.addEventListener('click', openAiSettingsFromPreviewDialog);
+  $('translationPreviewService')?.addEventListener('change', (event) => {
+    switchTranslationPreviewService(event.target.value).catch(() => {});
+  });
+  $('translationTargetLang')?.addEventListener('change', (event) => {
+    switchTranslationTargetLanguage(event.target.value).catch(() => {});
+  });
+  $('retryTranslation').addEventListener('click', async () => {
+    const retry = translationRetryAction; if (!retry || translationRunning || translationDecisionBusy) return;
+    translationDecisionBusy = true; $('applyResponseRepair').disabled = true; $('applyResponseFields').disabled = true;
+    translationRetryAction = null; $('retryTranslation').classList.add('hidden');
+    try { await retry(); } catch (error) { if (!error?.cancelled && error?.name !== 'AbortError') toast(error.message || 'ترجمه ناموفق بود', true); }
+    finally { translationDecisionBusy = false; $('applyResponseRepair').disabled = false; $('applyResponseFields').disabled = false; if (!$('translationDialog').open) clearResponseRepair(); }
+  });
+  async function submitResponseRepair(value) {
+    const action = translationRepairAction; if (!action || translationRunning || translationDecisionBusy) return;
+    translationDecisionBusy = true; $('retryTranslation').disabled = true;
+    $('applyResponseRepair').disabled = true; $('applyResponseFields').disabled = true; $('responseRepairStatus').textContent = 'در حال بررسی پاسخ اصلاح‌شده…';
+    try { await action(value); }
+    catch (error) { if (!error?.cancelled && error?.name !== 'AbortError') $('responseRepairStatus').textContent = error.message || String(error); }
+    finally { translationDecisionBusy = false; $('retryTranslation').disabled = false; $('applyResponseRepair').disabled = false; $('applyResponseFields').disabled = false; if (!$('translationDialog').open) clearResponseRepair(); }
+  }
+  $('applyResponseRepair').addEventListener('click', () => submitResponseRepair($('responseRepairText').value));
+  $('applyResponseFields').addEventListener('click', () => submitResponseRepair(JSON.stringify({translation: $('repairTranslation').value, summary: $('repairSummary').value})));
+  $('copyTranslationError').addEventListener('click', async () => {
+    try { await copyBlockText($('translationStatus').textContent); translationRetryAction = null; closeDialog('translationDialog'); }
+    catch (error) { toast(`کپی ممکن نبود؛ متن خطا را دستی انتخاب و کپی کنید: ${error.message || error}`, true); }
+  });
+  $('translationDialog').addEventListener('cancel', (event) => {
+    if ((translationRunning || translationDecisionBusy) && !translationClosingNormally) { event.preventDefault(); requestCancelTranslationDialog().catch(() => {}); }
+  });
+  $('translationDialog').addEventListener('close', () => {
+    if ((translationRunning || translationDecisionBusy) && !translationClosingNormally) abortRunningTranslation();
+    if (!$('translationDialog').open) { translationRetryAction = null; clearResponseRepair(); $('copyUnstoredResult').dataset.result = ''; $('copyUnstoredResult').classList.add('hidden'); }
+  });
+  $('exportDialog')?.addEventListener('cancel', (event) => {
+    if (exportRunning) { event.preventDefault(); requestCancelExport('exportDialog').catch(() => {}); }
+  });
+  $('docxExportDialog')?.addEventListener('cancel', (event) => {
+    if (exportRunning) { event.preventDefault(); requestCancelExport('docxExportDialog').catch(() => {}); }
+  });
+  $('pptxExportDialog')?.addEventListener('cancel', (event) => {
+    if (exportRunning) { event.preventDefault(); requestCancelExport('pptxExportDialog').catch(() => {}); }
+  });
+  $('modelsDialog')?.addEventListener('cancel', (event) => {
+    if (state.modelBusy) { event.preventDefault(); requestCancelModelJob().catch(() => {}); }
+  });
+  $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
+  $('copyTranslationSkill')?.addEventListener('click', () => copyFieldText($('translationSkill'), 'راهنمای ترجمه').catch((error) => toast(error.message || String(error), true)));
+  $('pasteTranslationSkill')?.addEventListener('click', () => pasteIntoField($('translationSkill')).catch((error) => toast(error.message || String(error), true)));
+  $('clearTranslationSkill')?.addEventListener('click', () => clearFieldText($('translationSkill')));
+  $('copyTranslationContext')?.addEventListener('click', () => copyFieldText($('translationContext'), 'خلاصهٔ زمینه').catch((error) => toast(error.message || String(error), true)));
+  $('pasteTranslationContext')?.addEventListener('click', () => pasteIntoField($('translationContext')).catch((error) => toast(error.message || String(error), true)));
+  $('clearTranslationContext')?.addEventListener('click', () => clearFieldText($('translationContext')));
+  $('translationSkill').addEventListener('input', updateTranslationSkillStatus); $('translationContext').addEventListener('input', updateTranslationSkillStatus); $('translationContextResume').addEventListener('change', updateTranslationSkillStatus);
+  $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
+  $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewSwitchTarget = null; translationPreviewData = null; } });
+  $('modelsBtn').addEventListener('click', () => {
+    if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = false;
+    if ($('modelsPageMode') && $('ocrPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
+    if ($('modelsLanguage') && $('ocrLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
+    if ($('testLanguage') && $('ocrLanguage')) $('testLanguage').value = $('ocrLanguage').value;
+    renderModels();
+    showDialog('modelsDialog');
+    setMenuOpen(false);
+    refreshEngineMemory().catch(() => {});
+  });
+  $('deleteModelsMenuBtn')?.addEventListener('click', () => {
+    if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = true;
+    if ($('modelsPageMode') && $('ocrPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
+    if ($('modelsLanguage') && $('ocrLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
+    if ($('testLanguage') && $('ocrLanguage')) $('testLanguage').value = $('ocrLanguage').value;
+    renderModels();
+    showDialog('modelsDialog');
+    setMenuOpen(false);
+    refreshEngineMemory().catch(() => {});
+  });
+  $('modelsInstalledOnly')?.addEventListener('change', () => renderModels());
+  $('modelsLanguage')?.addEventListener('change', () => {
+    if ($('testLanguage')) $('testLanguage').value = $('modelsLanguage').value;
+    renderModels({ resort: true });
+  });
+  $('testLanguage').addEventListener('change', () => {
+    if ($('modelsLanguage')) $('modelsLanguage').value = $('testLanguage').value;
+    renderModels({ resort: true });
+  });
+  $('modelsPageMode')?.addEventListener('change', () => renderModels({ resort: true }));
+  $('freeModelsRamBtn')?.addEventListener('click', () => freeModelsRam().catch(() => {}));
+  $('checkModelUpdatesBtn')?.addEventListener('click', () => checkEngineUpdates({ force: true, silent: false }).catch(() => {}));
+  $('updateAllModelsBtn')?.addEventListener('click', () => updateAllEngines().catch(() => {}));
+  $('modelsActiveCancelBtn')?.addEventListener('click', () => requestCancelModelJob().catch(() => {}));
+  $('engineUpdateNowBtn')?.addEventListener('click', () => {
+    if (!$('modelsDialog').open) { renderModels(); showDialog('modelsDialog'); }
+    updateAllEngines().catch(() => {});
+  });
+  $('engineUpdateOpenModelsBtn')?.addEventListener('click', () => {
+    renderModels();
+    showDialog('modelsDialog');
+    refreshEngineMemory().catch(() => {});
+  });
+  $('engineUpdateDismissBtn')?.addEventListener('click', () => { engineUpdateNoticeDismissed = true; syncEngineUpdateUi(); });
+  if (!helpController && window.ComicHelpGuide?.createHelpController) {
+    helpController = window.ComicHelpGuide.createHelpController();
+  }
+  $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(null));
+  $('editorOpenFullHelpBtn')?.addEventListener('click', () => openHelpDialog('visual-editor'));
+  $('helpDialogClose')?.addEventListener('click', (event) => { event.preventDefault(); closeDialog('helpDialog'); });
+  $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiBaseUrl')?.addEventListener('input', syncAiExecUi); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
+  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'visual').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'visual').catch(() => {})); $('docxChoiceFlowingTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'flowing').catch(() => {})); $('docxChoiceFlowingOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'flowing').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {})); $('exportPptxBtn')?.addEventListener('click', () => openPptxExportPrompt()); $('pptxChoiceTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'visual').catch(() => {})); $('pptxChoiceOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'visual').catch(() => {})); $('pptxChoiceFlowingTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'flowing').catch(() => {})); $('pptxChoiceFlowingOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'flowing').catch(() => {})); $('pptxExportCancel')?.addEventListener('click', () => requestCancelExport('pptxExportDialog').catch(() => {}));
+  $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
+  $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
+  $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
+  [['editorAlignLeft', 'left'], ['editorAlignCenter', 'center'], ['editorAlignRight', 'right'], ['editorAlignTop', 'top'], ['editorAlignMiddle', 'middle'], ['editorAlignBottom', 'bottom']].forEach(([id, direction]) => $(id).addEventListener('click', () => alignSelectedBoxes(direction)));
+  $('editorApply').addEventListener('click', () => applyEditor().catch((error) => toast(error.message, true)));
+  $('editorClose').addEventListener('click', () => closeEditor(false).catch((error) => toast(error.message, true)));
+  $('editorApproveClose')?.addEventListener('click', () => closeEditor(true).catch((error) => toast(error.message, true)));
+  $('editorCancel')?.addEventListener('click', () => cancelEditor().catch((error) => toast(error.message, true)));
+  $('editorUnapproveBtn')?.addEventListener('click', () => {
+    const item = editorItem();
+    if (!item) return;
+    item.approved = false;
+    syncEditorApprovalHeader(item);
+    renderGrid();
+    scheduleSave();
+    toast('مهر تأیید این صفحه برداشته شد');
+  });
+  $('editorRevert').addEventListener('click', () => revertEditor().catch((error) => toast(error.message, true)));
+  $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); if (classicEditor?.hasOpenModal?.()) classicEditor.closeModal(); else if (imageOverview) exitImageOverview().catch((error) => toast(error.message, true)); else if (inlineDraft) closeInlineEditor(); else closeEditor(false).catch((error) => toast(error.message, true)); });
+  $('inlineEditorApply').addEventListener('click', applyInlineEditor);
+  $('inlinePreview').addEventListener('mousedown', (event) => event.preventDefault());
+  $('inlinePreview').addEventListener('click', () => setInlineOutputPreview(!inlineDraft?.showOutput));
+  $('inlineEditorCancel').addEventListener('click', () => closeInlineEditor(true));
+  classicEditor = window.createEditor('#inlineEditorField', {
+    clearFormatId: 'inlineLineReset',
+    confirmDraft: (message) => appConfirm(message, {
+      title: 'بازیابی پیش‌نویس ذخیره‌شده',
+      confirmText: 'بله، بازیابی شود',
+      cancelText: 'خیر، حذف پیش‌نویس',
+      variant: 'warning',
+    }),
+    serializeHTML: serializeInlineFieldHtml,
+    undo: () => restoreInlineHistory(-1), redo: () => restoreInlineHistory(1),
+    inlineCommand: (cmd) => toggleInlineCommand(cmd),
+    clearFormat: () => resetInlineLineStyle(),
+    align: (value) => setInlineLineStyle('textAlign', value),
+    direction: (value) => setInlineLineStyle('direction', value),
+    color: (value) => {
+      if (hasInlineWordSelection()) return applyInlineWordStyle({ color: value }, { restoreFocus: false });
+      if (inlineDraft?.range?.collapsed) { setInlineLineStyle('color', value, { restoreFocus: false }); return true; }
+      return false;
+    },
+    onFullscreen: (enabled) => {
+      if (!inlineDraft) return;
+      const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
+      if (enabled) { classicEditor.field.style.padding = ''; classicEditor.detachField(); refreshInlineTypography(); }
+      else if (box) { classicEditor.attachField(box); refreshInlineTypography(); }
+    },
+    onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); autoApplyInlineDraft(); updateEditorSelection(); } },
+    getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && $('inlineEditorSize').value.trim() === inlineDraft.initialSizeValue) ? '' : $('inlineEditorSize').value, color: inlineDraft.color } : null,
+    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) { inlineDraft.verticalAlignTouched = true; $('inlineVerticalAlign').value = meta.verticalAlign; } if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; } else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; } if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; syncVerticalAlignButtons(); },
+  });
+  const inlineField = $('inlineEditorField');
+  inlineField.addEventListener('scroll', () => {
+    if (inlineField.scrollTop) inlineField.scrollTop = 0;
+    if (inlineField.scrollLeft) inlineField.scrollLeft = 0;
+  });
+  ['keyup', 'mouseup', 'focus'].forEach((name) => inlineField.addEventListener(name, () => { rememberInlineRange(); syncInlineLineControls(); }));
+  inlineField.addEventListener('blur', () => updateInlineSelectionHighlight());
+  document.addEventListener('selectionchange', () => {
+    if (inlineDraft && document.activeElement === inlineField) { rememberInlineRange(); syncInlineLineControls(); }
+  });
+  inlineField.addEventListener('input', () => { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); });
+  let inlineDownPt = null;
+  inlineField.addEventListener('pointerdown', (event) => {
+    if (event.ctrlKey || event.metaKey) {
+      const blk = inlineDraft?.block;
+      inlineDownPt = null;
+      event.preventDefault(); event.stopPropagation();
+      if (blk && closeInlineEditor()) selectEditorBlock(blk.id, true, true);
+      return;
+    }
+    event.stopPropagation();
+    inlineDownPt = event.button === 0 && !event.shiftKey ? { x: event.clientX, y: event.clientY } : null;
+    if (event.button === 0 && lastInlineOpenClick && performance.now() - lastInlineOpenClick.time < 360
+      && Math.hypot(event.clientX - lastInlineOpenClick.x, event.clientY - lastInlineOpenClick.y) <= 6) {
+      lastInlineOpenClick = null; inlineDownPt = null;
+      if (expandInlineWordAtPoint(inlineField, event.clientX, event.clientY)) event.preventDefault();
+    } else {
+      lastInlineOpenClick = null;
+    }
+  });
+  inlineField.addEventListener('dblclick', (event) => {
+    inlineDownPt = null;
+    event.stopPropagation();
+    expandInlineWordAtPoint(inlineField, event.clientX, event.clientY);
+  });
+  inlineField.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const down = inlineDownPt; inlineDownPt = null;
+    if (!down || event.detail !== 1 || event.shiftKey || !inlineField.parentElement?.classList.contains('editor-box')) return;
+    if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > 3) return;
+    const sel = window.getSelection?.();
+    if (!sel || !sel.isCollapsed) return;
+    placeInlineCaret(inlineField, event);
+    rememberInlineRange(); syncInlineLineControls();
+  });
+  $('inlineEditor').addEventListener('pointerdown', (event) => {
+    if (inlineDraft?.showOutput && !event.target.closest('#inlinePreview, #inlineEditorApply, #inlineEditorCancel, .editor-zoom-controls')) setInlineOutputPreview(false);
+    const boxDetails = $('inlineEditor').querySelector('.inline-box-settings');
+    if (boxDetails?.open && !event.target.closest('.inline-box-settings')) boxDetails.removeAttribute('open');
+  }, true);
+  $('inlineEditor').addEventListener('click', () => requestAnimationFrame(positionInlineEditor));
+  $('inlineEditor').querySelector('details')?.addEventListener('toggle', () => requestAnimationFrame(positionInlineEditor));
+  syncInlineDockIdleState();
+  $('inlineLineSize').addEventListener('input', () => {
+    const value = $('inlineLineSize').value.trim(); const size = Number(value);
+    if (value && Number.isFinite(size) && size >= 8 && size <= 160) setSelectionOrLineSize(`${Math.round(size)}px`, { restoreFocus: false });
+  });
+  $('inlineLineSize').addEventListener('change', () => {
+    const value = $('inlineLineSize').value.trim(); const size = Number(value);
+    if (value && (!Number.isFinite(size) || size < 8 || size > 160)) { toast('اندازه باید بین ۸ و ۱۶۰ باشد.', true); return; }
+    setSelectionOrLineSize(value ? `${Math.round(size)}px` : '', { restoreFocus: false });
+  });
+  $('inlineLineSize').addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    const value = $('inlineLineSize').value.trim(); const size = Number(value);
+    if (value && (!Number.isFinite(size) || size < 8 || size > 160)) { toast('اندازه باید بین ۸ و ۱۶۰ باشد.', true); return; }
+    setSelectionOrLineSize(value ? `${Math.round(size)}px` : '', { restoreFocus: true });
+  });
+  ['inlineSizeUp', 'inlineSizeDown'].forEach((id) => $(id)?.addEventListener('mousedown', (event) => event.preventDefault()));
+  document.querySelectorAll('.inline-box-layout-tools button, .inline-merge-split-tools button').forEach((btn) => btn.addEventListener('mousedown', (event) => event.preventDefault()));
+  $('inlineSizeUp')?.addEventListener('click', () => stepSelectionOrLineSize(2));
+  $('inlineSizeDown')?.addEventListener('click', () => stepSelectionOrLineSize(-2));
+  $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; classicEditor.notifyChange(); });
+  $('inlineEditorAlign').addEventListener('change', () => { inlineField.style.textAlign = $('inlineEditorAlign').value; classicEditor.notifyChange(); });
+  $('inlineVerticalAlign').addEventListener('change', () => { if (inlineDraft) inlineDraft.verticalAlignTouched = true; syncVerticalAlignButtons(); if (inlineDraft) classicEditor.notifyChange(); });
+  document.querySelectorAll('.inline-valign-btn').forEach((btn) => {
+    btn.addEventListener('mousedown', (event) => event.preventDefault());
+    btn.addEventListener('click', () => setVerticalPlacement(btn.dataset.valign));
+  });
+  $('inlineEditorColor').addEventListener('input', () => { if (inlineDraft) { inlineDraft.color = $('inlineEditorColor').value; classicEditor.notifyChange(); } });
+  $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) { inlineDraft.color = null; $('inlineEditorColor').value = effectiveInlineColor({ ...inlineDraft.block, color: null }); classicEditor.notifyChange(); } });
+  $('inlineEditorSize').addEventListener('input', () => {
+    if (!inlineDraft) return;
+    inlineDraft.sizeTouched = $('inlineEditorSize').value.trim() !== '';
+    inlineDraft.initialAutoSize = !inlineDraft.sizeTouched;
+    classicEditor.notifyChange();
+  });
+  document.querySelectorAll('.editor-zoom-controls button').forEach((btn) => btn.addEventListener('mousedown', (event) => event.preventDefault()));
+  const imagePreview = document.querySelector('.editor-preview'); let blankPointer = null;
+  imagePreview.addEventListener('pointerdown', (event) => { blankPointer = !event.target.closest('.editor-box') && event.button === 0 ? { x: event.clientX, y: event.clientY } : null; });
+  imagePreview.addEventListener('click', (event) => {
+    const start = blankPointer; blankPointer = null;
+    if (imageOverview) return;
+    if (!start || event.target.closest('.editor-box') || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 4) return;
+    if (!closeInlineEditor()) return; clearEditorSelection();
+  });
+  imagePreview.addEventListener('scroll', positionInlineEditor);
+  $('editorImageFullscreen').addEventListener('click', () => (imageOverview ? exitImageOverview() : enterImageOverview()).catch((error) => toast(error.message, true)));
+  document.addEventListener('fullscreenchange', () => { if (imageOverview?.native && document.fullscreenElement !== $('editorDialog')) exitImageOverview(true).catch((error) => toast(error.message, true)); });
+  $('editorZoomOut').addEventListener('click', () => setEditorZoom(state.editorScale / 1.25)); $('editorZoomIn').addEventListener('click', () => setEditorZoom(state.editorScale * 1.25)); $('editorZoomActual').addEventListener('click', () => setEditorZoom(1)); $('editorZoomFit').addEventListener('click', fitEditor);
+  document.querySelector('.editor-preview').addEventListener('wheel', handleEditorWheel, { passive: false });
+  $('editorStage').addEventListener('pointerdown', startEditorPan); $('editorStage').addEventListener('pointermove', moveEditorPan); $('editorStage').addEventListener('pointerup', stopEditorPan); $('editorStage').addEventListener('pointercancel', stopEditorPan); $('editorStage').addEventListener('lostpointercapture', stopEditorPan);
+  $('previewCopy').addEventListener('click', copyPreview);
+  window.addEventListener('resize', () => { if (state.editorId) { if (imageOverview) fitWholeEditorImage(); else fitEditor(); } if (state.cropId) drawCropRect(); scheduleOutlines(); });
+  ['cropX', 'cropY', 'cropW', 'cropH'].forEach((id) => $(id).addEventListener('change', readCropInputs)); $('cropRatio').addEventListener('change', changeCropRatio); $('cropStage').addEventListener('pointerdown', cropPointerDown); $('cropStage').addEventListener('pointermove', cropPointerMove); const stopCrop = () => { state.cropPointer = null; }; $('cropStage').addEventListener('pointerup', stopCrop); $('cropStage').addEventListener('pointercancel', stopCrop);
+  $('cropReset').addEventListener('click', () => {
+    const item = cropItem();
+    if (!item) { closeDialog('cropDialog'); return; }
+    item.crop = null;
+    state.crop = null;
+    const projectId = state.project?.id;
+    closeDialog('cropDialog');
+    renderGrid();
+    saveProject().then(() => {
+      if (projectId && state.project?.id === projectId) {
+        imagePreviewVersions.set(`${projectId}:${item.id}`, ++previewRevision);
+        renderGrid();
+      }
+    }).catch((error) => toast(error.message, true));
+  });
+  $('cropApply').addEventListener('click', () => {
+    const item = cropItem();
+    if (!item) { closeDialog('cropDialog'); return; }
+    readCropInputs();
+    item.crop = state.crop;
+    const projectId = state.project?.id;
+    closeDialog('cropDialog');
+    renderGrid();
+    saveProject().then(() => {
+      if (projectId && state.project?.id === projectId) {
+        imagePreviewVersions.set(`${projectId}:${item.id}`, ++previewRevision);
+        renderGrid();
+      }
+    }).catch((error) => toast(error.message, true));
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'F1') {
+      event.preventDefault();
+      event.stopPropagation();
+      if ($('helpDialog')?.open) closeDialog('helpDialog');
+      else openHelpDialog($('editorDialog')?.open ? 'visual-editor' : null);
+      return;
+    }
+    if (event.key === 'Escape') {
+      lastEscapeKeyAt = performance.now();
+      if (event.repeat) { event.preventDefault(); event.stopPropagation(); return; }
+      if ($('appModalDialog')?.open) { resolveActiveModal(false); event.preventDefault(); event.stopPropagation(); return; }
+      if (classicEditor?.hasOpenModal?.()) { classicEditor.closeModal(); event.preventDefault(); event.stopPropagation(); return; }
+      const topStackedId = [...openDialogStack].reverse().find((id) => $(id)?.open);
+      if (topStackedId && topStackedId !== 'editorDialog') {
+        if (closeTopDialog()) { event.preventDefault(); event.stopPropagation(); }
+        return;
+      }
+      if (imageOverview) { exitImageOverview().catch((error) => toast(error.message, true)); event.preventDefault(); event.stopPropagation(); return; }
+      if (inlineDraft && classicEditor.element.classList.contains('classic-fullscreen')) { classicEditor.exitFullscreen(); classicEditor.focus(); event.preventDefault(); event.stopPropagation(); return; }
+      if (inlineDraft) { closeInlineEditor(); event.preventDefault(); event.stopPropagation(); return; }
+      if (closeTopDialog()) { event.preventDefault(); event.stopPropagation(); }
+      else setMenuOpen(false);
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.editorId) { event.preventDefault(); applyEditor().catch((error) => toast(error.message, true)); }
+    if (event.key === 'Enter' && state.cropId && $('cropDialog').open && !event.target.matches('input,select')) { event.preventDefault(); $('cropApply').click(); }
+  });
+  syncAiExecUi();
+  if (localStorage.getItem('comic-studio-theme') === 'light') document.body.classList.add('light');
+}
+async function init() {
+  bindEvents(); startActivityFeed(); startSession();
+  try {
+    const [projects, engines, ai] = await Promise.all([api('/api/projects'), api('/api/engines'), api('/api/ai-settings')]);
+    state.engines = engines; state.ai = ai;
+    const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
+    adoptProject(project);
+    await refreshProjectList(projects.length ? projects : null);
+    await loadAiSettings(ai);
+    const unrenderedIds = sortedImages().filter((item) => hasOverlayText(item) && !item.edited).map((item) => item.id);
+    if (unrenderedIds.length) await renderImagesText(unrenderedIds);
+    syncEngineUpdateUi();
+    const shouldCheckUpdates = !startupUpdateChecked && state.engines.some((entry) => entry.runtimeInstalled);
+    if (shouldCheckUpdates) {
+      startupUpdateChecked = true;
+      checkEngineUpdates({ force: false, silent: true }).catch(() => {});
+    } else {
+      refreshEngineMemory().catch(() => {});
+    }
+  } catch (error) { toast(`راه‌اندازی ناموفق: ${error.message}`, true); }
+}
+init();

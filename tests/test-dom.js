@@ -1,10 +1,11 @@
 // DOM-level integration test: loads viewer.html scripts in jsdom with mocked extension APIs.
 const fs = require('fs');
 const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
 const vm = require('vm');
 const { JSDOM } = require('jsdom');
 
-const html = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.html'), 'utf8')
+const html = fs.readFileSync(path.join(ROOT, 'src/viewer/viewer.html'), 'utf8')
   .replace(/<script[\s\S]*?<\/script>/g, ''); // scripts evaluated manually in the window realm
 
 const dom = new JSDOM(html, {
@@ -119,13 +120,13 @@ const $ = (id) => window.document.getElementById(id);
   // 2.24: rebranded to PIC TO PDF
   check('viewer title uses PIC TO PDF', /PIC TO PDF/.test(window.document.title), window.document.title);
   check('viewer brand h1 uses PIC TO PDF', window.document.querySelector('.brand-text h1').textContent.trim() === 'PIC TO PDF');
-  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '../manifest.json'), 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
   check('manifest name and action title use PIC TO PDF', manifest.name === 'PIC TO PDF' &&
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
-  check('manifest and viewer version badge are synchronized at 2.64', manifest.version === '2.64' &&
-    window.document.querySelector('.version-pill').textContent.includes('۲.۶۴'));
-  const viewerCss = fs.readFileSync(path.join(__dirname, '../src/viewer/viewer.css'), 'utf8');
+  check('manifest and viewer version badge are synchronized at 2.65', manifest.version === '2.65' &&
+    window.document.querySelector('.version-pill').textContent.includes('۲.۶۵'));
+  const viewerCss = fs.readFileSync(path.join(ROOT, 'src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
   check('stylesheet has no literal newline escape that breaks a selector', !viewerCss.includes('\\n'));
@@ -218,6 +219,11 @@ const $ = (id) => window.document.getElementById(id);
   check('PDF converter opens in a separate extension tab',
     /pdf-import\.html\?/.test(window.__openedPdfImportUrl || '') && /returnTab=17/.test(window.__openedPdfImportUrl || ''),
     window.__openedPdfImportUrl);
+  const pdfImportHtml = fs.readFileSync(path.join(ROOT, 'src/pdf-import/pdf-import.html'), 'utf8');
+  check('pdf-import keeps single-PDF chooser and removes repeat retryButton',
+    pdfImportHtml.includes('id="choosePdf"') && !pdfImportHtml.includes('retryButton') && !pdfImportHtml.includes('انتخاب PDF دیگری'));
+  check('PDFImportStore exposes pruneStaleSessions helper',
+    typeof window.PDFImportStore?.pruneStaleSessions === 'function');
   ev('pendingPdfImportToken = null');
   check('summary shows 3 selected', /3/.test($('selCount').textContent), $('selCount').textContent);
   check('build button enabled', !$('buildBtn').disabled);
@@ -266,7 +272,16 @@ const $ = (id) => window.document.getElementById(id);
   ev('duplicateItem(items[0])');
   check('duplicate added', items.length === before + 1 && items[items.length - 1].dupNo === 1);
   const dup = items[items.length - 1];
+  ev('duplicateItem(items[0])');
+  const dup2 = items[items.length - 1];
+  check('second duplicate gets dupNo=2', dup2.dupNo === 2);
   ev(`deleteItem(items.find((x) => x.uid === ${dup.uid}))`);
+  ev('duplicateItem(items[0])');
+  const itemsWithDup3 = ev('items');
+  const dup3 = itemsWithDup3[itemsWithDup3.length - 1];
+  check('duplicate after deleting dupNo=1 gets unique dupNo=3 (never collides with dupNo=2)', dup3.dupNo === 3);
+  ev(`deleteItem(items.find((x) => x.uid === ${dup2.uid}))`);
+  ev(`deleteItem(items.find((x) => x.uid === ${dup3.uid}))`);
   const itemsAfterDelete = ev('items'); // deleteItem reassigns the global items binding
   check('delete removed', itemsAfterDelete.length === before && $('grid').children.length === before);
 

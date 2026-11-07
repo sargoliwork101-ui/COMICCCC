@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Comic OCR Studio</title>
+  <link rel="stylesheet" href="/style.css?v=3.99">
+  <link rel="stylesheet" href="/rich-editor.css?v=3.99">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۳.۹۹ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="topbar-actions">
+      <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
+      <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h11"/></svg><span>پروژه و تنظیمات</span></button>
+    </div>
+  </header>
+
+  <div id="menu" class="menu hidden">
+    <div class="mi project-controls">
+      <label>پروژه<select id="projectSelect" aria-label="بازکردن پروژه"></select></label>
+      <label>نام پروژه<input id="projectName" aria-label="نام پروژه" value="پروژهٔ کمیک"></label>
+      <div class="menu-actions"><button id="newProjectBtn" class="bt">پروژهٔ جدید</button><button id="deleteProjectBtn" class="bt danger">حذف پروژه</button></div>
+      <div class="menu-actions"><button id="backupProjectBtn" class="bt" type="button">بک‌آپ پروژه (ZIP)</button><button id="restoreProjectBtn" class="bt" type="button">بازیابی بک‌آپ</button><input id="restoreProjectInput" type="file" accept=".zip,application/zip" hidden></div>
+      <a id="backupDownloadLink" class="bt hidden" href="#" download>دانلود دوبارهٔ بک‌آپ</a>
+    </div>
+    <button id="modelsBtn" class="mi"><span>مدل‌های OCR و آزمایش</span><span id="modelsBtnBadge" class="menu-update-badge hidden"></span></button>
+    <button id="deleteModelsMenuBtn" class="mi"><span>حذف مدل‌های OCR نصب‌شده</span></button>
+    <button id="aiBtn" class="mi">ترجمهٔ رایگان / AI</button>
+    <button id="themeBtn" class="mi">تغییر تم روشن / تیره</button>
+    <div class="mi save-line"><span id="saveState">آماده</span><span>ذخیرهٔ خودکار روی همین کامپیوتر</span></div>
+  </div>
+
+  <main id="mainwrap">
+    <section id="engineUpdateNotice" class="panel engine-update-notice hidden" role="status" aria-live="polite">
+      <div class="engine-update-notice-body">
+        <span class="engine-update-dot" aria-hidden="true"></span>
+        <span id="engineUpdateNoticeText"></span>
+      </div>
+      <div class="engine-update-notice-actions">
+        <button id="engineUpdateNowBtn" class="bt primary" type="button">به‌روزرسانی خودکار</button>
+        <button id="engineUpdateOpenModelsBtn" class="bt" type="button">مشاهدهٔ مدل‌ها</button>
+        <button id="engineUpdateDismissBtn" class="icon engine-update-dismiss" type="button" aria-label="بستن اعلان به‌روزرسانی">×</button>
+      </div>
+      <div id="engineNoticeProgressWrap" class="model-live-progress engine-notice-progress hidden" aria-live="polite">
+        <div class="model-live-progress-head"><span id="engineNoticeProgressLabel">در حال به‌روزرسانی مدل…</span><strong id="engineNoticeProgressPercent" dir="ltr">0%</strong></div>
+        <div class="bar" role="progressbar" aria-label="پیشرفت به‌روزرسانی مدل OCR" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="engineNoticeProgress" class="fill"></div></div>
+      </div>
+    </section>
+    <section class="panel main-toolbar-panel">
+      <div class="toolbar main-actions">
+        <label class="bt primary file-button">
+          <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 10.5V2.5M5.2 5.3 8 2.5l2.8 2.8"/><path d="M2.5 10.5v2a1.3 1.3 0 0 0 1.3 1.3h8.4a1.3 1.3 0 0 0 1.3-1.3v-2"/></svg>
+          <span>ورود PDF یا تصاویر</span>
+          <input id="fileInput" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif" multiple hidden>
+        </label>
+        <button id="ocrBtn" class="bt primary" type="button">
+          <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.2V3.6A1.1 1.1 0 0 1 3.6 2.5h1.6M10.8 2.5h1.6a1.1 1.1 0 0 1 1.1 1.1v1.6M13.5 10.8v1.6a1.1 1.1 0 0 1-1.1 1.1h-1.6M5.2 13.5H3.6a1.1 1.1 0 0 1-1.1-1.1v-1.6M2.2 8h11.6"/></svg>
+          <span>OCR آفلاین</span>
+        </button>
+        <button id="translateBtn" class="bt translate-main-btn" type="button">
+          <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.2 4h6.6M5.5 2.3V4M3.5 4c.3 2.5 1.8 4.6 4.2 5.8M6.8 4c-.5 2.1-2 4.2-4.4 5.5M8.8 13.7l2.3-5.8 2.3 5.8M9.5 12h3.2"/></svg>
+          <span>ترجمهٔ انتخاب‌شده‌ها</span>
+        </button>
+        <span class="grow"></span>
+        <div id="selectionSummary" class="summary-pills" aria-live="polite"><span class="summary-empty">هنوز فایلی وارد نشده است</span></div>
+      </div>
+      <div class="row2 selection-actions">
+        <div class="action-group group-select" role="group" aria-label="ابزارهای انتخاب صفحات">
+          <span class="action-group-title">انتخاب</span>
+          <button id="selectAllBtn" class="bt" type="button" title="انتخاب همهٔ صفحات پروژه">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.3" y="2.3" width="11.4" height="11.4" rx="2.3"/><path d="m5.2 8.2 2 2 3.7-3.9"/></svg>
+            <span>همه</span>
+          </button>
+          <button id="selectNoneBtn" class="bt" type="button" title="لغو انتخاب همهٔ صفحات">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.3" y="2.3" width="11.4" height="11.4" rx="2.3" stroke-dasharray="2.4 2"/></svg>
+            <span>هیچ‌کدام</span>
+          </button>
+          <button id="invertBtn" class="bt" type="button" title="معکوس کردن وضعیت انتخاب صفحات">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.3h9.5M10 2.8l2.5 2.5L10 7.8M13 10.7H3.5M6 8.2l-2.5 2.5L6 13.2"/></svg>
+            <span>معکوس</span>
+          </button>
+        </div>
+
+        <div class="action-group group-merge" role="group" aria-label="ابزارهای گروه‌بندی و ادغام صفحات">
+          <span class="action-group-title">گروه‌بندی</span>
+          <button id="groupBtn" class="bt" type="button" title="گروه‌بندی و چسباندن عمودی صفحات انتخاب‌شده در خروجی PDF">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2 13.6 5 8 7.8 2.4 5 8 2.2Z"/><path d="m2.4 8.2 5.6 2.8 5.6-2.8M2.4 11.2 8 14l5.6-2.8"/></svg>
+            <span>ساخت گروه</span>
+          </button>
+          <button id="ungroupBtn" class="bt" type="button" title="خارج کردن صفحات انتخاب‌شده از گروه">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.4 13.4 5 8 7.6 2.6 5 8 2.4Z"/><path d="m2.6 10.6 5.4 2.7 5.4-2.7M3 13l10-10"/></svg>
+            <span>لغو گروه</span>
+          </button>
+        </div>
+
+        <div class="action-group group-approve" role="group" aria-label="ابزارهای تأیید نهایی صفحات آمادهٔ خروجی">
+          <span class="action-group-title">تأیید نهایی</span>
+          <button id="approveSelectedBtn" class="bt approve-toolbar-btn" type="button" title="زدن مهر تأیید نهایی روی صفحات انتخاب‌شده (فقط داخل برنامه)">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="m5.3 8.1 1.9 1.9 3.6-3.8"/></svg>
+            <span>تأیید</span>
+          </button>
+          <button id="unapproveSelectedBtn" class="bt" type="button" title="برداشتن مهر تأیید از صفحات انتخاب‌شده">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="m5.8 5.8 4.4 4.4M10.2 5.8l-4.4 4.4"/></svg>
+            <span>لغو تأیید</span>
+          </button>
+          <span class="group-inner-sep" aria-hidden="true"></span>
+          <button id="selectApprovedBtn" class="bt" type="button" title="انتخاب فقط صفحاتی که مهر تأیید نهایی دارند (مناسب خروجی گرفتن)">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.2 3.2h11.6L9.5 8.1v3.7l-3 1.4V8.1L2.2 3.2Z"/></svg>
+            <span>فقط تأییدشده‌ها</span>
+          </button>
+          <button id="selectUnapprovedBtn" class="bt" type="button" title="انتخاب فقط صفحاتی که هنوز تأیید نهایی نشده‌اند">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.9" stroke-dasharray="2.5 2.1"/><path d="M8 5v3.3l2.1 1.3"/></svg>
+            <span>مانده‌ها</span>
+          </button>
+        </div>
+
+        <div class="action-group group-manage" role="group" aria-label="کپی و حذف صفحات">
+          <span class="action-group-title">صفحه</span>
+          <button id="duplicateBtn" class="bt" type="button" title="ساخت کپی مستقل از صفحات انتخاب‌شده">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.3" y="5.3" width="8.2" height="8.2" rx="1.7"/><path d="M10.7 5.3V3.8a1.5 1.5 0 0 0-1.5-1.5H3.8a1.5 1.5 0 0 0-1.5 1.5v5.4a1.5 1.5 0 0 0 1.5 1.5h1.5"/></svg>
+            <span>کپی</span>
+          </button>
+          <button id="deleteBtn" class="bt danger" type="button" title="حذف صفحات انتخاب‌شده از پروژه">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.8 4.3h10.4M6.2 4.3V2.9c0-.4.3-.7.7-.7h2.2c.4 0 .7.3.7.7v1.4M4.3 4.3l.6 8.5c0 .7.6 1.2 1.3 1.2h3.6c.7 0 1.2-.5 1.3-1.2l.6-8.5M6.8 7v4.3M9.2 7v4.3"/></svg>
+            <span>حذف</span>
+          </button>
+        </div>
+
+        <div class="drag-guide-wrap">
+          <button id="dragGuideBtn" class="drag-guide-chip" type="button" aria-expanded="false" aria-controls="dragGuidePopover">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.1"/><path d="M8 7.2v4M8 4.8h.01"/></svg>
+            <span>راهنمای جابه‌جایی</span>
+          </button>
+          <div id="dragGuidePopover" class="drag-guide-popover" role="tooltip">
+            <div class="drag-guide-title">کشیدن و رها کردن کارت‌ها با ماوس:</div>
+            <div class="drag-guide-item"><strong>وسط کارت دیگر:</strong> ساخت گروه مشترک</div>
+            <div class="drag-guide-item"><strong>لبهٔ راست یا چپ:</strong> تغییر ترتیب صفحه</div>
+            <div class="drag-guide-item"><strong>لبهٔ کارت هم‌گروه:</strong> تغییر ترتیب داخل گروه</div>
+            <div class="drag-guide-item"><strong>فضای خالی صفحه:</strong> خارج‌کردن از گروه</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="groupPanel" class="panel group-panel hidden">
+      <div class="group-panel-head"><div><strong>گروه‌های صفحات</strong><span class="muted">هر گروه در PDF یک صفحهٔ عمودی می‌شود.</span></div><button id="cancelGroupEdit" class="bt hidden">لغو ویرایش</button></div>
+      <div id="groupList" class="group-list"></div>
+      <div id="groupEditStatus" class="hint-inline">برای ویرایش اعضا، «ویرایش» یک گروه را بزنید و سپس کارت‌ها را انتخاب یا لغو انتخاب کنید.</div>
+    </section>
+
+    <section id="grid" class="grid" aria-live="polite"></section>
+    <div id="groupOutlines" aria-hidden="true"></div>
+    <section id="emptyState" class="empty-state">
+      <h2>از خروجی افزونه شروع کنید</h2>
+      <p>PDF یا چند تصویر را وارد کنید. تصویرها برای OCR از همین کامپیوتر خارج نمی‌شوند.</p>
+      <p>ترجمهٔ رایگان یا AI فقط با انتخاب شما به سرویس آنلاین متصل می‌شود.</p>
+    </section>
+    <section id="result" class="panel result-panel">
+      <div class="row"><strong>وضعیت</strong><span id="jobStatus" role="status">آماده</span><a id="downloadLink" class="bt success hidden" href="#" download><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v8M5.2 7.7 8 10.5l2.8-2.8M2.8 13.2h10.4"/></svg><span>دانلود فایل آماده</span></a><span class="grow"></span><button id="pendingResultsBtn" class="bt" type="button"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 4.8v3.5l2.3 1.4"/></svg><span>نتایج منتظر بررسی</span></button><button id="clearActivityBtn" class="bt clear-activity" type="button"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13.2h10M5.2 10.4l5.9-5.9a1.4 1.4 0 0 1 2 2l-5.9 5.9H5.2v-2Z"/></svg><span>پاک‌کردن گزارش</span></button><span class="muted">PDF · ZIP · TXT · Word · PowerPoint</span></div>
+      <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت کار" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="jobProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+      <details id="activityDetails" class="activity-details" open>
+        <summary>گزارش زندهٔ کارها</summary>
+        <div id="activityLog" class="activity-log" role="log" aria-live="polite"></div>
+      </details>
+    </section>
+  </main>
+
+  <footer id="dock">
+    <div id="dockProgressWrap" class="dock-progress hidden" aria-live="polite">
+      <div class="dock-progress-head"><span id="dockProgressStatus">آماده</span><div class="dock-progress-meta"><strong id="dockProgressPercent">0%</strong><button id="dockCancelJobBtn" class="bt danger dock-cancel-btn" type="button">لغو عملیات</button></div></div>
+      <div class="bar" role="progressbar" aria-label="پیشرفت عملیات جاری" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="dockProgress" class="fill"></div></div>
+    </div>
+    <span class="dock-name-label"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.8 3.6h4.1l1.4 1.6h4.9v7.2a1.1 1.1 0 0 1-1.1 1.1H3.9a1.1 1.1 0 0 1-1.1-1.1V3.6Z"/></svg><span>نام خروجی</span></span>
+    <input id="exportName" value="" dir="auto" placeholder="هم‌نام با پروژه (قابل ویرایش)" aria-label="نام فایل خروجی">
+    <div class="dock-export-group" role="group" aria-label="ساخت خروجی">
+      <button id="exportPdfBtn" class="bt success" type="button" title="ساخت و دانلود فایل PDF">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.8h5.4L13 5.4v8.2a.9.9 0 0 1-.9.9H4a.9.9 0 0 1-.9-.9V2.7c0-.5.4-.9.9-.9Z"/><path d="M9.2 1.8v3.7H13M5.4 9.2h5.2M5.4 11.6h3.5"/></svg>
+        <span>PDF</span>
+      </button>
+      <button id="exportImagesBtn" class="bt" type="button" title="دانلود آرشیو ZIP تصاویر خروجی">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.6" width="11.6" height="10.8" rx="1.7"/><circle cx="5.7" cy="6" r="1.1"/><path d="m3 12 3.4-3.3 2.3 2.1 1.9-1.8 2.6 3"/></svg>
+        <span>ZIP تصاویر</span>
+      </button>
+      <button id="exportTxtBtn" class="bt" type="button" title="خروجی متنی ساده (TXT)">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h6.5"/></svg>
+        <span>TXT</span>
+      </button>
+      <button id="exportDocxBtn" class="bt dock-docx" type="button" title="خروجی قابل‌ویرایش Word (DOCX)">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.2" width="11.6" height="11.6" rx="2"/><path d="m4.7 5.2 1.4 5.6L8 6.5l1.9 4.3 1.4-5.6"/></svg>
+        <span>Word</span>
+      </button>
+      <button id="exportPptxBtn" class="bt dock-pptx" type="button" title="خروجی اسلاید PowerPoint (PPTX)">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.8" width="12" height="8.2" rx="1.5"/><path d="M8 11v2.8M5.3 13.8h5.4M5.4 5.5h3.2a1.3 1.3 0 0 1 0 2.6H5.4V5.5Z"/></svg>
+        <span>PowerPoint</span>
+      </button>
+    </div>
+    <span class="dock-sep" aria-hidden="true"></span>
+    <button id="exportBtn" class="bt dock-settings" type="button" title="تنظیمات کامل خروجی (چیدمان، یکپارچه‌سازی، فرمت و...)">
+      <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/><circle cx="5.8" cy="4.5" r="1.4"/><circle cx="10.4" cy="8" r="1.4"/><circle cx="6.8" cy="11.5" r="1.4"/></svg>
+      <span>تنظیمات خروجی</span>
+    </button>
+  </footer>
+
+  <dialog id="pendingDialog" class="dlg wide-dialog">
+    <form method="dialog" class="dialog-head"><h2>نتیجه‌های منتظر بررسی</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <p class="hint">نتیجه‌های موقت روی همین دستگاه نگهداری می‌شوند و ممکن است محرمانه باشند؛ در بک‌آپ پروژه نیستند. هر تعارض را مقایسه کنید. انتخاب «حفظ ویرایش» کادر یا صفحهٔ فعلی را دست‌نخورده می‌گذارد؛ در صورت حفظ هر کادر، خلاصهٔ تازه نیز جایگزین خلاصهٔ قبلی نمی‌شود.</p>
+    <div id="pendingList"></div><div id="pendingDetail" class="hidden"></div>
+    <p id="pendingStatus" class="hint diagnostic-message" role="status"></p>
+    <div class="dialog-actions"><button id="pendingCopy" class="bt hidden" type="button">کپی نتیجه</button><button id="pendingDiscard" class="bt danger hidden" type="button">حذف نتیجهٔ منتظر</button><button id="pendingApply" class="bt primary hidden" type="button">ثبت انتخاب‌ها</button></div>
+  </dialog>
+
+  <dialog id="ocrDialog" class="dlg ocr-dialog">
+    <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>OCR آفلاین</h2><span id="ocrExecBadge" class="exec-badge is-local hidden" title="تمام ۱۴ موتور OCR مستقیماً روی کامپیوتر خود شما اجرا می‌شوند و هنگام خواندن صفحات به اینترنت نیازی ندارند">اجرا روی سیستم شما (آفلاین)</span></div><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <div class="form-grid">
+      <label>نوع صفحه و چیدمان<select id="ocrPageMode"><option value="comic">کمیک و مانگا (حباب گفتگو)</option><option value="document">کتاب، مقاله و جزوه (پاراگراف و ستون)</option></select></label>
+      <label>موتور OCR<select id="ocrEngine"></select></label>
+      <label>زبان متن<select id="ocrLanguage"><option value="eng">English</option><option value="fas">فارسی</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label>
+      <label>حداقل اطمینان<input id="ocrConfidence" type="number" min="0" max="0.95" step="0.05" value="0.35"></label>
+    </div>
+    <div class="checks">
+      <label><input id="ocrOnlySelected" type="checkbox" checked> فقط تصاویر انتخاب‌شده</label>
+      <label><input id="ocrContrast" type="checkbox" checked> افزایش کنتراست نسخهٔ موقت OCR</label>
+      <label><input id="ocrPrecise" type="checkbox" checked> بزرگ‌نمایی برای دقت بیشتر</label>
+      <label><input id="ocrGroupLines" type="checkbox" checked> ادغام خودکار خط‌های هم‌خانواده (حباب کمیک یا پاراگراف کتاب)</label>
+      <label><input id="ocrErase" type="checkbox" checked> پاک‌کردن متن قبلی زیر متن نمایش‌داده‌شده</label>
+    </div>
+    <p id="ocrEngineStatus" class="hint"></p>
+    <div id="ocrEngineQuickActions" class="ocr-engine-quick-actions hidden">
+      <button id="ocrQuickPrepareBtn" class="bt primary hidden" type="button">نصب و دانلود خودکار همین مدل</button>
+      <button id="ocrQuickUpdateBtn" class="bt hidden" type="button">به‌روزرسانی به نسخهٔ جدید</button>
+    </div>
+    <div id="ocrQuickProgressWrap" class="model-live-progress hidden" aria-live="polite">
+      <div class="model-live-progress-head"><span id="ocrQuickProgressLabel">در حال آماده‌سازی مدل…</span><strong id="ocrQuickProgressPercent" dir="ltr">0%</strong></div>
+      <div class="bar" role="progressbar" aria-label="پیشرفت دانلود و به‌روزرسانی مدل در پنجره OCR" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="ocrQuickProgress" class="fill"></div></div>
+    </div>
+    <p id="ocrTranslationNotice" class="hint hidden" role="status"></p>
+    <p id="ocrStatus" class="hint diagnostic-message" role="status" aria-live="polite"></p>
+    <button id="copyOcrError" class="bt hidden" type="button">کپی خطای OCR</button>
+    <p class="hint">پیش از ارسال خطا، آن را از نظر اطلاعات شخصی یا محرمانه بررسی کنید.</p>
+    <p class="hint">بعد از OCR، متن خوانده‌شده در گزارش و روی تصویر می‌آید تا پیش از ترجمه بررسی و ویرایش شود.</p>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت OCR" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="ocrProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+    <div id="ocrActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
+    <div class="dialog-actions"><button id="cancelOcrBtn" class="bt danger hidden" type="button">لغو عملیات</button><button id="startOcrBtn" class="bt primary">شروع OCR</button></div>
+  </dialog>
+
+  <dialog id="translationDialog" class="dlg small-dialog">
+    <form method="dialog" class="dialog-head"><h2>ترجمهٔ متن‌ها</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <p id="translationStatus" class="hint diagnostic-message" role="status">آماده</p>
+    <div id="translationErrorChoice" class="hidden">
+      <p class="hint">تلاش‌های خودکار تمام شد یا خطایی رخ داد. دوباره تلاش شود یا خطا کپی و کار تمام شود؟ ارسال دوباره ممکن است هزینه داشته باشد؛ در خطای شبکه ممکن است درخواست قبلی هنوز در حال پردازش باشد.</p>
+      <div class="dialog-actions"><button id="retryTranslation" class="bt primary hidden" type="button">تلاش دوباره</button><button id="copyTranslationError" class="bt hidden" type="button">کپی خطا و پایان</button><button id="copyUnstoredResult" class="bt hidden" type="button">کپی نتیجهٔ ذخیره‌نشده</button></div>
+    </div>
+    <div id="responseRepair" class="hidden">
+      <p class="hint">پاسخ AI دریافت شده ولی قابل ذخیره نبود. می‌توانید ترجمه و خلاصه را در کادرهای زیر اصلاح کنید یا پاسخ خام را ویرایش کنید. ثبت اصلاح‌شده به این درخواست دوباره به AI ارسال نمی‌کند؛ پس از ثبت، درخواست‌های بعدیِ تأییدشده ادامه پیدا می‌کنند. پاسخ و فرصت اصلاح با بستن پنجره، بازنشانی برنامه یا پس از ۳۰ دقیقه از دست می‌رود.</p>
+      <label>متن ترجمه‌شده<textarea id="repairTranslation" dir="auto" rows="4" maxlength="190000" placeholder="ترجمه را اینجا وارد یا اصلاح کنید"></textarea></label>
+      <label>خلاصهٔ کوتاه داستان<input id="repairSummary" dir="auto" maxlength="100000" placeholder="خلاصهٔ یک‌خطی را وارد یا اصلاح کنید"></label>
+      <p class="hint">برای چند کادر، هر ترجمه را در خط جدا و به همان ترتیب بنویسید؛ خطوط مبدأ را ادغام یا حذف نکنید.</p>
+      <button id="applyResponseFields" class="bt primary" type="button">بررسی و ثبت ترجمه و خلاصه</button>
+      <details><summary>پاسخ خام AI و ویرایش مستقیم JSON</summary>
+        <textarea id="responseRepairText" dir="auto" rows="9" maxlength="200000" aria-label="پاسخ دریافتی AI برای اصلاح"></textarea>
+        <button id="applyResponseRepair" class="bt" type="button">بررسی و ثبت JSON اصلاح‌شده</button>
+      </details>
+      <p id="responseRepairStatus" class="hint diagnostic-message" role="status"></p>
+    </div>
+    <p class="hint">پیش از ارسال خطا، مطمئن شوید اطلاعات شخصی یا محرمانه داخل آن نیست.</p>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت ترجمه" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="translationProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+    <div id="translationActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
+    <div class="dialog-actions"><button id="cancelTranslationBtn" class="bt danger hidden" type="button">لغو عملیات</button></div>
+    <p class="hint">پیش از ارسال، متن دقیق درخواست اول و مقصد نمایش داده می‌شود؛ درخواست‌های بعدی بر اساس خلاصهٔ پاسخ قبلی با همان تأیید ساخته می‌شوند. کادرها با خط جدید معمولی ترکیب می‌شوند؛ در پاسخ چندکادری تعداد خط‌ها باید با متن مبدأ یکسان باشد تا هر خط در کادر درست قرار گیرد. برای سرویس رایگان، متن جمعی تا ۵۰۰ نویسه در یک query می‌رود و متن طولانی‌تر جدا و تا حد ممکن در مرز جمله تقسیم می‌شود. برای AI، متن‌های همان صفحه تا سقف قابل‌تنظیم هر API جمع می‌شوند؛ تقسیم فقط در انتهای خط و پایان جمله یا بند است. اگر تقسیم امن ممکن نباشد، سقف را افزایش دهید یا متن OCR را اصلاح کنید. در صورت فعال‌بودن گزینهٔ متن تکراری، ترجمهٔ کادرهای دقیقاً یکسان روی دیگر کادرهای انتخاب‌شده نیز اعمال می‌شود. هر پاسخ پیش از ارسال بعدی بررسی و ذخیره می‌شود. در حالت حافظه دستور، خلاصه، اسکیل و متن اصلی همگی در سقف کل هستند. برای ادامه پس از خطا، همان تصاویر انتخابی نوبت را نگه دارید و «ادامهٔ نوبت ناتمام قبلی» را تأیید کنید؛ درخواست‌های موفق دوباره ارسال نمی‌شوند.</p>
+  </dialog>
+
+  <dialog id="modelsDialog" class="dlg wide-dialog">
+    <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>مدل‌های OCR و آزمایش</h2><span id="modelsExecSummary" class="exec-badge is-local hidden" title="همهٔ ۱۴ مدل پس از یک‌بار دانلود اولیه، ۱۰۰٪ آفلاین روی پردازنده یا کارت گرافیک سیستم خودتان اجرا می‌شوند">همهٔ ۱۴ مدل: اجرا روی سیستم شما (آفلاین)</span></div><button class="icon" value="cancel">×</button></form>
+    <p class="hint">هیچ مدلی بدون کلیک شما دانلود نمی‌شود. همهٔ ۱۴ مدل OCR (ازجمله مدل بومی فارسی Hezar) پس از یک‌بار دانلود اولیه <strong>۱۰۰٪ روی خود سیستم شما (آفلاین)</strong> اجرا می‌شوند و برای خواندن تصاویر به اینترنت نیاز ندارند؛ هر مدلی را هم که دیگر نیاز نداشتید می‌توانید با دکمهٔ «حذف مدل» روی کارت آن به طور کامل از دیسک پاک کنید. رنگ‌بندی سبز، زرد و قرمز هر موتور بر اساس ترکیب هم‌زمان «زبان متن» و «نوع صفحه» محاسبه می‌شود. <a href="https://github.com/sargoliwork101-ui/COMICCCC/blob/arena/6cac229a-comicccc/python_app/README.md" target="_blank" rel="noopener noreferrer">راهنمای نصب برنامه از همین شاخهٔ GitHub</a>.</p>
+    <p class="hint">فقط اگر نصب در ویندوز خطای دسترسی داد، برنامه را ببندید و فایل <bdi dir="ltr">start_windows_admin.bat</bdi> را اجرا کنید.</p>
+    <div id="modelsToolbar" class="models-toolbar">
+      <div class="models-toolbar-info">
+        <span id="modelsHardwareSummary" class="muted">وضعیت سخت‌افزار سیستم به همراه هر مدل بررسی می‌شود.</span>
+        <span id="modelsRamStatus" class="models-ram-badge" title="مدل‌های OCR بلافاصله پس از پایان هر کار به‌صورت خودکار از رم خارج می‌شوند">رم مصرفی برنامه: در حال سنجش…</span>
+      </div>
+      <div class="models-toolbar-actions">
+        <label class="models-mode-filter"><span>نوع صفحه:</span><select id="modelsPageMode" aria-label="نوع صفحه برای رنگ‌بندی عملکرد مدل‌ها"><option value="comic">کمیک و مانگا</option><option value="document">کتاب، مقاله و جزوه</option></select></label>
+        <label class="models-mode-filter"><span>زبان متن:</span><select id="modelsLanguage" aria-label="زبان متن برای رنگ‌بندی عملکرد مدل‌ها"><option value="eng">English</option><option value="fas">فارسی</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label>
+        <label class="models-mode-filter models-installed-filter" title="نمایش فقط مدل‌هایی که دانلود و نصب شده‌اند برای مدیریت یا حذف سریع"><input id="modelsInstalledOnly" type="checkbox"><span>فقط نصب‌شده‌ها</span></label>
+        <button id="freeModelsRamBtn" class="bt" type="button" title="خالی‌سازی فوری مدل‌های OCR و حافظهٔ موقت از رم">آزادسازی فوری رم</button>
+        <button id="checkModelUpdatesBtn" class="bt" type="button">بررسی نسخهٔ جدید</button>
+        <button id="updateAllModelsBtn" class="bt primary hidden" type="button">به‌روزرسانی همهٔ مدل‌ها</button>
+      </div>
+    </div>
+    <div id="modelsActiveProgressWrap" class="model-live-progress models-sticky-progress hidden" aria-live="polite">
+      <div class="model-live-progress-head">
+        <span id="modelsActiveProgressLabel">در حال دریافت و آماده‌سازی مدل…</span>
+        <div class="model-live-progress-meta">
+          <strong id="modelsActiveProgressPercent" dir="ltr">0%</strong>
+          <button id="modelsActiveCancelBtn" class="bt danger dock-cancel-btn" type="button">لغو</button>
+        </div>
+      </div>
+      <div class="bar" role="progressbar" aria-label="پیشرفت زنده دانلود و به‌روزرسانی مدل OCR" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="modelsActiveProgress" class="fill"></div></div>
+    </div>
+    <div id="modelsUpdateBanner" class="engine-update-banner hidden" role="status" aria-live="polite"></div>
+    <div id="engineCards" class="engine-cards"></div>
+    <div class="test-panel"><label>زبان مدل و آزمایش<select id="testLanguage"><option value="eng">English</option><option value="fas">فارسی</option><option value="kor">한국어</option><option value="jpn">日本語</option><option value="chi_sim">中文</option></select></label><span>آماده‌سازی فقط همین زبان را نصب/دانلود می‌کند. آزمایش روی نخستین تصویر انتخاب‌شده انجام می‌شود و پروژه را تغییر نمی‌دهد.</span></div>
+    <pre id="modelTestResult" class="test-result" dir="auto"></pre>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت آماده‌سازی و آزمایش موتور" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="modelProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+    <div id="modelActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
+  </dialog>
+
+  <dialog id="aiDialog" class="dlg ai-dialog">
+    <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>ترجمه و AI</h2><span id="aiExecBadge" class="exec-badge is-online">سرویس آنلاین (اینترنتی)</span></div><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <div class="form-grid">
+      <label>روش ترجمه<select id="aiProvider"><option value="free">سرویس رایگان فعلی</option><option value="gemini">Google Gemini</option><option value="openai">OpenAI / سرویس سازگار</option><option value="openrouter">OpenRouter</option><option value="avalai">AvalAI</option></select></label>
+      <label>زبان مقصد ترجمه<select id="aiTargetLanguage"><option value="fa">فارسی (Persian)</option><option value="en">انگلیسی (English)</option><option value="ar">عربی (Arabic)</option><option value="tr">ترکی استانبولی (Turkish)</option><option value="de">آلمانی (German)</option><option value="fr">فرانسوی (French)</option><option value="ru">روسی (Russian)</option><option value="es">اسپانیایی (Spanish)</option><option value="ja">ژاپنی (Japanese)</option><option value="ko">کره‌ای (Korean)</option><option value="zh-CN">چینی (Chinese)</option></select></label>
+    </div>
+    <div id="aiExecBanner" class="exec-mode-banner is-online" role="status" aria-live="polite"></div>
+    <div id="freeFields" class="hidden">
+      <div id="freeServices"></div>
+      <p class="hint">ابتدا Google Translate و پس از شکست تلاش‌های آن MyMemory امتحان می‌شود. سقف مؤثر کمترین سقف دو سرویس است و هر درخواست علاوه بر آن حداکثر ۵۰۰ بایت UTF-8 دارد. بدون کلید، سرویس‌ها ممکن است سهمیه یا محدودیت‌های دیگری داشته باشند. تکرار یا تغییر سرویس پس از خطای شبکه ممکن است متن را دوباره ارسال کند.</p>
+    </div>
+    <label class="reuse-setting"><input id="aiReuseRepeated" type="checkbox" checked> استفادهٔ مجدد از ترجمهٔ کادرهای دقیقاً یکسان در صفحات انتخاب‌شده</label>
+    <p class="hint">بافت متفاوت ممکن است ترجمهٔ متفاوت بخواهد؛ برای ترجمهٔ مستقل این گزینه را خاموش کنید.</p>
+    <div id="aiFields" class="hidden">
+      <div class="form-grid"><label id="aiBaseUrlField">نشانی پایهٔ API<input id="aiBaseUrl" dir="ltr" spellcheck="false"></label><label>نام دقیق مدل<input id="aiModel" dir="ltr" spellcheck="false"></label></div>
+      <label>قالب پاسخ AI<select id="aiResponseMode"><option value="auto">خودکار (JSON برای نشانی رسمی OpenAI و Gemini)</option><option value="json">درخواست حالت JSON از سرویس</option><option value="text">متن معمولی (بدون اجبار حالت JSON)</option></select></label>
+      <p class="hint">اگر مدل حالت JSON را پشتیبانی نمی‌کند، متن معمولی را انتخاب کنید. تغییر قالب پس از تأیید ممکن است ادامهٔ نوبت را نیازمند پیش‌نمایش تازه کند.</p>
+      <div class="ai-profile-heading"><span>کلیدهای API و نام دلخواه هرکدام</span><button id="aiAddProfile" class="bt" type="button">افزودن API</button></div>
+      <div id="aiProfiles" class="ai-profile-list"></div>
+      <div class="form-grid"><label>سقف خلاصهٔ قبلی (درصد)<input id="aiContextPercent" type="number" min="0" max="100" value="15"></label><label>سقف اسکیل (درصد)<input id="aiSkillPercent" type="number" min="0" max="100" value="15"></label></div>
+      <p class="hint">پیش‌فرض هرکدام ۱۵٪ سقف کل هر درخواست است؛ فضای مصرف‌نشده به متن اصلی می‌رسد. دستور سیستم، خلاصه، اسکیل و متن همگی در سقف شمرده می‌شوند.</p>
+      <p class="hint"><a id="aiKeyHelp" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">ساخت کلید در Google AI Studio</a> · کلیدها فقط در فایل تنظیمات همین کامپیوتر ذخیره می‌شوند و به مرورگر برگردانده نمی‌شوند.</p>
+      <p class="hint">«تست» متن کمیک نمی‌فرستد. زمان انتظار، تعداد تکرار و فاصلهٔ بین تلاش‌ها برای هر کلید جداست؛ صفر یعنی بدون تکرار همان کلید. در خطاهای موقت تکرار انجام می‌شود؛ پاسخ AI نامعتبر بدون اجازه دوباره ارسال نمی‌شود. خطای اتصال پس از پایان تکرارها کار را متوقف می‌کند. خطاهای دیگر ممکن است کلید بعدی را امتحان کنند. این زمان سقف هر مرحلهٔ اتصال/خواندن است، نه الزاماً کل زمان درخواست. فاصله، پیش از تکرار همان کلید یا امتحان کلید بعدی اعمال می‌شود. تکرار ممکن است هزینهٔ دوباره داشته باشد.</p>
+    </div>
+    <p class="hint">تصویر برای ترجمه ارسال نمی‌شود؛ متن OCR، دستور، اسکیل و خلاصه به سرویس AI انتخابی فرستاده می‌شوند. برای AI آفلاین می‌توانید نشانی یک سرویس محلی سازگار با OpenAI بدهید. انتخاب رایگان هیچ درخواست AI انجام نمی‌دهد.</p>
+    <div id="aiStatus" class="hint diagnostic-message" role="status" aria-live="polite"></div>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت بررسی و ذخیرهٔ تنظیمات AI" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="aiProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+    <button id="copyAiError" class="bt hidden" type="button">کپی پیام خطا</button>
+    <div class="dialog-actions"><button id="saveAiBtn" class="bt primary" type="button">ذخیره</button></div>
+  </dialog>
+
+  <dialog id="exportDialog" class="dlg small-dialog">
+    <form method="dialog" class="dialog-head"><h2>تنظیمات خروجی</h2><button class="icon" value="cancel">×</button></form>
+    <label>نوع خروجی<select id="exportKind"><option value="pdf">PDF</option><option value="images">تصاویر جداگانه (ZIP)</option><option value="txt">متن OCR و ترجمه (TXT)</option><option value="docx">فایل Word (DOCX)</option><option value="pptx">فایل PowerPoint (PPTX)</option></select></label>
+    <label id="exportOverlayModeWrap">متن روی تصاویر<select id="exportOverlayMode"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select></label>
+    <div id="docxExportFields" class="checks hidden">
+      <label>متن داخل فایل Word<select id="exportDocxMode"><option value="translation">متن ترجمه‌شده (فارسی)</option><option value="ocr">متن انگلیسی / اصلی (OCR)</option></select></label>
+      <label>قالب چیدمان فایل Word<select id="exportDocxLayout"><option value="visual">صفحهٔ تصویری (کمیک و کتاب مصور — حفظ تصویر و جای کادرها)</option><option value="flowing">متن پیوستهٔ کتابی (کتاب، مقاله و جزوه — بدون تصویر پس‌زمینه)</option></select></label>
+    </div>
+    <div id="pptxExportFields" class="checks hidden">
+      <label>متن داخل فایل PowerPoint<select id="exportPptxMode"><option value="translation">متن ترجمه‌شده (فارسی)</option><option value="ocr">متن انگلیسی / اصلی (OCR)</option></select></label>
+      <label>قالب اسلایدهای PowerPoint<select id="exportPptxLayout"><option value="visual">اسلاید تصویری (کمیک و کتاب مصور — تصویر تمیز + کادرهای قابل‌ویرایش)</option><option value="flowing">اسلاید متنی ارائه ۱۶:۹ (کتاب، مقاله و جزوه — بدون عکس پس‌زمینه)</option></select></label>
+    </div>
+    <div id="pdfExportFields" class="checks"><label><input id="exportSeamless" type="checkbox"> همهٔ تصاویر پشت سر هم در یک صفحهٔ بلند</label><label><input id="exportUniform" type="checkbox"> قاب‌های هم‌اندازه</label><label><input id="exportTwo" type="checkbox"> دو تصویر در هر صفحه (گروه‌ها جدا می‌مانند)</label></div>
+    <div id="imageExportFields" class="form-grid hidden"><label>فرمت<select id="exportFormat"><option value="orig">اصلی / PNG برای ویرایش‌شده</option><option value="png">PNG</option><option value="jpg">JPEG کیفیت ۱۰۰٪</option></select></label><label>زیرپوشه داخل ZIP<input id="exportFolder" placeholder="اختیاری"></label></div>
+    <p class="hint">در PDF و ZIP، انتخاب فارسی/انگلیسیِ هر کادر همان‌طور اعمال می‌شود. در فایل‌های Word و PowerPoint هم حالت تصویری (حفظ تصویر صفحه و کادرهای متن قابل‌ویرایش) و هم حالت متنی بدون پس‌زمینه (سند کتابی یا اسلاید ارائهٔ ۱۶:۹) در دسترس است.</p>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت ساخت خروجی" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="exportProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+    <div id="exportActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
+    <div class="dialog-actions"><button id="startExportBtn" class="bt success">ساخت و دانلود</button></div>
+  </dialog>
+
+  <dialog id="docxExportDialog" class="dlg small-dialog">
+    <form method="dialog" class="dialog-head"><h2>انتخاب قالب و متن خروجی Word</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <p class="hint">قالب و زبان فایل Word را انتخاب کنید: حالت تصویری برای کمیک و کتاب مصور (تصویر تمیز صفحه در پس‌زمینه + کادرهای روی حباب) و حالت کتابی پیوسته برای کتاب، مقاله و جزوه (سند متنی استاندارد و قابل‌ویرایش آزاد بدون تصویر پس‌زمینه).</p>
+    <div class="docx-section-label">۱. صفحهٔ تصویری (کمیک و کتاب مصور — حفظ تصویر و جای کادرها)</div>
+    <div class="docx-choice-grid">
+      <button id="docxChoiceTranslation" class="bt primary docx-choice-btn" type="button">
+        <strong>تصویری — متن ترجمه‌شده</strong>
+        <span>قرار دادن متن فارسی / ترجمه‌شده داخل کادرها روی تصویر صفحه</span>
+      </button>
+      <button id="docxChoiceOcr" class="bt docx-choice-btn" type="button">
+        <strong>تصویری — متن اصلی (OCR)</strong>
+        <span>قرار دادن متن اصلی خوانده‌شده داخل کادرها روی تصویر صفحه</span>
+      </button>
+    </div>
+    <div class="docx-section-label">۲. متن پیوستهٔ کتابی (کتاب، مقاله و جزوه — بدون تصویر پس‌زمینه)</div>
+    <div class="docx-choice-grid">
+      <button id="docxChoiceFlowingTranslation" class="bt primary docx-choice-btn" type="button">
+        <strong>کتابی پیوسته — متن ترجمه‌شده</strong>
+        <span>سند Word معمولی و قابل‌ویرایش آزاد با پاراگراف‌ها، تیترها و فهرست‌های فارسی</span>
+      </button>
+      <button id="docxChoiceFlowingOcr" class="bt docx-choice-btn" type="button">
+        <strong>کتابی پیوسته — متن اصلی (OCR)</strong>
+        <span>سند Word معمولی و قابل‌ویرایش آزاد با متن اصلی استخراج‌شده از صفحات</span>
+      </button>
+    </div>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت ساخت فایل Word" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="docxProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+    <div id="docxActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
+    <div class="dialog-actions"><button id="docxExportCancel" class="bt" type="button">انصراف</button></div>
+  </dialog>
+
+  <dialog id="pptxExportDialog" class="dlg small-dialog">
+    <form method="dialog" class="dialog-head"><h2>انتخاب قالب و متن خروجی PowerPoint</h2><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <p class="hint">قالب و زبان فایل PowerPoint (PPTX) را انتخاب کنید: حالت تصویری برای کمیک و کتاب مصور (تصویر تمیز صفحه + کادرهای متن جابه‌جاشدنی و قابل‌ویرایش در PowerPoint) و حالت اسلاید متنی ارائه برای کتاب، مقاله و جزوه (اسلایدهای عریض ۱۶:۹ تمیز بدون عکس پس‌زمینه).</p>
+    <div class="docx-section-label">۱. اسلاید تصویری قابل‌ویرایش (کمیک و کتاب مصور — تصویر تمیز + کادرهای متن)</div>
+    <div class="docx-choice-grid">
+      <button id="pptxChoiceTranslation" class="bt primary docx-choice-btn" type="button">
+        <strong>تصویری — متن ترجمه‌شده</strong>
+        <span>قرار دادن متن فارسی / ترجمه‌شده در کادرهای متنی قابل‌ویرایش روی تصویر هر اسلاید</span>
+      </button>
+      <button id="pptxChoiceOcr" class="bt docx-choice-btn" type="button">
+        <strong>تصویری — متن اصلی (OCR)</strong>
+        <span>قرار دادن متن اصلی خوانده‌شده در کادرهای متنی قابل‌ویرایش روی تصویر هر اسلاید</span>
+      </button>
+    </div>
+    <div class="docx-section-label">۲. اسلاید متنی ارائه ۱۶:۹ (کتاب، مقاله و جزوه — بدون تصویر پس‌زمینه)</div>
+    <div class="docx-choice-grid">
+      <button id="pptxChoiceFlowingTranslation" class="bt primary docx-choice-btn" type="button">
+        <strong>اسلاید ارائه — متن ترجمه‌شده</strong>
+        <span>اسلایدهای عریض و استاندارد PowerPoint با تیترها، فهرست‌ها و پاراگراف‌های فارسی</span>
+      </button>
+      <button id="pptxChoiceFlowingOcr" class="bt docx-choice-btn" type="button">
+        <strong>اسلاید ارائه — متن اصلی (OCR)</strong>
+        <span>اسلایدهای عریض و استاندارد PowerPoint با متن اصلی استخراج‌شده از صفحات</span>
+      </button>
+    </div>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت ساخت فایل PowerPoint" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="pptxProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+    <div id="pptxActivityLog" class="activity-log dialog-activity" role="log" aria-live="polite"></div>
+    <div class="dialog-actions"><button id="pptxExportCancel" class="bt" type="button">انصراف</button></div>
+  </dialog>
+
+  <dialog id="editorDialog" class="dlg editor-dialog">
+    <div class="dialog-head">
+      <h2 id="editorTitle">ویرایش متن</h2>
+      <div class="editor-head-actions">
+        <div class="editor-head-group ehg-view" role="group" aria-label="پیش‌نمایش و بازنشانی تصویر">
+          <span class="editor-head-label">نمایش</span>
+          <button id="editorApply" class="bt" type="button" title="به‌روزرسانی پیش‌نمایش نهایی تصویر"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"/><path d="M16 16h5v5"/></svg><span>پیش‌نمایش</span></button>
+          <button id="editorRevert" class="bt danger" type="button" title="بازگشت به تصویر اصلی بدون لایهٔ متن"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg><span>تصویر اصلی</span></button>
+        </div>
+        <div class="editor-head-group ehg-finish" role="group" aria-label="ذخیره، تأیید و خروج از ویرایشگر">
+          <span class="editor-head-label">خروج</span>
+          <button id="editorUnapproveBtn" class="bt hidden" type="button" title="برداشتن مهر تأیید نهایی از این صفحه"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg><span>لغو تأیید صفحه</span></button>
+          <button id="editorCancel" class="bt" type="button" title="لغو تغییرات این نوبت ویرایش و خروج بدون ذخیره"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg><span>انصراف بدون ذخیره</span></button>
+          <button id="editorClose" class="bt primary" type="button" title="ذخیرهٔ تغییرات و بستن پنجرهٔ ویرایشگر"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span>ذخیره و بستن</span></button>
+          <button id="editorApproveClose" class="bt success" type="button" title="ذخیرهٔ تغییرات، زدن مهر تأیید نهایی روی این صفحه و بستن ویرایشگر"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/></svg><span>ذخیره، تأیید و بستن</span></button>
+        </div>
+      </div>
+    </div>
+    <div id="editorProgressWrap" class="editor-progress-wrap hidden"><div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت عملیات ویرایشگر" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="editorProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div></div>
+      <section id="inlineEditor" class="inline-editor is-idle" role="region" aria-label="ویرایش متن انتخاب‌شده">
+        <div class="inline-editor-head">
+          <div class="inline-editor-status"><span class="inline-status-dot" aria-hidden="true"></span><strong id="inlineEditorTitle">ویرایشگر متن آماده است · برای ویرایش، روی هر کادر متن در تصویر کلیک کنید</strong><span id="inlineTargetBadge" class="inline-target-badge hidden" aria-live="polite"></span></div>
+          <div class="editor-zoom-controls" role="group" aria-label="زوم تصویر">
+            <span class="zoom-group-label">نما</span>
+            <button id="editorZoomOut" type="button" aria-label="کوچک‌نمایی" title="کوچک‌نمایی تصویر">−</button>
+            <output id="editorZoomLabel" aria-live="polite">100٪</output>
+            <button id="editorZoomIn" type="button" aria-label="بزرگ‌نمایی" title="بزرگ‌نمایی تصویر">+</button>
+            <button id="editorZoomActual" type="button" title="نمایش با اندازهٔ واقعی ۱۰۰٪">۱۰۰٪</button>
+            <button id="editorZoomFit" type="button" title="تنظیم بر اساس عرض صفحه"><svg class="btn-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><path d="M8 12h8"/></svg><span>عرض صفحه</span></button>
+            <button id="editorImageFullscreen" type="button" aria-label="تمام‌صفحهٔ تصویر" aria-pressed="false" title="نمایش تمام تصویر"><svg class="btn-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg><span class="btn-label">تمام‌صفحه تصویر</span></button>
+          </div>
+          <div class="inline-editor-actions" role="group" aria-label="ابزار کادر در حال ویرایش">
+            <button id="inlinePreview" type="button" aria-label="نمایش دقیق متن روی تصویر" aria-pressed="false" title="پیش‌نمایش تمیز بدون نشانگر کادر"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg><span class="btn-label">پیش‌نمایش دقیق</span></button>
+            <button id="inlineEditorCancel" type="button" class="hidden" aria-label="بستن بدون ذخیره" title="بستن و صرف‌نظر از ویرایشِ ناسازگار"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg><span>بستن بدون ذخیره</span></button>
+            <button id="inlineEditorApply" type="button" class="primary" title="پایان ویرایش کادر فعلی (تغییرها خودکار ذخیره می‌شوند)"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span>پایان ویرایش کادر</span></button>
+          </div>
+        </div>
+        <div class="inline-editor-workbench">
+          <div id="inlineLineTools" class="inline-tool-group inline-line-tools" role="group" aria-label="تنظیم اندازهٔ متن">
+            <label title="اندازهٔ کلمهٔ انتخاب‌شده، خط فعلی یا کادر"><span>اندازه</span><input id="inlineLineSize" type="number" min="8" max="160" placeholder="خودکار" aria-label="اندازهٔ خط انتخاب‌شده روی تصویر"></label>
+            <button id="inlineSizeUp" type="button" class="inline-step-btn" title="بزرگ‌تر کردن اندازهٔ متن" aria-label="افزایش اندازهٔ متن">A+</button>
+            <button id="inlineSizeDown" type="button" class="inline-step-btn" title="کوچک‌تر کردن اندازهٔ متن" aria-label="کاهش اندازهٔ متن">A−</button>
+          </div>
+          <div class="inline-rich-slot">
+            <div id="inlineEditorField" class="inline-editor-field" contenteditable="true" role="textbox" aria-multiline="true" aria-label="متن انتخاب‌شده"></div>
+          </div>
+          <div class="inline-tool-group inline-group-layout" role="group" aria-label="جانمایی عمودی متن در کادر">
+            <div class="inline-valign-group" role="group" aria-label="جانمایی عمودی متن در کادر">
+              <button id="inlineValignTop" type="button" class="inline-valign-btn" data-valign="top" aria-pressed="false" title="جانمایی متن از بالای کادر (شروع از بالا مثل اکسل)"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 1.5h10M2.5 4.2h7M4 6.8h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span>بالا</span></button>
+              <button id="inlineValignMiddle" type="button" class="inline-valign-btn" data-valign="middle" aria-pressed="true" title="جانمایی متن در وسط عمودی کادر"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 2h10M2.5 4.8h7M4 7.2h4M1 10h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg><span>وسط</span></button>
+              <button id="inlineValignBottom" type="button" class="inline-valign-btn" data-valign="bottom" aria-pressed="false" title="جانمایی متن از پایین کادر (چسبیده به پایین)"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 5.2h4M2.5 7.8h7M1 10.5h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><span>پایین</span></button>
+            </div>
+          </div>
+        </div>
+        <hr class="inline-section-divider" aria-label="جداکنندهٔ ابزارهای چیدمان و هم‌اندازه‌سازی کادرها">
+        <div class="inline-box-ops-row">
+          <div id="inlineMergeSplitTools" class="editor-multi-tools inline-merge-split-tools" role="group" aria-label="ادغام و تفکیک کادرهای متن">
+            <span class="box-capsule-title">ادغام و تفکیک</span>
+            <button id="editorMergeText" class="bt" type="button" title="ادغام دو یا چند کادر انتخاب‌شده در یک کادر واحد (با Ctrl+کلیک چند کادر را انتخاب کنید)"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="7" height="7" rx="1.5"/><rect x="14" y="4" width="7" height="7" rx="1.5"/><rect x="5" y="15" width="14" height="5" rx="1.5"/><path d="M7 11v4"/><path d="M17 11v4"/></svg><span>ادغام متن‌ها</span></button>
+            <button id="editorSplitText" class="bt" type="button" title="جداکردن کادر ادغام‌شده یا چندخطی به کادرهای مجزا"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="5" rx="1.5"/><rect x="3" y="15" width="7" height="5" rx="1.5"/><rect x="14" y="15" width="7" height="5" rx="1.5"/><path d="M8 9v6"/><path d="M16 9v6"/></svg><span>جداکردن خط‌ها</span></button>
+          </div>
+          <div class="editor-multi-tools inline-box-layout-tools" role="group" aria-label="انتخاب، هم‌اندازه‌سازی و تراز گروهی کادرها">
+            <div class="box-sub-group bsg-select" role="group" aria-label="انتخاب کادرهای صفحه">
+              <span class="box-capsule-title">انتخاب</span>
+              <button id="editorSelectAll" class="bt" type="button" title="انتخاب همهٔ کادرهای صفحه"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m9 12 2 2 4-4"/></svg><span>همه</span></button>
+              <button id="editorSelectNone" class="bt" type="button" title="لغو انتخاب همهٔ کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" stroke-dasharray="3 2.5"/></svg><span>لغو</span></button>
+            </div>
+            <div class="box-sub-group bsg-size" role="group" aria-label="هم‌اندازه‌سازی کادرها">
+              <span class="box-capsule-title">ابعاد</span>
+              <button id="editorSameSize" class="bt" type="button" title="عرض و ارتفاع همهٔ کادرهای انتخاب‌شده برابر اولین انتخاب؛ مرکز هر کادر تا حد امکان حفظ می‌شود"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="8" height="12" rx="1.5"/><rect x="13" y="6" width="8" height="12" rx="1.5"/><path d="M7 10h0"/><path d="M17 10h0"/></svg><span>هم‌اندازه با اولی</span></button>
+            </div>
+            <div class="box-sub-group bsg-align-h" role="group" aria-label="تراز افقی کادرها">
+              <span class="box-capsule-title">افقی</span>
+              <button id="editorAlignRight" class="bt" type="button" title="تراز لبه‌های راست کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="20" y1="4" x2="20" y2="20"/><rect x="6" y="6" width="11" height="4" rx="1"/><rect x="10" y="14" width="7" height="4" rx="1"/></svg><span>راست</span></button>
+              <button id="editorAlignCenter" class="bt" type="button" title="تراز مراکز افقی کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="3" x2="12" y2="21"/><rect x="5" y="6" width="14" height="4" rx="1"/><rect x="7" y="14" width="10" height="4" rx="1"/></svg><span>وسط</span></button>
+              <button id="editorAlignLeft" class="bt" type="button" title="تراز لبه‌های چپ کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="4" x2="4" y2="20"/><rect x="7" y="6" width="11" height="4" rx="1"/><rect x="7" y="14" width="7" height="4" rx="1"/></svg><span>چپ</span></button>
+            </div>
+            <div class="box-sub-group bsg-align-v" role="group" aria-label="تراز عمودی کادرها">
+              <span class="box-capsule-title">عمودی</span>
+              <button id="editorAlignTop" class="bt" type="button" title="تراز لبه‌های بالای کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="4" x2="20" y2="4"/><rect x="6" y="7" width="4" height="11" rx="1"/><rect x="14" y="7" width="4" height="7" rx="1"/></svg><span>بالا</span></button>
+              <button id="editorAlignMiddle" class="bt" type="button" title="تراز مراکز عمودی کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="12" x2="21" y2="12"/><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="7" width="4" height="10" rx="1"/></svg><span>وسط</span></button>
+              <button id="editorAlignBottom" class="bt" type="button" title="تراز لبه‌های پایین کادرها"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="20" x2="20" y2="20"/><rect x="6" y="6" width="4" height="11" rx="1"/><rect x="14" y="10" width="4" height="7" rx="1"/></svg><span>پایین</span></button>
+            </div>
+            <span id="editorSelectionStatus" class="editor-selection-status" role="status">متنی انتخاب نشده</span>
+          </div>
+        </div>
+        <div class="inline-backing-fields" hidden aria-hidden="true">
+          <select id="overlayMode" aria-label="متن روی تصویر"><option value="translation">ترجمه</option><option value="ocr">متن اصلی OCR</option><option value="none">بدون متن</option></select>
+          <input id="inlineEditorSize" type="number" min="8" max="160" placeholder="خودکار" aria-label="اندازهٔ متن روی تصویر">
+          <input id="inlineEditorColor" type="color" value="#141414" aria-label="رنگ متن روی تصویر">
+          <button id="inlineEditorAutoColor" type="button">رنگ خودکار</button>
+          <select id="inlineVerticalAlign" aria-label="جای عمودی متن در کادر"><option value="top">بالا</option><option value="middle">وسط</option><option value="bottom">پایین</option></select>
+          <select id="inlineEditorAlign" aria-label="تراز متن"><option value="right">راست</option><option value="center">وسط</option><option value="left">چپ</option><option value="justify">جاستیفای</option></select>
+          <select id="inlineEditorDirection" aria-label="جهت متن"><option value="rtl">راست‌به‌چپ</option><option value="ltr">چپ‌به‌راست</option></select>
+        </div>
+      </section>
+    <div class="editor-body"><div class="editor-view"><div class="editor-preview"><div id="editorStage" title="فضای خالی تصویر را بکشید تا جابه‌جا شود"><canvas id="editorCanvas"></canvas><div id="editorBoxes"></div></div></div>
+
+    </div><div class="editor-side"><details class="editor-help-details"><summary><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg><span>راهنمای کوتاه ویرایش</span></summary><div class="editor-help">روی هر کادر در تصویر کلیک کنید و مستقیم تایپ یا بخشی از متن را انتخاب و قالب‌بندی کنید؛ تغییرها خودکار ذخیره می‌شوند. با Ctrl/⌘ + کلیک روی کادرها (یا ⠿) چند کادر را انتخاب کنید تا با کپسول‌های ردیف پایینِ نوار ابزار، آن‌ها را هم‌اندازه یا هم‌تراز کنید (اولین کادر انتخابی مرجع هم‌اندازه‌سازی است). چرخ ماوس صفحه را اسکرول می‌کند و با نگه داشتن Ctrl بزرگ‌نمایی را تغییر می‌دهد. <button id="editorOpenFullHelpBtn" class="bt editor-open-help-btn" type="button"><svg class="btn-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><span>بازکردن راهنمای کامل ویرایشگر (F1)</span></button></div></details><div id="blockList"></div></div></div>
+  </dialog>
+
+  <dialog id="cropDialog" class="dlg crop-dialog">
+    <form method="dialog" class="dialog-head"><h2>برش تصویر</h2><button class="icon" value="cancel">×</button></form>
+    <div class="crop-workspace"><div id="cropStage"><img id="cropImage" alt=""><div id="cropRect"><i data-dir="nw"></i><i data-dir="n"></i><i data-dir="ne"></i><i data-dir="e"></i><i data-dir="se"></i><i data-dir="s"></i><i data-dir="sw"></i><i data-dir="w"></i></div></div></div>
+    <div class="form-grid crop-inputs"><label>X<input id="cropX" type="number" min="0"></label><label>Y<input id="cropY" type="number" min="0"></label><label>عرض<input id="cropW" type="number" min="1"></label><label>ارتفاع<input id="cropH" type="number" min="1"></label><label>نسبت<select id="cropRatio"><option value="0">آزاد</option><option value="0.70710678">A4 عمودی</option><option value="0.66666667">۲:۳</option><option value="0.75">۳:۴</option><option value="1">مربع</option><option value="1.33333333">۴:۳</option><option value="1.77777778">۱۶:۹</option></select></label></div>
+    <div class="dialog-actions"><button id="cropReset" class="bt">حذف برش</button><button id="cropApply" class="bt primary">اعمال برش</button></div>
+  </dialog>
+
+  <dialog id="previewDialog" class="dlg preview-dialog"><form method="dialog"><button class="icon" aria-label="بستن">×</button><button id="previewCopy" type="button" class="bt">کپی تصویر</button></form><img id="previewImage" alt=""></dialog>
+  <dialog id="translationPreviewDialog" class="dlg payload-dialog">
+    <form method="dialog" class="dialog-head"><div class="dialog-title-row"><h2>بررسی متن قبل از ترجمه</h2><span id="translationPreviewExecBadge" class="exec-badge is-online">🌐 سرویس آنلاین (اینترنتی)</span></div><button class="icon" value="cancel" aria-label="بستن">×</button></form>
+    <div id="translationPreviewServiceBar" class="preview-service-bar">
+      <label class="preview-service-label" for="translationPreviewService">
+        <span>سرویس ترجمه برای این نوبت</span>
+        <select id="translationPreviewService"></select>
+      </label>
+      <label class="preview-service-label preview-target-lang-label" for="translationTargetLang">
+        <span>ترجمه به زبان</span>
+        <select id="translationTargetLang">
+          <option value="fa">فارسی (Persian)</option>
+          <option value="en">انگلیسی (English)</option>
+          <option value="ar">عربی (Arabic)</option>
+          <option value="tr">ترکی استانبولی (Turkish)</option>
+          <option value="de">آلمانی (German)</option>
+          <option value="fr">فرانسوی (French)</option>
+          <option value="ru">روسی (Russian)</option>
+          <option value="es">اسپانیایی (Spanish)</option>
+          <option value="ja">ژاپنی (Japanese)</option>
+          <option value="ko">کره‌ای (Korean)</option>
+          <option value="zh-CN">چینی (Chinese)</option>
+        </select>
+      </label>
+      <button id="openAiSettingsFromPreview" class="bt" type="button" title="افزودن کلید جدید یا ویرایش تنظیمات سرویس‌های ترجمه">تنظیمات سرویس‌ها…</button>
+    </div>
+    <p id="translationPreviewSummary" class="payload-summary"></p>
+    <p id="translationPreviewDestination" class="hint" dir="auto"></p>
+    <p class="hint">هنوز هیچ متنی برای ترجمه ارسال نشده است. درخواست اول را بررسی کنید؛ در حالت حافظه، متن درخواست‌های بعدی بر اساس خلاصهٔ پاسخ قبلی ساخته می‌شود.</p>
+    <div id="translationPreviewRequests" class="payload-requests"></div>
+    <div id="translationContextWrap" class="hidden">
+      <div id="translationContextHead" class="field-head-row">
+        <label id="translationContextLabel" for="translationContext">خلاصهٔ زمینه / داستان برای درخواست اول</label>
+        <div id="translationContextClipActions" class="field-clip-actions" role="group" aria-label="ابزار کپی و پیست خلاصهٔ زمینه">
+          <button id="copyTranslationContext" type="button" class="bt mini-clip-btn" title="کپی متن خلاصهٔ زمینه">کپی</button>
+          <button id="pasteTranslationContext" type="button" class="bt mini-clip-btn" title="چسباندن متن از کلیپ‌بورد">پیست</button>
+          <button id="clearTranslationContext" type="button" class="bt mini-clip-btn" title="پاک‌کردن متن خلاصهٔ زمینه">پاک‌کردن</button>
+        </div>
+      </div>
+      <input id="translationContext" type="text" dir="auto" aria-describedby="translationContextHelp translationContextCounter">
+      <p id="translationContextCounter" class="budget-counter" aria-live="polite"></p>
+      <p id="translationContextHelp" class="hint"></p>
+      <label><input id="translationContextResume" type="checkbox"> ادامهٔ نوبت ناتمام قبلی</label>
+    </div>
+    <div id="translationSkillWrap" class="hidden">
+      <div class="field-head-row">
+        <label for="translationSkill">راهنمای ترجمهٔ AI برای این نوبت</label>
+        <div class="field-clip-actions" role="group" aria-label="ابزار کپی و پیست راهنمای ترجمه">
+          <button id="copyTranslationSkill" type="button" class="bt mini-clip-btn" title="کپی متن راهنمای ترجمه">کپی</button>
+          <button id="pasteTranslationSkill" type="button" class="bt mini-clip-btn" title="چسباندن متن از کلیپ‌بورد">پیست</button>
+          <button id="clearTranslationSkill" type="button" class="bt mini-clip-btn" title="پاک‌کردن متن راهنمای ترجمه">پاک‌کردن</button>
+        </div>
+      </div>
+      <textarea id="translationSkill" rows="4" maxlength="100000" dir="auto" aria-describedby="translationSkillHelp translationSkillCounter"></textarea>
+      <p id="translationSkillCounter" class="budget-counter" aria-live="polite"></p>
+      <p id="translationSkillHelp" class="hint">این راهنما همراه تمام درخواست‌های AI همین نوبت ارسال می‌شود. بعد از تغییر، ابتدا پیش‌نمایش به‌روز می‌شود و برای ارسال باید دوباره تأیید کنید. دستور اصلیِ حفظ ترتیب جداگانه نمایش داده می‌شود؛ راهنمای متناقض ممکن است کیفیت پاسخ را خراب کند. اطلاعات محرمانه وارد نکنید؛ راهنمای تأییدشده در مرورگر همین پروژه ذخیره می‌شود.</p>
+      <button id="translationSkillReset" type="button" class="bt">بازگرداندن راهنمای پیش‌فرض</button>
+      <p id="translationSkillStatus" class="hint" role="status"></p>
+    </div>
+    <details id="translationPreviewSystemWrap" class="payload-system"><summary>دستور سیستم همراه درخواست AI</summary><pre id="translationPreviewSystem" dir="auto"></pre></details>
+    <p id="translationPreviewNote" class="hint"></p>
+    <p id="translationPreviewError" class="hint diagnostic-message hidden" role="status"></p>
+    <div class="preview-error-actions">
+      <button id="copyTranslationPreviewError" class="bt hidden" type="button">کپی خطای پیش‌نمایش</button>
+      <button id="openAiLimitFromPreview" class="bt hidden" type="button">تغییر سقف نویسه در تنظیمات AI</button>
+    </div>
+    <div class="bar-wrap"><div class="bar" role="progressbar" aria-label="پیشرفت آماده‌سازی پیش‌نمایش ترجمه" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="previewPrepProgress" class="fill"></div></div><span class="bar-percent" dir="ltr">0%</span></div>
+    <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
+  </dialog>
+
+  <dialog id="helpDialog" class="dlg help-dialog" aria-labelledby="helpDialogTitle">
+    <form method="dialog" class="dialog-head">
+      <div class="help-head-title">
+        <span class="help-head-icon" aria-hidden="true">؟</span>
+        <div>
+          <h2 id="helpDialogTitle">راهنمای کامل Comic OCR Studio <span class="ver" dir="ltr">Help · F1</span></h2>
+          <span id="helpSearchCount" class="muted">۱۳ بخش کامل · آموزش گام‌به‌گام + مثال عملی برای تک‌تک قسمت‌ها</span>
+        </div>
+      </div>
+      <button id="helpDialogClose" class="icon" value="cancel" aria-label="بستن راهنما">×</button>
+    </form>
+    <div class="help-toolbar">
+      <div class="help-search-wrap">
+        <input id="helpSearchInput" type="search" dir="auto" placeholder="جست‌وجو در راهنما... (مثلاً: Word، ستون، GPU، Merge، API Key، Crop، Backup)" aria-label="جست‌وجو در راهنما">
+        <button id="helpSearchClear" class="bt hidden" type="button">پاک‌کردن</button>
+      </div>
+      <div class="help-view-modes" role="group" aria-label="حالت نمایش راهنما">
+        <button id="helpViewChapterBtn" class="bt primary" type="button" aria-pressed="true">بخش‌به‌بخش</button>
+        <button id="helpViewAllBtn" class="bt" type="button" aria-pressed="false">نمایش یکجای همهٔ ۱۳ بخش</button>
+      </div>
+    </div>
+    <div class="help-layout">
+      <nav id="helpNavList" class="help-nav" aria-label="فهرست فصل‌های راهنما"></nav>
+      <div id="helpContentArea" class="help-content" tabindex="0"></div>
+    </div>
+  </dialog>
+
+  <dialog id="appModalDialog" class="dlg app-modal-dialog" data-variant="confirm" role="alertdialog" aria-modal="true" aria-labelledby="appModalTitle" aria-describedby="appModalMessage">
+    <div class="dialog-head app-modal-head">
+      <div class="app-modal-title-wrap">
+        <span id="appModalBadge" class="app-modal-badge" aria-hidden="true">؟</span>
+        <h2 id="appModalTitle">تأیید عملیات</h2>
+      </div>
+      <button id="appModalClose" class="icon" type="button" aria-label="بستن">×</button>
+    </div>
+    <p id="appModalMessage" class="app-modal-message" dir="rtl"></p>
+    <p id="appModalHint" class="hint app-modal-hint hidden" dir="rtl"></p>
+    <label id="appModalInputWrap" class="app-modal-input-wrap hidden" for="appModalInput">
+      <span id="appModalInputLabel">نام پروژه</span>
+      <input id="appModalInput" type="text" maxlength="120" dir="auto" autocomplete="off">
+    </label>
+    <div class="dialog-actions app-modal-actions">
+      <button id="appModalCancel" class="bt" type="button">انصراف</button>
+      <button id="appModalConfirm" class="bt primary" type="button">تأیید</button>
+    </div>
+  </dialog>
+  <div id="toast" role="status" popover="manual"></div>
+  <script src="/typeset.js?v=3.99"></script>
+  <script src="/groups.js?v=3.99"></script>
+  <script src="/rich-sanitize.js?v=3.99"></script>
+  <script src="/rich-editor.js?v=3.99"></script>
+  <script src="/inline-edit-session.js?v=3.99"></script>
+  <script src="/help-guide.js?v=3.99"></script>
+  <script src="/app.js?v=3.99"></script>
+</body>
+</html>

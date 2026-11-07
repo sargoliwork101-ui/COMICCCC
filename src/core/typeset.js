@@ -2,7 +2,18 @@
 (function (root) {
   const FONT = 'Vazirmatn';
 
-  function median(arr) { arr.sort((a, b) => a - b); return arr[Math.floor(arr.length / 2)]; }
+  const _histR = new Uint32Array(256);
+  const _histG = new Uint32Array(256);
+  const _histB = new Uint32Array(256);
+  function histMedian(hist, total) {
+    const target = Math.floor(total / 2);
+    let acc = 0;
+    for (let v = 0; v < 256; v += 1) {
+      acc += hist[v];
+      if (acc > target) return v;
+    }
+    return 255;
+  }
   const lum = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
   // رنگ پس‌زمینهٔ اطراف کادر متن را از نوار باریک بیرون آن می‌خواند
@@ -14,30 +25,51 @@
       [box.x0 - off - t, box.y0, t, box.y1 - box.y0],
       [box.x1 + off, box.y0, t, box.y1 - box.y0]
     ];
-    const R = [], G = [], B = [];
+    _histR.fill(0); _histG.fill(0); _histB.fill(0);
+    let count = 0;
+    const Ls = [];
     strips.forEach(([x, y, w, h]) => {
       x = Math.max(0, Math.round(x)); y = Math.max(0, Math.round(y));
       w = Math.min(W - x, Math.round(w)); h = Math.min(H - y, Math.round(h));
       if (w <= 0 || h <= 0) return;
       const d = ctx.getImageData(x, y, w, h).data;
-      for (let i = 0; i < d.length; i += 4) { R.push(d[i]); G.push(d[i + 1]); B.push(d[i + 2]); }
+      for (let i = 0; i < d.length; i += 4) {
+        const rv = d[i], gv = d[i + 1], bv = d[i + 2];
+        _histR[rv] += 1; _histG[gv] += 1; _histB[bv] += 1;
+        if (count % 3 === 0) Ls.push(lum(rv, gv, bv));
+        count += 1;
+      }
     });
-    if (!R.length) return { r: 255, g: 255, b: 255, uniform: true };
-    const r = median(R), g = median(G), b = median(B);
+    if (!count) return { r: 255, g: 255, b: 255, uniform: true };
+    const r = histMedian(_histR, count), g = histMedian(_histG, count), b = histMedian(_histB, count);
     let s = 0; const L = lum(r, g, b);
-    for (let i = 0; i < R.length; i += 3) { const d = lum(R[i], G[i], B[i]) - L; s += d * d; }
-    return { r, g, b, uniform: Math.sqrt(s / Math.ceil(R.length / 3)) < 28 };
+    for (let i = 0; i < Ls.length; i++) { const d = Ls[i] - L; s += d * d; }
+    return { r, g, b, uniform: Math.sqrt(s / Ls.length) < 28 };
+  }
+
+  function wrapWordList(ctx, words, maxW) {
+    const lines = []; let cur = '', curW = -1, widest = -Infinity;
+    for (const w of words) {
+      if (!cur) { cur = w; curW = -1; continue; }
+      const t = cur + ' ' + w;
+      const tw = ctx.measureText(t).width;
+      if (tw <= maxW) { cur = t; curW = tw; }
+      else {
+        const lw = curW >= 0 ? curW : ctx.measureText(cur).width;
+        if (lw > widest) widest = lw;
+        lines.push(cur); cur = w; curW = -1;
+      }
+    }
+    if (cur) {
+      const lw = curW >= 0 ? curW : ctx.measureText(cur).width;
+      if (lw > widest) widest = lw;
+      lines.push(cur);
+    }
+    return { lines, widest };
   }
 
   function wrapWords(ctx, text, maxW) {
-    const words = text.split(/\s+/).filter(Boolean);
-    const lines = []; let cur = '';
-    for (const w of words) {
-      const t = cur ? cur + ' ' + w : w;
-      if (!cur || ctx.measureText(t).width <= maxW) cur = t; else { lines.push(cur); cur = w; }
-    }
-    if (cur) lines.push(cur);
-    return lines;
+    return wrapWordList(ctx, text.split(/\s+/).filter(Boolean), maxW).lines;
   }
 
   // ---------- قالب‌بندی درون‌متنی: استایل یک کلمه/عبارت داخل متن یک بلوک ----------
@@ -166,41 +198,49 @@
   // عرض هر کلمه با فونت خودش + عرض فاصله با فونت پایهٔ بلوک
   function measureLine(ctx, line, st, size) {
     const baseFont = `${baseFontPrefix(st)}${size}px ${FONT}`;
+    let curFont = baseFont;
     ctx.font = baseFont;
     const spaceW = ctx.measureText(' ').width;
     const widths = line.map((w) => {
-      ctx.font = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${FONT}`;
+      const nextFont = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${FONT}`;
+      if (nextFont !== curFont) { curFont = nextFont; ctx.font = nextFont; }
       return ctx.measureText(w.t).width;
     });
-    ctx.font = baseFont;
+    if (curFont !== baseFont) ctx.font = baseFont;
     const width = widths.reduce((sum, v, i) => sum + v + (i && line[i].spaceBefore !== false ? spaceW : 0), 0);
     return { widths, spaceW, width };
   }
 
-  // شکستن خط با اندازهٔ مشخص؛ هر کلمه با فونت خودش اندازه می‌شود
-  function wrapInlineAt(ctx, words, maxW, st, size) {
+  function wrapInlineMeasured(ctx, words, maxW, st, size) {
     const baseFont = `${baseFontPrefix(st)}${size}px ${FONT}`;
+    let curFont = baseFont;
     ctx.font = baseFont;
     const spaceW = ctx.measureText(' ').width;
     const widthOf = (w) => {
-      ctx.font = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${FONT}`;
+      const nextFont = `${inlineFontPrefix(st, w)}${effWordSize(w, size, st)}px ${FONT}`;
+      if (nextFont !== curFont) { curFont = nextFont; ctx.font = nextFont; }
       return ctx.measureText(w.t).width;
     };
     const lines = [];
-    let cur = [], curW = 0;
+    let cur = [], curW = 0, widest = -Infinity;
     for (const w of words) {
-      if (w.lineBreakBefore && cur.length) { lines.push(cur); cur = []; curW = 0; }
+      if (w.lineBreakBefore && cur.length) { if (curW > widest) widest = curW; lines.push(cur); cur = []; curW = 0; }
       const ww = widthOf(w);
       if (!cur.length) { cur = [w]; curW = ww; }
       else {
         const gap = w.spaceBefore === false ? 0 : spaceW;
-        if (curW + gap + ww <= maxW) { cur.push(w); curW += gap + ww; }
-        else { lines.push(cur); cur = [w]; curW = ww; }
+        if (curW + gap + ww <= maxW) { cur.push(w); curW = curW + ww + gap; }
+        else { if (curW > widest) widest = curW; lines.push(cur); cur = [w]; curW = ww; }
       }
     }
-    if (cur.length) lines.push(cur);
-    ctx.font = baseFont;
-    return lines;
+    if (cur.length) { if (curW > widest) widest = curW; lines.push(cur); }
+    if (curFont !== baseFont) ctx.font = baseFont;
+    return { lines, widest };
+  }
+
+  // شکستن خط با اندازهٔ مشخص؛ هر کلمه با فونت خودش اندازه می‌شود
+  function wrapInlineAt(ctx, words, maxW, st, size) {
+    return wrapInlineMeasured(ctx, words, maxW, st, size).lines;
   }
 
   // ارتفاع خط بر اساس بلندترین کلمهٔ همان خط (اندازه‌های درون‌متنی متفاوت)
@@ -212,8 +252,7 @@
   function fitInline(ctx, text, boxW, boxH, maxSize, minSize, st) {
     const words = Array.isArray(text) ? text : inlineWords(text);
     for (let s = maxSize; s >= minSize; s--) {
-      const lines = wrapInlineAt(ctx, words, boxW, st, s);
-      const widest = Math.max(...lines.map((ln) => measureLine(ctx, ln, st, s).width));
+      const { lines, widest } = wrapInlineMeasured(ctx, words, boxW, st, s);
       const lhList = lineHeightsFor(lines, st, s);
       const totalH = lhList.reduce((sum, v) => sum + v, 0);
       if (totalH <= boxH && widest <= boxW * 1.04) {
@@ -225,15 +264,15 @@
   }
 
   function fit(ctx, text, boxW, boxH, maxSize, minSize, fontPrefix = '700 ') {
+    const words = text.split(/\s+/).filter(Boolean);
     for (let s = maxSize; s >= minSize; s--) {
       ctx.font = `${fontPrefix}${s}px ${FONT}`;
-      const lines = wrapWords(ctx, text, boxW);
-      const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
+      const { lines, widest } = wrapWordList(ctx, words, boxW);
       const lh = s * 1.55;
       if (lines.length * lh <= boxH && widest <= boxW * 1.04) return { size: s, lines, lh };
     }
     ctx.font = `${fontPrefix}${minSize}px ${FONT}`;
-    return { size: minSize, lines: wrapWords(ctx, text, boxW), lh: minSize * 1.55 };
+    return { size: minSize, lines: wrapWordList(ctx, words, boxW).lines, lh: minSize * 1.55 };
   }
 
   // قالب‌بندی هر بلوک با پیش‌فرض‌های ایمن برای بلوک‌های قدیمی (ذخیره‌شده قبل از نسخهٔ ۲.۲۸)
@@ -251,7 +290,7 @@
 
   // bmp: تصویر اصلی؛ blocks: بلوک‌ها؛ برمی‌گرداند canvas نهایی
   function render(bmp, blocks, opts) {
-    const o = Object.assign({ createCanvas: null }, opts);
+    const o = Object.assign({ createCanvas: null, eraseOriginal: true }, opts);
     const mk = o.createCanvas || ((w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; });
     const W = bmp.width, H = bmp.height;
     const cv = mk(W, H);
@@ -275,9 +314,10 @@
         y1: Math.min(H, Number.isFinite(b.ty1) ? b.ty1 : b.y1)
       };
       const bw = layoutBox.x1 - layoutBox.x0, bh = layoutBox.y1 - layoutBox.y0;
+      if (bw <= 0 || bh <= 0) return;
 
       let sourceFill = null, targetFill = null, txt = '#0b0b0b', stroke = null;
-      if (b.bg === 'none') {
+      if (b.bg === 'none' || (o.eraseOriginal === false && (!b.bg || b.bg === 'auto'))) {
         txt = '#ffffff'; stroke = '#000000';
       } else if (b.bg === 'white') { sourceFill = targetFill = '#ffffff'; }
       else if (b.bg === 'black') { sourceFill = targetFill = '#000000'; txt = '#fafafa'; }
@@ -321,7 +361,7 @@
       if ('direction' in ctx) ctx.direction = st.dir;
       ctx.textBaseline = 'middle';
       const totalH = inline ? f.lineLh.reduce((sum, v) => sum + v, 0) : f.lines.length * f.lh;
-      let y = (layoutBox.y0 + layoutBox.y1) / 2 - totalH / 2 + (inline ? f.lineLh[0] : f.lh) / 2;
+      let y = (layoutBox.y0 + layoutBox.y1) / 2 - totalH / 2 + (inline ? (f.lineLh[0] || f.lh) : f.lh) / 2;
       // لنگر هر خط بر اساس چیدمان انتخابی، با حاشیهٔ کوچک از لبهٔ کادر
       const anchorX = st.align === 'left' ? layoutBox.x0 + bw * 0.02
         : st.align === 'center' ? (layoutBox.x0 + layoutBox.x1) / 2
