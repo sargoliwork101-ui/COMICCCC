@@ -2129,7 +2129,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas410: verText.includes('۴.۱۰'),
+            verHas411: verText.includes('۴.۱۱'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2148,8 +2148,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.10 displays version 4.10 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas410 === true
+      'v4.00/v4.11 displays version 4.11 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas411 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3331,6 +3331,137 @@ function check(name, condition) {
         && v410Check.thumbUsesCroppedPreview === true
         && v410Check.ch3MentionsCropFilterAndLogoWm === true
         && v410Check.ch13MentionsSetupOnlyAndBundled === true,
+    );
+
+    const v411ExportStreamCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProject = JSON.parse(JSON.stringify(state.project));
+        let prepareHeaderSeen = null;
+        let waitedForPendingRender = false;
+        let renderFinishedBeforeExport = false;
+        let deleteTokenUrl = null;
+        let createObjCalls = 0;
+        const origCreateObj = window.URL.createObjectURL;
+        window.URL.createObjectURL = (...a) => { createObjCalls += 1; return origCreateObj(...a); };
+        try {
+          let resolvePending;
+          const pendingPromise = new Promise((r) => { resolvePending = r; });
+          const pKey = state.project.id + ':' + state.project.images[0].id;
+          imageRenderTasks.set(pKey, pendingPromise);
+          setTimeout(() => {
+            waitedForPendingRender = true;
+            imageRenderTasks.delete(pKey);
+            resolvePending();
+          }, 15);
+
+          const makeJson = (obj) => ({
+            ok: true,
+            status: 200,
+            headers: { get: () => 'application/json' },
+            text: async () => JSON.stringify(obj),
+            json: async () => obj,
+          });
+          const handleSubRoutes = (u, opts) => {
+            if (u.endsWith('/state') && opts.method === 'PUT') {
+              return makeJson({ updatedAt: '2026-11-07T12:00:00Z' });
+            }
+            if ((u.endsWith('/rendered') || u.endsWith('/revert')) && opts.method === 'POST') {
+              return makeJson({ ok: true, updatedAt: '2026-11-07T12:00:01Z' });
+            }
+            if (u.includes('/images/') && u.includes('/content')) {
+              return { ok: true, status: 200, headers: { get: () => 'image/png' }, blob: async () => new window.Blob() };
+            }
+            return null;
+          };
+
+          window.fetch = async (url, opts = {}) => {
+            const u = String(url);
+            if (u.endsWith('/export') && opts.method === 'POST') {
+              renderFinishedBeforeExport = waitedForPendingRender === true;
+              prepareHeaderSeen = opts.headers?.['X-Export-Prepare'] || opts.headers?.['x-export-prepare'] || null;
+              return {
+                ok: true,
+                status: 200,
+                headers: { get: (h) => String(h).toLowerCase() === 'content-type' ? 'application/json' : '' },
+                json: async () => ({ token: 'a'.repeat(32), filename: 'پروژهٔ کمیک.pdf', size: 2 * 1024 * 1024 }),
+              };
+            }
+            if (u.includes('/export/' + 'a'.repeat(32)) && opts.method === 'DELETE') {
+              deleteTokenUrl = u;
+              return { ok: true, status: 204, text: async () => '' };
+            }
+            const sub = handleSubRoutes(u, opts);
+            if (sub) return sub;
+            return origFetch(url, opts);
+          };
+
+          state.project.images[0].selected = true;
+          await exportResult('pdf');
+          const linkHrefAfterExport = $('downloadLink').getAttribute('href');
+          const linkDownloadAfterExport = $('downloadLink').getAttribute('download');
+          const statusAfterExport = $('jobStatus').textContent;
+
+          // Switching project clears #downloadLink and discards prepared token on server
+          adoptProject({ ...prevProject, id: 'other-proj-v411', name: 'Other' });
+          const linkHiddenAfterSwitch = $('downloadLink').classList.contains('hidden');
+
+          // Zero-byte prepared response surfaces exact Persian diagnostic
+          adoptProject(prevProject);
+          state.project.images[0].selected = true;
+          window.fetch = async (url, opts = {}) => {
+            const u = String(url);
+            if (u.endsWith('/export') && opts.method === 'POST') {
+              return {
+                ok: true,
+                status: 200,
+                headers: { get: (h) => String(h).toLowerCase() === 'content-type' ? 'application/json' : '' },
+                json: async () => ({ token: 'b'.repeat(32), filename: 'empty.pdf', size: 0 }),
+              };
+            }
+            const sub = handleSubRoutes(u, opts);
+            if (sub) return sub;
+            return origFetch(url, opts);
+          };
+          let zeroErr = '';
+          try { await exportResult('pdf'); } catch (e) { zeroErr = String(e?.message || e); }
+
+          openHelpDialog('exports-docx-pdf');
+          const ch11Text = $('helpContentArea')?.textContent || '';
+          closeDialog('helpDialog');
+
+          return {
+            prepareHeaderSeen,
+            renderFinishedBeforeExport,
+            createObjCalls,
+            usesDirectStreamUrl: linkHrefAfterExport === '/api/projects/' + prevProject.id + '/export/' + 'a'.repeat(32),
+            linkDownloadAfterExport,
+            statusHasMb: statusAfterExport.includes('مگابایت'),
+            linkHiddenAfterSwitch,
+            deletedPreparedToken: Boolean(deleteTokenUrl && deleteTokenUrl.endsWith('/export/' + 'a'.repeat(32))),
+            zeroErrHasEmptyMsg: zeroErr.includes('خالی'),
+            ch11MentionsStream: ch11Text.includes('مستقیماً روی دیسک استریم'),
+          };
+        } finally {
+          window.URL.createObjectURL = origCreateObj;
+          window.fetch = origFetch;
+          adoptProject(prevProject);
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+        }
+      })()
+    `, context);
+    check(
+      'v4.11 streams prepared exports directly without Blob RAM buffering, awaits pending renders, clears stale export links on project switch, and syncs Help Chapter 11',
+      v411ExportStreamCheck.prepareHeaderSeen === '1'
+        && v411ExportStreamCheck.renderFinishedBeforeExport === true
+        && v411ExportStreamCheck.createObjCalls === 0
+        && v411ExportStreamCheck.usesDirectStreamUrl === true
+        && v411ExportStreamCheck.linkDownloadAfterExport === 'پروژهٔ کمیک.pdf'
+        && v411ExportStreamCheck.statusHasMb === true
+        && v411ExportStreamCheck.linkHiddenAfterSwitch === true
+        && v411ExportStreamCheck.deletedPreparedToken === true
+        && v411ExportStreamCheck.zeroErrHasEmptyMsg === true
+        && v411ExportStreamCheck.ch11MentionsStream === true,
     );
   }
 

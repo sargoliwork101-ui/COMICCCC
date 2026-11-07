@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.10"
+    assert health.json()["version"] == "4.11"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۱۰ · Python</span>' in index_html
+    assert '<span class="ver">۴.۱۱ · Python</span>' in index_html
     assert "مدیریت مدل‌های OCR" in index_html
     assert "مدیریت ترجمه‌ها" in index_html
     assert 'id="deleteModelsMenuBtn"' not in index_html
@@ -3291,7 +3291,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.10"
+    assert APP_VERSION == "4.11"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -4459,6 +4459,136 @@ def test_v410_audit_watermark_parity_bundled_models_crop_txt_surya_cache_and_pre
     assert single_exec.status_code == 400
     assert single_exec.json()["detail"] == single_json["previewError"]
     assert "متنی برای ترجمه وجود ندارد" not in single_exec.json()["detail"]
+
+
+def test_v411_export_prepare_stream_non_empty_guard_pdf_fallback_moved_box_erase_and_pure_asgi(client, tmp_path, monkeypatch):
+    """v4.11 regression test for empty-export fix, prepared direct-stream downloads, PDF C-save fallback, moved-box erase, and pure ASGI middleware."""
+    import re
+    from pathlib import Path
+    from starlette.middleware.base import BaseHTTPMiddleware
+    import comic_studio.exporter as exp_mod
+    from comic_studio.paths import project_root
+
+    # 1. Pure ASGI middleware: zero BaseHTTPMiddleware wrappers that buffer/truncate large FileResponse streams
+    assert all(
+        not (isinstance(m.cls, type) and issubclass(m.cls, BaseHTTPMiddleware))
+        for m in client.app.user_middleware
+    ), "app must not use BaseHTTPMiddleware around streaming FileResponse routes"
+
+    # Create project with Persian default-like name + dark text in top-left box moved to bottom-right with custom hex bg
+    proj = client.post("/api/projects", json={"name": "پروژهٔ کمیک ۴.۱۱"}).json()
+    pid = proj["id"]
+
+    canvas_img = Image.new("RGB", (240, 240), (255, 255, 255))
+    # Draw black ink at original OCR box (20..100, 20..60) so we can verify moved-box source erasing in Visual DOCX
+    for x in range(30, 90):
+        for y in range(30, 50):
+            canvas_img.putpixel((x, y), (0, 0, 0))
+    buf = io.BytesIO()
+    canvas_img.save(buf, "PNG")
+    proj = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("page1.png", buf.getvalue(), "image/png"))],
+    ).json()
+    iid = proj["images"][0]["id"]
+    proj["images"][0]["blocks"] = [
+        {
+            "id": 1,
+            "text": "ORIGINAL INK",
+            "tr": "متن جابه‌جاشده",
+            "enabled": True,
+            "x0": 20,
+            "y0": 20,
+            "x1": 100,
+            "y1": 60,
+            "tx0": 120,
+            "ty0": 140,
+            "tx1": 220,
+            "ty1": 210,
+            "bg": "#ff2244",
+        }
+    ]
+    assert client.put(f"/api/projects/{pid}/state", json={"state": proj}).status_code == 200
+
+    # 2. Prepared export token flow (X-Export-Prepare: 1) works across all 5 formats & supports repeat downloads
+    for kind, magic in [
+        ("pdf", b"%PDF-"),
+        ("images", b"PK\x03\x04"),
+        ("txt", "\ufeff".encode("utf-8")),
+        ("docx", b"PK\x03\x04"),
+        ("pptx", b"PK\x03\x04"),
+    ]:
+        prep = client.post(
+            f"/api/projects/{pid}/export",
+            headers={"X-Export-Prepare": "1"},
+            json={"kind": kind, "image_ids": [iid], "name": "پروژهٔ کمیک"},
+        )
+        assert prep.status_code == 200, (kind, prep.text)
+        prep_json = prep.json()
+        assert re.fullmatch(r"[0-9a-f]{32}", prep_json["token"])
+        assert prep_json["size"] > 0
+        dl1 = client.get(f"/api/projects/{pid}/export/{prep_json['token']}")
+        dl2 = client.get(f"/api/projects/{pid}/export/{prep_json['token']}")
+        assert dl1.status_code == 200 and dl2.status_code == 200
+        assert len(dl1.content) == prep_json["size"] and dl1.content == dl2.content
+        assert dl1.content.startswith(magic)
+
+        if kind == "docx":
+            with zipfile.ZipFile(io.BytesIO(dl1.content)) as zf:
+                bg_png = zf.read("word/media/page_001.png")
+            with Image.open(io.BytesIO(bg_png)) as bg_im:
+                # Original OCR box (40, 40) was erased back to white; moved target box (160, 170) filled with #ff2244
+                assert bg_im.getpixel((40, 40))[:3] == (255, 255, 255)
+                r_px, g_px, b_px = bg_im.getpixel((160, 170))[:3]
+                assert r_px > 230 and g_px < 60 and b_px < 90
+
+        # Discard token via DELETE -> 404 on token URL, while exports/ file on disk remains intact for project backups
+        assert client.delete(f"/api/projects/{pid}/export/{prep_json['token']}").status_code == 204
+        assert client.get(f"/api/projects/{pid}/export/{prep_json['token']}").status_code == 404
+        saved_export = project_root(pid) / "exports" / prep_json["filename"]
+        assert saved_export.is_file() and saved_export.stat().st_size == prep_json["size"]
+
+    # 3. _atomic_export_path refuses 0-byte temp outputs and never clobbers an existing good export
+    existing_out = tmp_path / "good-export.pdf"
+    existing_out.write_bytes(b"%PDF-1.7-valid")
+    with pytest.raises(ValueError, match="خالی"):
+        with exp_mod._atomic_export_path(existing_out) as _tmp_zero:
+            pass  # leaves 0-byte mkstemp placeholder untouched
+    assert existing_out.read_bytes() == b"%PDF-1.7-valid"
+
+    # 4. Server-side 0-byte export guard returns HTTP 500 with Persian message instead of 200 OK empty body
+    empty_file = tmp_path / "empty-broken.txt"
+    empty_file.write_bytes(b"")
+    orig_build_txt = exp_mod.build_txt
+    import comic_studio.main as main_mod
+    monkeypatch.setattr(main_mod, "build_txt", lambda *_a, **_kw: empty_file)
+    zero_res = client.post(f"/api/projects/{pid}/export", json={"kind": "txt", "image_ids": [iid]})
+    assert zero_res.status_code == 500
+    assert "خالی" in zero_res.json()["detail"]
+    monkeypatch.setattr(main_mod, "build_txt", orig_build_txt)
+
+    # 5. build_pdf falls back to document.tobytes() when PyMuPDF C path save fails on special Windows/UNC paths
+    import pymupdf as fitz
+    orig_doc_save = fitz.Document.save
+
+    def broken_c_save(self, *args, **kwargs):
+        if args and isinstance(args[0], (str, Path)):
+            raise RuntimeError("Simulated Win32 C path save failure")
+        return orig_doc_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Document, "save", broken_c_save)
+    fallback_pdf = client.post(f"/api/projects/{pid}/export", json={"kind": "pdf", "image_ids": [iid], "name": "fallback-test"})
+    monkeypatch.setattr(fitz.Document, "save", orig_doc_save)
+    assert fallback_pdf.status_code == 200
+    assert fallback_pdf.content.startswith(b"%PDF-") and len(fallback_pdf.content) > 500
+
+    # 6. image_payload ignores 0-byte or reverted stale -edited.png files
+    stale_edited = project_root(pid) / "images" / f"{iid}-edited.png"
+    stale_edited.write_bytes(b"")
+    data_bytes, ext_str, w_out, h_out = exp_mod.image_payload(client.app.state if hasattr(client.app.state, "get") else exp_mod.ProjectStore(), pid, proj["images"][0])
+    assert len(data_bytes) > 100 and ext_str == "png" and (w_out, h_out) == (240, 240)
+    stale_edited.unlink(missing_ok=True)
+
 
 
 

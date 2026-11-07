@@ -151,6 +151,8 @@ def create_app() -> FastAPI:
     active_jobs_count = 0
     prepared_backups_lock = threading.Lock()
     prepared_backups: dict[str, dict[str, Any]] = {}
+    prepared_exports_lock = threading.Lock()
+    prepared_exports: dict[str, dict[str, Any]] = {}
 
     def _clear_prepared_backups(target_project_id: str | None = None, token: str | None = None) -> None:
         with prepared_backups_lock:
@@ -163,6 +165,19 @@ def create_app() -> FastAPI:
         for p in paths:
             with contextlib.suppress(OSError):
                 Path(p).unlink(missing_ok=True)
+
+    def _clear_prepared_exports(target_project_id: str | None = None, token: str | None = None) -> None:
+        now = time.monotonic()
+        with prepared_exports_lock:
+            keys = [
+                k for k, entry in prepared_exports.items()
+                if (token is not None and k == token and (target_project_id is None or entry.get("project_id") == target_project_id))
+                or (token is None and target_project_id is not None and entry.get("project_id") == target_project_id)
+                or (token is None and target_project_id is None)
+                or (now - float(entry.get("created", 0.0)) > 7200.0)
+            ]
+            for k in keys:
+                prepared_exports.pop(k, None)
     # Recovery state is short-lived, process-local and never contains the raw response.
     recoveries: dict[str, dict[str, Any]] = {}
     recovery_locks: dict[str, asyncio.Lock] = {}
@@ -190,61 +205,103 @@ def create_app() -> FastAPI:
     app.state.sessions = sessions
     activity.add("برنامه آماده است")
 
-    @app.middleware("http")
-    async def protect_local_data(request: Request, call_next: Any) -> Response:
-        # Loopback is the default trusted use case. LAN clients are denied by
-        # default. If configured, Basic authentication protects *all* requests,
-        # including those arriving through a loopback reverse proxy.
-        password = os.environ.get("COMIC_STUDIO_ACCESS_PASSWORD", "")
-        if password:
-            if len(password) < 20:
-                return JSONResponse({"detail": "COMIC_STUDIO_ACCESS_PASSWORD must contain at least 20 characters."}, status_code=503)
-            header = request.headers.get("authorization", "")
-            valid = False
-            try:
-                scheme, encoded = header.split(" ", 1)
-                if scheme.lower() == "basic" and len(encoded) <= 8192:
-                    decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
-                    username, supplied = decoded.split(":", 1)
-                    valid = hmac.compare_digest(username.encode("utf-8"), b"comic") and hmac.compare_digest(supplied.encode("utf-8"), password.encode("utf-8"))
-            except (ValueError, UnicodeError, binascii.Error):
-                pass
-            if not valid:
-                return JSONResponse({"detail": "Authentication required."}, status_code=401,
-                                    headers={"WWW-Authenticate": 'Basic realm="Comic OCR Studio", charset="UTF-8"', "Cache-Control": "no-store"})
-        else:
-            local = _is_loopback_peer(request.client.host if request.client else "")
-            if not local:
-                return JSONResponse({"detail": "Remote access is disabled. Configure COMIC_STUDIO_ACCESS_PASSWORD and HTTPS or a trusted VPN."}, status_code=403,
-                                    headers={"Cache-Control": "no-store"})
-            # Reject arbitrary DNS names on an unauthenticated loopback server;
-            # otherwise a malicious site can rebind its hostname to localhost.
-            local_host = _is_loopback_host_header(request.headers.get("host", ""))
-            if not local_host:
-                return JSONResponse({"detail": "Unauthenticated access requires a loopback hostname."}, status_code=403,
-                                    headers={"Cache-Control": "no-store"})
-        # Browsers normally send Origin on mutations. Reject a foreign origin;
-        # clients such as local command-line tools may legitimately omit it.
-        origin = request.headers.get("origin")
-        if request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
-            try:
-                parsed = urlsplit(origin)
-                same = (parsed.scheme in {"http", "https"} and parsed.scheme == request.url.scheme
-                        and parsed.netloc.lower() == request.headers.get("host", "").lower()
-                        and not parsed.path and not parsed.query and not parsed.fragment
-                        and parsed.username is None and parsed.password is None)
-            except ValueError:
-                same = False
-            if not same:
-                return JSONResponse({"detail": "Cross-origin requests are not allowed."}, status_code=403)
-        return await call_next(request)
+    class _SecurityAndNoStoreMiddleware:
+        """Pure ASGI security + UI cache-control middleware without BaseHTTPMiddleware stream wrapping."""
 
-    @app.middleware("http")
-    async def prevent_stale_interface(request: Request, call_next: Any) -> Response:
-        response = await call_next(request)
-        if request.url.path == "/" or request.url.path.endswith((".html", ".js", ".css")):
-            response.headers["Cache-Control"] = "no-store"
-        return response
+        def __init__(self, inner_app: Any) -> None:
+            self.app = inner_app
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            if scope.get("type") != "http":
+                await self.app(scope, receive, send)
+                return
+            request = Request(scope)
+            # Loopback is the default trusted use case. LAN clients are denied by
+            # default. If configured, Basic authentication protects *all* requests,
+            # including those arriving through a loopback reverse proxy.
+            password = os.environ.get("COMIC_STUDIO_ACCESS_PASSWORD", "")
+            if password:
+                if len(password) < 20:
+                    resp = JSONResponse({"detail": "COMIC_STUDIO_ACCESS_PASSWORD must contain at least 20 characters."}, status_code=503)
+                    await resp(scope, receive, send)
+                    return
+                header = request.headers.get("authorization", "")
+                valid = False
+                try:
+                    scheme, encoded = header.split(" ", 1)
+                    if scheme.lower() == "basic" and len(encoded) <= 8192:
+                        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+                        username, supplied = decoded.split(":", 1)
+                        valid = hmac.compare_digest(username.encode("utf-8"), b"comic") and hmac.compare_digest(supplied.encode("utf-8"), password.encode("utf-8"))
+                except (ValueError, UnicodeError, binascii.Error):
+                    pass
+                if not valid:
+                    resp = JSONResponse(
+                        {"detail": "Authentication required."},
+                        status_code=401,
+                        headers={"WWW-Authenticate": 'Basic realm="Comic OCR Studio", charset="UTF-8"', "Cache-Control": "no-store"},
+                    )
+                    await resp(scope, receive, send)
+                    return
+            else:
+                local = _is_loopback_peer(request.client.host if request.client else "")
+                if not local:
+                    resp = JSONResponse(
+                        {"detail": "Remote access is disabled. Configure COMIC_STUDIO_ACCESS_PASSWORD and HTTPS or a trusted VPN."},
+                        status_code=403,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await resp(scope, receive, send)
+                    return
+                # Reject arbitrary DNS names on an unauthenticated loopback server;
+                # otherwise a malicious site can rebind its hostname to localhost.
+                local_host = _is_loopback_host_header(request.headers.get("host", ""))
+                if not local_host:
+                    resp = JSONResponse(
+                        {"detail": "Unauthenticated access requires a loopback hostname."},
+                        status_code=403,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await resp(scope, receive, send)
+                    return
+            # Browsers normally send Origin on mutations. Reject a foreign origin;
+            # clients such as local command-line tools may legitimately omit it.
+            origin = request.headers.get("origin")
+            if request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
+                try:
+                    parsed = urlsplit(origin)
+                    same = (
+                        parsed.scheme in {"http", "https"}
+                        and parsed.scheme == request.url.scheme
+                        and parsed.netloc.lower() == request.headers.get("host", "").lower()
+                        and not parsed.path
+                        and not parsed.query
+                        and not parsed.fragment
+                        and parsed.username is None
+                        and parsed.password is None
+                    )
+                except ValueError:
+                    same = False
+                if not same:
+                    resp = JSONResponse({"detail": "Cross-origin requests are not allowed."}, status_code=403)
+                    await resp(scope, receive, send)
+                    return
+
+            req_path = str(scope.get("path") or "")
+            if req_path == "/" or req_path.endswith((".html", ".js", ".css")):
+                async def send_no_store(message: Any) -> None:
+                    if message.get("type") == "http.response.start":
+                        headers = [h for h in message.get("headers", []) if h[0].lower() != b"cache-control"]
+                        headers.append((b"cache-control", b"no-store"))
+                        message = {**message, "headers": headers}
+                    await send(message)
+
+                await self.app(scope, receive, send_no_store)
+                return
+
+            await self.app(scope, receive, send)
+
+    app.add_middleware(_SecurityAndNoStoreMiddleware)
 
     async def run_reported(
         function: Any,
@@ -474,6 +531,7 @@ def create_app() -> FastAPI:
         except KeyError as exc:
             raise HTTPException(404, "پروژهٔ موردنظر پیدا نشد.") from exc
         _clear_prepared_backups(target_project_id=project_id)
+        _clear_prepared_exports(target_project_id=project_id)
         if project_id in context_locks and not context_locks[project_id].locked():
             context_locks.pop(project_id, None)
         return Response(status_code=204)
@@ -1948,6 +2006,7 @@ def create_app() -> FastAPI:
                 invalidate_engine_runtime_caches()
                 reset_disk_free_cache()
                 _clear_prepared_backups()
+                _clear_prepared_exports()
                 cleanup_backup_temp(max_age_seconds=0.0)
                 recoveries.clear()
                 trim_process_memory()
@@ -1983,7 +2042,7 @@ def create_app() -> FastAPI:
             }
 
     @app.post("/api/projects/{project_id}/export")
-    async def export(project_id: str, values: ExportRequest) -> FileResponse:
+    async def export(project_id: str, values: ExportRequest, request_obj: Request, prepare: bool = False) -> Response:
         state = project(project_id)
         if not values.image_ids:
             raise HTTPException(400, "حداقل یک تصویر را برای خروجی انتخاب کنید.")
@@ -2009,6 +2068,14 @@ def create_app() -> FastAPI:
         finally:
             if values.kind in {"pdf", "images", "docx", "pptx"}:
                 await run_in_threadpool(trim_process_memory)
+        try:
+            size = path.stat().st_size if path.is_file() else 0
+        except OSError:
+            size = 0
+        if size <= 0:
+            msg = "فایل خروجی روی دیسک خالی یا ناقص ساخته شد؛ فضای خالی درایو و گزارش کارها را بررسی کنید."
+            activity.add(f"ساخت خروجی ناموفق بود: {msg}", "error")
+            raise HTTPException(500, msg)
         activity.add(f"خروجی {values.kind.upper()} آماده شد", "success", 1.0)
         media_type = {
             "pdf": "application/pdf",
@@ -2017,7 +2084,65 @@ def create_app() -> FastAPI:
             "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         }[values.kind]
-        return FileResponse(path, media_type=media_type, filename=path.name)
+        want_prepare = prepare or request_obj.headers.get("x-export-prepare") == "1"
+        if want_prepare:
+            now = time.monotonic()
+            token = secrets.token_hex(16)
+            with prepared_exports_lock:
+                stale = [
+                    k for k, entry in prepared_exports.items()
+                    if now - float(entry.get("created", 0.0)) > 7200.0
+                ]
+                for k in stale:
+                    prepared_exports.pop(k, None)
+                while len(prepared_exports) >= 32:
+                    oldest_key = next(iter(prepared_exports))
+                    prepared_exports.pop(oldest_key, None)
+                prepared_exports[token] = {
+                    "project_id": project_id,
+                    "path": path,
+                    "filename": path.name,
+                    "media_type": media_type,
+                    "created": now,
+                }
+            return JSONResponse(
+                {"token": token, "filename": path.name, "size": size},
+                headers={"Cache-Control": "no-store"},
+            )
+        return FileResponse(path, media_type=media_type, filename=path.name, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/projects/{project_id}/export/{token}")
+    def download_prepared_export(project_id: str, token: str) -> FileResponse:
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise HTTPException(404, "فایل خروجی آماده پیدا نشد؛ دوباره خروجی بگیرید.")
+        with prepared_exports_lock:
+            entry = prepared_exports.get(token)
+            if not entry or entry.get("project_id") != project_id:
+                entry = None
+            elif time.monotonic() - float(entry.get("created", 0.0)) > 7200.0:
+                prepared_exports.pop(token, None)
+                entry = None
+        if not entry:
+            raise HTTPException(404, "نشانی دانلود خروجی منقضی شده است؛ دوباره خروجی بگیرید.")
+        export_path = Path(entry["path"])
+        try:
+            valid_file = export_path.is_file() and export_path.stat().st_size > 0
+        except OSError:
+            valid_file = False
+        if not valid_file:
+            raise HTTPException(404, "فایل خروجی روی دیسک پیدا نشد؛ دوباره خروجی بگیرید.")
+        return FileResponse(
+            export_path,
+            media_type=entry["media_type"],
+            filename=entry["filename"],
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.delete("/api/projects/{project_id}/export/{token}", status_code=204)
+    def discard_prepared_export(project_id: str, token: str) -> Response:
+        if re.fullmatch(r"[0-9a-f]{32}", token):
+            _clear_prepared_exports(target_project_id=project_id, token=token)
+        return Response(status_code=204)
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:

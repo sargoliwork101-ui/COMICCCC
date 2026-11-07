@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw
 from .activity import emit
 from .ocr_managed import compute_worker_count, iter_parallel_ordered
 from .paths import project_root
-from .store import ProjectStore
+from .store import ProjectStore, _replace_with_retry
 from .watermark_render import apply_watermark_pil, has_active_watermark
 
 SAFE_PT = 14300.0
@@ -52,17 +52,32 @@ def _export_stem(state: dict[str, Any], request: dict[str, Any]) -> str:
     return clean_name(raw, "comic-translated")
 
 
+def _fs_path(path: Path) -> str:
+    resolved = str(path.resolve() if not path.is_absolute() else path)
+    if os.name == "nt" and not resolved.startswith("\\\\?\\") and len(resolved) >= 240:
+        if resolved.startswith("\\\\"):
+            return "\\\\?\\UNC\\" + resolved[2:]
+        return "\\\\?\\" + resolved
+    return resolved
+
+
 @contextlib.contextmanager
 def _atomic_export_path(output: Path) -> Iterator[Path]:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fd, raw_tmp = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
+    parent = Path(_fs_path(output.parent))
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_tmp = tempfile.mkstemp(prefix=".exp-", suffix=".tmp", dir=str(parent))
     os.close(fd)
     tmp_path = Path(raw_tmp)
     try:
         yield tmp_path
-        os.replace(tmp_path, output)
+        tmp_fs = Path(_fs_path(tmp_path))
+        if not tmp_fs.is_file() or tmp_fs.stat().st_size <= 0:
+            raise ValueError("فایل خروجی روی دیسک خالی ساخته شد؛ فضای خالی درایو و دسترسی پوشه را بررسی کنید.")
+        out_fs = Path(_fs_path(output))
+        _replace_with_retry(tmp_fs, out_fs)
     finally:
-        tmp_path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            Path(_fs_path(tmp_path)).unlink(missing_ok=True)
 
 
 def selected_images(state: dict[str, Any], image_ids: list[str]) -> list[dict[str, Any]]:
@@ -101,7 +116,12 @@ def image_payload(
 ) -> tuple[bytes, str, int, int]:
     """Return final bytes without recompressing an untouched original or uncropped PNG render."""
     edited_path = project_root(project_id) / "images" / f"{item['id']}-edited.png"
-    has_edited = bool(allow_edited and edited_path.exists())
+    has_edited = bool(
+        allow_edited
+        and item.get("edited") is not False
+        and edited_path.is_file()
+        and edited_path.stat().st_size > 0
+    )
     source_path = edited_path if has_edited else project_root(project_id) / "images" / item["file"]
     content = source_path.read_bytes()
     crop = crop_box(item)
@@ -348,10 +368,21 @@ def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
                     _insert(document, page_width, page_height, [entry])
                     entry["data"] = b""
                     emit(f"چیدمان صفحهٔ {idx} از {len(entries)} در PDF", progress=0.55 + idx / max(1, len(entries)) * 0.4)
+        if document.page_count < 1:
+            raise ValueError("هیچ صفحه‌ای برای ساخت PDF آماده نشد.")
         output = project_root(state["id"]) / "exports" / f"{_export_stem(state, request)}.pdf"
         emit("در حال ذخیره‌سازی فایل PDF…", progress=0.97)
         with _atomic_export_path(output) as tmp_output:
-            document.save(tmp_output, garbage=4, deflate=True)
+            tmp_fs = _fs_path(tmp_output)
+            with contextlib.suppress(OSError):
+                Path(tmp_fs).unlink(missing_ok=True)
+            saved_ok = False
+            with contextlib.suppress(Exception):
+                document.save(tmp_fs, garbage=4, deflate=True)
+                saved_ok = Path(tmp_fs).is_file() and Path(tmp_fs).stat().st_size > 0
+            if not saved_ok:
+                pdf_bytes = document.tobytes(garbage=4, deflate=True)
+                Path(tmp_fs).write_bytes(pdf_bytes)
     finally:
         document.close()
     return output
@@ -1000,6 +1031,7 @@ def _prepare_docx_pages(
             member_heights = [max(1, round(m["h"] * (common_w / max(1, m["w"])) * comp_scale)) for m in loaded_members]
             canvas = Image.new("RGB", (canvas_w, sum(member_heights)), "white")
             page_blocks: list[dict[str, Any]] = []
+            source_erase_rects: list[tuple[int, int, int, int]] = []
             y_cursor = 0
             for m, mh in zip(loaded_members, member_heights):
                 m_scale = (common_w / max(1, m["w"])) * comp_scale
@@ -1031,6 +1063,24 @@ def _prepare_docx_pages(
                     bx0, by0, bx1, by1 = _block_box(blk, m["off_x"], m["off_y"], m_scale, canvas_w, mh)
                     if bx1 - bx0 < 2 or by1 - by0 < 2:
                         continue
+                    if erase_original and not blk.get("manual") and str(blk.get("bg") or "auto") != "none":
+                        srx0 = float(blk.get("x0", 0) or 0) - m["off_x"]
+                        sry0 = float(blk.get("y0", 0) or 0) - m["off_y"]
+                        srx1 = float(blk.get("x1", 0) or 0) - m["off_x"]
+                        sry1 = float(blk.get("y1", 0) or 0) - m["off_y"]
+                        sx0 = max(0.0, min(float(canvas_w), min(srx0, srx1) * m_scale))
+                        sy0 = max(0.0, min(float(mh), min(sry0, sry1) * m_scale))
+                        sx1 = max(sx0, min(float(canvas_w), max(srx0, srx1) * m_scale))
+                        sy1 = max(sy0, min(float(mh), max(sry0, sry1) * m_scale))
+                        if sx1 - sx0 >= 2 and sy1 - sy0 >= 2 and (
+                            abs(sx0 - bx0) > 1.0 or abs(sy0 - by0) > 1.0 or abs(sx1 - bx1) > 1.0 or abs(sy1 - by1) > 1.0
+                        ):
+                            source_erase_rects.append((
+                                int(round(sx0)),
+                                int(round(sy0 + y_cursor)),
+                                int(round(sx1)),
+                                int(round(sy1 + y_cursor)),
+                            ))
                     page_blocks.append({
                         "block": blk,
                         "x0": bx0,
@@ -1040,8 +1090,11 @@ def _prepare_docx_pages(
                     })
                 y_cursor += mh
 
-            # Erase/fill bubble backgrounds first (matching Typeset.render targetFills) without baking raster text.
+            # Erase/fill bubble backgrounds first (matching Typeset.render source + targetFills) without baking raster text.
             draw = ImageDraw.Draw(canvas)
+            for sx0_i, sy0_i, sx1_i, sy1_i in source_erase_rects:
+                src_fill = _sample_box_bg(canvas, sx0_i, sy0_i, sx1_i, sy1_i)
+                draw.rectangle([sx0_i, sy0_i, max(sx0_i, sx1_i - 1), max(sy0_i, sy1_i - 1)], fill=src_fill)
             for spec in page_blocks:
                 bg_mode = str(spec["block"].get("bg") or "auto")
                 ix0, iy0 = int(round(spec["x0"])), int(round(spec["y0"]))
@@ -1049,10 +1102,17 @@ def _prepare_docx_pages(
                 if bg_mode == "none" or (not erase_original and bg_mode in {"", "auto"}):
                     spec["bg_rgb"] = _sample_box_bg(canvas, ix0, iy0, ix1, iy1)
                     continue
+                custom_bg_hex = _parse_css_color(bg_mode) if bg_mode not in {"", "auto", "white", "black"} else None
                 if bg_mode == "white":
                     fill_rgb = (255, 255, 255)
                 elif bg_mode == "black":
                     fill_rgb = (16, 16, 16)
+                elif custom_bg_hex:
+                    fill_rgb = (
+                        int(custom_bg_hex[0:2], 16),
+                        int(custom_bg_hex[2:4], 16),
+                        int(custom_bg_hex[4:6], 16),
+                    )
                 else:
                     fill_rgb = _sample_box_bg(canvas, ix0, iy0, ix1, iy1)
                 spec["bg_rgb"] = fill_rgb

@@ -74,11 +74,29 @@ let lastSyncedAiProvider = null;
 let translationPreviewTask = Promise.resolve();
 let overlayPreviewTask = Promise.resolve();
 let downloadUrl = null;
+let activeExportPrepared = null;
 let backupDownloadUrl = null;
 let activeBackupPrepared = null;
 let previewRevision = 0;
 const imageRenderTasks = new Map();
 const imagePreviewVersions = new Map();
+
+function clearExportDownloadLink() {
+  if (downloadUrl) {
+    URL.revokeObjectURL(downloadUrl);
+    downloadUrl = null;
+  }
+  if (activeExportPrepared) {
+    const { projectId, token } = activeExportPrepared;
+    activeExportPrepared = null;
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/export/${encodeURIComponent(token)}`, { method: 'DELETE' }).catch(() => {});
+  }
+  const link = $('downloadLink');
+  if (link) {
+    link.href = '#';
+    link.classList.add('hidden');
+  }
+}
 
 function clearBackupDownloadLink() {
   if (backupDownloadUrl) {
@@ -831,6 +849,7 @@ function adoptProject(project, options = {}) {
   const prevProjectId = state.project?.id || null;
   if (prevProjectId && prevProjectId !== project?.id) {
     clearBackupDownloadLink();
+    clearExportDownloadLink();
   }
   state.project = project;
   state.project.images = project.images || [];
@@ -3182,19 +3201,27 @@ function updateExportFields() {
   $('pptxExportFields')?.classList.toggle('hidden', kind !== 'pptx');
   $('exportOverlayModeWrap')?.classList.toggle('hidden', kind === 'txt' || kind === 'docx' || kind === 'pptx');
 }
-async function exportResult(kind = null, modeOverride = null, layoutOverride = null) {
+async function exportResult(kind = null, modeOverride = null, layoutOverride = null, externalSignal = null) {
   if (kind) { $('exportKind').value = kind; updateExportFields(); }
   if (!selectedImages().length) throw new Error('حداقل یک تصویر را برای خروجی انتخاب کنید');
   const controller = new AbortController();
   exportAbortController = controller; exportCancelledByUser = false; exportRunning = true;
+  const onExternalAbort = () => { exportCancelledByUser = true; controller.abort(); };
+  if (externalSignal) {
+    if (externalSignal.aborted) onExternalAbort();
+    else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+  }
   const checkNotCancelled = () => {
-    if (exportCancelledByUser || controller.signal.aborted) {
+    if (exportCancelledByUser || controller.signal.aborted || externalSignal?.aborted) {
       const err = new Error('ساخت خروجی لغو شد.'); err.name = 'AbortError'; err.cancelled = true; throw err;
     }
   };
   try {
     await overlayPreviewTask;
+    await waitForPendingRenders(state.project?.id);
     checkNotCancelled();
+    const project = state.project;
+    if (!project) throw new Error('پروژه‌ای برای خروجی فعال نیست');
     const exportKind = $('exportKind').value;
     if (layoutOverride) {
       if (exportKind === 'pptx' && $('exportPptxLayout')) $('exportPptxLayout').value = layoutOverride;
@@ -3238,13 +3265,14 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
           jobProgressTransform.floor = 0;
         }
       }
+      await waitForPendingRenders(project.id);
     } else if (jobProgressTransform) {
       jobProgressTransform.offset = 0;
       jobProgressTransform.scale = 0.98;
       jobProgressTransform.floor = 0;
     }
     checkNotCancelled();
-    const baseExportName = safeName($('exportName').value, safeName(state.project?.name || '', 'comic-translated'));
+    const baseExportName = safeName($('exportName').value, safeName(project.name || '', 'comic-translated'));
     const activeDocMode = exportKind === 'pptx' ? pptxMode : docxMode;
     const layoutExportName = exportKind === 'docx' && docxLayout === 'flowing' && !/-book$/i.test(baseExportName)
       ? `${baseExportName}-book`
@@ -3254,23 +3282,25 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
     const finalExportName = (exportKind === 'docx' || exportKind === 'pptx') && activeDocMode === 'ocr' && !/-(?:en|ocr)$/i.test(layoutExportName)
       ? `${layoutExportName}-en`
       : layoutExportName;
+    const reqOpts = jsonOptions('POST', {
+      kind: exportKind,
+      image_ids: selectedImages().map((item) => item.id),
+      name: finalExportName,
+      seamless: $('exportSeamless').checked,
+      uniform_size: $('exportUniform').checked,
+      two_per_page: $('exportTwo').checked,
+      image_format: $('exportFormat').value,
+      folder_name: $('exportFolder').value,
+      docx_mode: docxMode,
+      docx_layout: docxLayout,
+      pptx_mode: pptxMode,
+      pptx_layout: pptxLayout,
+    });
+    reqOpts.headers = { ...reqOpts.headers, 'X-Export-Prepare': '1' };
     let response;
     try {
-      response = await fetch(`/api/projects/${state.project.id}/export`, {
-        ...jsonOptions('POST', {
-          kind: exportKind,
-          image_ids: selectedImages().map((item) => item.id),
-          name: finalExportName,
-          seamless: $('exportSeamless').checked,
-          uniform_size: $('exportUniform').checked,
-          two_per_page: $('exportTwo').checked,
-          image_format: $('exportFormat').value,
-          folder_name: $('exportFolder').value,
-          docx_mode: docxMode,
-          docx_layout: docxLayout,
-          pptx_mode: pptxMode,
-          pptx_layout: pptxLayout,
-        }),
+      response = await fetch(`/api/projects/${encodeURIComponent(project.id)}/export`, {
+        ...reqOpts,
         signal: controller.signal,
       });
     } catch (cause) {
@@ -3278,19 +3308,41 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
       throw cause;
     }
     if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `خروجی ساخته نشد (HTTP ${response.status})`); }
-    const blob = await response.blob();
-    checkNotCancelled();
-    if (!blob.size) throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
+    const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
+    const fallbackFilename = `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`;
+    const link = $('downloadLink');
+    let finalBytes = 0;
+    if (contentType.includes('application/json')) {
+      const payload = await response.json();
+      checkNotCancelled();
+      finalBytes = Number(payload?.size) || 0;
+      if (!payload?.token || finalBytes <= 0) {
+        throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
+      }
+      clearExportDownloadLink();
+      activeExportPrepared = { projectId: project.id, token: payload.token };
+      link.href = `/api/projects/${encodeURIComponent(project.id)}/export/${encodeURIComponent(payload.token)}`;
+      link.download = payload.filename || fallbackFilename;
+    } else {
+      const blob = await response.blob();
+      checkNotCancelled();
+      if (!blob.size) throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
+      finalBytes = blob.size;
+      const disposition = response.headers?.get?.('content-disposition') || '';
+      clearExportDownloadLink();
+      downloadUrl = URL.createObjectURL(blob);
+      link.href = downloadUrl;
+      link.download = parseExportFilename(disposition, fallbackFilename);
+    }
     if (activeProgressId) setProgress(activeProgressId, 1, false);
-    const disposition = response.headers.get('content-disposition') || '';
-    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
-    downloadUrl = URL.createObjectURL(blob);
-    const link = $('downloadLink'); link.href = downloadUrl; link.download = parseExportFilename(disposition, `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`);
     const linkLabel = link.querySelector('span');
     if (linkLabel) linkLabel.textContent = `دانلود ${link.download}`;
     else link.textContent = `دانلود ${link.download}`;
     link.classList.remove('hidden'); link.click();
-    closeDialog('exportDialog'); closeDialog('docxExportDialog'); closeDialog('pptxExportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
+    const sizeText = finalBytes >= 1024 * 1024
+      ? `${(finalBytes / (1024 * 1024)).toFixed(1)} مگابایت`
+      : `${Math.max(1, Math.round(finalBytes / 1024))} کیلوبایت`;
+    closeDialog('exportDialog'); closeDialog('docxExportDialog'); closeDialog('pptxExportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${sizeText}`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
   } catch (error) {
     if (exportCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
       toast('ساخت خروجی به درخواست شما متوقف شد');
@@ -3298,6 +3350,7 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
     }
     throw error;
   } finally {
+    if (externalSignal) externalSignal.removeEventListener?.('abort', onExternalAbort);
     if (exportAbortController === controller) exportAbortController = null;
     exportRunning = false;
     dismissJobCancelModal('export');
@@ -3316,7 +3369,7 @@ async function runDocxChoiceExport(mode, layout = 'visual') {
   const layoutText = layout === 'flowing' ? 'متن پیوستهٔ کتابی' : 'تصویری';
   const modeText = mode === 'ocr' ? 'متن اصلی / OCR' : 'متن ترجمه‌شده';
   const label = `در حال ساخت فایل Word (${layoutText} — ${modeText})…`;
-  try { await runJob(label, () => exportResult('docx', mode, layout), 'docxProgress'); }
+  try { await runJob(label, (signal) => exportResult('docx', mode, layout, signal), 'docxProgress'); }
   finally { buttons.forEach((btn) => { btn.disabled = false; }); }
 }
 function openPptxExportPrompt() {
@@ -3332,7 +3385,7 @@ async function runPptxChoiceExport(mode, layout = 'visual') {
   const layoutText = layout === 'flowing' ? 'اسلاید ارائه' : 'اسلاید تصویری';
   const modeText = mode === 'ocr' ? 'متن اصلی / OCR' : 'متن ترجمه‌شده';
   const label = `در حال ساخت فایل PowerPoint (${layoutText} — ${modeText})…`;
-  try { await runJob(label, () => exportResult('pptx', mode, layout), 'pptxProgress'); }
+  try { await runJob(label, (signal) => exportResult('pptx', mode, layout, signal), 'pptxProgress'); }
   finally { buttons.forEach((btn) => { btn.disabled = false; }); }
 }
 
@@ -7600,7 +7653,7 @@ function bindEvents() {
   $('editorOpenFullHelpBtn')?.addEventListener('click', () => openHelpDialog('visual-editor'));
   $('helpDialogClose')?.addEventListener('click', (event) => { event.preventDefault(); closeDialog('helpDialog'); });
   $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiBaseUrl')?.addEventListener('input', syncAiExecUi); $('localNmtModelSelect')?.addEventListener('change', () => renderLocalNmtPanel()); $('localNmtCancelBtn')?.addEventListener('click', () => cancelLocalNmtPrepare().catch(() => {})); $('localNmtUnloadBtn')?.addEventListener('click', () => unloadLocalNmtRam().catch(() => {})); $('localNmtTestBtn')?.addEventListener('click', () => testLocalNmtSample().catch(() => {})); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
-  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'visual').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'visual').catch(() => {})); $('docxChoiceFlowingTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'flowing').catch(() => {})); $('docxChoiceFlowingOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'flowing').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {})); $('exportPptxBtn')?.addEventListener('click', () => openPptxExportPrompt()); $('pptxChoiceTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'visual').catch(() => {})); $('pptxChoiceOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'visual').catch(() => {})); $('pptxChoiceFlowingTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'flowing').catch(() => {})); $('pptxChoiceFlowingOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'flowing').catch(() => {})); $('pptxExportCancel')?.addEventListener('click', () => requestCancelExport('pptxExportDialog').catch(() => {}));
+  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', (signal) => exportResult(null, null, null, signal), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', (signal) => exportResult('pdf', null, null, signal), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', (signal) => exportResult('images', null, null, signal), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', (signal) => exportResult('txt', null, null, signal), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'visual').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'visual').catch(() => {})); $('docxChoiceFlowingTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'flowing').catch(() => {})); $('docxChoiceFlowingOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'flowing').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {})); $('exportPptxBtn')?.addEventListener('click', () => openPptxExportPrompt()); $('pptxChoiceTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'visual').catch(() => {})); $('pptxChoiceOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'visual').catch(() => {})); $('pptxChoiceFlowingTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'flowing').catch(() => {})); $('pptxChoiceFlowingOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'flowing').catch(() => {})); $('pptxExportCancel')?.addEventListener('click', () => requestCancelExport('pptxExportDialog').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
