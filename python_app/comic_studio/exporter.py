@@ -97,10 +97,11 @@ def image_payload(
     image_format: str = "orig",
     *,
     logos_map: dict[str, Any] | None = None,
+    allow_edited: bool = True,
 ) -> tuple[bytes, str, int, int]:
     """Return final bytes without recompressing an untouched original or uncropped PNG render."""
     edited_path = project_root(project_id) / "images" / f"{item['id']}-edited.png"
-    has_edited = edited_path.exists()
+    has_edited = bool(allow_edited and edited_path.exists())
     source_path = edited_path if has_edited else project_root(project_id) / "images" / item["file"]
     content = source_path.read_bytes()
     crop = crop_box(item)
@@ -122,8 +123,11 @@ def image_payload(
             resolved_logos = ((store.get(project_id).get("settings") or {}).get("watermarkLogos") or {})
     with Image.open(io.BytesIO(content)) as opened:
         image = opened.convert("RGB") if target == "jpg" or original_format == "jpg" else opened.convert("RGBA")
+    try:
         if crop:
-            image = image.crop(crop)
+            cropped_img = image.crop(crop)
+            image.close()
+            image = cropped_img
         if needs_backend_wm:
             watermarked = apply_watermark_pil(image, item.get("watermark"), resolved_logos)
             if watermarked is not image:
@@ -132,10 +136,17 @@ def image_payload(
         output_format = "JPEG" if (target == "jpg" or (target == "orig" and original_format == "jpg")) else "PNG"
         buffer = io.BytesIO()
         if output_format == "JPEG":
-            image.convert("RGB").save(buffer, "JPEG", quality=100, subsampling=0)
+            rgb_img = image if image.mode == "RGB" else image.convert("RGB")
+            try:
+                rgb_img.save(buffer, "JPEG", quality=100, subsampling=0)
+            finally:
+                if rgb_img is not image:
+                    rgb_img.close()
             return buffer.getvalue(), "jpg", image.width, image.height
         image.save(buffer, "PNG")
         return buffer.getvalue(), "png", image.width, image.height
+    finally:
+        image.close()
 
 
 def compose_images(entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -374,10 +385,26 @@ def build_images_zip(store: ProjectStore, state: dict[str, Any], request: dict[s
     return output
 
 
+def _block_within_crop(block: dict[str, Any], crop: tuple[int, int, int, int] | None) -> bool:
+    if not crop:
+        return True
+    cx0, cy0, cx1, cy1 = crop
+    bx0 = float(block.get("tx0", block.get("x0", 0)) or 0)
+    by0 = float(block.get("ty0", block.get("y0", 0)) or 0)
+    bx1 = float(block.get("tx1", block.get("x1", bx0)) or bx0)
+    by1 = float(block.get("ty1", block.get("y1", by0)) or by0)
+    return (min(bx1, cx1) - max(bx0, cx0) > 1) and (min(by1, cy1) - max(by0, cy0) > 1)
+
+
 def _ordered_export_blocks(item: dict[str, Any]) -> list[dict[str, Any]]:
     from .ocr_grouping import detect_page_mode, sort_document_reading_order
 
-    enabled = [b for b in item.get("blocks", []) if b.get("enabled", True) is not False]
+    crop = crop_box(item)
+    enabled = [
+        b
+        for b in item.get("blocks", [])
+        if b.get("enabled", True) is not False and _block_within_crop(b, crop)
+    ]
     if len(enabled) < 2:
         return enabled
     w = int(item.get("width") or 0)

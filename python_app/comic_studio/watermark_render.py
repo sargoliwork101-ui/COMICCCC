@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import functools
 import io
 import math
@@ -149,8 +150,8 @@ def shape_visual_text(text: str) -> str:
     return "\n".join(lines_out)
 
 
-@functools.lru_cache(maxsize=32)
-def _load_watermark_font(px_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+@functools.lru_cache(maxsize=64)
+def _load_watermark_font(px_size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     clamped = max(8, min(320, int(px_size)))
     for candidate in (
         STATIC_DIR / "assets" / "Vazirmatn.woff2",
@@ -158,33 +159,53 @@ def _load_watermark_font(px_size: int) -> ImageFont.FreeTypeFont | ImageFont.Ima
     ):
         if candidate.is_file():
             try:
-                return ImageFont.truetype(str(candidate), clamped)
+                font = ImageFont.truetype(str(candidate), clamped)
+                with contextlib.suppress(Exception):
+                    font.set_variation_by_axes([700 if bold else 400])
+                return font
             except Exception:
                 pass
     return ImageFont.load_default()
 
 
+def _explicit_watermark_mode(watermark: dict[str, Any]) -> str | None:
+    raw = str(watermark.get("mode") or "").strip().lower()
+    return raw if raw in {"text", "image", "both"} else None
+
+
 def has_active_watermark(watermark: Any) -> bool:
     if not isinstance(watermark, dict) or not watermark.get("enabled"):
         return False
-    mode = str(watermark.get("mode") or "text")
-    has_text = mode in {"text", "both"} and bool(str(watermark.get("text") or "").strip())
-    has_logo = mode in {"image", "both"} and bool(watermark.get("logoId") or watermark.get("logoDataUrl"))
-    return has_text or has_logo
+    mode = _explicit_watermark_mode(watermark)
+    raw_text = bool(str(watermark.get("text") or "").strip())
+    raw_logo = bool(str(watermark.get("logoId") or "").strip() or str(watermark.get("logoDataUrl") or "").strip())
+    if mode is not None:
+        has_text = mode in {"text", "both"} and raw_text
+        has_logo = mode in {"image", "both"} and raw_logo
+        return has_text or has_logo
+    return raw_text or raw_logo
 
 
-def _parse_rgb(color: Any) -> tuple[int, int, int]:
+def _parse_rgb_opt(color: Any) -> tuple[int, int, int] | None:
     m = _HEX_RE.match(str(color or "").strip())
     if m:
         hx = m.group(1)
         return int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
-    return 255, 255, 255
+    return None
+
+
+def _parse_rgb(color: Any) -> tuple[int, int, int]:
+    return _parse_rgb_opt(color) or (255, 255, 255)
 
 
 def _decode_logo_image(watermark: dict[str, Any], logos_map: dict[str, Any] | None) -> Image.Image | None:
     raw = str(watermark.get("logoDataUrl") or "").strip()
     if not raw and watermark.get("logoId") and isinstance(logos_map, dict):
-        raw = str(logos_map.get(str(watermark["logoId"])) or "").strip()
+        entry = logos_map.get(str(watermark["logoId"]).strip())
+        if isinstance(entry, dict):
+            raw = str(entry.get("dataUrl") or entry.get("logoDataUrl") or entry.get("url") or "").strip()
+        elif isinstance(entry, str):
+            raw = entry.strip()
     if not raw:
         return None
     if raw.startswith("data:"):
@@ -217,69 +238,114 @@ def apply_watermark_pil(
     if W < 4 or H < 4:
         return image
 
-    mode = str(wm.get("mode") or "text")
-    raw_text = str(wm.get("text") or "").strip() if mode in {"text", "both"} else ""
-    logo_rgba = _decode_logo_image(wm, logos_map) if mode in {"image", "both"} else None
+    mode = _explicit_watermark_mode(wm)
+    allow_text = mode in {None, "text", "both"}
+    allow_logo = mode in {None, "image", "both"}
+    raw_text = str(wm.get("text") or "").strip() if allow_text else ""
+    logo_rgba = _decode_logo_image(wm, logos_map) if allow_logo else None
     if not raw_text and logo_rgba is None:
         return image
 
     try:
-        opacity = max(0.05, min(1.0, float(wm.get("opacity", 0.45))))
-        logical_size = max(10.0, min(140.0, float(wm.get("size", 28))))
+        try:
+            raw_opacity = float(wm.get("opacity", 55))
+        except (TypeError, ValueError):
+            raw_opacity = 55.0
+        if raw_opacity > 1.0:
+            raw_opacity /= 100.0
+        opacity = max(0.05, min(1.0, raw_opacity))
+
+        min_dim = max(200.0, float(min(W, H)))
+        if wm.get("sizePct") is not None:
+            try:
+                scale_pct = max(1.0, min(25.0, float(wm.get("sizePct") or 3.5)))
+            except (TypeError, ValueError):
+                scale_pct = 3.5
+            font_px = max(12, round(min_dim * (scale_pct / 100.0)))
+        else:
+            logical_size = max(10.0, min(140.0, float(wm.get("size", 28))))
+            ref_dim = max(480.0, min(1800.0, float(min(W, H))))
+            font_px = max(12, round(logical_size * (ref_dim / 1000.0)))
+            scale_pct = max(1.0, min(25.0, (font_px / min_dim) * 100.0))
+
         position = str(wm.get("position") or "bottom-left")
-        raw_angle = float(wm.get("angle", -30.0 if position in {"diagonal", "tile"} else 0.0))
+        default_angle = -30.0 if position in {"diagonal", "tile"} else 0.0
+        raw_angle_val = wm.get("angle")
+        try:
+            raw_angle = float(raw_angle_val) if raw_angle_val is not None and raw_angle_val != "" else default_angle
+        except (TypeError, ValueError):
+            raw_angle = default_angle
         angle_deg = max(-90.0, min(90.0, raw_angle))
+
+        bold = wm.get("bold", True) is not False
         rgb = _parse_rgb(wm.get("color") or "#ffffff")
+        lum = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+        contrast_rgb = (12, 16, 24) if lum > 140 else (250, 250, 252)
         outline = wm.get("outline", True) is not False
+        outline_rgb = _parse_rgb_opt(wm.get("outlineColor")) or contrast_rgb
         bg_pill = bool(wm.get("bgPill", False))
+        bg_rgb = _parse_rgb_opt(wm.get("bgColor")) or contrast_rgb
 
-        ref_dim = max(480.0, min(1800.0, float(min(W, H))))
-        scale_factor = ref_dim / 1000.0
-        font_px = max(12, round(logical_size * scale_factor))
-        font = _load_watermark_font(font_px)
-
+        font = _load_watermark_font(font_px, bold=bold)
+        is_rtl = bool(_ARABIC_RANGE_RE.search(raw_text))
         shaped_text = shape_visual_text(raw_text) if raw_text else ""
-        dummy = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
         text_w = text_h = 0
         text_bbox = (0, 0, 0, 0)
         if shaped_text:
-            text_bbox = dummy.multiline_textbbox((0, 0), shaped_text, font=font, align="center", spacing=max(2, font_px // 5))
+            dummy_img = Image.new("RGBA", (4, 4))
+            try:
+                dummy = ImageDraw.Draw(dummy_img)
+                text_bbox = dummy.multiline_textbbox((0, 0), shaped_text, font=font, align="center", spacing=max(2, font_px // 5))
+            finally:
+                dummy_img.close()
             text_w = max(1, int(math.ceil(text_bbox[2] - text_bbox[0])))
             text_h = max(1, int(math.ceil(text_bbox[3] - text_bbox[1])))
 
         scaled_logo: Image.Image | None = None
         logo_w = logo_h = 0
         if logo_rgba is not None:
-            target_logo_h = max(18, round(font_px * (1.85 if shaped_text else 2.6)))
-            ratio = min(target_logo_h / max(1, logo_rgba.height), (W * 0.45) / max(1, logo_rgba.width))
+            if wm.get("logoScalePct") is not None:
+                try:
+                    logo_scale_pct = max(2.0, min(45.0, float(wm.get("logoScalePct") or max(6.0, scale_pct * 2.2))))
+                except (TypeError, ValueError):
+                    logo_scale_pct = max(6.0, scale_pct * 2.2)
+                target_max = max(20, round(min_dim * (logo_scale_pct / 100.0)))
+                ratio = min(target_max / max(1, logo_rgba.width), target_max / max(1, logo_rgba.height))
+            else:
+                target_logo_h = max(18, round(font_px * (1.85 if shaped_text else 2.6)))
+                ratio = min(target_logo_h / max(1, logo_rgba.height), (W * 0.45) / max(1, logo_rgba.width))
             logo_w = max(8, round(logo_rgba.width * ratio))
             logo_h = max(8, round(logo_rgba.height * ratio))
             scaled_logo = logo_rgba.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
 
-        gap = round(font_px * 0.4) if (scaled_logo is not None and shaped_text) else 0
-        pad_x = round(font_px * (0.65 if bg_pill else 0.35))
-        pad_y = round(font_px * (0.42 if bg_pill else 0.28))
+        gap = max(6, round(font_px * 0.42)) if (scaled_logo is not None and shaped_text) else 0
+        pad_x = max(10, round(font_px * 0.58)) if bg_pill else max(4, round(font_px * 0.25))
+        pad_y = max(6, round(font_px * 0.36)) if bg_pill else max(4, round(font_px * 0.22))
         content_w = logo_w + gap + text_w
-        content_h = max(logo_h, text_h)
+        content_h = max(logo_h, text_h, 1)
         stamp_w = max(8, content_w + pad_x * 2)
         stamp_h = max(8, content_h + pad_y * 2)
 
         stamp = Image.new("RGBA", (stamp_w, stamp_h), (0, 0, 0, 0))
         sdraw = ImageDraw.Draw(stamp)
 
-        lum = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
-        contrast_rgb = (12, 16, 24) if lum > 140 else (250, 250, 252)
-
         if bg_pill:
-            pill_alpha = max(18, min(230, round(155 * opacity)))
-            radius = max(6, min(stamp_h // 2, round(font_px * 0.45)))
+            pill_alpha = max(18, min(230, round(255 * opacity * 0.58)))
+            radius = max(6, min(stamp_h // 2, round(font_px * 0.42)))
             sdraw.rounded_rectangle(
                 [1, 1, stamp_w - 2, stamp_h - 2],
                 radius=radius,
-                fill=(*contrast_rgb, pill_alpha),
+                fill=(*bg_rgb, pill_alpha),
             )
 
-        cur_x = pad_x
+        # Match Typeset.drawWatermarkStamp: in RTL place logo on the right of text; in LTR on the left.
+        if is_rtl and scaled_logo is not None and shaped_text:
+            text_left = pad_x
+            logo_left = pad_x + text_w + gap
+        else:
+            logo_left = pad_x
+            text_left = pad_x + (logo_w + gap if scaled_logo is not None else 0)
+
         if scaled_logo is not None:
             if opacity < 0.999:
                 r_ch, g_ch, b_ch, a_ch = scaled_logo.split()
@@ -288,17 +354,16 @@ def apply_watermark_pil(
             else:
                 logo_to_paste = scaled_logo
             ly = (stamp_h - logo_h) // 2
-            stamp.alpha_composite(logo_to_paste, (cur_x, ly))
+            stamp.alpha_composite(logo_to_paste, (logo_left, ly))
             if logo_to_paste is not scaled_logo:
                 logo_to_paste.close()
-            cur_x += logo_w + gap
 
         if shaped_text:
-            tx = cur_x - int(text_bbox[0])
+            tx = text_left - int(text_bbox[0])
             ty = (stamp_h - text_h) // 2 - int(text_bbox[1])
             txt_alpha = max(12, min(255, round(255 * opacity)))
             stroke_w = max(1, round(font_px / 13)) if outline else 0
-            stroke_fill = (*contrast_rgb, max(12, min(245, round(215 * opacity)))) if outline else None
+            stroke_fill = (*outline_rgb, max(12, min(245, round(215 * opacity)))) if outline else None
             sdraw.multiline_text(
                 (tx, ty),
                 shaped_text,
@@ -323,11 +388,19 @@ def apply_watermark_pil(
         base_rgba = image.convert("RGBA")
         overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         sw, sh = stamp.size
-        margin = max(12, round(min(W, H) * 0.028))
+        try:
+            margin_pct = max(0.5, min(20.0, float(wm.get("marginPct") if wm.get("marginPct") is not None else 2.5)))
+        except (TypeError, ValueError):
+            margin_pct = 2.5
+        margin = max(8, round(min_dim * (margin_pct / 100.0)))
 
         if position == "tile":
-            step_x = max(sw + round(font_px * 2.2), round(W * 0.34))
-            step_y = max(sh + round(font_px * 2.0), round(H * 0.24))
+            try:
+                tile_gap_pct = max(6.0, min(60.0, float(wm.get("tileGapPct") or 22.0)))
+            except (TypeError, ValueError):
+                tile_gap_pct = 22.0
+            step_x = max(sw + 28, round(W * (tile_gap_pct / 100.0)) + round(sw * 0.55))
+            step_y = max(sh + 24, round(H * (tile_gap_pct / 100.0) * 0.85) + round(sh * 0.55))
             row = 0
             for cy in range(-sh // 2, H + sh, step_y):
                 row_shift = (step_x // 2) if (row % 2 == 1) else 0

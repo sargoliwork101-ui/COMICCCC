@@ -699,6 +699,25 @@ class _SuryaAdapter(_BaseAdapter):
         self._layout_detector: Any = None
         self._layout_detector_checked: bool = False
 
+    def _surya_cache_files(self, filename: str) -> list[Path]:
+        roots: list[Path] = []
+        xdg = (os.environ.get("XDG_CACHE_HOME") or "").strip()
+        if xdg:
+            roots.append(Path(xdg))
+        models_root = getattr(self, "models_root", None)
+        if models_root is not None:
+            roots.append(Path(models_root) / "cache")
+        roots.append(Path(os.path.expanduser("~/.cache")))
+        out: list[Path] = []
+        seen: set[str] = set()
+        for r in roots:
+            cand = r / "datalab" / "surya" / filename
+            key = os.path.normcase(str(cand))
+            if key not in seen:
+                seen.add(key)
+                out.append(cand)
+        return out
+
     @staticmethod
     def _sync_surya_runtime_settings() -> None:
         try:
@@ -765,13 +784,13 @@ class _SuryaAdapter(_BaseAdapter):
             if hasattr(mgr, "stop"):
                 with contextlib.suppress(Exception):
                     mgr.stop()
-        if server_pid is None:
-            state_json = Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.json"))
+        for state_json in self._surya_cache_files("llamacpp_server.json"):
             if state_json.is_file():
-                with contextlib.suppress(Exception):
-                    meta = json.loads(state_json.read_text(encoding="utf-8"))
-                    if isinstance(meta, dict) and meta.get("pid"):
-                        server_pid = int(meta["pid"])
+                if server_pid is None:
+                    with contextlib.suppress(Exception):
+                        meta = json.loads(state_json.read_text(encoding="utf-8"))
+                        if isinstance(meta, dict) and meta.get("pid"):
+                            server_pid = int(meta["pid"])
                 with contextlib.suppress(OSError):
                     state_json.unlink()
         if server_pid and server_pid > 0 and server_pid != os.getpid():
@@ -993,17 +1012,18 @@ class _SuryaAdapter(_BaseAdapter):
             lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height), **hints})
         return lines, had_error
 
-    @staticmethod
-    def _read_llama_server_error_tail() -> str:
-        log_path = Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.log"))
-        if not log_path.is_file():
-            return ""
-        try:
-            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-25:]
-            relevant = [ln.strip() for ln in tail if ln.strip()]
-            return " | ".join(relevant[-4:])[-400:]
-        except Exception:
-            return ""
+    def _read_llama_server_error_tail(self) -> str:
+        for log_path in self._surya_cache_files("llamacpp_server.log"):
+            if not log_path.is_file():
+                continue
+            try:
+                tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-25:]
+                relevant = [ln.strip() for ln in tail if ln.strip()]
+                if relevant:
+                    return " | ".join(relevant[-4:])[-400:]
+            except Exception:
+                continue
+        return ""
 
     def _invoke_surya_predictor(self, rgb: Any, layout_res: Any = None) -> Any:
         assert self._predictor is not None

@@ -177,11 +177,20 @@ def bundled_models_dir() -> Path | None:
     candidates: list[Path] = []
     if raw_env and raw_env.strip():
         candidates.append(_HostPath(raw_env.strip()))
-    candidates.append(APP_DIR / "bundled-models")
+    search_roots: list[Path] = [APP_DIR]
     if getattr(sys, "frozen", False):
+        with contextlib.suppress(OSError):
+            exe_dir = _HostPath(str(sys.executable)).resolve().parent
+            if exe_dir not in search_roots:
+                search_roots.append(exe_dir)
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
-            candidates.append(_HostPath(str(meipass)) / "bundled-models")
+            meipass_dir = _HostPath(str(meipass))
+            if meipass_dir not in search_roots:
+                search_roots.append(meipass_dir)
+    for root in search_roots:
+        candidates.append(root / "bundled_models")
+        candidates.append(root / "bundled-models")
     for cand in candidates:
         with contextlib.suppress(OSError):
             if cand.is_dir():

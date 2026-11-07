@@ -1051,6 +1051,37 @@ prepare = async (it, r) => {
       saved.providers.gemini.profiles[1].apiKey === 'ui-second-key');
   }
 
+  // ---------- v2.66: AI + fallback double-failure reports 0 translated images & getDisplaySource slices 64-byte PNG header ----------
+  {
+    const h = await prepareAiTranslationHarness();
+    h.$('ocrEnabled').checked = true;
+    h.$('trAiEnabled').checked = true;
+    h.ev(`
+      aiProfiles = [{ id: 'p1', name: 'کلید آزمایشی', apiKey: 'bad-ai-key' }];
+      AiTranslateTools.translateWithFailover = async () => { throw new Error('AI quota exhausted'); };
+      TranslateTools.translate = async () => ({ ok: false, text: '' });
+    `);
+    await h.ev('runTranslate()');
+    const stText = h.$('statusText').textContent;
+    check('v2.66 AI + fallback double-failure does not falsely report translated images',
+      h.$('sPages').textContent === '0' && /ترجمه کامل نشد/.test(stText), stText);
+
+    const slicedLengths = [];
+    const origSlice = h.window.Blob.prototype.slice;
+    h.window.Blob.prototype.slice = function (start, end, type) {
+      slicedLengths.push(Number(end) - Number(start || 0));
+      return origSlice.call(this, start, end, type);
+    };
+    try {
+      h.ev('items[0].edited = null; items[0].cropRect = { x: 0, y: 0, w: 1, h: 1 }; items[0].cropCache = null;');
+      const cropped = await h.ev('getDisplaySource(items[0])');
+      check('v2.66 getCroppedSource sniffs 64-byte slice instead of full PNG buffer',
+        Boolean(cropped && cropped.info && cropped.info.fmt === 'PNG') && slicedLengths.includes(64), slicedLengths);
+    } finally {
+      h.window.Blob.prototype.slice = origSlice;
+    }
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL EDGE-CASE TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

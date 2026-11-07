@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.09"
+    assert health.json()["version"] == "4.10"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۰۹ · Python</span>' in index_html
+    assert '<span class="ver">۴.۱۰ · Python</span>' in index_html
     assert "مدیریت مدل‌های OCR" in index_html
     assert "مدیریت ترجمه‌ها" in index_html
     assert 'id="deleteModelsMenuBtn"' not in index_html
@@ -3291,7 +3291,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.09"
+    assert APP_VERSION == "4.10"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -4313,6 +4313,153 @@ def test_v409_grouped_pages_translated_as_single_logical_page(client, monkeypatc
         },
     )
     assert stale_start.status_code == 409
+
+
+def test_v410_audit_watermark_parity_bundled_models_crop_txt_surya_cache_and_preview_error(client, tmp_path, monkeypatch):
+    """v4.10 end-to-end audit regression test covering watermark logo/opacity/RTL parity, bundled_models, Surya cache, crop TXT, image_content edited flag, and previewError propagation."""
+    import base64
+    import json
+    import os
+    import comic_studio.paths as paths_mod
+    from comic_studio.ocr_worker import _SuryaAdapter
+    from comic_studio.watermark_render import apply_watermark_pil, has_active_watermark
+
+    # 1. Logo-only & text+logo watermark parity (UI dict schema without `mode`, dict `logos_map`, 0..100 opacity, RTL logo-right)
+    logo_buf = io.BytesIO()
+    Image.new("RGBA", (40, 40), (255, 0, 0, 255)).save(logo_buf, "PNG")
+    logo_url = "data:image/png;base64," + base64.b64encode(logo_buf.getvalue()).decode("ascii")
+    logos_map = {"logo-red": {"id": "logo-red", "name": "قرمز", "dataUrl": logo_url}}
+
+    logo_only_wm = {
+        "enabled": True,
+        "text": "",
+        "logoId": "logo-red",
+        "logoScalePct": 25,
+        "position": "center",
+        "opacity": 50,
+    }
+    assert has_active_watermark(logo_only_wm) is True
+    white = Image.new("RGB", (240, 240), (255, 255, 255))
+    stamped_logo = apply_watermark_pil(white, logo_only_wm, logos_map)
+    cx_r, cx_g, cx_b = stamped_logo.getpixel((120, 120))
+    # 50% red over white => R stays ~255 while G/B sit near ~127 (neither untouched 255 nor 100%-opaque 0)
+    assert cx_r >= 245 and 100 <= cx_g <= 155 and 100 <= cx_b <= 155
+
+    rtl_combo = apply_watermark_pil(
+        white,
+        {"enabled": True, "text": "ترجمه کمیک", "logoId": "logo-red", "logoScalePct": 16, "sizePct": 6, "position": "center", "opacity": 100, "color": "#00ff00", "outline": False},
+        logos_map,
+    )
+    red_xs = [x for y in range(240) for x in range(240) if rtl_combo.getpixel((x, y))[0] > 220 and rtl_combo.getpixel((x, y))[1] < 40]
+    green_xs = [x for y in range(240) for x in range(240) if rtl_combo.getpixel((x, y))[1] > 200 and rtl_combo.getpixel((x, y))[0] < 60]
+    assert red_xs and green_xs
+    assert (sum(red_xs) / len(red_xs)) > (sum(green_xs) / len(green_xs)), "In RTL, logo must sit to the right of Persian text"
+
+    # 2. bundled_models_dir discovers `bundled_models` (underscore) staged by build_offline_package.py
+    fake_app_dir = tmp_path / "frozen_app"
+    underscore_bundle = fake_app_dir / "bundled_models"
+    underscore_bundle.mkdir(parents=True)
+    monkeypatch.delenv("COMIC_STUDIO_BUNDLED_MODELS", raising=False)
+    monkeypatch.setattr(paths_mod, "APP_DIR", fake_app_dir)
+    assert paths_mod.bundled_models_dir() == underscore_bundle
+
+    # 3. Surya custom-storage cache resolves llamacpp_server.{log,json} inside models_root/cache
+    surya_models_root = tmp_path / "custom_drive" / "models"
+    surya_dir = surya_models_root / "cache" / "datalab" / "surya"
+    surya_dir.mkdir(parents=True)
+    (surya_dir / "llamacpp_server.log").write_text("booting\nCUDA out of memory\n", encoding="utf-8")
+    (surya_dir / "llamacpp_server.json").write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(surya_models_root / "cache"))
+    adapter = _SuryaAdapter(surya_models_root)
+    assert "CUDA out of memory" in adapter._read_llama_server_error_tail()
+    adapter.close()
+    assert not (surya_dir / "llamacpp_server.json").exists()
+
+    # 4. image_content(cropped=True) honors edited=False vs edited=True AND renders unedited watermarked previews, while build_txt filters cropped-out blocks
+    proj = client.post("/api/projects", json={"name": "v4.10 Audit"}).json()
+    pid = proj["id"]
+    orig_blue = png_bytes((200, 200), "blue")
+    up = client.post(f"/api/projects/{pid}/files", files=[("files", ("page1.png", orig_blue, "image/png"))])
+    assert up.status_code == 200
+    proj = up.json()
+    iid = proj["images"][0]["id"]
+
+    # Save an edited red render, then set crop + inside/outside blocks
+    edited_red = png_bytes((200, 200), "red")
+    assert client.post(f"/api/projects/{pid}/images/{iid}/rendered", content=edited_red, headers={"Content-Type": "image/png"}).status_code == 200
+    proj = client.get(f"/api/projects/{pid}").json()
+    proj["images"][0]["crop"] = {"x": 20, "y": 40, "w": 120, "h": 120}
+    proj["images"][0]["blocks"] = [
+        {"id": 1, "text": "NOISY HEADER", "tr": "سرصفحه مزاحم", "x0": 25, "y0": 4, "x1": 110, "y1": 24, "enabled": True},
+        {"id": 2, "text": "CLEAN BODY", "tr": "متن اصلی داخل کادر", "x0": 30, "y0": 60, "x1": 120, "y1": 100, "enabled": True},
+    ]
+    assert client.put(f"/api/projects/{pid}/state", json={"state": proj}).status_code == 200
+
+    raw_crop_res = client.get(f"/api/projects/{pid}/images/{iid}/content?cropped=true")
+    ed_crop_res = client.get(f"/api/projects/{pid}/images/{iid}/content?edited=true&cropped=true")
+    with Image.open(io.BytesIO(raw_crop_res.content)) as im_raw, Image.open(io.BytesIO(ed_crop_res.content)) as im_ed:
+        assert im_raw.size == (120, 120) and im_ed.size == (120, 120)
+        assert im_raw.getpixel((10, 10))[:3] == (0, 0, 255), "edited=False must crop original blue image, not edited red"
+        assert im_ed.getpixel((10, 10))[:3] == (255, 0, 0), "edited=True must crop edited red image"
+
+    txt_export = client.post(f"/api/projects/{pid}/export", json={"kind": "txt", "image_ids": [iid], "name": "cropped-txt"})
+    assert txt_export.status_code == 200
+    txt_body = txt_export.content.decode("utf-8")
+    assert "CLEAN BODY" in txt_body and "متن اصلی داخل کادر" in txt_body
+    assert "NOISY HEADER" not in txt_body and "سرصفحه مزاحم" not in txt_body
+
+    # Revert edited render, attach logo-only watermark, remove crop -> /content?cropped=true renders watermark!
+    assert client.post(f"/api/projects/{pid}/images/{iid}/revert").status_code == 200
+    proj = client.get(f"/api/projects/{pid}").json()
+    proj["settings"] = proj.get("settings") or {}
+    proj["settings"]["watermarkLogos"] = logos_map
+    proj["images"][0]["crop"] = None
+    proj["images"][0]["watermark"] = logo_only_wm
+    assert client.put(f"/api/projects/{pid}/state", json={"state": proj}).status_code == 200
+    wm_prev_res = client.get(f"/api/projects/{pid}/images/{iid}/content?cropped=true")
+    with Image.open(io.BytesIO(wm_prev_res.content)) as wm_im:
+        assert wm_im.getpixel((100, 100))[0] > 100, "Unedited watermarked page preview must composite red logo"
+
+    # 5. context_start & context_text_translate surface actionable previewError instead of generic empty-text error
+    import comic_studio.local_nmt as nmt_mod
+    monkeypatch.setattr(nmt_mod, "models_dir", lambda: tmp_path / "empty_nmt_models")
+    prev_local = client.post(
+        f"/api/projects/{pid}/context-preview",
+        json={"image_ids": [iid], "provider": "local", "source_language": "eng", "skill": "", "summary": "", "reuse_repeated": True},
+    )
+    assert prev_local.status_code == 200
+    prev_json = prev_local.json()
+    assert prev_json["previewError"] and "دانلود" in prev_json["previewError"]
+    start_local = client.post(
+        f"/api/projects/{pid}/context-start",
+        json={"image_ids": [iid], "provider": "local", "source_language": "eng", "skill": "", "summary": "", "reuse_repeated": True, "confirmation": prev_json["signature"]},
+    )
+    assert start_local.status_code == 400
+    assert start_local.json()["detail"] == prev_json["previewError"]
+    assert "متنی برای ترجمه وجود ندارد" not in start_local.json()["detail"]
+
+    # Single-box context_text_preview & context_text_translate also surface actionable previewError instead of generic empty-text error
+    single_prev = client.post(
+        "/api/translate-text/context-preview",
+        json={"text": "Hello world!", "provider": "local", "source_language": "eng", "target_language": "fa"},
+    )
+    assert single_prev.status_code == 200
+    single_json = single_prev.json()
+    assert single_json["previewError"] and "دانلود" in single_json["previewError"]
+    single_exec = client.post(
+        "/api/translate-text/context",
+        json={
+            "text": "Hello world!",
+            "provider": "local",
+            "source_language": "eng",
+            "target_language": "fa",
+            "confirmation": single_json["signature"],
+        },
+    )
+    assert single_exec.status_code == 400
+    assert single_exec.json()["detail"] == single_json["previewError"]
+    assert "متنی برای ترجمه وجود ندارد" not in single_exec.json()["detail"]
+
 
 
 

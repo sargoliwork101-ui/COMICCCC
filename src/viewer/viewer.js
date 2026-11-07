@@ -666,7 +666,8 @@ async function getDisplaySource(it) {
     cv.getContext('2d').drawImage(bmp, x, y, w, h, 0, 0, w, h);
     const blob = await canvasToBlob(cv, 'image/png');
     cv.width = cv.height = 0;
-    const info = sniff(new Uint8Array(await blob.arrayBuffer()));
+    const headBlob = typeof blob.slice === 'function' ? blob.slice(0, 64) : blob;
+    const info = sniff(new Uint8Array(await headBlob.arrayBuffer()));
     it.cropCache = { i: it.i, blob, info, w, h, base, key };
     return it.cropCache;
   } finally { bmp.close(); }
@@ -1721,10 +1722,11 @@ async function composeVertically(group, pageKey) {
   }
   const blob = await canvasToBlob(cv, 'image/png');
   cv.width = cv.height = 0;
+  const headBlob = typeof blob.slice === 'function' ? blob.slice(0, 64) : blob;
   return {
     i: group[0].i, pdfKey: pageKey, pageOrder: Math.min(...group.map((it) => it.pdfOrder || it.i + 1)),
     sequence: Math.min(...group.map((it) => it.sequence)), blob, w, h,
-    info: sniff(new Uint8Array(await blob.arrayBuffer()))
+    info: sniff(new Uint8Array(await headBlob.arrayBuffer()))
   };
 }
 

@@ -980,7 +980,7 @@ function updateSummary() {
   $('emptyState').classList.toggle('hidden', total > 0);
   $('ocrBtn').disabled = !total; $('translateBtn').disabled = !total;
   $('exportBtn').disabled = !total;
-  ['selectAllBtn', 'selectNoneBtn', 'invertBtn', 'groupBtn', 'ungroupBtn', 'duplicateBtn', 'deleteBtn',
+  ['selectAllBtn', 'selectNoneBtn', 'invertBtn', 'groupBtn', 'ungroupBtn', 'watermarkBtn', 'duplicateBtn', 'deleteBtn',
     'approveSelectedBtn', 'unapproveSelectedBtn', 'selectApprovedBtn', 'selectUnapprovedBtn'].forEach((id) => {
     const btn = $(id);
     if (btn) btn.disabled = !total;
@@ -1036,7 +1036,7 @@ function renderGrid() {
     if (info) card.style.setProperty('--group-color', groupColor(info.id));
     const frameShell = document.createElement('div'); frameShell.className = 'tw-shell';
     const frame = document.createElement('div'); frame.className = 'tw';
-    const nextSrc = imageUrl(item, !!item.edited, Boolean(item.crop));
+    const nextSrc = imageUrl(item, !!item.edited, Boolean(item.crop || (!item.edited && hasActiveWatermark(item.watermark))));
     const reusable = prevImages.get(item.id);
     let image;
     if (reusable && reusable.dataset?.renderedSrc === nextSrc) {

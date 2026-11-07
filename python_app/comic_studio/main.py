@@ -31,6 +31,7 @@ from . import APP_NAME, APP_VERSION
 from .activity import ActivityLog, reporting
 from .backup import BackupError, cleanup_backup_temp, make_backup, restore_backup
 from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, clean_name, crop_box, image_payload
+from .watermark_render import has_active_watermark
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
 from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
 from .ocr_managed import (
@@ -545,11 +546,12 @@ def create_app() -> FastAPI:
         try:
             if cropped:
                 item = store._image_meta(project_id, image_id)
-                if crop_box(item) is not None:
-                    data, _, _, _ = image_payload(store, project_id, item, "png")
-                    return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
                 edited_candidate = project_root(project_id) / "images" / f"{image_id}-edited.png"
-                path = edited_candidate if edited_candidate.exists() else store.image_path(project_id, image_id, False)
+                use_edited = bool(edited and edited_candidate.exists())
+                if crop_box(item) is not None or ((not use_edited) and has_active_watermark(item.get("watermark"))):
+                    data, _, _, _ = image_payload(store, project_id, item, "png", allow_edited=use_edited)
+                    return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
+                path = edited_candidate if use_edited else store.image_path(project_id, image_id, False)
             else:
                 path = store.image_path(project_id, image_id, edited)
         except (KeyError, FileNotFoundError) as exc:
@@ -1160,6 +1162,7 @@ def create_app() -> FastAPI:
                     'providerLabel':'Google Translate؛ در صورت خطا MyMemory', 'base_url':'https://translate.googleapis.com/translate_a/single',
                     'fallback_url':'https://api.mymemory.translated.net/get', 'model':'',
                     'note':f"زبان مقصد: {target_label}.{group_notice} متن صفحه‌ها جداگانه و ترتیبی ارسال و ذخیره می‌شود؛ تأیید یک‌بار برای کل نوبت است. سقف مؤثر {run['limit']} نویسه و برای MyMemory حداکثر ۵۰۰ بایت UTF-8 است. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری. خلاصه و اسکیل AI در حالت رایگان استفاده نمی‌شوند. تنظیمات: {limits}.",
+                    'previewError': run.get('previewError', ''),
                     'signature':digest(run), 'totalLimit':run['limit'], 'resume':bool(run.get('id'))}
         if provider == 'local':
             model_id = str(policy.get('model') or DEFAULT_LOCAL_NMT_MODEL)
@@ -1215,7 +1218,7 @@ def create_app() -> FastAPI:
         if values.confirmation != digest(run):
             raise HTTPException(409, "اطلاعات یا تنظیمات پس از پیش‌نمایش تغییر کرده است؛ دوباره بررسی و تأیید کنید.")
         if not chosen:
-            raise HTTPException(400, "متنی برای ترجمه وجود ندارد.")
+            raise HTTPException(400, str(run.get('previewError') or "متنی برای ترجمه وجود ندارد."))
         def merge_latest_if_safe(latest: dict[str, Any]) -> None:
             nonlocal state, expected
             if latest.get('updatedAt', '') == expected:
@@ -1438,16 +1441,13 @@ def create_app() -> FastAPI:
             missing_msg = _local_nmt_missing_message(settings)
             if missing_msg:
                 run['previewError'] = missing_msg
-        if values.provider != 'free':
-            try:
-                if run.get('previewError'):
-                    raise TranslationError(run['previewError'])
-                request, chosen = next_request(run, values.skill)
-            except TranslationError as exc:
-                request, chosen = build_run_request(run, values.skill), []
-                run['previewError'] = str(exc)
-        else:
+        try:
+            if run.get('previewError'):
+                raise TranslationError(run['previewError'])
             request, chosen = next_request(run, values.skill)
+        except TranslationError as exc:
+            request, chosen = build_run_request(run, values.skill), []
+            run['previewError'] = str(exc)
         return state, run, request, chosen
 
     @app.post('/api/translate-text/context-preview')
@@ -1474,7 +1474,7 @@ def create_app() -> FastAPI:
                 if not values.confirmation or values.confirmation != digest(run):
                     raise HTTPException(409, 'متن یا تنظیمات پس از پیش‌نمایش تغییر کرده است.')
                 if not chosen:
-                    raise HTTPException(400, 'متنی برای ترجمه وجود ندارد.')
+                    raise HTTPException(400, str(run.get('previewError') or 'متنی برای ترجمه وجود ندارد.'))
             else:
                 if entry['signature'] != signature:
                     raise HTTPException(409, 'متن یا تنظیمات پاسخ اصلاح‌شده تغییر کرده است.')

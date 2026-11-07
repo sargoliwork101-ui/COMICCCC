@@ -2129,7 +2129,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas409: verText.includes('۴.۰۹'),
+            verHas410: verText.includes('۴.۱۰'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2148,8 +2148,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.09 displays version 4.09 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas409 === true
+      'v4.00/v4.10 displays version 4.10 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas410 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3280,6 +3280,57 @@ function check(name, condition) {
         && v409Check.ch4HasGroupTranslate === true
         && v409Check.ch8HasGroupTranslate === true
         && v409Check.previewShowsGroupHeader === true,
+    );
+  }
+
+  // v4.10: Verify empty-project watermarkBtn guard, unedited watermarked thumbnail URL, and Help Chapters 3 & 13 audit updates
+  {
+    const v410Check = await vm.runInContext(`
+      (() => {
+        const savedImages = state.project.images.slice();
+        try {
+          state.project.images = [];
+          updateSummary();
+          const disabledWhenEmpty = $('watermarkBtn')?.disabled === true;
+          state.project.images = [{
+            ...savedImages[0],
+            edited: false,
+            crop: null,
+            watermark: { enabled: true, text: '', logoId: 'logo-1', opacity: 60 },
+          }];
+          updateSummary();
+          renderGrid();
+          const enabledWhenPopulated = $('watermarkBtn')?.disabled === false;
+          const thumbSrc = document.querySelector('#grid .item .tw > img')?.dataset?.renderedSrc || '';
+
+          openHelpDialog('import-grid-crop');
+          const ch3Text = $('helpContentArea')?.textContent || '';
+          openHelpDialog('storage-memory-network');
+          const ch13Text = $('helpContentArea')?.textContent || '';
+          closeDialog('helpDialog');
+
+          return {
+            disabledWhenEmpty,
+            enabledWhenPopulated,
+            thumbUsesCroppedPreview: thumbSrc.includes('cropped=true') && !thumbSrc.includes('edited=true'),
+            ch3MentionsCropFilterAndLogoWm: ch3Text.includes('کادرهای متنی بیرون از ناحیهٔ برش') && ch3Text.includes('فقط لوگوی شفاف'),
+            ch13MentionsSetupOnlyAndBundled: ch13Text.includes('--setup-only') && ch13Text.includes('bundled_models'),
+          };
+        } finally {
+          state.project.images = savedImages;
+          updateSummary();
+          renderGrid();
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+        }
+      })()
+    `, context);
+    check(
+      'v4.10 disables watermarkBtn on empty projects, previews unedited watermarked pages via cropped=true, and syncs Help Chapters 3 & 13',
+      v410Check.disabledWhenEmpty === true
+        && v410Check.enabledWhenPopulated === true
+        && v410Check.thumbUsesCroppedPreview === true
+        && v410Check.ch3MentionsCropFilterAndLogoWm === true
+        && v410Check.ch13MentionsSetupOnlyAndBundled === true,
     );
   }
 

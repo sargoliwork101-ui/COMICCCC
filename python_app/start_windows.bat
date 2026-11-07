@@ -3,14 +3,14 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem Comic OCR Studio 4.09 - Windows setup and launcher.
+rem Comic OCR Studio 4.10 - Windows setup and launcher.
 rem Dependencies are installed in .venv during setup; later launches reuse that local environment.
 rem Existing supported system Python installations are never modified or removed.
 
 set "APP_DIR=%CD%"
 set "VENV_DIR=%APP_DIR%\.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
-set "READY=%VENV_DIR%\.comic-ocr-studio-4.09.ready"
+set "READY=%VENV_DIR%\.comic-ocr-studio-4.10.ready"
 set "OFFLINE_WHEELS=%APP_DIR%\wheelhouse"
 set "OFFLINE_PYTHON_EXE=%APP_DIR%\offline_python\python-3.13.17-amd64.exe"
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
@@ -20,9 +20,12 @@ set "PYTHON_MANAGER_AUTOMATIC_INSTALL=0"
 set "PIP_RETRIES=1"
 set "PIP_TIMEOUT=15"
 set "COMIC_MANAGED_PYTHON=%LocalAppData%\Programs\ComicOCRStudio\Python313\python.exe"
+set "SETUP_ONLY="
+if /i "%~1"=="--setup-only" set "SETUP_ONLY=1"
+if /i "%~1"=="--help" set "SETUP_ONLY=1"
 
 rem Fast path: if a standalone packaged ComicOCRStudio.exe sits next to this launcher, run it directly.
-if exist "%APP_DIR%\ComicOCRStudio.exe" (
+if not defined SETUP_ONLY if exist "%APP_DIR%\ComicOCRStudio.exe" (
     start "" "%APP_DIR%\ComicOCRStudio.exe"
     exit /b 0
 )
@@ -155,6 +158,10 @@ goto run_app
 :run_app
 set "PIP_RETRIES="
 set "PIP_TIMEOUT="
+if defined SETUP_ONLY (
+    echo [Comic OCR Studio] Environment setup complete.
+    exit /b 0
+)
 echo [Comic OCR Studio] Starting. Answer the browser and window questions below...
 "%VENV_PYTHON%" "%APP_DIR%\run.py"
 if errorlevel 1 goto failed
@@ -246,7 +253,7 @@ exit /b 0
 :failed_preserve
 echo.
 echo Could not preserve the old .venv. Close programs using it and retry. Nothing was deleted.
-pause
+if not defined SETUP_ONLY pause
 exit /b 1
 
 :no_python
@@ -254,12 +261,12 @@ echo.
 echo Python setup could not be completed. Check the internet connection and Windows permissions.
 echo You can install 64-bit Python 3.11, 3.12 or 3.13 from https://www.python.org/downloads/ and retry.
 echo The automatic installer requires PowerShell and a 64-bit supported Windows system.
-pause
+if not defined SETUP_ONLY pause
 exit /b 1
 
 :failed
 echo.
 echo Setup or application failed. Read the error above, then try again.
 echo Initial setup requires internet access. No project files were removed.
-pause
+if not defined SETUP_ONLY pause
 exit /b 1
