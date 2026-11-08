@@ -706,6 +706,7 @@
       bold: b.bold !== false,           // پیش‌فرض مثل گذشته: پررنگ
       italic: !!b.italic,
       underline: !!b.underline,
+      strike: !!b.strike,
       size: Number.isFinite(+b.size) && +b.size > 0 ? +b.size : null,
       color: /^#[0-9a-fA-F]{6}$/.test(b.color) ? b.color : null, // null = رنگ خودکار بر اساس پس‌زمینه
       fontFamily: rawFf || null,
@@ -856,7 +857,7 @@
   }
 
   function resolveDomNodeStyle(node, rootBox, st, baseSize) {
-    let bold = st.bold !== false, italic = !!st.italic, underline = !!st.underline, strike = false;
+    let bold = st.bold !== false, italic = !!st.italic, underline = !!st.underline, strike = !!st.strike;
     let size = baseSize, color = null, dir = st.dir, fontFamily = st.fontFamily || null;
     const chain = [];
     let cur = node?.parentElement;
@@ -1211,7 +1212,7 @@
               ctx.lineTo(x + m.widths[idx], y + wSize * 0.55);
               ctx.stroke();
             }
-            if (w.strike) {
+            if (st.strike || w.strike) {
               ctx.strokeStyle = wColor;
               ctx.lineWidth = Math.max(1, wSize / 14);
               ctx.beginPath();
@@ -1247,6 +1248,17 @@
           ctx.beginPath();
           ctx.moveTo(ux, uy);
           ctx.lineTo(ux + lineW, uy);
+          ctx.stroke();
+        }
+        if (st.strike) {
+          const lineW = ctx.measureText(ln).width;
+          const sx = st.align === 'left' ? anchorX : st.align === 'center' ? anchorX - lineW / 2 : anchorX - lineW;
+          const sy = y - f.size * 0.2;
+          ctx.strokeStyle = txt;
+          ctx.lineWidth = Math.max(1, f.size / 14);
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(sx + lineW, sy);
           ctx.stroke();
         }
         y += f.lh;

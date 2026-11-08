@@ -2499,7 +2499,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
       // v3.85–v4.09: Verify version badge ۴.۰۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, optional storage settings, race-free backup, built-in offline local translator, custom manual text boxes, watermarks, full-attribute box copy/paste/duplicate, API key priority ordering, lossless PDF import, and grouped-page translation
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۲۱ · Python', 'header shows version ۴.۲۱');
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۲۲ · Python', 'header shows version ۴.۲۲');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2992,7 +2992,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         await sellerPage.close();
         assert.equal(sellerVisualCheck.fontLoaded, true, 'Vazirmatn.woff2 loads in Seller Panel');
         assert.equal(sellerVisualCheck.logoNaturalWidth, 128, 'icon128.png loads in Seller Panel topbar');
-        assert.equal(sellerVisualCheck.ver, '۴.۲۱ · پنل فروشنده', 'Seller Panel topbar version badge matches Studio');
+        assert.equal(sellerVisualCheck.ver, '۴.۲۲ · پنل فروشنده', 'Seller Panel topbar version badge matches Studio');
         assert.equal(sellerVisualCheck.darkBg, 'rgb(11, 13, 18)', 'Seller Panel dark --bg matches Studio #0b0d12');
         assert.equal(sellerVisualCheck.lightBg, 'rgb(243, 244, 248)', 'Seller Panel light --bg matches Studio #f3f4f8');
         assert.equal(sellerVisualCheck.hasVazirmatnInComputed, true, 'Seller Panel body fontFamily uses Vazirmatn');
@@ -3023,7 +3023,101 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(v421BrowserCheck.uncheckedOnEng, true, 'Returning to English auto-unchecks #ocrPersianPreprocess when not manually customized');
       assert.equal(v421BrowserCheck.helpMentionsIt, true, 'Help guide documents پیش‌پردازش ویژه فارسی');
 
-      console.log('PASS: v3.81–v4.21 Persian OCR, #ocrPersianPreprocess dot-preserving preprocessing, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, v4.15–v4.18 modular license/vendor guard, v4.19 Seller Panel visual/Vazirmatn parity, and v4.20 full audit hardening');
+      // v4.22: Real Chromium verification that editing controls are NEVER disabled across idle, merged, copied, OCR, and Text-tab states
+      const v422BrowserCheck = await page.evaluate(async (realProj) => {
+        const countDisabledInDock = () => [...document.querySelectorAll('#inlineEditor button:not(#editorPasteBlock), #inlineEditor select, #inlineEditor input')]
+          .filter((el) => el.disabled === true).length;
+        const prevSnap = JSON.parse(JSON.stringify(state.project));
+        const prevOverlay = state.project?.settings?.overlayMode || 'translation';
+        try {
+          adoptProject(JSON.parse(JSON.stringify(realProj)));
+          const img = state.project?.images?.[0];
+          if (!img) return { ok: false, reason: 'no-image' };
+          img.blocks = [
+            { id: 701, text: 'Line A', tr: 'سطر اول', richHtml: '<span style="color:#ff0000">سطر اول</span>', conf: 95, enabled: true, bg: 'white', shape: 'rect', x0: 20, y0: 20, x1: 180, y1: 55, tx0: 20, ty0: 20, tx1: 180, ty1: 55 },
+            { id: 702, text: 'Line B', tr: 'سطر دوم', richHtml: '', conf: 95, enabled: true, bg: 'white', shape: 'rect', x0: 20, y0: 62, x1: 180, y1: 98, tx0: 20, ty0: 62, tx1: 180, ty1: 98 },
+          ];
+          setOverlayMode('translation', false);
+          await openEditor(img.id);
+          closeInlineEditor({ commit: false });
+          state.selectedBlockIds = [];
+          state.activeBlockId = null;
+          syncEditorShapeControls();
+          const disabledWhenIdle = countDisabledInDock();
+
+          // Merge two boxes
+          state.selectedBlockIds = ['701', '702'];
+          state.activeBlockId = '701';
+          mergeSelectedText();
+          const merged = img.blocks[0];
+          const disabledAfterMerge = countDisabledInDock();
+
+          // Apply Font + Bold directly from toolbar WITHOUT double-clicking first (box-level direct toggle)
+          document.getElementById('inlineFontFamily').value = 'Tahoma';
+          document.getElementById('inlineFontFamily').dispatchEvent(new Event('change', { bubbles: true }));
+          document.querySelector('#inlineEditor button[aria-label="پررنگ"]').click();
+          const fontAndBoldDirect = merged.fontFamily === 'Tahoma' && merged.bold === false;
+          // Also verify structural block command (Heading 2) auto-opens inline session on merged box without pre-opening
+          const fmtSel = document.querySelector('#inlineEditor select[aria-label="قالب بند"]');
+          fmtSel.value = 'h2';
+          fmtSel.dispatchEvent(new Event('change', { bubbles: true }));
+          const autoOpenedForHeading = Boolean(inlineDraft && inlineDraft.block === merged);
+          closeInlineEditor();
+          const mergedFormatted = fontAndBoldDirect && autoOpenedForHeading && /<h2\b/i.test(merged.richHtml || '');
+
+          // Duplicate merged box, format copy directly from toolbar, then split copied merged box
+          const copiedList = duplicateEditorBlocks([merged]);
+          const copied = copiedList[0];
+          state.selectedBlockIds = [String(copied.id)];
+          state.activeBlockId = String(copied.id);
+          document.querySelector('#inlineEditor button[aria-label="ایتالیک"]').click();
+          const copiedFormatted = copied.italic === true;
+
+          state.selectedBlockIds = [String(copied.id)];
+          state.activeBlockId = String(copied.id);
+          splitSelectedText();
+          const allIds = img.blocks.map((b) => String(b.id));
+          const uniqueIdsAfterSplit = new Set(allIds).size === allIds.length && img.blocks.length === 3;
+
+          // Switch to OCR mode: zero .plain-mode and zero disabled controls + rich style saved in ocrRichHtml
+          setOverlayMode('ocr', false);
+          openInlineEditor(img.blocks[0], null);
+          const disabledInOcr = countDisabledInDock();
+          const hasPlainClass = document.getElementById('inlineEditor').classList.contains('plain-mode');
+          document.querySelector('#inlineEditor button[aria-label="ایتالیک"]').click();
+          closeInlineEditor();
+          const ocrRichSaved = Boolean(img.blocks[0].ocrRichHtml && /font-style:\s*italic|<em|<i\b/i.test(img.blocks[0].ocrRichHtml));
+          await cancelEditor();
+
+          return {
+            ok: true,
+            disabledWhenIdle,
+            disabledAfterMerge,
+            mergedFormatted,
+            copiedFormatted,
+            uniqueIdsAfterSplit,
+            disabledInOcr,
+            hasPlainClass,
+            ocrRichSaved,
+          };
+        } finally {
+          closeInlineEditor({ commit: false });
+          if (document.getElementById('editorDialog')?.open) closeDialog('editorDialog');
+          adoptProject(prevSnap);
+          setOverlayMode(prevOverlay, false);
+        }
+      }, backupProject);
+      assert.equal(v422BrowserCheck.ok, true, `v4.22 browser check executed: ${JSON.stringify(v422BrowserCheck)}`);
+      assert.equal(v422BrowserCheck.disabledWhenIdle, 0, 'Zero disabled editing controls when idle');
+      assert.equal(v422BrowserCheck.disabledAfterMerge, 0, 'Zero disabled editing controls after merge');
+      assert.equal(v422BrowserCheck.mergedFormatted, true, `Merged box formats directly from toolbar: ${JSON.stringify(v422BrowserCheck)}`);
+      assert.equal(v422BrowserCheck.copiedFormatted, true, `Copied merged box formats directly from toolbar: ${JSON.stringify(v422BrowserCheck)}`);
+      assert.equal(v422BrowserCheck.uniqueIdsAfterSplit, true, `Splitting copied merged box produces unique IDs: ${JSON.stringify(v422BrowserCheck)}`);
+      assert.equal(v422BrowserCheck.disabledInOcr, 0, 'Zero disabled editing controls in OCR mode');
+      assert.equal(v422BrowserCheck.hasPlainClass, false, 'OCR mode never hides rich toolbar with .plain-mode');
+      assert.equal(v422BrowserCheck.ocrRichSaved, true, `OCR mode persists rich HTML independently in ocrRichHtml: ${JSON.stringify(v422BrowserCheck)}`);
+
+      console.log('PASS: v3.81–v4.22 Persian OCR, #ocrPersianPreprocess, always-enabled rich editing across merged/copied/OCR boxes, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, v4.15–v4.18 modular license/vendor guard, v4.19 Seller Panel visual/Vazirmatn parity, and v4.20 full audit hardening');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

@@ -865,7 +865,7 @@ function check(name, condition) {
     check('AI previewError opens translationPreviewDialog with clear error and AI settings shortcut instead of throwing empty-requests failure', $('translationPreviewDialog').open === true && !$('translationDialog').open && !$('translationPreviewError').classList.contains('hidden') && !$('openAiLimitFromPreview').classList.contains('hidden') && $('translationPreviewConfirm').disabled === true);
     $('translationPreviewCancel').click();
     await vm.runInContext('openEditor(state.project.images[0].id)', context);
-    check('inline editor stays permanently visible in idle state on openEditor', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && $('inlineEditorSize').disabled === true);
+    check('inline editor stays permanently visible and enabled in idle state on openEditor', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && $('inlineEditorSize').disabled === false);
     check('box alignment and same-size controls live inside inlineEditor below a divider with zero duplicate controls', !!$('inlineEditor').querySelector('.inline-section-divider') && !!$('inlineEditor').querySelector('.inline-box-layout-tools #editorSameSize') && !!$('inlineEditor').querySelector('.inline-box-layout-tools #editorAlignLeft') && !window.document.querySelector('.editor-side .editor-multi-tools') && !window.document.querySelector('.inline-box-settings') && window.document.querySelectorAll('#inlineLineReset').length === 1 && ![...$('blockList').querySelectorAll('button')].some((b) => b.textContent === 'ویرایش همین متن'));
     $('blockList').querySelector('.block-tr-edit').click();
     check('clicking sidebar translation line opens on-image inline editor directly', !$('inlineEditor').classList.contains('is-idle') && !!$('editorBoxes').querySelector('.editor-box.editing'));
@@ -2173,7 +2173,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas421: verText.includes('۴.۲۱'),
+            verHas422: verText.includes('۴.۲۲'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2192,8 +2192,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.21 displays version 4.21 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas421 === true
+      'v4.00/v4.22 displays version 4.22 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas422 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -4147,6 +4147,168 @@ function check(name, condition) {
         && v421UiCheck.manualOverrideRespected === true
         && v421UiCheck.helpHasPersianPreprocess === true,
       JSON.stringify(v421UiCheck),
+    );
+
+    const v422AlwaysEnabledCheck = await vm.runInContext(`
+      (async () => {
+        const prevImages = JSON.parse(JSON.stringify(state.project.images));
+        const prevSettings = JSON.parse(JSON.stringify(state.project.settings || {}));
+        const origFetch = window.fetch;
+        window.fetch = async (url, opts) => {
+          const u = String(url);
+          if (u.endsWith('/content')) return { ok: true, status: 200, headers: { get: () => 'image/png' }, blob: async () => new window.Blob() };
+          if (u.endsWith('/rendered') || (u.includes('/api/projects/') && opts?.method === 'PUT')) {
+            return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project, text: async () => JSON.stringify(state.project) };
+          }
+          return origFetch(url, opts);
+        };
+        try {
+          const testImgId = prevImages[0]?.id || 'img-1';
+          state.project.settings.overlayMode = 'translation';
+          state.project.images = [{
+            ...(prevImages[0] || {}),
+            id: testImgId,
+            name: 'v422.png',
+            width: 600,
+            height: 800,
+            selected: true,
+            blocks: [
+              { id: 1, x0: 20, y0: 20, x1: 220, y1: 60, text: 'LINE ONE', tr: 'خط اول', richHtml: '<div style="color:#112233">خط اول</div>', enabled: true, bg: 'white', dir: 'rtl', align: 'right', bold: true },
+              { id: 2, x0: 20, y0: 70, x1: 220, y1: 110, text: 'LINE TWO', tr: 'خط دوم', richHtml: '<div>خط دوم</div>', enabled: true, bg: 'white', dir: 'rtl', align: 'right', bold: true },
+            ],
+          }];
+          await openEditor(testImgId);
+          clearEditorSelection();
+
+          const countDisabledControls = () => [...document.querySelectorAll(
+            '#inlineEditor button:not(#editorPasteBlock), #inlineEditor select, #inlineEditor input'
+          )].filter((el) => el.disabled).length;
+
+          // 1. Zero disabled editing controls even in idle state with 0 selected boxes
+          const disabledIdleNoSelection = countDisabledControls();
+
+          // 2. Merge two boxes -> merged box is selected (!inlineDraft). ALL controls enabled and work directly!
+          selectAllEditorBlocks();
+          mergeSelectedText();
+          const disabledAfterMerge = countDisabledControls();
+          const mergedBlock = state.project.images[0].blocks[0];
+          const cleanMergedHtml = !mergedBlock.richHtml.includes('</div><br><div');
+
+          // Direct toolbar formatting on selected merged box WITHOUT opening inlineDraft first:
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="پررنگ"]').click();
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="ایتالیک"]').click();
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="زیرخط"]').click();
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="خط‌خورده"]').click();
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="تراز وسط"]').click();
+          const colorInp = document.querySelector('#inlineEditor .classic-toolbar input[type="color"]');
+          colorInp.value = '#cc1144';
+          colorInp.dispatchEvent(new window.Event('input', { bubbles: true }));
+          const directMergedFormattingOk = (
+            mergedBlock.bold === false
+            && mergedBlock.italic === true
+            && mergedBlock.underline === true
+            && mergedBlock.strike === true
+            && mergedBlock.align === 'center'
+            && mergedBlock.color === '#cc1144'
+          );
+
+          // 3. Open merged box with clickEvent = null (sidebar / programmatic) and detached range recovery:
+          openInlineEditor(mergedBlock, null);
+          const seededRangeValid = Boolean(inlineDraft && inlineDraft.range && $('inlineEditorField').contains(inlineDraft.range.startContainer));
+          inlineDraft.range = null;
+          window.getSelection().removeAllRanges();
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="تراز چپ"]').click();
+          const formatSelect = document.querySelector('#inlineEditor .classic-toolbar select[aria-label="قالب بند"]');
+          formatSelect.value = 'h2';
+          formatSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
+          const headingAppliedOnDetachedRange = $('inlineEditorField').innerHTML.toLowerCase().includes('<h2');
+          closeInlineEditor();
+
+          // 4. Duplicate the merged box, then split ONLY the duplicate -> unique IDs & shifted coordinates!
+          const dupes = duplicateEditorBlocks([mergedBlock]);
+          const copiedMerged = dupes[0];
+          const disabledAfterCopy = countDisabledControls();
+          selectEditorBlock(copiedMerged.id, false, false);
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="پررنگ"]').click();
+          const copiedFormatWorked = copiedMerged.bold === true;
+          splitSelectedText();
+          const allBlocksAfterSplit = state.project.images[0].blocks;
+          const allIdsUnique = new Set(allBlocksAfterSplit.map((b) => String(b.id))).size === allBlocksAfterSplit.length;
+          const splitStayedShifted = allBlocksAfterSplit.length === 3
+            && allBlocksAfterSplit[1].x0 === 42
+            && allBlocksAfterSplit[1].y0 === 42
+            && allBlocksAfterSplit[2].x0 === 42
+            && allBlocksAfterSplit[2].y0 === 92;
+
+          // 5. OCR mode rich editing: toolbar NEVER enters plain-mode, plain edit stays _plainText=true, rich edit saves ocrRichHtml
+          setOverlayMode('ocr', true);
+          const ocrTarget = state.project.images[0].blocks[0];
+          openInlineEditor(ocrTarget, null);
+          const disabledInOcrMode = countDisabledControls();
+          const noPlainModeClass = !$('inlineEditor').classList.contains('plain-mode')
+            && !classicEditor.element.classList.contains('classic-plain-mode');
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="ایتالیک"]').click();
+          closeInlineEditor();
+          const ocrOverlayRich = overlayBlock(ocrTarget, 'ocr');
+          const ocrRichSavedWithoutTouchingTr = Boolean(
+            ocrTarget.ocrRichHtml.includes('italic')
+            && ocrOverlayRich._plainText === false
+            && ocrTarget.tr.includes('خط اول')
+          );
+
+          // Switch to Text (HTML) tab -> toolbar controls remain enabled
+          openInlineEditor(ocrTarget, null);
+          document.querySelectorAll('#inlineEditor .classic-tabs [role="tab"]')[1].click();
+          const disabledInTextTab = countDisabledControls();
+          closeInlineEditor();
+          await closeEditor(false);
+
+          const helpVisual = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'visual-editor');
+          const helpUpdated = Boolean(helpVisual && helpVisual.features.some((f) => f.includes('همیشه فعال')));
+
+          return {
+            disabledIdleNoSelection,
+            disabledAfterMerge,
+            cleanMergedHtml,
+            directMergedFormattingOk,
+            seededRangeValid,
+            headingAppliedOnDetachedRange,
+            disabledAfterCopy,
+            copiedFormatWorked,
+            allIdsUnique,
+            splitStayedShifted,
+            disabledInOcrMode,
+            noPlainModeClass,
+            ocrRichSavedWithoutTouchingTr,
+            disabledInTextTab,
+            helpUpdated,
+          };
+        } finally {
+          window.fetch = origFetch;
+          state.project.images = prevImages;
+          state.project.settings = prevSettings;
+          setOverlayMode(prevSettings.overlayMode || 'translation', false);
+        }
+      })()
+    `, context);
+    check(
+      'v4.22 keeps all editing controls permanently enabled across idle, merged, copied, OCR, and Text-tab states with detached-range recovery and unique split IDs on copied merged boxes',
+      v422AlwaysEnabledCheck.disabledIdleNoSelection === 0
+        && v422AlwaysEnabledCheck.disabledAfterMerge === 0
+        && v422AlwaysEnabledCheck.cleanMergedHtml === true
+        && v422AlwaysEnabledCheck.directMergedFormattingOk === true
+        && v422AlwaysEnabledCheck.seededRangeValid === true
+        && v422AlwaysEnabledCheck.headingAppliedOnDetachedRange === true
+        && v422AlwaysEnabledCheck.disabledAfterCopy === 0
+        && v422AlwaysEnabledCheck.copiedFormatWorked === true
+        && v422AlwaysEnabledCheck.allIdsUnique === true
+        && v422AlwaysEnabledCheck.splitStayedShifted === true
+        && v422AlwaysEnabledCheck.disabledInOcrMode === 0
+        && v422AlwaysEnabledCheck.noPlainModeClass === true
+        && v422AlwaysEnabledCheck.ocrRichSavedWithoutTouchingTr === true
+        && v422AlwaysEnabledCheck.disabledInTextTab === 0
+        && v422AlwaysEnabledCheck.helpUpdated === true,
+      JSON.stringify(v422AlwaysEnabledCheck),
     );
   }
 

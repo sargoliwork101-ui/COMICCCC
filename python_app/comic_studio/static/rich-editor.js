@@ -31,9 +31,29 @@
     function restore() { field.focus({ preventScroll: true }); if (savedRange && field.contains(savedRange.startContainer) && field.contains(savedRange.endContainer)) { const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(savedRange); } }
     const rawHtml = () => typeof options.serializeHTML === 'function' ? options.serializeHTML(field) : field.innerHTML;
     function html() { return sanitize(mode === 'text' ? source.value : rawHtml()); }
+    function domTextWithBlocks(rootEl) {
+      let out = '';
+      const isBlock = (el) => /^(DIV|P|H[1-6]|LI|PRE|BLOCKQUOTE|TR|HR)$/i.test(el?.tagName || '');
+      const walk = (node) => {
+        if (!node) return;
+        if (node.nodeType === 3) { out += node.nodeValue || ''; return; }
+        if (node.nodeType !== 1) return;
+        if (node.tagName === 'BR') { out += '\n'; return; }
+        const block = isBlock(node);
+        if (block && out.length > 0 && !out.endsWith('\n')) out += '\n';
+        for (let ch = node.firstChild; ch; ch = ch.nextSibling) walk(ch);
+        if (block && !out.endsWith('\n') && node.nextSibling) out += '\n';
+      };
+      for (let ch = rootEl.firstChild; ch; ch = ch.nextSibling) walk(ch);
+      return out.replace(/\n+$/, '');
+    }
     function text() {
       const hidden = field.hidden; if (hidden) { field.innerHTML = html(); field.hidden = false; }
-      const value = (field.innerText ?? field.textContent ?? '').replace(/\u00a0/g, ' '); if (hidden) field.hidden = true; return value;
+      const useFallback = typeof field.innerText !== 'string' || !field.isConnected || root.getComputedStyle?.(field)?.display === 'none';
+      const raw = useFallback ? domTextWithBlocks(field) : field.innerText;
+      const value = (raw ?? field.textContent ?? '').replace(/\u00a0/g, ' ');
+      if (hidden) field.hidden = true;
+      return value;
     }
     let savedAt = '';
     const autosaveMs = Math.max(1000, options.autosaveInterval || 3000);
@@ -47,24 +67,47 @@
     function changed() { dirty = true; scheduleDraftSave(); if (mode === 'text') { field.innerHTML = html(); } updateStatus(); const value = html(); listeners.forEach((fn) => fn(value)); }
     function setMode(next) {
       if (next === mode) return;
-      if (next === 'text') { closeModal({ restoreFocus: false }); remember(); source.value = sanitize(rawHtml()); field.hidden = true; source.hidden = false; mode = 'text'; source.focus(); }
-      else { field.innerHTML = sanitize(source.value); source.hidden = true; field.hidden = false; mode = 'visual'; field.dispatchEvent(new Event('input', { bubbles: true })); field.focus(); }
+      if (next === 'text') {
+        if (typeof options.onEnsureTarget === 'function' && options.onEnsureTarget() === false) return;
+        closeModal({ restoreFocus: false }); remember(); source.value = sanitize(rawHtml()); field.hidden = true; source.hidden = false; mode = 'text'; source.focus();
+      } else {
+        field.innerHTML = sanitize(source.value); source.hidden = true; field.hidden = false; mode = 'visual'; field.dispatchEvent(new Event('input', { bubbles: true })); field.focus();
+      }
       visualTab.setAttribute('aria-selected', String(mode === 'visual')); textTab.setAttribute('aria-selected', String(mode === 'text'));
-      toolbar.querySelectorAll('button,select,input').forEach((control) => { control.disabled = mode === 'text' && !control.dataset.allowText; }); updateStatus();
+      toolbar.querySelectorAll('button,select,input').forEach((control) => { control.disabled = false; }); updateStatus();
     }
     visualTab.addEventListener('click', () => setMode('visual')); textTab.addEventListener('click', () => setMode('text')); visualTab.setAttribute('aria-selected', 'true'); textTab.setAttribute('aria-selected', 'false');
-    function exec(command, value = null) { if (mode !== 'visual') return; restore(); document.execCommand('styleWithCSS', false, true); document.execCommand(command, false, value); remember(); changed(); }
+    function exec(command, value = null) {
+      if (typeof options.onEnsureTarget === 'function' && options.onEnsureTarget() === false) return;
+      if (mode !== 'visual') setMode('visual');
+      restore();
+      if (!savedRange && field) {
+        const r = document.createRange();
+        r.selectNodeContents(field);
+        r.collapse(false);
+        const sel = window.getSelection?.();
+        if (sel) { sel.removeAllRanges(); sel.addRange(r); }
+        savedRange = r.cloneRange();
+      }
+      try { document.execCommand('styleWithCSS', false, true); } catch {}
+      try { document.execCommand(command, false, value); } catch {}
+      remember(); changed();
+    }
     function button(row, key, title, fn) { const b = document.createElement('button'); b.type = 'button'; b.className = 'classic-button'; b.title = title; b.setAttribute('aria-label', title); b.innerHTML = icon(key); b.addEventListener('mousedown', (e) => e.preventDefault()); b.addEventListener('click', fn); row.appendChild(b); return b; }
     const format = document.createElement('select'); format.setAttribute('aria-label', 'قالب بند');
     [['p','Paragraph'],['h1','Heading 1'],['h2','Heading 2'],['h3','Heading 3'],['h4','Heading 4'],['h5','Heading 5'],['h6','Heading 6'],['pre','Preformatted']].forEach(([v,t]) => { const o = document.createElement('option'); o.value=v; o.textContent=t; format.appendChild(o); });
-    format.addEventListener('change', () => exec('formatBlock', `<${format.value}>`));
-    [['bold','پررنگ'],['italic','ایتالیک'],['underline','زیرخط'],['strikeThrough','خط‌خورده']].forEach(([cmd,label]) => button(row1,cmd,label,()=>options.inlineCommand ? options.inlineCommand(cmd, () => exec(cmd)) : exec(cmd)));
-    const color=document.createElement('input'); color.type='color';color.value='#000000';color.className='classic-color';color.setAttribute('aria-label','رنگ متن');color.title='رنگ متن (کلمهٔ انتخابی یا خط فعلی)'; color.addEventListener('pointerdown',remember); color.addEventListener('input',()=>{if (!options.color || !options.color(color.value)) exec('foreColor',color.value);});row1.appendChild(color);
-    const clearBtn=button(row1,'removeFormat','پاک کردن قالب‌بندی',()=>options.clearFormat ? options.clearFormat(() => exec('removeFormat')) : exec('removeFormat'));
+    format.addEventListener('change', () => {
+      if (mode !== 'visual') setMode('visual');
+      if (typeof options.formatBlock === 'function' && options.formatBlock(format.value)) return;
+      exec('formatBlock', `<${format.value}>`);
+    });
+    [['bold','پررنگ'],['italic','ایتالیک'],['underline','زیرخط'],['strikeThrough','خط‌خورده']].forEach(([cmd,label]) => button(row1,cmd,label,()=>{ if (mode !== 'visual') setMode('visual'); return options.inlineCommand ? options.inlineCommand(cmd, () => exec(cmd)) : exec(cmd); }));
+    const color=document.createElement('input'); color.type='color';color.value='#000000';color.className='classic-color';color.setAttribute('aria-label','رنگ متن');color.title='رنگ متن (کلمهٔ انتخابی یا خط فعلی)'; color.addEventListener('pointerdown',remember); color.addEventListener('input',()=>{ if (mode !== 'visual') setMode('visual'); if (!options.color || !options.color(color.value)) exec('foreColor',color.value);});row1.appendChild(color);
+    const clearBtn=button(row1,'removeFormat','پاک کردن قالب‌بندی',()=>{ if (mode !== 'visual') setMode('visual'); return options.clearFormat ? options.clearFormat(() => exec('removeFormat')) : exec('removeFormat'); });
     if (options.clearFormatId) clearBtn.id = options.clearFormatId;
-    [['justifyRight','تراز راست','right'],['justifyCenter','تراز وسط','center'],['justifyLeft','تراز چپ','left'],['justifyFull','جاستیفای','justify']].forEach(([cmd,label,value])=>button(row1,cmd,label,()=>options.align ? options.align(value) : exec(cmd)));
+    [['justifyRight','تراز راست','right'],['justifyCenter','تراز وسط','center'],['justifyLeft','تراز چپ','left'],['justifyFull','جاستیفای','justify']].forEach(([cmd,label,value])=>button(row1,cmd,label,()=>{ if (mode !== 'visual') setMode('visual'); return options.align ? options.align(value) : exec(cmd); }));
     function direction(dir){restore();document.execCommand('formatBlock',false,'div');const node=window.getSelection()?.anchorNode;let element=node?.nodeType===1?node:node?.parentElement;while(element&&element!==field&&!['DIV','P','LI','H1','H2','H3','H4','H5','H6','PRE','BLOCKQUOTE'].includes(element.tagName))element=element.parentElement;if(element&&element!==field)element.style.direction=dir;else field.style.direction=dir;remember();field.dispatchEvent(new Event('input',{bubbles:true}));changed();}
-    button(row1,'rtl','راست‌به‌چپ',()=>options.direction ? options.direction('rtl') : direction('rtl'));button(row1,'ltr','چپ‌به‌راست',()=>options.direction ? options.direction('ltr') : direction('ltr'));
+    button(row1,'rtl','راست‌به‌چپ',()=>{ if (mode !== 'visual') setMode('visual'); return options.direction ? options.direction('rtl') : direction('rtl'); });button(row1,'ltr','چپ‌به‌راست',()=>{ if (mode !== 'visual') setMode('visual'); return options.direction ? options.direction('ltr') : direction('ltr'); });
     let modal = null, modalKeyHandler = null;
     function closeModal(opts = {}) {
       if (!modal) return false;
@@ -74,6 +117,8 @@
       return true;
     }
     function dialog(title, build) {
+      if (typeof options.onEnsureTarget === 'function' && options.onEnsureTarget() === false) return;
+      if (mode !== 'visual') setMode('visual');
       if (modal) closeModal({ restoreFocus: false });
       remember();
       modal = document.createElement('div'); modal.className = 'classic-modal'; modal.setAttribute('role','dialog'); modal.setAttribute('aria-modal','true'); modal.setAttribute('aria-label',title);
@@ -112,7 +157,7 @@
     const undo = () => options.undo ? options.undo() : exec('undo'); const redo = () => options.redo ? options.redo() : exec('redo');
     button(row1,'undo','واگرد',undo); button(row1,'redo','ازنو',redo);
     const plain=button(row1,'plain','چسباندن به‌صورت متن ساده',()=>{plainPaste=!plainPaste;plain.setAttribute('aria-pressed',String(plainPaste));});plain.setAttribute('aria-pressed','false');
-    const full=button(row1,'fullscreen','تمام‌صفحه',()=>{shell.classList.toggle('classic-fullscreen'); const enabled=shell.classList.contains('classic-fullscreen'); options.onFullscreen?.(enabled); full.setAttribute('aria-pressed',String(enabled));});full.setAttribute('aria-pressed','false');full.dataset.allowText='1';
+    const full=button(row1,'fullscreen','تمام‌صفحه',()=>{ if (!shell.classList.contains('classic-fullscreen') && typeof options.onEnsureTarget === 'function' && options.onEnsureTarget() === false) return; shell.classList.toggle('classic-fullscreen'); const enabled=shell.classList.contains('classic-fullscreen'); options.onFullscreen?.(enabled); full.setAttribute('aria-pressed',String(enabled));});full.setAttribute('aria-pressed','false');full.dataset.allowText='1';
     ['focus','keyup','mouseup'].forEach((name)=>field.addEventListener(name,remember));
     field.addEventListener('input',()=>{remember();changed();}); source.addEventListener('input',changed);
     field.addEventListener('paste',(e)=>{e.preventDefault();const data=e.clipboardData; const rich=data?.getData('text/html'); if(!plainMode&&!plainPaste&&rich) insertHTML(rich); else exec('insertText',data?.getData('text/plain')||'');});
