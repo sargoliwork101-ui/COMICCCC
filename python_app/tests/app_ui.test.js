@@ -2173,7 +2173,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas423: verText.includes('۴.۲۳'),
+            verHas424: verText.includes('۴.۲۴'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2192,8 +2192,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.23 displays version 4.23 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas423 === true
+      'v4.00/v4.24 displays version 4.24 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas424 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -4354,6 +4354,44 @@ function check(name, condition) {
         && v423PersianAutoUpgradeCheck.upgradedDoc === true
         && v423PersianAutoUpgradeCheck.helpDocsKafGafAndJoining === true,
       JSON.stringify(v423PersianAutoUpgradeCheck),
+    );
+
+    const v424PersianAdoptAndHelpCheck = await vm.runInContext(`
+      (() => {
+        const snap = JSON.parse(JSON.stringify(state.project));
+        try {
+          // 1. Saved Persian project where persianPreprocess defaulted to false (not manually customized) -> auto-enables!
+          const faProjAuto = JSON.parse(JSON.stringify(snap));
+          faProjAuto.settings = { ...faProjAuto.settings, ocrLanguage: 'fas', persianPreprocess: false };
+          delete faProjAuto.settings.persianPreprocessCustomized;
+          adoptProject(faProjAuto);
+          const autoEnabledOnSavedFa = $('ocrPersianPreprocess').checked === true;
+
+          // 2. Saved Persian project where user explicitly unchecked persianPreprocess (persianPreprocessCustomized: true) -> stays false!
+          const faProjManualOff = JSON.parse(JSON.stringify(snap));
+          faProjManualOff.settings = { ...faProjManualOff.settings, ocrLanguage: 'fas', persianPreprocess: false, persianPreprocessCustomized: true };
+          adoptProject(faProjManualOff);
+          const manualOffPreserved = $('ocrPersianPreprocess').checked === false;
+
+          // 3. Help Chapters 5 & 6 document v4.24 SOTA Persian OCR (PSM 13 RAW_LINE, LAB chromatic boxes, deskew, rasm lexicon)
+          const helpModes = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-modes');
+          const helpModels = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-models');
+          const helpHasV424Sota = Boolean(
+            helpModes && helpModes.features.some((f) => f.includes('LAB') && f.includes('اسکلت رسم‌الخط'))
+            && helpModels && helpModels.features.some((f) => f.includes('PSM 13 RAW_LINE'))
+          );
+          return { autoEnabledOnSavedFa, manualOffPreserved, helpHasV424Sota };
+        } finally {
+          adoptProject(snap);
+        }
+      })()
+    `, context);
+    check(
+      'v4.24 auto-enables #ocrPersianPreprocess on saved Persian projects unless manually customized and updates Help Chapters 5 & 6',
+      v424PersianAdoptAndHelpCheck.autoEnabledOnSavedFa === true
+        && v424PersianAdoptAndHelpCheck.manualOffPreserved === true
+        && v424PersianAdoptAndHelpCheck.helpHasV424Sota === true,
+      JSON.stringify(v424PersianAdoptAndHelpCheck),
     );
   }
 

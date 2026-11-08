@@ -2228,6 +2228,24 @@ class _HezarOcrAdapter(_BaseAdapter):
                 return str(getattr(first, "text") or "").strip()
         return ""
 
+    @staticmethod
+    def _extract_score(pred_item: Any, default: float = 0.90) -> float:
+        target = pred_item[0] if isinstance(pred_item, (list, tuple)) and pred_item else pred_item
+        raw: Any = None
+        if isinstance(target, dict):
+            raw = target.get("score") if "score" in target else target.get("confidence")
+        elif hasattr(target, "score"):
+            raw = getattr(target, "score")
+        try:
+            val = float(raw)
+            if 0.0 <= val <= 1.0:
+                return val
+            if 1.0 < val <= 100.0:
+                return val / 100.0
+        except (TypeError, ValueError):
+            pass
+        return default
+
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         from PIL import Image
 
@@ -2356,8 +2374,8 @@ class _HezarOcrAdapter(_BaseAdapter):
                 bx, by, bw, bh = [float(v) * inv_scale for v in raw_box[:4]]
                 if bw < 4.0 or bh < 4.0:
                     continue
-                pad_x = max(4, int(round(bh * 0.14)))
-                pad_y = max(5, int(round(bh * 0.26)))
+                pad_x = max(4, int(round(bh * 0.16)))
+                pad_y = max(6, int(round(bh * 0.30)))
                 cx0 = max(0, int(round(bx - pad_x)))
                 cy0 = max(0, int(round(by - pad_y)))
                 cx1 = min(width, int(round(bx + bw + pad_x)))
@@ -2443,11 +2461,21 @@ class _HezarOcrAdapter(_BaseAdapter):
             batch_size = 16
             for start in range(0, len(crop_specs), batch_size):
                 batch_specs = crop_specs[start:start + batch_size]
-                batch_imgs = [rgb.crop(box_coords) for box_coords, _ in batch_specs]
+                batch_imgs: list[Any] = []
+                for box_coords, _ in batch_specs:
+                    c_img = rgb.crop(box_coords)
+                    if c_img.height < 28 and c_img.width * 2 < 240:
+                        up_img = c_img.resize((max(4, c_img.width * 2), max(4, c_img.height * 2)), Image.Resampling.BICUBIC)
+                        c_img.close()
+                        c_img = up_img
+                    batch_imgs.append(c_img)
                 try:
                     with grad_ctx():
                         try:
-                            preds = recognizer.predict(batch_imgs)
+                            try:
+                                preds = recognizer.predict(batch_imgs, return_scores=True)
+                            except TypeError:
+                                preds = recognizer.predict(batch_imgs)
                         except Exception:
                             try:
                                 preds = [recognizer.predict(img) for img in batch_imgs]
@@ -2466,7 +2494,7 @@ class _HezarOcrAdapter(_BaseAdapter):
                             ys = [pt[1] for pt in poly]
                             raw_items.append({
                                 "text": txt,
-                                "confidence": 0.9,
+                                "confidence": self._extract_score(pred, 0.9),
                                 "polygon": poly,
                                 "x0": min(xs),
                                 "y0": min(ys),
@@ -2519,7 +2547,8 @@ class _HezarOcrAdapter(_BaseAdapter):
                 mx1 = max(c["x1"] for c in cluster)
                 my1 = max(c["y1"] for c in cluster)
                 merged_poly = _clamp_polygon(_rect_polygon(mx0, my0, mx1, my1), width, height)
-                lines.append({"text": joined_text, "confidence": 0.9, "polygon": merged_poly})
+                avg_conf = sum(float(c.get("confidence", 0.9)) for c in cluster) / max(1, len(cluster))
+                lines.append({"text": joined_text, "confidence": round(avg_conf, 4), "polygon": merged_poly})
             return lines
         finally:
             rgb.close()

@@ -48,7 +48,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.2.3.0")]
+[assembly: System.Reflection.AssemblyVersion("4.2.4.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -418,6 +418,9 @@ def pyinstaller_command(
         "--add-data",
         f"{static_dir}{sep}comic_studio/static",
     ]
+    assets_dir = static_dir.parent / "assets"
+    if assets_dir.is_dir():
+        cmd.extend(["--add-data", f"{assets_dir}{sep}comic_studio/assets"])
     if any(staged_models_dir.rglob("*")):
         cmd.extend(["--add-data", f"{staged_models_dir}{sep}bundled_models"])
 

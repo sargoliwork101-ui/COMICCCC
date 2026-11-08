@@ -893,9 +893,9 @@ function adoptProject(project, options = {}) {
   $('ocrContrast').checked = settings.contrast !== false;
   $('ocrPrecise').checked = settings.precise !== false;
   if ($('ocrPersianPreprocess')) {
-    $('ocrPersianPreprocess').checked = typeof settings.persianPreprocess === 'boolean'
-      ? settings.persianPreprocess
-      : (ocrLang === 'fas');
+    $('ocrPersianPreprocess').checked = settings.persianPreprocessCustomized === true
+      ? Boolean(settings.persianPreprocess)
+      : (ocrLang === 'fas' ? true : Boolean(settings.persianPreprocess));
   }
   $('ocrGroupLines').checked = settings.groupOcrLines !== false;
   $('ocrErase').checked = settings.eraseOriginal !== false;
@@ -1465,6 +1465,7 @@ function collectOcrSettings() {
     contrast: $('ocrContrast').checked,
     precise: $('ocrPrecise').checked,
     persianPreprocess: Boolean($('ocrPersianPreprocess')?.checked),
+    persianPreprocessCustomized: Boolean(state.project.settings.persianPreprocessCustomized),
     groupOcrLines: $('ocrGroupLines').checked,
     eraseOriginal: $('ocrErase').checked,
   });

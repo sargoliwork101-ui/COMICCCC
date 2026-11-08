@@ -3193,6 +3193,161 @@ def test_v423_persian_root_cause_joining_kaf_gaf_bidi_tessdata_best_and_containe
     assert "نمی\u200cچسبند" in hz_out[0]["text"]
 
 
+def test_v424_sota_persian_ocr_rasm_lexicon_lab_chromatic_deskew_psm13_and_bilingual_tsv(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+    import cv2
+    import comic_studio.ocr as ocr_mod
+    from comic_studio.persian_ocr_post import is_known_persian_word, postprocess_persian_ocr_text
+
+    repo_py = Path(__file__).resolve().parent.parent
+    if str(repo_py) not in sys.path:
+        sys.path.insert(0, str(repo_py))
+    from offline_packaging.build_offline_package import pyinstaller_command
+
+    # 1. SOTA Persian post-OCR: dotless Rasm homograph repair, ZWNJ compounds, run-on splitter, and verb safety
+    assert is_known_persian_word("دهند") and is_known_persian_word("ندارد") and is_known_persian_word("بگیرند")
+    assert not is_known_persian_word("نگهیان") and not is_known_persian_word("پرایر")
+
+    repaired_comic = ocr_mod.normalize_persian_ocr_text(
+        "نگهیان فریاد زد: «برگردید عقب! هیچ\u200cکس اجازه\u0654 عبور از گذرگاه بزرگ را نداردل»"
+    )
+    assert repaired_comic == "نگهبان فریاد زد: «برگردید عقب! هیچ\u200cکس اجازه\u0654 عبور از گذرگاه بزرگ را ندارد!»"
+
+    repaired_tech = postprocess_persian_ocr_text(
+        "پژوهشکران دانشکاه صنعتی کزارش دادند که سرکش حرف گافو نقطه\u200cهای پء چ و ژرا در شکل Figure 8-35 "
+        "استاندارد IPC-A-610 مقدار Toe Fillet پرایر %25 بررسی کرده 9 درباره کتابخانة مرجع و چشمانداز بزگ\u200cترین پروژه تصمیمبگیرند."
+    )
+    assert (
+        repaired_tech
+        == "پژوهشگران دانشگاه صنعتی گزارش دادند که سرکش حرف گاف و نقطه\u200cهای پ، چ و ژ را در شکل Figure 8-35 "
+        "استاندارد IPC-A-610 مقدار Toe Fillet برابر 25% بررسی کرده و درباره کتابخانه\u0654 مرجع و چشم\u200cانداز بزرگ\u200cترین پروژه تصمیم بگیرند."
+    )
+
+    # 2. Isoluminant CIE LAB ΔE chromatic ink extraction (#e63946 red ink inside #1e5aa8 blue comic box)
+    chroma_arr = np.full((140, 320, 3), 245, dtype=np.uint8)
+    cv2.rectangle(chroma_arr, (20, 20), (300, 120), (30, 90, 168), thickness=-1)  # #1e5aa8 blue box
+    cv2.rectangle(chroma_arr, (60, 58), (260, 78), (230, 57, 70), thickness=-1)  # #e63946 red text bar
+    chroma_img = Image.fromarray(chroma_arr, mode="RGB")
+    containers = ocr_mod._persian_container_regions(chroma_img)
+    assert len(containers) == 1
+    c_rgb, *_ = containers[0]
+    try:
+        prep_chroma, _, c_pad = ocr_mod.persian_preprocess_image(c_rgb, precise=True, page_mode="comic")
+        try:
+            p_arr = np.asarray(prep_chroma)[c_pad:-c_pad, c_pad:-c_pad, 0]
+            # Blue interior becomes bright paper (>210), while isoluminant red stroke becomes dark ink (<95)!
+            assert float(np.median(p_arr[12:28, 20:80])) > 210.0
+            assert float(np.min(p_arr[70:120, 90:420])) < 95.0
+        finally:
+            prep_chroma.close()
+    finally:
+        c_rgb.close()
+
+    # 3. Sub-degree projection-derivative deskew + exact inverse 2D affine coordinate mapping
+    upright = np.full((260, 420), 248, dtype=np.uint8)
+    for row_y in (65, 110, 155, 200):
+        for seg_x in range(60, 350, 42):
+            cv2.rectangle(upright, (seg_x, row_y), (seg_x + 28, row_y + 10), 25, thickness=-1)
+    rot_m = cv2.getRotationMatrix2D((210.0, 130.0), -5.0, 1.0)
+    tilted = cv2.warpAffine(upright, rot_m, (420, 260), flags=cv2.INTER_LINEAR, borderValue=248)
+    est_deg = ocr_mod.estimate_persian_skew_angle(tilted)
+    assert 4.0 <= est_deg <= 6.0
+
+    # Verify inverse coordinate unrotation in recognize_image(..., persian_preprocess=True)
+    tilted_rgb = Image.fromarray(tilted, mode="L").convert("RGB")
+    target_orig_pt = (100.0, 70.0)
+    fwd_m = cv2.getRotationMatrix2D((210.0, 130.0), est_deg, 1.0)
+    deskewed_x = float(fwd_m[0, 0] * target_orig_pt[0] + fwd_m[0, 1] * target_orig_pt[1] + fwd_m[0, 2])
+    deskewed_y = float(fwd_m[1, 0] * target_orig_pt[0] + fwd_m[1, 1] * target_orig_pt[1] + fwd_m[1, 2])
+
+    class DeskewEchoEngine:
+        def recognize(self, img: Image.Image, lang: str):
+            p = ocr_mod.PERSIAN_PREPROCESS_BORDER_PAD
+            sx0, sy0 = deskewed_x * 2.0 + p, deskewed_y * 2.0 + p
+            sx1, sy1 = sx0 + 80.0, sy0 + 20.0
+            return [ocr_mod.OcrLine("پژوهشگران دانشگاه", 0.93, [[sx0, sy0], [sx1, sy0], [sx1, sy1], [sx0, sy1]])]
+
+    monkeypatch.setattr("comic_studio.license_guard.require_module_license", lambda *a, **kw: None)
+    unrot_blocks = ocr_mod.recognize_image(
+        DeskewEchoEngine(), tilted_rgb, "fas", contrast=True, precise=True, persian_preprocess=True,
+    )
+    assert len(unrot_blocks) == 1
+    assert unrot_blocks[0]["polygon"][0][0] == pytest.approx(target_orig_pt[0], abs=2.5)
+    assert unrot_blocks[0]["polygon"][0][1] == pytest.approx(target_orig_pt[1], abs=2.5)
+
+    # 4. Legacy 431 KB `tessdata_fast/fas.traineddata` guard + kursi PSM 13 line recovery + bilingual FAS/ENG TSV arbitration
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    tess_dir = tmp_path / "models" / "tesseract"
+    tess_dir.mkdir(parents=True, exist_ok=True)
+    (tess_dir / "fas.traineddata").write_bytes(b"\x00" * 431_500)  # legacy int8 tessdata_fast size
+    (tess_dir / "eng.traineddata").write_bytes(b"\x00" * 2_000_000)
+    tess = ocr_mod.TesseractEngine()
+    tess._system_languages = set()
+    assert "fas" not in tess.ready_languages  # forces upgrade to 3.33 MB float32 tessdata_best!
+    (tess_dir / "fas.traineddata").write_bytes(b"\x00" * 3_325_955)
+    assert "fas" in tess.ready_languages and "eng" in tess.ready_languages
+
+    # Build a 2-line Persian document image where PSM 3 drops line 2, and PSM 13 + ENG TSV arbitrates line 2!
+    doc_arr = np.full((180, 480, 3), 255, dtype=np.uint8)
+    for lx in range(60, 420, 26):
+        cv2.rectangle(doc_arr, (lx, 42), (lx + 18, 56), (20, 20, 20), thickness=-1)
+        cv2.rectangle(doc_arr, (lx, 112), (lx + 18, 126), (20, 20, 20), thickness=-1)
+    doc_img = Image.fromarray(doc_arr, mode="RGB")
+    bands = ocr_mod._segment_persian_line_bands(doc_img)
+    assert len(bands) == 2
+
+    seen_calls: list[tuple[str, str]] = []
+
+    def fake_tsv(im: Image.Image, lang: str, psm: str) -> str:
+        seen_calls.append((lang, psm))
+        hdr = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+        if lang == "fas" and psm == "3":
+            # Simulate Textord dropping the second Persian line completely!
+            return hdr + "5\t1\t1\t1\t1\t1\t50\t40\t360\t18\t92.0\tپژوهشگران دانشگاه صنعتی\n"
+        if lang == "fas" and psm == "13":
+            # Line 2 has mixed FA + garbled technical English (`۱۳0-۸-610` and `۰۹۸25`)
+            return (
+                hdr
+                + "5\t1\t1\t1\t1\t1\t300\t12\t90\t18\t91.0\tاستاندارد\n"
+                + "5\t1\t1\t1\t1\t2\t170\t12\t110\t18\t61.0\t۱۳0-۸-610\n"
+                + "5\t1\t1\t1\t1\t3\t105\t12\t50\t18\t88.0\tپرایر\n"
+                + "5\t1\t1\t1\t1\t4\t30\t12\t60\t18\t44.0\t۰۹۸25\n"
+            )
+        if lang == "eng" and psm == "7":
+            return (
+                hdr
+                + "5\t1\t1\t1\t1\t1\t30\t12\t60\t18\t93.5\t%25\n"
+                + "5\t1\t1\t1\t1\t2\t105\t12\t50\t18\t42.0\tysl\n"
+                + "5\t1\t1\t1\t1\t3\t170\t12\t110\t18\t95.2\tIPC-A-610\n"
+                + "5\t1\t1\t1\t1\t4\t300\t12\t90\t18\t18.0\tslastiwl\n"
+            )
+        return hdr
+
+    monkeypatch.setattr(tess, "_run_tesseract_tsv", fake_tsv)
+    doc_lines = tess.recognize_document(doc_img, "fas")
+    assert ("fas", "13") in seen_calls and ("eng", "7") in seen_calls
+    assert [ln.text for ln in doc_lines] == [
+        "پژوهشگران دانشگاه صنعتی",
+        "استاندارد IPC-A-610 برابر 25%",
+    ]
+
+    # 5. Offline PyInstaller command bundles `comic_studio/assets` (`persian_ocr_lexicon.json.gz` + `Vazirmatn.woff2`)
+    repo_py = Path(__file__).resolve().parent.parent
+    pyi_cmd = pyinstaller_command(
+        entry_script=repo_py / "run.py",
+        dist_dir=tmp_path / "dist",
+        work_dir=tmp_path / "work",
+        spec_dir=tmp_path / "spec",
+        icon_path=tmp_path / "app.ico",
+        static_dir=repo_py / "comic_studio" / "static",
+        staged_models_dir=tmp_path / "empty_models",
+    )
+    assert any("comic_studio/assets" in arg for arg in pyi_cmd)
+
+
+
 
 
 
