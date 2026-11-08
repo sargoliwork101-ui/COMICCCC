@@ -3252,9 +3252,9 @@ def recognize_image(
     page_mode: str = "auto",
 ) -> list[dict[str, Any]]:
     """Run the established OCR first; optional fallbacks only compete after a weak result."""
-    from .license_guard import require_active_license
+    from .license_guard import require_module_license
 
-    require_active_license()
+    require_module_license("ocr")
     primary = _recognize_image_primary(
         engine, image, language, contrast, precise, min_confidence, page_mode=page_mode,
     )

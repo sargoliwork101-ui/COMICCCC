@@ -2173,7 +2173,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas415: verText.includes('۴.۱۵'),
+            verHas416: verText.includes('۴.۱۶'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2192,8 +2192,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.15 displays version 4.15 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas415 === true
+      'v4.00/v4.16 displays version 4.16 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas416 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3909,6 +3909,69 @@ function check(name, condition) {
     await rmTask;
     await vm.runInContext("closeDialog('licenseDialog')", context);
     check('v4.15 local password removed cleanly', $('lockAppMenuBtn').classList.contains('hidden'));
+
+    // v4.16: 24-Hour Trial Top Banner (09361111111) + Independent 3-Module Licensing Guards
+    mockLicenseState = {
+      ...mockLicenseState,
+      licensed: true,
+      unlocked: true,
+      isTrial: true,
+      trialExpiresAt: Math.floor(Date.now() / 1000) + 23 * 3600,
+      trialRemainingSeconds: 23 * 3600,
+      supportPhone: '09361111111',
+      modules: {
+        ocr: { active: true, source: 'trial', plan: 'trial24h', remainingSeconds: 23 * 3600 },
+        translation: { active: true, source: 'trial', plan: 'trial24h', remainingSeconds: 23 * 3600 },
+        editing: { active: true, source: 'trial', plan: 'trial24h', remainingSeconds: 23 * 3600 },
+      },
+      license: { holder: 'نسخهٔ آزمایشی ۲۴ ساعته', plan: 'trial24h', planLabel: 'آزمایشی ۲۴ ساعته' },
+    };
+    await vm.runInContext('refreshAuthGateState()', context);
+    check(
+      'v4.16 24-hour trial shows #trialNoticeBanner at top of workspace with 09361111111 contact phone',
+      !$('trialNoticeBanner').classList.contains('hidden')
+        && $('trialNoticeText').textContent.includes('09361111111')
+        && $('trialNoticeText').textContent.includes('۲۴ ساعته'),
+    );
+
+    mockLicenseState = {
+      ...mockLicenseState,
+      isTrial: false,
+      trialRemainingSeconds: 0,
+      modules: {
+        ocr: { active: true, source: 'license', plan: 'lifetime', expiresAt: null },
+        translation: { active: false, source: 'unlicensed', plan: 'none', expiresAt: null },
+        editing: { active: true, source: 'license', plan: 'subscription', expiresAt: Math.floor(Date.now() / 1000) + 30 * 86400, daysRemaining: 30 },
+      },
+      license: { holder: 'کاربر ماژولار', plan: 'modular', planLabel: 'ماژولار' },
+    };
+    await vm.runInContext('refreshAuthGateState()', context);
+    check(
+      'v4.16 paid modular license hides trial banner and marks unlicensed module buttons with .mod-locked',
+      $('trialNoticeBanner').classList.contains('hidden')
+        && !$('ocrBtn').classList.contains('mod-locked')
+        && $('translateBtn').classList.contains('mod-locked')
+        && !$('watermarkBtn').classList.contains('mod-locked'),
+    );
+    await vm.runInContext('openLicenseDialog()', context);
+    check(
+      'v4.16 #licenseDialog displays per-module status pills (OCR, Translation, Editing) and 09361111111',
+      $('licSupportPhone').textContent === '09361111111'
+        && $('licMod_ocr').textContent.includes('دائمی')
+        && $('licMod_translation').textContent.includes('غیرفعال')
+        && $('licMod_editing').textContent.includes('۳۰'),
+    );
+    await vm.runInContext("closeDialog('licenseDialog')", context);
+
+    const guardTask = vm.runInContext("ensureModuleLicensed('translation')", context);
+    await new Promise((r) => setTimeout(r, 15));
+    check(
+      'v4.16 clicking unlicensed module opens #appModalDialog mentioning 09361111111 (zero native alert)',
+      $('appModalDialog').open === true && $('appModalMessage').textContent.includes('09361111111'),
+    );
+    $('appModalCancel').click();
+    const guardAllowed = await guardTask;
+    check('v4.16 ensureModuleLicensed returns false for unlicensed module', guardAllowed === false);
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

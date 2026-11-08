@@ -192,6 +192,7 @@ def test_timed_license_expiry_and_anti_clock_rollback(monkeypatch):
 @pytest.mark.unlicensed
 def test_middleware_api_block_engine_deep_guards_and_local_password_flow(tmp_path, monkeypatch):
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path / "data"))
+    monkeypatch.setattr(license_guard, "_AUTO_TRIAL_ENABLED", False)
     seed, pub = ed25519_generate_keypair()
     monkeypatch.setattr(_public_key, "PUBLIC_VERIFY_KEY_HEX", pub.hex())
     SECURITY_GATE.reset_memory_state()
@@ -327,3 +328,204 @@ def test_seller_vault_key_sync_issuance_backup_and_dist_leak_guard(tmp_path):
     (clean_dist / "seller_master_key.json").write_text("{}", encoding="utf-8")
     with pytest.raises(RuntimeError, match="SECURITY ABORT"):
         verify_no_seller_secrets_in_dist(clean_dist)
+
+
+@pytest.mark.unlicensed
+def test_auto_24h_trial_banner_anti_reset_clock_rollback_and_expiry(tmp_path, monkeypatch):
+    """v4.16: Fresh install grants a 24h trial with 09361111111 notice, resists file deletion, and locks after 24h."""
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path / "data"))
+    assert license_guard._AUTO_TRIAL_ENABLED is True
+    seed, pub = ed25519_generate_keypair()
+    monkeypatch.setattr(_public_key, "PUBLIC_VERIFY_KEY_HEX", pub.hex())
+    SECURITY_GATE.reset_memory_state()
+
+    t0 = 1_810_000_000
+    st0 = SECURITY_GATE.inspect_status(now_ts=t0)
+    assert st0["licensed"] is True
+    assert st0["unlocked"] is True
+    assert st0["isTrial"] is True
+    assert st0["supportPhone"] == "09361111111"
+    assert "09361111111" in st0["message"]
+    assert st0["trialRemainingSeconds"] == 86_400
+    for mod_id in ("ocr", "translation", "editing"):
+        assert st0["modules"][mod_id]["active"] is True
+        assert st0["modules"][mod_id]["source"] == "trial"
+
+    # Advance 10 hours, then DELETE primary license-state.json -> secondary anchor prevents trial reset!
+    t_10h = t0 + 10 * 3600
+    st_10h = SECURITY_GATE.inspect_status(now_ts=t_10h)
+    assert st_10h["trialRemainingSeconds"] == 14 * 3600
+    SECURITY_GATE._state_path().unlink()
+    SECURITY_GATE.reset_memory_state()
+
+    st_after_delete = SECURITY_GATE.inspect_status(now_ts=t_10h + 60)
+    assert st_after_delete["isTrial"] is True
+    assert st_after_delete["trialRemainingSeconds"] == 14 * 3600 - 60  # NOT reset back to 86400!
+
+    # Rolling Windows clock backward by 3 hours during trial -> locked (`clock_tampered`)
+    st_rollback = SECURITY_GATE.inspect_status(now_ts=t_10h - 3 * 3600)
+    assert st_rollback["licensed"] is False
+    assert st_rollback["reason"] == "clock_tampered"
+
+    # Past 24 hours -> trial expires and blocks API with HTTP 402 + 09361111111
+    t_expired = t0 + 86_401
+    st_exp = SECURITY_GATE.inspect_status(now_ts=t_expired)
+    assert st_exp["licensed"] is False
+    assert st_exp["reason"] == "trial_expired"
+    assert "09361111111" in st_exp["message"]
+
+    # Even deleting license-state.json AFTER 24h expiry STILL stays expired!
+    SECURITY_GATE._state_path().unlink()
+    SECURITY_GATE.reset_memory_state()
+    st_exp_again = SECURITY_GATE.inspect_status(now_ts=t_expired + 10)
+    assert st_exp_again["licensed"] is False
+    assert st_exp_again["reason"] == "trial_expired"
+
+
+@pytest.mark.unlicensed
+def test_modular_three_part_licensing_durations_cumulative_and_route_gates(tmp_path, monkeypatch):
+    """v4.16: OCR, Translation & Editing activate independently with custom durations & cumulative keys."""
+    import sys
+
+    py_root = Path(__file__).resolve().parents[1]
+    if str(py_root) not in sys.path:
+        sys.path.insert(0, str(py_root))
+    from license_manager import SellerVault, parse_modules_cli_spec
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path / "data"))
+    fake_pub_py = tmp_path / "_pub.py"
+    fake_pub_py.write_text(
+        f'PUBLIC_VERIFY_KEY_HEX: str = (\n    "{_public_key.PUBLIC_VERIFY_KEY_HEX}"\n)\n',
+        encoding="utf-8",
+    )
+    vault = SellerVault(seller_dir=tmp_path / "seller", public_key_py=fake_pub_py)
+    key_rec = vault.ensure_master_key(sync_source=True)
+    monkeypatch.setattr(_public_key, "PUBLIC_VERIFY_KEY_HEX", key_rec["public_key_hex"])
+    SECURITY_GATE.reset_memory_state()
+
+    import time as _time
+
+    hwid = compute_hardware_id()
+    t0 = int(_time.time()) - 120
+
+    # Key 1 via CLI spec: OCR = lifetime, Translation = 15 days, Editing = off
+    spec1 = parse_modules_cli_spec("ocr=lifetime,translation=15,editing=off")
+    tok1 = issue_license_token(
+        private_seed_hex=key_rec["private_seed_hex"],
+        hardware_id=hwid,
+        holder="خریدار ماژولار",
+        issued_at=t0,
+        modules=spec1,
+    )
+
+    with scoped_client(create_app()) as client:
+        act1 = client.post("/api/license/activate", json={"license_key": tok1})
+        assert act1.status_code == 200
+        body1 = act1.json()
+        assert body1["licensed"] is True
+        assert body1["isTrial"] is False  # Paid key immediately replaces 24h trial
+        assert body1["modules"]["ocr"]["active"] is True
+        assert body1["modules"]["ocr"]["plan"] == "lifetime"
+        assert body1["modules"]["translation"]["active"] is True
+        assert body1["modules"]["translation"]["daysRemaining"] == 15
+        assert body1["modules"]["editing"]["active"] is False
+
+        # Base workspace + file import + non-editing state save + rendered upload + export ALL succeed!
+        proj = client.post("/api/projects", json={"name": "پروژه ماژولار"}).json()
+        pid = proj["id"]
+        imported = client.post(
+            f"/api/projects/{pid}/files",
+            files=[("files", ("page1.png", _sample_png(), "image/png"))],
+        )
+        assert imported.status_code == 200
+        proj_data = imported.json()
+        img_id = proj_data["images"][0]["id"]
+
+        # Changing project name & selection (non-editing state) succeeds even with editing=False!
+        proj_data["name"] = "تغییر نام مجاز"
+        proj_data["images"][0]["selected"] = True
+        non_edit_save = client.put(f"/api/projects/{pid}/state", json={"state": proj_data})
+        assert non_edit_save.status_code == 200
+
+        # Rendered bubble upload + revert + TXT export succeed for OCR/Translation buyer!
+        rend = client.post(
+            f"/api/projects/{pid}/images/{img_id}/rendered",
+            content=_sample_png(),
+            headers={"Content-Type": "image/png"},
+        )
+        assert rend.status_code == 200
+        rev = client.post(f"/api/projects/{pid}/images/{img_id}/revert")
+        assert rev.status_code == 200
+        exp = client.post(f"/api/projects/{pid}/export", json={"kind": "txt", "image_ids": [img_id]})
+        assert exp.status_code == 200
+
+        # Editing mutations (`blocks`, `crop`, `watermark`, `/duplicate`) are BLOCKED with 402 + 09361111111!
+        edit_attempt = json.loads(json.dumps(non_edit_save.json()))
+        edit_attempt["images"][0]["blocks"] = [{"id": "b1", "text": "manual", "x0": 0, "y0": 0, "x1": 10, "y1": 10}]
+        blocked_edit = client.put(f"/api/projects/{pid}/state", json={"state": edit_attempt})
+        assert blocked_edit.status_code == 402
+        assert blocked_edit.json()["code"] == "MODULE_EDITING_REQUIRED"
+        assert "09361111111" in blocked_edit.json()["detail"]
+
+        blocked_dup = client.post(f"/api/projects/{pid}/duplicate", json=[img_id])
+        assert blocked_dup.status_code == 402
+        assert blocked_dup.json()["code"] == "MODULE_EDITING_REQUIRED"
+
+        # Now customer buys Editing (60 days) -> cumulative activation keeps OCR + Translation AND adds Editing!
+        issued_edit = vault.issue(
+            hardware_id=hwid,
+            holder="خریدار ماژولار",
+            modules={"editing": {"plan": "subscription", "days": 60}},
+        )
+        act2 = client.post("/api/license/activate", json={"license_key": issued_edit["token"]})
+        assert act2.status_code == 200
+        body2 = act2.json()
+        assert body2["modules"]["ocr"]["active"] is True
+        assert body2["modules"]["translation"]["active"] is True
+        assert body2["modules"]["editing"]["active"] is True
+        assert body2["modules"]["editing"]["daysRemaining"] == 60
+
+        # Editing state save & duplicate now succeed!
+        ok_edit = client.put(f"/api/projects/{pid}/state", json={"state": edit_attempt})
+        assert ok_edit.status_code == 200
+        assert client.post(f"/api/projects/{pid}/duplicate", json=[img_id]).status_code == 200
+
+        # Replace with Editing-only key -> OCR & Translation routes return 402 MODULE_OCR/TRANSLATION_REQUIRED!
+        only_edit_tok = issue_license_token(
+            private_seed_hex=key_rec["private_seed_hex"],
+            hardware_id=hwid,
+            holder="فقط ویرایش",
+            issued_at=t0,
+            modules={"editing": {"plan": "lifetime"}},
+        )
+        act3 = client.post(
+            "/api/license/activate",
+            json={"license_key": only_edit_tok, "replace_all_modules": True},
+        )
+        assert act3.status_code == 200
+        assert act3.json()["modules"]["ocr"]["active"] is False
+        assert act3.json()["modules"]["translation"]["active"] is False
+        assert act3.json()["modules"]["editing"]["active"] is True
+
+        ocr_blocked = client.post(
+            f"/api/projects/{pid}/ocr",
+            json={"engine": "tesseract", "language": "eng", "image_ids": [img_id]},
+        )
+        assert ocr_blocked.status_code == 402
+        assert ocr_blocked.json()["code"] == "MODULE_OCR_REQUIRED"
+
+        tr_blocked = client.post(
+            "/api/translate-text/preview",
+            json={"text": "Hello", "provider": "free", "source_language": "eng", "target_language": "fa"},
+        )
+        assert tr_blocked.status_code == 402
+        assert tr_blocked.json()["code"] == "MODULE_TRANSLATION_REQUIRED"
+
+    # Independent expiry check: with tok1 (OCR=lifetime, Translation=15d), after 20 days Translation expires while OCR stays active!
+    SECURITY_GATE.activate_token(tok1, replace_all_modules=True, now_ts=t0 + 60)
+    st_day20 = SECURITY_GATE.inspect_status(now_ts=t0 + 20 * 86400)
+    assert st_day20["licensed"] is True
+    assert st_day20["modules"]["ocr"]["active"] is True
+    assert st_day20["modules"]["translation"]["active"] is False
+    assert st_day20["modules"]["translation"]["source"] == "expired"
+

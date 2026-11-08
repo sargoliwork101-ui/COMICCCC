@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seller-Only Master Key & Offline License Generator for Comic OCR Studio.
+"""Seller-Only Master Key & Offline Modular License Generator for Comic OCR Studio.
 
 SECURITY WARNING:
 - Keep this tool ONLY on the seller's computer. It is intentionally excluded from
@@ -23,7 +23,6 @@ import secrets
 import socket
 import sys
 import tempfile
-import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +35,9 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from comic_studio.license_guard import (  # noqa: E402
+    LICENSE_MODULES,
+    MODULE_LABELS_FA,
+    SUPPORT_PHONE,
     LicenseError,
     SECURITY_GATE,
     compute_hardware_id,
@@ -75,6 +77,36 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
         if tmp_path.exists():
             with contextlib.suppress(OSError):
                 tmp_path.unlink()
+
+
+def parse_modules_cli_spec(spec: str) -> dict[str, dict[str, Any]]:
+    """Parse CLI `--modules-spec` like `ocr=lifetime,translation=30,editing=off`."""
+    out: dict[str, dict[str, Any]] = {}
+    for chunk in str(spec or "").split(","):
+        part = chunk.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise ValueError(f"فرمت نامعتبر در تعریف ماژول: {part!r} (نمونه: ocr=lifetime,translation=30)")
+        mod_raw, val_raw = part.split("=", 1)
+        mod_id = mod_raw.strip().lower()
+        val = val_raw.strip().lower()
+        if mod_id not in LICENSE_MODULES:
+            raise ValueError(f"نام ماژول نامعتبر است: {mod_id!r} (مجاز: ocr, translation, editing)")
+        if val in {"off", "none", "0", "false", "disabled"}:
+            continue
+        if val in {"lifetime", "perm", "permanent", "forever"}:
+            out[mod_id] = {"plan": "lifetime"}
+        elif val.startswith("trial:"):
+            days = int(val.split(":", 1)[1])
+            out[mod_id] = {"plan": "trial", "days": days}
+        else:
+            cleaned_days = val.removesuffix("d").strip()
+            days = int(cleaned_days)
+            out[mod_id] = {"plan": "subscription", "days": days}
+    if not out:
+        raise ValueError("حداقل یکی از سه ماژول باید در کلید لایسنس فعال باشد.")
+    return out
 
 
 class SellerVault:
@@ -185,6 +217,7 @@ class SellerVault:
         holder: str,
         plan: str = "lifetime",
         days: int | None = None,
+        modules: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         key_rec = self.ensure_master_key(sync_source=True)
         norm_hwid = normalize_hardware_id(hardware_id)
@@ -195,6 +228,7 @@ class SellerVault:
             holder=clean_holder,
             plan=plan,
             days=days,
+            modules=modules,
         )
         verified = verify_license_token(
             token,
@@ -202,6 +236,17 @@ class SellerVault:
             public_key_bytes=bytes.fromhex(key_rec["public_key_hex"]),
             check_expiry=False,
         )
+        mod_summary = {
+            m: {
+                "label": MODULE_LABELS_FA[m],
+                "plan": verified["modules"][m]["plan"],
+                "planLabel": verified["modules"][m]["planLabel"],
+                "daysTotal": verified["modules"][m]["daysTotal"],
+                "expiresAt": verified["modules"][m]["expiresAt"],
+            }
+            for m in LICENSE_MODULES
+            if m in verified["modules"]
+        }
         entry = {
             "licenseId": verified["licenseId"],
             "issuedIso": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -211,6 +256,8 @@ class SellerVault:
             "planLabel": verified["planLabel"],
             "daysTotal": verified["daysTotal"],
             "expiresAt": verified["expiresAt"],
+            "modules": mod_summary,
+            "supportPhone": SUPPORT_PHONE,
             "token": token,
         }
         history = self.list_history()
@@ -222,7 +269,7 @@ class SellerVault:
         hwid = compute_hardware_id()
         issued = self.issue(hardware_id=hwid, holder=holder, plan="lifetime")
         SECURITY_GATE.reset_memory_state()
-        status, _ = SECURITY_GATE.activate_token(issued["token"])
+        status, _ = SECURITY_GATE.activate_token(issued["token"], replace_all_modules=True)
         return {"issued": issued, "status": status}
 
 
@@ -231,7 +278,7 @@ _PANEL_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>پنل مدیریت و صدور لایسنس — مخصوص فروشنده</title>
+  <title>پنل مدیریت و صدور لایسنس ماژولار — مخصوص فروشنده</title>
   <style>
     :root {
       --bg: #0f172a; --card: #1e293b; --border: #334155; --text: #f8fafc;
@@ -240,7 +287,7 @@ _PANEL_HTML = """<!doctype html>
     }
     * { box-sizing: border-box; font-family: Tahoma, "Vazirmatn", "Segoe UI", sans-serif; }
     body { margin: 0; background: var(--bg); color: var(--text); padding: 24px 16px 60px; line-height: 1.65; }
-    .wrap { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+    .wrap { max-width: 960px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px 22px; box-shadow: 0 12px 30px rgba(0,0,0,.28); }
     h1 { margin: 0 0 6px; font-size: 21px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     h2 { margin: 0 0 12px; font-size: 16.5px; color: #e2e8f0; }
@@ -258,30 +305,36 @@ _PANEL_HTML = """<!doctype html>
     .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
     button, .btn {
       background: #334155; color: #fff; border: 1px solid #475569; border-radius: 9px;
-      padding: 9px 15px; font-size: 13.5px; cursor: pointer; font-weight: 600; text-decoration: none;
+      padding: 8px 14px; font-size: 13px; cursor: pointer; font-weight: 600; text-decoration: none;
     }
     button:hover, .btn:hover { background: #475569; }
-    button.primary { background: var(--primary); border-color: var(--primary); }
+    button.primary { background: var(--primary); border-color: var(--primary); font-size: 14px; padding: 10px 18px; }
     button.primary:hover { background: var(--primary-h); }
     button.ok { background: #059669; border-color: #10b981; }
     button.ok:hover { background: #047857; }
+    .mod-box { margin-top: 14px; border: 1px solid var(--border); border-radius: 11px; padding: 14px; background: rgba(15,23,42,.55); }
+    .mod-row { display: grid; grid-template-columns: minmax(190px, 1.2fr) minmax(210px, 1fr) minmax(130px, .6fr); gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px dashed rgba(148,163,184,.2); }
+    .mod-row:last-child { border-bottom: none; }
+    .mod-title { font-weight: 700; color: #f1f5f9; font-size: 14px; }
+    .mod-sub { font-size: 12px; color: var(--muted); display: block; font-weight: 400; }
     .result-box { margin-top: 14px; padding: 14px; border-radius: 10px; background: #0b1220; border: 1px solid #1e40af; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
     th, td { border-bottom: 1px solid var(--border); padding: 9px 8px; text-align: right; }
     th { color: var(--muted); font-weight: 600; }
     .toast { position: fixed; bottom: 20px; left: 20px; padding: 10px 18px; border-radius: 10px; background: #059669; color: #fff; font-size: 13.5px; display: none; z-index: 99; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
     .toast.err { background: var(--danger); }
+    @media (max-width: 680px) { .mod-row { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="card">
-      <h1>پنل مدیریت و صدور لایسنس Comic OCR Studio <span class="badge">مخصوص فروشنده (آفلاین و امن)</span></h1>
-      <p class="sub">کلید خصوصی امضای دیجیتال (Ed25519) فقط در کامپیوتر شخصی شما نگهداری می‌شود و هرگز داخل فایل نصبی مشتری قرار نمی‌گیرد.</p>
+      <h1>پنل صدور لایسنس ماژولار Comic OCR Studio <span class="badge">مخصوص فروشنده (آفلاین و امن)</span></h1>
+      <p class="sub">کلید خصوصی امضای دیجیتال (Ed25519) فقط در کامپیوتر شخصی شما نگهداری می‌شود. برای هر بخش (OCR، ترجمه، ویرایش) می‌توانید به صورت مستقل اعتبار دائمی یا تعداد روز دلخواه تعیین کنید.</p>
       <div class="row" style="margin-top:14px">
         <span class="badge" id="keyBadge">در حال بررسی کلید مادر…</span>
         <span class="badge badge-warn" id="thisPcBadge">کد سیستم شما: …</span>
-        <button class="ok" id="selfActivateBtn" type="button">فعال‌سازی دائمی برنامه روی همین سیستم خودم</button>
+        <button class="ok" id="selfActivateBtn" type="button">فعال‌سازی دائمی هر ۳ بخش روی سیستم خودم</button>
         <button id="backupKeyBtn" type="button">دانلود پشتیبان کلید مادر (مهم)</button>
         <label class="btn" style="margin:0;flex-direction:row;align-items:center;cursor:pointer">
           <span>بازیابی کلید مادر</span>
@@ -291,7 +344,7 @@ _PANEL_HTML = """<!doctype html>
     </div>
 
     <div class="card">
-      <h2>صدور کلید لایسنس جدید برای مشتری</h2>
+      <h2>صدور کلید لایسنس برای مشتری (تعیین جداگانهٔ هر ماژول و مدت اعتبار)</h2>
       <div class="grid2">
         <label>کد شناسایی سیستم مشتری (System Code)
           <input id="custHwid" class="ltr" placeholder="CS4-XXXX-XXXX-XXXX-XXXX" autocomplete="off">
@@ -299,21 +352,66 @@ _PANEL_HTML = """<!doctype html>
         <label>نام خریدار یا شماره سفارش
           <input id="custHolder" placeholder="مثلاً: رضا محمدی - سفارش ۱۰۸" autocomplete="off">
         </label>
-        <label>نوع اعتبار لایسنس
-          <select id="planPreset">
-            <option value="lifetime">دائمی (مادام‌العمر)</option>
-            <option value="sub:30">اشتراک ۱ ماهه (۳۰ روز)</option>
-            <option value="sub:90">اشتراک ۳ ماهه (۹۰ روز)</option>
-            <option value="sub:180">اشتراک ۶ ماهه (۱۸۰ روز)</option>
-            <option value="sub:365">اشتراک ۱ ساله (۳۶۵ روز)</option>
-            <option value="trial:3">نسخهٔ آزمایشی ۳ روزه</option>
-            <option value="custom">تعداد روز دلخواه…</option>
-          </select>
-        </label>
-        <label id="customDaysWrap" style="display:none">تعداد روز اعتبار
-          <input id="customDays" type="number" min="1" max="3650" value="15">
-        </label>
       </div>
+
+      <div class="mod-box">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+          <strong style="font-size:14px;color:#93c5fd">وضعیت و مدت اعتبار هر یک از ۳ ماژول در این کلید:</strong>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button type="button" data-quick="all:lifetime">هر ۳ بخش دائمی</button>
+            <button type="button" data-quick="all:sub:30">هر ۳ بخش ۳۰ روزه</button>
+            <button type="button" data-quick="only:ocr">فقط OCR</button>
+            <button type="button" data-quick="only:translation">فقط ترجمه</button>
+            <button type="button" data-quick="only:editing">فقط ویرایش</button>
+          </div>
+        </div>
+
+        <div class="mod-row">
+          <div class="mod-title">۱. استخراج متن (OCR)<span class="mod-sub">اجرای موتورهای OCR و مدیریت مدل‌های OCR</span></div>
+          <select id="plan_ocr" class="mod-select" data-mod="ocr">
+            <option value="lifetime" selected>فعال — دائمی (مادام‌العمر)</option>
+            <option value="sub:30">فعال — ۱ ماهه (۳۰ روز)</option>
+            <option value="sub:90">فعال — ۳ ماهه (۹۰ روز)</option>
+            <option value="sub:180">فعال — ۶ ماهه (۱۸۰ روز)</option>
+            <option value="sub:365">فعال — ۱ ساله (۳۶۵ روز)</option>
+            <option value="trial:3">فعال — آزمایشی ۳ روزه</option>
+            <option value="custom">فعال — تعداد روز دلخواه…</option>
+            <option value="none">غیرفعال در این کلید</option>
+          </select>
+          <input id="days_ocr" type="number" min="1" max="3650" value="30" placeholder="تعداد روز" style="display:none">
+        </div>
+
+        <div class="mod-row">
+          <div class="mod-title">۲. ترجمه (Translation)<span class="mod-sub">مترجم رایگان، مترجم آفلاین و هوش مصنوعی</span></div>
+          <select id="plan_translation" class="mod-select" data-mod="translation">
+            <option value="lifetime" selected>فعال — دائمی (مادام‌العمر)</option>
+            <option value="sub:30">فعال — ۱ ماهه (۳۰ روز)</option>
+            <option value="sub:90">فعال — ۳ ماهه (۹۰ روز)</option>
+            <option value="sub:180">فعال — ۶ ماهه (۱۸۰ روز)</option>
+            <option value="sub:365">فعال — ۱ ساله (۳۶۵ روز)</option>
+            <option value="trial:3">فعال — آزمایشی ۳ روزه</option>
+            <option value="custom">فعال — تعداد روز دلخواه…</option>
+            <option value="none">غیرفعال در این کلید</option>
+          </select>
+          <input id="days_translation" type="number" min="1" max="3650" value="30" placeholder="تعداد روز" style="display:none">
+        </div>
+
+        <div class="mod-row">
+          <div class="mod-title">۳. ویرایش (Editing)<span class="mod-sub">ویرایشگر حباب و متن، برش تصویر و واترمارک</span></div>
+          <select id="plan_editing" class="mod-select" data-mod="editing">
+            <option value="lifetime" selected>فعال — دائمی (مادام‌العمر)</option>
+            <option value="sub:30">فعال — ۱ ماهه (۳۰ روز)</option>
+            <option value="sub:90">فعال — ۳ ماهه (۹۰ روز)</option>
+            <option value="sub:180">فعال — ۶ ماهه (۱۸۰ روز)</option>
+            <option value="sub:365">فعال — ۱ ساله (۳۶۵ روز)</option>
+            <option value="trial:3">فعال — آزمایشی ۳ روزه</option>
+            <option value="custom">فعال — تعداد روز دلخواه…</option>
+            <option value="none">غیرفعال در این کلید</option>
+          </select>
+          <input id="days_editing" type="number" min="1" max="3650" value="30" placeholder="تعداد روز" style="display:none">
+        </div>
+      </div>
+
       <div class="row">
         <button class="primary" id="issueBtn" type="button">صدور کلید لایسنس امضاشده</button>
       </div>
@@ -334,7 +432,7 @@ _PANEL_HTML = """<!doctype html>
       </div>
       <div style="overflow-x:auto">
         <table>
-          <thead><tr><th>تاریخ صدور</th><th>خریدار / سفارش</th><th>نوع اعتبار</th><th>کد سیستم</th><th>عملیات</th></tr></thead>
+          <thead><tr><th>تاریخ صدور</th><th>خریدار / سفارش</th><th>ماژول‌ها و اعتبار</th><th>کد سیستم</th><th>عملیات</th></tr></thead>
           <tbody id="historyBody"></tbody>
         </table>
       </div>
@@ -343,9 +441,12 @@ _PANEL_HTML = """<!doctype html>
   <div id="toast" class="toast"></div>
   <script>
     const SECRET = new URLSearchParams(location.search).get('secret') || '';
+    const SUPPORT_PHONE = '09361111111';
+    const MODS = ['ocr', 'translation', 'editing'];
     let historyItems = [];
     let lastIssued = null;
     const $ = (id) => document.getElementById(id);
+
     function notify(msg, err = false) {
       const el = $('toast'); el.textContent = msg;
       el.className = err ? 'toast err' : 'toast'; el.style.display = 'block';
@@ -361,20 +462,66 @@ _PANEL_HTML = """<!doctype html>
       if (!res.ok) throw new Error(data.detail || 'خطا در عملیات');
       return data;
     }
+    function syncCustomDaysVisibility() {
+      for (const m of MODS) {
+        $('days_' + m).style.display = $('plan_' + m).value === 'custom' ? 'block' : 'none';
+      }
+    }
+    document.querySelectorAll('.mod-select').forEach((sel) => {
+      sel.addEventListener('change', syncCustomDaysVisibility);
+    });
+    document.querySelectorAll('[data-quick]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const q = btn.getAttribute('data-quick') || '';
+        if (q.startsWith('all:')) {
+          const val = q.slice(4);
+          MODS.forEach((m) => { $('plan_' + m).value = val; });
+        } else if (q.startsWith('only:')) {
+          const target = q.slice(5);
+          MODS.forEach((m) => { $('plan_' + m).value = (m === target ? 'sub:30' : 'none'); });
+        }
+        syncCustomDaysVisibility();
+      });
+    });
+
+    function collectModulesSpec() {
+      const out = {};
+      for (const m of MODS) {
+        const preset = $('plan_' + m).value;
+        if (preset === 'none') continue;
+        if (preset === 'lifetime') out[m] = { plan: 'lifetime' };
+        else if (preset.startsWith('sub:')) out[m] = { plan: 'subscription', days: Number(preset.split(':')[1]) };
+        else if (preset.startsWith('trial:')) out[m] = { plan: 'trial', days: Number(preset.split(':')[1]) };
+        else if (preset === 'custom') out[m] = { plan: 'subscription', days: Number($('days_' + m).value || 30) };
+      }
+      return out;
+    }
+
     function buildReadyMessage(item) {
+      const modLines = [];
+      if (item.modules) {
+        for (const m of MODS) {
+          if (item.modules[m]) {
+            modLines.push(`  • ${item.modules[m].label}: ${item.modules[m].planLabel}`);
+          }
+        }
+      }
       return [
         `سلام و وقت بخیر 🌸`,
         `لایسنس رسمی برنامهٔ Comic OCR Studio برای سیستم شما صادر شد:`,
         `👤 نام ثبت‌شده: ${item.holder}`,
         `🖥 کد سیستم: ${item.hardwareId}`,
-        `⏳ اعتبار: ${item.planLabel}`,
+        `🧩 ماژول‌های فعال‌شده:`,
+        ...(modLines.length ? modLines : [`  • ${item.planLabel}`]),
         ``,
         `🔑 کلید فعال‌سازی شما:`,
         item.token,
         ``,
-        `کافی است برنامه را باز کنید، کلید بالا را در کادر فعال‌سازی بچسبانید و دکمهٔ «فعال‌سازی لایسنس» را بزنید.`,
+        `کافی است در برنامه وارد بخش «لایسنس و رمز ورود» شوید، کلید بالا را بچسبانید و دکمهٔ «فعال‌سازی لایسنس» را بزنید.`,
+        `📞 پشتیبانی و تمدید لایسنس: ${SUPPORT_PHONE}`,
       ].join('\\n');
     }
+
     function renderHistory() {
       const q = ($('searchBox').value || '').trim().toLowerCase();
       const rows = historyItems.filter((it) => !q || (it.holder || '').toLowerCase().includes(q) || (it.hardwareId || '').toLowerCase().includes(q));
@@ -405,29 +552,25 @@ _PANEL_HTML = """<!doctype html>
       historyItems = info.history || [];
       renderHistory();
     }
-    $('planPreset').onchange = () => {
-      $('customDaysWrap').style.display = $('planPreset').value === 'custom' ? 'flex' : 'none';
-    };
     $('searchBox').oninput = renderHistory;
     $('issueBtn').onclick = async () => {
       try {
-        const preset = $('planPreset').value;
-        let plan = 'lifetime', days = null;
-        if (preset.startsWith('sub:')) { plan = 'subscription'; days = Number(preset.split(':')[1]); }
-        else if (preset.startsWith('trial:')) { plan = 'trial'; days = Number(preset.split(':')[1]); }
-        else if (preset === 'custom') { plan = 'subscription'; days = Number($('customDays').value || 30); }
+        const modules = collectModulesSpec();
+        if (!Object.keys(modules).length) {
+          notify('حداقل یکی از سه ماژول (OCR، ترجمه، ویرایش) باید در کلید فعال باشد.', true);
+          return;
+        }
         const res = await callApi('/api/issue', 'POST', {
           hardware_id: $('custHwid').value,
           holder: $('custHolder').value,
-          plan,
-          days,
+          modules,
         });
         lastIssued = res.issued;
         $('issuedResult').style.display = 'block';
         $('issuedMeta').textContent = `صادر شد برای «${lastIssued.holder}» — ${lastIssued.planLabel} — کد سیستم: ${lastIssued.hardwareId}`;
         $('issuedToken').value = lastIssued.token;
         await refreshInfo();
-        notify('کلید لایسنس با موفقیت صادر شد.');
+        notify('کلید لایسنس ماژولار با موفقیت صادر شد.');
       } catch (e) { notify(e.message, true); }
     };
     $('copyTokenBtn').onclick = async () => {
@@ -524,6 +667,7 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
                         "publicKeyHex": rec["public_key_hex"],
                         "sellerDir": str(vault.seller_dir),
                         "thisHardwareId": compute_hardware_id(),
+                        "supportPhone": SUPPORT_PHONE,
                         "history": vault.list_history()[:200],
                     }
                 )
@@ -550,11 +694,13 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
             parsed = urlsplit(self.path)
             try:
                 if parsed.path == "/api/issue":
+                    raw_mods = data.get("modules")
                     issued = vault.issue(
                         hardware_id=str(data.get("hardware_id") or ""),
                         holder=str(data.get("holder") or ""),
                         plan=str(data.get("plan") or "lifetime"),
                         days=int(data["days"]) if data.get("days") is not None else None,
+                        modules=raw_mods if isinstance(raw_mods, dict) else None,
                     )
                     self._send_json({"issued": issued})
                     return
@@ -577,7 +723,7 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/?secret={panel_secret}"
     print("=" * 68)
-    print("  Comic OCR Studio — پنل مدیریت و صدور لایسنس (مخصوص فروشنده)")
+    print("  Comic OCR Studio — پنل مدیریت و صدور لایسنس ماژولار (مخصوص فروشنده)")
     print(f"  شناسهٔ کلید مادر شما: {key_info['fingerprint']}")
     print(f"  مسیر خصوصی کلید مادر: {vault.master_key_path}")
     print(f"  آدرس پنل محلی: {url}")
@@ -595,7 +741,7 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Comic OCR Studio Seller License Generator")
+    parser = argparse.ArgumentParser(description="Comic OCR Studio Seller Modular License Generator")
     parser.add_argument("--seller-dir", default="", help="Optional custom seller key vault directory")
     parser.add_argument("--init-seller", action="store_true", help="Create/sync seller master key and exit")
     parser.add_argument("--self-activate", action="store_true", help="Issue & activate lifetime license on this PC")
@@ -603,7 +749,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hwid", default="", help="Customer System Code (CS4-XXXX-XXXX-XXXX-XXXX)")
     parser.add_argument("--holder", default="کاربر رسمی", help="Customer name or order reference")
     parser.add_argument("--plan", choices=["lifetime", "subscription", "trial"], default="lifetime")
-    parser.add_argument("--days", type=int, default=None, help="Validity in days for subscription/trial")
+    parser.add_argument("--days", type=int, default=None, help="Validity in days for uniform subscription/trial")
+    parser.add_argument(
+        "--modules-spec",
+        default="",
+        help="Per-module spec, e.g. ocr=lifetime,translation=30,editing=off",
+    )
     parser.add_argument("--json", action="store_true", help="Print CLI output as JSON")
     parser.add_argument("--no-browser", action="store_true", help="Start panel without auto-opening browser")
     args = parser.parse_args(argv)
@@ -630,11 +781,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.issue:
         if not args.hwid:
             parser.error("--issue requires --hwid CS4-XXXX-XXXX-XXXX-XXXX")
+        mods = parse_modules_cli_spec(args.modules_spec) if args.modules_spec.strip() else None
         issued = vault.issue(
             hardware_id=args.hwid,
             holder=args.holder,
             plan=args.plan,
             days=args.days,
+            modules=mods,
         )
         if args.json:
             print(json.dumps(issued, ensure_ascii=False))

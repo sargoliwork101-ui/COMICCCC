@@ -2499,7 +2499,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
       // v3.85–v4.09: Verify version badge ۴.۰۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, optional storage settings, race-free backup, built-in offline local translator, custom manual text boxes, watermarks, full-attribute box copy/paste/duplicate, API key priority ordering, lossless PDF import, and grouped-page translation
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۵ · Python', 'header shows version ۴.۱۵');
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۶ · Python', 'header shows version ۴.۱۶');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2864,7 +2864,57 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         'v4.15 local password unlocks and removes cleanly in real Chromium',
       );
 
-      console.log('PASS: v3.81–v4.15 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, and v4.15 license/login guard');
+      // v4.16: Real Chromium E2E test of 24h Trial Top Banner (09361111111) + 3-Module Status UI + Unlicensed Module Modal Guard
+      const v416Chromium = await page.evaluate(async () => {
+        await openLicenseDialog();
+        const supportPhone = document.getElementById('licSupportPhone')?.textContent?.trim();
+        const ocrBadge = document.getElementById('licMod_ocr')?.textContent?.trim() || '';
+        const trBadge = document.getElementById('licMod_translation')?.textContent?.trim() || '';
+        const edBadge = document.getElementById('licMod_editing')?.textContent?.trim() || '';
+        closeDialog('licenseDialog');
+
+        const savedStatus = JSON.parse(JSON.stringify(state.licenseStatus));
+        applyAuthGateUi({
+          ...savedStatus,
+          isTrial: true,
+          trialExpiresAt: Math.floor(Date.now() / 1000) + 72000,
+          trialRemainingSeconds: 72000,
+          supportPhone: '09361111111',
+        });
+        const bannerShown = !document.getElementById('trialNoticeBanner').classList.contains('hidden')
+          && document.getElementById('trialNoticeText').textContent.includes('09361111111');
+
+        applyAuthGateUi({
+          ...savedStatus,
+          isTrial: false,
+          modules: {
+            ...savedStatus.modules,
+            editing: { ...savedStatus.modules.editing, active: false, source: 'unlicensed' },
+          },
+        });
+        const editCheckPromise = ensureModuleLicensed('editing');
+        await new Promise((r) => setTimeout(r, 35));
+        const modalHasPhone = document.getElementById('appModalDialog').open === true
+          && document.getElementById('appModalMessage').textContent.includes('09361111111');
+        document.getElementById('appModalCancel').click();
+        const editAllowed = await editCheckPromise;
+        applyAuthGateUi(savedStatus);
+
+        return {
+          supportPhone,
+          allThreeActive: ocrBadge.includes('فعال') && trBadge.includes('فعال') && edBadge.includes('فعال'),
+          bannerShown,
+          modalHasPhone,
+          editAllowed,
+        };
+      });
+      assert.deepEqual(
+        v416Chromium,
+        { supportPhone: '09361111111', allThreeActive: true, bannerShown: true, modalHasPhone: true, editAllowed: false },
+        'v4.16 24h trial banner (09361111111), 3-module license table, and unlicensed module modal work in real Chromium',
+      );
+
+      console.log('PASS: v3.81–v4.16 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, and v4.15–v4.16 modular license/24h trial guard');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.15">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.15">
+  <link rel="stylesheet" href="/style.css?v=4.16">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.16">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۱۵ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۱۶ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h11"/></svg><span>پروژه و تنظیمات</span></button>
@@ -35,6 +35,11 @@
             <button id="copyGateHwidBtn" class="bt" type="button">کپی کد سیستم</button>
           </div>
           <span class="hint">این کد را برای فروشنده بفرستید تا کلید لایسنس مخصوص همین کامپیوتر صادر شود.</span>
+        </div>
+
+        <div class="auth-phone-callout">
+          <span>برای ادامهٔ استفاده از برنامه و دریافت یا تمدید لایسنس تماس بگیرید:</span>
+          <strong id="gateSupportPhone" dir="ltr">09361111111</strong>
         </div>
 
         <label class="auth-field" for="gateLicenseKeyInput">
@@ -92,6 +97,16 @@
   </div>
 
   <main id="mainwrap">
+    <section id="trialNoticeBanner" class="panel trial-notice-banner hidden" role="status" aria-live="polite">
+      <div class="trial-notice-body">
+        <span id="trialNoticeBadge" class="trial-notice-badge">نسخهٔ آزمایشی ۲۴ ساعته</span>
+        <span id="trialNoticeText">نسخهٔ آزمایشی ۲۴ ساعته فعال است — برای ادامهٔ استفاده از برنامه باید لایسنس تهیه کنید و با شمارهٔ <strong dir="ltr">09361111111</strong> تماس بگیرید.</span>
+      </div>
+      <div class="trial-notice-actions">
+        <span id="trialNoticePhone" class="trial-phone-pill" dir="ltr">📞 09361111111</span>
+        <button id="trialBannerOpenLicBtn" class="bt primary" type="button">ثبت لایسنس / کد سیستم</button>
+      </div>
+    </section>
     <section id="engineUpdateNotice" class="panel engine-update-notice hidden" role="status" aria-live="polite">
       <div class="engine-update-notice-body">
         <span class="engine-update-dot" aria-hidden="true"></span>
@@ -846,15 +861,36 @@
 
     <section class="lic-section">
       <div class="lic-info-grid">
-        <div class="lic-info-row"><span>وضعیت لایسنس:</span><strong id="licInfoStatus" class="lic-status-ok">فعال ✓</strong></div>
+        <div class="lic-info-row"><span>وضعیت کلی لایسنس:</span><strong id="licInfoStatus" class="lic-status-ok">فعال ✓</strong></div>
         <div class="lic-info-row"><span>نام ثبت‌شده / سفارش:</span><strong id="licInfoHolder">—</strong></div>
-        <div class="lic-info-row"><span>نوع طرح و اعتبار:</span><strong id="licInfoPlan">—</strong></div>
+        <div class="lic-info-row"><span>خلاصهٔ طرح و اعتبار:</span><strong id="licInfoPlan">—</strong></div>
+        <div class="lic-info-row"><span>تلفن دریافت و تمدید لایسنس:</span><strong id="licSupportPhone" class="lic-phone-val" dir="ltr">09361111111</strong></div>
         <div class="lic-info-row">
           <span>کد سیستم این کامپیوتر:</span>
           <div class="lic-hwid-inline">
             <code id="licInfoHwid" dir="ltr">CS4-...</code>
             <button id="copyDialogHwidBtn" class="bt" type="button">کپی</button>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="lic-section">
+      <div class="lic-sec-head">
+        <h3>وضعیت ماژول‌های سه‌گانهٔ لایسنس</h3>
+      </div>
+      <div id="licModulesGrid" class="lic-modules-grid">
+        <div class="lic-mod-row" data-mod="ocr">
+          <span class="lic-mod-name">۱. استخراج متن (OCR آفلاین)</span>
+          <span id="licMod_ocr" class="lic-pill">—</span>
+        </div>
+        <div class="lic-mod-row" data-mod="translation">
+          <span class="lic-mod-name">۲. ترجمه</span>
+          <span id="licMod_translation" class="lic-pill">—</span>
+        </div>
+        <div class="lic-mod-row" data-mod="editing">
+          <span class="lic-mod-name">۳. ویرایش (ویرایشگر، برش، واترمارک)</span>
+          <span id="licMod_editing" class="lic-pill">—</span>
         </div>
       </div>
     </section>
@@ -887,12 +923,12 @@
       </div>
     </section>
 
-    <details class="lic-section lic-renew-details">
-      <summary>تمدید اعتبار یا ثبت کلید لایسنس جدید</summary>
+    <details id="licRenewDetails" class="lic-section lic-renew-details">
+      <summary>ثبت کلید لایسنس جدید / فعال‌سازی یا تمدید ماژول‌ها</summary>
       <div class="lic-renew-body">
         <textarea id="dialogNewLicenseInput" dir="ltr" rows="2" placeholder="CLIC1.eyJ..." autocomplete="off" spellcheck="false"></textarea>
         <div class="lic-pwd-actions">
-          <button id="dialogActivateNewBtn" class="bt" type="button">ثبت کلید لایسنس جدید</button>
+          <button id="dialogActivateNewBtn" class="bt primary" type="button">ثبت و فعال‌سازی کلید لایسنس</button>
         </div>
       </div>
     </details>
@@ -949,12 +985,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-  <script src="/typeset.js?v=4.15"></script>
-  <script src="/groups.js?v=4.15"></script>
-  <script src="/rich-sanitize.js?v=4.15"></script>
-  <script src="/rich-editor.js?v=4.15"></script>
-  <script src="/inline-edit-session.js?v=4.15"></script>
-  <script src="/help-guide.js?v=4.15"></script>
-  <script src="/app.js?v=4.15"></script>
+  <script src="/typeset.js?v=4.16"></script>
+  <script src="/groups.js?v=4.16"></script>
+  <script src="/rich-sanitize.js?v=4.16"></script>
+  <script src="/rich-editor.js?v=4.16"></script>
+  <script src="/inline-edit-session.js?v=4.16"></script>
+  <script src="/help-guide.js?v=4.16"></script>
+  <script src="/app.js?v=4.16"></script>
 </body>
 </html>

@@ -1,16 +1,21 @@
-"""Offline Hardware-Bound Licensing, Anti-Clock-Rollback & Local Password Guard.
+"""Offline Hardware-Bound Modular Licensing, 24h Auto-Trial & Local Password Guard.
 
-Security architecture (Model 1 Offline Asymmetric Licensing):
+Security architecture (Model 1 Offline Asymmetric Modular Licensing — v4.16):
 1. Pure-Python RFC 8032 Ed25519 digital signature verification (zero external wheels).
    Only the 32-byte public verification key is shipped in `_public_key.py`; without the
    seller's 32-byte private seed, forging a license key (`CLIC1....`) for any System Code
-   is mathematically infeasible.
+   or module combination is mathematically infeasible.
 2. Composite Hardware System Code (`CS4-XXXX-XXXX-XXXX-XXXX`) derived from stable OS and
    motherboard/CPU identifiers (Windows Registry MachineGuid + SMBIOS/CPU identifiers, or
    Linux/macOS machine-id + architecture), unaffected by USB drives or network changes.
-3. Dual-anchored HMAC monotonic timestamp ledger protecting timed/trial licenses against
-   Windows system clock rollback, while allowing 10 minutes of normal NTP drift.
-4. Optional PBKDF2-HMAC-SHA256 (310,000 iterations) local login password bound into the
+3. Automatic one-time 24-Hour Trial on first launch, anchored across multiple HMAC-signed
+   locations (primary license store + roaming profile anchor + Windows HKCU Registry when on
+   Windows) so deleting files or rolling back the Windows clock cannot reset the 24h trial.
+4. Independent Per-Module Licensing (`ocr`, `translation`, `editing`): a single `CLIC1.`
+   signed code can activate any subset of the 3 modules, each with its own independent
+   duration (`lifetime` or exact `days`), and activating additional module keys later
+   merges cleanly without overwriting previously licensed modules.
+5. Optional PBKDF2-HMAC-SHA256 (310,000 iterations) local login password bound into the
    HMAC-protected license state so deleting auxiliary files cannot bypass a local lock.
 """
 
@@ -70,7 +75,8 @@ def _recover_x(y: int, sign: int) -> int | None:
 
 _BY = (4 * _inv(5)) % _P
 _BX = _recover_x(_BY, 0)
-assert _BX is not None
+if _BX is None:
+    raise RuntimeError("Ed25519 base point initialization failed.")
 # Extended twisted Edwards coordinates: (X, Y, Z, T) where x = X/Z, y = Y/Z, x*y = T/Z
 _ExtPoint = tuple[int, int, int, int]
 _IDENTITY: _ExtPoint = (0, 1, 1, 0)
@@ -150,14 +156,12 @@ def _decode_point(raw: bytes) -> _ExtPoint | None:
     if x is None:
         return None
     pt: _ExtPoint = (x, y, 1, (x * y) % _P)
-    # Reject non-canonical encodings (e.g. negative zero x with sign=1).
     if _encode_point(pt) != raw:
         return None
     return pt
 
 
 def _is_low_order_point(point: _ExtPoint) -> bool:
-    # Cofactor of Ed25519 is 8; [8]A == identity means A is a torsion / identity point.
     p2 = _point_double(point)
     p4 = _point_double(p2)
     p8 = _point_double(p4)
@@ -224,8 +228,17 @@ def ed25519_verify(public32: bytes, message: bytes, signature64: bytes) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Hardware System Code (`CS4-XXXX-XXXX-XXXX-XXXX`)
+# Constants, Hardware System Code (`CS4-XXXX-XXXX-XXXX-XXXX`) & Modules
 # ---------------------------------------------------------------------------
+SUPPORT_PHONE = "09361111111"
+AUTO_TRIAL_DURATION_SEC = 24 * 3600  # 24-hour automatic trial on first install
+LICENSE_MODULES: tuple[str, ...] = ("ocr", "translation", "editing")
+MODULE_LABELS_FA: dict[str, str] = {
+    "ocr": "استخراج متن (OCR آفلاین)",
+    "translation": "ترجمه",
+    "editing": "ویرایش",
+}
+
 _HWID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # 32 unambiguous characters (no 0/O/1/I)
 _HWID_PREFIX = "CS4"
 _HWID_GROUPS = 4
@@ -240,13 +253,14 @@ SESSION_COOKIE_NAME = "comic_studio_session"
 _HWID_CACHE: str | None = None
 _HWID_LOCK = threading.RLock()
 
-# Internal test-only anchor override (never populated from environment variables!).
+# Internal test-only anchor overrides (never populated from environment variables!).
 _LICENSE_DIR_OVERRIDE: Path | None = None
 _SECONDARY_ANCHOR_OVERRIDE: Path | None = None
+_AUTO_TRIAL_ENABLED: bool = True
 
 
 class LicenseError(Exception):
-    """Raised when a license key or protected runtime action is unauthorized."""
+    """Raised when a license key or protected runtime module is unauthorized."""
 
     def __init__(self, message: str, *, code: str = "LICENSE_REQUIRED", status_code: int = 402) -> None:
         super().__init__(message)
@@ -403,9 +417,66 @@ def _b64u_decode(text: str) -> bytes:
 def plan_label_fa(plan: str, *, days_total: int | None = None) -> str:
     if plan == "lifetime":
         return "دائمی (مادام‌العمر)"
+    if plan == "trial24h":
+        return "آزمایشی ۲۴ ساعته"
     if plan == "trial":
         return f"آزمایشی ({days_total} روزه)" if days_total else "آزمایشی (مدت‌دار)"
+    if plan == "modular":
+        return "ماژولار (اختصاصی هر بخش)"
     return f"اشتراک مدت‌دار ({days_total} روزه)" if days_total else "اشتراک مدت‌دار"
+
+
+def _normalize_module_grants_input(
+    *,
+    iat: int,
+    plan: str,
+    days: int | None,
+    expires_at: int | None,
+    modules: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Normalize per-module grant definitions into `{mod_id: {'plan': str, 'exp': int | None}}`."""
+    if modules is not None:
+        if not isinstance(modules, dict):
+            raise ValueError("`modules` must be a dictionary of module grants.")
+        normalized: dict[str, dict[str, Any]] = {}
+        for mod_id, raw_spec in modules.items():
+            key = str(mod_id or "").strip().lower()
+            if key not in LICENSE_MODULES:
+                raise ValueError(f"Unknown license module: {mod_id!r}")
+            if not isinstance(raw_spec, dict):
+                continue
+            m_plan = str(raw_spec.get("plan") or "none").strip().lower()
+            if m_plan in {"none", "off", "disabled", ""}:
+                continue
+            if m_plan not in {"lifetime", "subscription", "trial"}:
+                raise ValueError(f"Unsupported plan {m_plan!r} for module {key!r}")
+            if m_plan == "lifetime":
+                m_exp: int | None = None
+            elif raw_spec.get("expires_at") is not None or raw_spec.get("exp") is not None:
+                raw_e = raw_spec.get("expires_at") if raw_spec.get("expires_at") is not None else raw_spec.get("exp")
+                m_exp = int(raw_e)  # type: ignore[arg-type]
+            else:
+                m_days = raw_spec.get("days")
+                if m_days is None or int(m_days) <= 0:
+                    raise ValueError(f"Module {key!r} with plan {m_plan!r} requires positive `days`.")
+                m_exp = iat + int(m_days) * 86400
+            normalized[key] = {"plan": m_plan, "exp": m_exp}
+        if not normalized:
+            raise ValueError("حداقل یکی از سه ماژول (OCR، ترجمه، ویرایش) باید در کلید لایسنس فعال باشد.")
+        return normalized
+
+    norm_plan = str(plan or "lifetime").strip().lower()
+    if norm_plan not in {"lifetime", "subscription", "trial"}:
+        raise ValueError(f"Unsupported license plan: {plan!r}")
+    if norm_plan == "lifetime":
+        shared_exp: int | None = None
+    elif expires_at is not None:
+        shared_exp = int(expires_at)
+    else:
+        if days is None or int(days) <= 0:
+            raise ValueError("Timed or trial licenses require a positive `days` duration.")
+        shared_exp = iat + int(days) * 86400
+    return {mod_id: {"plan": norm_plan, "exp": shared_exp} for mod_id in LICENSE_MODULES}
 
 
 def issue_license_token(
@@ -418,8 +489,9 @@ def issue_license_token(
     issued_at: int | None = None,
     expires_at: int | None = None,
     license_id: str | None = None,
+    modules: dict[str, dict[str, Any]] | None = None,
 ) -> str:
-    """Create a cryptographically signed `CLIC1.<payload>.<signature>` license key."""
+    """Create a cryptographically signed `CLIC1.<payload>.<signature>` modular license key."""
     try:
         seed = bytes.fromhex(str(private_seed_hex or "").strip())
     except ValueError as exc:
@@ -429,28 +501,35 @@ def issue_license_token(
 
     norm_hwid = normalize_hardware_id(hardware_id)
     clean_holder = str(holder or "").strip()[:120] or "کاربر رسمی"
-    norm_plan = str(plan or "lifetime").strip().lower()
-    if norm_plan not in {"lifetime", "subscription", "trial"}:
-        raise ValueError(f"Unsupported license plan: {plan!r}")
-
     iat = int(issued_at if issued_at is not None else time.time())
-    if norm_plan == "lifetime":
-        exp: int | None = None
-    elif expires_at is not None:
-        exp = int(expires_at)
+    mods = _normalize_module_grants_input(
+        iat=iat,
+        plan=plan,
+        days=days,
+        expires_at=expires_at,
+        modules=modules,
+    )
+
+    # Determine summary top-level plan/exp for uniform vs modular keys
+    unique_specs = {(spec["plan"], spec["exp"]) for spec in mods.values()}
+    if len(mods) == len(LICENSE_MODULES) and len(unique_specs) == 1:
+        top_plan, top_exp = next(iter(unique_specs))
     else:
-        if days is None or int(days) <= 0:
-            raise ValueError("Timed or trial licenses require a positive `days` duration.")
-        exp = iat + int(days) * 86400
+        top_plan = "modular"
+        if any(spec["exp"] is None for spec in mods.values()):
+            top_exp = None
+        else:
+            top_exp = max(int(spec["exp"]) for spec in mods.values() if spec["exp"] is not None)
 
     lid = str(license_id or secrets.token_hex(5)).strip()[:24]
     payload: dict[str, Any] = {
         "v": 1,
         "hid": norm_hwid,
         "holder": clean_holder,
-        "plan": norm_plan,
+        "plan": top_plan,
         "iat": iat,
-        "exp": exp,
+        "exp": top_exp,
+        "mods": mods,
         "lid": lid,
     }
     payload_bytes = json.dumps(
@@ -465,6 +544,42 @@ def clean_token_text(raw: str) -> str:
     return re.sub(r"[\s\u200b\u200c\u200d\u200e\u200f\ufeff]+", "", str(raw or ""))
 
 
+def _evaluate_module_entry(
+    mod_id: str,
+    mod_plan: str,
+    mod_exp: int | None,
+    iat: int,
+    now: float,
+) -> dict[str, Any]:
+    days_total: int | None = None
+    days_remaining: int | None = None
+    rem_sec: int | None = None
+    active = True
+    if mod_exp is not None:
+        days_total = max(1, int(round((mod_exp - iat) / 86400.0))) if iat > 0 else None
+        raw_rem = float(mod_exp) - now
+        if raw_rem <= 0:
+            active = False
+            rem_sec = 0
+            days_remaining = 0
+        else:
+            rem_sec = int(math.ceil(raw_rem))
+            days_remaining = int(math.ceil(raw_rem / 86400.0))
+    return {
+        "module": mod_id,
+        "label": MODULE_LABELS_FA.get(mod_id, mod_id),
+        "granted": True,
+        "active": active,
+        "plan": mod_plan,
+        "planLabel": plan_label_fa(mod_plan, days_total=days_total),
+        "issuedAt": iat,
+        "expiresAt": mod_exp,
+        "daysTotal": days_total,
+        "daysRemaining": days_remaining,
+        "remainingSeconds": rem_sec,
+    }
+
+
 def verify_license_token(
     token: str,
     *,
@@ -473,7 +588,7 @@ def verify_license_token(
     now_ts: float | None = None,
     check_expiry: bool = True,
 ) -> dict[str, Any]:
-    """Verify Ed25519 signature, hardware ID binding, and optional expiration of a license key."""
+    """Verify Ed25519 signature, hardware ID binding, and per-module grants of a license key."""
     cleaned = clean_token_text(token)
     if not cleaned:
         raise LicenseError("کلید لایسنس وارد نشده است.", code="EMPTY_TOKEN", status_code=400)
@@ -510,22 +625,44 @@ def verify_license_token(
             status_code=400,
         )
 
-    plan = str(payload.get("plan") or "lifetime").strip().lower()
-    if plan not in {"lifetime", "subscription", "trial"}:
+    iat = int(payload.get("iat") or 0)
+    now = float(now_ts if now_ts is not None else time.time())
+    top_plan = str(payload.get("plan") or "lifetime").strip().lower()
+    if top_plan not in {"lifetime", "subscription", "trial", "modular"}:
         raise LicenseError("نوع طرح لایسنس نامعتبر است.", code="INVALID_PLAN", status_code=400)
 
-    iat = int(payload.get("iat") or 0)
-    raw_exp = payload.get("exp")
-    exp = int(raw_exp) if raw_exp is not None else None
-    now = float(now_ts if now_ts is not None else time.time())
+    raw_mods = payload.get("mods")
+    parsed_mods: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_mods, dict) and raw_mods:
+        for mod_id in LICENSE_MODULES:
+            spec = raw_mods.get(mod_id)
+            if not isinstance(spec, dict):
+                continue
+            m_plan = str(spec.get("plan") or "").strip().lower()
+            if m_plan not in {"lifetime", "subscription", "trial"}:
+                continue
+            m_exp = int(spec["exp"]) if spec.get("exp") is not None else None
+            parsed_mods[mod_id] = _evaluate_module_entry(mod_id, m_plan, m_exp, iat, now)
+    else:
+        # Backward compatibility with uniform v4.15 tokens (grants all 3 modules)
+        fallback_plan = "subscription" if top_plan == "modular" else top_plan
+        raw_exp = payload.get("exp")
+        shared_exp = int(raw_exp) if raw_exp is not None else None
+        for mod_id in LICENSE_MODULES:
+            parsed_mods[mod_id] = _evaluate_module_entry(mod_id, fallback_plan, shared_exp, iat, now)
 
-    if exp is not None and check_expiry and now > float(exp):
+    if not parsed_mods:
+        raise LicenseError("هیچ ماژول فعالی در این کلید لایسنس تعریف نشده است.", code="INVALID_PLAN", status_code=400)
+
+    if check_expiry and not any(m["active"] for m in parsed_mods.values()):
         raise LicenseError(
-            "مدت اعتبار این لایسنس به پایان رسیده است. لطفاً کلید تمدید جدید را وارد کنید.",
+            f"مدت اعتبار این لایسنس به پایان رسیده است. برای تمدید با شمارهٔ {SUPPORT_PHONE} تماس بگیرید.",
             code="LICENSE_EXPIRED",
             status_code=402,
         )
 
+    raw_top_exp = payload.get("exp")
+    exp = int(raw_top_exp) if raw_top_exp is not None else None
     days_total: int | None = None
     days_remaining: int | None = None
     if exp is not None:
@@ -533,23 +670,34 @@ def verify_license_token(
         remaining_sec = max(0.0, float(exp) - now)
         days_remaining = int(math.ceil(remaining_sec / 86400.0)) if remaining_sec > 0 else 0
 
+    if top_plan == "modular":
+        mod_summaries = [
+            f"{MODULE_LABELS_FA[m]}: {parsed_mods[m]['planLabel']}"
+            for m in LICENSE_MODULES
+            if m in parsed_mods
+        ]
+        summary_label = " · ".join(mod_summaries)
+    else:
+        summary_label = plan_label_fa(top_plan, days_total=days_total)
+
     return {
         "valid": True,
         "token": cleaned,
         "hardwareId": token_hwid,
         "holder": str(payload.get("holder") or "کاربر رسمی"),
-        "plan": plan,
-        "planLabel": plan_label_fa(plan, days_total=days_total),
+        "plan": top_plan,
+        "planLabel": summary_label,
         "issuedAt": iat,
         "expiresAt": exp,
         "daysTotal": days_total,
         "daysRemaining": days_remaining,
+        "modules": parsed_mods,
         "licenseId": str(payload.get("lid") or ""),
     }
 
 
 # ---------------------------------------------------------------------------
-# Persistent License State, Anti-Clock-Rollback & Local Password Manager
+# Persistent License State, 24h Auto-Trial, Anti-Rollback & Local Password
 # ---------------------------------------------------------------------------
 def _default_license_dir() -> Path:
     if _LICENSE_DIR_OVERRIDE is not None:
@@ -622,6 +770,41 @@ def _read_verified_json(path: Path) -> dict[str, Any] | None:
     return data
 
 
+def _read_win_registry_anchor() -> dict[str, Any] | None:
+    if os.name != "nt" or _LICENSE_DIR_OVERRIDE is not None:
+        return None
+    try:
+        import winreg  # type: ignore[import-not-found]
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\ComicOCRStudio\Guard", 0, winreg.KEY_READ) as key:
+            raw, _ = winreg.QueryValueEx(key, "Ledger")
+            data = json.loads(str(raw or ""))
+            if not isinstance(data, dict):
+                return None
+            if not hmac.compare_digest(_compute_record_mac(data), str(data.get("mac") or "")):
+                return None
+            return data
+    except Exception:
+        return None
+
+
+def _write_win_registry_anchor(payload: dict[str, Any]) -> None:
+    if os.name != "nt" or _LICENSE_DIR_OVERRIDE is not None:
+        return
+    try:
+        import winreg  # type: ignore[import-not-found]
+
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\ComicOCRStudio\Guard",
+            0,
+            winreg.KEY_WRITE,
+        ) as key:
+            winreg.SetValueEx(key, "Ledger", 0, winreg.REG_SZ, json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        pass
+
+
 def _native_guard_verify_frozen() -> bool:
     """In frozen Windows `.exe` builds, optionally cross-verify against compiled `ComicLicenseGuard.exe`."""
     if not getattr(sys, "frozen", False) or os.name != "nt":
@@ -660,15 +843,31 @@ def _native_guard_verify_frozen() -> bool:
         return False
 
 
+def _inactive_modules_payload(reason_label: str = "غیرفعال") -> dict[str, dict[str, Any]]:
+    return {
+        m: {
+            "module": m,
+            "label": MODULE_LABELS_FA[m],
+            "active": False,
+            "source": "none",
+            "plan": "none",
+            "planLabel": reason_label,
+            "expiresAt": None,
+            "daysRemaining": None,
+            "remainingSeconds": 0,
+        }
+        for m in LICENSE_MODULES
+    }
+
+
 class _RuntimeSecurityGate:
-    """Thread-safe runtime gate managing license verification, anti-rollback & local sessions."""
+    """Thread-safe runtime gate managing 24h trial, modular licenses, anti-rollback & local sessions."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._sessions: dict[str, float] = {}  # session_token -> created_at
+        self._sessions: dict[str, float] = {}
         self._failed_attempts: list[float] = []
         self._cache_key: tuple[str, int, int] | None = None
-        self._cache_at: float = 0.0
         self._cached_record: dict[str, Any] | None = None
         self._native_checked: bool = False
         self._native_ok: bool = True
@@ -678,7 +877,6 @@ class _RuntimeSecurityGate:
             self._sessions.clear()
             self._failed_attempts.clear()
             self._cache_key = None
-            self._cache_at = 0.0
             self._cached_record = None
             self._native_checked = False
             self._native_ok = True
@@ -690,7 +888,6 @@ class _RuntimeSecurityGate:
         return _secondary_anchor_dir() / ".cs4-clock-anchor.json"
 
     def _load_state_record(self) -> tuple[dict[str, Any] | None, bool]:
-        """Return `(verified_record, corrupted_flag)`."""
         path = self._state_path()
         try:
             st = path.stat()
@@ -720,27 +917,62 @@ class _RuntimeSecurityGate:
             self._cache_key = (str(path), st.st_mtime_ns, st.st_size)
             self._cached_record = dict(clean)
 
-    def _max_observed_clock(self, record: dict[str, Any]) -> int:
-        candidates = [int(record.get("max_seen_utc") or 0)]
-        anchor = _read_verified_json(self._anchor_path())
-        if anchor is not None:
-            candidates.append(int(anchor.get("max_seen_utc") or 0))
-        return max(candidates)
+    def _read_anchors(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        file_anc = _read_verified_json(self._anchor_path())
+        if file_anc is not None:
+            out.append(file_anc)
+        reg_anc = _read_win_registry_anchor()
+        if reg_anc is not None:
+            out.append(reg_anc)
+        return out
+
+    def _write_anchors(self, *, max_seen_utc: int, trial_started_at: int, trial_consumed: bool) -> None:
+        anc: dict[str, Any] = {
+            "v": 1,
+            "max_seen_utc": int(max_seen_utc),
+            "trial_started_at": int(trial_started_at),
+            "trial_consumed": bool(trial_consumed),
+        }
+        anc["mac"] = _compute_record_mac(anc)
+        with contextlib.suppress(OSError):
+            _atomic_write_private_json(self._anchor_path(), anc)
+        _write_win_registry_anchor(anc)
+
+    def _ledger_summary(self, record: dict[str, Any] | None) -> tuple[int, int, bool]:
+        """Return `(max_seen_utc, earliest_trial_started_at, trial_consumed)` across all anchors."""
+        anchors = self._read_anchors()
+        max_seen = int((record or {}).get("max_seen_utc") or 0)
+        trial_starts: list[int] = []
+        r_trial = int((record or {}).get("trial_started_at") or 0)
+        if r_trial > 0:
+            trial_starts.append(r_trial)
+        consumed = bool((record or {}).get("trial_consumed", False))
+        for anc in anchors:
+            max_seen = max(max_seen, int(anc.get("max_seen_utc") or 0))
+            t_s = int(anc.get("trial_started_at") or 0)
+            if t_s > 0:
+                trial_starts.append(t_s)
+            if anc.get("trial_consumed"):
+                consumed = True
+        trial_started = min(trial_starts) if trial_starts else 0
+        return max_seen, trial_started, consumed
 
     def _advance_clock_ledger(self, record: dict[str, Any], now_int: int) -> None:
-        prev_max = self._max_observed_clock(record)
+        prev_max, trial_started, consumed = self._ledger_summary(record)
         new_max = max(prev_max, now_int)
         if new_max > int(record.get("max_seen_utc") or 0) + 60:
             record["max_seen_utc"] = new_max
             with contextlib.suppress(OSError):
                 self._save_state_record(record)
-        anchor = _read_verified_json(self._anchor_path())
-        anchor_max = int(anchor.get("max_seen_utc") or 0) if anchor else 0
-        if new_max > anchor_max + 60:
-            anchor_payload: dict[str, Any] = {"v": 1, "max_seen_utc": new_max}
-            anchor_payload["mac"] = _compute_record_mac(anchor_payload)
-            with contextlib.suppress(OSError):
-                _atomic_write_private_json(self._anchor_path(), anchor_payload)
+        anchors = self._read_anchors()
+        anchor_max = max((int(a.get("max_seen_utc") or 0) for a in anchors), default=0)
+        if new_max > anchor_max + 60 or not anchors:
+            self._write_anchors(
+                max_seen_utc=new_max,
+                trial_started_at=trial_started,
+                trial_consumed=consumed,
+            )
 
     def _check_native_integrity(self) -> bool:
         if not self._native_checked:
@@ -775,13 +1007,28 @@ class _RuntimeSecurityGate:
                 if hmac.compare_digest(active_tok, session_token):
                     self._sessions.pop(active_tok, None)
 
+    @staticmethod
+    def _extract_module_tokens(record: dict[str, Any]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        raw_map = record.get("module_tokens")
+        if isinstance(raw_map, dict):
+            for mod_id in LICENSE_MODULES:
+                tok = str(raw_map.get(mod_id) or "").strip()
+                if tok:
+                    out[mod_id] = tok
+        legacy_tok = str(record.get("token") or "").strip()
+        if legacy_tok and not out:
+            for mod_id in LICENSE_MODULES:
+                out[mod_id] = legacy_tok
+        return out
+
     def inspect_status(
         self,
         *,
         session_token: str | None = None,
         now_ts: float | None = None,
     ) -> dict[str, Any]:
-        """Evaluate complete license + clock + local-password status."""
+        """Evaluate 24h auto-trial, per-module signed licenses, clock rollback & local password."""
         with self._lock:
             hwid = compute_hardware_id()
             now = float(now_ts if now_ts is not None else time.time())
@@ -791,123 +1038,357 @@ class _RuntimeSecurityGate:
                 return {
                     "licensed": False,
                     "unlocked": False,
+                    "isTrial": False,
+                    "supportPhone": SUPPORT_PHONE,
                     "reason": "integrity_failed",
                     "message": "یکپارچگی فایل‌های امنیتی برنامه تأیید نشد. لطفاً برنامه را مجدداً نصب کنید.",
                     "hardwareId": hwid,
                     "passwordEnabled": False,
+                    "modules": _inactive_modules_payload(),
                     "license": None,
                 }
 
             record, corrupted = self._load_state_record()
-            if record is None:
+            if corrupted:
                 return {
                     "licensed": False,
                     "unlocked": False,
-                    "reason": "tampered" if corrupted else "unlicensed",
+                    "isTrial": False,
+                    "supportPhone": SUPPORT_PHONE,
+                    "reason": "tampered",
                     "message": (
-                        "فایل وضعیت لایسنس دست‌کاری شده یا آسیب دیده است. لطفاً کلید لایسنس خود را مجدداً وارد کنید."
-                        if corrupted
-                        else "برنامه هنوز روی این سیستم فعال نشده است. کد سیستم زیر را برای دریافت کلید لایسنس ارسال کنید."
+                        f"فایل وضعیت لایسنس دست‌کاری شده یا آسیب دیده است. "
+                        f"برای دریافت یا ثبت کلید لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید."
                     ),
                     "hardwareId": hwid,
                     "passwordEnabled": False,
+                    "modules": _inactive_modules_payload(),
                     "license": None,
                 }
 
-            raw_token = str(record.get("token") or "")
-            pwd_enabled = bool(record.get("pwd_salt") and record.get("pwd_hash"))
-            try:
-                lic_info = verify_license_token(
-                    raw_token,
-                    expected_hardware_id=hwid,
-                    now_ts=now,
-                    check_expiry=False,
-                )
-            except LicenseError as exc:
-                return {
-                    "licensed": False,
-                    "unlocked": False,
-                    "reason": exc.code.lower(),
-                    "message": exc.message,
-                    "hardwareId": hwid,
-                    "passwordEnabled": pwd_enabled,
-                    "license": None,
-                }
+            max_seen, anchor_trial_start, trial_consumed = self._ledger_summary(record)
 
-            # Timed/trial anti-clock-rollback check (lifetime licenses never expire).
-            exp = lic_info.get("expiresAt")
-            iat = int(lic_info.get("issuedAt") or 0)
-            if exp is not None:
-                max_seen = max(self._max_observed_clock(record), iat)
-                if now_int + CLOCK_DRIFT_TOLERANCE_SEC < max_seen:
+            # Bootstrap initial record on first launch (24-hour automatic trial if enabled & unconsumed)
+            if record is None:
+                if not _AUTO_TRIAL_ENABLED and anchor_trial_start == 0:
                     return {
                         "licensed": False,
                         "unlocked": False,
-                        "reason": "clock_tampered",
+                        "isTrial": False,
+                        "supportPhone": SUPPORT_PHONE,
+                        "reason": "unlicensed",
                         "message": (
-                            "تاریخ یا ساعت ویندوز به عقب کشیده شده است. "
-                            "لطفاً تاریخ و ساعت سیستم را به زمان واقعی برگردانید تا لایسنس دوباره فعال شود."
+                            f"برنامه هنوز روی این سیستم فعال نشده است. "
+                            f"برای دریافت کلید لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید."
+                        ),
+                        "hardwareId": hwid,
+                        "passwordEnabled": False,
+                        "modules": _inactive_modules_payload(),
+                        "license": None,
+                    }
+                trial_start = anchor_trial_start if anchor_trial_start > 0 else now_int
+                init_max = max(max_seen, now_int, trial_start)
+                record = {
+                    "v": 2,
+                    "module_tokens": {},
+                    "trial_started_at": trial_start,
+                    "trial_consumed": trial_consumed,
+                    "max_seen_utc": init_max,
+                    "pwd_salt": "",
+                    "pwd_hash": "",
+                }
+                with contextlib.suppress(OSError):
+                    self._save_state_record(record)
+                self._write_anchors(
+                    max_seen_utc=init_max,
+                    trial_started_at=trial_start,
+                    trial_consumed=trial_consumed,
+                )
+                max_seen = init_max
+                anchor_trial_start = trial_start
+
+            pwd_enabled = bool(record.get("pwd_salt") and record.get("pwd_hash"))
+            mod_tokens = self._extract_module_tokens(record)
+
+            # Case A: One or more seller-signed module tokens have been activated on this PC
+            if mod_tokens:
+                verified_cache: dict[str, dict[str, Any]] = {}
+                modules_out: dict[str, dict[str, Any]] = {}
+                holders: list[str] = []
+                any_timed_grant = False
+                max_iat = 0
+
+                for mod_id in LICENSE_MODULES:
+                    tok = mod_tokens.get(mod_id)
+                    if not tok:
+                        modules_out[mod_id] = {
+                            "module": mod_id,
+                            "label": MODULE_LABELS_FA[mod_id],
+                            "active": False,
+                            "source": "unlicensed",
+                            "plan": "none",
+                            "planLabel": "غیرفعال (تهیه‌نشده)",
+                            "expiresAt": None,
+                            "daysRemaining": None,
+                            "remainingSeconds": 0,
+                        }
+                        continue
+                    if tok not in verified_cache:
+                        try:
+                            verified_cache[tok] = verify_license_token(
+                                tok,
+                                expected_hardware_id=hwid,
+                                now_ts=now,
+                                check_expiry=False,
+                            )
+                        except LicenseError as exc:
+                            return {
+                                "licensed": False,
+                                "unlocked": False,
+                                "isTrial": False,
+                                "supportPhone": SUPPORT_PHONE,
+                                "reason": exc.code.lower(),
+                                "message": exc.message,
+                                "hardwareId": hwid,
+                                "passwordEnabled": pwd_enabled,
+                                "modules": _inactive_modules_payload(),
+                                "license": None,
+                            }
+                    parsed_tok = verified_cache[tok]
+                    max_iat = max(max_iat, int(parsed_tok.get("issuedAt") or 0))
+                    if parsed_tok["holder"] not in holders:
+                        holders.append(parsed_tok["holder"])
+                    m_grant = parsed_tok["modules"].get(mod_id)
+                    if not m_grant:
+                        modules_out[mod_id] = {
+                            "module": mod_id,
+                            "label": MODULE_LABELS_FA[mod_id],
+                            "active": False,
+                            "source": "unlicensed",
+                            "plan": "none",
+                            "planLabel": "غیرفعال (تهیه‌نشده)",
+                            "expiresAt": None,
+                            "daysRemaining": None,
+                            "remainingSeconds": 0,
+                        }
+                        continue
+                    if m_grant["expiresAt"] is not None:
+                        any_timed_grant = True
+                    modules_out[mod_id] = {
+                        "module": mod_id,
+                        "label": MODULE_LABELS_FA[mod_id],
+                        "active": bool(m_grant["active"]),
+                        "source": "license" if m_grant["active"] else "expired",
+                        "plan": m_grant["plan"],
+                        "planLabel": (
+                            m_grant["planLabel"]
+                            if m_grant["active"]
+                            else f"پایان اعتبار ({m_grant['planLabel']})"
+                        ),
+                        "issuedAt": m_grant["issuedAt"],
+                        "expiresAt": m_grant["expiresAt"],
+                        "daysTotal": m_grant["daysTotal"],
+                        "daysRemaining": m_grant["daysRemaining"],
+                        "remainingSeconds": m_grant["remainingSeconds"],
+                    }
+
+                # Clock rollback check when any module uses a timed expiration
+                all_three_lifetime = all(
+                    modules_out[m]["active"] and modules_out[m]["expiresAt"] is None
+                    for m in LICENSE_MODULES
+                )
+                if any_timed_grant and not all_three_lifetime:
+                    effective_max = max(max_seen, max_iat)
+                    if now_int + CLOCK_DRIFT_TOLERANCE_SEC < effective_max:
+                        return {
+                            "licensed": False,
+                            "unlocked": False,
+                            "isTrial": False,
+                            "supportPhone": SUPPORT_PHONE,
+                            "reason": "clock_tampered",
+                            "message": (
+                                "تاریخ یا ساعت ویندوز به عقب کشیده شده است. "
+                                "لطفاً تاریخ و ساعت سیستم را به زمان واقعی برگردانید تا لایسنس دوباره فعال شود."
+                            ),
+                            "hardwareId": hwid,
+                            "passwordEnabled": pwd_enabled,
+                            "modules": _inactive_modules_payload("قفل به دلیل تغییر ساعت"),
+                            "license": None,
+                        }
+                    self._advance_clock_ledger(record, now_int)
+
+                active_mods = [m for m in LICENSE_MODULES if modules_out[m]["active"]]
+                holder_str = " / ".join(holders) if holders else "کاربر رسمی"
+                active_summary = " · ".join(
+                    f"{MODULE_LABELS_FA[m]}: {modules_out[m]['planLabel']}" for m in active_mods
+                )
+                if not active_mods:
+                    return {
+                        "licensed": False,
+                        "unlocked": False,
+                        "isTrial": False,
+                        "supportPhone": SUPPORT_PHONE,
+                        "reason": "license_expired",
+                        "message": (
+                            f"مدت اعتبار لایسنس شما به پایان رسیده است. "
+                            f"برای تمدید لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید."
                         ),
                         "hardwareId": hwid,
                         "passwordEnabled": pwd_enabled,
+                        "modules": modules_out,
                         "license": {
-                            "holder": lic_info["holder"],
-                            "plan": lic_info["plan"],
-                            "planLabel": lic_info["planLabel"],
-                            "issuedAt": lic_info["issuedAt"],
-                            "expiresAt": exp,
-                            "daysRemaining": lic_info["daysRemaining"],
-                        },
-                    }
-                if now > float(exp):
-                    self._advance_clock_ledger(record, now_int)
-                    return {
-                        "licensed": False,
-                        "unlocked": False,
-                        "reason": "license_expired",
-                        "message": "مدت اعتبار لایسنس شما به پایان رسیده است. لطفاً کلید تمدید جدید را وارد کنید.",
-                        "hardwareId": hwid,
-                        "passwordEnabled": pwd_enabled,
-                        "license": {
-                            "holder": lic_info["holder"],
-                            "plan": lic_info["plan"],
-                            "planLabel": lic_info["planLabel"],
-                            "issuedAt": lic_info["issuedAt"],
-                            "expiresAt": exp,
+                            "holder": holder_str,
+                            "plan": "modular",
+                            "planLabel": "پایان اعتبار",
+                            "expiresAt": None,
                             "daysRemaining": 0,
                         },
                     }
-                self._advance_clock_ledger(record, now_int)
 
-            unlocked = (not pwd_enabled) or self.has_valid_session(session_token)
-            public_lic = {
-                "holder": lic_info["holder"],
-                "plan": lic_info["plan"],
-                "planLabel": lic_info["planLabel"],
-                "issuedAt": lic_info["issuedAt"],
-                "expiresAt": lic_info["expiresAt"],
-                "daysTotal": lic_info["daysTotal"],
-                "daysRemaining": lic_info["daysRemaining"],
-                "licenseId": lic_info["licenseId"],
+                unlocked = (not pwd_enabled) or self.has_valid_session(session_token)
+                # Keep top-level `plan`/`expiresAt`/`daysRemaining` intuitive for UI & existing callers
+                exp_values = [
+                    int(modules_out[m]["expiresAt"])
+                    for m in active_mods
+                    if modules_out[m]["expiresAt"] is not None
+                ]
+                nearest_exp = min(exp_values) if exp_values else None
+                nearest_days = (
+                    min(
+                        int(modules_out[m]["daysRemaining"] or 0)
+                        for m in active_mods
+                        if modules_out[m]["daysRemaining"] is not None
+                    )
+                    if exp_values
+                    else None
+                )
+                is_all_lifetime = len(active_mods) == len(LICENSE_MODULES) and not exp_values
+                return {
+                    "licensed": True,
+                    "unlocked": unlocked,
+                    "isTrial": False,
+                    "trialRemainingSeconds": 0,
+                    "supportPhone": SUPPORT_PHONE,
+                    "reason": "ok" if unlocked else "login_required",
+                    "message": "" if unlocked else "برای ورود به محیط کاری، رمز ورود شخصی خود را وارد کنید.",
+                    "hardwareId": hwid,
+                    "passwordEnabled": pwd_enabled,
+                    "modules": modules_out,
+                    "license": {
+                        "holder": holder_str,
+                        "plan": "lifetime" if is_all_lifetime else "modular",
+                        "planLabel": "دائمی (هر ۳ بخش)" if is_all_lifetime else active_summary,
+                        "expiresAt": nearest_exp,
+                        "daysRemaining": nearest_days,
+                    },
+                }
+
+            # Case B: No paid license key activated yet -> 24-Hour Automatic Trial evaluation
+            trial_start = anchor_trial_start or int(record.get("trial_started_at") or now_int)
+            effective_max = max(max_seen, trial_start)
+            if now_int + CLOCK_DRIFT_TOLERANCE_SEC < effective_max:
+                return {
+                    "licensed": False,
+                    "unlocked": False,
+                    "isTrial": False,
+                    "supportPhone": SUPPORT_PHONE,
+                    "reason": "clock_tampered",
+                    "message": (
+                        "تاریخ یا ساعت ویندوز به عقب کشیده شده است. "
+                        "لطفاً تاریخ و ساعت سیستم را به زمان واقعی برگردانید."
+                    ),
+                    "hardwareId": hwid,
+                    "passwordEnabled": pwd_enabled,
+                    "modules": _inactive_modules_payload("قفل به دلیل تغییر ساعت"),
+                    "license": None,
+                }
+
+            self._advance_clock_ledger(record, now_int)
+            trial_exp = trial_start + AUTO_TRIAL_DURATION_SEC
+            rem_sec = max(0, int(math.ceil(float(trial_exp) - now)))
+
+            if trial_consumed or not _AUTO_TRIAL_ENABLED or rem_sec <= 0:
+                return {
+                    "licensed": False,
+                    "unlocked": False,
+                    "isTrial": False,
+                    "trialExpired": True,
+                    "trialRemainingSeconds": 0,
+                    "supportPhone": SUPPORT_PHONE,
+                    "reason": "trial_expired",
+                    "message": (
+                        f"مهلت استفادهٔ آزمایشی ۲۴ ساعته به پایان رسیده است. "
+                        f"برای ادامهٔ استفاده و دریافت کلید لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید."
+                    ),
+                    "hardwareId": hwid,
+                    "passwordEnabled": pwd_enabled,
+                    "modules": _inactive_modules_payload("پایان مهلت آزمایشی ۲۴ ساعته"),
+                    "license": None,
+                }
+
+            hours_left = rem_sec // 3600
+            mins_left = (rem_sec % 3600) // 60
+            trial_label = f"آزمایشی ۲۴ ساعته ({hours_left} ساعت و {mins_left} دقیقه باقی‌مانده)"
+            trial_mods = {
+                m: {
+                    "module": m,
+                    "label": MODULE_LABELS_FA[m],
+                    "active": True,
+                    "source": "trial",
+                    "plan": "trial24h",
+                    "planLabel": trial_label,
+                    "issuedAt": trial_start,
+                    "expiresAt": trial_exp,
+                    "daysTotal": 1,
+                    "daysRemaining": 1,
+                    "remainingSeconds": rem_sec,
+                }
+                for m in LICENSE_MODULES
             }
+            unlocked = (not pwd_enabled) or self.has_valid_session(session_token)
             return {
                 "licensed": True,
                 "unlocked": unlocked,
+                "isTrial": True,
+                "trialExpiresAt": trial_exp,
+                "trialRemainingSeconds": rem_sec,
+                "supportPhone": SUPPORT_PHONE,
                 "reason": "ok" if unlocked else "login_required",
-                "message": "" if unlocked else "برای ورود به محیط کاری، رمز ورود شخصی خود را وارد کنید.",
+                "message": (
+                    f"نسخهٔ آزمایشی ۲۴ ساعته فعال است — برای ادامهٔ استفاده و دریافت لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید."
+                    if unlocked
+                    else "برای ورود به محیط کاری، رمز ورود شخصی خود را وارد کنید."
+                ),
                 "hardwareId": hwid,
                 "passwordEnabled": pwd_enabled,
-                "license": public_lic,
+                "modules": trial_mods,
+                "license": {
+                    "holder": "نسخهٔ آزمایشی ۲۴ ساعته",
+                    "plan": "trial24h",
+                    "planLabel": trial_label,
+                    "issuedAt": trial_start,
+                    "expiresAt": trial_exp,
+                    "daysTotal": 1,
+                    "daysRemaining": 1,
+                },
             }
+
+    def is_module_active(self, module_id: str, *, now_ts: float | None = None) -> bool:
+        status = self.inspect_status(session_token=None, now_ts=now_ts)
+        if not status.get("licensed"):
+            return False
+        mod_entry = (status.get("modules") or {}).get(module_id)
+        return bool(mod_entry and mod_entry.get("active"))
 
     def activate_token(
         self,
         token: str,
         *,
         reset_local_password: bool = False,
+        replace_all_modules: bool = False,
         now_ts: float | None = None,
     ) -> tuple[dict[str, Any], str]:
-        """Verify and persist a new license token, returning `(status_dict, session_token)`."""
+        """Verify and merge a signed `CLIC1.` license key per module, returning `(status, session)`."""
         with self._lock:
             now = float(now_ts if now_ts is not None else time.time())
             now_int = int(now)
@@ -915,28 +1396,38 @@ class _RuntimeSecurityGate:
             lic_info = verify_license_token(token, expected_hardware_id=hwid, now_ts=now, check_expiry=True)
 
             existing, _ = self._load_state_record()
-            prev_max = self._max_observed_clock(existing or {})
-            if lic_info.get("expiresAt") is not None and now_int + CLOCK_DRIFT_TOLERANCE_SEC < prev_max:
+            prev_max, prev_trial_start, _ = self._ledger_summary(existing)
+            has_timed = any(m["expiresAt"] is not None for m in lic_info["modules"].values())
+            if has_timed and now_int + CLOCK_DRIFT_TOLERANCE_SEC < prev_max:
                 raise LicenseError(
                     "تاریخ یا ساعت ویندوز عقب‌تر از زمان ثبت‌شدهٔ سیستم است. ابتدا ساعت ویندوز را تنظیم کنید.",
                     code="CLOCK_TAMPERED",
                     status_code=400,
                 )
 
+            merged_tokens = {} if replace_all_modules else self._extract_module_tokens(existing or {})
+            for mod_id, m_grant in lic_info["modules"].items():
+                if m_grant.get("granted"):
+                    merged_tokens[mod_id] = lic_info["token"]
+
             new_max = max(prev_max, now_int, int(lic_info.get("issuedAt") or 0))
+            trial_start = prev_trial_start or now_int
             record: dict[str, Any] = {
-                "v": 1,
-                "token": lic_info["token"],
+                "v": 2,
+                "module_tokens": merged_tokens,
                 "activated_at": now_int,
+                "trial_started_at": trial_start,
+                "trial_consumed": True,
                 "max_seen_utc": new_max,
                 "pwd_salt": "" if reset_local_password else str((existing or {}).get("pwd_salt") or ""),
                 "pwd_hash": "" if reset_local_password else str((existing or {}).get("pwd_hash") or ""),
             }
             self._save_state_record(record)
-            anchor_payload: dict[str, Any] = {"v": 1, "max_seen_utc": new_max}
-            anchor_payload["mac"] = _compute_record_mac(anchor_payload)
-            with contextlib.suppress(OSError):
-                _atomic_write_private_json(self._anchor_path(), anchor_payload)
+            self._write_anchors(
+                max_seen_utc=new_max,
+                trial_started_at=trial_start,
+                trial_consumed=True,
+            )
 
             session_tok = self.create_session()
             return self.inspect_status(session_token=session_tok, now_ts=now), session_tok
@@ -1036,12 +1527,30 @@ SECURITY_GATE = _RuntimeSecurityGate()
 
 
 def require_active_license() -> dict[str, Any]:
-    """Independent deep engine guard called directly inside OCR, Translation & Export pipelines."""
+    """Ensure at least one licensed module (or the 24h initial trial) is currently active."""
     status = SECURITY_GATE.inspect_status(session_token=None)
     if not status.get("licensed"):
         raise LicenseError(
-            status.get("message") or "لایسنس معتبری روی این سیستم فعال نیست.",
+            status.get("message") or f"لایسنس معتبری فعال نیست. برای دریافت لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید.",
             code=str(status.get("reason") or "LICENSE_REQUIRED").upper(),
+            status_code=402,
+        )
+    return status
+
+
+def require_module_license(module_id: str) -> dict[str, Any]:
+    """Ensure a specific module (`ocr`, `translation`, or `editing`) is currently active."""
+    norm = str(module_id or "").strip().lower()
+    if norm not in LICENSE_MODULES:
+        raise ValueError(f"Unknown module_id: {module_id!r}")
+    status = require_active_license()
+    mod_info = (status.get("modules") or {}).get(norm) or {}
+    if not mod_info.get("active"):
+        label = MODULE_LABELS_FA.get(norm, norm)
+        raise LicenseError(
+            f"لایسنس بخش «{label}» فعال نیست یا مهلت آن پایان یافته است. "
+            f"برای تهیه یا تمدید این ماژول با شمارهٔ {SUPPORT_PHONE} تماس بگیرید.",
+            code=f"MODULE_{norm.upper()}_REQUIRED",
             status_code=402,
         )
     return status

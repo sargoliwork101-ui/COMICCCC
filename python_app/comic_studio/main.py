@@ -50,7 +50,13 @@ from .paths import (
     project_root,
 )
 from . import context_run, pending_results
-from .license_guard import LicenseError, SECURITY_GATE, SESSION_COOKIE_NAME
+from .license_guard import (
+    SUPPORT_PHONE,
+    LicenseError,
+    SECURITY_GATE,
+    SESSION_COOKIE_NAME,
+    require_module_license,
+)
 from .local_nmt import DEFAULT_LOCAL_NMT_MODEL, LOCAL_NMT_MODELS, LocalNmtError
 from .schemas import (
     AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest,
@@ -307,6 +313,8 @@ def create_app() -> FastAPI:
                             "code": str(gate_state.get("reason") or "LICENSE_REQUIRED").upper(),
                             "licensed": False,
                             "unlocked": False,
+                            "supportPhone": gate_state.get("supportPhone") or SUPPORT_PHONE,
+                            "modules": gate_state.get("modules"),
                         },
                         status_code=402,
                         headers={"Cache-Control": "no-store"},
@@ -428,7 +436,7 @@ def create_app() -> FastAPI:
     @app.exception_handler(LicenseError)
     async def license_error(_: Request, exc: LicenseError) -> JSONResponse:
         return JSONResponse(
-            {"detail": exc.message, "code": exc.code},
+            {"detail": exc.message, "code": exc.code, "supportPhone": SUPPORT_PHONE},
             status_code=exc.status_code,
             headers={"Cache-Control": "no-store"},
         )
@@ -499,8 +507,10 @@ def create_app() -> FastAPI:
         state, session_token = SECURITY_GATE.activate_token(
             values.license_key,
             reset_local_password=bool(values.reset_local_password),
+            replace_all_modules=bool(values.replace_all_modules),
         )
-        activity.add(f"لایسنس برنامه با موفقیت فعال شد ({state.get('license', {}).get('planLabel', '')})", "success")
+        plan_lbl = (state.get("license") or {}).get("planLabel", "")
+        activity.add(f"لایسنس برنامه با موفقیت فعال شد ({plan_lbl})", "success")
         resp = JSONResponse(state, headers={"Cache-Control": "no-store"})
         return _set_session_cookie(resp, session_token, request)
 
@@ -633,9 +643,35 @@ def create_app() -> FastAPI:
             context_locks.pop(project_id, None)
         return Response(status_code=204)
 
+    def _state_update_mutates_editing(current: dict[str, Any], incoming: dict[str, Any]) -> bool:
+        """Return True iff `incoming` modifies editor-owned fields (blocks, crop, watermark)."""
+        cur_settings = current.get("settings") if isinstance(current.get("settings"), dict) else {}
+        inc_settings = incoming.get("settings") if isinstance(incoming.get("settings"), dict) else None
+        if inc_settings is not None:
+            for wm_key in ("watermarkLogos", "watermarkPreset"):
+                if wm_key in inc_settings and (inc_settings.get(wm_key) or None) != (cur_settings.get(wm_key) or None):
+                    return True
+        existing = {str(item.get("id", "")): item for item in current.get("images", []) if isinstance(item, dict)}
+        for candidate in incoming.get("images", []) or []:
+            if not isinstance(candidate, dict):
+                continue
+            old = existing.get(str(candidate.get("id", "")))
+            if old is None:
+                continue
+            for edit_key in ("blocks", "crop", "watermark", "pageMode", "approved"):
+                if edit_key not in candidate:
+                    continue
+                new_val = bool(candidate[edit_key]) if edit_key == "approved" else candidate[edit_key]
+                old_val = bool(old.get(edit_key, False)) if edit_key == "approved" else old.get(edit_key)
+                if new_val != old_val:
+                    return True
+        return False
+
     @app.put("/api/projects/{project_id}/state")
     def update_state(project_id: str, update: StateUpdate) -> dict[str, Any]:
-        project(project_id)
+        current = project(project_id)
+        if _state_update_mutates_editing(current, update.state):
+            require_module_license("editing")
         return store.update_state(project_id, update.state)
 
     @app.get("/api/projects/{project_id}/pending")
@@ -749,6 +785,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/duplicate")
     def duplicate(project_id: str, ids: list[str] = Body(...)) -> dict[str, Any]:
+        require_module_license("editing")
         project(project_id)
         return store.duplicate(project_id, ids)
 
@@ -789,6 +826,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engines/check-updates")
     async def check_engine_updates(values: EngineUpdateCheckRequest | None = None) -> dict[str, Any]:
+        require_module_license("ocr")
         force = bool(values.force) if values else False
         report = await run_in_threadpool(registry.check_updates, force)
         count = int(report.get("updatesCount") or 0)
@@ -824,6 +862,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engines/{engine_id}/download", response_model=None)
     async def download_engine(request: Request, engine_id: str, values: EngineDownloadRequest | None = None) -> Response | dict[str, Any]:
+        require_module_license("ocr")
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
         if info.get("action") == "guide":
@@ -864,6 +903,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engines/{engine_id}/update")
     async def update_engine_route(request: Request, engine_id: str, values: EngineUpdateRequest | None = None) -> dict[str, Any]:
+        require_module_license("ocr")
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
         language = values.language if values else (info["languages"][0] if info["languages"] else "eng")
@@ -887,6 +927,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engines/{engine_id}/uninstall")
     async def uninstall_engine_route(engine_id: str) -> dict[str, Any]:
+        require_module_license("ocr")
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
         if info.get("action") == "guide":
@@ -929,6 +970,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engines/{engine_id}/test")
     async def test_engine(engine_id: str, values: EngineTestRequest) -> dict[str, Any]:
+        require_module_license("ocr")
         engine = registry.get(engine_id)
         if not ENGINE_INFO[engine_id].get("selectable", False):
             raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR نیست.")
@@ -968,6 +1010,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/ocr")
     async def run_ocr(project_id: str, values: OcrRequest, http_request: Request) -> dict[str, Any]:
+        require_module_license("ocr")
         with store._lock:
             state = project(project_id)
             expected_updated_at = state.get("updatedAt", "")
@@ -1356,6 +1399,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/context-preview")
     def context_preview(project_id: str, values: ContextPreviewRequest) -> dict[str, Any]:
+        require_module_license("translation")
         run, request, chosen = context_preparation(project(project_id), values)
         result = context_view(run, request, chosen, values.provider)
         result['skill'] = values.skill
@@ -1365,6 +1409,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/context-start")
     def context_start(project_id: str, values: ContextStartRequest) -> dict[str, Any]:
+        require_module_license("translation")
         for pending in pending_results.list_pending(store, project_id):
             if pending['kind'] == 'translation':
                 raise PendingResultConflict(pending['id'], 'translation')
@@ -1422,6 +1467,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/context-step")
     async def context_step(project_id: str, values: ContextStepRequest, http_request: Request) -> dict[str, Any]:
+        require_module_license("translation")
         lock = context_locks.setdefault(project_id, asyncio.Lock())
         async with lock:
             state = project(project_id); expected = state.get('updatedAt', '')
@@ -1607,6 +1653,7 @@ def create_app() -> FastAPI:
 
     @app.post('/api/translate-text/context-preview')
     def context_text_preview(values: ContextTextRequest) -> dict[str, Any]:
+        require_module_license("translation")
         state, run, request, chosen = prepare_context_text(values)
         result = context_view(run, request, chosen, values.provider)
         result['skill'] = values.skill; result['singleContext'] = True
@@ -1619,6 +1666,7 @@ def create_app() -> FastAPI:
 
     @app.post('/api/translate-text/context')
     async def context_text_translate(values: ContextTextRequest) -> dict[str, str]:
+        require_module_license("translation")
         if (values.recovery_token is None) != (values.corrected_response is None):
             raise HTTPException(400, 'نشانه و متن پاسخ اصلاح‌شده باید همراه هم ارسال شوند.')
         signature = digest(values.model_dump(exclude={'recovery_token', 'corrected_response'}))
@@ -1709,6 +1757,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/translation-preview")
     def translation_preview(project_id: str, values: TranslateRequest) -> dict[str, Any]:
+        require_module_license("translation")
         if values.provider in {'free', 'local'}:
             return context_preview(project_id, legacy_direct_context(values))
         state = project(project_id)
@@ -1720,6 +1769,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/translate")
     async def run_translation(project_id: str, values: TranslateRequest, http_request: Request) -> dict[str, Any]:
+        require_module_license("translation")
         if await http_request.is_disconnected():
             raise HTTPException(499, "عملیات ترجمه توسط کاربر لغو شد.")
         if values.provider in {'free', 'local'}:
@@ -1889,6 +1939,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/translate-text/preview")
     def translate_text_preview(values: TextTranslateRequest) -> dict[str, Any]:
+        require_module_license("translation")
         if values.provider in {'free', 'local'}:
             return context_text_preview(ContextTextRequest(
                 text=values.text,
@@ -1903,6 +1954,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/translate-text")
     async def translate_text(values: TextTranslateRequest) -> dict[str, str]:
+        require_module_license("translation")
         if values.provider in {'free', 'local'}:
             request = ContextTextRequest(
                 text=values.text,
@@ -1956,6 +2008,7 @@ def create_app() -> FastAPI:
 
     @app.put("/api/ai-settings")
     def save_ai_settings(values: AiSettings) -> dict[str, Any]:
+        require_module_license("translation")
         try:
             return translations.save_settings(values.model_dump(exclude_none=True))
         except ValueError as exc:
@@ -1963,6 +2016,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/ai-settings/test")
     async def test_ai_settings(values: AiConnectionTest | None = None) -> dict[str, Any]:
+        require_module_license("translation")
         overrides = values.model_dump(exclude_none=True) if values else {}
         return await run_in_threadpool(translations.test_connection, overrides)
 
@@ -1973,6 +2027,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/local-nmt/prepare")
     async def prepare_local_nmt(request: Request, values: LocalNmtModelActionRequest | None = None) -> dict[str, Any]:
+        require_module_license("translation")
         model_id = values.model if values else DEFAULT_LOCAL_NMT_MODEL
         done_ev = asyncio.Event()
 
@@ -2014,6 +2069,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/local-nmt/delete")
     async def delete_local_nmt_model(values: LocalNmtModelActionRequest) -> dict[str, Any]:
+        require_module_license("translation")
         try:
             summary = await run_reported(
                 translations.local_nmt.delete_model,
@@ -2032,6 +2088,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/local-nmt/test")
     async def test_local_nmt(values: LocalNmtTestRequest | None = None) -> dict[str, Any]:
+        require_module_license("translation")
         req = values or LocalNmtTestRequest()
         try:
             return await run_reported(

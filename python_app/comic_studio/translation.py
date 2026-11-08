@@ -748,9 +748,9 @@ class TranslationService:
         skill: str | None = None,
         target_language: str = "fa",
     ) -> str:
-        from .license_guard import require_active_license
+        from .license_guard import require_module_license
 
-        require_active_license()
+        require_module_license("translation")
         text = str(text or "").strip()
         if not text:
             return ""
@@ -826,9 +826,9 @@ class TranslationService:
         """Send one exact budgeted request and accept translation/summary together."""
         from .context_budget import parse_context_response
         from .context_run import provider_policy
-        from .license_guard import require_active_license
+        from .license_guard import require_module_license
         from .store import ProjectChangedError
-        require_active_license()
+        require_module_license("translation")
         if provider not in AI_PROVIDERS:
             raise TranslationError("سرویس AI معتبر نیست.")
         user = request.user_message(text)
@@ -996,9 +996,9 @@ class TranslationService:
     ) -> str:
         """Translate one bounded page-local request, with independent retries."""
         from .context_run import provider_policy
-        from .license_guard import require_active_license
+        from .license_guard import require_module_license
         from .store import ProjectChangedError
-        require_active_license()
+        require_module_license("translation")
         request.user_message(text)  # enforce both character and UTF-8 limits
         settings = self._secret()
         if provider_policy(settings, 'free') != expected_policy:
@@ -1066,9 +1066,9 @@ class TranslationService:
     ) -> str:
         """Translate one bounded page-local or single-block request 100% offline via local NLLB."""
         from .context_run import provider_policy
-        from .license_guard import require_active_license
+        from .license_guard import require_module_license
         from .store import ProjectChangedError
-        require_active_license()
+        require_module_license("translation")
         request.user_message(text)
         settings = self._secret()
         if provider_policy(settings, "local") != expected_policy:

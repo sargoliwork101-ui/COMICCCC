@@ -190,6 +190,7 @@ class StorageFolderPickRequest(BaseModel):
 class LicenseActivateRequest(BaseModel):
     license_key: str = Field(min_length=8, max_length=4096)
     reset_local_password: bool = False
+    replace_all_modules: bool = False
 
 
 class LocalLoginRequest(BaseModel):

@@ -353,6 +353,7 @@ function startSession() {
 function closeSession() {
   if (sessionCloseSent) return;
   sessionCloseSent = true;
+  stopTrialCountdown();
   if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
   if (activityPollTimer) { clearTimeout(activityPollTimer); activityPollTimer = null; }
   if (downloadUrl) { URL.revokeObjectURL(downloadUrl); downloadUrl = null; }
@@ -1277,7 +1278,7 @@ function renderGrid() {
   }
 }
 function moveImageBy(imageId, delta) { G.moveUnit(state.project.images, imageId, delta); renderGrid(); scheduleSave(); }
-async function duplicateImages(ids) { if (!ids.length) return; await saveProject(); adoptProject(await api(`/api/projects/${state.project.id}/duplicate`, jsonOptions('POST', ids))); }
+async function duplicateImages(ids) { if (!ids.length) return; if (!isModuleLicensed('editing')) { await ensureModuleLicensed('editing'); return; } await saveProject(); adoptProject(await api(`/api/projects/${state.project.id}/duplicate`, jsonOptions('POST', ids))); }
 async function deleteImages(ids) {
   if (!ids.length) return;
   const ok = await appConfirm(`آیا مطمئن هستید که می‌خواهید ${ids.length} تصویر انتخاب‌شده را از پروژه حذف کنید؟`, {
@@ -2251,6 +2252,7 @@ function reportOcrError(error) {
 }
 async function runOcr() {
   if (ocrRunning) return;
+  if (!isModuleLicensed('ocr')) { await ensureModuleLicensed('ocr'); return; }
   const pending = pendingTranslationAfterOcr;
   const controller = new AbortController();
   ocrAbortController = controller; ocrCancelledByUser = false; ocrClosingNormally = false;
@@ -2914,6 +2916,7 @@ async function confirmTranslationRequestPreview() {
 }
 async function runTranslation(targetOverride = null) {
   if (translationRunning) return;
+  if (!isModuleLicensed('translation')) { await ensureModuleLicensed('translation'); return; }
   try {
     // Loading a project also uploads previews; do not race those writes against
     // the translation's optimistic version check or snapshot the old selection.
@@ -2922,6 +2925,7 @@ async function runTranslation(targetOverride = null) {
     if (!ids.length) throw new Error('حداقل یک تصویر را انتخاب کنید.');
     const missing = selected.filter(item => !item.ocrCompleted && !(item.blocks || []).length);
     if (missing.length) {
+      if (!isModuleLicensed('ocr')) { await ensureModuleLicensed('ocr'); return; }
       const old = state.project._aiContextRun;
       if (old?.jobs?.some(job => job.remaining)) {
         const proceed = await appConfirm('نوبت ترجمهٔ ناتمام وجود دارد. اجرای OCR روی تصاویر جدید می‌تواند ادامهٔ آن را نامعتبر کند و ممکن است برای نوبت تازه تأیید و ارسال دوباره لازم شود. آیا ادامه می‌دهید؟', {
@@ -4949,6 +4953,7 @@ function discardInlineEditorForCancel() {
 }
 function boxOf(block) { return { x0: Number.isFinite(block.tx0) ? block.tx0 : block.x0, y0: Number.isFinite(block.ty0) ? block.ty0 : block.y0, x1: Number.isFinite(block.tx1) ? block.tx1 : block.x1, y1: Number.isFinite(block.ty1) ? block.ty1 : block.y1 }; }
 async function openEditor(imageId) {
+  if (!isModuleLicensed('editing')) { await ensureModuleLicensed('editing'); return; }
   const loadSeq = ++editorLoadSeq;
   await ensureFont();
   if (loadSeq !== editorLoadSeq) return;
@@ -6892,6 +6897,7 @@ function applyTranslatedBlockDefaults(block, text, targetLang = null) {
 }
 async function retranslateBlock(block, targetOverride = null) {
   if (!block) return;
+  if (!isModuleLicensed('translation')) { await ensureModuleLicensed('translation'); return; }
   if (inlineDraft?.block === block && !closeInlineEditor()) return;
   let text = String(block.text || '').trim();
   const canUseManualTypedSource = Boolean(block.manual && (block.manualLang === 'en' || block.dir === 'ltr'));
@@ -7486,6 +7492,7 @@ async function revertEditor() {
 // ---------- Crop with aspect ratio, moving, and eight handles ----------
 function cropItem() { return state.project?.images.find((item) => item.id === state.cropId); }
 function openCrop(imageId) {
+  if (!isModuleLicensed('editing')) { ensureModuleLicensed('editing').catch(() => {}); return; }
   const item = state.project?.images.find((entry) => entry.id === imageId);
   if (!item) return;
   state.cropId = imageId;
@@ -7791,6 +7798,7 @@ async function deleteSelectedWatermarkLogo() {
 }
 
 async function openWatermarkDialog(fromEditor = false) {
+  if (!isModuleLicensed('editing')) { await ensureModuleLicensed('editing'); return; }
   if (!state.project?.images?.length) {
     toast('ابتدا حداقل یک صفحه یا فایل به پروژه وارد کنید.', true);
     return;
@@ -8110,7 +8118,10 @@ function bindEvents() {
       $('dragGuideBtn')?.setAttribute('aria-expanded', 'false');
     }
   });
-  $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); });
+  $('ocrBtn').addEventListener('click', () => {
+    if (!isModuleLicensed('ocr')) { ensureModuleLicensed('ocr').catch(() => {}); return; }
+    clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog');
+  });
   $('ocrEngine').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); scheduleSave(); });
   $('ocrLanguage').addEventListener('change', () => {
     const nextLang = $('ocrLanguage').value;
@@ -8205,13 +8216,14 @@ function bindEvents() {
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewSwitchTarget = null; translationPreviewData = null; } });
   $('modelsBtn').addEventListener('click', () => {
+    setMenuOpen(false);
+    if (!isModuleLicensed('ocr')) { ensureModuleLicensed('ocr').catch(() => {}); return; }
     if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = false;
     if ($('modelsPageMode') && $('ocrPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
     if ($('modelsLanguage') && $('ocrLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
     if ($('testLanguage') && $('ocrLanguage')) $('testLanguage').value = $('ocrLanguage').value;
     renderModels();
     showDialog('modelsDialog');
-    setMenuOpen(false);
     refreshEngineMemory().catch(() => {});
   });
   $('modelsInstalledOnly')?.addEventListener('change', () => renderModels());
@@ -8238,10 +8250,12 @@ function bindEvents() {
   $('updateAllModelsBtn')?.addEventListener('click', () => updateAllEngines().catch(() => {}));
   $('modelsActiveCancelBtn')?.addEventListener('click', () => requestCancelModelJob().catch(() => {}));
   $('engineUpdateNowBtn')?.addEventListener('click', () => {
+    if (!isModuleLicensed('ocr')) { ensureModuleLicensed('ocr').catch(() => {}); return; }
     if (!$('modelsDialog').open) { renderModels(); showDialog('modelsDialog'); }
     updateAllEngines().catch(() => {});
   });
   $('engineUpdateOpenModelsBtn')?.addEventListener('click', () => {
+    if (!isModuleLicensed('ocr')) { ensureModuleLicensed('ocr').catch(() => {}); return; }
     renderModels();
     showDialog('modelsDialog');
     refreshEngineMemory().catch(() => {});
@@ -8252,6 +8266,7 @@ function bindEvents() {
   }
   $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(document.body.classList.contains('auth-locked') ? 'license-login-security' : null));
   $('licenseBtn')?.addEventListener('click', () => { setMenuOpen(false); openLicenseDialog().catch((error) => toast(error.detailText || error.message, true)); });
+  $('trialBannerOpenLicBtn')?.addEventListener('click', () => { openLicenseDialog({ focusRenew: true }).catch((error) => toast(error.detailText || error.message, true)); });
   $('lockAppMenuBtn')?.addEventListener('click', () => { setMenuOpen(false); lockWorkspaceNow().catch((error) => toast(error.detailText || error.message, true)); });
   $('lockNowInsideDialogBtn')?.addEventListener('click', () => { closeDialog('licenseDialog'); lockWorkspaceNow().catch((error) => toast(error.detailText || error.message, true)); });
   $('licenseDialogDoneBtn')?.addEventListener('click', () => closeDialog('licenseDialog'));
@@ -8293,7 +8308,12 @@ function bindEvents() {
   $('dialogActivateNewBtn')?.addEventListener('click', () => activateNewLicenseFromDialog().catch(() => {}));
   $('editorOpenFullHelpBtn')?.addEventListener('click', () => openHelpDialog('visual-editor'));
   $('helpDialogClose')?.addEventListener('click', (event) => { event.preventDefault(); closeDialog('helpDialog'); });
-  $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiBaseUrl')?.addEventListener('input', syncAiExecUi); $('localNmtModelSelect')?.addEventListener('change', () => renderLocalNmtPanel()); $('localNmtCancelBtn')?.addEventListener('click', () => cancelLocalNmtPrepare().catch(() => {})); $('localNmtUnloadBtn')?.addEventListener('click', () => unloadLocalNmtRam().catch(() => {})); $('localNmtTestBtn')?.addEventListener('click', () => testLocalNmtSample().catch(() => {})); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
+  $('aiBtn').addEventListener('click', () => {
+    setMenuOpen(false);
+    if (!isModuleLicensed('translation')) { ensureModuleLicensed('translation').catch(() => {}); return; }
+    setProgress('aiProgress', 0, false);
+    loadAiSettings().then(() => { showDialog('aiDialog'); }).catch((error) => toast(error.message, true));
+  }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiBaseUrl')?.addEventListener('input', syncAiExecUi); $('localNmtModelSelect')?.addEventListener('change', () => renderLocalNmtPanel()); $('localNmtCancelBtn')?.addEventListener('click', () => cancelLocalNmtPrepare().catch(() => {})); $('localNmtUnloadBtn')?.addEventListener('click', () => unloadLocalNmtRam().catch(() => {})); $('localNmtTestBtn')?.addEventListener('click', () => testLocalNmtSample().catch(() => {})); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
   $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', (signal) => exportResult(null, null, null, signal), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', (signal) => exportResult('pdf', null, null, signal), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', (signal) => exportResult('images', null, null, signal), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', (signal) => exportResult('txt', null, null, signal), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'visual').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'visual').catch(() => {})); $('docxChoiceFlowingTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'flowing').catch(() => {})); $('docxChoiceFlowingOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'flowing').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {})); $('exportPptxBtn')?.addEventListener('click', () => openPptxExportPrompt()); $('pptxChoiceTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'visual').catch(() => {})); $('pptxChoiceOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'visual').catch(() => {})); $('pptxChoiceFlowingTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'flowing').catch(() => {})); $('pptxChoiceFlowingOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'flowing').catch(() => {})); $('pptxExportCancel')?.addEventListener('click', () => requestCancelExport('pptxExportDialog').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
@@ -8710,8 +8730,106 @@ async function copyTextWithToast(rawText, okMsg) {
   finally { area.remove(); }
 }
 
+const DEFAULT_SUPPORT_PHONE = '09361111111';
+const MODULE_TITLES_FA = {
+  ocr: 'استخراج متن (OCR آفلاین)',
+  translation: 'ترجمه',
+  editing: 'ویرایش (ویرایشگر، برش و واترمارک)',
+};
+let trialCountdownTimer = null;
+
+function isModuleLicensed(moduleId) {
+  const st = state.licenseStatus;
+  if (!st) return true;
+  if (!st.licensed) return false;
+  if (!st.modules || typeof st.modules !== 'object' || !(moduleId in st.modules)) return true;
+  return Boolean(st.modules[moduleId]?.active);
+}
+
+async function ensureModuleLicensed(moduleId) {
+  if (isModuleLicensed(moduleId)) return true;
+  const phone = state.licenseStatus?.supportPhone || DEFAULT_SUPPORT_PHONE;
+  const modTitle = MODULE_TITLES_FA[moduleId] || moduleId;
+  const openLic = await appConfirm(
+    `لایسنس بخش «${modTitle}» روی سیستم شما فعال نیست یا مهلت آن پایان یافته است.\n\nبرای تهیه یا تمدید لایسنس این بخش، با شمارهٔ ${phone} تماس بگیرید و سپس کلید دریافتی را ثبت کنید.`,
+    {
+      title: `نیاز به لایسنس بخش «${modTitle}»`,
+      confirmText: 'ثبت کلید لایسنس',
+      cancelText: 'بستن',
+      variant: 'warning',
+    },
+  );
+  if (openLic) {
+    await openLicenseDialog({ focusRenew: true });
+  }
+  return false;
+}
+
+function formatTrialRemainingText(seconds) {
+  const sec = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hrs = Math.floor(sec / 3600);
+  const mins = Math.floor((sec % 3600) / 60);
+  if (hrs > 0 && mins > 0) return `${hrs.toLocaleString('fa-IR')} ساعت و ${mins.toLocaleString('fa-IR')} دقیقه`;
+  if (hrs > 0) return `${hrs.toLocaleString('fa-IR')} ساعت`;
+  return `${Math.max(1, mins).toLocaleString('fa-IR')} دقیقه`;
+}
+
+function stopTrialCountdown() {
+  if (trialCountdownTimer !== null) {
+    clearInterval(trialCountdownTimer);
+    trialCountdownTimer = null;
+  }
+}
+
+function syncTrialBannerAndModulesUi(status) {
+  const phone = status?.supportPhone || DEFAULT_SUPPORT_PHONE;
+  if ($('gateSupportPhone')) $('gateSupportPhone').textContent = phone;
+  if ($('licSupportPhone')) $('licSupportPhone').textContent = phone;
+  if ($('trialNoticePhone')) $('trialNoticePhone').textContent = `📞 ${phone}`;
+
+  const banner = $('trialNoticeBanner');
+  const showBanner = Boolean(status?.licensed && status?.unlocked && status?.isTrial);
+  banner?.classList.toggle('hidden', !showBanner);
+  stopTrialCountdown();
+
+  if (showBanner && banner) {
+    const expSec = Number(status.trialExpiresAt || 0);
+    const updateBannerText = () => {
+      const rem = expSec > 0
+        ? Math.max(0, Math.ceil(expSec - Date.now() / 1000))
+        : Number(status.trialRemainingSeconds || 0);
+      if (rem <= 0 && expSec > 0) {
+        stopTrialCountdown();
+        refreshAuthGateState().catch(() => {});
+        return;
+      }
+      const remText = formatTrialRemainingText(rem);
+      if ($('trialNoticeBadge')) $('trialNoticeBadge').textContent = `نسخهٔ آزمایشی ۲۴ ساعته (${remText} باقی‌مانده)`;
+      if ($('trialNoticeText')) {
+        $('trialNoticeText').textContent = `شما در حال استفاده از نسخهٔ آزمایشی ۲۴ ساعته هستید (${remText} باقی‌مانده) — برای ادامهٔ استفاده از برنامه باید لایسنس تهیه کنید و با شمارهٔ ${phone} تماس بگیرید.`;
+      }
+    };
+    updateBannerText();
+    if (expSec > 0) {
+      trialCountdownTimer = setInterval(updateBannerText, 30000);
+      if (typeof trialCountdownTimer?.unref === 'function') trialCountdownTimer.unref();
+    }
+  }
+
+  const ocrOk = isModuleLicensed('ocr');
+  const trOk = isModuleLicensed('translation');
+  const edOk = isModuleLicensed('editing');
+  $('ocrBtn')?.classList.toggle('mod-locked', !ocrOk);
+  $('modelsBtn')?.classList.toggle('mod-locked', !ocrOk);
+  $('translateBtn')?.classList.toggle('mod-locked', !trOk);
+  $('aiBtn')?.classList.toggle('mod-locked', !trOk);
+  $('watermarkBtn')?.classList.toggle('mod-locked', !edOk);
+  $('duplicateBtn')?.classList.toggle('mod-locked', !edOk);
+}
+
 function formatLicensePlanDetail(lic) {
   if (!lic) return '—';
+  if (lic.plan === 'trial24h') return lic.planLabel || 'نسخهٔ آزمایشی ۲۴ ساعته';
   if (lic.plan === 'lifetime' || lic.expiresAt == null) return lic.planLabel || 'دائمی (مادام‌العمر)';
   const rem = typeof lic.daysRemaining === 'number' ? `${lic.daysRemaining.toLocaleString('fa-IR')} روز باقی‌مانده` : '';
   let expDate = '';
@@ -8722,6 +8840,20 @@ function formatLicensePlanDetail(lic) {
   return tail ? `${lic.planLabel || 'مدت‌دار'} (${tail})` : (lic.planLabel || 'مدت‌دار');
 }
 
+function formatModuleBadgeText(modInfo) {
+  if (!modInfo || !modInfo.active) {
+    return modInfo?.source === 'expired' ? 'پایان اعتبار (نیازمند تمدید)' : 'غیرفعال';
+  }
+  if (modInfo.source === 'trial' || modInfo.plan === 'trial24h') {
+    return `آزمایشی ۲۴ ساعته (${formatTrialRemainingText(modInfo.remainingSeconds || 0)})`;
+  }
+  if (modInfo.plan === 'lifetime' || modInfo.expiresAt == null) {
+    return 'فعال ✓ (دائمی)';
+  }
+  const days = typeof modInfo.daysRemaining === 'number' ? `${modInfo.daysRemaining.toLocaleString('fa-IR')} روز باقی‌مانده` : (modInfo.planLabel || 'مدت‌دار');
+  return `فعال ✓ (${days})`;
+}
+
 function applyAuthGateUi(status, { forceActivatePane = false } = {}) {
   if (!status || typeof status !== 'object') return;
   state.licenseStatus = status;
@@ -8729,6 +8861,7 @@ function applyAuthGateUi(status, { forceActivatePane = false } = {}) {
   if ($('gateHardwareId') && hwid) $('gateHardwareId').textContent = hwid;
   if ($('licInfoHwid') && hwid) $('licInfoHwid').textContent = hwid;
   $('lockAppMenuBtn')?.classList.toggle('hidden', !(status.licensed && status.passwordEnabled));
+  syncTrialBannerAndModulesUi(status);
 
   if (status.licensed && status.unlocked) {
     document.body.classList.remove('auth-locked');
@@ -8753,15 +8886,24 @@ function applyAuthGateUi(status, { forceActivatePane = false } = {}) {
 
   const badge = $('authGateBadge');
   if (badge) {
-    badge.textContent = showLogin ? 'قفل‌شده با رمز شخصی' : (status.reason === 'license_expired' ? 'پایان اعتبار لایسنس' : status.reason === 'clock_tampered' ? 'خطای تاریخ و ساعت سیستم' : 'نیازمند فعال‌سازی لایسنس');
+    badge.textContent = showLogin
+      ? 'قفل‌شده با رمز شخصی'
+      : (status.reason === 'trial_expired'
+        ? 'پایان مهلت آزمایشی ۲۴ ساعته'
+        : status.reason === 'license_expired'
+          ? 'پایان اعتبار لایسنس'
+          : status.reason === 'clock_tampered'
+            ? 'خطای تاریخ و ساعت سیستم'
+            : 'نیازمند فعال‌سازی لایسنس');
     badge.classList.toggle('is-ok', showLogin);
   }
   if ($('authGateMessage')) {
+    const phone = status.supportPhone || DEFAULT_SUPPORT_PHONE;
     const msg = forceActivatePane && status.licensed
       ? 'در این بخش می‌توانید کد سیستم خود را مشاهده کنید، کلید تمدید وارد کنید یا در صورت فراموشی رمز ورود، با کلید لایسنس اصلی رمز را بازنشانی نمایید.'
-      : (status.message || 'برنامه هنوز روی این سیستم فعال نشده است.');
+      : (status.message || `برنامه هنوز روی این سیستم فعال نشده است. برای دریافت لایسنس با شمارهٔ ${phone} تماس بگیرید.`);
     $('authGateMessage').textContent = msg;
-    $('authGateMessage').classList.toggle('is-warn', status.reason === 'license_expired' || status.reason === 'clock_tampered');
+    $('authGateMessage').classList.toggle('is-warn', status.reason === 'trial_expired' || status.reason === 'license_expired' || status.reason === 'clock_tampered');
   }
   if (showLogin) {
     const holder = status.license?.holder || 'کاربر رسمی';
@@ -8814,7 +8956,7 @@ async function bootUnlockedWorkspace() {
     startupRenderTask.catch(() => {});
   }
   syncEngineUpdateUi();
-  const shouldCheckUpdates = !startupUpdateChecked && state.engines.some((entry) => entry.runtimeInstalled);
+  const shouldCheckUpdates = !startupUpdateChecked && isModuleLicensed('ocr') && state.engines.some((entry) => entry.runtimeInstalled);
   if (shouldCheckUpdates) {
     startupUpdateChecked = true;
     setTimeout(() => { checkEngineUpdates({ force: false, silent: true }).catch(() => {}); }, 800);
@@ -8877,10 +9019,32 @@ async function submitGatePasswordLogin() {
 
 function populateLicenseDialog(status) {
   if (!status) return;
-  if ($('licInfoStatus')) $('licInfoStatus').textContent = status.licensed ? 'فعال ✓' : 'غیرفعال';
+  if ($('licInfoStatus')) {
+    $('licInfoStatus').textContent = status.isTrial
+      ? 'نسخهٔ آزمایشی ۲۴ ساعته'
+      : (status.licensed ? 'فعال ✓' : 'غیرفعال');
+  }
   if ($('licInfoHolder')) $('licInfoHolder').textContent = status.license?.holder || '—';
   if ($('licInfoPlan')) $('licInfoPlan').textContent = formatLicensePlanDetail(status.license);
   if ($('licInfoHwid')) $('licInfoHwid').textContent = status.hardwareId || '';
+  if ($('licSupportPhone')) $('licSupportPhone').textContent = status.supportPhone || DEFAULT_SUPPORT_PHONE;
+
+  const mods = status.modules || null;
+  for (const modId of ['ocr', 'translation', 'editing']) {
+    const pill = $(`licMod_${modId}`);
+    if (!pill) continue;
+    const modEntry = mods && typeof mods === 'object' && (modId in mods)
+      ? mods[modId]
+      : (status.licensed ? { active: true, plan: status.license?.plan || 'lifetime', expiresAt: status.license?.expiresAt, daysRemaining: status.license?.daysRemaining } : { active: false });
+    pill.textContent = formatModuleBadgeText(modEntry);
+    pill.classList.toggle('is-active', Boolean(modEntry?.active && modEntry?.source !== 'trial' && modEntry?.plan !== 'trial24h'));
+    pill.classList.toggle('is-trial', Boolean(modEntry?.active && (modEntry?.source === 'trial' || modEntry?.plan === 'trial24h')));
+    pill.classList.toggle('is-off', !modEntry?.active);
+  }
+
+  const anyInactive = Boolean(status.isTrial || !isModuleLicensed('ocr') || !isModuleLicensed('translation') || !isModuleLicensed('editing'));
+  if ($('licRenewDetails') && anyInactive) $('licRenewDetails').open = true;
+
   const pwdOn = Boolean(status.passwordEnabled);
   if ($('licPwdStateBadge')) {
     $('licPwdStateBadge').textContent = pwdOn ? 'فعال (محافظت با رمز)' : 'غیرفعال (ورود مستقیم)';
@@ -8895,11 +9059,15 @@ function populateLicenseDialog(status) {
   if ($('licPwdFeedback')) $('licPwdFeedback').classList.add('hidden');
 }
 
-async function openLicenseDialog() {
+async function openLicenseDialog({ focusRenew = false } = {}) {
   const status = await refreshAuthGateState();
   if (!status.licensed || !status.unlocked) return;
   populateLicenseDialog(status);
+  if (focusRenew && $('licRenewDetails')) $('licRenewDetails').open = true;
   showDialog('licenseDialog');
+  if (focusRenew) {
+    setTimeout(() => { try { $('dialogNewLicenseInput')?.focus({ preventScroll: true }); } catch { /* ignore */ } }, 40);
+  }
 }
 
 async function saveLocalPasswordFromDialog() {
