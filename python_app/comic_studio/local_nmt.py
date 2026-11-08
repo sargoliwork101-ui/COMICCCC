@@ -590,7 +590,7 @@ class LocalNmtManager:
         last_exc: Exception | None = None
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        headers = {"User-Agent": "ComicOCRStudio/4.24"}
+        headers = {"User-Agent": "ComicOCRStudio/4.25"}
         with httpx.Client(headers=headers, follow_redirects=True, transport=self._transport) as client:
             selected_manifest: list[tuple[str, int]] | None = None
             selected_endpoint = endpoints[0]

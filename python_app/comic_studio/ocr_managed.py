@@ -2174,6 +2174,8 @@ class IsolatedOcrEngine:
                     stream.close()
                 except Exception:
                     pass
+        if self.id == "surya":
+            _stop_lingering_surya_server()
 
     def unload(self) -> None:
         self.close()
@@ -2269,8 +2271,39 @@ class IsolatedOcrEngine:
             env.setdefault("SURYA_MAX_TOKENS_FULL_PAGE", "4096")
             env.setdefault("SURYA_INFERENCE_LOGPROBS", "false")
             env.setdefault("SURYA_INFERENCE_KEEP_ALIVE", "false")
-            use_gpu_layers = bool(hw.get("hasNvidiaGpu")) or sys.platform == "darwin"
-            env.setdefault("LLAMA_CPP_NGL", "99" if use_gpu_layers else "0")
+            vram_gb = float(hw.get("vramGb") or 0.0)
+            has_vulkan_bin = False
+            if llama_bin.is_dir():
+                with contextlib.suppress(OSError):
+                    has_vulkan_bin = any("vulkan" in p.name.lower() for p in llama_bin.rglob("*vulkan*"))
+            use_gpu_layers = (
+                sys.platform == "darwin"
+                or (bool(hw.get("hasNvidiaGpu")) and (vram_gb <= 0.0 or vram_gb >= 4.5))
+            )
+            ngl_str = "99" if use_gpu_layers else "0"
+            env.setdefault("LLAMA_CPP_NGL", ngl_str)
+            # Root-cause fix for `failed to process mtmd chunk, res = -1`:
+            # 1) llama-server defaults `mmproj_use_gpu = true` EVEN when `-ngl 0`! On Vulkan builds
+            #    (and Intel/AMD/low-VRAM GPUs), Surya 2.5's CLIP vision graph (`head_dim = 72`) lacks
+            #    Vulkan FlashAttention (`FLASH_ATTN_EXT`), falling back to multi-GB dense attention
+            #    buffers that exceed Vulkan's maxStorageBufferRange / VRAM (`ErrorOutOfDeviceMemory` /
+            #    `ErrorDeviceLost` -> `failed to process mtmd chunk, res = -1`).
+            # 2) Passing `--no-mmproj-offload` keeps the vision projector safe on multi-core CPU while
+            #    allowing NVIDIA GPUs to keep `-ngl 99` for fast 2B LLM decoding; `-b 2048 -ub 2048`
+            #    raises the physical micro-batch above the 512 default so large vision chunks decode cleanly.
+            no_mmproj_gpu = (
+                ngl_str == "0"
+                or has_vulkan_bin
+                or (sys.platform != "darwin" and 0.0 < vram_gb < 7.5)
+            )
+            env.setdefault("LLAMA_CPP_NO_MMPROJ_OFFLOAD", "true" if no_mmproj_gpu else "false")
+            if ngl_str == "0":
+                extra_args = "-b 2048 -ub 2048 --flash-attn off --device none"
+            elif has_vulkan_bin:
+                extra_args = "-b 2048 -ub 2048 --flash-attn off"
+            else:
+                extra_args = "-b 2048 -ub 2048"
+            env.setdefault("LLAMA_CPP_EXTRA_ARGS", extra_args)
         return env
 
     def _ensure_llama_cpp_for_surya(self) -> None:
@@ -3097,6 +3130,8 @@ class IsolatedOcrEngine:
                         pass
             self._worker_proc = None
         self._worker_stderr_tail.clear()
+        if self.id == "surya":
+            _stop_lingering_surya_server()
         if self._spec.get("needs_llama_cpp_cpu"):
             self._ensure_llama_cpp_for_surya()
         worker_script = _worker_script_path()
@@ -3188,6 +3223,8 @@ class IsolatedOcrEngine:
                             except Exception:
                                 pass
                     self._worker_proc = None
+                    if self.id == "surya":
+                        _stop_lingering_surya_server()
                     err_hint = ("\n".join(self._worker_stderr_tail))[-600:]
                     suffix = f": {err_hint}" if err_hint else ""
                     raise self._error_cls(f"پردازشگر مدل {self.id} به شکل غیرمنتظره‌ای بسته شد.{suffix}")
@@ -3399,13 +3436,22 @@ def engine_has_uninstallable_files(engine_id: str, engine: Any = None) -> bool:
 
 
 def _stop_lingering_surya_server() -> None:
-    candidates = [
-        models_dir() / "cache" / "datalab" / "surya" / "llamacpp_server.json",
-        Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.json")),
+    cache_roots: list[Path] = [
+        models_dir() / "cache",
+        Path(os.path.expanduser("~/.cache")),
     ]
-    for state_json in candidates:
-        if not state_json.is_file():
+    for env_key in ("XDG_CACHE_HOME", "USERPROFILE"):
+        raw = (os.environ.get(env_key) or "").strip()
+        if raw:
+            cache_roots.append(Path(raw) / ".cache" if env_key == "USERPROFILE" else Path(raw))
+    seen: set[str] = set()
+    killed_pids: set[int] = set()
+    for root in cache_roots:
+        state_json = root / "datalab" / "surya" / "llamacpp_server.json"
+        norm_key = os.path.normcase(str(state_json))
+        if norm_key in seen or not state_json.is_file():
             continue
+        seen.add(norm_key)
         server_pid: int | None = None
         with contextlib.suppress(Exception):
             meta = json.loads(state_json.read_text(encoding="utf-8"))
@@ -3413,7 +3459,8 @@ def _stop_lingering_surya_server() -> None:
                 server_pid = int(meta["pid"])
         with contextlib.suppress(OSError):
             state_json.unlink()
-        if server_pid and server_pid > 0 and server_pid != os.getpid():
+        if server_pid and server_pid > 0 and server_pid != os.getpid() and server_pid not in killed_pids:
+            killed_pids.add(server_pid)
             with contextlib.suppress(Exception):
                 if os.name == "nt":
                     _run_Subprocess(["taskkill", "/F", "/T", "/PID", str(server_pid)], capture_output=True, timeout=4, check=False)

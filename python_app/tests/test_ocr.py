@@ -3347,6 +3347,141 @@ def test_v424_sota_persian_ocr_rasm_lexicon_lab_chromatic_deskew_psm13_and_bilin
     assert any("comic_studio/assets" in arg for arg in pyi_cmd)
 
 
+def test_v425_surya_mtmd_chunk_vulkan_mmproj_sentinel_and_crop_root_cause(tmp_path, monkeypatch):
+    import json
+    import sys
+    import types
+    from types import SimpleNamespace
+    from PIL import Image, ImageDraw
+    import comic_studio.ocr_managed as managed
+    import comic_studio.ocr_worker as worker
+
+    # 1. Vulkan llama-bin + Intel/AMD (`LLAMA_CPP_NGL == "0"`) AND NVIDIA Vulkan (`LLAMA_CPP_NGL == "99"`):
+    #    both MUST set `LLAMA_CPP_NO_MMPROJ_OFFLOAD == "true"` and `-b 2048 -ub 2048 --flash-attn off`
+    #    so Surya 2.5's head_dim=72 CLIP vision graph never faults on Vulkan!
+    fake_models = tmp_path / "models"
+    llama_bin = fake_models / "envs" / "surya" / "llama-bin"
+    llama_bin.mkdir(parents=True, exist_ok=True)
+    (llama_bin / "llama-server.exe").write_bytes(b"MZ")
+    (llama_bin / "ggml-vulkan.dll").write_bytes(b"MZ")
+
+    monkeypatch.setattr(managed, "models_dir", lambda: fake_models)
+    monkeypatch.setattr(managed, "_is_windows", lambda: True)
+    monkeypatch.setattr(managed.sys, "platform", "win32")
+    for k in ("LLAMA_CPP_NGL", "LLAMA_CPP_NO_MMPROJ_OFFLOAD", "LLAMA_CPP_EXTRA_ARGS", "LLAMA_CPP_BINARY"):
+        monkeypatch.delenv(k, raising=False)
+
+    monkeypatch.setattr(managed, "inspect_hardware", lambda: {"hasNvidiaGpu": True, "hasGpu": True, "vramGb": 8.0})
+    eng_nv = managed.IsolatedOcrEngine("surya", ["eng", "fas"], threading.Lock(), OcrLine, OcrError)
+    env_nv = eng_nv._worker_env()
+    assert env_nv["LLAMA_CPP_NGL"] == "99"
+    assert env_nv["LLAMA_CPP_NO_MMPROJ_OFFLOAD"] == "true"
+    assert "-b 2048 -ub 2048" in env_nv["LLAMA_CPP_EXTRA_ARGS"]
+    assert "--flash-attn off" in env_nv["LLAMA_CPP_EXTRA_ARGS"]
+    assert "--device none" not in env_nv["LLAMA_CPP_EXTRA_ARGS"]
+
+    monkeypatch.setattr(managed, "inspect_hardware", lambda: {"hasNvidiaGpu": False, "hasGpu": True, "vramGb": 4.0})
+    env_igpu = eng_nv._worker_env()
+    assert env_igpu["LLAMA_CPP_NGL"] == "0"
+    assert env_igpu["LLAMA_CPP_NO_MMPROJ_OFFLOAD"] == "true"
+    assert "--device none" in env_igpu["LLAMA_CPP_EXTRA_ARGS"]
+
+    # 2. Stale sentinel cleanup across USERPROFILE/.cache/datalab/surya/llamacpp_server.json
+    fake_userprofile = tmp_path / "win_user"
+    stale_sentinel = fake_userprofile / ".cache" / "datalab" / "surya" / "llamacpp_server.json"
+    stale_sentinel.parent.mkdir(parents=True, exist_ok=True)
+    stale_sentinel.write_text(json.dumps({"port": 51999, "pid": 999999, "backend": "llamacpp"}), encoding="utf-8")
+    monkeypatch.setenv("USERPROFILE", str(fake_userprofile))
+    monkeypatch.setattr(managed, "_run_Subprocess", lambda *a, **kw: None)
+    managed._stop_lingering_surya_server()
+    assert not stale_sentinel.exists(), "Stale USERPROFILE llamacpp_server.json must be removed"
+
+    # 3. _SuryaAdapter syncs LLAMA_CPP_NO_MMPROJ_OFFLOAD + LLAMA_CPP_EXTRA_ARGS and recovers even when NGL started at "0"!
+    fake_settings = SimpleNamespace(
+        SURYA_INFERENCE_BACKEND="auto",
+        SURYA_INFERENCE_PARALLEL=8,
+        SURYA_INFERENCE_CTX_SIZE=16384,
+        SURYA_MAX_TOKENS_FULL_PAGE=12288,
+        SURYA_INFERENCE_LOGPROBS=True,
+        SURYA_INFERENCE_KEEP_ALIVE=True,
+        LLAMA_CPP_NGL=0,
+        LLAMA_CPP_NO_MMPROJ_OFFLOAD=False,
+        LLAMA_CPP_EXTRA_ARGS=None,
+    )
+    fake_surya = types.ModuleType("surya")
+    fake_surya_settings = types.ModuleType("surya.settings")
+    fake_surya_settings.settings = fake_settings
+    monkeypatch.setitem(sys.modules, "surya", fake_surya)
+    monkeypatch.setitem(sys.modules, "surya.settings", fake_surya_settings)
+    monkeypatch.setenv("LLAMA_CPP_BINARY", str(llama_bin / "llama-server.exe"))
+    monkeypatch.setenv("LLAMA_CPP_NGL", "0")
+    monkeypatch.delenv("LLAMA_CPP_NO_MMPROJ_OFFLOAD", raising=False)
+    monkeypatch.delenv("LLAMA_CPP_EXTRA_ARGS", raising=False)
+
+    adapter = worker._SuryaAdapter(fake_models)
+    adapter._sync_surya_runtime_settings()
+    assert fake_settings.LLAMA_CPP_NO_MMPROJ_OFFLOAD is True
+    assert "--device none" in fake_settings.LLAMA_CPP_EXTRA_ARGS
+    assert "-ub 2048" in fake_settings.LLAMA_CPP_EXTRA_ARGS
+
+    # 4. Oversized page (3600x2400) + degenerate layout slivers + `mtmd chunk` error when NGL=="0" ->
+    #    auto-recovers on pure-CPU 1568px cap and unmaps polygon coordinates accurately back to 3600x2400!
+    big_path = tmp_path / "big_comic.png"
+    big_im = Image.new("RGB", (3600, 2400), (255, 255, 255))
+    draw = ImageDraw.Draw(big_im)
+    draw.rectangle([360, 240, 1800, 480], fill=(20, 20, 20))
+    big_im.save(big_path)
+    big_im.close()
+
+    # Verify _sanitize_layout_for_surya drops <4px noise slivers and expands tiny 10x10 boxes to >=28x28
+    sliver_box = SimpleNamespace(label="Text", polygon=[[10, 10], [500, 10], [500, 12], [10, 12]])
+    tiny_box = SimpleNamespace(label="Text", polygon=[[100, 100], [110, 100], [110, 110], [100, 110]])
+    san = adapter._sanitize_layout_for_surya(SimpleNamespace(bboxes=[sliver_box, tiny_box]), 1000, 800)
+    assert len(san.bboxes) == 1
+    xs = [p[0] for p in san.bboxes[0].polygon]
+    ys = [p[1] for p in san.bboxes[0].polygon]
+    assert (max(xs) - min(xs)) >= 28.0 and (max(ys) - min(ys)) >= 28.0
+
+    # Simulate first pass failing with `error=True` (`failed to process mtmd chunk, res = -1`) even when NGL=="0",
+    # then succeeding after `_restart_on_pure_cpu()` at 1568px cap!
+    monkeypatch.setenv("LLAMA_CPP_NGL", "0")
+    monkeypatch.setenv("LLAMA_CPP_NO_MMPROJ_OFFLOAD", "false")
+    seen_sizes: list[tuple[int, int]] = []
+
+    def _mtmd_fail_then_recover(imgs, layout_results=None):
+        im0 = imgs[0]
+        seen_sizes.append(im0.size)
+        if worker.os.environ.get("LLAMA_CPP_NO_MMPROJ_OFFLOAD") != "true":
+            return [SimpleNamespace(error=True, blocks=[SimpleNamespace(html="", text="", label="Full-Page", bbox=[0, 0, im0.size[0], im0.size[1]], error=True)])]
+        # On 1568x1045 downscaled image, box [156.8, 104.5, 784.0, 209.0] maps back to [360, 240, 1800, 480]
+        return [
+            SimpleNamespace(
+                error=False,
+                blocks=[
+                    SimpleNamespace(
+                        html="<p>متن فارسی بازیابی‌شده</p>",
+                        label="Text",
+                        bbox=[156.8, 104.5, 784.0, 209.0],
+                        confidence=0.95,
+                        error=False,
+                    )
+                ],
+            )
+        ]
+
+    adapter._predictor = _mtmd_fail_then_recover
+    monkeypatch.setattr(adapter, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(adapter, "_detect_fast_layout_inprocess", lambda _im: None)
+    out = adapter.recognize(str(big_path), "fas", None)
+    assert seen_sizes[0][0] == 2240 and seen_sizes[1][0] == 1568
+    assert worker.os.environ.get("LLAMA_CPP_NO_MMPROJ_OFFLOAD") == "true"
+    assert "--device none" in (worker.os.environ.get("LLAMA_CPP_EXTRA_ARGS") or "")
+    assert len(out) == 1 and out[0]["text"] == "متن فارسی بازیابی‌شده"
+    assert abs(out[0]["polygon"][0][0] - 360.0) <= 3.0
+    assert abs(out[0]["polygon"][2][0] - 1800.0) <= 3.0
+
+
+
 
 
 

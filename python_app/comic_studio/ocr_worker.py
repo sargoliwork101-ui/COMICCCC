@@ -701,9 +701,10 @@ class _SuryaAdapter(_BaseAdapter):
 
     def _surya_cache_files(self, filename: str) -> list[Path]:
         roots: list[Path] = []
-        xdg = (os.environ.get("XDG_CACHE_HOME") or "").strip()
-        if xdg:
-            roots.append(Path(xdg))
+        for env_key in ("XDG_CACHE_HOME", "USERPROFILE"):
+            raw = (os.environ.get(env_key) or "").strip()
+            if raw:
+                roots.append(Path(raw) / ".cache" if env_key == "USERPROFILE" else Path(raw))
         models_root = getattr(self, "models_root", None)
         if models_root is not None:
             roots.append(Path(models_root) / "cache")
@@ -719,21 +720,78 @@ class _SuryaAdapter(_BaseAdapter):
         return out
 
     @staticmethod
-    def _sync_surya_runtime_settings() -> None:
+    def _has_vulkan_llama_binary() -> bool:
+        bin_raw = (os.environ.get("LLAMA_CPP_BINARY") or "").strip()
+        if not bin_raw:
+            return False
+        bin_dir = Path(bin_raw).parent
+        if not bin_dir.is_dir():
+            return False
+        with contextlib.suppress(OSError):
+            return any("vulkan" in p.name.lower() for p in bin_dir.iterdir())
+        return False
+
+    @staticmethod
+    def _force_pure_cpu_llama_env() -> None:
+        os.environ["LLAMA_CPP_NGL"] = "0"
+        os.environ["LLAMA_CPP_NO_MMPROJ_OFFLOAD"] = "true"
+        os.environ["LLAMA_CPP_EXTRA_ARGS"] = "-b 2048 -ub 2048 --flash-attn off --device none"
+
+    @classmethod
+    def _sync_surya_runtime_settings(cls) -> None:
         try:
             from surya.settings import settings as _ss
             ctx_val = int(os.environ.get("SURYA_INFERENCE_CTX_SIZE", "24576") or "24576")
             max_tok = int(os.environ.get("SURYA_MAX_TOKENS_FULL_PAGE", "4096") or "4096")
             ngl_val = int(os.environ.get("LLAMA_CPP_NGL", "0") or "0")
             logprobs_raw = str(os.environ.get("SURYA_INFERENCE_LOGPROBS", "false")).strip().lower()
+            has_vulkan = cls._has_vulkan_llama_binary()
+            mmproj_raw = os.environ.get("LLAMA_CPP_NO_MMPROJ_OFFLOAD")
+            if mmproj_raw is None or not str(mmproj_raw).strip():
+                no_mmproj_offload = (ngl_val == 0) or has_vulkan
+            else:
+                no_mmproj_offload = str(mmproj_raw).strip().lower() in {"1", "true", "yes"}
+            extra_args = (os.environ.get("LLAMA_CPP_EXTRA_ARGS") or "").strip()
+            if not extra_args:
+                if ngl_val == 0:
+                    extra_args = "-b 2048 -ub 2048 --flash-attn off --device none"
+                elif has_vulkan:
+                    extra_args = "-b 2048 -ub 2048 --flash-attn off"
+                else:
+                    extra_args = "-b 2048 -ub 2048"
             _ss.SURYA_INFERENCE_BACKEND = "llamacpp"
             _ss.SURYA_INFERENCE_PARALLEL = 1
             _ss.SURYA_INFERENCE_CTX_SIZE = ctx_val
             _ss.SURYA_MAX_TOKENS_FULL_PAGE = max_tok
             _ss.SURYA_INFERENCE_LOGPROBS = logprobs_raw in {"1", "true", "yes"}
+            _ss.SURYA_INFERENCE_KEEP_ALIVE = False
             _ss.LLAMA_CPP_NGL = ngl_val
+            _ss.LLAMA_CPP_NO_MMPROJ_OFFLOAD = no_mmproj_offload
+            _ss.LLAMA_CPP_EXTRA_ARGS = extra_args
         except Exception:
             pass
+
+    def _terminate_sentinel_servers(self) -> None:
+        killed_pids: set[int] = set()
+        for state_json in self._surya_cache_files("llamacpp_server.json"):
+            if not state_json.is_file():
+                continue
+            server_pid: int | None = None
+            with contextlib.suppress(Exception):
+                meta = json.loads(state_json.read_text(encoding="utf-8"))
+                if isinstance(meta, dict) and meta.get("pid"):
+                    server_pid = int(meta["pid"])
+            with contextlib.suppress(OSError):
+                state_json.unlink()
+            if server_pid and server_pid > 0 and server_pid != os.getpid() and server_pid not in killed_pids:
+                killed_pids.add(server_pid)
+                with contextlib.suppress(Exception):
+                    if os.name == "nt":
+                        import subprocess as _sp
+                        _sp.run(["taskkill", "/F", "/T", "/PID", str(server_pid)], capture_output=True, timeout=4, check=False)
+                    else:
+                        import signal as _sig
+                        os.kill(server_pid, _sig.SIGTERM)
 
     def _ensure_loaded(self) -> None:
         if self._predictor is not None or self._legacy is not None:
@@ -744,6 +802,12 @@ class _SuryaAdapter(_BaseAdapter):
             os.environ.setdefault("TORCH_DEVICE", dev)
         except Exception:
             pass
+        # Never attach to an orphaned/poisoned llama-server left over from a killed or older worker
+        # (unless the user explicitly pinned SURYA_INFERENCE_URL or SURYA_INFERENCE_KEEP_ALIVE=true).
+        if not (os.environ.get("SURYA_INFERENCE_URL") or "").strip():
+            keep_alive = str(os.environ.get("SURYA_INFERENCE_KEEP_ALIVE", "false")).strip().lower() in {"1", "true", "yes"}
+            if not keep_alive:
+                self._terminate_sentinel_servers()
         self._sync_surya_runtime_settings()
         try:
             from surya.inference import SuryaInferenceManager
@@ -776,7 +840,7 @@ class _SuryaAdapter(_BaseAdapter):
             proc = getattr(handle, "process", None) if handle is not None else None
             if proc is not None and hasattr(proc, "pid"):
                 server_pid = int(proc.pid)
-            elif handle is not None and hasattr(handle, "pid"):
+            elif handle is not None and hasattr(handle, "pid") and getattr(handle, "pid") is not None:
                 try:
                     server_pid = int(handle.pid)
                 except Exception:
@@ -784,15 +848,7 @@ class _SuryaAdapter(_BaseAdapter):
             if hasattr(mgr, "stop"):
                 with contextlib.suppress(Exception):
                     mgr.stop()
-        for state_json in self._surya_cache_files("llamacpp_server.json"):
-            if state_json.is_file():
-                if server_pid is None:
-                    with contextlib.suppress(Exception):
-                        meta = json.loads(state_json.read_text(encoding="utf-8"))
-                        if isinstance(meta, dict) and meta.get("pid"):
-                            server_pid = int(meta["pid"])
-                with contextlib.suppress(OSError):
-                    state_json.unlink()
+        self._terminate_sentinel_servers()
         if server_pid and server_pid > 0 and server_pid != os.getpid():
             with contextlib.suppress(Exception):
                 if os.name == "nt":
@@ -970,6 +1026,128 @@ class _SuryaAdapter(_BaseAdapter):
             layout_boxes.append(lb)
         return LayoutResult(bboxes=layout_boxes, image_bbox=[0.0, 0.0, float(width), float(height)])
 
+    @classmethod
+    def _sanitize_layout_for_surya(cls, layout_res: Any, width: int, height: int) -> Any:
+        """Ensure every LayoutBox crop passed to Surya's `mtmd` vision encoder is at least 28x28 px
+        and free of degenerate <4px slivers or >80:1 extreme aspect ratios that fail inside `mtmd`."""
+        if layout_res is None:
+            return None
+        bboxes = getattr(layout_res, "bboxes", None)
+        if not bboxes:
+            return layout_res
+        sanitized: list[Any] = []
+        changed = False
+        for box in bboxes:
+            lbl = str(getattr(box, "label", "") or "")
+            if lbl in cls._SKIP_LABELS:
+                sanitized.append(box)
+                continue
+            poly = getattr(box, "polygon", None)
+            if not poly or len(poly) < 4:
+                changed = True
+                continue
+            xs = [float(p[0]) for p in poly]
+            ys = [float(p[1]) for p in poly]
+            x0, x1 = max(0.0, min(xs)), min(float(width), max(xs))
+            y0, y1 = max(0.0, min(ys)), min(float(height), max(ys))
+            bw, bh = x1 - x0, y1 - y0
+            if bw < 4.0 or bh < 4.0:
+                changed = True
+                continue
+            min_side = 28.0
+            if bw < min_side and width >= 28:
+                grow_x = (min_side - bw) * 0.5
+                x0 = max(0.0, x0 - grow_x)
+                x1 = min(float(width), x0 + min_side)
+                x0 = max(0.0, x1 - min_side)
+                changed = True
+            if bh < min_side and height >= 28:
+                grow_y = (min_side - bh) * 0.5
+                y0 = max(0.0, y0 - grow_y)
+                y1 = min(float(height), y0 + min_side)
+                y0 = max(0.0, y1 - min_side)
+                changed = True
+            bw, bh = max(1.0, x1 - x0), max(1.0, y1 - y0)
+            if max(bw / bh, bh / bw) > 75.0:
+                if bw > bh and height >= int(bw / 60.0):
+                    need_h = min(float(height), bw / 60.0)
+                    cy = 0.5 * (y0 + y1)
+                    y0 = max(0.0, cy - need_h * 0.5)
+                    y1 = min(float(height), y0 + need_h)
+                    y0 = max(0.0, y1 - need_h)
+                    changed = True
+                elif bh > bw and width >= int(bh / 60.0):
+                    need_w = min(float(width), bh / 60.0)
+                    cx = 0.5 * (x0 + x1)
+                    x0 = max(0.0, cx - need_w * 0.5)
+                    x1 = min(float(width), x0 + need_w)
+                    x0 = max(0.0, x1 - need_w)
+                    changed = True
+            if changed:
+                with contextlib.suppress(Exception):
+                    box.polygon = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            sanitized.append(box)
+        if not sanitized:
+            return None
+        if changed:
+            with contextlib.suppress(Exception):
+                layout_res.bboxes = sanitized
+        return layout_res
+
+    @staticmethod
+    def _prepare_surya_work_image(rgb: Any, *, max_side: int = 2240) -> tuple[Any, float, float, int, int]:
+        """Cap oversized pages so Surya's Qwen-VL `mtmd` vision graph never allocates multi-GB
+        8,000-token scratch buffers, and pad tiny <48px strips so `scale_to_fit` never produces
+        extreme aspect ratios. Returns `(work_rgb, scale_x, scale_y, pad_x, pad_y)`."""
+        from PIL import Image, ImageOps
+
+        w, h = rgb.size
+        work = rgb
+        scale_x = 1.0
+        scale_y = 1.0
+        if max(w, h) > max_side:
+            ratio = float(max_side) / float(max(w, h))
+            nw = max(28, int(round(w * ratio)))
+            nh = max(28, int(round(h * ratio)))
+            work = rgb.resize((nw, nh), Image.Resampling.LANCZOS)
+            scale_x = float(w) / float(nw)
+            scale_y = float(h) / float(nh)
+        cw, ch = work.size
+        pad_x = max(0, (48 - cw + 1) // 2) if cw < 48 else 0
+        pad_y = max(0, (48 - ch + 1) // 2) if ch < 48 else 0
+        if pad_x > 0 or pad_y > 0:
+            padded = ImageOps.expand(work, border=(pad_x, pad_y, pad_x, pad_y), fill=(255, 255, 255))
+            if work is not rgb:
+                work.close()
+            work = padded
+        return work, scale_x, scale_y, pad_x, pad_y
+
+    @staticmethod
+    def _unmap_surya_lines(
+        lines: list[dict[str, Any]],
+        orig_w: int,
+        orig_h: int,
+        scale_x: float,
+        scale_y: float,
+        pad_x: int,
+        pad_y: int,
+    ) -> list[dict[str, Any]]:
+        if scale_x == 1.0 and scale_y == 1.0 and pad_x == 0 and pad_y == 0:
+            return lines
+        out: list[dict[str, Any]] = []
+        for item in lines:
+            mapped_poly = [
+                [
+                    (float(pt[0]) - float(pad_x)) * scale_x,
+                    (float(pt[1]) - float(pad_y)) * scale_y,
+                ]
+                for pt in item["polygon"]
+            ]
+            cloned = dict(item)
+            cloned["polygon"] = _clamp_polygon(mapped_poly, orig_w, orig_h)
+            out.append(cloned)
+        return out
+
     @staticmethod
     def _is_blank_image(rgb: Any) -> bool:
         try:
@@ -1017,10 +1195,15 @@ class _SuryaAdapter(_BaseAdapter):
             if not log_path.is_file():
                 continue
             try:
-                tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-25:]
-                relevant = [ln.strip() for ln in tail if ln.strip()]
-                if relevant:
-                    return " | ".join(relevant[-4:])[-400:]
+                tail = [ln.strip() for ln in log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:] if ln.strip()]
+                if not tail:
+                    continue
+                err_lines = [
+                    ln for ln in tail
+                    if " E " in ln or any(k in ln.lower() for k in ("error", "vulkan", "cuda", "alloc", "mtmd", "clip", "out of memory"))
+                ]
+                chosen = (err_lines[-5:] if err_lines else tail[-4:])
+                return " | ".join(chosen)[-500:]
             except Exception:
                 continue
         return ""
@@ -1034,6 +1217,15 @@ class _SuryaAdapter(_BaseAdapter):
                 return self._predictor([rgb])
         return self._predictor([rgb])
 
+    def _restart_on_pure_cpu(self) -> None:
+        prev_pred = self._predictor
+        had_mgr = self._manager is not None
+        self.close()
+        self._force_pure_cpu_llama_env()
+        self._ensure_loaded()
+        if self._predictor is None and not had_mgr and prev_pred is not None:
+            self._predictor = prev_pred
+
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         from PIL import Image
         self._ensure_loaded()
@@ -1044,55 +1236,82 @@ class _SuryaAdapter(_BaseAdapter):
         try:
             if self._predictor is not None:
                 page_blank = self._is_blank_image(rgb)
-                fast_layout = None if page_blank else self._detect_fast_layout_inprocess(rgb)
                 had_error = False
 
-                def _run_pass() -> tuple[list[dict[str, Any]], bool]:
-                    if fast_layout is not None:
-                        p_fast = self._invoke_surya_predictor(rgb, fast_layout)
-                        l_fast, err_fast = self._extract_surya_lines(p_fast, width, height)
-                        if l_fast:
-                            return l_fast, err_fast
-                        if err_fast:
-                            return [], True
-                    p_full = self._invoke_surya_predictor(rgb, None)
-                    return self._extract_surya_lines(p_full, width, height)
+                def _run_on_side_cap(side_cap: int) -> tuple[list[dict[str, Any]], bool, Any]:
+                    work_im, sx, sy, px, py = self._prepare_surya_work_image(rgb, max_side=side_cap)
+                    try:
+                        ww, wh = work_im.size
+                        fl = None if page_blank else self._sanitize_layout_for_surya(self._detect_fast_layout_inprocess(work_im), ww, wh)
+                        if fl is not None:
+                            p_fast = self._invoke_surya_predictor(work_im, fl)
+                            l_fast, err_fast = self._extract_surya_lines(p_fast, ww, wh)
+                            if l_fast:
+                                return self._unmap_surya_lines(l_fast, width, height, sx, sy, px, py), err_fast, fl
+                            if err_fast:
+                                return [], True, fl
+                        p_full = self._invoke_surya_predictor(work_im, None)
+                        l_full, err_full = self._extract_surya_lines(p_full, ww, wh)
+                        return self._unmap_surya_lines(l_full, width, height, sx, sy, px, py), err_full, fl
+                    finally:
+                        if work_im is not rgb:
+                            work_im.close()
 
+                fast_layout = None
+                cpu_recovered = False
                 try:
-                    lines, had_error = _run_pass()
+                    lines, had_error, fast_layout = _run_on_side_cap(2240)
                 except Exception:
-                    if os.environ.get("LLAMA_CPP_NGL", "0") != "0":
-                        self.close()
-                        os.environ["LLAMA_CPP_NGL"] = "0"
-                        self._ensure_loaded()
-                        lines, had_error = _run_pass()
-                    else:
-                        raise
+                    cpu_recovered = True
+                    self._restart_on_pure_cpu()
+                    lines, had_error, fast_layout = _run_on_side_cap(1568)
 
-                # Surya's openai_client swallows llama-server HTTP errors into BlockOCRResult(error=True)
-                # without raising an exception! Recover on CPU if GPU offload was active.
-                if not lines and not page_blank and (had_error or os.environ.get("LLAMA_CPP_NGL", "0") != "0"):
-                    if os.environ.get("LLAMA_CPP_NGL", "0") != "0":
-                        self.close()
-                        os.environ["LLAMA_CPP_NGL"] = "0"
-                        self._ensure_loaded()
-                        lines, had_error = _run_pass()
+                # Surya's openai_client swallows llama-server HTTP 500 (`failed to process mtmd chunk`)
+                # into BlockOCRResult(error=True) without raising an exception! Unconditionally restart
+                # llama-server in pure-CPU `--no-mmproj-offload --device none` mode + 1568px cap even if
+                # LLAMA_CPP_NGL already started at "0" (where Vulkan mmproj offload was previously active).
+                if not lines and not page_blank and (had_error or os.environ.get("LLAMA_CPP_NGL", "0") != "0") and not cpu_recovered:
+                    if had_error or os.environ.get("LLAMA_CPP_NGL", "0") != "0":
+                        cpu_recovered = True
+                        self._restart_on_pure_cpu()
+                        lines, had_error, fast_layout = _run_on_side_cap(1568)
 
-                # If full-page special-token parsing returned 0 blocks on a non-blank page without fast_layout,
-                # run per-block BLOCK_PROMPT on OpenCV/provided text regions.
-                if not lines and not page_blank and fast_layout is None:
-                    region_layout = self._build_region_layout_fallback(rgb, regions)
-                    if region_layout is not None:
-                        try:
-                            p_reg = self._predictor([rgb], layout_results=[region_layout])
-                            reg_lines, reg_err = self._extract_surya_lines(p_reg, width, height)
-                            if reg_lines:
-                                lines = reg_lines
-                                had_error = False
-                            elif reg_err:
-                                had_error = True
-                        except TypeError:
-                            pass
+                # If full-page special-token parsing returned 0 blocks on a non-blank page,
+                # run per-block BLOCK_PROMPT on sanitized OpenCV/provided text regions (~200 tokens/crop).
+                if not lines and not page_blank and (fast_layout is None or had_error):
+                    reg_side = 1568 if cpu_recovered else 2240
+                    work_im, sx, sy, px, py = self._prepare_surya_work_image(rgb, max_side=reg_side)
+                    try:
+                        ww, wh = work_im.size
+                        scaled_regs: list[list[float]] | None = None
+                        if regions:
+                            scaled_regs = [
+                                [
+                                    float(r[0]) / sx + px,
+                                    float(r[1]) / sy + py,
+                                    float(r[2]) / sx + px,
+                                    float(r[3]) / sy + py,
+                                ]
+                                for r in regions
+                                if isinstance(r, (list, tuple)) and len(r) == 4
+                            ]
+                        region_layout = self._sanitize_layout_for_surya(
+                            self._build_region_layout_fallback(work_im, scaled_regs), ww, wh,
+                        )
+                        if region_layout is not None:
+                            try:
+                                p_reg = self._predictor([work_im], layout_results=[region_layout])
+                                reg_lines, reg_err = self._extract_surya_lines(p_reg, ww, wh)
+                                if reg_lines:
+                                    lines = self._unmap_surya_lines(reg_lines, width, height, sx, sy, px, py)
+                                    had_error = False
+                                elif reg_err:
+                                    had_error = True
+                            except TypeError:
+                                pass
+                    finally:
+                        if work_im is not rgb:
+                            work_im.close()
 
                 if not lines and had_error:
                     log_hint = self._read_llama_server_error_tail()
