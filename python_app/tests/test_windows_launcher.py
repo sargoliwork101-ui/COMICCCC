@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 import tomllib
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -126,7 +127,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     offline_bat = (ROOT / "build_windows_offline.bat").read_text(encoding="utf-8")
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
-    assert "ComicOCRStudio-Offline-Setup-4.26" in offline_bat
+    assert "ComicOCRStudio-Offline-Setup-4.27" in offline_bat
     assert "DisableDelayedExpansion" in offline_bat
     assert '--find-links="%WHEELHOUSE_DIR%"' in offline_bat
     assert 'start_windows.bat" --setup-only' in offline_bat
@@ -191,3 +192,53 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
 
 
 
+
+
+def test_v427_offline_builder_survives_slow_pypi_and_can_write_the_exe_to_another_folder(tmp_path):
+    """v4.27: the EXE builder must not die on a slow pypi.org and must honour a custom output folder."""
+    import sys
+    from pathlib import Path
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from offline_packaging import build_offline_package as pkg
+
+    # 1. The PyInstaller bootstrap uses a long timeout + the public PyPI mirrors.
+    source = (ROOT / "offline_packaging" / "build_offline_package.py").read_text(encoding="utf-8")
+    assert "PIP_TIMEOUT_SECONDS = 120" in source
+    assert "PIP_RETRIES = 10" in source
+    assert "mirrors.aliyun.com/pypi/simple/" in source
+    assert "pypi.tuna.tsinghua.edu.cn/simple" in source
+    assert "def ensure_pyinstaller(" in source
+    assert callable(pkg.ensure_pyinstaller)
+
+    # 2. An already installed PyInstaller short-circuits the whole network dance.
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0)
+
+    original_run = pkg.subprocess.run
+    pkg.subprocess.run = fake_run
+    try:
+        assert pkg.ensure_pyinstaller(sys.executable) is True
+    finally:
+        pkg.subprocess.run = original_run
+    assert calls == [] or all("pip" not in " ".join(call) for call in calls)
+    assert not any("install" in " ".join(call) for call in calls)
+
+    # 3. The builder accepts a custom output folder and a custom build folder.
+    parser_flags = source.split("parser.add_argument(", 1)
+    assert any("--output-dir" in chunk for chunk in parser_flags)
+    assert any("--build-dir" in chunk for chunk in parser_flags)
+    assert "--ensure-pyinstaller" in source
+    assert 'dist_root = Path(args.output_dir).expanduser().resolve() if args.output_dir else REPO_PY_ROOT / "dist"' in source
+
+    # 4. The .bat asks for the output folder and keeps the mirror failover.
+    offline_bat = (ROOT / "build_windows_offline.bat").read_text(encoding="utf-8")
+    assert "--output-dir" in offline_bat
+    assert "--ensure-pyinstaller" in offline_bat
+    assert "mirrors.aliyun.com/pypi/simple/" in offline_bat
+    assert "pypi.tuna.tsinghua.edu.cn/simple" in offline_bat
+    assert "--timeout 120 --retries 10" in offline_bat
+    assert "OUT_DIR" in offline_bat

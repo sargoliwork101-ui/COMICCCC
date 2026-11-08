@@ -63,6 +63,7 @@ from .paths import (
     is_custom_data_dir_active,
     models_dir,
 )
+from .table_ocr import TableReadout, recognize_tables
 
 # Optional bright-white-text fallback. The original OCR path always runs first.
 EXTRA_PREPROCESS_SCALE = 3
@@ -3602,6 +3603,18 @@ _PERSIAN_CHAR_MAP = str.maketrans({
     "\u06c0": "\u0647\u0654",  # Heh with Yeh above ۀ -> هٔ
     "\u06c2": "\u0647\u0654",  # Heh Goal with Hamza above ۂ -> هٔ
     "\u06c3": "\u0647\u0654",  # Teh Marbuta Goal ۃ -> هٔ
+    # Arabic-Indic digits (٠-٩) -> Persian digits (۰-۹): Iranian documents never use the
+    # Arabic-Indic shapes and mixed digit shapes inside tables break the number reading.
+    "\u0660": "\u06f0",
+    "\u0661": "\u06f1",
+    "\u0662": "\u06f2",
+    "\u0663": "\u06f3",
+    "\u0664": "\u06f4",
+    "\u0665": "\u06f5",
+    "\u0666": "\u06f6",
+    "\u0667": "\u06f7",
+    "\u0668": "\u06f8",
+    "\u0669": "\u06f9",
 })
 _PERSIAN_CONTEXTUAL_COMMA_RE = re.compile(r"(?<=[\u0600-\u06ff])\s*,\s*(?=[\u0600-\u06ff0-9۰-۹])")
 _PERSIAN_LONELY_GUILLEMET_COMMA_RE = re.compile(r"(?<=[\u0621-\u06cc])»(?=\s+[\u0621-\u06cc])")
@@ -4963,6 +4976,121 @@ def _recognize_persian_containers(
     return discovered
 
 
+def _block_box(block: dict[str, Any]) -> tuple[float, float, float, float]:
+    try:
+        return (float(block["x0"]), float(block["y0"]), float(block["x1"]), float(block["y1"]))
+    except (KeyError, TypeError, ValueError):
+        return (0.0, 0.0, 0.0, 0.0)
+
+
+def _table_cell_blocks(cells: list[Any]) -> list[dict[str, Any]]:
+    """Convert read table cells into the unchanged public block schema."""
+    blocks: list[dict[str, Any]] = []
+    for cell in cells:
+        x0, y0, x1, y1 = float(cell.x0), float(cell.y0), float(cell.x1), float(cell.y1)
+        line_h = max(8.0, y1 - y0)
+        blocks.append({
+            "id": len(blocks) + 1,
+            "text": str(cell.text),
+            "tr": "",
+            "richHtml": "",
+            "conf": round(float(cell.confidence) * 100, 2),
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+            "lineH": line_h,
+            "sourceIndent": min(40, max(0, round(x0 / max(4.0, line_h * 0.45)))),
+            "enabled": True,
+            "bg": "auto",
+            "dir": "rtl",
+            "align": "right",
+            "bold": False,
+            "italic": False,
+            "underline": False,
+            "size": None,
+            "color": None,
+        })
+    return blocks
+
+
+def _merge_table_blocks(blocks: list[dict[str, Any]], readout: TableReadout) -> list[dict[str, Any]]:
+    """Replace the garbled page-level text of every table with its per-cell text.
+
+    The cell blocks are inserted at the position of the first page block that
+    belonged to the table, so the surrounding page keeps its reading order and
+    the table keeps its own right-to-left row order.
+    """
+    if not readout.cells or not readout.regions:
+        return blocks
+    region_cells: dict[int, list[Any]] = {}
+    for cell in readout.cells:
+        region_cells.setdefault(int(cell.region_index), []).append(cell)
+    # Persian tables are read right-to-left: inside a row the rightmost cell comes first.
+    for cells in region_cells.values():
+        cells.sort(key=lambda c: (int(getattr(c, "row", 0)), -float(getattr(c, "x1", 0.0))))
+
+    def _block_hits_region(block: dict[str, Any], region: Any) -> bool:
+        bx0, by0, bx1, by1 = _block_box(block)
+        area = max(1.0, (bx1 - bx0) * (by1 - by0))
+        inter = max(0.0, min(bx1, float(region.x1)) - max(bx0, float(region.x0)))
+        inter *= max(0.0, min(by1, float(region.y1)) - max(by0, float(region.y0)))
+        return inter > 0.25 * area
+
+    out: list[dict[str, Any]] = []
+    replaced: set[int] = set()
+    for block in blocks:
+        hit: int | None = None
+        for index, region in enumerate(readout.regions):
+            if index in replaced:
+                continue
+            if _block_hits_region(block, region):
+                hit = index
+                break
+        if hit is None:
+            out.append(block)
+            continue
+        cells = region_cells.get(hit, [])
+        expected = len(readout.regions[hit].row_bands) * len(readout.regions[hit].col_bands)
+        if len(cells) < max(2, int(0.4 * expected)):
+            # The cell reading was too weak: keep the page level text of this table.
+            replaced.add(hit)
+            out.append(block)
+            continue
+        replaced.add(hit)
+        out.extend(_table_cell_blocks(cells))
+    for index in range(len(readout.regions)):
+        if index in replaced:
+            continue
+        cells = region_cells.get(index, [])
+        expected = len(readout.regions[index].row_bands) * len(readout.regions[index].col_bands)
+        if len(cells) < max(2, int(0.4 * expected)):
+            continue
+        out.extend(_table_cell_blocks(cells))
+    for index, block in enumerate(out, start=1):
+        block["id"] = index
+    return out
+
+
+def _apply_table_pass(
+    engine: Any,
+    image: Image.Image,
+    language: str,
+    blocks: list[dict[str, Any]],
+    min_confidence: float,
+) -> list[dict[str, Any]]:
+    """Read ruled tables cell by cell (Persian/Arabic) and merge them into the page."""
+    if language not in {"fas", "ara"}:
+        return blocks
+    try:
+        readout = recognize_tables(engine, image, language, min_confidence=min_confidence)
+    except JobCancelledError:
+        raise
+    except Exception:
+        return blocks
+    if not readout.cells:
+        return blocks
+    return _merge_table_blocks(blocks, readout)
+
+
 def recognize_image(
     engine: Any,
     image: Image.Image,
@@ -4979,6 +5107,12 @@ def recognize_image(
 
     require_module_license("ocr")
     _check_ocr_cancelled()
+
+    def _finalize(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged = _apply_table_pass(engine, image, language, blocks, min_confidence)
+        analyze_blocks_typography(image, merged, page_mode=page_mode)
+        return merged
+
     primary = _recognize_image_primary(
         engine,
         image,
@@ -4991,8 +5125,7 @@ def recognize_image(
     )
     _check_ocr_cancelled()
     if isinstance(engine, IsolatedOcrEngine):
-        analyze_blocks_typography(image, primary, page_mode=page_mode)
-        return primary
+        return _finalize(primary)
     best = primary
     if (
         persian_preprocess
@@ -5015,8 +5148,7 @@ def recognize_image(
             )
     _check_ocr_cancelled()
     if not _needs_extra_preprocess(best):
-        analyze_blocks_typography(image, best, page_mode=page_mode)
-        return best
+        return _finalize(best)
     if page_mode == "document":
         emit("نتیجهٔ اولیهٔ مقاله/کتاب ضعیف بود؛ پیش‌پردازش تخصصی شفاف‌سازی کاغذ و متن اجرا می‌شود")
         try:
@@ -5054,8 +5186,7 @@ def recognize_image(
                 emit("نتیجهٔ پیش‌پردازش تخصصی مقاله بهتر بود و انتخاب شد", "success")
                 best = doc_fallback
                 if not _needs_extra_preprocess(best):
-                    analyze_blocks_typography(image, best, page_mode=page_mode)
-                    return best
+                    return _finalize(best)
     _check_ocr_cancelled()
     if EXTRA_PREPROCESS_ENABLED:
         emit("نتیجهٔ OCR اصلی ضعیف یا کوتاه است؛ پیش‌پردازش تکمیلی متن روشن اجرا می‌شود")
@@ -5118,5 +5249,4 @@ def recognize_image(
             else:
                 emit("نتیجهٔ حباب بهتر نبود؛ بهترین نتیجهٔ فعلی حفظ شد")
     _check_ocr_cancelled()
-    analyze_blocks_typography(image, best, page_mode=page_mode)
-    return best
+    return _finalize(best)

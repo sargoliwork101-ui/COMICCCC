@@ -3577,3 +3577,83 @@ def test_v426_job_cancel_preempts_ocr_translation_and_export(tmp_path, monkeypat
     resp = client.post("/api/jobs/cancel", json={"kind": "ocr"})
     assert resp.status_code == 200
     assert resp.json()["kind"] == "ocr"
+
+
+def test_v427_persian_table_ocr_cell_grid_rtl_order_and_digits(tmp_path, monkeypatch):
+    """v4.27: Persian tables must be read cell by cell (right-to-left), not as one garbled line."""
+    import cv2
+    import comic_studio.ocr as ocr_mod
+    from comic_studio.table_ocr import detect_table_regions, recognize_tables
+
+    monkeypatch.setattr("comic_studio.license_guard.require_module_license", lambda *a, **kw: None)
+
+    # 1. A ruled Persian table: 3 columns x 4 rows.
+    canvas = np.full((620, 900, 3), 255, dtype=np.uint8)
+    col_edges = [80, 320, 560, 820]
+    row_edges = [80, 195, 310, 425, 540]
+    for x in col_edges:
+        cv2.line(canvas, (x, row_edges[0]), (x, row_edges[-1]), (0, 0, 0), 3)
+    for y in row_edges:
+        cv2.line(canvas, (col_edges[0], y), (col_edges[-1], y), (0, 0, 0), 3)
+    for row in range(4):
+        for col in range(3):
+            # Every cell gets its own number of ink groups so the fake OCR can
+            # report which cell it is reading.
+            groups = row * 3 + col + 1
+            base_x = col_edges[col] + 25
+            base_y = row_edges[row] + 35
+            for k in range(groups):
+                cv2.rectangle(canvas, (base_x + k * 26, base_y), (base_x + k * 26 + 16, base_y + 24), (20, 20, 20), -1)
+    table_img = Image.fromarray(canvas, mode="RGB")
+
+    regions = detect_table_regions(table_img)
+    assert len(regions) == 1
+    region = regions[0]
+    assert len(region.row_bands) == 4
+    assert len(region.col_bands) == 3
+
+    # 2. Every cell is read on its own with a single-line Tesseract pass.
+    words = ["یک", "دو", "سه", "چهار", "پنج", "شش", "هفت", "هشت", "نه", "ده", "یازده", "دوازده"]
+
+    class FakeTableEngine:
+        id = "tesseract"
+
+        def recognize(self, image, language):  # page level: Tesseract glues the whole table
+            return [ocr_mod.OcrLine("جدولبه‌هم‌ریخته", 0.55, [[80, 80], [820, 80], [820, 540], [80, 540]])]
+
+        def _run_tesseract_tsv(self, image, language, psm):
+            arr = np.asarray(image.convert("L"))
+            dark = arr < 128
+            column_has_ink = dark.sum(axis=0) > 0
+            groups = 0
+            previous = False
+            for flag in column_has_ink:
+                if flag and not previous:
+                    groups += 1
+                previous = bool(flag)
+            rows_with_ink = np.nonzero(dark.any(axis=1))[0]
+            text = words[groups - 1] if 1 <= groups <= len(words) else ""
+            header = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+            if not text or rows_with_ink.size == 0:
+                return header
+            top = int(rows_with_ink[0])
+            bottom = int(rows_with_ink[-1]) + 1
+            return header + f"5\t1\t1\t1\t1\t1\t0\t{top}\t50\t{bottom - top}\t95.0\t{text}\n"
+
+    readout = recognize_tables(FakeTableEngine(), table_img, "fas")
+    assert len(readout.cells) == 12
+    assert {cell.text for cell in readout.cells} <= set(words)
+    assert all(cell.text for cell in readout.cells)
+
+    # 3. The garbled page level line is replaced by the per-cell blocks, right-to-left.
+    blocks = ocr_mod.recognize_image(FakeTableEngine(), table_img, "fas", page_mode="document")
+    assert len(blocks) == 12
+    assert all(block["text"] in words for block in blocks)
+    first_row = [b for b in blocks if b["y0"] < 200]
+    assert len(first_row) == 3
+    # Inside a row the right-most cell is read first (Persian reading order).
+    assert first_row[0]["x0"] > first_row[1]["x0"] > first_row[2]["x0"]
+    assert [b["id"] for b in blocks] == list(range(1, 13))
+
+    # 4. Arabic-Indic digits are normalized to Persian digits inside Persian text.
+    assert ocr_mod.normalize_persian_ocr_text("سال ٢٠٢٤") == "سال ۲۰۲۴"

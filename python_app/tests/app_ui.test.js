@@ -968,7 +968,7 @@ function check(name, condition) {
     check('confirming translation cancel closes translationDialog without reopening and resets busy state', $('appModalDialog').open === false && $('translationDialog').open === false && vm.runInContext('translationRunning === false && jobBusy === false', context) && $('translateBtn').disabled === false);
     releaseTr1(); translationGate = null;
 
-    // v4.26: the "لغو" buttons must really stop the running work (server-side preemption), and every
+    // v4.27: the "لغو" buttons must really stop the running work (server-side preemption), and every
     // long-running dialog now exposes its own visible cancel button.
     check('export, editor and OCR-quick cancel buttons exist for in-flight work', Boolean($('cancelExportBtn')) && Boolean($('editorCancelJobBtn')) && Boolean($('ocrQuickCancelBtn')));
     check('cancel buttons start hidden and are only shown while their job runs', $('cancelExportBtn').classList.contains('hidden') && $('editorCancelJobBtn').classList.contains('hidden'));
@@ -2195,7 +2195,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas426: verText.includes('۴.۲۶'),
+            verHas426: verText.includes('۴.۲۷'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2214,7 +2214,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.26 displays version 4.26 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.27 displays version 4.27 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4414,6 +4414,25 @@ function check(name, condition) {
         && v424PersianAdoptAndHelpCheck.manualOffPreserved === true
         && v424PersianAdoptAndHelpCheck.helpHasV424Sota === true,
       JSON.stringify(v424PersianAdoptAndHelpCheck),
+    );
+
+    // v4.27: the in-app Help must document the new cell-by-cell Persian table reading.
+    const v427TableHelpCheck = await vm.runInContext(`
+      (() => {
+        const helpModes = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-modes');
+        const helpHasV427Table = Boolean(
+          helpModes
+          && helpModes.features.some((f) => f.includes('سلول') && f.includes('جدول'))
+          && helpModes.example && helpModes.example.body.includes('جدول')
+        );
+        const verText = document.querySelector('.brand .ver')?.textContent || '';
+        return { helpHasV427Table, verHas427: verText.includes('۴.۲۷') };
+      })()
+    `, context);
+    check(
+      'v4.27 documents the cell-by-cell Persian table reading in Help chapter 6 and shows version 4.27',
+      v427TableHelpCheck.helpHasV427Table === true && v427TableHelpCheck.verHas427 === true,
+      JSON.stringify(v427TableHelpCheck),
     );
   }
 

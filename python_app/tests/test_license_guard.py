@@ -820,7 +820,7 @@ def test_seller_panel_visual_and_font_parity_with_main_app(tmp_path: Path) -> No
 
         assert '<header class="topbar">' in html
         assert '<img class="logo" src="/assets/icon128.png"' in html
-        assert '<span class="ver">۴.۲۶ · پنل فروشنده</span>' in html
+        assert '<span class="ver">۴.۲۷ · پنل فروشنده</span>' in html
         assert '<meta name="referrer" content="no-referrer">' in html
         assert 'id="sellerThemeBtn"' in html
         assert "comic-studio-theme" in html

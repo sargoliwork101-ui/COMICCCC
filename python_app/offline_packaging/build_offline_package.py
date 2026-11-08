@@ -36,6 +36,16 @@ from comic_studio.paths import models_dir  # noqa: E402
 
 SFX_MAGIC = b"COS405PK"
 
+PYINSTALLER_SPEC = "pyinstaller>=6.10,<7"
+# Official public PyPI mirrors used when `pypi.org` is slow or blocked.
+PYPI_FALLBACK_MIRRORS: tuple[tuple[str, str], ...] = (
+    ("Aliyun PyPI", "https://mirrors.aliyun.com/pypi/simple/"),
+    ("Tsinghua TUNA", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+)
+PIP_TIMEOUT_SECONDS = 120
+PIP_RETRIES = 10
+
+
 CSHARP_SFX_INSTALLER = r"""
 using System;
 using System.Diagnostics;
@@ -48,7 +58,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.2.6.0")]
+[assembly: System.Reflection.AssemblyVersion("4.2.7.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -335,6 +345,99 @@ def download_wheelhouse(pyproject_path: Path, wheelhouse_dir: Path) -> Path:
     ]
     subprocess.check_call(cmd, cwd=str(REPO_PY_ROOT))
     return wheelhouse_dir
+
+
+def _pyinstaller_installed(python_exe: str) -> bool:
+    try:
+        completed = subprocess.run(
+            [python_exe, "-c", "import PyInstaller"],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except Exception:
+        return False
+    return completed.returncode == 0
+
+
+def _local_wheelhouse_dirs() -> list[Path]:
+    """Every local folder that may already hold the PyInstaller wheel."""
+    dirs: list[Path] = []
+    try:
+        dirs.append(REPO_PY_ROOT / "wheelhouse")
+    except OSError:
+        pass
+    try:
+        from comic_studio.ocr_managed import sync_local_wheelhouse
+
+        dirs.append(Path(sync_local_wheelhouse()))
+    except Exception:
+        pass
+    return [d for d in dirs if d.is_dir() and any(d.glob("*.whl"))]
+
+
+def ensure_pyinstaller(python_exe: str | None = None) -> bool:
+    """Install PyInstaller without dying on a slow or blocked `pypi.org`.
+
+    Root cause of the old failure: the builder ran a plain `pip install pyinstaller`
+    with the default 15 second read timeout, so a slow `pypi.org` produced
+    ``ReadTimeoutError`` -> ``(from versions: none)`` and the build stopped.
+    Now the install is retried with a long timeout, first from the local
+    wheelhouse, then from `pypi.org` and finally from the official public
+    mirrors (Aliyun / Tsinghua).
+    """
+    exe = python_exe or sys.executable
+    if _pyinstaller_installed(exe):
+        print("[ok] PyInstaller is already installed in the build environment.")
+        return True
+
+    base_cmd = [
+        exe, "-m", "pip", "install",
+        "--disable-pip-version-check",
+        "--timeout", str(PIP_TIMEOUT_SECONDS),
+        "--retries", str(PIP_RETRIES),
+        "--prefer-binary",
+    ]
+    cache_dir: Path | None = None
+    try:
+        from comic_studio.ocr_managed import pip_cache_dir
+
+        cache_dir = Path(pip_cache_dir())
+    except Exception:
+        cache_dir = None
+
+    attempts: list[tuple[str, Path | None, str | None]] = []
+    for wheelhouse in _local_wheelhouse_dirs():
+        attempts.append((f"local wheelhouse ({wheelhouse})", wheelhouse, None))
+    attempts.append(("pypi.org", None, None))
+    for name, url in PYPI_FALLBACK_MIRRORS:
+        attempts.append((name, None, url))
+
+    for label, wheelhouse, index_url in attempts:
+        cmd = list(base_cmd)
+        if cache_dir is not None:
+            cmd.extend(["--cache-dir", str(cache_dir)])
+        if wheelhouse is not None:
+            cmd.extend(["--find-links", str(wheelhouse)])
+        if index_url:
+            cmd.extend(["--index-url", index_url])
+        cmd.append(PYINSTALLER_SPEC)
+        print(f"[pyinstaller] Installing from {label} ...")
+        try:
+            completed = subprocess.run(cmd, check=False)
+        except Exception as exc:
+            print(f"[warn] pip could not be started for {label}: {exc}")
+            continue
+        if completed.returncode == 0:
+            print(f"[ok] PyInstaller installed from {label}.")
+            return True
+        print(f"[warn] PyInstaller install from {label} failed (exit {completed.returncode}).")
+    print(
+        "[ERROR] Could not install PyInstaller. Internet access to pypi.org (or one of the public\n"
+        "        mirrors) is required, or place the PyInstaller .whl file inside the folder\n"
+        "        'python_app\\wheelhouse' and run the build again."
+    )
+    return False
 
 
 def stage_bundled_models(staging_dir: Path, *, include_nmt: bool = False, skip_download: bool = False) -> Path:
@@ -680,12 +783,33 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--with-nmt", action="store_true", help="Bundle 600M offline NLLB-200 translator inside the offline installer")
     parser.add_argument("--skip-model-download", action="store_true", help="Only bundle models already present in local models directory")
     parser.add_argument("--download-wheelhouse", action="store_true", help="Populate python_app/wheelhouse with offline pip wheels")
+    parser.add_argument(
+        "--output-dir",
+        default="",
+        help="Folder that receives the standalone EXE folder and the offline Setup .exe (default: python_app/dist)",
+    )
+    parser.add_argument(
+        "--build-dir",
+        default="",
+        help="Temporary folder used by PyInstaller while building (default: python_app/build/offline_pkg)",
+    )
+    parser.add_argument(
+        "--ensure-pyinstaller",
+        action="store_true",
+        help="Only install PyInstaller (with mirror fallback) and exit",
+    )
     args = parser.parse_args(argv)
 
-    build_root = REPO_PY_ROOT / "build" / "offline_pkg"
-    dist_root = REPO_PY_ROOT / "dist"
+    build_root = Path(args.build_dir).expanduser().resolve() if args.build_dir else REPO_PY_ROOT / "build" / "offline_pkg"
+    dist_root = Path(args.output_dir).expanduser().resolve() if args.output_dir else REPO_PY_ROOT / "dist"
     build_root.mkdir(parents=True, exist_ok=True)
     dist_root.mkdir(parents=True, exist_ok=True)
+
+    if args.ensure_pyinstaller:
+        return 0 if ensure_pyinstaller() else 1
+
+    if not ensure_pyinstaller():
+        return 1
 
     from license_manager import SellerVault
 
