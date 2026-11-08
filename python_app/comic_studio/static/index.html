@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.17">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.17">
+  <link rel="stylesheet" href="/style.css?v=4.18">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.18">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۱۷ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۱۸ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="licenseTopStatusBtn" class="bt lic-top-btn hidden" type="button" title="مشاهدهٔ وضعیت لایسنس و مدت اعتبار باقی‌مانده"><span id="licenseTopDot" class="lic-top-dot" aria-hidden="true"></span><span id="licenseTopStatusText">اعتبار لایسنس</span></button>
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
@@ -34,13 +34,17 @@
           <div class="auth-hwid-row">
             <code id="gateHardwareId" class="auth-hwid-code" dir="ltr">CS4-....-....-....-....</code>
             <button id="copyGateHwidBtn" class="bt" type="button">کپی کد سیستم</button>
+            <button id="copyGateOrderMsgBtn" class="bt primary" type="button">کپی متن آمادهٔ سفارش لایسنس</button>
           </div>
-          <span class="hint">این کد را برای فروشنده بفرستید تا کلید لایسنس مخصوص همین کامپیوتر صادر شود.</span>
+          <span class="hint">با زدن «کپی متن آمادهٔ سفارش لایسنس»، پیام آماده همراه با کد سیستم شما کپی می‌شود تا بدون اشتباه تایپی برای فروشنده بفرستید.</span>
         </div>
 
         <div class="auth-phone-callout">
-          <span>برای ادامهٔ استفاده از برنامه و دریافت یا تمدید لایسنس تماس بگیرید:</span>
-          <strong id="gateSupportPhone" dir="ltr">09361111111</strong>
+          <div class="auth-phone-main">
+            <span>راه‌های ارتباطی دریافت و تمدید لایسنس:</span>
+            <strong id="gateSupportPhone" dir="ltr">09361111111</strong>
+          </div>
+          <div id="gateVendorChannels" class="vendor-channels-list"></div>
         </div>
 
         <label class="auth-field" for="gateLicenseKeyInput">
@@ -867,11 +871,13 @@
         <div class="lic-info-row"><span>مدت اعتبار باقی‌مانده:</span><strong id="licInfoRemaining" class="lic-remaining-val">—</strong></div>
         <div class="lic-info-row"><span>خلاصهٔ طرح و اعتبار:</span><strong id="licInfoPlan">—</strong></div>
         <div class="lic-info-row"><span>تلفن دریافت و تمدید لایسنس:</span><strong id="licSupportPhone" class="lic-phone-val" dir="ltr">09361111111</strong></div>
+        <div id="licVendorChannels" class="vendor-channels-list lic-dialog-channels hidden"></div>
         <div class="lic-info-row">
           <span>کد سیستم این کامپیوتر:</span>
           <div class="lic-hwid-inline">
             <code id="licInfoHwid" dir="ltr">CS4-...</code>
-            <button id="copyDialogHwidBtn" class="bt" type="button">کپی</button>
+            <button id="copyDialogHwidBtn" class="bt" type="button">کپی کد</button>
+            <button id="copyDialogOrderMsgBtn" class="bt primary" type="button">کپی متن آمادهٔ سفارش</button>
           </div>
         </div>
       </div>
@@ -987,12 +993,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-  <script src="/typeset.js?v=4.17"></script>
-  <script src="/groups.js?v=4.17"></script>
-  <script src="/rich-sanitize.js?v=4.17"></script>
-  <script src="/rich-editor.js?v=4.17"></script>
-  <script src="/inline-edit-session.js?v=4.17"></script>
-  <script src="/help-guide.js?v=4.17"></script>
-  <script src="/app.js?v=4.17"></script>
+  <script src="/typeset.js?v=4.18"></script>
+  <script src="/groups.js?v=4.18"></script>
+  <script src="/rich-sanitize.js?v=4.18"></script>
+  <script src="/rich-editor.js?v=4.18"></script>
+  <script src="/inline-edit-session.js?v=4.18"></script>
+  <script src="/help-guide.js?v=4.18"></script>
+  <script src="/app.js?v=4.18"></script>
 </body>
 </html>

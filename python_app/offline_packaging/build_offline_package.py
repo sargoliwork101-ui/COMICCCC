@@ -48,7 +48,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.1.7.0")]
+[assembly: System.Reflection.AssemblyVersion("4.1.8.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -676,8 +676,11 @@ def main(argv: list[str] | None = None) -> int:
 
     from license_manager import SellerVault
 
-    seller_info = SellerVault().ensure_master_key(sync_source=True)
+    synced_bundle = SellerVault().sync_all_before_exe_build()
+    seller_info = synced_bundle["key"]
+    vc_info = synced_bundle["vendorContact"]
     print(f"[ok] Synced seller Ed25519 public key into build (fingerprint: {seller_info['fingerprint']})")
+    print(f"[ok] Synced customer-facing contact info into build (phone: {vc_info['supportPhone']})")
 
     if args.download_wheelhouse:
         wh = download_wheelhouse(REPO_PY_ROOT / "pyproject.toml", REPO_PY_ROOT / "wheelhouse")

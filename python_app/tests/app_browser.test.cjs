@@ -2499,7 +2499,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
       // v3.85–v4.09: Verify version badge ۴.۰۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, optional storage settings, race-free backup, built-in offline local translator, custom manual text boxes, watermarks, full-attribute box copy/paste/duplicate, API key priority ordering, lossless PDF import, and grouped-page translation
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۷ · Python', 'header shows version ۴.۱۷');
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۸ · Python', 'header shows version ۴.۱۸');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2871,6 +2871,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         await openLicenseDialog();
         const supportPhone = document.getElementById('licSupportPhone')?.textContent?.trim();
         const remRow = document.getElementById('licInfoRemaining')?.textContent?.trim() || '';
+        const orderTxt = buildCustomerOrderRequestText();
+        const hasOrderBtn = Boolean(document.getElementById('copyDialogOrderMsgBtn')) && orderTxt.includes('CS4-');
         const ocrBadge = document.getElementById('licMod_ocr')?.textContent?.trim() || '';
         const trBadge = document.getElementById('licMod_translation')?.textContent?.trim() || '';
         const edBadge = document.getElementById('licMod_editing')?.textContent?.trim() || '';
@@ -2905,7 +2907,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         applyAuthGateUi(savedStatus);
 
         return {
-          topBtnOk: topBtnVisible && topBtnInitial.length > 0 && remRow.length > 0,
+          topBtnOk: topBtnVisible && topBtnInitial.length > 0 && remRow.length > 0 && hasOrderBtn,
           supportPhone,
           allThreeActive: ocrBadge.includes('فعال') && trBadge.includes('فعال') && edBadge.includes('فعال'),
           bannerShown,
@@ -2919,7 +2921,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         'v4.16–v4.17 live topbar remaining time, 24h trial banner (09361111111), 3-module license table, and unlicensed module modal work in real Chromium',
       );
 
-      console.log('PASS: v3.81–v4.17 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, and v4.15–v4.17 modular license/countdown guard');
+      console.log('PASS: v3.81–v4.18 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, and v4.15–v4.18 modular license/countdown/vendor-contact guard');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

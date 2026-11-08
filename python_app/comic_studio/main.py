@@ -55,6 +55,8 @@ from .license_guard import (
     LicenseError,
     SECURITY_GATE,
     SESSION_COOKIE_NAME,
+    get_support_phone,
+    get_vendor_contact_info,
     require_module_license,
 )
 from .local_nmt import DEFAULT_LOCAL_NMT_MODEL, LOCAL_NMT_MODELS, LocalNmtError
@@ -436,7 +438,12 @@ def create_app() -> FastAPI:
     @app.exception_handler(LicenseError)
     async def license_error(_: Request, exc: LicenseError) -> JSONResponse:
         return JSONResponse(
-            {"detail": exc.message, "code": exc.code, "supportPhone": SUPPORT_PHONE},
+            {
+                "detail": exc.message,
+                "code": exc.code,
+                "supportPhone": get_support_phone(),
+                "vendorContact": get_vendor_contact_info(),
+            },
             status_code=exc.status_code,
             headers={"Cache-Control": "no-store"},
         )

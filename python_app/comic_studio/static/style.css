@@ -542,6 +542,12 @@ body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body
 .lic-top-btn.is-warn .lic-top-dot{background:#fbbf24;box-shadow:0 0 0 3px #fbbf242e}
 .lic-remaining-val{color:#34d399;font-weight:700}
 .lic-remaining-val.is-warn{color:#fbbf24}
+.auth-phone-main{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;width:100%}
+.vendor-channels-list{display:flex;flex-wrap:wrap;gap:6px 8px;margin-top:8px;width:100%;font-size:12px}
+.vendor-channel-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:8px;background:#0f172a88;border:1px solid var(--border);color:var(--text);text-decoration:none}
+.vendor-channel-chip bdi{font-family:Consolas,monospace;font-weight:600}
+.vendor-channel-note{flex-basis:100%;font-size:12px;color:var(--muted);margin-top:2px}
+.lic-dialog-channels{padding:6px 0 2px;margin-top:0}
 .auth-gate-overlay{position:fixed;inset:58px 0 0 0;z-index:48;display:flex;align-items:center;justify-content:center;padding:18px;overflow:auto;background:radial-gradient(circle at 50% 0%,#8b7bff1f,transparent 52%),var(--bg)}
 .auth-gate-card{width:min(540px,100%);background:var(--surface);border:1px solid var(--line-2);border-radius:16px;padding:22px;box-shadow:var(--shadow)}
 .auth-gate-head{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--line)}

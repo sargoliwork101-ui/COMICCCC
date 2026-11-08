@@ -689,6 +689,66 @@ def test_seller_vault_256b_master_key_customer_crm_and_panel_http(tmp_path: Path
         assert st_after["licensed"] is True
         assert isinstance(st_after["license"]["remainingSeconds"], int)
         assert 4 * 86400 < st_after["license"]["remainingSeconds"] <= 5 * 86400
+
+        # v4.18: Seller sets their OWN custom Master Key (passphrase & 512-char hex) + edits Vendor Contact before EXE!
+        fake_vendor_json = tmp_path / "vendor_contact.json"
+        fake_vendor_py = tmp_path / "_vendor_config.py"
+        vault.vendor_json_path = fake_vendor_json
+        vault.vendor_py_path = fake_vendor_py
+
+        st_short, err_short = _req("/api/set-master-key", "POST", {"raw_secret": "short123"})
+        assert st_short == 400 and "۱۶ کاراکتر" in err_short["detail"]
+
+        st_rand, rand_res = _req("/api/random-master-key")
+        assert st_rand == 200 and len(rand_res["candidateHex"]) == 512
+
+        custom_phrase = "کلید-مادر-اختصاصی-بسیار-امن-من-۲۰۲۶-ComicStudio!"
+        st_set1, set_res1 = _req("/api/set-master-key", "POST", {"raw_secret": custom_phrase})
+        assert st_set1 == 200
+        assert set_res1["inputMode"] == "passphrase_pbkdf2_256b"
+        assert set_res1["publicKeyHex"] in fake_pub_py.read_text(encoding="utf-8")
+
+        # Deterministic check: entering the exact same custom phrase in another vault produces identical fingerprint!
+        vault_check = SellerVault(seller_dir=tmp_path / "same_phrase_check", public_key_py=fake_pub_py)
+        same_rec = vault_check.set_custom_master_key(custom_phrase, sync_source=False)
+        assert same_rec["fingerprint"] == set_res1["fingerprint"]
+        assert same_rec["public_key_hex"] == set_res1["publicKeyHex"]
+
+        # Raw 512-hex-char 256B key also works directly
+        hex_512 = "cd" * 256
+        hex_rec = vault_check.set_custom_master_key(hex_512, sync_source=False)
+        assert hex_rec["input_mode"] == "hex256b"
+        assert hex_rec["master_secret_256b_hex"] == hex_512
+
+        # Save vendor contact info via Seller Panel HTTP & verify sync to both JSON and _vendor_config.py
+        from comic_studio import _vendor_config
+        orig_vc = dict(_vendor_config.VENDOR_CONTACT_INFO)
+        monkeypatch.setattr(license_guard, "_VENDOR_JSON_OVERRIDE", fake_vendor_json)
+        try:
+            st_vc, vc_res = _req(
+                "/api/vendor-contact",
+                "POST",
+                {
+                    "supportPhone": "09120009988",
+                    "whatsapp": "09120009988",
+                    "telegram": "@ComicSupport",
+                    "domesticMessenger": "ایتا: @ComicSupportIR",
+                    "supportHours": "همه‌روزه ۹ تا ۲۳",
+                    "website": "https://comic-studio.example",
+                    "customNote": "کد سیستم را در تلگرام ارسال کنید.",
+                },
+            )
+            assert st_vc == 200
+            assert vc_res["vendorContact"]["telegram"] == "@ComicSupport"
+            assert "@ComicSupport" in fake_vendor_py.read_text(encoding="utf-8")
+            assert "09120009988" in fake_vendor_json.read_text(encoding="utf-8")
+
+            st_live = SECURITY_GATE.inspect_status()
+            assert st_live["supportPhone"] == "09120009988"
+            assert st_live["vendorContact"]["telegram"] == "@ComicSupport"
+            assert st_live["vendorContact"]["domesticMessenger"] == "ایتا: @ComicSupportIR"
+        finally:
+            _vendor_config.VENDOR_CONTACT_INFO = orig_vc
     finally:
         server.shutdown()
         server.server_close()

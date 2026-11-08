@@ -46,18 +46,25 @@ from comic_studio.license_guard import (  # noqa: E402
     LICENSE_MODULES,
     MODULE_LABELS_FA,
     SUPPORT_PHONE,
+    VENDOR_CONTACT_KEYS,
     LicenseError,
     SECURITY_GATE,
     compute_hardware_id,
     ed25519_public_key,
+    get_support_phone,
+    get_vendor_contact_info,
     issue_license_token,
     normalize_hardware_id,
+    normalize_vendor_contact_dict,
     plan_label_fa,
     verify_license_token,
 )
 
 PUBLIC_KEY_MODULE_PATH = APP_DIR / "comic_studio" / "_public_key.py"
+VENDOR_CONFIG_PY_PATH = APP_DIR / "comic_studio" / "_vendor_config.py"
+VENDOR_CONTACT_JSON_PATH = APP_DIR / "vendor_contact.json"
 MASTER_SECRET_BYTES = 256  # 256 bytes = 2048 bits (512 hex chars)
+CUSTOM_MASTER_PBKDF2_ITERS = 600_000
 
 _DIGIT_TRANS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
@@ -74,6 +81,27 @@ def derive_ed25519_seed_from_master_256b(master_256b: bytes) -> bytes:
     if len(master_256b) != MASTER_SECRET_BYTES:
         raise ValueError(f"کلید مادر ریشه باید دقیقاً {MASTER_SECRET_BYTES} بایت (۲۰۴۸ بیت) باشد.")
     return hmac.new(b"CS4-Ed25519-MasterRoot-256B-v1", master_256b, hashlib.sha512).digest()[:32]
+
+
+def derive_master_256b_from_user_input(raw_secret: str) -> tuple[bytes, str]:
+    """Convert seller's custom secret (512-char hex OR custom passphrase >=16 chars) into 256 bytes."""
+    cleaned = str(raw_secret or "").strip()
+    if len(cleaned) < 16:
+        raise ValueError(
+            "کلید یا عبارت مادر دلخواه شما برای امنیت کامل باید حداقل ۱۶ کاراکتر باشد "
+            "(یا ۵۱۲ کاراکتر هگز برای کلید خام ۲۵۶ بایتی)."
+        )
+    compact_hex = re.sub(r"\s+", "", cleaned)
+    if len(compact_hex) == MASTER_SECRET_BYTES * 2 and re.fullmatch(r"[0-9a-fA-F]+", compact_hex):
+        return bytes.fromhex(compact_hex), "hex256b"
+    derived = hashlib.pbkdf2_hmac(
+        "sha512",
+        cleaned.encode("utf-8"),
+        b"CS4-SellerMasterKey-256B-Salt-v1",
+        CUSTOM_MASTER_PBKDF2_ITERS,
+        dklen=MASTER_SECRET_BYTES,
+    )
+    return derived, "passphrase_pbkdf2_256b"
 
 
 def normalize_customer_phone(raw_phone: str, *, required: bool = True) -> str:
@@ -159,11 +187,19 @@ def parse_modules_cli_spec(spec: str) -> dict[str, dict[str, Any]]:
 
 
 class SellerVault:
-    """Manages 256-byte Master Key + Ed25519 signing, Customer CRM, and issued license log."""
+    """Manages 256-byte Master Key + Ed25519 signing, Vendor Contact Config, and Customer CRM."""
 
-    def __init__(self, seller_dir: Path | None = None, public_key_py: Path | None = None) -> None:
+    def __init__(
+        self,
+        seller_dir: Path | None = None,
+        public_key_py: Path | None = None,
+        vendor_json_path: Path | None = None,
+        vendor_py_path: Path | None = None,
+    ) -> None:
         self.seller_dir = Path(seller_dir) if seller_dir is not None else default_seller_dir()
         self.public_key_py = Path(public_key_py) if public_key_py is not None else PUBLIC_KEY_MODULE_PATH
+        self.vendor_json_path = Path(vendor_json_path) if vendor_json_path is not None else VENDOR_CONTACT_JSON_PATH
+        self.vendor_py_path = Path(vendor_py_path) if vendor_py_path is not None else VENDOR_CONFIG_PY_PATH
 
     @property
     def master_key_path(self) -> Path:
@@ -240,6 +276,90 @@ class SellerVault:
         if sync_source:
             self.sync_public_key_to_source(record["public_key_hex"])
         return record
+
+    @staticmethod
+    def generate_random_master_key_hex() -> str:
+        """Return a fresh random 256-byte (512 hex chars) Master Key candidate without saving yet."""
+        return secrets.token_bytes(MASTER_SECRET_BYTES).hex()
+
+    def set_custom_master_key(self, raw_secret: str, *, sync_source: bool = True) -> dict[str, Any]:
+        """Set seller's own custom Master Key (512-char hex or custom passphrase >= 16 chars) and sync."""
+        master_bytes, input_mode = derive_master_256b_from_user_input(raw_secret)
+        seed = derive_ed25519_seed_from_master_256b(master_bytes)
+        pub = ed25519_public_key(seed)
+        record = {
+            "v": 2,
+            "key_scheme": "Ed25519+MasterRoot256B",
+            "input_mode": input_mode,
+            "master_secret_bytes": MASTER_SECRET_BYTES,
+            "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "master_secret_256b_hex": master_bytes.hex(),
+            "private_seed_hex": seed.hex(),
+            "public_key_hex": pub.hex(),
+            "fingerprint": hashlib.sha256(pub).hexdigest()[:16].upper(),
+        }
+        _atomic_write_json(self.master_key_path, record)
+        if sync_source:
+            self.sync_public_key_to_source(record["public_key_hex"])
+        return record
+
+    def get_vendor_contact(self) -> dict[str, str]:
+        """Read current vendor contact settings from `vendor_contact.json` / `_vendor_config.py`."""
+        merged: dict[str, Any] = dict(get_vendor_contact_info())
+        if self.vendor_json_path.is_file():
+            with contextlib.suppress(Exception):
+                loaded = json.loads(self.vendor_json_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    merged.update(loaded)
+        return normalize_vendor_contact_dict(merged)
+
+    def sync_vendor_contact_to_source(self, info: dict[str, str]) -> None:
+        """Write customer-facing contact channels into `comic_studio/_vendor_config.py` for `.exe` bundling."""
+        norm = normalize_vendor_contact_dict(info)
+        lines = [
+            '"""Embedded customer-facing vendor contact & support channels for Comic OCR Studio.',
+            "",
+            "HOW TO CUSTOMIZE BEFORE BUILDING `.exe`:",
+            "1. Visual method (recommended): Run `start_license_manager.bat` and open the tab",
+            "   «⚙️ کلید مادر و اطلاعات داخل EXE», edit your phone/Telegram/WhatsApp/Eitaa/hours/website,",
+            "   and click «ذخیره و همگام‌سازی برای ساخت EXE».",
+            "2. Direct file method: Edit `python_app/vendor_contact.json` with Notepad; running",
+            "   `build_windows_offline.bat` automatically syncs `vendor_contact.json` into this module",
+            "   before compiling `ComicOCRStudio.exe`.",
+            '"""',
+            "",
+            "from __future__ import annotations",
+            "",
+            "VENDOR_CONTACT_INFO: dict[str, str] = {",
+        ]
+        for k in VENDOR_CONTACT_KEYS:
+            val_json = json.dumps(norm[k], ensure_ascii=False)
+            lines.append(f'    "{k}": {val_json},')
+        lines.append("}")
+        lines.append("")
+        self.vendor_py_path.parent.mkdir(parents=True, exist_ok=True)
+        self.vendor_py_path.write_text("\n".join(lines), encoding="utf-8")
+        import comic_studio._vendor_config as vc_mod
+
+        vc_mod.VENDOR_CONTACT_INFO = dict(norm)
+
+    def save_vendor_contact(self, payload: dict[str, Any], *, sync_source: bool = True) -> dict[str, str]:
+        """Validate, save to `vendor_contact.json`, and sync to `_vendor_config.py` for `.exe` builds."""
+        raw_phone = str((payload or {}).get("supportPhone") or "").strip()
+        if not raw_phone:
+            raise ValueError("شماره تماس پشتیبانی نمی‌تواند خالی باشد.")
+        norm = normalize_vendor_contact_dict({**(payload or {}), "supportPhone": raw_phone})
+        _atomic_write_json(self.vendor_json_path, norm)
+        if sync_source:
+            self.sync_vendor_contact_to_source(norm)
+        return norm
+
+    def sync_all_before_exe_build(self) -> dict[str, Any]:
+        """Ensure both `_public_key.py` and `_vendor_config.py` reflect latest seller settings before `.exe` build."""
+        key_rec = self.ensure_master_key(sync_source=True)
+        vendor = self.get_vendor_contact()
+        self.sync_vendor_contact_to_source(vendor)
+        return {"key": key_rec, "vendorContact": vendor}
 
     def import_master_key(self, payload: dict[str, Any], *, sync_source: bool = True) -> dict[str, Any]:
         # Accept either full bundle `{"backup": {...}, "customers": [...], "history": [...]}` or raw key dict
@@ -640,7 +760,7 @@ class SellerVault:
             "daysTotal": verified["daysTotal"],
             "expiresAt": verified["expiresAt"],
             "modules": mod_summary,
-            "supportPhone": SUPPORT_PHONE,
+            "supportPhone": self.get_vendor_contact()["supportPhone"],
             "token": token,
         }
         history = self.list_history()
@@ -833,8 +953,9 @@ _PANEL_HTML = """<!doctype html>
         </div>
       </div>
       <div class="hero-actions">
+        <button type="button" id="openSetupTabHeroBtn" style="border-color:rgba(96,165,250,.55);background:rgba(59,130,246,.18);color:#bfdbfe">⚙️ تنظیم کلید مادر و اطلاعات داخل EXE</button>
         <button class="ok" id="selfActivateBtn" type="button">فعال‌سازی دائمی روی سیستم خودم</button>
-        <button id="backupKeyBtn" type="button">📦 دانلود پشتیبان کامل (کلید مادر + مشتریان)</button>
+        <button id="backupKeyBtn" type="button">📦 دانلود پشتیبان کامل</button>
         <label class="btn" style="margin:0;cursor:pointer">
           <span>♻️ بازیابی پشتیبان</span>
           <input id="restoreKeyInput" type="file" accept=".json,application/json" hidden>
@@ -865,6 +986,7 @@ _PANEL_HTML = """<!doctype html>
       <button class="tab-btn active" type="button" data-tab="issue">🔑 صدور لایسنس جدید</button>
       <button class="tab-btn" type="button" data-tab="customers">👥 لیست کاربران و مشتریان <span class="tab-count" id="tabCustCount">۰</span></button>
       <button class="tab-btn" type="button" data-tab="history">📜 تاریخچهٔ کلیدهای صادرشده <span class="tab-count" id="tabHistCount">۰</span></button>
+      <button class="tab-btn" type="button" data-tab="setup">⚙️ کلید مادر و اطلاعات داخل EXE</button>
     </nav>
 
     <!-- TAB 1: ISSUE LICENSE -->
@@ -1048,6 +1170,99 @@ _PANEL_HTML = """<!doctype html>
         </div>
       </div>
     </section>
+
+    <!-- TAB 4: MASTER KEY & PRE-EXE VENDOR CONTACT SETUP -->
+    <section id="pane-setup" class="tab-pane">
+      <div class="card" style="margin-bottom:18px">
+        <div class="sec-head">
+          <h2>۱. تعریف یا تغییر کلید مادر ۲۵۶ بایتی شما (قبل از ساخت فایل EXE)</h2>
+          <span class="pill pill-ok" id="setupFpPill">شناسهٔ فعلی: …</span>
+        </div>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 14px">
+          شما می‌توانید <strong>خودتان هر کلید یا عبارت رمزی دلخواه</strong> (حداقل ۱۶ کاراکتر — مثلاً یک جمله یا رمز طولانی شخصی، و یا ۵۱۲ کاراکتر هگز ۲۵۶ بایتی) به برنامه بدهید، یا با دکمهٔ زیر یک کلید تصادفی ۲۵۶ بایتی بسازید. به محض زدن «ثبت کلید مادر»، کلید خصوصی فقط روی سیستم خودتان ذخیره می‌شود و کلید عمومی تأیید خودکار در کدهای برنامه قرار می‌گیرد تا هنگام اجرای <code>build_windows_offline.bat</code> داخل فایل <code>.exe</code> پخته شود.
+        </p>
+
+        <div class="form-grid-2" style="margin-top:0;margin-bottom:12px">
+          <label class="field">
+            <span>کلید عمومی فعلی داخل برنامه (PUBLIC_VERIFY_KEY — بی‌خطر برای قرارگیری در EXE):</span>
+            <input id="currentPublicKeyBox" class="ltr" readonly>
+          </label>
+          <label class="field">
+            <span>کلید مادر ۲۵۶ بایتی فعلی شما (محرمانه — فقط روی سیستم شما):</span>
+            <div style="display:flex;gap:6px">
+              <input id="currentMasterHexBox" class="ltr" value="••••••••••••••••••••••••••••••••" readonly style="flex:1">
+              <button type="button" id="revealCurrentMasterBtn" class="sm">👁 نمایش و کپی</button>
+            </div>
+          </label>
+        </div>
+
+        <label class="field">
+          <span>ورود دستی کلید مادر دلخواه خودتان (عبارت رمزی اختصاصی حداقل ۱۶ کاراکتری، یا ۵۱۲ کاراکتر هگز ۲۵۶ بایتی):</span>
+          <textarea id="customMasterInput" class="ltr" rows="3" placeholder="اینجا کلید مادر یا رمز طولانی اختصاصی خودتان را بنویسید، یا دکمهٔ «ساخت پیشنهادی کلید ۲۵۶ بایتی تصادفی» را بزنید…"></textarea>
+        </label>
+
+        <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+          <button type="button" id="genRandomMasterBtn">🎲 ساخت پیشنهادی کلید ۲۵۶ بایتی تصادفی در کادر بالا</button>
+          <button type="button" class="primary" id="saveCustomMasterBtn">🔐 ثبت این کلید مادر و همگام‌سازی برای ساخت EXE</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="sec-head">
+          <h2>۲. ویرایش اطلاعات تماس، پیام‌رسان‌ها و سایت داخل نرم‌افزار مشتری (قبل از ساخت EXE)</h2>
+          <span class="pill pill-info">ذخیره در vendor_contact.json و هستهٔ EXE</span>
+        </div>
+        <p style="font-size:13px;color:var(--muted);margin:0 0 14px">
+          هر اطلاعاتی که در کادرهای زیر وارد و ذخیره کنید، مستقیماً در صفحهٔ قفل و پنجرهٔ لایسنس برنامهٔ مشتری نمایش داده می‌شود (هر کادری را هم که خالی بگذارید، به صورت خودکار در برنامهٔ مشتری مخفی می‌ماند). پس از ذخیره، کافی است <code>build_windows_offline.bat</code> را اجرا کنید تا فایل نصاب <code>.exe</code> دقیقاً با همین مشخصات ساخته شود.
+        </p>
+
+        <div class="form-grid-4">
+          <label class="field">
+            <span>شماره تماس فروش و پشتیبانی <span class="req">*</span></span>
+            <input id="vcSupportPhone" class="ltr" placeholder="09361111111">
+          </label>
+          <label class="field">
+            <span>شماره یا آیدی واتساپ (اختیاری)</span>
+            <input id="vcWhatsapp" class="ltr" placeholder="09361111111">
+          </label>
+          <label class="field">
+            <span>آیدی یا لینک تلگرام (اختیاری)</span>
+            <input id="vcTelegram" class="ltr" placeholder="@YourTelegramID">
+          </label>
+          <label class="field">
+            <span>پیام‌رسان داخلی — ایتا / بله / روبیکا (اختیاری)</span>
+            <input id="vcDomestic" placeholder="مثلاً: ایتا @YourID">
+          </label>
+        </div>
+
+        <div class="form-grid-2">
+          <label class="field">
+            <span>ساعات پاسخ‌گویی پشتیبانی (اختیاری)</span>
+            <input id="vcHours" placeholder="مثلاً: پاسخ‌گویی همه‌روزه از ساعت ۹ صبح تا ۱۰ شب">
+          </label>
+          <label class="field">
+            <span>آدرس وب‌سایت، کانال یا صفحهٔ تعرفه و خرید (اختیاری)</span>
+            <input id="vcWebsite" class="ltr" placeholder="https://your-site.ir">
+          </label>
+        </div>
+
+        <div style="margin-top:12px">
+          <label class="field">
+            <span>توضیح کوتاه تکمیلی برای خریدار در صفحهٔ لایسنس (اختیاری)</span>
+            <input id="vcNote" placeholder="مثلاً: برای دریافت آنی لایسنس، «متن آمادهٔ سفارش» را کپی کرده و در تلگرام یا واتساپ بفرستید.">
+          </label>
+        </div>
+
+        <div style="margin-top:16px;padding:14px 16px;border-radius:12px;background:#090f1d;border:1px dashed rgba(96,165,250,.4)">
+          <strong style="font-size:12.5px;color:#93c5fd;display:block;margin-bottom:6px">👁 پیش‌نمایش زنده در نرم‌افزار مشتری:</strong>
+          <div id="vcLivePreview" style="font-size:13px;color:#e2e8f0;display:flex;flex-direction:column;gap:4px"></div>
+        </div>
+
+        <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <button type="button" class="ok" id="saveVendorContactBtn" style="padding:11px 22px;font-size:14px">💾 ذخیرهٔ اطلاعات تماس در برنامه (آماده برای ساخت EXE)</button>
+        </div>
+      </div>
+    </section>
   </div>
 
   <!-- Edit / Add Customer Modal -->
@@ -1072,6 +1287,7 @@ _PANEL_HTML = """<!doctype html>
   <script>
     const SECRET = new URLSearchParams(location.search).get('secret') || '';
     let SUPPORT_PHONE = '09361111111';
+    let vendorContact = {};
     const MODS = ['ocr', 'translation', 'editing'];
     const SHORT_MOD = { ocr: 'OCR', translation: 'ترجمه', editing: 'ویرایش' };
     let historyItems = [];
@@ -1108,6 +1324,7 @@ _PANEL_HTML = """<!doctype html>
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       btn.addEventListener('click', () => switchTab(btn.dataset.tab));
     });
+    $('openSetupTabHeroBtn').onclick = () => switchTab('setup');
 
     function syncCustomDaysVisibility() {
       for (const m of MODS) {
@@ -1149,6 +1366,11 @@ _PANEL_HTML = """<!doctype html>
           if (item.modules[m]) modLines.push(`  • ${item.modules[m].label}: ${item.modules[m].planLabel}`);
         }
       }
+      const contactTail = [`📞 تماس و پشتیبانی: ${SUPPORT_PHONE}`];
+      if (vendorContact.telegram) contactTail.push(`✈️ تلگرام: ${vendorContact.telegram}`);
+      if (vendorContact.whatsapp) contactTail.push(`💬 واتساپ: ${vendorContact.whatsapp}`);
+      if (vendorContact.domesticMessenger) contactTail.push(`📱 پیام‌رسان داخلی: ${vendorContact.domesticMessenger}`);
+      if (vendorContact.website) contactTail.push(`🌐 وب‌سایت: ${vendorContact.website}`);
       return [
         `سلام ${item.holder || ''} عزیز، وقت بخیر 🌸`,
         `لایسنس رسمی برنامهٔ Comic OCR Studio برای سیستم شما صادر شد:`,
@@ -1162,7 +1384,7 @@ _PANEL_HTML = """<!doctype html>
         item.token,
         ``,
         `در برنامه وارد بخش «لایسنس و رمز ورود» شوید، کلید بالا را جای‌گذاری کرده و دکمهٔ «فعال‌سازی لایسنس» را بزنید.`,
-        `📞 پشتیبانی و تمدید: ${SUPPORT_PHONE}`,
+        ...contactTail,
       ].filter((x) => x !== null).join('\\n');
     }
 
@@ -1376,6 +1598,98 @@ _PANEL_HTML = """<!doctype html>
       }
     }
 
+    function collectVendorForm() {
+      return {
+        supportPhone: ($('vcSupportPhone').value || '').trim(),
+        whatsapp: ($('vcWhatsapp').value || '').trim(),
+        telegram: ($('vcTelegram').value || '').trim(),
+        domesticMessenger: ($('vcDomestic').value || '').trim(),
+        supportHours: ($('vcHours').value || '').trim(),
+        website: ($('vcWebsite').value || '').trim(),
+        customNote: ($('vcNote').value || '').trim(),
+      };
+    }
+
+    function updateVendorLivePreview() {
+      const vc = collectVendorForm();
+      const box = $('vcLivePreview');
+      box.innerHTML = '';
+      const addLine = (txt) => {
+        const d = document.createElement('div');
+        d.textContent = txt;
+        box.appendChild(d);
+      };
+      addLine(`📞 تلفن دریافت و تمدید لایسنس: ${vc.supportPhone || '09361111111'}`);
+      if (vc.whatsapp) addLine(`💬 واتساپ / پیامک: ${vc.whatsapp}`);
+      if (vc.telegram) addLine(`✈️ تلگرام: ${vc.telegram}`);
+      if (vc.domesticMessenger) addLine(`📱 پیام‌رسان داخلی: ${vc.domesticMessenger}`);
+      if (vc.supportHours) addLine(`🕒 ساعات پاسخ‌گویی: ${vc.supportHours}`);
+      if (vc.website) addLine(`🌐 وب‌سایت / خرید: ${vc.website}`);
+      if (vc.customNote) addLine(`📌 راهنما: ${vc.customNote}`);
+    }
+    ['vcSupportPhone', 'vcWhatsapp', 'vcTelegram', 'vcDomestic', 'vcHours', 'vcWebsite', 'vcNote'].forEach((id) => {
+      $(id).addEventListener('input', updateVendorLivePreview);
+    });
+
+    function populateSetupTab(info) {
+      $('setupFpPill').textContent = `شناسهٔ فعلی: ${info.fingerprint}`;
+      $('currentPublicKeyBox').value = info.publicKeyHex || '';
+      const vc = info.vendorContact || {};
+      vendorContact = vc;
+      if (document.activeElement?.id?.startsWith('vc')) return;
+      $('vcSupportPhone').value = vc.supportPhone || info.supportPhone || '09361111111';
+      $('vcWhatsapp').value = vc.whatsapp || '';
+      $('vcTelegram').value = vc.telegram || '';
+      $('vcDomestic').value = vc.domesticMessenger || '';
+      $('vcHours').value = vc.supportHours || '';
+      $('vcWebsite').value = vc.website || '';
+      $('vcNote').value = vc.customNote || '';
+      updateVendorLivePreview();
+    }
+
+    $('revealCurrentMasterBtn').onclick = async () => {
+      try {
+        const data = await callApi('/api/master-secret');
+        $('currentMasterHexBox').value = data.masterSecret256bHex;
+        await navigator.clipboard.writeText(data.masterSecret256bHex);
+        notify('کلید مادر ۲۵۶ بایتی فعلی نمایش داده شد و در کلیپ‌بورد کپی گردید.');
+      } catch (e) { notify(e.message, true); }
+    };
+
+    $('genRandomMasterBtn').onclick = async () => {
+      try {
+        const data = await callApi('/api/random-master-key');
+        $('customMasterInput').value = data.candidateHex;
+        notify('یک کلید تصادفی ۲۵۶ بایتی در کادر قرار گرفت؛ برای اعمال نهایی، دکمهٔ «ثبت این کلید مادر» را بزنید.');
+      } catch (e) { notify(e.message, true); }
+    };
+
+    $('saveCustomMasterBtn').onclick = async () => {
+      const raw = ($('customMasterInput').value || '').trim();
+      if (!raw) {
+        notify('لطفاً کلید یا عبارت مادر دلخواه خودتان را وارد کنید (یا دکمهٔ ساخت تصادفی را بزنید).', true);
+        $('customMasterInput').focus();
+        return;
+      }
+      if (!confirm('آیا مطمئن هستید که این کلید به عنوان کلید مادر اصلی شما ثبت و داخل کدهای برنامه (برای ساخت EXE) همگام‌سازی شود؟\n(توجه: اگر قبلاً با کلید دیگری لایسنس صادر کرده باشید، فایل EXE جدید فقط کلیدهای امضاشده با این کلید مادر جدید را می‌پذیرد.)')) {
+        return;
+      }
+      try {
+        const res = await callApi('/api/set-master-key', 'POST', { raw_secret: raw });
+        $('currentMasterHexBox').value = '••••••••••••••••••••••••••••••••';
+        await refreshInfo();
+        notify(`کلید مادر اختصاصی شما با موفقیت ثبت و همگام شد (شناسه جدید: ${res.fingerprint}).`);
+      } catch (e) { notify(e.message, true); }
+    };
+
+    $('saveVendorContactBtn').onclick = async () => {
+      try {
+        await callApi('/api/vendor-contact', 'POST', collectVendorForm());
+        await refreshInfo();
+        notify('اطلاعات تماس با موفقیت در برنامه ذخیره شد و آمادهٔ ساخت فایل EXE است.');
+      } catch (e) { notify(e.message, true); }
+    };
+
     async function refreshInfo() {
       const info = await callApi('/api/info');
       SUPPORT_PHONE = info.supportPhone || SUPPORT_PHONE;
@@ -1391,6 +1705,7 @@ _PANEL_HTML = """<!doctype html>
       $('kpiExpiredCust').textContent = toFaNum(st.expiredCustomers || 0);
       $('tabCustCount').textContent = toFaNum(customerItems.length);
       $('tabHistCount').textContent = toFaNum(historyItems.length);
+      populateSetupTab(info);
       renderQuickSelect();
       renderCustomers();
       renderHistory();
@@ -1521,6 +1836,7 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
 
             if parsed.path == "/api/info":
                 rec = vault.ensure_master_key(sync_source=True)
+                vc = vault.get_vendor_contact()
                 customers = vault.list_customers()
                 stats = {
                     "totalCustomers": len(customers),
@@ -1536,12 +1852,28 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                         "publicKeyHex": rec["public_key_hex"],
                         "sellerDir": str(vault.seller_dir),
                         "thisHardwareId": compute_hardware_id(),
-                        "supportPhone": SUPPORT_PHONE,
+                        "supportPhone": vc["supportPhone"],
+                        "vendorContact": vc,
                         "stats": stats,
                         "customers": customers,
                         "history": vault.list_history()[:300],
                     }
                 )
+                return
+
+            if parsed.path == "/api/master-secret":
+                rec = vault.ensure_master_key(sync_source=False)
+                self._send_json(
+                    {
+                        "fingerprint": rec["fingerprint"],
+                        "masterSecret256bHex": rec["master_secret_256b_hex"],
+                        "publicKeyHex": rec["public_key_hex"],
+                    }
+                )
+                return
+
+            if parsed.path == "/api/random-master-key":
+                self._send_json({"candidateHex": vault.generate_random_master_key_hex()})
                 return
 
             if parsed.path == "/api/customers.csv":
@@ -1628,6 +1960,22 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                     self._send_json({"fingerprint": rec["fingerprint"], "publicKeyHex": rec["public_key_hex"]})
                     return
 
+                if parsed.path == "/api/set-master-key":
+                    rec = vault.set_custom_master_key(str(data.get("raw_secret") or ""), sync_source=True)
+                    self._send_json(
+                        {
+                            "fingerprint": rec["fingerprint"],
+                            "publicKeyHex": rec["public_key_hex"],
+                            "inputMode": rec["input_mode"],
+                        }
+                    )
+                    return
+
+                if parsed.path == "/api/vendor-contact":
+                    saved_vc = vault.save_vendor_contact(data, sync_source=True)
+                    self._send_json({"vendorContact": saved_vc})
+                    return
+
                 self._send_json({"detail": "مسیر پیدا نشد."}, HTTPStatus.NOT_FOUND)
             except (LicenseError, ValueError, RuntimeError) as exc:
                 self._send_json({"detail": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -1668,6 +2016,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Comic OCR Studio Seller Modular License Generator & CRM")
     parser.add_argument("--seller-dir", default="", help="Optional custom seller key vault directory")
     parser.add_argument("--init-seller", action="store_true", help="Create/sync seller master key and exit")
+    parser.add_argument("--set-master-key", default="", help="Set your own custom Master Key (passphrase or 512-char hex)")
+    parser.add_argument("--sync-before-build", action="store_true", help="Sync public key & vendor_contact.json into source before EXE build")
     parser.add_argument("--self-activate", action="store_true", help="Issue & activate lifetime license on this PC")
     parser.add_argument("--issue", action="store_true", help="Issue a customer license key via CLI")
     parser.add_argument("--hwid", default="", help="Customer System Code (CS4-XXXX-XXXX-XXXX-XXXX)")
@@ -1688,6 +2038,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     vault = SellerVault(seller_dir=Path(args.seller_dir) if args.seller_dir else None)
+
+    if args.set_master_key.strip():
+        rec = vault.set_custom_master_key(args.set_master_key, sync_source=True)
+        if args.json:
+            print(json.dumps({"fingerprint": rec["fingerprint"], "publicKeyHex": rec["public_key_hex"], "inputMode": rec["input_mode"]}))
+        else:
+            print(f"[Seller Vault] Custom 256B Master Key saved & synced ({rec['fingerprint']}).")
+        return 0
+
+    if args.sync_before_build:
+        synced = vault.sync_all_before_exe_build()
+        if args.json:
+            print(json.dumps({"fingerprint": synced["key"]["fingerprint"], "vendorContact": synced["vendorContact"]}, ensure_ascii=False))
+        else:
+            print(f"[Synced] Master Key ({synced['key']['fingerprint']}) + Vendor Contact ({synced['vendorContact']['supportPhone']})")
+        return 0
 
     if args.init_seller:
         info = vault.ensure_master_key(sync_source=True)

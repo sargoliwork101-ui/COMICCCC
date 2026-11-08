@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import _public_key
+from . import _public_key, _vendor_config
 
 # ---------------------------------------------------------------------------
 # RFC 8032 Ed25519 Curve Constants & Pure-Python Arithmetic
@@ -228,9 +228,57 @@ def ed25519_verify(public32: bytes, message: bytes, signature64: bytes) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Constants, Hardware System Code (`CS4-XXXX-XXXX-XXXX-XXXX`) & Modules
+# Constants, Vendor Contact Config, Hardware System Code (`CS4-XXXX-...`)
 # ---------------------------------------------------------------------------
 SUPPORT_PHONE = "09361111111"
+VENDOR_CONTACT_KEYS: tuple[str, ...] = (
+    "supportPhone",
+    "whatsapp",
+    "telegram",
+    "domesticMessenger",
+    "supportHours",
+    "website",
+    "customNote",
+)
+_VENDOR_JSON_OVERRIDE: Path | None = None
+
+
+def _default_vendor_json_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "vendor_contact.json"
+
+
+def normalize_vendor_contact_dict(raw: dict[str, Any] | None) -> dict[str, str]:
+    src = raw if isinstance(raw, dict) else {}
+    out: dict[str, str] = {}
+    for k in VENDOR_CONTACT_KEYS:
+        val = str(src.get(k, "") or "").strip()[:300]
+        out[k] = val
+    if not out["supportPhone"]:
+        out["supportPhone"] = SUPPORT_PHONE
+    return out
+
+
+def get_vendor_contact_info() -> dict[str, str]:
+    """Return active customer-facing contact & support info (compiled `_vendor_config` + optional dev JSON)."""
+    merged: dict[str, Any] = dict(getattr(_vendor_config, "VENDOR_CONTACT_INFO", {}) or {})
+    if _VENDOR_JSON_OVERRIDE is not None:
+        json_path: Path | None = _VENDOR_JSON_OVERRIDE
+    elif not getattr(sys, "frozen", False):
+        json_path = _default_vendor_json_path()
+    else:
+        json_path = None
+    if json_path is not None and json_path.is_file():
+        with contextlib.suppress(Exception):
+            loaded = json.loads(json_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                merged.update(loaded)
+    return normalize_vendor_contact_dict(merged)
+
+
+def get_support_phone() -> str:
+    return get_vendor_contact_info()["supportPhone"]
+
+
 AUTO_TRIAL_DURATION_SEC = 24 * 3600  # 24-hour automatic trial on first install
 LICENSE_MODULES: tuple[str, ...] = ("ocr", "translation", "editing")
 MODULE_LABELS_FA: dict[str, str] = {
@@ -656,7 +704,7 @@ def verify_license_token(
 
     if check_expiry and not any(m["active"] for m in parsed_mods.values()):
         raise LicenseError(
-            f"مدت اعتبار این لایسنس به پایان رسیده است. برای تمدید با شمارهٔ {SUPPORT_PHONE} تماس بگیرید.",
+            f"مدت اعتبار این لایسنس به پایان رسیده است. برای تمدید با شمارهٔ {get_support_phone()} تماس بگیرید.",
             code="LICENSE_EXPIRED",
             status_code=402,
         )
@@ -1033,13 +1081,16 @@ class _RuntimeSecurityGate:
             hwid = compute_hardware_id()
             now = float(now_ts if now_ts is not None else time.time())
             now_int = int(now)
+            vendor_info = get_vendor_contact_info()
+            phone = vendor_info["supportPhone"]
 
             if not self._check_native_integrity():
                 return {
                     "licensed": False,
                     "unlocked": False,
                     "isTrial": False,
-                    "supportPhone": SUPPORT_PHONE,
+                    "supportPhone": phone,
+                    "vendorContact": vendor_info,
                     "reason": "integrity_failed",
                     "message": "یکپارچگی فایل‌های امنیتی برنامه تأیید نشد. لطفاً برنامه را مجدداً نصب کنید.",
                     "hardwareId": hwid,
@@ -1054,11 +1105,12 @@ class _RuntimeSecurityGate:
                     "licensed": False,
                     "unlocked": False,
                     "isTrial": False,
-                    "supportPhone": SUPPORT_PHONE,
+                    "supportPhone": phone,
+                    "vendorContact": vendor_info,
                     "reason": "tampered",
                     "message": (
                         f"فایل وضعیت لایسنس دست‌کاری شده یا آسیب دیده است. "
-                        f"برای دریافت یا ثبت کلید لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید."
+                        f"برای دریافت یا ثبت کلید لایسنس با شمارهٔ {phone} تماس بگیرید."
                     ),
                     "hardwareId": hwid,
                     "passwordEnabled": False,
@@ -1075,11 +1127,12 @@ class _RuntimeSecurityGate:
                         "licensed": False,
                         "unlocked": False,
                         "isTrial": False,
-                        "supportPhone": SUPPORT_PHONE,
+                        "supportPhone": phone,
+                        "vendorContact": vendor_info,
                         "reason": "unlicensed",
                         "message": (
                             f"برنامه هنوز روی این سیستم فعال نشده است. "
-                            f"برای دریافت کلید لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید."
+                            f"برای دریافت کلید لایسنس با شمارهٔ {phone} تماس بگیرید."
                         ),
                         "hardwareId": hwid,
                         "passwordEnabled": False,
@@ -1146,7 +1199,8 @@ class _RuntimeSecurityGate:
                                 "licensed": False,
                                 "unlocked": False,
                                 "isTrial": False,
-                                "supportPhone": SUPPORT_PHONE,
+                                "supportPhone": phone,
+                                "vendorContact": vendor_info,
                                 "reason": exc.code.lower(),
                                 "message": exc.message,
                                 "hardwareId": hwid,
@@ -1204,7 +1258,8 @@ class _RuntimeSecurityGate:
                             "licensed": False,
                             "unlocked": False,
                             "isTrial": False,
-                            "supportPhone": SUPPORT_PHONE,
+                            "supportPhone": phone,
+                            "vendorContact": vendor_info,
                             "reason": "clock_tampered",
                             "message": (
                                 "تاریخ یا ساعت ویندوز به عقب کشیده شده است. "
@@ -1227,11 +1282,12 @@ class _RuntimeSecurityGate:
                         "licensed": False,
                         "unlocked": False,
                         "isTrial": False,
-                        "supportPhone": SUPPORT_PHONE,
+                        "supportPhone": phone,
+                        "vendorContact": vendor_info,
                         "reason": "license_expired",
                         "message": (
                             f"مدت اعتبار لایسنس شما به پایان رسیده است. "
-                            f"برای تمدید لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید."
+                            f"برای تمدید لایسنس با شمارهٔ {phone} تماس بگیرید."
                         ),
                         "hardwareId": hwid,
                         "passwordEnabled": pwd_enabled,
@@ -1277,7 +1333,8 @@ class _RuntimeSecurityGate:
                     "unlocked": unlocked,
                     "isTrial": False,
                     "trialRemainingSeconds": 0,
-                    "supportPhone": SUPPORT_PHONE,
+                    "supportPhone": phone,
+                    "vendorContact": vendor_info,
                     "reason": "ok" if unlocked else "login_required",
                     "message": "" if unlocked else "برای ورود به محیط کاری، رمز ورود شخصی خود را وارد کنید.",
                     "hardwareId": hwid,
@@ -1301,7 +1358,8 @@ class _RuntimeSecurityGate:
                     "licensed": False,
                     "unlocked": False,
                     "isTrial": False,
-                    "supportPhone": SUPPORT_PHONE,
+                    "supportPhone": phone,
+                    "vendorContact": vendor_info,
                     "reason": "clock_tampered",
                     "message": (
                         "تاریخ یا ساعت ویندوز به عقب کشیده شده است. "
@@ -1324,11 +1382,12 @@ class _RuntimeSecurityGate:
                     "isTrial": False,
                     "trialExpired": True,
                     "trialRemainingSeconds": 0,
-                    "supportPhone": SUPPORT_PHONE,
+                    "supportPhone": phone,
+                    "vendorContact": vendor_info,
                     "reason": "trial_expired",
                     "message": (
                         f"مهلت استفادهٔ آزمایشی ۲۴ ساعته به پایان رسیده است. "
-                        f"برای ادامهٔ استفاده و دریافت کلید لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید."
+                        f"برای ادامهٔ استفاده و دریافت کلید لایسنس با شمارهٔ {phone} تماس بگیرید."
                     ),
                     "hardwareId": hwid,
                     "passwordEnabled": pwd_enabled,
@@ -1362,10 +1421,11 @@ class _RuntimeSecurityGate:
                 "isTrial": True,
                 "trialExpiresAt": trial_exp,
                 "trialRemainingSeconds": rem_sec,
-                "supportPhone": SUPPORT_PHONE,
+                "supportPhone": phone,
+                "vendorContact": vendor_info,
                 "reason": "ok" if unlocked else "login_required",
                 "message": (
-                    f"نسخهٔ آزمایشی ۲۴ ساعته فعال است — برای ادامهٔ استفاده و دریافت لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید."
+                    f"نسخهٔ آزمایشی ۲۴ ساعته فعال است — برای ادامهٔ استفاده و دریافت لایسنس با شمارهٔ {phone} تماس بگیرید."
                     if unlocked
                     else "برای ورود به محیط کاری، رمز ورود شخصی خود را وارد کنید."
                 ),
@@ -1541,8 +1601,9 @@ def require_active_license() -> dict[str, Any]:
     """Ensure at least one licensed module (or the 24h initial trial) is currently active."""
     status = SECURITY_GATE.inspect_status(session_token=None)
     if not status.get("licensed"):
+        phone = status.get("supportPhone") or get_support_phone()
         raise LicenseError(
-            status.get("message") or f"لایسنس معتبری فعال نیست. برای دریافت لایسنس با شمارهٔ {SUPPORT_PHONE} تماس بگیرید.",
+            status.get("message") or f"لایسنس معتبری فعال نیست. برای دریافت لایسنس با شمارهٔ {phone} تماس بگیرید.",
             code=str(status.get("reason") or "LICENSE_REQUIRED").upper(),
             status_code=402,
         )
@@ -1558,9 +1619,10 @@ def require_module_license(module_id: str) -> dict[str, Any]:
     mod_info = (status.get("modules") or {}).get(norm) or {}
     if not mod_info.get("active"):
         label = MODULE_LABELS_FA.get(norm, norm)
+        phone = status.get("supportPhone") or get_support_phone()
         raise LicenseError(
             f"لایسنس بخش «{label}» فعال نیست یا مهلت آن پایان یافته است. "
-            f"برای تهیه یا تمدید این ماژول با شمارهٔ {SUPPORT_PHONE} تماس بگیرید.",
+            f"برای تهیه یا تمدید این ماژول با شمارهٔ {phone} تماس بگیرید.",
             code=f"MODULE_{norm.upper()}_REQUIRED",
             status_code=402,
         )

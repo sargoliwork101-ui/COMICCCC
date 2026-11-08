@@ -2173,7 +2173,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas417: verText.includes('۴.۱۷'),
+            verHas418: verText.includes('۴.۱۸'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2192,8 +2192,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.17 displays version 4.17 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas417 === true
+      'v4.00/v4.18 displays version 4.18 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas418 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3941,6 +3941,15 @@ function check(name, condition) {
       ...mockLicenseState,
       isTrial: false,
       trialRemainingSeconds: 0,
+      vendorContact: {
+        supportPhone: '09361111111',
+        whatsapp: '09361111111',
+        telegram: '@ComicSupportTest',
+        domesticMessenger: 'ایتا: @ComicIR',
+        supportHours: '۹ الی ۲۲',
+        website: 'https://comic.example.ir',
+        customNote: 'برای دریافت آنی پیام بدهید.',
+      },
       modules: {
         ocr: { active: true, source: 'license', plan: 'lifetime', expiresAt: null },
         translation: { active: false, source: 'unlicensed', plan: 'none', expiresAt: null },
@@ -3961,10 +3970,16 @@ function check(name, condition) {
     );
     $('licenseTopStatusBtn').click();
     await new Promise((r) => setTimeout(r, 20));
+    const orderMsgSample = await vm.runInContext("buildCustomerOrderRequestText('CS4-ABCD-EFGH-JKLM-NPQR')", context);
     check(
-      'v4.17 clicking #licenseTopStatusBtn opens #licenseDialog with #licInfoRemaining and per-module countdowns',
+      'v4.17/v4.18 clicking #licenseTopStatusBtn opens #licenseDialog with #licInfoRemaining, vendor channels (Telegram/WhatsApp/Eitaa/Hours/Website), and ready order message',
       $('licenseDialog').open === true
         && $('licSupportPhone').textContent === '09361111111'
+        && $('licVendorChannels').textContent.includes('@ComicSupportTest')
+        && $('licVendorChannels').textContent.includes('ایتا: @ComicIR')
+        && $('licVendorChannels').textContent.includes('۹ الی ۲۲')
+        && $('licVendorChannels').textContent.includes('https://comic.example.ir')
+        && orderMsgSample.includes('CS4-ABCD-EFGH-JKLM-NPQR')
         && $('licInfoRemaining').textContent.includes('OCR: دائمی')
         && $('licMod_ocr').textContent.includes('دائمی')
         && $('licMod_translation').textContent.includes('غیرفعال')

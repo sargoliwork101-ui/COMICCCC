@@ -8273,6 +8273,8 @@ function bindEvents() {
   $('licenseDialogDoneBtn')?.addEventListener('click', () => closeDialog('licenseDialog'));
   $('copyGateHwidBtn')?.addEventListener('click', () => copyTextWithToast($('gateHardwareId')?.textContent || '', 'کد سیستم در کلیپ‌بورد کپی شد'));
   $('copyDialogHwidBtn')?.addEventListener('click', () => copyTextWithToast($('licInfoHwid')?.textContent || '', 'کد سیستم در کلیپ‌بورد کپی شد'));
+  $('copyGateOrderMsgBtn')?.addEventListener('click', () => copyTextWithToast(buildCustomerOrderRequestText($('gateHardwareId')?.textContent || ''), 'متن آمادهٔ سفارش لایسنس کپی شد؛ آن را برای فروشنده ارسال کنید'));
+  $('copyDialogOrderMsgBtn')?.addEventListener('click', () => copyTextWithToast(buildCustomerOrderRequestText($('licInfoHwid')?.textContent || ''), 'متن آمادهٔ سفارش لایسنس کپی شد؛ آن را برای فروشنده ارسال کنید'));
   $('pasteGateLicenseBtn')?.addEventListener('click', async () => {
     try {
       const clip = await navigator.clipboard?.readText?.();
@@ -8888,11 +8890,71 @@ function stopTrialCountdown() {
   }
 }
 
+function buildCustomerOrderRequestText(explicitHwid = '') {
+  const hwid = String(explicitHwid || state.licenseStatus?.hardwareId || $('gateHardwareId')?.textContent || $('licInfoHwid')?.textContent || '').trim();
+  return [
+    'سلام و وقت بخیر',
+    'درخواست تهیه / تمدید لایسنس نرم‌افزار Comic OCR Studio را دارم.',
+    `🖥 کد شناسایی سیستم من: ${hwid}`,
+    'لطفاً شرایط دریافت لایسنس را ارسال فرمایید.',
+  ].join('\n');
+}
+
+function renderVendorChannelsInto(container, vc) {
+  if (!container) return;
+  container.textContent = '';
+  const info = vc && typeof vc === 'object' ? vc : {};
+  const addChip = (label, val, isLtr = true, href = '') => {
+    const clean = String(val || '').trim();
+    if (!clean) return;
+    const el = document.createElement(href ? 'a' : 'span');
+    el.className = 'vendor-channel-chip';
+    if (href) {
+      el.href = href;
+      el.target = '_blank';
+      el.rel = 'noopener noreferrer';
+    }
+    const lbl = document.createElement('span');
+    lbl.textContent = `${label}:`;
+    const bdi = document.createElement('bdi');
+    if (isLtr) bdi.dir = 'ltr';
+    bdi.textContent = clean;
+    el.append(lbl, bdi);
+    container.appendChild(el);
+  };
+
+  if (info.whatsapp) addChip('💬 واتساپ / پیامک', info.whatsapp, true);
+  if (info.telegram) {
+    const tgRaw = String(info.telegram).trim();
+    const tgHref = /^https?:\/\//i.test(tgRaw)
+      ? tgRaw
+      : (tgRaw.startsWith('@') ? `https://t.me/${tgRaw.slice(1)}` : '');
+    addChip('✈️ تلگرام', tgRaw, true, tgHref);
+  }
+  if (info.domesticMessenger) addChip('📱 پیام‌رسان داخلی', info.domesticMessenger, false);
+  if (info.supportHours) addChip('🕒 پاسخ‌گویی', info.supportHours, false);
+  if (info.website) {
+    const webRaw = String(info.website).trim();
+    const webHref = /^https?:\/\//i.test(webRaw) ? webRaw : '';
+    addChip('🌐 وب‌سایت', webRaw, true, webHref);
+  }
+  if (info.customNote) {
+    const note = document.createElement('div');
+    note.className = 'vendor-channel-note';
+    note.textContent = String(info.customNote).trim();
+    container.appendChild(note);
+  }
+  container.classList.toggle('hidden', container.childNodes.length === 0);
+}
+
 function syncTrialBannerAndModulesUi(status) {
-  const phone = status?.supportPhone || DEFAULT_SUPPORT_PHONE;
+  const vc = status?.vendorContact && typeof status.vendorContact === 'object' ? status.vendorContact : {};
+  const phone = vc.supportPhone || status?.supportPhone || DEFAULT_SUPPORT_PHONE;
   if ($('gateSupportPhone')) $('gateSupportPhone').textContent = phone;
   if ($('licSupportPhone')) $('licSupportPhone').textContent = phone;
   if ($('trialNoticePhone')) $('trialNoticePhone').textContent = `📞 ${phone}`;
+  renderVendorChannelsInto($('gateVendorChannels'), vc);
+  renderVendorChannelsInto($('licVendorChannels'), vc);
 
   const banner = $('trialNoticeBanner');
   const showBanner = Boolean(status?.licensed && status?.unlocked && status?.isTrial);
@@ -9191,7 +9253,9 @@ function populateLicenseDialog(status) {
   }
   if ($('licInfoPlan')) $('licInfoPlan').textContent = formatLicensePlanDetail(status.license);
   if ($('licInfoHwid')) $('licInfoHwid').textContent = status.hardwareId || '';
-  if ($('licSupportPhone')) $('licSupportPhone').textContent = status.supportPhone || DEFAULT_SUPPORT_PHONE;
+  const vc = status.vendorContact && typeof status.vendorContact === 'object' ? status.vendorContact : {};
+  if ($('licSupportPhone')) $('licSupportPhone').textContent = vc.supportPhone || status.supportPhone || DEFAULT_SUPPORT_PHONE;
+  renderVendorChannelsInto($('licVendorChannels'), vc);
 
   renderLicenseModulePills(status);
 
