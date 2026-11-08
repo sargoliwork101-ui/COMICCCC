@@ -185,3 +185,18 @@ class StorageSettingsUpdate(BaseModel):
 
 class StorageFolderPickRequest(BaseModel):
     initial_dir: str | None = Field(default=None, max_length=2048)
+
+
+class LicenseActivateRequest(BaseModel):
+    license_key: str = Field(min_length=8, max_length=4096)
+    reset_local_password: bool = False
+
+
+class LocalLoginRequest(BaseModel):
+    password: str = Field(default="", max_length=256)
+
+
+class LocalPasswordUpdateRequest(BaseModel):
+    current_password: str = Field(default="", max_length=256)
+    new_password: str = Field(default="", max_length=256)
+

@@ -4,17 +4,75 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.14">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.14">
+  <link rel="stylesheet" href="/style.css?v=4.15">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.15">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۱۴ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۱۵ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h11"/></svg><span>پروژه و تنظیمات</span></button>
     </div>
   </header>
+
+  <section id="authGateOverlay" class="auth-gate-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="authGateTitle">
+    <div class="auth-gate-card">
+      <div class="auth-gate-head">
+        <img class="auth-gate-logo" src="/assets/icon128.png" alt="">
+        <div>
+          <h2 id="authGateTitle">فعال‌سازی و ورود به Comic OCR Studio</h2>
+          <span id="authGateBadge" class="auth-gate-badge">نیازمند فعال‌سازی لایسنس</span>
+        </div>
+      </div>
+
+      <div id="authActivatePane" class="auth-gate-pane">
+        <p id="authGateMessage" class="auth-gate-notice" role="status">برنامه هنوز روی این سیستم فعال نشده است. کد سیستم زیر را برای دریافت کلید لایسنس ارسال کنید.</p>
+        <div class="auth-hwid-box">
+          <span class="auth-hwid-label">کد شناسایی اختصاصی سیستم شما (System Code):</span>
+          <div class="auth-hwid-row">
+            <code id="gateHardwareId" class="auth-hwid-code" dir="ltr">CS4-....-....-....-....</code>
+            <button id="copyGateHwidBtn" class="bt" type="button">کپی کد سیستم</button>
+          </div>
+          <span class="hint">این کد را برای فروشنده بفرستید تا کلید لایسنس مخصوص همین کامپیوتر صادر شود.</span>
+        </div>
+
+        <label class="auth-field" for="gateLicenseKeyInput">
+          <span>کلید لایسنس دریافت‌شده (شروع با <bdi dir="ltr">CLIC1.</bdi>):</span>
+          <textarea id="gateLicenseKeyInput" dir="ltr" rows="3" placeholder="CLIC1.eyJ..." autocomplete="off" spellcheck="false"></textarea>
+        </label>
+
+        <label id="gateResetPwdWrap" class="auth-inline-check hidden" for="gateResetLocalPwd">
+          <input id="gateResetLocalPwd" type="checkbox">
+          <span>رمز ورود شخصی قبلی را فراموش کرده‌ام (بازنشانی رمز ورود با کلید لایسنس اصلی)</span>
+        </label>
+
+        <p id="gateActivateError" class="auth-error-msg hidden" role="alert"></p>
+
+        <div class="auth-gate-actions">
+          <button id="pasteGateLicenseBtn" class="bt" type="button">چسباندن از کلیپ‌بورد</button>
+          <button id="backToLoginPaneBtn" class="bt hidden" type="button">بازگشت به صفحهٔ رمز ورود</button>
+          <button id="activateGateLicenseBtn" class="bt primary" type="button">فعال‌سازی لایسنس و ورود</button>
+        </div>
+      </div>
+
+      <div id="authLoginPane" class="auth-gate-pane hidden">
+        <div id="gateHolderSummary" class="auth-holder-summary"></div>
+        <label class="auth-field" for="gateLoginPasswordInput">
+          <span>رمز ورود شخصی برنامه:</span>
+          <div class="auth-pwd-input-row">
+            <input id="gateLoginPasswordInput" type="password" dir="auto" placeholder="رمز ورود خود را وارد کنید…" autocomplete="current-password">
+            <button id="toggleGatePwdVisBtn" class="bt" type="button" aria-label="نمایش یا پنهان‌کردن رمز">نمایش</button>
+          </div>
+        </label>
+        <p id="gateLoginError" class="auth-error-msg hidden" role="alert"></p>
+        <div class="auth-gate-actions">
+          <button id="switchToActivatePaneBtn" class="bt" type="button">کد سیستم / تمدید لایسنس یا بازیابی رمز</button>
+          <button id="gateLoginSubmitBtn" class="bt primary" type="button">ورود به برنامه</button>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <div id="menu" class="menu hidden">
     <div class="mi project-controls">
@@ -27,6 +85,8 @@
     <button id="modelsBtn" class="mi"><span>مدیریت مدل‌های OCR</span><span id="modelsBtnBadge" class="menu-update-badge hidden"></span></button>
     <button id="aiBtn" class="mi">مدیریت ترجمه‌ها</button>
     <button id="storageBtn" class="mi"><span>مسیر ذخیره‌سازی و دانلودها (اختیاری)</span></button>
+    <button id="licenseBtn" class="mi"><span>لایسنس و رمز ورود</span></button>
+    <button id="lockAppMenuBtn" class="mi hidden"><span>قفل فوری برنامه</span></button>
     <button id="themeBtn" class="mi">تغییر تم روشن / تیره</button>
     <div class="mi save-line"><span id="saveState">آماده</span><span>ذخیرهٔ خودکار روی همین کامپیوتر</span></div>
   </div>
@@ -778,25 +838,89 @@
     <div class="dialog-actions"><button id="translationPreviewCancel" class="bt" type="button">انصراف</button><button id="translationPreviewConfirm" class="bt primary" type="button">تأیید و ارسال برای ترجمه</button></div>
   </dialog>
 
+  <dialog id="licenseDialog" class="dlg small-dialog" aria-labelledby="licenseDialogTitle">
+    <form method="dialog" class="dialog-head">
+      <h2 id="licenseDialogTitle">وضعیت لایسنس و رمز ورود محلی</h2>
+      <button id="licenseDialogClose" class="icon" value="cancel" aria-label="بستن">×</button>
+    </form>
+
+    <section class="lic-section">
+      <div class="lic-info-grid">
+        <div class="lic-info-row"><span>وضعیت لایسنس:</span><strong id="licInfoStatus" class="lic-status-ok">فعال ✓</strong></div>
+        <div class="lic-info-row"><span>نام ثبت‌شده / سفارش:</span><strong id="licInfoHolder">—</strong></div>
+        <div class="lic-info-row"><span>نوع طرح و اعتبار:</span><strong id="licInfoPlan">—</strong></div>
+        <div class="lic-info-row">
+          <span>کد سیستم این کامپیوتر:</span>
+          <div class="lic-hwid-inline">
+            <code id="licInfoHwid" dir="ltr">CS4-...</code>
+            <button id="copyDialogHwidBtn" class="bt" type="button">کپی</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="lic-section">
+      <div class="lic-sec-head">
+        <h3>رمز ورود شخصی (قفل محلی برنامه)</h3>
+        <span id="licPwdStateBadge" class="lic-pill">غیرفعال</span>
+      </div>
+      <p class="hint">با تعیین رمز ورود شخصی، هر بار که برنامه باز می‌شود (یا گزینهٔ «قفل فوری برنامه» را می‌زنید)، محیط کاری و پروژه‌های شما تا زمان وارد کردن رمز پوشیده می‌مانند.</p>
+      <div class="form-grid lic-pwd-grid">
+        <label id="licCurrentPwdWrap" class="hidden" for="licCurrentPwdInput">
+          <span>رمز ورود فعلی</span>
+          <input id="licCurrentPwdInput" type="password" dir="auto" autocomplete="current-password">
+        </label>
+        <label for="licNewPwdInput">
+          <span>رمز ورود جدید (حداقل ۴ کاراکتر)</span>
+          <input id="licNewPwdInput" type="password" dir="auto" autocomplete="new-password" placeholder="رمز جدید…">
+        </label>
+        <label for="licConfirmPwdInput">
+          <span>تکرار رمز ورود جدید</span>
+          <input id="licConfirmPwdInput" type="password" dir="auto" autocomplete="new-password" placeholder="تکرار رمز…">
+        </label>
+      </div>
+      <p id="licPwdFeedback" class="hint hidden" role="status"></p>
+      <div class="lic-pwd-actions">
+        <button id="lockNowInsideDialogBtn" class="bt hidden" type="button">قفل فوری برنامه</button>
+        <button id="removeLocalPwdBtn" class="bt danger hidden" type="button">حذف رمز ورود</button>
+        <button id="saveLocalPwdBtn" class="bt primary" type="button">ذخیرهٔ رمز ورود</button>
+      </div>
+    </section>
+
+    <details class="lic-section lic-renew-details">
+      <summary>تمدید اعتبار یا ثبت کلید لایسنس جدید</summary>
+      <div class="lic-renew-body">
+        <textarea id="dialogNewLicenseInput" dir="ltr" rows="2" placeholder="CLIC1.eyJ..." autocomplete="off" spellcheck="false"></textarea>
+        <div class="lic-pwd-actions">
+          <button id="dialogActivateNewBtn" class="bt" type="button">ثبت کلید لایسنس جدید</button>
+        </div>
+      </div>
+    </details>
+
+    <div class="dialog-actions">
+      <button id="licenseDialogDoneBtn" class="bt" type="button">بستن</button>
+    </div>
+  </dialog>
+
   <dialog id="helpDialog" class="dlg help-dialog" aria-labelledby="helpDialogTitle">
     <form method="dialog" class="dialog-head">
       <div class="help-head-title">
         <span class="help-head-icon" aria-hidden="true">؟</span>
         <div>
           <h2 id="helpDialogTitle">راهنمای کامل Comic OCR Studio <span class="ver" dir="ltr">Help · F1</span></h2>
-          <span id="helpSearchCount" class="muted">۱۴ بخش کامل · آموزش گام‌به‌گام + مثال عملی برای تک‌تک قسمت‌ها</span>
+          <span id="helpSearchCount" class="muted">۱۵ بخش کامل · آموزش گام‌به‌گام + مثال عملی برای تک‌تک قسمت‌ها</span>
         </div>
       </div>
       <button id="helpDialogClose" class="icon" value="cancel" aria-label="بستن راهنما">×</button>
     </form>
     <div class="help-toolbar">
       <div class="help-search-wrap">
-        <input id="helpSearchInput" type="search" dir="auto" placeholder="جست‌وجو در راهنما... (مثلاً: Word، درایو، GPU، Merge، API Key، Crop، Backup)" aria-label="جست‌وجو در راهنما">
+        <input id="helpSearchInput" type="search" dir="auto" placeholder="جست‌وجو در راهنما... (مثلاً: لایسنس، Word، درایو، GPU، Merge، API Key، Crop)" aria-label="جست‌وجو در راهنما">
         <button id="helpSearchClear" class="bt hidden" type="button">پاک‌کردن</button>
       </div>
       <div class="help-view-modes" role="group" aria-label="حالت نمایش راهنما">
         <button id="helpViewChapterBtn" class="bt primary" type="button" aria-pressed="true">بخش‌به‌بخش</button>
-        <button id="helpViewAllBtn" class="bt" type="button" aria-pressed="false">نمایش یکجای همهٔ ۱۴ بخش</button>
+        <button id="helpViewAllBtn" class="bt" type="button" aria-pressed="false">نمایش یکجای همهٔ ۱۵ بخش</button>
       </div>
     </div>
     <div class="help-layout">
@@ -825,12 +949,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-  <script src="/typeset.js?v=4.14"></script>
-  <script src="/groups.js?v=4.14"></script>
-  <script src="/rich-sanitize.js?v=4.14"></script>
-  <script src="/rich-editor.js?v=4.14"></script>
-  <script src="/inline-edit-session.js?v=4.14"></script>
-  <script src="/help-guide.js?v=4.14"></script>
-  <script src="/app.js?v=4.14"></script>
+  <script src="/typeset.js?v=4.15"></script>
+  <script src="/groups.js?v=4.15"></script>
+  <script src="/rich-sanitize.js?v=4.15"></script>
+  <script src="/rich-editor.js?v=4.15"></script>
+  <script src="/inline-edit-session.js?v=4.15"></script>
+  <script src="/help-guide.js?v=4.15"></script>
+  <script src="/app.js?v=4.15"></script>
 </body>
 </html>

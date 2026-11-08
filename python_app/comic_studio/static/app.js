@@ -5,7 +5,8 @@ const $ = (id) => document.getElementById(id);
 const G = window.StudioGroups;
 const GROUP_COLORS = ['#34d399', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa', '#2dd4bf', '#fb923c', '#e879f9'];
 const state = {
-  project: null, engines: [], ai: null, storage: null, editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
+  project: null, engines: [], ai: null, storage: null, licenseStatus: null, workspaceBooted: false, activityFeedStarted: false,
+  editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
   copiedEditorBlocks: [], copiedEditorPasteStep: 0, copiedEditorSourceImageId: null,
   cropId: null, crop: null, cropPointer: null, modelBusy: null, dragId: null, dragIds: [],
   dragMode: null, groupEditId: null, groupSnapshot: null, lastSelectedId: null,
@@ -415,7 +416,10 @@ async function api(url, options = {}) {
     const raw = payload && (payload.detail || payload.message);
     const detail = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.map(item => `${(item.loc || []).join('.')}: ${item.msg || item.type || 'خطای اعتبارسنجی'}`).join('؛ ') : raw ? JSON.stringify(raw) : parseError || 'سرور جزئیاتی برنگرداند.';
     const error = new Error(`${method} ${path} — HTTP ${response.status}: ${detail}`);
-    error.status = response.status; error.errorId = payload?.error_id;
+    error.status = response.status; error.detailText = detail; error.code = payload?.code; error.errorId = payload?.error_id;
+    if ((response.status === 402 || (response.status === 401 && payload?.code === 'LOGIN_REQUIRED')) && !path.startsWith('/api/license/')) {
+      refreshAuthGateState().catch(() => {});
+    }
     if (payload?.kind === 'invalid_context_response') { error.responseText = payload.response_text; error.recoveryToken = payload.recovery_token; error.responseTruncated = payload.response_truncated; }
     if (payload?.kind === 'pending_result') { error.pendingId = payload.pending_id; error.pendingKind = payload.pending_kind; }
     if (payload?.kind === 'unstored_result') error.unstoredResult = `${payload.translation || ''}\nخلاصه: ${payload.summary || ''}`;
@@ -8246,7 +8250,47 @@ function bindEvents() {
   if (!helpController && window.ComicHelpGuide?.createHelpController) {
     helpController = window.ComicHelpGuide.createHelpController();
   }
-  $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(null));
+  $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(document.body.classList.contains('auth-locked') ? 'license-login-security' : null));
+  $('licenseBtn')?.addEventListener('click', () => { setMenuOpen(false); openLicenseDialog().catch((error) => toast(error.detailText || error.message, true)); });
+  $('lockAppMenuBtn')?.addEventListener('click', () => { setMenuOpen(false); lockWorkspaceNow().catch((error) => toast(error.detailText || error.message, true)); });
+  $('lockNowInsideDialogBtn')?.addEventListener('click', () => { closeDialog('licenseDialog'); lockWorkspaceNow().catch((error) => toast(error.detailText || error.message, true)); });
+  $('licenseDialogDoneBtn')?.addEventListener('click', () => closeDialog('licenseDialog'));
+  $('copyGateHwidBtn')?.addEventListener('click', () => copyTextWithToast($('gateHardwareId')?.textContent || '', 'کد سیستم در کلیپ‌بورد کپی شد'));
+  $('copyDialogHwidBtn')?.addEventListener('click', () => copyTextWithToast($('licInfoHwid')?.textContent || '', 'کد سیستم در کلیپ‌بورد کپی شد'));
+  $('pasteGateLicenseBtn')?.addEventListener('click', async () => {
+    try {
+      const clip = await navigator.clipboard?.readText?.();
+      if (clip && $('gateLicenseKeyInput')) {
+        $('gateLicenseKeyInput').value = clip.trim();
+        toast('کلید لایسنس چسبانده شد');
+      } else {
+        toast('کلیپ‌بورد خالی است یا مرورگر اجازهٔ خواندن مستقیم نداد (با Ctrl+V بچسبانید)', true);
+      }
+    } catch {
+      toast('با کلیدهای Ctrl+V کلید لایسنس را در کادر بچسبانید', true);
+    }
+  });
+  $('activateGateLicenseBtn')?.addEventListener('click', () => submitGateLicenseActivation().catch(() => {}));
+  $('switchToActivatePaneBtn')?.addEventListener('click', () => {
+    if (state.licenseStatus) applyAuthGateUi(state.licenseStatus, { forceActivatePane: true });
+  });
+  $('backToLoginPaneBtn')?.addEventListener('click', () => {
+    if (state.licenseStatus) applyAuthGateUi(state.licenseStatus, { forceActivatePane: false });
+  });
+  $('toggleGatePwdVisBtn')?.addEventListener('click', () => {
+    const inp = $('gateLoginPasswordInput');
+    if (!inp) return;
+    const isPwd = inp.type === 'password';
+    inp.type = isPwd ? 'text' : 'password';
+    if ($('toggleGatePwdVisBtn')) $('toggleGatePwdVisBtn').textContent = isPwd ? 'پنهان' : 'نمایش';
+  });
+  $('gateLoginSubmitBtn')?.addEventListener('click', () => submitGatePasswordLogin().catch(() => {}));
+  $('gateLoginPasswordInput')?.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); submitGatePasswordLogin().catch(() => {}); }
+  });
+  $('saveLocalPwdBtn')?.addEventListener('click', () => saveLocalPasswordFromDialog().catch(() => {}));
+  $('removeLocalPwdBtn')?.addEventListener('click', () => removeLocalPasswordFromDialog().catch(() => {}));
+  $('dialogActivateNewBtn')?.addEventListener('click', () => activateNewLicenseFromDialog().catch(() => {}));
   $('editorOpenFullHelpBtn')?.addEventListener('click', () => openHelpDialog('visual-editor'));
   $('helpDialogClose')?.addEventListener('click', (event) => { event.preventDefault(); closeDialog('helpDialog'); });
   $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiBaseUrl')?.addEventListener('input', syncAiExecUi); $('localNmtModelSelect')?.addEventListener('change', () => renderLocalNmtPanel()); $('localNmtCancelBtn')?.addEventListener('click', () => cancelLocalNmtPrepare().catch(() => {})); $('localNmtUnloadBtn')?.addEventListener('click', () => unloadLocalNmtRam().catch(() => {})); $('localNmtTestBtn')?.addEventListener('click', () => testLocalNmtSample().catch(() => {})); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
@@ -8577,6 +8621,7 @@ function bindEvents() {
       }
       const topDlg = [...openDialogStack].reverse().find((id) => $(id)?.open);
       const sectionByDialog = {
+        licenseDialog: 'license-login-security',
         storageDialog: 'storage-memory-network',
         modelsDialog: 'ocr-models',
         ocrDialog: 'ocr-modes',
@@ -8591,7 +8636,8 @@ function bindEvents() {
         pendingDialog: 'conflicts-cancel-errors',
         editorDialog: 'visual-editor',
       };
-      openHelpDialog((topDlg && sectionByDialog[topDlg]) || ($('editorDialog')?.open ? 'visual-editor' : null));
+      const defaultHelpSec = document.body.classList.contains('auth-locked') ? 'license-login-security' : null;
+      openHelpDialog((topDlg && sectionByDialog[topDlg]) || ($('editorDialog')?.open ? 'visual-editor' : defaultHelpSec));
       return;
     }
     if (event.key === 'Escape') {
@@ -8642,36 +8688,295 @@ function bindEvents() {
   syncAiExecUi();
   if (localStorage.getItem('comic-studio-theme') === 'light') document.body.classList.add('light');
 }
-async function init() {
-  bindEvents(); startActivityFeed(); startSession();
+async function copyTextWithToast(rawText, okMsg) {
+  const text = String(rawText || '').trim();
+  if (!text) return;
   try {
-    const enginesTask = api('/api/engines');
-    const aiTask = api('/api/ai-settings');
-    enginesTask.catch(() => {});
-    aiTask.catch(() => {});
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      toast(okMsg);
+      return;
+    }
+  } catch { /* fallback below */ }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', 'readonly');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  try { document.execCommand('copy'); toast(okMsg); }
+  catch { toast('کپی خودکار ممکن نشد؛ کد را انتخاب و با Ctrl+C کپی کنید', true); }
+  finally { area.remove(); }
+}
+
+function formatLicensePlanDetail(lic) {
+  if (!lic) return '—';
+  if (lic.plan === 'lifetime' || lic.expiresAt == null) return lic.planLabel || 'دائمی (مادام‌العمر)';
+  const rem = typeof lic.daysRemaining === 'number' ? `${lic.daysRemaining.toLocaleString('fa-IR')} روز باقی‌مانده` : '';
+  let expDate = '';
+  try {
+    expDate = new Date(Number(lic.expiresAt) * 1000).toLocaleDateString('fa-IR');
+  } catch { expDate = ''; }
+  const tail = [rem, expDate ? `تا ${expDate}` : ''].filter(Boolean).join(' · ');
+  return tail ? `${lic.planLabel || 'مدت‌دار'} (${tail})` : (lic.planLabel || 'مدت‌دار');
+}
+
+function applyAuthGateUi(status, { forceActivatePane = false } = {}) {
+  if (!status || typeof status !== 'object') return;
+  state.licenseStatus = status;
+  const hwid = status.hardwareId || '';
+  if ($('gateHardwareId') && hwid) $('gateHardwareId').textContent = hwid;
+  if ($('licInfoHwid') && hwid) $('licInfoHwid').textContent = hwid;
+  $('lockAppMenuBtn')?.classList.toggle('hidden', !(status.licensed && status.passwordEnabled));
+
+  if (status.licensed && status.unlocked) {
+    document.body.classList.remove('auth-locked');
+    $('authGateOverlay')?.classList.add('hidden');
+    if ($('gateActivateError')) $('gateActivateError').classList.add('hidden');
+    if ($('gateLoginError')) $('gateLoginError').classList.add('hidden');
+    return;
+  }
+
+  setMenuOpen(false);
+  [...openDialogStack].reverse().forEach((dlgId) => {
+    if (dlgId !== 'helpDialog' && dlgId !== 'appModalDialog' && $(dlgId)?.open) closeDialog(dlgId);
+  });
+  document.body.classList.add('auth-locked');
+  $('authGateOverlay')?.classList.remove('hidden');
+
+  const showLogin = Boolean(status.licensed && !status.unlocked && !forceActivatePane);
+  $('authActivatePane')?.classList.toggle('hidden', showLogin);
+  $('authLoginPane')?.classList.toggle('hidden', !showLogin);
+  $('backToLoginPaneBtn')?.classList.toggle('hidden', !(status.licensed && !status.unlocked && forceActivatePane));
+  $('gateResetPwdWrap')?.classList.toggle('hidden', !status.passwordEnabled);
+
+  const badge = $('authGateBadge');
+  if (badge) {
+    badge.textContent = showLogin ? 'قفل‌شده با رمز شخصی' : (status.reason === 'license_expired' ? 'پایان اعتبار لایسنس' : status.reason === 'clock_tampered' ? 'خطای تاریخ و ساعت سیستم' : 'نیازمند فعال‌سازی لایسنس');
+    badge.classList.toggle('is-ok', showLogin);
+  }
+  if ($('authGateMessage')) {
+    const msg = forceActivatePane && status.licensed
+      ? 'در این بخش می‌توانید کد سیستم خود را مشاهده کنید، کلید تمدید وارد کنید یا در صورت فراموشی رمز ورود، با کلید لایسنس اصلی رمز را بازنشانی نمایید.'
+      : (status.message || 'برنامه هنوز روی این سیستم فعال نشده است.');
+    $('authGateMessage').textContent = msg;
+    $('authGateMessage').classList.toggle('is-warn', status.reason === 'license_expired' || status.reason === 'clock_tampered');
+  }
+  if (showLogin) {
+    const holder = status.license?.holder || 'کاربر رسمی';
+    const planDesc = formatLicensePlanDetail(status.license);
+    if ($('gateHolderSummary')) {
+      $('gateHolderSummary').textContent = `لایسنس فعال به نام «${holder}» · اعتبار: ${planDesc}`;
+    }
+    setTimeout(() => { try { $('gateLoginPasswordInput')?.focus({ preventScroll: true }); } catch { /* ignore */ } }, 40);
+  }
+}
+
+async function refreshAuthGateState() {
+  const status = await api('/api/license/status');
+  applyAuthGateUi(status);
+  return status;
+}
+
+async function bootUnlockedWorkspace() {
+  if (!state.activityFeedStarted) {
+    state.activityFeedStarted = true;
+    startActivityFeed();
+  }
+  if (state.workspaceBooted) {
     const projects = await api('/api/projects');
-    const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
-    adoptProject(project);
-    const [engines, ai] = await Promise.all([enginesTask, aiTask]);
-    state.engines = engines; state.ai = ai;
-    updateEngineOptions(state.project?.settings?.ocrEngine || 'rapidocr-v6');
+    if (!state.project && projects.length) {
+      const p = await api(`/api/projects/${projects[0].id}`);
+      adoptProject(p);
+    }
     await refreshProjectList(projects.length ? projects : null);
-    await loadAiSettings(ai);
-    const unrenderedIds = sortedImages().filter((item) => hasOverlayText(item) && !item.edited).map((item) => item.id);
-    if (unrenderedIds.length) {
-      const startupRenderTask = renderImagesText(unrenderedIds);
-      projectLoadTasks.add(startupRenderTask);
-      startupRenderTask.finally(() => projectLoadTasks.delete(startupRenderTask)).catch(() => {});
-      startupRenderTask.catch(() => {});
+    return;
+  }
+  const enginesTask = api('/api/engines');
+  const aiTask = api('/api/ai-settings');
+  enginesTask.catch(() => {});
+  aiTask.catch(() => {});
+  const projects = await api('/api/projects');
+  const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
+  adoptProject(project);
+  const [engines, ai] = await Promise.all([enginesTask, aiTask]);
+  state.engines = engines; state.ai = ai;
+  state.workspaceBooted = true;
+  updateEngineOptions(state.project?.settings?.ocrEngine || 'rapidocr-v6');
+  await refreshProjectList(projects.length ? projects : null);
+  await loadAiSettings(ai);
+  const unrenderedIds = sortedImages().filter((item) => hasOverlayText(item) && !item.edited).map((item) => item.id);
+  if (unrenderedIds.length) {
+    const startupRenderTask = renderImagesText(unrenderedIds);
+    projectLoadTasks.add(startupRenderTask);
+    startupRenderTask.finally(() => projectLoadTasks.delete(startupRenderTask)).catch(() => {});
+    startupRenderTask.catch(() => {});
+  }
+  syncEngineUpdateUi();
+  const shouldCheckUpdates = !startupUpdateChecked && state.engines.some((entry) => entry.runtimeInstalled);
+  if (shouldCheckUpdates) {
+    startupUpdateChecked = true;
+    setTimeout(() => { checkEngineUpdates({ force: false, silent: true }).catch(() => {}); }, 800);
+  } else {
+    setTimeout(() => { refreshEngineMemory().catch(() => {}); }, 500);
+  }
+}
+
+async function submitGateLicenseActivation() {
+  const rawKey = ($('gateLicenseKeyInput')?.value || '').trim();
+  const errEl = $('gateActivateError');
+  if (errEl) errEl.classList.add('hidden');
+  if (!rawKey) {
+    if (errEl) { errEl.textContent = 'لطفاً ابتدا کلید لایسنس (شروع با CLIC1.) را در کادر بالا وارد کنید.'; errEl.classList.remove('hidden'); }
+    return;
+  }
+  const btn = $('activateGateLicenseBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const resetPwd = Boolean($('gateResetLocalPwd')?.checked);
+    const status = await api('/api/license/activate', jsonOptions('POST', { license_key: rawKey, reset_local_password: resetPwd }));
+    if ($('gateLicenseKeyInput')) $('gateLicenseKeyInput').value = '';
+    if ($('gateResetLocalPwd')) $('gateResetLocalPwd').checked = false;
+    applyAuthGateUi(status);
+    if (status.licensed && status.unlocked) {
+      await bootUnlockedWorkspace();
+      toast('لایسنس با موفقیت فعال شد؛ خوش آمدید!');
     }
-    syncEngineUpdateUi();
-    const shouldCheckUpdates = !startupUpdateChecked && state.engines.some((entry) => entry.runtimeInstalled);
-    if (shouldCheckUpdates) {
-      startupUpdateChecked = true;
-      setTimeout(() => { checkEngineUpdates({ force: false, silent: true }).catch(() => {}); }, 800);
-    } else {
-      setTimeout(() => { refreshEngineMemory().catch(() => {}); }, 500);
+  } catch (error) {
+    if (errEl) { errEl.textContent = error.detailText || error.message; errEl.classList.remove('hidden'); }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function submitGatePasswordLogin() {
+  const pwd = $('gateLoginPasswordInput')?.value || '';
+  const errEl = $('gateLoginError');
+  if (errEl) errEl.classList.add('hidden');
+  if (!pwd) {
+    if (errEl) { errEl.textContent = 'لطفاً رمز ورود خود را وارد کنید.'; errEl.classList.remove('hidden'); }
+    return;
+  }
+  const btn = $('gateLoginSubmitBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const status = await api('/api/license/login', jsonOptions('POST', { password: pwd }));
+    if ($('gateLoginPasswordInput')) $('gateLoginPasswordInput').value = '';
+    applyAuthGateUi(status);
+    if (status.licensed && status.unlocked) {
+      await bootUnlockedWorkspace();
+      toast('خوش آمدید');
     }
-  } catch (error) { toast(`راه‌اندازی ناموفق: ${error.message}`, true); }
+  } catch (error) {
+    if (errEl) { errEl.textContent = error.detailText || error.message; errEl.classList.remove('hidden'); }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function populateLicenseDialog(status) {
+  if (!status) return;
+  if ($('licInfoStatus')) $('licInfoStatus').textContent = status.licensed ? 'فعال ✓' : 'غیرفعال';
+  if ($('licInfoHolder')) $('licInfoHolder').textContent = status.license?.holder || '—';
+  if ($('licInfoPlan')) $('licInfoPlan').textContent = formatLicensePlanDetail(status.license);
+  if ($('licInfoHwid')) $('licInfoHwid').textContent = status.hardwareId || '';
+  const pwdOn = Boolean(status.passwordEnabled);
+  if ($('licPwdStateBadge')) {
+    $('licPwdStateBadge').textContent = pwdOn ? 'فعال (محافظت با رمز)' : 'غیرفعال (ورود مستقیم)';
+    $('licPwdStateBadge').classList.toggle('is-active', pwdOn);
+  }
+  $('licCurrentPwdWrap')?.classList.toggle('hidden', !pwdOn);
+  $('removeLocalPwdBtn')?.classList.toggle('hidden', !pwdOn);
+  $('lockNowInsideDialogBtn')?.classList.toggle('hidden', !pwdOn);
+  if ($('licCurrentPwdInput')) $('licCurrentPwdInput').value = '';
+  if ($('licNewPwdInput')) $('licNewPwdInput').value = '';
+  if ($('licConfirmPwdInput')) $('licConfirmPwdInput').value = '';
+  if ($('licPwdFeedback')) $('licPwdFeedback').classList.add('hidden');
+}
+
+async function openLicenseDialog() {
+  const status = await refreshAuthGateState();
+  if (!status.licensed || !status.unlocked) return;
+  populateLicenseDialog(status);
+  showDialog('licenseDialog');
+}
+
+async function saveLocalPasswordFromDialog() {
+  const cur = $('licCurrentPwdInput')?.value || '';
+  const next = $('licNewPwdInput')?.value || '';
+  const confirm = $('licConfirmPwdInput')?.value || '';
+  const fb = $('licPwdFeedback');
+  const showFb = (msg, isErr) => {
+    if (!fb) return;
+    fb.textContent = msg;
+    fb.style.color = isErr ? 'var(--danger)' : '#34d399';
+    fb.classList.remove('hidden');
+  };
+  if (next.length < 4) { showFb('رمز ورود جدید باید حداقل ۴ کاراکتر باشد.', true); return; }
+  if (next !== confirm) { showFb('رمز جدید و تکرار آن یکسان نیستند.', true); return; }
+  try {
+    const status = await api('/api/license/password', jsonOptions('PUT', { current_password: cur, new_password: next }));
+    applyAuthGateUi(status);
+    populateLicenseDialog(status);
+    showFb('رمز ورود شخصی با موفقیت ذخیره و فعال شد.', false);
+    toast('رمز ورود محلی فعال شد');
+  } catch (error) {
+    showFb(error.detailText || error.message, true);
+  }
+}
+
+async function removeLocalPasswordFromDialog() {
+  const cur = $('licCurrentPwdInput')?.value || '';
+  const fb = $('licPwdFeedback');
+  if (!cur) {
+    if (fb) { fb.textContent = 'برای حذف رمز ورود، ابتدا رمز فعلی را در کادر «رمز ورود فعلی» بنویسید.'; fb.style.color = 'var(--danger)'; fb.classList.remove('hidden'); }
+    return;
+  }
+  const ok = await appConfirm('آیا رمز ورود محلی حذف شود تا برنامه بدون پرسیدن رمز باز شود؟', {
+    title: 'حذف رمز ورود محلی',
+    confirmText: 'بله، حذف شود',
+    cancelText: 'انصراف',
+    variant: 'danger',
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    const status = await api('/api/license/password', jsonOptions('PUT', { current_password: cur, new_password: '' }));
+    applyAuthGateUi(status);
+    populateLicenseDialog(status);
+    toast('رمز ورود محلی حذف شد');
+  } catch (error) {
+    if (fb) { fb.textContent = error.detailText || error.message; fb.style.color = 'var(--danger)'; fb.classList.remove('hidden'); }
+  }
+}
+
+async function activateNewLicenseFromDialog() {
+  const rawKey = ($('dialogNewLicenseInput')?.value || '').trim();
+  if (!rawKey) { toast('ابتدا کلید لایسنس جدید را وارد کنید', true); return; }
+  try {
+    const status = await api('/api/license/activate', jsonOptions('POST', { license_key: rawKey, reset_local_password: false }));
+    if ($('dialogNewLicenseInput')) $('dialogNewLicenseInput').value = '';
+    applyAuthGateUi(status);
+    populateLicenseDialog(status);
+    toast(`کلید لایسنس جدید با موفقیت ثبت شد (${status.license?.planLabel || ''})`);
+  } catch (error) {
+    toast(error.detailText || error.message, true);
+  }
+}
+
+async function lockWorkspaceNow() {
+  const status = await api('/api/license/logout', { method: 'POST' });
+  applyAuthGateUi(status);
+  toast('برنامه قفل شد');
+}
+
+async function init() {
+  bindEvents(); startSession();
+  try {
+    const authStatus = await refreshAuthGateState();
+    if (!authStatus?.licensed || !authStatus?.unlocked) return;
+    await bootUnlockedWorkspace();
+  } catch (error) { toast(`راه‌اندازی ناموفق: ${error.detailText || error.message}`, true); }
 }
 init();

@@ -16,3 +16,10 @@ python_app/dist/
 python_app/wheelhouse/
 python_app/*.spec
 
+# Seller-only private licensing keys & local issuance logs (never commit!)
+.seller_keys/
+seller_master_key*.json
+*.seller-key.json
+issued_licenses*.json
+
+

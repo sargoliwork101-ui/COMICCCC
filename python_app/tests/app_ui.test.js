@@ -63,6 +63,25 @@ const jsonResponse = (payload, status = 200) => ({
   headers: { get: () => 'application/json' },
   json: async () => payload,
 });
+let mockLicensePwd = '';
+let mockLicenseState = {
+  licensed: true,
+  unlocked: true,
+  reason: 'ok',
+  message: '',
+  hardwareId: 'CS4-ABCD-EFGH-2345-6789',
+  passwordEnabled: false,
+  license: {
+    holder: 'کاربر آزمایشی',
+    plan: 'lifetime',
+    planLabel: 'دائمی (مادام‌العمر)',
+    issuedAt: 1793491200,
+    expiresAt: null,
+    daysTotal: null,
+    daysRemaining: null,
+    licenseId: 'lic001',
+  },
+};
 const makeTranslationPreview = (body, single = false) => {
   const provider = body.provider || 'free';
   const liveProject = vm.runInContext('state.project', context);
@@ -81,6 +100,31 @@ const makeTranslationPreview = (body, single = false) => {
 window.fetch = async (url, options = {}) => {
   const parsed = new URL(url, 'http://127.0.0.1:8765');
   const pathname = parsed.pathname;
+  if (pathname === '/api/license/status') return jsonResponse(mockLicenseState);
+  if (pathname === '/api/license/activate' && options.method === 'POST') {
+    const req = JSON.parse(options.body || '{}');
+    if (!String(req.license_key || '').startsWith('CLIC1.')) return jsonResponse({ detail: 'کلید لایسنس معتبر نیست.' }, 400);
+    if (req.reset_local_password) { mockLicensePwd = ''; mockLicenseState.passwordEnabled = false; }
+    mockLicenseState = { ...mockLicenseState, licensed: true, unlocked: true, reason: 'ok', message: '' };
+    return jsonResponse(mockLicenseState);
+  }
+  if (pathname === '/api/license/login' && options.method === 'POST') {
+    const req = JSON.parse(options.body || '{}');
+    if (mockLicensePwd && req.password !== mockLicensePwd) return jsonResponse({ detail: 'رمز ورود اشتباه است.', code: 'WRONG_PASSWORD' }, 401);
+    mockLicenseState = { ...mockLicenseState, unlocked: true, reason: 'ok', message: '' };
+    return jsonResponse(mockLicenseState);
+  }
+  if (pathname === '/api/license/logout' && options.method === 'POST') {
+    mockLicenseState = { ...mockLicenseState, unlocked: !mockLicenseState.passwordEnabled, reason: mockLicenseState.passwordEnabled ? 'login_required' : 'ok' };
+    return jsonResponse(mockLicenseState);
+  }
+  if (pathname === '/api/license/password' && options.method === 'PUT') {
+    const req = JSON.parse(options.body || '{}');
+    if (mockLicensePwd && req.current_password !== mockLicensePwd) return jsonResponse({ detail: 'رمز فعلی نادرست است.' }, 400);
+    mockLicensePwd = String(req.new_password || '');
+    mockLicenseState = { ...mockLicenseState, passwordEnabled: Boolean(mockLicensePwd), unlocked: true };
+    return jsonResponse(mockLicenseState);
+  }
   if (pathname === '/api/projects' && (!options.method || options.method === 'GET')) return jsonResponse([summary]);
   if (pathname === '/api/projects' && options.method === 'POST') return jsonResponse(project, 201);
   if (pathname === `/api/projects/${project.id}`) { projectGetCount += 1; return jsonResponse(project); }
@@ -1029,14 +1073,14 @@ function check(name, condition) {
     window.fetch = origFetchV369;
   }
 
-  // v3.71 / v4.02: Interactive section-by-section Help Center (#helpDialog, #helpTopBtn, F1, 14 sections, search, examples)
+  // v3.71 / v4.02 / v4.15: Interactive section-by-section Help Center (#helpDialog, #helpTopBtn, F1, 15 sections, search, examples)
   {
-    check('all 14 Help sections include practical examples and untranslated terms', window.ComicHelpGuide.HELP_SECTIONS.length === 14 && window.ComicHelpGuide.HELP_SECTIONS.every((s) => s.example && s.example.title.includes('مثال عملی') && s.example.body.length > 60 && s.features?.length >= 3 && s.steps?.length >= 3));
+    check('all 15 Help sections include practical examples and untranslated terms', window.ComicHelpGuide.HELP_SECTIONS.length === 15 && window.ComicHelpGuide.HELP_SECTIONS.every((s) => s.example && s.example.title.includes('مثال عملی') && s.example.body.length > 60 && s.features?.length >= 3 && s.steps?.length >= 3));
     $('helpTopBtn').click();
-    check('clicking topbar Help button opens #helpDialog with 14 chapter nav items', $('helpDialog').open === true && window.document.querySelectorAll('#helpNavList .help-nav-item').length === 14);
+    check('clicking topbar Help button opens #helpDialog with 15 chapter nav items', $('helpDialog').open === true && window.document.querySelectorAll('#helpNavList .help-nav-item').length === 15);
     check('chapter mode renders active chapter with practical example box', window.document.querySelectorAll('#helpContentArea .help-article').length === 1 && $('helpContentArea').textContent.includes('مثال عملی'));
     $('helpViewAllBtn').click();
-    check('view-all mode renders all 14 sections simultaneously', window.document.querySelectorAll('#helpContentArea .help-article').length === 14);
+    check('view-all mode renders all 15 sections simultaneously', window.document.querySelectorAll('#helpContentArea .help-article').length === 15);
     $('helpSearchInput').value = 'Flowing Book';
     $('helpSearchInput').dispatchEvent(new window.Event('input', { bubbles: true }));
     check('searching untranslated term Flowing Book filters matching Help section', window.document.querySelectorAll('#helpContentArea .help-article').length >= 1 && $('helpContentArea').textContent.includes('Flowing Book Layout'));
@@ -2129,7 +2173,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas414: verText.includes('۴.۱۴'),
+            verHas415: verText.includes('۴.۱۵'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2148,8 +2192,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.14 displays version 4.14 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas414 === true
+      'v4.00/v4.15 displays version 4.15 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas415 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3807,6 +3851,64 @@ function check(name, condition) {
         && v414ShapesCheck.helpHasStarAndThought === true,
       JSON.stringify(v414ShapesCheck),
     );
+  }
+
+  // v4.15: Offline Hardware-Bound Activation Gate, Local Password Login & Chapter 15 Help
+  {
+    mockLicenseState = { ...mockLicenseState, licensed: false, unlocked: false, reason: 'unlicensed', message: 'برنامه هنوز فعال نشده است.' };
+    await vm.runInContext('refreshAuthGateState()', context);
+    check(
+      'v4.15 unlicensed state activates auth-locked body class and displays System Code in #authGateOverlay',
+      window.document.body.classList.contains('auth-locked')
+        && !$('authGateOverlay').classList.contains('hidden')
+        && !$('authActivatePane').classList.contains('hidden')
+        && $('gateHardwareId').textContent === 'CS4-ABCD-EFGH-2345-6789',
+    );
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+    check(
+      'v4.15 pressing F1 on Activation Gate opens Help Chapter 15 (license-login-security)',
+      $('helpDialog').open === true && $('helpContentArea').textContent.includes('CLIC1.') && $('helpContentArea').textContent.includes('PBKDF2-SHA256'),
+    );
+    await vm.runInContext("closeDialog('helpDialog')", context);
+
+    $('gateLicenseKeyInput').value = 'CLIC1.validPayload.validSignature';
+    await vm.runInContext('submitGateLicenseActivation()', context);
+    check(
+      'v4.15 activating valid CLIC1. license unlocks workspace and hides #authGateOverlay',
+      !window.document.body.classList.contains('auth-locked') && $('authGateOverlay').classList.contains('hidden'),
+    );
+
+    await vm.runInContext('openLicenseDialog()', context);
+    check('v4.15 #licenseDialog opens showing holder and plan', $('licenseDialog').open === true && $('licInfoHolder').textContent === 'کاربر آزمایشی');
+    $('licNewPwdInput').value = 'Pass#415';
+    $('licConfirmPwdInput').value = 'Pass#415';
+    await vm.runInContext('saveLocalPasswordFromDialog()', context);
+    check('v4.15 setting local password reveals #lockAppMenuBtn', !$('lockAppMenuBtn').classList.contains('hidden'));
+    await vm.runInContext("closeDialog('licenseDialog')", context);
+
+    await vm.runInContext('lockWorkspaceNow()', context);
+    check(
+      'v4.15 locking workspace switches to #authLoginPane',
+      window.document.body.classList.contains('auth-locked')
+        && !$('authLoginPane').classList.contains('hidden')
+        && $('authActivatePane').classList.contains('hidden'),
+    );
+    $('gateLoginPasswordInput').value = 'WrongPass';
+    await vm.runInContext('submitGatePasswordLogin()', context);
+    check('v4.15 wrong password keeps workspace locked with Persian error', window.document.body.classList.contains('auth-locked') && !$('gateLoginError').classList.contains('hidden'));
+    $('gateLoginPasswordInput').value = 'Pass#415';
+    await vm.runInContext('submitGatePasswordLogin()', context);
+    check('v4.15 correct local password unlocks workspace', !window.document.body.classList.contains('auth-locked') && $('authGateOverlay').classList.contains('hidden'));
+
+    await vm.runInContext('openLicenseDialog()', context);
+    $('licCurrentPwdInput').value = 'Pass#415';
+    const rmTask = vm.runInContext('removeLocalPasswordFromDialog()', context);
+    await new Promise((r) => setTimeout(r, 15));
+    check('v4.15 removing local password uses themed #appModalDialog (zero native confirm)', $('appModalDialog').open === true);
+    $('appModalConfirm').click();
+    await rmTask;
+    await vm.runInContext("closeDialog('licenseDialog')", context);
+    check('v4.15 local password removed cleanly', $('lockAppMenuBtn').classList.contains('hidden'));
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

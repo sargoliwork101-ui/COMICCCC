@@ -15,6 +15,7 @@ Produces:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -47,7 +48,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.1.4.0")]
+[assembly: System.Reflection.AssemblyVersion("4.1.5.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -392,6 +393,8 @@ def pyinstaller_command(
         "--clean",
         "--onedir",
         "--windowed",
+        "--optimize",
+        "1",
         "--name",
         "ComicOCRStudio",
         "--distpath",
@@ -430,7 +433,16 @@ def pyinstaller_command(
     ):
         cmd.extend(["--hidden-import", hidden])
 
-    for excluded in ("torch", "torchvision", "torchaudio", "transformers", "tensorflow", "paddle", "pytest"):
+    for excluded in (
+        "torch",
+        "torchvision",
+        "torchaudio",
+        "transformers",
+        "tensorflow",
+        "paddle",
+        "pytest",
+        "license_manager",
+    ):
         cmd.extend(["--exclude-module", excluded])
 
     cmd.append(str(entry_script))
@@ -590,6 +602,59 @@ def build_windows_installer(
     return payload_zip
 
 
+def build_native_license_guard(app_dist_dir: Path, build_root: Path, public_key_hex: str) -> Path | None:
+    """Compile a native Windows guard (`ComicLicenseGuard.exe`) embedding the public key SHA-256."""
+    csc = find_dotnet_csc()
+    if csc is None:
+        return None
+    pub_sha = hashlib.sha256(bytes.fromhex(public_key_hex.strip())).hexdigest().lower()
+    guard_cs = build_root / "ComicLicenseGuard.cs"
+    internal_dir = app_dist_dir / "_internal"
+    target_dir = internal_dir if internal_dir.is_dir() else app_dist_dir
+    guard_exe = target_dir / "ComicLicenseGuard.exe"
+    guard_src = f"""using System;
+using System.Security.Cryptography;
+using System.Text;
+
+internal static class ComicLicenseGuard {{
+    private const string PubSha = "{pub_sha}";
+    private static int Main(string[] args) {{
+        if (args == null || args.Length < 1 || string.IsNullOrWhiteSpace(args[0])) return 2;
+        byte[] key = Encoding.ASCII.GetBytes(PubSha);
+        byte[] msg = Encoding.ASCII.GetBytes("CS4-GUARD:" + args[0].Trim());
+        using (var h = new HMACSHA256(key)) {{
+            byte[] mac = h.ComputeHash(msg);
+            var sb = new StringBuilder(mac.Length * 2);
+            foreach (byte b in mac) sb.Append(b.ToString("x2"));
+            Console.Out.Write(sb.ToString());
+        }}
+        return 0;
+    }}
+}}
+"""
+    guard_cs.write_text(guard_src, encoding="utf-8-sig")
+    subprocess.check_call(
+        [
+            str(csc),
+            "/nologo",
+            "/optimize+",
+            "/target:exe",
+            f"/out:{guard_exe}",
+            str(guard_cs),
+        ]
+    )
+    return guard_exe
+
+
+def verify_no_seller_secrets_in_dist(app_dist_dir: Path) -> None:
+    """Fail the build immediately if any seller-only script or private key leaked into dist."""
+    forbidden_markers = ("seller_master_key", ".seller-key.json", "license_manager.py", "start_license_manager.bat")
+    for item in app_dist_dir.rglob("*"):
+        low = item.name.lower()
+        if any(marker in low for marker in forbidden_markers):
+            raise RuntimeError(f"SECURITY ABORT: Seller-only file detected in customer bundle: {item}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=f"Build Comic OCR Studio v{APP_VERSION} Offline .exe & Setup")
     parser.add_argument("--with-nmt", action="store_true", help="Bundle 600M offline NLLB-200 translator inside the offline installer")
@@ -601,6 +666,11 @@ def main(argv: list[str] | None = None) -> int:
     dist_root = REPO_PY_ROOT / "dist"
     build_root.mkdir(parents=True, exist_ok=True)
     dist_root.mkdir(parents=True, exist_ok=True)
+
+    from license_manager import SellerVault
+
+    seller_info = SellerVault().ensure_master_key(sync_source=True)
+    print(f"[ok] Synced seller Ed25519 public key into build (fingerprint: {seller_info['fingerprint']})")
 
     if args.download_wheelhouse:
         wh = download_wheelhouse(REPO_PY_ROOT / "pyproject.toml", REPO_PY_ROOT / "wheelhouse")
@@ -630,6 +700,10 @@ def main(argv: list[str] | None = None) -> int:
     subprocess.check_call(cmd, cwd=str(REPO_PY_ROOT))
 
     app_dist_dir = dist_root / "ComicOCRStudio"
+    guard_bin = build_native_license_guard(app_dist_dir, build_root, seller_info["public_key_hex"])
+    if guard_bin is not None:
+        print(f"[ok] Compiled native public-key integrity guard: {guard_bin}")
+    verify_no_seller_secrets_in_dist(app_dist_dir)
     write_offline_readme(app_dist_dir, include_nmt=args.with_nmt)
 
     suffix = "-Full-NMT" if args.with_nmt else ""

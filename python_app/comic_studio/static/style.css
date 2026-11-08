@@ -533,4 +533,46 @@ body.light .watermark-badge{background:rgba(255,255,255,.88);color:#1e293b;borde
 .editor-box[data-shape="rect"]>.box-shape-svg{display:none}
 .item.just-edited{box-shadow:0 0 0 2.5px var(--a1),0 8px 24px rgba(56,189,248,.22);transition:box-shadow .35s ease}
 
+/* v4.15: Offline Hardware-Bound Activation Gate & Local Password Login */
+body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body.auth-locked #menu{display:none!important}
+.auth-gate-overlay{position:fixed;inset:58px 0 0 0;z-index:48;display:flex;align-items:center;justify-content:center;padding:18px;overflow:auto;background:radial-gradient(circle at 50% 0%,#8b7bff1f,transparent 52%),var(--bg)}
+.auth-gate-card{width:min(540px,100%);background:var(--surface);border:1px solid var(--line-2);border-radius:16px;padding:22px;box-shadow:var(--shadow)}
+.auth-gate-head{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.auth-gate-logo{width:44px;height:44px;border-radius:11px;box-shadow:0 4px 16px #8b7bff33}
+.auth-gate-head h2{margin:0 0 3px;font-size:16.5px}
+.auth-gate-badge{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;font-size:10.5px;font-weight:700;background:#8b7bff22;color:var(--a2);border:1px solid #8b7bff44}
+.auth-gate-badge.is-ok{background:#10b98122;color:#34d399;border-color:#10b98155}
+.auth-gate-pane{display:flex;flex-direction:column;gap:12px}
+.auth-gate-notice{margin:0;padding:10px 12px;border-radius:10px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--text);font-size:12px;line-height:1.8}
+.auth-gate-notice.is-warn{border-color:#fbbf2477;background:#fbbf2414}
+.auth-hwid-box{padding:11px 13px;border-radius:11px;background:var(--surface-2);border:1px solid var(--line-2);display:flex;flex-direction:column;gap:6px}
+.auth-hwid-label{font-size:11.5px;color:var(--muted);font-weight:600}
+.auth-hwid-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.auth-hwid-code{flex:1 1 210px;padding:7px 11px;border-radius:8px;background:var(--bg);border:1px solid var(--line-2);color:var(--a2);font:700 13.5px/1.4 Consolas,monospace;letter-spacing:.7px;text-align:center;user-select:all}
+.auth-field span{font-size:12px;color:var(--text);font-weight:600}
+.auth-field textarea{font:12px/1.55 Consolas,monospace;resize:vertical;min-height:68px}
+.auth-pwd-input-row{display:flex;gap:7px;align-items:center}
+.auth-pwd-input-row input{flex:1}
+.auth-inline-check{flex-direction:row!important;align-items:center;gap:8px;font-size:11.5px;color:var(--text);cursor:pointer}
+.auth-error-msg{margin:0;padding:8px 11px;border-radius:9px;background:#fb718518;border:1px solid #fb718566;color:var(--danger);font-size:11.5px}
+.auth-holder-summary{padding:10px 12px;border-radius:10px;background:#10b98114;border:1px solid #10b98144;color:var(--text);font-size:12px}
+.auth-gate-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:4px}
+.lic-section{padding:11px 12px;border:1px solid var(--line);border-radius:11px;background:var(--surface-2);margin-bottom:11px}
+.lic-info-grid{display:grid;gap:7px}
+.lic-info-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:12px}
+.lic-info-row>span{color:var(--muted)}
+.lic-status-ok{color:#34d399}
+.lic-hwid-inline{display:inline-flex;align-items:center;gap:6px}
+.lic-hwid-inline code{padding:3px 8px;border-radius:6px;background:var(--bg);border:1px solid var(--line-2);color:var(--a2);font:700 11.5px/1.3 Consolas,monospace}
+.lic-sec-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
+.lic-sec-head h3{margin:0;font-size:13.5px}
+.lic-pill{padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:700;background:var(--surface);border:1px solid var(--line-2);color:var(--muted)}
+.lic-pill.is-active{background:#10b98120;border-color:#10b98155;color:#34d399}
+.lic-pwd-grid{grid-template-columns:1fr}
+.lic-pwd-actions{display:flex;justify-content:flex-end;gap:7px;flex-wrap:wrap;margin-top:8px}
+.lic-renew-details summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--a2);user-select:none}
+.lic-renew-body{margin-top:9px;display:grid;gap:6px}
+.lic-renew-body textarea{font:11.5px/1.5 Consolas,monospace}
+
+
 

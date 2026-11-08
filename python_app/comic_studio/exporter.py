@@ -17,6 +17,7 @@ from xml.sax.saxutils import escape as xml_escape
 from PIL import Image, ImageDraw
 
 from .activity import emit
+from .license_guard import require_active_license
 from .ocr_managed import compute_worker_count, iter_parallel_ordered
 from .paths import project_root
 from .store import ProjectStore, _replace_with_retry
@@ -322,6 +323,7 @@ def _insert(document: Any, width: float, height: float, entries: list[dict[str, 
 def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any]) -> Path:
     import pymupdf as fitz
 
+    require_active_license()
     images = selected_images(state, request.get("image_ids", []))
     if not images:
         raise ValueError("No images selected")
@@ -389,6 +391,7 @@ def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
 
 
 def build_images_zip(store: ProjectStore, state: dict[str, Any], request: dict[str, Any]) -> Path:
+    require_active_license()
     images = selected_images(state, request.get("image_ids", []))
     if not images:
         raise ValueError("No images selected")
@@ -448,6 +451,7 @@ def _ordered_export_blocks(item: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any]) -> Path:
+    require_active_license()
     images = selected_images(state, request.get("image_ids", []))
     if not images:
         raise ValueError("No images selected")
@@ -1724,6 +1728,7 @@ def _build_flowing_docx(
 
 
 def build_docx(store: ProjectStore, state: dict[str, Any], request: dict[str, Any]) -> Path:
+    require_active_license()
     images = selected_images(state, request.get("image_ids", []))
     if not images:
         raise ValueError("No images selected")
@@ -2541,6 +2546,7 @@ def _build_flowing_pptx(
 
 def build_pptx(store: ProjectStore, state: dict[str, Any], request: dict[str, Any]) -> Path:
     """Build an editable PowerPoint (.pptx) presentation in either visual-comic or flowing-slide mode."""
+    require_active_license()
     images = selected_images(state, request.get("image_ids", []))
     if not images:
         raise ValueError("No images selected")

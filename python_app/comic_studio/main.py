@@ -50,10 +50,11 @@ from .paths import (
     project_root,
 )
 from . import context_run, pending_results
+from .license_guard import LicenseError, SECURITY_GATE, SESSION_COOKIE_NAME
 from .local_nmt import DEFAULT_LOCAL_NMT_MODEL, LOCAL_NMT_MODELS, LocalNmtError
 from .schemas import (
     AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest,
-    LocalNmtModelActionRequest, LocalNmtTestRequest, OcrRequest, ProjectCreate,
+    LicenseActivateRequest, LocalLoginRequest, LocalNmtModelActionRequest, LocalNmtTestRequest, LocalPasswordUpdateRequest, OcrRequest, ProjectCreate,
     SessionRequest, StateUpdate, StorageFolderPickRequest, StorageSettingsUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .sessions import SessionManager
@@ -288,6 +289,44 @@ def create_app() -> FastAPI:
                     return
 
             req_path = str(scope.get("path") or "")
+            if req_path.startswith("/api/") and req_path not in {
+                "/api/health",
+                "/api/session/heartbeat",
+                "/api/session/close",
+                "/api/license/status",
+                "/api/license/activate",
+                "/api/license/login",
+                "/api/license/logout",
+            }:
+                session_cookie = request.cookies.get(SESSION_COOKIE_NAME)
+                gate_state = SECURITY_GATE.inspect_status(session_token=session_cookie)
+                if not gate_state.get("licensed"):
+                    resp = JSONResponse(
+                        {
+                            "detail": gate_state.get("message") or "لایسنس معتبری روی این سیستم فعال نیست.",
+                            "code": str(gate_state.get("reason") or "LICENSE_REQUIRED").upper(),
+                            "licensed": False,
+                            "unlocked": False,
+                        },
+                        status_code=402,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await resp(scope, receive, send)
+                    return
+                if not gate_state.get("unlocked"):
+                    resp = JSONResponse(
+                        {
+                            "detail": gate_state.get("message") or "ابتدا رمز ورود محلی را وارد کنید.",
+                            "code": "LOGIN_REQUIRED",
+                            "licensed": True,
+                            "unlocked": False,
+                        },
+                        status_code=401,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await resp(scope, receive, send)
+                    return
+
             if req_path == "/" or req_path.endswith((".html", ".js", ".css")):
                 async def send_no_store(message: Any) -> None:
                     if message.get("type") == "http.response.start":
@@ -386,6 +425,14 @@ def create_app() -> FastAPI:
     async def ocr_error(_: Request, exc: OcrError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=503)
 
+    @app.exception_handler(LicenseError)
+    async def license_error(_: Request, exc: LicenseError) -> JSONResponse:
+        return JSONResponse(
+            {"detail": exc.message, "code": exc.code},
+            status_code=exc.status_code,
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.exception_handler(InvalidContextResponse)
     async def invalid_context_response(_: Request, exc: InvalidContextResponse) -> JSONResponse:
         return JSONResponse({"detail": str(exc), "kind": "invalid_context_response", "response_text": exc.response_text,
@@ -430,6 +477,56 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         return {"name": APP_NAME, "version": APP_VERSION, "offlineOcr": True, "scraping": False}
+
+    def _set_session_cookie(response: JSONResponse, token: str, request: Request) -> JSONResponse:
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=token,
+            httponly=True,
+            samesite="strict",
+            secure=(request.url.scheme == "https"),
+            path="/",
+        )
+        return response
+
+    @app.get("/api/license/status")
+    def license_status(request: Request) -> JSONResponse:
+        state = SECURITY_GATE.inspect_status(session_token=request.cookies.get(SESSION_COOKIE_NAME))
+        return JSONResponse(state, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/license/activate")
+    def license_activate(values: LicenseActivateRequest, request: Request) -> JSONResponse:
+        state, session_token = SECURITY_GATE.activate_token(
+            values.license_key,
+            reset_local_password=bool(values.reset_local_password),
+        )
+        activity.add(f"لایسنس برنامه با موفقیت فعال شد ({state.get('license', {}).get('planLabel', '')})", "success")
+        resp = JSONResponse(state, headers={"Cache-Control": "no-store"})
+        return _set_session_cookie(resp, session_token, request)
+
+    @app.post("/api/license/login")
+    def license_login(values: LocalLoginRequest, request: Request) -> JSONResponse:
+        state, session_token = SECURITY_GATE.login_with_password(values.password)
+        resp = JSONResponse(state, headers={"Cache-Control": "no-store"})
+        return _set_session_cookie(resp, session_token, request)
+
+    @app.post("/api/license/logout")
+    def license_logout(request: Request) -> JSONResponse:
+        SECURITY_GATE.revoke_session(request.cookies.get(SESSION_COOKIE_NAME))
+        state = SECURITY_GATE.inspect_status(session_token=None)
+        resp = JSONResponse(state, headers={"Cache-Control": "no-store"})
+        resp.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+        return resp
+
+    @app.put("/api/license/password")
+    def license_password_update(values: LocalPasswordUpdateRequest, request: Request) -> JSONResponse:
+        state, session_token = SECURITY_GATE.configure_local_password(
+            current_password=values.current_password,
+            new_password=values.new_password,
+            session_token=request.cookies.get(SESSION_COOKIE_NAME),
+        )
+        resp = JSONResponse(state, headers={"Cache-Control": "no-store"})
+        return _set_session_cookie(resp, session_token, request)
 
     @app.get("/api/activity")
     def activity_feed(after: int = 0) -> dict[str, Any]:

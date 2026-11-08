@@ -200,6 +200,19 @@ def ocr_stub(engine, image, language, contrast, precise, confidence):
     if r.json()['empty']: return []
     return [{'id':1,'text':'NEWLY READ OCR','tr':'','richHtml':'','enabled':True,'x0':5,'y0':5,'x1':180,'y1':45,'lineH':40,'conf':90}]
 studio_main.recognize_image = ocr_stub
+from pathlib import Path
+from comic_studio import _public_key, license_guard
+_seed, _pub = license_guard.ed25519_generate_keypair()
+_public_key.PUBLIC_VERIFY_KEY_HEX = _pub.hex()
+license_guard._LICENSE_DIR_OVERRIDE = Path(${JSON.stringify(path.join(temporary, 'license'))})
+license_guard._SECONDARY_ANCHOR_OVERRIDE = Path(${JSON.stringify(path.join(temporary, 'license_anchor'))})
+_tok = license_guard.issue_license_token(
+    private_seed_hex=_seed.hex(),
+    hardware_id=license_guard.compute_hardware_id(),
+    holder='کاربر مرورگر واقعی',
+    plan='lifetime',
+)
+license_guard.SECURITY_GATE.activate_token(_tok)
 from comic_studio.__main__ import main
 main()
 `;
@@ -769,7 +782,7 @@ main()
       });
       await page.mouse.move(previewCenter.x, previewCenter.y);
       await page.mouse.wheel({ deltaY: 90 });
-      await sleep(30);
+      await page.waitForFunction(() => document.querySelector('.editor-preview').scrollTop > 0, { timeout: 2000 }).catch(() => {});
       const afterPlainWheel = await page.evaluate(() => ({
         scrollTop: document.querySelector('.editor-preview').scrollTop,
         scale: state.editorScale,
@@ -2226,7 +2239,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert.equal(await page.$('#menu .hint'), null);
     await page.click('#helpTopBtn');
     await page.waitForSelector('#helpDialog[open]');
-    assert.equal(await page.$$eval('#helpNavList .help-nav-item', (els) => els.length), 14);
+    assert.equal(await page.$$eval('#helpNavList .help-nav-item', (els) => els.length), 15);
     assert.ok((await page.$eval('#helpContentArea', (el) => el.textContent)).includes('مثال عملی'));
     await page.type('#helpSearchInput', 'API Key');
     await page.waitForFunction(() => document.getElementById('helpContentArea').textContent.includes('Multi-Key Profiles'));
@@ -2486,7 +2499,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
       // v3.85–v4.09: Verify version badge ۴.۰۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, optional storage settings, race-free backup, built-in offline local translator, custom manual text boxes, watermarks, full-attribute box copy/paste/duplicate, API key priority ordering, lossless PDF import, and grouped-page translation
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۴ · Python', 'header shows version ۴.۱۴');
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۵ · Python', 'header shows version ۴.۱۵');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2805,7 +2818,53 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         'v4.12–v4.14 manual box font, size, 14 writing shapes (star, thought cloud, comic cloud) SVG, and rotation work in real Chromium',
       );
 
-      console.log('PASS: v3.81–v4.12 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, and v4.12 shapes/rotation/fonts');
+      // v4.15: Real Chromium E2E test of License Status Dialog + PBKDF2 Local Password Lock + Backend 401 Gate + Unlock
+      const v415LicInfo = await page.evaluate(async () => {
+        await openLicenseDialog();
+        const holder = document.getElementById('licInfoHolder')?.textContent?.trim();
+        const hwid = document.getElementById('licInfoHwid')?.textContent?.trim();
+        document.getElementById('licNewPwdInput').value = 'Browser#415';
+        document.getElementById('licConfirmPwdInput').value = 'Browser#415';
+        await saveLocalPasswordFromDialog();
+        closeDialog('licenseDialog');
+        await lockWorkspaceNow();
+        return {
+          holder,
+          hwidOk: Boolean(hwid && hwid.startsWith('CS4-')),
+          lockedClass: document.body.classList.contains('auth-locked'),
+          loginVisible: !document.getElementById('authLoginPane').classList.contains('hidden'),
+        };
+      });
+      assert.deepEqual(
+        v415LicInfo,
+        { holder: 'کاربر مرورگر واقعی', hwidOk: true, lockedClass: true, loginVisible: true },
+        'v4.15 license dialog sets local password and locks workspace in real Chromium',
+      );
+      const unauthProbe = await fetch(`${base}/api/projects`);
+      assert.equal(unauthProbe.status, 401, 'v4.15 backend blocks /api/projects with HTTP 401 while local password lock is active');
+
+      const v415Unlocked = await page.evaluate(async () => {
+        document.getElementById('gateLoginPasswordInput').value = 'Browser#415';
+        await submitGatePasswordLogin();
+        await openLicenseDialog();
+        document.getElementById('licCurrentPwdInput').value = 'Browser#415';
+        const rmPromise = removeLocalPasswordFromDialog();
+        await new Promise((r) => setTimeout(r, 40));
+        document.getElementById('appModalConfirm').click();
+        await rmPromise;
+        closeDialog('licenseDialog');
+        return {
+          unlockedOk: !document.body.classList.contains('auth-locked'),
+          pwdDisabledAgain: document.getElementById('lockAppMenuBtn').classList.contains('hidden'),
+        };
+      });
+      assert.deepEqual(
+        v415Unlocked,
+        { unlockedOk: true, pwdDisabledAgain: true },
+        'v4.15 local password unlocks and removes cleanly in real Chromium',
+      );
+
+      console.log('PASS: v3.81–v4.15 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, and v4.15 license/login guard');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
