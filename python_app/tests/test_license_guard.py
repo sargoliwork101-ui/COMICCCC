@@ -754,3 +754,95 @@ def test_seller_vault_256b_master_key_customer_crm_and_panel_http(tmp_path: Path
         server.server_close()
 
 
+def test_seller_panel_visual_and_font_parity_with_main_app(tmp_path: Path) -> None:
+    """v4.19: Seller License Manager serves bundled Vazirmatn.woff2 & icon128.png and matches Studio UI/theme/dialogs."""
+    import re
+    import threading
+    import urllib.request
+    from http.server import HTTPServer
+    from license_manager import SellerVault, build_seller_panel_handler
+
+    vault = SellerVault(
+        seller_dir=tmp_path / "seller_vault_v419",
+        public_key_py=tmp_path / "fake_pub.py",
+        vendor_json_path=tmp_path / "fake_vc.json",
+        vendor_py_path=tmp_path / "fake_vc.py",
+    )
+    vault.ensure_master_key(sync_source=True)
+    secret = "parity-secret-v419"
+    handler_cls = build_seller_panel_handler(vault, secret)
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+    try:
+        app_root = Path(__file__).resolve().parents[1]
+        expected_font = (app_root / "comic_studio" / "static" / "assets" / "Vazirmatn.woff2").read_bytes()
+        expected_logo = (app_root / "comic_studio" / "static" / "assets" / "icon128.png").read_bytes()
+
+        # 1. Offline bundled Vazirmatn.woff2 & icon128.png are served byte-identically
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/assets/Vazirmatn.woff2", timeout=5) as resp:
+            assert resp.status == 200
+            assert "font/woff2" in (resp.headers.get("Content-Type") or "")
+            assert resp.read() == expected_font
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/assets/icon128.png", timeout=5) as resp:
+            assert resp.status == 200
+            assert "image/png" in (resp.headers.get("Content-Type") or "")
+            assert resp.read() == expected_logo
+
+        # 2. Main HTML matches Studio's @font-face, CSS design tokens, light/dark toggle, .topbar, and zero native dialogs
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/?secret={secret}", timeout=5) as resp:
+            assert resp.status == 200
+            html = resp.read().decode("utf-8")
+
+        assert "@font-face{font-family:Vazirmatn;src:url('/assets/Vazirmatn.woff2') format('woff2')" in html
+        assert "font:13px/1.8 Vazirmatn,Tahoma,sans-serif" in html
+        for token in (
+            "--bg:#0b0d12",
+            "--surface:#10131a",
+            "--surface-2:#171b25",
+            "--panel:#13161e",
+            "--line:#252b38",
+            "--line-2:#333b4d",
+            "--text:#e8eaf2",
+            "--muted:#8a92a6",
+            "--a1:#8b7bff",
+            "--a2:#5e9dff",
+            "--grad:linear-gradient(135deg,#8b7bff,#5e9dff)",
+            "--grad-ok:linear-gradient(135deg,#10b981,#34d399)",
+            "body.light{",
+            "--bg:#f3f4f8",
+        ):
+            assert token in html, f"missing Studio design token: {token}"
+
+        assert '<header class="topbar">' in html
+        assert '<img class="logo" src="/assets/icon128.png"' in html
+        assert '<span class="ver">۴.۱۹ · پنل فروشنده</span>' in html
+        assert 'id="sellerThemeBtn"' in html
+        assert "comic-studio-theme" in html
+        assert 'id="sellerConfirmDialog"' in html
+
+        # Zero native browser confirm/alert/prompt calls inside <script>, plus valid JS syntax
+        script_match = re.search(r"<script>([\s\S]*?)</script>", html)
+        assert script_match is not None
+        js_body = script_match.group(1)
+        assert re.search(r"\b(window\.)?(confirm|alert|prompt)\s*\(", js_body) is None
+        import shutil
+        import subprocess
+        if shutil.which("node"):
+            chk = subprocess.run(
+                ["node", "-e", 'const vm=require("vm"),fs=require("fs");new vm.Script(fs.readFileSync(0,"utf8"));'],
+                input=js_body,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert chk.returncode == 0, f"Invalid JS syntax in _PANEL_HTML: {chk.stderr}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+

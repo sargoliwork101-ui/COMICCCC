@@ -2499,7 +2499,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
       // v3.85–v4.09: Verify version badge ۴.۰۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, optional storage settings, race-free backup, built-in offline local translator, custom manual text boxes, watermarks, full-attribute box copy/paste/duplicate, API key priority ordering, lossless PDF import, and grouped-page translation
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۸ · Python', 'header shows version ۴.۱۸');
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۹ · Python', 'header shows version ۴.۱۹');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2921,7 +2921,89 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         'v4.16–v4.17 live topbar remaining time, 24h trial banner (09361111111), 3-module license table, and unlicensed module modal work in real Chromium',
       );
 
-      console.log('PASS: v3.81–v4.18 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, and v4.15–v4.18 modular license/countdown/vendor-contact guard');
+      // v4.19: Verify Seller License Manager live in headless Chromium (Vazirmatn font, icon128.png, Studio colors, light/dark toggle, themed modal)
+      const sellerTmpDir = path.join(os.tmpdir(), `comic-seller-v419-${Date.now()}`);
+      fs.mkdirSync(sellerTmpDir, { recursive: true });
+      const sellerSecret = 'chromium-seller-v419';
+      const sellerProc = spawn(
+        python,
+        [
+          '-c',
+          [
+            'import pathlib, sys, time',
+            'from http.server import HTTPServer',
+            'sys.path.insert(0, "python_app")',
+            'from license_manager import SellerVault, build_seller_panel_handler',
+            'd = pathlib.Path(sys.argv[1])',
+            'v = SellerVault(seller_dir=d / "vault", public_key_py=d / "pub.py", vendor_json_path=d / "vc.json", vendor_py_path=d / "vc.py")',
+            'v.ensure_master_key(sync_source=True)',
+            'srv = HTTPServer(("127.0.0.1", 0), build_seller_panel_handler(v, sys.argv[2]))',
+            'print("SELLER_PORT=" + str(srv.server_address[1]), flush=True)',
+            'srv.serve_forever()',
+          ].join('; '),
+          sellerTmpDir,
+          sellerSecret,
+        ],
+        { cwd: repository, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      try {
+        const sellerPort = await new Promise((resolve, reject) => {
+          let buf = '';
+          const timer = setTimeout(() => reject(new Error('seller server start timeout')), 8000);
+          sellerProc.stdout.on('data', (chunk) => {
+            buf += chunk.toString('utf8');
+            const m = buf.match(/SELLER_PORT=(\d+)/);
+            if (m) {
+              clearTimeout(timer);
+              resolve(Number(m[1]));
+            }
+          });
+          sellerProc.on('exit', (code) => {
+            clearTimeout(timer);
+            reject(new Error(`seller server exited early: ${code}`));
+          });
+        });
+        const sellerPage = await browser.newPage();
+        await sellerPage.goto(`http://127.0.0.1:${sellerPort}/?secret=${sellerSecret}`, { waitUntil: 'networkidle0' });
+        const sellerVisualCheck = await sellerPage.evaluate(async () => {
+          await document.fonts.ready;
+          const fontLoaded = document.fonts.check('13px Vazirmatn');
+          const logo = document.querySelector('.topbar .brand img.logo');
+          const ver = document.querySelector('.topbar .brand .ver')?.textContent?.trim();
+          const darkBg = getComputedStyle(document.body).backgroundColor;
+          const fontFam = getComputedStyle(document.body).fontFamily;
+          document.getElementById('sellerThemeBtn').click();
+          const lightBg = getComputedStyle(document.body).backgroundColor;
+          const p = sellerConfirm('تست پنجرهٔ تأیید هماهنگ با برنامهٔ اصلی');
+          const modalOpen = document.getElementById('sellerConfirmDialog').open === true;
+          document.getElementById('sellerConfirmCancel').click();
+          const modalResult = await p;
+          return {
+            fontLoaded,
+            logoNaturalWidth: logo?.naturalWidth || 0,
+            ver,
+            darkBg,
+            lightBg,
+            hasVazirmatnInComputed: fontFam.toLowerCase().includes('vazirmatn'),
+            modalOpen,
+            modalResult,
+          };
+        });
+        await sellerPage.close();
+        assert.equal(sellerVisualCheck.fontLoaded, true, 'Vazirmatn.woff2 loads in Seller Panel');
+        assert.equal(sellerVisualCheck.logoNaturalWidth, 128, 'icon128.png loads in Seller Panel topbar');
+        assert.equal(sellerVisualCheck.ver, '۴.۱۹ · پنل فروشنده', 'Seller Panel topbar version badge matches Studio');
+        assert.equal(sellerVisualCheck.darkBg, 'rgb(11, 13, 18)', 'Seller Panel dark --bg matches Studio #0b0d12');
+        assert.equal(sellerVisualCheck.lightBg, 'rgb(243, 244, 248)', 'Seller Panel light --bg matches Studio #f3f4f8');
+        assert.equal(sellerVisualCheck.hasVazirmatnInComputed, true, 'Seller Panel body fontFamily uses Vazirmatn');
+        assert.equal(sellerVisualCheck.modalOpen, true, 'Seller Panel uses themed #sellerConfirmDialog');
+        assert.equal(sellerVisualCheck.modalResult, false, 'Seller Panel cancel resolves false cleanly');
+      } finally {
+        if (sellerProc.exitCode === null) sellerProc.kill('SIGTERM');
+        fs.rmSync(sellerTmpDir, { recursive: true, force: true });
+      }
+
+      console.log('PASS: v3.81–v4.19 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, v4.15–v4.18 modular license/vendor guard, and v4.19 Seller Panel visual/Vazirmatn parity');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

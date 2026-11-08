@@ -776,192 +776,212 @@ class SellerVault:
         return {"issued": issued, "status": status}
 
 
+_STATIC_ASSETS_DIR = APP_DIR / "comic_studio" / "static" / "assets"
+
+
 _PANEL_HTML = """<!doctype html>
 <html lang="fa" dir="rtl">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>پنل مدرن مدیریت مشتریان و صدور لایسنس — Comic OCR Studio</title>
+  <title>Comic OCR Studio — پنل مدیریت مشتریان و صدور لایسنس</title>
+  <link rel="icon" type="image/png" href="/assets/icon128.png">
   <style>
-    :root {
-      --bg: #070b14;
-      --bg-grad: radial-gradient(1100px 520px at 85% -10%, rgba(59,130,246,.18), transparent 60%),
-                 radial-gradient(900px 460px at 10% -5%, rgba(16,185,129,.13), transparent 55%);
-      --surface: rgba(17, 25, 40, 0.86);
-      --surface-2: #0f172a;
-      --surface-3: #1e293b;
-      --border: rgba(148, 163, 184, 0.18);
-      --border-strong: rgba(96, 165, 250, 0.45);
-      --text: #f8fafc;
-      --muted: #94a3b8;
-      --primary: #3b82f6;
-      --primary-h: #2563eb;
-      --ok: #10b981;
-      --ok-bg: rgba(16, 185, 129, 0.14);
-      --warn: #f59e0b;
-      --warn-bg: rgba(245, 158, 11, 0.15);
-      --danger: #ef4444;
-      --danger-bg: rgba(239, 68, 68, 0.15);
-      --radius: 16px;
+    @font-face{font-family:Vazirmatn;src:url('/assets/Vazirmatn.woff2') format('woff2');font-weight:100 900;font-display:swap}
+    :root{
+      --bg:#0b0d12;--surface:#10131a;--surface-2:#171b25;--panel:#13161e;
+      --line:#252b38;--line-2:#333b4d;--text:#e8eaf2;--muted:#8a92a6;--faint:#5b6375;
+      --a1:#8b7bff;--a2:#5e9dff;
+      --grad:linear-gradient(135deg,#8b7bff,#5e9dff);
+      --grad-ok:linear-gradient(135deg,#10b981,#34d399);
+      --danger:#fb7185;--warning:#fbbf24;
+      --shadow:0 18px 50px #0009;
     }
-    * { box-sizing: border-box; font-family: "Vazirmatn", Tahoma, "Segoe UI", sans-serif; }
-    body {
-      margin: 0; min-height: 100vh; background-color: var(--bg); background-image: var(--bg-grad);
-      color: var(--text); padding: 24px 18px 64px; line-height: 1.65;
+    body.light{
+      --bg:#f3f4f8;--surface:#fff;--surface-2:#f0f1f6;--panel:#fff;
+      --line:#dfe2eb;--line-2:#c9cfdd;--text:#202536;--muted:#667085;--faint:#98a2b3;
+      --shadow:0 18px 50px #24304a22;
     }
-    .shell { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
-    .hero {
-      background: var(--surface); backdrop-filter: blur(16px); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 20px 24px;
-      display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap;
-      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.35);
-    }
-    .hero-title { margin: 0; font-size: 21px; font-weight: 800; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .hero-sub { margin: 6px 0 0; font-size: 13px; color: var(--muted); max-width: 720px; }
-    .pill {
-      display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600;
-      padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); background: rgba(15,23,42,.7);
-    }
-    .pill-ok { background: var(--ok-bg); color: #34d399; border-color: rgba(16,185,129,.35); }
-    .pill-warn { background: var(--warn-bg); color: #fbbf24; border-color: rgba(245,158,11,.35); }
-    .pill-danger { background: var(--danger-bg); color: #f87171; border-color: rgba(239,68,68,.35); }
-    .pill-info { background: rgba(59,130,246,.15); color: #93c5fd; border-color: rgba(59,130,246,.35); }
-    .hero-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    *{box-sizing:border-box}
+    html,body{margin:0;min-height:100vh;background:radial-gradient(circle at 85% -20%,#29214c66,transparent 38%),var(--bg);color:var(--text);font:13px/1.8 Vazirmatn,Tahoma,sans-serif}
+    body.light{background:radial-gradient(circle at 85% -20%,#8b7bff20,transparent 42%),var(--bg)}
+    button,input,select,textarea{font:inherit;color:inherit}
+    input,textarea{user-select:text;-webkit-user-select:text}
+    code{font:700 11.5px/1.5 Consolas,"Courier New",monospace;padding:1px 6px;border-radius:6px;background:color-mix(in srgb,var(--a2) 13%,var(--bg));border:1px solid color-mix(in srgb,var(--a2) 34%,var(--line));color:var(--a2)}
 
-    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
-    .kpi-card {
-      background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 15px 18px;
-      display: flex; flex-direction: column; gap: 4px;
-    }
-    .kpi-label { font-size: 12.5px; color: var(--muted); }
-    .kpi-val { font-size: 26px; font-weight: 800; letter-spacing: -.5px; }
-    .kpi-ok .kpi-val { color: #34d399; }
-    .kpi-warn .kpi-val { color: #fbbf24; }
-    .kpi-danger .kpi-val { color: #f87171; }
-    .kpi-info .kpi-val { color: #60a5fa; }
+    /* Sticky Topbar — exact match with Comic OCR Studio main window */
+    .topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 18px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--surface) 88%,transparent);backdrop-filter:blur(14px);flex-wrap:wrap}
+    .topbar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .brand{display:flex;align-items:center;gap:10px}
+    .logo{width:34px;height:34px;border-radius:9px;box-shadow:0 6px 18px #8b7bff38}
+    .brand h1{margin:0;font-size:15px;font-weight:800;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .brand-sub{display:block;font-size:11px;color:var(--muted)}
+    .ver{font-size:11px;padding:1px 8px;border-radius:999px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--a1);font-weight:700}
 
-    .tabs-bar {
-      display: flex; gap: 8px; background: var(--surface); border: 1px solid var(--border);
-      padding: 6px; border-radius: 13px; width: fit-content; max-width: 100%; flex-wrap: wrap;
-    }
-    .tab-btn {
-      background: transparent; color: var(--muted); border: none; padding: 9px 18px;
-      border-radius: 9px; font-size: 13.5px; font-weight: 700; cursor: pointer; transition: .15s;
-      display: inline-flex; align-items: center; gap: 8px;
-    }
-    .tab-btn:hover { color: var(--text); background: rgba(255,255,255,.04); }
-    .tab-btn.active { background: var(--primary); color: #fff; box-shadow: 0 4px 14px rgba(59,130,246,.35); }
-    .tab-count {
-      font-size: 11px; padding: 1px 7px; border-radius: 999px;
-      background: rgba(255,255,255,.16); color: inherit;
-    }
-    .tab-pane { display: none; }
-    .tab-pane.active { display: block; }
+    /* Buttons & Icons — exact match with Comic OCR Studio (.bt / .btn-ico) */
+    .btn-ico{width:15px;height:15px;flex:0 0 auto;stroke:currentColor;fill:none;stroke-width:1.85;stroke-linecap:round;stroke-linejoin:round}
+    button,.bt{border:1px solid var(--line-2);background:var(--surface-2);color:var(--text);border-radius:9px;padding:7px 12px;cursor:pointer;transition:.16s;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;font-weight:600;font-size:12.5px}
+    button:hover:not(:disabled),.bt:hover:not(:disabled){border-color:var(--a1);transform:translateY(-1px)}
+    button:disabled,.bt:disabled{opacity:.46;cursor:not-allowed;transform:none}
+    button.primary,.bt.primary{background:var(--grad);border-color:transparent;color:#fff;font-weight:700;box-shadow:0 8px 22px #8b7bff30}
+    button.ok,button.success,.bt.success{background:var(--grad-ok);border-color:transparent;color:#05261c;font-weight:800}
+    body.light button.ok,body.light button.success,body.light .bt.success{color:#fff}
+    button.danger-ghost,button.danger,.bt.danger{color:var(--danger);border-color:#fb718548;background:color-mix(in srgb,var(--danger) 8%,var(--surface-2))}
+    button.danger-solid{background:linear-gradient(135deg,#e11d48,#fb7185);border-color:transparent;color:#fff;font-weight:700}
+    button.sm,.bt.sm{padding:4px 10px;font-size:11.5px;border-radius:8px}
+    .icon-close{width:30px;height:30px;padding:0;border-radius:8px;font-size:16px}
+    .setup-top-btn{background:color-mix(in srgb,var(--a1) 14%,var(--surface-2));border-color:color-mix(in srgb,var(--a1) 48%,var(--line-2));font-weight:700}
 
-    .card {
-      background: var(--surface); backdrop-filter: blur(14px); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 22px 24px; box-shadow: 0 14px 34px rgba(0,0,0,.28);
-    }
-    .sec-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
-    .sec-head h2 { margin: 0; font-size: 17px; color: #f1f5f9; }
-    .form-grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 13px; }
-    .form-grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 13px; margin-top: 12px; }
-    label.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #cbd5e1; font-weight: 600; }
-    .req { color: #f87171; margin-right: 3px; }
-    input, select, textarea {
-      background: #090f1d; color: var(--text); border: 1px solid var(--border);
-      border-radius: 10px; padding: 10px 12px; font-size: 13.5px; outline: none; transition: border-color .15s, box-shadow .15s;
-    }
-    input:focus, select:focus, textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(59,130,246,.18); }
-    .ltr { direction: ltr; text-align: left; font-family: Consolas, "Courier New", monospace; letter-spacing: .4px; }
+    /* Main Shell & Panels */
+    .shell{max-width:1260px;margin:0 auto;padding:16px 18px 68px;display:flex;flex-direction:column;gap:14px}
+    .panel,.card{background:color-mix(in srgb,var(--panel) 94%,transparent);border:1px solid var(--line);border-radius:13px;padding:18px 20px;box-shadow:0 10px 28px #00000018}
+    .status-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:13px 18px}
+    .status-strip-pills{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .status-strip-note{margin:6px 0 0;font-size:11.8px;color:var(--muted)}
 
-    button, .btn {
-      background: var(--surface-3); color: #f1f5f9; border: 1px solid rgba(148,163,184,.28); border-radius: 10px;
-      padding: 8px 14px; font-size: 12.8px; cursor: pointer; font-weight: 600; text-decoration: none;
-      display: inline-flex; align-items: center; justify-content: center; gap: 6px; transition: .15s;
-    }
-    button:hover, .btn:hover { background: #334155; border-color: rgba(148,163,184,.45); }
-    button.primary { background: linear-gradient(135deg, #3b82f6, #2563eb); border-color: #3b82f6; color: #fff; padding: 11px 22px; font-size: 14px; }
-    button.primary:hover { filter: brightness(1.08); }
-    button.ok { background: linear-gradient(135deg, #10b981, #059669); border-color: #10b981; color: #fff; }
-    button.danger-ghost { background: rgba(239,68,68,.12); color: #fca5a5; border-color: rgba(239,68,68,.3); }
-    button.danger-ghost:hover { background: rgba(239,68,68,.24); }
-    button.sm { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
+    /* Pills & Badges — exact match with Studio .summary-pill / .lic-pill */
+    .pill{display:inline-flex;align-items:center;gap:6px;padding:3.5px 11px;border-radius:999px;font-size:11.5px;font-weight:700;border:1px solid var(--line-2);background:var(--surface-2);color:var(--text);white-space:nowrap}
+    .pill-dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none}
+    .pill-ok{border-color:#10b98166;background:color-mix(in srgb,#10b981 12%,var(--surface-2));color:#34d399}
+    .pill-ok .pill-dot{background:#10b981;box-shadow:0 0 8px #10b98199}
+    body.light .pill-ok{color:#047857}
+    .pill-warn{border-color:#fbbf2466;background:color-mix(in srgb,#fbbf24 13%,var(--surface-2));color:#fbbf24}
+    body.light .pill-warn{color:#b45309}
+    .pill-danger{border-color:#fb718566;background:color-mix(in srgb,#fb7185 12%,var(--surface-2));color:#fb7185}
+    body.light .pill-danger{color:#be123c}
+    .pill-info{border-color:color-mix(in srgb,var(--a1) 50%,var(--line-2));background:color-mix(in srgb,var(--a1) 12%,var(--surface-2));color:var(--a2)}
+    body.light .pill-info{color:#4f46e5}
 
-    .mod-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 12px; margin-top: 12px; }
-    .mod-card {
-      background: rgba(9, 15, 29, 0.72); border: 1px solid var(--border); border-radius: 13px;
-      padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
-    }
-    .mod-card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-    .mod-card-title { font-weight: 700; font-size: 14px; color: #f8fafc; }
-    .mod-card-desc { font-size: 12px; color: var(--muted); margin-top: -4px; }
-    .quick-bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    /* KPI Summary Grid */
+    .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+    .kpi-card{background:color-mix(in srgb,var(--panel) 94%,transparent);border:1px solid var(--line);border-radius:13px;padding:14px 16px;display:flex;flex-direction:column;gap:3px}
+    .kpi-label{font-size:11.8px;color:var(--muted);font-weight:600}
+    .kpi-val{font-size:24px;font-weight:800;letter-spacing:-.4px;line-height:1.3}
+    .kpi-ok .kpi-val{color:#34d399}
+    .kpi-warn .kpi-val{color:var(--warning)}
+    .kpi-danger .kpi-val{color:var(--danger)}
+    .kpi-info .kpi-val{color:var(--a1)}
+    body.light .kpi-ok .kpi-val{color:#059669}
+    body.light .kpi-warn .kpi-val{color:#b45309}
+    body.light .kpi-danger .kpi-val{color:#e11d48}
 
-    .result-box {
-      margin-top: 18px; padding: 18px; border-radius: 14px;
-      background: linear-gradient(180deg, rgba(16,185,129,.1), rgba(9,15,29,.9));
-      border: 1px solid rgba(16,185,129,.4);
-    }
-    .filter-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
-    .filter-chip {
-      padding: 6px 12px; border-radius: 999px; font-size: 12px; background: #0b1324;
-      border: 1px solid var(--border); color: var(--muted); cursor: pointer;
-    }
-    .filter-chip.active { background: rgba(59,130,246,.2); color: #93c5fd; border-color: rgba(59,130,246,.5); }
+    /* Navigation Tabs — Studio .action-group capsule bar */
+    .tabs-bar{display:inline-flex;gap:6px;padding:5px;border-radius:12px;border:1px solid var(--line-2);background:color-mix(in srgb,var(--surface) 80%,var(--surface-2));width:fit-content;max-width:100%;flex-wrap:wrap}
+    .tab-btn{background:transparent;color:var(--muted);border:1px solid transparent;padding:7px 15px;border-radius:9px;font-size:12.5px;font-weight:700;cursor:pointer;transition:.16s}
+    .tab-btn:hover{color:var(--text);background:var(--surface-2);border-color:var(--line-2);transform:none}
+    .tab-btn.active{background:var(--grad);color:#fff;border-color:transparent;box-shadow:0 6px 18px #8b7bff35}
+    .tab-count{font-size:10.5px;padding:1px 7px;border-radius:999px;background:#ffffff28;color:inherit;font-weight:800}
+    body.light .tab-btn:not(.active) .tab-count{background:var(--line);color:var(--text)}
+    .tab-pane{display:none}
+    .tab-pane.active{display:block}
 
-    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: rgba(9,15,29,.55); }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { border-bottom: 1px solid var(--border); padding: 11px 12px; text-align: right; vertical-align: middle; }
-    th { color: #cbd5e1; font-weight: 700; background: rgba(15,23,42,.85); white-space: nowrap; }
-    tr:last-child td { border-bottom: none; }
-    tr:hover td { background: rgba(255,255,255,.02); }
-    .mod-mini-list { display: flex; gap: 5px; flex-wrap: wrap; }
-    .mod-mini { font-size: 11px; padding: 2px 8px; border-radius: 7px; border: 1px solid var(--border); white-space: nowrap; }
-    .mod-mini.st-lifetime, .mod-mini.st-active { background: var(--ok-bg); color: #34d399; border-color: rgba(16,185,129,.35); }
-    .mod-mini.st-expiring { background: var(--warn-bg); color: #fbbf24; border-color: rgba(245,158,11,.38); }
-    .mod-mini.st-expired { background: var(--danger-bg); color: #f87171; border-color: rgba(239,68,68,.35); }
-    .mod-mini.st-none { color: var(--muted); background: rgba(148,163,184,.08); }
+    /* Forms & Inputs — exact match with Studio inputs */
+    .sec-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+    .sec-head h2{margin:0;font-size:15.5px;font-weight:800;color:var(--text)}
+    .form-grid-4{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+    .form-grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-top:12px}
+    label.field{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted);font-weight:600}
+    .req{color:var(--danger);margin-right:3px}
+    input:not([type=checkbox]):not([type=file]),select,textarea{width:100%;border:1px solid var(--line-2);background:var(--bg);color:var(--text);border-radius:9px;padding:8px 11px;font-size:12.8px;outline:none;transition:border-color .15s,box-shadow .15s}
+    input:focus,select:focus,textarea:focus{border-color:var(--a1);box-shadow:0 0 0 3px color-mix(in srgb,var(--a1) 20%,transparent)}
+    .ltr{direction:ltr;text-align:left;font-family:Consolas,"Courier New",monospace;letter-spacing:.35px}
 
-    dialog.modal {
-      background: #111827; color: var(--text); border: 1px solid var(--border-strong);
-      border-radius: 16px; padding: 22px; width: min(520px, 94vw); box-shadow: 0 24px 60px rgba(0,0,0,.65);
-    }
-    dialog.modal::backdrop { background: rgba(3,7,18,.72); backdrop-filter: blur(4px); }
-    .toast {
-      position: fixed; bottom: 22px; left: 22px; padding: 11px 18px; border-radius: 12px;
-      background: #059669; color: #fff; font-size: 13.5px; font-weight: 600;
-      display: none; z-index: 999; box-shadow: 0 12px 30px rgba(0,0,0,.45);
-    }
-    .toast.err { background: var(--danger); }
+    /* Module Cards */
+    .mod-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(285px,1fr));gap:12px;margin-top:12px}
+    .mod-card{background:var(--surface-2);border:1px solid var(--line-2);border-radius:12px;padding:13px 15px;display:flex;flex-direction:column;gap:9px;transition:border-color .15s}
+    .mod-card:hover{border-color:color-mix(in srgb,var(--a1) 55%,var(--line-2))}
+    .mod-card-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+    .mod-card-title{font-weight:800;font-size:13.2px;color:var(--text)}
+    .mod-card-desc{font-size:11.5px;color:var(--muted);margin-top:-4px}
+    .quick-bar{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+
+    /* Issued Token Result Box */
+    .result-box{margin-top:16px;padding:15px 17px;border-radius:12px;background:color-mix(in srgb,#10b981 9%,var(--surface));border:1.5px solid #10b98166}
+    .preview-callout{margin-top:16px;padding:13px 15px;border-radius:11px;background:color-mix(in srgb,var(--a1) 8%,var(--surface));border:1px dashed color-mix(in srgb,var(--a1) 48%,var(--line-2))}
+
+    /* Filters & Tables */
+    .filter-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+    .filter-chip{padding:5px 12px;border-radius:999px;font-size:11.8px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--muted);cursor:pointer;font-weight:600}
+    .filter-chip.active{background:color-mix(in srgb,var(--a1) 18%,var(--surface-2));color:var(--a1);border-color:var(--a1);font-weight:800}
+    .table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+    table{width:100%;border-collapse:collapse;font-size:12.5px}
+    th,td{border-bottom:1px solid var(--line);padding:10px 12px;text-align:right;vertical-align:middle}
+    th{color:var(--muted);font-weight:800;font-size:11.8px;background:var(--surface-2);white-space:nowrap}
+    tr:last-child td{border-bottom:none}
+    tr:hover td{background:color-mix(in srgb,var(--a1) 4%,transparent)}
+    .mod-mini-list{display:flex;gap:5px;flex-wrap:wrap}
+    .mod-mini{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;border:1px solid var(--line-2);white-space:nowrap}
+    .mod-mini.st-lifetime,.mod-mini.st-active{background:color-mix(in srgb,#10b981 13%,var(--surface-2));color:#34d399;border-color:#10b98155}
+    body.light .mod-mini.st-lifetime,body.light .mod-mini.st-active{color:#047857}
+    .mod-mini.st-expiring{background:color-mix(in srgb,#fbbf24 14%,var(--surface-2));color:#fbbf24;border-color:#fbbf2466}
+    body.light .mod-mini.st-expiring{color:#b45309}
+    .mod-mini.st-expired{background:color-mix(in srgb,#fb7185 13%,var(--surface-2));color:#fb7185;border-color:#fb718555}
+    body.light .mod-mini.st-expired{color:#be123c}
+    .mod-mini.st-none{color:var(--muted);background:var(--surface-2)}
+
+    /* Dialogs (.dlg) & Confirmation Modal — exact match with Studio #appModalDialog */
+    dialog.dlg{width:min(540px,calc(100vw - 24px));border:1px solid var(--line-2);border-radius:16px;background:var(--surface);color:var(--text);padding:18px;box-shadow:var(--shadow)}
+    dialog.dlg::backdrop{background:#05070cb5;backdrop-filter:blur(5px)}
+    .dialog-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+    .dialog-head h3{margin:0;font-size:15.5px;font-weight:800}
+    .app-modal-title-wrap{display:flex;align-items:center;gap:10px}
+    .app-modal-badge{width:28px;height:28px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;background:color-mix(in srgb,var(--warning) 18%,var(--surface-2));color:var(--warning);border:1px solid color-mix(in srgb,var(--warning) 45%,var(--line-2))}
+    .app-modal-message{margin:4px 0 16px;font-size:13px;line-height:1.9;color:var(--text);white-space:pre-line}
+    .dialog-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:16px}
+
+    /* Bottom-Centered Toast — exact match with Studio #toast */
+    .toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);z-index:999;padding:9px 18px;border-radius:999px;background:var(--surface-2);border:1px solid var(--a1);box-shadow:var(--shadow);font-size:12.5px;font-weight:700;color:var(--text);display:none;max-width:min(92vw,680px);text-align:center}
+    .toast.err{border-color:var(--danger);background:color-mix(in srgb,var(--danger) 16%,var(--surface-2));color:var(--danger)}
+    ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:99px}
   </style>
 </head>
 <body>
-  <div class="shell">
-    <header class="hero">
+  <header class="topbar">
+    <div class="brand">
+      <img class="logo" src="/assets/icon128.png" alt="">
       <div>
-        <h1 class="hero-title">
-          <span>پنل هوشمند مشتریان و صدور لایسنس Comic OCR Studio</span>
-          <span class="pill pill-ok" id="keyBadge">در حال بررسی کلید مادر…</span>
+        <h1>Comic OCR Studio <span class="ver">۴.۱۹ · پنل فروشنده</span></h1>
+        <span class="brand-sub">مدیریت کلید مادر ۲۵۶ بایتی، بانک مشتریان و صدور لایسنس ماژولار آفلاین</span>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button type="button" id="openSetupTabHeroBtn" class="bt setup-top-btn" title="تعریف کلید مادر اختصاصی و اطلاعات تماس داخل فایل EXE">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.7M8 12.5v1.7M1.8 8h1.7M12.5 8h1.7M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M12.4 3.6l-1.2 1.2M4.8 11.2l-1.2 1.2"/></svg>
+        <span>تنظیم کلید مادر و اطلاعات EXE</span>
+      </button>
+      <button class="bt success" id="selfActivateBtn" type="button" title="فعال‌سازی دائمی هر ۳ ماژول روی همین کامپیوتر شما">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 4.3 6.5 11 2.8 7.3"/></svg>
+        <span>فعال‌سازی دائمی سیستم خودم</span>
+      </button>
+      <button class="bt" id="backupKeyBtn" type="button" title="دانلود فایل پشتیبان کلید مادر ۲۵۶ بایتی و لیست مشتریان">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2v7.6M5.2 7l2.8 2.8L10.8 7M2.6 12.2v1.3h10.8v-1.3"/></svg>
+        <span>پشتیبان کلید و مشتریان</span>
+      </button>
+      <label class="bt" style="margin:0;cursor:pointer" title="بازیابی فایل پشتیبان قبلی (.seller-key.json)">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 10.2V2.6M5.2 5.4 8 2.6l2.8 2.8M2.6 12.2v1.3h10.8v-1.3"/></svg>
+        <span>بازیابی پشتیبان</span>
+        <input id="restoreKeyInput" type="file" accept=".json,application/json" hidden>
+      </label>
+      <button class="bt" id="sellerThemeBtn" type="button" title="تغییر تم روشن / تیره هماهنگ با برنامهٔ اصلی">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.8 9.8A5.4 5.4 0 0 1 6.2 3.2a5.5 5.5 0 1 0 6.6 6.6Z"/></svg>
+        <span id="sellerThemeLabel">تم روشن / تیره</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="shell">
+    <section class="panel status-strip">
+      <div>
+        <div class="status-strip-pills">
+          <span class="pill pill-ok"><span class="pill-dot" aria-hidden="true"></span><span id="keyBadge">در حال بررسی کلید مادر…</span></span>
           <span class="pill pill-info" id="schemeBadge">کلید مادر ۲۵۶ بایتی + Ed25519</span>
-        </h1>
-        <p class="hero-sub">
-          کلید مادر ۲۵۶ بایتی (۲۰۴۸ بیت) و کلید خصوصی امضای دیجیتال شما فقط روی همین سیستم نگهداری می‌شود و هرگز وارد فایل <code>.exe</code> مشتری نمی‌شود. مشخصات کامل همهٔ خریداران به صورت خودکار در بانک مشتریان ذخیره می‌گردد.
-        </p>
-        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
           <span class="pill pill-warn" id="thisPcBadge">کد سیستم شما: …</span>
         </div>
+        <p class="status-strip-note">
+          کلید مادر ۲۵۶ بایتی (۲۰۴۸ بیت) و کلید خصوصی امضای دیجیتال فقط روی سیستم خودتان نگهداری می‌شود و هرگز وارد پوشهٔ <code>dist</code> یا فایل نصاب <code>.exe</code> مشتری نمی‌شود.
+        </p>
       </div>
-      <div class="hero-actions">
-        <button type="button" id="openSetupTabHeroBtn" style="border-color:rgba(96,165,250,.55);background:rgba(59,130,246,.18);color:#bfdbfe">⚙️ تنظیم کلید مادر و اطلاعات داخل EXE</button>
-        <button class="ok" id="selfActivateBtn" type="button">فعال‌سازی دائمی روی سیستم خودم</button>
-        <button id="backupKeyBtn" type="button">📦 دانلود پشتیبان کامل</button>
-        <label class="btn" style="margin:0;cursor:pointer">
-          <span>♻️ بازیابی پشتیبان</span>
-          <input id="restoreKeyInput" type="file" accept=".json,application/json" hidden>
-        </label>
-      </div>
-    </header>
+    </section>
 
     <section class="kpi-grid">
       <div class="kpi-card kpi-info">
@@ -982,23 +1002,37 @@ _PANEL_HTML = """<!doctype html>
       </div>
     </section>
 
-    <nav class="tabs-bar" role="tablist">
-      <button class="tab-btn active" type="button" data-tab="issue">🔑 صدور لایسنس جدید</button>
-      <button class="tab-btn" type="button" data-tab="customers">👥 لیست کاربران و مشتریان <span class="tab-count" id="tabCustCount">۰</span></button>
-      <button class="tab-btn" type="button" data-tab="history">📜 تاریخچهٔ کلیدهای صادرشده <span class="tab-count" id="tabHistCount">۰</span></button>
-      <button class="tab-btn" type="button" data-tab="setup">⚙️ کلید مادر و اطلاعات داخل EXE</button>
+    <nav class="tabs-bar" role="tablist" aria-label="بخش‌های پنل فروشنده">
+      <button class="tab-btn active" type="button" data-tab="issue">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.5" cy="8.5" r="2.8"/><path d="M8 7.5h6M11.5 7.5v2.3M13.5 7.5v1.8"/></svg>
+        <span>صدور لایسنس جدید</span>
+      </button>
+      <button class="tab-btn" type="button" data-tab="customers">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.2" cy="5.5" r="2.3"/><path d="M2.2 13a4 4 0 0 1 8 0M11 4.2a2 2 0 0 1 0 3.8M13.8 13a3.3 3.3 0 0 0-2.5-3.1"/></svg>
+        <span>لیست کاربران و مشتریان</span>
+        <span class="tab-count" id="tabCustCount">۰</span>
+      </button>
+      <button class="tab-btn" type="button" data-tab="history">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8v3.5l2.4 1.5"/></svg>
+        <span>تاریخچهٔ کلیدهای صادرشده</span>
+        <span class="tab-count" id="tabHistCount">۰</span>
+      </button>
+      <button class="tab-btn" type="button" data-tab="setup">
+        <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.9 13 4v3.8c0 3.2-2.1 5.4-5 6.3-2.9-.9-5-3.1-5-6.3V4l5-2.1Z"/></svg>
+        <span>کلید مادر و اطلاعات داخل EXE</span>
+      </button>
     </nav>
 
     <!-- TAB 1: ISSUE LICENSE -->
     <section id="pane-issue" class="tab-pane active">
-      <div class="card">
+      <div class="panel">
         <div class="sec-head">
           <h2>مشخصات خریدار و صدور کلید لایسنس ماژولار</h2>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <select id="quickFillCustomer" style="min-width:250px">
-              <option value="">⚡ انتخاب سریع از مشتریان قبلی (تمدید)…</option>
+            <select id="quickFillCustomer" style="width:auto;min-width:255px">
+              <option value="">انتخاب سریع از مشتریان قبلی (تمدید)…</option>
             </select>
-            <button type="button" class="sm" id="clearIssueFormBtn">پاک‌کردن فرم</button>
+            <button type="button" class="bt sm" id="clearIssueFormBtn">پاک‌کردن فرم</button>
           </div>
         </div>
 
@@ -1029,16 +1063,16 @@ _PANEL_HTML = """<!doctype html>
           </label>
         </div>
 
-        <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+        <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">
           <div class="sec-head" style="margin-bottom:10px">
-            <strong style="font-size:14.5px;color:#93c5fd">تعیین وضعیت و مدت اعتبار هر یک از ۳ بخش نرم‌افزار:</strong>
+            <strong style="font-size:13.5px;color:var(--a2)">تعیین وضعیت و مدت اعتبار هر یک از ۳ بخش نرم‌افزار:</strong>
             <div class="quick-bar">
-              <button type="button" class="sm" data-quick="all:lifetime">هر ۳ بخش دائمی</button>
-              <button type="button" class="sm" data-quick="all:sub:30">هر ۳ بخش ۱ ماهه (۳۰ روز)</button>
-              <button type="button" class="sm" data-quick="all:sub:365">هر ۳ بخش ۱ ساله</button>
-              <button type="button" class="sm" data-quick="only:ocr">فقط OCR (۳۰ روز)</button>
-              <button type="button" class="sm" data-quick="only:translation">فقط ترجمه (۳۰ روز)</button>
-              <button type="button" class="sm" data-quick="only:editing">فقط ویرایش (۳۰ روز)</button>
+              <button type="button" class="bt sm" data-quick="all:lifetime">هر ۳ بخش دائمی</button>
+              <button type="button" class="bt sm" data-quick="all:sub:30">هر ۳ بخش ۱ ماهه (۳۰ روز)</button>
+              <button type="button" class="bt sm" data-quick="all:sub:365">هر ۳ بخش ۱ ساله</button>
+              <button type="button" class="bt sm" data-quick="only:ocr">فقط OCR (۳۰ روز)</button>
+              <button type="button" class="bt sm" data-quick="only:translation">فقط ترجمه (۳۰ روز)</button>
+              <button type="button" class="bt sm" data-quick="only:editing">فقط ویرایش (۳۰ روز)</button>
             </div>
           </div>
 
@@ -1094,16 +1128,19 @@ _PANEL_HTML = """<!doctype html>
         </div>
 
         <div style="margin-top:18px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-          <button class="primary" id="issueBtn" type="button">✨ ثبت مشتری و صدور کلید لایسنس امضاشده</button>
-          <span style="font-size:12.5px;color:var(--muted)">پس از صدور، نام، نام خانوادگی و موبایل مشتری خودکار در «لیست کاربران» ذخیره می‌شود.</span>
+          <button class="bt primary" id="issueBtn" type="button" style="padding:9px 20px;font-size:13.2px">
+            <svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 4.3 6.5 11 2.8 7.3"/></svg>
+            <span>ثبت مشتری و صدور کلید لایسنس امضاشده</span>
+          </button>
+          <span style="font-size:12px;color:var(--muted)">پس از صدور، نام، نام خانوادگی و موبایل مشتری خودکار در «لیست کاربران» ذخیره می‌شود.</span>
         </div>
 
         <div id="issuedResult" class="result-box" style="display:none">
-          <div style="font-size:13.5px;color:#6ee7b7;font-weight:700;margin-bottom:8px" id="issuedMeta"></div>
+          <div style="font-size:13px;color:#34d399;font-weight:800;margin-bottom:8px" id="issuedMeta"></div>
           <textarea id="issuedToken" class="ltr" rows="3" readonly style="width:100%"></textarea>
           <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
-            <button class="primary" id="copyTokenBtn" type="button">📋 کپی کلید لایسنس</button>
-            <button class="ok" id="copyReadyMsgBtn" type="button">💬 کپی پیام آمادهٔ ارسال برای مشتری (تلگرام / واتساپ / پیامک)</button>
+            <button class="bt primary" id="copyTokenBtn" type="button">کپی کلید لایسنس</button>
+            <button class="bt success" id="copyReadyMsgBtn" type="button">کپی پیام آمادهٔ ارسال برای مشتری (تلگرام / واتساپ / پیامک)</button>
           </div>
         </div>
       </div>
@@ -1111,17 +1148,17 @@ _PANEL_HTML = """<!doctype html>
 
     <!-- TAB 2: CUSTOMERS CRM -->
     <section id="pane-customers" class="tab-pane">
-      <div class="card">
+      <div class="panel">
         <div class="sec-head">
           <h2>بانک اطلاعات کاربران و مشتریان</h2>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button type="button" id="addCustomerManualBtn">+ ثبت مشتری جدید بدون صدور آنی</button>
-            <button type="button" id="exportCsvBtn">📥 خروجی اکسل (CSV)</button>
+            <button type="button" class="bt" id="addCustomerManualBtn">+ ثبت مشتری جدید بدون صدور آنی</button>
+            <button type="button" class="bt primary" id="exportCsvBtn">خروجی اکسل (CSV)</button>
           </div>
         </div>
 
         <div class="filter-bar">
-          <input id="custSearchBox" placeholder="جستجوی نام، نام خانوادگی، شماره موبایل، کد سیستم یا یادداشت…" style="min-width:300px;flex:1">
+          <input id="custSearchBox" placeholder="جستجوی نام، نام خانوادگی، شماره موبایل، کد سیستم یا یادداشت…" style="min-width:280px;flex:1">
           <button type="button" class="filter-chip active" data-cfilter="all">همه</button>
           <button type="button" class="filter-chip" data-cfilter="active">دارای لایسنس فعال</button>
           <button type="button" class="filter-chip" data-cfilter="expiring">نزدیک به انقضا</button>
@@ -1148,10 +1185,10 @@ _PANEL_HTML = """<!doctype html>
 
     <!-- TAB 3: ISSUED KEYS HISTORY -->
     <section id="pane-history" class="tab-pane">
-      <div class="card">
+      <div class="panel">
         <div class="sec-head">
           <h2>تاریخچهٔ کامل کلیدهای صادرشده</h2>
-          <input id="searchBox" placeholder="جستجوی نام، موبایل یا کد سیستم…" style="min-width:280px">
+          <input id="searchBox" placeholder="جستجوی نام، موبایل یا کد سیستم…" style="width:auto;min-width:280px">
         </div>
         <div class="table-wrap">
           <table>
@@ -1173,12 +1210,12 @@ _PANEL_HTML = """<!doctype html>
 
     <!-- TAB 4: MASTER KEY & PRE-EXE VENDOR CONTACT SETUP -->
     <section id="pane-setup" class="tab-pane">
-      <div class="card" style="margin-bottom:18px">
+      <div class="panel" style="margin-bottom:14px">
         <div class="sec-head">
           <h2>۱. تعریف یا تغییر کلید مادر ۲۵۶ بایتی شما (قبل از ساخت فایل EXE)</h2>
           <span class="pill pill-ok" id="setupFpPill">شناسهٔ فعلی: …</span>
         </div>
-        <p style="font-size:13px;color:var(--muted);margin:0 0 14px">
+        <p style="font-size:12.5px;color:var(--muted);margin:0 0 14px">
           شما می‌توانید <strong>خودتان هر کلید یا عبارت رمزی دلخواه</strong> (حداقل ۱۶ کاراکتر — مثلاً یک جمله یا رمز طولانی شخصی، و یا ۵۱۲ کاراکتر هگز ۲۵۶ بایتی) به برنامه بدهید، یا با دکمهٔ زیر یک کلید تصادفی ۲۵۶ بایتی بسازید. به محض زدن «ثبت کلید مادر»، کلید خصوصی فقط روی سیستم خودتان ذخیره می‌شود و کلید عمومی تأیید خودکار در کدهای برنامه قرار می‌گیرد تا هنگام اجرای <code>build_windows_offline.bat</code> داخل فایل <code>.exe</code> پخته شود.
         </p>
 
@@ -1191,7 +1228,7 @@ _PANEL_HTML = """<!doctype html>
             <span>کلید مادر ۲۵۶ بایتی فعلی شما (محرمانه — فقط روی سیستم شما):</span>
             <div style="display:flex;gap:6px">
               <input id="currentMasterHexBox" class="ltr" value="••••••••••••••••••••••••••••••••" readonly style="flex:1">
-              <button type="button" id="revealCurrentMasterBtn" class="sm">👁 نمایش و کپی</button>
+              <button type="button" id="revealCurrentMasterBtn" class="bt sm">نمایش و کپی</button>
             </div>
           </label>
         </div>
@@ -1202,17 +1239,17 @@ _PANEL_HTML = """<!doctype html>
         </label>
 
         <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-          <button type="button" id="genRandomMasterBtn">🎲 ساخت پیشنهادی کلید ۲۵۶ بایتی تصادفی در کادر بالا</button>
-          <button type="button" class="primary" id="saveCustomMasterBtn">🔐 ثبت این کلید مادر و همگام‌سازی برای ساخت EXE</button>
+          <button type="button" class="bt" id="genRandomMasterBtn">ساخت پیشنهادی کلید ۲۵۶ بایتی تصادفی در کادر بالا</button>
+          <button type="button" class="bt primary" id="saveCustomMasterBtn">ثبت این کلید مادر و همگام‌سازی برای ساخت EXE</button>
         </div>
       </div>
 
-      <div class="card">
+      <div class="panel">
         <div class="sec-head">
           <h2>۲. ویرایش اطلاعات تماس، پیام‌رسان‌ها و سایت داخل نرم‌افزار مشتری (قبل از ساخت EXE)</h2>
           <span class="pill pill-info">ذخیره در vendor_contact.json و هستهٔ EXE</span>
         </div>
-        <p style="font-size:13px;color:var(--muted);margin:0 0 14px">
+        <p style="font-size:12.5px;color:var(--muted);margin:0 0 14px">
           هر اطلاعاتی که در کادرهای زیر وارد و ذخیره کنید، مستقیماً در صفحهٔ قفل و پنجرهٔ لایسنس برنامهٔ مشتری نمایش داده می‌شود (هر کادری را هم که خالی بگذارید، به صورت خودکار در برنامهٔ مشتری مخفی می‌ماند). پس از ذخیره، کافی است <code>build_windows_offline.bat</code> را اجرا کنید تا فایل نصاب <code>.exe</code> دقیقاً با همین مشخصات ساخته شود.
         </p>
 
@@ -1253,39 +1290,59 @@ _PANEL_HTML = """<!doctype html>
           </label>
         </div>
 
-        <div style="margin-top:16px;padding:14px 16px;border-radius:12px;background:#090f1d;border:1px dashed rgba(96,165,250,.4)">
-          <strong style="font-size:12.5px;color:#93c5fd;display:block;margin-bottom:6px">👁 پیش‌نمایش زنده در نرم‌افزار مشتری:</strong>
-          <div id="vcLivePreview" style="font-size:13px;color:#e2e8f0;display:flex;flex-direction:column;gap:4px"></div>
+        <div class="preview-callout">
+          <strong style="font-size:12px;color:var(--a2);display:block;margin-bottom:6px">پیش‌نمایش زنده در نرم‌افزار مشتری:</strong>
+          <div id="vcLivePreview" style="font-size:12.5px;color:var(--text);display:flex;flex-direction:column;gap:4px"></div>
         </div>
 
         <div style="margin-top:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-          <button type="button" class="ok" id="saveVendorContactBtn" style="padding:11px 22px;font-size:14px">💾 ذخیرهٔ اطلاعات تماس در برنامه (آماده برای ساخت EXE)</button>
+          <button type="button" class="bt success" id="saveVendorContactBtn" style="padding:9px 20px;font-size:13.2px">ذخیرهٔ اطلاعات تماس در برنامه (آماده برای ساخت EXE)</button>
         </div>
       </div>
     </section>
   </div>
 
   <!-- Edit / Add Customer Modal -->
-  <dialog id="custEditModal" class="modal">
-    <h3 id="custModalTitle" style="margin:0 0 14px;font-size:16.5px">ویرایش مشخصات مشتری</h3>
+  <dialog id="custEditModal" class="dlg">
+    <div class="dialog-head">
+      <h3 id="custModalTitle">ویرایش مشخصات مشتری</h3>
+      <button id="modalCloseXBtn" class="bt icon-close" type="button" aria-label="بستن">×</button>
+    </div>
     <input type="hidden" id="modalCustId">
-    <div style="display:flex;flex-direction:column;gap:11px">
+    <div style="display:flex;flex-direction:column;gap:10px">
       <label class="field"><span>نام <span class="req">*</span></span><input id="modalFirstName"></label>
       <label class="field"><span>نام خانوادگی <span class="req">*</span></span><input id="modalLastName"></label>
       <label class="field"><span>شماره موبایل <span class="req">*</span></span><input id="modalPhone" class="ltr" placeholder="09123456789"></label>
       <label class="field"><span>کد سیستم (اختیاری)</span><input id="modalHwid" class="ltr" placeholder="CS4-XXXX-XXXX-XXXX-XXXX"></label>
       <label class="field"><span>یادداشت فروشنده</span><input id="modalNote"></label>
     </div>
-    <div style="margin-top:18px;display:flex;justify-content:flex-end;gap:8px">
-      <button type="button" id="modalCancelBtn">انصراف</button>
-      <button type="button" class="primary" id="modalSaveBtn">ذخیرهٔ اطلاعات مشتری</button>
+    <div class="dialog-actions">
+      <button type="button" class="bt" id="modalCancelBtn">انصراف</button>
+      <button type="button" class="bt primary" id="modalSaveBtn">ذخیرهٔ اطلاعات مشتری</button>
     </div>
   </dialog>
 
-  <div id="toast" class="toast"></div>
+  <!-- Themed Confirmation Modal (matches Studio #appModalDialog — zero native confirm) -->
+  <dialog id="sellerConfirmDialog" class="dlg" role="alertdialog" aria-modal="true" aria-labelledby="sellerConfirmTitle" aria-describedby="sellerConfirmMessage">
+    <div class="dialog-head">
+      <div class="app-modal-title-wrap">
+        <span class="app-modal-badge" aria-hidden="true">؟</span>
+        <h3 id="sellerConfirmTitle">تأیید عملیات</h3>
+      </div>
+      <button id="sellerConfirmClose" class="bt icon-close" type="button" aria-label="بستن">×</button>
+    </div>
+    <p id="sellerConfirmMessage" class="app-modal-message" dir="rtl"></p>
+    <div class="dialog-actions">
+      <button id="sellerConfirmCancel" class="bt" type="button">انصراف</button>
+      <button id="sellerConfirmAccept" class="bt primary" type="button">تأیید</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script>
     const SECRET = new URLSearchParams(location.search).get('secret') || '';
+    const THEME_STORAGE_KEY = 'comic-studio-theme';
     let SUPPORT_PHONE = '09361111111';
     let vendorContact = {};
     const MODS = ['ocr', 'translation', 'editing'];
@@ -1294,7 +1351,49 @@ _PANEL_HTML = """<!doctype html>
     let customerItems = [];
     let custFilter = 'all';
     let lastIssued = null;
+    let confirmResolver = null;
     const $ = (id) => document.getElementById(id);
+
+    function applyTheme(mode) {
+      const isLight = mode === 'light';
+      document.body.classList.toggle('light', isLight);
+      $('sellerThemeLabel').textContent = isLight ? 'تم تیره' : 'تم روشن';
+    }
+    try {
+      applyTheme(localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark');
+    } catch { applyTheme('dark'); }
+    $('sellerThemeBtn').addEventListener('click', () => {
+      const next = document.body.classList.contains('light') ? 'dark' : 'light';
+      applyTheme(next);
+      try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch {}
+    });
+
+    function sellerConfirm(message, { title = 'تأیید عملیات', confirmText = 'تأیید', danger = false } = {}) {
+      const dlg = $('sellerConfirmDialog');
+      $('sellerConfirmTitle').textContent = title;
+      $('sellerConfirmMessage').textContent = message;
+      const okBtn = $('sellerConfirmAccept');
+      okBtn.textContent = confirmText;
+      okBtn.className = danger ? 'bt danger-solid' : 'bt primary';
+      return new Promise((resolve) => {
+        confirmResolver = resolve;
+        if (!dlg.open) dlg.showModal();
+        okBtn.focus();
+      });
+    }
+    function closeSellerConfirm(accepted) {
+      const dlg = $('sellerConfirmDialog');
+      if (dlg.open) dlg.close();
+      if (confirmResolver) {
+        const fn = confirmResolver;
+        confirmResolver = null;
+        fn(Boolean(accepted));
+      }
+    }
+    $('sellerConfirmAccept').onclick = () => closeSellerConfirm(true);
+    $('sellerConfirmCancel').onclick = () => closeSellerConfirm(false);
+    $('sellerConfirmClose').onclick = () => closeSellerConfirm(false);
+    $('sellerConfirmDialog').addEventListener('cancel', (ev) => { ev.preventDefault(); closeSellerConfirm(false); });
 
     function toFaNum(n) {
       return Number(n || 0).toLocaleString('fa-IR');
@@ -1419,7 +1518,7 @@ _PANEL_HTML = """<!doctype html>
     function renderQuickSelect() {
       const sel = $('quickFillCustomer');
       const prev = sel.value;
-      sel.innerHTML = '<option value="">⚡ انتخاب سریع از مشتریان قبلی (تمدید)…</option>';
+      sel.innerHTML = '<option value="">انتخاب سریع از مشتریان قبلی (تمدید)…</option>';
       for (const c of customerItems) {
         const opt = document.createElement('option');
         opt.value = c.customerId;
@@ -1488,20 +1587,24 @@ _PANEL_HTML = """<!doctype html>
         actWrap.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
 
         const renewBtn = document.createElement('button');
-        renewBtn.className = 'sm ok';
-        renewBtn.textContent = '⚡ تمدید / صدور کلید';
+        renewBtn.className = 'bt sm success';
+        renewBtn.textContent = 'تمدید / صدور کلید';
         renewBtn.onclick = () => prefillIssueFromCustomer(c);
 
         const editBtn = document.createElement('button');
-        editBtn.className = 'sm';
-        editBtn.textContent = '✏️ ویرایش';
+        editBtn.className = 'bt sm';
+        editBtn.textContent = 'ویرایش';
         editBtn.onclick = () => openCustomerModal(c);
 
         const delBtn = document.createElement('button');
-        delBtn.className = 'sm danger-ghost';
+        delBtn.className = 'bt sm danger';
         delBtn.textContent = 'حذف';
         delBtn.onclick = async () => {
-          if (!confirm(`آیا از حذف «${c.fullName}» از لیست مشتریان مطمئن هستید؟`)) return;
+          const confirmed = await sellerConfirm(
+            `آیا از حذف «${c.fullName}» از بانک مشتریان مطمئن هستید؟`,
+            { title: 'حذف مشتری از لیست', confirmText: 'بله، حذف شود', danger: true }
+          );
+          if (!confirmed) return;
           try {
             await callApi('/api/customer/delete', 'POST', { customer_id: c.customerId });
             await refreshInfo();
@@ -1537,6 +1640,7 @@ _PANEL_HTML = """<!doctype html>
     }
     $('addCustomerManualBtn').onclick = () => openCustomerModal(null);
     $('modalCancelBtn').onclick = () => $('custEditModal').close();
+    $('modalCloseXBtn').onclick = () => $('custEditModal').close();
     $('modalSaveBtn').onclick = async () => {
       try {
         await callApi('/api/customer/save', 'POST', {
@@ -1587,9 +1691,9 @@ _PANEL_HTML = """<!doctype html>
         const td5 = document.createElement('td'); td5.textContent = item.hardwareId || ''; td5.className = 'ltr'; td5.style.fontSize = '12px';
         const td6 = document.createElement('td');
         const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap';
-        const btnKey = document.createElement('button'); btnKey.className = 'sm'; btnKey.textContent = 'کپی کلید';
+        const btnKey = document.createElement('button'); btnKey.className = 'bt sm'; btnKey.textContent = 'کپی کلید';
         btnKey.onclick = async () => { await navigator.clipboard.writeText(item.token); notify('کلید لایسنس کپی شد.'); };
-        const btnMsg = document.createElement('button'); btnMsg.className = 'sm ok'; btnMsg.textContent = 'پیام آماده';
+        const btnMsg = document.createElement('button'); btnMsg.className = 'bt sm success'; btnMsg.textContent = 'پیام آماده';
         btnMsg.onclick = async () => { await navigator.clipboard.writeText(buildReadyMessage(item)); notify('پیام آمادهٔ ارسال کپی شد.'); };
         wrap.append(btnKey, btnMsg);
         td6.appendChild(wrap);
@@ -1671,9 +1775,11 @@ _PANEL_HTML = """<!doctype html>
         $('customMasterInput').focus();
         return;
       }
-      if (!confirm('آیا مطمئن هستید که این کلید به عنوان کلید مادر اصلی شما ثبت و داخل کدهای برنامه (برای ساخت EXE) همگام‌سازی شود؟\n(توجه: اگر قبلاً با کلید دیگری لایسنس صادر کرده باشید، فایل EXE جدید فقط کلیدهای امضاشده با این کلید مادر جدید را می‌پذیرد.)')) {
-        return;
-      }
+      const confirmed = await sellerConfirm(
+        'آیا مطمئن هستید که این کلید به عنوان کلید مادر اصلی شما ثبت و داخل کدهای برنامه (برای ساخت EXE) همگام‌سازی شود؟\\n\\nتوجه: اگر قبلاً با کلید دیگری لایسنس صادر کرده باشید، فایل EXE جدید فقط کلیدهای امضاشده با این کلید مادر جدید را می‌پذیرد.',
+        { title: 'ثبت کلید مادر جدید و همگام‌سازی با EXE', confirmText: 'بله، ثبت و همگام‌سازی شود', danger: false }
+      );
+      if (!confirmed) return;
       try {
         const res = await callApi('/api/set-master-key', 'POST', { raw_secret: raw });
         $('currentMasterHexBox').value = '••••••••••••••••••••••••••••••••';
@@ -1795,6 +1901,10 @@ _PANEL_HTML = """<!doctype html>
 
 def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[BaseHTTPRequestHandler]:
     """Create the HTTP handler class for the Seller Panel (reusable in unit tests)."""
+    allowed_static: dict[str, tuple[Path, str]] = {
+        "/assets/Vazirmatn.woff2": (_STATIC_ASSETS_DIR / "Vazirmatn.woff2", "font/woff2"),
+        "/assets/icon128.png": (_STATIC_ASSETS_DIR / "icon128.png", "image/png"),
+    }
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:
@@ -1815,6 +1925,20 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlsplit(self.path)
+            if parsed.path in allowed_static:
+                asset_path, mime_type = allowed_static[parsed.path]
+                if not asset_path.is_file():
+                    self._send_json({"detail": "فایل ثابت یافت نشد."}, HTTPStatus.NOT_FOUND)
+                    return
+                asset_bytes = asset_path.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", mime_type)
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.send_header("Content-Length", str(len(asset_bytes)))
+                self.end_headers()
+                self.wfile.write(asset_bytes)
+                return
+
             if parsed.path == "/":
                 qs = parse_qs(parsed.query)
                 given_q = (qs.get("secret") or [""])[0]

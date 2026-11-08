@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.18"
+    assert health.json()["version"] == "4.19"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۱۸ · Python</span>' in index_html
+    assert '<span class="ver">۴.۱۹ · Python</span>' in index_html
     assert 'id="licenseTopStatusBtn"' in index_html
     assert 'id="copyGateOrderMsgBtn"' in index_html
     assert "09361111111" in index_html
@@ -3294,7 +3294,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.18"
+    assert APP_VERSION == "4.19"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"

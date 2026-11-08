@@ -3,7 +3,7 @@ setlocal EnableExtensions
 chcp 65001 >nul
 cd /d "%~dp0"
 
-title Comic OCR Studio - Seller License Generator
+title Comic OCR Studio 4.19 - Seller License Generator
 
 rem Seller-only launcher (never shipped inside customer dist\ComicOCRStudio builds).
 set "PYTHON_EXE="

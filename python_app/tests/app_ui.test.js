@@ -2173,7 +2173,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas418: verText.includes('۴.۱۸'),
+            verHas419: verText.includes('۴.۱۹'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2192,8 +2192,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.18 displays version 4.18 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas418 === true
+      'v4.00/v4.19 displays version 4.19 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas419 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
