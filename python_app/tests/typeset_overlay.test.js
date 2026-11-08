@@ -212,11 +212,27 @@ assert(hrOnly.some((point) => point.text.includes('─')), 'separator-only block
 {
   assert.ok(Typeset.FONT_STACKS && Typeset.FONT_STACKS.tahoma.includes('Tahoma'), 'FONT_STACKS exposes curated font families');
   assert.match(Typeset.resolveFontStack('Comic Sans MS'), /Comic Sans MS/, 'resolveFontStack resolves Comic Sans MS');
-  assert.deepStrictEqual(Typeset.BOX_SHAPES, ['rect', 'ellipse', 'pill', 'diamond', 'hexagon', 'cloud'], 'BOX_SHAPES exposes all 6 shapes');
+  assert.deepStrictEqual(
+    Typeset.BOX_SHAPES,
+    ['rect', 'ellipse', 'pill', 'cloud', 'thought', 'speech', 'star', 'burst', 'seal', 'diamond', 'hexagon', 'octagon', 'heart', 'banner'],
+    'BOX_SHAPES exposes all 14 writing shapes',
+  );
   assert.equal(Typeset.normalizeBoxShape('cloud'), 'cloud');
+  assert.equal(Typeset.normalizeBoxShape('star'), 'star');
+  assert.equal(Typeset.normalizeBoxShape('thought'), 'thought');
+  assert.equal(Typeset.normalizeBoxShape('speech'), 'speech');
+  assert.equal(Typeset.normalizeBoxShape('burst'), 'burst');
+  assert.equal(Typeset.normalizeBoxShape('heart'), 'heart');
   assert.equal(Typeset.normalizeBoxShape('unknown'), 'rect');
   assert.equal(Typeset.normalizeCornerRadius(145), 100);
   assert.equal(Typeset.normalizeBoxAngle(375), 15);
+  const thoughtInsets = Typeset.shapeInsets(200, 120, 'thought', 0);
+  assert.ok(thoughtInsets.padBottom > thoughtInsets.padTop && thoughtInsets.padX >= 28, 'thought cloud reserves extra bottom inset for bubble trail');
+  const starInsets = Typeset.shapeInsets(200, 200, 'star', 0);
+  assert.ok(starInsets.padX >= 46 && starInsets.padY >= 48, '5-point star keeps text safely inside inner star core');
+  assert.ok((Typeset.shapeSvgPath(160, 100, 'thought', 0).match(/A /g) || []).length >= 4, 'thought cloud SVG path includes trailing bubbles');
+  assert.ok((Typeset.shapeSvgPath(160, 160, 'star', 0).match(/ L /g) || []).length === 9, '5-point star SVG path has 10 vertices (1 M + 9 L)');
+  assert.ok((Typeset.shapeSvgPath(160, 160, 'burst', 0).match(/ L /g) || []).length === 23, '12-spike burst SVG path has 24 vertices');
 
   const shapeOps = [];
   const savedCreate = global.document.createElement;
@@ -235,7 +251,9 @@ assert(hrOnly.some((point) => point.text.includes('─')), 'separator-only block
           translate(x, y) { shapeOps.push(['translate', x, y]); },
           rotate(r) { shapeOps.push(['rotate', Number(r.toFixed(4))]); },
           beginPath() { shapeOps.push(['beginPath']); },
-          moveTo() {}, lineTo() {}, quadraticCurveTo() {}, arc() {},
+          moveTo(x, y) { shapeOps.push(['moveTo', Math.round(x), Math.round(y)]); },
+          lineTo(x, y) { shapeOps.push(['lineTo', Math.round(x), Math.round(y)]); },
+          quadraticCurveTo() {}, arc() {},
           ellipse(cx, cy, rx, ry) { shapeOps.push(['ellipse', cx, cy, rx, ry]); },
           closePath() {},
           fill() { shapeOps.push(['fill', this.fillStyle]); },
@@ -247,11 +265,21 @@ assert(hrOnly.some((point) => point.text.includes('─')), 'separator-only block
       },
     };
   };
-  Typeset.render({ width: 200, height: 120 }, [{
-    id: 1, x0: 20, y0: 20, x1: 140, y1: 80,
-    tr: 'سلام کمیک', richHtml: '<span style="font-family:Tahoma">سلام کمیک</span>',
-    enabled: true, bg: '#ffeeaa', shape: 'ellipse', angle: 30, fontFamily: 'Impact',
-  }]);
+  Typeset.render({ width: 240, height: 180 }, [
+    {
+      id: 1, x0: 20, y0: 20, x1: 140, y1: 80,
+      tr: 'سلام کمیک', richHtml: '<span style="font-family:Tahoma">سلام کمیک</span>',
+      enabled: true, bg: '#ffeeaa', shape: 'ellipse', angle: 30, fontFamily: 'Impact',
+    },
+    {
+      id: 2, x0: 150, y0: 20, x1: 230, y1: 100,
+      tr: '', manual: true, enabled: true, bg: 'white', shape: 'star', angle: 0,
+    },
+    {
+      id: 3, x0: 20, y0: 95, x1: 140, y1: 170,
+      tr: 'فکر عمیق', manual: true, enabled: true, bg: '#e0f2fe', shape: 'thought', angle: 0,
+    },
+  ]);
   global.document.createElement = savedCreate;
   assert.ok(Typeset.resolveFontStack('Georgia').startsWith('Georgia,'), 'Georgia resolves to dedicated serif stack');
   assert.ok(Typeset.resolveFontStack('Arial Black').includes('Arial Black'), 'Arial Black resolves to dedicated display stack');
@@ -259,8 +287,10 @@ assert(hrOnly.some((point) => point.text.includes('─')), 'separator-only block
   assert.ok(shapeOps.some((op) => op[0] === 'rotate' && Math.abs(op[1] - 0.5236) < 0.01), '30deg box rotates canvas context around box center');
   assert.ok(shapeOps.some((op) => op[0] === 'ellipse' && op[3] === 60 && op[4] === 30), 'ellipse shape builds exact half-width/half-height path');
   assert.ok(shapeOps.some((op) => op[0] === 'fill' && op[1] === '#ffeeaa'), 'custom hex bg fills shaped path');
+  assert.ok(shapeOps.some((op) => op[0] === 'fill' && op[1] === '#ffffff'), 'empty manual star box immediately paints its white star fill');
+  assert.ok(shapeOps.some((op) => op[0] === 'fill' && op[1] === '#e0f2fe'), 'thought cloud fills custom sky-blue contour and trailing bubbles');
   assert.ok(shapeOps.some((op) => op[0] === 'fillText' && String(op[2]).includes('Tahoma')), 'inline span font-family reaches fillText font');
-  console.log('PASS: v4.12–v4.13 font stacks, shapes, corner radius, rotation, and custom hex bg in Typeset');
+  console.log('PASS: v4.12–v4.14 font stacks, 14 writing shapes (star/cloud/thought/speech/burst/heart), corner radius, rotation, and custom hex bg in Typeset');
 }
 delete global.document;
 console.log('PASS: rich text justifies and list markers survive output rendering');

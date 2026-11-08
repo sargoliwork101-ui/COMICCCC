@@ -2129,7 +2129,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas413: verText.includes('۴.۱۳'),
+            verHas414: verText.includes('۴.۱۴'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2148,8 +2148,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.13 displays version 4.13 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas413 === true
+      'v4.00/v4.14 displays version 4.14 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas414 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3778,6 +3778,34 @@ function check(name, condition) {
         && v413Check.bmpClosed === true
         && v413Check.wmCleared === true,
       JSON.stringify(v413Check),
+    );
+
+    const v414ShapesCheck = await vm.runInContext(`
+      (() => {
+        const shapeOpts = [...($('editorBoxShape')?.options || [])].map((o) => o.value);
+        openHelpDialog('visual-editor');
+        const ch9Text = $('helpContentArea')?.textContent || '';
+        closeDialog('helpDialog');
+        const emptyManualStar = { id: 91, manual: true, enabled: true, tr: '', bg: 'white', shape: 'star' };
+        const emptyOcrStar = { id: 92, manual: false, enabled: true, tr: '', bg: 'white', shape: 'star' };
+        return {
+          shapeOpts,
+          hasOverlayForManualStar: hasOverlayText({ blocks: [emptyManualStar] }, 'translation'),
+          hasOverlayInNoneMode: hasOverlayText({ blocks: [emptyManualStar] }, 'none'),
+          hasOverlayForEmptyOcr: hasOverlayText({ blocks: [emptyOcrStar] }, 'translation'),
+          helpHasStarAndThought: ch9Text.includes('ستاره (۵پر)') && ch9Text.includes('ابر فکر') && ch9Text.includes('حباب گفتگو') && ch9Text.includes('ابر کمیک'),
+        };
+      })()
+    `, context);
+    check(
+      'v4.14 exposes all 14 writing shapes (star, burst, seal, cloud, thought, speech, heart, banner, etc.), renders manual shaped box fill before typing, and documents shapes in Help Chapter 9',
+      v414ShapesCheck.shapeOpts.length === 14
+        && ['star', 'burst', 'seal', 'cloud', 'thought', 'speech', 'heart', 'banner', 'octagon'].every((k) => v414ShapesCheck.shapeOpts.includes(k))
+        && v414ShapesCheck.hasOverlayForManualStar === true
+        && v414ShapesCheck.hasOverlayInNoneMode === false
+        && v414ShapesCheck.hasOverlayForEmptyOcr === false
+        && v414ShapesCheck.helpHasStarAndThought === true,
+      JSON.stringify(v414ShapesCheck),
     );
   }
 

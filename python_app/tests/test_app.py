@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.13"
+    assert health.json()["version"] == "4.14"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۱۳ · Python</span>' in index_html
+    assert '<span class="ver">۴.۱۴ · Python</span>' in index_html
     assert "مدیریت مدل‌های OCR" in index_html
     assert "مدیریت ترجمه‌ها" in index_html
     assert 'id="deleteModelsMenuBtn"' not in index_html
@@ -3291,7 +3291,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.13"
+    assert APP_VERSION == "4.14"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -4768,6 +4768,102 @@ def test_v413_full_audit_backend_fixes(client, tmp_path, monkeypatch):
         doc_xml = zf.read("word/document.xml").decode("utf-8")
         assert "کادر دستی فارسی در حالت OCR" in doc_xml
         assert 'w:ascii="Arial Black"' in doc_xml
+
+
+def test_v414_writing_shapes_pil_docx_and_pptx(client):
+    """v4.14 regression test covering all 14 writing shapes (star, burst, seal, cloud, thought,
+    speech, octagon, heart, banner, etc.) across PIL masks, Visual DOCX, and Visual PPTX exports.
+    """
+    from comic_studio.exporter import (
+        _ALLOWED_BOX_SHAPES,
+        _draw_shaped_box_pil,
+        _normalize_box_shape,
+        _pptx_prst_geom_xml,
+        _shape_insets_px,
+    )
+
+    assert len(_ALLOWED_BOX_SHAPES) == 14
+    for sh in _ALLOWED_BOX_SHAPES:
+        assert _normalize_box_shape(sh) == sh
+        canvas = Image.new("RGB", (220, 180), (30, 40, 50))
+        _draw_shaped_box_pil(
+            canvas, 20, 20, 200, 160, (255, 255, 255), shape=sh, corner_radius_pct=20.0, angle_deg=0.0
+        )
+        # Center of the main body (upper half for callouts) must receive the white fill
+        assert canvas.getpixel((110, 75)) == (255, 255, 255), f"shape {sh} did not fill interior"
+        canvas.close()
+
+    # Thought and speech reserve larger bottom insets than top insets
+    px_t, pt_t, pb_t = _shape_insets_px(200, 140, "thought", 0.0)
+    assert pb_t > pt_t and px_t >= 28.0
+    assert 'prst="star5"' in _pptx_prst_geom_xml("star", 0.0)
+    assert 'prst="star12"' in _pptx_prst_geom_xml("burst", 0.0)
+    assert 'prst="star8"' in _pptx_prst_geom_xml("seal", 0.0)
+    assert 'prst="cloudCallout"' in _pptx_prst_geom_xml("thought", 0.0)
+    assert 'prst="wedgeRoundRectCallout"' in _pptx_prst_geom_xml("speech", 0.0)
+    assert 'prst="heart"' in _pptx_prst_geom_xml("heart", 0.0)
+    assert 'prst="ribbon2"' in _pptx_prst_geom_xml("banner", 0.0)
+
+    proj = client.post("/api/projects", json={"name": "پروژه شکل‌های ۴.۱۴"}).json()
+    pid = proj["id"]
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 320), (40, 50, 60)).save(buf, format="PNG")
+    up = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("shapes.png", buf.getvalue(), "image/png"))],
+    )
+    assert up.status_code == 200
+    state = up.json()
+    iid = state["images"][0]["id"]
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1, "x0": 20, "y0": 20, "x1": 180, "y1": 140,
+            "text": "", "tr": "ستارهٔ درخشان", "manual": True, "enabled": True,
+            "shape": "star", "bg": "#fff3b0", "angle": -10,
+        },
+        {
+            "id": 2, "x0": 200, "y0": 20, "x1": 380, "y1": 150,
+            "text": "", "tr": "ابر فکر حباب‌دار", "manual": True, "enabled": True,
+            "shape": "thought", "bg": "white", "angle": 0,
+        },
+        {
+            "id": 3, "x0": 20, "y0": 170, "x1": 200, "y1": 300,
+            "text": "", "tr": "فریاد انفجاری!", "manual": True, "enabled": True,
+            "shape": "burst", "bg": "#ffd6d6", "angle": 8,
+        },
+        {
+            "id": 4, "x0": 220, "y0": 170, "x1": 380, "y1": 300,
+            "text": "", "tr": "", "manual": True, "enabled": True,
+            "shape": "speech", "bg": "white", "angle": 0,
+        },
+    ]
+    assert client.put(f"/api/projects/{pid}/state", json={"state": state}).status_code == 200
+
+    pptx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "pptx", "image_ids": [iid], "pptx_layout": "visual", "pptx_mode": "translation"},
+    )
+    assert pptx_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(pptx_res.content)) as zf:
+        slide_xml = zf.read("ppt/slides/slide1.xml").decode("utf-8")
+        assert 'prst="star5"' in slide_xml
+        assert 'prst="cloudCallout"' in slide_xml
+        assert 'prst="star12"' in slide_xml
+        assert 'prst="wedgeRoundRectCallout"' in slide_xml
+        assert "ستارهٔ درخشان" in slide_xml
+        assert "ابر فکر حباب‌دار" in slide_xml
+
+    docx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "docx", "image_ids": [iid], "docx_layout": "visual", "docx_mode": "translation"},
+    )
+    assert docx_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(docx_res.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "ستارهٔ درخشان" in doc_xml
+        assert "فریاد انفجاری!" in doc_xml
+        assert "comicbox_4" in doc_xml
+
 
 
 

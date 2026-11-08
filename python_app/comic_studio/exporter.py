@@ -667,9 +667,35 @@ def _clean_font_family(value: Any) -> str | None:
     return None
 
 
+_ALLOWED_BOX_SHAPES = frozenset({
+    "rect", "ellipse", "pill", "cloud", "thought", "speech",
+    "star", "burst", "seal", "diamond", "hexagon", "octagon", "heart", "banner",
+})
+
+_CLOUD_CUBIC_SEGMENTS: tuple[tuple[float, float, float, float, float, float], ...] = (
+    (0.05, 0.18, 0.16, 0.05, 0.29, 0.14),
+    (0.32, 0.01, 0.46, 0.00, 0.50, 0.11),
+    (0.54, 0.00, 0.68, 0.01, 0.71, 0.14),
+    (0.84, 0.05, 0.95, 0.18, 0.88, 0.34),
+    (1.00, 0.39, 1.00, 0.61, 0.88, 0.66),
+    (0.95, 0.82, 0.84, 0.95, 0.71, 0.86),
+    (0.68, 0.99, 0.54, 1.00, 0.50, 0.89),
+    (0.46, 1.00, 0.32, 0.99, 0.29, 0.86),
+    (0.16, 0.95, 0.05, 0.82, 0.12, 0.66),
+    (0.00, 0.61, 0.00, 0.39, 0.12, 0.34),
+)
+
+_HEART_CUBIC_SEGMENTS: tuple[tuple[float, float, float, float, float, float], ...] = (
+    (0.58, 0.02, 0.96, 0.02, 0.99, 0.31),
+    (0.99, 0.58, 0.74, 0.78, 0.50, 0.98),
+    (0.26, 0.78, 0.01, 0.58, 0.01, 0.31),
+    (0.04, 0.02, 0.42, 0.02, 0.50, 0.21),
+)
+
+
 def _normalize_box_shape(value: Any) -> str:
     s = str(value or "rect").strip().lower()
-    return s if s in {"rect", "ellipse", "pill", "diamond", "hexagon", "cloud"} else "rect"
+    return s if s in _ALLOWED_BOX_SHAPES else "rect"
 
 
 def _normalize_corner_radius_pct(value: Any) -> float:
@@ -693,21 +719,123 @@ def _normalize_angle_deg(value: Any) -> float:
     return 0.0 if abs(wrapped) < 0.05 else round(wrapped, 2)
 
 
+def _shape_insets_px(
+    bw: float,
+    bh: float,
+    shape: str = "rect",
+    corner_radius_pct: float = 0.0,
+) -> tuple[float, float, float]:
+    """Return `(pad_x, pad_top, pad_bottom)` in pixels matching `typeset.js:shapeInsets`."""
+    base_x = _box_inset_px(bw)
+    base_y = _box_inset_px(bh)
+    sh = _normalize_box_shape(shape)
+    cr = _normalize_corner_radius_pct(corner_radius_pct)
+    if sh == "rect":
+        if cr <= 0.0:
+            return base_x, base_y, base_y
+        r_px = (cr / 100.0) * (min(bw, bh) / 2.0)
+        diag = r_px * 0.293
+        return max(base_x, diag), max(base_y, diag), max(base_y, diag)
+    if sh == "pill":
+        r_px = min(bw, bh) / 2.0
+        py = max(base_y, r_px * 0.16)
+        return max(base_x, r_px * 0.32), py, py
+    if sh == "ellipse":
+        py = max(base_y, bh * 0.12)
+        return max(base_x, bw * 0.12), py, py
+    if sh == "cloud":
+        py = max(base_y, bh * 0.15)
+        return max(base_x, bw * 0.14), py, py
+    if sh == "thought":
+        return max(base_x, bw * 0.14), max(base_y, bh * 0.13), max(base_y, bh * 0.29)
+    if sh == "speech":
+        return max(base_x, bw * 0.10), max(base_y, bh * 0.10), max(base_y, bh * 0.24)
+    if sh == "star":
+        py = max(base_y, bh * 0.24)
+        return max(base_x, bw * 0.23), py, py
+    if sh in ("burst", "seal"):
+        py = max(base_y, bh * 0.16)
+        return max(base_x, bw * 0.16), py, py
+    if sh == "diamond":
+        py = max(base_y, bh * 0.18)
+        return max(base_x, bw * 0.18), py, py
+    if sh == "hexagon":
+        py = max(base_y, bh * 0.08)
+        return max(base_x, bw * 0.11), py, py
+    if sh == "octagon":
+        py = max(base_y, bh * 0.11)
+        return max(base_x, bw * 0.11), py, py
+    if sh == "heart":
+        return max(base_x, bw * 0.19), max(base_y, bh * 0.20), max(base_y, bh * 0.27)
+    if sh == "banner":
+        return max(base_x, bw * 0.12), base_y, base_y
+    return base_x, base_y, base_y
+
+
 def _pptx_prst_geom_xml(shape: str, corner_radius_pct: float) -> str:
-    if shape == "ellipse":
-        return '<a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>'
     if shape == "pill":
         return '<a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 50000"/></a:avLst></a:prstGeom>'
-    if shape == "diamond":
-        return '<a:prstGeom prst="diamond"><a:avLst/></a:prstGeom>'
-    if shape == "hexagon":
-        return '<a:prstGeom prst="hexagon"><a:avLst/></a:prstGeom>'
-    if shape == "cloud":
-        return '<a:prstGeom prst="cloud"><a:avLst/></a:prstGeom>'
+    prst_map = {
+        "ellipse": "ellipse",
+        "cloud": "cloud",
+        "thought": "cloudCallout",
+        "speech": "wedgeRoundRectCallout",
+        "star": "star5",
+        "burst": "star12",
+        "seal": "star8",
+        "diamond": "diamond",
+        "hexagon": "hexagon",
+        "octagon": "octagon",
+        "heart": "heart",
+        "banner": "ribbon2",
+    }
+    if shape in prst_map:
+        return f'<a:prstGeom prst="{prst_map[shape]}"><a:avLst/></a:prstGeom>'
     if corner_radius_pct > 0.0:
         adj = max(0, min(50000, int(round(corner_radius_pct * 500.0))))
         return f'<a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val {adj}"/></a:avLst></a:prstGeom>'
     return '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+
+
+def _star_polygon_points(n_points: int, inner_ratio: float, pw: float, ph: float) -> list[tuple[float, float]]:
+    raw: list[tuple[float, float]] = []
+    for idx in range(n_points * 2):
+        ang = -math.pi / 2.0 + (idx * math.pi) / n_points
+        rad = 0.5 if idx % 2 == 0 else 0.5 * inner_ratio
+        raw.append((0.5 + rad * math.cos(ang), 0.5 + rad * math.sin(ang)))
+    xs = [pt[0] for pt in raw]
+    ys = [pt[1] for pt in raw]
+    min_x, span_x = min(xs), max(1e-6, max(xs) - min(xs))
+    min_y, span_y = min(ys), max(1e-6, max(ys) - min(ys))
+    return [
+        (((px - min_x) / span_x) * (pw - 1.0), ((py - min_y) / span_y) * (ph - 1.0))
+        for px, py in raw
+    ]
+
+
+def _eval_cubic_contour(
+    pw: float,
+    ph: float,
+    start_fx: float,
+    start_fy: float,
+    segments: tuple[tuple[float, float, float, float, float, float], ...],
+    steps_per_seg: int = 12,
+) -> list[tuple[float, float]]:
+    cur_x = start_fx * (pw - 1.0)
+    cur_y = start_fy * (ph - 1.0)
+    pts: list[tuple[float, float]] = [(cur_x, cur_y)]
+    for cx1, cy1, cx2, cy2, ex, ey in segments:
+        p1x, p1y = cx1 * (pw - 1.0), cy1 * (ph - 1.0)
+        p2x, p2y = cx2 * (pw - 1.0), cy2 * (ph - 1.0)
+        p3x, p3y = ex * (pw - 1.0), ey * (ph - 1.0)
+        for step in range(1, steps_per_seg + 1):
+            t = step / steps_per_seg
+            mt = 1.0 - t
+            bx = (mt ** 3) * cur_x + 3.0 * (mt ** 2) * t * p1x + 3.0 * mt * (t ** 2) * p2x + (t ** 3) * p3x
+            by = (mt ** 3) * cur_y + 3.0 * (mt ** 2) * t * p1y + 3.0 * mt * (t ** 2) * p2y + (t ** 3) * p3y
+            pts.append((bx, by))
+        cur_x, cur_y = p3x, p3y
+    return pts
 
 
 def _draw_shaped_box_pil(
@@ -738,30 +866,55 @@ def _draw_shaped_box_pil(
     elif shape == "pill":
         rad = max(1, min(pw, ph) // 2)
         mdraw.rounded_rectangle([0, 0, pw - 1, ph - 1], radius=rad, fill=255)
+    elif shape == "star":
+        mdraw.polygon(_star_polygon_points(5, 0.52, float(pw), float(ph)), fill=255)
+    elif shape == "burst":
+        mdraw.polygon(_star_polygon_points(12, 0.76, float(pw), float(ph)), fill=255)
+    elif shape == "seal":
+        mdraw.polygon(_star_polygon_points(8, 0.74, float(pw), float(ph)), fill=255)
     elif shape == "diamond":
         mdraw.polygon([(pw / 2.0, 0.0), (pw - 1.0, ph / 2.0), (pw / 2.0, ph - 1.0), (0.0, ph / 2.0)], fill=255)
     elif shape == "hexagon":
-        cut = min(pw * 0.22, ph * 0.5)
+        cut = pw * 0.18
         mdraw.polygon(
-            [(cut, 0.0), (pw - cut, 0.0), (pw - 1.0, ph / 2.0), (pw - cut, ph - 1.0), (cut, ph - 1.0), (0.0, ph / 2.0)],
+            [(cut, 0.0), (pw - 1.0 - cut, 0.0), (pw - 1.0, ph / 2.0), (pw - 1.0 - cut, ph - 1.0), (cut, ph - 1.0), (0.0, ph / 2.0)],
             fill=255,
         )
-    elif shape == "cloud":
-        mdraw.ellipse([pw * 0.08, ph * 0.14, pw * 0.92, ph * 0.86], fill=255)
-        lobes = [
-            (0.22, 0.26, 0.22, 0.24),
-            (0.50, 0.19, 0.26, 0.22),
-            (0.78, 0.26, 0.22, 0.24),
-            (0.86, 0.52, 0.18, 0.26),
-            (0.76, 0.76, 0.23, 0.23),
-            (0.50, 0.81, 0.26, 0.22),
-            (0.24, 0.76, 0.23, 0.23),
-            (0.14, 0.52, 0.18, 0.26),
-        ]
-        for cx_f, cy_f, rx_f, ry_f in lobes:
-            lcx, lcy = pw * cx_f, ph * cy_f
-            lrx, lry = pw * rx_f, ph * ry_f
-            mdraw.ellipse([lcx - lrx, lcy - lry, lcx + lrx, lcy + lry], fill=255)
+    elif shape == "octagon":
+        dx, dy = pw * 0.22, ph * 0.22
+        mdraw.polygon(
+            [
+                (dx, 0.0), (pw - 1.0 - dx, 0.0), (pw - 1.0, dy), (pw - 1.0, ph - 1.0 - dy),
+                (pw - 1.0 - dx, ph - 1.0), (dx, ph - 1.0), (0.0, ph - 1.0 - dy), (0.0, dy),
+            ],
+            fill=255,
+        )
+    elif shape == "banner":
+        dx = pw * 0.10
+        mdraw.polygon(
+            [(0.0, 0.0), (pw - 1.0, 0.0), (pw - 1.0 - dx, ph / 2.0), (pw - 1.0, ph - 1.0), (0.0, ph - 1.0), (dx, ph / 2.0)],
+            fill=255,
+        )
+    elif shape in ("cloud", "thought"):
+        body_h = ph * 0.82 if shape == "thought" else float(ph)
+        mdraw.polygon(_eval_cubic_contour(float(pw), body_h, 0.12, 0.34, _CLOUD_CUBIC_SEGMENTS), fill=255)
+        if shape == "thought":
+            b1cx, b1cy, b1rx, b1ry = pw * 0.27, ph * 0.885, max(1.0, pw * 0.055), max(1.0, ph * 0.042)
+            mdraw.ellipse([b1cx - b1rx, b1cy - b1ry, b1cx + b1rx, b1cy + b1ry], fill=255)
+            b2cx, b2cy, b2rx, b2ry = pw * 0.18, ph * 0.960, max(1.0, pw * 0.034), max(1.0, ph * 0.028)
+            mdraw.ellipse([b2cx - b2rx, b2cy - b2ry, b2cx + b2rx, b2cy + b2ry], fill=255)
+    elif shape == "speech":
+        body_h = max(2, int(round(ph * 0.82)))
+        rad = max(1, int(round(min(pw / 2.0, body_h / 2.0, min(pw, body_h) * 0.28))))
+        mdraw.rounded_rectangle([0, 0, pw - 1, body_h - 1], radius=rad, fill=255)
+        tail_l = max(float(rad), pw * 0.26)
+        tail_r = min(float(pw - 1 - rad), max(tail_l + 4.0, pw * 0.42))
+        mdraw.polygon(
+            [(tail_l, body_h - 2.0), (tail_r, body_h - 2.0), (pw * 0.22, ph * 0.99)],
+            fill=255,
+        )
+    elif shape == "heart":
+        mdraw.polygon(_eval_cubic_contour(float(pw), float(ph), 0.50, 0.21, _HEART_CUBIC_SEGMENTS), fill=255)
     else:
         rad = max(0, int(round((corner_radius_pct / 100.0) * (min(pw, ph) / 2.0))))
         if rad > 0:
@@ -1220,14 +1373,21 @@ def _prepare_docx_pages(
                         has_text = bool(_strip_inline_markers(_clean_text(blk.get("text") or "")).strip())
                     else:
                         has_text = bool(_block_translation_plain(blk).strip())
-                    if not has_text:
+                    blk_shape = _normalize_box_shape(blk.get("shape"))
+                    blk_radius_pct = _normalize_corner_radius_pct(blk.get("cornerRadius"))
+                    blk_angle_deg = _normalize_angle_deg(blk.get("angle"))
+                    blk_bg_raw = str(blk.get("bg") or "")
+                    has_manual_shape_bg = bool(
+                        blk.get("manual")
+                        and blk_bg_raw
+                        and blk_bg_raw != "none"
+                        and (blk_shape != "rect" or blk_radius_pct > 0.0)
+                    )
+                    if not has_text and not has_manual_shape_bg:
                         continue
                     bx0, by0, bx1, by1 = _block_box(blk, m["off_x"], m["off_y"], m_scale, canvas_w, mh)
                     if bx1 - bx0 < 2 or by1 - by0 < 2:
                         continue
-                    blk_shape = _normalize_box_shape(blk.get("shape"))
-                    blk_radius_pct = _normalize_corner_radius_pct(blk.get("cornerRadius"))
-                    blk_angle_deg = _normalize_angle_deg(blk.get("angle"))
                     needs_uncovered_erase = (
                         blk_shape != "rect" or blk_radius_pct > 0.0 or abs(blk_angle_deg) > 0.05
                     )
@@ -1657,10 +1817,14 @@ def _finalize_visual_docx(
             top_pt = spec["y0"] * scale_y_pt
             bw_pt = max(8.0, bw_px * scale_x_pt)
             bh_pt = max(8.0, bh_px * scale_y_pt)
-            eff_bw_px = max(2.0, bw_pt / max(1e-6, font_scale_pt))
-            eff_bh_px = max(2.0, bh_pt / max(1e-6, font_scale_pt))
-            inset_x = _box_inset_px(bw_px) * scale_x_pt
-            inset_y = _box_inset_px(bh_px) * scale_y_pt
+            blk_shape = _normalize_box_shape(blk.get("shape"))
+            blk_radius_pct = _normalize_corner_radius_pct(blk.get("cornerRadius"))
+            pad_x_px, pad_top_px, pad_bot_px = _shape_insets_px(bw_px, bh_px, blk_shape, blk_radius_pct)
+            inset_x = pad_x_px * scale_x_pt
+            inset_top = pad_top_px * scale_y_pt
+            inset_bot = pad_bot_px * scale_y_pt
+            eff_bw_px = max(2.0, (bw_pt - 2.0 * inset_x + 2.0 * _box_inset_px(bw_px) * scale_x_pt) / max(1e-6, font_scale_pt))
+            eff_bh_px = max(2.0, (bh_pt - inset_top - inset_bot + 2.0 * _box_inset_px(bh_px) * scale_y_pt) / max(1e-6, font_scale_pt))
             valign = str(blk.get("verticalAlign") or ("middle" if eff_mode == "ocr" else "top"))
             v_anchor = valign if valign in ("top", "middle", "bottom") else ("middle" if eff_mode == "ocr" else "top")
             txbx_p = _build_textbox_paragraphs_xml(
@@ -1674,7 +1838,7 @@ def _finalize_visual_docx(
                 f"width:{bw_pt:.2f}pt;height:{bh_pt:.2f}pt;{rot_css}z-index:{shape_serial + 10};"
                 f"v-text-anchor:{v_anchor};mso-position-horizontal-relative:page;mso-position-vertical-relative:page"
             )
-            inset_str = f"{inset_x:.2f}pt,{inset_y:.2f}pt,{inset_x:.2f}pt,{inset_y:.2f}pt"
+            inset_str = f"{inset_x:.2f}pt,{inset_top:.2f}pt,{inset_x:.2f}pt,{inset_bot:.2f}pt"
             box_runs.append(
                 "<w:r><w:pict>"
                 f'<v:shape id="comicbox_{shape_serial}" style="{shape_style}" filled="f" stroked="f">'
@@ -2448,10 +2612,15 @@ def _finalize_visual_pptx(
             by_emu = off_y + max(0, round(spec["y0"] * fit_scale_emu))
             bcx_emu = max(101_600, round(bw_px * fit_scale_emu))
             bcy_emu = max(101_600, round(bh_px * fit_scale_emu))
-            eff_bw_px = max(2.0, (bcx_emu / 12700.0) / max(1e-6, font_scale_pt))
-            eff_bh_px = max(2.0, (bcy_emu / 12700.0) / max(1e-6, font_scale_pt))
-            ins_x = max(0, round(_box_inset_px(bw_px) * fit_scale_emu))
-            ins_y = max(0, round(_box_inset_px(bh_px) * fit_scale_emu))
+            blk_shape = _normalize_box_shape(blk.get("shape"))
+            blk_radius_pct = _normalize_corner_radius_pct(blk.get("cornerRadius"))
+            blk_angle_deg = _normalize_angle_deg(blk.get("angle"))
+            pad_x_px, pad_top_px, pad_bot_px = _shape_insets_px(bw_px, bh_px, blk_shape, blk_radius_pct)
+            ins_x = max(0, round(pad_x_px * fit_scale_emu))
+            ins_top = max(0, round(pad_top_px * fit_scale_emu))
+            ins_bot = max(0, round(pad_bot_px * fit_scale_emu))
+            eff_bw_px = max(2.0, ((bcx_emu - 2 * ins_x) / 12700.0) / max(1e-6, font_scale_pt) + 2.0 * _box_inset_px(bw_px))
+            eff_bh_px = max(2.0, ((bcy_emu - ins_top - ins_bot) / 12700.0) / max(1e-6, font_scale_pt) + 2.0 * _box_inset_px(bh_px))
             valign = str(blk.get("verticalAlign") or ("middle" if eff_mode == "ocr" else "top"))
             anchor = _pptx_anchor(valign if valign in ("top", "middle", "bottom") else ("middle" if eff_mode == "ocr" else "top"))
             tx_p_xml, is_rtl = _build_pptx_textbox_paragraphs_xml(
@@ -2462,9 +2631,6 @@ def _finalize_visual_pptx(
                 scale_pt=font_scale_pt,
                 bg_rgb=spec.get("bg_rgb"),
             )
-            blk_shape = _normalize_box_shape(blk.get("shape"))
-            blk_radius_pct = _normalize_corner_radius_pct(blk.get("cornerRadius"))
-            blk_angle_deg = _normalize_angle_deg(blk.get("angle"))
             rot_emu_attr = ""
             if abs(blk_angle_deg) > 0.05:
                 rot_units = int(round((blk_angle_deg % 360.0) * 60000.0)) % 21_600_000
@@ -2476,7 +2642,7 @@ def _finalize_visual_pptx(
                 f'        <p:spPr><a:xfrm{rot_emu_attr}><a:off x="{bx_emu}" y="{by_emu}"/><a:ext cx="{bcx_emu}" cy="{bcy_emu}"/></a:xfrm>'
                 f'{prst_geom_xml}<a:noFill/></p:spPr>\n'
                 "        <p:txBody>\n"
-                f'          <a:bodyPr wrap="square" rtlCol="{"1" if is_rtl else "0"}" lIns="{ins_x}" tIns="{ins_y}" rIns="{ins_x}" bIns="{ins_y}" anchor="{anchor}"><a:normAutofit/></a:bodyPr>\n'
+                f'          <a:bodyPr wrap="square" rtlCol="{"1" if is_rtl else "0"}" lIns="{ins_x}" tIns="{ins_top}" rIns="{ins_x}" bIns="{ins_bot}" anchor="{anchor}"><a:normAutofit/></a:bodyPr>\n'
                 "          <a:lstStyle/>\n"
                 f"          {tx_p_xml}\n"
                 "        </p:txBody>\n"

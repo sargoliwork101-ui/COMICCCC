@@ -952,7 +952,7 @@ function blockOverlayMode(block, mode = currentOverlayMode()) {
 }
 function overlayBlock(block, mode = currentOverlayMode()) {
   const effectiveMode = blockOverlayMode(block, mode);
-  if (effectiveMode === 'none') return { ...block, tr: '', richHtml: '' };
+  if (effectiveMode === 'none') return { ...block, tr: '', richHtml: '', manual: false };
   if (effectiveMode !== 'ocr') return block;
   if (block.manual && !String(block.text || '').trim() && String(block.tr || '').trim()) return block;
   const ocrRtl = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(block.text || '') && !/[A-Za-z]{3,}/.test(block.text || '');
@@ -967,13 +967,19 @@ function overlayBlock(block, mode = currentOverlayMode()) {
 }
 function overlayBlocks(item, mode = currentOverlayMode()) { return (item.blocks || []).map((block) => overlayBlock(block, mode)); }
 function hasRenderableText(block) { return !!block.tr?.trim() || !!(!block._plainText && block.richHtml && Typeset.richHtmlWords(block.richHtml).some((word) => String(word.t || '').trim())); }
+function hasRenderableShapeFill(block) {
+  if (!block || !block.manual) return false;
+  const bg = String(block.bg || '');
+  if (!bg || bg === 'none') return false;
+  return normalizeShapeKey(block.shape) !== 'rect' || normalizeRadiusPct(block.cornerRadius) > 0;
+}
 function hasActiveWatermark(wm) {
   if (!wm || typeof wm !== 'object' || wm.enabled === false) return false;
   if (typeof Typeset?.hasActiveWatermark === 'function') return Typeset.hasActiveWatermark(wm);
   return Boolean(String(wm.text || '').trim() || wm.logoId || wm.logoDataUrl);
 }
 function hasOverlayText(item, mode = currentOverlayMode()) {
-  return overlayBlocks(item, mode).some((block) => block.enabled && hasRenderableText(block)) || hasActiveWatermark(item?.watermark);
+  return overlayBlocks(item, mode).some((block) => block.enabled && (hasRenderableText(block) || hasRenderableShapeFill(block))) || hasActiveWatermark(item?.watermark);
 }
 function renderAll() { renderGrid(); updateEngineOptions(); }
 function makeSummaryPill(text, extraClass = '') {
@@ -3186,7 +3192,7 @@ function isPageRenderCurrent(item, mode = currentOverlayMode()) {
   if (!state.project?.id || !item) return false;
   const key = `${state.project.id}:${item.id}`;
   const blocks = overlayBlocks(item, mode);
-  const active = blocks.some((block) => block.enabled && hasRenderableText(block)) || hasActiveWatermark(item?.watermark);
+  const active = blocks.some((block) => block.enabled && (hasRenderableText(block) || hasRenderableShapeFill(block))) || hasActiveWatermark(item?.watermark);
   return Boolean(item.edited) === active && renderedPageSignatures.get(key) === pageRenderSignature(item, mode, blocks);
 }
 async function ensureFont() {
@@ -3221,7 +3227,7 @@ async function decodeProjectImageBitmap(rawBlob, item) {
 async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false } = {}) {
   const key = `${projectId}:${item.id}`;
   const blocks = overlayBlocks(item, mode);
-  const active = blocks.some((block) => block.enabled && hasRenderableText(block)) || hasActiveWatermark(item?.watermark);
+  const active = blocks.some((block) => block.enabled && (hasRenderableText(block) || hasRenderableShapeFill(block))) || hasActiveWatermark(item?.watermark);
   const signature = pageRenderSignature(item, mode, blocks);
   if (skipUnchanged && Boolean(item.edited) === active && renderedPageSignatures.get(key) === signature) {
     return;
@@ -5146,10 +5152,14 @@ function resolveBlockFontStack(fontFamily) {
   if (opt === 'Vazirmatn') return 'Vazirmatn, Tahoma, sans-serif';
   return `${/\s/.test(opt) ? `"${opt}"` : opt}, Vazirmatn, Tahoma, sans-serif`;
 }
+const EDITOR_BOX_SHAPES_FALLBACK = [
+  'rect', 'ellipse', 'pill', 'cloud', 'thought', 'speech',
+  'star', 'burst', 'seal', 'diamond', 'hexagon', 'octagon', 'heart', 'banner',
+];
 function normalizeShapeKey(shape) {
   if (typeof Typeset?.normalizeBoxShape === 'function') return Typeset.normalizeBoxShape(shape);
   const s = String(shape || '').trim().toLowerCase();
-  return ['rect', 'ellipse', 'pill', 'diamond', 'hexagon', 'cloud'].includes(s) ? s : 'rect';
+  return EDITOR_BOX_SHAPES_FALLBACK.includes(s) ? s : 'rect';
 }
 function normalizeRadiusPct(value) {
   if (typeof Typeset?.normalizeCornerRadius === 'function') return Typeset.normalizeCornerRadius(value);
@@ -5170,7 +5180,7 @@ function boxShapeInsets(bw, bh, block) {
   if (typeof Typeset?.shapeInsets === 'function') return Typeset.shapeInsets(bw, bh, sh, cr);
   const baseX = Typeset?.boxInset ? Typeset.boxInset(bw) : Math.min(4, Math.max(0, bw * 0.02));
   const baseY = Typeset?.boxInset ? Typeset.boxInset(bh) : Math.min(4, Math.max(0, bh * 0.02));
-  return { padX: baseX, padY: baseY };
+  return { padX: baseX, padY: baseY, padTop: baseY, padBottom: baseY };
 }
 function shapeSvgPathForBox(w, h, shape, cornerRadius) {
   if (typeof Typeset?.shapeSvgPath === 'function') return Typeset.shapeSvgPath(w, h, shape, cornerRadius);
@@ -5285,8 +5295,13 @@ function refreshInlineTypography() {
   field.style.transform = `scale(${scale / layoutZoom})`;
   const rawScrollH = field.scrollHeight;
   const contentH = (rawScrollH > 0 ? rawScrollH : baseSize * layoutZoom * 1.55) / layoutZoom;
-  const insetY = shapePad.padY;
-  const topUnscaled = style.verticalAlign === 'top' ? insetY : style.verticalAlign === 'bottom' ? bh - insetY - contentH : (bh - contentH) / 2;
+  const padTop = Number.isFinite(shapePad.padTop) ? shapePad.padTop : shapePad.padY;
+  const padBottom = Number.isFinite(shapePad.padBottom) ? shapePad.padBottom : shapePad.padY;
+  const topUnscaled = style.verticalAlign === 'top'
+    ? padTop
+    : style.verticalAlign === 'bottom'
+      ? bh - padBottom - contentH
+      : padTop + (bh - padTop - padBottom - contentH) / 2;
   field.style.left = `${-(host.clientLeft || 0)}px`;
   field.style.top = `${-(host.clientTop || 0) + topUnscaled * scale}px`;
   const fieldHLayout = Math.max(Math.max(1, bh - topUnscaled) * layoutZoom, rawScrollH + 4);
@@ -6146,9 +6161,7 @@ function openInlineEditor(block, clickEvent = null) {
       classicEditor.focus();
     }).catch(() => {});
   }
-  const background = block.bg || 'auto';
-  box.style.setProperty('--editing-bg', background === 'white' ? '#fff' : background === 'black' ? '#101010' : 'var(--surface)');
-  box.style.setProperty('--editing-fg', background === 'white' ? '#202020' : background === 'black' ? '#fff' : 'var(--text)');
+  syncEditingBoxColors(box, block);
   box.classList.add('editing'); classicEditor.attachField(box);
 
   inlineEditSession = window.createInlineEditSession({
@@ -6520,6 +6533,27 @@ function syncEditorBoxVisualGeometry(el, block, box, scale) {
     handle.style.right = corner.endsWith('e') ? off : '';
   });
 }
+function syncEditingBoxColors(boxEl, block) {
+  if (!boxEl || !block) return;
+  const background = String(block.bg || 'auto');
+  if (background === 'white') {
+    boxEl.style.setProperty('--editing-bg', '#fff');
+    boxEl.style.setProperty('--editing-fg', '#202020');
+  } else if (background === 'black') {
+    boxEl.style.setProperty('--editing-bg', '#101010');
+    boxEl.style.setProperty('--editing-fg', '#fff');
+  } else if (/^#[0-9a-fA-F]{6}$/.test(background)) {
+    const rv = parseInt(background.slice(1, 3), 16);
+    const gv = parseInt(background.slice(3, 5), 16);
+    const bv = parseInt(background.slice(5, 7), 16);
+    const bright = (rv * 299 + gv * 587 + bv * 114) / 1000 > 150;
+    boxEl.style.setProperty('--editing-bg', background);
+    boxEl.style.setProperty('--editing-fg', bright ? '#202020' : '#fff');
+  } else {
+    boxEl.style.setProperty('--editing-bg', 'var(--surface)');
+    boxEl.style.setProperty('--editing-fg', 'var(--text)');
+  }
+}
 function applyBoxShapeSettings(patch) {
   const targets = selectedEditorBlocks();
   const singleTarget = inlineDraft?.block ? [inlineDraft.block] : [];
@@ -6542,6 +6576,11 @@ function applyBoxShapeSettings(patch) {
   });
   buildBlockList();
   drawEditor();
+  if (inlineDraft && blocks.includes(inlineDraft.block)) {
+    const activeEditingBox = document.querySelector('#editorBoxes .editor-box.editing');
+    syncEditingBoxColors(activeEditingBox, inlineDraft.block);
+    refreshInlineTypography();
+  }
   syncEditorShapeControls();
   scheduleSave();
 }

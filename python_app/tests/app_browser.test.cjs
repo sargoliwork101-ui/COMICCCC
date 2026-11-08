@@ -240,8 +240,17 @@ main()
     const chromiumRoot = path.resolve(path.dirname(require.resolve('@sparticuz/chromium')), '..');
     await chromiumModule.inflate(path.join(chromiumRoot, 'bin', 'al2023.tar.br'));
     chromiumModule.setupLambdaEnvironment('/tmp/al2023/lib');
+    const fastArgs = chromium.args.filter((arg) => (
+      arg !== '--single-process'
+      && !arg.startsWith('--headless')
+      && !arg.startsWith('--use-gl')
+      && !arg.startsWith('--use-angle')
+      && arg !== '--enable-unsafe-swiftshader'
+      && arg !== '--in-process-gpu'
+    ));
+    fastArgs.push('--disable-gpu', '--window-size=1440,1000');
     browser = await puppeteer.launch({
-      args: chromium.args, executablePath: await chromium.executablePath(), headless: true,
+      args: fastArgs, executablePath: await chromium.executablePath(), headless: 'new',
       defaultViewport: { width: 1440, height: 1000 },
     });
     const page = await browser.newPage(); await page.setCacheEnabled(false);
@@ -753,6 +762,7 @@ main()
       assert.ok(oldAreaDark > 50, `moving a box must not erase the old OCR region (${oldAreaDark} dark pixels)`);
 
       // (2) Mouse wheel alone scrolls vertically without changing zoom; Ctrl + wheel zooms!
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       const previewCenter = await page.evaluate(() => {
         const r = document.querySelector('.editor-preview').getBoundingClientRect();
         return { x: r.left + r.width / 2, y: r.top + r.height / 2, scale: state.editorScale };
@@ -1685,12 +1695,13 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.equal(await page.$eval('#ocrDialog',el=>el.open),false); assert.equal(ocrCalls.length,0);
     await page.click('#translateBtn'); await page.waitForSelector('#ocrDialog[open]');
     await page.click('#startOcrBtn');
-    await page.waitForFunction(()=>document.getElementById('ocrStatus').textContent.includes('ocr simulated failure'),{timeout:15000});
+    await page.waitForFunction(()=>document.getElementById('ocrStatus').textContent.includes('ocr simulated failure') && !document.getElementById('startOcrBtn').disabled,{timeout:15000});
     assert.equal(await page.$eval('#ocrDialog',el=>el.open),true);
     assert.ok(await page.$eval('#ocrStatus',el=>el.textContent.includes('HTTP 500') && el.textContent.includes('/ocr') && el.textContent.includes('RuntimeError')));
     assert.equal(await page.$eval('#copyOcrError',el=>el.classList.contains('hidden')),false);
     assert.equal(freeGenerations.length,callsBeforeAuto);
-    await page.click('#startOcrBtn'); await page.waitForSelector('#translationPreviewDialog[open]',{timeout:15000});
+    await page.$eval('#startOcrBtn', (el) => el.scrollIntoView({ block: 'nearest' }));
+    await page.click('#startOcrBtn'); await page.waitForSelector('#translationPreviewDialog[open]',{timeout:30000});
     assert.equal(ocrCalls.length,2); assert.equal(await page.$eval('#ocrDialog',el=>el.open),false);
     const ocrSaved=await api(base,`/api/projects/${autoProject.id}`);
     assert.equal(ocrSaved.images[0].blocks[0].tr,'existing translation');
@@ -2475,7 +2486,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
       // v3.85–v4.09: Verify version badge ۴.۰۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, optional storage settings, race-free backup, built-in offline local translator, custom manual text boxes, watermarks, full-attribute box copy/paste/duplicate, API key priority ordering, lossless PDF import, and grouped-page translation
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۳ · Python', 'header shows version ۴.۱۳');
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۱۴ · Python', 'header shows version ۴.۱۴');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2759,18 +2770,28 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
           classicEditor.setHTML('<p>تست کرومیوم ۴.۱۲</p>');
           closeInlineEditor();
           selectEditorBlock(blk.id, false, false);
+          document.getElementById('editorBoxShape').value = 'star';
+          document.getElementById('editorBoxShape').dispatchEvent(new Event('change', { bubbles: true }));
+          const starSvgPath = document.querySelector(`#editorBoxes .editor-box[data-id="${blk.id}"] .box-shape-svg path`)?.getAttribute('d') || '';
+          document.getElementById('editorBoxShape').value = 'thought';
+          document.getElementById('editorBoxShape').dispatchEvent(new Event('change', { bubbles: true }));
+          const thoughtSvgPath = document.querySelector(`#editorBoxes .editor-box[data-id="${blk.id}"] .box-shape-svg path`)?.getAttribute('d') || '';
           document.getElementById('editorBoxShape').value = 'cloud';
           document.getElementById('editorBoxShape').dispatchEvent(new Event('change', { bubbles: true }));
           document.getElementById('editorBoxAngle').value = '15';
           document.getElementById('editorBoxAngle').dispatchEvent(new Event('change', { bubbles: true }));
           const boxEl = document.querySelector(`#editorBoxes .editor-box[data-id="${blk.id}"]`);
           const svgPath = boxEl?.querySelector('.box-shape-svg path')?.getAttribute('d') || '';
+          const shapeOptionCount = document.getElementById('editorBoxShape')?.options?.length || 0;
           const out = {
             font: blk.fontFamily,
             size: blk.size,
             shape: blk.shape,
             angle: blk.angle,
             hasSvgPath: svgPath.startsWith('M '),
+            hasStarPath: (starSvgPath.match(/ L /g) || []).length === 9,
+            hasThoughtBubbles: (thoughtSvgPath.match(/A /g) || []).length >= 4,
+            shapeOptionCount,
           };
           await cancelEditor();
           return out;
@@ -2778,7 +2799,11 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
           adoptProject(prevSnap);
         }
       }, backupProject);
-      assert.deepEqual(v412Chromium, { font: 'Tahoma', size: 22, shape: 'cloud', angle: 15, hasSvgPath: true }, 'v4.12 manual box font, size, cloud shape SVG, and rotation work in real Chromium');
+      assert.deepEqual(
+        v412Chromium,
+        { font: 'Tahoma', size: 22, shape: 'cloud', angle: 15, hasSvgPath: true, hasStarPath: true, hasThoughtBubbles: true, shapeOptionCount: 14 },
+        'v4.12–v4.14 manual box font, size, 14 writing shapes (star, thought cloud, comic cloud) SVG, and rotation work in real Chromium',
+      );
 
       console.log('PASS: v3.81–v4.12 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, and v4.12 shapes/rotation/fonts');
     }

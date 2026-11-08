@@ -13,7 +13,10 @@
     'comic sans ms': '"Comic Sans MS", cursive, Vazirmatn, sans-serif',
     'courier new': '"Courier New", monospace, Vazirmatn',
   });
-  const BOX_SHAPES = Object.freeze(['rect', 'ellipse', 'pill', 'diamond', 'hexagon', 'cloud']);
+  const BOX_SHAPES = Object.freeze([
+    'rect', 'ellipse', 'pill', 'cloud', 'thought', 'speech',
+    'star', 'burst', 'seal', 'diamond', 'hexagon', 'octagon', 'heart', 'banner',
+  ]);
 
   function resolveFontStack(fontFamily) {
     const raw = String(fontFamily || '').trim();
@@ -45,32 +48,123 @@
     const baseX = boxInset(bw), baseY = boxInset(bh);
     const sh = normalizeBoxShape(shape);
     const cr = normalizeCornerRadius(cornerRadius);
+    const sym = (px, py) => ({ padX: px, padY: py, padTop: py, padBottom: py });
     if (sh === 'rect') {
-      if (cr <= 0) return { padX: baseX, padY: baseY };
+      if (cr <= 0) return sym(baseX, baseY);
       const rPx = (cr / 100) * (Math.min(bw, bh) / 2);
       const diag = rPx * 0.293;
-      return { padX: Math.max(baseX, diag), padY: Math.max(baseY, diag) };
+      return sym(Math.max(baseX, diag), Math.max(baseY, diag));
     }
     if (sh === 'pill') {
       const rPx = Math.min(bw, bh) / 2;
-      return { padX: Math.max(baseX, rPx * 0.32), padY: Math.max(baseY, rPx * 0.16) };
+      return sym(Math.max(baseX, rPx * 0.32), Math.max(baseY, rPx * 0.16));
     }
-    if (sh === 'ellipse') return { padX: Math.max(baseX, bw * 0.12), padY: Math.max(baseY, bh * 0.12) };
-    if (sh === 'diamond') return { padX: Math.max(baseX, bw * 0.18), padY: Math.max(baseY, bh * 0.18) };
-    if (sh === 'hexagon') return { padX: Math.max(baseX, bw * 0.11), padY: Math.max(baseY, bh * 0.08) };
-    if (sh === 'cloud') return { padX: Math.max(baseX, bw * 0.12), padY: Math.max(baseY, bh * 0.12) };
-    return { padX: baseX, padY: baseY };
+    if (sh === 'ellipse') return sym(Math.max(baseX, bw * 0.12), Math.max(baseY, bh * 0.12));
+    if (sh === 'cloud') return sym(Math.max(baseX, bw * 0.14), Math.max(baseY, bh * 0.15));
+    if (sh === 'thought') {
+      const px = Math.max(baseX, bw * 0.14);
+      const pt = Math.max(baseY, bh * 0.13);
+      const pb = Math.max(baseY, bh * 0.29);
+      return { padX: px, padY: (pt + pb) / 2, padTop: pt, padBottom: pb };
+    }
+    if (sh === 'speech') {
+      const px = Math.max(baseX, bw * 0.10);
+      const pt = Math.max(baseY, bh * 0.10);
+      const pb = Math.max(baseY, bh * 0.24);
+      return { padX: px, padY: (pt + pb) / 2, padTop: pt, padBottom: pb };
+    }
+    if (sh === 'star') return sym(Math.max(baseX, bw * 0.23), Math.max(baseY, bh * 0.24));
+    if (sh === 'burst') return sym(Math.max(baseX, bw * 0.16), Math.max(baseY, bh * 0.16));
+    if (sh === 'seal') return sym(Math.max(baseX, bw * 0.16), Math.max(baseY, bh * 0.16));
+    if (sh === 'diamond') return sym(Math.max(baseX, bw * 0.18), Math.max(baseY, bh * 0.18));
+    if (sh === 'hexagon') return sym(Math.max(baseX, bw * 0.11), Math.max(baseY, bh * 0.08));
+    if (sh === 'octagon') return sym(Math.max(baseX, bw * 0.11), Math.max(baseY, bh * 0.11));
+    if (sh === 'heart') {
+      const px = Math.max(baseX, bw * 0.19);
+      const pt = Math.max(baseY, bh * 0.20);
+      const pb = Math.max(baseY, bh * 0.27);
+      return { padX: px, padY: (pt + pb) / 2, padTop: pt, padBottom: pb };
+    }
+    if (sh === 'banner') return sym(Math.max(baseX, bw * 0.12), baseY);
+    return sym(baseX, baseY);
   }
 
   function cloudContourBumps() {
     return [
-      [0.14, 0.18, 0.30, 0.01, 0.50, 0.05],
-      [0.70, 0.01, 0.86, 0.18, 0.90, 0.30],
-      [1.02, 0.38, 0.97, 0.62, 0.90, 0.72],
-      [0.86, 0.86, 0.70, 0.99, 0.50, 0.95],
-      [0.30, 0.99, 0.14, 0.86, 0.10, 0.72],
-      [0.02, 0.62, 0.02, 0.38, 0.10, 0.30],
+      [0.05, 0.18, 0.16, 0.05, 0.29, 0.14],
+      [0.32, 0.01, 0.46, 0.00, 0.50, 0.11],
+      [0.54, 0.00, 0.68, 0.01, 0.71, 0.14],
+      [0.84, 0.05, 0.95, 0.18, 0.88, 0.34],
+      [1.00, 0.39, 1.00, 0.61, 0.88, 0.66],
+      [0.95, 0.82, 0.84, 0.95, 0.71, 0.86],
+      [0.68, 0.99, 0.54, 1.00, 0.50, 0.89],
+      [0.46, 1.00, 0.32, 0.99, 0.29, 0.86],
+      [0.16, 0.95, 0.05, 0.82, 0.12, 0.66],
+      [0.00, 0.61, 0.00, 0.39, 0.12, 0.34],
     ];
+  }
+
+  function heartContourCurves() {
+    return [
+      [0.58, 0.02, 0.96, 0.02, 0.99, 0.31],
+      [0.99, 0.58, 0.74, 0.78, 0.50, 0.98],
+      [0.26, 0.78, 0.01, 0.58, 0.01, 0.31],
+      [0.04, 0.02, 0.42, 0.02, 0.50, 0.21],
+    ];
+  }
+
+  function starNormalizedVertices(points, innerRatio) {
+    const raw = [];
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (let i = 0; i < points * 2; i += 1) {
+      const ang = -Math.PI / 2 + (i * Math.PI) / points;
+      const r = i % 2 === 0 ? 0.5 : 0.5 * innerRatio;
+      const px = 0.5 + r * Math.cos(ang);
+      const py = 0.5 + r * Math.sin(ang);
+      if (px < minX) minX = px;
+      if (px > maxX) maxX = px;
+      if (py < minY) minY = py;
+      if (py > maxY) maxY = py;
+      raw.push([px, py]);
+    }
+    const spanX = Math.max(1e-6, maxX - minX);
+    const spanY = Math.max(1e-6, maxY - minY);
+    return raw.map(([px, py]) => [(px - minX) / spanX, (py - minY) / spanY]);
+  }
+
+  function polygonNormalizedVertices(sh) {
+    if (sh === 'star') return starNormalizedVertices(5, 0.52);
+    if (sh === 'burst') return starNormalizedVertices(12, 0.76);
+    if (sh === 'seal') return starNormalizedVertices(8, 0.74);
+    if (sh === 'diamond') return [[0.5, 0], [1, 0.5], [0.5, 1], [0, 0.5]];
+    if (sh === 'hexagon') return [[0.18, 0], [0.82, 0], [1, 0.5], [0.82, 1], [0.18, 1], [0, 0.5]];
+    if (sh === 'octagon') return [[0.22, 0], [0.78, 0], [1, 0.22], [1, 0.78], [0.78, 1], [0.22, 1], [0, 0.78], [0, 0.22]];
+    if (sh === 'banner') return [[0, 0], [1, 0], [0.90, 0.5], [1, 1], [0, 1], [0.10, 0.5]];
+    return null;
+  }
+
+  function traceCubicSegments(ctx, x, y, w, h, startFx, startFy, segments) {
+    let curX = x + startFx * w, curY = y + startFy * h;
+    if (typeof ctx.moveTo === 'function') ctx.moveTo(curX, curY);
+    if (typeof ctx.bezierCurveTo === 'function') {
+      segments.forEach(([cx1, cy1, cx2, cy2, ex, ey]) => {
+        ctx.bezierCurveTo(x + cx1 * w, y + cy1 * h, x + cx2 * w, y + cy2 * h, x + ex * w, y + ey * h);
+      });
+    } else if (typeof ctx.lineTo === 'function') {
+      segments.forEach(([cx1, cy1, cx2, cy2, ex, ey]) => {
+        const p1x = x + cx1 * w, p1y = y + cy1 * h;
+        const p2x = x + cx2 * w, p2y = y + cy2 * h;
+        const p3x = x + ex * w, p3y = y + ey * h;
+        for (let step = 1; step <= 10; step += 1) {
+          const t = step / 10, mt = 1 - t;
+          const bx = mt * mt * mt * curX + 3 * mt * mt * t * p1x + 3 * mt * t * t * p2x + t * t * t * p3x;
+          const by = mt * mt * mt * curY + 3 * mt * mt * t * p1y + 3 * mt * t * t * p2y + t * t * t * p3y;
+          ctx.lineTo(bx, by);
+        }
+        curX = p3x; curY = p3y;
+      });
+    }
+    if (typeof ctx.closePath === 'function') ctx.closePath();
   }
 
   function shapeSvgPath(w, h, shape, cornerRadius) {
@@ -80,17 +174,38 @@
       const rx = bw / 2, ry = bh / 2;
       return `M ${rx} 0 A ${rx} ${ry} 0 1 1 ${rx} ${bh} A ${rx} ${ry} 0 1 1 ${rx} 0 Z`;
     }
-    if (sh === 'diamond') {
-      return `M ${bw / 2} 0 L ${bw} ${bh / 2} L ${bw / 2} ${bh} L 0 ${bh / 2} Z`;
+    const poly = polygonNormalizedVertices(sh);
+    if (poly) {
+      return `M ${poly.map(([fx, fy]) => `${(fx * bw).toFixed(1)} ${(fy * bh).toFixed(1)}`).join(' L ')} Z`;
     }
-    if (sh === 'hexagon') {
-      const dx = bw * 0.18;
-      return `M ${dx} 0 L ${bw - dx} 0 L ${bw} ${bh / 2} L ${bw - dx} ${bh} L ${dx} ${bh} L 0 ${bh / 2} Z`;
+    if (sh === 'cloud' || sh === 'thought') {
+      const yScale = sh === 'thought' ? 0.82 : 1.0;
+      let d = `M ${(0.12 * bw).toFixed(1)} ${(0.34 * bh * yScale).toFixed(1)}`;
+      cloudContourBumps().forEach(([cx1, cy1, cx2, cy2, ex, ey]) => {
+        d += ` C ${(cx1 * bw).toFixed(1)} ${(cy1 * bh * yScale).toFixed(1)}, ${(cx2 * bw).toFixed(1)} ${(cy2 * bh * yScale).toFixed(1)}, ${(ex * bw).toFixed(1)} ${(ey * bh * yScale).toFixed(1)}`;
+      });
+      d += ' Z';
+      if (sh === 'thought') {
+        const b1x = (0.27 * bw).toFixed(1), b1rX = (0.055 * bw).toFixed(1), b1rY = (0.042 * bh).toFixed(1);
+        const b1Top = ((0.885 - 0.042) * bh).toFixed(1), b1Bot = ((0.885 + 0.042) * bh).toFixed(1);
+        const b2x = (0.18 * bw).toFixed(1), b2rX = (0.034 * bw).toFixed(1), b2rY = (0.028 * bh).toFixed(1);
+        const b2Top = ((0.960 - 0.028) * bh).toFixed(1), b2Bot = ((0.960 + 0.028) * bh).toFixed(1);
+        d += ` M ${b1x} ${b1Top} A ${b1rX} ${b1rY} 0 1 1 ${b1x} ${b1Bot} A ${b1rX} ${b1rY} 0 1 1 ${b1x} ${b1Top} Z`;
+        d += ` M ${b2x} ${b2Top} A ${b2rX} ${b2rY} 0 1 1 ${b2x} ${b2Bot} A ${b2rX} ${b2rY} 0 1 1 ${b2x} ${b2Top} Z`;
+      }
+      return d;
     }
-    if (sh === 'cloud') {
-      const bumps = cloudContourBumps();
-      let d = `M ${(0.10 * bw).toFixed(1)} ${(0.30 * bh).toFixed(1)}`;
-      bumps.forEach(([cx1, cy1, cx2, cy2, ex, ey]) => {
+    if (sh === 'speech') {
+      const bodyH = 0.82 * bh;
+      const r = Math.min(bw / 2, bodyH / 2, Math.min(bw, bodyH) * 0.28);
+      const tailL = Math.max(r + 1, 0.26 * bw);
+      const tailR = Math.min(bw - r - 1, Math.max(tailL + 4, 0.42 * bw));
+      const tipX = 0.22 * bw, tipY = 0.99 * bh;
+      return `M ${r.toFixed(1)} 0 H ${(bw - r).toFixed(1)} A ${r.toFixed(1)} ${r.toFixed(1)} 0 0 1 ${bw.toFixed(1)} ${r.toFixed(1)} V ${(bodyH - r).toFixed(1)} A ${r.toFixed(1)} ${r.toFixed(1)} 0 0 1 ${(bw - r).toFixed(1)} ${bodyH.toFixed(1)} H ${tailR.toFixed(1)} L ${tipX.toFixed(1)} ${tipY.toFixed(1)} L ${tailL.toFixed(1)} ${bodyH.toFixed(1)} H ${r.toFixed(1)} A ${r.toFixed(1)} ${r.toFixed(1)} 0 0 1 0 ${(bodyH - r).toFixed(1)} V ${r.toFixed(1)} A ${r.toFixed(1)} ${r.toFixed(1)} 0 0 1 ${r.toFixed(1)} 0 Z`;
+    }
+    if (sh === 'heart') {
+      let d = `M ${(0.50 * bw).toFixed(1)} ${(0.21 * bh).toFixed(1)}`;
+      heartContourCurves().forEach(([cx1, cy1, cx2, cy2, ex, ey]) => {
         d += ` C ${(cx1 * bw).toFixed(1)} ${(cy1 * bh).toFixed(1)}, ${(cx2 * bw).toFixed(1)} ${(cy2 * bh).toFixed(1)}, ${(ex * bw).toFixed(1)} ${(ey * bh).toFixed(1)}`;
       });
       return `${d} Z`;
@@ -126,31 +241,53 @@
       if (typeof ctx.closePath === 'function') ctx.closePath();
       return;
     }
-    if (sh === 'diamond' && typeof ctx.moveTo === 'function' && typeof ctx.lineTo === 'function') {
-      ctx.moveTo(x + w / 2, y);
-      ctx.lineTo(x + w, y + h / 2);
-      ctx.lineTo(x + w / 2, y + h);
-      ctx.lineTo(x, y + h / 2);
-      if (typeof ctx.closePath === 'function') ctx.closePath();
-      return;
-    }
-    if (sh === 'hexagon' && typeof ctx.moveTo === 'function' && typeof ctx.lineTo === 'function') {
-      const dx = w * 0.18;
-      ctx.moveTo(x + dx, y);
-      ctx.lineTo(x + w - dx, y);
-      ctx.lineTo(x + w, y + h / 2);
-      ctx.lineTo(x + w - dx, y + h);
-      ctx.lineTo(x + dx, y + h);
-      ctx.lineTo(x, y + h / 2);
-      if (typeof ctx.closePath === 'function') ctx.closePath();
-      return;
-    }
-    if (sh === 'cloud' && typeof ctx.moveTo === 'function' && typeof ctx.bezierCurveTo === 'function') {
-      ctx.moveTo(x + 0.10 * w, y + 0.30 * h);
-      cloudContourBumps().forEach(([cx1, cy1, cx2, cy2, ex, ey]) => {
-        ctx.bezierCurveTo(x + cx1 * w, y + cy1 * h, x + cx2 * w, y + cy2 * h, x + ex * w, y + ey * h);
+    const poly = polygonNormalizedVertices(sh);
+    if (poly && typeof ctx.moveTo === 'function' && typeof ctx.lineTo === 'function') {
+      poly.forEach(([fx, fy], idx) => {
+        if (idx === 0) ctx.moveTo(x + fx * w, y + fy * h);
+        else ctx.lineTo(x + fx * w, y + fy * h);
       });
       if (typeof ctx.closePath === 'function') ctx.closePath();
+      return;
+    }
+    if ((sh === 'cloud' || sh === 'thought') && typeof ctx.moveTo === 'function') {
+      const yScale = sh === 'thought' ? 0.82 : 1.0;
+      traceCubicSegments(ctx, x, y, w, h * yScale, 0.12, 0.34, cloudContourBumps());
+      if (sh === 'thought' && typeof ctx.ellipse === 'function') {
+        const b1x = x + 0.27 * w, b1y = y + 0.885 * h, b1rx = 0.055 * w, b1ry = 0.042 * h;
+        ctx.moveTo(b1x + b1rx, b1y);
+        ctx.ellipse(b1x, b1y, b1rx, b1ry, 0, 0, Math.PI * 2);
+        const b2x = x + 0.18 * w, b2y = y + 0.960 * h, b2rx = 0.034 * w, b2ry = 0.028 * h;
+        ctx.moveTo(b2x + b2rx, b2y);
+        ctx.ellipse(b2x, b2y, b2rx, b2ry, 0, 0, Math.PI * 2);
+      }
+      return;
+    }
+    if (sh === 'speech' && typeof ctx.moveTo === 'function' && typeof ctx.lineTo === 'function') {
+      const bodyH = 0.82 * h;
+      const r = Math.min(w / 2, bodyH / 2, Math.min(w, bodyH) * 0.28);
+      const tailL = Math.max(r + 1, 0.26 * w);
+      const tailR = Math.min(w - r - 1, Math.max(tailL + 4, 0.42 * w));
+      const qCurve = typeof ctx.quadraticCurveTo === 'function'
+        ? (cx, cy, ex, ey) => ctx.quadraticCurveTo(cx, cy, ex, ey)
+        : (_cx, _cy, ex, ey) => ctx.lineTo(ex, ey);
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      qCurve(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + bodyH - r);
+      qCurve(x + w, y + bodyH, x + w - r, y + bodyH);
+      ctx.lineTo(x + tailR, y + bodyH);
+      ctx.lineTo(x + 0.22 * w, y + 0.99 * h);
+      ctx.lineTo(x + tailL, y + bodyH);
+      ctx.lineTo(x + r, y + bodyH);
+      qCurve(x, y + bodyH, x, y + bodyH - r);
+      ctx.lineTo(x, y + r);
+      qCurve(x, y, x + r, y);
+      if (typeof ctx.closePath === 'function') ctx.closePath();
+      return;
+    }
+    if (sh === 'heart' && typeof ctx.moveTo === 'function') {
+      traceCubicSegments(ctx, x, y, w, h, 0.50, 0.21, heartContourCurves());
       return;
     }
     if (typeof ctx.rect === 'function') ctx.rect(x, y, w, h);
@@ -753,8 +890,8 @@
     if (hasSpecialRichElements(rawHtml)) return null;
     const box = getDomMeasureBox();
     if (!box) return null;
-    const { padX, padY } = shapeInsets(bw, bh, st.shape, st.cornerRadius);
-    const usableW = Math.max(1, bw - 2 * padX), usableH = Math.max(1, bh - 2 * padY);
+    const { padX, padY, padTop = padY, padBottom = padY } = shapeInsets(bw, bh, st.shape, st.cornerRadius);
+    const usableW = Math.max(1, bw - 2 * padX), usableH = Math.max(1, bh - padTop - padBottom);
     const tpl = buildSafeDomTemplate(rawHtml);
     let size = st.size;
     if (!size) {
@@ -774,9 +911,9 @@
 
     const rawScrollH = box.scrollHeight;
     const contentH = rawScrollH > 0 ? rawScrollH : size * 1.55;
-    const topUnscaled = st.verticalAlign === 'top' ? padY
-      : st.verticalAlign === 'bottom' ? bh - padY - contentH
-      : (bh - contentH) / 2;
+    const topUnscaled = st.verticalAlign === 'top' ? padTop
+      : st.verticalAlign === 'bottom' ? bh - padBottom - contentH
+      : padTop + (bh - padTop - padBottom - contentH) / 2;
 
     const boxRect = box.getBoundingClientRect();
     const walker = document.createTreeWalker(box, 4);
@@ -906,8 +1043,19 @@
       if (!b.enabled) return;
       const sourceText = String(b.tr || '').trim();
       const richWords = !b._plainText && b.richHtml ? richHtmlWords(b.richHtml) : null;
-      if (!sourceText && !richWords?.some((word) => String(word.t || '').trim()) && !(typeof b._liveHtml === 'string' && b._liveHtml.trim())) return;
+      const hasText = Boolean(
+        sourceText
+        || richWords?.some((word) => String(word.t || '').trim())
+        || (typeof b._liveHtml === 'string' && b._liveHtml.replace(/<[^>]*>/g, '').trim())
+      );
       const st = blockStyle(b);
+      const hasManualShapeBg = Boolean(
+        b.manual
+        && b.bg
+        && b.bg !== 'none'
+        && (st.shape !== 'rect' || st.cornerRadius > 0)
+      );
+      if (!hasText && !hasManualShapeBg) return;
       const layoutBox = {
         x0: Math.max(0, Number.isFinite(b.tx0) ? b.tx0 : b.x0),
         y0: Math.max(0, Number.isFinite(b.ty0) ? b.ty0 : b.y0),
@@ -948,6 +1096,7 @@
       // رنگ دستی کاربر بر انتخاب خودکار اولویت دارد (زیرخط هم با همین رنگ رسم می‌شود)
       if (st.color) txt = st.color;
       if (targetFill) targetFills.push({ style: targetFill, x: layoutBox.x0, y: layoutBox.y0, w: bw, h: bh, cx, cy, st, isPlainAxisRect });
+      if (!hasText) return;
 
       // در مرورگر واقعی، جایگاه دقیق کلمه‌ها مستقیماً از همان جعبهٔ چیدمان DOM خوانده می‌شود
       // تا متنِ زمان تایپ، مکان‌نما و خروجی نهایی روی عکس از یک موتور واحد و بدون حتی ۱ پیکسل اختلاف بیایند.
@@ -1001,7 +1150,7 @@
         return;
       }
 
-      const { padX, padY } = shapeInsets(bw, bh, st.shape, st.cornerRadius);
+      const { padX, padY, padTop = padY, padBottom = padY } = shapeInsets(bw, bh, st.shape, st.cornerRadius);
       const usableW = Math.max(1, bw - 2 * padX);
       const f = computeJsFit(ctx, b, st, bw, bh, richWords);
       const inline = f.inline;
@@ -1014,12 +1163,11 @@
       if ('direction' in ctx) ctx.direction = st.dir;
       ctx.textBaseline = 'middle';
       const totalH = inline ? f.lineLh.reduce((sum, v) => sum + v, 0) : f.lines.length * f.lh;
-      const insetY = padY;
       // Top/bottom anchor the entire text block, including wrapped and blank lines.
-      // Preserve the previous centred placement for projects without this option.
-      const textTop = st.verticalAlign === 'top' ? layoutBox.y0 + insetY
-        : st.verticalAlign === 'bottom' ? layoutBox.y1 - insetY - totalH
-        : (layoutBox.y0 + layoutBox.y1 - totalH) / 2;
+      // Preserve centred placement for symmetric shapes while shifting away from bottom tails/bubbles.
+      const textTop = st.verticalAlign === 'top' ? layoutBox.y0 + padTop
+        : st.verticalAlign === 'bottom' ? layoutBox.y1 - padBottom - totalH
+        : layoutBox.y0 + padTop + (bh - padTop - padBottom - totalH) / 2;
       let y = textTop + (inline ? (f.lineLh[0] || f.lh) : f.lh) / 2;
       // لنگر هر خط بر اساس چیدمان انتخابی، با حاشیهٔ کوچک از لبهٔ کادر
       const anchorX = st.align === 'left' || (st.align === 'justify' && st.dir === 'ltr') ? layoutBox.x0 + padX

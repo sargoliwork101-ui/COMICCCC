@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.13">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.13">
+  <link rel="stylesheet" href="/style.css?v=4.14">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.14">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۱۳ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۱۴ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
       <button id="menuBtn" class="bt" aria-expanded="false" aria-controls="menu"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.2h11M2.5 8h11M2.5 11.8h11"/></svg><span>پروژه و تنظیمات</span></button>
@@ -556,7 +556,7 @@
           </div>
           <div id="inlineShapeTools" class="editor-multi-tools inline-shape-tools" role="group" aria-label="شکل، گردی گوشه‌ها، چرخش و پس‌زمینهٔ کادر">
             <span class="box-capsule-title">شکل و چرخش</span>
-            <label class="shape-tool-field" title="انتخاب شکل کادر (مستطیل، بیضی، کپسولی، لوزی، شش‌ضلعی یا ابر کمیک)"><span>شکل</span><select id="editorBoxShape" aria-label="شکل کادر انتخاب‌شده"><option value="rect">مستطیل</option><option value="ellipse">بیضی</option><option value="pill">کپسولی</option><option value="diamond">لوزی</option><option value="hexagon">شش‌ضلعی</option><option value="cloud">ابر کمیک</option></select></label>
+            <label class="shape-tool-field" title="انتخاب شکل کادر برای نوشتن (مستطیل، بیضی، کپسولی، ابر کمیک، ابر فکر، حباب گفتگو، ستاره‌ها، لوزی، چندضلعی، قلب یا پرچم)"><span>شکل</span><select id="editorBoxShape" aria-label="شکل کادر انتخاب‌شده"><option value="rect">مستطیل</option><option value="ellipse">بیضی</option><option value="pill">کپسولی</option><option value="cloud">ابر کمیک</option><option value="thought">ابر فکر (حباب‌دار)</option><option value="speech">حباب گفتگو</option><option value="star">ستاره (۵پر)</option><option value="burst">ستارهٔ انفجاری (فریاد)</option><option value="seal">ستارهٔ ۸پر (نشان)</option><option value="diamond">لوزی</option><option value="hexagon">شش‌ضلعی</option><option value="octagon">هشت‌ضلعی</option><option value="heart">قلب</option><option value="banner">پرچم / روبان</option></select></label>
             <label id="editorBoxRadiusWrap" class="shape-tool-field" title="گردی گوشه‌های مستطیل (۰ تا ۱۰۰٪ — یا نقاط گرد داخل چهار گوشهٔ مستطیل را بکشید)"><span>گوشه</span><input id="editorBoxRadius" type="number" min="0" max="100" step="5" value="0" aria-label="درصد گردی گوشهٔ مستطیل"></label>
             <label class="shape-tool-field" title="زاویهٔ چرخش کادر به درجه (یا دستگیرهٔ چرخش بالای کادر را روی تصویر بکشید؛ نگه داشتن Shift روی مضرب ۱۵ درجه قفل می‌کند)"><span>چرخش°</span><input id="editorBoxAngle" type="number" min="-180" max="180" step="1" value="0" aria-label="زاویهٔ چرخش کادر به درجه"></label>
             <button id="editorRotateReset" class="bt" type="button" title="بازنشانی زاویهٔ چرخش کادر به ۰ درجه"><svg class="btn-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg><span>۰°</span></button>
@@ -825,12 +825,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-  <script src="/typeset.js?v=4.13"></script>
-  <script src="/groups.js?v=4.13"></script>
-  <script src="/rich-sanitize.js?v=4.13"></script>
-  <script src="/rich-editor.js?v=4.13"></script>
-  <script src="/inline-edit-session.js?v=4.13"></script>
-  <script src="/help-guide.js?v=4.13"></script>
-  <script src="/app.js?v=4.13"></script>
+  <script src="/typeset.js?v=4.14"></script>
+  <script src="/groups.js?v=4.14"></script>
+  <script src="/rich-sanitize.js?v=4.14"></script>
+  <script src="/rich-editor.js?v=4.14"></script>
+  <script src="/inline-edit-session.js?v=4.14"></script>
+  <script src="/help-guide.js?v=4.14"></script>
+  <script src="/app.js?v=4.14"></script>
 </body>
 </html>
