@@ -202,6 +202,17 @@ async function resolveGoogleBooksPage(pageUrl, pid, lpgPid) {
   return { ok: true, pid: entry.pid, src: normalizeGoogleBooksSrc(entry.src) };
 }
 
+const activeGbookWalks = new Set();
+if (chrome.tabs && chrome.tabs.onRemoved && typeof chrome.tabs.onRemoved.addListener === 'function') {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    if (activeGbookWalks.has(tabId)) {
+      gbookCancels.set(tabId, true);
+    } else {
+      gbookCancels.delete(tabId);
+    }
+  });
+}
+
 // دریافت لیست تصاویر از صفحه و باز کردن تب ساخت PDF
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // اسکن اختصاصی Google Books از طریق API رسمی reader (اجرا در service worker برای دورزدن CORS)
@@ -216,10 +227,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       catch { /* تب بسته شده یا ناوبری کرده؛ بی‌خطر */ }
     };
     const pageLimit = Number.isFinite(msg.pageLimit) && msg.pageLimit > 0 ? Math.floor(msg.pageLimit) : 0;
+    if (tabId != null) activeGbookWalks.add(tabId);
     walkGoogleBooks(pageUrl, tabId, report, pageLimit)
-      .then((result) => { if (tabId != null) gbookCancels.delete(tabId); sendResponse(Object.assign({ ok: true }, result)); })
+      .then((result) => {
+        if (tabId != null) { activeGbookWalks.delete(tabId); gbookCancels.delete(tabId); }
+        sendResponse(Object.assign({ ok: true }, result));
+      })
       .catch((error) => {
-        if (tabId != null) gbookCancels.delete(tabId);
+        if (tabId != null) { activeGbookWalks.delete(tabId); gbookCancels.delete(tabId); }
         sendResponse({ ok: false, cancelled: !!error.cancelled, error: error && error.message ? error.message : String(error) });
       });
     return true;

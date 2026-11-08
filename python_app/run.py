@@ -7,8 +7,17 @@ from pathlib import Path
 # The app owns its dependencies in python_app/.venv. If a system Python launches
 # this file, hand off to that local interpreter rather than using global packages.
 _APP_DIR = Path(__file__).resolve().parent
+_IS_FROZEN = bool(getattr(sys, "frozen", False))
 _LOCAL_PYTHON = _APP_DIR / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 _IN_APP_VENV = Path(sys.prefix).resolve() == (_APP_DIR / ".venv").resolve()
+
+
+def _ensure_frozen_stdio() -> None:
+    """Ensure PyInstaller `--windowed` builds never crash when uvicorn/logging inspects stdio."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
 
 
 def _local_venv_python_usable(py_path: Path) -> bool:
@@ -53,7 +62,7 @@ def _ensure_local_package_resolution() -> None:
         importlib.invalidate_caches()
 
 
-if __name__ == "__main__" and not _IN_APP_VENV and _LOCAL_PYTHON.exists():
+if __name__ == "__main__" and not _IS_FROZEN and not _IN_APP_VENV and _LOCAL_PYTHON.exists():
     if _local_venv_python_usable(_LOCAL_PYTHON):
         _HANDOFF_ARGV = [str(_LOCAL_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]]
         if os.name == "nt":
@@ -73,7 +82,9 @@ _REQUIRED_IMPORTS = {
 }
 
 if __name__ == "__main__":
-    _ensure_local_package_resolution()
+    _ensure_frozen_stdio()
+    if not _IS_FROZEN:
+        _ensure_local_package_resolution()
     try:
         from comic_studio.__main__ import main
         main()

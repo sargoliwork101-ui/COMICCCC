@@ -315,7 +315,8 @@ def create_app() -> FastAPI:
                             "code": str(gate_state.get("reason") or "LICENSE_REQUIRED").upper(),
                             "licensed": False,
                             "unlocked": False,
-                            "supportPhone": gate_state.get("supportPhone") or SUPPORT_PHONE,
+                            "supportPhone": gate_state.get("supportPhone") or get_support_phone(),
+                            "vendorContact": gate_state.get("vendorContact") or get_vendor_contact_info(),
                             "modules": gate_state.get("modules"),
                         },
                         status_code=402,
@@ -475,13 +476,13 @@ def create_app() -> FastAPI:
     async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         """Redact known credentials; exception messages can still contain private data."""
         reference = uuid.uuid4().hex[:12]
-        secrets = [os.environ.get('COMIC_STUDIO_ACCESS_PASSWORD', '')]
+        sensitive_values = [os.environ.get('COMIC_STUDIO_ACCESS_PASSWORD', '')]
         try:
             settings = translations._secret()
-            secrets.extend(p['api_key'] for config in settings['providers'].values() for p in config['profiles'] if p.get('api_key'))
+            sensitive_values.extend(p['api_key'] for config in settings['providers'].values() for p in config['profiles'] if p.get('api_key'))
         except Exception:
             pass
-        detail = _redact_diagnostic(str(exc), secrets)
+        detail = _redact_diagnostic(str(exc), sensitive_values)
         detail = re.sub(r'(https?://[^\s?]+)\?[^\s]+', r'\1?[REDACTED]', detail)
         frames = traceback.extract_tb(exc.__traceback__)
         location = f"{Path(frames[-1].filename).name}:{frames[-1].lineno} ({frames[-1].name})" if frames else 'unknown'
@@ -701,6 +702,9 @@ def create_app() -> FastAPI:
         if not isinstance(revision, str) or not isinstance(choices, dict) or any(not isinstance(k, str) or v not in ('keep', 'apply') for k,v in choices.items()):
             raise HTTPException(400, 'انتخاب‌های رفع تعارض معتبر نیستند.')
         try:
+            with store._lock:
+                entry = pending_results.load(store, project_id, token)
+            require_module_license('ocr' if entry.get('kind') == 'ocr' else 'translation')
             return pending_results.resolve(store, project_id, token, revision, choices)
         except KeyError as exc:
             raise HTTPException(404, 'نتیجهٔ منتظر پیدا نشد.') from exc

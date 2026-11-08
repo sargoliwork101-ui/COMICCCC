@@ -430,9 +430,16 @@ def compute_hardware_id(*, refresh: bool = False) -> str:
         return _HWID_CACHE
 
 
+_HWID_DIGIT_TRANS = str.maketrans(
+    "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩–—−‐",
+    "01234567890123456789----",
+)
+
+
 def normalize_hardware_id(raw: str) -> str:
     """Validate and normalize a user-entered Hardware System Code to `CS4-XXXX-XXXX-XXXX-XXXX`."""
-    cleaned = re.sub(r"[\s\-_\u200c\u200e\u200f\ufeff]+", "", str(raw or "")).upper()
+    normalized_digits = str(raw or "").translate(_HWID_DIGIT_TRANS)
+    cleaned = re.sub(r"[\s\-_\u200c\u200e\u200f\ufeff]+", "", normalized_digits).upper()
     if cleaned.startswith(_HWID_PREFIX):
         body = cleaned[len(_HWID_PREFIX) :]
     else:
@@ -1476,9 +1483,41 @@ class _RuntimeSecurityGate:
                     status_code=400,
                 )
 
-            merged_tokens = {} if replace_all_modules else self._extract_module_tokens(existing or {})
+            def _grant_rank(grant_obj: dict[str, Any]) -> tuple[int, int]:
+                exp_val = grant_obj.get("expiresAt")
+                if exp_val is None or grant_obj.get("plan") == "lifetime":
+                    return (2, 0)
+                return (1, int(exp_val))
+
+            merged_tokens: dict[str, str] = {}
+            carried_grants: dict[str, dict[str, Any]] = {}
+            if not replace_all_modules:
+                raw_carried = self._extract_module_tokens(existing or {})
+                verified_by_tok: dict[str, dict[str, Any] | None] = {}
+                for mod_id, prev_tok in raw_carried.items():
+                    if prev_tok not in verified_by_tok:
+                        try:
+                            verified_by_tok[prev_tok] = verify_license_token(
+                                prev_tok,
+                                expected_hardware_id=hwid,
+                                now_ts=now,
+                                check_expiry=False,
+                            )
+                        except LicenseError:
+                            # Prune stale tokens from an older rotated Master Key or mismatched HWID
+                            # so activating a valid new key never gets poisoned by an old leftover slot.
+                            verified_by_tok[prev_tok] = None
+                    prev_verified = verified_by_tok[prev_tok]
+                    if prev_verified is not None:
+                        prev_grant = (prev_verified.get("modules") or {}).get(mod_id)
+                        if prev_grant and prev_grant.get("granted"):
+                            merged_tokens[mod_id] = prev_tok
+                            carried_grants[mod_id] = prev_grant
+
             for mod_id, m_grant in lic_info["modules"].items():
-                if m_grant.get("granted"):
+                if not m_grant.get("granted"):
+                    continue
+                if replace_all_modules or mod_id not in carried_grants or _grant_rank(m_grant) >= _grant_rank(carried_grants[mod_id]):
                     merged_tokens[mod_id] = lic_info["token"]
 
             new_max = max(prev_max, now_int, int(lic_info.get("issuedAt") or 0))

@@ -2173,7 +2173,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas419: verText.includes('۴.۱۹'),
+            verHas420: verText.includes('۴.۲۰'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2192,8 +2192,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.19 displays version 4.19 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas419 === true
+      'v4.00/v4.20 displays version 4.20 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas420 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3996,6 +3996,88 @@ function check(name, condition) {
     $('appModalCancel').click();
     const guardAllowed = await guardTask;
     check('v4.16 ensureModuleLicensed returns false for unlicensed module', guardAllowed === false);
+
+    // v4.20: renderVendorChannelsInto linkifies t.me/... and bare domain safely, and lockWorkspaceNow flushes savePending before logout
+    const v420UiCheck = await vm.runInContext(`
+      (async () => {
+        const tmpBox = document.createElement('div');
+        renderVendorChannelsInto(tmpBox, {
+          telegram: 't.me/ComicSupportIR',
+          website: 'comicstudio.example.ir',
+        });
+        const links = [...tmpBox.querySelectorAll('a')].map((a) => a.href);
+
+        const order = [];
+        const origSave = saveProject;
+        const origFetch = window.fetch;
+        savePending = true;
+        saveProject = async () => { order.push('saveProject'); savePending = false; };
+        window.fetch = async (url, opts) => {
+          if (String(url).includes('/api/license/logout')) {
+            order.push('logout');
+            return {
+              ok: true,
+              status: 200,
+              headers: { get: () => 'application/json' },
+              json: async () => ({
+                licensed: true,
+                unlocked: false,
+                passwordEnabled: true,
+                reason: 'login_required',
+                hardwareId: 'CS4-ABCD-EFGH-JKLM-NPQR',
+                supportPhone: '09361111111',
+                modules: {
+                  ocr: { active: true, plan: 'lifetime', label: 'استخراج متن (OCR)' },
+                  translation: { active: false, label: 'ترجمه' },
+                  editing: { active: true, plan: 'lifetime', label: 'ویرایش' },
+                },
+              }),
+              text: async () => JSON.stringify({
+                licensed: true,
+                unlocked: false,
+                passwordEnabled: true,
+                reason: 'login_required',
+                hardwareId: 'CS4-ABCD-EFGH-JKLM-NPQR',
+                supportPhone: '09361111111',
+                modules: {
+                  ocr: { active: true, plan: 'lifetime', label: 'استخراج متن (OCR)' },
+                  translation: { active: false, label: 'ترجمه' },
+                  editing: { active: true, plan: 'lifetime', label: 'ویرایش' },
+                },
+              }),
+            };
+          }
+          return origFetch(url, opts);
+        };
+        try {
+          await lockWorkspaceNow();
+        } finally {
+          saveProject = origSave;
+          window.fetch = origFetch;
+          await applyAuthGateUi({
+            licensed: true,
+            unlocked: true,
+            passwordEnabled: false,
+            hardwareId: 'CS4-ABCD-EFGH-JKLM-NPQR',
+            supportPhone: '09361111111',
+            modules: {
+              ocr: { active: true, plan: 'lifetime', label: 'استخراج متن (OCR)' },
+              translation: { active: true, plan: 'lifetime', label: 'ترجمه' },
+              editing: { active: true, plan: 'lifetime', label: 'ویرایش' },
+            },
+          });
+        }
+        return { links, order };
+      })()
+    `, context);
+    check(
+      'v4.20 renderVendorChannelsInto linkifies t.me/... & bare domains safely and lockWorkspaceNow flushes saveProject before logout',
+      v420UiCheck.links.includes('https://t.me/ComicSupportIR')
+        && v420UiCheck.links.includes('https://comicstudio.example.ir/')
+        && v420UiCheck.order[0] === 'saveProject'
+        && v420UiCheck.order[1] === 'logout',
+      JSON.stringify(v420UiCheck),
+    );
   }
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.19"
+    assert health.json()["version"] == "4.20"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۱۹ · Python</span>' in index_html
+    assert '<span class="ver">۴.۲۰ · Python</span>' in index_html
     assert 'id="licenseTopStatusBtn"' in index_html
     assert 'id="copyGateOrderMsgBtn"' in index_html
     assert "09361111111" in index_html
@@ -3294,7 +3294,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.19"
+    assert APP_VERSION == "4.20"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -4866,6 +4866,81 @@ def test_v414_writing_shapes_pil_docx_and_pptx(client):
         assert "ستارهٔ درخشان" in doc_xml
         assert "فریاد انفجاری!" in doc_xml
         assert "comicbox_4" in doc_xml
+
+
+def test_v420_pending_resolve_requires_module_license_and_402_includes_vendor_contact(tmp_path, monkeypatch):
+    """v4.20: Applying a pending OCR/translation result enforces module license, and 402 JSON includes vendorContact."""
+    import time
+    from comic_studio import _public_key, pending_results
+    import comic_studio.license_guard as lg
+
+    priv_seed, pub_key = lg.ed25519_generate_keypair()
+    monkeypatch.setattr(_public_key, "PUBLIC_VERIFY_KEY_HEX", pub_key.hex())
+    hwid = lg.compute_hardware_id()
+
+    # Activate editing-only license (OCR and translation unlicensed) before calling API
+    issued_at = int(time.time()) - 120
+    edit_only_tok = lg.issue_license_token(
+        private_seed_hex=priv_seed.hex(),
+        hardware_id=hwid,
+        holder="کاربر ویرایش",
+        issued_at=issued_at,
+        modules={"editing": {"plan": "lifetime"}},
+    )
+    lg.SECURITY_GATE.activate_token(edit_only_tok, replace_all_modules=True)
+
+    local_client = TestClient(create_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+    proj, item = make_project(local_client)
+    pid = proj["id"]
+
+    # Seed a pending OCR result on disk and verify `apply` is blocked with 402 while `keep` is allowed
+    from comic_studio.store import ProjectStore
+
+    store_inst = ProjectStore()
+    cur_proj = store_inst.get(pid)
+    tok = pending_results.stage(
+        store_inst,
+        pid,
+        "ocr",
+        {
+            "outputs": [
+                {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "blocks": [{"id": "b1", "box": [10, 10, 80, 40], "text": "HELLO", "translated": ""}],
+                }
+            ],
+            "baseline": {item["id"]: "stale-sig"},
+        },
+    )["id"]
+    res_blocked = local_client.post(
+        f"/api/projects/{pid}/pending/{tok}/resolve",
+        json={"revision": cur_proj.get("updatedAt", ""), "choices": {item["id"]: "apply"}},
+    )
+    assert res_blocked.status_code == 402
+    assert res_blocked.json()["code"] == "MODULE_OCR_REQUIRED"
+
+    # Discarding the pending result via DELETE remains allowed without OCR license
+    del_res = local_client.delete(f"/api/projects/{pid}/pending/{tok}")
+    assert del_res.status_code == 204
+
+    # Also verify middleware 402 response carries vendorContact when completely unlicensed
+    past_start = int(time.time()) - 200_000
+    lg.SECURITY_GATE._save_state_record(
+        {
+            "v": 2,
+            "module_tokens": {},
+            "trial_started_at": past_start,
+            "trial_consumed": True,
+            "max_seen_utc": int(time.time()),
+        }
+    )
+    unlic_res = local_client.get("/api/projects")
+    assert unlic_res.status_code == 402
+    unlic_json = unlic_res.json()
+    assert isinstance(unlic_json.get("vendorContact"), dict)
+    assert unlic_json["vendorContact"].get("supportPhone")
+
 
 
 

@@ -1,7 +1,7 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>nul
-title Build Offline EXE ^& Setup - Comic OCR Studio 4.19
+title Build Offline EXE ^& Setup - Comic OCR Studio 4.20
 
 cd /d "%~dp0"
 set "APP_DIR=%CD%"
@@ -9,7 +9,7 @@ set "VENV_PY=%APP_DIR%\.venv\Scripts\python.exe"
 set "WHEELHOUSE_DIR=%APP_DIR%\wheelhouse"
 
 echo ====================================================================
-echo   Comic OCR Studio 4.19 - Offline Windows EXE ^& Setup Builder
+echo   Comic OCR Studio 4.20 - Offline Windows EXE ^& Setup Builder
 echo ====================================================================
 echo.
 
@@ -42,11 +42,13 @@ if not exist "%VENV_PY%" (
 )
 
 echo [2/3] Ensuring PyInstaller is installed in .venv...
-set "PIP_FIND_LINKS="
-if exist "%WHEELHOUSE_DIR%\*.whl" set "PIP_FIND_LINKS=--find-links=%WHEELHOUSE_DIR%"
 "%VENV_PY%" -c "import PyInstaller" >nul 2>nul
 if errorlevel 1 (
-  "%VENV_PY%" -m pip install --disable-pip-version-check %PIP_FIND_LINKS% "pyinstaller>=6.10,<7"
+  if exist "%WHEELHOUSE_DIR%\*.whl" (
+    "%VENV_PY%" -m pip install --disable-pip-version-check --find-links="%WHEELHOUSE_DIR%" "pyinstaller>=6.10,<7"
+  ) else (
+    "%VENV_PY%" -m pip install --disable-pip-version-check "pyinstaller>=6.10,<7"
+  )
   if errorlevel 1 (
     echo [ERROR] Could not install PyInstaller.
     pause
@@ -71,7 +73,7 @@ echo.
 echo ====================================================================
 echo   BUILD COMPLETE!
 echo   1-Click Standalone EXE : "%APP_DIR%\dist\ComicOCRStudio\ComicOCRStudio.exe"
-echo   Offline Setup Installer: "%APP_DIR%\dist\ComicOCRStudio-Offline-Setup-4.19*.exe"
+echo   Offline Setup Installer: "%APP_DIR%\dist\ComicOCRStudio-Offline-Setup-4.20*.exe"
 echo ====================================================================
 pause
 exit /b 0

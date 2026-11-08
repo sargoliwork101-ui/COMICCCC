@@ -30,6 +30,7 @@ import secrets
 import socket
 import sys
 import tempfile
+import threading
 import time
 import webbrowser
 from http import HTTPStatus
@@ -186,6 +187,17 @@ def parse_modules_cli_spec(spec: str) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _safe_csv_cell(value: Any) -> Any:
+    """Prevent Excel/LibreOffice formula evaluation & `+` phone truncation in exported CSV cells."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    text = str(value if value is not None else "")
+    stripped = text.lstrip(" \t\r\n")
+    if stripped.startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r")):
+        return "'" + text
+    return text
+
+
 class SellerVault:
     """Manages 256-byte Master Key + Ed25519 signing, Vendor Contact Config, and Customer CRM."""
 
@@ -196,6 +208,7 @@ class SellerVault:
         vendor_json_path: Path | None = None,
         vendor_py_path: Path | None = None,
     ) -> None:
+        self._lock = threading.RLock()
         self.seller_dir = Path(seller_dir) if seller_dir is not None else default_seller_dir()
         self.public_key_py = Path(public_key_py) if public_key_py is not None else PUBLIC_KEY_MODULE_PATH
         self.vendor_json_path = Path(vendor_json_path) if vendor_json_path is not None else VENDOR_CONTACT_JSON_PATH
@@ -214,6 +227,10 @@ class SellerVault:
         return self.seller_dir / "seller_customers.json"
 
     def ensure_master_key(self, *, sync_source: bool = True) -> dict[str, Any]:
+        with self._lock:
+            return self._ensure_master_key_unlocked(sync_source=sync_source)
+
+    def _ensure_master_key_unlocked(self, *, sync_source: bool = True) -> dict[str, Any]:
         record: dict[str, Any] | None = None
         needs_upgrade_save = False
         if self.master_key_path.is_file():
@@ -298,9 +315,10 @@ class SellerVault:
             "public_key_hex": pub.hex(),
             "fingerprint": hashlib.sha256(pub).hexdigest()[:16].upper(),
         }
-        _atomic_write_json(self.master_key_path, record)
-        if sync_source:
-            self.sync_public_key_to_source(record["public_key_hex"])
+        with self._lock:
+            _atomic_write_json(self.master_key_path, record)
+            if sync_source:
+                self.sync_public_key_to_source(record["public_key_hex"])
         return record
 
     def get_vendor_contact(self) -> dict[str, str]:
@@ -349,19 +367,25 @@ class SellerVault:
         if not raw_phone:
             raise ValueError("شماره تماس پشتیبانی نمی‌تواند خالی باشد.")
         norm = normalize_vendor_contact_dict({**(payload or {}), "supportPhone": raw_phone})
-        _atomic_write_json(self.vendor_json_path, norm)
-        if sync_source:
-            self.sync_vendor_contact_to_source(norm)
+        with self._lock:
+            _atomic_write_json(self.vendor_json_path, norm)
+            if sync_source:
+                self.sync_vendor_contact_to_source(norm)
         return norm
 
     def sync_all_before_exe_build(self) -> dict[str, Any]:
         """Ensure both `_public_key.py` and `_vendor_config.py` reflect latest seller settings before `.exe` build."""
-        key_rec = self.ensure_master_key(sync_source=True)
-        vendor = self.get_vendor_contact()
-        self.sync_vendor_contact_to_source(vendor)
-        return {"key": key_rec, "vendorContact": vendor}
+        with self._lock:
+            key_rec = self.ensure_master_key(sync_source=True)
+            vendor = self.get_vendor_contact()
+            self.sync_vendor_contact_to_source(vendor)
+            return {"key": key_rec, "vendorContact": vendor}
 
     def import_master_key(self, payload: dict[str, Any], *, sync_source: bool = True) -> dict[str, Any]:
+        with self._lock:
+            return self._import_master_key_unlocked(payload, sync_source=sync_source)
+
+    def _import_master_key_unlocked(self, payload: dict[str, Any], *, sync_source: bool = True) -> dict[str, Any]:
         # Accept either full bundle `{"backup": {...}, "customers": [...], "history": [...]}` or raw key dict
         key_obj = payload.get("backup") if isinstance(payload.get("backup"), dict) else payload
         if not isinstance(key_obj, dict):
@@ -480,6 +504,7 @@ class SellerVault:
         hardware_id: str = "",
         note: str = "",
         customer_id: str = "",
+        allow_clear_note: bool = False,
     ) -> dict[str, Any]:
         fn = str(first_name or "").strip()[:80]
         ln = str(last_name or "").strip()[:80]
@@ -492,65 +517,67 @@ class SellerVault:
         clean_note = str(note or "").strip()[:400]
         now_iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-        customers = self._load_raw_customers()
-        target: dict[str, Any] | None = None
-        cid_clean = str(customer_id or "").strip()
-        if cid_clean:
-            for cust in customers:
-                if str(cust.get("customerId") or "") == cid_clean:
-                    target = cust
-                    break
-        if target is None:
-            for cust in customers:
-                if str(cust.get("phone") or "") == norm_phone:
-                    target = cust
-                    break
-        if target is None and norm_hwid:
-            for cust in customers:
-                hw_list = cust.get("hardwareIds") or []
-                if isinstance(hw_list, list) and norm_hwid in hw_list:
-                    target = cust
-                    break
+        with self._lock:
+            customers = self._load_raw_customers()
+            target: dict[str, Any] | None = None
+            cid_clean = str(customer_id or "").strip()
+            if cid_clean:
+                for cust in customers:
+                    if str(cust.get("customerId") or "") == cid_clean:
+                        target = cust
+                        break
+            if target is None:
+                for cust in customers:
+                    if str(cust.get("phone") or "") == norm_phone:
+                        target = cust
+                        break
+            if target is None and norm_hwid:
+                for cust in customers:
+                    hw_list = cust.get("hardwareIds") or []
+                    if isinstance(hw_list, list) and norm_hwid in hw_list:
+                        target = cust
+                        break
 
-        if target is None:
-            target = {
-                "customerId": "CUST-" + secrets.token_hex(5).upper(),
-                "firstName": fn,
-                "lastName": ln,
-                "fullName": f"{fn} {ln}".strip(),
-                "phone": norm_phone,
-                "hardwareIds": [norm_hwid] if norm_hwid else [],
-                "note": clean_note,
-                "createdIso": now_iso,
-                "updatedIso": now_iso,
-            }
-            customers.insert(0, target)
-        else:
-            target["firstName"] = fn
-            target["lastName"] = ln
-            target["fullName"] = f"{fn} {ln}".strip()
-            target["phone"] = norm_phone
-            hw_list = [str(x) for x in (target.get("hardwareIds") or []) if str(x).strip()]
-            if norm_hwid and norm_hwid not in hw_list:
-                hw_list.insert(0, norm_hwid)
-            target["hardwareIds"] = hw_list
-            if clean_note or "note" not in target:
-                target["note"] = clean_note
-            target["updatedIso"] = now_iso
+            if target is None:
+                target = {
+                    "customerId": "CUST-" + secrets.token_hex(5).upper(),
+                    "firstName": fn,
+                    "lastName": ln,
+                    "fullName": f"{fn} {ln}".strip(),
+                    "phone": norm_phone,
+                    "hardwareIds": [norm_hwid] if norm_hwid else [],
+                    "note": clean_note,
+                    "createdIso": now_iso,
+                    "updatedIso": now_iso,
+                }
+                customers.insert(0, target)
+            else:
+                target["firstName"] = fn
+                target["lastName"] = ln
+                target["fullName"] = f"{fn} {ln}".strip()
+                target["phone"] = norm_phone
+                hw_list = [str(x) for x in (target.get("hardwareIds") or []) if str(x).strip()]
+                if norm_hwid and norm_hwid not in hw_list:
+                    hw_list.insert(0, norm_hwid)
+                target["hardwareIds"] = hw_list
+                if clean_note or allow_clear_note or "note" not in target:
+                    target["note"] = clean_note
+                target["updatedIso"] = now_iso
 
-        _atomic_write_json(self.customers_path, customers[:5000])
-        return target
+            _atomic_write_json(self.customers_path, customers[:5000])
+            return dict(target)
 
     def delete_customer(self, customer_id: str) -> bool:
         cid = str(customer_id or "").strip()
         if not cid:
             raise ValueError("شناسهٔ مشتری مشخص نشده است.")
-        customers = self._load_raw_customers()
-        filtered = [c for c in customers if str(c.get("customerId") or "") != cid]
-        if len(filtered) == len(customers):
-            return False
-        _atomic_write_json(self.customers_path, filtered)
-        return True
+        with self._lock:
+            customers = self._load_raw_customers()
+            filtered = [c for c in customers if str(c.get("customerId") or "") != cid]
+            if len(filtered) == len(customers):
+                return False
+            _atomic_write_json(self.customers_path, filtered)
+            return True
 
     def list_customers(self, *, now_ts: float | None = None) -> list[dict[str, Any]]:
         """Return all customers enriched with live per-module status computed from issued history."""
@@ -573,15 +600,22 @@ class SellerVault:
                 or (str(h.get("hardwareId") or "") in c_hwids)
             ]
 
-            # Latest grant per module across additive keys issued to this customer
+            # Best grant per module across additive keys issued to this customer
             mod_live: dict[str, dict[str, Any]] = {}
             for m in LICENSE_MODULES:
                 best: dict[str, Any] | None = None
+                best_rank: tuple[int, int] = (-1, -1)
                 for h in matched_hist:
                     h_mods = h.get("modules")
                     if isinstance(h_mods, dict) and m in h_mods:
-                        best = h_mods[m]
-                        break
+                        cand = h_mods[m]
+                        cand_exp = cand.get("expiresAt")
+                        cand_rank = (2, 0) if (cand_exp is None or cand.get("plan") == "lifetime") else (1, int(cand_exp))
+                        if cand_rank > best_rank:
+                            best = cand
+                            best_rank = cand_rank
+                            if cand_rank[0] == 2:
+                                break
                 if best is None:
                     mod_live[m] = {"state": "none", "label": MODULE_LABELS_FA[m], "text": "صادرنشده", "daysRemaining": None}
                     continue
@@ -668,18 +702,18 @@ class SellerVault:
             ml = c.get("modulesLive") or {}
             writer.writerow(
                 [
-                    c.get("customerId", ""),
-                    c.get("firstName", ""),
-                    c.get("lastName", ""),
-                    c.get("phone", ""),
-                    " | ".join(c.get("hardwareIds") or []),
-                    status_map.get(str(c.get("overallStatus") or ""), ""),
-                    (ml.get("ocr") or {}).get("text", ""),
-                    (ml.get("translation") or {}).get("text", ""),
-                    (ml.get("editing") or {}).get("text", ""),
+                    _safe_csv_cell(c.get("customerId", "")),
+                    _safe_csv_cell(c.get("firstName", "")),
+                    _safe_csv_cell(c.get("lastName", "")),
+                    _safe_csv_cell(c.get("phone", "")),
+                    _safe_csv_cell(" | ".join(c.get("hardwareIds") or [])),
+                    _safe_csv_cell(status_map.get(str(c.get("overallStatus") or ""), "")),
+                    _safe_csv_cell((ml.get("ocr") or {}).get("text", "")),
+                    _safe_csv_cell((ml.get("translation") or {}).get("text", "")),
+                    _safe_csv_cell((ml.get("editing") or {}).get("text", "")),
                     c.get("issuedCount", 0),
-                    c.get("lastIssuedIso", ""),
-                    c.get("note", ""),
+                    _safe_csv_cell(c.get("lastIssuedIso", "")),
+                    _safe_csv_cell(c.get("note", "")),
                 ]
             )
         return ("\ufeff" + buf.getvalue()).encode("utf-8")
@@ -699,74 +733,76 @@ class SellerVault:
         days: int | None = None,
         modules: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        key_rec = self.ensure_master_key(sync_source=True)
-        norm_hwid = normalize_hardware_id(hardware_id)
+        with self._lock:
+            key_rec = self.ensure_master_key(sync_source=True)
+            norm_hwid = normalize_hardware_id(hardware_id)
 
-        fn = str(first_name or "").strip()[:80]
-        ln = str(last_name or "").strip()[:80]
-        raw_phone = str(phone or "").strip()
+            fn = str(first_name or "").strip()[:80]
+            ln = str(last_name or "").strip()[:80]
+            raw_phone = str(phone or "").strip()
 
-        customer_rec: dict[str, Any] | None = None
-        if require_contact or (fn and ln and raw_phone):
-            customer_rec = self.upsert_customer(
-                first_name=fn,
-                last_name=ln,
-                phone=raw_phone,
+            customer_rec: dict[str, Any] | None = None
+            if require_contact or (fn and ln and raw_phone):
+                customer_rec = self.upsert_customer(
+                    first_name=fn,
+                    last_name=ln,
+                    phone=raw_phone,
+                    hardware_id=norm_hwid,
+                    note=note,
+                    customer_id=customer_id,
+                    allow_clear_note=False,
+                )
+
+            derived_holder = f"{fn} {ln}".strip()
+            clean_holder = str(holder or "").strip()[:120] or derived_holder or "کاربر رسمی"
+
+            token = issue_license_token(
+                private_seed_hex=key_rec["private_seed_hex"],
                 hardware_id=norm_hwid,
-                note=note,
-                customer_id=customer_id,
+                holder=clean_holder,
+                plan=plan,
+                days=days,
+                modules=modules,
             )
-
-        derived_holder = f"{fn} {ln}".strip()
-        clean_holder = str(holder or "").strip()[:120] or derived_holder or "کاربر رسمی"
-
-        token = issue_license_token(
-            private_seed_hex=key_rec["private_seed_hex"],
-            hardware_id=norm_hwid,
-            holder=clean_holder,
-            plan=plan,
-            days=days,
-            modules=modules,
-        )
-        verified = verify_license_token(
-            token,
-            expected_hardware_id=norm_hwid,
-            public_key_bytes=bytes.fromhex(key_rec["public_key_hex"]),
-            check_expiry=False,
-        )
-        mod_summary = {
-            m: {
-                "label": MODULE_LABELS_FA[m],
-                "plan": verified["modules"][m]["plan"],
-                "planLabel": verified["modules"][m]["planLabel"],
-                "daysTotal": verified["modules"][m]["daysTotal"],
-                "expiresAt": verified["modules"][m]["expiresAt"],
+            verified = verify_license_token(
+                token,
+                expected_hardware_id=norm_hwid,
+                public_key_bytes=bytes.fromhex(key_rec["public_key_hex"]),
+                check_expiry=False,
+            )
+            mod_summary = {
+                m: {
+                    "label": MODULE_LABELS_FA[m],
+                    "plan": verified["modules"][m]["plan"],
+                    "planLabel": verified["modules"][m]["planLabel"],
+                    "daysTotal": verified["modules"][m]["daysTotal"],
+                    "expiresAt": verified["modules"][m]["expiresAt"],
+                }
+                for m in LICENSE_MODULES
+                if m in verified["modules"]
             }
-            for m in LICENSE_MODULES
-            if m in verified["modules"]
-        }
-        entry = {
-            "licenseId": verified["licenseId"],
-            "issuedIso": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            "customerId": customer_rec["customerId"] if customer_rec else "",
-            "firstName": customer_rec["firstName"] if customer_rec else fn,
-            "lastName": customer_rec["lastName"] if customer_rec else ln,
-            "phone": customer_rec["phone"] if customer_rec else (normalize_customer_phone(raw_phone, required=False) if raw_phone else ""),
-            "note": str(note or "").strip()[:400],
-            "holder": verified["holder"],
-            "hardwareId": verified["hardwareId"],
-            "plan": verified["plan"],
-            "planLabel": verified["planLabel"],
-            "daysTotal": verified["daysTotal"],
-            "expiresAt": verified["expiresAt"],
-            "modules": mod_summary,
-            "supportPhone": self.get_vendor_contact()["supportPhone"],
-            "token": token,
-        }
-        history = self.list_history()
-        history.insert(0, entry)
-        _atomic_write_json(self.history_path, history[:2000])
-        return entry
+            entry = {
+                "licenseId": verified["licenseId"],
+                "issuedIso": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                "customerId": customer_rec["customerId"] if customer_rec else "",
+                "firstName": customer_rec["firstName"] if customer_rec else fn,
+                "lastName": customer_rec["lastName"] if customer_rec else ln,
+                "phone": customer_rec["phone"] if customer_rec else (normalize_customer_phone(raw_phone, required=False) if raw_phone else ""),
+                "note": str(note or "").strip()[:400],
+                "holder": verified["holder"],
+                "hardwareId": verified["hardwareId"],
+                "plan": verified["plan"],
+                "planLabel": verified["planLabel"],
+                "daysTotal": verified["daysTotal"],
+                "expiresAt": verified["expiresAt"],
+                "modules": mod_summary,
+                "supportPhone": self.get_vendor_contact()["supportPhone"],
+                "token": token,
+            }
+            history = self.list_history()
+            history.insert(0, entry)
+            _atomic_write_json(self.history_path, history[:2000])
+            return entry
 
     def self_activate_this_pc(self, holder: str = "نسخهٔ اصلی فروشنده (مالک برنامه)") -> dict[str, Any]:
         hwid = compute_hardware_id()
@@ -784,6 +820,7 @@ _PANEL_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>Comic OCR Studio — پنل مدیریت مشتریان و صدور لایسنس</title>
   <link rel="icon" type="image/png" href="/assets/icon128.png">
   <style>
@@ -940,7 +977,7 @@ _PANEL_HTML = """<!doctype html>
     <div class="brand">
       <img class="logo" src="/assets/icon128.png" alt="">
       <div>
-        <h1>Comic OCR Studio <span class="ver">۴.۱۹ · پنل فروشنده</span></h1>
+        <h1>Comic OCR Studio <span class="ver">۴.۲۰ · پنل فروشنده</span></h1>
         <span class="brand-sub">مدیریت کلید مادر ۲۵۶ بایتی، بانک مشتریان و صدور لایسنس ماژولار آفلاین</span>
       </div>
     </div>
@@ -1662,10 +1699,12 @@ _PANEL_HTML = """<!doctype html>
         const res = await fetch('/api/customers.csv', { headers: { 'X-Seller-Secret': SECRET } });
         if (!res.ok) throw new Error('خطا در دریافت خروجی اکسل');
         const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
+        a.href = blobUrl;
         a.download = `ComicOCRStudio-Customers-${new Date().toISOString().slice(0,10)}.csv`;
         a.click();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
         notify('فایل اکسل (CSV) لیست مشتریان دانلود شد.');
       } catch (e) { notify(e.message, true); }
     };
@@ -1873,10 +1912,12 @@ _PANEL_HTML = """<!doctype html>
       try {
         const data = await callApi('/api/backup-key');
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
+        a.href = blobUrl;
         a.download = `ComicOCRStudio-SellerVault-${data.backup.fingerprint}.seller-key.json`;
         a.click();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
         notify('پشتیبان کامل کلید مادر ۲۵۶ بایتی + لیست مشتریان دانلود شد.');
       } catch (e) { notify(e.message, true); }
     };
@@ -1906,15 +1947,37 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
         "/assets/icon128.png": (_STATIC_ASSETS_DIR / "icon128.png", "image/png"),
     }
 
+    max_post_bytes = 16 * 1024 * 1024
+    loopback_hosts = {"127.0.0.1", "localhost", "[::1]", "::1"}
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:
             return
+
+        def _send_security_headers(self) -> None:
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+
+        def _is_loopback_request(self) -> bool:
+            raw_host = (self.headers.get("Host") or "").strip().lower()
+            if raw_host:
+                host_only = raw_host.split("]")[0] + "]" if raw_host.startswith("[") else raw_host.split(":")[0]
+                if host_only not in loopback_hosts:
+                    return False
+            origin = (self.headers.get("Origin") or "").strip()
+            if origin:
+                origin_host = (urlsplit(origin).hostname or "").lower()
+                if origin_host not in loopback_hosts:
+                    return False
+            return True
 
         def _send_json(self, payload: Any, status: int = 200) -> None:
             raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
+            self._send_security_headers()
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -1924,6 +1987,9 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
             return bool(given) and hmac.compare_digest(given, panel_secret)
 
         def do_GET(self) -> None:  # noqa: N802
+            if not self._is_loopback_request():
+                self._send_json({"detail": "دسترسی فقط از آدرس محلی مجاز است."}, HTTPStatus.FORBIDDEN)
+                return
             parsed = urlsplit(self.path)
             if parsed.path in allowed_static:
                 asset_path, mime_type = allowed_static[parsed.path]
@@ -1934,6 +2000,7 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", mime_type)
                 self.send_header("Cache-Control", "public, max-age=86400")
+                self._send_security_headers()
                 self.send_header("Content-Length", str(len(asset_bytes)))
                 self.end_headers()
                 self.wfile.write(asset_bytes)
@@ -1949,6 +2016,7 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self._send_security_headers()
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -2005,6 +2073,7 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
+                self._send_security_headers()
                 self.send_header("Content-Disposition", 'attachment; filename="customers.csv"')
                 self.send_header("Content-Length", str(len(csv_bytes)))
                 self.end_headers()
@@ -2025,10 +2094,20 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
             self._send_json({"detail": "مسیر پیدا نشد."}, HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802
+            if not self._is_loopback_request():
+                self._send_json({"detail": "دسترسی فقط از آدرس محلی مجاز است."}, HTTPStatus.FORBIDDEN)
+                return
             if not self._authorized():
                 self._send_json({"detail": "توکن امنیتی پنل فروشنده نامعتبر است."}, HTTPStatus.FORBIDDEN)
                 return
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._send_json({"detail": "هدر Content-Length نامعتبر است."}, HTTPStatus.BAD_REQUEST)
+                return
+            if length < 0 or length > max_post_bytes:
+                self._send_json({"detail": "حجم درخواست بیش از حد مجاز است."}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                return
             raw_body = self.rfile.read(length) if length > 0 else b"{}"
             try:
                 data = json.loads(raw_body.decode("utf-8"))
@@ -2065,6 +2144,7 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                         hardware_id=str(data.get("hardware_id") or ""),
                         note=str(data.get("note") or ""),
                         customer_id=str(data.get("customer_id") or ""),
+                        allow_clear_note=True,
                     )
                     self._send_json({"customer": saved})
                     return
@@ -2111,12 +2191,8 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     key_info = vault.ensure_master_key(sync_source=True)
     panel_secret = secrets.token_urlsafe(24)
     handler_cls = build_seller_panel_handler(vault, panel_secret)
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    port = int(server.server_address[1])
     url = f"http://127.0.0.1:{port}/?secret={panel_secret}"
     print("=" * 72)
     print("  Comic OCR Studio — پنل مدرن مدیریت مشتریان و صدور لایسنس (فروشنده)")

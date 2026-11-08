@@ -79,6 +79,10 @@ startBtn.addEventListener('click', async () => {
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || tab.id == null) {
+      showError('تب فعالی برای اسکن پیدا نشد. لطفاً ابتدا صفحهٔ موردنظر را باز کنید.');
+      return;
+    }
     // مرحلهٔ ۱: کاوش همهٔ فریم‌ها برای پیدا کردن فریم اصلی reader گوگل‌بوک (در صفحات edition داخل iframe است)
     let injectionTarget = { tabId: tab.id };
     try {

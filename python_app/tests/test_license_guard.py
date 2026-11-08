@@ -795,6 +795,7 @@ def test_seller_panel_visual_and_font_parity_with_main_app(tmp_path: Path) -> No
         # 2. Main HTML matches Studio's @font-face, CSS design tokens, light/dark toggle, .topbar, and zero native dialogs
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/?secret={secret}", timeout=5) as resp:
             assert resp.status == 200
+            status_headers = resp.headers
             html = resp.read().decode("utf-8")
 
         assert "@font-face{font-family:Vazirmatn;src:url('/assets/Vazirmatn.woff2') format('woff2')" in html
@@ -819,10 +820,14 @@ def test_seller_panel_visual_and_font_parity_with_main_app(tmp_path: Path) -> No
 
         assert '<header class="topbar">' in html
         assert '<img class="logo" src="/assets/icon128.png"' in html
-        assert '<span class="ver">۴.۱۹ · پنل فروشنده</span>' in html
+        assert '<span class="ver">۴.۲۰ · پنل فروشنده</span>' in html
+        assert '<meta name="referrer" content="no-referrer">' in html
         assert 'id="sellerThemeBtn"' in html
         assert "comic-studio-theme" in html
         assert 'id="sellerConfirmDialog"' in html
+        assert status_headers.get("Referrer-Policy") == "no-referrer"
+        assert status_headers.get("X-Frame-Options") == "DENY"
+        assert status_headers.get("X-Content-Type-Options") == "nosniff"
 
         # Zero native browser confirm/alert/prompt calls inside <script>, plus valid JS syntax
         script_match = re.search(r"<script>([\s\S]*?)</script>", html)
@@ -840,6 +845,146 @@ def test_seller_panel_visual_and_font_parity_with_main_app(tmp_path: Path) -> No
                 check=False,
             )
             assert chk.returncode == 0, f"Invalid JS syntax in _PANEL_HTML: {chk.stderr}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_v420_hwid_persian_digits_non_downgrade_activation_and_seller_csv_hardening(tmp_path, monkeypatch):
+    """v4.20 audit fixes: Persian-digit HWIDs, non-downgrade/stale-pruning activation, CSV formula defense, clearable notes, & Origin check."""
+    import csv
+    import io
+    import sys
+    import threading
+    import time
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    import comic_studio.license_guard as lg
+
+    app_root = Path(__file__).resolve().parents[1]
+    if str(app_root) not in sys.path:
+        sys.path.insert(0, str(app_root))
+    import license_manager as lm
+
+    # 1. Persian/Arabic digits & Unicode dashes normalize cleanly in System Codes
+    norm_hw = lg.normalize_hardware_id("cs۴–۲۳۴۵—۶۷۸۹−abcd‐efgh")
+    assert norm_hw == "CS4-2345-6789-ABCD-EFGH"
+
+    # 2. Additive activate_token prunes stale rotated-key tokens AND never downgrades a lifetime/longer grant
+    old_seed, _ = lg.ed25519_generate_keypair()
+    new_seed, new_pub = lg.ed25519_generate_keypair()
+    monkeypatch.setattr(_public_key, "PUBLIC_VERIFY_KEY_HEX", new_pub.hex())
+    monkeypatch.setattr(lg, "compute_hardware_id", lambda: norm_hw)
+    gate = lg.SECURITY_GATE
+    gate.reset_memory_state()
+
+    now = time.time()
+    stale_old_key_tok = lg.issue_license_token(
+        private_seed_hex=old_seed.hex(),
+        hardware_id=norm_hw,
+        holder="قدیمی",
+        issued_at=int(now) - 300,
+        modules={"editing": {"plan": "lifetime"}},
+    )
+    gate._save_state_record(
+        {
+            "v": 2,
+            "module_tokens": {"editing": stale_old_key_tok},
+            "trial_started_at": int(now) - 200_000,
+            "trial_consumed": True,
+            "max_seen_utc": int(now) - 60,
+        }
+    )
+
+    lifetime_ocr_tok = lg.issue_license_token(
+        private_seed_hex=new_seed.hex(),
+        hardware_id=norm_hw,
+        holder="مشتری اصلی",
+        issued_at=int(now) - 120,
+        modules={"ocr": {"plan": "lifetime"}},
+    )
+    st1, _ = gate.activate_token(lifetime_ocr_tok, replace_all_modules=False, now_ts=now)
+    assert st1["licensed"] is True
+    assert st1["modules"]["ocr"]["plan"] == "lifetime"
+    assert st1["modules"]["editing"]["active"] is False  # stale rotated-key token pruned cleanly!
+
+    timed_ocr_and_trans_tok = lg.issue_license_token(
+        private_seed_hex=new_seed.hex(),
+        hardware_id=norm_hw,
+        holder="مشتری اصلی",
+        issued_at=int(now) - 90,
+        modules={"ocr": {"plan": "subscription", "days": 30}, "translation": {"plan": "subscription", "days": 30}},
+    )
+    st2, _ = gate.activate_token(timed_ocr_and_trans_tok, replace_all_modules=False, now_ts=now)
+    assert st2["modules"]["ocr"]["plan"] == "lifetime"  # NOT downgraded to 30-day timed!
+    assert st2["modules"]["translation"]["active"] is True
+
+    # 3. SellerVault CSV formula defense + clearable notes + Origin check
+    pub_py = tmp_path / "_public_key.py"
+    pub_py.write_text('PUBLIC_VERIFY_KEY_HEX: str = ("' + ("0" * 64) + '")\n', encoding="utf-8")
+    vault = lm.SellerVault(
+        seller_dir=tmp_path / "seller_vault",
+        public_key_py=pub_py,
+        vendor_json_path=tmp_path / "vendor_contact.json",
+        vendor_py_path=tmp_path / "_vendor_config.py",
+    )
+    cust = vault.upsert_customer(
+        first_name="=CMD|'/C calc'!A0",
+        last_name="رضایی",
+        phone="+491701234567",
+        hardware_id=norm_hw,
+        note="- یادداشت اولیه",
+    )
+    csv_text = vault.export_customers_csv().decode("utf-8-sig")
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    assert len(rows) == 2
+    assert rows[1][1].startswith("'=CMD")
+    assert rows[1][3] == "'+491701234567"
+    assert rows[1][11].startswith("'- یادداشت")
+
+    # issue() with empty note preserves existing note, while allow_clear_note=True clears it
+    preserved = vault.upsert_customer(
+        customer_id=cust["customerId"],
+        first_name="علی",
+        last_name="رضایی",
+        phone="+491701234567",
+        note="",
+        allow_clear_note=False,
+    )
+    assert preserved["note"] == "- یادداشت اولیه"
+    cleared = vault.upsert_customer(
+        customer_id=cust["customerId"],
+        first_name="علی",
+        last_name="رضایی",
+        phone="+491701234567",
+        note="",
+        allow_clear_note=True,
+    )
+    assert cleared["note"] == ""
+
+    # Cross-origin POST is rejected with 403 even if X-Seller-Secret is present
+    secret = "seller-secret-v420"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), lm.build_seller_panel_handler(vault, secret))
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/self-activate",
+            data=b"{}",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Seller-Secret": secret,
+                "Origin": "https://evil.example",
+            },
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("Expected 403 for cross-origin Origin header")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
     finally:
         server.shutdown()
         server.server_close()

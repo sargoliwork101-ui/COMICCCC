@@ -8926,16 +8926,19 @@ function renderVendorChannelsInto(container, vc) {
   if (info.whatsapp) addChip('💬 واتساپ / پیامک', info.whatsapp, true);
   if (info.telegram) {
     const tgRaw = String(info.telegram).trim();
-    const tgHref = /^https?:\/\//i.test(tgRaw)
-      ? tgRaw
-      : (tgRaw.startsWith('@') ? `https://t.me/${tgRaw.slice(1)}` : '');
+    let tgHref = '';
+    if (/^https?:\/\//i.test(tgRaw)) tgHref = tgRaw;
+    else if (tgRaw.startsWith('@') && tgRaw.length > 1) tgHref = `https://t.me/${tgRaw.slice(1)}`;
+    else if (/^(t\.me|telegram\.me)\/[A-Za-z0-9_+/.-]+$/i.test(tgRaw)) tgHref = `https://${tgRaw}`;
     addChip('✈️ تلگرام', tgRaw, true, tgHref);
   }
   if (info.domesticMessenger) addChip('📱 پیام‌رسان داخلی', info.domesticMessenger, false);
   if (info.supportHours) addChip('🕒 پاسخ‌گویی', info.supportHours, false);
   if (info.website) {
     const webRaw = String(info.website).trim();
-    const webHref = /^https?:\/\//i.test(webRaw) ? webRaw : '';
+    let webHref = '';
+    if (/^https?:\/\//i.test(webRaw)) webHref = webRaw;
+    else if (/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+(\/[^\s]*)?$/.test(webRaw)) webHref = `https://${webRaw}`;
     addChip('🌐 وب‌سایت', webRaw, true, webHref);
   }
   if (info.customNote) {
@@ -9351,6 +9354,9 @@ async function activateNewLicenseFromDialog() {
 }
 
 async function lockWorkspaceNow() {
+  if (savePending) {
+    try { await saveProject(); } catch { /* ignore */ }
+  }
   const status = await api('/api/license/logout', { method: 'POST' });
   applyAuthGateUi(status);
   toast('برنامه قفل شد');
