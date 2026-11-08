@@ -16,7 +16,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from PIL import Image, ImageDraw
 
-from .activity import emit
+from .activity import check_cancelled, emit
 from .license_guard import require_active_license
 from .ocr_managed import compute_worker_count, iter_parallel_ordered
 from .paths import project_root
@@ -352,6 +352,7 @@ def build_pdf(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
                 pending: list[dict[str, Any]] = []
                 pending_height = 0.0
                 for entry in scaled:
+                    check_cancelled("ساخت خروجی به درخواست کاربر لغو شد.")
                     if pending and (pending_height + entry["h"]) * scale > SAFE_PT:
                         _insert(document, common_width, pending_height, pending, stacked=True)
                         for p in pending:
@@ -458,6 +459,7 @@ def build_txt(store: ProjectStore, state: dict[str, Any], request: dict[str, Any
     chunks = []
     total = max(1, len(images))
     for index, item in enumerate(images, start=1):
+        check_cancelled("ساخت خروجی به درخواست کاربر لغو شد.")
         chunks.append(f"===== تصویر {index:03d} — {item['name']} =====\n")
         blocks = _ordered_export_blocks(item)
         if not blocks:
@@ -1761,6 +1763,7 @@ def _finalize_visual_docx(
     shape_serial = 1
 
     for page_idx, page in enumerate(pages, start=1):
+        check_cancelled("ساخت خروجی به درخواست کاربر لغو شد.")
         rel_id = f"rIdImg{page_idx}"
         media_name = f"media/page_{page_idx:03d}.png"
         rel_entries.append(
@@ -2589,6 +2592,7 @@ def _finalize_visual_pptx(
 
     slides: list[dict[str, Any]] = []
     for page_idx, page in enumerate(pages, start=1):
+        check_cancelled("ساخت خروجی به درخواست کاربر لغو شد.")
         img_w, img_h = max(1, page["w"]), max(1, page["h"])
         fit_scale_emu = min(slide_cx / img_w, slide_cy / img_h)
         draw_cx = max(12700, round(img_w * fit_scale_emu))

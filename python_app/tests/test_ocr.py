@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -3502,3 +3503,77 @@ def test_v425_surya_mtmd_chunk_vulkan_mmproj_sentinel_and_crop_root_cause(tmp_pa
 
 
 
+
+
+def test_v426_job_cancel_preempts_ocr_translation_and_export(tmp_path, monkeypatch):
+    """v4.26: the "لغو" button must actually stop running work, not just close the window."""
+    from fastapi.testclient import TestClient
+
+    from comic_studio import activity as activity_mod
+    from comic_studio.main import create_app
+    from comic_studio.ocr import EngineRegistry
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+
+    # 1) Cooperative cancellation: a running job raises JobCancelledError as soon as the cancel event is set.
+    cancel_event = threading.Event()
+    with activity_mod.cancellation_scope(cancel_event):
+        assert not activity_mod.is_job_cancelled()
+        cancel_event.set()
+        assert activity_mod.is_job_cancelled()
+        with pytest.raises(activity_mod.JobCancelledError):
+            activity_mod.check_cancelled("عملیات لغو شد.")
+
+    # 2) An interruptible sleep wakes up immediately when cancelled instead of waiting the full delay.
+    cancel_event = threading.Event()
+    cancel_event.set()
+    started = time.monotonic()
+    with pytest.raises(activity_mod.JobCancelledError):
+        activity_mod.sleep_interruptible(30.0, cancel_event, "عملیات لغو شد.")
+    assert time.monotonic() - started < 1.0
+
+    # 3) The isolated-engine worker can be killed without waiting for its stdout readline() to return.
+    from comic_studio.ocr_managed import IsolatedOcrEngine
+
+    engine = IsolatedOcrEngine(
+        engine_id="got-ocr-2",
+        languages=["eng"],
+        install_lock=threading.Lock(),
+        line_factory=OcrLine,
+        error_cls=OcrError,
+    )
+    worker_script = tmp_path / "fake_worker.py"
+    worker_script.write_text(
+        "import sys, time\n"
+        "print('ready', flush=True)\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line:\n"
+        "        break\n"
+        "    time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("comic_studio.ocr_managed._worker_script_path", lambda: worker_script)
+    monkeypatch.setattr(engine, "_env_python", lambda: Path(sys.executable))
+
+    proc = engine._ensure_worker()
+    assert proc.poll() is None
+    engine.cancel_ocr()
+    deadline = time.monotonic() + 5.0
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert proc.poll() is not None, "cancel_ocr() must terminate the worker process immediately"
+
+    # 4) The registry exposes a global OCR cancel that also stops Tesseract subprocesses.
+    registry = EngineRegistry()
+    assert callable(getattr(registry, "cancel_ocr", None))
+    assert callable(getattr(registry, "cancel_all_installs", None))
+
+    # 5) The HTTP API exposes an immediate job-cancel route.
+    client = TestClient(create_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+    resp = client.post("/api/jobs/cancel", json={"kind": "all"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    resp = client.post("/api/jobs/cancel", json={"kind": "ocr"})
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "ocr"

@@ -21,11 +21,12 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageOps
 
-from .activity import emit
+from .activity import JobCancelledError, emit, is_job_cancelled
 from .persian_ocr_post import SINGLE_FA_LETTERS, is_known_persian_word, postprocess_persian_ocr_text
 from .ocr_managed import (
     ISOLATED_ENGINE_SPECS,
     IsolatedOcrEngine,
+    _kill_process_tree,
     _remove_path_safely,
     acknowledge_engine_update,
     check_remote_updates,
@@ -87,6 +88,14 @@ _INSTALL_LOCK = threading.Lock()
 _ORIG_SUBPROCESS_RUN = subprocess.run
 _ORIG_INSTALL_TESSERACT = install_tesseract_runtime
 _STANDARD_CANCEL_EVENT = threading.Event()
+_ACTIVE_OCR_PROCS_LOCK = threading.Lock()
+_ACTIVE_OCR_PROCS: set[subprocess.Popen[Any]] = set()
+_KILLED_OCR_PROCS: set[int] = set()
+
+
+def _check_ocr_cancelled() -> None:
+    if is_job_cancelled():
+        raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
 
 
 def _call_install_tesseract_runtime() -> str:
@@ -733,31 +742,34 @@ def _stream_download_with_mirrors(
         headers = {"User-Agent": "Comic-OCR-Studio", **extra_headers}
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=180) as resp, part_path.open("wb") as out:
+            with urllib.request.urlopen(req, timeout=30) as resp, part_path.open("wb") as out:
                 hdrs = getattr(resp, "headers", None)
                 raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
                 expected = int(raw_len) if raw_len and str(raw_len).isdigit() else 12 * 1024 * 1024
                 total = 0
+                last_emit_total = 0
                 while True:
-                    if _STANDARD_CANCEL_EVENT.is_set():
+                    if _STANDARD_CANCEL_EVENT.is_set() or is_job_cancelled():
                         raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
-                    chunk = resp.read(512 * 1024)
+                    chunk = resp.read(64 * 1024)
                     if not chunk:
                         break
                     total += len(chunk)
                     if total > max_bytes:
                         raise OcrError(f"Downloaded file {dest_path.name} exceeded safe size limit.")
                     out.write(chunk)
-                    ratio = min(1.0, total / max(1, expected))
-                    emit(
-                        f"دانلود {label}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
-                        progress=round(start_p + span_p * ratio, 3),
-                    )
+                    if total - last_emit_total >= 256 * 1024 or total >= expected:
+                        last_emit_total = total
+                        ratio = min(1.0, total / max(1, expected))
+                        emit(
+                            f"دانلود {label}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
+                            progress=round(start_p + span_p * ratio, 3),
+                        )
             if part_path.stat().st_size < min_bytes:
                 raise OcrError(f"Downloaded file {dest_path.name} is incomplete or empty.")
             os.replace(part_path, dest_path)
             return dest_path
-        except OcrError:
+        except (OcrError, JobCancelledError):
             part_path.unlink(missing_ok=True)
             raise
         except Exception as exc:
@@ -2173,33 +2185,36 @@ class TesseractEngine:
                 emit(f"ادامهٔ دانلود فایل زبان Tesseract ({language}) از میرور جایگزین…", "warning", progress=0.22)
             try:
                 request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio", **extra_headers})
-                with urllib.request.urlopen(request, timeout=180) as response, temporary.open("wb") as output:
+                with urllib.request.urlopen(request, timeout=30) as response, temporary.open("wb") as output:
                     hdrs = getattr(response, "headers", None)
                     raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
                     expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 12 * 1024 * 1024
                     total = 0
+                    last_emit_total = 0
                     while True:
-                        if _STANDARD_CANCEL_EVENT.is_set():
+                        if _STANDARD_CANCEL_EVENT.is_set() or is_job_cancelled():
                             raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
-                        chunk = response.read(1024 * 1024)
+                        chunk = response.read(64 * 1024)
                         if not chunk:
                             break
                         total += len(chunk)
-                        ratio = min(1.0, total / max(1, expected_bytes))
-                        emit(
-                            f"Tesseract {language}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
-                            progress=round(0.24 + 0.66 * ratio, 3),
-                        )
                         if total > 50 * 1024 * 1024:
                             raise OcrError("The selected Tesseract language file is unexpectedly large.")
                         output.write(chunk)
+                        if total - last_emit_total >= 256 * 1024 or total >= expected_bytes:
+                            last_emit_total = total
+                            ratio = min(1.0, total / max(1, expected_bytes))
+                            emit(
+                                f"Tesseract {language}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
+                                progress=round(0.24 + 0.66 * ratio, 3),
+                            )
                 if temporary.stat().st_size < 1000:
                     raise OcrError("The downloaded Tesseract language file is empty or invalid.")
                 os.replace(temporary, target)
                 self._ensure_tsv_config()
                 emit(f"فایل زبان Tesseract ({language}) ذخیره شد", "success", progress=0.94)
                 return target
-            except OcrError:
+            except (OcrError, JobCancelledError):
                 temporary.unlink(missing_ok=True)
                 raise
             except Exception as exc:
@@ -2289,6 +2304,7 @@ class TesseractEngine:
             trim_process_memory()
 
     def _run_tesseract_tsv(self, image: Image.Image, language: str, psm: str) -> str:
+        _check_ocr_cancelled()
         executable = _tesseract_executable()
         if not executable:
             raise OcrError("Tesseract is not installed. Install the binary and use the explicit language download button.")
@@ -2365,14 +2381,65 @@ class TesseractEngine:
             tess_env["TESSDATA_PREFIX"] = str(self._model_dir())
         omp_limit = self._omp_threads if self._omp_threads is not None else min(4, cpu_core_count())
         tess_env["OMP_THREAD_LIMIT"] = str(max(1, omp_limit))
+        _check_ocr_cancelled()
+        if subprocess.run is not _ORIG_SUBPROCESS_RUN:
+            try:
+                result = subprocess.run(command, input=buffer.getvalue(), env=tess_env, capture_output=True, timeout=180, check=False, **_win_subprocess_kwargs())
+            except JobCancelledError:
+                raise
+            except Exception as exc:
+                raise OcrError(f"Tesseract failed: {exc}") from exc
+            _check_ocr_cancelled()
+            if result.returncode:
+                details = (result.stderr or result.stdout or b"Tesseract failed")[-1800:]
+                raise OcrError(f"Tesseract failed: {details.decode('utf-8', 'replace') if isinstance(details, bytes) else details}")
+            return result.stdout.decode("utf-8", "replace") if isinstance(result.stdout, bytes) else result.stdout
+
+        proc: subprocess.Popen[bytes] | None = None
+        proc_id_key = 0
         try:
-            result = subprocess.run(command, input=buffer.getvalue(), env=tess_env, capture_output=True, timeout=180, check=False, **_win_subprocess_kwargs())
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=tess_env,
+                start_new_session=(os.name != "nt"),
+                **_win_subprocess_kwargs(),
+            )
+            proc_id_key = id(proc)
+            with _ACTIVE_OCR_PROCS_LOCK:
+                _ACTIVE_OCR_PROCS.add(proc)
+            if is_job_cancelled():
+                _kill_process_tree(proc)
+                raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
+            stdout_bytes, stderr_bytes = proc.communicate(input=buffer.getvalue(), timeout=180)
+        except JobCancelledError:
+            if proc is not None:
+                _kill_process_tree(proc)
+            raise
         except Exception as exc:
+            if proc is not None:
+                _kill_process_tree(proc)
+            with _ACTIVE_OCR_PROCS_LOCK:
+                was_killed = proc_id_key in _KILLED_OCR_PROCS
+                _KILLED_OCR_PROCS.discard(proc_id_key)
+            if was_killed or is_job_cancelled():
+                raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.") from exc
             raise OcrError(f"Tesseract failed: {exc}") from exc
-        if result.returncode:
-            details = (result.stderr or result.stdout or b"Tesseract failed")[-1800:]
-            raise OcrError(f"Tesseract failed: {details.decode('utf-8', 'replace') if isinstance(details, bytes) else details}")
-        return result.stdout.decode("utf-8", "replace") if isinstance(result.stdout, bytes) else result.stdout
+        finally:
+            if proc is not None:
+                with _ACTIVE_OCR_PROCS_LOCK:
+                    _ACTIVE_OCR_PROCS.discard(proc)
+        with _ACTIVE_OCR_PROCS_LOCK:
+            was_killed = proc_id_key in _KILLED_OCR_PROCS
+            _KILLED_OCR_PROCS.discard(proc_id_key)
+        if was_killed or is_job_cancelled():
+            raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
+        if proc.returncode:
+            details = (stderr_bytes or stdout_bytes or b"Tesseract failed")[-1800:]
+            raise OcrError(f"Tesseract failed: {details.decode('utf-8', 'replace')}")
+        return stdout_bytes.decode("utf-8", "replace")
 
     def _recognize_with_psm(self, image: Image.Image, language: str, psm: str) -> list[OcrLine]:
         tsv_out = self._run_tesseract_tsv(image, language, psm)
@@ -3411,6 +3478,31 @@ class EngineRegistry:
         if callable(canceller):
             canceller()
 
+    def cancel_all_installs(self) -> None:
+        _STANDARD_CANCEL_EVENT.set()
+        for engine_id in list(self.engines.keys()):
+            self.cancel_install(engine_id)
+
+    def reset_ocr_cancel(self) -> None:
+        with _ACTIVE_OCR_PROCS_LOCK:
+            _KILLED_OCR_PROCS.clear()
+
+    def cancel_ocr(self, engine_id: str | None = None) -> None:
+        """Preemptively abort active OCR inference subprocesses/workers across built-in and isolated engines."""
+        with _ACTIVE_OCR_PROCS_LOCK:
+            procs = list(_ACTIVE_OCR_PROCS)
+            for p in procs:
+                _KILLED_OCR_PROCS.add(id(p))
+        for proc in procs:
+            _kill_process_tree(proc)
+        target_ids = [engine_id] if engine_id and engine_id in self.engines else list(self.engines.keys())
+        for eid in target_ids:
+            engine = self.engines.get(eid)
+            canceller = getattr(engine, "cancel_ocr", None)
+            if callable(canceller):
+                with contextlib.suppress(Exception):
+                    canceller()
+
     def download(self, engine_id: str, language: str = "eng") -> None:
         self.unload_all(except_id=engine_id)
         try:
@@ -4219,6 +4311,7 @@ def _recognize_image_primary(
     lines: list[OcrLine] = []
     try:
         for start in range(0, height, slice_height):
+            _check_ocr_cancelled()
             end = min(height, start + slice_height)
             read_y0 = max(0, start - overlap)
             read_y1 = min(height, end + overlap)
@@ -4385,31 +4478,39 @@ def _recognize_bubble(
     language: str,
     min_confidence: float,
 ) -> list[dict[str, Any]]:
-    regions = _bubble_preprocess_regions(image)
+    _check_ocr_cancelled()
+    regions = sorted(_bubble_preprocess_regions(image), key=lambda region: (region[2], region[1]))
     blocks: list[dict[str, Any]] = []
-    for prepared, offset_x, offset_y in sorted(regions, key=lambda region: (region[2], region[1])):
-        try:
-            lines = [line for line in _recognize_bubble_lines(engine, prepared, language) if line.text.strip()]
-        finally:
-            prepared.close()
-        if not lines or _bubble_region_confidence(lines) < BUBBLE_MIN_REGION_CONFIDENCE:
-            continue
-        restored = []
-        for line in lines:
-            if line.confidence < min_confidence:
+    idx_r = 0
+    try:
+        for idx_r, (prepared, offset_x, offset_y) in enumerate(regions):
+            _check_ocr_cancelled()
+            try:
+                lines = [line for line in _recognize_bubble_lines(engine, prepared, language) if line.text.strip()]
+            finally:
+                prepared.close()
+            if not lines or _bubble_region_confidence(lines) < BUBBLE_MIN_REGION_CONFIDENCE:
                 continue
-            polygon = [[
-                (x - BUBBLE_PADDING) / BUBBLE_SCALE + offset_x,
-                (y - BUBBLE_PADDING) / BUBBLE_SCALE + offset_y,
-            ] for x, y in line.polygon]
-            restored.append(OcrLine(line.text, line.confidence, polygon))
-        is_rtl_lang = language in {"fas", "ara"}
-        restored.sort(key=lambda line: (
-            round(((line.box[1] + line.box[3]) / 2) / 12) * 12,
-            -line.box[2] if is_rtl_lang else line.box[0],
-            line.box[1],
-        ))
-        blocks.extend(_blocks_from_lines(restored))
+            restored = []
+            for line in lines:
+                if line.confidence < min_confidence:
+                    continue
+                polygon = [[
+                    (x - BUBBLE_PADDING) / BUBBLE_SCALE + offset_x,
+                    (y - BUBBLE_PADDING) / BUBBLE_SCALE + offset_y,
+                ] for x, y in line.polygon]
+                restored.append(OcrLine(line.text, line.confidence, polygon))
+            is_rtl_lang = language in {"fas", "ara"}
+            restored.sort(key=lambda line: (
+                round(((line.box[1] + line.box[3]) / 2) / 12) * 12,
+                -line.box[2] if is_rtl_lang else line.box[0],
+                line.box[1],
+            ))
+            blocks.extend(_blocks_from_lines(restored))
+    finally:
+        for rem_prepared, _, _ in regions[idx_r:]:
+            with contextlib.suppress(Exception):
+                rem_prepared.close()
     for index, block in enumerate(blocks, start=1):
         block["id"] = index
     return blocks
@@ -4786,69 +4887,77 @@ def _recognize_persian_containers(
     discovered: list[dict[str, Any]] = []
     is_rtl_lang = language in {"fas", "ara"}
     page_w, page_h = image.size
-    for crop_rgb, ox, oy, bw, bh in regions:
-        try:
-            # Skip containers already well-covered by high-confidence primary OCR blocks.
-            inside_existing = [
-                b for b in existing
-                if float(b["x0"]) >= ox - 12 and float(b["x1"]) <= ox + bw + 12
-                and float(b["y0"]) >= oy - 12 and float(b["y1"]) <= oy + bh + 12
-            ]
-            ex_chars, ex_conf = _result_metrics(inside_existing)
-            if ex_chars >= 18 and ex_conf >= 0.80:
-                continue
-
-            expected_rows = max(1, _estimate_persian_text_line_count(crop_rgb))
-            best_lines: list[OcrLine] = []
-            best_score = -1.0
-            best_scale = 1.5
-            best_pad = PERSIAN_PREPROCESS_BORDER_PAD
-            for sc in (2.0, 1.5):
-                prep_img, used_scale, used_pad = persian_preprocess_image(
-                    crop_rgb, precise=True, page_mode="comic", scale_override=sc,
-                )
-                try:
-                    raw_lines = [
-                        ln for ln in _recognize_bubble_lines(engine, prep_img, language)
-                        if ln.text.strip()
-                    ]
-                finally:
-                    prep_img.close()
-                if language == "fas":
-                    raw_lines = [
-                        OcrLine(normalize_persian_ocr_text(ln.text), ln.confidence, ln.polygon)
-                        for ln in raw_lines
-                        if normalize_persian_ocr_text(ln.text)
-                    ]
-                    if len(raw_lines) >= 2:
-                        raw_lines = _coalesce_rtl_ocr_lines(raw_lines, None)
-                cand_score = _container_candidate_score(raw_lines, expected_rows)
-                if cand_score > best_score + 0.5:
-                    best_lines = raw_lines
-                    best_score = cand_score
-                    best_scale = used_scale
-                    best_pad = used_pad
-                if best_lines and len(best_lines) <= expected_rows and _bubble_region_confidence(best_lines) >= 84.0:
-                    break
-
-            if not best_lines or _bubble_region_confidence(best_lines) < 42.0:
-                continue
-            restored: list[OcrLine] = []
-            for ln in best_lines:
-                if ln.confidence < min_confidence:
-                    continue
-                poly = [
-                    [
-                        max(0.0, min(float(page_w), (px - best_pad) / best_scale + ox)),
-                        max(0.0, min(float(page_h), (py - best_pad) / best_scale + oy)),
-                    ]
-                    for px, py in ln.polygon
+    r_idx = 0
+    try:
+        for r_idx, (crop_rgb, ox, oy, bw, bh) in enumerate(regions):
+            _check_ocr_cancelled()
+            try:
+                # Skip containers already well-covered by high-confidence primary OCR blocks.
+                inside_existing = [
+                    b for b in existing
+                    if float(b["x0"]) >= ox - 12 and float(b["x1"]) <= ox + bw + 12
+                    and float(b["y0"]) >= oy - 12 and float(b["y1"]) <= oy + bh + 12
                 ]
-                restored.append(OcrLine(ln.text, ln.confidence, poly))
-            _sort_ocr_lines_reading_order(restored, is_rtl_lang=is_rtl_lang)
-            discovered.extend(_blocks_from_lines(restored))
-        finally:
-            crop_rgb.close()
+                ex_chars, ex_conf = _result_metrics(inside_existing)
+                if ex_chars >= 18 and ex_conf >= 0.80:
+                    continue
+
+                expected_rows = max(1, _estimate_persian_text_line_count(crop_rgb))
+                best_lines: list[OcrLine] = []
+                best_score = -1.0
+                best_scale = 1.5
+                best_pad = PERSIAN_PREPROCESS_BORDER_PAD
+                for sc in (2.0, 1.5):
+                    _check_ocr_cancelled()
+                    prep_img, used_scale, used_pad = persian_preprocess_image(
+                        crop_rgb, precise=True, page_mode="comic", scale_override=sc,
+                    )
+                    try:
+                        raw_lines = [
+                            ln for ln in _recognize_bubble_lines(engine, prep_img, language)
+                            if ln.text.strip()
+                        ]
+                    finally:
+                        prep_img.close()
+                    if language == "fas":
+                        raw_lines = [
+                            OcrLine(normalize_persian_ocr_text(ln.text), ln.confidence, ln.polygon)
+                            for ln in raw_lines
+                            if normalize_persian_ocr_text(ln.text)
+                        ]
+                        if len(raw_lines) >= 2:
+                            raw_lines = _coalesce_rtl_ocr_lines(raw_lines, None)
+                    cand_score = _container_candidate_score(raw_lines, expected_rows)
+                    if cand_score > best_score + 0.5:
+                        best_lines = raw_lines
+                        best_score = cand_score
+                        best_scale = used_scale
+                        best_pad = used_pad
+                    if best_lines and len(best_lines) <= expected_rows and _bubble_region_confidence(best_lines) >= 84.0:
+                        break
+
+                if not best_lines or _bubble_region_confidence(best_lines) < 42.0:
+                    continue
+                restored: list[OcrLine] = []
+                for ln in best_lines:
+                    if ln.confidence < min_confidence:
+                        continue
+                    poly = [
+                        [
+                            max(0.0, min(float(page_w), (px - best_pad) / best_scale + ox)),
+                            max(0.0, min(float(page_h), (py - best_pad) / best_scale + oy)),
+                        ]
+                        for px, py in ln.polygon
+                    ]
+                    restored.append(OcrLine(ln.text, ln.confidence, poly))
+                _sort_ocr_lines_reading_order(restored, is_rtl_lang=is_rtl_lang)
+                discovered.extend(_blocks_from_lines(restored))
+            finally:
+                crop_rgb.close()
+    finally:
+        for rem_crop, *_ in regions[r_idx:]:
+            with contextlib.suppress(Exception):
+                rem_crop.close()
     for idx, blk in enumerate(discovered, start=1):
         blk["id"] = idx
     return discovered
@@ -4869,6 +4978,7 @@ def recognize_image(
     from .license_guard import require_module_license
 
     require_module_license("ocr")
+    _check_ocr_cancelled()
     primary = _recognize_image_primary(
         engine,
         image,
@@ -4879,6 +4989,7 @@ def recognize_image(
         page_mode=page_mode,
         persian_preprocess=persian_preprocess,
     )
+    _check_ocr_cancelled()
     if isinstance(engine, IsolatedOcrEngine):
         analyze_blocks_typography(image, primary, page_mode=page_mode)
         return primary
@@ -4894,12 +5005,15 @@ def recognize_image(
             container_blocks = _recognize_persian_containers(
                 engine, image, language, min_confidence, existing_blocks=best,
             )
+        except JobCancelledError:
+            raise
         except Exception:
             container_blocks = []
         if container_blocks:
             best = _merge_non_overlapping_blocks(
                 best, container_blocks, is_rtl_lang=(language in {"fas", "ara"}),
             )
+    _check_ocr_cancelled()
     if not _needs_extra_preprocess(best):
         analyze_blocks_typography(image, best, page_mode=page_mode)
         return best
@@ -4931,6 +5045,8 @@ def recognize_image(
                         ]
             finally:
                 doc_image.close()
+        except JobCancelledError:
+            raise
         except Exception:
             emit("پیش‌پردازش تخصصی مقاله ممکن نبود؛ نتیجهٔ اولیه حفظ شد", "warning")
         else:
@@ -4940,6 +5056,7 @@ def recognize_image(
                 if not _needs_extra_preprocess(best):
                     analyze_blocks_typography(image, best, page_mode=page_mode)
                     return best
+    _check_ocr_cancelled()
     if EXTRA_PREPROCESS_ENABLED:
         emit("نتیجهٔ OCR اصلی ضعیف یا کوتاه است؛ پیش‌پردازش تکمیلی متن روشن اجرا می‌شود")
         try:
@@ -4974,6 +5091,8 @@ def recognize_image(
                         ]
             finally:
                 fallback_image.close()
+        except JobCancelledError:
+            raise
         except Exception:
             # An optional preprocessing backend must never break the established OCR result.
             emit("پیش‌پردازش تکمیلی ممکن نبود؛ نتیجهٔ OCR اصلی حفظ شد", "warning")
@@ -4983,10 +5102,13 @@ def recognize_image(
                 best = fallback
             else:
                 emit("نتیجهٔ OCR اصلی بهتر بود و حفظ شد")
+    _check_ocr_cancelled()
     if BUBBLE_PREPROCESS_ENABLED and page_mode != "document" and not persian_preprocess:
         emit("پیش‌پردازش حباب کمیک برای مقایسه اجرا می‌شود")
         try:
             bubble = _recognize_bubble(engine, image, language, min_confidence)
+        except JobCancelledError:
+            raise
         except Exception:
             emit("پیش‌پردازش حباب ممکن نبود؛ بهترین نتیجهٔ فعلی حفظ شد", "warning")
         else:
@@ -4995,5 +5117,6 @@ def recognize_image(
                 best = bubble
             else:
                 emit("نتیجهٔ حباب بهتر نبود؛ بهترین نتیجهٔ فعلی حفظ شد")
+    _check_ocr_cancelled()
     analyze_blocks_typography(image, best, page_mode=page_mode)
     return best

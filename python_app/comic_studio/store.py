@@ -15,7 +15,7 @@ from typing import Any
 
 from PIL import Image, ImageOps
 
-from .activity import emit
+from .activity import check_cancelled, emit
 from .ocr_managed import compute_worker_count, iter_parallel_ordered, trim_process_memory
 from .paths import data_dir, project_root
 
@@ -463,6 +463,7 @@ class ProjectStore:
                 image_batch.clear()
 
             for filename, content in files:
+                check_cancelled("ورود فایل به درخواست کاربر لغو شد.")
                 suffix = Path(filename).suffix.lower()
                 if suffix == ".pdf":
                     _flush_image_batch()
@@ -473,6 +474,7 @@ class ProjectStore:
                 else:
                     image_batch.append((filename, content))
             _flush_image_batch()
+            check_cancelled("ورود فایل به درخواست کاربر لغو شد.")
 
             # Import adds fresh IDs and never changes existing images. Merge
             # those additions into the latest project under the same lock so

@@ -41,6 +41,7 @@ const stateSaveRequests = [];
 const ocrRequests = [];
 let projectGetCount = 0;
 const exportRequests = [];
+const jobCancelRequests = [];
 const aiSaveRequests = [];
 const aiTestRequests = [];
 const translationPreviewCalls = [];
@@ -127,6 +128,10 @@ window.fetch = async (url, options = {}) => {
   }
   if (pathname === '/api/projects' && (!options.method || options.method === 'GET')) return jsonResponse([summary]);
   if (pathname === '/api/projects' && options.method === 'POST') return jsonResponse(project, 201);
+  if (pathname === '/api/jobs/cancel' && options.method === 'POST') {
+    jobCancelRequests.push(JSON.parse(options.body || '{}'));
+    return jsonResponse({ ok: true, kind: JSON.parse(options.body || '{}').kind || 'all', cancelledCount: 1 });
+  }
   if (pathname === `/api/projects/${project.id}`) { projectGetCount += 1; return jsonResponse(project); }
   if (pathname === '/api/engines') return jsonResponse([engine]);
   if (pathname === '/api/ai-settings/test' && options.method === 'POST') {
@@ -962,6 +967,23 @@ function check(name, condition) {
     await new Promise((r) => setTimeout(r, 25));
     check('confirming translation cancel closes translationDialog without reopening and resets busy state', $('appModalDialog').open === false && $('translationDialog').open === false && vm.runInContext('translationRunning === false && jobBusy === false', context) && $('translateBtn').disabled === false);
     releaseTr1(); translationGate = null;
+
+    // v4.26: the "لغو" buttons must really stop the running work (server-side preemption), and every
+    // long-running dialog now exposes its own visible cancel button.
+    check('export, editor and OCR-quick cancel buttons exist for in-flight work', Boolean($('cancelExportBtn')) && Boolean($('editorCancelJobBtn')) && Boolean($('ocrQuickCancelBtn')));
+    check('cancel buttons start hidden and are only shown while their job runs', $('cancelExportBtn').classList.contains('hidden') && $('editorCancelJobBtn').classList.contains('hidden'));
+    jobCancelRequests.length = 0;
+    let releaseOcr2; ocrGate = new Promise((r) => { releaseOcr2 = r; });
+    $('ocrBtn').click();
+    $('startOcrBtn').click();
+    await new Promise((r) => setTimeout(r, 20));
+    $('ocrDialog').querySelector('.dialog-head button').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('the stop confirmation focuses the "بله، متوقف شود" button so Enter confirms it', $('appModalDialog').open === true && window.document.activeElement === $('appModalConfirm') && $('appModalConfirm').textContent.includes('متوقف'));
+    $('appModalConfirm').click();
+    await new Promise((r) => setTimeout(r, 25));
+    check('confirming OCR cancel asks the server to stop the running job immediately', jobCancelRequests.some((entry) => entry.kind === 'ocr'));
+    releaseOcr2(); ocrGate = null;
 
     // Alert & delete confirmation use themed #appModalDialog with Persian text (no native confirm/alert).
     let nativeConfirmCalled = 0;
@@ -2173,7 +2195,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas425: verText.includes('۴.۲۵'),
+            verHas426: verText.includes('۴.۲۶'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2192,8 +2214,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.25 displays version 4.25 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas425 === true
+      'v4.00/v4.26 displays version 4.26 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true

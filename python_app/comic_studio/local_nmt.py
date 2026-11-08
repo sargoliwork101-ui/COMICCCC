@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 import httpx
 
+from .activity import JobCancelledError, check_cancelled, is_job_cancelled
 from .ocr import OcrError, emit, ensure_custom_site_packages_on_path, install_packages, trim_process_memory
 from .paths import bundled_models_dir, models_dir
 
@@ -357,6 +358,9 @@ class LocalNmtManager:
         self._lock = threading.RLock()
         self._download_lock = threading.Lock()
         self._cancel_event = threading.Event()
+        self._inference_cancel_event = threading.Event()
+        self._clients_lock = threading.Lock()
+        self._active_clients: set[httpx.Client] = set()
         self._busy_model: str | None = None
         self._busy_stage: str = ""
         self._busy_progress: float = 0.0
@@ -461,7 +465,22 @@ class LocalNmtManager:
 
     def cancel_prepare(self) -> dict[str, Any]:
         self._cancel_event.set()
+        with self._clients_lock:
+            clients = list(self._active_clients)
+        for client in clients:
+            with contextlib.suppress(Exception):
+                client.close()
         return {"ok": True, "cancelled": True}
+
+    def cancel_inference(self) -> None:
+        self._inference_cancel_event.set()
+
+    def reset_inference_cancel(self) -> None:
+        self._inference_cancel_event.clear()
+
+    def _check_inference_cancelled(self) -> None:
+        if self._inference_cancel_event.is_set() or is_job_cancelled():
+            raise JobCancelledError("عملیات ترجمهٔ آفلاین به درخواست کاربر لغو شد.")
 
     def unload(self) -> dict[str, Any]:
         with self._lock:
@@ -509,7 +528,7 @@ class LocalNmtManager:
             self._busy_progress = max(0.0, min(1.0, float(progress)))
 
     def _check_cancelled(self) -> None:
-        if self._cancel_event.is_set():
+        if self._cancel_event.is_set() or is_job_cancelled():
             raise LocalNmtError("دانلود و آماده‌سازی مترجم آفلاین به درخواست شما لغو شد.")
 
     def _fetch_repo_manifest(
@@ -590,8 +609,12 @@ class LocalNmtManager:
         last_exc: Exception | None = None
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        headers = {"User-Agent": "ComicOCRStudio/4.25"}
-        with httpx.Client(headers=headers, follow_redirects=True, transport=self._transport) as client:
+        headers = {"User-Agent": "ComicOCRStudio/4.26"}
+        client = httpx.Client(headers=headers, follow_redirects=True, transport=self._transport)
+        with self._clients_lock:
+            self._active_clients.add(client)
+        try:
+          with client:
             selected_manifest: list[tuple[str, int]] | None = None
             selected_endpoint = endpoints[0]
             selected_repo = repos[0]
@@ -604,11 +627,15 @@ class LocalNmtManager:
                         selected_endpoint = endpoint
                         selected_repo = repo_id
                         break
+                    except JobCancelledError:
+                        raise
                     except LocalNmtError as exc:
-                        if self._cancel_event.is_set():
+                        if self._cancel_event.is_set() or is_job_cancelled():
                             raise
                         last_exc = exc
                     except Exception as exc:
+                        if self._cancel_event.is_set() or is_job_cancelled():
+                            self._check_cancelled()
                         last_exc = exc
                 if selected_manifest is not None:
                     break
@@ -666,11 +693,15 @@ class LocalNmtManager:
                         self._stream_file(client, url, target_file, on_chunk_bytes=_on_chunk)
                         file_downloaded = True
                         break
+                    except JobCancelledError:
+                        raise
                     except LocalNmtError:
-                        if self._cancel_event.is_set():
+                        if self._cancel_event.is_set() or is_job_cancelled():
                             raise
                         completed_bytes = before_file
                     except Exception as exc:
+                        if self._cancel_event.is_set() or is_job_cancelled():
+                            self._check_cancelled()
                         completed_bytes = before_file
                         last_exc = exc
                 if not file_downloaded:
@@ -695,15 +726,24 @@ class LocalNmtManager:
                         self._stream_file(client, sp_url, sp_dest, on_chunk_bytes=_on_sp_chunk)
                         sp_ok = True
                         break
+                    except JobCancelledError:
+                        raise
                     except LocalNmtError:
-                        if self._cancel_event.is_set():
+                        if self._cancel_event.is_set() or is_job_cancelled():
                             raise
                         completed_bytes = before_sp
                     except Exception as exc:
+                        if self._cancel_event.is_set() or is_job_cancelled():
+                            self._check_cancelled()
                         completed_bytes = before_sp
                         last_exc = exc
                 if not sp_ok:
                     raise LocalNmtError(f"دانلود فایل توکنایزر SentencePiece ناموفق بود: {last_exc}")
+        finally:
+            with self._clients_lock:
+                self._active_clients.discard(client)
+            with contextlib.suppress(Exception):
+                client.close()
 
     def prepare(
         self,
@@ -893,29 +933,38 @@ class LocalNmtManager:
             return outputs
 
         with self._lock:
+            self._check_inference_cancelled()
             translator, sp = self._ensure_loaded(model_id)
             tokenized_batch: list[list[str]] = []
             for s in active_sentences:
                 pieces = list(sp.encode(s, out_type=str))
                 tokenized_batch.append([src_flores, *pieces, "</s>"])
-            target_prefixes = [[tgt_flores]] * len(tokenized_batch)
-            results = translator.translate_batch(
-                tokenized_batch,
-                target_prefix=target_prefixes,
-                beam_size=max(1, min(4, int(beam_size))),
-                max_batch_size=32,
-                max_input_length=512,
-                max_decoding_length=384,
-                repetition_penalty=1.08,
-                no_repeat_ngram_size=4,
-                replace_unknowns=True,
-            )
             strip_tokens = {"</s>", "<s>", "<unk>", tgt_flores, src_flores}
-            for out_pos, src_sent, res in zip(active_indices, active_sentences, results):
-                hyp = list(res.hypotheses[0]) if getattr(res, "hypotheses", None) else []
-                cleaned = [tok for tok in hyp if tok not in strip_tokens]
-                text_out = str(sp.decode(cleaned) or "").strip()
-                outputs[out_pos] = text_out or src_sent
+            eff_beam = max(1, min(4, int(beam_size)))
+            chunk_size = 8
+            for c_start in range(0, len(tokenized_batch), chunk_size):
+                self._check_inference_cancelled()
+                tok_slice = tokenized_batch[c_start:c_start + chunk_size]
+                idx_slice = active_indices[c_start:c_start + chunk_size]
+                src_slice = active_sentences[c_start:c_start + chunk_size]
+                target_prefixes = [[tgt_flores]] * len(tok_slice)
+                results = translator.translate_batch(
+                    tok_slice,
+                    target_prefix=target_prefixes,
+                    beam_size=eff_beam,
+                    max_batch_size=32,
+                    max_input_length=512,
+                    max_decoding_length=384,
+                    repetition_penalty=1.08,
+                    no_repeat_ngram_size=4,
+                    replace_unknowns=True,
+                )
+                self._check_inference_cancelled()
+                for out_pos, src_sent, res in zip(idx_slice, src_slice, results):
+                    hyp = list(res.hypotheses[0]) if getattr(res, "hypotheses", None) else []
+                    cleaned = [tok for tok in hyp if tok not in strip_tokens]
+                    text_out = str(sp.decode(cleaned) or "").strip()
+                    outputs[out_pos] = text_out or src_sent
             return outputs
 
     def translate_blocks(
@@ -929,6 +978,8 @@ class LocalNmtManager:
         keep_loaded: bool = True,
     ) -> list[str]:
         """Translate one or many blocks offline, guaranteeing 1-to-1 line parity for multi-block batches."""
+        check_cancelled("عملیات ترجمهٔ آفلاین به درخواست کاربر لغو شد.")
+        self._inference_cancel_event.clear()
         if not source_texts:
             return []
         combined_sample = "\n".join(str(t or "") for t in source_texts)

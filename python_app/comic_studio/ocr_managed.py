@@ -35,7 +35,7 @@ os.environ.setdefault("KMP_BLOCKTIME", "0")
 import numpy as np
 from PIL import Image
 
-from .activity import emit
+from .activity import JobCancelledError, check_cancelled, emit, is_job_cancelled
 from .paths import bundled_models_dir, is_custom_data_dir_active, models_dir
 
 _SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -542,6 +542,15 @@ def _kill_process_tree(proc: subprocess.Popen[Any]) -> None:
             )
         except Exception:
             pass
+    elif pid and hasattr(os, "killpg") and hasattr(os, "getpgid"):
+        try:
+            import signal as _sig
+
+            pgid = os.getpgid(pid)
+            if pgid > 0 and pgid != os.getpgid(0):
+                os.killpg(pgid, _sig.SIGKILL)
+        except Exception:
+            pass
     try:
         proc.kill()
     except Exception:
@@ -710,34 +719,43 @@ def iter_parallel_ordered(
     effective_workers = max(1, min(int(max_workers), total))
     if effective_workers <= 1:
         for idx, item in enumerate(items):
+            check_cancelled()
             yield idx, item, worker_fn(idx, item)
         return
 
     inflight: deque[tuple[int, _TItem, Future[_TResult]]] = deque()
     next_idx = 0
-    with ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="comic-worker") as pool:
-        try:
-            while next_idx < total and len(inflight) < effective_workers:
+    pool = ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="comic-worker")
+    aborted = False
+    try:
+        while next_idx < total and len(inflight) < effective_workers:
+            check_cancelled()
+            item = items[next_idx]
+            ctx = contextvars.copy_context()
+            fut = pool.submit(ctx.run, worker_fn, next_idx, item)
+            inflight.append((next_idx, item, fut))
+            next_idx += 1
+
+        while inflight:
+            check_cancelled()
+            done_idx, done_item, done_fut = inflight.popleft()
+            result = done_fut.result()
+            check_cancelled()
+            if next_idx < total:
                 item = items[next_idx]
                 ctx = contextvars.copy_context()
                 fut = pool.submit(ctx.run, worker_fn, next_idx, item)
                 inflight.append((next_idx, item, fut))
                 next_idx += 1
-
-            while inflight:
-                done_idx, done_item, done_fut = inflight.popleft()
-                result = done_fut.result()
-                if next_idx < total:
-                    item = items[next_idx]
-                    ctx = contextvars.copy_context()
-                    fut = pool.submit(ctx.run, worker_fn, next_idx, item)
-                    inflight.append((next_idx, item, fut))
-                    next_idx += 1
-                yield done_idx, done_item, result
-        finally:
-            while inflight:
-                _, _, pending_fut = inflight.popleft()
-                pending_fut.cancel()
+            yield done_idx, done_item, result
+    except BaseException:
+        aborted = True
+        raise
+    finally:
+        while inflight:
+            _, _, pending_fut = inflight.popleft()
+            pending_fut.cancel()
+        pool.shutdown(wait=not aborted, cancel_futures=aborted)
 
 
 def configure_native_runtime(eager_cv2: bool = True) -> dict[str, Any]:
@@ -2027,6 +2045,8 @@ class IsolatedOcrEngine:
         self._last_used_mono: float = 0.0
         self._idle_timeout_sec: float = _WORKER_IDLE_TIMEOUT_SECONDS
         self._cancel_install = threading.Event()
+        self._cancel_ocr = threading.Event()
+        self._proc_ref_lock = threading.Lock()
         self._active_procs_lock = threading.Lock()
         self._active_install_procs: set[subprocess.Popen[Any]] = set()
         atexit.register(self.close)
@@ -2048,6 +2068,22 @@ class IsolatedOcrEngine:
             procs = list(self._active_install_procs)
         for proc in procs:
             self._kill_proc_tree(proc)
+
+    def cancel_ocr(self) -> None:
+        """Preemptively abort any in-flight or booting OCR worker without deadlocking on `_worker_lock`."""
+        self._cancel_ocr.set()
+        self._cancel_idle_timer()
+        with self._proc_ref_lock:
+            proc = self._worker_proc
+            self._worker_proc = None
+        if proc is not None:
+            self._kill_proc_tree(proc)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    with contextlib.suppress(Exception):
+                        stream.close()
+        if self.id == "surya":
+            _stop_lingering_surya_server()
 
     def _env_dir(self) -> Path:
         return models_dir() / "envs" / self.id
@@ -2139,12 +2175,14 @@ class IsolatedOcrEngine:
             trim_process_memory()
 
     def _terminate_worker_locked(self) -> None:
-        proc = self._worker_proc
-        self._worker_proc = None
+        with self._proc_ref_lock:
+            proc = self._worker_proc
+            self._worker_proc = None
         if proc is None:
+            if self.id == "surya":
+                _stop_lingering_surya_server()
             return
         if proc.poll() is None:
-            pid = proc.pid
             try:
                 if proc.stdin:
                     proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
@@ -2153,21 +2191,7 @@ class IsolatedOcrEngine:
             except Exception:
                 pass
             if proc.poll() is None:
-                if os.name == "nt" and pid:
-                    try:
-                        _run_Subprocess(
-                            ["taskkill", "/F", "/T", "/PID", str(pid)],
-                            capture_output=True,
-                            timeout=5,
-                            check=False,
-                        )
-                    except Exception:
-                        pass
-                try:
-                    proc.kill()
-                    proc.wait(timeout=2)
-                except Exception:
-                    pass
+                _kill_process_tree(proc)
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             if stream is not None:
                 try:
@@ -2182,8 +2206,16 @@ class IsolatedOcrEngine:
 
     def close(self) -> None:
         self._cancel_idle_timer()
-        with self._worker_lock:
-            self._terminate_worker_locked()
+        acquired = self._worker_lock.acquire(blocking=False)
+        if not acquired:
+            # Break any in-flight `readline()` immediately so `close()` never deadlocks.
+            self.cancel_ocr()
+            acquired = self._worker_lock.acquire(timeout=2.5)
+        if acquired:
+            try:
+                self._terminate_worker_locked()
+            finally:
+                self._worker_lock.release()
 
     def uninstall(self) -> int:
         self.cancel_install()
@@ -2351,24 +2383,27 @@ class IsolatedOcrEngine:
         arc_tmp = llama_dir / f".llama-bin{suffix}.part"
         try:
             req = urllib.request.Request(wanted_url, headers={"User-Agent": "Comic-OCR-Studio"})
-            with urllib.request.urlopen(req, timeout=180) as resp, arc_tmp.open("wb") as out:
+            with urllib.request.urlopen(req, timeout=30) as resp, arc_tmp.open("wb") as out:
                 hdrs = getattr(resp, "headers", None)
                 raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
                 expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 35 * 1024 * 1024
                 total = 0
+                last_emit_total = 0
                 while True:
-                    if self._cancel_install.is_set():
+                    if self._cancel_install.is_set() or is_job_cancelled():
                         raise self._error_cls("عملیات آماده‌سازی مدل لغو شد.")
-                    chunk = resp.read(1024 * 1024)
+                    chunk = resp.read(64 * 1024)
                     if not chunk:
                         break
                     total += len(chunk)
                     out.write(chunk)
-                    ratio = min(1.0, total / max(1, expected_bytes))
-                    emit(
-                        f"دانلود موتور اجرایی llama-server برای Surya: {total / (1024 * 1024):.1f} از {expected_bytes / (1024 * 1024):.1f} مگابایت",
-                        progress=round(0.73 + 0.06 * ratio, 3),
-                    )
+                    if total - last_emit_total >= 256 * 1024 or total >= expected_bytes:
+                        last_emit_total = total
+                        ratio = min(1.0, total / max(1, expected_bytes))
+                        emit(
+                            f"دانلود موتور اجرایی llama-server برای Surya: {total / (1024 * 1024):.1f} از {expected_bytes / (1024 * 1024):.1f} مگابایت",
+                            progress=round(0.73 + 0.06 * ratio, 3),
+                        )
             resolved_llama_dir = llama_dir.resolve()
             if suffix == ".zip":
                 with zipfile.ZipFile(arc_tmp) as archive:
@@ -3152,7 +3187,10 @@ class IsolatedOcrEngine:
             bufsize=1,
             env=self._worker_env(),
             creationflags=_SUBPROCESS_NO_WINDOW if os.name == "nt" else 0,
+            start_new_session=(os.name != "nt"),
         )
+        with self._proc_ref_lock:
+            self._worker_proc = proc
         stderr_tail = self._worker_stderr_tail
 
         def _drain_worker_stderr() -> None:
@@ -3170,13 +3208,27 @@ class IsolatedOcrEngine:
 
         err_thread = threading.Thread(target=_drain_worker_stderr, daemon=True)
         err_thread.start()
-        banner = proc.stdout.readline().strip() if proc.stdout else ""
+        try:
+            banner = proc.stdout.readline().strip() if proc.stdout else ""
+        except Exception:
+            banner = ""
+        if self._cancel_ocr.is_set() or is_job_cancelled():
+            with self._proc_ref_lock:
+                if self._worker_proc is proc:
+                    self._worker_proc = None
+            _kill_process_tree(proc)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    with contextlib.suppress(Exception):
+                        stream.close()
+            if self.id == "surya":
+                _stop_lingering_surya_server()
+            raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
         if not banner:
-            try:
-                proc.kill()
-                proc.wait(timeout=2)
-            except Exception:
-                pass
+            with self._proc_ref_lock:
+                if self._worker_proc is proc:
+                    self._worker_proc = None
+            _kill_process_tree(proc)
             err_thread.join(timeout=1.0)
             for stream in (proc.stdin, proc.stdout, proc.stderr):
                 if stream is not None:
@@ -3186,13 +3238,15 @@ class IsolatedOcrEngine:
                         pass
             err_tail = "\n".join(stderr_tail)[-800:]
             raise self._error_cls(f"راه‌اندازی پردازشگر مدل {self.id} ناموفق بود: {err_tail}")
-        self._worker_proc = proc
         return proc
 
     def recognize(self, image: Image.Image, language: str, *, page_mode: str = "auto") -> list[Any]:
+        check_cancelled("عملیات OCR به درخواست کاربر لغو شد.")
+        self._cancel_ocr.clear()
         if not self.runtime_installed or not self.model_ready:
             raise self._error_cls(f"{self.id} is not ready. Click the explicit preparation button first.")
         regions = detect_comic_text_regions(image, page_mode=page_mode) if self._spec.get("needs_regions") else None
+        check_cancelled("عملیات OCR به درخواست کاربر لغو شد.")
         with tempfile.NamedTemporaryFile(prefix=f"comic-{self.id}-", suffix=".png", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         try:
@@ -3204,25 +3258,40 @@ class IsolatedOcrEngine:
                     rgb_img.close()
             self._cancel_idle_timer()
             with self._worker_lock:
+                if self._cancel_ocr.is_set() or is_job_cancelled():
+                    raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
                 proc = self._ensure_worker()
                 assert proc.stdin is not None and proc.stdout is not None
                 req = {"imagePath": str(tmp_path), "language": language, "regions": regions, "pageMode": page_mode}
-                proc.stdin.write(json.dumps(req) + "\n")
-                proc.stdin.flush()
-                raw_resp = proc.stdout.readline().strip()
+                try:
+                    proc.stdin.write(json.dumps(req) + "\n")
+                    proc.stdin.flush()
+                    raw_resp = proc.stdout.readline().strip()
+                except Exception:
+                    raw_resp = ""
+                if self._cancel_ocr.is_set() or is_job_cancelled():
+                    with self._proc_ref_lock:
+                        if self._worker_proc is proc:
+                            self._worker_proc = None
+                    _kill_process_tree(proc)
+                    for stream in (proc.stdin, proc.stdout, proc.stderr):
+                        if stream is not None:
+                            with contextlib.suppress(Exception):
+                                stream.close()
+                    if self.id == "surya":
+                        _stop_lingering_surya_server()
+                    raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
                 if not raw_resp:
-                    try:
-                        proc.kill()
-                        proc.wait(timeout=2)
-                    except Exception:
-                        pass
+                    _kill_process_tree(proc)
                     for stream in (proc.stdin, proc.stdout, proc.stderr):
                         if stream is not None:
                             try:
                                 stream.close()
                             except Exception:
                                 pass
-                    self._worker_proc = None
+                    with self._proc_ref_lock:
+                        if self._worker_proc is proc:
+                            self._worker_proc = None
                     if self.id == "surya":
                         _stop_lingering_surya_server()
                     err_hint = ("\n".join(self._worker_stderr_tail))[-600:]

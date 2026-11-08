@@ -416,6 +416,11 @@ async function api(url, options = {}) {
   if (!response.ok || parseError) {
     const raw = payload && (payload.detail || payload.message);
     const detail = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.map(item => `${(item.loc || []).join('.')}: ${item.msg || item.type || 'خطای اعتبارسنجی'}`).join('؛ ') : raw ? JSON.stringify(raw) : parseError || 'سرور جزئیاتی برنگرداند.';
+    if (response.status === 499 || payload?.cancelled === true) {
+      const abortErr = new Error(detail || 'عملیات توسط کاربر لغو شد.');
+      abortErr.name = 'AbortError'; abortErr.cancelled = true; abortErr.status = 499;
+      throw abortErr;
+    }
     const error = new Error(`${method} ${path} — HTTP ${response.status}: ${detail}`);
     error.status = response.status; error.detailText = detail; error.code = payload?.code; error.errorId = payload?.error_id;
     if ((response.status === 402 || (response.status === 401 && payload?.code === 'LOGIN_REQUIRED')) && !path.startsWith('/api/license/')) {
@@ -466,6 +471,7 @@ function showAppModal(options = {}) {
     variant = 'confirm',
     destructive = false,
     alertOnly = false,
+    focusConfirm = false,
     cancelJobKind = null,
     promptMode = false,
     inputLabel = 'نام پروژه',
@@ -515,7 +521,8 @@ function showAppModal(options = {}) {
         try { inputEl.focus({ preventScroll: true }); inputEl.select(); } catch { /* ignore */ }
         return;
       }
-      const target = (destructive && !alertOnly ? cancelBtn : confirmBtn) || confirmBtn;
+      const preferCancel = destructive && !alertOnly && !focusConfirm;
+      const target = (preferCancel ? cancelBtn : confirmBtn) || confirmBtn;
       try { target?.focus?.({ preventScroll: true }); } catch { /* ignore */ }
     });
   });
@@ -538,6 +545,7 @@ function appConfirm(message, options = {}) {
     cancelText: options.cancelText || 'انصراف',
     variant: options.variant || 'confirm',
     destructive: !!options.destructive,
+    focusConfirm: !!options.focusConfirm,
     alertOnly: false,
     cancelJobKind: options.cancelJobKind || null,
   });
@@ -575,20 +583,37 @@ window.appPrompt = appPrompt;
 window.appAlert = appAlert;
 window.alert = (msg) => { appAlert(String(msg ?? ''), { title: 'اعلان برنامه', variant: 'warning' }); };
 
+function notifyServerJobCancel(kind = 'all') {
+  try {
+    if (typeof fetch === 'function') {
+      Promise.resolve(
+        fetch('/api/jobs/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind }),
+        }),
+      ).catch(() => {});
+    }
+  } catch { /* ignore */ }
+}
+
 function abortRunningOcr() {
   if (!ocrRunning) return;
   ocrCancelledByUser = true;
   clearPendingTranslationOcr();
+  notifyServerJobCancel('ocr');
   try { ocrAbortController?.abort(); } catch { /* ignore */ }
 }
 function abortRunningTranslation() {
   if (!translationRunning && !translationDecisionBusy) return;
   translationCancelledByUser = true;
+  notifyServerJobCancel('translation');
   try { translationAbortController?.abort(); } catch { /* ignore */ }
 }
 function abortRunningExport() {
   if (!exportRunning) return;
   exportCancelledByUser = true;
+  notifyServerJobCancel('export');
   try { exportAbortController?.abort(); } catch { /* ignore */ }
 }
 function abortRunningModelJob() {
@@ -600,6 +625,7 @@ function abortRunningModelJob() {
       Promise.resolve(fetch(`/api/engines/${encodeURIComponent(busyId)}/cancel`, { method: 'POST' })).catch(() => {});
     }
   } catch { /* ignore */ }
+  notifyServerJobCancel('model');
   try { modelAbortController?.abort(); } catch { /* ignore */ }
 }
 function showDialog(id) {
@@ -651,6 +677,12 @@ function openHelpDialog(sectionId = null) {
   showDialog('helpDialog');
 }
 async function requestCancelOcrDialog() {
+  if ((!ocrRunning || ocrClosingNormally) && state.modelBusy && modelFromOcrDialog) {
+    const cancelledModel = await requestCancelModelJob({ closeModelsDialog: false });
+    if (!cancelledModel) return false;
+    closeDialog('ocrDialog');
+    return true;
+  }
   if (!ocrRunning || ocrClosingNormally) { closeDialog('ocrDialog'); return true; }
   const ok = await appConfirm('عملیات خواندن متن (OCR) در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
     title: 'توقف عملیات در حال اجرا',
@@ -658,6 +690,7 @@ async function requestCancelOcrDialog() {
     cancelText: 'خیر، ادامه دهد',
     variant: 'warning',
     destructive: true,
+    focusConfirm: true,
     cancelJobKind: 'ocr',
   });
   if (!ok) return false;
@@ -674,6 +707,7 @@ async function requestCancelTranslationDialog() {
     cancelText: 'خیر، ادامه دهد',
     variant: 'warning',
     destructive: true,
+    focusConfirm: true,
     cancelJobKind: 'translation',
   });
   if (!ok) return false;
@@ -689,6 +723,7 @@ async function requestCancelExport(dialogId = null) {
     cancelText: 'خیر، ادامه دهد',
     variant: 'warning',
     destructive: true,
+    focusConfirm: true,
     cancelJobKind: 'export',
   });
   if (!ok) return false;
@@ -696,19 +731,40 @@ async function requestCancelExport(dialogId = null) {
   if (dialogId) closeDialog(dialogId);
   return true;
 }
-async function requestCancelModelJob() {
-  if (!state.modelBusy) { closeDialog('modelsDialog'); return true; }
+async function requestCancelModelJob(options = {}) {
+  const shouldCloseModels = options.closeModelsDialog !== false;
+  if (!state.modelBusy) { if (shouldCloseModels) closeDialog('modelsDialog'); return true; }
   const ok = await appConfirm('عملیات آماده‌سازی یا آزمایش مدل OCR در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
     title: 'توقف عملیات مدل OCR',
     confirmText: 'بله، متوقف شود',
     cancelText: 'خیر، ادامه دهد',
     variant: 'warning',
     destructive: true,
+    focusConfirm: true,
     cancelJobKind: 'model',
   });
   if (!ok) return false;
   if (state.modelBusy) abortRunningModelJob();
-  closeDialog('modelsDialog');
+  if (shouldCloseModels && $('modelsDialog')?.open) closeDialog('modelsDialog');
+  return true;
+}
+async function requestCancelAiDialog() {
+  if (!localNmtBusyModel && !localNmtTestAbortController) { closeDialog('aiDialog'); return true; }
+  const ok = await appConfirm('دانلود یا آزمایش مترجم آفلاین در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف عملیات مترجم آفلاین',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    focusConfirm: true,
+    cancelJobKind: 'local-nmt',
+  });
+  if (!ok) return false;
+  await cancelLocalNmtPrepare();
+  if (localNmtTestAbortController) {
+    try { localNmtTestAbortController.abort(); } catch { /* ignore */ }
+  }
+  closeDialog('aiDialog');
   return true;
 }
 async function requestCancelActiveJob() {
@@ -718,7 +774,8 @@ async function requestCancelActiveJob() {
     const activeExportDlg = $('pptxExportDialog')?.open ? 'pptxExportDialog' : ($('docxExportDialog')?.open ? 'docxExportDialog' : ($('exportDialog')?.open ? 'exportDialog' : null));
     return requestCancelExport(activeExportDlg);
   }
-  if (state.modelBusy) return requestCancelModelJob();
+  if (state.modelBusy) return requestCancelModelJob({ closeModelsDialog: Boolean($('modelsDialog')?.open) });
+  if (localNmtBusyModel || localNmtTestAbortController) return requestCancelAiDialog();
   if (!jobBusy) return false;
   const ok = await appConfirm('عملیات در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
     title: 'توقف عملیات در حال اجرا',
@@ -726,9 +783,11 @@ async function requestCancelActiveJob() {
     cancelText: 'خیر، ادامه دهد',
     variant: 'warning',
     destructive: true,
+    focusConfirm: true,
     cancelJobKind: 'job',
   });
   if (!ok) return false;
+  notifyServerJobCancel('all');
   try { currentJobAbortController?.abort(); } catch { /* ignore */ }
   return true;
 }
@@ -737,7 +796,7 @@ function closeTopDialog() {
   const stackedId = [...openDialogStack].reverse().find((id) => $(id)?.open);
   const dialog = stackedId ? $(stackedId) : [...document.querySelectorAll('dialog[open]')].at(-1);
   if (!dialog) {
-    if (jobBusy || state.modelBusy) { requestCancelActiveJob().catch(() => {}); return true; }
+    if (jobBusy || state.modelBusy || localNmtBusyModel) { requestCancelActiveJob().catch(() => {}); return true; }
     return false;
   }
   if (dialog.id === 'editorDialog') closeEditor().catch((error) => toast(error.message, true));
@@ -747,6 +806,7 @@ function closeTopDialog() {
   else if (dialog.id === 'docxExportDialog') requestCancelExport('docxExportDialog').catch(() => {});
   else if (dialog.id === 'pptxExportDialog') requestCancelExport('pptxExportDialog').catch(() => {});
   else if (dialog.id === 'modelsDialog') requestCancelModelJob().catch(() => {});
+  else if (dialog.id === 'aiDialog') requestCancelAiDialog().catch(() => {});
   else if (dialog.id === 'translationPreviewDialog') cancelTranslationRequestPreview();
   else closeDialog(dialog.id);
   return true;
@@ -798,6 +858,7 @@ function setBusy(message) {
   if ($('editorProgressWrap')) {
     const showEditorBar = !!message && !!$('editorDialog')?.open;
     $('editorProgressWrap').classList.toggle('hidden', !showEditorBar);
+    $('editorCancelJobBtn')?.classList.toggle('hidden', !showEditorBar);
     setProgress('editorProgress', null, showEditorBar);
   }
   if (translationRunning) {
@@ -2180,8 +2241,15 @@ async function restoreProjectBackup(file) {
     }
     await refreshProjectList();
     if (opened) {
+      const checkCancel = () => {
+        if (signal?.aborted) {
+          const err = new Error('بازیابی بک‌آپ لغو شد.');
+          err.name = 'AbortError'; err.cancelled = true;
+          throw err;
+        }
+      };
       const mismatchedIds = sortedImages().filter((item) => hasOverlayText(item) !== !!item.edited).map((item) => item.id);
-      if (mismatchedIds.length) await renderImagesText(mismatchedIds);
+      if (mismatchedIds.length) await renderImagesText(mismatchedIds, null, checkCancel);
     }
     setMenuOpen(false);
     if (failedDrafts) toast(`پروژه بازیابی شد، ولی ${failedDrafts} پیش‌نویس در حافظهٔ مرورگر ذخیره نشد؛ فایل ZIP را نگه دارید.`, true);
@@ -2364,15 +2432,18 @@ async function runOcr() {
     }
     reportOcrError(error); if (error.pendingId) openPendingResults(error.pendingId); throw error;
   } finally {
-    if (usedKeepEngineLoaded) {
-      usedKeepEngineLoaded = false;
-      await api('/api/engines/unload', { method: 'POST' }).catch(() => {});
-    }
     if (!ocrSucceeded) setProgress('ocrProgress', 0, false);
     if (ocrAbortController === controller) ocrAbortController = null;
     ocrClosingNormally = false; ocrRunning = false; $('startOcrBtn').disabled = false; $('cancelOcrBtn')?.classList.add('hidden');
     dismissJobCancelModal('ocr');
-    refreshEngineMemory().catch(() => {});
+    if (usedKeepEngineLoaded) {
+      usedKeepEngineLoaded = false;
+      api('/api/engines/unload', { method: 'POST' })
+        .then(() => refreshEngineMemory().catch(() => {}))
+        .catch(() => {});
+    } else {
+      refreshEngineMemory().catch(() => {});
+    }
   }
 }
 
@@ -3109,8 +3180,9 @@ async function performContextTranslation(request, preview, ongoing = null, corre
         run.completed = result.completed ?? run.completed;
         phase = 'preview'; setOverlayMode('translation', false);
         if (hasAffected) {
-          try { await renderImagesText(result.affectedImageIds); }
+          try { await renderImagesText(result.affectedImageIds, null, checkNotCancelled); }
           catch (error) {
+            if (error?.cancelled || error?.name === 'AbortError' || translationCancelledByUser) throw error;
             renderGrid();
             toast(`ترجمه ذخیره شد، اما همگام‌سازی پیش‌نمایش ناموفق بود: ${error.message || error}`, true);
           }
@@ -3365,6 +3437,10 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
       const err = new Error('ساخت خروجی لغو شد.'); err.name = 'AbortError'; err.cancelled = true; throw err;
     }
   };
+  $('cancelExportBtn')?.classList.remove('hidden');
+  if ($('startExportBtn')) $('startExportBtn').disabled = true;
+  if ($('docxExportCancel')) { $('docxExportCancel').textContent = 'لغو عملیات'; $('docxExportCancel').classList.add('danger'); }
+  if ($('pptxExportCancel')) { $('pptxExportCancel').textContent = 'لغو عملیات'; $('pptxExportCancel').classList.add('danger'); }
   try {
     await overlayPreviewTask;
     await waitForPendingRenders(state.project?.id);
@@ -3502,6 +3578,10 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
     if (externalSignal) externalSignal.removeEventListener?.('abort', onExternalAbort);
     if (exportAbortController === controller) exportAbortController = null;
     exportRunning = false;
+    $('cancelExportBtn')?.classList.add('hidden');
+    if ($('startExportBtn')) $('startExportBtn').disabled = false;
+    if ($('docxExportCancel')) { $('docxExportCancel').textContent = 'انصراف'; $('docxExportCancel').classList.remove('danger'); }
+    if ($('pptxExportCancel')) { $('pptxExportCancel').textContent = 'انصراف'; $('pptxExportCancel').classList.remove('danger'); }
     dismissJobCancelModal('export');
   }
 }
@@ -3876,6 +3956,11 @@ function renderModels(options = {}) {
         const test = makeButton('آزمایش روی تصویر', () => testEngine(engine.id));
         test.disabled = Boolean(state.modelBusy || !supported);
         buttons.appendChild(test);
+        if (isBusyThis) {
+          const cancelCardBtn = makeButton('لغو عملیات', () => requestCancelModelJob({ closeModelsDialog: false }).catch(() => {}));
+          cancelCardBtn.classList.add('danger', 'engine-cancel-btn');
+          buttons.appendChild(cancelCardBtn);
+        }
         if (canUninstallEngine(engine)) {
           const deleteBtn = makeButton('حذف مدل', () => uninstallEngine(engine).catch(() => {}));
           deleteBtn.classList.add('danger', 'engine-delete-btn');
@@ -4693,15 +4778,21 @@ async function prepareLocalNmtModel(modelId) {
     if (localNmtPollTimer) { clearInterval(localNmtPollTimer); localNmtPollTimer = null; }
     if (localNmtAbortController === controller) localNmtAbortController = null;
     localNmtBusyModel = null;
+    dismissJobCancelModal('local-nmt');
     updateLocalNmtProgressUi(false);
     await refreshLocalNmtStatusSilently();
     pollActivity().catch(() => {});
   }
 }
 
+let localNmtTestAbortController = null;
+
 async function cancelLocalNmtPrepare() {
+  if (localNmtAbortController) {
+    try { localNmtAbortController.abort(); } catch { /* ignore */ }
+  }
+  notifyServerJobCancel('model');
   try { await api('/api/local-nmt/cancel', jsonOptions('POST', {})); } catch { /* ignore */ }
-  if (localNmtAbortController) localNmtAbortController.abort();
 }
 
 async function deleteLocalNmtModel(modelId, label) {
@@ -4752,24 +4843,35 @@ async function testLocalNmtSample() {
   $('copyAiError').classList.add('hidden');
   $('aiStatus').textContent = 'در حال ترجمهٔ آفلاین جملهٔ نمونه روی پردازندهٔ سیستم…';
   setProgress('aiProgress', null, true);
+  const testCtrl = new AbortController();
+  localNmtTestAbortController = testCtrl;
   try {
-    const res = await api('/api/local-nmt/test', jsonOptions('POST', {
-      model: modelId,
-      source_language: sourceLang,
-      target_language: targetLang,
-      sample_text: sampleText,
-      beam_size: beamSize,
-      keep_loaded: keepLoaded,
-    }));
+    const res = await api('/api/local-nmt/test', {
+      ...jsonOptions('POST', {
+        model: modelId,
+        source_language: sourceLang,
+        target_language: targetLang,
+        sample_text: sampleText,
+        beam_size: beamSize,
+        keep_loaded: keepLoaded,
+      }),
+      signal: testCtrl.signal,
+    });
     setProgress('aiProgress', 1, false);
     $('aiStatus').textContent = res.message || `نمونهٔ ترجمه: ${res.translatedText}`;
     await refreshLocalNmtStatusSilently();
   } catch (error) {
     setProgress('aiProgress', 0, false);
+    if (error?.cancelled || error?.name === 'AbortError' || testCtrl.signal.aborted) {
+      $('aiStatus').textContent = 'تست ترجمهٔ آفلاین لغو شد.';
+      return;
+    }
     $('aiStatus').textContent = error.message || String(error);
     $('copyAiError').classList.remove('hidden');
     toast(error.message || 'تست ترجمهٔ آفلاین ناموفق بود', true);
   } finally {
+    if (localNmtTestAbortController === testCtrl) localNmtTestAbortController = null;
+    dismissJobCancelModal('local-nmt');
     if (btn) btn.disabled = Boolean(localNmtBusyModel);
   }
 }
@@ -8391,9 +8493,16 @@ async function applyWatermarkFromDialog() {
   if (state.editorId && targets.some((t) => t.id === state.editorId)) {
     drawEditorCanvas();
   }
-  await runJob(`در حال اعمال واترمارک روی ${targets.length.toLocaleString('fa-IR')} صفحه…`, async () => {
+  await runJob(`در حال اعمال واترمارک روی ${targets.length.toLocaleString('fa-IR')} صفحه…`, async (signal) => {
+    const checkCancel = () => {
+      if (signal?.aborted) {
+        const err = new Error('اعمال واترمارک لغو شد.');
+        err.name = 'AbortError'; err.cancelled = true;
+        throw err;
+      }
+    };
     await saveProject();
-    await renderImagesText(targets.map((t) => t.id));
+    await renderImagesText(targets.map((t) => t.id), null, checkCancel);
   }, 'jobProgress');
   renderGrid();
   toast(`واترمارک روی ${targets.length.toLocaleString('fa-IR')} صفحه اعمال شد`);
@@ -8428,9 +8537,16 @@ async function removeWatermarkFromDialog() {
   if (state.editorId && activeTargets.some((t) => t.id === state.editorId)) {
     drawEditorCanvas();
   }
-  await runJob(`در حال حذف واترمارک از ${activeTargets.length.toLocaleString('fa-IR')} صفحه…`, async () => {
+  await runJob(`در حال حذف واترمارک از ${activeTargets.length.toLocaleString('fa-IR')} صفحه…`, async (signal) => {
+    const checkCancel = () => {
+      if (signal?.aborted) {
+        const err = new Error('حذف واترمارک لغو شد.');
+        err.name = 'AbortError'; err.cancelled = true;
+        throw err;
+      }
+    };
     await saveProject();
-    await renderImagesText(activeTargets.map((t) => t.id));
+    await renderImagesText(activeTargets.map((t) => t.id), null, checkCancel);
   }, 'jobProgress');
   renderGrid();
   toast(`واترمارک از ${activeTargets.length.toLocaleString('fa-IR')} صفحه حذف شد`);
@@ -8476,6 +8592,7 @@ function bindEvents() {
         else if (dlg.id === 'docxExportDialog') requestCancelExport('docxExportDialog').catch(() => {});
         else if (dlg.id === 'pptxExportDialog') requestCancelExport('pptxExportDialog').catch(() => {});
         else if (dlg.id === 'modelsDialog') requestCancelModelJob().catch(() => {});
+        else if (dlg.id === 'aiDialog') requestCancelAiDialog().catch(() => {});
         else if (dlg.id === 'translationPreviewDialog') cancelTranslationRequestPreview();
         else closeDialog(dlg.id);
       });
@@ -8493,6 +8610,9 @@ function bindEvents() {
   $('appModalDialog')?.addEventListener('cancel', (event) => { event.preventDefault(); resolveActiveModal(false); });
   $('appModalDialog')?.addEventListener('close', () => { if (activeModalState && !$('appModalDialog')?.open) resolveActiveModal(false); });
   $('dockCancelJobBtn')?.addEventListener('click', () => requestCancelActiveJob().catch(() => {}));
+  $('editorCancelJobBtn')?.addEventListener('click', () => requestCancelActiveJob().catch(() => {}));
+  $('ocrQuickCancelBtn')?.addEventListener('click', () => requestCancelModelJob({ closeModelsDialog: false }).catch(() => {}));
+  $('cancelExportBtn')?.addEventListener('click', () => requestCancelExport('exportDialog').catch(() => {}));
   $('themeBtn').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('comic-studio-theme', document.body.classList.contains('light') ? 'light' : 'dark'); });
   $('backupProjectBtn').addEventListener('click', () => backupCurrentProject().catch(() => {}));
   $('restoreProjectBtn').addEventListener('click', () => $('restoreProjectInput').click());
@@ -8719,7 +8839,7 @@ function bindEvents() {
   });
   $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('cancelOcrBtn')?.addEventListener('click', () => requestCancelOcrDialog().catch(() => {})); $('cancelTranslationBtn')?.addEventListener('click', () => requestCancelTranslationDialog().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
   $('ocrDialog').addEventListener('cancel', (event) => {
-    if (ocrRunning && !ocrClosingNormally) { event.preventDefault(); requestCancelOcrDialog().catch(() => {}); }
+    if ((ocrRunning && !ocrClosingNormally) || (state.modelBusy && modelFromOcrDialog)) { event.preventDefault(); requestCancelOcrDialog().catch(() => {}); }
   });
   $('ocrDialog').addEventListener('close', () => {
     if (ocrRunning && !ocrClosingNormally) abortRunningOcr();
@@ -8774,6 +8894,9 @@ function bindEvents() {
   });
   $('modelsDialog')?.addEventListener('cancel', (event) => {
     if (state.modelBusy) { event.preventDefault(); requestCancelModelJob().catch(() => {}); }
+  });
+  $('aiDialog')?.addEventListener('cancel', (event) => {
+    if (localNmtBusyModel || localNmtTestAbortController) { event.preventDefault(); requestCancelAiDialog().catch(() => {}); }
   });
   $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
   $('copyTranslationSkill')?.addEventListener('click', () => copyFieldText($('translationSkill'), 'راهنمای ترجمه').catch((error) => toast(error.message || String(error), true)));

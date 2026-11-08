@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import os
 import re
 import stat
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
-from .activity import emit
+from .activity import JobCancelledError, check_cancelled, emit, is_job_cancelled, sleep_interruptible
 from .local_nmt import (
     DEFAULT_LOCAL_NMT_MODEL,
     LOCAL_NMT_MODELS,
@@ -419,12 +421,32 @@ def _retryable(error: Exception) -> bool:
     return False
 
 
+_ORIG_HTTPX_POST = httpx.post
+_ORIG_HTTPX_GET = httpx.get
+_ORIG_TIME_SLEEP = time.sleep
+
+
+def _sleep_translation(seconds: float, cancel_ev: threading.Event | None = None) -> None:
+    if (cancel_ev is not None and cancel_ev.is_set()) or is_job_cancelled():
+        raise JobCancelledError("عملیات ترجمه به درخواست کاربر لغو شد.")
+    if time.sleep is not _ORIG_TIME_SLEEP:
+        time.sleep(seconds)
+        if (cancel_ev is not None and cancel_ev.is_set()) or is_job_cancelled():
+            raise JobCancelledError("عملیات ترجمه به درخواست کاربر لغو شد.")
+        return
+    sleep_interruptible(seconds, cancel_ev, "عملیات ترجمه به درخواست کاربر لغو شد.")
+
+
 def _run_with_retries(action: Any, profile: dict[str, Any], provider: str, secrets: list[str]) -> Any:
     retries = profile.get("retry_count", DEFAULT_AI_RETRIES)
     for attempt in range(retries + 1):
+        check_cancelled("عملیات ترجمه به درخواست کاربر لغو شد.")
         try:
             return action()
+        except JobCancelledError:
+            raise
         except Exception as exc:
+            check_cancelled("عملیات ترجمه به درخواست کاربر لغو شد.")
             if not _retryable(exc) or attempt >= retries:
                 if isinstance(exc, InvalidContextResponse):
                     if retries == 0:
@@ -439,7 +461,7 @@ def _run_with_retries(action: Any, profile: dict[str, Any], provider: str, secre
                 emit(f"پاسخ AI از نظر قالب/محتوا نامعتبر بود: {_safe_error(exc, provider, secrets)}؛ پس از {wait} ثانیه همان API دوباره امتحان می‌شود ({attempt + 1} از {retries}). هر بار ممکن است هزینه داشته باشد.", "warning")
             else:
                 emit(f"تلاش {attempt + 1} ناموفق بود: {_safe_error(exc, provider, secrets)}؛ پس از {wait} ثانیه، تکرار {attempt + 1} از {retries} برای همین API (ممکن است هزینه تکرار شود).", "warning")
-            time.sleep(wait)
+            _sleep_translation(wait)
     raise AssertionError("unreachable")
 
 
@@ -548,6 +570,9 @@ class TranslationService:
     def __init__(self, path: Path | None = None) -> None:
         self._explicit_path: Path | None = Path(path) if path is not None else None
         self.local_nmt = local_nmt_manager
+        self._clients_lock = threading.Lock()
+        self._active_clients: set[Any] = set()
+        self._cancel_event = threading.Event()
         # Harden pre-existing settings and the old fixed-name temporary file
         # without deleting data or following a potentially unsafe symlink.
         if os.name == "posix" and hasattr(os, "O_NOFOLLOW"):
@@ -561,6 +586,70 @@ class TranslationService:
                         os.close(fd)
                 except OSError:
                     pass
+
+    def reset_cancel(self) -> None:
+        self._cancel_event.clear()
+        self.local_nmt.reset_inference_cancel()
+
+    def cancel_active(self) -> None:
+        """Preemptively abort in-flight HTTP translation calls, retry sleeps, and local NMT chunks."""
+        self._cancel_event.set()
+        self.local_nmt.cancel_inference()
+        with self._clients_lock:
+            clients = list(self._active_clients)
+        for client in clients:
+            with contextlib.suppress(Exception):
+                client.close()
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_event.is_set() or is_job_cancelled():
+            raise JobCancelledError("عملیات ترجمه به درخواست کاربر لغو شد.")
+
+    @contextlib.contextmanager
+    def _tracked_client(self, **kwargs: Any):
+        self._check_cancelled()
+        client = httpx.Client(**kwargs)
+        with self._clients_lock:
+            self._active_clients.add(client)
+        try:
+            with client as active:
+                yield active
+        except JobCancelledError:
+            raise
+        except Exception:
+            self._check_cancelled()
+            raise
+        finally:
+            with self._clients_lock:
+                self._active_clients.discard(client)
+            with contextlib.suppress(Exception):
+                client.close()
+
+    def _http_post(self, url: str, **kwargs: Any) -> httpx.Response:
+        self._check_cancelled()
+        if httpx.post is not _ORIG_HTTPX_POST:
+            resp = httpx.post(url, **kwargs)
+            self._check_cancelled()
+            return resp
+        timeout = kwargs.pop("timeout", DEFAULT_AI_TIMEOUT)
+        follow_redirects = kwargs.pop("follow_redirects", True)
+        with self._tracked_client(timeout=timeout, follow_redirects=follow_redirects) as client:
+            resp = client.post(url, **kwargs)
+        self._check_cancelled()
+        return resp
+
+    def _http_get(self, url: str, **kwargs: Any) -> httpx.Response:
+        self._check_cancelled()
+        if httpx.get is not _ORIG_HTTPX_GET:
+            resp = httpx.get(url, **kwargs)
+            self._check_cancelled()
+            return resp
+        timeout = kwargs.pop("timeout", DEFAULT_AI_TIMEOUT)
+        follow_redirects = kwargs.pop("follow_redirects", True)
+        with self._tracked_client(timeout=timeout, follow_redirects=follow_redirects) as client:
+            resp = client.get(url, **kwargs)
+        self._check_cancelled()
+        return resp
 
     @property
     def path(self) -> Path:
@@ -751,6 +840,8 @@ class TranslationService:
         from .license_guard import require_module_license
 
         require_module_license("translation")
+        check_cancelled("عملیات ترجمه به درخواست کاربر لغو شد.")
+        self._cancel_event.clear()
         text = str(text or "").strip()
         if not text:
             return ""
@@ -805,7 +896,10 @@ class TranslationService:
                     normalized = _run_with_retries(request_translation, profile, selected, secrets)
                     emit(f"پاسخ ترجمه با {name} دریافت شد.", "success")
                     return normalized
+                except JobCancelledError:
+                    raise
                 except Exception as exc:
+                    self._check_cancelled()
                     message = _safe_error(exc, selected, secrets)
                     if isinstance(exc, httpx.TransportError):
                         emit(f"پاسخ {name} به‌علت خطای ارتباطی دریافت نشد: {message}؛ کلید بعدی خودکار امتحان نشد.", "error")
@@ -816,7 +910,7 @@ class TranslationService:
                     if profile_index + 1 < len(profiles):
                         wait = profile["retry_wait_seconds"]
                         emit(f"تلاش با کلید بعدی پس از {wait} ثانیه انجام می‌شود؛ ممکن است هزینه تکرار شود.", "warning")
-                        time.sleep(wait)
+                        _sleep_translation(wait, self._cancel_event)
             raise TranslationError("هیچ‌یک از کلیدهای این سرویس پاسخ قابل‌استفاده‌ای ندادند. " + "؛ ".join(failures))
         else:
             raise TranslationError("Unknown translation provider")
@@ -829,6 +923,8 @@ class TranslationService:
         from .license_guard import require_module_license
         from .store import ProjectChangedError
         require_module_license("translation")
+        check_cancelled("عملیات ترجمه به درخواست کاربر لغو شد.")
+        self._cancel_event.clear()
         if provider not in AI_PROVIDERS:
             raise TranslationError("سرویس AI معتبر نیست.")
         user = request.user_message(text)
@@ -851,14 +947,14 @@ class TranslationService:
                 mode = profile['response_mode']
                 use_json = context_uses_json(provider, base, mode)
                 if provider == 'gemini':
-                    response = httpx.post(f"{base}/models/{quote(model, safe='')}:generateContent",
+                    response = self._http_post(f"{base}/models/{quote(model, safe='')}:generateContent",
                         headers={'x-goog-api-key': profile['api_key']},
                         json={'systemInstruction': {'parts': [{'text': request.system}]},
                               'contents': [{'role': 'user', 'parts': [{'text': user}]}],
                               'generationConfig': {'temperature': 0.2, **({'responseMimeType': 'application/json'} if use_json else {})}},
                         timeout=profile['timeout_seconds'], follow_redirects=True)
                 else:
-                    response = httpx.post(base + '/chat/completions',
+                    response = self._http_post(base + '/chat/completions',
                         headers={'Authorization': f"Bearer {profile['api_key']}"},
                         json={'model': model, 'messages': [{'role': 'system', 'content': request.system},
                               {'role': 'user', 'content': user}], 'temperature': 0.2, **({'response_format': {'type': 'json_object'}} if use_json else {})},
@@ -878,10 +974,13 @@ class TranslationService:
                 result = _run_with_retries(action, profile, provider, secrets)
                 emit(f"پاسخ ترجمه و خلاصه با {name} دریافت شد.", "success")
                 return result
+            except JobCancelledError:
+                raise
             except InvalidContextResponse:
                 # A paid response arrived: don't resend it to this or another key.
                 raise
             except Exception as exc:
+                self._check_cancelled()
                 message = _safe_error(exc, provider, secrets)
                 if isinstance(exc, httpx.TransportError):
                     raise TranslationError(f"ارتباط {name} قطع شد؛ ممکن است درخواست پردازش یا هزینه حساب شده باشد. کلید بعدی خودکار امتحان نشد. جزئیات: {message}") from exc
@@ -890,7 +989,7 @@ class TranslationService:
                 failures.append(f"{name}: {message}")
                 emit(f"تلاش با {name} ناموفق بود: {message}", "error")
                 if profile_index + 1 < len(profiles):
-                    time.sleep(profile['retry_wait_seconds'])
+                    _sleep_translation(profile['retry_wait_seconds'], self._cancel_event)
         raise TranslationError("هیچ‌یک از کلیدها پاسخ قابل‌استفاده‌ای ندادند. " + "؛ ".join(failures))
 
     def condense_context(
@@ -939,14 +1038,14 @@ class TranslationService:
                 mode = profile['response_mode']
                 use_json = context_uses_json(provider, base, mode)
                 if provider == 'gemini':
-                    response = httpx.post(f"{base}/models/{quote(model, safe='')}:generateContent",
+                    response = self._http_post(f"{base}/models/{quote(model, safe='')}:generateContent",
                         headers={'x-goog-api-key': profile['api_key']},
                         json={'systemInstruction': {'parts': [{'text': system}]},
                               'contents': [{'role': 'user', 'parts': [{'text': user}]}],
                               'generationConfig': {'temperature': 0.2, **({'responseMimeType': 'application/json'} if use_json else {})}},
                         timeout=profile['timeout_seconds'], follow_redirects=True)
                 else:
-                    response = httpx.post(base + '/chat/completions',
+                    response = self._http_post(base + '/chat/completions',
                         headers={'Authorization': f"Bearer {profile['api_key']}"},
                         json={'model': model, 'messages': [{'role': 'system', 'content': system},
                               {'role': 'user', 'content': user}], 'temperature': 0.2,
@@ -972,9 +1071,12 @@ class TranslationService:
                 condensed = _run_with_retries(action, profile, provider, secrets)
                 emit(f"فشرده‌سازی خلاصه انجام شد؛ {len(condensed)} نویسه باقی ماند.", "success")
                 return condensed
+            except JobCancelledError:
+                raise
             except InvalidContextResponse:
                 raise
             except Exception as exc:
+                self._check_cancelled()
                 message = _safe_error(exc, provider, secrets)
                 if isinstance(exc, httpx.TransportError):
                     raise TranslationError(f"ارتباط هنگام فشرده‌سازی خلاصه قطع شد؛ درخواست ترجمه ارسال نشد. {message}") from exc
@@ -982,7 +1084,7 @@ class TranslationService:
                 if profile_index + 1 < len(profiles):
                     wait = profile['retry_wait_seconds']
                     emit(f"فشرده‌سازی با {name} ناموفق بود؛ پس از {wait} ثانیه کلید بعدی امتحان می‌شود.", "warning")
-                    time.sleep(wait)
+                    _sleep_translation(wait, self._cancel_event)
         raise TranslationError("خلاصه فشرده نشد: " + "؛ ".join(failures))
 
     def translate_free_batch(
@@ -999,6 +1101,8 @@ class TranslationService:
         from .license_guard import require_module_license
         from .store import ProjectChangedError
         require_module_license("translation")
+        check_cancelled("عملیات ترجمه به درخواست کاربر لغو شد.")
+        self._cancel_event.clear()
         request.user_message(text)  # enforce both character and UTF-8 limits
         settings = self._secret()
         if provider_policy(settings, 'free') != expected_policy:
@@ -1019,7 +1123,7 @@ class TranslationService:
                     normalized_same = normalize_translation_text(text)
                     distribute_translation(source_texts, normalized_same)
                     return normalized_same
-                with httpx.Client(timeout=profile['timeout_seconds'], follow_redirects=True) as client:
+                with self._tracked_client(timeout=profile['timeout_seconds'], follow_redirects=True) as client:
                     if name == 'google':
                         response = client.get('https://translate.googleapis.com/translate_a/single', params={'client':'gtx','sl':google_sl,'tl':tl,'dt':'t','q':text})
                         response.raise_for_status(); payload = response.json()
@@ -1043,14 +1147,17 @@ class TranslationService:
             try:
                 emit(f"ترجمه با {info['label']} (انتظار {profile['timeout_seconds']} ثانیه، {profile['retry_count']} تکرار)…")
                 return _run_with_retries(action, profile, name, [])
+            except JobCancelledError:
+                raise
             except Exception as exc:
+                self._check_cancelled()
                 detail = _safe_error(exc, name, [])
                 failures.append(f"{info['label']}: {detail}")
                 emit(f"{info['label']} ناموفق بود: {detail}", 'error')
                 if index + 1 < len(FREE_SERVICES):
                     wait = profile['retry_wait_seconds']
                     emit(f"همان متن پس از {wait} ثانیه به MyMemory فرستاده می‌شود؛ درخواست قبلی ممکن است پردازش شده باشد.", 'warning')
-                    time.sleep(wait)
+                    _sleep_translation(wait, self._cancel_event)
         raise TranslationError('ترجمهٔ رایگان ناموفق بود: ' + '؛ '.join(failures))
 
     def translate_local_batch(
@@ -1099,8 +1206,9 @@ class TranslationService:
         tl = normalize_target_language(target_language)
         queries = split_free_query(text)
         translated_parts = []
-        with httpx.Client(timeout=35, follow_redirects=True) as client:
+        with self._tracked_client(timeout=35, follow_redirects=True) as client:
             for query in queries:
+                self._check_cancelled()
                 translated_parts.append(self._free_query(client, query, source) if tl == "fa" else self._free_query(client, query, source, tl))
         return " ".join(part.strip() for part in translated_parts if part.strip()).strip()
 
@@ -1160,7 +1268,7 @@ class TranslationService:
             ],
             "temperature": 0.2,
         }
-        response = httpx.post(
+        response = self._http_post(
             base_url + "/chat/completions",
             headers={"Authorization": f"Bearer {settings['api_key']}"},
             json=payload, timeout=settings.get("timeout_seconds", DEFAULT_AI_TIMEOUT), follow_redirects=True,
@@ -1182,7 +1290,7 @@ class TranslationService:
             settings.get("translation_skill"),
             target_language=settings.get("target_language", "fa"),
         )
-        response = httpx.post(
+        response = self._http_post(
             f"{base_url}/models/{quote(model, safe='')}:generateContent",
             headers={"x-goog-api-key": settings["api_key"]},
             json={
@@ -1200,6 +1308,8 @@ class TranslationService:
         return translated
 
     def test_connection(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        check_cancelled("تست اتصال به درخواست کاربر لغو شد.")
+        self._cancel_event.clear()
         overrides = overrides or {}
         settings = self._secret()
         provider = str(overrides.get("provider") or settings.get("provider", "free"))
@@ -1247,11 +1357,13 @@ class TranslationService:
         policy = _profile_policy(selected_profile or {})
         secrets = [p["api_key"] for c in settings["providers"].values() for p in c["profiles"] if p["api_key"]] + [key]
         def request_models() -> Any:
-            response = httpx.get(url, headers=headers, timeout=policy["timeout_seconds"], follow_redirects=True)
+            response = self._http_get(url, headers=headers, timeout=policy["timeout_seconds"], follow_redirects=True)
             response.raise_for_status()
             return response.json()
         try:
             payload = _run_with_retries(request_models, policy, provider, secrets)
+        except JobCancelledError:
+            raise
         except (httpx.HTTPError, ValueError) as exc:
             raise TranslationError(_safe_error(exc, provider, secrets)) from exc
 

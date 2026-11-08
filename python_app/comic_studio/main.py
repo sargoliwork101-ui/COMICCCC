@@ -28,7 +28,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.background import BackgroundTask
 
 from . import APP_NAME, APP_VERSION
-from .activity import ActivityLog, reporting
+from .activity import ActivityLog, JobCancelledError, cancellation_scope, reporting
 from .backup import BackupError, cleanup_backup_temp, make_backup, restore_backup
 from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, clean_name, crop_box, image_payload
 from .watermark_render import has_active_watermark
@@ -158,6 +158,42 @@ def create_app() -> FastAPI:
     storage_switch_lock = asyncio.Lock()
     active_jobs_lock = threading.Lock()
     active_jobs_count = 0
+    next_job_token = 0
+    active_job_entries: dict[int, tuple[str, threading.Event, Any]] = {}
+
+    def cancel_active_jobs(target_kind: str = "all") -> int:
+        with active_jobs_lock:
+            entries = [
+                (kind, ev, cb)
+                for kind, ev, cb in active_job_entries.values()
+                if target_kind == "all" or kind == target_kind
+            ]
+        count = 0
+        for _kind, ev, cb in entries:
+            if not ev.is_set():
+                ev.set()
+                count += 1
+            if callable(cb):
+                with contextlib.suppress(Exception):
+                    cb()
+        if target_kind in {"all", "ocr"}:
+            cancel_ocr_fn = getattr(registry, "cancel_ocr", None)
+            if callable(cancel_ocr_fn):
+                with contextlib.suppress(Exception):
+                    cancel_ocr_fn()
+        if target_kind in {"all", "translation"}:
+            cancel_tr_fn = getattr(translations, "cancel_active", None)
+            if callable(cancel_tr_fn):
+                with contextlib.suppress(Exception):
+                    cancel_tr_fn()
+        if target_kind in {"all", "model"}:
+            cancel_inst_fn = getattr(registry, "cancel_all_installs", None)
+            if callable(cancel_inst_fn):
+                with contextlib.suppress(Exception):
+                    cancel_inst_fn()
+            with contextlib.suppress(Exception):
+                translations.local_nmt.cancel_prepare()
+        return count
     prepared_backups_lock = threading.Lock()
     prepared_backups: dict[str, dict[str, Any]] = {}
     prepared_exports_lock = threading.Lock()
@@ -358,15 +394,31 @@ def create_app() -> FastAPI:
         *args: Any,
         pulse_label: str | None = None,
         progress_span: tuple[float, float] | None = None,
+        job_kind: str = "generic",
+        http_request: Request | None = None,
+        on_cancel: Any = None,
+        cancel_event: threading.Event | None = None,
         **kwargs: Any,
     ) -> Any:
-        nonlocal active_jobs_count
+        nonlocal active_jobs_count, next_job_token
         stop_pulse = threading.Event()
+        job_cancel_ev = cancel_event if cancel_event is not None else threading.Event()
         started = time.monotonic()
         last_state: dict[str, Any] = {"ts": started, "progress": None, "detail": ""}
         pulse = None
         with active_jobs_lock:
             active_jobs_count += 1
+            next_job_token += 1
+            job_token = next_job_token
+            active_job_entries[job_token] = (job_kind, job_cancel_ev, on_cancel)
+
+        def _trigger_cancel() -> None:
+            if not job_cancel_ev.is_set():
+                job_cancel_ev.set()
+            stop_pulse.set()
+            if callable(on_cancel):
+                with contextlib.suppress(Exception):
+                    on_cancel()
 
         def _map_progress(raw_p: float | None) -> float | None:
             if raw_p is None or not isinstance(raw_p, (int, float)) or not math.isfinite(float(raw_p)):
@@ -378,6 +430,8 @@ def create_app() -> FastAPI:
             return clamped
 
         def tracked_report(message: str, kind: str = "info", progress: float | None = None) -> None:
+            if job_cancel_ev.is_set() and kind not in {"warning", "error"}:
+                return
             last_state["ts"] = time.monotonic()
             mapped_p = _map_progress(progress)
             if mapped_p is not None:
@@ -390,6 +444,8 @@ def create_app() -> FastAPI:
         if pulse_label:
             def report_alive() -> None:
                 while not stop_pulse.wait(5):
+                    if job_cancel_ev.is_set():
+                        return
                     now = time.monotonic()
                     if now - float(last_state["ts"]) < 4.2:
                         continue
@@ -402,14 +458,42 @@ def create_app() -> FastAPI:
                     )
             pulse = threading.Thread(target=report_alive, daemon=True)
             pulse.start()
+
+        disconnect_task: asyncio.Task[None] | None = None
+        done_async_ev = asyncio.Event()
+        if http_request is not None:
+            async def _watch_http_disconnect() -> None:
+                while not done_async_ev.is_set() and not job_cancel_ev.is_set():
+                    try:
+                        await asyncio.wait_for(done_async_ev.wait(), timeout=0.2)
+                        return
+                    except asyncio.TimeoutError:
+                        try:
+                            if await http_request.is_disconnected():
+                                _trigger_cancel()
+                                return
+                        except Exception:
+                            return
+
+            disconnect_task = asyncio.create_task(_watch_http_disconnect())
+
+        def _invoke_with_scopes() -> Any:
+            with reporting(tracked_report), cancellation_scope(job_cancel_ev):
+                return function(*args, **kwargs)
+
         try:
-            with reporting(tracked_report):
-                return await run_in_threadpool(function, *args, **kwargs)
+            return await run_in_threadpool(_invoke_with_scopes)
         finally:
+            done_async_ev.set()
             stop_pulse.set()
+            if disconnect_task is not None:
+                disconnect_task.cancel()
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await disconnect_task
             if pulse:
                 pulse.join(timeout=0.1)
             with active_jobs_lock:
+                active_job_entries.pop(job_token, None)
                 active_jobs_count = max(0, active_jobs_count - 1)
 
     def context_progress(run: dict[str, Any]) -> float:
@@ -467,6 +551,14 @@ def create_app() -> FastAPI:
     @app.exception_handler(TranslationError)
     async def translation_error(_: Request, exc: TranslationError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=502)
+
+    @app.exception_handler(JobCancelledError)
+    async def job_cancelled_error(_: Request, exc: JobCancelledError) -> JSONResponse:
+        return JSONResponse(
+            {"detail": str(exc) or "عملیات به درخواست شما لغو شد.", "cancelled": True},
+            status_code=499,
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.exception_handler(ProjectChangedError)
     async def project_changed(_: Request, exc: ProjectChangedError) -> JSONResponse:
@@ -554,6 +646,14 @@ def create_app() -> FastAPI:
     def clear_activity() -> dict[str, Any]:
         return {"ok": True, "next": activity.clear()}
 
+    @app.post("/api/jobs/cancel")
+    def cancel_jobs_route(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+        raw_kind = str((payload or {}).get("kind") or "all").strip().lower()
+        target_kind = raw_kind if raw_kind in {"all", "ocr", "translation", "export", "import", "backup", "model", "generic"} else "all"
+        cancelled_count = cancel_active_jobs(target_kind)
+        activity.add("درخواست توقف فوری عملیات ثبت شد.", "warning")
+        return {"ok": True, "kind": target_kind, "cancelledCount": cancelled_count}
+
     @app.post("/api/session/heartbeat")
     def session_heartbeat(values: SessionRequest) -> dict[str, Any]:
         return {"ok": True, "active": sessions.heartbeat(values.client_id)}
@@ -572,10 +672,20 @@ def create_app() -> FastAPI:
         return store.create(values.name if values else "پروژهٔ کمیک")
 
     @app.post("/api/projects/restore", status_code=201)
-    async def restore_project(file: UploadFile = File(...)) -> dict[str, Any]:
+    async def restore_project(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
         activity.add("بازیابی بک‌آپ پروژه آغاز شد")
         try:
-            state, drafts = await run_reported(restore_backup, store, file.file, pulse_label="بازیابی بک‌آپ")
+            state, drafts = await run_reported(
+                restore_backup,
+                store,
+                file.file,
+                pulse_label="بازیابی بک‌آپ",
+                job_kind="backup",
+                http_request=request,
+            )
+        except JobCancelledError:
+            activity.add("بازیابی بک‌آپ به درخواست شما متوقف شد.", "warning")
+            raise
         except BackupError as exc:
             activity.add(f"بازیابی بک‌آپ ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
@@ -583,11 +693,23 @@ def create_app() -> FastAPI:
         return {"project": state, "drafts": drafts}
 
     @app.post("/api/projects/{project_id}/backup")
-    async def backup_project(project_id: str, values: BackupRequest, prepare: bool = False) -> Response:
+    async def backup_project(project_id: str, values: BackupRequest, request: Request, prepare: bool = False) -> Response:
         proj = project(project_id)
         activity.add("ساخت بک‌آپ پروژه آغاز شد")
         try:
-            path = await run_reported(make_backup, store, project_id, values.drafts, values.expected_updated_at, pulse_label="ساخت بک‌آپ")
+            path = await run_reported(
+                make_backup,
+                store,
+                project_id,
+                values.drafts,
+                values.expected_updated_at,
+                pulse_label="ساخت بک‌آپ",
+                job_kind="backup",
+                http_request=request,
+            )
+        except JobCancelledError:
+            activity.add("ساخت بک‌آپ به درخواست شما متوقف شد.", "warning")
+            raise
         except BackupError as exc:
             activity.add(f"ساخت بک‌آپ ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
@@ -720,7 +842,7 @@ def create_app() -> FastAPI:
         return Response(status_code=204)
 
     @app.post("/api/projects/{project_id}/files")
-    async def import_files(project_id: str, files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    async def import_files(project_id: str, request: Request, files: list[UploadFile] = File(...)) -> dict[str, Any]:
         project(project_id)
         payloads = []
         for upload in files:
@@ -730,9 +852,19 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "هیچ فایلی انتخاب نشده است.")
         activity.add(f"دریافت و آماده‌سازی {len(payloads)} فایل آغاز شد")
         try:
-            result = await run_reported(store.import_files, project_id, payloads, pulse_label="ورود و آماده‌سازی فایل")
+            result = await run_reported(
+                store.import_files,
+                project_id,
+                payloads,
+                pulse_label="ورود و آماده‌سازی فایل",
+                job_kind="import",
+                http_request=request,
+            )
             activity.add(f"{len(result.get('images', []))} تصویر در پروژه آماده است", "success", 1.0)
             return result
+        except JobCancelledError:
+            activity.add("ورود فایل به درخواست شما متوقف شد.", "warning")
+            raise
         except (ValueError, RuntimeError) as exc:
             activity.add(f"ورود فایل ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
@@ -868,6 +1000,10 @@ def create_app() -> FastAPI:
         cancel_fn = getattr(registry, "cancel_install", None)
         if callable(cancel_fn):
             cancel_fn(engine_id)
+        cancel_ocr_fn = getattr(registry, "cancel_ocr", None)
+        if callable(cancel_ocr_fn):
+            cancel_ocr_fn(engine_id)
+        cancel_active_jobs("model")
         activity.add(f"درخواست توقف عملیات مدل {engine_id} ثبت شد", "warning")
         return {"ok": True, "engineId": engine_id}
 
@@ -900,9 +1036,23 @@ def create_app() -> FastAPI:
         done_ev = asyncio.Event()
         watch_task = asyncio.create_task(_watch_client_cancel(request, engine_id, done_ev))
         try:
-            await run_reported(registry.download, engine_id, language, pulse_label=f"آماده‌سازی {info['name']}")
+            await run_reported(
+                registry.download,
+                engine_id,
+                language,
+                pulse_label=f"آماده‌سازی {info['name']}",
+                job_kind="model",
+                http_request=request,
+                on_cancel=lambda: registry.cancel_install(engine_id),
+            )
+        except JobCancelledError:
+            activity.add(f"آماده‌سازی {info['name']} به درخواست شما متوقف شد.", "warning")
+            raise
         except Exception as exc:
-            activity.add(f"آماده‌سازی {info['name']} ناموفق بود: {exc}", "error")
+            if "لغو" in str(exc):
+                activity.add(f"آماده‌سازی {info['name']} به درخواست شما متوقف شد.", "warning")
+            else:
+                activity.add(f"آماده‌سازی {info['name']} ناموفق بود: {exc}", "error")
             raise
         finally:
             done_ev.set()
@@ -924,9 +1074,23 @@ def create_app() -> FastAPI:
         done_ev = asyncio.Event()
         watch_task = asyncio.create_task(_watch_client_cancel(request, engine_id, done_ev))
         try:
-            await run_reported(registry.update, engine_id, language, pulse_label=f"به‌روزرسانی {info['name']}")
+            await run_reported(
+                registry.update,
+                engine_id,
+                language,
+                pulse_label=f"به‌روزرسانی {info['name']}",
+                job_kind="model",
+                http_request=request,
+                on_cancel=lambda: registry.cancel_install(engine_id),
+            )
+        except JobCancelledError:
+            activity.add(f"به‌روزرسانی {info['name']} به درخواست شما متوقف شد.", "warning")
+            raise
         except Exception as exc:
-            activity.add(f"به‌روزرسانی {info['name']} ناموفق بود: {exc}", "error")
+            if "لغو" in str(exc):
+                activity.add(f"به‌روزرسانی {info['name']} به درخواست شما متوقف شد.", "warning")
+            else:
+                activity.add(f"به‌روزرسانی {info['name']} ناموفق بود: {exc}", "error")
             raise
         finally:
             done_ev.set()
@@ -984,7 +1148,7 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/api/engines/{engine_id}/test")
-    async def test_engine(engine_id: str, values: EngineTestRequest) -> dict[str, Any]:
+    async def test_engine(engine_id: str, values: EngineTestRequest, http_request: Request) -> dict[str, Any]:
         require_module_license("ocr")
         engine = registry.get(engine_id)
         if not ENGINE_INFO[engine_id].get("selectable", False):
@@ -997,6 +1161,7 @@ def create_app() -> FastAPI:
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         from PIL import Image
+        registry.reset_ocr_cancel()
         await run_in_threadpool(configure_native_runtime, True)
         await run_in_threadpool(registry.unload_all, engine_id)
         with Image.open(path) as im:
@@ -1010,6 +1175,9 @@ def create_app() -> FastAPI:
             raw_blocks = await run_reported(
                 _invoke_recognize, engine, image, values.language, True, True, 0.2, values.page_mode, use_persian_prep,
                 pulse_label=f"آزمایش {ENGINE_INFO[engine_id]['name']}",
+                job_kind="ocr",
+                http_request=http_request,
+                on_cancel=lambda: registry.cancel_ocr(engine_id),
             )
             blocks, _ = organize_ocr_blocks(
                 raw_blocks,
@@ -1017,6 +1185,9 @@ def create_app() -> FastAPI:
                 group_lines=True,
                 page_size=page_size,
             )
+        except JobCancelledError:
+            activity.add(f"آزمایش {ENGINE_INFO[engine_id]['name']} به درخواست شما متوقف شد.", "warning")
+            raise
         except Exception as exc:
             activity.add(f"آزمایش موتور ناموفق بود: {exc}", "error")
             raise
@@ -1047,6 +1218,7 @@ def create_app() -> FastAPI:
                 entry = pending_results.load(store, project_id, pending['id'])
                 if set(ids).intersection(output['id'] for output in entry['outputs']):
                     raise PendingResultConflict(pending['id'], 'ocr')
+        registry.reset_ocr_cancel()
         await run_in_threadpool(configure_native_runtime, True)
         await run_in_threadpool(registry.unload_all, values.engine)
         target_items = [item for item in state["images"] if item["id"] in ids]
@@ -1140,14 +1312,15 @@ def create_app() -> FastAPI:
             else contextlib.nullcontext(1)
         )
         keep_loaded_ok = False
+        ocr_cancel_ev = threading.Event()
         try:
             from PIL import Image
 
             with batch_ctx as batch_workers:
                 if int(batch_workers) <= 1:
                     for completed, item in enumerate(target_items, start=1):
-                        if await http_request.is_disconnected():
-                            activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
+                        if ocr_cancel_ev.is_set() or await http_request.is_disconnected():
+                            activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
                             return store.get(project_id)
                         disp_idx = ui_batch_index if is_ui_paged_batch else completed
                         disp_tot = ui_batch_total if is_ui_paged_batch else total_targets
@@ -1167,22 +1340,22 @@ def create_app() -> FastAPI:
                                 use_persian_prep,
                                 pulse_label=f"در حال خواندن {item['name']}",
                                 progress_span=(start_page_p, round(p_lo + (p_hi - p_lo) * 0.92, 4)),
+                                job_kind="ocr",
+                                http_request=http_request,
+                                on_cancel=lambda: registry.cancel_ocr(values.engine),
+                                cancel_event=ocr_cancel_ev,
                             )
                             page_size = image.size
                         finally:
                             image.close()
+                        if ocr_cancel_ev.is_set() or await http_request.is_disconnected():
+                            activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
+                            return store.get(project_id)
                         _apply_page_ocr_result(item, blocks, page_size, completed)
                         if completed < total_targets:
                             await run_in_threadpool(trim_process_memory)
                 else:
-                    cancel_event = threading.Event()
-
-                    async def _watch_disconnect() -> None:
-                        while not cancel_event.is_set():
-                            if await http_request.is_disconnected():
-                                cancel_event.set()
-                                return
-                            await asyncio.sleep(0.15)
+                    cancel_event = ocr_cancel_ev
 
                     def _run_parallel_ocr() -> bool:
                         def _ocr_single_page(idx: int, item: dict[str, Any]) -> tuple[list[dict[str, Any]], tuple[int, int]] | None:
@@ -1212,24 +1385,19 @@ def create_app() -> FastAPI:
                             _apply_page_ocr_result(item, raw_blocks, page_size, idx + 1)
                         return not cancel_event.is_set()
 
-                    watcher = asyncio.create_task(_watch_disconnect())
-                    try:
-                        finished_ok = await run_reported(
-                            _run_parallel_ocr,
-                            pulse_label=f"خواندن موازی {total_targets} تصویر",
-                        )
-                    finally:
-                        cancel_event.set()
-                        watcher.cancel()
-                        try:
-                            await watcher
-                        except asyncio.CancelledError:
-                            pass
+                    finished_ok = await run_reported(
+                        _run_parallel_ocr,
+                        pulse_label=f"خواندن موازی {total_targets} تصویر",
+                        job_kind="ocr",
+                        http_request=http_request,
+                        on_cancel=lambda: registry.cancel_ocr(values.engine),
+                        cancel_event=cancel_event,
+                    )
                     if not finished_ok:
-                        activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
+                        activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
                         return store.get(project_id)
-            if await http_request.is_disconnected():
-                activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
+            if ocr_cancel_ev.is_set() or await http_request.is_disconnected():
+                activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
                 return store.get(project_id)
             with store._lock:
                 entry = pending_results.stage(store, project_id, 'ocr', {
@@ -1243,6 +1411,9 @@ def create_app() -> FastAPI:
                 merged = pending_results.resolve(store, project_id, entry['id'], view['revision'], {})
                 state = merged['project']
             keep_loaded_ok = bool(values.keep_engine_loaded)
+        except JobCancelledError:
+            activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
+            return store.get(project_id)
         except Exception as exc:
             activity.add(f"خواندن متن ناموفق بود: {exc}", "error")
             raise
@@ -1495,6 +1666,8 @@ def create_app() -> FastAPI:
     @app.post("/api/projects/{project_id}/context-step")
     async def context_step(project_id: str, values: ContextStepRequest, http_request: Request) -> dict[str, Any]:
         require_module_license("translation")
+        translations.reset_cancel()
+        step_cancel_ev = threading.Event()
         lock = context_locks.setdefault(project_id, asyncio.Lock())
         async with lock:
             state = project(project_id); expected = state.get('updatedAt', '')
@@ -1520,7 +1693,14 @@ def create_app() -> FastAPI:
                             _call_with_target_lang, translations.condense_context, context_to_condense, target_context_length,
                             run['provider'], policy, target_language=run.get('targetLanguage', 'fa'),
                             pulse_label='در حال فشرده‌سازی خلاصهٔ قبلی',
+                            job_kind='translation',
+                            http_request=http_request,
+                            on_cancel=translations.cancel_active,
+                            cancel_event=step_cancel_ev,
                         )
+                    except JobCancelledError:
+                        activity.add("عملیات ترجمه به درخواست شما متوقف شد.", "warning")
+                        raise
                     except Exception as exc:
                         activity.add(f"فشرده‌سازی AI انجام نشد؛ برای جلوگیری از توقف از نسخهٔ کوتاه‌شده استفاده می‌شود. {exc}", 'warning')
                     if condensed:
@@ -1565,18 +1745,26 @@ def create_app() -> FastAPI:
                     error = InvalidContextResponse(str(exc), values.corrected_response)
                     error.recovery_token = values.recovery_token
                     raise error from exc
-            elif await http_request.is_disconnected():
+            elif step_cancel_ev.is_set() or await http_request.is_disconnected():
                 if run['provider'] == 'local' and not settings.get('local_nmt', {}).get('keep_loaded', False):
                     await run_in_threadpool(translations.local_nmt.unload)
-                activity.add("ادامهٔ ترجمه با بستن پنجره متوقف شد.", "warning")
+                activity.add("ادامهٔ ترجمه به درخواست شما متوقف شد.", "warning")
                 return {'project': state, 'done': False, 'affectedImageIds': [], 'completed': run['completed']}
             elif run['provider'] == 'free':
-                translated = await run_reported(
-                    _call_with_target_lang, translations.translate_free_batch,
-                    request, text, source_texts, run['language'], policy,
-                    target_language=run.get('targetLanguage', 'fa'),
-                    pulse_label='ترجمهٔ رایگان',
-                )
+                try:
+                    translated = await run_reported(
+                        _call_with_target_lang, translations.translate_free_batch,
+                        request, text, source_texts, run['language'], policy,
+                        target_language=run.get('targetLanguage', 'fa'),
+                        pulse_label='ترجمهٔ رایگان',
+                        job_kind='translation',
+                        http_request=http_request,
+                        on_cancel=translations.cancel_active,
+                        cancel_event=step_cancel_ev,
+                    )
+                except JobCancelledError:
+                    activity.add("ادامهٔ ترجمه به درخواست شما متوقف شد.", "warning")
+                    raise
                 summary = ''
             elif run['provider'] == 'local':
                 try:
@@ -1592,7 +1780,16 @@ def create_app() -> FastAPI:
                             keep_loaded_override=True,
                         ),
                         pulse_label='ترجمهٔ آفلاین داخلی',
+                        job_kind='translation',
+                        http_request=http_request,
+                        on_cancel=translations.cancel_active,
+                        cancel_event=step_cancel_ev,
                     )
+                except JobCancelledError:
+                    if not settings.get('local_nmt', {}).get('keep_loaded', False):
+                        await run_in_threadpool(translations.local_nmt.unload)
+                    activity.add("ادامهٔ ترجمهٔ آفلاین به درخواست شما متوقف شد.", "warning")
+                    raise
                 except Exception:
                     if not settings.get('local_nmt', {}).get('keep_loaded', False):
                         await run_in_threadpool(translations.local_nmt.unload)
@@ -1600,10 +1797,30 @@ def create_app() -> FastAPI:
                 summary = ''
             else:
                 try:
-                    translated, summary = await run_reported(translations.translate_context, request, text, source_texts, run['provider'], policy, pulse_label='ترجمه و خلاصه')
+                    translated, summary = await run_reported(
+                        translations.translate_context,
+                        request,
+                        text,
+                        source_texts,
+                        run['provider'],
+                        policy,
+                        pulse_label='ترجمه و خلاصه',
+                        job_kind='translation',
+                        http_request=http_request,
+                        on_cancel=translations.cancel_active,
+                        cancel_event=step_cancel_ev,
+                    )
+                except JobCancelledError:
+                    activity.add("ادامهٔ ترجمه به درخواست شما متوقف شد.", "warning")
+                    raise
                 except InvalidContextResponse as exc:
                     exc.recovery_token = recovery_store({'kind':'project', 'project_id': project_id, 'run_id': values.run_id, 'completed': values.completed, 'updated_at': expected})
                     raise
+            if step_cancel_ev.is_set() or await http_request.is_disconnected():
+                if run['provider'] == 'local' and not settings.get('local_nmt', {}).get('keep_loaded', False):
+                    await run_in_threadpool(translations.local_nmt.unload)
+                activity.add("ادامهٔ ترجمه به درخواست شما متوقف شد؛ نتیجهٔ مرحلهٔ لغوشده ذخیره نشد.", "warning")
+                raise JobCancelledError("عملیات ترجمه به درخواست شما متوقف شد.")
             with store._lock:
                 wanted = {(str(ref['imageId']), str(ref['blockId'])) for part in chosen for ref in run['jobs'][part['job']]['refs']}
                 originals = {f"{item['id']}:{block.get('id')}": {'text':str(block.get('text') or ''), 'tr':str(block.get('tr') or '')}
@@ -1692,8 +1909,9 @@ def create_app() -> FastAPI:
         return result
 
     @app.post('/api/translate-text/context')
-    async def context_text_translate(values: ContextTextRequest) -> dict[str, str]:
+    async def context_text_translate(values: ContextTextRequest, http_request: Request) -> dict[str, str]:
         require_module_license("translation")
+        translations.reset_cancel()
         if (values.recovery_token is None) != (values.corrected_response is None):
             raise HTTPException(400, 'نشانه و متن پاسخ اصلاح‌شده باید همراه هم ارسال شوند.')
         signature = digest(values.model_dump(exclude={'recovery_token', 'corrected_response'}))
@@ -1735,6 +1953,9 @@ def create_app() -> FastAPI:
                             request, text, sources, values.source_language, policy,
                             target_language=values.target_language,
                             pulse_label='بازترجمهٔ رایگان',
+                            job_kind='translation',
+                            http_request=http_request,
+                            on_cancel=translations.cancel_active,
                         )
                         summary = ''
                     elif values.provider == 'local':
@@ -1749,11 +1970,25 @@ def create_app() -> FastAPI:
                                 target_language=values.target_language,
                             ),
                             pulse_label='بازترجمهٔ آفلاین داخلی',
+                            job_kind='translation',
+                            http_request=http_request,
+                            on_cancel=translations.cancel_active,
                         )
                         summary = ''
                     else:
                         try:
-                            translated, summary = await run_reported(translations.translate_context, request, text, sources, values.provider, policy, pulse_label='بازترجمه و خلاصه')
+                            translated, summary = await run_reported(
+                                translations.translate_context,
+                                request,
+                                text,
+                                sources,
+                                values.provider,
+                                policy,
+                                pulse_label='بازترجمه و خلاصه',
+                                job_kind='translation',
+                                http_request=http_request,
+                                on_cancel=translations.cancel_active,
+                            )
                         except InvalidContextResponse as exc:
                             exc.recovery_token = recovery_store({'kind':'single', 'state':state, 'run':run, 'signature':signature})
                             raise
@@ -1895,6 +2130,9 @@ def create_app() -> FastAPI:
                         _call_with_target_lang, translations.translate, call["text"], values.source_language, values.provider, page_sources, settings["_translation_skill"],
                         target_language=values.target_language,
                         pulse_label=f"ترجمهٔ درخواست {page_index} از {page_total}",
+                        job_kind="translation",
+                        http_request=http_request,
+                        on_cancel=translations.cancel_active,
                     )
                     page_result = distribute_translation(page_sources, translated)
                     completed_block = True
@@ -1945,6 +2183,9 @@ def create_app() -> FastAPI:
                     store.save_if_unchanged(state, expected_updated_at)
                 except OSError as exc:
                     raise ResultStorageError("\n".join(translated_blocks), "") from exc
+        except JobCancelledError:
+            activity.add("عملیات ترجمه به درخواست شما متوقف شد.", "warning")
+            raise
         except Exception as exc:
             if completed_ai:
                 message = f"{completed_ai} درخواست ذخیره شد؛ درخواست ناموفق ذخیره نشد و درخواست‌های پس از آن ارسال نشدند. "
@@ -1980,8 +2221,9 @@ def create_app() -> FastAPI:
         return plan_preview(plan, values.provider, values.source_language, settings)
 
     @app.post("/api/translate-text")
-    async def translate_text(values: TextTranslateRequest) -> dict[str, str]:
+    async def translate_text(values: TextTranslateRequest, http_request: Request) -> dict[str, str]:
         require_module_license("translation")
+        translations.reset_cancel()
         if values.provider in {'free', 'local'}:
             request = ContextTextRequest(
                 text=values.text,
@@ -1995,7 +2237,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(400, preview['previewError'])
             if values.confirmation and values.confirmation != preview['signature']:
                 raise HTTPException(409, 'متن یا تنظیمات پس از پیش‌نمایش تغییر کرده است.')
-            result = await context_text_translate(request.model_copy(update={'confirmation': preview['signature']}))
+            result = await context_text_translate(request.model_copy(update={'confirmation': preview['signature']}), http_request)
             return {'text': result['text']}
         settings = translation_settings(values.provider, values.skill, values.target_language)
         if values.confirmation:
@@ -2012,17 +2254,24 @@ def create_app() -> FastAPI:
                     translated_part = await run_reported(
                         _call_with_target_lang, translations.translate, call["text"], values.source_language, values.provider,
                         target_language=values.target_language,
+                        job_kind="translation",
+                        on_cancel=translations.cancel_active,
                     )
                 else:
                     translated_part = await run_reported(
                         _call_with_target_lang, translations.translate, call["text"], values.source_language, values.provider, None, normalize_ai_skill(values.skill),
                         target_language=values.target_language,
+                        job_kind="translation",
+                        on_cancel=translations.cancel_active,
                     )
                 responses.append(translated_part)
             translated = responses[0] if responses else ""
             if responses:
                 for index, join in enumerate(plan["calls"][0].get("joins", []), start=1):
                     translated += join + responses[index]
+        except JobCancelledError:
+            activity.add("ترجمهٔ دوباره به درخواست شما متوقف شد.", "warning")
+            raise
         except Exception as exc:
             activity.add(f"ترجمهٔ دوباره ناموفق بود: {exc}", "error")
             raise
@@ -2042,10 +2291,17 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
 
     @app.post("/api/ai-settings/test")
-    async def test_ai_settings(values: AiConnectionTest | None = None) -> dict[str, Any]:
+    async def test_ai_settings(values: AiConnectionTest | None = None, http_request: Request = None) -> dict[str, Any]:
         require_module_license("translation")
         overrides = values.model_dump(exclude_none=True) if values else {}
-        return await run_in_threadpool(translations.test_connection, overrides)
+        return await run_reported(
+            translations.test_connection,
+            overrides,
+            pulse_label="تست اتصال سرویس ترجمه",
+            job_kind="translation",
+            http_request=http_request,
+            on_cancel=translations.cancel_active,
+        )
 
     @app.get("/api/local-nmt/status")
     def local_nmt_status() -> dict[str, Any]:
@@ -2077,8 +2333,14 @@ def create_app() -> FastAPI:
                 translations.local_nmt.prepare,
                 model_id,
                 pulse_label="دانلود و آماده‌سازی مترجم آفلاین",
+                job_kind="model",
+                http_request=request,
+                on_cancel=translations.local_nmt.cancel_prepare,
             )
             return {"ok": True, "status": status_payload, "memory": registry.memory_status()}
+        except JobCancelledError:
+            activity.add("دانلود مترجم آفلاین به درخواست شما متوقف شد.", "warning")
+            raise
         except LocalNmtError as exc:
             activity.add(f"آماده‌سازی مترجم آفلاین متوقف شد: {exc}", "warning" if "لغو" in str(exc) else "error")
             raise HTTPException(400, str(exc)) from exc
@@ -2114,7 +2376,7 @@ def create_app() -> FastAPI:
         return {**summary, "status": translations.local_nmt.status(), "memory": registry.memory_status()}
 
     @app.post("/api/local-nmt/test")
-    async def test_local_nmt(values: LocalNmtTestRequest | None = None) -> dict[str, Any]:
+    async def test_local_nmt(values: LocalNmtTestRequest | None = None, http_request: Request = None) -> dict[str, Any]:
         require_module_license("translation")
         req = values or LocalNmtTestRequest()
         try:
@@ -2129,7 +2391,13 @@ def create_app() -> FastAPI:
                     keep_loaded=req.keep_loaded,
                 ),
                 pulse_label="تست ترجمهٔ آفلاین یک جمله",
+                job_kind="translation",
+                http_request=http_request,
+                on_cancel=translations.local_nmt.cancel_inference,
             )
+        except JobCancelledError:
+            activity.add("تست ترجمهٔ آفلاین به درخواست شما متوقف شد.", "warning")
+            raise
         except LocalNmtError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -2231,15 +2499,18 @@ def create_app() -> FastAPI:
         activity.add(f"ساخت خروجی {values.kind.upper()} آغاز شد")
         try:
             if values.kind == "pdf":
-                path = await run_reported(build_pdf, store, state, request, pulse_label="ساخت PDF")
+                path = await run_reported(build_pdf, store, state, request, pulse_label="ساخت PDF", job_kind="export", http_request=request_obj)
             elif values.kind == "images":
-                path = await run_reported(build_images_zip, store, state, request, pulse_label="ساخت ZIP")
+                path = await run_reported(build_images_zip, store, state, request, pulse_label="ساخت ZIP", job_kind="export", http_request=request_obj)
             elif values.kind == "docx":
-                path = await run_reported(build_docx, store, state, request, pulse_label="ساخت فایل Word")
+                path = await run_reported(build_docx, store, state, request, pulse_label="ساخت فایل Word", job_kind="export", http_request=request_obj)
             elif values.kind == "pptx":
-                path = await run_reported(build_pptx, store, state, request, pulse_label="ساخت فایل PowerPoint")
+                path = await run_reported(build_pptx, store, state, request, pulse_label="ساخت فایل PowerPoint", job_kind="export", http_request=request_obj)
             else:
-                path = await run_reported(build_txt, store, state, request, pulse_label="ساخت TXT")
+                path = await run_reported(build_txt, store, state, request, pulse_label="ساخت TXT", job_kind="export", http_request=request_obj)
+        except JobCancelledError:
+            activity.add(f"ساخت خروجی {values.kind.upper()} به درخواست شما متوقف شد.", "warning")
+            raise
         except ValueError as exc:
             activity.add(f"ساخت خروجی ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
