@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>nul
-title Build Offline EXE ^& Setup - Comic OCR Studio 4.22
+title Build Offline EXE ^& Setup - Comic OCR Studio 4.23
 
 cd /d "%~dp0"
 set "APP_DIR=%CD%"
@@ -9,7 +9,7 @@ set "VENV_PY=%APP_DIR%\.venv\Scripts\python.exe"
 set "WHEELHOUSE_DIR=%APP_DIR%\wheelhouse"
 
 echo ====================================================================
-echo   Comic OCR Studio 4.22 - Offline Windows EXE ^& Setup Builder
+echo   Comic OCR Studio 4.23 - Offline Windows EXE ^& Setup Builder
 echo ====================================================================
 echo.
 
@@ -73,7 +73,7 @@ echo.
 echo ====================================================================
 echo   BUILD COMPLETE!
 echo   1-Click Standalone EXE : "%APP_DIR%\dist\ComicOCRStudio\ComicOCRStudio.exe"
-echo   Offline Setup Installer: "%APP_DIR%\dist\ComicOCRStudio-Offline-Setup-4.22*.exe"
+echo   Offline Setup Installer: "%APP_DIR%\dist\ComicOCRStudio-Offline-Setup-4.23*.exe"
 echo ====================================================================
 pause
 exit /b 0

@@ -8664,11 +8664,22 @@ function bindEvents() {
     const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
     const prevId = $('ocrEngine').value;
     const prevEng = state.engines.find((entry) => entry.id === prevId);
-    const prevReady = Boolean(prevEng?.runtimeInstalled && (prevEng?.readyLanguages || []).includes(nextLang));
+    const prevSupports = Boolean(prevEng && (prevEng.languages || []).includes(nextLang));
+    const prevReady = Boolean(prevSupports && prevEng.runtimeInstalled && (prevEng.readyLanguages || []).includes(nextLang));
+    const prevTier = prevEng ? engineSuitability(prevEng, pageMode, nextLang).tier : 'weak';
     const anyReadyForLang = state.engines.some(
       (entry) => entry.selectable !== false && entry.runtimeInstalled && (entry.readyLanguages || []).includes(nextLang),
     );
-    const targetEngine = (!prevReady && anyReadyForLang)
+    const anyBestReadyForLang = state.engines.some(
+      (entry) => entry.selectable !== false
+        && entry.runtimeInstalled
+        && (entry.readyLanguages || []).includes(nextLang)
+        && engineSuitability(entry, pageMode, nextLang).tier === 'best',
+    );
+    const shouldAutoUpgrade = !prevSupports
+      || (!prevReady && anyReadyForLang)
+      || (prevTier !== 'best' && anyBestReadyForLang);
+    const targetEngine = shouldAutoUpgrade
       ? pickBestEngineForLanguage(nextLang, pageMode, '')
       : prevId;
     updateEngineOptions(targetEngine, { resort: true });
@@ -8677,9 +8688,23 @@ function bindEvents() {
     if ($('modelsDialog')?.open) renderModels({ resort: true });
   });
   $('ocrPageMode')?.addEventListener('change', () => {
-    collectOcrSettings();
+    const lang = $('ocrLanguage')?.value || state.project?.settings?.ocrLanguage || 'eng';
+    const nextMode = normalizePageMode($('ocrPageMode')?.value);
+    const curId = $('ocrEngine')?.value || '';
+    const curEng = state.engines.find((entry) => entry.id === curId);
+    const curTier = curEng ? engineSuitability(curEng, nextMode, lang).tier : 'weak';
+    const hasBestReady = state.engines.some(
+      (entry) => entry.selectable !== false
+        && entry.runtimeInstalled
+        && (entry.readyLanguages || []).includes(lang)
+        && engineSuitability(entry, nextMode, lang).tier === 'best',
+    );
+    const nextTarget = (curTier !== 'best' && hasBestReady)
+      ? pickBestEngineForLanguage(lang, nextMode, '')
+      : '';
     if ($('modelsPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
-    updateEngineOptions('', { resort: true });
+    updateEngineOptions(nextTarget, { resort: true });
+    collectOcrSettings();
     scheduleSave();
     if ($('modelsDialog')?.open) renderModels({ resort: true });
   });

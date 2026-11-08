@@ -2173,7 +2173,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas422: verText.includes('۴.۲۲'),
+            verHas423: verText.includes('۴.۲۳'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2192,8 +2192,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.22 displays version 4.22 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas422 === true
+      'v4.00/v4.23 displays version 4.23 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas423 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -4309,6 +4309,51 @@ function check(name, condition) {
         && v422AlwaysEnabledCheck.disabledInTextTab === 0
         && v422AlwaysEnabledCheck.helpUpdated === true,
       JSON.stringify(v422AlwaysEnabledCheck),
+    );
+
+    const v423PersianAutoUpgradeCheck = vm.runInContext(`
+      (() => {
+        const prevEngines = state.engines.map((e) => ({ ...e }));
+        const prevLang = $('ocrLanguage').value;
+        const prevMode = $('ocrPageMode').value;
+        try {
+          state.engines = [
+            { id: 'rapidocr-v5', name: 'PP-OCRv5 Mobile', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'multi', family: 'Paddle' },
+            { id: 'easyocr', name: 'EasyOCR', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'comic', family: 'CRAFT' },
+            { id: 'tesseract', name: 'Tesseract 5 LSTM', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'doc', family: 'Tesseract' },
+          ];
+          $('ocrPageMode').value = 'comic';
+          $('ocrLanguage').value = 'eng';
+          updateEngineOptions('rapidocr-v5', { resort: true });
+          // Switch to Persian in comic mode -> must auto-upgrade from medium rapidocr-v5 to best easyocr!
+          $('ocrLanguage').value = 'fas';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const upgradedComic = $('ocrEngine').value === 'easyocr';
+          // Switch pageMode to document while on Persian -> must auto-upgrade from weak easyocr to best tesseract!
+          $('ocrPageMode').value = 'document';
+          $('ocrPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const upgradedDoc = $('ocrEngine').value === 'tesseract';
+          const helpOcrModes = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-modes');
+          const helpOcrModels = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-models');
+          const helpDocsKafGafAndJoining = Boolean(
+            helpOcrModes && helpOcrModes.features.some((f) => f.includes('تفاوت «ک» و «گ»') && f.includes('می‌چسبند'))
+            && helpOcrModels && helpOcrModels.features.some((f) => f.includes('tessdata_best'))
+          );
+          return { upgradedComic, upgradedDoc, helpDocsKafGafAndJoining };
+        } finally {
+          state.engines = prevEngines;
+          $('ocrLanguage').value = prevLang;
+          $('ocrPageMode').value = prevMode;
+          updateEngineOptions('', { resort: true });
+        }
+      })()
+    `, context);
+    check(
+      'v4.23 auto-upgrades from medium/weak engines to ready green Persian engines across language and page-mode switches and updates Help guide',
+      v423PersianAutoUpgradeCheck.upgradedComic === true
+        && v423PersianAutoUpgradeCheck.upgradedDoc === true
+        && v423PersianAutoUpgradeCheck.helpDocsKafGafAndJoining === true,
+      JSON.stringify(v423PersianAutoUpgradeCheck),
     );
   }
 

@@ -48,7 +48,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.2.2.0")]
+[assembly: System.Reflection.AssemblyVersion("4.2.3.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -346,8 +346,10 @@ def stage_bundled_models(staging_dir: Path, *, include_nmt: bool = False, skip_d
     user_models = models_dir()
     rapid_src = user_models / "rapidocr"
     rapid_dst = staging_dir / "rapidocr"
+    tess_src = user_models / "tesseract"
+    tess_dst = staging_dir / "tesseract"
     if not skip_download:
-        from comic_studio.ocr import RapidEngine
+        from comic_studio.ocr import RapidEngine, TesseractEngine
 
         engine = RapidEngine("rapidocr-v5", "v5")
         for lang in ("eng", "fas"):
@@ -355,8 +357,16 @@ def stage_bundled_models(staging_dir: Path, *, include_nmt: bool = False, skip_d
                 engine.download(lang)
             except Exception as exc:
                 print(f"[warn] RapidOCR model download for {lang} skipped/failed: {exc}")
+        tess_engine = TesseractEngine()
+        for lang in ("eng", "fas"):
+            try:
+                tess_engine._download_language_file(lang)
+            except Exception as exc:
+                print(f"[warn] Tesseract traineddata download for {lang} skipped/failed: {exc}")
     if rapid_src.is_dir():
         shutil.copytree(rapid_src, rapid_dst, dirs_exist_ok=True)
+    if tess_src.is_dir():
+        shutil.copytree(tess_src, tess_dst, dirs_exist_ok=True)
 
     if include_nmt:
         nmt_src = user_models / "local-nmt" / "nllb-600m"

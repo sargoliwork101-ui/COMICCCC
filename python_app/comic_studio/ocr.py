@@ -552,12 +552,116 @@ def _detect_onnx_acceleration() -> dict[str, Any]:
     return {"mode": "cpu", "gpu": False, "params": {}}
 
 
+_PERSIAN_ZWNJ_AL_SHIELD = "\u077e"
+_PERSIAN_STRONG_RTL_RE = re.compile(r"[\u0590-\u065f\u066a-\u06ef\u06fa-\u08ff\ufb1d-\ufdff\ufe70-\ufeff]")
+_PERSIAN_VISUAL_LTR_ISLAND_RE = re.compile(
+    r"[A-Za-z][A-Za-z0-9._:/+\-#%&*=]*(?:[ \t,;:\-]+[A-Za-z0-9._:/+\-#%&*=]+)*"
+    r"|[\d\u0660-\u0669\u06f0-\u06f9]+(?:[.,:/\-][\d\u0660-\u0669\u06f0-\u06f9]+)*%?"
+)
+_PERSIAN_BRACKET_MIRROR = str.maketrans("()[]{}<>«»", ")(][}{><»«")
+_BIDI_CTX_LOCAL = threading.local()
+
+
+def _pure_persian_visual_to_logical(text: str) -> str:
+    """Pure-Python RTL visual-to-logical reordering (`base_dir='R'`) that preserves ZWNJ (`\\u200c`),
+    multi-word embedded English phrases (`Toe Fillet`, `Figure 8-35`, `IPC-610`), ASCII/Persian numbers
+    (`۱۲۳`, `۳.۱۴`, `2026`), and bracket mirroring (`()[]{}<>«»`)."""
+    if not text or not _PERSIAN_STRONG_RTL_RE.search(text):
+        return text
+    spans: list[tuple[bool, str]] = []
+    pos = 0
+    for match in _PERSIAN_VISUAL_LTR_ISLAND_RE.finditer(text):
+        if match.start() > pos:
+            spans.append((False, text[pos:match.start()]))
+        spans.append((True, match.group(0)))
+        pos = match.end()
+    if pos < len(text):
+        spans.append((False, text[pos:]))
+    out: list[str] = []
+    for is_ltr, seg in reversed(spans):
+        out.append(seg if is_ltr else seg[::-1].translate(_PERSIAN_BRACKET_MIRROR))
+    return "".join(out)
+
+
+def _persian_visual_to_logical(text_or_bytes: str | bytes, *args: Any, **kwargs: Any) -> str | bytes:
+    """Convert CTC visual-order RTL text into logical Unicode order with explicit `base_dir='R'`
+    while protecting ZWNJ (`\\u200c`) from `python-bidi`'s control-character stripping."""
+    is_bytes = isinstance(text_or_bytes, bytes)
+    encoding = str(kwargs.get("encoding", "utf-8"))
+    text = text_or_bytes.decode(encoding, errors="replace") if is_bytes else str(text_or_bytes)
+    if not text or not _PERSIAN_STRONG_RTL_RE.search(text):
+        return text.encode(encoding) if is_bytes else text
+    orig_gd = getattr(_BIDI_CTX_LOCAL, "orig_get_display", None)
+    if orig_gd is None:
+        try:
+            from bidi.algorithm import get_display as _imported_gd
+            if not getattr(_imported_gd, "_is_comic_fallback_shim", False) and not getattr(_imported_gd, "_is_comic_persian_wrapper", False):
+                orig_gd = _imported_gd
+        except Exception:
+            orig_gd = None
+    if orig_gd is not None:
+        try:
+            shielded = text.replace("\u200c", _PERSIAN_ZWNJ_AL_SHIELD)
+            reordered = orig_gd(shielded, base_dir="R")
+            if isinstance(reordered, bytes):
+                reordered = reordered.decode(encoding, errors="replace")
+            out = str(reordered).replace(_PERSIAN_ZWNJ_AL_SHIELD, "\u200c")
+            return out.encode(encoding) if is_bytes else out
+        except Exception:
+            pass
+    out = _pure_persian_visual_to_logical(text)
+    return out.encode(encoding) if is_bytes else out
+
+
+_persian_visual_to_logical._is_comic_persian_wrapper = True  # type: ignore[attr-defined]
+
+
+@contextlib.contextmanager
+def _persian_ctc_bidi_context(language: str):
+    """Ensure RapidOCR and EasyOCR use `base_dir='R'` + ZWNJ preservation when decoding Persian/Arabic CTC lines."""
+    if language not in {"fas", "ara"}:
+        yield
+        return
+    saved_bidi_gd = None
+    saved_easy_gd = None
+    bidi_alg_mod = None
+    easy_mod = None
+    try:
+        import bidi.algorithm as _ba
+        bidi_alg_mod = _ba
+        saved_bidi_gd = getattr(_ba, "get_display", None)
+        if saved_bidi_gd is not None and not getattr(saved_bidi_gd, "_is_comic_persian_wrapper", False):
+            _BIDI_CTX_LOCAL.orig_get_display = saved_bidi_gd
+            _ba.get_display = _persian_visual_to_logical  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        easy_mod = sys.modules.get("easyocr.easyocr")
+        if easy_mod is not None and hasattr(easy_mod, "get_display"):
+            saved_easy_gd = getattr(easy_mod, "get_display")
+            if not getattr(saved_easy_gd, "_is_comic_persian_wrapper", False):
+                if getattr(_BIDI_CTX_LOCAL, "orig_get_display", None) is None:
+                    _BIDI_CTX_LOCAL.orig_get_display = saved_easy_gd
+                setattr(easy_mod, "get_display", _persian_visual_to_logical)
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        if bidi_alg_mod is not None and saved_bidi_gd is not None:
+            with contextlib.suppress(Exception):
+                bidi_alg_mod.get_display = saved_bidi_gd  # type: ignore[attr-defined]
+        if easy_mod is not None and saved_easy_gd is not None:
+            with contextlib.suppress(Exception):
+                setattr(easy_mod, "get_display", saved_easy_gd)
+        _BIDI_CTX_LOCAL.orig_get_display = None
+
+
 def _install_fallback_bidi_shim() -> None:
     """Provide a pure-Python visual-to-logical RTL `bidi.algorithm.get_display` fallback
     only if `python-bidi` could not be imported (e.g. offline/air-gapped runtime), so
     `rapidocr`'s `validate_rtl_dependency()` never aborts Persian (`fas` -> `arabic`) OCR."""
     import types
-    import unicodedata
 
     try:
         from bidi.algorithm import get_display as _gd  # noqa: F401
@@ -573,32 +677,16 @@ def _install_fallback_bidi_shim() -> None:
     except Exception:
         pass
 
-    _MIRROR = str.maketrans("()[]{}<>«»", ")(][}{><»«")
-
     def _fallback_get_display(text_or_bytes: str | bytes, *args: Any, **kwargs: Any) -> str | bytes:
         is_bytes = isinstance(text_or_bytes, bytes)
         encoding = str(kwargs.get("encoding", "utf-8"))
         text = text_or_bytes.decode(encoding, errors="replace") if is_bytes else str(text_or_bytes)
         if not text:
             return b"" if is_bytes else ""
-        has_rtl = any(unicodedata.bidirectional(ch) in {"R", "AL", "AN"} for ch in text)
-        if not has_rtl:
-            return text.encode(encoding) if is_bytes else text
-        # Reverse visual-order RTL line while keeping contiguous LTR/digit runs forward.
-        tokens: list[tuple[bool, str]] = []
-        for ch in text:
-            bd = unicodedata.bidirectional(ch)
-            is_ltr_tok = bd in {"L", "EN", "ES", "ET"} or ch.isascii() and ch.isalnum()
-            if tokens and tokens[-1][0] == is_ltr_tok:
-                tokens[-1] = (is_ltr_tok, tokens[-1][1] + ch)
-            else:
-                tokens.append((is_ltr_tok, ch))
-        rebuilt: list[str] = []
-        for is_ltr_tok, seg in reversed(tokens):
-            rebuilt.append(seg if is_ltr_tok else seg[::-1].translate(_MIRROR))
-        out = "".join(rebuilt)
+        out = _pure_persian_visual_to_logical(text)
         return out.encode(encoding) if is_bytes else out
 
+    _fallback_get_display._is_comic_fallback_shim = True  # type: ignore[attr-defined]
     bidi_pkg = sys.modules.get("bidi") or types.ModuleType("bidi")
     alg_mod = types.ModuleType("bidi.algorithm")
     bidi_pkg.get_display = _fallback_get_display  # type: ignore[attr-defined]
@@ -840,9 +928,9 @@ class RapidEngine:
         }
         if language == "fas":
             # Disable 0°/180° orientation classifier (trained on CJK/Latin) so cursive RTL Persian lines
-            # are never flipped upside-down, and widen DBNet polygon unclip so upper/lower dots stay inside.
+            # are never flipped upside-down, and widen DBNet polygon unclip so گ sarkesh & upper/lower dots stay inside.
             params["Global.use_cls"] = False
-            params["Det.unclip_ratio"] = 2.0
+            params["Det.unclip_ratio"] = 2.2
             params["Det.box_thresh"] = 0.45
         if self.version == "v5":
             # Keep user-downloaded models outside the virtual environment (or use bundled offline models).
@@ -1126,36 +1214,37 @@ class RapidEngine:
                 rgb.close()
         need_cpu_retry = False
         force_cpu_before = self._force_cpu
-        with self._checkout(language) as engine:
-            used_gpu_engine = self.using_gpu or (not force_cpu_before and self._force_cpu)
-            infer_ctx = self._gpu_infer_lock if used_gpu_engine else contextlib.nullcontext()
-            try:
-                with infer_ctx:
-                    if used_gpu_engine and self._force_cpu:
+        with _persian_ctc_bidi_context(language):
+            with self._checkout(language) as engine:
+                used_gpu_engine = self.using_gpu or (not force_cpu_before and self._force_cpu)
+                infer_ctx = self._gpu_infer_lock if used_gpu_engine else contextlib.nullcontext()
+                try:
+                    with infer_ctx:
+                        if used_gpu_engine and self._force_cpu:
+                            need_cpu_retry = True
+                        else:
+                            try:
+                                result = engine(arr, use_cls=False)
+                            except TypeError:
+                                result = engine(arr)
+                except Exception as exc:
+                    if used_gpu_engine:
+                        # Automatic fallback to multi-core CPU if GPU provider fails at runtime (e.g. VRAM limit)
+                        with self._gpu_infer_lock:
+                            if not self._force_cpu:
+                                self._force_cpu = True
+                                self.unload()
                         need_cpu_retry = True
                     else:
-                        try:
-                            result = engine(arr, use_cls=False)
-                        except TypeError:
-                            result = engine(arr)
-            except Exception as exc:
-                if used_gpu_engine:
-                    # Automatic fallback to multi-core CPU if GPU provider fails at runtime (e.g. VRAM limit)
-                    with self._gpu_infer_lock:
-                        if not self._force_cpu:
-                            self._force_cpu = True
-                            self.unload()
-                    need_cpu_retry = True
-                else:
-                    raise OcrError(f"OCR failed: {exc}") from exc
-        if need_cpu_retry:
-            with self._checkout(language) as cpu_engine:
-                try:
-                    result = cpu_engine(arr, use_cls=False)
-                except TypeError:
-                    result = cpu_engine(arr)
-                except Exception as cpu_exc:
-                    raise OcrError(f"OCR failed: {cpu_exc}") from cpu_exc
+                        raise OcrError(f"OCR failed: {exc}") from exc
+            if need_cpu_retry:
+                with self._checkout(language) as cpu_engine:
+                    try:
+                        result = cpu_engine(arr, use_cls=False)
+                    except TypeError:
+                        result = cpu_engine(arr)
+                    except Exception as cpu_exc:
+                        raise OcrError(f"OCR failed: {cpu_exc}") from cpu_exc
         lines = _lines_from_rapid(result)
         if language == "fas":
             lines = [
@@ -1170,6 +1259,7 @@ class RapidEngine:
                 for line in lines
                 if normalize_persian_ocr_text(line.text)
             ]
+            lines = _coalesce_rtl_ocr_lines(lines, arr)
         return lines
 
 
@@ -1502,12 +1592,19 @@ class EasyEngine:
         except Exception:
             pass
         extra_fa_kwargs: dict[str, Any] = (
-            {"add_margin": 0.18, "width_ths": 0.75, "text_threshold": 0.6, "low_text": 0.32}
+            {
+                "add_margin": 0.18,
+                "width_ths": 0.88,
+                "ycenter_ths": 0.6,
+                "height_ths": 0.6,
+                "text_threshold": 0.6,
+                "low_text": 0.30,
+            }
             if language == "fas"
             else {}
         )
         try:
-            with self._infer_lock, grad_ctx():
+            with self._infer_lock, grad_ctx(), _persian_ctc_bidi_context(language):
                 try:
                     result = reader.readtext(arr, detail=1, paragraph=False, batch_size=batch_sz, **extra_fa_kwargs)
                 except TypeError:
@@ -1522,25 +1619,26 @@ class EasyEngine:
                 self.unload()
                 cpu_reader = self._reader(language, False)
                 try:
-                    with self._infer_lock, grad_ctx():
+                    with self._infer_lock, grad_ctx(), _persian_ctc_bidi_context(language):
                         try:
                             result = cpu_reader.readtext(arr, detail=1, paragraph=False, batch_size=4, **extra_fa_kwargs)
                         except TypeError:
                             try:
                                 result = cpu_reader.readtext(arr, detail=1, paragraph=False, batch_size=4)
                             except TypeError:
-                                result = cpu_reader.readtext(arr, detail=1, paragraph=False)
+                                result = reader.readtext(arr, detail=1, paragraph=False)
                 except Exception as cpu_exc:
                     raise OcrError(f"EasyOCR failed: {cpu_exc}") from cpu_exc
             else:
                 raise OcrError(f"EasyOCR failed: {exc}") from exc
-        finally:
-            del arr
         lines = []
         for box, text, score in result:
             cleaned = normalize_persian_ocr_text(str(text)) if language == "fas" else str(text).strip()
             if cleaned:
                 lines.append(OcrLine(cleaned, float(score), _polygon(box)))
+        if language == "fas" and len(lines) >= 2:
+            lines = _coalesce_rtl_ocr_lines(lines, arr)
+        del arr
         return lines
 
 
@@ -1730,7 +1828,23 @@ class TesseractEngine:
         if _STANDARD_CANCEL_EVENT.is_set():
             raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
         self._model_dir().mkdir(parents=True, exist_ok=True)
-        sources: list[tuple[str, dict[str, str]]] = [
+        # For Persian (`fas`), use full float32 `tessdata_best` (~3.33 MB) instead of int8 `tessdata_fast` (431 KB):
+        # int8 quantization collapses `گ`'s twin sarkesh strokes into `ک`, whereas float32 `tessdata_best` distinguishes them cleanly.
+        best_sources: list[tuple[str, dict[str, str]]] = (
+            [
+                (
+                    f"https://api.github.com/repos/tesseract-ocr/tessdata_best/contents/{language}.traineddata",
+                    {"Accept": "application/vnd.github.raw"},
+                ),
+                (f"https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/{language}.traineddata", {}),
+                (f"https://github.com/tesseract-ocr/tessdata_best/raw/main/{language}.traineddata", {}),
+                (f"https://hf-mirror.com/datasets/tesseract-ocr/tessdata_best/resolve/main/{language}.traineddata", {}),
+                (f"https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_best@main/{language}.traineddata", {}),
+            ]
+            if language == "fas"
+            else []
+        )
+        sources: list[tuple[str, dict[str, str]]] = best_sources + [
             (f"https://github.com/tesseract-ocr/tessdata_fast/raw/main/{language}.traineddata", {}),
             (
                 f"https://api.github.com/repos/tesseract-ocr/tessdata_fast/contents/{language}.traineddata",
@@ -1840,6 +1954,8 @@ class TesseractEngine:
                 self._system_languages = None
                 self._system_languages_exe = None
             local_langs = [lang for lang in LANGUAGES if (self._model_dir() / f"{lang}.traineddata").is_file()]
+            if "fas" in self.ready_languages and "fas" not in local_langs:
+                local_langs.append("fas")
             target_langs = local_langs or [language if language in LANGUAGES else "eng"]
             last_target: Path | None = None
             for selected in target_langs:
@@ -1904,6 +2020,17 @@ class TesseractEngine:
             language=language,
         )
 
+    @staticmethod
+    def _persian_lines_quality(lines: list[OcrLine]) -> float:
+        if not lines:
+            return 0.0
+        chars = sum(sum(ch.isalnum() for ch in ln.text) for ln in lines)
+        if chars == 0:
+            return 0.0
+        avg_conf = sum(float(ln.confidence) for ln in lines) / len(lines)
+        frag_penalty = max(0, len(lines) - 1) * 3.5
+        return max(0.0, chars * (avg_conf ** 1.15) - frag_penalty)
+
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
         if language == "fas":
             # Tesseract's sparse-text mode (--psm 11) drops or shatters cursive RTL Persian lines;
@@ -1912,8 +2039,16 @@ class TesseractEngine:
             primary_psm = "6" if is_crop else "3"
             lines = self._recognize_with_psm(image, language, primary_psm)
             if lines:
+                if (
+                    is_crop
+                    and (len(lines) >= 2 or (sum(ln.confidence for ln in lines) / len(lines)) < 0.80)
+                    and _estimate_persian_text_line_count(image) == 1
+                ):
+                    single_lines = self._recognize_with_psm(image, language, "7")
+                    if self._persian_lines_quality(single_lines) > self._persian_lines_quality(lines) + 1.0:
+                        return single_lines
                 return lines
-            fallback_psms = ("7", "11") if (image.height < 110 and image.width > image.height * 2) else ("6", "11")
+            fallback_psms = ("7", "11") if (image.height < 160 and image.width > image.height * 1.8) else ("6", "11")
             for alt_psm in fallback_psms:
                 if alt_psm == primary_psm:
                     continue
@@ -1930,8 +2065,14 @@ class TesseractEngine:
         return lines
 
     def recognize_bubble(self, image: Image.Image, language: str) -> list[OcrLine]:
+        if language == "fas" and _estimate_persian_text_line_count(image) == 1:
+            single_lines = self._recognize_with_psm(image, language, "7")
+            if single_lines and (sum(ln.confidence for ln in single_lines) / len(single_lines)) >= 0.55:
+                return single_lines
+            block_lines = self._recognize_with_psm(image, language, "6")
+            return single_lines if self._persian_lines_quality(single_lines) >= self._persian_lines_quality(block_lines) else block_lines
         lines = self._recognize_with_psm(image, language, "6")
-        if not lines and language == "fas" and image.height < 120:
+        if not lines and language == "fas" and image.height < 180:
             return self._recognize_with_psm(image, language, "7")
         return lines
 
@@ -2869,17 +3010,293 @@ def _to_white_backed_rgb(image: Image.Image) -> Image.Image:
 
 
 PERSIAN_PREPROCESS_BORDER_PAD = 18
-_PERSIAN_BIDI_MARKS_RE = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+_PERSIAN_BIDI_MARKS_RE = re.compile(r"[\u061c\u0640\u200b\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+# Canonicalize non-joining Kurdish/Uyghur/Urdu lookalikes (such as `ە` U+06D5 Right_Joining AE which breaks
+# Persian word joining inside `بهم` -> `بەم`!) and all Arabic/Pashto/Sindhi Kaf & Gaf variants emitted by
+# multilingual Arabic/Persian CTC dictionaries (`RapidOCR`, `EasyOCR`, `Tesseract`).
 _PERSIAN_CHAR_MAP = str.maketrans({
-    "\u064a": "\u06cc",  # Arabic Yeh ي -> Persian Yeh ی
-    "\u0649": "\u06cc",  # Alef Maksura ى -> Persian Yeh ی
-    "\u0643": "\u06a9",  # Arabic Kaf ك -> Persian Keheh ک
+    # Yeh variants -> Persian Yeh `ی` (\u06cc, Dual_Joining)
+    "\u064a": "\u06cc",  # Arabic Yeh ي
+    "\u0649": "\u06cc",  # Alef Maksura ى
+    "\u06d2": "\u06cc",  # Urdu Yeh Barree ے (Right_Joining -> breaks mid-word joining unless mapped!)
+    "\u06d0": "\u06cc",  # Pashto/Uyghur Yeh ې
+    "\u06cd": "\u06cc",  # Pashto Tail Yeh ۍ
+    "\u06ce": "\u06cc",  # Kurdish Yeh with small V ێ
+    "\u06d3": "\u06cc\u0654",  # Yeh Barree with Hamza above ۓ -> یٔ
+    # Kaf variants -> Persian Keheh `ک` (\u06a9, Dual_Joining)
+    "\u0643": "\u06a9",  # Arabic Kaf ك
+    "\u06aa": "\u06a9",  # Swash Kaf ڪ
+    "\u06ab": "\u06a9",  # Kaf with ring ګ
+    "\u06ac": "\u06a9",  # Kaf with dot above ڬ
+    "\u06ad": "\u06a9",  # Ng ڭ
+    "\u06ae": "\u06a9",  # Kaf with three dots below ڮ
+    "\u063b": "\u06a9",  # Keheh with two dots above ػ
+    "\u063c": "\u06a9",  # Keheh with three dots below ؼ
+    # Gaf variants -> Persian Gaf `گ` (\u06af, Dual_Joining)
+    "\u06b0": "\u06af",  # Gaf with ring ڰ
+    "\u06b1": "\u06af",  # Ngoeh ڱ
+    "\u06b2": "\u06af",  # Gaf with two dots below ڲ
+    "\u06b3": "\u06af",  # Gueh ڳ
+    "\u06b4": "\u06af",  # Gaf with three dots above ڴ
+    # Heh variants -> Persian Heh `ه` (\u0647, Dual_Joining) & Heh+Ezafe `هٔ`
+    "\u06d5": "\u0647",  # Kurdish/Uyghur AE ە (visually identical to ه but Right_Joining -> breaks `بهم`!)
+    "\u06c1": "\u0647",  # Urdu Heh Goal ہ
+    "\u06be": "\u0647",  # Heh Doachashmee ھ
+    "\u06ff": "\u0647",  # Heh with inverted V ۿ
+    "\u06c0": "\u0647\u0654",  # Heh with Yeh above ۀ -> هٔ
+    "\u06c2": "\u0647\u0654",  # Heh Goal with Hamza above ۂ -> هٔ
+    "\u06c3": "\u0647\u0654",  # Teh Marbuta Goal ۃ -> هٔ
 })
 _PERSIAN_CONTEXTUAL_COMMA_RE = re.compile(r"(?<=[\u0600-\u06ff])\s*,\s*(?=[\u0600-\u06ff0-9۰-۹])")
+_PERSIAN_LONELY_GUILLEMET_COMMA_RE = re.compile(r"(?<=[\u0621-\u06cc])»(?=\s+[\u0621-\u06cc])")
+# Tesseract often misreads Persian word-final Ezafe `هٔ` as `هُ` / `هٌ` or `ة` on common `-ه` Persian stems.
+_PERSIAN_HEH_DAMMA_EZAFE_RE = re.compile(r"(?<=[\u0621-\u06cc]{2})\u0647[\u064f\u064c](?=\s|$|[،؛.!؟:»)\]])")
+_PERSIAN_TEH_MARBUTA_EZAFE_RE = re.compile(
+    r"(خان|بار|صفح|مقال|مجل|نسخ|نقط|جمل|کلم|فاصل|واژ|گون|نمون|زمین|نتیج|مرحل|مسئل|حاشی|زاوی|لای|پروژ|جزو|قص|شاخ|برگ|تک|پرد|چهر|شیو|هم|تاز|ساد|آماد|آیند|گذشت|نویسند|خوانند|پروند|انداز|فرشت|ستار)\u0629[\u064b-\u0652]?(?=\s|$|[،؛.!؟:»)\]])"
+)
+# Collapse OCR-inserted spaces across runs of 3+ single Persian letters (excluding standalone conjunction `و`),
+# e.g. `ب ه م` -> `بهم`, `ف ا ر س ی` -> `فارسی`, `ک ت ا ب` -> `کتاب`.
+_PERSIAN_SHATTERED_LETTERS_RE = re.compile(
+    r"(?<![\u0621-\u06cc\w])(?!و(?:\s|$))[\u0621-\u06cc](?:[ \t]+(?!و(?:\s|$))[\u0621-\u06cc]){2,}(?![\u0621-\u06cc\w])"
+)
+_PERSIAN_SHATTERED_FUNCTION_WORDS_RE = re.compile(
+    r"(?<![\u0621-\u06cc\w])(ب[ \t]+ه|ک[ \t]+ه|چ[ \t]+ه|ن[ \t]+ه)(?![\u0621-\u06cc\w])"
+)
+# Space-around-ZWNJ cleanup + morphological ZWNJ restoration for `نمی`/`می` verb prefixes & plural/comparative suffixes.
+_PERSIAN_ZWNJ_PAD_RE = re.compile(r"[ \t]*\u200c+[ \t]*")
+_PERSIAN_NEMI_SPACE_RE = re.compile(r"(?<![\u0621-\u06cc\w])(نمی)[ \t]+(?=[\u0621-\u06cc]{2,})")
+_PERSIAN_MI_VERB_SPACE_RE = re.compile(
+    r"(?<![\u0621-\u06cc\w])(می)[ \t]+(?=(?:چسب|توان|گو|کن|شو|باش|ده|گیر|آی|رو|دان|خواه|بین|دار|زن|ساز|رس|مان|خوان|نویس|کش|بر|آور|فرما|گذار|گذر|پرداز|شناس|نشین|افت|ایست|گرد|یاب|خور|فرست|پرس|ترس|خند)[\u0621-\u06cc]*|[\u0621-\u06cc]{2,}(?:م|یم|ید|ند)(?![\u0621-\u06cc]))"
+)
+_PERSIAN_SUFFIX_SPACE_RE = re.compile(
+    r"(?<=[\u0621-\u06cc]{2})[ \t]+(هایی|هایم|هایت|هایش|هایمان|هایتان|هایشان|ترین)(?![\u0621-\u06cc])"
+)
+
+_PERSIAN_DUAL_JOINING_CONSONANTS = frozenset("بپتثجچحخسشصضطظعغفقکگلمن")
+_PERSIAN_STANDALONE_SHORT_WORDS = frozenset({
+    "و", "به", "از", "در", "با", "بر", "تا", "را", "که", "چه", "نه", "هم", "هر",
+    "من", "ما", "تو", "او", "آن", "این", "یک", "دو", "سه", "یا", "ای", "بی", "می",
+    "کم", "گم", "دل", "دم", "سر", "پا", "لب", "شب", "زن", "کل", "پر", "پس", "چپ", "حق", "خط", "سد", "شد", "صف", "طی", "فن", "قد", "مد", "نم",
+})
+_PERSIAN_ZWNJ_SUFFIX_TOKENS = frozenset({
+    "ها", "های", "هایی", "هایم", "هایت", "هایش", "هایمان", "هایتان", "هایشان",
+    "تر", "ترین", "ام", "ات", "اش", "مان", "تان", "شان",
+})
+
+
+def _choose_persian_join_sep(right_txt: str, left_txt: str, h_gap: float, avg_h: float) -> str:
+    """Choose `""`, `"\\u200c"`, or `" "` when joining two adjacent RTL fragments on the same row."""
+    r_clean = right_txt.strip()
+    l_clean = left_txt.strip()
+    if not r_clean or not l_clean:
+        return " "
+    if re.search(r"(?<![\u0621-\u06cc])ن?می$", r_clean) and re.match(r"^[\u0621-\u06cc]{2,}", l_clean):
+        return "\u200c"
+    if l_clean in _PERSIAN_ZWNJ_SUFFIX_TOKENS and re.search(r"[\u0621-\u06cc]$", r_clean):
+        return "\u200c"
+    safe_h = max(8.0, float(avg_h))
+    r_last_word = r_clean.split()[-1]
+    l_first_word = l_clean.split()[0]
+    if (
+        h_gap <= 0.08 * safe_h
+        and r_last_word not in _PERSIAN_STANDALONE_SHORT_WORDS
+        and re.search(r"[\u0621-\u06cc]$", r_last_word)
+        and re.match(r"^[\u0621-\u06cc]", l_first_word)
+    ):
+        return ""
+    if (
+        h_gap <= 0.16 * safe_h
+        and r_last_word not in _PERSIAN_STANDALONE_SHORT_WORDS
+        and r_last_word[-1] in _PERSIAN_DUAL_JOINING_CONSONANTS
+        and re.match(r"^[\u0621-\u06cc]", l_first_word)
+    ):
+        return ""
+    return " "
+
+
+def _has_vertical_border_between(
+    arr: np.ndarray | None,
+    left_box: tuple[float, float, float, float],
+    right_box: tuple[float, float, float, float],
+) -> bool:
+    """Return True if a comic speech-bubble border wall or sharp background jump separates two same-row boxes."""
+    if arr is None or arr.ndim < 2:
+        return False
+    h, w = arr.shape[:2]
+    gray = arr.mean(axis=2) if arr.ndim == 3 else arr.astype(np.float32)
+    lx0, ly0, lx1, ly1 = left_box
+    rx0, ry0, rx1, ry1 = right_box
+    y0 = max(0, min(h - 1, int(round(min(ly0, ry0)))))
+    y1 = max(y0 + 1, min(h, int(round(max(ly1, ry1)))))
+    gx0 = max(0, min(w - 1, int(round(lx1)) - 1))
+    gx1 = max(gx0 + 1, min(w, int(round(rx0)) + 1))
+    if y1 - y0 < 8:
+        return False
+    l_patch = gray[y0:y1, max(0, int(lx0)):max(1, min(w, int(lx1)))]
+    r_patch = gray[y0:y1, max(0, int(rx0)):max(1, min(w, int(rx1)))]
+    if l_patch.size >= 16 and r_patch.size >= 16:
+        l_bg = float(np.percentile(l_patch, 80.0))
+        r_bg = float(np.percentile(r_patch, 80.0))
+        if abs(l_bg - r_bg) > 38.0:
+            return True
+        ref_bg = 0.5 * (l_bg + r_bg)
+    else:
+        ref_bg = float(np.median(gray[y0:y1, gx0:gx1])) if gx1 > gx0 else 240.0
+    if gx1 - gx0 >= 2:
+        strip = gray[y0:y1, gx0:gx1]
+        wall_cols = np.mean(np.abs(strip - ref_bg) > 42.0, axis=0)
+        if float(np.max(wall_cols)) >= 0.72:
+            return True
+    return False
+
+
+def _coalesce_rtl_ocr_lines(
+    lines: list[OcrLine],
+    image_arr: np.ndarray | None = None,
+    *,
+    max_gap_ratio: float = 0.92,
+) -> list[OcrLine]:
+    """Merge horizontal word/sub-word `OcrLine` fragments sitting on the same Persian line in RTL order,
+    while refusing to cross speech-bubble borders or wide inter-bubble gaps."""
+    if len(lines) < 2:
+        return lines
+    indexed = list(enumerate(lines))
+    indexed.sort(key=lambda item: ((item[1].box[1] + item[1].box[3]) * 0.5, -item[1].box[2]))
+    rows: list[list[OcrLine]] = []
+    for _, ln in indexed:
+        bx0, by0, bx1, by1 = ln.box
+        bh = max(4.0, by1 - by0)
+        bcy = 0.5 * (by0 + by1)
+        placed = False
+        for row in rows:
+            ry0 = min(r.box[1] for r in row)
+            ry1 = max(r.box[3] for r in row)
+            rh = float(np.median([max(4.0, r.box[3] - r.box[1]) for r in row]))
+            rcy = float(np.mean([0.5 * (r.box[1] + r.box[3]) for r in row]))
+            v_ov = min(by1, ry1) - max(by0, ry0)
+            if abs(bcy - rcy) <= 0.38 * max(bh, rh) and v_ov >= 0.42 * min(bh, rh) and 0.52 <= (bh / rh) <= 1.92:
+                row.append(ln)
+                placed = True
+                break
+        if not placed:
+            rows.append([ln])
+
+    merged_out: list[OcrLine] = []
+    for row in rows:
+        if len(row) == 1:
+            merged_out.append(row[0])
+            continue
+        # Order RTL (rightmost `x1` first)
+        row.sort(key=lambda r: -r.box[2])
+        cur = row[0]
+        for nxt in row[1:]:
+            cx0, cy0, cx1, cy1 = cur.box
+            nx0, ny0, nx1, ny1 = nxt.box
+            avg_h = 0.5 * (max(4.0, cy1 - cy0) + max(4.0, ny1 - ny0))
+            # `cur` is on the right, `nxt` is on the left -> horizontal gap is `cx0 - nx1`
+            h_gap = cx0 - nx1
+            both_rtl = bool(_PERSIAN_STRONG_RTL_RE.search(cur.text) or _PERSIAN_STRONG_RTL_RE.search(nxt.text))
+            if (
+                both_rtl
+                and -0.35 * avg_h <= h_gap <= max_gap_ratio * avg_h
+                and not _has_vertical_border_between(image_arr, nxt.box, cur.box)
+            ):
+                sep = _choose_persian_join_sep(cur.text, nxt.text, h_gap, avg_h)
+                joined_txt = normalize_persian_ocr_text(f"{cur.text}{sep}{nxt.text}")
+                c_chars = max(1, len(cur.text.strip()))
+                n_chars = max(1, len(nxt.text.strip()))
+                w_conf = (cur.confidence * c_chars + nxt.confidence * n_chars) / (c_chars + n_chars)
+                mx0, my0 = min(cx0, nx0), min(cy0, ny0)
+                mx1, my1 = max(cx1, nx1), max(cy1, ny1)
+                cur = OcrLine(
+                    joined_txt,
+                    w_conf,
+                    [[mx0, my0], [mx1, my0], [mx1, my1], [mx0, my1]],
+                    bold=bool(getattr(cur, "bold", False) or getattr(nxt, "bold", False)),
+                    italic=bool(getattr(cur, "italic", False) or getattr(nxt, "italic", False)),
+                    role=getattr(cur, "role", None) or getattr(nxt, "role", None),
+                )
+            else:
+                merged_out.append(cur)
+                cur = nxt
+        merged_out.append(cur)
+    return merged_out
+
+
+def _estimate_persian_text_line_count(image: Image.Image) -> int:
+    """Estimate how many horizontal text rows exist inside a crop/bubble image, coalescing floating
+    upper/lower Persian dot bands (نقطه / سرکش) into their parent baseline so single-line Persian
+    bubbles are never mis-segmented into 2–3 fragments by Tesseract `--psm 6`."""
+    w, h = image.size
+    if w < 16 or h < 10:
+        return 0
+    gray = np.asarray(image.convert("L"), dtype=np.uint8)
+    # Ignore outermost border quiet-zone / frame edge
+    trim_y = min(max(2, int(h * 0.08)), h // 4)
+    trim_x = min(max(2, int(w * 0.04)), w // 5)
+    sub = gray[trim_y:h - trim_y, trim_x:w - trim_x]
+    if sub.size < 64:
+        return 0
+    bg = float(np.percentile(sub, 82.0))
+    fg_min = float(np.percentile(sub, 2.0))
+    if bg - fg_min < 28.0:
+        return 0
+    ink = sub < (bg - max(22.0, 0.28 * (bg - fg_min)))
+    row_density = ink.mean(axis=1)
+    peak = float(np.max(row_density)) if row_density.size else 0.0
+    if peak < 0.015:
+        return 0
+    active = row_density >= max(0.012, peak * 0.16)
+    bands: list[list[int]] = []
+    in_band = False
+    start = 0
+    for idx, val in enumerate(active):
+        if val and not in_band:
+            start = idx
+            in_band = True
+        elif not val and in_band:
+            bands.append([start, idx])
+            in_band = False
+    if in_band:
+        bands.append([start, len(active)])
+    if not bands:
+        return 0
+    # Merge nearby upper/lower diacritical dot bands into the core Persian baseline band
+    max_band_h = max(b[1] - b[0] for b in bands)
+    merge_gap = max(4, int(round(max_band_h * 0.55)))
+    merged_bands: list[list[int]] = [bands[0][:]]
+    for b0, b1 in bands[1:]:
+        prev0, prev1 = merged_bands[-1]
+        if b0 - prev1 <= merge_gap or min(b1 - b0, prev1 - prev0) <= max(3, int(round(max_band_h * 0.28))):
+            merged_bands[-1][1] = b1
+        else:
+            merged_bands.append([b0, b1])
+    significant = [b for b in merged_bands if (b[1] - b[0]) >= max(4, int(round(max_band_h * 0.32)))]
+    return len(significant)
+
+
+def _normalize_single_persian_line(line: str) -> str:
+    s = re.sub(r"[ \t\r\f\v]+", " ", line).strip()
+    if not s:
+        return ""
+    s = _PERSIAN_ZWNJ_PAD_RE.sub("\u200c", s)
+    s = _PERSIAN_HEH_DAMMA_EZAFE_RE.sub("\u0647\u0654", s)
+    s = _PERSIAN_TEH_MARBUTA_EZAFE_RE.sub("\\1\u0647\u0654", s)
+    s = re.sub(r"(?<![\u0621-\u06cc\w])ب[ \t]+ه[ \t]+ه[ \t]+م(?![\u0621-\u06cc\w])", "به هم", s)
+    s = _PERSIAN_SHATTERED_LETTERS_RE.sub(lambda m: re.sub(r"[ \t]+", "", m.group(0)), s)
+    s = _PERSIAN_SHATTERED_FUNCTION_WORDS_RE.sub(lambda m: re.sub(r"[ \t]+", "", m.group(0)), s)
+    s = _PERSIAN_NEMI_SPACE_RE.sub("\\1\u200c", s)
+    s = _PERSIAN_MI_VERB_SPACE_RE.sub("\\1\u200c", s)
+    s = _PERSIAN_SUFFIX_SPACE_RE.sub("\u200c\\1", s)
+    s = _PERSIAN_CONTEXTUAL_COMMA_RE.sub("، ", s)
+    if "«" not in s:
+        s = _PERSIAN_LONELY_GUILLEMET_COMMA_RE.sub("،", s)
+    return re.sub(r"[ \t]+", " ", s).strip()
 
 
 def normalize_persian_ocr_text(text: str) -> str:
-    """Clean bidi control marks, Arabic presentation forms, and Yeh/Kaf variants while preserving ZWNJ (نیم‌فاصله)."""
+    """Clean bidi control marks, Arabic presentation forms, non-joining lookalikes (`ە`/`ے`),
+    Kaf/Gaf variants, shattered single-letter spaces, and broken ZWNJ (`نیم‌فاصله`)."""
     import unicodedata
 
     if not text:
@@ -2894,11 +3311,10 @@ def normalize_persian_ocr_text(text: str) -> str:
     out = "".join(cleaned_chars)
     out = _PERSIAN_BIDI_MARKS_RE.sub("", out)
     out = out.translate(_PERSIAN_CHAR_MAP)
-    out = _PERSIAN_CONTEXTUAL_COMMA_RE.sub("، ", out)
-    # Collapse repeated spaces on each line while preserving explicit newlines and ZWNJ (\u200c).
     if "\n" in out:
-        return "\n".join(re.sub(r"[ \t\r\f\v]+", " ", ln).strip() for ln in out.splitlines() if ln.strip())
-    return re.sub(r"[ \t\r\f\v]+", " ", out).strip()
+        norm_lines = [_normalize_single_persian_line(ln) for ln in out.splitlines()]
+        return "\n".join(ln for ln in norm_lines if ln)
+    return _normalize_single_persian_line(out)
 
 
 def persian_preprocess_image(
@@ -2909,18 +3325,17 @@ def persian_preprocess_image(
     scale_override: float | None = None,
     border_pad: int = PERSIAN_PREPROCESS_BORDER_PAD,
 ) -> tuple[Image.Image, float, int]:
-    """Dot-preserving Persian OCR preprocessing:
+    """Dot- & sarkesh-preserving Persian OCR preprocessing:
     1. Auto-inverts white/light Persian text on dark backgrounds or night caption boxes.
     2. Uses clean rational upscaling (2.0x or 1.5x, width-aware so tall webtoon strips still upscale)
-       BEFORE spatial filtering so tiny 1.5px Persian dots (نقطه) are never erased as speckle noise.
-    3. Preserves natural anti-aliasing on clean uniform backgrounds, and applies bilateral edge-preserving
-       denoising + morphological/Gaussian illumination division (cv2.divide) + paper-white floor + mild
-       unsharp mask on shadowed, colored, or noisy scans.
+       BEFORE spatial filtering so tiny 1.5px Persian dots (نقطه) and `گ`'s twin sarkesh strokes are never erased or fused.
+    3. Preserves natural anti-aliasing on clean uniform backgrounds with gentle mosquito-noise cleanup,
+       and applies narrow-radius edge-preserving denoising + illumination division (cv2.divide) + subtle
+       stroke unsharp mask on shadowed, colored, or noisy scans without bleaching thin cursive connectors.
     4. Adds a clean white quiet-zone border so edge glyphs (آ / ک / گ) never touch crop boundaries.
     """
     base = _to_white_backed_rgb(image)
     try:
-        orig_w, orig_h = base.size
         gray_pil = base.convert("L")
         gray_in = np.asarray(gray_pil, dtype=np.uint8)
         gray_pil.close()
@@ -2972,7 +3387,7 @@ def persian_preprocess_image(
     contrast_span = p90 - p2
 
     if bg_std < 7.5 and contrast_span > 135.0 and page_mode != "document":
-        # Clean uniform background: keep natural grayscale anti-aliasing around Persian dots & connectors.
+        # Clean uniform background: keep crisp anti-aliasing around `گ` sarkesh, dots, and cursive connectors.
         pil_g = ImageOps.autocontrast(Image.fromarray(work, mode="L"), cutoff=0)
         if scale != 1.0:
             pil_g = pil_g.resize(
@@ -2981,7 +3396,9 @@ def persian_preprocess_image(
             )
         arr = np.asarray(pil_g, dtype=np.uint8)
         pil_g.close()
-        arr = cv2.bilateralFilter(arr, d=5, sigmaColor=14, sigmaSpace=14)
+        arr = cv2.bilateralFilter(arr, d=3, sigmaColor=10, sigmaSpace=6)
+        blur_c = cv2.GaussianBlur(arr, (0, 0), sigmaX=0.75)
+        arr = cv2.addWeighted(arr, 1.18, blur_c, -0.18, 0)
         padded = cv2.copyMakeBorder(arr, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255) if pad > 0 else arr
         return Image.fromarray(padded, mode="L").convert("RGB"), scale, pad
 
@@ -2991,7 +3408,8 @@ def persian_preprocess_image(
             (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
             interpolation=cv2.INTER_CUBIC,
         )
-    denoised = cv2.bilateralFilter(work, d=5, sigmaColor=24, sigmaSpace=24)
+    # Narrow sigmaSpace=9 preserves the 1–2px gap between `گ`'s twin sarkesh strokes while cleaning JPEG grain.
+    denoised = cv2.bilateralFilter(work, d=5, sigmaColor=14, sigmaSpace=9)
     m_pad = 36
     work_pad = cv2.copyMakeBorder(denoised, m_pad, m_pad, m_pad, m_pad, cv2.BORDER_REPLICATE)
     bg_est = cv2.morphologyEx(
@@ -3002,11 +3420,11 @@ def persian_preprocess_image(
     bg_est = cv2.GaussianBlur(bg_est, (0, 0), sigmaX=24.0)[m_pad:-m_pad, m_pad:-m_pad]
     norm = cv2.divide(denoised, np.maximum(bg_est, 48), scale=255)
     p_ink = float(np.percentile(norm, 0.8))
-    lo = min(135.0, max(0.0, p_ink * 0.82)) if p_ink > 42.0 else 0.0
-    hi = 236.0
+    lo = min(130.0, max(0.0, p_ink * 0.80)) if p_ink > 42.0 else 0.0
+    hi = 238.0
     cleaned = np.clip((norm.astype(np.float32) - lo) * (255.0 / max(30.0, hi - lo)), 0, 255).astype(np.uint8)
-    blur_u = cv2.GaussianBlur(cleaned, (0, 0), sigmaX=0.9)
-    sharp = cv2.addWeighted(cleaned, 1.32, blur_u, -0.32, 0)
+    blur_u = cv2.GaussianBlur(cleaned, (0, 0), sigmaX=0.8)
+    sharp = cv2.addWeighted(cleaned, 1.24, blur_u, -0.24, 0)
     padded = cv2.copyMakeBorder(sharp, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255) if pad > 0 else sharp
     return Image.fromarray(padded, mode="L").convert("RGB"), scale, pad
 
@@ -3619,32 +4037,65 @@ def _merge_non_overlapping_blocks(
     *,
     is_rtl_lang: bool = True,
 ) -> list[dict[str, Any]]:
-    """Keep primary blocks and append newly discovered container blocks (or replace lower-quality overlaps)."""
-    if not extra:
+    """Keep primary blocks, append newly discovered container blocks, and split/replace wide primary
+    blocks that illegally fused multiple bordered speech bubbles or captured border-wall garbage."""
+    valid_extra = [dict(c) for c in extra if str(c.get("text") or "").strip()]
+    if not valid_extra:
         return primary
     if not primary:
-        merged = list(extra)
+        merged = list(valid_extra)
     else:
         merged = [dict(b) for b in primary]
-        for cand in extra:
-            cand_txt = str(cand.get("text") or "").strip()
-            if not cand_txt:
-                continue
-            overlapping_idxs = [i for i, cur in enumerate(merged) if _blocks_overlap_strongly(cur, cand)]
-            if not overlapping_idxs:
-                merged.append(dict(cand))
-                continue
-            if len(overlapping_idxs) == 1:
-                idx = overlapping_idxs[0]
-                cur = merged[idx]
-                cur_chars = sum(ch.isalnum() for ch in str(cur.get("text") or ""))
-                cand_chars = sum(ch.isalnum() for ch in cand_txt)
-                cur_conf = float(cur.get("conf", 0.0))
+        # 1) Detect multi-bubble fusion: when 2+ isolated speech-bubble container blocks overlap the SAME
+        #    wide primary block, replace that fused multi-bubble block with its clean per-bubble blocks.
+        by_primary: dict[int, list[dict[str, Any]]] = {}
+        unmatched: list[dict[str, Any]] = []
+        for cand in valid_extra:
+            ov = [i for i, cur in enumerate(merged) if cur is not None and _blocks_overlap_strongly(cur, cand)]
+            if not ov:
+                unmatched.append(cand)
+            elif len(ov) == 1:
+                by_primary.setdefault(ov[0], []).append(cand)
+            else:
+                # Candidate overlaps multiple tiny fragments -> compare combined fragments vs candidate
+                frag_chars = sum(sum(ch.isalnum() for ch in str(merged[i].get("text") or "")) for i in ov if merged[i])
+                frag_conf = sum(float(merged[i].get("conf", 0.0)) for i in ov if merged[i]) / max(1, len(ov))
+                cand_chars = sum(ch.isalnum() for ch in str(cand.get("text") or ""))
                 cand_conf = float(cand.get("conf", 0.0))
-                if (cand_chars >= cur_chars + 3 and cand_conf >= cur_conf - 6.0) or (
-                    cand_chars >= cur_chars and cand_conf > cur_conf + 8.0
-                ):
-                    merged[idx] = dict(cand)
+                if cand_chars >= max(4, int(frag_chars * 0.80)) and cand_conf >= frag_conf - 4.0:
+                    for i in ov:
+                        merged[i] = None  # type: ignore[assignment]
+                    unmatched.append(cand)
+
+        replaced_cands: list[dict[str, Any]] = []
+        for p_idx, cands in by_primary.items():
+            cur = merged[p_idx]
+            if cur is None:
+                continue
+            cur_txt = str(cur.get("text") or "").strip()
+            cur_chars = sum(ch.isalnum() for ch in cur_txt)
+            cur_conf = float(cur.get("conf", 0.0))
+            if len(cands) >= 2:
+                sum_chars = sum(sum(ch.isalnum() for ch in str(c.get("text") or "")) for c in cands)
+                avg_conf = sum(float(c.get("conf", 0.0)) for c in cands) / len(cands)
+                if sum_chars >= max(6, int(cur_chars * 0.60)) and avg_conf >= max(48.0, cur_conf - 15.0):
+                    merged[p_idx] = None  # type: ignore[assignment]
+                    replaced_cands.extend(cands)
+                continue
+            cand = cands[0]
+            cand_txt = str(cand.get("text") or "").strip()
+            cand_chars = sum(ch.isalnum() for ch in cand_txt)
+            cand_conf = float(cand.get("conf", 0.0))
+            has_border_noise = bool(re.match(r"^[|\[\]1Il!/\\]+|[|\[\]1Il!/\\]+$", cur_txt))
+            if (
+                (cand_chars >= cur_chars + 3 and cand_conf >= cur_conf - 6.0)
+                or (cand_chars >= cur_chars and cand_conf > cur_conf + 6.0)
+                or (cand_conf >= cur_conf + 8.0 and cand_chars >= max(4, int(cur_chars * 0.78)))
+                or (has_border_noise and cand_chars >= max(4, cur_chars - 3) and cand_conf >= cur_conf - 4.0)
+            ):
+                merged[p_idx] = dict(cand)
+
+        merged = [b for b in merged if b is not None] + unmatched + replaced_cands
     if len(merged) >= 2:
         heights = sorted(max(8.0, float(b["y1"]) - float(b["y0"])) for b in merged)
         row_bucket = max(12.0, round(heights[len(heights) // 2] * 0.55))
@@ -3658,6 +4109,17 @@ def _merge_non_overlapping_blocks(
     for idx, blk in enumerate(merged, start=1):
         blk["id"] = idx
     return merged
+
+
+def _container_candidate_score(lines: list[OcrLine], expected_lines: int) -> float:
+    if not lines:
+        return 0.0
+    chars = sum(sum(ch.isalnum() for ch in ln.text) for ln in lines)
+    if chars == 0:
+        return 0.0
+    conf_ratio = _bubble_region_confidence(lines) / 100.0
+    extra_frag = max(0, len(lines) - max(1, expected_lines))
+    return max(0.0, chars * (conf_ratio ** 1.15) - extra_frag * 4.5)
 
 
 def _recognize_persian_containers(
@@ -3687,10 +4149,12 @@ def _recognize_persian_containers(
             if ex_chars >= 18 and ex_conf >= 0.80:
                 continue
 
+            expected_rows = max(1, _estimate_persian_text_line_count(crop_rgb))
             best_lines: list[OcrLine] = []
+            best_score = -1.0
             best_scale = 1.5
             best_pad = PERSIAN_PREPROCESS_BORDER_PAD
-            for sc in (1.5, 2.0):
+            for sc in (2.0, 1.5):
                 prep_img, used_scale, used_pad = persian_preprocess_image(
                     crop_rgb, precise=True, page_mode="comic", scale_override=sc,
                 )
@@ -3707,14 +4171,15 @@ def _recognize_persian_containers(
                         for ln in raw_lines
                         if normalize_persian_ocr_text(ln.text)
                     ]
-                if len(raw_lines) > len(best_lines) or (
-                    len(raw_lines) == len(best_lines)
-                    and _bubble_region_confidence(raw_lines) > _bubble_region_confidence(best_lines) + 2.0
-                ):
+                    if len(raw_lines) >= 2:
+                        raw_lines = _coalesce_rtl_ocr_lines(raw_lines, None)
+                cand_score = _container_candidate_score(raw_lines, expected_rows)
+                if cand_score > best_score + 0.5:
                     best_lines = raw_lines
+                    best_score = cand_score
                     best_scale = used_scale
                     best_pad = used_pad
-                if len(best_lines) >= 2 and _bubble_region_confidence(best_lines) >= 78.0:
+                if best_lines and len(best_lines) <= expected_rows and _bubble_region_confidence(best_lines) >= 84.0:
                     break
 
             if not best_lines or _bubble_region_confidence(best_lines) < 42.0:

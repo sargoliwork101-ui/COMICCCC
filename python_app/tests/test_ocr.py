@@ -3037,6 +3037,163 @@ def test_v421_persian_preprocess_normalization_containers_and_engines(tmp_path, 
     assert [b["text"] for b in ordered_comic] == ["حباب راست", "حباب چپ"]
 
 
+def test_v423_persian_root_cause_joining_kaf_gaf_bidi_tessdata_best_and_containers(tmp_path, monkeypatch):
+    import io
+    import cv2
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_worker as worker_mod
+
+    # 1. Non-joining lookalikes (`ە` U+06D5 Right_Joining AE, `ے` U+06D2, `ہ`/`ھ`), Kaf/Gaf variants (`ڪ ګ ڬ ڭ ڮ ڰ ڱ ڲ ڳ ڴ`),
+    #    Ezafe (`کتابخانة` / `دربارهُ`), shattered single-letter spaces (`ب ه م`), and ZWNJ (`نمی چسبند` / `می گوید`)
+    raw_broken = (
+        "ب\u06d5م و چ\u06beر\u06d5 در کتابخان\u0629 مل\u06d2 دربار\u0647\u064f "
+        "\u06aaلاه \u06b0شاد \u06b3ر\u06af \u06abوچ\u06ac صحبت م\u064a گویند و حروف ف ا ر س ی ب ه ه م نم\u064a چسبند"
+    )
+    norm = ocr_mod.normalize_persian_ocr_text(raw_broken)
+    assert "\u06d5" not in norm and "\u06d2" not in norm and "\u06be" not in norm
+    assert "بهم" in norm and "چهره" in norm
+    assert "کتابخانهٔ ملی" in norm and "دربارهٔ" in norm
+    assert "کلاه گشاد گرگ کوچک" in norm
+    assert "می\u200cگویند" in norm
+    assert "فارسی به هم نمی\u200cچسبند" in norm
+    # Standalone conjunction `و` must never be glued to neighbors
+    assert "بهم و چهره" in norm
+
+    # 2. CTC visual-to-logical (`base_dir='R'`) preserves ZWNJ, multi-word English (`Toe Fillet`, `Figure 8-35`),
+    #    leading Latin tokens (`IPC-610`), Persian digits (`۱۲۳`), and bracket mirroring (`()«»`)
+    assert ocr_mod._persian_visual_to_logical("IPC-610 درادناتسا") == "استاندارد IPC-610"
+    assert (
+        ocr_mod._persian_visual_to_logical("یراک\u200cمیحل رد Toe Fillet درادناتسا")
+        == "استاندارد Toe Fillet در لحیم\u200cکاری"
+    )
+    assert ocr_mod._persian_visual_to_logical("۴۵۶ و ۱۲۳ هحفص") == "صفحه ۱۲۳ و ۴۵۶"
+    assert ocr_mod._persian_visual_to_logical("(2026 لاس) باتک") == "کتاب (سال 2026)"
+    assert ocr_mod._persian_visual_to_logical("Figure 3.2: Toe Fillet") == "Figure 3.2: Toe Fillet"
+
+    # 3. Tesseract Persian downloads float32 `tessdata_best/fas.traineddata` first (while English uses `tessdata_fast`),
+    #    and single-line Persian bubbles use `--psm 7` instead of slicing upper/lower dots with `--psm 6`
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    ocr_mod._STANDARD_CANCEL_EVENT.clear()
+    tess = ocr_mod.TesseractEngine()
+    seen_urls: list[str] = []
+
+    class FakeTessResp:
+        headers = {"Content-Length": "4096"}
+
+        def __init__(self):
+            self._buf = io.BytesIO(b"T" * 4096)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, sz=-1):
+            return self._buf.read(sz)
+
+    def fake_urlopen(req, timeout=180):
+        seen_urls.append(req.full_url)
+        return FakeTessResp()
+
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", fake_urlopen)
+    tess._download_language_file("fas")
+    assert seen_urls and "tessdata_best" in seen_urls[0] and seen_urls[0].endswith("/fas.traineddata")
+    seen_urls.clear()
+    tess._download_language_file("eng")
+    assert seen_urls and "tessdata_fast" in seen_urls[0] and seen_urls[0].endswith("/eng.traineddata")
+
+    # Single-line Persian bubble image (with main baseline + floating upper/lower dot rows) -> 1 line -> `--psm 7`
+    bubble_arr = np.full((76, 320, 3), 255, dtype=np.uint8)
+    cv2.rectangle(bubble_arr, (36, 33), (284, 43), (20, 20, 20), thickness=-1)  # baseline
+    for dx in range(55, 265, 28):
+        cv2.circle(bubble_arr, (dx, 24), 2, (20, 20, 20), -1)  # upper Persian dots
+        cv2.circle(bubble_arr, (dx + 8, 52), 2, (20, 20, 20), -1)  # lower Persian dots
+    single_bubble_img = Image.fromarray(bubble_arr)
+    assert ocr_mod._estimate_persian_text_line_count(single_bubble_img) == 1
+
+    bubble_psms: list[str] = []
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    monkeypatch.setattr(
+        tess,
+        "_recognize_with_psm",
+        lambda im, lg, psm: (
+            bubble_psms.append(psm)
+            or [ocr_mod.OcrLine("چرا حروف فارسی به هم نمی\u200cچسبند؟", 0.91, [[20, 20], [300, 20], [300, 56], [20, 56]])]
+        ),
+    )
+    b_lines = tess.recognize_bubble(single_bubble_img, "fas")
+    assert bubble_psms == ["7"]
+    assert b_lines[0].text == "چرا حروف فارسی به هم نمی\u200cچسبند؟"
+
+    # 4. `_coalesce_rtl_ocr_lines` reconnects sub-word/ZWNJ fragments on the same row, EXCEPT across a bubble border wall!
+    split_canvas = np.full((80, 420, 3), 250, dtype=np.uint8)
+    same_bubble_frags = [
+        ocr_mod.OcrLine("چسبند؟", 0.89, [[40, 25], [110, 25], [110, 52], [40, 52]]),
+        ocr_mod.OcrLine("نمی", 0.91, [[114, 25], [150, 25], [150, 52], [114, 52]]),
+        ocr_mod.OcrLine("رسی", 0.88, [[165, 25], [205, 25], [205, 52], [165, 52]]),
+        ocr_mod.OcrLine("فا", 0.90, [[206, 25], [228, 25], [228, 52], [206, 52]]),
+    ]
+    coalesced = ocr_mod._coalesce_rtl_ocr_lines(same_bubble_frags, split_canvas)
+    assert len(coalesced) == 1
+    assert coalesced[0].text == "فارسی نمی\u200cچسبند؟"
+
+    # Draw a dark vertical bubble border wall at x=160 -> fragments on opposite sides MUST stay separate!
+    cv2.line(split_canvas, (160, 10), (160, 70), (15, 15, 15), 3)
+    bordered_frags = [
+        ocr_mod.OcrLine("حباب چپ", 0.90, [[40, 25], [148, 25], [148, 52], [40, 52]]),
+        ocr_mod.OcrLine("حباب راست", 0.92, [[172, 25], [280, 25], [280, 52], [172, 52]]),
+    ]
+    unmerged_across_wall = ocr_mod._coalesce_rtl_ocr_lines(bordered_frags, split_canvas)
+    assert [ln.text for ln in unmerged_across_wall] == ["حباب راست", "حباب چپ"]
+
+    # 5. `_merge_non_overlapping_blocks` splits a wide primary block that illegally fused two separate speech bubbles
+    fused_primary = [
+        {"id": 1, "text": "| چرا حروف فا ز کلاه گشاد گرگ |", "conf": 72.0, "x0": 500.0, "y0": 170.0, "x1": 1070.0, "y1": 225.0}
+    ]
+    clean_containers = [
+        {"id": 1, "text": "چرا حروف فارسی به هم نمی\u200cچسبند؟", "conf": 90.5, "x0": 785.0, "y0": 175.0, "x1": 1060.0, "y1": 220.0},
+        {"id": 2, "text": "کلاه گشاد گرگ کوچک گم شد!", "conf": 90.2, "x0": 508.0, "y0": 175.0, "x1": 742.0, "y1": 220.0},
+    ]
+    repaired_blocks = ocr_mod._merge_non_overlapping_blocks(fused_primary, clean_containers, is_rtl_lang=True)
+    assert [b["text"] for b in repaired_blocks] == [
+        "چرا حروف فارسی به هم نمی\u200cچسبند؟",
+        "کلاه گشاد گرگ کوچک گم شد!",
+    ]
+
+    # 6. `_HezarOcrAdapter` splits wide ink-bearing line crops along vertical whitespace valleys before `128x32` CRNN
+    #    (preventing horizontal `گ->ک` squishing) and joins sub-words/ZWNJ intelligently
+    hz = worker_mod._HezarOcrAdapter(tmp_path / "hz_v423")
+    wide_arr = np.full((90, 420, 3), 255, dtype=np.uint8)
+    # 3 distinct word ink islands inside one wide CRAFT box (x=30..370, h=24 -> aspect > 12!)
+    cv2.rectangle(wide_arr, (40, 34), (125, 54), (20, 20, 20), thickness=-1)
+    cv2.rectangle(wide_arr, (150, 34), (245, 54), (20, 20, 20), thickness=-1)
+    cv2.rectangle(wide_arr, (270, 34), (360, 54), (20, 20, 20), thickness=-1)
+    wide_path = tmp_path / "wide_hezar.png"
+    Image.fromarray(wide_arr).save(wide_path)
+
+    seen_crop_widths: list[int] = []
+
+    class FakeCraftWide:
+        def predict(self, img):
+            return [{"boxes": [(35, 32, 330, 24)]}]
+
+    class FakeCrnnSubwords:
+        def predict(self, crops):
+            for c in crops:
+                seen_crop_widths.append(c.size[0])
+            # Left-to-right crops correspond to: left word "چسبند", middle "نمی", right "کلاه گشاد"
+            labels = ["چسبند", "نمی", "کلاه گشاد"]
+            return [{"text": labels[i % len(labels)]} for i in range(len(crops))]
+
+    monkeypatch.setattr(hz, "_ensure_loaded", lambda force_cpu=False: (FakeCraftWide(), FakeCrnnSubwords()))
+    hz_out = hz.recognize(str(wide_path), "fas", None)
+    assert len(seen_crop_widths) >= 2 and all(cw < 260 for cw in seen_crop_widths)
+    assert len(hz_out) == 1
+    assert "نمی\u200cچسبند" in hz_out[0]["text"]
+
+
+
 
 
 

@@ -2499,7 +2499,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
       // v3.85–v4.09: Verify version badge ۴.۰۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, optional storage settings, race-free backup, built-in offline local translator, custom manual text boxes, watermarks, full-attribute box copy/paste/duplicate, API key priority ordering, lossless PDF import, and grouped-page translation
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۲۲ · Python', 'header shows version ۴.۲۲');
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۲۳ · Python', 'header shows version ۴.۲۳');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2992,7 +2992,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         await sellerPage.close();
         assert.equal(sellerVisualCheck.fontLoaded, true, 'Vazirmatn.woff2 loads in Seller Panel');
         assert.equal(sellerVisualCheck.logoNaturalWidth, 128, 'icon128.png loads in Seller Panel topbar');
-        assert.equal(sellerVisualCheck.ver, '۴.۲۲ · پنل فروشنده', 'Seller Panel topbar version badge matches Studio');
+        assert.equal(sellerVisualCheck.ver, '۴.۲۳ · پنل فروشنده', 'Seller Panel topbar version badge matches Studio');
         assert.equal(sellerVisualCheck.darkBg, 'rgb(11, 13, 18)', 'Seller Panel dark --bg matches Studio #0b0d12');
         assert.equal(sellerVisualCheck.lightBg, 'rgb(243, 244, 248)', 'Seller Panel light --bg matches Studio #f3f4f8');
         assert.equal(sellerVisualCheck.hasVazirmatnInComputed, true, 'Seller Panel body fontFamily uses Vazirmatn');
@@ -3117,7 +3117,56 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(v422BrowserCheck.hasPlainClass, false, 'OCR mode never hides rich toolbar with .plain-mode');
       assert.equal(v422BrowserCheck.ocrRichSaved, true, `OCR mode persists rich HTML independently in ocrRichHtml: ${JSON.stringify(v422BrowserCheck)}`);
 
-      console.log('PASS: v3.81–v4.22 Persian OCR, #ocrPersianPreprocess, always-enabled rich editing across merged/copied/OCR boxes, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, v4.15–v4.18 modular license/vendor guard, v4.19 Seller Panel visual/Vazirmatn parity, and v4.20 full audit hardening');
+      // v4.23: Real Chromium verification of Persian green-engine auto-upgrade & joined Kaf/Gaf/ZWNJ canvas rendering
+      const v423BrowserCheck = await page.evaluate(() => {
+        const prevEngines = state.engines.map((e) => ({ ...e }));
+        const prevLang = document.getElementById('ocrLanguage').value;
+        const prevMode = document.getElementById('ocrPageMode').value;
+        try {
+          state.engines = [
+            { id: 'rapidocr-v5', name: 'PP-OCRv5 Mobile', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'multi', family: 'Paddle' },
+            { id: 'easyocr', name: 'EasyOCR', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'comic', family: 'CRAFT' },
+            { id: 'tesseract', name: 'Tesseract 5 LSTM', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'doc', family: 'Tesseract' },
+          ];
+          document.getElementById('ocrPageMode').value = 'comic';
+          document.getElementById('ocrLanguage').value = 'eng';
+          updateEngineOptions('rapidocr-v5', { resort: true });
+          document.getElementById('ocrLanguage').value = 'fas';
+          document.getElementById('ocrLanguage').dispatchEvent(new Event('change', { bubbles: true }));
+          const comicPickedEasy = document.getElementById('ocrEngine').value === 'easyocr';
+          document.getElementById('ocrPageMode').value = 'document';
+          document.getElementById('ocrPageMode').dispatchEvent(new Event('change', { bubbles: true }));
+          const docPickedTess = document.getElementById('ocrEngine').value === 'tesseract';
+
+          const bgCv = document.createElement('canvas');
+          bgCv.width = 480;
+          bgCv.height = 120;
+          const bgCtx = bgCv.getContext('2d');
+          bgCtx.fillStyle = '#ffffff';
+          bgCtx.fillRect(0, 0, 480, 120);
+          const cv = Typeset.render(bgCv, [
+            { id: 1, text: 'کلاه گشاد گرگ به هم نمی‌چسبند', tr: 'کلاه گشاد گرگ به هم نمی‌چسبند', dir: 'rtl', size: 22, color: '#111111', x0: 20, y0: 20, x1: 460, y1: 100, bg: '#ffffff', enabled: true },
+          ]);
+          const ctx = cv.getContext('2d');
+          const px = ctx.getImageData(0, 0, 480, 120).data;
+          let darkPixels = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i] < 120) darkPixels += 1;
+          }
+          return { ok: true, comicPickedEasy, docPickedTess, renderedJoinedPersian: darkPixels > 250 };
+        } finally {
+          state.engines = prevEngines;
+          document.getElementById('ocrLanguage').value = prevLang;
+          document.getElementById('ocrPageMode').value = prevMode;
+          updateEngineOptions('', { resort: true });
+        }
+      });
+      assert.equal(v423BrowserCheck.ok, true);
+      assert.equal(v423BrowserCheck.comicPickedEasy, true, 'Switching to Persian in comic mode upgrades from medium rapidocr-v5 to best easyocr');
+      assert.equal(v423BrowserCheck.docPickedTess, true, 'Switching Persian page mode to document upgrades to best tesseract');
+      assert.equal(v423BrowserCheck.renderedJoinedPersian, true, 'Typeset.render draws joined Persian Kaf/Gaf/ZWNJ text on Chromium canvas');
+
+      console.log('PASS: v3.81–v4.23 Persian root-cause OCR (tessdata_best float32 ک/گ, non-joining ە/ے repair, ZWNJ, base_dir=R BiDi, RTL horizontal coalescing, multi-bubble separation), #ocrPersianPreprocess, always-enabled rich editing, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, v4.15–v4.18 modular license/vendor guard, v4.19 Seller Panel visual/Vazirmatn parity, and v4.20 full audit hardening');
     }
 
     assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);

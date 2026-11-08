@@ -3194,9 +3194,16 @@ class IsolatedOcrEngine:
                 payload = json.loads(raw_resp)
                 if not payload.get("ok"):
                     raise self._error_cls(f"OCR failed ({self.id}): {payload.get('error')}")
+                persian_norm = None
+                if language == "fas":
+                    with contextlib.suppress(Exception):
+                        from .ocr import normalize_persian_ocr_text as _pnorm
+                        persian_norm = _pnorm
                 out_lines: list[Any] = []
                 for entry in payload.get("lines") or []:
                     raw_txt = str(entry.get("text", "")).strip("\r\n")
+                    if persian_norm is not None:
+                        raw_txt = persian_norm(raw_txt)
                     if not raw_txt.strip() or not entry.get("polygon"):
                         continue
                     poly = [[float(pt[0]), float(pt[1])] for pt in entry["polygon"]]
@@ -3606,10 +3613,11 @@ def fetch_hf_repo_revision(hf_repo: str | None, timeout: float = 6.0) -> str | N
 
 
 def fetch_tessdata_revision(languages: list[str], timeout: float = 6.0) -> str | None:
-    lang = languages[0] if languages else "eng"
+    lang = "fas" if "fas" in (languages or []) and len(languages) == 1 else (languages[0] if languages else "eng")
+    repo = "tesseract-ocr/tessdata_best" if lang == "fas" else "tesseract-ocr/tessdata_fast"
     try:
         commits = _fetch_json(
-            f"https://api.github.com/repos/tesseract-ocr/tessdata_fast/commits?path={lang}.traineddata&per_page=1",
+            f"https://api.github.com/repos/{repo}/commits?path={lang}.traineddata&per_page=1",
             timeout=timeout,
         )
         if isinstance(commits, list) and commits:

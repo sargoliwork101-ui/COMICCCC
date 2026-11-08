@@ -1,5 +1,5 @@
 """Comic OCR Studio — local file-based OCR and translation."""
 
 APP_NAME = "Comic OCR Studio"
-APP_VERSION = "4.22"
-__version__ = "4.2.2"
+APP_VERSION = "4.23"
+__version__ = "4.2.3"

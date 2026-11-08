@@ -392,6 +392,140 @@ def _apply_document_block_defaults(block: dict[str, Any], role: str) -> dict[str
     return block
 
 
+_RTL_DUAL_JOIN_CONSONANTS = frozenset("بپتثجچحخسشصضطظعغفقکگلمن")
+_RTL_SHORT_STANDALONE_WORDS = frozenset({
+    "و", "به", "از", "در", "با", "بر", "تا", "را", "که", "چه", "نه", "هم", "هر",
+    "من", "ما", "تو", "او", "آن", "این", "یک", "دو", "سه", "یا", "ای", "بی", "می",
+    "کم", "گم", "دل", "دم", "سر", "پا", "لب", "شب", "زن", "کل", "پر", "پس", "چپ", "حق", "خط", "سد", "شد", "صف", "طی", "فن", "قد", "مد", "نم",
+})
+_RTL_ZWNJ_SUFFIXES = frozenset({
+    "ها", "های", "هایی", "هایم", "هایت", "هایش", "هایمان", "هایتان", "هایشان",
+    "تر", "ترین", "ام", "ات", "اش", "مان", "تان", "شان",
+})
+
+
+def _rtl_horizontal_join_sep(right_txt: str, left_txt: str, h_gap: float, avg_h: float) -> str:
+    r_clean = right_txt.strip()
+    l_clean = left_txt.strip()
+    if not r_clean or not l_clean:
+        return " "
+    if re.search(r"(?<![\u0621-\u06cc])ن?می$", r_clean) and re.match(r"^[\u0621-\u06cc]{2,}", l_clean):
+        return "\u200c"
+    if l_clean in _RTL_ZWNJ_SUFFIXES and re.search(r"[\u0621-\u06cc]$", r_clean):
+        return "\u200c"
+    safe_h = max(8.0, float(avg_h))
+    r_last = r_clean.split()[-1]
+    l_first = l_clean.split()[0]
+    if (
+        h_gap <= 0.08 * safe_h
+        and r_last not in _RTL_SHORT_STANDALONE_WORDS
+        and re.search(r"[\u0621-\u06cc]$", r_last)
+        and re.match(r"^[\u0621-\u06cc]", l_first)
+    ):
+        return ""
+    if (
+        h_gap <= 0.16 * safe_h
+        and r_last not in _RTL_SHORT_STANDALONE_WORDS
+        and r_last[-1] in _RTL_DUAL_JOIN_CONSONANTS
+        and re.match(r"^[\u0621-\u06cc]", l_first)
+    ):
+        return ""
+    return " "
+
+
+def _coalesce_rtl_same_row_blocks(
+    blocks: list[dict[str, Any]],
+    *,
+    max_gap_ratio: float = 0.82,
+    columns: list[tuple[float, float]] | None = None,
+) -> list[dict[str, Any]]:
+    """Coalesce shattered RTL word/sub-word fragments sitting on the same horizontal baseline
+    right-to-left (`-x1`), while keeping side-by-side comic bubbles and separate columns distinct."""
+    if len(blocks) < 2 or not _is_mostly_rtl_blocks(blocks):
+        return [copy.deepcopy(b) for b in blocks]
+
+    def _col_of(blk: dict[str, Any]) -> int:
+        if not columns or len(columns) < 2:
+            return 0
+        bx0, bx1 = float(blk.get("x0", 0)), float(blk.get("x1", 0))
+        total_span = max(1.0, columns[-1][1] - columns[0][0])
+        if (bx1 - bx0) > total_span * 0.68:
+            return -1
+        cx = 0.5 * (bx0 + bx1)
+        return min(
+            range(len(columns)),
+            key=lambda k: 0.0 if columns[k][0] <= cx <= columns[k][1] else min(abs(cx - columns[k][0]), abs(cx - columns[k][1])),
+        )
+
+    copied = [copy.deepcopy(b) for b in blocks]
+    copied.sort(key=lambda b: (0.5 * (float(b.get("y0", 0)) + float(b.get("y1", 0))), -float(b.get("x1", 0))))
+    rows: list[list[dict[str, Any]]] = []
+    for blk in copied:
+        by0, by1 = float(blk.get("y0", 0)), float(blk.get("y1", 0))
+        bh = max(4.0, _height(blk))
+        bcy = 0.5 * (by0 + by1)
+        placed = False
+        if not _is_multi_line_box(blk):
+            for row in rows:
+                if any(_is_multi_line_box(r) for r in row):
+                    continue
+                ry0 = min(float(r.get("y0", 0)) for r in row)
+                ry1 = max(float(r.get("y1", 0)) for r in row)
+                rh = median(_height(r) for r in row)
+                rcy = sum(0.5 * (float(r.get("y0", 0)) + float(r.get("y1", 0))) for r in row) / len(row)
+                v_ov = min(by1, ry1) - max(by0, ry0)
+                if abs(bcy - rcy) <= 0.36 * max(bh, rh) and v_ov >= 0.45 * min(bh, rh) and 0.55 <= (bh / rh) <= 1.82:
+                    row.append(blk)
+                    placed = True
+                    break
+        if not placed:
+            rows.append([blk])
+
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        if len(row) == 1:
+            result.append(row[0])
+            continue
+        row.sort(key=lambda r: -float(r.get("x1", 0)))
+        cur = row[0]
+        cur_members = list(cur.get("sourceLines") or [copy.deepcopy(cur)])
+        for nxt in row[1:]:
+            cx0, cy0, cx1, cy1 = float(cur.get("x0", 0)), float(cur.get("y0", 0)), float(cur.get("x1", 0)), float(cur.get("y1", 0))
+            nx0, ny0, nx1, ny1 = float(nxt.get("x0", 0)), float(nxt.get("y0", 0)), float(nxt.get("x1", 0)), float(nxt.get("y1", 0))
+            avg_h = 0.5 * (_height(cur) + _height(nxt))
+            h_gap = cx0 - nx1
+            c_txt = str(cur.get("text") or "").strip()
+            n_txt = str(nxt.get("text") or "").strip()
+            has_rtl = bool(_RTL_TEXT_RE.search(c_txt) or _RTL_TEXT_RE.search(n_txt))
+            same_col = _col_of(cur) == _col_of(nxt)
+            if has_rtl and same_col and -0.35 * avg_h <= h_gap <= max_gap_ratio * avg_h:
+                sep = _rtl_horizontal_join_sep(c_txt, n_txt, h_gap, avg_h)
+                joined_txt = f"{c_txt}{sep}{n_txt}".strip()
+                nxt_members = list(nxt.get("sourceLines") or [copy.deepcopy(nxt)])
+                cur_members.extend(nxt_members)
+                c_w = max(1, len(c_txt))
+                n_w = max(1, len(n_txt))
+                w_conf = round((float(cur.get("conf", 0)) * c_w + float(nxt.get("conf", 0)) * n_w) / (c_w + n_w), 2)
+                mx0, my0 = min(cx0, nx0), min(cy0, ny0)
+                mx1, my1 = max(cx1, nx1), max(cy1, ny1)
+                cur.update({
+                    "text": joined_txt,
+                    "conf": w_conf,
+                    "x0": mx0, "y0": my0, "x1": mx1, "y1": my1,
+                    "polygon": [[mx0, my0], [mx1, my0], [mx1, my1], [mx0, my1]],
+                    "lineH": round(median(_height(m) for m in cur_members), 2),
+                    "sourceLines": copy.deepcopy(cur_members),
+                })
+                for k in ("tx0", "ty0", "tx1", "ty1"):
+                    cur.pop(k, None)
+            else:
+                result.append(cur)
+                cur = nxt
+                cur_members = list(cur.get("sourceLines") or [copy.deepcopy(cur)])
+        result.append(cur)
+    return result
+
+
 def group_document_lines(
     blocks: list[dict[str, Any]],
     page_size: tuple[int, int] | None = None,
@@ -402,6 +536,10 @@ def group_document_lines(
     if not blocks:
         return []
     effective_rtl = rtl_columns or _is_mostly_rtl_blocks(blocks)
+    if effective_rtl and len(blocks) >= 2:
+        prelim_lh = median(_line_h(b) for b in blocks)
+        prelim_cols = _detect_column_ranges(blocks, prelim_lh)
+        blocks = _coalesce_rtl_same_row_blocks(blocks, max_gap_ratio=1.25, columns=prelim_cols)
     ordered = sort_document_reading_order(blocks, page_size=page_size, rtl_columns=effective_rtl)
     if len(ordered) == 1:
         single = copy.deepcopy(ordered[0])
@@ -688,7 +826,7 @@ def group_document_lines(
             "y1": y1,
             "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
             "lineH": round(median(_line_h(m) for m in members), 2),
-            "sourceLines": copy.deepcopy(members),
+            "sourceLines": copy.deepcopy([sl for m in members for sl in (m.get("sourceLines") or [m])]),
         })
         for key in ("tx0", "ty0", "tx1", "ty1", "firstLineIndent", "hangingIndent", "blockIndent", "blockOutdent"):
             first.pop(key, None)
@@ -698,10 +836,14 @@ def group_document_lines(
 
 
 def _group_comic_lines(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Original comic speech-bubble union-find grouping (preserved 100% intact)."""
+    """Original comic speech-bubble union-find grouping (with RTL same-row word/sub-word coalescing)."""
     if len(blocks) < 2:
         return [copy.deepcopy(block) for block in blocks]
-    lines = [copy.deepcopy(block) for block in blocks]
+    lines = _coalesce_rtl_same_row_blocks(blocks, max_gap_ratio=0.82) if _is_mostly_rtl_blocks(blocks) else [copy.deepcopy(block) for block in blocks]
+    if len(lines) < 2:
+        single = copy.deepcopy(lines[0])
+        single["id"] = 1
+        return [single]
     parent = list(range(len(lines)))
 
     def find(index: int) -> int:
@@ -803,7 +945,7 @@ def _group_comic_lines(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "lineH": round(median(_height(b) for b in items), 2),
             "bold": bool(non_empty and bold_votes * 2 >= len(non_empty)),
             "italic": bool(non_empty and italic_votes * 2 >= len(non_empty)),
-            "sourceLines": copy.deepcopy(items),
+            "sourceLines": copy.deepcopy([sl for b in items for sl in (b.get("sourceLines") or [b])]),
         })
         for key in ("tx0", "ty0", "tx1", "ty1"):
             first.pop(key, None)

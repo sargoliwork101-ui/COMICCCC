@@ -2279,30 +2279,165 @@ class _HezarOcrAdapter(_BaseAdapter):
 
             inv_scale = 1.0 / det_scale
             crop_specs: list[tuple[tuple[int, int, int, int], list[list[float]]]] = []
+
+            def _split_wide_persian_crop(
+                cx0: int, cy0: int, cx1: int, cy1: int, orig_x0: float, orig_y0: float, orig_x1: float, orig_y1: float
+            ) -> list[tuple[tuple[int, int, int, int], list[list[float]]]]:
+                """`hezarai/crnn-base-fa-v2` resizes every input to a fixed `128x32` word tensor.
+                When CRAFT merges 3–6 Persian words into one wide line box (`w / h > 3.8`), feeding
+                the whole line into `128x32` horizontally crushes `گ`'s twin sarkesh strokes into `ک`.
+                Split wide ink-bearing crops along clean vertical whitespace valleys into word-sized
+                sub-crops (`w / h <= 3.8`) before CRNN recognition."""
+                cw = cx1 - cx0
+                ch = max(1, cy1 - cy0)
+                if cw <= 3.8 * max(12, ch) or cw < 96:
+                    return [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+                try:
+                    import numpy as np
+                    sub_gray = np.asarray(rgb.crop((cx0, cy0, cx1, cy1)).convert("L"), dtype=np.uint8)
+                    band_y0 = int(ch * 0.16)
+                    band_y1 = max(band_y0 + 4, int(ch * 0.84))
+                    core = sub_gray[band_y0:band_y1, :]
+                    bg = float(np.percentile(core, 82.0))
+                    fg_min = float(np.percentile(core, 3.0))
+                    if bg - fg_min < 28.0:
+                        return [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+                    ink_cols = (core < (bg - max(22.0, 0.28 * (bg - fg_min)))).mean(axis=0)
+                    empty = ink_cols <= 0.03
+                    min_valley = max(3, int(round(ch * 0.14)))
+                    valleys: list[tuple[int, int]] = []
+                    run_s = -1
+                    for idx_c, is_emp in enumerate(empty):
+                        if is_emp and run_s < 0:
+                            run_s = idx_c
+                        elif not is_emp and run_s >= 0:
+                            mid_c = (run_s + idx_c) // 2
+                            if idx_c - run_s >= min_valley and int(cw * 0.10) < mid_c < int(cw * 0.90):
+                                valleys.append((run_s, idx_c))
+                            run_s = -1
+                    if not valleys:
+                        return [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+                    target_max_w = max(48.0, 3.4 * ch)
+                    chosen_valleys: list[tuple[int, int]] = []
+                    last_end = 0
+                    for vs, ve in valleys:
+                        if vs - last_end >= target_max_w * 0.50 and (cw - last_end) > target_max_w:
+                            chosen_valleys.append((vs, ve))
+                            last_end = ve
+                    if not chosen_valleys:
+                        return [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+                    spans: list[tuple[int, int]] = []
+                    seg_start = 0
+                    for vs, ve in chosen_valleys:
+                        spans.append((seg_start, vs))
+                        seg_start = ve
+                    spans.append((seg_start, cw))
+                    pieces: list[tuple[tuple[int, int, int, int], list[list[float]]]] = []
+                    pad_s = max(2, int(round(ch * 0.08)))
+                    for s0, s1 in spans:
+                        if s1 - s0 < 6:
+                            continue
+                        px0 = max(0, cx0 + s0 - pad_s)
+                        px1 = min(width, cx0 + s1 + pad_s)
+                        bx0 = max(orig_x0, float(cx0 + s0))
+                        bx1 = min(orig_x1, float(cx0 + s1))
+                        if bx1 - bx0 < 4.0:
+                            bx0, bx1 = float(px0), float(px1)
+                        pieces.append(((px0, cy0, px1, cy1), _clamp_polygon(_rect_polygon(bx0, orig_y0, bx1, orig_y1), width, height)))
+                    return pieces or [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+                except Exception:
+                    return [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+
             for raw_box in raw_boxes:
                 if not isinstance(raw_box, (list, tuple)) or len(raw_box) < 4:
                     continue
                 # Hezar CRAFT boxes are (x1, y1, width, height); add generous vertical margin
-                # so Persian upper/lower diacritical dots (پ چ ژ ی ت ث ب ن) are never clipped.
+                # so Persian upper/lower diacritical dots (پ چ ژ ی ت ث ب ن) and گ sarkesh are never clipped.
                 bx, by, bw, bh = [float(v) * inv_scale for v in raw_box[:4]]
                 if bw < 4.0 or bh < 4.0:
                     continue
                 pad_x = max(4, int(round(bh * 0.14)))
-                pad_y = max(5, int(round(bh * 0.24)))
+                pad_y = max(5, int(round(bh * 0.26)))
                 cx0 = max(0, int(round(bx - pad_x)))
                 cy0 = max(0, int(round(by - pad_y)))
                 cx1 = min(width, int(round(bx + bw + pad_x)))
                 cy1 = min(height, int(round(by + bh + pad_y)))
                 if cx1 - cx0 < 4 or cy1 - cy0 < 4:
                     continue
-                poly = _clamp_polygon(_rect_polygon(bx, by, bx + bw, by + bh), width, height)
-                crop_specs.append(((cx0, cy0, cx1, cy1), poly))
+                crop_specs.extend(_split_wide_persian_crop(cx0, cy0, cx1, cy1, bx, by, bx + bw, by + bh))
 
             if not crop_specs and regions:
                 for rx0, ry0, rx1, ry1 in _default_regions(width, height, regions):
                     if rx1 - rx0 >= 4 and ry1 - ry0 >= 4:
-                        poly = _clamp_polygon(_rect_polygon(rx0, ry0, rx1, ry1), width, height)
-                        crop_specs.append(((int(rx0), int(ry0), int(rx1), int(ry1)), poly))
+                        crop_specs.extend(
+                            _split_wide_persian_crop(
+                                int(rx0), int(ry0), int(rx1), int(ry1),
+                                float(rx0), float(ry0), float(rx1), float(ry1),
+                            )
+                        )
+
+            _hezar_char_map = str.maketrans({
+                "\u064a": "\u06cc", "\u0649": "\u06cc", "\u06d2": "\u06cc", "\u06d0": "\u06cc",
+                "\u06cd": "\u06cc", "\u06ce": "\u06cc", "\u0643": "\u06a9", "\u06aa": "\u06a9",
+                "\u06ab": "\u06a9", "\u06ac": "\u06a9", "\u06ad": "\u06a9", "\u06ae": "\u06a9",
+                "\u06b0": "\u06af", "\u06b1": "\u06af", "\u06b2": "\u06af", "\u06b3": "\u06af",
+                "\u06b4": "\u06af", "\u06d5": "\u0647", "\u06c1": "\u0647", "\u06be": "\u0647",
+                "\u06c0": "\u0647\u0654", "\u06c2": "\u0647\u0654", "\u06c3": "\u0647\u0654",
+            })
+            _dual_join_cons = frozenset("بپتثجچحخسشصضطظعغفقکگلمن")
+            _short_standalone = frozenset({
+                "و", "به", "از", "در", "با", "بر", "تا", "را", "که", "چه", "نه", "هم", "هر",
+                "من", "ما", "تو", "او", "آن", "این", "یک", "دو", "سه", "یا", "ای", "بی", "می",
+                "کم", "گم", "دل", "دم", "سر", "پا", "لب", "شب", "زن", "کل", "پر", "پس", "چپ", "شد",
+            })
+            _zwnj_suffixes = frozenset({
+                "ها", "های", "هایی", "هایم", "هایت", "هایش", "هایمان", "هایتان", "هایشان",
+                "تر", "ترین", "ام", "ات", "اش", "مان", "تان", "شان",
+            })
+
+            def _clean_fa_tok(t: str) -> str:
+                t = re.sub(r"[\u061c\u0640\u200b\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]", "", t)
+                return re.sub(r"[ \t]+", " ", t.translate(_hezar_char_map)).strip()
+
+            def _join_hezar_row(cluster_rtl: list[dict[str, Any]], row_h: float) -> str:
+                if not cluster_rtl:
+                    return ""
+                acc = cluster_rtl[0]["text"]
+                safe_h = max(8.0, float(row_h))
+                for prev_it, cur_it in zip(cluster_rtl[:-1], cluster_rtl[1:]):
+                    r_txt = acc.strip()
+                    l_txt = cur_it["text"].strip()
+                    if not l_txt:
+                        continue
+                    if not r_txt:
+                        acc = l_txt
+                        continue
+                    h_gap = float(prev_it["x0"]) - float(cur_it["x1"])
+                    r_last = r_txt.split()[-1]
+                    l_first = l_txt.split()[0]
+                    if re.search(r"(?<![\u0621-\u06cc])ن?می$", r_txt) and re.match(r"^[\u0621-\u06cc]{2,}", l_txt):
+                        sep = "\u200c"
+                    elif l_txt in _zwnj_suffixes and re.search(r"[\u0621-\u06cc]$", r_txt):
+                        sep = "\u200c"
+                    elif (
+                        h_gap <= 0.08 * safe_h
+                        and r_last not in _short_standalone
+                        and re.search(r"[\u0621-\u06cc]$", r_last)
+                        and re.match(r"^[\u0621-\u06cc]", l_first)
+                    ):
+                        sep = ""
+                    elif (
+                        h_gap <= 0.16 * safe_h
+                        and r_last not in _short_standalone
+                        and r_last[-1] in _dual_join_cons
+                        and re.match(r"^[\u0621-\u06cc]", l_first)
+                    ):
+                        sep = ""
+                    else:
+                        sep = " "
+                    acc = f"{r_txt}{sep}{l_txt}"
+                acc = re.sub(r"(?<![\u0621-\u06cc\w])(نمی)[ \t]+(?=[\u0621-\u06cc]{2,})", "\\1\u200c", acc)
+                return acc.strip()
 
             raw_items: list[dict[str, Any]] = []
             batch_size = 16
@@ -2325,7 +2460,7 @@ class _HezarOcrAdapter(_BaseAdapter):
                     if not isinstance(preds, (list, tuple)):
                         preds = [preds]
                     for (_, poly), pred in zip(batch_specs, preds):
-                        txt = _strip_markup(self._extract_text(pred))
+                        txt = _clean_fa_tok(_strip_markup(self._extract_text(pred)))
                         if txt:
                             xs = [pt[0] for pt in poly]
                             ys = [pt[1] for pt in poly]
@@ -2361,7 +2496,7 @@ class _HezarOcrAdapter(_BaseAdapter):
                     cx0 = min(c["x0"] for c in cluster)
                     cx1 = max(c["x1"] for c in cluster)
                     h_gap = max(0.0, max(cx0 - item["x1"], item["x0"] - cx1))
-                    if v_ov >= 0.55 * min(ih, ch) and h_gap <= 2.2 * max(ih, ch):
+                    if v_ov >= 0.50 * min(ih, ch) and h_gap <= 1.85 * max(ih, ch):
                         cluster.append(item)
                         placed = True
                         break
@@ -2375,7 +2510,8 @@ class _HezarOcrAdapter(_BaseAdapter):
                     lines.append({"text": only["text"], "confidence": only["confidence"], "polygon": only["polygon"]})
                     continue
                 cluster.sort(key=lambda c: -c["x1"])
-                joined_text = " ".join(c["text"] for c in cluster if c["text"].strip()).strip()
+                med_h = sorted(max(4.0, c["y1"] - c["y0"]) for c in cluster)[len(cluster) // 2]
+                joined_text = _join_hezar_row(cluster, med_h)
                 if not joined_text:
                     continue
                 mx0 = min(c["x0"] for c in cluster)

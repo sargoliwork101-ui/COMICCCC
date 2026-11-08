@@ -175,3 +175,28 @@ def test_v389_ipc_headings_line_breaks_indents_outdents_and_auto_doc_promotion()
     assert ind_blk.get("sourceIndent", 0) > 0
 
 
+def test_v423_rtl_horizontal_word_and_subword_coalescing_preserves_side_by_side_bubbles_and_columns():
+    from comic_studio.ocr_grouping import organize_ocr_blocks
+
+    # Shattered Persian sentence fragments on the same row in comic mode -> 1 unified RTL sentence with ZWNJ & sub-word glue,
+    # while a second comic bubble far to the left on the same row stays a separate block!
+    shattered_comic = [
+        line(1, "چسبند؟", 310, 40, width=62, height=24),
+        line(2, "نمی", 376, 40, width=34, height=24),
+        line(3, "به هم", 418, 40, width=46, height=24),
+        line(4, "رسی", 474, 40, width=36, height=24),
+        line(5, "فا", 511, 40, width=20, height=24),
+        line(6, "چرا حروف", 542, 40, width=78, height=24),
+        # Separate bubble to the left (gap = 310 - 190 = 120px = 5.0 * height)
+        line(7, "کلاه گشاد گرگ!", 60, 41, width=130, height=24),
+    ]
+    grouped_comic, mode = organize_ocr_blocks(shattered_comic, page_mode="comic", group_lines=True, page_size=(680, 300))
+    assert mode == "comic"
+    assert [b["text"] for b in grouped_comic] == [
+        "چرا حروف فارسی به هم نمی\u200cچسبند؟",
+        "کلاه گشاد گرگ!",
+    ]
+    assert len(grouped_comic[0]["sourceLines"]) == 6
+
+
+
