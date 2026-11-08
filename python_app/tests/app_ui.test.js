@@ -2173,7 +2173,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas416: verText.includes('۴.۱۶'),
+            verHas417: verText.includes('۴.۱۷'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2192,8 +2192,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.16 displays version 4.16 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas416 === true
+      'v4.00/v4.17 displays version 4.17 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas417 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -3928,10 +3928,13 @@ function check(name, condition) {
     };
     await vm.runInContext('refreshAuthGateState()', context);
     check(
-      'v4.16 24-hour trial shows #trialNoticeBanner at top of workspace with 09361111111 contact phone',
+      'v4.16 24-hour trial shows #trialNoticeBanner and v4.17 #licenseTopStatusBtn with remaining hours',
       !$('trialNoticeBanner').classList.contains('hidden')
         && $('trialNoticeText').textContent.includes('09361111111')
-        && $('trialNoticeText').textContent.includes('۲۴ ساعته'),
+        && $('trialNoticeText').textContent.includes('۲۴ ساعته')
+        && !$('licenseTopStatusBtn').classList.contains('hidden')
+        && $('licenseTopStatusText').textContent.includes('آزمایشی')
+        && $('licenseTopStatusText').textContent.includes('مانده'),
     );
 
     mockLicenseState = {
@@ -3947,16 +3950,22 @@ function check(name, condition) {
     };
     await vm.runInContext('refreshAuthGateState()', context);
     check(
-      'v4.16 paid modular license hides trial banner and marks unlicensed module buttons with .mod-locked',
+      'v4.16/v4.17 paid modular license hides trial banner, shows remaining license time in #licenseTopStatusBtn, and marks unlicensed module buttons with .mod-locked',
       $('trialNoticeBanner').classList.contains('hidden')
+        && !$('licenseTopStatusBtn').classList.contains('hidden')
+        && $('licenseTopStatusText').textContent.includes('OCR: دائمی')
+        && $('licenseTopStatusText').textContent.includes('ویرایش:')
         && !$('ocrBtn').classList.contains('mod-locked')
         && $('translateBtn').classList.contains('mod-locked')
         && !$('watermarkBtn').classList.contains('mod-locked'),
     );
-    await vm.runInContext('openLicenseDialog()', context);
+    $('licenseTopStatusBtn').click();
+    await new Promise((r) => setTimeout(r, 20));
     check(
-      'v4.16 #licenseDialog displays per-module status pills (OCR, Translation, Editing) and 09361111111',
-      $('licSupportPhone').textContent === '09361111111'
+      'v4.17 clicking #licenseTopStatusBtn opens #licenseDialog with #licInfoRemaining and per-module countdowns',
+      $('licenseDialog').open === true
+        && $('licSupportPhone').textContent === '09361111111'
+        && $('licInfoRemaining').textContent.includes('OCR: دائمی')
         && $('licMod_ocr').textContent.includes('دائمی')
         && $('licMod_translation').textContent.includes('غیرفعال')
         && $('licMod_editing').textContent.includes('۳۰'),

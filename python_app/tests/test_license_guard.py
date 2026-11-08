@@ -529,3 +529,168 @@ def test_modular_three_part_licensing_durations_cumulative_and_route_gates(tmp_p
     assert st_day20["modules"]["translation"]["active"] is False
     assert st_day20["modules"]["translation"]["source"] == "expired"
 
+
+def test_seller_vault_256b_master_key_customer_crm_and_panel_http(tmp_path: Path, monkeypatch) -> None:
+    """v4.17: 256-byte Master Key Vault + Mandatory Name/LastName/Mobile + Customer CRM + Live Remaining Seconds."""
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    from license_manager import (
+        MASTER_SECRET_BYTES,
+        SellerVault,
+        build_seller_panel_handler,
+        derive_ed25519_seed_from_master_256b,
+        normalize_customer_phone,
+    )
+
+    # 1. Phone normalization handles Persian/Arabic digits, +98, 0098, and rejects invalid phones
+    assert normalize_customer_phone("۰۹۱۲ ۳۴۵-۶۷۸۹") == "09123456789"
+    assert normalize_customer_phone("+989361111111") == "09361111111"
+    with pytest.raises(ValueError):
+        normalize_customer_phone("")
+    with pytest.raises(ValueError):
+        normalize_customer_phone("09123")
+
+    # 2. Brand-new SellerVault creates a 256-byte (512 hex chars) Master Root Secret + deterministic Ed25519 key
+    seller_dir = tmp_path / "seller_v417"
+    fake_pub_py = tmp_path / "_public_key.py"
+    fake_pub_py.write_text('PUBLIC_VERIFY_KEY_HEX: str = (\n    "' + ("0" * 64) + '"\n)\n', encoding="utf-8")
+    vault = SellerVault(seller_dir=seller_dir, public_key_py=fake_pub_py)
+    rec = vault.ensure_master_key(sync_source=False)
+    assert rec["v"] == 2
+    assert rec["master_secret_bytes"] == 256
+    assert len(bytes.fromhex(rec["master_secret_256b_hex"])) == MASTER_SECRET_BYTES == 256
+    expected_seed = derive_ed25519_seed_from_master_256b(bytes.fromhex(rec["master_secret_256b_hex"]))
+    assert rec["private_seed_hex"] == expected_seed.hex()
+
+    # 3. Seamless v1 -> v2 vault upgrade preserves exact Ed25519 signing seed so older issued keys stay valid
+    v1_dir = tmp_path / "seller_v1"
+    v1_dir.mkdir()
+    v1_seed, _ = ed25519_generate_keypair()
+    (v1_dir / "seller_master_key.json").write_text(
+        json.dumps({"v": 1, "private_seed_hex": v1_seed.hex()}),
+        encoding="utf-8",
+    )
+    v1_vault = SellerVault(seller_dir=v1_dir, public_key_py=fake_pub_py)
+    upgraded = v1_vault.ensure_master_key(sync_source=False)
+    assert upgraded["private_seed_hex"] == v1_seed.hex()
+    assert len(bytes.fromhex(upgraded["master_secret_256b_hex"])) == 256
+
+    # 4. Spin up real Seller Panel HTTP handler & verify mandatory First Name, Last Name & Mobile + Customer CRM
+    secret = "test-panel-secret-417"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), build_seller_panel_handler(vault, secret))
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def _req(path: str, method: str = "GET", body: dict | None = None, raw: bool = False):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}",
+            data=(json.dumps(body).encode("utf-8") if body is not None else None),
+            method=method,
+            headers={"Content-Type": "application/json", "X-Seller-Secret": secret},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                payload = resp.read()
+                return resp.status, (payload if raw else json.loads(payload.decode("utf-8")))
+        except urllib.error.HTTPError as err:
+            return err.code, json.loads(err.read().decode("utf-8"))
+
+    try:
+        # Panel HTML contains modern tabs + mandatory fields
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/?secret={secret}", timeout=5) as html_resp:
+            html_text = html_resp.read().decode("utf-8")
+            assert html_resp.status == 200
+            assert 'id="custFirstName"' in html_text
+            assert 'id="custLastName"' in html_text
+            assert 'id="custPhone"' in html_text
+            assert 'لیست کاربران و مشتریان' in html_text
+
+        # Missing first_name, last_name, or phone MUST be rejected with HTTP 400!
+        hwid = compute_hardware_id()
+        st_no_fn, err_no_fn = _req(
+            "/api/issue",
+            "POST",
+            {"first_name": "", "last_name": "محمدی", "phone": "09123456789", "hardware_id": hwid},
+        )
+        assert st_no_fn == 400 and "نام" in err_no_fn["detail"]
+
+        st_no_ln, err_no_ln = _req(
+            "/api/issue",
+            "POST",
+            {"first_name": "علی", "last_name": "", "phone": "09123456789", "hardware_id": hwid},
+        )
+        assert st_no_ln == 400 and "نام خانوادگی" in err_no_ln["detail"]
+
+        st_no_ph, err_no_ph = _req(
+            "/api/issue",
+            "POST",
+            {"first_name": "علی", "last_name": "محمدی", "phone": "", "hardware_id": hwid},
+        )
+        assert st_no_ph == 400 and "موبایل" in err_no_ph["detail"]
+
+        # Valid issue saves customer in CRM + normalizes Persian digits + issues valid Ed25519 modular token!
+        st_ok, res_ok = _req(
+            "/api/issue",
+            "POST",
+            {
+                "first_name": "سارا",
+                "last_name": "رضایی",
+                "phone": "۰۹۱۲۱۱۱۲۲۳۳",
+                "note": "مشتری ویژه تلگرام",
+                "hardware_id": hwid,
+                "modules": {
+                    "ocr": {"plan": "lifetime"},
+                    "translation": {"plan": "subscription", "days": 5},
+                },
+            },
+        )
+        assert st_ok == 200
+        issued = res_ok["issued"]
+        assert issued["holder"] == "سارا رضایی"
+        assert issued["phone"] == "09121112233"
+        assert issued["customerId"].startswith("CUST-")
+
+        # Check /api/info returns enriched customer with live module states & KPI counts
+        st_info, info = _req("/api/info")
+        assert st_info == 200
+        assert info["masterSecretBytes"] == 256
+        assert info["stats"]["totalCustomers"] == 1
+        assert info["stats"]["expiringCustomers"] == 1  # 5 days <= 7 days threshold!
+        cust = info["customers"][0]
+        assert cust["fullName"] == "سارا رضایی"
+        assert cust["phone"] == "09121112233"
+        assert cust["modulesLive"]["ocr"]["state"] == "lifetime"
+        assert cust["modulesLive"]["translation"]["state"] == "expiring"
+        assert cust["modulesLive"]["editing"]["state"] == "none"
+
+        # CSV export includes UTF-8 BOM and customer data
+        st_csv, csv_bytes = _req("/api/customers.csv", raw=True)
+        assert st_csv == 200
+        assert csv_bytes.startswith(b"\xef\xbb\xbf")
+        csv_text = csv_bytes.decode("utf-8-sig")
+        assert "سارا" in csv_text and "رضایی" in csv_text and "09121112233" in csv_text
+
+        # Backup & restore into a brand-new SellerVault preserves 256B master key + customers + history!
+        st_bak, backup_bundle = _req("/api/backup-key")
+        assert st_bak == 200
+        restored_vault = SellerVault(seller_dir=tmp_path / "restored_vault", public_key_py=fake_pub_py)
+        restored_rec = restored_vault.import_master_key(backup_bundle, sync_source=False)
+        assert restored_rec["fingerprint"] == rec["fingerprint"]
+        assert len(restored_vault.list_customers()) == 1
+        assert restored_vault.list_customers()[0]["phone"] == "09121112233"
+
+        # Verify `inspect_status()` returns exact `remainingSeconds` on `status["license"]`
+        monkeypatch.setattr(_public_key, "PUBLIC_VERIFY_KEY_HEX", rec["public_key_hex"])
+        SECURITY_GATE.reset_memory_state()
+        st_after, _ = SECURITY_GATE.activate_token(issued["token"])
+        assert st_after["licensed"] is True
+        assert isinstance(st_after["license"]["remainingSeconds"], int)
+        assert 4 * 86400 < st_after["license"]["remainingSeconds"] <= 5 * 86400
+    finally:
+        server.shutdown()
+        server.server_close()
+
+

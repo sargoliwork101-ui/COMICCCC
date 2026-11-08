@@ -533,8 +533,15 @@ body.light .watermark-badge{background:rgba(255,255,255,.88);color:#1e293b;borde
 .editor-box[data-shape="rect"]>.box-shape-svg{display:none}
 .item.just-edited{box-shadow:0 0 0 2.5px var(--a1),0 8px 24px rgba(56,189,248,.22);transition:box-shadow .35s ease}
 
-/* v4.15: Offline Hardware-Bound Activation Gate & Local Password Login */
-body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body.auth-locked #menu{display:none!important}
+/* v4.15–v4.17: Offline Hardware-Bound Activation Gate, Live Topbar License Countdown & Local Password Login */
+body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body.auth-locked #menu,body.auth-locked #licenseTopStatusBtn{display:none!important}
+.lic-top-btn{font-size:11.5px;padding:6px 11px;border-color:#10b98155;background:#10b98114;color:var(--text);max-width:340px}
+.lic-top-btn span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lic-top-btn.is-warn{border-color:#fbbf2477;background:#fbbf2416}
+.lic-top-dot{width:8px;height:8px;border-radius:999px;flex:none;background:#34d399;box-shadow:0 0 0 3px #34d3992b}
+.lic-top-btn.is-warn .lic-top-dot{background:#fbbf24;box-shadow:0 0 0 3px #fbbf242e}
+.lic-remaining-val{color:#34d399;font-weight:700}
+.lic-remaining-val.is-warn{color:#fbbf24}
 .auth-gate-overlay{position:fixed;inset:58px 0 0 0;z-index:48;display:flex;align-items:center;justify-content:center;padding:18px;overflow:auto;background:radial-gradient(circle at 50% 0%,#8b7bff1f,transparent 52%),var(--bg)}
 .auth-gate-card{width:min(540px,100%);background:var(--surface);border:1px solid var(--line-2);border-radius:16px;padding:22px;box-shadow:var(--shadow)}
 .auth-gate-head{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--line)}

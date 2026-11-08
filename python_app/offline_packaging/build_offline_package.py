@@ -48,7 +48,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.1.6.0")]
+[assembly: System.Reflection.AssemblyVersion("4.1.7.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -647,8 +647,15 @@ internal static class ComicLicenseGuard {{
 
 
 def verify_no_seller_secrets_in_dist(app_dist_dir: Path) -> None:
-    """Fail the build immediately if any seller-only script or private key leaked into dist."""
-    forbidden_markers = ("seller_master_key", ".seller-key.json", "license_manager.py", "start_license_manager.bat")
+    """Fail the build immediately if any seller-only script, customer DB, or private key leaked into dist."""
+    forbidden_markers = (
+        "seller_master_key",
+        ".seller-key.json",
+        "seller_customers",
+        "issued_licenses",
+        "license_manager.py",
+        "start_license_manager.bat",
+    )
     for item in app_dist_dir.rglob("*"):
         low = item.name.lower()
         if any(marker in low for marker in forbidden_markers):

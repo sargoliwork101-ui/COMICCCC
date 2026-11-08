@@ -8265,6 +8265,7 @@ function bindEvents() {
     helpController = window.ComicHelpGuide.createHelpController();
   }
   $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(document.body.classList.contains('auth-locked') ? 'license-login-security' : null));
+  $('licenseTopStatusBtn')?.addEventListener('click', () => { openLicenseDialog().catch((error) => toast(error.detailText || error.message, true)); });
   $('licenseBtn')?.addEventListener('click', () => { setMenuOpen(false); openLicenseDialog().catch((error) => toast(error.detailText || error.message, true)); });
   $('trialBannerOpenLicBtn')?.addEventListener('click', () => { openLicenseDialog({ focusRenew: true }).catch((error) => toast(error.detailText || error.message, true)); });
   $('lockAppMenuBtn')?.addEventListener('click', () => { setMenuOpen(false); lockWorkspaceNow().catch((error) => toast(error.detailText || error.message, true)); });
@@ -8765,13 +8766,119 @@ async function ensureModuleLicensed(moduleId) {
   return false;
 }
 
-function formatTrialRemainingText(seconds) {
-  const sec = Math.max(0, Math.floor(Number(seconds) || 0));
-  const hrs = Math.floor(sec / 3600);
-  const mins = Math.floor((sec % 3600) / 60);
+function formatDurationDetailedFa(seconds) {
+  const sec = Math.max(0, Number(seconds) || 0);
+  if (sec <= 0) return '۰ دقیقه';
+  const totalMins = Math.max(1, Math.ceil(sec / 60));
+  const days = Math.floor(totalMins / 1440);
+  const hrs = Math.floor((totalMins % 1440) / 60);
+  const mins = totalMins % 60;
+  if (days > 0) {
+    return hrs > 0
+      ? `${days.toLocaleString('fa-IR')} روز و ${hrs.toLocaleString('fa-IR')} ساعت`
+      : `${days.toLocaleString('fa-IR')} روز`;
+  }
   if (hrs > 0 && mins > 0) return `${hrs.toLocaleString('fa-IR')} ساعت و ${mins.toLocaleString('fa-IR')} دقیقه`;
   if (hrs > 0) return `${hrs.toLocaleString('fa-IR')} ساعت`;
-  return `${Math.max(1, mins).toLocaleString('fa-IR')} دقیقه`;
+  return `${mins.toLocaleString('fa-IR')} دقیقه`;
+}
+
+function formatTrialRemainingText(seconds) {
+  return formatDurationDetailedFa(seconds);
+}
+
+function liveRemainingSecondsFor(entry) {
+  if (!entry) return null;
+  if (entry.expiresAt != null && Number(entry.expiresAt) > 0) {
+    return Math.max(0, Math.ceil(Number(entry.expiresAt) - Date.now() / 1000));
+  }
+  if (typeof entry.remainingSeconds === 'number') {
+    return Math.max(0, Math.floor(entry.remainingSeconds));
+  }
+  if (typeof entry.daysRemaining === 'number') {
+    return Math.max(0, Math.floor(entry.daysRemaining * 86400));
+  }
+  return null;
+}
+
+function computeTopbarLicenseSummary(status) {
+  if (!status || !status.licensed || !status.unlocked) {
+    return { visible: false, text: '', warn: false, detail: '—' };
+  }
+  if (status.isTrial) {
+    const expSec = Number(status.trialExpiresAt || status.license?.expiresAt || 0);
+    const rem = expSec > 0
+      ? Math.max(0, Math.ceil(expSec - Date.now() / 1000))
+      : Number(status.trialRemainingSeconds || 0);
+    const dur = formatDurationDetailedFa(rem);
+    return {
+      visible: true,
+      text: `آزمایشی: ${dur} مانده`,
+      warn: true,
+      detail: `${dur} باقی‌مانده (نسخهٔ آزمایشی ۲۴ ساعته)`,
+      expiredNow: expSec > 0 && rem <= 0,
+    };
+  }
+  const mods = status.modules && typeof status.modules === 'object' ? status.modules : null;
+  const shortNames = { ocr: 'OCR', translation: 'ترجمه', editing: 'ویرایش' };
+  if (mods) {
+    const activeIds = ['ocr', 'translation', 'editing'].filter((m) => mods[m]?.active);
+    if (!activeIds.length) return { visible: false, text: '', warn: false, detail: 'پایان‌یافته' };
+    const remList = activeIds.map((m) => ({ id: m, mod: mods[m], rem: liveRemainingSecondsFor(mods[m]) }));
+    const expiredNow = remList.some((x) => x.mod.expiresAt != null && x.rem !== null && x.rem <= 0);
+    const timed = remList.filter((x) => x.mod.expiresAt != null && x.rem !== null);
+    if (!timed.length) {
+      const label = activeIds.length === 3
+        ? 'اعتبار لایسنس: دائمی ✓'
+        : `لایسنس دائمی: ${activeIds.map((m) => shortNames[m]).join(' + ')}`;
+      return {
+        visible: true,
+        text: label,
+        warn: false,
+        detail: activeIds.length === 3 ? 'دائمی (مادام‌العمر — هر ۳ بخش)' : `دائمی (${activeIds.map((m) => shortNames[m]).join('، ')})`,
+        expiredNow,
+      };
+    }
+    const minRem = Math.min(...timed.map((x) => x.rem));
+    const uniqueExps = new Set(remList.map((x) => (x.mod.expiresAt == null ? 'life' : String(x.mod.expiresAt))));
+    const warn = minRem < 3 * 86400;
+    if (activeIds.length === 3 && uniqueExps.size === 1) {
+      const dur = formatDurationDetailedFa(minRem);
+      return {
+        visible: true,
+        text: `اعتبار لایسنس: ${dur} مانده`,
+        warn,
+        detail: `${dur} باقی‌مانده (هر ۳ بخش)`,
+        expiredNow,
+      };
+    }
+    const parts = remList.map((x) => (
+      x.mod.expiresAt == null
+        ? `${shortNames[x.id]}: دائمی`
+        : `${shortNames[x.id]}: ${formatDurationDetailedFa(x.rem)}`
+    ));
+    return {
+      visible: true,
+      text: `اعتبار: ${parts.join(' · ')}`,
+      warn,
+      detail: parts.map((p) => `${p} باقی‌مانده`.replace('دائمی باقی‌مانده', 'دائمی')).join(' | '),
+      expiredNow,
+    };
+  }
+  // Fallback when `status.modules` is omitted (e.g. legacy mock status)
+  const lic = status.license;
+  if (!lic || lic.plan === 'lifetime' || lic.expiresAt == null) {
+    return { visible: true, text: 'اعتبار لایسنس: دائمی ✓', warn: false, detail: 'دائمی (مادام‌العمر)' };
+  }
+  const rem = liveRemainingSecondsFor(lic) ?? 0;
+  const dur = formatDurationDetailedFa(rem);
+  return {
+    visible: true,
+    text: `اعتبار لایسنس: ${dur} مانده`,
+    warn: rem < 3 * 86400,
+    detail: `${dur} باقی‌مانده`,
+    expiredNow: lic.expiresAt != null && rem <= 0,
+  };
 }
 
 function stopTrialCountdown() {
@@ -8792,28 +8899,53 @@ function syncTrialBannerAndModulesUi(status) {
   banner?.classList.toggle('hidden', !showBanner);
   stopTrialCountdown();
 
-  if (showBanner && banner) {
-    const expSec = Number(status.trialExpiresAt || 0);
-    const updateBannerText = () => {
+  const refreshLiveCountdowns = () => {
+    const topInfo = computeTopbarLicenseSummary(status);
+    if (topInfo.expiredNow) {
+      stopTrialCountdown();
+      refreshAuthGateState().catch(() => {});
+      return;
+    }
+    const topBtn = $('licenseTopStatusBtn');
+    if (topBtn) {
+      topBtn.classList.toggle('hidden', !topInfo.visible);
+      topBtn.classList.toggle('is-warn', Boolean(topInfo.warn));
+      topBtn.title = topInfo.visible ? `${topInfo.detail} — برای مشاهدهٔ جزئیات کلیک کنید` : '';
+    }
+    if ($('licenseTopStatusText') && topInfo.visible) {
+      $('licenseTopStatusText').textContent = topInfo.text;
+    }
+    if ($('licInfoRemaining')) {
+      $('licInfoRemaining').textContent = topInfo.detail || '—';
+      $('licInfoRemaining').classList.toggle('is-warn', Boolean(topInfo.warn));
+    }
+    if (showBanner && banner) {
+      const expSec = Number(status.trialExpiresAt || 0);
       const rem = expSec > 0
         ? Math.max(0, Math.ceil(expSec - Date.now() / 1000))
         : Number(status.trialRemainingSeconds || 0);
-      if (rem <= 0 && expSec > 0) {
-        stopTrialCountdown();
-        refreshAuthGateState().catch(() => {});
-        return;
-      }
       const remText = formatTrialRemainingText(rem);
       if ($('trialNoticeBadge')) $('trialNoticeBadge').textContent = `نسخهٔ آزمایشی ۲۴ ساعته (${remText} باقی‌مانده)`;
       if ($('trialNoticeText')) {
         $('trialNoticeText').textContent = `شما در حال استفاده از نسخهٔ آزمایشی ۲۴ ساعته هستید (${remText} باقی‌مانده) — برای ادامهٔ استفاده از برنامه باید لایسنس تهیه کنید و با شمارهٔ ${phone} تماس بگیرید.`;
       }
-    };
-    updateBannerText();
-    if (expSec > 0) {
-      trialCountdownTimer = setInterval(updateBannerText, 30000);
-      if (typeof trialCountdownTimer?.unref === 'function') trialCountdownTimer.unref();
     }
+    if ($('licenseDialog')?.open) {
+      renderLicenseModulePills(status);
+    }
+  };
+
+  refreshLiveCountdowns();
+  const hasAnyTimed = Boolean(
+    status?.licensed && status?.unlocked && (
+      status.isTrial
+      || status.license?.expiresAt != null
+      || (status.modules && Object.values(status.modules).some((m) => m?.active && m?.expiresAt != null))
+    )
+  );
+  if (hasAnyTimed) {
+    trialCountdownTimer = setInterval(refreshLiveCountdowns, 30000);
+    if (typeof trialCountdownTimer?.unref === 'function') trialCountdownTimer.unref();
   }
 
   const ocrOk = isModuleLicensed('ocr');
@@ -8831,7 +8963,10 @@ function formatLicensePlanDetail(lic) {
   if (!lic) return '—';
   if (lic.plan === 'trial24h') return lic.planLabel || 'نسخهٔ آزمایشی ۲۴ ساعته';
   if (lic.plan === 'lifetime' || lic.expiresAt == null) return lic.planLabel || 'دائمی (مادام‌العمر)';
-  const rem = typeof lic.daysRemaining === 'number' ? `${lic.daysRemaining.toLocaleString('fa-IR')} روز باقی‌مانده` : '';
+  const liveSec = liveRemainingSecondsFor(lic);
+  const rem = liveSec !== null
+    ? `${formatDurationDetailedFa(liveSec)} باقی‌مانده`
+    : (typeof lic.daysRemaining === 'number' ? `${lic.daysRemaining.toLocaleString('fa-IR')} روز باقی‌مانده` : '');
   let expDate = '';
   try {
     expDate = new Date(Number(lic.expiresAt) * 1000).toLocaleDateString('fa-IR');
@@ -8845,13 +8980,37 @@ function formatModuleBadgeText(modInfo) {
     return modInfo?.source === 'expired' ? 'پایان اعتبار (نیازمند تمدید)' : 'غیرفعال';
   }
   if (modInfo.source === 'trial' || modInfo.plan === 'trial24h') {
-    return `آزمایشی ۲۴ ساعته (${formatTrialRemainingText(modInfo.remainingSeconds || 0)})`;
+    const rem = liveRemainingSecondsFor(modInfo) ?? 0;
+    return `آزمایشی ۲۴ ساعته (${formatDurationDetailedFa(rem)} مانده)`;
   }
   if (modInfo.plan === 'lifetime' || modInfo.expiresAt == null) {
     return 'فعال ✓ (دائمی)';
   }
-  const days = typeof modInfo.daysRemaining === 'number' ? `${modInfo.daysRemaining.toLocaleString('fa-IR')} روز باقی‌مانده` : (modInfo.planLabel || 'مدت‌دار');
-  return `فعال ✓ (${days})`;
+  const rem = liveRemainingSecondsFor(modInfo);
+  const dur = rem !== null
+    ? `${formatDurationDetailedFa(rem)} باقی‌مانده`
+    : (typeof modInfo.daysRemaining === 'number' ? `${modInfo.daysRemaining.toLocaleString('fa-IR')} روز باقی‌مانده` : (modInfo.planLabel || 'مدت‌دار'));
+  let expDate = '';
+  if (modInfo.expiresAt != null) {
+    try { expDate = new Date(Number(modInfo.expiresAt) * 1000).toLocaleDateString('fa-IR'); } catch { expDate = ''; }
+  }
+  return expDate ? `فعال ✓ (${dur} · تا ${expDate})` : `فعال ✓ (${dur})`;
+}
+
+function renderLicenseModulePills(status) {
+  if (!status) return;
+  const mods = status.modules || null;
+  for (const modId of ['ocr', 'translation', 'editing']) {
+    const pill = $(`licMod_${modId}`);
+    if (!pill) continue;
+    const modEntry = mods && typeof mods === 'object' && (modId in mods)
+      ? mods[modId]
+      : (status.licensed ? { active: true, plan: status.license?.plan || 'lifetime', expiresAt: status.license?.expiresAt, daysRemaining: status.license?.daysRemaining } : { active: false });
+    pill.textContent = formatModuleBadgeText(modEntry);
+    pill.classList.toggle('is-active', Boolean(modEntry?.active && modEntry?.source !== 'trial' && modEntry?.plan !== 'trial24h'));
+    pill.classList.toggle('is-trial', Boolean(modEntry?.active && (modEntry?.source === 'trial' || modEntry?.plan === 'trial24h')));
+    pill.classList.toggle('is-off', !modEntry?.active);
+  }
 }
 
 function applyAuthGateUi(status, { forceActivatePane = false } = {}) {
@@ -9025,22 +9184,16 @@ function populateLicenseDialog(status) {
       : (status.licensed ? 'فعال ✓' : 'غیرفعال');
   }
   if ($('licInfoHolder')) $('licInfoHolder').textContent = status.license?.holder || '—';
+  const topInfo = computeTopbarLicenseSummary(status);
+  if ($('licInfoRemaining')) {
+    $('licInfoRemaining').textContent = topInfo.detail || '—';
+    $('licInfoRemaining').classList.toggle('is-warn', Boolean(topInfo.warn));
+  }
   if ($('licInfoPlan')) $('licInfoPlan').textContent = formatLicensePlanDetail(status.license);
   if ($('licInfoHwid')) $('licInfoHwid').textContent = status.hardwareId || '';
   if ($('licSupportPhone')) $('licSupportPhone').textContent = status.supportPhone || DEFAULT_SUPPORT_PHONE;
 
-  const mods = status.modules || null;
-  for (const modId of ['ocr', 'translation', 'editing']) {
-    const pill = $(`licMod_${modId}`);
-    if (!pill) continue;
-    const modEntry = mods && typeof mods === 'object' && (modId in mods)
-      ? mods[modId]
-      : (status.licensed ? { active: true, plan: status.license?.plan || 'lifetime', expiresAt: status.license?.expiresAt, daysRemaining: status.license?.daysRemaining } : { active: false });
-    pill.textContent = formatModuleBadgeText(modEntry);
-    pill.classList.toggle('is-active', Boolean(modEntry?.active && modEntry?.source !== 'trial' && modEntry?.plan !== 'trial24h'));
-    pill.classList.toggle('is-trial', Boolean(modEntry?.active && (modEntry?.source === 'trial' || modEntry?.plan === 'trial24h')));
-    pill.classList.toggle('is-off', !modEntry?.active);
-  }
+  renderLicenseModulePills(status);
 
   const anyInactive = Boolean(status.isTrial || !isModuleLicensed('ocr') || !isModuleLicensed('translation') || !isModuleLicensed('editing'));
   if ($('licRenewDetails') && anyInactive) $('licRenewDetails').open = true;

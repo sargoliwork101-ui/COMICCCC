@@ -1262,6 +1262,15 @@ class _RuntimeSecurityGate:
                     if exp_values
                     else None
                 )
+                nearest_rem_sec = (
+                    min(
+                        int(modules_out[m]["remainingSeconds"] or 0)
+                        for m in active_mods
+                        if modules_out[m]["expiresAt"] is not None
+                    )
+                    if exp_values
+                    else None
+                )
                 is_all_lifetime = len(active_mods) == len(LICENSE_MODULES) and not exp_values
                 return {
                     "licensed": True,
@@ -1280,6 +1289,7 @@ class _RuntimeSecurityGate:
                         "planLabel": "دائمی (هر ۳ بخش)" if is_all_lifetime else active_summary,
                         "expiresAt": nearest_exp,
                         "daysRemaining": nearest_days,
+                        "remainingSeconds": nearest_rem_sec,
                     },
                 }
 
@@ -1370,6 +1380,7 @@ class _RuntimeSecurityGate:
                     "expiresAt": trial_exp,
                     "daysTotal": 1,
                     "daysRemaining": 1,
+                    "remainingSeconds": rem_sec,
                 },
             }
 
