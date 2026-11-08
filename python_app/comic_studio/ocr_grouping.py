@@ -749,10 +749,29 @@ def _group_comic_lines(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for idx in order:
         buckets.setdefault(find(idx), []).append(lines[idx])
 
+    is_rtl_comic = _is_mostly_rtl_blocks(lines)
     grouped = []
-    ordered_groups = sorted(buckets.values(), key=lambda items: (min(float(b["y0"]) for b in items), min(float(b["x0"]) for b in items)))
+    if is_rtl_comic:
+        # Order side-by-side Persian/RTL bubbles right-to-left (-x1) within the same horizontal band.
+        med_bh = median(max(float(b["y1"]) - float(b["y0"]) for b in items) for items in buckets.values())
+        band_h = max(24.0, round(med_bh * 0.9))
+        ordered_groups = sorted(
+            buckets.values(),
+            key=lambda items: (
+                round(min(float(b["y0"]) for b in items) / band_h) * band_h,
+                -max(float(b["x1"]) for b in items),
+                min(float(b["y0"]) for b in items),
+            ),
+        )
+    else:
+        ordered_groups = sorted(buckets.values(), key=lambda items: (min(float(b["y0"]) for b in items), min(float(b["x0"]) for b in items)))
     for block_id, items in enumerate(ordered_groups, start=1):
-        items.sort(key=lambda b: (round(((float(b["y0"]) + float(b["y1"])) / 2) / 10) * 10, float(b["x0"])))
+        items.sort(
+            key=lambda b: (
+                round(((float(b["y0"]) + float(b["y1"])) / 2) / 10) * 10,
+                -float(b["x1"]) if is_rtl_comic else float(b["x0"]),
+            )
+        )
         if len(items) == 1:
             single = copy.deepcopy(items[0])
             single["id"] = block_id
@@ -850,15 +869,31 @@ def organize_ocr_blocks(
     if group_lines:
         return _group_comic_lines(blocks), "comic"
     copied = [copy.deepcopy(b) for b in blocks]
+    page_is_rtl = _is_mostly_rtl_blocks(copied)
     if copied:
         med_lh = median(_line_h(b) for b in copied)
         x0_vals = [float(b.get("x0", 0)) for b in copied if str(b.get("text") or "").strip()]
+        x1_vals = [float(b.get("x1", 0)) for b in copied if str(b.get("text") or "").strip()]
         min_x0 = min(x0_vals) if x0_vals else 0.0
+        max_x1 = max(x1_vals) if x1_vals else 0.0
         space_px = max(4.0, med_lh * 0.45)
+        if page_is_rtl and len(copied) >= 2:
+            band_h = max(14.0, round(med_lh * 0.65))
+            copied.sort(
+                key=lambda b: (
+                    round(((float(b.get("y0", 0)) + float(b.get("y1", 0))) / 2.0) / band_h) * band_h,
+                    -float(b.get("x1", 0)),
+                    float(b.get("y0", 0)),
+                )
+            )
     else:
-        med_lh, min_x0, space_px = 16.0, 0.0, 7.2
+        med_lh, min_x0, max_x1, space_px = 16.0, 0.0, 0.0, 7.2
     for idx, blk in enumerate(copied, start=1):
         blk["id"] = idx
-        rel_ext = max(0.0, float(blk.get("x0", 0)) - min_x0)
+        rel_ext = (
+            max(0.0, max_x1 - float(blk.get("x1", 0)))
+            if page_is_rtl
+            else max(0.0, float(blk.get("x0", 0)) - min_x0)
+        )
         blk["sourceIndent"] = min(32, max(0, round(rel_ext / space_px))) if rel_ext >= med_lh * 0.75 else 0
     return copied, "comic"

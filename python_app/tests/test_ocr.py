@@ -2901,6 +2901,143 @@ def test_v399_worker_memory_trim_and_onnx_session_options():
         eng.unload()
 
 
+def test_v421_persian_preprocess_normalization_containers_and_engines(tmp_path, monkeypatch):
+    import cv2
+    from PIL import ImageDraw
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_worker as worker_mod
+    from comic_studio.ocr_grouping import organize_ocr_blocks
+
+    # 1. Persian text normalization: strips bidi marks, converts Arabic ي/ى/ك & Presentation Forms, preserves ZWNJ
+    dirty = "\u200f\ufb58\u064a\u0634\u200c\u067e\u0631\u062f\u0627\u0632\u0634 \u0643\u0645\u064a\u0643, \u0639\u0627\u0644\u0649\u200e"
+    cleaned = ocr_mod.normalize_persian_ocr_text(dirty)
+    assert cleaned == "پیش\u200cپردازش کمیک، عالی"
+    assert "\u200c" in cleaned and "\u200f" not in cleaned and "\u200e" not in cleaned
+
+    # 2. persian_preprocess_image: auto-inverts dark caption boxes, flattens heavy scan shadows, adds white quiet-zone,
+    #    and upscales tall narrow webtoon strips (>4MP total pixels) based on width!
+    dark_box = Image.new("RGB", (260, 90), (24, 26, 34))
+    dr = ImageDraw.Draw(dark_box)
+    dr.rectangle((60, 32, 200, 56), fill=(242, 242, 246))
+    prep_dark, sc_dark, pad_dark = ocr_mod.persian_preprocess_image(dark_box, precise=True, page_mode="comic")
+    try:
+        arr_dark = np.asarray(prep_dark)
+        assert sc_dark == 2.0
+        assert pad_dark == ocr_mod.PERSIAN_PREPROCESS_BORDER_PAD
+        assert prep_dark.size == (260 * 2 + pad_dark * 2, 90 * 2 + pad_dark * 2)
+        # Border and inverted background are white, while inverted ink center is dark
+        assert np.all(arr_dark[:pad_dark, :, 0] == 255)
+        assert float(arr_dark[pad_dark + 5, pad_dark + 5, 0]) > 220.0
+        assert float(arr_dark[pad_dark + 88, pad_dark + 260, 0]) < 45.0
+    finally:
+        prep_dark.close()
+
+    # Shadowed book scan (left side dark 75, right side bright 235) -> flattened paper >= 235 everywhere
+    yy, xx = np.mgrid[0:180, 0:320]
+    shaded = np.clip(75.0 + 160.0 * (xx / 320.0), 0, 255).astype(np.uint8)
+    shaded[70:86, 40:280] = np.maximum(15, (shaded[70:86, 40:280] * 0.32).astype(np.uint8))
+    prep_shade, sc_shade, pad_shade = ocr_mod.persian_preprocess_image(
+        Image.fromarray(shaded, mode="L").convert("RGB"), precise=True, page_mode="document",
+    )
+    try:
+        arr_shade = np.asarray(prep_shade)[pad_shade:-pad_shade, pad_shade:-pad_shade, 0]
+        assert sc_shade == 2.0
+        # Shadowed top-left paper corner is flattened to white (>= 240), while ink bar remains dark
+        assert float(np.median(arr_shade[10:40, 10:60])) >= 240.0
+        assert float(np.min(arr_shade[135:175, 100:500])) < 60.0
+    finally:
+        prep_shade.close()
+
+    # Coordinate restoration through recognize_image(..., persian_preprocess=True) un-pads & un-scales accurately
+    class CoordEchoEngine:
+        def recognize(self, img: Image.Image, lang: str):
+            # Simulate a line at native (20..120, 15..45) -> scaled by 2.0 + 18px border pad = (58..258, 48..108)
+            p = ocr_mod.PERSIAN_PREPROCESS_BORDER_PAD
+            return [ocr_mod.OcrLine("متن\u200f \u0643\u062a\u0627\u0628", 0.92, [[20 * 2 + p, 15 * 2 + p], [120 * 2 + p, 15 * 2 + p], [120 * 2 + p, 45 * 2 + p], [20 * 2 + p, 45 * 2 + p]])]
+
+    restored_blocks = ocr_mod.recognize_image(
+        CoordEchoEngine(), Image.new("RGB", (180, 90), "white"), "fas",
+        contrast=True, precise=True, persian_preprocess=True,
+    )
+    assert len(restored_blocks) == 1
+    assert restored_blocks[0]["text"] == "متن کتاب"
+    assert restored_blocks[0]["x0"] == pytest.approx(20.0)
+    assert restored_blocks[0]["y0"] == pytest.approx(15.0)
+    assert restored_blocks[0]["x1"] == pytest.approx(120.0)
+    assert restored_blocks[0]["y1"] == pytest.approx(45.0)
+
+    # 3. Multi-container Persian comic extraction detects BOTH colored AND dark speech bubbles and merges them
+    comic_arr = np.full((360, 480, 3), 90, dtype=np.uint8)
+    cv2.rectangle(comic_arr, (30, 30), (220, 150), (180, 210, 240), thickness=-1)
+    cv2.rectangle(comic_arr, (30, 30), (220, 150), (20, 30, 45), thickness=3)
+    cv2.rectangle(comic_arr, (65, 72), (185, 92), (30, 40, 70), thickness=-1)
+    cv2.rectangle(comic_arr, (260, 190), (450, 310), (26, 28, 38), thickness=-1)
+    cv2.rectangle(comic_arr, (260, 190), (450, 310), (238, 238, 245), thickness=3)
+    cv2.rectangle(comic_arr, (295, 235), (415, 255), (240, 240, 248), thickness=-1)
+    containers = ocr_mod._persian_container_regions(Image.fromarray(comic_arr))
+    assert len(containers) == 2
+    for c_im, *_ in containers:
+        c_im.close()
+
+    # 4. Tesseract Persian uses --psm 6/3 + --oem 1 + preserve_interword_spaces=1 and RTL word order (while English keeps --psm 11)
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    monkeypatch.setattr(ocr_mod.TesseractEngine, "ready_languages", property(lambda self: ["eng", "fas"]))
+    tess_cmds: list[list[str]] = []
+
+    def fake_tess_run(cmd, **kw):
+        tess_cmds.append(cmd)
+        tsv = (
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+            "5\t1\t1\t1\t1\t30\t10\t40\t18\t91\t\u062f\u0646\u064a\u0627\n"
+            "5\t1\t1\t1\t1\t90\t10\t40\t18\t93\t\u0633\u0644\u0627\u0645\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, tsv.encode("utf-8"), b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_tess_run)
+    tess_eng = ocr_mod.TesseractEngine()
+    fa_lines = tess_eng.recognize(Image.new("RGB", (200, 80), "white"), "fas")
+    en_lines = tess_eng.recognize(Image.new("RGB", (200, 80), "white"), "eng")
+    assert tess_cmds[0][tess_cmds[0].index("--psm") + 1] == "6"
+    assert "preserve_interword_spaces=1" in tess_cmds[0]
+    assert tess_cmds[1][tess_cmds[1].index("--psm") + 1] == "11"
+    assert fa_lines[0].text == "سلام دنیا"
+    assert en_lines[0].text == "دنيا سلام"
+
+    # 5. Hezar >2560px CraftImageProcessor bug workaround + RTL same-row word-box merging
+    hz = worker_mod._HezarOcrAdapter(tmp_path / "hz")
+    seen_det_sizes: list[tuple[int, int]] = []
+
+    class FakeCraftLarge:
+        def predict(self, img):
+            seen_det_sizes.append(img.size)
+            # Two word boxes on the same row in LTR order -> must merge RTL ("سلام خوبی؟") and rescale 2x back to 3200px!
+            return [{"boxes": [(50, 40, 80, 28), (150, 42, 90, 28)]}]
+
+    class FakeCrnnWords:
+        def predict(self, crops):
+            return [{"text": "خوبی؟"}, {"text": "سلام"}]
+
+    monkeypatch.setattr(hz, "_ensure_loaded", lambda force_cpu=False: (FakeCraftLarge(), FakeCrnnWords()))
+    tall_img = tmp_path / "tall_fa.png"
+    Image.new("RGB", (1600, 5120), "white").save(tall_img)
+    hz_lines = hz.recognize(str(tall_img), "fas", None)
+    assert seen_det_sizes == [(800, 2560)]
+    assert len(hz_lines) == 1
+    assert hz_lines[0]["text"] == "سلام خوبی؟"
+    assert hz_lines[0]["polygon"] == [[100.0, 80.0], [480.0, 80.0], [480.0, 140.0], [100.0, 140.0]]
+
+    # 6. RTL comic bubble ordering orders right bubble before left bubble on the same horizontal band
+    rtl_bubbles = [
+        {"id": 1, "text": "حباب چپ", "conf": 92, "x0": 40, "y0": 52, "x1": 180, "y1": 90, "lineH": 38},
+        {"id": 2, "text": "حباب راست", "conf": 94, "x0": 320, "y0": 50, "x1": 470, "y1": 88, "lineH": 38},
+    ]
+    ordered_comic, c_mode = organize_ocr_blocks(rtl_bubbles, page_mode="comic", group_lines=True, page_size=(520, 400))
+    assert c_mode == "comic"
+    assert [b["text"] for b in ordered_comic] == ["حباب راست", "حباب چپ"]
+
+
+
 
 
 

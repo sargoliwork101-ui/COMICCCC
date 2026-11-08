@@ -20,6 +20,7 @@ class OcrRequest(BaseModel):
     language: str = "eng"
     contrast: bool = True
     precise: bool = True
+    persian_preprocess: bool | None = None
     group_lines: bool = False
     page_mode: Literal["auto", "comic", "document"] = "auto"
     min_confidence: float = Field(default=0.35, ge=0.0, le=1.0)
@@ -99,6 +100,7 @@ class EngineTestRequest(BaseModel):
     image_id: str
     language: str = "eng"
     page_mode: Literal["auto", "comic", "document"] = "auto"
+    persian_preprocess: bool | None = None
 
 
 class EngineDownloadRequest(BaseModel):

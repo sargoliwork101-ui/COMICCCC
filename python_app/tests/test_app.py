@@ -44,12 +44,12 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.20"
+    assert health.json()["version"] == "4.21"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۴.۲۰ · Python</span>' in index_html
+    assert '<span class="ver">۴.۲۱ · Python</span>' in index_html
     assert 'id="licenseTopStatusBtn"' in index_html
     assert 'id="copyGateOrderMsgBtn"' in index_html
     assert "09361111111" in index_html
@@ -3294,7 +3294,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.20"
+    assert APP_VERSION == "4.21"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -4940,6 +4940,97 @@ def test_v420_pending_resolve_requires_module_license_and_402_includes_vendor_co
     unlic_json = unlic_res.json()
     assert isinstance(unlic_json.get("vendorContact"), dict)
     assert unlic_json["vendorContact"].get("supportPhone")
+
+
+def test_v421_persian_preprocess_input_option_in_ocr_and_engine_test(tmp_path, monkeypatch):
+    """v4.21: #ocrPersianPreprocess exists in index.html, OcrRequest & EngineTestRequest accept
+    persian_preprocess (auto-defaulting True for language='fas' and honoring explicit False/True)."""
+    app_inst = create_app()
+    local_client = TestClient(app_inst, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+    html = local_client.get("/").text
+    assert 'id="ocrPersianPreprocess"' in html
+    assert "پیش‌پردازش ویژه فارسی" in html
+
+    proj, item = make_project(local_client)
+    pid = proj["id"]
+    assert proj["settings"]["persianPreprocess"] is False
+
+    seen_calls: list[dict[str, object]] = []
+
+    def fake_recognize(
+        engine,
+        image,
+        language,
+        contrast=True,
+        precise=True,
+        min_confidence=0.35,
+        *,
+        page_mode="auto",
+        persian_preprocess=False,
+    ):
+        seen_calls.append({
+            "language": language,
+            "page_mode": page_mode,
+            "persian_preprocess": persian_preprocess,
+        })
+        return [
+            {
+                "id": 1,
+                "text": "سلام دنیا",
+                "tr": "",
+                "richHtml": "",
+                "conf": 95.0,
+                "x0": 10.0,
+                "y0": 10.0,
+                "x1": 120.0,
+                "y1": 40.0,
+                "polygon": [[10.0, 10.0], [120.0, 10.0], [120.0, 40.0], [10.0, 40.0]],
+                "lineH": 30.0,
+                "sourceIndent": 0,
+                "enabled": True,
+                "bg": "auto",
+                "dir": "rtl",
+                "align": "right",
+                "bold": False,
+                "italic": False,
+                "underline": False,
+                "size": None,
+                "color": None,
+            }
+        ]
+
+    monkeypatch.setattr("comic_studio.main.recognize_image", fake_recognize)
+
+    # 1) Omitting persian_preprocess with language='fas' defaults to True automatically
+    res_auto = local_client.post(
+        f"/api/projects/{pid}/ocr",
+        json={"image_ids": [item["id"]], "engine": "tesseract", "language": "fas", "page_mode": "document"},
+    )
+    assert res_auto.status_code == 200
+    assert seen_calls[-1]["persian_preprocess"] is True
+
+    # 2) Explicit persian_preprocess=False is respected even when language='fas'
+    res_off = local_client.post(
+        f"/api/projects/{pid}/ocr",
+        json={
+            "image_ids": [item["id"]],
+            "engine": "tesseract",
+            "language": "fas",
+            "page_mode": "comic",
+            "persian_preprocess": False,
+        },
+    )
+    assert res_off.status_code == 200
+    assert seen_calls[-1]["persian_preprocess"] is False
+
+    # 3) Engine test endpoint also forwards persian_preprocess (defaults True for 'fas')
+    res_test = local_client.post(
+        "/api/engines/tesseract/test",
+        json={"project_id": pid, "image_id": item["id"], "language": "fas", "page_mode": "comic"},
+    )
+    assert res_test.status_code == 200
+    assert seen_calls[-1]["persian_preprocess"] is True
+
 
 
 

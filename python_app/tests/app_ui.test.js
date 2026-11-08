@@ -2173,7 +2173,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas420: verText.includes('۴.۲۰'),
+            verHas421: verText.includes('۴.۲۱'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2192,8 +2192,8 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.20 displays version 4.20 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
-      v400StorageCheck.verHas420 === true
+      'v4.00/v4.21 displays version 4.21 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas421 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
         && v400StorageCheck.pickCalled === true
@@ -4077,6 +4077,76 @@ function check(name, condition) {
         && v420UiCheck.order[0] === 'saveProject'
         && v420UiCheck.order[1] === 'logout',
       JSON.stringify(v420UiCheck),
+    );
+
+    // v4.21: Verify #ocrPersianPreprocess auto-enables on Persian ('fas'), switches from unready to ready Persian engine,
+    // respects manual user toggle, forwards persian_preprocess in OCR payload, and documents the option in Help guide
+    const v421UiCheck = await vm.runInContext(`
+      (async () => {
+        const prevEngines = state.engines;
+        const prevSettings = JSON.parse(JSON.stringify(state.project.settings || {}));
+        try {
+          state.engines = [
+            { id: 'rapidocr-v6', name: 'PP-OCRv6 Small', selectable: true, runtimeInstalled: true, languages: ['eng'], readyLanguages: ['eng'], description: 'fast', family: 'Paddle' },
+            { id: 'rapidocr-v5', name: 'PP-OCRv5 Mobile', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng'], description: 'multi', family: 'Paddle' },
+            { id: 'tesseract', name: 'Tesseract 5 LSTM', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'doc', family: 'Tesseract' },
+          ];
+          delete state.project.settings.persianPreprocessCustomized;
+          $('ocrLanguage').value = 'eng';
+          updateEngineOptions('rapidocr-v5');
+          $('ocrPersianPreprocess').checked = false;
+
+          // Switch language to Persian ('fas'): auto-checks #ocrPersianPreprocess AND switches from unready rapidocr-v5 to ready tesseract!
+          $('ocrLanguage').value = 'fas';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const autoCheckedOnFas = $('ocrPersianPreprocess').checked === true;
+          const switchedToReadyEngine = $('ocrEngine').value === 'tesseract';
+          const savedInSettings = state.project.settings.persianPreprocess === true;
+
+          // Switch back to English before manual customization -> auto-unchecks #ocrPersianPreprocess
+          $('ocrLanguage').value = 'eng';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const autoUncheckedOnEng = $('ocrPersianPreprocess').checked === false;
+
+          // Manually turn OFF #ocrPersianPreprocess on Persian -> manual choice stays respected across language switches
+          $('ocrLanguage').value = 'fas';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          $('ocrPersianPreprocess').checked = false;
+          $('ocrPersianPreprocess').dispatchEvent(new window.Event('change', { bubbles: true }));
+          $('ocrLanguage').value = 'fas';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const manualOverrideRespected = $('ocrPersianPreprocess').checked === false && state.project.settings.persianPreprocessCustomized === true;
+
+          // Help guide documents پیش‌پردازش ویژه فارسی in section ocr-modes
+          const helpOcrModes = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-modes');
+          const helpHasPersianPreprocess = Boolean(helpOcrModes && helpOcrModes.features.some((f) => f.includes('پیش‌پردازش ویژه فارسی')));
+
+          return {
+            autoCheckedOnFas,
+            switchedToReadyEngine,
+            savedInSettings,
+            autoUncheckedOnEng,
+            manualOverrideRespected,
+            helpHasPersianPreprocess,
+          };
+        } finally {
+          state.engines = prevEngines;
+          state.project.settings = prevSettings;
+          $('ocrLanguage').value = 'eng';
+          $('ocrPersianPreprocess').checked = false;
+          updateEngineOptions('rapidocr-v6', { resort: true });
+        }
+      })()
+    `, context);
+    check(
+      'v4.21 #ocrPersianPreprocess auto-enables on Persian, switches to ready Persian engine, respects manual toggle, and is documented in Help guide',
+      v421UiCheck.autoCheckedOnFas === true
+        && v421UiCheck.switchedToReadyEngine === true
+        && v421UiCheck.savedInSettings === true
+        && v421UiCheck.autoUncheckedOnEng === true
+        && v421UiCheck.manualOverrideRespected === true
+        && v421UiCheck.helpHasPersianPreprocess === true,
+      JSON.stringify(v421UiCheck),
     );
   }
 

@@ -2,7 +2,7 @@
 ; Automatically invoked by offline_packaging/build_offline_package.py when ISCC.exe is installed.
 
 #ifndef AppVersion
-  #define AppVersion "4.20"
+  #define AppVersion "4.21"
 #endif
 #ifndef SourceDistDir
   #define SourceDistDir "..\dist\ComicOCRStudio"
@@ -14,7 +14,7 @@
   #define OutputDirPath "..\dist"
 #endif
 #ifndef OutputBaseName
-  #define OutputBaseName "ComicOCRStudio-Offline-Setup-4.20"
+  #define OutputBaseName "ComicOCRStudio-Offline-Setup-4.21"
 #endif
 
 [Setup]

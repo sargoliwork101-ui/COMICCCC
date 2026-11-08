@@ -2243,15 +2243,31 @@ class _HezarOcrAdapter(_BaseAdapter):
             grad_ctx = getattr(torch_mod, "inference_mode", None) or getattr(torch_mod, "no_grad", None) or contextlib.nullcontext
         try:
             detector, recognizer = self._ensure_loaded()
-            with grad_ctx():
-                try:
-                    det_outputs = detector.predict(rgb)
-                except Exception:
-                    if self._device != "cpu":
-                        detector, recognizer = self._ensure_loaded(force_cpu=True)
-                        det_outputs = detector.predict(rgb)
-                    else:
-                        raise
+            # Work around upstream Hezar CraftImageProcessor.get_ratio bug when max(width, height) > 2560:
+            # pre-resize only the detector copy to <=2560px and map boxes back to full-res `rgb`.
+            max_side = max(width, height)
+            det_scale = (2560.0 / float(max_side)) if max_side > 2560 else 1.0
+            det_img = (
+                rgb.resize(
+                    (max(1, int(round(width * det_scale))), max(1, int(round(height * det_scale)))),
+                    Image.Resampling.LANCZOS,
+                )
+                if det_scale < 1.0
+                else rgb
+            )
+            try:
+                with grad_ctx():
+                    try:
+                        det_outputs = detector.predict(det_img)
+                    except Exception:
+                        if self._device != "cpu":
+                            detector, recognizer = self._ensure_loaded(force_cpu=True)
+                            det_outputs = detector.predict(det_img)
+                        else:
+                            raise
+            finally:
+                if det_img is not rgb:
+                    det_img.close()
 
             first_det = det_outputs[0] if isinstance(det_outputs, (list, tuple)) and det_outputs else det_outputs
             raw_boxes = (
@@ -2261,17 +2277,18 @@ class _HezarOcrAdapter(_BaseAdapter):
             ) or []
             del det_outputs, first_det
 
+            inv_scale = 1.0 / det_scale
             crop_specs: list[tuple[tuple[int, int, int, int], list[list[float]]]] = []
             for raw_box in raw_boxes:
                 if not isinstance(raw_box, (list, tuple)) or len(raw_box) < 4:
                     continue
                 # Hezar CRAFT boxes are (x1, y1, width, height); add generous vertical margin
                 # so Persian upper/lower diacritical dots (پ چ ژ ی ت ث ب ن) are never clipped.
-                bx, by, bw, bh = [float(v) for v in raw_box[:4]]
+                bx, by, bw, bh = [float(v) * inv_scale for v in raw_box[:4]]
                 if bw < 4.0 or bh < 4.0:
                     continue
-                pad_x = max(3, int(round(bh * 0.10)))
-                pad_y = max(4, int(round(bh * 0.18)))
+                pad_x = max(4, int(round(bh * 0.14)))
+                pad_y = max(5, int(round(bh * 0.24)))
                 cx0 = max(0, int(round(bx - pad_x)))
                 cy0 = max(0, int(round(by - pad_y)))
                 cx1 = min(width, int(round(bx + bw + pad_x)))
@@ -2287,7 +2304,7 @@ class _HezarOcrAdapter(_BaseAdapter):
                         poly = _clamp_polygon(_rect_polygon(rx0, ry0, rx1, ry1), width, height)
                         crop_specs.append(((int(rx0), int(ry0), int(rx1), int(ry1)), poly))
 
-            lines: list[dict[str, Any]] = []
+            raw_items: list[dict[str, Any]] = []
             batch_size = 16
             for start in range(0, len(crop_specs), batch_size):
                 batch_specs = crop_specs[start:start + batch_size]
@@ -2310,10 +2327,63 @@ class _HezarOcrAdapter(_BaseAdapter):
                     for (_, poly), pred in zip(batch_specs, preds):
                         txt = _strip_markup(self._extract_text(pred))
                         if txt:
-                            lines.append({"text": txt, "confidence": 0.9, "polygon": poly})
+                            xs = [pt[0] for pt in poly]
+                            ys = [pt[1] for pt in poly]
+                            raw_items.append({
+                                "text": txt,
+                                "confidence": 0.9,
+                                "polygon": poly,
+                                "x0": min(xs),
+                                "y0": min(ys),
+                                "x1": max(xs),
+                                "y1": max(ys),
+                            })
                 finally:
                     for crop_img in batch_imgs:
                         crop_img.close()
+
+            # Merge adjacent word-level CRAFT detections on the same horizontal row in RTL order (-x1).
+            if len(raw_items) <= 1:
+                return [
+                    {"text": it["text"], "confidence": it["confidence"], "polygon": it["polygon"]}
+                    for it in raw_items
+                ]
+            sorted_items = sorted(raw_items, key=lambda it: ((it["y0"] + it["y1"]) * 0.5, -it["x1"]))
+            row_clusters: list[list[dict[str, Any]]] = []
+            for item in sorted_items:
+                ih = max(4.0, item["y1"] - item["y0"])
+                placed = False
+                for cluster in row_clusters:
+                    cy0 = min(c["y0"] for c in cluster)
+                    cy1 = max(c["y1"] for c in cluster)
+                    ch = max(4.0, cy1 - cy0)
+                    v_ov = min(cy1, item["y1"]) - max(cy0, item["y0"])
+                    cx0 = min(c["x0"] for c in cluster)
+                    cx1 = max(c["x1"] for c in cluster)
+                    h_gap = max(0.0, max(cx0 - item["x1"], item["x0"] - cx1))
+                    if v_ov >= 0.55 * min(ih, ch) and h_gap <= 2.2 * max(ih, ch):
+                        cluster.append(item)
+                        placed = True
+                        break
+                if not placed:
+                    row_clusters.append([item])
+
+            lines: list[dict[str, Any]] = []
+            for cluster in row_clusters:
+                if len(cluster) == 1:
+                    only = cluster[0]
+                    lines.append({"text": only["text"], "confidence": only["confidence"], "polygon": only["polygon"]})
+                    continue
+                cluster.sort(key=lambda c: -c["x1"])
+                joined_text = " ".join(c["text"] for c in cluster if c["text"].strip()).strip()
+                if not joined_text:
+                    continue
+                mx0 = min(c["x0"] for c in cluster)
+                my0 = min(c["y0"] for c in cluster)
+                mx1 = max(c["x1"] for c in cluster)
+                my1 = max(c["y1"] for c in cluster)
+                merged_poly = _clamp_polygon(_rect_polygon(mx0, my0, mx1, my1), width, height)
+                lines.append({"text": joined_text, "confidence": 0.9, "polygon": merged_poly})
             return lines
         finally:
             rgb.close()

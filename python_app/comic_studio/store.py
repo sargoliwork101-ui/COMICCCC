@@ -124,6 +124,7 @@ class ProjectStore:
                 "ocrPageMode": "comic",
                 "contrast": True,
                 "precise": True,
+                "persianPreprocess": False,
                 "eraseOriginal": True,
                 "provider": "free",
                 "targetLanguage": "fa",

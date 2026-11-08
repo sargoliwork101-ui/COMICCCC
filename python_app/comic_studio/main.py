@@ -972,12 +972,16 @@ def create_app() -> FastAPI:
         precise: bool,
         min_confidence: float,
         page_mode: str = "auto",
+        persian_preprocess: bool = False,
     ) -> list[dict[str, Any]]:
+        kwargs: dict[str, Any] = {}
         if _supports_kwarg(recognize_image, "page_mode"):
-            return recognize_image(
-                engine, image, language, contrast, precise, min_confidence, page_mode=page_mode,
-            )
-        return recognize_image(engine, image, language, contrast, precise, min_confidence)
+            kwargs["page_mode"] = page_mode
+        if persian_preprocess and _supports_kwarg(recognize_image, "persian_preprocess"):
+            kwargs["persian_preprocess"] = True
+        return recognize_image(
+            engine, image, language, contrast, precise, min_confidence, **kwargs,
+        )
 
     @app.post("/api/engines/{engine_id}/test")
     async def test_engine(engine_id: str, values: EngineTestRequest) -> dict[str, Any]:
@@ -998,10 +1002,13 @@ def create_app() -> FastAPI:
         with Image.open(path) as im:
             image = im.copy()
             page_size = image.size
+        use_persian_prep = bool(
+            values.language == "fas" if values.persian_preprocess is None else values.persian_preprocess
+        )
         activity.add(f"آزمایش {ENGINE_INFO[engine_id]['name']} روی {path.name} آغاز شد")
         try:
             raw_blocks = await run_reported(
-                _invoke_recognize, engine, image, values.language, True, True, 0.2, values.page_mode,
+                _invoke_recognize, engine, image, values.language, True, True, 0.2, values.page_mode, use_persian_prep,
                 pulse_label=f"آزمایش {ENGINE_INFO[engine_id]['name']}",
             )
             blocks, _ = organize_ocr_blocks(
@@ -1048,8 +1055,15 @@ def create_app() -> FastAPI:
         ui_batch_total = max(1, int(values.batch_total)) if is_ui_paged_batch else total_targets
         ui_batch_index = min(ui_batch_total, max(1, int(values.batch_index))) if is_ui_paged_batch else 1
         erase_original = bool(state.get("settings", {}).get("eraseOriginal", True))
+        use_persian_prep = bool(
+            values.language == "fas" if values.persian_preprocess is None else values.persian_preprocess
+        )
         if not is_ui_paged_batch or ui_batch_index == 1:
-            activity.add(f"خواندن متن در {ui_batch_total} تصویر آغاز شد", progress=0.0 if is_ui_paged_batch else None)
+            prep_tag = " (با پیش‌پردازش ویژه فارسی)" if use_persian_prep else ""
+            activity.add(
+                f"خواندن متن در {ui_batch_total} تصویر آغاز شد{prep_tag}",
+                progress=0.0 if is_ui_paged_batch else None,
+            )
 
         def _page_progress_bounds(step: int) -> tuple[float, float]:
             if is_ui_paged_batch:
@@ -1150,6 +1164,7 @@ def create_app() -> FastAPI:
                             blocks = await run_reported(
                                 _invoke_recognize, engine, image, values.language,
                                 values.contrast, values.precise, values.min_confidence, values.page_mode,
+                                use_persian_prep,
                                 pulse_label=f"در حال خواندن {item['name']}",
                                 progress_span=(start_page_p, round(p_lo + (p_hi - p_lo) * 0.92, 4)),
                             )
@@ -1182,6 +1197,7 @@ def create_app() -> FastAPI:
                                 blocks = _invoke_recognize(
                                     engine, image, values.language,
                                     values.contrast, values.precise, values.min_confidence, values.page_mode,
+                                    use_persian_prep,
                                 )
                                 return blocks, page_size
                             finally:

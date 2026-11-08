@@ -892,6 +892,11 @@ function adoptProject(project, options = {}) {
   }
   $('ocrContrast').checked = settings.contrast !== false;
   $('ocrPrecise').checked = settings.precise !== false;
+  if ($('ocrPersianPreprocess')) {
+    $('ocrPersianPreprocess').checked = typeof settings.persianPreprocess === 'boolean'
+      ? settings.persianPreprocess
+      : (ocrLang === 'fas');
+  }
   $('ocrGroupLines').checked = settings.groupOcrLines !== false;
   $('ocrErase').checked = settings.eraseOriginal !== false;
   const output = settings.output || {};
@@ -1456,6 +1461,7 @@ function collectOcrSettings() {
     ocrPageMode: normalizePageMode($('ocrPageMode')?.value),
     contrast: $('ocrContrast').checked,
     precise: $('ocrPrecise').checked,
+    persianPreprocess: Boolean($('ocrPersianPreprocess')?.checked),
     groupOcrLines: $('ocrGroupLines').checked,
     eraseOriginal: $('ocrErase').checked,
   });
@@ -2284,6 +2290,7 @@ async function runOcr() {
         page_mode: normalizePageMode($('ocrPageMode')?.value),
         contrast: $('ocrContrast').checked,
         precise: $('ocrPrecise').checked,
+        persian_preprocess: Boolean($('ocrPersianPreprocess')?.checked),
         group_lines: $('ocrGroupLines').checked,
         min_confidence: confidence === '' ? .35 : Number(confidence),
       };
@@ -4192,7 +4199,11 @@ async function testEngine(engineId) {
   modelAbortController = controller; modelCancelledByUser = false;
   state.modelBusy = engineId; scheduleActivityPoll(true); setProgress('modelProgress', null, true); renderModels(); $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
   try {
-    const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value, page_mode: normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value) }), signal: controller.signal });
+    const testLang = $('testLanguage').value;
+    const testPersianPrep = testLang === 'fas'
+      ? ($('ocrLanguage')?.value === 'fas' && $('ocrPersianPreprocess') ? Boolean($('ocrPersianPreprocess').checked) : true)
+      : Boolean($('ocrPersianPreprocess')?.checked && $('ocrLanguage')?.value === testLang);
+    const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: testLang, page_mode: normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value), persian_preprocess: testPersianPrep }), signal: controller.signal });
     if (result?.memory) engineMemorySummary = result.memory;
     setProgress('modelProgress', 1, false);
     $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => {
@@ -8123,11 +8134,32 @@ function bindEvents() {
     clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog');
   });
   $('ocrEngine').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); scheduleSave(); });
+  $('ocrPersianPreprocess')?.addEventListener('change', () => {
+    if (state.project) {
+      state.project.settings = state.project.settings || {};
+      state.project.settings.persianPreprocessCustomized = true;
+    }
+    collectOcrSettings();
+    scheduleSave();
+  });
   $('ocrLanguage').addEventListener('change', () => {
     const nextLang = $('ocrLanguage').value;
     if ($('modelsLanguage')) $('modelsLanguage').value = nextLang;
     if ($('testLanguage')) $('testLanguage').value = nextLang;
-    updateEngineOptions($('ocrEngine').value, { resort: true });
+    if ($('ocrPersianPreprocess') && state.project?.settings?.persianPreprocessCustomized !== true) {
+      $('ocrPersianPreprocess').checked = nextLang === 'fas';
+    }
+    const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
+    const prevId = $('ocrEngine').value;
+    const prevEng = state.engines.find((entry) => entry.id === prevId);
+    const prevReady = Boolean(prevEng?.runtimeInstalled && (prevEng?.readyLanguages || []).includes(nextLang));
+    const anyReadyForLang = state.engines.some(
+      (entry) => entry.selectable !== false && entry.runtimeInstalled && (entry.readyLanguages || []).includes(nextLang),
+    );
+    const targetEngine = (!prevReady && anyReadyForLang)
+      ? pickBestEngineForLanguage(nextLang, pageMode, '')
+      : prevId;
+    updateEngineOptions(targetEngine, { resort: true });
     collectOcrSettings();
     scheduleSave();
     if ($('modelsDialog')?.open) renderModels({ resort: true });

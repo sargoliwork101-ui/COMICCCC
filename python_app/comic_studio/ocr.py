@@ -838,6 +838,12 @@ class RapidEngine:
             "Det.lang_type": det_lang, "Rec.lang_type": rec_lang,
             "Det.engine_type": EngineType.ONNXRUNTIME, "Rec.engine_type": EngineType.ONNXRUNTIME,
         }
+        if language == "fas":
+            # Disable 0°/180° orientation classifier (trained on CJK/Latin) so cursive RTL Persian lines
+            # are never flipped upside-down, and widen DBNet polygon unclip so upper/lower dots stay inside.
+            params["Global.use_cls"] = False
+            params["Det.unclip_ratio"] = 2.0
+            params["Det.box_thresh"] = 0.45
         if self.version == "v5":
             # Keep user-downloaded models outside the virtual environment (or use bundled offline models).
             params["Global.model_root_dir"] = str(self._effective_v5_dir(language))
@@ -1150,7 +1156,21 @@ class RapidEngine:
                     result = cpu_engine(arr)
                 except Exception as cpu_exc:
                     raise OcrError(f"OCR failed: {cpu_exc}") from cpu_exc
-        return _lines_from_rapid(result)
+        lines = _lines_from_rapid(result)
+        if language == "fas":
+            lines = [
+                OcrLine(
+                    normalize_persian_ocr_text(line.text),
+                    line.confidence,
+                    line.polygon,
+                    bold=bool(getattr(line, "bold", False)),
+                    italic=bool(getattr(line, "italic", False)),
+                    role=getattr(line, "role", None),
+                )
+                for line in lines
+                if normalize_persian_ocr_text(line.text)
+            ]
+        return lines
 
 
 class EasyEngine:
@@ -1481,12 +1501,20 @@ class EasyEngine:
             grad_ctx = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
         except Exception:
             pass
+        extra_fa_kwargs: dict[str, Any] = (
+            {"add_margin": 0.18, "width_ths": 0.75, "text_threshold": 0.6, "low_text": 0.32}
+            if language == "fas"
+            else {}
+        )
         try:
             with self._infer_lock, grad_ctx():
                 try:
-                    result = reader.readtext(arr, detail=1, paragraph=False, batch_size=batch_sz)
+                    result = reader.readtext(arr, detail=1, paragraph=False, batch_size=batch_sz, **extra_fa_kwargs)
                 except TypeError:
-                    result = reader.readtext(arr, detail=1, paragraph=False)
+                    try:
+                        result = reader.readtext(arr, detail=1, paragraph=False, batch_size=batch_sz)
+                    except TypeError:
+                        result = reader.readtext(arr, detail=1, paragraph=False)
         except Exception as exc:
             if self._using_gpu and not self._force_cpu:
                 self._force_cpu = True
@@ -1496,9 +1524,12 @@ class EasyEngine:
                 try:
                     with self._infer_lock, grad_ctx():
                         try:
-                            result = cpu_reader.readtext(arr, detail=1, paragraph=False, batch_size=4)
+                            result = cpu_reader.readtext(arr, detail=1, paragraph=False, batch_size=4, **extra_fa_kwargs)
                         except TypeError:
-                            result = cpu_reader.readtext(arr, detail=1, paragraph=False)
+                            try:
+                                result = cpu_reader.readtext(arr, detail=1, paragraph=False, batch_size=4)
+                            except TypeError:
+                                result = cpu_reader.readtext(arr, detail=1, paragraph=False)
                 except Exception as cpu_exc:
                     raise OcrError(f"EasyOCR failed: {cpu_exc}") from cpu_exc
             else:
@@ -1507,8 +1538,9 @@ class EasyEngine:
             del arr
         lines = []
         for box, text, score in result:
-            if str(text).strip():
-                lines.append(OcrLine(str(text).strip(), float(score), _polygon(box)))
+            cleaned = normalize_persian_ocr_text(str(text)) if language == "fas" else str(text).strip()
+            if cleaned:
+                lines.append(OcrLine(cleaned, float(score), _polygon(box)))
         return lines
 
 
@@ -1531,7 +1563,7 @@ def _tesseract_executable() -> str | None:
     return None
 
 
-def _lines_from_tesseract(payload: str) -> list[OcrLine]:
+def _lines_from_tesseract(payload: str, language: str = "eng") -> list[OcrLine]:
     """Turn Tesseract TSV words into physical lines and bounding boxes."""
     groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     reader = csv.DictReader(
@@ -1551,6 +1583,7 @@ def _lines_from_tesseract(payload: str) -> list[OcrLine]:
         key = tuple(str(row.get(k, "")) for k in ("page_num", "block_num", "par_num", "line_num"))
         groups.setdefault(key, []).append(row)
     lines = []
+    is_persian = language == "fas"
     for words in groups.values():
         try:
             boxes = [(float(row["left"]), float(row["top"]), float(row["width"]), float(row["height"])) for row in words]
@@ -1561,7 +1594,21 @@ def _lines_from_tesseract(payload: str) -> list[OcrLine]:
             confidence = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
         except (KeyError, TypeError, ValueError):
             continue
-        text = " ".join((row.get("text") or "").strip() for row in words).strip()
+        ordered_words = words
+        if is_persian and len(words) >= 2:
+            # If Tesseract emitted Persian words in visual left-to-right coordinate order, sort right-to-left.
+            first_cx = boxes[0][0] + boxes[0][2] * 0.5
+            last_cx = boxes[-1][0] + boxes[-1][2] * 0.5
+            has_rtl_chars = any(
+                "\u0600" <= ch <= "\u06ff" or "\ufb50" <= ch <= "\ufefc"
+                for row in words for ch in (row.get("text") or "")
+            )
+            if has_rtl_chars and first_cx + 4.0 < last_cx:
+                paired = sorted(zip(boxes, words), key=lambda pair: -(pair[0][0] + pair[0][2]))
+                ordered_words = [w for _, w in paired]
+        text = " ".join((row.get("text") or "").strip() for row in ordered_words).strip()
+        if is_persian and text:
+            text = normalize_persian_ocr_text(text)
         if text:
             lines.append(OcrLine(text, confidence, [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]))
     return lines
@@ -1833,6 +1880,8 @@ class TesseractEngine:
             "--dpi", "300",
             "-c", "tessedit_create_tsv=1",
         ]
+        if language == "fas":
+            command.extend(["--oem", "1", "-c", "preserve_interword_spaces=1"])
         local_traineddata = (self._model_dir() / f"{language}.traineddata").is_file()
         if local_traineddata:
             self._ensure_tsv_config()
@@ -1850,16 +1899,41 @@ class TesseractEngine:
         if result.returncode:
             details = (result.stderr or result.stdout or b"Tesseract failed")[-1800:]
             raise OcrError(f"Tesseract failed: {details.decode('utf-8', 'replace') if isinstance(details, bytes) else details}")
-        return _lines_from_tesseract(result.stdout.decode("utf-8", "replace") if isinstance(result.stdout, bytes) else result.stdout)
+        return _lines_from_tesseract(
+            result.stdout.decode("utf-8", "replace") if isinstance(result.stdout, bytes) else result.stdout,
+            language=language,
+        )
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+        if language == "fas":
+            # Tesseract's sparse-text mode (--psm 11) drops or shatters cursive RTL Persian lines;
+            # use block/line segmentation (--psm 6 / 7) on crops and RTL page segmentation (--psm 3) on pages.
+            is_crop = image.height < 260 or image.width < 520
+            primary_psm = "6" if is_crop else "3"
+            lines = self._recognize_with_psm(image, language, primary_psm)
+            if lines:
+                return lines
+            fallback_psms = ("7", "11") if (image.height < 110 and image.width > image.height * 2) else ("6", "11")
+            for alt_psm in fallback_psms:
+                if alt_psm == primary_psm:
+                    continue
+                lines = self._recognize_with_psm(image, language, alt_psm)
+                if lines:
+                    return lines
+            return []
         return self._recognize_with_psm(image, language, "11")
 
     def recognize_document(self, image: Image.Image, language: str) -> list[OcrLine]:
-        return self._recognize_with_psm(image, language, "3")
+        lines = self._recognize_with_psm(image, language, "3")
+        if not lines and language == "fas":
+            return self._recognize_with_psm(image, language, "6")
+        return lines
 
     def recognize_bubble(self, image: Image.Image, language: str) -> list[OcrLine]:
-        return self._recognize_with_psm(image, language, "6")
+        lines = self._recognize_with_psm(image, language, "6")
+        if not lines and language == "fas" and image.height < 120:
+            return self._recognize_with_psm(image, language, "7")
+        return lines
 
 
 class ManualEngine:
@@ -2794,6 +2868,149 @@ def _to_white_backed_rgb(image: Image.Image) -> Image.Image:
     return rgb
 
 
+PERSIAN_PREPROCESS_BORDER_PAD = 18
+_PERSIAN_BIDI_MARKS_RE = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+_PERSIAN_CHAR_MAP = str.maketrans({
+    "\u064a": "\u06cc",  # Arabic Yeh ي -> Persian Yeh ی
+    "\u0649": "\u06cc",  # Alef Maksura ى -> Persian Yeh ی
+    "\u0643": "\u06a9",  # Arabic Kaf ك -> Persian Keheh ک
+})
+_PERSIAN_CONTEXTUAL_COMMA_RE = re.compile(r"(?<=[\u0600-\u06ff])\s*,\s*(?=[\u0600-\u06ff0-9۰-۹])")
+
+
+def normalize_persian_ocr_text(text: str) -> str:
+    """Clean bidi control marks, Arabic presentation forms, and Yeh/Kaf variants while preserving ZWNJ (نیم‌فاصله)."""
+    import unicodedata
+
+    if not text:
+        return ""
+    cleaned_chars: list[str] = []
+    for ch in str(text):
+        code = ord(ch)
+        if (0xFB50 <= code <= 0xFDFF) or (0xFE70 <= code <= 0xFEFC):
+            cleaned_chars.append(unicodedata.normalize("NFKC", ch))
+        else:
+            cleaned_chars.append(ch)
+    out = "".join(cleaned_chars)
+    out = _PERSIAN_BIDI_MARKS_RE.sub("", out)
+    out = out.translate(_PERSIAN_CHAR_MAP)
+    out = _PERSIAN_CONTEXTUAL_COMMA_RE.sub("، ", out)
+    # Collapse repeated spaces on each line while preserving explicit newlines and ZWNJ (\u200c).
+    if "\n" in out:
+        return "\n".join(re.sub(r"[ \t\r\f\v]+", " ", ln).strip() for ln in out.splitlines() if ln.strip())
+    return re.sub(r"[ \t\r\f\v]+", " ", out).strip()
+
+
+def persian_preprocess_image(
+    image: Image.Image,
+    *,
+    precise: bool = True,
+    page_mode: str = "comic",
+    scale_override: float | None = None,
+    border_pad: int = PERSIAN_PREPROCESS_BORDER_PAD,
+) -> tuple[Image.Image, float, int]:
+    """Dot-preserving Persian OCR preprocessing:
+    1. Auto-inverts white/light Persian text on dark backgrounds or night caption boxes.
+    2. Uses clean rational upscaling (2.0x or 1.5x, width-aware so tall webtoon strips still upscale)
+       BEFORE spatial filtering so tiny 1.5px Persian dots (نقطه) are never erased as speckle noise.
+    3. Preserves natural anti-aliasing on clean uniform backgrounds, and applies bilateral edge-preserving
+       denoising + morphological/Gaussian illumination division (cv2.divide) + paper-white floor + mild
+       unsharp mask on shadowed, colored, or noisy scans.
+    4. Adds a clean white quiet-zone border so edge glyphs (آ / ک / گ) never touch crop boundaries.
+    """
+    base = _to_white_backed_rgb(image)
+    try:
+        orig_w, orig_h = base.size
+        gray_pil = base.convert("L")
+        gray_in = np.asarray(gray_pil, dtype=np.uint8)
+        gray_pil.close()
+    finally:
+        if base is not image:
+            base.close()
+
+    h, w = gray_in.shape[:2]
+    if scale_override is not None:
+        scale = float(scale_override)
+    elif not precise:
+        scale = 1.0
+    elif w <= 950 or min(h, w) < 90:
+        scale = 2.0
+    elif w <= 1700:
+        scale = 1.5
+    else:
+        scale = 1.0
+    if w * scale > 4800:
+        scale = 1.0
+
+    pad = max(0, int(border_pad))
+    work = gray_in.copy()
+    if h >= 4 and w >= 4:
+        border_vals = np.concatenate([work[0, :], work[-1, :], work[:, 0], work[:, -1]])
+        border_med = float(np.median(border_vals))
+        med = float(np.median(work))
+        if med < 110.0 and border_med < 120.0 and float(np.percentile(work, 99.4)) > med + 55.0:
+            work = (255 - work).astype(np.uint8)
+
+    try:
+        import cv2
+    except Exception:
+        pil_clean = ImageOps.autocontrast(Image.fromarray(work, mode="L"), cutoff=0)
+        if scale != 1.0:
+            pil_clean = pil_clean.resize(
+                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                Image.Resampling.LANCZOS,
+            )
+        if pad > 0:
+            pil_clean = ImageOps.expand(pil_clean, border=pad, fill=255)
+        out_rgb = pil_clean.convert("RGB")
+        pil_clean.close()
+        return out_rgb, scale, pad
+
+    p2, p50, p90 = [float(np.percentile(work, q)) for q in (2.0, 50.0, 90.0)]
+    bg_pixels = work[work >= p50]
+    bg_std = float(np.std(bg_pixels)) if bg_pixels.size > 20 else 0.0
+    contrast_span = p90 - p2
+
+    if bg_std < 7.5 and contrast_span > 135.0 and page_mode != "document":
+        # Clean uniform background: keep natural grayscale anti-aliasing around Persian dots & connectors.
+        pil_g = ImageOps.autocontrast(Image.fromarray(work, mode="L"), cutoff=0)
+        if scale != 1.0:
+            pil_g = pil_g.resize(
+                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                Image.Resampling.LANCZOS,
+            )
+        arr = np.asarray(pil_g, dtype=np.uint8)
+        pil_g.close()
+        arr = cv2.bilateralFilter(arr, d=5, sigmaColor=14, sigmaSpace=14)
+        padded = cv2.copyMakeBorder(arr, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255) if pad > 0 else arr
+        return Image.fromarray(padded, mode="L").convert("RGB"), scale, pad
+
+    if scale != 1.0:
+        work = cv2.resize(
+            work,
+            (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+            interpolation=cv2.INTER_CUBIC,
+        )
+    denoised = cv2.bilateralFilter(work, d=5, sigmaColor=24, sigmaSpace=24)
+    m_pad = 36
+    work_pad = cv2.copyMakeBorder(denoised, m_pad, m_pad, m_pad, m_pad, cv2.BORDER_REPLICATE)
+    bg_est = cv2.morphologyEx(
+        work_pad,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (71, 71)),
+    )
+    bg_est = cv2.GaussianBlur(bg_est, (0, 0), sigmaX=24.0)[m_pad:-m_pad, m_pad:-m_pad]
+    norm = cv2.divide(denoised, np.maximum(bg_est, 48), scale=255)
+    p_ink = float(np.percentile(norm, 0.8))
+    lo = min(135.0, max(0.0, p_ink * 0.82)) if p_ink > 42.0 else 0.0
+    hi = 236.0
+    cleaned = np.clip((norm.astype(np.float32) - lo) * (255.0 / max(30.0, hi - lo)), 0, 255).astype(np.uint8)
+    blur_u = cv2.GaussianBlur(cleaned, (0, 0), sigmaX=0.9)
+    sharp = cv2.addWeighted(cleaned, 1.32, blur_u, -0.32, 0)
+    padded = cv2.copyMakeBorder(sharp, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255) if pad > 0 else sharp
+    return Image.fromarray(padded, mode="L").convert("RGB"), scale, pad
+
+
 def preprocess(
     image: Image.Image,
     contrast: bool,
@@ -2815,12 +3032,36 @@ def preprocess(
     return image, scale
 
 
-def _blocks_from_lines(lines: list[OcrLine], coordinate_scale: float = 1.0) -> list[dict[str, Any]]:
+def _blocks_from_lines(
+    lines: list[OcrLine],
+    coordinate_scale: float = 1.0,
+    *,
+    coordinate_pad: float = 0.0,
+    bounds: tuple[int, int] | None = None,
+) -> list[dict[str, Any]]:
     """Build the unchanged public block schema from positioned OCR lines."""
     blocks = []
+    max_w = float(bounds[0]) if bounds else None
+    max_h = float(bounds[1]) if bounds else None
     for index, line in enumerate(lines, start=1):
-        x0, y0, x1, y1 = [value / coordinate_scale for value in line.box]
-        polygon = [[x / coordinate_scale, y / coordinate_scale] for x, y in line.polygon]
+        raw_x0, raw_y0, raw_x1, raw_y1 = line.box
+        x0 = (raw_x0 - coordinate_pad) / coordinate_scale
+        y0 = (raw_y0 - coordinate_pad) / coordinate_scale
+        x1 = (raw_x1 - coordinate_pad) / coordinate_scale
+        y1 = (raw_y1 - coordinate_pad) / coordinate_scale
+        if max_w is not None and max_h is not None:
+            x0 = max(0.0, min(max_w, x0))
+            x1 = max(x0 + 1.0, min(max_w, x1))
+            y0 = max(0.0, min(max_h, y0))
+            y1 = max(y0 + 1.0, min(max_h, y1))
+        polygon = []
+        for px, py in line.polygon:
+            ux = (px - coordinate_pad) / coordinate_scale
+            uy = (py - coordinate_pad) / coordinate_scale
+            if max_w is not None and max_h is not None:
+                ux = max(0.0, min(max_w, ux))
+                uy = max(0.0, min(max_h, uy))
+            polygon.append([ux, uy])
         line_h = max(8.0, y1 - y0)
         is_bold = bool(getattr(line, "bold", False))
         is_italic = bool(getattr(line, "italic", False))
@@ -2865,10 +3106,47 @@ def _recognize_crop_lines(
     if page_mode == "document":
         doc_rec = getattr(engine, "recognize_document", None)
         if callable(doc_rec):
-            return doc_rec(crop, language)
-    if isinstance(engine, IsolatedOcrEngine):
-        return engine.recognize(crop, language, page_mode=page_mode)
-    return engine.recognize(crop, language)
+            lines = doc_rec(crop, language)
+        elif isinstance(engine, IsolatedOcrEngine):
+            lines = engine.recognize(crop, language, page_mode=page_mode)
+        else:
+            lines = engine.recognize(crop, language)
+    elif isinstance(engine, IsolatedOcrEngine):
+        lines = engine.recognize(crop, language, page_mode=page_mode)
+    else:
+        lines = engine.recognize(crop, language)
+    if language == "fas" and lines:
+        normalized_lines: list[OcrLine] = []
+        for ln in lines:
+            cleaned = normalize_persian_ocr_text(ln.text)
+            if cleaned:
+                normalized_lines.append(
+                    OcrLine(
+                        cleaned,
+                        ln.confidence,
+                        ln.polygon,
+                        bold=bool(getattr(ln, "bold", False)),
+                        italic=bool(getattr(ln, "italic", False)),
+                        role=getattr(ln, "role", None),
+                    )
+                )
+        return normalized_lines
+    return lines
+
+
+def _sort_ocr_lines_reading_order(lines: list[OcrLine], *, is_rtl_lang: bool) -> None:
+    if len(lines) < 2:
+        return
+    heights = sorted(max(8.0, float(ln.box[3] - ln.box[1])) for ln in lines)
+    med_h = heights[len(heights) // 2]
+    row_bucket = max(12.0, round(med_h * 0.55))
+    lines.sort(
+        key=lambda line: (
+            round(((line.box[1] + line.box[3]) / 2.0) / row_bucket) * row_bucket,
+            -line.box[2] if is_rtl_lang else line.box[0],
+            line.box[1],
+        )
+    )
 
 
 def _recognize_image_primary(
@@ -2880,13 +3158,26 @@ def _recognize_image_primary(
     min_confidence: float = 0.35,
     input_scale: float = 1.0,
     page_mode: str = "auto",
+    *,
+    persian_preprocess: bool = False,
 ) -> list[dict[str, Any]]:
     """The established OCR path; input_scale only restores fallback geometry."""
     from .ocr_grouping import detect_page_mode, sort_document_reading_order
 
-    # Isolated VLM/layout engines handle their own vision scaling; skipping 2x Lanczos prevents multi-GB RAM spikes.
-    effective_precise = False if isinstance(engine, IsolatedOcrEngine) else precise
-    prepared, scale = preprocess(image, contrast, effective_precise, page_mode=page_mode)
+    is_isolated = isinstance(engine, IsolatedOcrEngine)
+    border_pad = 0
+    if persian_preprocess:
+        # Heavy isolated VLM/layout engines manage their own high-res vision encoders, whereas lightweight
+        # Hezar CRAFT+CRNN benefits from upscaling small crops (<900px) while keeping RAM bounded.
+        is_light_isolated = is_isolated and getattr(engine, "id", "") == "hezar-ocr" and max(image.size) <= 950
+        effective_precise = precise if (not is_isolated or is_light_isolated) else False
+        prepared, scale, border_pad = persian_preprocess_image(
+            image, precise=effective_precise, page_mode=page_mode,
+        )
+    else:
+        # Isolated VLM/layout engines handle their own vision scaling; skipping 2x Lanczos prevents multi-GB RAM spikes.
+        effective_precise = False if is_isolated else precise
+        prepared, scale = preprocess(image, contrast, effective_precise, page_mode=page_mode)
     width, height = prepared.size
     slice_height = 3000
     overlap = 100
@@ -2925,14 +3216,18 @@ def _recognize_image_primary(
             prepared.close()
     # Reading order is stable: physical row first, then horizontal position (right-to-left for Persian/RTL).
     is_rtl_lang = language in {"fas", "ara"}
-    lines.sort(
-        key=lambda line: (
-            round(((line.box[1] + line.box[3]) / 2) / 12) * 12,
-            -line.box[2] if is_rtl_lang else line.box[0],
-            line.box[1],
-        )
+    _sort_ocr_lines_reading_order(lines, is_rtl_lang=is_rtl_lang)
+    orig_bounds = (
+        (max(1, int(round(image.width / input_scale))), max(1, int(round(image.height / input_scale))))
+        if border_pad > 0
+        else None
     )
-    blocks = _blocks_from_lines(lines, scale * input_scale)
+    blocks = _blocks_from_lines(
+        lines,
+        scale * input_scale,
+        coordinate_pad=float(border_pad),
+        bounds=orig_bounds,
+    )
     effective_mode = detect_page_mode(blocks, page_size=image.size) if page_mode == "auto" else page_mode
     if effective_mode == "document" and len(blocks) >= 2:
         blocks = sort_document_reading_order(blocks, page_size=image.size, rtl_columns=is_rtl_lang)
@@ -3241,6 +3536,210 @@ def analyze_blocks_typography(
                 blk["_explicitBold"] = True
 
 
+def _persian_container_regions(image: Image.Image) -> list[tuple[Image.Image, int, int, int, int]]:
+    """Detect uniform-background comic speech bubbles and caption boxes (light, colored, AND dark)
+    and return isolated grayscale-filled crops `(clean_pil_rgb, x, y, bw, bh)` so rounded/colored
+    borders never confuse Persian line segmentation."""
+    import cv2
+
+    base = _to_white_backed_rgb(image)
+    try:
+        rgb = np.asarray(base, dtype=np.uint8)
+    finally:
+        if base is not image:
+            base.close()
+    h, w = rgb.shape[:2]
+    if h < 80 or w < 100:
+        return []
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    k3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    grad_rgb = np.max([cv2.morphologyEx(rgb[:, :, c], cv2.MORPH_GRADIENT, k3) for c in range(3)], axis=0)
+    _, wall = cv2.threshold(grad_rgb, 24, 255, cv2.THRESH_BINARY)
+    interior = cv2.bitwise_not(cv2.morphologyEx(wall, cv2.MORPH_CLOSE, k3))
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(interior, connectivity=4)
+    regions: list[tuple[Image.Image, int, int, int, int]] = []
+    for lbl in range(1, num_labels):
+        area = int(stats[lbl, cv2.CC_STAT_AREA])
+        if area < 1400 or area > h * w * 0.78:
+            continue
+        x = int(stats[lbl, cv2.CC_STAT_LEFT])
+        y = int(stats[lbl, cv2.CC_STAT_TOP])
+        bw = int(stats[lbl, cv2.CC_STAT_WIDTH])
+        bh = int(stats[lbl, cv2.CC_STAT_HEIGHT])
+        if bw < 45 or bh < 24 or (area / float(bw * bh)) < 0.35:
+            continue
+        if bw * bh > h * w * 0.72 or (bw >= w * 0.94 and bh >= h * 0.94):
+            continue
+        comp_mask = labels[y:y + bh, x:x + bw] == lbl
+        vals = gray[y:y + bh, x:x + bw][comp_mask]
+        if vals.size < 350:
+            continue
+        med = float(np.median(vals))
+        if float(np.mean(np.abs(vals.astype(np.float32) - med) <= 20.0)) < 0.62:
+            continue
+        comp_u8 = (comp_mask.astype(np.uint8)) * 255
+        cnts, _ = cv2.findContours(comp_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        filled = np.zeros_like(comp_u8)
+        cv2.drawContours(filled, cnts, -1, 255, thickness=cv2.FILLED)
+        filled = cv2.erode(filled, np.ones((4, 4), np.uint8))
+        crop_g = gray[y:y + bh, x:x + bw]
+        in_px = crop_g[filled > 0]
+        if in_px.size < 250:
+            continue
+        contrast_px = float(np.mean(in_px < med - 32.0)) if med >= 105.0 else float(np.mean(in_px > med + 38.0))
+        if not (0.006 <= contrast_px <= 0.48):
+            continue
+        clean_crop = np.full((bh, bw), int(round(med)), dtype=np.uint8)
+        clean_crop[filled > 0] = crop_g[filled > 0]
+        regions.append((Image.fromarray(clean_crop, mode="L").convert("RGB"), x, y, bw, bh))
+    regions.sort(key=lambda r: (round((r[2] + r[4] * 0.5) / 24.0) * 24, -r[1]))
+    return regions
+
+
+def _blocks_overlap_strongly(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    ax0, ay0, ax1, ay1 = float(a["x0"]), float(a["y0"]), float(a["x1"]), float(a["y1"])
+    bx0, by0, bx1, by1 = float(b["x0"]), float(b["y0"]), float(b["x1"]), float(b["y1"])
+    ix = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    iy = max(0.0, min(ay1, by1) - max(ay0, by0))
+    if ix <= 0.0 or iy <= 0.0:
+        return False
+    inter = ix * iy
+    area_a = max(1.0, (ax1 - ax0) * (ay1 - ay0))
+    area_b = max(1.0, (bx1 - bx0) * (by1 - by0))
+    if inter / min(area_a, area_b) >= 0.42:
+        return True
+    v_ov = iy / max(1.0, min(ay1 - ay0, by1 - by0))
+    h_ov = ix / max(1.0, min(ax1 - ax0, bx1 - bx0))
+    return v_ov >= 0.55 and h_ov >= 0.45
+
+
+def _merge_non_overlapping_blocks(
+    primary: list[dict[str, Any]],
+    extra: list[dict[str, Any]],
+    *,
+    is_rtl_lang: bool = True,
+) -> list[dict[str, Any]]:
+    """Keep primary blocks and append newly discovered container blocks (or replace lower-quality overlaps)."""
+    if not extra:
+        return primary
+    if not primary:
+        merged = list(extra)
+    else:
+        merged = [dict(b) for b in primary]
+        for cand in extra:
+            cand_txt = str(cand.get("text") or "").strip()
+            if not cand_txt:
+                continue
+            overlapping_idxs = [i for i, cur in enumerate(merged) if _blocks_overlap_strongly(cur, cand)]
+            if not overlapping_idxs:
+                merged.append(dict(cand))
+                continue
+            if len(overlapping_idxs) == 1:
+                idx = overlapping_idxs[0]
+                cur = merged[idx]
+                cur_chars = sum(ch.isalnum() for ch in str(cur.get("text") or ""))
+                cand_chars = sum(ch.isalnum() for ch in cand_txt)
+                cur_conf = float(cur.get("conf", 0.0))
+                cand_conf = float(cand.get("conf", 0.0))
+                if (cand_chars >= cur_chars + 3 and cand_conf >= cur_conf - 6.0) or (
+                    cand_chars >= cur_chars and cand_conf > cur_conf + 8.0
+                ):
+                    merged[idx] = dict(cand)
+    if len(merged) >= 2:
+        heights = sorted(max(8.0, float(b["y1"]) - float(b["y0"])) for b in merged)
+        row_bucket = max(12.0, round(heights[len(heights) // 2] * 0.55))
+        merged.sort(
+            key=lambda b: (
+                round(((float(b["y0"]) + float(b["y1"])) / 2.0) / row_bucket) * row_bucket,
+                -float(b["x1"]) if is_rtl_lang else float(b["x0"]),
+                float(b["y0"]),
+            )
+        )
+    for idx, blk in enumerate(merged, start=1):
+        blk["id"] = idx
+    return merged
+
+
+def _recognize_persian_containers(
+    engine: Any,
+    image: Image.Image,
+    language: str,
+    min_confidence: float,
+    existing_blocks: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Run dot-preserving Persian preprocessing on isolated comic speech bubbles and dark/colored boxes."""
+    regions = _persian_container_regions(image)
+    if not regions:
+        return []
+    existing = existing_blocks or []
+    discovered: list[dict[str, Any]] = []
+    is_rtl_lang = language in {"fas", "ara"}
+    page_w, page_h = image.size
+    for crop_rgb, ox, oy, bw, bh in regions:
+        try:
+            # Skip containers already well-covered by high-confidence primary OCR blocks.
+            inside_existing = [
+                b for b in existing
+                if float(b["x0"]) >= ox - 12 and float(b["x1"]) <= ox + bw + 12
+                and float(b["y0"]) >= oy - 12 and float(b["y1"]) <= oy + bh + 12
+            ]
+            ex_chars, ex_conf = _result_metrics(inside_existing)
+            if ex_chars >= 18 and ex_conf >= 0.80:
+                continue
+
+            best_lines: list[OcrLine] = []
+            best_scale = 1.5
+            best_pad = PERSIAN_PREPROCESS_BORDER_PAD
+            for sc in (1.5, 2.0):
+                prep_img, used_scale, used_pad = persian_preprocess_image(
+                    crop_rgb, precise=True, page_mode="comic", scale_override=sc,
+                )
+                try:
+                    raw_lines = [
+                        ln for ln in _recognize_bubble_lines(engine, prep_img, language)
+                        if ln.text.strip()
+                    ]
+                finally:
+                    prep_img.close()
+                if language == "fas":
+                    raw_lines = [
+                        OcrLine(normalize_persian_ocr_text(ln.text), ln.confidence, ln.polygon)
+                        for ln in raw_lines
+                        if normalize_persian_ocr_text(ln.text)
+                    ]
+                if len(raw_lines) > len(best_lines) or (
+                    len(raw_lines) == len(best_lines)
+                    and _bubble_region_confidence(raw_lines) > _bubble_region_confidence(best_lines) + 2.0
+                ):
+                    best_lines = raw_lines
+                    best_scale = used_scale
+                    best_pad = used_pad
+                if len(best_lines) >= 2 and _bubble_region_confidence(best_lines) >= 78.0:
+                    break
+
+            if not best_lines or _bubble_region_confidence(best_lines) < 42.0:
+                continue
+            restored: list[OcrLine] = []
+            for ln in best_lines:
+                if ln.confidence < min_confidence:
+                    continue
+                poly = [
+                    [
+                        max(0.0, min(float(page_w), (px - best_pad) / best_scale + ox)),
+                        max(0.0, min(float(page_h), (py - best_pad) / best_scale + oy)),
+                    ]
+                    for px, py in ln.polygon
+                ]
+                restored.append(OcrLine(ln.text, ln.confidence, poly))
+            _sort_ocr_lines_reading_order(restored, is_rtl_lang=is_rtl_lang)
+            discovered.extend(_blocks_from_lines(restored))
+        finally:
+            crop_rgb.close()
+    for idx, blk in enumerate(discovered, start=1):
+        blk["id"] = idx
+    return discovered
+
+
 def recognize_image(
     engine: Any,
     image: Image.Image,
@@ -3250,30 +3749,72 @@ def recognize_image(
     min_confidence: float = 0.35,
     *,
     page_mode: str = "auto",
+    persian_preprocess: bool = False,
 ) -> list[dict[str, Any]]:
     """Run the established OCR first; optional fallbacks only compete after a weak result."""
     from .license_guard import require_module_license
 
     require_module_license("ocr")
     primary = _recognize_image_primary(
-        engine, image, language, contrast, precise, min_confidence, page_mode=page_mode,
+        engine,
+        image,
+        language,
+        contrast,
+        precise,
+        min_confidence,
+        page_mode=page_mode,
+        persian_preprocess=persian_preprocess,
     )
     if isinstance(engine, IsolatedOcrEngine):
         analyze_blocks_typography(image, primary, page_mode=page_mode)
         return primary
-    if not _needs_extra_preprocess(primary):
-        analyze_blocks_typography(image, primary, page_mode=page_mode)
-        return primary
     best = primary
+    if (
+        persian_preprocess
+        and BUBBLE_PREPROCESS_ENABLED
+        and page_mode != "document"
+        and image.width >= 200
+        and image.height >= 140
+    ):
+        try:
+            container_blocks = _recognize_persian_containers(
+                engine, image, language, min_confidence, existing_blocks=best,
+            )
+        except Exception:
+            container_blocks = []
+        if container_blocks:
+            best = _merge_non_overlapping_blocks(
+                best, container_blocks, is_rtl_lang=(language in {"fas", "ara"}),
+            )
+    if not _needs_extra_preprocess(best):
+        analyze_blocks_typography(image, best, page_mode=page_mode)
+        return best
     if page_mode == "document":
         emit("نتیجهٔ اولیهٔ مقاله/کتاب ضعیف بود؛ پیش‌پردازش تخصصی شفاف‌سازی کاغذ و متن اجرا می‌شود")
         try:
-            doc_image, doc_scale = _document_preprocess_image(image)
+            if persian_preprocess:
+                doc_image, doc_scale, doc_pad = persian_preprocess_image(
+                    image, precise=True, page_mode="document", scale_override=2.0,
+                )
+            else:
+                doc_image, doc_scale = _document_preprocess_image(image)
+                doc_pad = 0
             try:
                 doc_fallback = _recognize_image_primary(
                     engine, doc_image, language, False, False, min_confidence,
-                    input_scale=doc_scale, page_mode=page_mode,
+                    input_scale=doc_scale, page_mode=page_mode, persian_preprocess=False,
                 )
+                if doc_pad > 0 and doc_scale > 0:
+                    shift = doc_pad / doc_scale
+                    for blk in doc_fallback:
+                        blk["x0"] = max(0.0, float(blk["x0"]) - shift)
+                        blk["y0"] = max(0.0, float(blk["y0"]) - shift)
+                        blk["x1"] = min(float(image.width), max(blk["x0"] + 1.0, float(blk["x1"]) - shift))
+                        blk["y1"] = min(float(image.height), max(blk["y0"] + 1.0, float(blk["y1"]) - shift))
+                        blk["polygon"] = [
+                            [max(0.0, px - shift), max(0.0, py - shift)]
+                            for px, py in blk.get("polygon", [])
+                        ]
             finally:
                 doc_image.close()
         except Exception:
@@ -3288,12 +3829,35 @@ def recognize_image(
     if EXTRA_PREPROCESS_ENABLED:
         emit("نتیجهٔ OCR اصلی ضعیف یا کوتاه است؛ پیش‌پردازش تکمیلی متن روشن اجرا می‌شود")
         try:
-            fallback_image = _extra_preprocess_image(image)
+            if persian_preprocess:
+                # Avoid destructive binary >200 threshold that erases anti-aliased Persian dots (نقطه).
+                inv_rgb = ImageOps.invert(_to_white_backed_rgb(image))
+                try:
+                    fallback_image, fb_scale, fb_pad = persian_preprocess_image(
+                        inv_rgb, precise=True, page_mode=page_mode, scale_override=2.0,
+                    )
+                finally:
+                    inv_rgb.close()
+            else:
+                fallback_image = _extra_preprocess_image(image)
+                fb_scale = float(EXTRA_PREPROCESS_SCALE)
+                fb_pad = 0
             try:
                 fallback = _recognize_image_primary(
                     engine, fallback_image, language, False, False, min_confidence,
-                    input_scale=EXTRA_PREPROCESS_SCALE, page_mode=page_mode,
+                    input_scale=fb_scale, page_mode=page_mode, persian_preprocess=False,
                 )
+                if fb_pad > 0 and fb_scale > 0:
+                    shift = fb_pad / fb_scale
+                    for blk in fallback:
+                        blk["x0"] = max(0.0, float(blk["x0"]) - shift)
+                        blk["y0"] = max(0.0, float(blk["y0"]) - shift)
+                        blk["x1"] = min(float(image.width), max(blk["x0"] + 1.0, float(blk["x1"]) - shift))
+                        blk["y1"] = min(float(image.height), max(blk["y0"] + 1.0, float(blk["y1"]) - shift))
+                        blk["polygon"] = [
+                            [max(0.0, px - shift), max(0.0, py - shift)]
+                            for px, py in blk.get("polygon", [])
+                        ]
             finally:
                 fallback_image.close()
         except Exception:
@@ -3305,7 +3869,7 @@ def recognize_image(
                 best = fallback
             else:
                 emit("نتیجهٔ OCR اصلی بهتر بود و حفظ شد")
-    if BUBBLE_PREPROCESS_ENABLED and page_mode != "document":
+    if BUBBLE_PREPROCESS_ENABLED and page_mode != "document" and not persian_preprocess:
         emit("پیش‌پردازش حباب کمیک برای مقایسه اجرا می‌شود")
         try:
             bubble = _recognize_bubble(engine, image, language, min_confidence)
