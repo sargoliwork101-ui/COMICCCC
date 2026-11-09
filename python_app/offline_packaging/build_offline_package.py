@@ -121,7 +121,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.3.6.0")]
+[assembly: System.Reflection.AssemblyVersion("4.3.7.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -451,7 +451,7 @@ def ensure_pyinstaller(python_exe: str | None = None) -> bool:
     """
     exe = python_exe or sys.executable
     if _pyinstaller_installed(exe):
-        print("[ok] PyInstaller is already installed in the build environment.")
+        say("[ok] PyInstaller is already installed in the build environment.")
         return True
 
     base_cmd = [
@@ -485,17 +485,17 @@ def ensure_pyinstaller(python_exe: str | None = None) -> bool:
         if index_url:
             cmd.extend(["--index-url", index_url])
         cmd.append(PYINSTALLER_SPEC)
-        print(f"[pyinstaller] Installing from {label} ...")
+        say(f"[pyinstaller] Installing from {label} ...")
         try:
             completed = subprocess.run(cmd, check=False)
         except Exception as exc:
-            print(f"[warn] pip could not be started for {label}: {exc}")
+            say(f"[warn] pip could not be started for {label}: {exc}")
             continue
         if completed.returncode == 0:
-            print(f"[ok] PyInstaller installed from {label}.")
+            say(f"[ok] PyInstaller installed from {label}.")
             return True
-        print(f"[warn] PyInstaller install from {label} failed (exit {completed.returncode}).")
-    print(
+        say(f"[warn] PyInstaller install from {label} failed (exit {completed.returncode}).")
+    say(
         "[ERROR] Could not install PyInstaller. Internet access to pypi.org (or one of the public\n"
         "        mirrors) is required, or place the PyInstaller .whl file inside the folder\n"
         "        'python_app\\wheelhouse' and run the build again."
@@ -526,7 +526,7 @@ def verify_bundled_language_models(tess_dir: Path, *, allow_missing: bool = Fals
             "the full float32 tessdata_best file (~3.33 MB) is required for correct Persian"
         )
     if not problems:
-        print("[ok] Bundled Tesseract language files (eng + fas) are present and up to date.")
+        say("[ok] Bundled Tesseract language files (eng + fas) are present and up to date.")
         return
     message = (
         "The offline bundle would ship without usable Tesseract language files:\n"
@@ -603,13 +603,13 @@ def stage_bundled_models(
             try:
                 engine.download(lang)
             except Exception as exc:
-                print(f"[warn] RapidOCR model download for {lang} skipped/failed: {exc}")
+                say(f"[warn] RapidOCR model download for {lang} skipped/failed: {exc}")
         tess_engine = TesseractEngine()
         for lang in ("eng", "fas"):
             try:
                 tess_engine._download_language_file(lang)
             except Exception as exc:
-                print(f"[warn] Tesseract traineddata download for {lang} skipped/failed: {exc}")
+                say(f"[warn] Tesseract traineddata download for {lang} skipped/failed: {exc}")
     if rapid_src.is_dir():
         shutil.copytree(rapid_src, rapid_dst, dirs_exist_ok=True)
     if tess_src.is_dir():
@@ -702,7 +702,7 @@ def pyinstaller_command(
     for pkg in ("rapidocr", "onnxruntime", "ctranslate2", "sentencepiece", "pymupdf", "bidi"):
         try:
             if importlib.util.find_spec(pkg) is None:
-                print(f"[warn] Optional package '{pkg}' is not installed - it will not be bundled.")
+                say(f"[warn] Optional package '{pkg}' is not installed - it will not be bundled.")
                 continue
         except Exception:
             continue
@@ -760,7 +760,9 @@ def write_offline_readme(target_dir: Path, *, include_nmt: bool) -> None:
         f"  {nmt_line}\r\n"
         "  - با بستن تب مرورگر، برنامه به‌صورت خودکار و تمیز بسته می‌شود.\r\n"
     )
-    (target_dir / "README-OFFLINE-FA.txt").write_text(text, encoding="utf-8")
+    # The BOM matters on Windows: without it Notepad shows the Persian text as
+    # broken characters. The TXT export of the program does the same thing.
+    (target_dir / "README-OFFLINE-FA.txt").write_text("\ufeff" + text, encoding="utf-8")
 
 
 def find_iscc() -> Path | None:
@@ -851,7 +853,7 @@ def build_windows_installer(
     iscc = find_iscc()
     iss_script = Path(__file__).resolve().parent / "ComicOCRStudio.iss"
     if iscc and iss_script.is_file():
-        print(f"[installer] Building Inno Setup installer with {iscc} ...")
+        say(f"[installer] Building Inno Setup installer with {iscc} ...")
         subprocess.check_call([
             str(iscc),
             f"/DAppVersion={APP_VERSION}",
@@ -865,12 +867,12 @@ def build_windows_installer(
             return output_exe
 
     payload_zip = dist_root / f"{base_name}.zip"
-    print(f"[installer] Compressing offline bundle archive {payload_zip.name} ...")
+    say(f"[installer] Compressing offline bundle archive {payload_zip.name} ...")
     zip_directory(app_dist_dir, payload_zip)
 
     csc = find_dotnet_csc()
     if csc:
-        print(f"[installer] Building native Windows GUI Setup .exe via {csc} ...")
+        say(f"[installer] Building native Windows GUI Setup .exe via {csc} ...")
         cs_source = build_root / "SetupStub.cs"
         stub_exe = build_root / "SetupStub.exe"
         cs_code = CSHARP_SFX_INSTALLER.replace("__APP_VERSION__", APP_VERSION)

@@ -318,8 +318,10 @@ def next_request(run: dict[str, Any], skill: str) -> tuple[ContextRequest | Free
             break
         remaining = job['remaining']
         prefix = combine_translation_texts([c['text'] for c in chosen])
-        def fits_next(part: str) -> bool:
-            return request.fits((prefix + '\n' if prefix else '') + part)
+        # The values are bound as defaults on purpose: a closure that reads the
+        # loop variables would silently use the values of a later iteration.
+        def fits_next(part: str, _request: Any = request, _prefix: str = prefix) -> bool:
+            return _request.fits((_prefix + '\n' if _prefix else '') + part)
         if fits_next(remaining):
             chosen.append({'job': index, 'text': remaining, 'rest': '', 'join': ''})
             continue

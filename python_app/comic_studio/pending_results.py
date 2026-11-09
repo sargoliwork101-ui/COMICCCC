@@ -175,18 +175,23 @@ def resolve(store: ProjectStore, project_id: str, token: str, revision: str,
             done = True; affected = replace
         else:
             run = state[RUN_KEY]; blocks = _lookup(state)
+            rows_by_key = {row['key']: row for row in view['rows']}
             for part in entry['chosen']:
                 job = run['jobs'][part['job']]; kept = []
                 for ref in job['refs']:
                     key = f"{ref['imageId']}:{ref['blockId']}"
                     block = blocks.get((str(ref['imageId']), str(ref['blockId'])))
-                    row = next(item for item in view['rows'] if item['key'] == key)
-                    if block is None or (row['conflict'] and choices[key] == 'keep'):
+                    row = rows_by_key.get(key)
+                    if row is None:
+                        # The row disappeared between preview and apply: keep the
+                        # block untouched instead of failing the whole request.
+                        continue
+                    if block is None or (row['conflict'] and choices.get(key) == 'keep'):
                         continue
                     ref['snapshot'] = target_snapshot(block)
                     kept.append(ref)
                 job['refs'] = kept
-            skipped = any(row['missing'] or (row['conflict'] and choices[row['key']] == 'keep') for row in view['rows'])
+            skipped = any(row['missing'] or (row['conflict'] and choices.get(row['key']) == 'keep') for row in view['rows'])
             # A summary produced from skipped/changed material must not silently
             # replace the user's existing story context.
             summary = run['context'] if skipped else entry['summary']

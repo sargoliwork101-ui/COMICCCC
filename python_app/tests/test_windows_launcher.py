@@ -130,7 +130,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
     assert "ComicOCRStudio-Offline-Setup-%APP_VERSION%" in offline_bat
-    assert 'set "APP_VERSION=4.36"' in offline_bat
+    assert 'set "APP_VERSION=4.37"' in offline_bat
     assert "DisableDelayedExpansion" in offline_bat
     assert '--find-links="%WHEELHOUSE_DIR%"' in offline_bat
     assert 'start_windows.bat" --setup-only' in offline_bat
@@ -536,3 +536,102 @@ def test_v436_every_builder_line_is_saved_in_a_log_file(tmp_path, monkeypatch):
     assert "test run" in text
     assert "hello from the builder" in text
     assert "second line" in text
+
+
+# ---------------------------------------------------------------------------
+# v4.37 - the full code review: every fix gets a regression test
+# ---------------------------------------------------------------------------
+
+
+def test_v437_the_builder_log_contains_every_message(tmp_path, monkeypatch):
+    """v4.37: the seller's log file must not miss a single builder message.
+
+    Root cause: parts of the builder still used `print()`, so those lines never
+    reached `build_offline.log` - the file the seller is asked to send when a
+    build fails was incomplete.
+    """
+    builder = _builder_module()
+    log = tmp_path / "build_offline.log"
+    monkeypatch.setattr(builder, "_log_file", lambda: log)
+
+    builder.start_log("review run")
+    builder.say("[ok] first line")
+    builder.say("[warn] second line")
+
+    text = log.read_text(encoding="utf-8")
+    assert "[ok] first line" in text
+    assert "[warn] second line" in text
+
+    source = (ROOT / "offline_packaging" / "build_offline_package.py").read_text(encoding="utf-8")
+    body = source.split("def say(", 1)[1].split("\n\n\n", 1)[-1]
+    assert "print(" not in body, "the builder must use say() so every line reaches the log file"
+
+
+def test_v437_the_offline_readme_opens_correctly_in_notepad(tmp_path):
+    """v4.37: the Persian read-me inside the offline package needs a UTF-8 BOM.
+
+    Without the BOM, Notepad on Windows shows the Persian text as broken
+    characters (the program's own TXT export already writes the BOM).
+    """
+    builder = _builder_module()
+    target = tmp_path / "app"
+    target.mkdir()
+    builder.write_offline_readme(target, include_nmt=False)
+    raw = (target / "README-OFFLINE-FA.txt").read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf"), "the offline read-me must start with a UTF-8 BOM"
+    assert "Comic OCR Studio" in raw.decode("utf-8-sig")
+
+
+def test_v437_the_context_helper_never_reads_a_later_loop_value():
+    """v4.37: the closure inside the loop must use the values of its own round."""
+    source = (ROOT / "comic_studio" / "context_run.py").read_text(encoding="utf-8")
+    assert "def fits_next(part: str, _request: Any = request, _prefix: str = prefix) -> bool:" in source
+
+
+def test_v437_applying_a_translation_never_crashes_when_a_row_disappeared(tmp_path, monkeypatch):
+    """v4.37: a missing preview row must not break the whole request."""
+    import sys
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from comic_studio import pending_results
+
+    class _Store:
+        def __init__(self):
+            self._lock = __import__("threading").RLock()
+            self.state = {
+                "id": "proj", "updatedAt": "now", "images": [], "settings": {},
+                "_aiContextRun": {
+                    "jobs": [{"refs": [{"imageId": "img", "blockId": "b"}], "imageName": "i", "remaining": ""}],
+                    "context": "", "completed": 0,
+                },
+            }
+
+        def get(self, project_id):
+            return self.state
+
+        def save(self, state):
+            self.state = state
+
+    store = _Store()
+    monkeypatch.setattr(pending_results, "load", lambda *a, **k: {
+        "id": "t", "kind": "translation", "createdAt": "now", "runDigest": "d",
+        "chosen": [{"job": 0, "text": "hello", "rest": "", "join": ""}],
+        "translated": ["سلام"],
+        "run": {"jobs": [{"refs": [{"imageId": "img", "blockId": "b"}], "imageName": "i"}],
+                "context": "", "completed": 0},
+        "summary": "",
+        "originals": {},
+    })
+    monkeypatch.setattr(pending_results, "inspect", lambda *a, **k: {
+        "id": "t", "kind": "translation", "createdAt": "now", "revision": "now", "canApply": True,
+        # The row for the job is missing on purpose.
+        "rows": [], "summary": "",
+    })
+    monkeypatch.setattr(pending_results, "_lookup", lambda state: {})
+    monkeypatch.setattr(pending_results, "remove", lambda *a, **k: None)
+    monkeypatch.setattr(pending_results, "distribute_translation", lambda parts, translated: list(translated))
+    monkeypatch.setattr(pending_results, "apply_response", lambda state, run, chosen, translated, summary: [])
+
+    result = pending_results.resolve(store, "proj", "t", "now", {})
+    assert result["kind"] == "translation"

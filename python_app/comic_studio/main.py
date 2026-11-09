@@ -1169,7 +1169,7 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR نیست.")
         if values.language not in ENGINE_INFO[engine_id]["languages"]:
             raise HTTPException(400, "این موتور از زبان انتخاب‌شده پشتیبانی نمی‌کند.")
-        state = project(values.project_id)
+        project(values.project_id)  # raises 404 when the project is gone
         try:
             path = store.image_path(values.project_id, values.image_id)
         except (KeyError, FileNotFoundError) as exc:
@@ -1216,7 +1216,6 @@ def create_app() -> FastAPI:
         require_module_license("ocr")
         with store._lock:
             state = project(project_id)
-            expected_updated_at = state.get("updatedAt", "")
             baseline = {item['id']: pending_results.ocr_signature(store, state, item['id']) for item in state['images']}
             original_ocr = {item['id']: '\n'.join(str(b.get('text') or '') for b in item.get('blocks', [])) for item in state['images']}
         engine = registry.get(values.engine)
@@ -2300,7 +2299,7 @@ def create_app() -> FastAPI:
     @app.put("/api/resources")
     def save_resources(values: ResourceBudget) -> dict[str, Any]:
         """Store how much of the machine the app may use (v4.29)."""
-        saved = resources.save_budget(values.model_dump())
+        resources.save_budget(values.model_dump())
         summary = resources.budget_summary()
         activity.add(
             "سهمیهٔ پردازنده و حافظهٔ برنامه به‌روزرسانی شد "
