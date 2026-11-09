@@ -15,6 +15,7 @@ python_app/build/
 python_app/dist/
 python_app/wheelhouse/
 python_app/*.spec
+python_app/build_offline.log
 
 # Seller-only private licensing keys, customer CRM & local issuance logs (never commit!)
 .seller_keys/

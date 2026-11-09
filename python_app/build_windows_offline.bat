@@ -1,60 +1,48 @@
 @echo off
+rem Comic OCR Studio 4.36 - Windows offline EXE / Setup builder launcher.
+rem The questions (which package, which output folder) are asked by the builder itself
+rem (Python), not by this file: the old `set /p` menu died silently on the seller's
+rem machine right after the output-folder question.
+rem Every run is recorded in python_app\build_offline.log
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>nul
-title Build Offline EXE ^& Setup - Comic OCR Studio 4.35
+title Build Offline EXE ^& Setup - Comic OCR Studio 4.36
 
 cd /d "%~dp0"
 set "APP_DIR=%CD%"
 set "VENV_PY=%APP_DIR%\.venv\Scripts\python.exe"
 set "WHEELHOUSE_DIR=%APP_DIR%\wheelhouse"
 set "DEFAULT_OUT_DIR=%APP_DIR%\dist"
-set "APP_VERSION=4.35"
+set "APP_VERSION=4.36"
 
 echo ====================================================================
-echo   Comic OCR Studio 4.35 - Offline Windows EXE ^& Setup Builder
+echo   Comic OCR Studio 4.36 - Offline Windows EXE ^& Setup Builder
 echo ====================================================================
 echo.
 
-set "BUILD_MODE="
-if /I "%~1"=="--base" set "BUILD_MODE=1"
-if /I "%~1"=="--with-nmt" set "BUILD_MODE=2"
-if /I "%~1"=="--full" set "BUILD_MODE=3"
-if /I "%~1"=="--check" set "BUILD_MODE=4"
+set "MODE=%~1"
 set "OUT_DIR=%~2"
+set "EXTRA_FLAGS="
+if /I "%MODE%"=="--base" set "MODE=1"
+if /I "%MODE%"=="--with-nmt" set "MODE=2"
+if /I "%MODE%"=="--full" set "MODE=3"
+if /I "%MODE%"=="--check" set "MODE=4"
+if not defined MODE set "MODE=menu"
+if "%MODE%"=="2" set "EXTRA_FLAGS=--with-nmt"
+if "%MODE%"=="3" set "EXTRA_FLAGS=--with-nmt --download-wheelhouse"
 
-if defined BUILD_MODE goto mode_selected
-
-echo Select offline package variant to build:
-echo   [1] Standard Offline Setup ^(App + Base RapidOCR models - compact ^& fast^)
-echo   [2] Full Offline Setup     ^(App + Base RapidOCR + 600M Offline NLLB Translator^)
-echo   [3] Full Offline Setup + Download wheelhouse\ for portable .bat installs
-echo   [4] Self-test only         ^(check this computer, build nothing^)
-echo.
-set /p "BUILD_MODE=Enter choice [1/2/3/4] (default 1): "
-if not defined BUILD_MODE set "BUILD_MODE=1"
-
-:mode_selected
-if "%BUILD_MODE%"=="4" goto self_test
-if defined OUT_DIR goto output_selected
-echo.
-echo Folder that receives the built EXE files:
-echo   Standalone app : ^<output folder^>\ComicOCRStudio\ComicOCRStudio.exe
-echo   Offline Setup  : ^<output folder^>\ComicOCRStudio-Offline-Setup-%APP_VERSION%.exe
-echo.
-set /p "OUT_DIR=Output folder (press Enter for %DEFAULT_OUT_DIR%): "
-if not defined OUT_DIR set "OUT_DIR=%DEFAULT_OUT_DIR%"
-
-:output_selected
 call :ensure_venv
 if errorlevel 1 goto no_venv
 
-if "%BUILD_MODE%"=="2" set "EXTRA_FLAGS=--with-nmt"
-if "%BUILD_MODE%"=="3" set "EXTRA_FLAGS=--with-nmt --download-wheelhouse"
+if "%MODE%"=="4" goto self_test
+if "%MODE%"=="menu" goto interactive
+if not defined OUT_DIR set "OUT_DIR=%DEFAULT_OUT_DIR%"
 
+echo [1/4] Output folder: "%OUT_DIR%"
 echo [2/4] Ensuring PyInstaller is installed in .venv...
 "%VENV_PY%" -c "import PyInstaller" >nul 2>nul
 if errorlevel 1 (
-  echo       PyInstaller is missing - installing it now (local wheelhouse, then pypi.org, then public mirrors)...
+  echo       PyInstaller is missing - installing it now ^(local wheelhouse, then pypi.org, then public mirrors^)...
   "%VENV_PY%" -m offline_packaging.build_offline_package --ensure-pyinstaller
   if errorlevel 1 (
     echo       Retrying with a direct pip install and mirror failover...
@@ -66,21 +54,14 @@ if errorlevel 1 (
 if errorlevel 1 goto pyi_failed
 
 echo [3/4] Building ComicOCRStudio.exe and 1-click Offline Windows Setup...
-echo       Output folder: "%OUT_DIR%"
 "%VENV_PY%" -m offline_packaging.build_offline_package %EXTRA_FLAGS% --output-dir "%OUT_DIR%"
-if errorlevel 1 (
-  echo.
-  echo [ERROR] The offline build did not finish. Read the last message above - it says exactly what to fix.
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto build_failed
 
 echo [4/4] Checking the produced files...
 if not exist "%OUT_DIR%\ComicOCRStudio" (
   echo.
   echo [ERROR] The standalone app folder was not created: "%OUT_DIR%\ComicOCRStudio"
-  pause
-  exit /b 1
+  goto build_failed
 )
 set "SETUP_EXE="
 if exist "%OUT_DIR%\ComicOCRStudio-Offline-Setup-%APP_VERSION%.exe" set "SETUP_EXE=%OUT_DIR%\ComicOCRStudio-Offline-Setup-%APP_VERSION%.exe"
@@ -101,19 +82,35 @@ if defined SETUP_EXE (
     echo   [warn] No installer file was found in "%OUT_DIR%" - check the messages above.
   )
 )
+echo   Full log       : "%APP_DIR%\build_offline.log"
+echo ====================================================================
+pause
+exit /b 0
+
+:interactive
+rem The builder asks the questions and prints the progress; nothing is asked here.
+"%VENV_PY%" -m offline_packaging.build_offline_package --interactive
+if errorlevel 1 goto build_failed
+echo.
+echo   Full log       : "%APP_DIR%\build_offline.log"
 echo ====================================================================
 pause
 exit /b 0
 
 :self_test
-call :ensure_venv
-if errorlevel 1 goto no_venv
-echo.
 "%VENV_PY%" -m offline_packaging.build_offline_package --preflight
 echo.
 echo (Self-test finished. Nothing was built and nothing was changed.)
+echo   Full log       : "%APP_DIR%\build_offline.log"
 pause
 exit /b 0
+
+:build_failed
+echo.
+echo [ERROR] The offline build did not finish. Read the last message above - it says exactly what to fix.
+echo         The full log is here: "%APP_DIR%\build_offline.log"
+pause
+exit /b 1
 
 :no_venv
 echo.
@@ -135,7 +132,7 @@ if exist "%VENV_PY%" (
   "%VENV_PY%" -c "import sys,struct; sys.exit(0 if (3,11) <= sys.version_info[:2] < (3,14) and struct.calcsize('P') == 8 else 1)" >nul 2>&1
   if not errorlevel 1 exit /b 0
 )
-echo [1/4] Preparing the Python environment of the program first...
+echo [0/4] Preparing the Python environment of the program first...
 call "%APP_DIR%\start_windows.bat" --setup-only
 if not exist "%VENV_PY%" exit /b 1
 "%VENV_PY%" -c "import sys,struct; sys.exit(0 if (3,11) <= sys.version_info[:2] < (3,14) and struct.calcsize('P') == 8 else 1)" >nul 2>&1
@@ -153,3 +150,9 @@ if not errorlevel 1 exit /b 0
 if not errorlevel 1 exit /b 0
 "%VENV_PY%" -m pip install --disable-pip-version-check --timeout 120 --retries 10 --prefer-binary --index-url https://pypi.tuna.tsinghua.edu.cn/simple "pyinstaller>=6.10,<7"
 exit /b %errorlevel%
+
+:done
+echo.
+echo (The builder stopped.)
+pause
+exit /b 0

@@ -130,7 +130,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
     assert "ComicOCRStudio-Offline-Setup-%APP_VERSION%" in offline_bat
-    assert 'set "APP_VERSION=4.35"' in offline_bat
+    assert 'set "APP_VERSION=4.36"' in offline_bat
     assert "DisableDelayedExpansion" in offline_bat
     assert '--find-links="%WHEELHOUSE_DIR%"' in offline_bat
     assert 'start_windows.bat" --setup-only' in offline_bat
@@ -428,3 +428,111 @@ def test_v435_only_real_blockers_are_listed_as_not_ready(tmp_path, monkeypatch, 
     # A missing backup copy is a heads-up, not a blocker.
     assert "[warn] Backup copy of the seller master key" in out
     assert "[note] PyInstaller" in out
+
+
+# ---------------------------------------------------------------------------
+# v4.36 - the seller lost a build because the .bat menu died silently
+# ---------------------------------------------------------------------------
+
+
+def test_v436_the_questions_are_asked_by_python_and_the_build_really_starts(monkeypatch, capsys):
+    """v4.36: the menu + output-folder question live in Python, not in the .bat.
+
+    On the seller's machine the old `set /p` menu closed the window right after
+    the output-folder question, so no build ever started. The builder now asks
+    the questions itself and every answer is echoed back.
+    """
+    builder = _builder_module()
+
+    asked: list[str] = []
+    answers = iter(["1", ""])
+
+    def fake_input(prompt: str = "") -> str:
+        asked.append(prompt)
+        try:
+            return next(answers)
+        except StopIteration:
+            return ""
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    captured: dict[str, object] = {}
+
+    def fake_run_build(args):
+        captured["output_dir"] = args.output_dir
+        captured["with_nmt"] = args.with_nmt
+        captured["download_wheelhouse"] = args.download_wheelhouse
+        return 0
+
+    monkeypatch.setattr(builder, "_run_build", fake_run_build)
+
+    code = builder.main(["--interactive"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert len(asked) == 2, out
+    assert "Enter choice" in asked[0]
+    assert "Output folder" in asked[1]
+    assert "Selected: 1" in out
+    assert str(builder.REPO_PY_ROOT / "dist") in out
+    assert captured["output_dir"] == str(builder.REPO_PY_ROOT / "dist")
+    assert captured["with_nmt"] is False
+    assert captured["download_wheelhouse"] is False
+
+
+def test_v436_the_menu_takes_the_full_offline_options(monkeypatch, capsys):
+    """v4.36: choices 2 and 3 must switch on the offline translator / wheelhouse."""
+    builder = _builder_module()
+
+    answers = iter(["3", "D:\\Builds"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    captured: dict[str, object] = {}
+
+    def fake_run_build(args):
+        captured["output_dir"] = args.output_dir
+        captured["with_nmt"] = args.with_nmt
+        captured["download_wheelhouse"] = args.download_wheelhouse
+        return 0
+
+    monkeypatch.setattr(builder, "_run_build", fake_run_build)
+
+    assert builder.main(["--interactive"]) == 0
+    out = capsys.readouterr().out
+    assert "Selected: 3" in out
+    assert captured["with_nmt"] is True
+    assert captured["download_wheelhouse"] is True
+    assert captured["output_dir"] == "D:\\Builds"
+
+
+def test_v436_the_batch_launcher_never_asks_questions_itself():
+    """v4.36: the .bat must not use `set /p` any more - it delegates to the builder."""
+    offline_bat = (ROOT / "build_windows_offline.bat").read_text(encoding="utf-8")
+    command_lines = [line.strip().lower() for line in offline_bat.splitlines() if not line.strip().lower().startswith("rem ")]
+    assert not any(line.startswith("set /p") for line in command_lines)
+    assert "--interactive" in offline_bat
+    assert "offline_packaging.build_offline_package" in offline_bat
+    # The window must never close silently: every exit path pauses first.
+    assert offline_bat.count("pause") >= 4
+
+
+def test_v436_batch_files_are_checked_out_with_crlf_endings():
+    """v4.36: cmd.exe mis-parses LF-only .bat files, so the endings are enforced."""
+    attrs = (ROOT.parent / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.bat text eol=crlf" in attrs
+
+
+def test_v436_every_builder_line_is_saved_in_a_log_file(tmp_path, monkeypatch):
+    """v4.36: a failing build must leave a log the seller can paste."""
+    builder = _builder_module()
+    log = tmp_path / "build_offline.log"
+    monkeypatch.setattr(builder, "_log_file", lambda: log)
+
+    builder.start_log("test run")
+    builder.say("hello from the builder")
+    builder.say("second line")
+
+    text = log.read_text(encoding="utf-8")
+    assert "test run" in text
+    assert "hello from the builder" in text
+    assert "second line" in text

@@ -60,8 +60,34 @@ def say(message: str = "") -> None:
 
     Without the flush the builder's own lines appeared *after* the output of
     PyInstaller (which writes straight to the console), so the log looked scrambled.
+
+    v4.36: every line is also appended to ``python_app/build_offline.log`` so the
+    seller can paste one file if a build ever fails again (the old `.bat` menu died
+    silently at the first question and left nothing behind to look at).
     """
     print(message, flush=True)
+    _append_log(message)
+
+
+def _log_file() -> Path:
+    return REPO_PY_ROOT / "build_offline.log"
+
+
+def _append_log(message: str) -> None:
+    try:
+        with _log_file().open("a", encoding="utf-8", errors="replace") as handle:
+            handle.write(message + "\n")
+    except Exception:
+        pass
+
+
+def start_log(title: str) -> None:
+    """Start a fresh log file for this run."""
+    try:
+        path = _log_file()
+        path.write_text(f"=== {title} ===\n", encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _describe_cmd(cmd: list[str] | str) -> str:
@@ -95,7 +121,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.3.5.0")]
+[assembly: System.Reflection.AssemblyVersion("4.3.6.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -1135,6 +1161,59 @@ def run_preflight(*, include_nmt: bool = False) -> int:
     return 0 if not problems else 1
 
 
+def _ask(question: str, default: str = "") -> str:
+    """Ask one question. An empty answer means "use the default".
+
+    v4.36: the questions are asked by Python instead of the `.bat` file. The old
+    `set /p` based menu died silently on the seller's machine right after the
+    output-folder question, so the menu now lives where it can be tested.
+    """
+    try:
+        raw = input(question)
+    except (EOFError, KeyboardInterrupt):
+        raw = ""
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        raw = raw[1:-1].strip()
+    return raw or default
+
+
+def interactive_menu() -> tuple[str, str]:
+    """Ask the seller what to build. Returns ``(mode, output_dir)``.
+
+    ``mode`` is one of ``"1"``, ``"2"``, ``"3"`` or ``"4"`` (self-test only).
+    """
+    say("=" * 72)
+    say(f"  Comic OCR Studio v{APP_VERSION} - Offline Windows EXE & Setup Builder")
+    say("=" * 72)
+    say("")
+    say("Select offline package variant to build:")
+    say("  [1] Standard Offline Setup (App + Base RapidOCR models - compact & fast)")
+    say("  [2] Full Offline Setup     (App + Base RapidOCR + 600M Offline NLLB Translator)")
+    say("  [3] Full Offline Setup + Download wheelhouse\\ for portable .bat installs")
+    say("  [4] Self-test only         (check this computer, build nothing)")
+    say("")
+    choice = _ask("Enter choice [1/2/3/4] (default 1): ", "1")
+    if choice not in {"1", "2", "3", "4"}:
+        say(f"[note] '{choice}' is not one of 1/2/3/4 - continuing with 1.")
+        choice = "1"
+    say(f"   Selected: {choice}")
+    if choice == "4":
+        return "4", ""
+
+    default_out = str(REPO_PY_ROOT / "dist")
+    say("")
+    say("Folder that receives the built EXE files:")
+    say(r"  Standalone app : <output folder>\ComicOCRStudio\ComicOCRStudio.exe")
+    say(rf"  Offline Setup  : <output folder>\ComicOCRStudio-Offline-Setup-{APP_VERSION}.exe")
+    say("")
+    out_dir = _ask(f"Output folder (press Enter for {default_out}): ", default_out)
+    out_path = Path(out_dir).expanduser()
+    say(f"   Output folder: {out_path}")
+    say("")
+    return choice, str(out_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=f"Build Comic OCR Studio v{APP_VERSION} Offline .exe & Setup")
     parser.add_argument("--with-nmt", action="store_true", help="Bundle 600M offline NLLB-200 translator inside the offline installer")
@@ -1165,9 +1244,25 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only check whether this computer can build the offline package (fast self-test) and exit",
     )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Ask which package to build and where to put it, then build (used by the .bat launcher)",
+    )
     args = parser.parse_args(argv)
 
     _reconfigure_console()
+    start_log(f"Comic OCR Studio v{APP_VERSION} offline builder - {' '.join(sys.argv[1:]) or 'no arguments'}")
+
+    if args.interactive:
+        mode, out_dir = interactive_menu()
+        if mode == "4":
+            return run_preflight(include_nmt=args.with_nmt)
+        args.output_dir = out_dir
+        if mode in {"2", "3"}:
+            args.with_nmt = True
+        if mode == "3":
+            args.download_wheelhouse = True
 
     if args.preflight:
         return run_preflight(include_nmt=args.with_nmt)
@@ -1178,6 +1273,7 @@ def main(argv: list[str] | None = None) -> int:
         say("")
         say("=" * 72)
         say(f"[ERROR] ساخت بستهٔ آفلاین انجام نشد: {exc}")
+        say(f"       گزارش کامل: {_log_file()}")
         say("=" * 72)
         return 1
     except subprocess.CalledProcessError as exc:
@@ -1197,6 +1293,7 @@ def main(argv: list[str] | None = None) -> int:
         say("=" * 72)
         say(f"[ERROR] ساخت بستهٔ آفلاین با یک خطای غیرمنتظره متوقف شد: {exc}")
         say(f"       ({type(exc).__name__}) - اگر این خطا تکرار شد، متن کامل بالا را نگه دارید.")
+        say(f"       گزارش کامل: {_log_file()}")
         say("=" * 72)
         return 1
 
@@ -1320,6 +1417,8 @@ def _run_build(args: argparse.Namespace) -> int:
         say("  [warn] Inno Setup روی این رایانه نصب نیست، بنابراین به‌جای فایل نصاب .exe یک")
         say("         آرشیو .zip ساخته شد. برای ساخت فایل نصاب واقعی، «Inno Setup 6» را نصب کنید")
         say("         و دوباره همین سازنده را اجرا کنید.")
+    say("=" * 72)
+    say(f"  گزارش کامل این ساخت: {_log_file()}")
     say("=" * 72)
     return 0
 
