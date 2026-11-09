@@ -130,7 +130,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
     assert "ComicOCRStudio-Offline-Setup-%APP_VERSION%" in offline_bat
-    assert 'set "APP_VERSION=4.34"' in offline_bat
+    assert 'set "APP_VERSION=4.35"' in offline_bat
     assert "DisableDelayedExpansion" in offline_bat
     assert '--find-links="%WHEELHOUSE_DIR%"' in offline_bat
     assert 'start_windows.bat" --setup-only' in offline_bat
@@ -387,3 +387,44 @@ def test_v434_the_readiness_checklist_never_contradicts_its_own_marks(tmp_path, 
     assert "[warn]" not in out
     assert "OCR models (RapidOCR) - found in" in out
     assert "Backup copy of the seller master key - found in" in out
+
+
+def test_v435_only_real_blockers_are_listed_as_not_ready(tmp_path, monkeypatch, capsys):
+    """v4.35: items the builder solves on its own must not be listed as 'not ready'."""
+    builder = _builder_module()
+
+    monkeypatch.setattr(builder, "_pyinstaller_installed", lambda *a, **k: False)
+    monkeypatch.setattr(builder, "find_iscc", lambda: None)
+    monkeypatch.setattr(builder, "find_dotnet_csc", lambda: None)
+
+    models = tmp_path / "models"
+    (models / "rapidocr").mkdir(parents=True)
+    (models / "rapidocr" / "ch_PP-OCRv5_det_mobile.onnx").write_bytes(b"onnx")
+    (models / "tesseract").mkdir(parents=True)
+    for lang in ("eng", "fas"):
+        (models / "tesseract" / f"{lang}.traineddata").write_bytes(b"x" * 3_400_000)
+    monkeypatch.setattr(builder, "models_dir", lambda: models)
+
+    import license_manager
+
+    class _VaultWithoutBackup:
+        def key_status(self):
+            return {
+                "vaultPublicKey": "a" * 64,
+                "embeddedPublicKey": "a" * 64,
+                "backupExists": False,
+                "issuedCount": 3,
+                "masterKeyPath": str(tmp_path / "seller_master_key.json"),
+                "backupPath": str(tmp_path / "backup" / "seller_master_key.json"),
+            }
+
+    monkeypatch.setattr(license_manager, "SellerVault", _VaultWithoutBackup)
+
+    code = builder.run_preflight()
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "همه‌چیز آماده است" in out
+    assert "مورد آماده نیست" not in out
+    # A missing backup copy is a heads-up, not a blocker.
+    assert "[warn] Backup copy of the seller master key" in out
+    assert "[note] PyInstaller" in out

@@ -95,7 +95,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.3.4.0")]
+[assembly: System.Reflection.AssemblyVersion("4.3.5.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -983,16 +983,22 @@ def run_preflight(*, include_nmt: bool = False) -> int:
     problems: list[str] = []
     notes: list[str] = []
 
-    def check(name: str, ok: bool, detail: str = "", *, blocking: bool = True) -> bool:
+    def check(name: str, ok: bool, detail: str = "", *, severity: str = "blocking") -> bool:
         """Print one checklist line. `name` is a neutral label, `detail` states the state.
 
-        `blocking=False` marks an item that the builder solves on its own (or that only
-        changes the kind of output), so it must not be listed as a problem.
+        `severity` decides how a missing item is reported:
+          - "blocking": the build cannot succeed -> counted as a problem,
+          - "warn": a heads-up that does not stop the build,
+          - "note": informational only (the builder solves it on its own).
         """
-        if blocking:
+        if severity == "blocking":
             mark = "[ok]  " if ok else "[warn]"
             if not ok:
                 problems.append(f"{name}: {detail}" if detail else name)
+        elif severity == "warn":
+            mark = "[ok]  " if ok else "[warn]"
+            if not ok:
+                notes.append(f"{name}: {detail}" if detail else name)
         else:
             mark = "[ok]  " if ok else "[note]"
             if not ok:
@@ -1021,7 +1027,7 @@ def run_preflight(*, include_nmt: bool = False) -> int:
         "PyInstaller (the packer that makes the .exe)",
         pyi_ok,
         "installed" if pyi_ok else "not installed - it will be installed automatically during the build",
-        blocking=False,
+        severity="note",
     )
     icon_png = REPO_PY_ROOT / "comic_studio" / "static" / "assets" / "icon128.png"
     check(
@@ -1064,13 +1070,14 @@ def run_preflight(*, include_nmt: bool = False) -> int:
                 "Backup copy of the seller master key",
                 backup_ok,
                 f"found in {status.get('backupPath', '')}" if backup_ok else f"missing in {status.get('backupPath', '')} - it is created automatically",
+                severity="warn",
             )
-        elif status.get("embeddedPublicKey"):
+        elif int(status.get("issuedCount") or 0) > 0:
             check(
                 "Seller master key",
                 False,
-                "the private seller folder has no master key - restore it (or import your backup) before building, "
-                "otherwise every license you already issued stops working",
+                "the private seller folder has no master key, but licenses were already issued - restore it "
+                "(or import your backup) before building, otherwise every license your customers have stops working",
             )
         else:
             check("Seller master key", True, "a new master key will be created on the first build")
@@ -1080,20 +1087,20 @@ def run_preflight(*, include_nmt: bool = False) -> int:
     iscc = find_iscc()
     csc = find_dotnet_csc()
     if iscc:
-        check("Inno Setup (makes the real .exe installer)", True, str(iscc), blocking=False)
+        check("Inno Setup (makes the real .exe installer)", True, str(iscc), severity="note")
     elif csc:
         check(
             "Inno Setup (makes the real .exe installer)",
             True,
             "not installed - a self-extracting .exe installer will be built instead",
-            blocking=False,
+            severity="note",
         )
     else:
         check(
             "Inno Setup (makes the real .exe installer)",
             True,
             "not installed - only a .zip archive can be produced",
-            blocking=False,
+            severity="note",
         )
         note("برای ساخت فایل نصاب واقعی .exe، نرم‌افزار «Inno Setup 6» را نصب کنید.")
 
