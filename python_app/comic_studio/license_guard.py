@@ -39,7 +39,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import _public_key, _vendor_config
+try:  # The embedded key/config modules must never break the app start-up (v4.32).
+    from . import _public_key
+except Exception:  # pragma: no cover - only hit when the file is missing/damaged
+    _public_key = None  # type: ignore[assignment]
+
+try:
+    from . import _vendor_config
+except Exception:  # pragma: no cover - only hit when the file is missing/damaged
+    _vendor_config = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # RFC 8032 Ed25519 Curve Constants & Pure-Python Arithmetic
@@ -318,7 +326,18 @@ class LicenseError(Exception):
 
 
 def active_public_key_bytes() -> bytes:
-    raw_hex = str(getattr(_public_key, "PUBLIC_VERIFY_KEY_HEX", "") or "").strip()
+    """Return the embedded 32-byte public verification key.
+
+    v4.32: a missing/damaged key module now yields a clear Persian `LicenseError`
+    instead of an `ImportError` that used to kill the whole app at start-up.
+    """
+    mod = _public_key
+    raw_hex = str(getattr(mod, "PUBLIC_VERIFY_KEY_HEX", "") or "").strip() if mod is not None else ""
+    if not raw_hex:
+        raise LicenseError(
+            "کلید عمومی برنامه در دسترس نیست. لطفاً برنامه را دوباره نصب کنید یا با پشتیبانی تماس بگیرید.",
+            code="CORRUPT_PUBLIC_KEY",
+        )
     try:
         pub = bytes.fromhex(raw_hex)
     except ValueError as exc:

@@ -58,7 +58,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.3.1.0")]
+[assembly: System.Reflection.AssemblyVersion("4.3.2.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -867,8 +867,19 @@ def main(argv: list[str] | None = None) -> int:
     synced_bundle = SellerVault().sync_all_before_exe_build()
     seller_info = synced_bundle["key"]
     vc_info = synced_bundle["vendorContact"]
+    key_status = synced_bundle.get("keyStatus") or {}
     print(f"[ok] Synced seller Ed25519 public key into build (fingerprint: {seller_info['fingerprint']})")
     print(f"[ok] Synced customer-facing contact info into build (phone: {vc_info['supportPhone']})")
+    # v4.32: never ship an EXE with a key that differs from the seller's vault, and warn loudly
+    # when the seller key was (re)created - that invalidates every license issued before.
+    for warning in key_status.get("warnings") or []:
+        print(f"[warn] {warning}")
+    embedded_now = SellerVault().embedded_public_key_hex()
+    if embedded_now and embedded_now != str(seller_info["public_key_hex"]).lower():
+        print("[error] The key embedded in the app does NOT match the seller's master key - aborting build.")
+        return 1
+    if not key_status.get("backupExists"):
+        print("[warn] No backup copy of the seller master key exists yet (see <seller dir>/backup/).")
 
     if args.download_wheelhouse:
         wh = download_wheelhouse(REPO_PY_ROOT / "pyproject.toml", REPO_PY_ROOT / "wheelhouse")

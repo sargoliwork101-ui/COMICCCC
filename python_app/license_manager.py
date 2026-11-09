@@ -157,6 +157,81 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
                 tmp_path.unlink()
 
 
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Write raw bytes atomically (temp file + `os.replace`)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        if os.name != "nt":
+            with contextlib.suppress(OSError):
+                os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            with contextlib.suppress(OSError):
+                os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            with contextlib.suppress(OSError):
+                tmp_path.unlink()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write a text file atomically (temp file + `os.replace`) so it is never left half-written."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        if os.name != "nt":
+            with contextlib.suppress(OSError):
+                os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            with contextlib.suppress(OSError):
+                os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            with contextlib.suppress(OSError):
+                tmp_path.unlink()
+
+
+class SellerKeyLostError(RuntimeError):
+    """Raised when the seller's private master key is missing and must not be silently replaced.
+
+    Silently creating a brand-new keypair would invalidate **every** license the seller
+    already issued to customers, so this is always surfaced to the seller instead.
+    """
+
+
+# Canonical body of `comic_studio/_public_key.py`.
+# The public verification key has to live *inside* the program (a user-writable copy could
+# be swapped by anyone to forge licenses), so instead of hoping the file is never damaged
+# we rewrite it in this canonical, validated and atomic form whenever the seller's vault
+# is used (panel start-up, or `.exe` build).
+_PUBLIC_KEY_MODULE_TEMPLATE = '''"""Embedded Ed25519 public verification key for Comic OCR Studio licenses.
+
+IMPORTANT SECURITY NOTE:
+- Only the 32-byte PUBLIC verification key lives in the client application.
+- The corresponding 32-byte PRIVATE signing key NEVER ships with the app or repository;
+  it stays exclusively inside the seller's private folder (`~/.comic-ocr-studio-seller/`).
+- Running `python_app/license_manager.py` (or `start_license_manager.bat`) on the seller's
+  computer automatically creates the seller's private master key (if absent) and syncs
+  its public verification key into `PUBLIC_VERIFY_KEY_HEX` below before building `.exe`.
+"""
+
+from __future__ import annotations
+
+# 32-byte (64-hex) RFC 8032 Ed25519 public verification key.
+PUBLIC_VERIFY_KEY_HEX: str = (
+    "{key_hex}"
+)
+'''
+
+
 def parse_modules_cli_spec(spec: str) -> dict[str, dict[str, Any]]:
     """Parse CLI `--modules-spec` like `ocr=lifetime,translation=30,editing=off`."""
     out: dict[str, dict[str, Any]] = {}
@@ -219,6 +294,11 @@ class SellerVault:
         return self.seller_dir / "seller_master_key.json"
 
     @property
+    def master_key_backup_path(self) -> Path:
+        """Second, independent copy of the master key so a single deletion cannot kill it."""
+        return self.seller_dir / "backup" / "seller_master_key.json"
+
+    @property
     def history_path(self) -> Path:
         return self.seller_dir / "issued_licenses.json"
 
@@ -226,11 +306,62 @@ class SellerVault:
     def customers_path(self) -> Path:
         return self.seller_dir / "seller_customers.json"
 
-    def ensure_master_key(self, *, sync_source: bool = True) -> dict[str, Any]:
-        with self._lock:
-            return self._ensure_master_key_unlocked(sync_source=sync_source)
+    def ensure_master_key(
+        self,
+        *,
+        sync_source: bool = True,
+        allow_create: bool = True,
+        force_new_key: bool = False,
+    ) -> dict[str, Any]:
+        """Return the seller's master key record, restoring it from the backup when needed.
 
-    def _ensure_master_key_unlocked(self, *, sync_source: bool = True) -> dict[str, Any]:
+        v4.32: the master key is the one thing that must never change silently - replacing it
+        invalidates every license the seller already issued. Therefore:
+        - a missing vault file is restored from the automatic backup copy when possible,
+        - a completely missing vault is **not** regenerated while licenses exist unless the
+          seller explicitly asks for it (`force_new_key=True`).
+        """
+        with self._lock:
+            return self._ensure_master_key_unlocked(
+                sync_source=sync_source,
+                allow_create=allow_create,
+                force_new_key=force_new_key,
+            )
+
+    def _restore_master_key_from_backup(self) -> dict[str, Any] | None:
+        """Copy the backup master key back to its main location (returns the loaded record)."""
+        backup = self.master_key_backup_path
+        if not backup.is_file():
+            return None
+        try:
+            payload = backup.read_bytes()
+            self.master_key_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(self.master_key_path, payload)
+            return json.loads(payload.decode("utf-8"))
+        except Exception:
+            return None
+
+    def _write_master_key_record(self, record: dict[str, Any]) -> None:
+        """Persist the master key to its main location **and** to the independent backup copy."""
+        _atomic_write_json(self.master_key_path, record)
+        with contextlib.suppress(Exception):
+            _atomic_write_json(self.master_key_backup_path, record)
+
+    def _vault_looks_lost(self) -> bool:
+        """True when the vault is empty but the app already carries a real key / issued licenses."""
+        issued = len(self.list_history()) or len(self._load_raw_customers())
+        embedded = self.embedded_public_key_hex()
+        real_embedded = bool(embedded) and set(embedded) != {"0"}
+        return bool(issued) or (real_embedded and self.seller_dir.exists())
+
+    def _ensure_master_key_unlocked(
+        self,
+        *,
+        sync_source: bool = True,
+        allow_create: bool = True,
+        force_new_key: bool = False,
+        _restored_from_backup: bool = False,
+    ) -> dict[str, Any]:
         record: dict[str, Any] | None = None
         needs_upgrade_save = False
         if self.master_key_path.is_file():
@@ -270,9 +401,42 @@ class SellerVault:
                     "fingerprint": hashlib.sha256(pub).hexdigest()[:16].upper(),
                 }
             except Exception as exc:
+                # A damaged vault file must not kill the seller's key: fall back to the
+                # independent backup copy before giving up.
+                if not _restored_from_backup and self.master_key_backup_path.is_file():
+                    restored = self._restore_master_key_from_backup()
+                    if restored is not None:
+                        return self._ensure_master_key_unlocked(
+                            sync_source=sync_source,
+                            allow_create=allow_create,
+                            force_new_key=force_new_key,
+                            _restored_from_backup=True,
+                        )
                 raise RuntimeError(f"فایل کلید مادر فروشنده آسیب دیده است: {exc}") from exc
+        elif self.master_key_backup_path.is_file():
+            # The main vault file vanished (deleted / moved / cleaned): restore it from the
+            # independent backup copy so the seller's key - and every issued license - survives.
+            restored = self._restore_master_key_from_backup()
+            if restored is not None:
+                return self._ensure_master_key_unlocked(
+                    sync_source=sync_source,
+                    allow_create=allow_create,
+                    force_new_key=force_new_key,
+                    _restored_from_backup=True,
+                )
 
         if record is None:
+            if self._vault_looks_lost() and not force_new_key:
+                raise SellerKeyLostError(
+                    "کلید مادر فروشنده در پوشهٔ خصوصی پیدا نشد، ولی لایسنس‌هایی قبلاً صادر شده‌اند. "
+                    "ساخت کلید جدید همهٔ لایسنس‌های صادرشده را از کار می‌اندازد؛ "
+                    "ابتدا فایل پشتیبان کلید را برگردانید (پوشهٔ backup داخل پوشهٔ فروشنده) "
+                    "یا از بخش «بازیابی کلید» در پنل فروشنده استفاده کنید."
+                )
+            if not allow_create and not force_new_key:
+                raise SellerKeyLostError(
+                    "کلید مادر فروشنده در پوشهٔ خصوصی پیدا نشد و ساخت خودکار آن غیرفعال است."
+                )
             master_bytes = secrets.token_bytes(MASTER_SECRET_BYTES)
             seed = derive_ed25519_seed_from_master_256b(master_bytes)
             pub = ed25519_public_key(seed)
@@ -289,7 +453,12 @@ class SellerVault:
             needs_upgrade_save = True
 
         if needs_upgrade_save:
-            _atomic_write_json(self.master_key_path, record)
+            self._write_master_key_record(record)
+        else:
+            # Keep the independent backup copy in sync with the live vault.
+            with contextlib.suppress(Exception):
+                if not self.master_key_backup_path.is_file():
+                    _atomic_write_json(self.master_key_backup_path, record)
         if sync_source:
             self.sync_public_key_to_source(record["public_key_hex"])
         return record
@@ -316,7 +485,7 @@ class SellerVault:
             "fingerprint": hashlib.sha256(pub).hexdigest()[:16].upper(),
         }
         with self._lock:
-            _atomic_write_json(self.master_key_path, record)
+            self._write_master_key_record(record)
             if sync_source:
                 self.sync_public_key_to_source(record["public_key_hex"])
         return record
@@ -376,10 +545,11 @@ class SellerVault:
     def sync_all_before_exe_build(self) -> dict[str, Any]:
         """Ensure both `_public_key.py` and `_vendor_config.py` reflect latest seller settings before `.exe` build."""
         with self._lock:
-            key_rec = self.ensure_master_key(sync_source=True)
+            key_rec = self.ensure_master_key(sync_source=True, allow_create=True)
             vendor = self.get_vendor_contact()
             self.sync_vendor_contact_to_source(vendor)
-            return {"key": key_rec, "vendorContact": vendor}
+            status = self.key_status()
+            return {"key": key_rec, "vendorContact": vendor, "keyStatus": status}
 
     def import_master_key(self, payload: dict[str, Any], *, sync_source: bool = True) -> dict[str, Any]:
         with self._lock:
@@ -429,7 +599,7 @@ class SellerVault:
             "public_key_hex": pub.hex(),
             "fingerprint": hashlib.sha256(pub).hexdigest()[:16].upper(),
         }
-        _atomic_write_json(self.master_key_path, record)
+        self._write_master_key_record(record)
 
         # If the backup bundle also carries customer directory or history, merge them safely!
         if isinstance(payload.get("customers"), list) and payload["customers"]:
@@ -452,30 +622,114 @@ class SellerVault:
         return record
 
     def sync_public_key_to_source(self, public_key_hex: str) -> bool:
-        if not self.public_key_py.is_file():
-            return False
-        current_text = self.public_key_py.read_text(encoding="utf-8")
-        pattern = r'(PUBLIC_VERIFY_KEY_HEX:\s*str\s*=\s*\(\s*")([0-9a-fA-F]{64})("\s*\))'
-        updated_text, count = re.subn(
-            pattern,
-            rf"\g<1>{public_key_hex.lower()}\g<3>",
-            current_text,
-            count=1,
-        )
-        if count == 0:
-            pattern_flat = r'(PUBLIC_VERIFY_KEY_HEX(?:\s*:\s*str)?\s*=\s*")([0-9a-fA-F]{64})(")'
+        """Write the seller's public verification key into the app source file.
+
+        v4.32 (root-cause hardening):
+        - The key is validated (exactly 32 bytes / 64 hex chars, valid Ed25519 curve point)
+          before anything is written.
+        - The file is rewritten **atomically** (temp file + `os.replace`) so a crash or a
+          power cut can never leave a truncated / duplicated key behind.
+        - A damaged file (missing, split over several lines, stale 64-byte value, ...) is
+          **repaired** into the canonical single-line form instead of staying broken
+          forever - a broken embedded key makes every license check fail.
+        """
+        key_hex = str(public_key_hex or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", key_hex):
+            raise ValueError("کلید عمومی فروشنده معتبر نیست (باید دقیقاً ۶۴ کاراکتر هگز باشد).")
+        try:
+            from comic_studio.license_guard import _decode_point
+
+            if _decode_point(bytes.fromhex(key_hex)) is None:
+                raise ValueError("کلید عمومی فروشنده یک نقطهٔ معتبر Ed25519 نیست.")
+        except ImportError:
+            pass
+
+        current_text = ""
+        if self.public_key_py.is_file():
+            try:
+                current_text = self.public_key_py.read_text(encoding="utf-8")
+            except OSError:
+                current_text = ""
+
+        updated_text = current_text
+        if current_text:
+            pattern = r'(PUBLIC_VERIFY_KEY_HEX:\s*str\s*=\s*\(\s*")([0-9a-fA-F]{64})("\s*\))'
             updated_text, count = re.subn(
-                pattern_flat,
-                rf"\g<1>{public_key_hex.lower()}\g<3>",
+                pattern,
+                rf"\g<1>{key_hex}\g<3>",
                 current_text,
                 count=1,
             )
-        if count > 0 and updated_text != current_text:
-            self.public_key_py.write_text(updated_text, encoding="utf-8")
-        import comic_studio._public_key as pub_mod
+            if count == 0:
+                pattern_flat = r'(PUBLIC_VERIFY_KEY_HEX(?:\s*:\s*str)?\s*=\s*")([0-9a-fA-F]{64})(")'
+                updated_text, count = re.subn(
+                    pattern_flat,
+                    rf"\g<1>{key_hex}\g<3>",
+                    current_text,
+                    count=1,
+                )
+            # A file that still carries extra/duplicated 64-hex chunks (e.g. a key that was
+            # split over two lines) is damaged: rewrite it in the canonical form.
+            if count == 0 or len(re.findall(r"[0-9a-fA-F]{64}", updated_text)) != 1:
+                updated_text = ""
+        if not updated_text:
+            updated_text = _PUBLIC_KEY_MODULE_TEMPLATE.format(key_hex=key_hex)
 
-        pub_mod.PUBLIC_VERIFY_KEY_HEX = public_key_hex.lower()
-        return count > 0
+        if updated_text != current_text:
+            _atomic_write_text(self.public_key_py, updated_text)
+
+        with contextlib.suppress(Exception):
+            import comic_studio._public_key as pub_mod
+
+            pub_mod.PUBLIC_VERIFY_KEY_HEX = key_hex
+        return True
+
+    def embedded_public_key_hex(self) -> str:
+        """Return the public key currently embedded in the app source (empty when unusable)."""
+        if not self.public_key_py.is_file():
+            return ""
+        try:
+            text = self.public_key_py.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        found = re.findall(r"[0-9a-fA-F]{64}", text)
+        return found[0].lower() if found else ""
+
+    def key_status(self) -> dict[str, Any]:
+        """Summarize the seller key state for the panel / build output."""
+        embedded = self.embedded_public_key_hex()
+        vault_pub = ""
+        if self.master_key_path.is_file():
+            try:
+                loaded = json.loads(self.master_key_path.read_text(encoding="utf-8"))
+                vault_pub = str(loaded.get("public_key_hex") or "").strip().lower()
+            except Exception:
+                vault_pub = ""
+        has_backup = self.master_key_backup_path.is_file()
+        issued = len(self.list_history()) or len(self._load_raw_customers())
+        warnings: list[str] = []
+        if not vault_pub and not has_backup:
+            warnings.append(
+                "کلید مادر فروشنده پیدا نشد. اگر کلید جدیدی ساخته شود، همهٔ لایسنس‌های صادرشده از کار می‌افتند؛ "
+                "فایل پشتیبان کلید را برگردانید."
+            )
+        elif vault_pub and embedded and vault_pub != embedded:
+            warnings.append(
+                "کلید داخل برنامه با کلید فروشنده یکی نیست. پیش از ساخت EXE همگام‌سازی خودکار انجام می‌شود، "
+                "ولی اگر نسخهٔ قدیمی نصب شده باشد مشتریان باید لایسنس را دوباره وارد کنند."
+            )
+        if not has_backup and vault_pub:
+            warnings.append("نسخهٔ پشتیبان کلید مادر ساخته نشده است؛ توصیه می‌شود پشتیبان‌گیری شود.")
+        return {
+            "vaultPublicKey": vault_pub,
+            "embeddedPublicKey": embedded,
+            "inSync": bool(vault_pub) and vault_pub == embedded,
+            "backupExists": has_backup,
+            "issuedCount": issued,
+            "masterKeyPath": str(self.master_key_path),
+            "backupPath": str(self.master_key_backup_path),
+            "warnings": warnings,
+        }
 
     def list_history(self) -> list[dict[str, Any]]:
         if not self.history_path.is_file():
@@ -875,6 +1129,10 @@ _PANEL_HTML = """<!doctype html>
     .status-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:13px 18px}
     .status-strip-pills{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     .status-strip-note{margin:6px 0 0;font-size:11.8px;color:var(--muted)}
+    .key-alert{margin:10px 0 0;padding:10px 13px;border-radius:10px;font-size:12.4px;line-height:1.85;font-weight:600;border:1px solid #fbbf2455;background:color-mix(in srgb,#f59e0b 12%,transparent);color:#fbbf24}
+    .key-alert.danger{border-color:#fb718555;background:color-mix(in srgb,#e11d48 12%,transparent);color:#fb7185}
+    .key-alert ul{margin:6px 0 0;padding-right:18px}
+    .key-alert li{margin:3px 0}
 
     /* Pills & Badges — exact match with Studio .summary-pill / .lic-pill */
     .pill{display:inline-flex;align-items:center;gap:6px;padding:3.5px 11px;border-radius:999px;font-size:11.5px;font-weight:700;border:1px solid var(--line-2);background:var(--surface-2);color:var(--text);white-space:nowrap}
@@ -1017,6 +1275,7 @@ _PANEL_HTML = """<!doctype html>
         <p class="status-strip-note">
           کلید مادر ۲۵۶ بایتی (۲۰۴۸ بیت) و کلید خصوصی امضای دیجیتال فقط روی سیستم خودتان نگهداری می‌شود و هرگز وارد پوشهٔ <code>dist</code> یا فایل نصاب <code>.exe</code> مشتری نمی‌شود.
         </p>
+        <div id="keyAlert" class="key-alert" hidden></div>
       </div>
     </section>
 
@@ -1436,6 +1695,12 @@ _PANEL_HTML = """<!doctype html>
       return Number(n || 0).toLocaleString('fa-IR');
     }
 
+    function escapeHtml(str) {
+      return String(str == null ? '' : str).replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[ch]));
+    }
+
     function notify(msg, err = false) {
       const el = $('toast'); el.textContent = msg;
       el.className = err ? 'toast err' : 'toast'; el.style.display = 'block';
@@ -1835,9 +2100,60 @@ _PANEL_HTML = """<!doctype html>
       } catch (e) { notify(e.message, true); }
     };
 
+    function renderKeyAlert(info) {
+      const box = $('keyAlert');
+      if (!box) return;
+      const msgs = [];
+      let danger = false;
+      if (info.keyState === 'missing') {
+        danger = true;
+        msgs.push(info.detail || 'کلید مادر فروشنده پیدا نشد.');
+      }
+      const status = info.keyStatus || {};
+      (status.warnings || []).forEach((w) => msgs.push(w));
+      if (!msgs.length) { box.hidden = true; box.innerHTML = ''; return; }
+      box.hidden = false;
+      box.className = 'key-alert' + (danger ? ' danger' : '');
+      let html = '<div>' + msgs.map((m) => `<div>• ${escapeHtml(m)}</div>`).join('') + '</div>';
+      if (info.keyState === 'missing') {
+        html += '<div style="margin-top:8px"><button type="button" class="sm danger" id="recreateKeyBtn">'
+          + 'ساخت کلید مادر جدید (همهٔ لایسنس‌های قبلی باطل می‌شود)</button></div>';
+      }
+      box.innerHTML = html;
+      const btn = $('recreateKeyBtn');
+      if (btn) {
+        btn.onclick = async () => {
+          const ok = await sellerConfirm(
+            'با ساخت کلید جدید، همهٔ لایسنس‌هایی که تا الان صادر کرده‌اید دیگر کار نمی‌کنند و مشتریان باید لایسنس تازه بگیرند. '
+            + 'اگر فایل پشتیبان کلید دارید، بهتر است همان را برگردانید. ادامه می‌دهید؟',
+            { title: 'ساخت کلید مادر جدید', confirmText: 'بله، کلید جدید بساز', danger: true }
+          );
+          if (!ok) return;
+          try {
+            await callApi('/api/recreate-master-key', 'POST', {});
+            notify('کلید مادر جدید ساخته شد و در برنامه همگام شد.');
+            await refreshInfo();
+          } catch (e) { notify(e.message, true); }
+        };
+      }
+    }
+
     async function refreshInfo() {
       const info = await callApi('/api/info');
       SUPPORT_PHONE = info.supportPhone || SUPPORT_PHONE;
+      renderKeyAlert(info);
+      if (info.keyState === 'missing') {
+        $('keyBadge').textContent = 'کلید مادر پیدا نشد';
+        $('schemeBadge').textContent = 'کلید مادر در دسترس نیست';
+        $('thisPcBadge').textContent = `کد سیستم شما: ${info.thisHardwareId || '—'}`;
+        historyItems = [];
+        customerItems = [];
+        populateSetupTab(info);
+        renderQuickSelect();
+        renderCustomers();
+        renderHistory();
+        return;
+      }
       $('keyBadge').textContent = `کلید مادر فعال (شناسه: ${info.fingerprint})`;
       $('schemeBadge').textContent = `کلید مادر ${toFaNum(info.masterSecretBytes || 256)} بایتی + Ed25519`;
       $('thisPcBadge').textContent = `کد سیستم شما: ${info.thisHardwareId}`;
@@ -2027,7 +2343,31 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                 return
 
             if parsed.path == "/api/info":
-                rec = vault.ensure_master_key(sync_source=True)
+                try:
+                    rec = vault.ensure_master_key(sync_source=True, allow_create=True)
+                except SellerKeyLostError as exc:
+                    # The seller's private key is gone: never silently create a new one,
+                    # because that would invalidate every license already issued.
+                    status = vault.key_status()
+                    self._send_json(
+                        {
+                            "keyState": "missing",
+                            "detail": str(exc),
+                            "keyStatus": status,
+                            "fingerprint": "",
+                            "keyScheme": "Ed25519+MasterRoot256B",
+                            "masterSecretBytes": MASTER_SECRET_BYTES,
+                            "publicKeyHex": "",
+                            "sellerDir": str(vault.seller_dir),
+                            "thisHardwareId": compute_hardware_id(),
+                            "supportPhone": "",
+                            "vendorContact": {},
+                            "stats": {"totalCustomers": 0, "activeCustomers": 0, "expiringCustomers": 0, "expiredCustomers": 0},
+                            "customers": [],
+                            "history": [],
+                        }
+                    )
+                    return
                 vc = vault.get_vendor_contact()
                 customers = vault.list_customers()
                 stats = {
@@ -2049,12 +2389,18 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                         "stats": stats,
                         "customers": customers,
                         "history": vault.list_history()[:300],
+                        "keyState": "ok",
+                        "keyStatus": vault.key_status(),
                     }
                 )
                 return
 
             if parsed.path == "/api/master-secret":
-                rec = vault.ensure_master_key(sync_source=False)
+                try:
+                    rec = vault.ensure_master_key(sync_source=False, allow_create=False)
+                except SellerKeyLostError as exc:
+                    self._send_json({"detail": str(exc)}, HTTPStatus.CONFLICT)
+                    return
                 self._send_json(
                     {
                         "fingerprint": rec["fingerprint"],
@@ -2164,6 +2510,13 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
                     self._send_json({"fingerprint": rec["fingerprint"], "publicKeyHex": rec["public_key_hex"]})
                     return
 
+                if parsed.path == "/api/recreate-master-key":
+                    # Explicit, seller-confirmed replacement of a lost master key.
+                    # Every license issued with the old key stops verifying afterwards.
+                    rec = vault.ensure_master_key(sync_source=True, allow_create=True, force_new_key=True)
+                    self._send_json({"fingerprint": rec["fingerprint"], "publicKeyHex": rec["public_key_hex"]})
+                    return
+
                 if parsed.path == "/api/set-master-key":
                     rec = vault.set_custom_master_key(str(data.get("raw_secret") or ""), sync_source=True)
                     self._send_json(
@@ -2188,7 +2541,15 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
 
 
 def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
-    key_info = vault.ensure_master_key(sync_source=True)
+    try:
+        key_info = vault.ensure_master_key(sync_source=True, allow_create=True)
+    except SellerKeyLostError as exc:
+        print("=" * 72)
+        print("  Comic OCR Studio — پنل فروشنده")
+        print(f"  ⚠ {exc}")
+        print("  پنل باز می‌شود تا بتوانید از بخش «بازیابی کلید» فایل پشتیبان را برگردانید.")
+        print("=" * 72)
+        key_info = {"fingerprint": "—"}
     panel_secret = secrets.token_urlsafe(24)
     handler_cls = build_seller_panel_handler(vault, panel_secret)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
@@ -2198,6 +2559,7 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     print("  Comic OCR Studio — پنل مدرن مدیریت مشتریان و صدور لایسنس (فروشنده)")
     print(f"  شناسهٔ کلید مادر ۲۵۶ بایتی + Ed25519 شما: {key_info['fingerprint']}")
     print(f"  مسیر خصوصی گاوصندوق فروشنده: {vault.seller_dir}")
+    print(f"  نسخهٔ پشتیبان کلید مادر: {vault.master_key_backup_path}")
     print(f"  آدرس پنل محلی: {url}")
     print("  برای بستن پنل، کلیدهای Ctrl+C را بزنید یا این پنجره را ببندید.")
     print("=" * 72)

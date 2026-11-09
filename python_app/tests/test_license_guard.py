@@ -991,3 +991,206 @@ def test_v420_hwid_persian_digits_non_downgrade_activation_and_seller_csv_harden
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# v4.32 — the embedded public key must never stay broken / get lost
+# ---------------------------------------------------------------------------
+
+
+def test_v432_a_damaged_embedded_public_key_file_is_repaired(tmp_path: Path) -> None:
+    """v4.32: a key file split over two lines (or with a stale 64-byte value) is repaired.
+
+    Before v4.32 the seller sync only replaced the *first* 64-hex chunk, so a file that
+    carried the key over two lines stayed broken forever and every license check failed.
+    """
+    import sys
+
+    py_root = Path(__file__).resolve().parents[1]
+    if str(py_root) not in sys.path:
+        sys.path.insert(0, str(py_root))
+    from license_manager import SellerVault
+
+    pub_py = tmp_path / "_public_key.py"
+    pub_py.write_text(
+        'PUBLIC_VERIFY_KEY_HEX: str = (\n'
+        '    "3b951708d00abcee2e8f405664964c0c158976f336c2039ba0c81a84e6fd31b7"\n'
+        '    "28a8307044fcf1017f75b3429b981136d6bc9b066de9c56a3d7a0ec7a3e2462c"\n'
+        ')\n',
+        encoding="utf-8",
+    )
+    vault = SellerVault(seller_dir=tmp_path / "seller_v432", public_key_py=pub_py)
+    rec = vault.ensure_master_key(sync_source=True)
+    key_hex = rec["public_key_hex"]
+
+    text = pub_py.read_text(encoding="utf-8")
+    import re
+
+    chunks = re.findall(r"[0-9a-fA-F]{64}", text)
+    assert chunks == [key_hex], f"the file must contain exactly one 64-hex key, got {chunks}"
+    assert f'"{key_hex}"' in text
+
+    # The repaired file must be understood by the runtime verifier.
+    import importlib
+
+    mod = importlib.import_module("comic_studio._public_key")
+    original = mod.PUBLIC_VERIFY_KEY_HEX
+    try:
+        namespace: dict = {}
+        exec(compile(text, str(pub_py), "exec"), namespace)  # noqa: S102
+        assert namespace["PUBLIC_VERIFY_KEY_HEX"] == key_hex
+    finally:
+        mod.PUBLIC_VERIFY_KEY_HEX = original
+
+
+def test_v432_the_seller_master_key_is_backed_up_and_restored_automatically(tmp_path: Path) -> None:
+    """v4.32: deleting the seller's key file must not change the key (licenses keep working)."""
+    import sys
+
+    py_root = Path(__file__).resolve().parents[1]
+    if str(py_root) not in sys.path:
+        sys.path.insert(0, str(py_root))
+    from license_manager import SellerVault
+
+    pub_py = tmp_path / "_public_key.py"
+    pub_py.write_text(
+        'PUBLIC_VERIFY_KEY_HEX: str = (\n    "' + ("0" * 64) + '"\n)\n',
+        encoding="utf-8",
+    )
+    seller_dir = tmp_path / "seller_v432_backup"
+    vault = SellerVault(seller_dir=seller_dir, public_key_py=pub_py)
+    rec = vault.ensure_master_key(sync_source=True)
+    assert vault.master_key_backup_path.is_file(), "an independent backup copy must exist"
+
+    # The seller (or a cleaner) deletes the main vault file -> the key must come back.
+    vault.master_key_path.unlink()
+    restored = vault.ensure_master_key(sync_source=True)
+    assert restored["public_key_hex"] == rec["public_key_hex"]
+    assert restored["private_seed_hex"] == rec["private_seed_hex"]
+    assert vault.master_key_path.is_file()
+
+    status = vault.key_status()
+    assert status["backupExists"] is True
+    assert status["inSync"] is True
+
+
+def test_v432_a_lost_seller_key_is_never_silently_replaced(tmp_path: Path) -> None:
+    """v4.32: with licenses already issued, a missing vault must NOT silently create a new key."""
+    import sys
+
+    py_root = Path(__file__).resolve().parents[1]
+    if str(py_root) not in sys.path:
+        sys.path.insert(0, str(py_root))
+    from license_manager import SellerKeyLostError, SellerVault
+
+    pub_py = tmp_path / "_public_key.py"
+    pub_py.write_text(
+        'PUBLIC_VERIFY_KEY_HEX: str = (\n    "' + ("0" * 64) + '"\n)\n',
+        encoding="utf-8",
+    )
+    seller_dir = tmp_path / "seller_v432_lost"
+    vault = SellerVault(seller_dir=seller_dir, public_key_py=pub_py)
+    rec = vault.ensure_master_key(sync_source=True)
+    vault.issue(hardware_id="CS4-ABCD-EFGH-JKLM-NPQR", holder="مشتری", plan="lifetime", days=None)
+
+    # Both the vault and its backup disappear -> the seller must be warned, not silently replaced.
+    vault.master_key_path.unlink()
+    if vault.master_key_backup_path.is_file():
+        vault.master_key_backup_path.unlink()
+    with pytest.raises(SellerKeyLostError):
+        vault.ensure_master_key(sync_source=True)
+
+    # Explicit confirmation is required to build a replacement key.
+    forced = vault.ensure_master_key(sync_source=True, force_new_key=True)
+    assert forced["public_key_hex"] != rec["public_key_hex"]
+
+
+def test_v432_a_missing_public_key_module_gives_a_clear_persian_error(monkeypatch) -> None:
+    """v4.32: a missing/damaged key module must not crash the app start-up with an ImportError."""
+    monkeypatch.setattr(license_guard, "_public_key", None)
+    with pytest.raises(LicenseError) as excinfo:
+        license_guard.active_public_key_bytes()
+    assert excinfo.value.code == "CORRUPT_PUBLIC_KEY"
+    assert "کلید عمومی برنامه" in str(excinfo.value)
+
+
+def test_v432_the_seller_panel_reports_a_missing_master_key(tmp_path: Path) -> None:
+    """v4.32: the seller panel must show a clear message (not a crash) when the key is gone."""
+    import sys
+    import threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    py_root = Path(__file__).resolve().parents[1]
+    if str(py_root) not in sys.path:
+        sys.path.insert(0, str(py_root))
+    from license_manager import SellerVault, build_seller_panel_handler
+
+    pub_py = tmp_path / "_public_key.py"
+    pub_py.write_text(
+        'PUBLIC_VERIFY_KEY_HEX: str = (\n    "' + ("0" * 64) + '"\n)\n',
+        encoding="utf-8",
+    )
+    seller_dir = tmp_path / "seller_v432_panel"
+    vault = SellerVault(seller_dir=seller_dir, public_key_py=pub_py)
+    vault.ensure_master_key(sync_source=True)
+    vault.issue(hardware_id="CS4-ABCD-EFGH-JKLM-NPQR", holder="مشتری", plan="lifetime", days=None)
+    vault.master_key_path.unlink()
+    if vault.master_key_backup_path.is_file():
+        vault.master_key_backup_path.unlink()
+
+    secret = "test-panel-secret-432"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), build_seller_panel_handler(vault, secret))
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/info",
+            headers={"X-Seller-Secret": secret},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        assert payload["keyState"] == "missing"
+        assert "کلید مادر" in payload["detail"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_v432_the_app_still_answers_when_the_public_key_module_is_missing(monkeypatch, tmp_path) -> None:
+    """v4.32: a missing key module must not crash the app - the UI gets a clear Persian message."""
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path / "data"))
+    monkeypatch.setattr(license_guard, "_public_key", None)
+    SECURITY_GATE.reset_memory_state()
+    app = create_app()
+    with scoped_client(app) as client:
+        resp = client.get("/api/license/status")
+        assert resp.status_code in (200, 402), resp.text
+        body = resp.text
+        if resp.status_code == 402:
+            assert "کلید عمومی برنامه" in body
+
+
+def test_v432_a_damaged_seller_vault_file_is_restored_from_the_backup(tmp_path: Path) -> None:
+    """v4.32: a truncated/corrupted vault file must fall back to the automatic backup copy."""
+    import sys
+
+    py_root = Path(__file__).resolve().parents[1]
+    if str(py_root) not in sys.path:
+        sys.path.insert(0, str(py_root))
+    from license_manager import SellerVault
+
+    pub_py = tmp_path / "_public_key.py"
+    pub_py.write_text(
+        'PUBLIC_VERIFY_KEY_HEX: str = (\n    "' + ("0" * 64) + '"\n)\n',
+        encoding="utf-8",
+    )
+    vault = SellerVault(seller_dir=tmp_path / "seller_v432_damaged", public_key_py=pub_py)
+    rec = vault.ensure_master_key(sync_source=True)
+
+    # Simulate a half-written vault file (the pre-v4.32 write was not atomic).
+    vault.master_key_path.write_text('{"private_seed_hex": "aa', encoding="utf-8")
+    recovered = vault.ensure_master_key(sync_source=True)
+    assert recovered["public_key_hex"] == rec["public_key_hex"]
+    assert recovered["private_seed_hex"] == rec["private_seed_hex"]
