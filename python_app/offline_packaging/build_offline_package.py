@@ -36,6 +36,43 @@ from comic_studio.paths import models_dir  # noqa: E402
 
 SFX_MAGIC = b"COS405PK"
 
+
+class BuildError(RuntimeError):
+    """A build failure that already carries an actionable message for the user.
+
+    v4.33: every expected failure of the offline builder is reported through this
+    exception so the builder prints a clear Persian/English explanation instead of a
+    raw Python traceback (which is what the user saw: «اصلاً کار نمی‌کنه، همه‌اش پایتونی»).
+    """
+
+
+def _reconfigure_console() -> None:
+    """Make sure Persian messages are not garbled when the output is redirected."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+def say(message: str = "") -> None:
+    """Print a builder message and flush immediately.
+
+    Without the flush the builder's own lines appeared *after* the output of
+    PyInstaller (which writes straight to the console), so the log looked scrambled.
+    """
+    print(message, flush=True)
+
+
+def _describe_cmd(cmd: list[str] | str) -> str:
+    if isinstance(cmd, str):
+        return cmd
+    parts = [str(part) for part in cmd]
+    for marker in ("PyInstaller", "pip", "ISCC", "csc.exe"):
+        if any(marker in part for part in parts):
+            return marker
+    return parts[0] if parts else "the build step"
+
 PYINSTALLER_SPEC = "pyinstaller>=6.10,<7"
 # Official public PyPI mirrors used when `pypi.org` is slow or blocked.
 PYPI_FALLBACK_MIRRORS: tuple[tuple[str, str], ...] = (
@@ -58,7 +95,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.3.2.0")]
+[assembly: System.Reflection.AssemblyVersion("4.3.3.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -472,10 +509,47 @@ def verify_bundled_language_models(tess_dir: Path, *, allow_missing: bool = Fals
         f"or copy them manually into '{models_dir() / 'tesseract'}' before building."
     )
     if allow_missing:
-        print("[warn] " + message.replace("\n", "\n       "))
-        print("[warn] The built app cannot read Persian until these files are added.")
+        say("[warn] " + message.replace("\n", "\n       "))
+        say("[warn] The built app cannot read Persian until these files are added.")
         return
-    raise RuntimeError(message)
+    raise BuildError(message)
+
+
+def verify_bundled_ocr_models(staging_dir: Path, *, allow_missing: bool = False) -> None:
+    """Fail the build when the bundled OCR models are missing.
+
+    Root cause of «the offline app does not work»: the builder only checked the
+    Tesseract language files and happily shipped a bundle **without the RapidOCR
+    models**, so the installed app started but could not read a single line of text.
+    Now the OCR models are verified exactly like the language files.
+    """
+    problems: list[str] = []
+    rapid_dir = staging_dir / "rapidocr"
+    expected = [
+        "ch_PP-OCRv5_det_mobile.onnx",
+        "latin_PP-OCRv5_rec_mobile.onnx",
+        "arabic_PP-OCRv5_rec_mobile.onnx",
+    ]
+    present = [name for name in expected if (rapid_dir / name).is_file()]
+    if not present:
+        problems.append("the RapidOCR models are missing (no .onnx model file was bundled)")
+    else:
+        for language, rec_name in (("English", "latin_PP-OCRv5_rec_mobile.onnx"), ("Persian", "arabic_PP-OCRv5_rec_mobile.onnx")):
+            if rec_name not in present:
+                problems.append(f"the {language} OCR model ({rec_name}) is missing")
+    if problems:
+        message = (
+            "The offline bundle would ship without usable OCR models:\n"
+            + "\n".join(f"  - {item}" for item in problems)
+            + "\nConnect to the internet and build again (the builder downloads them automatically),\n"
+            + f"or copy them manually into '{models_dir() / 'rapidocr'}' before building."
+        )
+        if allow_missing:
+            say("[warn] " + message.replace("\n", "\n       "))
+            say("[warn] The built app cannot read text until these files are added.")
+            return
+        raise BuildError(message)
+    say("[ok] Bundled RapidOCR models (detector + English + Persian) are present.")
 
 
 def stage_bundled_models(
@@ -515,6 +589,7 @@ def stage_bundled_models(
     if tess_src.is_dir():
         shutil.copytree(tess_src, tess_dst, dirs_exist_ok=True)
 
+    verify_bundled_ocr_models(staging_dir, allow_missing=allow_missing_language_models)
     verify_bundled_language_models(tess_dst, allow_missing=allow_missing_language_models)
 
     if include_nmt:
@@ -524,11 +599,31 @@ def stage_bundled_models(
             from comic_studio.local_nmt import LocalNmtManager
 
             mgr = LocalNmtManager()
-            mgr.prepare("nllb-600m")
+            try:
+                mgr.prepare("nllb-600m")
+            except Exception as exc:
+                message = (
+                    "The offline translator model (NLLB-200 600M) could not be prepared:\n"
+                    f"  {exc}\n"
+                    "Check the internet connection and try again, or build the standard package (without --with-nmt)."
+                )
+                if allow_missing_language_models:
+                    say("[warn] " + message.replace("\n", "\n       "))
+                else:
+                    raise BuildError(message) from exc
             nmt_src = mgr.model_dir("nllb-600m")
         if nmt_src.is_dir():
             nmt_dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(nmt_src, nmt_dst, dirs_exist_ok=True)
+        if not any(nmt_dst.glob("*")):
+            message = (
+                "The offline bundle would ship without the offline translator model.\n"
+                "Connect to the internet and build again, or build the standard package (without --with-nmt)."
+            )
+            if allow_missing_language_models:
+                say("[warn] " + message.replace("\n", "\n       "))
+            else:
+                raise BuildError(message)
 
     return staging_dir
 
@@ -573,7 +668,18 @@ def pyinstaller_command(
     if any(staged_models_dir.rglob("*")):
         cmd.extend(["--add-data", f"{staged_models_dir}{sep}bundled_models"])
 
+    # v4.33: only ask PyInstaller to collect packages that are really installed.
+    # `--collect-all <missing package>` makes PyInstaller abort the whole build, which used
+    # to kill the offline build on a machine where one optional runtime was absent.
+    import importlib.util
+
     for pkg in ("rapidocr", "onnxruntime", "ctranslate2", "sentencepiece", "pymupdf", "bidi"):
+        try:
+            if importlib.util.find_spec(pkg) is None:
+                print(f"[warn] Optional package '{pkg}' is not installed - it will not be bundled.")
+                continue
+        except Exception:
+            continue
         cmd.extend(["--collect-all", pkg])
 
     for hidden in (
@@ -824,6 +930,130 @@ def verify_no_seller_secrets_in_dist(app_dist_dir: Path) -> None:
             raise RuntimeError(f"SECURITY ABORT: Seller-only file detected in customer bundle: {item}")
 
 
+def verify_built_app(app_dist_dir: Path, *, expect_models: bool = True) -> None:
+    """Check the built app folder before it is packaged into an installer.
+
+    Root cause of «the offline app does not work»: the build could finish while the
+    executable or the bundled models were missing, and the broken result was handed
+    to the customer as if it were fine.
+    """
+    problems: list[str] = []
+    if not app_dist_dir.is_dir():
+        problems.append(f"the output folder '{app_dist_dir}' was not created")
+    else:
+        exe = app_dist_dir / "ComicOCRStudio.exe"
+        if not exe.is_file():
+            linux_exe = app_dist_dir / "ComicOCRStudio"
+            if not linux_exe.is_file():
+                problems.append("the ComicOCRStudio executable is missing from the output folder")
+        internal = app_dist_dir / "_internal"
+        base = internal if internal.is_dir() else app_dist_dir
+        if not (base / "comic_studio" / "static" / "index.html").is_file():
+            problems.append("the program files (static folder) are missing from the built app")
+        if expect_models:
+            models_root = base / "bundled_models"
+            rapid_bundle = models_root / "rapidocr"
+            if not models_root.is_dir():
+                problems.append("the offline OCR models were not bundled into the app")
+            elif not rapid_bundle.is_dir() or not any(rapid_bundle.glob("*.onnx")):
+                problems.append("the RapidOCR models are not inside the bundled_models folder")
+    if not problems:
+        say("[ok] The built app contains the executable, the program files and the offline models.")
+        return
+    raise BuildError(
+        "The build finished but the result is not usable:\n"
+        + "\n".join(f"  - {item}" for item in problems)
+        + "\nNothing was installed; please report this message."
+    )
+
+
+def run_preflight(*, include_nmt: bool = False) -> int:
+    """Check the build environment in seconds and print a clear checklist.
+
+    v4.33: the seller could not tell *why* the offline build failed, so the builder
+    now offers a self-test that answers every question before the long build starts.
+    """
+    say("=" * 72)
+    say(f"  Comic OCR Studio v{APP_VERSION} - بررسی آمادگی ساخت بستهٔ آفلاین")
+    say("=" * 72)
+    problems: list[str] = []
+
+    def check(label: str, ok: bool, detail: str = "") -> bool:
+        mark = "[ok]  " if ok else "[warn]"
+        say(f"  {mark} {label}" + (f" - {detail}" if detail else ""))
+        if not ok:
+            problems.append(label)
+        return ok
+
+    check("Python 3.11+", sys.version_info >= (3, 11), f"Python {sys.version.split()[0]}")
+    try:
+        import comic_studio  # noqa: F401
+
+        check("The program package (comic_studio) can be imported", True)
+    except Exception as exc:
+        check("The program package (comic_studio) can be imported", False, str(exc))
+    check("PyInstaller is installed", _pyinstaller_installed(sys.executable))
+    icon_png = REPO_PY_ROOT / "comic_studio" / "static" / "assets" / "icon128.png"
+    check("The program icon is available", icon_png.is_file(), str(icon_png))
+
+    rapid_dir = models_dir() / "rapidocr"
+    rapid_ok = rapid_dir.is_dir() and any(rapid_dir.glob("*.onnx"))
+    check("The OCR models are downloaded (RapidOCR)", rapid_ok, str(rapid_dir))
+    tess_dir = models_dir() / "tesseract"
+    tess_ok = all((tess_dir / f"{lang}.traineddata").is_file() for lang in ("eng", "fas"))
+    check("The language files are downloaded (eng + fas)", tess_ok, str(tess_dir))
+    if include_nmt:
+        nmt_dir = models_dir() / "local-nmt" / "nllb-600m"
+        check("The offline translator model (NLLB-200 600M) is available", nmt_dir.is_dir(), str(nmt_dir))
+
+    try:
+        from license_manager import SellerVault
+
+        vault = SellerVault()
+        status = vault.key_status()
+        if status.get("vaultPublicKey"):
+            check("The seller master key is available", True, status.get("masterKeyPath", ""))
+            check("A backup copy of the seller master key exists", bool(status.get("backupExists")), status.get("backupPath", ""))
+        elif status.get("embeddedPublicKey"):
+            check(
+                "The seller master key is available",
+                False,
+                "the private seller folder has no master key - restore it (or import your backup) before building, "
+                "otherwise every license you already issued stops working",
+            )
+        else:
+            check("The seller master key is available", True, "a new master key will be created on the first build")
+    except Exception as exc:
+        check("The seller master key is available", False, str(exc))
+
+    iscc = find_iscc()
+    csc = find_dotnet_csc()
+    if iscc:
+        check("Inno Setup is installed (real .exe installer)", True, str(iscc))
+    elif csc:
+        check("Inno Setup is installed (real .exe installer)", False, "not installed - a self-extracting .exe installer will be built instead")
+    else:
+        check("Inno Setup is installed (real .exe installer)", False, "not installed - only a .zip archive can be produced")
+
+    try:
+        usage = shutil.disk_usage(str(REPO_PY_ROOT))
+        free_gb = usage.free / (1024 ** 3)
+        check("There is enough free disk space", free_gb >= 3.0, f"{free_gb:.1f} GB free")
+    except Exception:
+        pass
+
+    say("-" * 72)
+    if problems:
+        say(f"  {len(problems)} مورد آماده نیست — ساخت بستهٔ آفلاین با این موارد ممکن است ناموفق باشد:")
+        for item in problems:
+            say(f"    - {item}")
+        say("  راه‌حل معمول: یک‌بار اینترنت را وصل کنید و دوباره اجرا کنید (مدل‌ها خودکار دانلود می‌شوند).")
+    else:
+        say("  همه‌چیز آماده است — ساخت بستهٔ آفلاین باید با موفقیت انجام شود.")
+    say("=" * 72)
+    return 0 if not problems else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=f"Build Comic OCR Studio v{APP_VERSION} Offline .exe & Setup")
     parser.add_argument("--with-nmt", action="store_true", help="Bundle 600M offline NLLB-200 translator inside the offline installer")
@@ -847,47 +1077,120 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-missing-language-models",
         action="store_true",
-        help="Do not stop the build when the bundled Tesseract language files (eng/fas) are missing",
+        help="Do not stop the build when the bundled OCR models / language files are missing",
+    )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="Only check whether this computer can build the offline package (fast self-test) and exit",
     )
     args = parser.parse_args(argv)
 
+    _reconfigure_console()
+
+    if args.preflight:
+        return run_preflight(include_nmt=args.with_nmt)
+
+    try:
+        return _run_build(args)
+    except BuildError as exc:
+        say("")
+        say("=" * 72)
+        say(f"[ERROR] ساخت بستهٔ آفلاین انجام نشد: {exc}")
+        say("=" * 72)
+        return 1
+    except subprocess.CalledProcessError as exc:
+        say("")
+        say("=" * 72)
+        say(f"[ERROR] مرحلهٔ «{_describe_cmd(exc.cmd)}» با خطا متوقف شد (کد خروجی {exc.returncode}).")
+        say("       پیام‌های بالای صفحه دلیل خطا را نشان می‌دهند.")
+        say("       اگر مدل‌ها یا فایل‌های زبان دانلود نشده‌اند، یک‌بار اینترنت را وصل کنید و دوباره تلاش کنید.")
+        say("=" * 72)
+        return 1
+    except KeyboardInterrupt:
+        say("")
+        say("[ERROR] ساخت بستهٔ آفلاین توسط کاربر لغو شد.")
+        return 130
+    except Exception as exc:  # last resort - the user never sees a raw Python traceback
+        say("")
+        say("=" * 72)
+        say(f"[ERROR] ساخت بستهٔ آفلاین با یک خطای غیرمنتظره متوقف شد: {exc}")
+        say(f"       ({type(exc).__name__}) - اگر این خطا تکرار شد، متن کامل بالا را نگه دارید.")
+        say("=" * 72)
+        return 1
+
+
+def _run_build(args: argparse.Namespace) -> int:
     build_root = Path(args.build_dir).expanduser().resolve() if args.build_dir else REPO_PY_ROOT / "build" / "offline_pkg"
     dist_root = Path(args.output_dir).expanduser().resolve() if args.output_dir else REPO_PY_ROOT / "dist"
     build_root.mkdir(parents=True, exist_ok=True)
     dist_root.mkdir(parents=True, exist_ok=True)
 
     if args.ensure_pyinstaller:
-        return 0 if ensure_pyinstaller() else 1
+        if ensure_pyinstaller():
+            return 0
+        raise BuildError(
+            "PyInstaller could not be installed. Internet access to pypi.org (or one of the public\n"
+            "       mirrors) is required, or copy the PyInstaller .whl file into the folder\n"
+            "       'python_app\\wheelhouse' and run the build again."
+        )
 
     if not ensure_pyinstaller():
-        return 1
+        raise BuildError(
+            "PyInstaller could not be installed. Internet access to pypi.org (or one of the public\n"
+            "       mirrors) is required, or copy the PyInstaller .whl file into the folder\n"
+            "       'python_app\\wheelhouse' and run the build again."
+        )
 
-    from license_manager import SellerVault
+    from license_manager import SellerKeyLostError, SellerVault
 
-    synced_bundle = SellerVault().sync_all_before_exe_build()
+    vault = SellerVault()
+    key_state_before = vault.key_status()
+    try:
+        synced_bundle = vault.sync_all_before_exe_build()
+    except SellerKeyLostError as exc:
+        raise BuildError(str(exc)) from exc
     seller_info = synced_bundle["key"]
     vc_info = synced_bundle["vendorContact"]
     key_status = synced_bundle.get("keyStatus") or {}
-    print(f"[ok] Synced seller Ed25519 public key into build (fingerprint: {seller_info['fingerprint']})")
-    print(f"[ok] Synced customer-facing contact info into build (phone: {vc_info['supportPhone']})")
+    if not key_state_before.get("vaultPublicKey"):
+        # The private seller folder was empty: a brand new keypair was created and the key
+        # inside the app was replaced. Licenses issued with the old key stop working.
+        issued = int(key_state_before.get("issuedCount") or 0)
+        if issued:
+            raise BuildError(
+                f"The private seller folder has no master key, but {issued} license(s) were already issued.\n"
+                "       A new key was created, which would break every license your customers have.\n"
+                "       Restore your master key (the backup file inside the seller folder) and build again."
+            )
+        say("[warn] The private seller folder was empty, so a NEW master key was created for this build.")
+        say("[warn] If you issued licenses on another computer, restore your master key backup first -")
+        say("[warn] otherwise those licenses will not be accepted by the new build.")
+    say(f"[ok] Synced seller Ed25519 public key into build (fingerprint: {seller_info['fingerprint']})")
+    say(f"[ok] Synced customer-facing contact info into build (phone: {vc_info['supportPhone']})")
     # v4.32: never ship an EXE with a key that differs from the seller's vault, and warn loudly
     # when the seller key was (re)created - that invalidates every license issued before.
     for warning in key_status.get("warnings") or []:
-        print(f"[warn] {warning}")
+        say(f"[warn] {warning}")
     embedded_now = SellerVault().embedded_public_key_hex()
     if embedded_now and embedded_now != str(seller_info["public_key_hex"]).lower():
-        print("[error] The key embedded in the app does NOT match the seller's master key - aborting build.")
-        return 1
+        raise BuildError(
+            "The key embedded in the app does NOT match the seller's master key.\n"
+            "       Restore the seller key (or run start_license_manager.bat once) and build again -\n"
+            "       shipping this build would break every license your customers already have."
+        )
     if not key_status.get("backupExists"):
-        print("[warn] No backup copy of the seller master key exists yet (see <seller dir>/backup/).")
+        say("[warn] No backup copy of the seller master key exists yet (see <seller dir>/backup/).")
 
     if args.download_wheelhouse:
         wh = download_wheelhouse(REPO_PY_ROOT / "pyproject.toml", REPO_PY_ROOT / "wheelhouse")
-        print(f"[ok] Offline wheelhouse ready at: {wh}")
+        say(f"[ok] Offline wheelhouse ready at: {wh}")
 
     icon_png = REPO_PY_ROOT / "comic_studio" / "static" / "assets" / "icon128.png"
+    if not icon_png.is_file():
+        raise BuildError(f"The program icon is missing: {icon_png}")
     icon_ico = generate_windows_ico(icon_png, build_root / "ComicOCRStudio.ico")
-    print(f"[ok] Generated multi-size Windows icon: {icon_ico}")
+    say(f"[ok] Generated multi-size Windows icon: {icon_ico}")
 
     staged_models = stage_bundled_models(
         build_root / "bundled_models",
@@ -895,7 +1198,7 @@ def main(argv: list[str] | None = None) -> int:
         skip_download=args.skip_model_download,
         allow_missing_language_models=args.allow_missing_language_models,
     )
-    print(f"[ok] Staged bundled offline models (with_nmt={args.with_nmt}): {staged_models}")
+    say(f"[ok] Staged bundled offline models (with_nmt={args.with_nmt}): {staged_models}")
 
     cmd = pyinstaller_command(
         entry_script=REPO_PY_ROOT / "run.py",
@@ -906,13 +1209,14 @@ def main(argv: list[str] | None = None) -> int:
         static_dir=REPO_PY_ROOT / "comic_studio" / "static",
         staged_models_dir=staged_models,
     )
-    print("[pyinstaller] Running:", " ".join(cmd))
+    say("[pyinstaller] Running: " + " ".join(cmd))
     subprocess.check_call(cmd, cwd=str(REPO_PY_ROOT))
 
     app_dist_dir = dist_root / "ComicOCRStudio"
+    verify_built_app(app_dist_dir, expect_models=not args.allow_missing_language_models)
     guard_bin = build_native_license_guard(app_dist_dir, build_root, seller_info["public_key_hex"])
     if guard_bin is not None:
-        print(f"[ok] Compiled native public-key integrity guard: {guard_bin}")
+        say(f"[ok] Compiled native public-key integrity guard: {guard_bin}")
     verify_no_seller_secrets_in_dist(app_dist_dir)
     write_offline_readme(app_dist_dir, include_nmt=args.with_nmt)
 
@@ -924,8 +1228,18 @@ def main(argv: list[str] | None = None) -> int:
         icon_path=icon_ico,
         suffix=suffix,
     )
-    print(f"\n[SUCCESS] Standalone executable folder: {app_dist_dir}")
-    print(f"[SUCCESS] Offline installer package : {installer_artifact}")
+    say("")
+    say("=" * 72)
+    say("  BUILD COMPLETE - ساخت بستهٔ آفلاین با موفقیت انجام شد")
+    say("=" * 72)
+    say(f"  برنامهٔ مستقل (پوشه) : {app_dist_dir}")
+    say(f"  فایل نصاب آفلاین    : {installer_artifact}")
+    if installer_artifact.suffix.lower() != ".exe":
+        say("")
+        say("  [warn] Inno Setup روی این رایانه نصب نیست، بنابراین به‌جای فایل نصاب .exe یک")
+        say("         آرشیو .zip ساخته شد. برای ساخت فایل نصاب واقعی، «Inno Setup 6» را نصب کنید")
+        say("         و دوباره همین سازنده را اجرا کنید.")
+    say("=" * 72)
     return 0
 
 

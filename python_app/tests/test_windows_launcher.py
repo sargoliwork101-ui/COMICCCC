@@ -3,6 +3,8 @@ import re
 import tomllib
 from types import SimpleNamespace
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 NORMAL = (ROOT / "start_windows.bat").read_text(encoding="utf-8")
@@ -127,7 +129,8 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     offline_bat = (ROOT / "build_windows_offline.bat").read_text(encoding="utf-8")
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
-    assert "ComicOCRStudio-Offline-Setup-4.32" in offline_bat
+    assert "ComicOCRStudio-Offline-Setup-%APP_VERSION%" in offline_bat
+    assert 'set "APP_VERSION=4.33"' in offline_bat
     assert "DisableDelayedExpansion" in offline_bat
     assert '--find-links="%WHEELHOUSE_DIR%"' in offline_bat
     assert 'start_windows.bat" --setup-only' in offline_bat
@@ -242,3 +245,101 @@ def test_v427_offline_builder_survives_slow_pypi_and_can_write_the_exe_to_anothe
     assert "pypi.tuna.tsinghua.edu.cn/simple" in offline_bat
     assert "--timeout 120 --retries 10" in offline_bat
     assert "OUT_DIR" in offline_bat
+
+
+# ---------------------------------------------------------------------------
+# v4.33 - the offline builder must never show a raw Python traceback
+# ---------------------------------------------------------------------------
+
+
+def _builder_module():
+    import sys
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    import offline_packaging.build_offline_package as builder
+
+    return builder
+
+
+def test_v433_the_offline_builder_never_shows_a_python_traceback(tmp_path, monkeypatch, capsys):
+    """v4.33: a failing build must print a clear message, not a Python stack trace."""
+    builder = _builder_module()
+
+    monkeypatch.setattr(builder, "ensure_pyinstaller", lambda *a, **k: False)
+    code = builder.main(["--output-dir", str(tmp_path / "dist"), "--build-dir", str(tmp_path / "build")])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "Traceback" not in out
+    assert "[ERROR]" in out
+    assert "PyInstaller" in out
+
+
+def test_v433_the_offline_builder_checks_the_ocr_models_before_shipping(tmp_path):
+    """v4.33: a bundle without the OCR models must stop the build (it would not read text)."""
+    builder = _builder_module()
+
+    staging = tmp_path / "bundled_models"
+    (staging / "rapidocr").mkdir(parents=True)
+    with pytest.raises(builder.BuildError) as excinfo:
+        builder.verify_bundled_ocr_models(staging)
+    assert "OCR models" in str(excinfo.value)
+
+    for name in (
+        "ch_PP-OCRv5_det_mobile.onnx",
+        "latin_PP-OCRv5_rec_mobile.onnx",
+        "arabic_PP-OCRv5_rec_mobile.onnx",
+    ):
+        (staging / "rapidocr" / name).write_bytes(b"onnx")
+    builder.verify_bundled_ocr_models(staging)
+
+
+def test_v433_the_offline_builder_checks_the_built_app_before_packaging(tmp_path):
+    """v4.33: the built app folder must contain the exe, the program files and the models."""
+    builder = _builder_module()
+
+    app_dir = tmp_path / "ComicOCRStudio"
+    with pytest.raises(builder.BuildError) as excinfo:
+        builder.verify_built_app(app_dir)
+    assert "not usable" in str(excinfo.value)
+
+    (app_dir / "_internal" / "comic_studio" / "static").mkdir(parents=True)
+    (app_dir / "_internal" / "comic_studio" / "static" / "index.html").write_text("<html></html>", encoding="utf-8")
+    (app_dir / "ComicOCRStudio.exe").write_bytes(b"MZ")
+    (app_dir / "_internal" / "bundled_models" / "rapidocr").mkdir(parents=True)
+    (app_dir / "_internal" / "bundled_models" / "rapidocr" / "det.onnx").write_bytes(b"onnx")
+    builder.verify_built_app(app_dir)
+
+
+def test_v433_the_offline_builder_self_test_runs_without_breaking(tmp_path, monkeypatch, capsys):
+    """v4.33: the new --preflight self-test answers every question before the long build."""
+    builder = _builder_module()
+
+    monkeypatch.setattr(builder, "_pyinstaller_installed", lambda *a, **k: True)
+    code = builder.run_preflight()
+    out = capsys.readouterr().out
+    assert code in (0, 1)
+    assert "Traceback" not in out
+    assert "بررسی آمادگی ساخت بستهٔ آفلاین" in out
+    assert "PyInstaller" in out
+
+
+def test_v433_the_offline_builder_only_collects_installed_packages(tmp_path):
+    """v4.33: `--collect-all <missing package>` used to abort the whole PyInstaller build."""
+    builder = _builder_module()
+
+    staged = tmp_path / "bundled_models"
+    staged.mkdir(parents=True)
+    cmd = builder.pyinstaller_command(
+        entry_script=ROOT / "run.py",
+        dist_dir=tmp_path / "dist",
+        work_dir=tmp_path / "work",
+        spec_dir=tmp_path,
+        icon_path=tmp_path / "icon.ico",
+        static_dir=ROOT / "comic_studio" / "static",
+        staged_models_dir=staged,
+    )
+    import importlib.util
+
+    for pkg in ("rapidocr", "onnxruntime", "ctranslate2", "sentencepiece", "pymupdf", "bidi"):
+        if importlib.util.find_spec(pkg) is None:
+            assert pkg not in cmd, f"{pkg} is not installed and must not be collected"
