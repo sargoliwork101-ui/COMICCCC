@@ -1,5 +1,7 @@
 from pathlib import Path
 import re
+import subprocess
+import sys
 import tomllib
 from types import SimpleNamespace
 
@@ -130,7 +132,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
     assert "ComicOCRStudio-Offline-Setup-%APP_VERSION%" in offline_bat
-    assert 'set "APP_VERSION=4.37"' in offline_bat
+    assert 'set "APP_VERSION=4.38"' in offline_bat
     assert "DisableDelayedExpansion" in offline_bat
     assert '--find-links="%WHEELHOUSE_DIR%"' in offline_bat
     assert 'start_windows.bat" --setup-only' in offline_bat
@@ -290,7 +292,72 @@ def test_v433_the_offline_builder_checks_the_ocr_models_before_shipping(tmp_path
         "arabic_PP-OCRv5_rec_mobile.onnx",
     ):
         (staging / "rapidocr" / name).write_bytes(b"onnx")
+    _stage_default_engine_models(builder, staging)
     builder.verify_bundled_ocr_models(staging)
+
+
+def _stage_default_engine_models(builder, staging) -> None:
+    """Put the weights of the default engine (PP-OCRv6 Small) into the staging folder."""
+    target = staging / "rapidocr-v6"
+    target.mkdir(parents=True, exist_ok=True)
+    for name in builder._default_engine_model_files():
+        (target / name).write_bytes(b"onnx")
+
+
+def test_v438_the_offline_builder_also_checks_the_default_engine_models(tmp_path, monkeypatch):
+    """v4.38: the app reads with PP-OCRv6 Small by default - the bundle must ship it.
+
+    Root cause of the old behaviour: only the v5 models were verified, so a
+    build machine without the `rapidocr` package (or with an older one that
+    ships no v6 weights) produced an offline app whose default engine could
+    not read a single line - while the builder still said "everything is fine".
+    """
+    builder = _builder_module()
+
+    staging = tmp_path / "bundled_models"
+    (staging / "rapidocr").mkdir(parents=True)
+    for name in (
+        "ch_PP-OCRv5_det_mobile.onnx",
+        "latin_PP-OCRv5_rec_mobile.onnx",
+        "arabic_PP-OCRv5_rec_mobile.onnx",
+    ):
+        (staging / "rapidocr" / name).write_bytes(b"onnx")
+
+    # No v6 weights anywhere: the build must stop with a readable reason.
+    monkeypatch.setattr(builder, "_default_engine_model_files", lambda: ("PP-OCRv6_det_small.onnx",))
+    monkeypatch.setitem(sys.modules, "rapidocr", None)  # the package is not installed
+    with pytest.raises(builder.BuildError) as excinfo:
+        builder.verify_bundled_ocr_models(staging)
+    message = str(excinfo.value)
+    assert "PP-OCRv6" in message
+    assert "default OCR engine" in message
+
+    # With the weights in place the same check passes.
+    _stage_default_engine_models(builder, staging)
+    builder.verify_bundled_ocr_models(staging)
+
+
+def test_v438_a_hanging_pip_install_never_freezes_the_builder(monkeypatch, capsys):
+    """v4.38: a mirror that accepts the connection and goes silent must not hang the build.
+
+    Root cause of the old behaviour: `pip install` ran without a process-level
+    timeout, so a stalled mirror froze the builder forever and the seller saw
+    nothing at all.
+    """
+    builder = _builder_module()
+
+    attempts = []
+
+    def fake_run(cmd, **kwargs):
+        attempts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout") or 0)
+
+    monkeypatch.setattr(builder, "_pyinstaller_installed", lambda exe=None: False)
+    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+    assert builder.ensure_pyinstaller() is False
+    out = capsys.readouterr().out
+    assert "did not finish" in out
+    assert attempts and all(value for value in attempts)
 
 
 def test_v433_the_offline_builder_checks_the_built_app_before_packaging(tmp_path):

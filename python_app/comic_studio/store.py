@@ -94,6 +94,21 @@ def read_json(path: Path, default: Any) -> Any:
         return default
 
 
+def _client_blocks_are_stale(old: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """True when the browser sends boxes from before the server's OCR run.
+
+    The browser never clears the ``ocrCompleted`` flag - only the server sets
+    it after a successful OCR run.  A window that is behind therefore sends the
+    flag as false together with the boxes it knows, and applying those boxes
+    would erase the recognized text (and the translation) of that page.
+    """
+    if not old.get("ocrCompleted"):
+        return False
+    if candidate.get("ocrCompleted"):
+        return False
+    return True
+
+
 class ProjectStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -249,13 +264,25 @@ class ProjectStore:
                 seen.add(image_id)
                 old = existing[image_id]
                 item = dict(old)
+                stale_blocks = _client_blocks_are_stale(old, candidate)
                 for key in ("order", "selected", "groupId", "crop", "blocks", "pageMode", "approved", "watermark"):
                     if key in candidate:
+                        if key == "blocks" and stale_blocks:
+                            # The window has not seen the OCR run yet; its older
+                            # boxes must not replace the recognized text.
+                            continue
                         item[key] = bool(candidate[key]) if key == "approved" else candidate[key]
                 edited_file = project_root(project_id) / "images" / f"{image_id}-edited.png"
                 item["edited"] = bool(edited_file.is_file() and edited_file.stat().st_size > 0)
                 merged.append(item)
-            # An image omitted by the UI is deliberately removed from the project, not from source files on disk.
+            # Pages leave a project only through the explicit delete endpoint.
+            # A window that is behind (a second tab, or a tab that stayed open
+            # while another one imported pages) used to delete every page it
+            # had not seen yet - the imported pages silently vanished from the
+            # project while their files stayed on disk.
+            for image_id, old in existing.items():
+                if image_id not in seen:
+                    merged.append(dict(old))
             current["images"] = merged
             return self.save(current)
 
@@ -300,10 +327,10 @@ class ProjectStore:
 
     def save_rendered(self, project_id: str, image_id: str, content: bytes) -> dict[str, Any]:
         if len(content) > 150 * 1024 * 1024:
-            raise ValueError("Rendered image is too large")
+            raise ValueError("حجم تصویر ویرایش‌شده بیش از حد مجاز است.")
         with Image.open(io.BytesIO(content)) as im:
             if (im.format or "").upper() != "PNG":
-                raise ValueError("Rendered image must be PNG")
+                raise ValueError("تصویر ویرایش‌شده باید از نوع PNG باشد.")
             rendered_size = im.size
             im.verify()
         with self._lock:
@@ -312,7 +339,7 @@ class ProjectStore:
             if target_item is None:
                 raise KeyError(image_id)
             if rendered_size != (target_item["width"], target_item["height"]):
-                raise ValueError("Rendered image dimensions do not match the source")
+                raise ValueError("اندازهٔ تصویر ویرایش‌شده با تصویر اصلی یکی نیست.")
             path = project_root(project_id) / "images" / f"{image_id}-edited.png"
             atomic_bytes(path, content)
             target_item["edited"] = True
@@ -511,7 +538,7 @@ class ProjectStore:
             if image_id not in known and not any(images_dir.glob(f"{image_id}.*")):
                 known.add(image_id)
                 return image_id, file_name, image_path
-        raise ValueError("Could not allocate a unique image ID")
+        raise ValueError("شناسهٔ یکتا برای تصویر ساخته نشد؛ دوباره تلاش کنید.")
 
     @staticmethod
     def _compute_pdf_page_scales(page: Any, base_scale: float) -> tuple[float, float]:
@@ -590,16 +617,16 @@ class ProjectStore:
         progress_span: tuple[float, float] = (0.0, 0.96),
     ) -> None:
         if len(content) > 500 * 1024 * 1024:
-            raise ValueError("PDF is too large")
+            raise ValueError("حجم فایل PDF بیش از حد مجاز است.")
         import pymupdf as fitz
 
         scale = max(1.0, min(8.5, float(scale)))
         with fitz.open(stream=content, filetype="pdf") as check_doc:
             if check_doc.needs_pass:
-                raise ValueError("Password-protected PDF is not supported")
+                raise ValueError("فایل PDF رمزگذاری‌شده پشتیبانی نمی‌شود.")
             page_count = len(check_doc)
             if page_count > 1000:
-                raise ValueError("PDF has too many pages")
+                raise ValueError("تعداد صفحه‌های فایل PDF بیش از حد مجاز است.")
 
         if page_count == 0:
             return

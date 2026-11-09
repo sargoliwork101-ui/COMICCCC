@@ -1,22 +1,22 @@
 @echo off
-rem Comic OCR Studio 4.37 - Windows offline EXE / Setup builder launcher.
+rem Comic OCR Studio 4.38 - Windows offline EXE / Setup builder launcher.
 rem The questions (which package, which output folder) are asked by the builder itself
 rem (Python), not by this file: the old `set /p` menu died silently on the seller's
 rem machine right after the output-folder question.
 rem Every run is recorded in python_app\build_offline.log
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>nul
-title Build Offline EXE ^& Setup - Comic OCR Studio 4.37
+title Build Offline EXE ^& Setup - Comic OCR Studio 4.38
 
 cd /d "%~dp0"
 set "APP_DIR=%CD%"
 set "VENV_PY=%APP_DIR%\.venv\Scripts\python.exe"
 set "WHEELHOUSE_DIR=%APP_DIR%\wheelhouse"
 set "DEFAULT_OUT_DIR=%APP_DIR%\dist"
-set "APP_VERSION=4.37"
+set "APP_VERSION=4.38"
 
 echo ====================================================================
-echo   Comic OCR Studio 4.37 - Offline Windows EXE ^& Setup Builder
+echo   Comic OCR Studio 4.38 - Offline Windows EXE ^& Setup Builder
 echo ====================================================================
 echo.
 

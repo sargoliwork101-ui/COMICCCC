@@ -25,7 +25,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
-from starlette.background import BackgroundTask
+from PIL import UnidentifiedImageError
 
 from . import APP_NAME, APP_VERSION
 from .activity import ActivityLog, JobCancelledError, cancellation_scope, reporting
@@ -33,7 +33,7 @@ from .backup import BackupError, cleanup_backup_temp, make_backup, restore_backu
 from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, clean_name, crop_box, image_payload
 from .watermark_render import has_active_watermark
 from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
-from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
+from .ocr_grouping import organize_ocr_blocks
 from .ocr_managed import (
     _stop_lingering_surya_server,
     configure_native_runtime,
@@ -52,7 +52,6 @@ from .paths import (
 from . import context_run, pending_results
 from . import resources
 from .license_guard import (
-    SUPPORT_PHONE,
     LicenseError,
     SECURITY_GATE,
     SESSION_COOKIE_NAME,
@@ -926,6 +925,10 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         except PermissionError as exc:
             raise HTTPException(503, "فایل پروژه موقتاً در حال ذخیره‌سازی است؛ چند لحظه بعد دوباره تلاش کنید.") from exc
+        except UnidentifiedImageError as exc:
+            # A broken render must be explained in Persian, not with the English
+            # message of the image library.
+            raise HTTPException(400, "فایل PNG معتبر نیست؛ تصویر ویرایش‌شده خراب است. دوباره تصویر را رندر کنید.") from exc
         except Exception as exc:
             raise HTTPException(400, f"فایل PNG معتبر نیست: {exc}") from exc
         finally:
@@ -2078,7 +2081,7 @@ def create_app() -> FastAPI:
         signed_plan = plan
         if values.call_id is not None:
             if values.provider == "free" or (len(ids) != 1 and not values.call_image_id):
-                raise HTTPException(400, "An AI task needs its page ID")
+                raise HTTPException(400, "برای انجام هر بخش ترجمه باید شمارهٔ صفحه مشخص باشد.")
             task_image_id = values.call_image_id or ids[0]
             calls_to_run = [call for call in plan["calls"] if call.get("call_id") == values.call_id and call.get("image_id") == task_image_id]
             if len(calls_to_run) != 1:
@@ -2215,7 +2218,7 @@ def create_app() -> FastAPI:
         elif values.provider == "free":
             activity.add(f"هر {len(blocks)} متن جدا ترجمه و در کادرهای خودشان قرار گرفتند", "success", 1.0)
         elif not values.batch_total or values.batch_index == values.batch_total:
-            activity.add(f"ترجمهٔ صفحه‌های درخواست‌شده پایان یافت؛ هر صفحه جداگانه ذخیره شد", "success", 1.0)
+            activity.add("ترجمهٔ صفحه‌های درخواست‌شده پایان یافت؛ هر صفحه جداگانه ذخیره شد", "success", 1.0)
         return state
 
     @app.post("/api/translate-text/preview")

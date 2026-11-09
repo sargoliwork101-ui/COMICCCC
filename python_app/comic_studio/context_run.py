@@ -17,7 +17,7 @@ from .translation import (
     normalize_target_language,
     target_language_direction,
 )
-from .translation_plan import logical_page_units, split_ai_paragraph, target_snapshot
+from .translation_plan import logical_page_units, target_snapshot
 
 RUN_KEY = '_aiContextRun'
 SUMMARY_KEY = '_aiStorySummary'

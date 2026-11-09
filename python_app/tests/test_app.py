@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.37"
+    assert health.json()["version"] == "4.38"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3294,7 +3294,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.37"
+    assert APP_VERSION == "4.38"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -5058,3 +5058,106 @@ def test_v421_persian_preprocess_input_option_in_ocr_and_engine_test(tmp_path, m
 
 
 
+
+
+def test_v438_a_window_that_is_behind_never_deletes_pages_it_has_not_seen(client):
+    """v4.38: pages leave a project only through the delete endpoint.
+
+    Root cause of the old behaviour: the state save treated every page the
+    browser did not mention as deleted, so a second tab (or a tab that stayed
+    open while another one imported pages) silently removed the imported pages
+    from the project while their files stayed on disk.
+    """
+    project, first = make_project(client)
+    project_id = project["id"]
+    response = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("page2.png", png_bytes((200, 150), "white"), "image/png"))],
+    )
+    assert response.status_code == 200, response.text
+    project = response.json()
+    assert len(project["images"]) == 2
+
+    # A window that only knows the first page saves its (older) state.
+    stale_state = dict(project)
+    stale_state["images"] = [dict(project["images"][0])]
+    put = client.put(f"/api/projects/{project_id}/state", json={"state": stale_state})
+    assert put.status_code == 200, put.text
+    saved = client.get(f"/api/projects/{project_id}").json()
+    assert len(saved["images"]) == 2, "the page of the other window was deleted"
+
+    # The explicit delete endpoint still removes pages (and their files).
+    deleted = client.post(f"/api/projects/{project_id}/delete", json=[project["images"][1]["id"]])
+    assert deleted.status_code == 200, deleted.text
+    assert len(client.get(f"/api/projects/{project_id}").json()["images"]) == 1
+
+
+def test_v438_a_window_that_is_behind_never_erases_the_recognized_text(client, monkeypatch):
+    """v4.38: the OCR result of the server must survive an old window's save.
+
+    The browser never clears the `ocrCompleted` flag - only the server sets it
+    after a successful OCR run.  A window that has not seen that run sends the
+    flag as false together with its older boxes; applying them erased the
+    recognized text (and the translation) of the page.
+    """
+    project, item = make_project(client)
+    project_id, image_id = project["id"], item["id"]
+    monkeypatch.setattr(
+        "comic_studio.main.recognize_image",
+        lambda *args: [{"id": 1, "text": "HELLO", "enabled": True}],
+    )
+    ocr = client.post(
+        f"/api/projects/{project_id}/ocr",
+        json={"image_ids": [image_id], "engine": "rapidocr-v6", "language": "eng"},
+    )
+    assert ocr.status_code == 200, ocr.text
+    recognized = client.get(f"/api/projects/{project_id}").json()["images"][0]
+    assert recognized["ocrCompleted"] is True
+    assert recognized["blocks"] and recognized["blocks"][0]["text"] == "HELLO"
+
+    # An old window still has the page without any text.
+    stale_state = dict(recognized)
+    stale_image = dict(recognized)
+    stale_image["blocks"] = []
+    stale_image["ocrCompleted"] = False
+    stale_state["images"] = [stale_image]
+    put = client.put(f"/api/projects/{project_id}/state", json={"state": stale_state})
+    assert put.status_code == 200, put.text
+    saved = client.get(f"/api/projects/{project_id}").json()["images"][0]
+    assert saved["ocrCompleted"] is True
+    assert len(saved["blocks"]) == 1
+    assert saved["blocks"][0]["text"] == "HELLO"
+
+    # The window that has seen the OCR may still edit and clear the page itself.
+    edited = dict(recognized)
+    edited_image = dict(recognized)
+    edited_image["blocks"] = []
+    edited["images"] = [edited_image]
+    put = client.put(f"/api/projects/{project_id}/state", json={"state": edited})
+    assert put.status_code == 200, put.text
+    assert client.get(f"/api/projects/{project_id}").json()["images"][0]["blocks"] == []
+
+
+def test_v438_the_user_never_sees_an_english_error_message(client):
+    """v4.38: every message the customer reads must be in simple Persian.
+
+    Root cause of the old behaviour: a few failure paths still answered in
+    English ("No images selected", "Rendered image must be PNG", ...), so the
+    Persian user got a technical English sentence with no explanation.
+    """
+    project, item = make_project(client)
+    project_id, image_id = project["id"], item["id"]
+
+    export = client.post(f"/api/projects/{project_id}/export", json={"kind": "pdf", "image_ids": []})
+    assert export.status_code == 400, export.text
+    detail = export.json()["detail"]
+    assert "برای خروجی" in detail
+    assert not detail.isascii(), detail
+
+    broken = client.post(
+        f"/api/projects/{project_id}/images/{image_id}/rendered",
+        content=b"not a png", headers={"Content-Type": "image/png"},
+    )
+    assert broken.status_code == 400, broken.text
+    detail = broken.json()["detail"]
+    assert not detail.isascii(), detail

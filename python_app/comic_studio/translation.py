@@ -186,7 +186,7 @@ def split_free_query(text: str, limit: int = MAX_FREE_QUERY_CHARS) -> list[str]:
     """Close at the last sentence end within the limit; never fill it with a partial next sentence."""
     remaining = str(text or "").strip()
     if limit < 1:
-        raise ValueError("Query limit must be positive")
+        raise ValueError("سقف تعداد درخواست باید بزرگ‌تر از صفر باشد.")
     if not remaining:
         return []
     chunks = []
@@ -561,7 +561,7 @@ def translation_request_view(
     if provider == "local":
         return {"texts": [clean] if clean else [], "systemPrompt": ""}
     if provider not in AI_PROVIDERS:
-        raise TranslationError("Unknown translation provider")
+        raise TranslationError("سرویس ترجمهٔ انتخاب‌شده معتبر نیست.")
     system_prompt, source = _ai_prompt(source_language, skill, target_language=target_language)
     return {"texts": [f"Source language: {source}\n\n{clean}"], "systemPrompt": system_prompt}
 
@@ -711,7 +711,7 @@ class TranslationService:
         current = _normalize_settings(read_json(self.path, {}))
         provider = str(values.get("provider", current["provider"]) or "free").strip().lower()
         if provider not in {"free", "local", *AI_PROVIDERS}:
-            raise ValueError("Unknown translation provider")
+            raise ValueError("سرویس ترجمهٔ انتخاب‌شده معتبر نیست.")
         context_percent = _setting_int(values.get("context_percent", current["context_percent"]), 15, 0, 100, strict=True)
         skill_percent = _setting_int(values.get("skill_percent", current["skill_percent"]), 15, 0, 100, strict=True)
         if context_percent + skill_percent > 100:
@@ -913,7 +913,7 @@ class TranslationService:
                         _sleep_translation(wait, self._cancel_event)
             raise TranslationError("هیچ‌یک از کلیدهای این سرویس پاسخ قابل‌استفاده‌ای ندادند. " + "؛ ".join(failures))
         else:
-            raise TranslationError("Unknown translation provider")
+            raise TranslationError("سرویس ترجمهٔ انتخاب‌شده معتبر نیست.")
         return normalize_translation_text(translated)
 
     def translate_context(self, request: Any, text: str, source_texts: list[str], provider: str, expected_policy: dict[str, Any]) -> tuple[str, str]:
@@ -1245,11 +1245,11 @@ class TranslationService:
             errors.append("MyMemory returned no translation")
         except Exception as exc:
             errors.append(str(exc))
-        raise TranslationError("Free translation failed: " + "; ".join(errors[-2:]))
+        raise TranslationError("ترجمهٔ رایگان ناموفق بود: " + "؛ ".join(errors[-2:]))
 
     def _openai(self, text: str, source_language: str, settings: dict[str, Any]) -> str:
         if not settings.get("api_key"):
-            raise TranslationError("API key is not configured")
+            raise TranslationError("کلید API این سرویس تنظیم نشده است.")
         provider = str(settings.get("provider") or "openai")
         if provider not in AI_PROVIDERS or provider == "gemini":
             provider = "openai"
@@ -1282,7 +1282,7 @@ class TranslationService:
 
     def _gemini(self, text: str, source_language: str, settings: dict[str, Any]) -> str:
         if not settings.get("api_key"):
-            raise TranslationError("API key is not configured")
+            raise TranslationError("کلید API این سرویس تنظیم نشده است.")
         base_url = _normalize_base_url(settings.get("base_url"), "gemini")
         model = _normalize_model(settings.get("model"), "gemini")
         system_prompt, source = _ai_prompt(
@@ -1329,7 +1329,7 @@ class TranslationService:
             except LocalNmtError as exc:
                 raise TranslationError(str(exc)) from exc
         if provider not in AI_PROVIDERS:
-            raise TranslationError("Unknown translation provider")
+            raise TranslationError("سرویس ترجمهٔ انتخاب‌شده معتبر نیست.")
         config = dict(settings["providers"][provider])
         if overrides.get("model") is not None:
             config["model"] = overrides["model"]

@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .context_run import RUN_KEY, SUMMARY_KEY, apply_response, digest
+from .context_run import RUN_KEY, apply_response, digest
 from .paths import project_root
 from .store import ProjectChangedError, ProjectStore, atomic_json, read_json, utc_now
 from .translation import distribute_translation
