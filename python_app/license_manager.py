@@ -27,7 +27,6 @@ import math
 import os
 import re
 import secrets
-import socket
 import sys
 import tempfile
 import threading
@@ -46,13 +45,11 @@ if str(APP_DIR) not in sys.path:
 from comic_studio.license_guard import (  # noqa: E402
     LICENSE_MODULES,
     MODULE_LABELS_FA,
-    SUPPORT_PHONE,
     VENDOR_CONTACT_KEYS,
     LicenseError,
     SECURITY_GATE,
     compute_hardware_id,
     ed25519_public_key,
-    get_support_phone,
     get_vendor_contact_info,
     issue_license_token,
     normalize_hardware_id,

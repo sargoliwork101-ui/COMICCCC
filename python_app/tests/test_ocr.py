@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from comic_studio.ocr import (
     ENGINE_INFO, EasyEngine, OcrError, OcrLine, RapidEngine, TesseractEngine,
@@ -1147,7 +1147,6 @@ def test_v385_onnx_gpu_detection_and_rapidengine_gpu_fallback_plus_cpu_pool(monk
     import threading
     import time
     import types
-    import numpy as np
     from PIL import Image
     import comic_studio.ocr as ocr_mod
     from comic_studio.ocr import RapidEngine
@@ -1636,7 +1635,7 @@ def test_worker_requests_timeout_widener_upgrades_short_timeouts(monkeypatch):
     import types
     import comic_studio.ocr_worker as worker
 
-    captured: list[Any] = []
+    captured = []
 
     class FakeSession:
         def request(self, method, url, **kwargs):
@@ -2740,7 +2739,7 @@ def test_v396_persian_download_fixes_across_rapid_hezar_easy_and_bidi_shim(tmp_p
 def test_v397_idle_cpu_passive_threads_hardware_cache_and_worker_idle_reaper(tmp_path, monkeypatch):
     import io
     import time
-    from comic_studio import ocr_managed, ocr_worker
+    from comic_studio import ocr_managed
     from comic_studio.ocr import TesseractEngine, analyze_blocks_typography
 
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
@@ -3690,7 +3689,6 @@ def test_v428_tesseract_persian_language_auto_prepare_and_offline_bundle_guard(t
     """v4.28: a Persian OCR run must download the missing `fas` file instead of dying with HTTP 503."""
     import sys
     from pathlib import Path
-    import comic_studio.ocr as ocr_mod
     from comic_studio.ocr import OcrError, TesseractEngine
 
     repo_py = Path(__file__).resolve().parent.parent

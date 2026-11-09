@@ -80,7 +80,6 @@ def test_windows_launcher_clears_pip_timeout_before_starting_server():
 
 
 def test_windows_launcher_repairs_relocated_app_folder_offline_without_deleting_venv(tmp_path, monkeypatch):
-    import os
     import site
 
     assert "call :repair_relocated_venv" in NORMAL
@@ -132,7 +131,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
     assert "ComicOCRStudio-Offline-Setup-%APP_VERSION%" in offline_bat
-    assert 'set "APP_VERSION=4.38"' in offline_bat
+    assert 'set "APP_VERSION=4.39"' in offline_bat
     assert "DisableDelayedExpansion" in offline_bat
     assert '--find-links="%WHEELHOUSE_DIR%"' in offline_bat
     assert 'start_windows.bat" --setup-only' in offline_bat
@@ -202,7 +201,6 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
 def test_v427_offline_builder_survives_slow_pypi_and_can_write_the_exe_to_another_folder(tmp_path):
     """v4.29: the EXE builder must not die on a slow pypi.org and must honour a custom output folder."""
     import sys
-    from pathlib import Path
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     from offline_packaging import build_offline_package as pkg

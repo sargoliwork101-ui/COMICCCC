@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.38"
+    assert health.json()["version"] == "4.39"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -2774,8 +2774,6 @@ def test_v385_parallel_pdf_import_multi_page_ocr_and_low_ram_spooled_exports(cli
     # 2) Run multi-page OCR across all 5 pages using a multi-worker batch engine
     seen_threads: set[int] = set()
     seen_lock = threading.Lock()
-    reg_engine = client.app.state  # verify via monkeypatching recognize_image + RapidEngine.configure_batch
-
     from comic_studio.ocr import RapidEngine
     monkeypatch.setattr(
         RapidEngine,
@@ -2972,7 +2970,6 @@ def test_v388_url_ipv6_nan_progress_reuse_repeated_and_duplicate_edited_sync(cli
     import pytest
     from comic_studio.__main__ import _format_browser_url
     from comic_studio.activity import ActivityLog
-    from comic_studio.backup import make_backup
     from comic_studio.paths import project_root
     from comic_studio.store import ProjectStore, atomic_json
     from comic_studio.translation import TranslationService
@@ -3284,7 +3281,6 @@ def test_v399_per_page_ocr_keep_engine_loaded_and_memory_release(client, monkeyp
 
 
 def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_path, monkeypatch):
-    import json
     import os
     from pathlib import Path
     import shutil
@@ -3294,7 +3290,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.38"
+    assert APP_VERSION == "4.39"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -5161,3 +5157,65 @@ def test_v438_the_user_never_sees_an_english_error_message(client):
     assert broken.status_code == 400, broken.text
     detail = broken.json()["detail"]
     assert not detail.isascii(), detail
+
+
+def test_v439_import_rejections_are_explained_in_persian(client):
+    """v4.39: a rejected import must tell the Persian user *why*, in Persian.
+
+    Root cause of the old behaviour: `_normalize_and_validate_image_bytes` and
+    `import_files` raised English messages ("Image is too large", "Unsupported
+    file", "Invalid or unsupported image") and the import endpoint passes the
+    message straight to the user as the 400 detail, so a Persian customer saw
+    a technical English sentence.
+    """
+    response = client.post("/api/projects", json={"name": "ورود"})
+    assert response.status_code == 201
+    project_id = response.json()["id"]
+
+    broken = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("page.png", b"this is not an image", "image/png"))],
+    )
+    assert broken.status_code == 400, broken.text
+    detail = broken.json()["detail"]
+    assert "پشتیبانی نمی‌شود" in detail or "خراب" in detail
+    assert not detail.isascii(), detail
+    assert "Invalid" not in detail and "unsupported" not in detail.lower()
+
+    wrong_kind = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("setup.exe", b"MZ not really", "application/octet-stream"))],
+    )
+    assert wrong_kind.status_code == 400, wrong_kind.text
+    detail = wrong_kind.json()["detail"]
+    assert "پشتیبانی نمی‌شود" in detail
+    assert not detail.isascii(), detail
+
+    store_module = pytest.importorskip("comic_studio.store")
+    try:
+        store_module.ProjectStore._normalize_and_validate_image_bytes("big.png", b"x" * (150 * 1024 * 1024 + 1))
+        raise AssertionError("oversized image must be rejected")
+    except ValueError as exc:
+        assert "بیش از حد مجاز" in str(exc)
+        assert not str(exc).isascii()
+
+
+def test_v439_swapping_a_same_length_watermark_logo_renders_again():
+    """v4.39: the page-render signature must notice a logo swap with the same length.
+
+    Root cause of the old behaviour: `watermarkSignaturePart` only embedded the
+    logo dataURL *length* in the render signature. Two different logo images
+    that serialize to equally long dataURLs produced the same signature, so the
+    page was never re-rendered and the old logo stayed in the exported pages.
+    Implemented Node-free here by mirroring the fingerprint rule: the signature
+    part must include the last characters, not just the length.
+    """
+    import re
+    from pathlib import Path
+
+    app_js = (Path(__file__).resolve().parents[1] / "comic_studio" / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function watermarkSignaturePart\(wm\) \{(?P<body>.*?)\n\}", app_js, re.DOTALL)
+    assert match, "watermarkSignaturePart must exist in app.js"
+    body = match.group("body")
+    assert "slice(-32)" in body, "logo fingerprint must include a content tail, not only its length"
+    assert "logoFingerprint" in body

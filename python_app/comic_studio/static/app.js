@@ -3375,16 +3375,29 @@ async function ensureWatermarkLogoDrawable(logoId, dataUrl) {
   if (drawable) watermarkLogoCache.set(key, drawable);
   return drawable;
 }
+// v4.39: decoded logo images are runtime-only objects.  A plain assignment made
+// them *enumerable*, so saving the project serialized the DOM/image object as
+// "{}" straight into project.json; after the next launch the renderer received
+// that empty object as the logo and drawing the page crashed.  Attaching the
+// drawable as a non-enumerable property keeps it usable in memory while
+// JSON.stringify (the project save) simply skips it.
+function attachRuntimeDrawable(target, key, drawable) {
+  try {
+    Object.defineProperty(target, key, { value: drawable, writable: true, configurable: true, enumerable: false });
+  } catch {
+    target[key] = drawable;
+  }
+}
 async function ensureWatermarkLogosReady(wm) {
   if (!hasActiveWatermark(wm)) return;
   const logoId = String(wm.logoId || '').trim();
   const logos = projectWatermarkLogos();
   if (logoId && logos[logoId]?.dataUrl) {
     const drawable = await ensureWatermarkLogoDrawable(logoId, logos[logoId].dataUrl);
-    if (drawable) logos[logoId]._drawable = drawable;
+    if (drawable) attachRuntimeDrawable(logos[logoId], '_drawable', drawable);
   } else if (wm.logoDataUrl) {
     const drawable = await ensureWatermarkLogoDrawable('inline', wm.logoDataUrl);
-    if (drawable) wm._logoDrawable = drawable;
+    if (drawable) attachRuntimeDrawable(wm, '_logoDrawable', drawable);
   }
 }
 function buildTypesetRenderOptions(item) {
@@ -3399,8 +3412,13 @@ function watermarkSignaturePart(wm) {
   if (!hasActiveWatermark(wm)) return null;
   const logoId = String(wm.logoId || '').trim();
   const logoEntry = logoId ? projectWatermarkLogos()[logoId] : null;
-  const logoLen = logoEntry?.dataUrl ? logoEntry.dataUrl.length : (wm.logoDataUrl ? String(wm.logoDataUrl).length : 0);
-  return [wm.text || '', wm.position || 'bottom-left', wm.sizePct ?? 3.5, wm.opacity ?? 55, wm.angle ?? '', wm.marginPct ?? 2.5, wm.tileGapPct ?? 22, wm.color || '#ffffff', wm.bold !== false, wm.outline !== false, wm.outlineColor || '#000000', !!wm.bgPill, wm.bgColor || '#000000', logoId, wm.logoScalePct ?? 9, logoLen];
+  // v4.39: length alone cannot tell two different logos apart when they happen
+  // to serialize to the same dataURL length, and a stale signature then skips
+  // the re-render, so the old logo would still appear in the exported pages.
+  // Use the same content fingerprint as the drawable logo cache (length + tail).
+  const logoSrc = logoEntry?.dataUrl ? String(logoEntry.dataUrl) : String(wm.logoDataUrl || '');
+  const logoFingerprint = logoSrc ? `${logoSrc.length}:${logoSrc.slice(-32)}` : '';
+  return [wm.text || '', wm.position || 'bottom-left', wm.sizePct ?? 3.5, wm.opacity ?? 55, wm.angle ?? '', wm.marginPct ?? 2.5, wm.tileGapPct ?? 22, wm.color || '#ffffff', wm.bold !== false, wm.outline !== false, wm.outlineColor || '#000000', !!wm.bgPill, wm.bgColor || '#000000', logoId, wm.logoScalePct ?? 9, logoFingerprint];
 }
 function pageRenderSignature(item, mode = currentOverlayMode(), blocksOverride = null) {
   const blocks = blocksOverride || overlayBlocks(item, mode);

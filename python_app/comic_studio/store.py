@@ -358,14 +358,14 @@ class ProjectStore:
     @staticmethod
     def _normalize_and_validate_image_bytes(filename: str, content: bytes) -> tuple[bytes, str, int, int]:
         if len(content) > 150 * 1024 * 1024:
-            raise ValueError(f"Image is too large: {filename}")
+            raise ValueError(f"حجم تصویر «{filename}» بیش از حد مجاز است (حداکثر ۱۵۰ مگابایت).")
         try:
             with Image.open(io.BytesIO(content)) as im:
                 raw_format = (im.format or "PNG").upper()
                 image_format = "JPEG" if raw_format == "MPO" else raw_format
                 width, height = im.size
                 if width < 1 or height < 1 or width * height > 100_000_000:
-                    raise ValueError(f"Invalid image dimensions: {filename}")
+                    raise ValueError(f"ابعاد تصویر «{filename}» معتبر نیست یا بیش از حد بزرگ است.")
                 im.load()
                 try:
                     orientation = int(im.getexif().get(0x0112, 1) or 1)
@@ -376,7 +376,7 @@ class ProjectStore:
                     try:
                         width, height = transposed.size
                         if width < 1 or height < 1 or width * height > 100_000_000:
-                            raise ValueError(f"Invalid image dimensions: {filename}")
+                            raise ValueError(f"ابعاد تصویر «{filename}» پس از چرخش معتبر نیست یا بیش از حد بزرگ است.")
                         out = io.BytesIO()
                         save_fmt = image_format if image_format in {"JPEG", "PNG", "WEBP", "BMP", "GIF"} else "PNG"
                         exif_bytes = transposed.info.get("exif")
@@ -400,9 +400,9 @@ class ProjectStore:
                         if transposed is not im:
                             transposed.close()
         except (OSError, Image.DecompressionBombError) as exc:
-            raise ValueError(f"Invalid or unsupported image: {filename}") from exc
+            raise ValueError(f"تصویر «{filename}» خراب است یا قالب آن پشتیبانی نمی‌شود.") from exc
         if len(content) > 150 * 1024 * 1024:
-            raise ValueError(f"Image is too large: {filename}")
+            raise ValueError(f"حجم تصویر «{filename}» پس از چرخش بیش از حد مجاز است (حداکثر ۱۵۰ مگابایت).")
         return content, image_format, width, height
 
     @classmethod
@@ -456,7 +456,7 @@ class ProjectStore:
             for filename, _ in files:
                 suffix = Path(filename).suffix.lower()
                 if suffix != ".pdf" and suffix not in ALLOWED_IMAGES:
-                    raise ValueError(f"Unsupported file: {filename}")
+                    raise ValueError(f"قالب فایل «{filename}» پشتیبانی نمی‌شود؛ فقط تصویر یا PDF می‌توانید وارد کنید.")
 
             total_inputs = max(1, len(files))
             completed_inputs = 0
@@ -659,7 +659,7 @@ class ProjectStore:
             width, height = int(pix.width), int(pix.height)
             if width < 1 or height < 1 or width * height > 100_000_000:
                 del pix
-                raise ValueError(f"Invalid image dimensions: {stem} — صفحهٔ {page_index + 1}.png")
+                raise ValueError(f"ابعاد صفحهٔ {page_index + 1} از فایل «{stem}» معتبر نیست یا بیش از حد بزرگ است.")
             png = pix.tobytes("png")
             byte_len = len(png)
             del pix

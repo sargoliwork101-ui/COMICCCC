@@ -67,7 +67,6 @@ def test_v429_probe_tells_a_dying_studio_instance_apart_from_a_live_one():
     """The launcher must not hand the browser over to an instance that is closing."""
     import json
     import threading
-    import urllib.request
 
     port = _free_port()
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -186,7 +185,7 @@ def test_v430_the_browser_waits_for_the_app_to_answer_not_only_for_the_socket():
 
     # 3) The app answers with its health payload - now the browser may open.
     live_port = _free_port()
-    server = _serve_health(live_port, {"name": "Comic OCR Studio", "version": "4.38"})
+    server = _serve_health(live_port, {"name": "Comic OCR Studio", "version": "4.39"})
     try:
         assert _app_answers("127.0.0.1", live_port) is True
         worker = threading.Thread(
