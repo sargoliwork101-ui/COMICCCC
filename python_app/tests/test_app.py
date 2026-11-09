@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.40"
+    assert health.json()["version"] == "4.41"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3290,7 +3290,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.40"
+    assert APP_VERSION == "4.41"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -5270,3 +5270,36 @@ def test_v440_corrupt_pdf_import_is_explained_in_persian(client):
         detail = res.json()["detail"]
         assert not detail.isascii(), detail
         assert "Failed to open stream" not in detail
+
+
+def test_v441_truncated_rendered_png_is_explained_in_persian(client):
+    """v4.41: a truncated/corrupt editor render must not leak PIL's Latin error.
+
+    Root cause of the old behaviour: `ProjectStore.save_rendered` let PIL's
+    OSError ("Truncated File Read") reach the route's catch-all, which patched
+    it into a Persian prefix as `{exc}` - so the user still saw English words.
+    """
+    project_id = client.post("/api/projects", json={"name": "رندر"}).json()["id"]
+    png = io.BytesIO()
+    Image.new("RGB", (24, 24), "red").save(png, "PNG")
+    uploaded = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("page.png", png.getvalue(), "image/png"))],
+    )
+    image_id = uploaded.json()["images"][0]["id"]
+
+    truncated_sig = b"\x89PNG\r\n\x1a\n" + b"garbage" * 10
+    broken = client.post(f"/api/projects/{project_id}/images/{image_id}/rendered", content=truncated_sig)
+    assert broken.status_code == 400, broken.text
+    detail = broken.json()["detail"]
+    assert not detail.isascii(), detail
+    assert "Truncated" not in detail and "File Read" not in detail
+    assert "خراب" in detail or "معتبر نیست" in detail
+
+    junk = client.post(f"/api/projects/{project_id}/images/{image_id}/rendered", content=b"not png at all")
+    assert junk.status_code == 400
+    assert not junk.json()["detail"].isascii()
+
+    # و رندر سالم همچنان ذخیره می‌شود
+    ok = client.post(f"/api/projects/{project_id}/images/{image_id}/rendered", content=png.getvalue())
+    assert ok.status_code == 200, ok.text

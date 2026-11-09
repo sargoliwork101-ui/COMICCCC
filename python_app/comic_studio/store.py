@@ -328,11 +328,18 @@ class ProjectStore:
     def save_rendered(self, project_id: str, image_id: str, content: bytes) -> dict[str, Any]:
         if len(content) > 150 * 1024 * 1024:
             raise ValueError("حجم تصویر ویرایش‌شده بیش از حد مجاز است.")
-        with Image.open(io.BytesIO(content)) as im:
-            if (im.format or "").upper() != "PNG":
-                raise ValueError("تصویر ویرایش‌شده باید از نوع PNG باشد.")
-            rendered_size = im.size
-            im.verify()
+        try:
+            with Image.open(io.BytesIO(content)) as im:
+                if (im.format or "").upper() != "PNG":
+                    raise ValueError("تصویر ویرایش‌شده باید از نوع PNG باشد.")
+                rendered_size = im.size
+                im.verify()
+        except ValueError:
+            # پیام‌های ValueError خودِ ما فارسی‌اند و از اینجا عبور می‌کنند.
+            raise
+        except Exception as exc:
+            # پیام خام PIL (مثل «Truncated File Read») لاتین است؛ کاربر فارسی می‌خواند.
+            raise ValueError("تصویر ویرایش‌شدهٔ PNG ناقص یا خراب است؛ دوباره تصویر را رندر کنید.") from exc
         with self._lock:
             state = self.get(project_id)
             target_item = next((item for item in state.get("images", []) if item["id"] == image_id), None)
