@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.39"
+    assert health.json()["version"] == "4.40"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3290,7 +3290,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.39"
+    assert APP_VERSION == "4.40"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -5219,3 +5219,54 @@ def test_v439_swapping_a_same_length_watermark_logo_renders_again():
     body = match.group("body")
     assert "slice(-32)" in body, "logo fingerprint must include a content tail, not only its length"
     assert "logoFingerprint" in body
+
+
+def test_v440_corrupt_pdf_import_is_explained_in_persian(client):
+    """v4.40: a corrupt PDF must tell the Persian user *why* - in Persian.
+
+    Root cause of the old behaviour: `_import_pdf` passed `fitz.open(...)`
+    straight through, so PyMuPDF's RuntimeError ("Failed to open stream" or
+    other engine-native text) satisfied the endpoint's `except RuntimeError`
+    mapping and reached the user as-is. The corruption message must be Persian.
+    """
+    response = client.post("/api/projects", json={"name": "PDF خراب"})
+    assert response.status_code == 201
+    project_id = response.json()["id"]
+
+    garbage = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("book.pdf", b"%PDF-1.7\n" + b"\xde\xad\xbe\xef" * 512, "application/pdf"))],
+    )
+    assert garbage.status_code == 400, garbage.text
+    detail = garbage.json()["detail"]
+    assert "خراب" in detail or "پشتیبانی نمی‌شود" in detail
+    assert not detail.isascii(), detail
+    assert "Failed to open stream" not in detail
+    assert "failed to open stream" not in detail.lower()
+
+    text_in_pdf_skin = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("readme.pdf", "مطمئناً PDF نیست".encode("utf-8"), "application/pdf"))],
+    )
+    assert text_in_pdf_skin.status_code == 400, text_in_pdf_skin.text
+    detail = text_in_pdf_skin.json()["detail"]
+    assert not detail.isascii(), detail
+    assert "Failed to open stream" not in detail
+
+    # آسیب میانهٔ فایل: ممکن است موتور xref آن را بازیابی کند (آزمون را تحمیل نمی‌کنیم)،
+    # اما اگر رد شد، پیام تا به‌کاربر برسد باید فارسی باشد.
+    import pymupdf as fitz  # noqa: PLC0415
+
+    doc = fitz.open()
+    doc.new_page()
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    damaged = pdf_bytes[:2000] + b"GARBAGE-IN-MIDDLE" + pdf_bytes[2000:]
+    res = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("book2.pdf", damaged, "application/pdf"))],
+    )
+    if res.status_code == 400:
+        detail = res.json()["detail"]
+        assert not detail.isascii(), detail
+        assert "Failed to open stream" not in detail

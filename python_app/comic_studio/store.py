@@ -620,8 +620,14 @@ class ProjectStore:
             raise ValueError("حجم فایل PDF بیش از حد مجاز است.")
         import pymupdf as fitz
 
+        stem = Path(filename).stem
         scale = max(1.0, min(8.5, float(scale)))
-        with fitz.open(stream=content, filetype="pdf") as check_doc:
+        try:
+            opened_check_doc = fitz.open(stream=content, filetype="pdf")
+        except Exception as exc:
+            # پیام خام PyMuPDF (مثل Failed to open stream) لاتین است؛ کاربر باید فارسی بخواند.
+            raise ValueError(f"فایل PDF «{stem}» خراب است یا قالب آن پشتیبانی نمی‌شود.") from exc
+        with opened_check_doc as check_doc:
             if check_doc.needs_pass:
                 raise ValueError("فایل PDF رمزگذاری‌شده پشتیبانی نمی‌شود.")
             page_count = len(check_doc)
@@ -634,7 +640,6 @@ class ProjectStore:
         project_id = state["id"]
         known = {item["id"] for item in state["images"]}
         slots = [self._allocate_image_slot(project_id, known, ".png") for _ in range(page_count)]
-        stem = Path(filename).stem
         workers, _ = compute_worker_count(page_count, per_worker_mb=240, max_cap=6)
 
         tls = threading.local()
@@ -652,10 +657,14 @@ class ProjectStore:
 
         def _render_one_page(_idx: int, page_index: int) -> dict[str, Any]:
             image_id, file_name, image_path = slots[page_index]
-            doc = _get_thread_doc()
-            page = doc[page_index]
-            scale_x, scale_y = self._compute_pdf_page_scales(page, scale)
-            pix = page.get_pixmap(matrix=fitz.Matrix(scale_x, scale_y), alpha=False)
+            try:
+                doc = _get_thread_doc()
+                page = doc[page_index]
+                scale_x, scale_y = self._compute_pdf_page_scales(page, scale)
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale_x, scale_y), alpha=False)
+            except Exception as exc:
+                # خطاهای خام PyMuPDF لاتین‌اند؛ کاربر باید صفحهٔ آسیب‌دیده را فارسی بخواند.
+                raise ValueError(f"خواندن صفحهٔ {page_index + 1} از فایل PDF «{stem}» ممکن نشد؛ فایل آسیب‌دیده است.") from exc
             width, height = int(pix.width), int(pix.height)
             if width < 1 or height < 1 or width * height > 100_000_000:
                 del pix

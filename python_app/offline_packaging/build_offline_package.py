@@ -31,10 +31,12 @@ REPO_PY_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_PY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_PY_ROOT))
 
-from comic_studio import APP_VERSION  # noqa: E402
+from comic_studio import APP_VERSION, __version__  # noqa: E402
 from comic_studio.paths import models_dir  # noqa: E402
 
 SFX_MAGIC = b"COS405PK"
+# چهاربخشی برای فرادادهٔ فایل نصاب C# (رشتهٔ «4.3.9» → «4.3.9.0») تا با هر بامپ نسخه خودکار به‌روز شود.
+SFX_ASSEMBLY_VERSION = f"{__version__}.0"
 
 
 class BuildError(RuntimeError):
@@ -125,7 +127,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.3.9.0")]
+[assembly: System.Reflection.AssemblyVersion("__APP_ASSEMBLY_VERSION__")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -959,7 +961,11 @@ def build_windows_installer(
         say(f"[installer] Building native Windows GUI Setup .exe via {csc} ...")
         cs_source = build_root / "SetupStub.cs"
         stub_exe = build_root / "SetupStub.exe"
-        cs_code = CSHARP_SFX_INSTALLER.replace("__APP_VERSION__", APP_VERSION)
+        cs_code = (
+            CSHARP_SFX_INSTALLER
+            .replace("__APP_VERSION__", APP_VERSION)
+            .replace("__APP_ASSEMBLY_VERSION__", SFX_ASSEMBLY_VERSION)
+        )
         cs_source.write_text(cs_code, encoding="utf-8-sig")
         subprocess.check_call([
             str(csc),

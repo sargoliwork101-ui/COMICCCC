@@ -131,7 +131,13 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
     assert "ComicOCRStudio-Offline-Setup-%APP_VERSION%" in offline_bat
-    assert 'set "APP_VERSION=4.39"' in offline_bat
+    assert 'set "APP_VERSION=4.40"' in offline_bat
+
+    # v4.40: فرادادهٔ نسخهٔ نصاب C# باید از نسخهٔ پایتون تغذیه شود، نه رشتهٔ ثابت قدیمی.
+    builder = (ROOT / "offline_packaging" / "build_offline_package.py").read_text(encoding="utf-8")
+    assert 'AssemblyVersion("__APP_ASSEMBLY_VERSION__")' in builder
+    assert ".replace(\"__APP_ASSEMBLY_VERSION__\", SFX_ASSEMBLY_VERSION)" in builder
+    assert "SFX_ASSEMBLY_VERSION = f\"{__version__}.0\"" in builder
     assert "DisableDelayedExpansion" in offline_bat
     assert '--find-links="%WHEELHOUSE_DIR%"' in offline_bat
     assert 'start_windows.bat" --setup-only' in offline_bat
