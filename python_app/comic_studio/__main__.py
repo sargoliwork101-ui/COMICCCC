@@ -50,7 +50,15 @@ def _format_browser_url(host: str, port: int) -> str:
 
 
 def _probe_port_state(host: str, port: int) -> str:
-    """Return 'free', 'studio' (already-running Comic OCR Studio), or 'other'."""
+    """Return 'free', 'studio' (a live Comic OCR Studio), 'studio-dying' or 'other'.
+
+    Root cause of the "the app does not come up on the first launch" report:
+    a Studio instance that is shutting down (its last browser tab was closed)
+    keeps the port busy for a moment.  The old launcher could hand the browser
+    over to that dying instance - or try to bind the same port and die with
+    "address already in use" - so the user saw a dead page until they launched
+    the app again.  The probe now tells the two cases apart.
+    """
     connect_host = _probe_connect_host(host)
     try:
         with socket.create_connection((connect_host, port), timeout=0.08):
@@ -60,10 +68,10 @@ def _probe_port_state(host: str, port: int) -> str:
     health_url = f"{_format_browser_url(host, port)}/api/health"
     try:
         req = urllib.request.Request(health_url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=0.4) as resp:
+        with urllib.request.urlopen(req, timeout=0.6) as resp:
             payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
             if isinstance(payload, dict) and payload.get("name") == APP_NAME:
-                return "studio"
+                return "studio-dying" if payload.get("shutdownPending") else "studio"
     except Exception:
         pass
     return "other"
@@ -77,12 +85,109 @@ def _pick_free_port(host: str) -> int:
         return int(sock.getsockname()[1])
 
 
+def _show_startup_error(message: str) -> None:
+    """Make a failed start visible.
+
+    The packaged Windows `.exe` runs without a console window, so a message on
+    `stderr` would be invisible - a small native box tells the user what went
+    wrong instead of the app silently doing nothing.
+    """
+    print(message, file=sys.stderr, flush=True)
+    if os.name != "nt":
+        return
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, str(message), "Comic OCR Studio", 0x10)
+
+
+def _prepare_listen_socket(sock: socket.socket) -> None:
+    """Apply the same safe socket options uvicorn uses for its own server socket.
+
+    On Windows `SO_EXCLUSIVEADDRUSE` prevents another program from stealing the
+    port, on other systems `SO_REUSEADDR` allows a quick relaunch to reuse a
+    port that is still in `TIME_WAIT`.
+    """
+    with contextlib.suppress(OSError, AttributeError):
+        if os.name == "nt":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+
+def _port_can_be_bound(host: str, port: int) -> bool:
+    """True when the port can be bound right now (no other process owns it)."""
+    bind_host = _probe_connect_host(host)
+    family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            _prepare_listen_socket(sock)
+            sock.bind((bind_host, port))
+        return True
+    except OSError:
+        return False
+
+
+def _wait_for_port_release(host: str, port: int, *, timeout: float = 25.0) -> bool:
+    """Wait until a previous instance has released the port.
+
+    The Studio server stops a couple of seconds after its last browser tab is
+    closed, so a quick relaunch used to collide with the dying instance.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if _port_can_be_bound(host, port):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
+def _acquire_listening_socket(host: str, port: int, *, timeout: float = 30.0) -> socket.socket | None:
+    """Bind and listen on the port ourselves, waiting for a dying instance to let go.
+
+    Owning the socket removes the "address already in use" crash entirely: the
+    port is acquired with retries *before* the web server starts, so a quick
+    relaunch can never die with a dead page in the browser.
+    """
+    bind_host = _probe_connect_host(host)
+    family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+    deadline = time.monotonic() + max(0.0, timeout)
+    last_error: OSError | None = None
+    while True:
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            _prepare_listen_socket(sock)
+            sock.bind((bind_host, port))
+            sock.listen(128)
+            sock.set_inheritable(True)
+            return sock
+        except OSError as exc:
+            last_error = exc
+            sock.close()
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+    if last_error is not None:
+        print(
+            f"Could not use port {port} ({last_error}); trying another free port.",
+            file=sys.stderr,
+            flush=True,
+        )
+    return None
+
+
 def _open_browser_when_listening(host: str, port: int, callback) -> None:
+    """Open the browser only once the app really answers on the port.
+
+    The old code opened the browser even when the server had died, which showed
+    the user an unreachable page instead of the studio.
+    """
     if threading.current_thread() is threading.main_thread():
         callback()
         return
     connect_host = _probe_connect_host(host)
-    deadline = time.monotonic() + 15.0
+    deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         try:
             with socket.create_connection((connect_host, port), timeout=0.05):
@@ -90,10 +195,18 @@ def _open_browser_when_listening(host: str, port: int, callback) -> None:
                 return
         except OSError:
             time.sleep(0.035)
-    callback()
+    print(
+        "Comic OCR Studio did not start listening on the expected port; the browser was not opened.",
+        file=sys.stderr,
+        flush=True,
+    )
+    _show_startup_error(
+        "Comic OCR Studio could not start listening on its local port, so the browser was not opened.\n"
+        "Close other Comic OCR Studio windows and start the app again."
+    )
 
 
-def run_server(host: str, port: int) -> None:
+def run_server(host: str, port: int, listening_socket: socket.socket | None = None) -> None:
     """Run one server whose lifetime can follow the last open app tab."""
     from .main import create_app
 
@@ -111,7 +224,10 @@ def run_server(host: str, port: int) -> None:
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, reload=False, access_log=False))
     app.state.sessions.on_empty = lambda: setattr(server, "should_exit", True)
     try:
-        server.run()
+        if listening_socket is not None:
+            server.run(sockets=[listening_socket])
+        else:
+            server.run()
     finally:
         app.state.sessions.stop()
 
@@ -152,9 +268,32 @@ def main() -> None:
                 with contextlib.suppress(BrowserError):
                     open_url(url, browser, window)
             return
-        if state == "other":
+        if state == "studio-dying":
+            # A previous instance is closing down and still owns the port.
+            # Wait for it instead of handing the browser over to a dying
+            # server (that showed an empty page) or colliding with it
+            # ("address already in use" made the new instance quit at once).
+            print("Waiting for the previous Comic OCR Studio instance to release the port...", flush=True)
+            if not _wait_for_port_release(args.host, port, timeout=25.0):
+                with contextlib.suppress(OSError):
+                    port = _pick_free_port(args.host)
+        elif state == "other":
             with contextlib.suppress(OSError):
                 port = _pick_free_port(args.host)
+
+    # Own the port before anything else: a previous instance that is still
+    # shutting down must never make this launch die with "address already in
+    # use" while the browser already opened a dead page.
+    listening_socket = _acquire_listening_socket(args.host, port, timeout=30.0)
+    if listening_socket is None:
+        if explicit_port:
+            _show_startup_error(
+                f"Port {port} is still in use by another program. Close it and start Comic OCR Studio again."
+            )
+            raise SystemExit(1)
+        with contextlib.suppress(OSError):
+            port = _pick_free_port(args.host)
+        listening_socket = _acquire_listening_socket(args.host, port, timeout=10.0)
 
     if not args.no_browser and browser != "none":
         url = _format_browser_url(args.host, port)
@@ -171,7 +310,7 @@ def main() -> None:
         )
         opener.daemon = True
         opener.start()
-    run_server(args.host, port)
+    run_server(args.host, port, listening_socket)
 
 
 if __name__ == "__main__":

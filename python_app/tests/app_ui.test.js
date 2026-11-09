@@ -968,7 +968,7 @@ function check(name, condition) {
     check('confirming translation cancel closes translationDialog without reopening and resets busy state', $('appModalDialog').open === false && $('translationDialog').open === false && vm.runInContext('translationRunning === false && jobBusy === false', context) && $('translateBtn').disabled === false);
     releaseTr1(); translationGate = null;
 
-    // v4.28: the "لغو" buttons must really stop the running work (server-side preemption), and every
+    // v4.29: the "لغو" buttons must really stop the running work (server-side preemption), and every
     // long-running dialog now exposes its own visible cancel button.
     check('export, editor and OCR-quick cancel buttons exist for in-flight work', Boolean($('cancelExportBtn')) && Boolean($('editorCancelJobBtn')) && Boolean($('ocrQuickCancelBtn')));
     check('cancel buttons start hidden and are only shown while their job runs', $('cancelExportBtn').classList.contains('hidden') && $('editorCancelJobBtn').classList.contains('hidden'));
@@ -1051,7 +1051,7 @@ function check(name, condition) {
         if (!body.force) {
           return jsonResponse({ kind: 'hardware_warning', detail: 'NVIDIA GPU required', warnings: mockCatalog[1].hardwareCheck.warnings, hardwareCheck: mockCatalog[1].hardwareCheck }, 409);
         }
-        mockCatalog = mockCatalog.map((item) => item.id === 'olmocr' ? { ...item, runtimeInstalled: true, modelReady: true, readyLanguages: [body.language || 'eng'], installedVersion: '0.4.28' } : item);
+        mockCatalog = mockCatalog.map((item) => item.id === 'olmocr' ? { ...item, runtimeInstalled: true, modelReady: true, readyLanguages: [body.language || 'eng'], installedVersion: '0.4.29' } : item);
         return jsonResponse({ ok: true, language: body.language || 'eng', engines: mockCatalog });
       }
       if (parsed.pathname === '/api/engines/rapidocr-v6/update' && options.method === 'POST') {
@@ -2195,7 +2195,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas426: verText.includes('۴.۲۸'),
+            verHas426: verText.includes('۴.۲۹'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2214,7 +2214,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.28 displays version 4.28 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.29 displays version 4.29 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4416,7 +4416,7 @@ function check(name, condition) {
       JSON.stringify(v424PersianAdoptAndHelpCheck),
     );
 
-    // v4.27/v4.28: the in-app Help must document the Persian table reading and the automatic
+    // v4.27/v4.29: the in-app Help must document the Persian table reading and the automatic
     // download of the missing Persian language file.
     const v427TableHelpCheck = await vm.runInContext(`
       (() => {
@@ -4431,15 +4431,79 @@ function check(name, condition) {
           && helpModes.features.some((f) => f.includes('دانلود خودکار فایل زبان فارسی') && f.includes('fas'))
         );
         const verText = document.querySelector('.brand .ver')?.textContent || '';
-        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۲۸') };
+        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۲۹') };
       })()
     `, context);
     check(
-      'v4.27/v4.28 document the cell-by-cell Persian table reading and the automatic Persian language download in Help chapter 6',
+      'v4.27/v4.29 document the cell-by-cell Persian table reading and the automatic Persian language download in Help chapter 6',
       v427TableHelpCheck.helpHasV427Table === true
         && v427TableHelpCheck.helpHasV428AutoLang === true
         && v427TableHelpCheck.verHas428 === true,
       JSON.stringify(v427TableHelpCheck),
+    );
+  }
+
+  // v4.29: the user can decide how much of the machine the studio may use (#resourcesBtn / #resourcesDialog).
+  {
+    const v429ResourcesCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        let putPayload = null;
+        const mockJson = (payload) => ({
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => payload,
+        });
+        window.fetch = async (url, opts = {}) => {
+          const parsed = new URL(url, 'http://127.0.0.1:8765');
+          if (parsed.pathname === '/api/resources' && (!opts.method || opts.method === 'GET')) {
+            return mockJson({
+              mode: 'auto', cpuPercent: 60, ramPercent: 60, cpuCores: 8, ramGb: 16,
+              allowedCores: 8, allowedRamMb: 15000, minPercent: 10, maxPercent: 100,
+            });
+          }
+          if (parsed.pathname === '/api/resources' && opts.method === 'PUT') {
+            putPayload = JSON.parse(opts.body || '{}');
+            return mockJson({
+              mode: putPayload.mode, cpuPercent: putPayload.cpuPercent, ramPercent: putPayload.ramPercent,
+              cpuCores: 8, ramGb: 16, allowedCores: 2, allowedRamMb: 6000, minPercent: 10, maxPercent: 100,
+            });
+          }
+          return mockJson({});
+        };
+        $('resourcesBtn').click();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        const opened = $('resourcesDialog').open === true;
+        const autoChecked = $('resourcesAutoMode').checked === true;
+        const cpuInfo = $('resourcesCpuInfo').textContent || '';
+        const ramInfo = $('resourcesRamInfo').textContent || '';
+        $('resourcesAutoMode').checked = false;
+        $('resourcesAutoMode').dispatchEvent(new window.Event('change'));
+        $('resourcesCpuPercent').value = '30';
+        $('resourcesCpuPercent').dispatchEvent(new window.Event('input'));
+        const manualVisible = !$('resourcesManualBox').classList.contains('hidden');
+        const cpuLabel = $('resourcesCpuValue').textContent || '';
+        $('resourcesSaveBtn').click();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        window.fetch = origFetch;
+        if ($('resourcesDialog')?.open) closeDialog('resourcesDialog');
+        return { opened, autoChecked, cpuInfo, ramInfo, manualVisible, cpuLabel, putPayload };
+      })()
+    `, context);
+    check(
+      'v4.29 opens the CPU/RAM budget dialog from #resourcesBtn, shows the machine specs and saves the chosen percentages',
+      v429ResourcesCheck.opened === true
+        && v429ResourcesCheck.autoChecked === true
+        && /هسته/.test(v429ResourcesCheck.cpuInfo)
+        && /گیگابایت/.test(v429ResourcesCheck.ramInfo)
+        && v429ResourcesCheck.manualVisible === true
+        && /۳۰/.test(v429ResourcesCheck.cpuLabel)
+        && v429ResourcesCheck.putPayload
+        && v429ResourcesCheck.putPayload.mode === 'manual'
+        && v429ResourcesCheck.putPayload.cpuPercent === 30
+        && v429ResourcesCheck.putPayload.ramPercent === 60,
+      JSON.stringify(v429ResourcesCheck),
     );
   }
 

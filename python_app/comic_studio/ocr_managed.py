@@ -37,6 +37,7 @@ from PIL import Image
 
 from .activity import JobCancelledError, check_cancelled, emit, is_job_cancelled
 from .paths import bundled_models_dir, is_custom_data_dir_active, models_dir
+from . import resources
 
 _SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 _HW_CACHE_LOCK = threading.Lock()
@@ -671,16 +672,16 @@ _RUNTIME_LOCK = threading.Lock()
 
 
 def cpu_core_count() -> int:
-    """Return available logical CPU cores (honoring COMIC_STUDIO_FAKE_HARDWARE_JSON when set)."""
+    """Return the CPU cores the app may use (honoring the user's budget and the test override)."""
     override = os.environ.get("COMIC_STUDIO_FAKE_HARDWARE_JSON")
     if override:
         try:
             parsed = json.loads(override)
             if isinstance(parsed, dict) and parsed.get("cpuCores") is not None:
-                return max(1, int(parsed["cpuCores"]))
+                return resources.effective_cpu_cores(max(1, int(parsed["cpuCores"])))
         except Exception:
             pass
-    return max(1, int(os.cpu_count() or 1))
+    return resources.effective_cpu_cores(max(1, int(os.cpu_count() or 1)))
 
 
 def compute_worker_count(
@@ -694,10 +695,10 @@ def compute_worker_count(
     if task_count <= 1 or cores <= 1:
         return 1, cores
     hw = inspect_hardware()
-    cores = max(1, int(hw.get("cpuCores") or cores))
     ram_gb = float(hw.get("ramGb") or 0.0)
     if ram_gb > 0:
-        usable_mb = max(128.0, (ram_gb - 1.2) * 1024.0)
+        # The user's RAM share decides how much memory may be used in parallel.
+        usable_mb = max(128.0, resources.usable_ram_mb(ram_gb))
         ram_cap = max(1, int(usable_mb // max(32, per_worker_mb)))
     else:
         ram_cap = max_cap

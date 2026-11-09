@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const G = window.StudioGroups;
 const GROUP_COLORS = ['#34d399', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa', '#2dd4bf', '#fb923c', '#e879f9'];
 const state = {
-  project: null, engines: [], ai: null, storage: null, licenseStatus: null, workspaceBooted: false, activityFeedStarted: false,
+  project: null, engines: [], ai: null, storage: null, resources: null, licenseStatus: null, workspaceBooted: false, activityFeedStarted: false,
   editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
   copiedEditorBlocks: [], copiedEditorPasteStep: 0, copiedEditorSourceImageId: null,
   cropId: null, crop: null, cropPointer: null, modelBusy: null, dragId: null, dragIds: [],
@@ -2664,6 +2664,78 @@ function renderStorageSettings(info) {
     $('storageResetDefaultBtn').classList.toggle('hidden', !info.customPath);
   }
   syncStorageCheckboxState();
+}
+function formatResourcePercent(value) {
+  return `${Number(value || 0).toLocaleString('fa-IR')}٪`;
+}
+function formatResourceRam(mb) {
+  const amount = Number(mb || 0);
+  if (amount >= 1024) return `${(amount / 1024).toLocaleString('fa-IR', { maximumFractionDigits: 1 })} گیگابایت`;
+  return `${amount.toLocaleString('fa-IR')} مگابایت`;
+}
+function renderResourceBudget(summary) {
+  if (!summary) return;
+  const manual = summary.mode === 'manual';
+  if ($('resourcesAutoMode')) $('resourcesAutoMode').checked = !manual;
+  if ($('resourcesCpuPercent')) $('resourcesCpuPercent').value = String(summary.cpuPercent ?? 60);
+  if ($('resourcesRamPercent')) $('resourcesRamPercent').value = String(summary.ramPercent ?? 60);
+  if ($('resourcesModeBadge')) {
+    $('resourcesModeBadge').textContent = manual ? 'دستی' : 'خودکار';
+    $('resourcesModeBadge').classList.toggle('is-local', !manual);
+  }
+  if ($('resourcesCpuInfo')) $('resourcesCpuInfo').textContent = `${Number(summary.cpuCores || 0).toLocaleString('fa-IR')} هسته`;
+  if ($('resourcesRamInfo')) $('resourcesRamInfo').textContent = summary.ramGb
+    ? `${Number(summary.ramGb).toLocaleString('fa-IR', { maximumFractionDigits: 1 })} گیگابایت`
+    : 'نامشخص';
+  if ($('resourcesEffectiveInfo')) {
+    $('resourcesEffectiveInfo').textContent = manual
+      ? `${Number(summary.allowedCores || 0).toLocaleString('fa-IR')} هسته از ${Number(summary.cpuCores || 0).toLocaleString('fa-IR')} · ${formatResourceRam(summary.allowedRamMb)} حافظه`
+      : 'خودکار (برنامه خودش متناسب با سیستم تصمیم می‌گیرد)';
+  }
+  syncResourceSliderLabels();
+  $('resourcesManualBox')?.classList.toggle('hidden', !manual);
+  [$('resourcesCpuPercent'), $('resourcesRamPercent')].forEach((el) => { if (el) el.disabled = !manual; });
+}
+function syncResourceSliderLabels() {
+  if ($('resourcesCpuValue')) $('resourcesCpuValue').textContent = formatResourcePercent($('resourcesCpuPercent')?.value ?? 60);
+  if ($('resourcesRamValue')) $('resourcesRamValue').textContent = formatResourcePercent($('resourcesRamPercent')?.value ?? 60);
+}
+async function openResourcesDialog() {
+  if (!$('resourcesDialog')) return;
+  if ($('resourcesStatus')) $('resourcesStatus').textContent = '';
+  try {
+    const summary = await api('/api/resources');
+    state.resources = summary;
+    renderResourceBudget(summary);
+  } catch (error) {
+    if ($('resourcesStatus')) $('resourcesStatus').textContent = error?.detailText || error?.message || String(error);
+  }
+  showDialog('resourcesDialog');
+  setMenuOpen(false);
+}
+async function submitResourceBudget() {
+  const auto = Boolean($('resourcesAutoMode')?.checked);
+  const cpuPercent = Number($('resourcesCpuPercent')?.value ?? 60);
+  const ramPercent = Number($('resourcesRamPercent')?.value ?? 60);
+  const btn = $('resourcesSaveBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const summary = await api('/api/resources', jsonOptions('PUT', {
+      mode: auto ? 'auto' : 'manual',
+      cpuPercent: Math.min(100, Math.max(10, Math.round(cpuPercent))),
+      ramPercent: Math.min(100, Math.max(10, Math.round(ramPercent))),
+    }));
+    state.resources = summary;
+    renderResourceBudget(summary);
+    if ($('resourcesStatus')) $('resourcesStatus').textContent = 'تنظیم منابع ذخیره شد و از همین حالا اعمال می‌شود.';
+    toast(auto ? 'منابع سیستم به حالت خودکار برگشت' : 'سهمیهٔ رم و پردازنده ذخیره شد');
+  } catch (error) {
+    const msg = error?.detailText || error?.message || String(error);
+    if ($('resourcesStatus')) $('resourcesStatus').textContent = msg;
+    toast(msg, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 async function openStorageDialog() {
   if (!$('storageDialog')) return;
@@ -8939,6 +9011,19 @@ function bindEvents() {
   $('storageDialog')?.addEventListener('cancel', (event) => {
     if (storageSwitchBusy) event.preventDefault();
   });
+  $('resourcesBtn')?.addEventListener('click', () => openResourcesDialog().catch((error) => toast(error.message || String(error), true)));
+  $('resourcesSaveBtn')?.addEventListener('click', () => submitResourceBudget().catch(() => {}));
+  $('resourcesAutoMode')?.addEventListener('change', () => {
+    const manual = !$('resourcesAutoMode')?.checked;
+    $('resourcesManualBox')?.classList.toggle('hidden', !manual);
+    [$('resourcesCpuPercent'), $('resourcesRamPercent')].forEach((el) => { if (el) el.disabled = !manual; });
+    if ($('resourcesModeBadge')) {
+      $('resourcesModeBadge').textContent = manual ? 'دستی' : 'خودکار';
+      $('resourcesModeBadge').classList.toggle('is-local', !manual);
+    }
+  });
+  $('resourcesCpuPercent')?.addEventListener('input', syncResourceSliderLabels);
+  $('resourcesRamPercent')?.addEventListener('input', syncResourceSliderLabels);
   $('checkModelUpdatesBtn')?.addEventListener('click', () => checkEngineUpdates({ force: true, silent: false }).catch(() => {}));
   $('updateAllModelsBtn')?.addEventListener('click', () => updateAllEngines().catch(() => {}));
   $('modelsActiveCancelBtn')?.addEventListener('click', () => requestCancelModelJob().catch(() => {}));

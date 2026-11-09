@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Comic OCR Studio</title>
-  <link rel="stylesheet" href="/style.css?v=4.28">
-  <link rel="stylesheet" href="/rich-editor.css?v=4.28">
+  <link rel="stylesheet" href="/style.css?v=4.29">
+  <link rel="stylesheet" href="/rich-editor.css?v=4.29">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۲۸ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
+    <div class="brand"><img class="logo" src="/assets/icon128.png" alt=""><div><h1>Comic OCR Studio <span class="ver">۴.۲۹ · Python</span></h1><span class="brand-sub">OCR آفلاین، ترجمه و خروجی کمیک، کتاب و مقاله — مستقل از افزونه</span></div></div>
     <div class="topbar-actions">
       <button id="licenseTopStatusBtn" class="bt lic-top-btn hidden" type="button" title="مشاهدهٔ وضعیت لایسنس و مدت اعتبار باقی‌مانده"><span id="licenseTopDot" class="lic-top-dot" aria-hidden="true"></span><span id="licenseTopStatusText">اعتبار لایسنس</span></button>
       <button id="helpTopBtn" class="bt help-top-btn" type="button" title="راهنمای کامل و بخش‌به‌بخش برنامه با مثال (F1)"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.3"/><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.6.3-.8.6-.8 1.2M8 11.6h.01"/></svg><span>راهنما (Help)</span></button>
@@ -95,6 +95,7 @@
     <button id="modelsBtn" class="mi"><span>مدیریت مدل‌های OCR</span><span id="modelsBtnBadge" class="menu-update-badge hidden"></span></button>
     <button id="aiBtn" class="mi">مدیریت ترجمه‌ها</button>
     <button id="storageBtn" class="mi"><span>مسیر ذخیره‌سازی و دانلودها (اختیاری)</span></button>
+    <button id="resourcesBtn" class="mi"><span>تنظیم منابع سیستم (رم و پردازنده)</span></button>
     <button id="licenseBtn" class="mi"><span>لایسنس و رمز ورود</span></button>
     <button id="lockAppMenuBtn" class="mi hidden"><span>قفل فوری برنامه</span></button>
     <button id="themeBtn" class="mi">تغییر تم روشن / تیره</button>
@@ -484,6 +485,36 @@
     <div class="dialog-actions">
       <button id="storageResetDefaultBtn" class="bt hidden" type="button">بازگشت به مسیر پیش‌فرض</button>
       <button id="storageSaveBtn" class="bt primary" type="button">ذخیره و اعمال مسیر</button>
+    </div>
+  </dialog>
+
+  <dialog id="resourcesDialog" class="dlg small-dialog resources-dialog">
+    <form method="dialog" class="dialog-head">
+      <div class="dialog-title-row">
+        <h2>تنظیم منابع سیستم (رم و پردازنده)</h2>
+        <span id="resourcesModeBadge" class="exec-badge is-local">خودکار</span>
+      </div>
+      <button class="icon" value="cancel" aria-label="بستن">×</button>
+    </form>
+    <p class="hint">اگر هنگام خواندن متن یا ترجمه، سیستم شما کند یا هنگ می‌کند، می‌توانید مشخص کنید برنامه از پردازنده و حافظهٔ سیستم شما چقدر استفاده کند. هرچه این درصد کمتر باشد، برنامه <strong>سبک‌تر</strong> اجرا می‌شود و سیستم شما آزادتر می‌ماند؛ البته خواندن متن هم کمی طولانی‌تر می‌شود.</p>
+    <div class="storage-summary-box">
+      <div class="storage-summary-row"><span>پردازندهٔ این سیستم:</span><strong id="resourcesCpuInfo" dir="ltr">—</strong></div>
+      <div class="storage-summary-row"><span>حافظهٔ این سیستم:</span><strong id="resourcesRamInfo" dir="ltr">—</strong></div>
+      <div class="storage-summary-row"><span>سهمیهٔ فعلی برنامه:</span><strong id="resourcesEffectiveInfo">—</strong></div>
+    </div>
+    <div class="checks storage-checks">
+      <label><input id="resourcesAutoMode" type="checkbox" checked> حالت خودکار (پیشنهادی) — برنامه خودش با توجه به رم و پردازندهٔ سیستم تصمیم می‌گیرد</label>
+    </div>
+    <div id="resourcesManualBox" class="resources-manual-box">
+      <label for="resourcesCpuPercent">سهمیهٔ پردازنده: <strong id="resourcesCpuValue">۶۰٪</strong></label>
+      <input id="resourcesCpuPercent" type="range" min="10" max="100" step="5" value="60">
+      <label for="resourcesRamPercent">سهمیهٔ حافظه: <strong id="resourcesRamValue">۶۰٪</strong></label>
+      <input id="resourcesRamPercent" type="range" min="10" max="100" step="5" value="60">
+      <p class="hint">پیشنهاد برای سیستم‌های ضعیف: پردازنده ۲۵٪ تا ۴۰٪ و حافظه ۴۰٪ تا ۶۰٪.</p>
+    </div>
+    <p id="resourcesStatus" class="hint diagnostic-message" role="status" aria-live="polite"></p>
+    <div class="dialog-actions">
+      <button id="resourcesSaveBtn" class="bt primary" type="button">ذخیره و اعمال</button>
     </div>
   </dialog>
 
@@ -994,12 +1025,12 @@
     </div>
   </dialog>
   <div id="toast" role="status" popover="manual"></div>
-<script src="/typeset.js?v=4.28"></script>
-<script src="/groups.js?v=4.28"></script>
-<script src="/rich-sanitize.js?v=4.28"></script>
-<script src="/rich-editor.js?v=4.28"></script>
-<script src="/inline-edit-session.js?v=4.28"></script>
-<script src="/help-guide.js?v=4.28"></script>
-<script src="/app.js?v=4.28"></script>
+<script src="/typeset.js?v=4.29"></script>
+<script src="/groups.js?v=4.29"></script>
+<script src="/rich-sanitize.js?v=4.29"></script>
+<script src="/rich-editor.js?v=4.29"></script>
+<script src="/inline-edit-session.js?v=4.29"></script>
+<script src="/help-guide.js?v=4.29"></script>
+<script src="/app.js?v=4.29"></script>
 </body>
 </html>

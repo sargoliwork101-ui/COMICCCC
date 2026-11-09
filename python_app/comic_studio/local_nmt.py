@@ -23,6 +23,7 @@ import httpx
 from .activity import JobCancelledError, check_cancelled, is_job_cancelled
 from .ocr import OcrError, emit, ensure_custom_site_packages_on_path, install_packages, trim_process_memory
 from .paths import bundled_models_dir, models_dir
+from . import resources
 
 DEFAULT_LOCAL_NMT_MODEL = "nllb-600m"
 DEFAULT_LOCAL_BEAM_SIZE = 2
@@ -609,7 +610,7 @@ class LocalNmtManager:
         last_exc: Exception | None = None
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        headers = {"User-Agent": "ComicOCRStudio/4.28"}
+        headers = {"User-Agent": "ComicOCRStudio/4.29"}
         client = httpx.Client(headers=headers, follow_redirects=True, transport=self._transport)
         with self._clients_lock:
             self._active_clients.add(client)
@@ -874,7 +875,7 @@ class LocalNmtManager:
             if not sp.Load(str(sp_path)):
                 raise LocalNmtError("بارگذاری فایل توکنایزر SentencePiece ناموفق بود.")
 
-            cpu_threads = max(1, min(4, (os.cpu_count() or 2)))
+            cpu_threads = max(1, min(4, resources.effective_cpu_cores(os.cpu_count() or 2)))
             translator = None
             # Prefer CUDA automatically only when available and healthy; fall back cleanly to CPU int8/default.
             try_configs: list[tuple[str, str]] = []

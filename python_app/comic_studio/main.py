@@ -50,6 +50,7 @@ from .paths import (
     project_root,
 )
 from . import context_run, pending_results
+from . import resources
 from .license_guard import (
     SUPPORT_PHONE,
     LicenseError,
@@ -63,7 +64,7 @@ from .local_nmt import DEFAULT_LOCAL_NMT_MODEL, LOCAL_NMT_MODELS, LocalNmtError
 from .schemas import (
     AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest,
     LicenseActivateRequest, LocalLoginRequest, LocalNmtModelActionRequest, LocalNmtTestRequest, LocalPasswordUpdateRequest, OcrRequest, ProjectCreate,
-    SessionRequest, StateUpdate, StorageFolderPickRequest, StorageSettingsUpdate, TextTranslateRequest, TranslateRequest,
+    ResourceBudget, SessionRequest, StateUpdate, StorageFolderPickRequest, StorageSettingsUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .sessions import SessionManager
 from .store import ProjectChangedError, ProjectStore
@@ -584,7 +585,17 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
-        return {"name": APP_NAME, "version": APP_VERSION, "offlineOcr": True, "scraping": False}
+        # `shutdownPending` tells the launcher that this instance is closing down
+        # (its last browser tab was closed).  A second launcher must not hand the
+        # browser over to a dying instance, otherwise the user gets a dead page.
+        return {
+            "name": APP_NAME,
+            "version": APP_VERSION,
+            "offlineOcr": True,
+            "scraping": False,
+            "shutdownPending": bool(sessions.shutdown_pending),
+            "activeTabs": int(sessions.active_count),
+        }
 
     def _set_session_cookie(response: JSONResponse, token: str, request: Request) -> JSONResponse:
         response.set_cookie(
@@ -2277,6 +2288,23 @@ def create_app() -> FastAPI:
             raise
         activity.add("ترجمهٔ دوبارهٔ خط تمام شد", "success")
         return {"text": translated}
+
+    @app.get("/api/resources")
+    def resources_status() -> dict[str, Any]:
+        """The user's CPU/RAM budget plus a summary of the current machine."""
+        return resources.budget_summary()
+
+    @app.put("/api/resources")
+    def save_resources(values: ResourceBudget) -> dict[str, Any]:
+        """Store how much of the machine the app may use (v4.29)."""
+        saved = resources.save_budget(values.model_dump())
+        summary = resources.budget_summary()
+        activity.add(
+            "سهمیهٔ پردازنده و حافظهٔ برنامه به‌روزرسانی شد "
+            f"({summary['mode']} — پردازنده {summary['cpuPercent']}٪، حافظه {summary['ramPercent']}٪)",
+            "success",
+        )
+        return summary
 
     @app.get("/api/ai-settings")
     def ai_settings() -> dict[str, Any]:

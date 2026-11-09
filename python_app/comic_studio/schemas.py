@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BackupRequest(BaseModel):
@@ -71,6 +71,16 @@ class LocalNmtTestRequest(BaseModel):
     sample_text: str = Field(default="", max_length=2000)
     beam_size: int = Field(default=2, ge=1, le=4)
     keep_loaded: bool = False
+
+
+class ResourceBudget(BaseModel):
+    """How much of the machine Comic OCR Studio may use (v4.29)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    mode: Literal["auto", "manual"] = "auto"
+    cpu_percent: int | None = Field(default=None, ge=10, le=100, alias="cpuPercent")
+    ram_percent: int | None = Field(default=None, ge=10, le=100, alias="ramPercent")
 
 
 class AiSettings(BaseModel):

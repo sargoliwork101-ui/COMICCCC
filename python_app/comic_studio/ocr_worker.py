@@ -45,7 +45,8 @@ def _configure_cache_dirs(models_root: Path) -> None:
     os.environ.setdefault("SURYA_INFERENCE_PARALLEL", "1")
     os.environ.setdefault("SURYA_INFERENCE_CTX_SIZE", "16384")
     os.environ.setdefault("SURYA_INFERENCE_KEEP_ALIVE", "false")
-    cores = str(max(1, int(os.cpu_count() or 1)))
+    # The parent process already limits these to the user's CPU budget.
+    cores = str(max(1, int(os.environ.get("OMP_NUM_THREADS") or os.cpu_count() or 1)))
     for thread_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ.setdefault(thread_key, cores)
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
@@ -92,7 +93,7 @@ def _widen_requests_default_timeout(min_timeout: float = 120.0) -> None:
 
 def _configure_torch_runtime(torch_mod: Any) -> str:
     """Configure PyTorch multi-core CPU threads and return best available accelerator ('cuda', 'mps', or 'cpu')."""
-    cores = max(1, int(os.cpu_count() or 1))
+    cores = max(1, int(os.environ.get("OMP_NUM_THREADS") or os.cpu_count() or 1))
     try:
         torch_mod.set_num_threads(cores)
     except Exception:
@@ -492,7 +493,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
                 except Exception:
                     paddle_device = None
             self._device = "gpu" if (paddle_device or "").startswith("gpu") else "cpu"
-            cpu_threads = max(1, min(12, os.cpu_count() or 4))
+            cpu_threads = max(1, min(12, int(os.environ.get("OMP_NUM_THREADS") or os.cpu_count() or 4)))
 
             last_err: Exception | None = None
             for candidate in candidates:

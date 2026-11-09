@@ -441,6 +441,15 @@ body.light .exec-badge.is-online,body.light .engine-chip.is-exec-online{border-c
 .storage-checks{display:flex;flex-direction:column;gap:7px;margin:6px 0 10px}
 .storage-warning-banner{border-color:#f59e0b88;background:color-mix(in srgb,#f59e0b 14%,var(--surface-2));color:var(--text)}
 
+/* v4.29: System Resource Budget (CPU & RAM share) dialog */
+.resources-dialog{max-width:560px;width:min(94vw,560px)}
+.resources-manual-box{display:flex;flex-direction:column;gap:6px;margin:6px 0 10px;padding:11px 12px;border-radius:11px;border:1px solid var(--line-2);background:var(--surface-2)}
+.resources-manual-box.hidden{display:none}
+.resources-manual-box label{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font-size:12.5px}
+.resources-manual-box label strong{color:var(--a1);font-size:13px}
+.resources-manual-box input[type=range]{width:100%;accent-color:var(--a1)}
+.resources-manual-box .hint{margin:2px 0 0}
+
 /* v4.04: Built-in Offline Local NMT (NLLB-200) cards & controls inside #aiDialog */
 .local-nmt-panel{display:flex;flex-direction:column;gap:10px;margin:6px 0 8px}
 .local-nmt-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
