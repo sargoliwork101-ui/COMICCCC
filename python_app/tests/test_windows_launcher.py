@@ -130,7 +130,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
     assert "ComicOCRStudio-Offline-Setup-%APP_VERSION%" in offline_bat
-    assert 'set "APP_VERSION=4.33"' in offline_bat
+    assert 'set "APP_VERSION=4.34"' in offline_bat
     assert "DisableDelayedExpansion" in offline_bat
     assert '--find-links="%WHEELHOUSE_DIR%"' in offline_bat
     assert 'start_windows.bat" --setup-only' in offline_bat
@@ -343,3 +343,47 @@ def test_v433_the_offline_builder_only_collects_installed_packages(tmp_path):
     for pkg in ("rapidocr", "onnxruntime", "ctranslate2", "sentencepiece", "pymupdf", "bidi"):
         if importlib.util.find_spec(pkg) is None:
             assert pkg not in cmd, f"{pkg} is not installed and must not be collected"
+
+
+def test_v434_the_readiness_checklist_never_contradicts_its_own_marks(tmp_path, monkeypatch, capsys):
+    """v4.34: a ready machine must not be reported as 'not ready' (the wording was inverted)."""
+    builder = _builder_module()
+
+    monkeypatch.setattr(builder, "_pyinstaller_installed", lambda *a, **k: True)
+    monkeypatch.setattr(builder, "find_iscc", lambda: Path("C:/Program Files (x86)/Inno Setup 6/ISCC.exe"))
+    monkeypatch.setattr(builder, "find_dotnet_csc", lambda: None)
+
+    # A seller machine where everything is in place.
+    models = tmp_path / "models"
+    (models / "rapidocr").mkdir(parents=True)
+    (models / "rapidocr" / "ch_PP-OCRv5_det_mobile.onnx").write_bytes(b"onnx")
+    (models / "tesseract").mkdir(parents=True)
+    for lang in ("eng", "fas"):
+        (models / "tesseract" / f"{lang}.traineddata").write_bytes(b"x" * 3_400_000)
+    monkeypatch.setattr(builder, "models_dir", lambda: models)
+
+    import license_manager
+
+    class _ReadyVault:
+        def key_status(self):
+            return {
+                "vaultPublicKey": "a" * 64,
+                "embeddedPublicKey": "a" * 64,
+                "backupExists": True,
+                "masterKeyPath": str(tmp_path / "seller_master_key.json"),
+                "backupPath": str(tmp_path / "backup" / "seller_master_key.json"),
+            }
+
+    monkeypatch.setattr(license_manager, "SellerVault", _ReadyVault)
+
+    code = builder.run_preflight()
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "Traceback" not in out
+    assert "مورد آماده نیست" not in out
+    assert "همه‌چیز آماده است" in out
+    # Every checklist line states the real state, never a sentence that contradicts its mark.
+    assert "PyInstaller (the packer that makes the .exe) - installed" in out
+    assert "[warn]" not in out
+    assert "OCR models (RapidOCR) - found in" in out
+    assert "Backup copy of the seller master key - found in" in out

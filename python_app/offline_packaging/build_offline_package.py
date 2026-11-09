@@ -95,7 +95,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.3.3.0")]
+[assembly: System.Reflection.AssemblyVersion("4.3.4.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -972,39 +972,85 @@ def run_preflight(*, include_nmt: bool = False) -> int:
 
     v4.33: the seller could not tell *why* the offline build failed, so the builder
     now offers a self-test that answers every question before the long build starts.
+    v4.34: the checklist wording was misleading - a missing item was printed with the
+    sentence "X is installed" behind a [warn] mark, so a perfectly ready machine
+    looked broken. Every line now has a neutral name plus the real state, and items
+    that the builder solves on its own are shown as a note, not as a problem.
     """
     say("=" * 72)
     say(f"  Comic OCR Studio v{APP_VERSION} - بررسی آمادگی ساخت بستهٔ آفلاین")
     say("=" * 72)
     problems: list[str] = []
+    notes: list[str] = []
 
-    def check(label: str, ok: bool, detail: str = "") -> bool:
-        mark = "[ok]  " if ok else "[warn]"
-        say(f"  {mark} {label}" + (f" - {detail}" if detail else ""))
-        if not ok:
-            problems.append(label)
+    def check(name: str, ok: bool, detail: str = "", *, blocking: bool = True) -> bool:
+        """Print one checklist line. `name` is a neutral label, `detail` states the state.
+
+        `blocking=False` marks an item that the builder solves on its own (or that only
+        changes the kind of output), so it must not be listed as a problem.
+        """
+        if blocking:
+            mark = "[ok]  " if ok else "[warn]"
+            if not ok:
+                problems.append(f"{name}: {detail}" if detail else name)
+        else:
+            mark = "[ok]  " if ok else "[note]"
+            if not ok:
+                notes.append(f"{name}: {detail}" if detail else name)
+        say(f"  {mark} {name}" + (f" - {detail}" if detail else ""))
         return ok
 
-    check("Python 3.11+", sys.version_info >= (3, 11), f"Python {sys.version.split()[0]}")
+    def note(text: str) -> None:
+        say(f"  [note] {text}")
+        notes.append(text)
+
+    py_ok = sys.version_info >= (3, 11)
+    check(
+        "Python 3.11 or newer",
+        py_ok,
+        f"Python {sys.version.split()[0]}" if py_ok else f"Python {sys.version.split()[0]} is too old",
+    )
     try:
         import comic_studio  # noqa: F401
 
-        check("The program package (comic_studio) can be imported", True)
+        check("Program package (comic_studio)", True, "imported successfully")
     except Exception as exc:
-        check("The program package (comic_studio) can be imported", False, str(exc))
-    check("PyInstaller is installed", _pyinstaller_installed(sys.executable))
+        check("Program package (comic_studio)", False, f"cannot be imported: {exc}")
+    pyi_ok = _pyinstaller_installed(sys.executable)
+    check(
+        "PyInstaller (the packer that makes the .exe)",
+        pyi_ok,
+        "installed" if pyi_ok else "not installed - it will be installed automatically during the build",
+        blocking=False,
+    )
     icon_png = REPO_PY_ROOT / "comic_studio" / "static" / "assets" / "icon128.png"
-    check("The program icon is available", icon_png.is_file(), str(icon_png))
+    check(
+        "Program icon",
+        icon_png.is_file(),
+        str(icon_png) if icon_png.is_file() else f"missing: {icon_png}",
+    )
 
     rapid_dir = models_dir() / "rapidocr"
     rapid_ok = rapid_dir.is_dir() and any(rapid_dir.glob("*.onnx"))
-    check("The OCR models are downloaded (RapidOCR)", rapid_ok, str(rapid_dir))
+    check(
+        "OCR models (RapidOCR)",
+        rapid_ok,
+        f"found in {rapid_dir}" if rapid_ok else f"not found in {rapid_dir} - connect to the internet and build again",
+    )
     tess_dir = models_dir() / "tesseract"
     tess_ok = all((tess_dir / f"{lang}.traineddata").is_file() for lang in ("eng", "fas"))
-    check("The language files are downloaded (eng + fas)", tess_ok, str(tess_dir))
+    check(
+        "Language files (eng + fas)",
+        tess_ok,
+        f"found in {tess_dir}" if tess_ok else f"not found in {tess_dir} - connect to the internet and build again",
+    )
     if include_nmt:
         nmt_dir = models_dir() / "local-nmt" / "nllb-600m"
-        check("The offline translator model (NLLB-200 600M) is available", nmt_dir.is_dir(), str(nmt_dir))
+        check(
+            "Offline translator model (NLLB-200 600M)",
+            nmt_dir.is_dir(),
+            f"found in {nmt_dir}" if nmt_dir.is_dir() else f"not found in {nmt_dir} - connect to the internet and build again",
+        )
 
     try:
         from license_manager import SellerVault
@@ -1012,44 +1058,72 @@ def run_preflight(*, include_nmt: bool = False) -> int:
         vault = SellerVault()
         status = vault.key_status()
         if status.get("vaultPublicKey"):
-            check("The seller master key is available", True, status.get("masterKeyPath", ""))
-            check("A backup copy of the seller master key exists", bool(status.get("backupExists")), status.get("backupPath", ""))
+            check("Seller master key", True, f"found in {status.get('masterKeyPath', '')}")
+            backup_ok = bool(status.get("backupExists"))
+            check(
+                "Backup copy of the seller master key",
+                backup_ok,
+                f"found in {status.get('backupPath', '')}" if backup_ok else f"missing in {status.get('backupPath', '')} - it is created automatically",
+            )
         elif status.get("embeddedPublicKey"):
             check(
-                "The seller master key is available",
+                "Seller master key",
                 False,
                 "the private seller folder has no master key - restore it (or import your backup) before building, "
                 "otherwise every license you already issued stops working",
             )
         else:
-            check("The seller master key is available", True, "a new master key will be created on the first build")
+            check("Seller master key", True, "a new master key will be created on the first build")
     except Exception as exc:
-        check("The seller master key is available", False, str(exc))
+        check("Seller master key", False, str(exc))
 
     iscc = find_iscc()
     csc = find_dotnet_csc()
     if iscc:
-        check("Inno Setup is installed (real .exe installer)", True, str(iscc))
+        check("Inno Setup (makes the real .exe installer)", True, str(iscc), blocking=False)
     elif csc:
-        check("Inno Setup is installed (real .exe installer)", False, "not installed - a self-extracting .exe installer will be built instead")
+        check(
+            "Inno Setup (makes the real .exe installer)",
+            True,
+            "not installed - a self-extracting .exe installer will be built instead",
+            blocking=False,
+        )
     else:
-        check("Inno Setup is installed (real .exe installer)", False, "not installed - only a .zip archive can be produced")
+        check(
+            "Inno Setup (makes the real .exe installer)",
+            True,
+            "not installed - only a .zip archive can be produced",
+            blocking=False,
+        )
+        note("برای ساخت فایل نصاب واقعی .exe، نرم‌افزار «Inno Setup 6» را نصب کنید.")
 
     try:
         usage = shutil.disk_usage(str(REPO_PY_ROOT))
         free_gb = usage.free / (1024 ** 3)
-        check("There is enough free disk space", free_gb >= 3.0, f"{free_gb:.1f} GB free")
+        check(
+            "Free disk space",
+            free_gb >= 3.0,
+            f"{free_gb:.1f} GB free" if free_gb >= 3.0 else f"only {free_gb:.1f} GB free - the build needs about 3 GB",
+        )
     except Exception:
         pass
 
     say("-" * 72)
     if problems:
-        say(f"  {len(problems)} مورد آماده نیست — ساخت بستهٔ آفلاین با این موارد ممکن است ناموفق باشد:")
+        say(f"  {len(problems)} مورد آماده نیست و باید درست شود:")
         for item in problems:
             say(f"    - {item}")
-        say("  راه‌حل معمول: یک‌بار اینترنت را وصل کنید و دوباره اجرا کنید (مدل‌ها خودکار دانلود می‌شوند).")
+        if any(("OCR models" in p) or ("Language files" in p) or ("translator" in p) for p in problems):
+            say("  راه‌حل مدل‌ها: یک‌بار اینترنت را وصل کنید و دوباره اجرا کنید (مدل‌ها خودکار دانلود می‌شوند).")
+        if any("Seller master key" in p for p in problems):
+            say("  راه‌حل کلید مادر: پنل فروشنده (start_license_manager.bat) را باز کنید یا فایل پشتیبان کلید را برگردانید.")
+        say("  تا آن زمان ساخت بستهٔ آفلاین انجام نمی‌شود.")
     else:
         say("  همه‌چیز آماده است — ساخت بستهٔ آفلاین باید با موفقیت انجام شود.")
+    if notes:
+        say("")
+        for item in notes:
+            say(f"  یادآوری: {item}")
     say("=" * 72)
     return 0 if not problems else 1
 
