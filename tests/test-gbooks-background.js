@@ -63,7 +63,8 @@ function bootBackground(fetchImpl) {
     tabs: {
       create: (opts, cb) => cb({ id: 42 }),
       update: (id, patch, cb) => cb(),
-      sendMessage: async () => ({})
+      sendMessage: async () => ({}),
+      onRemoved: { addListener: (fn) => { listeners.tabRemoved = fn; } }
     }
   };
   const ctx = {
@@ -210,6 +211,19 @@ function bootBackground(fetchImpl) {
     await waitFor(() => renamed !== null);
     check('single page: pid rename tolerated via first src entry',
       renamed && renamed.ok === true && renamed.src.includes('pg=PA1') && /w=10000/.test(renamed.src), renamed);
+
+    // v2.67: lpgPid forwarded by WTPDF_GBOOKS_PAGE reaches the click3 request URL
+    const beforeCalls = bp.fetchCalls.length;
+    let withLpg = null;
+    bp.listeners.message(
+      { type: 'WTPDF_GBOOKS_PAGE', pageUrl: 'https://books.google.com/books?id=B1', pid: 'PA2', lpgPid: 'PP1' },
+      { tab: { id: 22 } },
+      (r) => { withLpg = r; }
+    );
+    await waitFor(() => withLpg !== null);
+    const lpgUrl = bp.fetchCalls.slice(beforeCalls).find((u) => u.includes('pg=PA2')) || '';
+    check('single page: lpgPid forwarded to click3 lpg query parameter',
+      withLpg && withLpg.ok === true && lpgUrl.includes('lpg=PP1'), lpgUrl);
   }
 
   // 6. message handler: SCAN responds via sendResponse with the url list
@@ -254,6 +268,22 @@ function bootBackground(fetchImpl) {
     );
     await waitFor(() => response !== null);
     check('unknown URL shape returns ok:false', response && response.ok === false && !response.cancelled, response);
+  }
+
+  // 9. v2.68: closing a tab cleans up orphan gbookCancels so a later tab reusing the id is not auto-cancelled
+  {
+    const b5 = bootBackground();
+    b5.listeners.message({ type: 'WTPDF_GBOOKS_CANCEL' }, { tab: { id: 77 } }, () => {});
+    check('v2.68 tabs.onRemoved listener registered', typeof b5.listeners.tabRemoved === 'function');
+    b5.listeners.tabRemoved(77);
+    let response = null;
+    b5.listeners.message(
+      { type: 'WTPDF_GBOOKS_SCAN', pageUrl: 'https://books.google.com/books?id=B1' },
+      { tab: { id: 77, url: 'https://books.google.com/books?id=B1' } },
+      (r) => { response = r; }
+    );
+    await waitFor(() => response !== null);
+    check('v2.68 closed tab cleans up gbookCancels entry cleanly', response && response.ok === true && response.urls.length === 3, response);
   }
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL GBOOKS BACKGROUND TESTS PASSED');

@@ -12,8 +12,11 @@
     function candidate() {
       const value = read();
       const next = { ...block };
-      if (mode === 'ocr') next.text = String(value.text ?? '');
-      else {
+      if (mode === 'ocr') {
+        next.text = String(value.text ?? '');
+        if ('ocrRichHtml' in value && value.ocrRichHtml !== undefined) next.ocrRichHtml = String(value.ocrRichHtml ?? '');
+        if ('ocrDir' in value && (value.ocrDir === 'rtl' || value.ocrDir === 'ltr' || value.ocrDir === '')) next.ocrDir = value.ocrDir;
+      } else {
         next.tr = String(value.text ?? '');
         next.richHtml = String(value.richHtml ?? '');
         if (value.dir === 'rtl' || value.dir === 'ltr') next.dir = value.dir;
@@ -24,6 +27,14 @@
         next.size = value.size === null ? null : Math.round(value.size);
       }
       if (value.color === null || /^#[0-9a-f]{6}$/i.test(value.color || '')) next.color = value.color;
+      if ('fontFamily' in value) {
+        const ff = String(value.fontFamily ?? '').trim();
+        next.fontFamily = ff ? ff.slice(0, 80) : null;
+      }
+      if ('bold' in value && typeof value.bold === 'boolean') next.bold = value.bold;
+      if ('italic' in value && typeof value.italic === 'boolean') next.italic = value.italic;
+      if ('underline' in value && typeof value.underline === 'boolean') next.underline = value.underline;
+      if ('strike' in value && typeof value.strike === 'boolean') next.strike = value.strike;
       return next;
     }
 
@@ -37,13 +48,24 @@
         conflictReported = true;
         return false;
       }
+      const rawValue = read();
       const next = candidate();
       const changed = snapshot(next) !== snapshot(block);
       if (changed) {
         // Only assign editable properties; geometry and unrelated fields may have changed independently.
-        if (mode === 'ocr') block.text = next.text;
-        else { block.tr = next.tr; block.richHtml = next.richHtml; if ('dir' in next) block.dir = next.dir; }
+        if (mode === 'ocr') {
+          block.text = next.text;
+          if ('ocrRichHtml' in rawValue && rawValue.ocrRichHtml !== undefined) block.ocrRichHtml = next.ocrRichHtml;
+          if ('ocrDir' in rawValue && rawValue.ocrDir !== undefined) block.ocrDir = next.ocrDir;
+        } else {
+          block.tr = next.tr; block.richHtml = next.richHtml; if ('dir' in next) block.dir = next.dir;
+        }
         block.align = next.align; block.verticalAlign = next.verticalAlign; block.size = next.size; block.color = next.color;
+        if ('fontFamily' in next) block.fontFamily = next.fontFamily;
+        if ('bold' in next) block.bold = next.bold;
+        if ('italic' in next) block.italic = next.italic;
+        if ('underline' in next) block.underline = next.underline;
+        if ('strike' in next) block.strike = next.strike;
         conflictReported = false;
         onCommit?.(block, snapshot(block));
       }

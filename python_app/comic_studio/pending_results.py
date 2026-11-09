@@ -94,7 +94,8 @@ def ocr_signature(store: ProjectStore, state: dict[str, Any], image_id: str) -> 
     except FileNotFoundError:
         rendered = None
     return digest({'file':item.get('file'), 'blocks':item.get('blocks', []), 'ocrCompleted':item.get('ocrCompleted'),
-                   'rendered':rendered, 'eraseOriginal':state.get('settings', {}).get('eraseOriginal', True)})
+                   'rendered':rendered, 'eraseOriginal':state.get('settings', {}).get('eraseOriginal', True),
+                   'watermark':item.get('watermark')})
 
 
 def _lookup(state: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:

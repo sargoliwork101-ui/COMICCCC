@@ -371,10 +371,12 @@ async function runTranslate() {
       if (!TR.cancel && $('ocrEnabled').checked) {
         attemptedBlocks += entries.length;
         const missing = [];
+        const okBlocks = new WeakSet();
         entries.forEach((entry) => {
           const translated = translations.get(entry.id);
           entry.block.tr = translated || '';
-          if (!translated) missing.push(entry);
+          if (translated) okBlocks.add(entry.block);
+          else missing.push(entry);
         });
         if (aiError) {
           errs.push('ترجمهٔ هوش مصنوعی: ' + AiTranslateTools.safeError(aiError));
@@ -393,7 +395,8 @@ async function runTranslate() {
             const entry = missing[next++];
             const r = await TranslateTools.translate(entry.block.text, L.sl);
             entry.block.tr = r.text;
-            if (!r.ok) trFail++;
+            if (r.ok) okBlocks.add(entry.block);
+            else trFail++;
             finished++;
             $('progressBar').style.width = Math.round(60 + 15 * finished / missing.length) + '%';
           }
@@ -402,10 +405,11 @@ async function runTranslate() {
         for (let index = 0; index < aiItems.length && !TR.cancel && $('ocrEnabled').checked; index++) {
           const it = aiItems[index];
           try {
+            const translatedHere = it.ocr.blocks.filter((b) => okBlocks.has(b)).length;
             await renderEdited(it);
             if (!$('ocrEnabled').checked) break;
-            totalBlocks += it.ocr.blocks.length;
-            doneImgs++;
+            totalBlocks += translatedHere;
+            if (translatedHere > 0) doneImgs++;
             $('sPages').innerText = totalBlocks;
           } catch (error) {
             console.warn(error);

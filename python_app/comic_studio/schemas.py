@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BackupRequest(BaseModel):
@@ -20,10 +20,13 @@ class OcrRequest(BaseModel):
     language: str = "eng"
     contrast: bool = True
     precise: bool = True
+    persian_preprocess: bool | None = None
     group_lines: bool = False
     page_mode: Literal["auto", "comic", "document"] = "auto"
     min_confidence: float = Field(default=0.35, ge=0.0, le=1.0)
     keep_engine_loaded: bool = False
+    batch_index: int | None = Field(default=None, ge=1)
+    batch_total: int | None = Field(default=None, ge=1)
 
 
 class TranslateRequest(BaseModel):
@@ -50,8 +53,39 @@ class TextTranslateRequest(BaseModel):
     confirmation: str | None = None
 
 
+class LocalNmtSettingsPayload(BaseModel):
+    model: str = Field(default="nllb-600m", max_length=60)
+    beam_size: int = Field(default=2, ge=1, le=4)
+    source_limit: int = Field(default=4000, ge=200, le=20_000)
+    keep_loaded: bool = False
+
+
+class LocalNmtModelActionRequest(BaseModel):
+    model: str = Field(default="nllb-600m", min_length=1, max_length=60)
+
+
+class LocalNmtTestRequest(BaseModel):
+    model: str = Field(default="nllb-600m", max_length=60)
+    source_language: str = Field(default="eng", max_length=20)
+    target_language: str = Field(default="fa", max_length=16)
+    sample_text: str = Field(default="", max_length=2000)
+    beam_size: int = Field(default=2, ge=1, le=4)
+    keep_loaded: bool = False
+
+
+class ResourceBudget(BaseModel):
+    """How much of the machine Comic OCR Studio may use (v4.29)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    mode: Literal["auto", "manual"] = "auto"
+    cpu_percent: int | None = Field(default=None, ge=10, le=100, alias="cpuPercent")
+    ram_percent: int | None = Field(default=None, ge=10, le=100, alias="ramPercent")
+
+
 class AiSettings(BaseModel):
     free_services: dict[str, dict[str, Any]] | None = None
+    local_nmt: LocalNmtSettingsPayload | None = None
     context_percent: int | None = Field(default=None, ge=0, le=100)
     skill_percent: int | None = Field(default=None, ge=0, le=100)
     reuse_repeated: bool | None = None
@@ -76,6 +110,7 @@ class EngineTestRequest(BaseModel):
     image_id: str
     language: str = "eng"
     page_mode: Literal["auto", "comic", "document"] = "auto"
+    persian_preprocess: bool | None = None
 
 
 class EngineDownloadRequest(BaseModel):
@@ -152,3 +187,29 @@ class ContextTextRequest(BaseModel):
     skill: str = Field(default='', max_length=100000)
     summary: str = Field(default='', max_length=100000)
     confirmation: str | None = None
+
+
+class StorageSettingsUpdate(BaseModel):
+    custom_path: str = Field(default="", max_length=2048)
+    migrate_existing: bool = True
+    cleanup_source: bool = True
+
+
+class StorageFolderPickRequest(BaseModel):
+    initial_dir: str | None = Field(default=None, max_length=2048)
+
+
+class LicenseActivateRequest(BaseModel):
+    license_key: str = Field(min_length=8, max_length=4096)
+    reset_local_password: bool = False
+    replace_all_modules: bool = False
+
+
+class LocalLoginRequest(BaseModel):
+    password: str = Field(default="", max_length=256)
+
+
+class LocalPasswordUpdateRequest(BaseModel):
+    current_password: str = Field(default="", max_length=256)
+    new_password: str = Field(default="", max_length=256)
+

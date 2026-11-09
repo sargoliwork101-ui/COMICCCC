@@ -42,4 +42,25 @@ assert.equal(sourceBlock.text, 'corrected OCR');
 assert.equal(sourceBlock.tr, 'keep translation'); assert.equal(sourceBlock.richHtml, '<b>keep translation</b>');
 assert.equal(sourceSession.close(), true); assert.equal(sourceSession.commit(), false, 'closed sessions cannot mutate project data');
 
+function richSnapshot(b) {
+  return JSON.stringify([b.text || '', b.tr || '', b.richHtml || '', b.ocrRichHtml || '', b.dir || '', b.ocrDir || '', b.align || '', b.strike || false]);
+}
+const ocrRichBlock = { text: 'HELLO', tr: 'سلام', richHtml: '<i>سلام</i>', ocrRichHtml: '', ocrDir: 'ltr', align: 'left', strike: false };
+let ocrRichBaseline = richSnapshot(ocrRichBlock);
+const ocrRichSession = createInlineEditSession({
+  block: ocrRichBlock,
+  mode: 'ocr',
+  read: () => ({ text: 'HELLO RICH', ocrRichHtml: '<div><b>HELLO RICH</b></div>', ocrDir: 'rtl', align: 'center', strike: true }),
+  getBaseline: () => ocrRichBaseline,
+  snapshot: richSnapshot,
+  onCommit: (_updated, rev) => { ocrRichBaseline = rev; },
+});
+assert.equal(ocrRichSession.commit(), true);
+assert.equal(ocrRichBlock.text, 'HELLO RICH');
+assert.equal(ocrRichBlock.ocrRichHtml, '<div><b>HELLO RICH</b></div>');
+assert.equal(ocrRichBlock.ocrDir, 'rtl');
+assert.equal(ocrRichBlock.strike, true);
+assert.equal(ocrRichBlock.tr, 'سلام', 'OCR rich edits never overwrite translation text');
+assert.equal(ocrRichBlock.richHtml, '<i>سلام</i>', 'OCR rich edits never overwrite translation richHtml');
+
 console.log('PASS: inline edit sessions preview, auto-commit, preserve geometry, and protect concurrent edits');

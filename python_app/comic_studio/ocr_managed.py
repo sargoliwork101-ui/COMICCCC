@@ -35,8 +35,9 @@ os.environ.setdefault("KMP_BLOCKTIME", "0")
 import numpy as np
 from PIL import Image
 
-from .activity import emit
-from .paths import models_dir
+from .activity import JobCancelledError, check_cancelled, emit, is_job_cancelled
+from .paths import bundled_models_dir, is_custom_data_dir_active, models_dir
+from . import resources
 
 _SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 _HW_CACHE_LOCK = threading.Lock()
@@ -373,7 +374,8 @@ def sync_local_wheelhouse() -> Path:
 
 
 def clean_pip_env() -> dict[str, str]:
-    """Build a sanitized environment for pip subprocesses so launcher vars like PIP_RETRIES=1 or PIP_TIMEOUT=15 never throttle model installs."""
+    """Build a sanitized environment for pip subprocesses so launcher vars like PIP_RETRIES=1 or PIP_TIMEOUT=15 never throttle model installs,
+    and route pip cache + temporary wheel unpack folders into `models_dir()` so multi-GB installs never fill Drive C."""
     env = dict(os.environ)
     for blocked in ("PIP_NO_CACHE_DIR",):
         env.pop(blocked, None)
@@ -383,6 +385,19 @@ def clean_pip_env() -> dict[str, str]:
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    with contextlib.suppress(OSError):
+        if is_custom_data_dir_active() or bool((os.environ.get("COMIC_STUDIO_DATA") or "").strip()):
+            m_root = models_dir()
+            cdir = m_root / "pip-cache"
+            tdir = m_root / "tmp"
+            xdg_dir = m_root / "cache"
+            for directory in (cdir, tdir, xdg_dir):
+                directory.mkdir(parents=True, exist_ok=True)
+            env["PIP_CACHE_DIR"] = str(cdir)
+            env["TMPDIR"] = str(tdir)
+            env["TEMP"] = str(tdir)
+            env["TMP"] = str(tdir)
+            env["XDG_CACHE_HOME"] = str(xdg_dir)
     return env
 
 
@@ -399,6 +414,19 @@ def is_pip_network_or_index_error(output: str) -> bool:
     if "(from versions: none)" in lower:
         return True
     return False
+
+
+def _parse_size_to_bytes(text: str) -> float:
+    """Parse human size token such as '245.3 MB', '2.65G', or '512 kB' into bytes."""
+    m = re.search(r"([\d.]+)\s*([kKmMgGtT])i?[bB]?", str(text or ""))
+    if not m:
+        return 0.0
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return 0.0
+    mult = {"k": 1024.0, "m": 1024.0 ** 2, "g": 1024.0 ** 3, "t": 1024.0 ** 4}.get(m.group(2).lower(), 1.0)
+    return max(0.0, val * mult)
 
 
 def _dir_bytes_fast(root: Path, max_files: int = 8000) -> int:
@@ -498,6 +526,59 @@ def _run_Subprocess(command: list[str] | str, **kwargs: Any) -> subprocess.Compl
     if os.name == "nt" and "creationflags" not in kwargs:
         kwargs["creationflags"] = _SUBPROCESS_NO_WINDOW
     return subprocess.run(command, **kwargs)
+
+
+@contextlib.contextmanager
+def _install_lock_timeout(lock: threading.Lock, error_cls: type[Exception], timeout: float = 6.0):
+    """Take the shared install lock, or fail fast with a readable message.
+
+    The lock is held while a model is downloaded or removed, which can take
+    minutes.  Waiting for it in silence made the app look frozen, so a
+    second request now fails fast with a clear Persian explanation.
+    """
+    if not lock.acquire(timeout=max(0.0, float(timeout))):
+        raise error_cls(
+            "عملیات آماده‌سازی مدل دیگری در همین لحظه در حال اجراست؛ "
+            "کمی صبر کنید و دوباره تلاش کنید."
+        )
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _kill_process_tree(proc: subprocess.Popen[Any]) -> None:
+    """Terminate `proc` and any child processes cleanly across Windows and POSIX."""
+    if proc.poll() is not None:
+        return
+    pid = proc.pid
+    if os.name == "nt" and pid:
+        try:
+            _run_Subprocess(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+    elif pid and hasattr(os, "killpg") and hasattr(os, "getpgid"):
+        try:
+            import signal as _sig
+
+            pgid = os.getpgid(pid)
+            if pgid > 0 and pgid != os.getpgid(0):
+                os.killpg(pgid, _sig.SIGKILL)
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=3)
+    except Exception:
+        pass
 
 
 def process_rss_mb(pid: int | None = None) -> float:
@@ -610,16 +691,16 @@ _RUNTIME_LOCK = threading.Lock()
 
 
 def cpu_core_count() -> int:
-    """Return available logical CPU cores (honoring COMIC_STUDIO_FAKE_HARDWARE_JSON when set)."""
+    """Return the CPU cores the app may use (honoring the user's budget and the test override)."""
     override = os.environ.get("COMIC_STUDIO_FAKE_HARDWARE_JSON")
     if override:
         try:
             parsed = json.loads(override)
             if isinstance(parsed, dict) and parsed.get("cpuCores") is not None:
-                return max(1, int(parsed["cpuCores"]))
+                return resources.effective_cpu_cores(max(1, int(parsed["cpuCores"])))
         except Exception:
             pass
-    return max(1, int(os.cpu_count() or 1))
+    return resources.effective_cpu_cores(max(1, int(os.cpu_count() or 1)))
 
 
 def compute_worker_count(
@@ -633,10 +714,10 @@ def compute_worker_count(
     if task_count <= 1 or cores <= 1:
         return 1, cores
     hw = inspect_hardware()
-    cores = max(1, int(hw.get("cpuCores") or cores))
     ram_gb = float(hw.get("ramGb") or 0.0)
     if ram_gb > 0:
-        usable_mb = max(128.0, (ram_gb - 1.2) * 1024.0)
+        # The user's RAM share decides how much memory may be used in parallel.
+        usable_mb = max(128.0, resources.usable_ram_mb(ram_gb))
         ram_cap = max(1, int(usable_mb // max(32, per_worker_mb)))
     else:
         ram_cap = max_cap
@@ -658,37 +739,46 @@ def iter_parallel_ordered(
     effective_workers = max(1, min(int(max_workers), total))
     if effective_workers <= 1:
         for idx, item in enumerate(items):
+            check_cancelled()
             yield idx, item, worker_fn(idx, item)
         return
 
     inflight: deque[tuple[int, _TItem, Future[_TResult]]] = deque()
     next_idx = 0
-    with ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="comic-worker") as pool:
-        try:
-            while next_idx < total and len(inflight) < effective_workers:
+    pool = ThreadPoolExecutor(max_workers=effective_workers, thread_name_prefix="comic-worker")
+    aborted = False
+    try:
+        while next_idx < total and len(inflight) < effective_workers:
+            check_cancelled()
+            item = items[next_idx]
+            ctx = contextvars.copy_context()
+            fut = pool.submit(ctx.run, worker_fn, next_idx, item)
+            inflight.append((next_idx, item, fut))
+            next_idx += 1
+
+        while inflight:
+            check_cancelled()
+            done_idx, done_item, done_fut = inflight.popleft()
+            result = done_fut.result()
+            check_cancelled()
+            if next_idx < total:
                 item = items[next_idx]
                 ctx = contextvars.copy_context()
                 fut = pool.submit(ctx.run, worker_fn, next_idx, item)
                 inflight.append((next_idx, item, fut))
                 next_idx += 1
-
-            while inflight:
-                done_idx, done_item, done_fut = inflight.popleft()
-                result = done_fut.result()
-                if next_idx < total:
-                    item = items[next_idx]
-                    ctx = contextvars.copy_context()
-                    fut = pool.submit(ctx.run, worker_fn, next_idx, item)
-                    inflight.append((next_idx, item, fut))
-                    next_idx += 1
-                yield done_idx, done_item, result
-        finally:
-            while inflight:
-                _, _, pending_fut = inflight.popleft()
-                pending_fut.cancel()
+            yield done_idx, done_item, result
+    except BaseException:
+        aborted = True
+        raise
+    finally:
+        while inflight:
+            _, _, pending_fut = inflight.popleft()
+            pending_fut.cancel()
+        pool.shutdown(wait=not aborted, cancel_futures=aborted)
 
 
-def configure_native_runtime() -> dict[str, Any]:
+def configure_native_runtime(eager_cv2: bool = True) -> dict[str, Any]:
     """Configure OpenCV, OpenMP/BLAS, and transparent OpenCL GPU acceleration once per process."""
     global _RUNTIME_CONFIGURED
     cores = cpu_core_count()
@@ -700,20 +790,24 @@ def configure_native_runtime() -> dict[str, Any]:
 
     cv_threads = cores
     opencl_active = False
-    try:
-        import cv2
-        cv2.setUseOptimized(True)
-        cv2.setNumThreads(cores)
-        cv_threads = int(cv2.getNumThreads())
-        if hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
-            hw = inspect_hardware()
-            if hw.get("hasGpu"):
-                cv2.ocl.setUseOpenCL(True)
-                opencl_active = bool(cv2.ocl.useOpenCL())
-    except Exception:
-        pass
-    with _RUNTIME_LOCK:
-        _RUNTIME_CONFIGURED = True
+    if eager_cv2:
+        with _RUNTIME_LOCK:
+            already_configured = _RUNTIME_CONFIGURED
+        if not already_configured:
+            try:
+                import cv2
+                cv2.setUseOptimized(True)
+                cv2.setNumThreads(cores)
+                cv_threads = int(cv2.getNumThreads())
+                if hasattr(cv2, "ocl") and cv2.ocl.haveOpenCL():
+                    hw = inspect_hardware()
+                    if hw.get("hasGpu"):
+                        cv2.ocl.setUseOpenCL(True)
+                        opencl_active = bool(cv2.ocl.useOpenCL())
+            except Exception:
+                pass
+            with _RUNTIME_LOCK:
+                _RUNTIME_CONFIGURED = True
     return {"cpuCores": cores, "cvThreads": cv_threads, "openclActive": opencl_active}
 
 
@@ -957,6 +1051,74 @@ def _detect_other_gpu() -> tuple[bool, str, float, str, str]:
         return False, "", 0.0, "", ""
 
     if os.name == "nt":
+        virtual_tokens = (
+            "microsoft basic",
+            "remote",
+            "hyper-v",
+            "parsec",
+            "indirect",
+            "virtual",
+            "vmware",
+            "vbox",
+            "citrix",
+        )
+        # Fast in-process Windows Registry display-adapter lookup (<1 ms vs 2-4 s cold PowerShell CIM).
+        try:
+            import winreg  # type: ignore[import-not-found]
+
+            reg_path = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+            best_name = ""
+            best_vram_gb = 0.0
+            best_vendor = ""
+            best_score = -1
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as class_key:
+                for sub_idx in range(32):
+                    try:
+                        sub_name = winreg.EnumKey(class_key, sub_idx)
+                    except OSError:
+                        break
+                    if not (len(sub_name) == 4 and sub_name.isdigit()):
+                        continue
+                    try:
+                        with winreg.OpenKey(class_key, sub_name) as dev_key:
+                            desc_val, _ = winreg.QueryValueEx(dev_key, "DriverDesc")
+                            name = str(desc_val or "").strip()
+                            lower = name.lower()
+                            if not name or any(tok in lower for tok in virtual_tokens):
+                                continue
+                            ram_bytes = 0
+                            for mem_key in ("HardwareInformation.qwMemorySize", "HardwareInformation.MemorySize"):
+                                try:
+                                    raw_mem, _ = winreg.QueryValueEx(dev_key, mem_key)
+                                    if isinstance(raw_mem, int):
+                                        ram_bytes = raw_mem
+                                    elif isinstance(raw_mem, (bytes, bytearray)) and raw_mem:
+                                        ram_bytes = int.from_bytes(raw_mem, "little", signed=False)
+                                    if ram_bytes > 0:
+                                        break
+                                except OSError:
+                                    continue
+                            vram_gb = round(max(0, ram_bytes) / (1024 ** 3), 1) if ram_bytes > 0 else 0.0
+                            if "nvidia" in lower or "geforce" in lower or "rtx" in lower or "quadro" in lower:
+                                vendor, score = "nvidia", 3
+                            elif "amd" in lower or "radeon" in lower:
+                                vendor, score = "amd", 2
+                            elif "intel" in lower or "arc" in lower or "iris" in lower:
+                                vendor, score = "intel", 1
+                            else:
+                                vendor, score = "other", 1
+                            if score > best_score or (score == best_score and vram_gb >= best_vram_gb):
+                                best_name = name
+                                best_vram_gb = vram_gb
+                                best_vendor = vendor
+                                best_score = score
+                    except OSError:
+                        continue
+            if best_name:
+                return True, best_name, best_vram_gb, best_vendor, "directml"
+        except Exception:
+            pass
+
         ps = shutil.which("powershell.exe") or shutil.which("powershell")
         if ps:
             try:
@@ -979,17 +1141,6 @@ def _detect_other_gpu() -> tuple[bool, str, float, str, str]:
                 if proc.returncode == 0 and proc.stdout.strip():
                     raw = json.loads(proc.stdout.strip())
                     adapters = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
-                    virtual_tokens = (
-                        "microsoft basic",
-                        "remote",
-                        "hyper-v",
-                        "parsec",
-                        "indirect",
-                        "virtual",
-                        "vmware",
-                        "vbox",
-                        "citrix",
-                    )
                     best_name = ""
                     best_vram_gb = 0.0
                     best_vendor = ""
@@ -1129,6 +1280,12 @@ def inspect_hardware(force_refresh: bool = False) -> dict[str, Any]:
             _DISK_FREE_CACHE = (probe_key, now, free_disk_gb)
     base["freeDiskGb"] = free_disk_gb
     return base
+
+
+def reset_disk_free_cache() -> None:
+    global _DISK_FREE_CACHE
+    with _HW_CACHE_LOCK:
+        _DISK_FREE_CACHE = None
 
 
 def engine_meta(engine_id: str) -> dict[str, Any]:
@@ -1908,6 +2065,8 @@ class IsolatedOcrEngine:
         self._last_used_mono: float = 0.0
         self._idle_timeout_sec: float = _WORKER_IDLE_TIMEOUT_SECONDS
         self._cancel_install = threading.Event()
+        self._cancel_ocr = threading.Event()
+        self._proc_ref_lock = threading.Lock()
         self._active_procs_lock = threading.Lock()
         self._active_install_procs: set[subprocess.Popen[Any]] = set()
         atexit.register(self.close)
@@ -1921,27 +2080,7 @@ class IsolatedOcrEngine:
             self._active_install_procs.discard(proc)
 
     def _kill_proc_tree(self, proc: subprocess.Popen[Any]) -> None:
-        if proc.poll() is not None:
-            return
-        pid = proc.pid
-        if _is_windows() and pid:
-            try:
-                _run_Subprocess(
-                    ["taskkill", "/F", "/T", "/PID", str(pid)],
-                    capture_output=True,
-                    timeout=5,
-                    check=False,
-                )
-            except Exception:
-                pass
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=3)
-        except Exception:
-            pass
+        _kill_process_tree(proc)
 
     def cancel_install(self) -> None:
         self._cancel_install.set()
@@ -1949,6 +2088,22 @@ class IsolatedOcrEngine:
             procs = list(self._active_install_procs)
         for proc in procs:
             self._kill_proc_tree(proc)
+
+    def cancel_ocr(self) -> None:
+        """Preemptively abort any in-flight or booting OCR worker without deadlocking on `_worker_lock`."""
+        self._cancel_ocr.set()
+        self._cancel_idle_timer()
+        with self._proc_ref_lock:
+            proc = self._worker_proc
+            self._worker_proc = None
+        if proc is not None:
+            self._kill_proc_tree(proc)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    with contextlib.suppress(Exception):
+                        stream.close()
+        if self.id == "surya":
+            _stop_lingering_surya_server()
 
     def _env_dir(self) -> Path:
         return models_dir() / "envs" / self.id
@@ -2040,12 +2195,14 @@ class IsolatedOcrEngine:
             trim_process_memory()
 
     def _terminate_worker_locked(self) -> None:
-        proc = self._worker_proc
-        self._worker_proc = None
+        with self._proc_ref_lock:
+            proc = self._worker_proc
+            self._worker_proc = None
         if proc is None:
+            if self.id == "surya":
+                _stop_lingering_surya_server()
             return
         if proc.poll() is None:
-            pid = proc.pid
             try:
                 if proc.stdin:
                     proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
@@ -2054,40 +2211,36 @@ class IsolatedOcrEngine:
             except Exception:
                 pass
             if proc.poll() is None:
-                if os.name == "nt" and pid:
-                    try:
-                        _run_Subprocess(
-                            ["taskkill", "/F", "/T", "/PID", str(pid)],
-                            capture_output=True,
-                            timeout=5,
-                            check=False,
-                        )
-                    except Exception:
-                        pass
-                try:
-                    proc.kill()
-                    proc.wait(timeout=2)
-                except Exception:
-                    pass
+                _kill_process_tree(proc)
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             if stream is not None:
                 try:
                     stream.close()
                 except Exception:
                     pass
+        if self.id == "surya":
+            _stop_lingering_surya_server()
 
     def unload(self) -> None:
         self.close()
 
     def close(self) -> None:
         self._cancel_idle_timer()
-        with self._worker_lock:
-            self._terminate_worker_locked()
+        acquired = self._worker_lock.acquire(blocking=False)
+        if not acquired:
+            # Break any in-flight `readline()` immediately so `close()` never deadlocks.
+            self.cancel_ocr()
+            acquired = self._worker_lock.acquire(timeout=2.5)
+        if acquired:
+            try:
+                self._terminate_worker_locked()
+            finally:
+                self._worker_lock.release()
 
     def uninstall(self) -> int:
         self.cancel_install()
         self.close()
-        with self._install_lock:
+        with _install_lock_timeout(self._install_lock, self._error_cls):
             self.close()
             freed = uninstall_isolated_engine_files(self.id)
         trim_process_memory()
@@ -2130,24 +2283,36 @@ class IsolatedOcrEngine:
         env.setdefault("HF_HUB_DISABLE_XET", "1")
         env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
         env.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        m_root = models_dir()
+        for sub_name in ("hf", "paddlex", "torch", "cache", "tmp"):
+            with contextlib.suppress(OSError):
+                (m_root / sub_name).mkdir(parents=True, exist_ok=True)
+        env["HF_HOME"] = str(m_root / "hf")
+        env["HUGGINGFACE_HUB_CACHE"] = str(m_root / "hf" / "hub")
+        env["PADDLE_PDX_CACHE_HOME"] = str(m_root / "paddlex")
+        env["TORCH_HOME"] = str(m_root / "torch")
+        env["XDG_CACHE_HOME"] = str(m_root / "cache")
+        env["TMPDIR"] = str(m_root / "tmp")
+        env["TEMP"] = str(m_root / "tmp")
+        env["TMP"] = str(m_root / "tmp")
         if self.id == "mineru-2-5-pro":
-            mineru_home = models_dir() / "mineru"
+            mineru_home = m_root / "mineru"
             with contextlib.suppress(OSError):
                 mineru_home.mkdir(parents=True, exist_ok=True)
-            env.setdefault("MINERU_HOME", str(mineru_home))
+            env["MINERU_HOME"] = str(mineru_home)
         if self.id == "hezar-ocr":
-            hezar_home = models_dir() / "hezar"
+            hezar_home = m_root / "hezar"
             with contextlib.suppress(OSError):
                 hezar_home.mkdir(parents=True, exist_ok=True)
-            env.setdefault("HEZAR_CACHE_DIR", str(hezar_home))
+            env["HEZAR_CACHE_DIR"] = str(hezar_home)
         if self.id == "surya":
             hw = inspect_hardware()
-            surya_cache = models_dir() / "surya"
+            surya_cache = m_root / "surya"
             try:
                 surya_cache.mkdir(parents=True, exist_ok=True)
             except OSError:
                 pass
-            env.setdefault("MODEL_CACHE_DIR", str(surya_cache))
+            env["MODEL_CACHE_DIR"] = str(surya_cache)
             # Always use native llama.cpp rather than Surya 2.5's Docker-only vLLM backend.
             # Context size 24576 + max_tokens 4096 prevents llama-server HTTP 400 context
             # overflow when scale_to_fit produces ~8k visual tokens on high-res book pages,
@@ -2158,8 +2323,39 @@ class IsolatedOcrEngine:
             env.setdefault("SURYA_MAX_TOKENS_FULL_PAGE", "4096")
             env.setdefault("SURYA_INFERENCE_LOGPROBS", "false")
             env.setdefault("SURYA_INFERENCE_KEEP_ALIVE", "false")
-            use_gpu_layers = bool(hw.get("hasNvidiaGpu")) or sys.platform == "darwin"
-            env.setdefault("LLAMA_CPP_NGL", "99" if use_gpu_layers else "0")
+            vram_gb = float(hw.get("vramGb") or 0.0)
+            has_vulkan_bin = False
+            if llama_bin.is_dir():
+                with contextlib.suppress(OSError):
+                    has_vulkan_bin = any("vulkan" in p.name.lower() for p in llama_bin.rglob("*vulkan*"))
+            use_gpu_layers = (
+                sys.platform == "darwin"
+                or (bool(hw.get("hasNvidiaGpu")) and (vram_gb <= 0.0 or vram_gb >= 4.5))
+            )
+            ngl_str = "99" if use_gpu_layers else "0"
+            env.setdefault("LLAMA_CPP_NGL", ngl_str)
+            # Root-cause fix for `failed to process mtmd chunk, res = -1`:
+            # 1) llama-server defaults `mmproj_use_gpu = true` EVEN when `-ngl 0`! On Vulkan builds
+            #    (and Intel/AMD/low-VRAM GPUs), Surya 2.5's CLIP vision graph (`head_dim = 72`) lacks
+            #    Vulkan FlashAttention (`FLASH_ATTN_EXT`), falling back to multi-GB dense attention
+            #    buffers that exceed Vulkan's maxStorageBufferRange / VRAM (`ErrorOutOfDeviceMemory` /
+            #    `ErrorDeviceLost` -> `failed to process mtmd chunk, res = -1`).
+            # 2) Passing `--no-mmproj-offload` keeps the vision projector safe on multi-core CPU while
+            #    allowing NVIDIA GPUs to keep `-ngl 99` for fast 2B LLM decoding; `-b 2048 -ub 2048`
+            #    raises the physical micro-batch above the 512 default so large vision chunks decode cleanly.
+            no_mmproj_gpu = (
+                ngl_str == "0"
+                or has_vulkan_bin
+                or (sys.platform != "darwin" and 0.0 < vram_gb < 7.5)
+            )
+            env.setdefault("LLAMA_CPP_NO_MMPROJ_OFFLOAD", "true" if no_mmproj_gpu else "false")
+            if ngl_str == "0":
+                extra_args = "-b 2048 -ub 2048 --flash-attn off --device none"
+            elif has_vulkan_bin:
+                extra_args = "-b 2048 -ub 2048 --flash-attn off"
+            else:
+                extra_args = "-b 2048 -ub 2048"
+            env.setdefault("LLAMA_CPP_EXTRA_ARGS", extra_args)
         return env
 
     def _ensure_llama_cpp_for_surya(self) -> None:
@@ -2207,24 +2403,27 @@ class IsolatedOcrEngine:
         arc_tmp = llama_dir / f".llama-bin{suffix}.part"
         try:
             req = urllib.request.Request(wanted_url, headers={"User-Agent": "Comic-OCR-Studio"})
-            with urllib.request.urlopen(req, timeout=180) as resp, arc_tmp.open("wb") as out:
+            with urllib.request.urlopen(req, timeout=30) as resp, arc_tmp.open("wb") as out:
                 hdrs = getattr(resp, "headers", None)
                 raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
                 expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 35 * 1024 * 1024
                 total = 0
+                last_emit_total = 0
                 while True:
-                    if self._cancel_install.is_set():
+                    if self._cancel_install.is_set() or is_job_cancelled():
                         raise self._error_cls("عملیات آماده‌سازی مدل لغو شد.")
-                    chunk = resp.read(1024 * 1024)
+                    chunk = resp.read(64 * 1024)
                     if not chunk:
                         break
                     total += len(chunk)
                     out.write(chunk)
-                    ratio = min(1.0, total / max(1, expected_bytes))
-                    emit(
-                        f"دانلود موتور اجرایی llama-server برای Surya: {total / (1024 * 1024):.1f} از {expected_bytes / (1024 * 1024):.1f} مگابایت",
-                        progress=round(0.73 + 0.06 * ratio, 3),
-                    )
+                    if total - last_emit_total >= 256 * 1024 or total >= expected_bytes:
+                        last_emit_total = total
+                        ratio = min(1.0, total / max(1, expected_bytes))
+                        emit(
+                            f"دانلود موتور اجرایی llama-server برای Surya: {total / (1024 * 1024):.1f} از {expected_bytes / (1024 * 1024):.1f} مگابایت",
+                            progress=round(0.73 + 0.06 * ratio, 3),
+                        )
             resolved_llama_dir = llama_dir.resolve()
             if suffix == ".zip":
                 with zipfile.ZipFile(arc_tmp) as archive:
@@ -2277,12 +2476,25 @@ class IsolatedOcrEngine:
         tail_lines: list[str] = []
         started = time.monotonic()
         last_activity_ts = started
-        step_count = 0.0
         current_pkg_label = ""
         cdir = pip_cache_dir()
         env_dir = self._env_dir()
-        base_dl_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
-        last_bytes = base_dl_bytes
+        initial_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
+        last_bytes = initial_bytes
+        prof_rt_gb = float(compute_engine_download_estimate(self.id).get("runtimeDownloadGb") or 0.5)
+        span_p = max(0.02, end_p - start_p)
+        expected_bytes = max(35 * (1024 ** 2), prof_rt_gb * (1024 ** 3) * min(1.0, span_p / 0.50))
+        announced_bytes = 0.0
+        completed_wheel_bytes = 0.0
+        active_wheel_bytes = 0.0
+        collect_steps = 0
+        best_p = start_p
+
+        def _emit_bounded(msg: str, ratio: float) -> None:
+            nonlocal best_p
+            clamped = max(0.0, min(0.98, ratio))
+            best_p = max(best_p, round(start_p + span_p * clamped, 3))
+            emit(msg, progress=best_p)
 
         proc = subprocess.Popen(
             full_cmd,
@@ -2320,7 +2532,7 @@ class IsolatedOcrEngine:
                     self._kill_proc_tree(proc)
                     return 1, "Operation timed out during pip installation."
                 try:
-                    raw_line = line_q.get(timeout=2.5)
+                    raw_line = line_q.get(timeout=2.0)
                 except queue.Empty:
                     if proc.poll() is not None and line_q.empty():
                         break
@@ -2328,15 +2540,15 @@ class IsolatedOcrEngine:
                     if now_bytes > last_bytes:
                         last_bytes = now_bytes
                         last_activity_ts = time.monotonic()
-                        gained_mb = (now_bytes - base_dl_bytes) / (1024 * 1024)
+                        gained_bytes = max(0.0, float(now_bytes - initial_bytes))
+                        gained_mb = gained_bytes / (1024 * 1024)
                         if gained_mb >= 0.8:
-                            step_count += 0.35
-                            ratio = min(0.86, 1.0 - (1.0 / (1.0 + step_count * 0.14)))
-                            cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                            denom = max(expected_bytes, announced_bytes * 1.04, gained_bytes * 1.06)
+                            dl_ratio = min(1.0, max(gained_bytes, completed_wheel_bytes) / max(1.0, denom))
                             pkg_note = f" ({current_pkg_label})" if current_pkg_label else ""
-                            emit(
+                            _emit_bounded(
                                 f"{label_prefix}: در حال دانلود{pkg_note} — {gained_mb:.1f} مگابایت دریافت شد…",
-                                progress=cur_p,
+                                0.08 + 0.78 * dl_ratio,
                             )
                     elif time.monotonic() - last_activity_ts > stall_timeout:
                         self._kill_proc_tree(proc)
@@ -2357,34 +2569,48 @@ class IsolatedOcrEngine:
                     tail_lines.pop(0)
                 lower = line.lower()
                 if lower.startswith("downloading "):
-                    step_count += 1.0
-                    ratio = min(0.82, 1.0 - (1.0 / (1.0 + step_count * 0.14)))
-                    cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                    completed_wheel_bytes += active_wheel_bytes
                     wheel_part = line.split("/")[-1].split(" ")[0][:48]
                     size_m = re.search(r"\(([\d.]+\s*[kKmMgG][bB])\)", line)
                     size_str = size_m.group(1) if size_m else ""
+                    active_wheel_bytes = _parse_size_to_bytes(size_str)
+                    announced_bytes += active_wheel_bytes
+                    expected_bytes = max(expected_bytes, announced_bytes * 1.05)
                     current_pkg_label = f"{wheel_part} · {size_str}" if size_str else wheel_part
-                    base_dl_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
-                    last_bytes = base_dl_bytes
+                    now_bytes = _dir_bytes_fast(cdir) + _dir_bytes_fast(env_dir)
+                    last_bytes = max(last_bytes, now_bytes)
+                    gained_bytes = max(0.0, float(now_bytes - initial_bytes), completed_wheel_bytes)
+                    dl_ratio = min(1.0, gained_bytes / max(1.0, expected_bytes))
                     size_suffix = f" ({size_str})" if size_str else ""
-                    emit(f"{label_prefix}: دانلود بستهٔ {wheel_part}{size_suffix}…", progress=cur_p)
+                    _emit_bounded(
+                        f"{label_prefix}: دانلود بستهٔ {wheel_part}{size_suffix}…",
+                        0.08 + 0.78 * dl_ratio,
+                    )
                 elif lower.startswith("using cached "):
-                    step_count += 0.5
-                    ratio = min(0.80, 1.0 - (1.0 / (1.0 + step_count * 0.12)))
-                    cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                    completed_wheel_bytes += active_wheel_bytes
+                    active_wheel_bytes = 0.0
                     wheel_part = line.split("/")[-1].split(" ")[0][:44]
-                    emit(f"{label_prefix}: استفاده از فایل کش‌شدهٔ {wheel_part}…", progress=cur_p)
+                    dl_ratio = min(1.0, completed_wheel_bytes / max(1.0, expected_bytes))
+                    _emit_bounded(
+                        f"{label_prefix}: استفاده از فایل کش‌شدهٔ {wheel_part}…",
+                        0.08 + 0.78 * dl_ratio,
+                    )
                 elif lower.startswith("collecting "):
-                    step_count += 0.8
-                    ratio = min(0.75, 1.0 - (1.0 / (1.0 + step_count * 0.10)))
-                    cur_p = round(start_p + (end_p - start_p) * ratio, 3)
+                    collect_steps += 1
                     pkg_part = line[11:].split()[0][:40]
                     current_pkg_label = pkg_part
-                    emit(f"{label_prefix}: بررسی بستهٔ {pkg_part}…", progress=cur_p)
+                    _emit_bounded(
+                        f"{label_prefix}: بررسی بستهٔ {pkg_part}…",
+                        min(0.08, collect_steps * 0.008),
+                    )
                 elif lower.startswith("installing collected packages"):
+                    completed_wheel_bytes += active_wheel_bytes
+                    active_wheel_bytes = 0.0
                     current_pkg_label = "ثبت بسته‌ها روی دیسک"
-                    cur_p = round(start_p + (end_p - start_p) * 0.88, 3)
-                    emit(f"{label_prefix}: در حال بازگشایی و ثبت بسته‌ها روی دیسک…", progress=cur_p)
+                    _emit_bounded(
+                        f"{label_prefix}: در حال بازگشایی و ثبت بسته‌ها روی دیسک…",
+                        0.90,
+                    )
             rc = proc.wait(timeout=120)
             if self._cancel_install.is_set():
                 return 130, "عملیات آماده‌سازی مدل لغو شد."
@@ -2493,7 +2719,7 @@ class IsolatedOcrEngine:
         env_dir = self._env_dir()
         py = self._env_python()
         hw = inspect_hardware()
-        with self._install_lock:
+        with _install_lock_timeout(self._install_lock, self._error_cls):
             cdir = pip_cache_dir()
             wheelhouse = sync_local_wheelhouse()
             find_links_args: list[str] = []
@@ -2503,13 +2729,29 @@ class IsolatedOcrEngine:
             except OSError:
                 pass
 
+            if getattr(sys, "frozen", False):
+                from .ocr import _resolve_pip_python_executable
+                try:
+                    base_py = _resolve_pip_python_executable(match_current_minor=False)
+                except Exception as exc:
+                    raise self._error_cls(str(exc)) from exc
+            else:
+                base_py = getattr(sys, "_base_executable", None) or sys.executable
+                if not base_py or not os.path.isfile(base_py):
+                    base_py = sys.executable
+
+            rt_pair = getattr(self, "_active_rt_span", None) or (0.06, 0.72)
+            r_lo, r_hi = float(rt_pair[0]), float(rt_pair[1])
+            r_span = max(0.04, r_hi - r_lo)
+            rp = lambda frac: round(r_lo + r_span * max(0.0, min(1.0, frac)), 3)
+
             if not py.is_file():
-                emit(f"ساخت پوشه و محیط مستقل برای مدل {self.id}…", progress=0.08)
+                emit(f"ساخت پوشه و محیط مستقل برای مدل {self.id}…", progress=rp(0.03))
                 env_dir.parent.mkdir(parents=True, exist_ok=True)
-                res = _run_Subprocess([sys.executable, "-m", "venv", str(env_dir)], capture_output=True, text=True, timeout=300, check=False)
+                res = _run_Subprocess([str(base_py), "-m", "venv", str(env_dir)], capture_output=True, text=True, timeout=300, check=False)
                 if res.returncode != 0 or not py.is_file():
                     raise self._error_cls(f"ساخت محیط مستقل برای {self.id} ناموفق بود: {(res.stderr or res.stdout)[-800:]}")
-                emit(f"آماده‌سازی ابزار نصب در محیط مستقل {self.id}…", progress=0.14)
+                emit(f"آماده‌سازی ابزار نصب در محیط مستقل {self.id}…", progress=rp(0.10))
                 _run_Subprocess([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300, check=False)
                 _run_Subprocess(
                     [str(py), "-m", "pip", "install", "--timeout", "90", "--retries", "5", "--prefer-binary", "--cache-dir", str(cdir), *find_links_args, "--upgrade", "pip", "setuptools", "wheel"],
@@ -2517,6 +2759,9 @@ class IsolatedOcrEngine:
                 )
             else:
                 self._clean_broken_venv_artifacts()
+                py_probe = _run_Subprocess([str(py), "-c", "import sys"], capture_output=True, text=True, timeout=30, check=False)
+                if py_probe.returncode != 0:
+                    _run_Subprocess([str(base_py), "-m", "venv", "--upgrade", str(env_dir)], capture_output=True, text=True, timeout=180, check=False)
                 pip_probe = _run_Subprocess([str(py), "-m", "pip", "--version"], capture_output=True, text=True, timeout=60, check=False)
                 if pip_probe.returncode != 0:
                     _run_Subprocess([str(py), "-m", "ensurepip", "--upgrade"], capture_output=True, text=True, timeout=300, check=False)
@@ -2538,7 +2783,7 @@ class IsolatedOcrEngine:
                 )
                 if not torch_ready:
                     if repair_cpu_torch_on_nvidia:
-                        emit(f"جایگزینی نسخهٔ CPU زیرساخت PyTorch با نسخهٔ شتاب‌دهندهٔ NVIDIA برای {self.id}…", progress=0.19)
+                        emit(f"جایگزینی نسخهٔ CPU زیرساخت PyTorch با نسخهٔ شتاب‌دهندهٔ NVIDIA برای {self.id}…", progress=rp(0.18))
                         _run_Subprocess(
                             [str(py), "-m", "pip", "uninstall", "-y", "torch", "torchvision"],
                             capture_output=True, text=True, timeout=180, check=False, env=clean_pip_env(),
@@ -2558,11 +2803,11 @@ class IsolatedOcrEngine:
                     else:
                         torch_candidates.append(list(base_torch_pkgs))
 
-                    emit(f"نصب زیرساخت PyTorch برای {self.id}…", progress=0.20)
+                    emit(f"نصب زیرساخت PyTorch برای {self.id}…", progress=rp(0.20))
                     t_rc, t_out = 1, ""
                     for cand_args in torch_candidates:
                         t_rc, t_out = self._run_pip_resilient(
-                            py, cand_args, upgrade=False, start_p=0.20, end_p=0.45, label_prefix=f"زیرساخت {self.id}"
+                            py, cand_args, upgrade=False, start_p=rp(0.20), end_p=rp(0.68), label_prefix=f"زیرساخت {self.id}"
                         )
                         if t_rc == 0 or self._cancel_install.is_set() or t_rc == 130:
                             break
@@ -2577,13 +2822,13 @@ class IsolatedOcrEngine:
             ):
                 # Pre-install lightweight CPU PyTorch on Linux CPU machines so surya-ocr's layout detector
                 # does not pull 4.5 GB of Linux CUDA 13 packages from default PyPI.
-                emit("نصب نسخهٔ سبک پردازنده (CPU) زیرساخت Surya…", progress=0.18)
+                emit("نصب نسخهٔ سبک پردازنده (CPU) زیرساخت Surya…", progress=rp(0.16))
                 self._run_pip_resilient(
                     py,
                     ["torch>=2.7.0,<3", "torchvision>=0.20.0,<1", "--index-url", "https://download.pytorch.org/whl/cpu"],
                     upgrade=False,
-                    start_p=0.18,
-                    end_p=0.34,
+                    start_p=rp(0.16),
+                    end_p=rp(0.46),
                     label_prefix="زیرساخت سبک Surya",
                 )
 
@@ -2591,7 +2836,8 @@ class IsolatedOcrEngine:
             extra_flags: list[str] = []
             # Neither Surya 2.5 (native llama-server) nor MinerU 4.x (ONNX DirectML + llama-cpp) uses PyTorch CUDA wheels.
             action_word = "به‌روزرسانی" if upgrade else "نصب"
-            p_start = 0.46 if self._spec.get("needs_torch") else 0.18
+            p_start = rp(0.69) if self._spec.get("needs_torch") else rp(0.16)
+            p_end = rp(0.96)
             emit(f"{action_word} بسته‌های اختصاصی مدل {self.id} آغاز شد…", progress=p_start)
             if self.id == "paddleocr-vl-1-6" and hw.get("hasNvidiaGpu") and sys.platform.startswith("linux"):
                 gpu_paddle_pkgs = [
@@ -2602,7 +2848,7 @@ class IsolatedOcrEngine:
                     py, [*extra_flags, *gpu_paddle_pkgs],
                     upgrade=upgrade,
                     start_p=p_start,
-                    end_p=0.70,
+                    end_p=p_end,
                     label_prefix=f"{action_word} GPU {self.id}",
                 )
                 if p_rc != 0:
@@ -2610,7 +2856,7 @@ class IsolatedOcrEngine:
                         py, [*extra_flags, *packages],
                         upgrade=upgrade,
                         start_p=p_start,
-                        end_p=0.70,
+                        end_p=p_end,
                         label_prefix=f"{action_word} {self.id}",
                     )
             else:
@@ -2618,24 +2864,25 @@ class IsolatedOcrEngine:
                     py, [*extra_flags, *packages],
                     upgrade=upgrade,
                     start_p=p_start,
-                    end_p=0.70,
+                    end_p=p_end,
                     label_prefix=f"{action_word} {self.id}",
                 )
             fallback_pkgs = self._spec.get("pip_packages_fallback")
             if p_rc != 0 and fallback_pkgs:
-                emit(f"تنظیم نسخهٔ سازگار بسته‌های {self.id} برای سیستم شما…", progress=round((p_start + 0.70) / 2, 2))
+                mid_p = round((p_start + p_end) / 2, 3)
+                emit(f"تنظیم نسخهٔ سازگار بسته‌های {self.id} برای سیستم شما…", progress=mid_p)
                 p_rc, p_out = self._run_pip_resilient(
                     py, [*extra_flags, *fallback_pkgs],
                     upgrade=upgrade,
-                    start_p=round((p_start + 0.70) / 2, 2),
-                    end_p=0.70,
+                    start_p=mid_p,
+                    end_p=p_end,
                     label_prefix=f"{action_word} سازگار {self.id}",
                 )
             if p_rc != 0:
                 details = (p_out or "pip failed")[-1500:].strip()
                 raise self._error_cls(f"نصب بسته‌های مدل {self.id} ناموفق بود: {details}")
 
-            emit(f"بسته‌های اجرایی مدل {self.id} آماده شد", progress=0.72)
+            emit(f"بسته‌های اجرایی مدل {self.id} آماده شد", progress=rp(0.98))
             self._ensure_llama_cpp_for_surya()
             (env_dir / ".runtime-ready").write_text(_now_iso(), encoding="utf-8")
 
@@ -2651,11 +2898,19 @@ class IsolatedOcrEngine:
                 + _dir_bytes_fast(m_root / "paddlex")
                 + _dir_bytes_fast(m_root / "surya")
                 + _dir_bytes_fast(m_root / "mineru")
+                + _dir_bytes_fast(m_root / "hezar")
+                + _dir_bytes_fast(m_root / "torch")
             )
 
         base_weight_bytes = _tracked_weight_bytes()
         last_weight_bytes = base_weight_bytes
-        emit(f"دریافت و آماده‌سازی فایل‌های مدل {self.id}…", progress=0.80)
+        wt_span_pair = getattr(self, "_active_wt_span", None) or (0.74, 0.96)
+        w_lo, w_hi = float(wt_span_pair[0]), float(wt_span_pair[1])
+        w_span = max(0.02, w_hi - w_lo)
+        prof_wt_gb = float(compute_engine_download_estimate(self.id).get("weightsDownloadGb") or 0.5)
+        expected_wt_bytes = max(15 * (1024 ** 2), prof_wt_gb * (1024 ** 3))
+        best_wt_p = [round(w_lo, 3)]
+        emit(f"دریافت و آماده‌سازی فایل‌های مدل {self.id}…", progress=best_wt_p[0])
         proc = subprocess.Popen(
             [
                 str(self._env_python()),
@@ -2664,6 +2919,7 @@ class IsolatedOcrEngine:
                 "--models-root", str(m_root),
                 "--prepare",
                 "--language", language,
+                "--parent-pid", str(os.getpid()),
             ],
             env=self._worker_env(),
             stdout=subprocess.PIPE,
@@ -2676,8 +2932,15 @@ class IsolatedOcrEngine:
         self._register_install_proc(proc)
         stderr_tail: list[str] = []
         stdout_chunks: list[str] = []
-        weight_steps = [0.0]
         last_activity_at = [time.monotonic()]
+        stderr_byte_ratio = [0.0]
+
+        def _emit_weight_progress(msg: str, ratio: float) -> None:
+            clamped = max(0.0, min(0.98, ratio))
+            cand_p = round(w_lo + w_span * clamped, 3)
+            if cand_p > best_wt_p[0]:
+                best_wt_p[0] = cand_p
+            emit(msg, progress=best_wt_p[0])
 
         def _drain_stderr() -> None:
             if proc.stderr is None:
@@ -2695,19 +2958,32 @@ class IsolatedOcrEngine:
                         if len(stderr_tail) > 60:
                             stderr_tail.pop(0)
                         now_t = time.monotonic()
-                        if now_t - last_emit_at >= 1.5:
-                            weight_steps[0] += 1.0
-                            ratio = min(0.92, 1.0 - (1.0 / (1.0 + weight_steps[0] * 0.18)))
-                            cur_p = round(0.80 + 0.14 * ratio, 3)
+                        if now_t - last_emit_at >= 1.2:
+                            cur_b = _tracked_weight_bytes()
+                            dl_b = max(0.0, float(cur_b - base_weight_bytes))
+                            frac_match = re.search(
+                                r"([\d.]+\s*[kKmMgGtT]i?[bB]?)\s*/\s*([\d.]+\s*[kKmMgGtT]i?[bB]?)",
+                                s,
+                            )
+                            if frac_match:
+                                done_f = _parse_size_to_bytes(frac_match.group(1))
+                                tot_f = _parse_size_to_bytes(frac_match.group(2))
+                                if tot_f > 0:
+                                    denom = max(expected_wt_bytes, tot_f)
+                                    stderr_byte_ratio[0] = max(stderr_byte_ratio[0], min(0.97, max(dl_b, done_f) / denom))
+                            disk_ratio = min(0.97, dl_b / max(1.0, expected_wt_bytes))
+                            ratio = max(disk_ratio, stderr_byte_ratio[0])
                             pct_match = re.search(r"(\d{1,3})%", s)
                             if pct_match:
                                 sub_pct = min(100, max(0, int(pct_match.group(1))))
-                                emit(
+                                if expected_wt_bytes <= 250 * (1024 ** 2):
+                                    ratio = max(ratio, (sub_pct / 100.0) * 0.96)
+                                _emit_weight_progress(
                                     f"دانلود فایل‌های مدل {self.id} ({sub_pct}٪ از فایل جاری)…",
-                                    progress=cur_p,
+                                    ratio,
                                 )
                             else:
-                                emit(f"در حال آماده‌سازی وزن‌های مدل {self.id}…", progress=cur_p)
+                                _emit_weight_progress(f"در حال آماده‌سازی وزن‌های مدل {self.id}…", ratio)
                             last_emit_at = now_t
             except Exception:
                 pass
@@ -2727,6 +3003,7 @@ class IsolatedOcrEngine:
         err_thread.start()
         out_thread.start()
         started_w = time.monotonic()
+        last_disk_emit_at = started_w
         try:
             while proc.poll() is None:
                 if self._cancel_install.is_set():
@@ -2736,19 +3013,21 @@ class IsolatedOcrEngine:
                     self._kill_proc_tree(proc)
                     raise self._error_cls(f"مهلت آماده‌سازی فایل‌های مدل {self.id} به پایان رسید.")
                 time.sleep(0.5)
-                if time.monotonic() - last_activity_at[0] >= 3.0:
+                now_loop = time.monotonic()
+                if now_loop - last_disk_emit_at >= 1.2:
                     cur_bytes = _tracked_weight_bytes()
                     if cur_bytes > last_weight_bytes:
                         last_weight_bytes = cur_bytes
-                        last_activity_at[0] = time.monotonic()
-                        dl_mb = (cur_bytes - base_weight_bytes) / (1024 * 1024)
+                        last_activity_at[0] = now_loop
+                        last_disk_emit_at = now_loop
+                        dl_bytes = max(0.0, float(cur_bytes - base_weight_bytes))
+                        dl_mb = dl_bytes / (1024 * 1024)
                         if dl_mb >= 1.0:
-                            weight_steps[0] += 0.4
-                            ratio = min(0.92, 1.0 - (1.0 / (1.0 + weight_steps[0] * 0.18)))
-                            cur_p = round(0.80 + 0.14 * ratio, 3)
-                            emit(
+                            denom = max(expected_wt_bytes, dl_bytes * 1.04)
+                            ratio = max(stderr_byte_ratio[0], min(0.97, dl_bytes / denom))
+                            _emit_weight_progress(
                                 f"دانلود وزن‌های مدل {self.id} — {dl_mb:.1f} مگابایت ذخیره شد…",
-                                progress=cur_p,
+                                ratio,
                             )
         except Exception:
             self._kill_proc_tree(proc)
@@ -2781,24 +3060,41 @@ class IsolatedOcrEngine:
         state.mkdir(parents=True, exist_ok=True)
         (state / ".ready-all").write_text(_now_iso(), encoding="utf-8")
         (state / f".ready-{language}").write_text(_now_iso(), encoding="utf-8")
-        emit(f"فایل‌های مدل {self.id} ذخیره و تایید شد", progress=0.96)
+        emit(f"فایل‌های مدل {self.id} ذخیره و تایید شد", progress=round(w_hi, 3))
         return str(last_json.get("modelRevision") or "ready")
 
     def download(self, language: str = "eng") -> None:
         self._cancel_install.clear()
         self.close()
         try:
+            rt_already = self.runtime_installed
+            wt_already = self.model_ready
             dl_est = compute_engine_download_estimate(
                 self.id,
-                runtime_installed=self.runtime_installed,
-                model_ready=self.model_ready,
+                runtime_installed=rt_already,
+                model_ready=wt_already,
             )
             dl_label = format_download_size_fa(dl_est["totalDownloadGb"])
-            emit(f"شروع آماده‌سازی خودکار مدل {self.id} (کل حجم دانلود: {dl_label})…", progress=0.05)
-            if not self.runtime_installed:
+            rt_gb = float(dl_est["runtimeDownloadGb"])
+            wt_gb = float(dl_est["weightsDownloadGb"])
+            if not rt_already and not wt_already:
+                tot_gb = max(0.05, rt_gb + wt_gb)
+                rt_share = max(0.14, min(0.84, rt_gb / tot_gb))
+                rt_end = round(0.04 + 0.92 * rt_share, 3)
+                self._active_rt_span = (0.04, rt_end)
+                self._active_wt_span = (rt_end, 0.96)
+            elif not rt_already:
+                self._active_rt_span = (0.04, 0.92)
+                self._active_wt_span = (0.92, 0.96)
+            else:
+                self._active_rt_span = (0.04, 0.08)
+                self._active_wt_span = (0.08, 0.96)
+
+            emit(f"شروع آماده‌سازی خودکار مدل {self.id} (کل حجم دانلود: {dl_label})…", progress=0.04)
+            if not rt_already:
                 self._ensure_isolated_venv(upgrade=False)
             else:
-                emit(f"محیط اجرایی {self.id} از قبل آماده است؛ بررسی ابزارها و فایل‌های مدل…", progress=0.65)
+                emit(f"محیط اجرایی {self.id} از قبل آماده است؛ بررسی ابزارها و فایل‌های مدل…", progress=0.08)
                 self._ensure_llama_cpp_for_surya()
             revision = self._prepare_weights(language)
             hf_repo = self._spec.get("hf_repo")
@@ -2816,6 +3112,8 @@ class IsolatedOcrEngine:
             )
             emit(f"مدل {self.id} آماده و قابل استفاده است", "success", progress=1.0)
         finally:
+            self._active_rt_span = None
+            self._active_wt_span = None
             self.close()
             trim_process_memory()
 
@@ -2888,6 +3186,8 @@ class IsolatedOcrEngine:
                         pass
             self._worker_proc = None
         self._worker_stderr_tail.clear()
+        if self.id == "surya":
+            _stop_lingering_surya_server()
         if self._spec.get("needs_llama_cpp_cpu"):
             self._ensure_llama_cpp_for_surya()
         worker_script = _worker_script_path()
@@ -2898,6 +3198,7 @@ class IsolatedOcrEngine:
                 "--engine", self.id,
                 "--models-root", str(models_dir()),
                 "--serve",
+                "--parent-pid", str(os.getpid()),
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -2908,7 +3209,10 @@ class IsolatedOcrEngine:
             bufsize=1,
             env=self._worker_env(),
             creationflags=_SUBPROCESS_NO_WINDOW if os.name == "nt" else 0,
+            start_new_session=(os.name != "nt"),
         )
+        with self._proc_ref_lock:
+            self._worker_proc = proc
         stderr_tail = self._worker_stderr_tail
 
         def _drain_worker_stderr() -> None:
@@ -2926,13 +3230,27 @@ class IsolatedOcrEngine:
 
         err_thread = threading.Thread(target=_drain_worker_stderr, daemon=True)
         err_thread.start()
-        banner = proc.stdout.readline().strip() if proc.stdout else ""
+        try:
+            banner = proc.stdout.readline().strip() if proc.stdout else ""
+        except Exception:
+            banner = ""
+        if self._cancel_ocr.is_set() or is_job_cancelled():
+            with self._proc_ref_lock:
+                if self._worker_proc is proc:
+                    self._worker_proc = None
+            _kill_process_tree(proc)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    with contextlib.suppress(Exception):
+                        stream.close()
+            if self.id == "surya":
+                _stop_lingering_surya_server()
+            raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
         if not banner:
-            try:
-                proc.kill()
-                proc.wait(timeout=2)
-            except Exception:
-                pass
+            with self._proc_ref_lock:
+                if self._worker_proc is proc:
+                    self._worker_proc = None
+            _kill_process_tree(proc)
             err_thread.join(timeout=1.0)
             for stream in (proc.stdin, proc.stdout, proc.stderr):
                 if stream is not None:
@@ -2942,13 +3260,18 @@ class IsolatedOcrEngine:
                         pass
             err_tail = "\n".join(stderr_tail)[-800:]
             raise self._error_cls(f"راه‌اندازی پردازشگر مدل {self.id} ناموفق بود: {err_tail}")
-        self._worker_proc = proc
         return proc
 
     def recognize(self, image: Image.Image, language: str, *, page_mode: str = "auto") -> list[Any]:
+        check_cancelled("عملیات OCR به درخواست کاربر لغو شد.")
+        self._cancel_ocr.clear()
         if not self.runtime_installed or not self.model_ready:
-            raise self._error_cls(f"{self.id} is not ready. Click the explicit preparation button first.")
+            raise self._error_cls(
+                f"مدل {self.id} آماده نیست. در پنجرهٔ «مدیریت مدل‌های OCR» "
+                "روی «آماده‌سازی / دانلود خودکار» این مدل بزنید (برای دانلود اینترنت لازم است)."
+            )
         regions = detect_comic_text_regions(image, page_mode=page_mode) if self._spec.get("needs_regions") else None
+        check_cancelled("عملیات OCR به درخواست کاربر لغو شد.")
         with tempfile.NamedTemporaryFile(prefix=f"comic-{self.id}-", suffix=".png", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         try:
@@ -2960,34 +3283,58 @@ class IsolatedOcrEngine:
                     rgb_img.close()
             self._cancel_idle_timer()
             with self._worker_lock:
+                if self._cancel_ocr.is_set() or is_job_cancelled():
+                    raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
                 proc = self._ensure_worker()
                 assert proc.stdin is not None and proc.stdout is not None
                 req = {"imagePath": str(tmp_path), "language": language, "regions": regions, "pageMode": page_mode}
-                proc.stdin.write(json.dumps(req) + "\n")
-                proc.stdin.flush()
-                raw_resp = proc.stdout.readline().strip()
+                try:
+                    proc.stdin.write(json.dumps(req) + "\n")
+                    proc.stdin.flush()
+                    raw_resp = proc.stdout.readline().strip()
+                except Exception:
+                    raw_resp = ""
+                if self._cancel_ocr.is_set() or is_job_cancelled():
+                    with self._proc_ref_lock:
+                        if self._worker_proc is proc:
+                            self._worker_proc = None
+                    _kill_process_tree(proc)
+                    for stream in (proc.stdin, proc.stdout, proc.stderr):
+                        if stream is not None:
+                            with contextlib.suppress(Exception):
+                                stream.close()
+                    if self.id == "surya":
+                        _stop_lingering_surya_server()
+                    raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
                 if not raw_resp:
-                    try:
-                        proc.kill()
-                        proc.wait(timeout=2)
-                    except Exception:
-                        pass
+                    _kill_process_tree(proc)
                     for stream in (proc.stdin, proc.stdout, proc.stderr):
                         if stream is not None:
                             try:
                                 stream.close()
                             except Exception:
                                 pass
-                    self._worker_proc = None
+                    with self._proc_ref_lock:
+                        if self._worker_proc is proc:
+                            self._worker_proc = None
+                    if self.id == "surya":
+                        _stop_lingering_surya_server()
                     err_hint = ("\n".join(self._worker_stderr_tail))[-600:]
                     suffix = f": {err_hint}" if err_hint else ""
                     raise self._error_cls(f"پردازشگر مدل {self.id} به شکل غیرمنتظره‌ای بسته شد.{suffix}")
                 payload = json.loads(raw_resp)
                 if not payload.get("ok"):
                     raise self._error_cls(f"OCR failed ({self.id}): {payload.get('error')}")
+                persian_norm = None
+                if language == "fas":
+                    with contextlib.suppress(Exception):
+                        from .ocr import normalize_persian_ocr_text as _pnorm
+                        persian_norm = _pnorm
                 out_lines: list[Any] = []
                 for entry in payload.get("lines") or []:
                     raw_txt = str(entry.get("text", "")).strip("\r\n")
+                    if persian_norm is not None:
+                        raw_txt = persian_norm(raw_txt)
                     if not raw_txt.strip() or not entry.get("polygon"):
                         continue
                     poly = [[float(pt[0]), float(pt[1])] for pt in entry["polygon"]]
@@ -3153,11 +3500,13 @@ def engine_has_uninstallable_files(engine_id: str, engine: Any = None) -> bool:
             for cand in _isolated_engine_owned_paths(engine_id, root)
         )
     if engine_id == "rapidocr-v5":
+        if bundled_models_dir() is not None:
+            return _dir_has_any_entry(root / "rapidocr")
         if engine is not None and bool(getattr(engine, "model_ready", False)):
             return True
         return _dir_has_any_entry(root / "rapidocr")
     if engine_id == "easyocr":
-        if _dir_has_any_entry(root / "easyocr"):
+        if _dir_has_any_entry(root / "easyocr") or _dir_has_any_entry(root / "site-packages"):
             return True
         if engine is not None and bool(getattr(engine, "model_ready", False)):
             return True
@@ -3181,23 +3530,37 @@ def engine_has_uninstallable_files(engine_id: str, engine: Any = None) -> bool:
 
 
 def _stop_lingering_surya_server() -> None:
-    state_json = Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.json"))
-    if not state_json.is_file():
-        return
-    server_pid: int | None = None
-    with contextlib.suppress(Exception):
-        meta = json.loads(state_json.read_text(encoding="utf-8"))
-        if isinstance(meta, dict) and meta.get("pid"):
-            server_pid = int(meta["pid"])
-    with contextlib.suppress(OSError):
-        state_json.unlink()
-    if server_pid and server_pid > 0 and server_pid != os.getpid():
+    cache_roots: list[Path] = [
+        models_dir() / "cache",
+        Path(os.path.expanduser("~/.cache")),
+    ]
+    for env_key in ("XDG_CACHE_HOME", "USERPROFILE"):
+        raw = (os.environ.get(env_key) or "").strip()
+        if raw:
+            cache_roots.append(Path(raw) / ".cache" if env_key == "USERPROFILE" else Path(raw))
+    seen: set[str] = set()
+    killed_pids: set[int] = set()
+    for root in cache_roots:
+        state_json = root / "datalab" / "surya" / "llamacpp_server.json"
+        norm_key = os.path.normcase(str(state_json))
+        if norm_key in seen or not state_json.is_file():
+            continue
+        seen.add(norm_key)
+        server_pid: int | None = None
         with contextlib.suppress(Exception):
-            if os.name == "nt":
-                _run_Subprocess(["taskkill", "/F", "/T", "/PID", str(server_pid)], capture_output=True, timeout=4, check=False)
-            else:
-                import signal as _sig
-                os.kill(server_pid, _sig.SIGTERM)
+            meta = json.loads(state_json.read_text(encoding="utf-8"))
+            if isinstance(meta, dict) and meta.get("pid"):
+                server_pid = int(meta["pid"])
+        with contextlib.suppress(OSError):
+            state_json.unlink()
+        if server_pid and server_pid > 0 and server_pid != os.getpid() and server_pid not in killed_pids:
+            killed_pids.add(server_pid)
+            with contextlib.suppress(Exception):
+                if os.name == "nt":
+                    _run_Subprocess(["taskkill", "/F", "/T", "/PID", str(server_pid)], capture_output=True, timeout=4, check=False)
+                else:
+                    import signal as _sig
+                    os.kill(server_pid, _sig.SIGTERM)
 
 
 def uninstall_isolated_engine_files(engine_id: str) -> int:
@@ -3391,10 +3754,11 @@ def fetch_hf_repo_revision(hf_repo: str | None, timeout: float = 6.0) -> str | N
 
 
 def fetch_tessdata_revision(languages: list[str], timeout: float = 6.0) -> str | None:
-    lang = languages[0] if languages else "eng"
+    lang = "fas" if "fas" in (languages or []) and len(languages) == 1 else (languages[0] if languages else "eng")
+    repo = "tesseract-ocr/tessdata_best" if lang == "fas" else "tesseract-ocr/tessdata_fast"
     try:
         commits = _fetch_json(
-            f"https://api.github.com/repos/tesseract-ocr/tessdata_fast/commits?path={lang}.traineddata&per_page=1",
+            f"https://api.github.com/repos/{repo}/commits?path={lang}.traineddata&per_page=1",
             timeout=timeout,
         )
         if isinstance(commits, list) and commits:

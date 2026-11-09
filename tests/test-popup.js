@@ -350,6 +350,30 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
       calls[1] && calls[1].target && calls[1].target.frameIds && calls[1].target.frameIds[0] === 77, calls[1] && calls[1].target);
   }
 
+  // v2.68: missing active tab shows a clean Persian error instead of throwing TypeError
+  {
+    const dom4 = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const w4 = dom4.window;
+    Object.defineProperty(w4.Element.prototype, 'innerText', {
+      get() { return this.textContent; }, set(v) { this.textContent = v; }, configurable: true
+    });
+    w4.chrome = {
+      tabs: { query: async () => [] },
+      scripting: { executeScript: async () => { throw new Error('should not executeScript without a tab'); } }
+    };
+    vm.runInContext(popupCode, dom4.getInternalVMContext(), { filename: 'popup.js' });
+    w4.document.getElementById('startBtn').click();
+    await new Promise((r) => setTimeout(r, 10));
+    const statusBox = w4.document.getElementById('statusBox');
+    check('v2.68 missing active tab displays clean Persian error and re-enables start button',
+      !statusBox.classList.contains('hidden') &&
+      statusBox.textContent.includes('تب فعالی برای اسکن پیدا نشد') &&
+      w4.document.getElementById('startBtn').disabled === false,
+      statusBox.textContent);
+  }
+
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL POPUP TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error('TEST CRASH:', e); process.exit(2); });

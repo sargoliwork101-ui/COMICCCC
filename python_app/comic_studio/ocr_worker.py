@@ -9,6 +9,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -24,22 +26,29 @@ def _configure_cache_dirs(models_root: Path) -> None:
     surya_dir = models_root / "surya"
     mineru_dir = models_root / "mineru"
     hezar_dir = models_root / "hezar"
-    for directory in (hf_dir, paddlex_dir, torch_dir, surya_dir, mineru_dir, hezar_dir):
+    cache_dir = models_root / "cache"
+    tmp_dir = models_root / "tmp"
+    for directory in (hf_dir, paddlex_dir, torch_dir, surya_dir, mineru_dir, hezar_dir, cache_dir, tmp_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("HF_HOME", str(hf_dir))
-    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf_dir / "hub"))
-    os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(paddlex_dir))
-    os.environ.setdefault("TORCH_HOME", str(torch_dir))
-    os.environ.setdefault("MODEL_CACHE_DIR", str(surya_dir))
-    os.environ.setdefault("MINERU_HOME", str(mineru_dir))
-    os.environ.setdefault("HEZAR_CACHE_DIR", str(hezar_dir))
+    os.environ["HF_HOME"] = str(hf_dir)
+    os.environ["HUGGINGFACE_HUB_CACHE"] = str(hf_dir / "hub")
+    os.environ["PADDLE_PDX_CACHE_HOME"] = str(paddlex_dir)
+    os.environ["TORCH_HOME"] = str(torch_dir)
+    os.environ["MODEL_CACHE_DIR"] = str(surya_dir)
+    os.environ["MINERU_HOME"] = str(mineru_dir)
+    os.environ["HEZAR_CACHE_DIR"] = str(hezar_dir)
+    os.environ["XDG_CACHE_HOME"] = str(cache_dir)
+    os.environ["TMPDIR"] = str(tmp_dir)
+    os.environ["TEMP"] = str(tmp_dir)
+    os.environ["TMP"] = str(tmp_dir)
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
     os.environ.setdefault("SURYA_INFERENCE_BACKEND", "llamacpp")
     os.environ.setdefault("SURYA_INFERENCE_PARALLEL", "1")
     os.environ.setdefault("SURYA_INFERENCE_CTX_SIZE", "16384")
     os.environ.setdefault("SURYA_INFERENCE_KEEP_ALIVE", "false")
-    cores = str(max(1, int(os.cpu_count() or 1)))
+    # The parent process already limits these to the user's CPU budget.
+    cores = str(max(1, int(os.environ.get("OMP_NUM_THREADS") or os.cpu_count() or 1)))
     for thread_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ.setdefault(thread_key, cores)
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
@@ -86,7 +95,7 @@ def _widen_requests_default_timeout(min_timeout: float = 120.0) -> None:
 
 def _configure_torch_runtime(torch_mod: Any) -> str:
     """Configure PyTorch multi-core CPU threads and return best available accelerator ('cuda', 'mps', or 'cpu')."""
-    cores = max(1, int(os.cpu_count() or 1))
+    cores = max(1, int(os.environ.get("OMP_NUM_THREADS") or os.cpu_count() or 1))
     try:
         torch_mod.set_num_threads(cores)
     except Exception:
@@ -486,7 +495,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
                 except Exception:
                     paddle_device = None
             self._device = "gpu" if (paddle_device or "").startswith("gpu") else "cpu"
-            cpu_threads = max(1, min(12, os.cpu_count() or 4))
+            cpu_threads = max(1, min(12, int(os.environ.get("OMP_NUM_THREADS") or os.cpu_count() or 4)))
 
             last_err: Exception | None = None
             for candidate in candidates:
@@ -693,22 +702,99 @@ class _SuryaAdapter(_BaseAdapter):
         self._layout_detector: Any = None
         self._layout_detector_checked: bool = False
 
+    def _surya_cache_files(self, filename: str) -> list[Path]:
+        roots: list[Path] = []
+        for env_key in ("XDG_CACHE_HOME", "USERPROFILE"):
+            raw = (os.environ.get(env_key) or "").strip()
+            if raw:
+                roots.append(Path(raw) / ".cache" if env_key == "USERPROFILE" else Path(raw))
+        models_root = getattr(self, "models_root", None)
+        if models_root is not None:
+            roots.append(Path(models_root) / "cache")
+        roots.append(Path(os.path.expanduser("~/.cache")))
+        out: list[Path] = []
+        seen: set[str] = set()
+        for r in roots:
+            cand = r / "datalab" / "surya" / filename
+            key = os.path.normcase(str(cand))
+            if key not in seen:
+                seen.add(key)
+                out.append(cand)
+        return out
+
     @staticmethod
-    def _sync_surya_runtime_settings() -> None:
+    def _has_vulkan_llama_binary() -> bool:
+        bin_raw = (os.environ.get("LLAMA_CPP_BINARY") or "").strip()
+        if not bin_raw:
+            return False
+        bin_dir = Path(bin_raw).parent
+        if not bin_dir.is_dir():
+            return False
+        with contextlib.suppress(OSError):
+            return any("vulkan" in p.name.lower() for p in bin_dir.iterdir())
+        return False
+
+    @staticmethod
+    def _force_pure_cpu_llama_env() -> None:
+        os.environ["LLAMA_CPP_NGL"] = "0"
+        os.environ["LLAMA_CPP_NO_MMPROJ_OFFLOAD"] = "true"
+        os.environ["LLAMA_CPP_EXTRA_ARGS"] = "-b 2048 -ub 2048 --flash-attn off --device none"
+
+    @classmethod
+    def _sync_surya_runtime_settings(cls) -> None:
         try:
             from surya.settings import settings as _ss
             ctx_val = int(os.environ.get("SURYA_INFERENCE_CTX_SIZE", "24576") or "24576")
             max_tok = int(os.environ.get("SURYA_MAX_TOKENS_FULL_PAGE", "4096") or "4096")
             ngl_val = int(os.environ.get("LLAMA_CPP_NGL", "0") or "0")
             logprobs_raw = str(os.environ.get("SURYA_INFERENCE_LOGPROBS", "false")).strip().lower()
+            has_vulkan = cls._has_vulkan_llama_binary()
+            mmproj_raw = os.environ.get("LLAMA_CPP_NO_MMPROJ_OFFLOAD")
+            if mmproj_raw is None or not str(mmproj_raw).strip():
+                no_mmproj_offload = (ngl_val == 0) or has_vulkan
+            else:
+                no_mmproj_offload = str(mmproj_raw).strip().lower() in {"1", "true", "yes"}
+            extra_args = (os.environ.get("LLAMA_CPP_EXTRA_ARGS") or "").strip()
+            if not extra_args:
+                if ngl_val == 0:
+                    extra_args = "-b 2048 -ub 2048 --flash-attn off --device none"
+                elif has_vulkan:
+                    extra_args = "-b 2048 -ub 2048 --flash-attn off"
+                else:
+                    extra_args = "-b 2048 -ub 2048"
             _ss.SURYA_INFERENCE_BACKEND = "llamacpp"
             _ss.SURYA_INFERENCE_PARALLEL = 1
             _ss.SURYA_INFERENCE_CTX_SIZE = ctx_val
             _ss.SURYA_MAX_TOKENS_FULL_PAGE = max_tok
             _ss.SURYA_INFERENCE_LOGPROBS = logprobs_raw in {"1", "true", "yes"}
+            _ss.SURYA_INFERENCE_KEEP_ALIVE = False
             _ss.LLAMA_CPP_NGL = ngl_val
+            _ss.LLAMA_CPP_NO_MMPROJ_OFFLOAD = no_mmproj_offload
+            _ss.LLAMA_CPP_EXTRA_ARGS = extra_args
         except Exception:
             pass
+
+    def _terminate_sentinel_servers(self) -> None:
+        killed_pids: set[int] = set()
+        for state_json in self._surya_cache_files("llamacpp_server.json"):
+            if not state_json.is_file():
+                continue
+            server_pid: int | None = None
+            with contextlib.suppress(Exception):
+                meta = json.loads(state_json.read_text(encoding="utf-8"))
+                if isinstance(meta, dict) and meta.get("pid"):
+                    server_pid = int(meta["pid"])
+            with contextlib.suppress(OSError):
+                state_json.unlink()
+            if server_pid and server_pid > 0 and server_pid != os.getpid() and server_pid not in killed_pids:
+                killed_pids.add(server_pid)
+                with contextlib.suppress(Exception):
+                    if os.name == "nt":
+                        import subprocess as _sp
+                        _sp.run(["taskkill", "/F", "/T", "/PID", str(server_pid)], capture_output=True, timeout=4, check=False)
+                    else:
+                        import signal as _sig
+                        os.kill(server_pid, _sig.SIGTERM)
 
     def _ensure_loaded(self) -> None:
         if self._predictor is not None or self._legacy is not None:
@@ -719,6 +805,12 @@ class _SuryaAdapter(_BaseAdapter):
             os.environ.setdefault("TORCH_DEVICE", dev)
         except Exception:
             pass
+        # Never attach to an orphaned/poisoned llama-server left over from a killed or older worker
+        # (unless the user explicitly pinned SURYA_INFERENCE_URL or SURYA_INFERENCE_KEEP_ALIVE=true).
+        if not (os.environ.get("SURYA_INFERENCE_URL") or "").strip():
+            keep_alive = str(os.environ.get("SURYA_INFERENCE_KEEP_ALIVE", "false")).strip().lower() in {"1", "true", "yes"}
+            if not keep_alive:
+                self._terminate_sentinel_servers()
         self._sync_surya_runtime_settings()
         try:
             from surya.inference import SuryaInferenceManager
@@ -751,7 +843,7 @@ class _SuryaAdapter(_BaseAdapter):
             proc = getattr(handle, "process", None) if handle is not None else None
             if proc is not None and hasattr(proc, "pid"):
                 server_pid = int(proc.pid)
-            elif handle is not None and hasattr(handle, "pid"):
+            elif handle is not None and hasattr(handle, "pid") and getattr(handle, "pid") is not None:
                 try:
                     server_pid = int(handle.pid)
                 except Exception:
@@ -759,15 +851,7 @@ class _SuryaAdapter(_BaseAdapter):
             if hasattr(mgr, "stop"):
                 with contextlib.suppress(Exception):
                     mgr.stop()
-        if server_pid is None:
-            state_json = Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.json"))
-            if state_json.is_file():
-                with contextlib.suppress(Exception):
-                    meta = json.loads(state_json.read_text(encoding="utf-8"))
-                    if isinstance(meta, dict) and meta.get("pid"):
-                        server_pid = int(meta["pid"])
-                with contextlib.suppress(OSError):
-                    state_json.unlink()
+        self._terminate_sentinel_servers()
         if server_pid and server_pid > 0 and server_pid != os.getpid():
             with contextlib.suppress(Exception):
                 if os.name == "nt":
@@ -945,6 +1029,128 @@ class _SuryaAdapter(_BaseAdapter):
             layout_boxes.append(lb)
         return LayoutResult(bboxes=layout_boxes, image_bbox=[0.0, 0.0, float(width), float(height)])
 
+    @classmethod
+    def _sanitize_layout_for_surya(cls, layout_res: Any, width: int, height: int) -> Any:
+        """Ensure every LayoutBox crop passed to Surya's `mtmd` vision encoder is at least 28x28 px
+        and free of degenerate <4px slivers or >80:1 extreme aspect ratios that fail inside `mtmd`."""
+        if layout_res is None:
+            return None
+        bboxes = getattr(layout_res, "bboxes", None)
+        if not bboxes:
+            return layout_res
+        sanitized: list[Any] = []
+        changed = False
+        for box in bboxes:
+            lbl = str(getattr(box, "label", "") or "")
+            if lbl in cls._SKIP_LABELS:
+                sanitized.append(box)
+                continue
+            poly = getattr(box, "polygon", None)
+            if not poly or len(poly) < 4:
+                changed = True
+                continue
+            xs = [float(p[0]) for p in poly]
+            ys = [float(p[1]) for p in poly]
+            x0, x1 = max(0.0, min(xs)), min(float(width), max(xs))
+            y0, y1 = max(0.0, min(ys)), min(float(height), max(ys))
+            bw, bh = x1 - x0, y1 - y0
+            if bw < 4.0 or bh < 4.0:
+                changed = True
+                continue
+            min_side = 28.0
+            if bw < min_side and width >= 28:
+                grow_x = (min_side - bw) * 0.5
+                x0 = max(0.0, x0 - grow_x)
+                x1 = min(float(width), x0 + min_side)
+                x0 = max(0.0, x1 - min_side)
+                changed = True
+            if bh < min_side and height >= 28:
+                grow_y = (min_side - bh) * 0.5
+                y0 = max(0.0, y0 - grow_y)
+                y1 = min(float(height), y0 + min_side)
+                y0 = max(0.0, y1 - min_side)
+                changed = True
+            bw, bh = max(1.0, x1 - x0), max(1.0, y1 - y0)
+            if max(bw / bh, bh / bw) > 75.0:
+                if bw > bh and height >= int(bw / 60.0):
+                    need_h = min(float(height), bw / 60.0)
+                    cy = 0.5 * (y0 + y1)
+                    y0 = max(0.0, cy - need_h * 0.5)
+                    y1 = min(float(height), y0 + need_h)
+                    y0 = max(0.0, y1 - need_h)
+                    changed = True
+                elif bh > bw and width >= int(bh / 60.0):
+                    need_w = min(float(width), bh / 60.0)
+                    cx = 0.5 * (x0 + x1)
+                    x0 = max(0.0, cx - need_w * 0.5)
+                    x1 = min(float(width), x0 + need_w)
+                    x0 = max(0.0, x1 - need_w)
+                    changed = True
+            if changed:
+                with contextlib.suppress(Exception):
+                    box.polygon = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            sanitized.append(box)
+        if not sanitized:
+            return None
+        if changed:
+            with contextlib.suppress(Exception):
+                layout_res.bboxes = sanitized
+        return layout_res
+
+    @staticmethod
+    def _prepare_surya_work_image(rgb: Any, *, max_side: int = 2240) -> tuple[Any, float, float, int, int]:
+        """Cap oversized pages so Surya's Qwen-VL `mtmd` vision graph never allocates multi-GB
+        8,000-token scratch buffers, and pad tiny <48px strips so `scale_to_fit` never produces
+        extreme aspect ratios. Returns `(work_rgb, scale_x, scale_y, pad_x, pad_y)`."""
+        from PIL import Image, ImageOps
+
+        w, h = rgb.size
+        work = rgb
+        scale_x = 1.0
+        scale_y = 1.0
+        if max(w, h) > max_side:
+            ratio = float(max_side) / float(max(w, h))
+            nw = max(28, int(round(w * ratio)))
+            nh = max(28, int(round(h * ratio)))
+            work = rgb.resize((nw, nh), Image.Resampling.LANCZOS)
+            scale_x = float(w) / float(nw)
+            scale_y = float(h) / float(nh)
+        cw, ch = work.size
+        pad_x = max(0, (48 - cw + 1) // 2) if cw < 48 else 0
+        pad_y = max(0, (48 - ch + 1) // 2) if ch < 48 else 0
+        if pad_x > 0 or pad_y > 0:
+            padded = ImageOps.expand(work, border=(pad_x, pad_y, pad_x, pad_y), fill=(255, 255, 255))
+            if work is not rgb:
+                work.close()
+            work = padded
+        return work, scale_x, scale_y, pad_x, pad_y
+
+    @staticmethod
+    def _unmap_surya_lines(
+        lines: list[dict[str, Any]],
+        orig_w: int,
+        orig_h: int,
+        scale_x: float,
+        scale_y: float,
+        pad_x: int,
+        pad_y: int,
+    ) -> list[dict[str, Any]]:
+        if scale_x == 1.0 and scale_y == 1.0 and pad_x == 0 and pad_y == 0:
+            return lines
+        out: list[dict[str, Any]] = []
+        for item in lines:
+            mapped_poly = [
+                [
+                    (float(pt[0]) - float(pad_x)) * scale_x,
+                    (float(pt[1]) - float(pad_y)) * scale_y,
+                ]
+                for pt in item["polygon"]
+            ]
+            cloned = dict(item)
+            cloned["polygon"] = _clamp_polygon(mapped_poly, orig_w, orig_h)
+            out.append(cloned)
+        return out
+
     @staticmethod
     def _is_blank_image(rgb: Any) -> bool:
         try:
@@ -987,17 +1193,23 @@ class _SuryaAdapter(_BaseAdapter):
             lines.append({"text": text, "confidence": max(0.0, min(1.0, conf)), "polygon": _clamp_polygon(poly, width, height), **hints})
         return lines, had_error
 
-    @staticmethod
-    def _read_llama_server_error_tail() -> str:
-        log_path = Path(os.path.expanduser("~/.cache/datalab/surya/llamacpp_server.log"))
-        if not log_path.is_file():
-            return ""
-        try:
-            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-25:]
-            relevant = [ln.strip() for ln in tail if ln.strip()]
-            return " | ".join(relevant[-4:])[-400:]
-        except Exception:
-            return ""
+    def _read_llama_server_error_tail(self) -> str:
+        for log_path in self._surya_cache_files("llamacpp_server.log"):
+            if not log_path.is_file():
+                continue
+            try:
+                tail = [ln.strip() for ln in log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-40:] if ln.strip()]
+                if not tail:
+                    continue
+                err_lines = [
+                    ln for ln in tail
+                    if " E " in ln or any(k in ln.lower() for k in ("error", "vulkan", "cuda", "alloc", "mtmd", "clip", "out of memory"))
+                ]
+                chosen = (err_lines[-5:] if err_lines else tail[-4:])
+                return " | ".join(chosen)[-500:]
+            except Exception:
+                continue
+        return ""
 
     def _invoke_surya_predictor(self, rgb: Any, layout_res: Any = None) -> Any:
         assert self._predictor is not None
@@ -1007,6 +1219,15 @@ class _SuryaAdapter(_BaseAdapter):
             except TypeError:
                 return self._predictor([rgb])
         return self._predictor([rgb])
+
+    def _restart_on_pure_cpu(self) -> None:
+        prev_pred = self._predictor
+        had_mgr = self._manager is not None
+        self.close()
+        self._force_pure_cpu_llama_env()
+        self._ensure_loaded()
+        if self._predictor is None and not had_mgr and prev_pred is not None:
+            self._predictor = prev_pred
 
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         from PIL import Image
@@ -1018,55 +1239,82 @@ class _SuryaAdapter(_BaseAdapter):
         try:
             if self._predictor is not None:
                 page_blank = self._is_blank_image(rgb)
-                fast_layout = None if page_blank else self._detect_fast_layout_inprocess(rgb)
                 had_error = False
 
-                def _run_pass() -> tuple[list[dict[str, Any]], bool]:
-                    if fast_layout is not None:
-                        p_fast = self._invoke_surya_predictor(rgb, fast_layout)
-                        l_fast, err_fast = self._extract_surya_lines(p_fast, width, height)
-                        if l_fast:
-                            return l_fast, err_fast
-                        if err_fast:
-                            return [], True
-                    p_full = self._invoke_surya_predictor(rgb, None)
-                    return self._extract_surya_lines(p_full, width, height)
+                def _run_on_side_cap(side_cap: int) -> tuple[list[dict[str, Any]], bool, Any]:
+                    work_im, sx, sy, px, py = self._prepare_surya_work_image(rgb, max_side=side_cap)
+                    try:
+                        ww, wh = work_im.size
+                        fl = None if page_blank else self._sanitize_layout_for_surya(self._detect_fast_layout_inprocess(work_im), ww, wh)
+                        if fl is not None:
+                            p_fast = self._invoke_surya_predictor(work_im, fl)
+                            l_fast, err_fast = self._extract_surya_lines(p_fast, ww, wh)
+                            if l_fast:
+                                return self._unmap_surya_lines(l_fast, width, height, sx, sy, px, py), err_fast, fl
+                            if err_fast:
+                                return [], True, fl
+                        p_full = self._invoke_surya_predictor(work_im, None)
+                        l_full, err_full = self._extract_surya_lines(p_full, ww, wh)
+                        return self._unmap_surya_lines(l_full, width, height, sx, sy, px, py), err_full, fl
+                    finally:
+                        if work_im is not rgb:
+                            work_im.close()
 
+                fast_layout = None
+                cpu_recovered = False
                 try:
-                    lines, had_error = _run_pass()
+                    lines, had_error, fast_layout = _run_on_side_cap(2240)
                 except Exception:
-                    if os.environ.get("LLAMA_CPP_NGL", "0") != "0":
-                        self.close()
-                        os.environ["LLAMA_CPP_NGL"] = "0"
-                        self._ensure_loaded()
-                        lines, had_error = _run_pass()
-                    else:
-                        raise
+                    cpu_recovered = True
+                    self._restart_on_pure_cpu()
+                    lines, had_error, fast_layout = _run_on_side_cap(1568)
 
-                # Surya's openai_client swallows llama-server HTTP errors into BlockOCRResult(error=True)
-                # without raising an exception! Recover on CPU if GPU offload was active.
-                if not lines and not page_blank and (had_error or os.environ.get("LLAMA_CPP_NGL", "0") != "0"):
-                    if os.environ.get("LLAMA_CPP_NGL", "0") != "0":
-                        self.close()
-                        os.environ["LLAMA_CPP_NGL"] = "0"
-                        self._ensure_loaded()
-                        lines, had_error = _run_pass()
+                # Surya's openai_client swallows llama-server HTTP 500 (`failed to process mtmd chunk`)
+                # into BlockOCRResult(error=True) without raising an exception! Unconditionally restart
+                # llama-server in pure-CPU `--no-mmproj-offload --device none` mode + 1568px cap even if
+                # LLAMA_CPP_NGL already started at "0" (where Vulkan mmproj offload was previously active).
+                if not lines and not page_blank and (had_error or os.environ.get("LLAMA_CPP_NGL", "0") != "0") and not cpu_recovered:
+                    if had_error or os.environ.get("LLAMA_CPP_NGL", "0") != "0":
+                        cpu_recovered = True
+                        self._restart_on_pure_cpu()
+                        lines, had_error, fast_layout = _run_on_side_cap(1568)
 
-                # If full-page special-token parsing returned 0 blocks on a non-blank page without fast_layout,
-                # run per-block BLOCK_PROMPT on OpenCV/provided text regions.
-                if not lines and not page_blank and fast_layout is None:
-                    region_layout = self._build_region_layout_fallback(rgb, regions)
-                    if region_layout is not None:
-                        try:
-                            p_reg = self._predictor([rgb], layout_results=[region_layout])
-                            reg_lines, reg_err = self._extract_surya_lines(p_reg, width, height)
-                            if reg_lines:
-                                lines = reg_lines
-                                had_error = False
-                            elif reg_err:
-                                had_error = True
-                        except TypeError:
-                            pass
+                # If full-page special-token parsing returned 0 blocks on a non-blank page,
+                # run per-block BLOCK_PROMPT on sanitized OpenCV/provided text regions (~200 tokens/crop).
+                if not lines and not page_blank and (fast_layout is None or had_error):
+                    reg_side = 1568 if cpu_recovered else 2240
+                    work_im, sx, sy, px, py = self._prepare_surya_work_image(rgb, max_side=reg_side)
+                    try:
+                        ww, wh = work_im.size
+                        scaled_regs: list[list[float]] | None = None
+                        if regions:
+                            scaled_regs = [
+                                [
+                                    float(r[0]) / sx + px,
+                                    float(r[1]) / sy + py,
+                                    float(r[2]) / sx + px,
+                                    float(r[3]) / sy + py,
+                                ]
+                                for r in regions
+                                if isinstance(r, (list, tuple)) and len(r) == 4
+                            ]
+                        region_layout = self._sanitize_layout_for_surya(
+                            self._build_region_layout_fallback(work_im, scaled_regs), ww, wh,
+                        )
+                        if region_layout is not None:
+                            try:
+                                p_reg = self._predictor([work_im], layout_results=[region_layout])
+                                reg_lines, reg_err = self._extract_surya_lines(p_reg, ww, wh)
+                                if reg_lines:
+                                    lines = self._unmap_surya_lines(reg_lines, width, height, sx, sy, px, py)
+                                    had_error = False
+                                elif reg_err:
+                                    had_error = True
+                            except TypeError:
+                                pass
+                    finally:
+                        if work_im is not rgb:
+                            work_im.close()
 
                 if not lines and had_error:
                     log_hint = self._read_llama_server_error_tail()
@@ -2202,6 +2450,24 @@ class _HezarOcrAdapter(_BaseAdapter):
                 return str(getattr(first, "text") or "").strip()
         return ""
 
+    @staticmethod
+    def _extract_score(pred_item: Any, default: float = 0.90) -> float:
+        target = pred_item[0] if isinstance(pred_item, (list, tuple)) and pred_item else pred_item
+        raw: Any = None
+        if isinstance(target, dict):
+            raw = target.get("score") if "score" in target else target.get("confidence")
+        elif hasattr(target, "score"):
+            raw = getattr(target, "score")
+        try:
+            val = float(raw)
+            if 0.0 <= val <= 1.0:
+                return val
+            if 1.0 < val <= 100.0:
+                return val / 100.0
+        except (TypeError, ValueError):
+            pass
+        return default
+
     def recognize(self, image_path: str, language: str, regions: list[list[float]] | None) -> list[dict[str, Any]]:
         from PIL import Image
 
@@ -2217,15 +2483,31 @@ class _HezarOcrAdapter(_BaseAdapter):
             grad_ctx = getattr(torch_mod, "inference_mode", None) or getattr(torch_mod, "no_grad", None) or contextlib.nullcontext
         try:
             detector, recognizer = self._ensure_loaded()
-            with grad_ctx():
-                try:
-                    det_outputs = detector.predict(rgb)
-                except Exception:
-                    if self._device != "cpu":
-                        detector, recognizer = self._ensure_loaded(force_cpu=True)
-                        det_outputs = detector.predict(rgb)
-                    else:
-                        raise
+            # Work around upstream Hezar CraftImageProcessor.get_ratio bug when max(width, height) > 2560:
+            # pre-resize only the detector copy to <=2560px and map boxes back to full-res `rgb`.
+            max_side = max(width, height)
+            det_scale = (2560.0 / float(max_side)) if max_side > 2560 else 1.0
+            det_img = (
+                rgb.resize(
+                    (max(1, int(round(width * det_scale))), max(1, int(round(height * det_scale)))),
+                    Image.Resampling.LANCZOS,
+                )
+                if det_scale < 1.0
+                else rgb
+            )
+            try:
+                with grad_ctx():
+                    try:
+                        det_outputs = detector.predict(det_img)
+                    except Exception:
+                        if self._device != "cpu":
+                            detector, recognizer = self._ensure_loaded(force_cpu=True)
+                            det_outputs = detector.predict(det_img)
+                        else:
+                            raise
+            finally:
+                if det_img is not rgb:
+                    det_img.close()
 
             first_det = det_outputs[0] if isinstance(det_outputs, (list, tuple)) and det_outputs else det_outputs
             raw_boxes = (
@@ -2235,41 +2517,187 @@ class _HezarOcrAdapter(_BaseAdapter):
             ) or []
             del det_outputs, first_det
 
+            inv_scale = 1.0 / det_scale
             crop_specs: list[tuple[tuple[int, int, int, int], list[list[float]]]] = []
+
+            def _split_wide_persian_crop(
+                cx0: int, cy0: int, cx1: int, cy1: int, orig_x0: float, orig_y0: float, orig_x1: float, orig_y1: float
+            ) -> list[tuple[tuple[int, int, int, int], list[list[float]]]]:
+                """`hezarai/crnn-base-fa-v2` resizes every input to a fixed `128x32` word tensor.
+                When CRAFT merges 3–6 Persian words into one wide line box (`w / h > 3.8`), feeding
+                the whole line into `128x32` horizontally crushes `گ`'s twin sarkesh strokes into `ک`.
+                Split wide ink-bearing crops along clean vertical whitespace valleys into word-sized
+                sub-crops (`w / h <= 3.8`) before CRNN recognition."""
+                cw = cx1 - cx0
+                ch = max(1, cy1 - cy0)
+                if cw <= 3.8 * max(12, ch) or cw < 96:
+                    return [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+                try:
+                    import numpy as np
+                    sub_gray = np.asarray(rgb.crop((cx0, cy0, cx1, cy1)).convert("L"), dtype=np.uint8)
+                    band_y0 = int(ch * 0.16)
+                    band_y1 = max(band_y0 + 4, int(ch * 0.84))
+                    core = sub_gray[band_y0:band_y1, :]
+                    bg = float(np.percentile(core, 82.0))
+                    fg_min = float(np.percentile(core, 3.0))
+                    if bg - fg_min < 28.0:
+                        return [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+                    ink_cols = (core < (bg - max(22.0, 0.28 * (bg - fg_min)))).mean(axis=0)
+                    empty = ink_cols <= 0.03
+                    min_valley = max(3, int(round(ch * 0.14)))
+                    valleys: list[tuple[int, int]] = []
+                    run_s = -1
+                    for idx_c, is_emp in enumerate(empty):
+                        if is_emp and run_s < 0:
+                            run_s = idx_c
+                        elif not is_emp and run_s >= 0:
+                            mid_c = (run_s + idx_c) // 2
+                            if idx_c - run_s >= min_valley and int(cw * 0.10) < mid_c < int(cw * 0.90):
+                                valleys.append((run_s, idx_c))
+                            run_s = -1
+                    if not valleys:
+                        return [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+                    target_max_w = max(48.0, 3.4 * ch)
+                    chosen_valleys: list[tuple[int, int]] = []
+                    last_end = 0
+                    for vs, ve in valleys:
+                        if vs - last_end >= target_max_w * 0.50 and (cw - last_end) > target_max_w:
+                            chosen_valleys.append((vs, ve))
+                            last_end = ve
+                    if not chosen_valleys:
+                        return [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+                    spans: list[tuple[int, int]] = []
+                    seg_start = 0
+                    for vs, ve in chosen_valleys:
+                        spans.append((seg_start, vs))
+                        seg_start = ve
+                    spans.append((seg_start, cw))
+                    pieces: list[tuple[tuple[int, int, int, int], list[list[float]]]] = []
+                    pad_s = max(2, int(round(ch * 0.08)))
+                    for s0, s1 in spans:
+                        if s1 - s0 < 6:
+                            continue
+                        px0 = max(0, cx0 + s0 - pad_s)
+                        px1 = min(width, cx0 + s1 + pad_s)
+                        bx0 = max(orig_x0, float(cx0 + s0))
+                        bx1 = min(orig_x1, float(cx0 + s1))
+                        if bx1 - bx0 < 4.0:
+                            bx0, bx1 = float(px0), float(px1)
+                        pieces.append(((px0, cy0, px1, cy1), _clamp_polygon(_rect_polygon(bx0, orig_y0, bx1, orig_y1), width, height)))
+                    return pieces or [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+                except Exception:
+                    return [((cx0, cy0, cx1, cy1), _clamp_polygon(_rect_polygon(orig_x0, orig_y0, orig_x1, orig_y1), width, height))]
+
             for raw_box in raw_boxes:
                 if not isinstance(raw_box, (list, tuple)) or len(raw_box) < 4:
                     continue
                 # Hezar CRAFT boxes are (x1, y1, width, height); add generous vertical margin
-                # so Persian upper/lower diacritical dots (پ چ ژ ی ت ث ب ن) are never clipped.
-                bx, by, bw, bh = [float(v) for v in raw_box[:4]]
+                # so Persian upper/lower diacritical dots (پ چ ژ ی ت ث ب ن) and گ sarkesh are never clipped.
+                bx, by, bw, bh = [float(v) * inv_scale for v in raw_box[:4]]
                 if bw < 4.0 or bh < 4.0:
                     continue
-                pad_x = max(3, int(round(bh * 0.10)))
-                pad_y = max(4, int(round(bh * 0.18)))
+                pad_x = max(4, int(round(bh * 0.16)))
+                pad_y = max(6, int(round(bh * 0.30)))
                 cx0 = max(0, int(round(bx - pad_x)))
                 cy0 = max(0, int(round(by - pad_y)))
                 cx1 = min(width, int(round(bx + bw + pad_x)))
                 cy1 = min(height, int(round(by + bh + pad_y)))
                 if cx1 - cx0 < 4 or cy1 - cy0 < 4:
                     continue
-                poly = _clamp_polygon(_rect_polygon(bx, by, bx + bw, by + bh), width, height)
-                crop_specs.append(((cx0, cy0, cx1, cy1), poly))
+                crop_specs.extend(_split_wide_persian_crop(cx0, cy0, cx1, cy1, bx, by, bx + bw, by + bh))
 
             if not crop_specs and regions:
                 for rx0, ry0, rx1, ry1 in _default_regions(width, height, regions):
                     if rx1 - rx0 >= 4 and ry1 - ry0 >= 4:
-                        poly = _clamp_polygon(_rect_polygon(rx0, ry0, rx1, ry1), width, height)
-                        crop_specs.append(((int(rx0), int(ry0), int(rx1), int(ry1)), poly))
+                        crop_specs.extend(
+                            _split_wide_persian_crop(
+                                int(rx0), int(ry0), int(rx1), int(ry1),
+                                float(rx0), float(ry0), float(rx1), float(ry1),
+                            )
+                        )
 
-            lines: list[dict[str, Any]] = []
+            _hezar_char_map = str.maketrans({
+                "\u064a": "\u06cc", "\u0649": "\u06cc", "\u06d2": "\u06cc", "\u06d0": "\u06cc",
+                "\u06cd": "\u06cc", "\u06ce": "\u06cc", "\u0643": "\u06a9", "\u06aa": "\u06a9",
+                "\u06ab": "\u06a9", "\u06ac": "\u06a9", "\u06ad": "\u06a9", "\u06ae": "\u06a9",
+                "\u06b0": "\u06af", "\u06b1": "\u06af", "\u06b2": "\u06af", "\u06b3": "\u06af",
+                "\u06b4": "\u06af", "\u06d5": "\u0647", "\u06c1": "\u0647", "\u06be": "\u0647",
+                "\u06c0": "\u0647\u0654", "\u06c2": "\u0647\u0654", "\u06c3": "\u0647\u0654",
+            })
+            _dual_join_cons = frozenset("بپتثجچحخسشصضطظعغفقکگلمن")
+            _short_standalone = frozenset({
+                "و", "به", "از", "در", "با", "بر", "تا", "را", "که", "چه", "نه", "هم", "هر",
+                "من", "ما", "تو", "او", "آن", "این", "یک", "دو", "سه", "یا", "ای", "بی", "می",
+                "کم", "گم", "دل", "دم", "سر", "پا", "لب", "شب", "زن", "کل", "پر", "پس", "چپ", "شد",
+            })
+            _zwnj_suffixes = frozenset({
+                "ها", "های", "هایی", "هایم", "هایت", "هایش", "هایمان", "هایتان", "هایشان",
+                "تر", "ترین", "ام", "ات", "اش", "مان", "تان", "شان",
+            })
+
+            def _clean_fa_tok(t: str) -> str:
+                t = re.sub(r"[\u061c\u0640\u200b\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]", "", t)
+                return re.sub(r"[ \t]+", " ", t.translate(_hezar_char_map)).strip()
+
+            def _join_hezar_row(cluster_rtl: list[dict[str, Any]], row_h: float) -> str:
+                if not cluster_rtl:
+                    return ""
+                acc = cluster_rtl[0]["text"]
+                safe_h = max(8.0, float(row_h))
+                for prev_it, cur_it in zip(cluster_rtl[:-1], cluster_rtl[1:]):
+                    r_txt = acc.strip()
+                    l_txt = cur_it["text"].strip()
+                    if not l_txt:
+                        continue
+                    if not r_txt:
+                        acc = l_txt
+                        continue
+                    h_gap = float(prev_it["x0"]) - float(cur_it["x1"])
+                    r_last = r_txt.split()[-1]
+                    l_first = l_txt.split()[0]
+                    if re.search(r"(?<![\u0621-\u06cc])ن?می$", r_txt) and re.match(r"^[\u0621-\u06cc]{2,}", l_txt):
+                        sep = "\u200c"
+                    elif l_txt in _zwnj_suffixes and re.search(r"[\u0621-\u06cc]$", r_txt):
+                        sep = "\u200c"
+                    elif (
+                        h_gap <= 0.08 * safe_h
+                        and r_last not in _short_standalone
+                        and re.search(r"[\u0621-\u06cc]$", r_last)
+                        and re.match(r"^[\u0621-\u06cc]", l_first)
+                    ):
+                        sep = ""
+                    elif (
+                        h_gap <= 0.16 * safe_h
+                        and r_last not in _short_standalone
+                        and r_last[-1] in _dual_join_cons
+                        and re.match(r"^[\u0621-\u06cc]", l_first)
+                    ):
+                        sep = ""
+                    else:
+                        sep = " "
+                    acc = f"{r_txt}{sep}{l_txt}"
+                acc = re.sub(r"(?<![\u0621-\u06cc\w])(نمی)[ \t]+(?=[\u0621-\u06cc]{2,})", "\\1\u200c", acc)
+                return acc.strip()
+
+            raw_items: list[dict[str, Any]] = []
             batch_size = 16
             for start in range(0, len(crop_specs), batch_size):
                 batch_specs = crop_specs[start:start + batch_size]
-                batch_imgs = [rgb.crop(box_coords) for box_coords, _ in batch_specs]
+                batch_imgs: list[Any] = []
+                for box_coords, _ in batch_specs:
+                    c_img = rgb.crop(box_coords)
+                    if c_img.height < 28 and c_img.width * 2 < 240:
+                        up_img = c_img.resize((max(4, c_img.width * 2), max(4, c_img.height * 2)), Image.Resampling.BICUBIC)
+                        c_img.close()
+                        c_img = up_img
+                    batch_imgs.append(c_img)
                 try:
                     with grad_ctx():
                         try:
-                            preds = recognizer.predict(batch_imgs)
+                            try:
+                                preds = recognizer.predict(batch_imgs, return_scores=True)
+                            except TypeError:
+                                preds = recognizer.predict(batch_imgs)
                         except Exception:
                             try:
                                 preds = [recognizer.predict(img) for img in batch_imgs]
@@ -2282,12 +2710,67 @@ class _HezarOcrAdapter(_BaseAdapter):
                     if not isinstance(preds, (list, tuple)):
                         preds = [preds]
                     for (_, poly), pred in zip(batch_specs, preds):
-                        txt = _strip_markup(self._extract_text(pred))
+                        txt = _clean_fa_tok(_strip_markup(self._extract_text(pred)))
                         if txt:
-                            lines.append({"text": txt, "confidence": 0.9, "polygon": poly})
+                            xs = [pt[0] for pt in poly]
+                            ys = [pt[1] for pt in poly]
+                            raw_items.append({
+                                "text": txt,
+                                "confidence": self._extract_score(pred, 0.9),
+                                "polygon": poly,
+                                "x0": min(xs),
+                                "y0": min(ys),
+                                "x1": max(xs),
+                                "y1": max(ys),
+                            })
                 finally:
                     for crop_img in batch_imgs:
                         crop_img.close()
+
+            # Merge adjacent word-level CRAFT detections on the same horizontal row in RTL order (-x1).
+            if len(raw_items) <= 1:
+                return [
+                    {"text": it["text"], "confidence": it["confidence"], "polygon": it["polygon"]}
+                    for it in raw_items
+                ]
+            sorted_items = sorted(raw_items, key=lambda it: ((it["y0"] + it["y1"]) * 0.5, -it["x1"]))
+            row_clusters: list[list[dict[str, Any]]] = []
+            for item in sorted_items:
+                ih = max(4.0, item["y1"] - item["y0"])
+                placed = False
+                for cluster in row_clusters:
+                    cy0 = min(c["y0"] for c in cluster)
+                    cy1 = max(c["y1"] for c in cluster)
+                    ch = max(4.0, cy1 - cy0)
+                    v_ov = min(cy1, item["y1"]) - max(cy0, item["y0"])
+                    cx0 = min(c["x0"] for c in cluster)
+                    cx1 = max(c["x1"] for c in cluster)
+                    h_gap = max(0.0, max(cx0 - item["x1"], item["x0"] - cx1))
+                    if v_ov >= 0.50 * min(ih, ch) and h_gap <= 1.85 * max(ih, ch):
+                        cluster.append(item)
+                        placed = True
+                        break
+                if not placed:
+                    row_clusters.append([item])
+
+            lines: list[dict[str, Any]] = []
+            for cluster in row_clusters:
+                if len(cluster) == 1:
+                    only = cluster[0]
+                    lines.append({"text": only["text"], "confidence": only["confidence"], "polygon": only["polygon"]})
+                    continue
+                cluster.sort(key=lambda c: -c["x1"])
+                med_h = sorted(max(4.0, c["y1"] - c["y0"]) for c in cluster)[len(cluster) // 2]
+                joined_text = _join_hezar_row(cluster, med_h)
+                if not joined_text:
+                    continue
+                mx0 = min(c["x0"] for c in cluster)
+                my0 = min(c["y0"] for c in cluster)
+                mx1 = max(c["x1"] for c in cluster)
+                my1 = max(c["y1"] for c in cluster)
+                merged_poly = _clamp_polygon(_rect_polygon(mx0, my0, mx1, my1), width, height)
+                avg_conf = sum(float(c.get("confidence", 0.9)) for c in cluster) / max(1, len(cluster))
+                lines.append({"text": joined_text, "confidence": round(avg_conf, 4), "polygon": merged_poly})
             return lines
         finally:
             rgb.close()
@@ -2317,6 +2800,58 @@ def _create_adapter(engine_id: str, models_root: Path) -> _BaseAdapter:
     raise ValueError(f"Unsupported isolated engine: {engine_id}")
 
 
+def _process_alive(pid: int) -> bool:
+    """True while the given process still exists."""
+    if pid <= 0:
+        return True
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x100000, False, int(pid))  # SYNCHRONIZE
+            if not handle:
+                # ERROR_ACCESS_DENIED means the process exists but belongs to
+                # another user - it is still alive.
+                return ctypes.get_last_error() == 5
+            kernel32.CloseHandle(handle)
+            return True
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _start_parent_watchdog(parent_pid: int) -> None:
+    """Stop this worker when the studio process disappears.
+
+    The worker normally stops on stdin EOF, but a heavy recognition never
+    reads stdin: if the app was killed in the middle of it, the worker stayed
+    alive for minutes and kept gigabytes of RAM busy for nobody.  Watching
+    the parent process releases that memory at once.
+    """
+    if parent_pid <= 0:
+        return
+
+    def _watch() -> None:
+        while True:
+            time.sleep(1.0)
+            if _process_alive(parent_pid):
+                continue
+            with contextlib.suppress(Exception):
+                sys.stderr.write("the studio process is gone; the OCR worker stops itself\n")
+                sys.stderr.flush()
+            os._exit(0)
+
+    thread = threading.Thread(target=_watch, name="parent-watchdog", daemon=True)
+    thread.start()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Comic OCR Studio isolated OCR worker")
     parser.add_argument("--engine", required=True)
@@ -2324,7 +2859,9 @@ def main() -> int:
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--language", default="eng")
+    parser.add_argument("--parent-pid", type=int, default=0)
     args = parser.parse_args()
+    _start_parent_watchdog(args.parent_pid)
 
     protocol_out = sys.stdout
     models_root = Path(args.models_root).resolve()

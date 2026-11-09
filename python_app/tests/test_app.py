@@ -44,12 +44,18 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "3.99"
+    assert health.json()["version"] == "4.36"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
     assert "Comic OCR Studio" in index_html
-    assert '<span class="ver">۳.۹۹ · Python</span>' in index_html
+    assert '<span class="ver">۴.۳۰ · Python</span>' in index_html
+    assert 'id="licenseTopStatusBtn"' in index_html
+    assert 'id="copyGateOrderMsgBtn"' in index_html
+    assert "09361111111" in index_html
+    assert "مدیریت مدل‌های OCR" in index_html
+    assert "مدیریت ترجمه‌ها" in index_html
+    assert 'id="deleteModelsMenuBtn"' not in index_html
     assert 'class="action-group group-select"' in index_html
     assert 'class="action-group group-merge"' in index_html
     assert 'class="action-group group-approve"' in index_html
@@ -2763,7 +2769,7 @@ def test_v385_parallel_pdf_import_multi_page_ocr_and_low_ram_spooled_exports(cli
     imported_images = imp.json()["images"]
     assert len(imported_images) == 5
     assert [im["name"] for im in imported_images] == [f"chapter — صفحهٔ {i}.png" for i in range(1, 6)]
-    assert all(im["width"] == 480 and im["height"] == 320 for im in imported_images)
+    assert all(im["width"] == 960 and im["height"] == 640 for im in imported_images)
 
     # 2) Run multi-page OCR across all 5 pages using a multi-worker batch engine
     seen_threads: set[int] = set()
@@ -2792,7 +2798,7 @@ def test_v385_parallel_pdf_import_multi_page_ocr_and_low_ram_spooled_exports(cli
     )
     assert ocr_resp.status_code == 200, ocr_resp.text
     ocr_images = ocr_resp.json()["images"]
-    assert all(im["ocrCompleted"] is True and im["blocks"][0]["text"] == "OCR-480x320" for im in ocr_images)
+    assert all(im["ocrCompleted"] is True and im["blocks"][0]["text"] == "OCR-960x640" for im in ocr_images)
     assert len(seen_threads) >= 2
 
     # Memory endpoint confirms 0 models remain resident in RAM after parallel OCR
@@ -3275,6 +3281,1766 @@ def test_v399_per_page_ocr_keep_engine_loaded_and_memory_release(client, monkeyp
     )
     assert r2.status_code == 200
     assert None in unload_calls
+
+
+def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_path, monkeypatch):
+    import json
+    import os
+    from pathlib import Path
+    import shutil
+    from comic_studio import APP_VERSION
+    import comic_studio.paths as paths_mod
+    import comic_studio.ocr_managed as managed_mod
+    import comic_studio.ocr_worker as worker_mod
+    import comic_studio.ocr as ocr_mod
+
+    assert APP_VERSION == "4.36"
+
+    default_root = tmp_path / "default_c_drive"
+    custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(default_root))
+    monkeypatch.delenv("COMIC_STUDIO_CONFIG", raising=False)
+    paths_mod._CONFIG_CACHE = None
+
+    local_client = TestClient(create_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+
+    # 1. Default behavior is 100% optional and unchanged
+    st0 = local_client.get("/api/storage-settings")
+    assert st0.status_code == 200
+    info0 = st0.json()
+    assert info0["mode"] == "default"
+    assert info0["customActive"] is False
+    assert info0["customPath"] == ""
+    assert Path(info0["activePath"]).resolve() == default_root.resolve()
+
+    # Seed project + AI settings + downloaded OCR model files in default_root
+    proj, item = make_project(local_client)
+    pid = proj["id"]
+    ai_res = local_client.put(
+        "/api/ai-settings",
+        json={"provider": "gemini", "target_language": "en", "reuse_repeated": False},
+    )
+    assert ai_res.status_code == 200
+    fake_weight = default_root / "models" / "hezar" / "crnn_fa_v2.safetensors"
+    fake_weight.parent.mkdir(parents=True, exist_ok=True)
+    fake_weight.write_bytes(b"PERSIAN-MODEL-WEIGHTS" * 120)
+    (default_root / "models" / "isolated" / "hezar-ocr").mkdir(parents=True, exist_ok=True)
+    (default_root / "models" / "isolated" / "hezar-ocr" / ".ready-all").write_text("ok", encoding="utf-8")
+
+    # 2. Invalid/unsafe paths are rejected before touching storage-config.json
+    bad_rel = local_client.put("/api/storage-settings", json={"custom_path": "relative/folder"})
+    assert bad_rel.status_code == 400
+    bad_nested = local_client.put("/api/storage-settings", json={"custom_path": str(default_root / "nested_inside")})
+    assert bad_nested.status_code == 400
+    bad_app = local_client.put("/api/storage-settings", json={"custom_path": str(paths_mod.APP_DIR)})
+    assert bad_app.status_code == 400
+    bad_pkg = local_client.put("/api/storage-settings", json={"custom_path": str(paths_mod.PACKAGE_DIR / "sub")})
+    assert bad_pkg.status_code == 400
+
+    # 3. Insufficient destination disk space aborts cleanly BEFORE deleting or changing anything
+    def _tiny_disk_usage(_p):
+        return shutil._ntuple_diskusage(1024 * 1024, 1020 * 1024, 4096)
+
+    monkeypatch.setattr(paths_mod.shutil, "disk_usage", _tiny_disk_usage)
+    low_space_res = local_client.put(
+        "/api/storage-settings",
+        json={"custom_path": str(custom_root), "migrate_existing": True, "cleanup_source": True},
+    )
+    assert low_space_res.status_code == 400
+    assert "فضای خالی" in low_space_res.json()["detail"]
+    assert fake_weight.is_file()  # Source untouched!
+    assert paths_mod.is_custom_data_dir_active() is False
+    monkeypatch.undo()
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(default_root))
+    monkeypatch.delenv("COMIC_STUDIO_CONFIG", raising=False)
+    paths_mod._CONFIG_CACHE = None
+
+    # 4. Full migration + verification + source space cleanup onto custom_root
+    sw_res = local_client.put(
+        "/api/storage-settings",
+        json={"custom_path": str(custom_root), "migrate_existing": True, "cleanup_source": True},
+    )
+    assert sw_res.status_code == 200
+    sw_body = sw_res.json()
+    assert sw_body["storage"]["mode"] == "custom"
+    assert sw_body["storage"]["customActive"] is True
+    assert Path(sw_body["storage"]["activePath"]).resolve() == custom_root.resolve()
+    assert sw_body["storage"]["migratedBytes"] >= fake_weight.stat().st_size if fake_weight.exists() else 2000
+    assert sw_body["ai"]["provider"] == "gemini"
+    assert sw_body["ai"]["target_language"] == "en"
+    assert any(p["id"] == pid for p in sw_body["projects"])
+
+    # Verify files exist in custom_root AND were freed from default_root (except storage-config.json)
+    assert (custom_root / "models" / "hezar" / "crnn_fa_v2.safetensors").read_bytes() == b"PERSIAN-MODEL-WEIGHTS" * 120
+    assert (custom_root / "projects" / pid / "project.json").is_file()
+    assert (custom_root / "ai-settings.json").is_file()
+    assert (default_root / "storage-config.json").is_file()
+    assert not (default_root / "models").exists()
+    assert not (default_root / "projects").exists()
+
+    # 5. Zero-C:-leak check: pip env, worker env, worker cache dirs, and EasyOCR install_packages all route to custom_root
+    pip_env = managed_mod.clean_pip_env()
+    assert Path(pip_env["PIP_CACHE_DIR"]).resolve() == (custom_root / "models" / "pip-cache").resolve()
+    assert Path(pip_env["TEMP"]).resolve() == (custom_root / "models" / "tmp").resolve()
+    assert Path(pip_env["TMP"]).resolve() == (custom_root / "models" / "tmp").resolve()
+    assert Path(pip_env["XDG_CACHE_HOME"]).resolve() == (custom_root / "models" / "cache").resolve()
+
+    iso_eng = managed_mod.IsolatedOcrEngine("surya", ["eng", "fas"], ocr_mod._INSTALL_LOCK, ocr_mod.OcrLine, ocr_mod.OcrError)
+    w_env = iso_eng._worker_env()
+    assert Path(w_env["HF_HOME"]).resolve() == (custom_root / "models" / "hf").resolve()
+    assert Path(w_env["MODEL_CACHE_DIR"]).resolve() == (custom_root / "models" / "surya").resolve()
+    assert Path(w_env["TEMP"]).resolve() == (custom_root / "models" / "tmp").resolve()
+
+    # Even if user had a stale HF_HOME on C:\, ocr_worker._configure_cache_dirs overrides it to models_root!
+    old_hf = os.environ.get("HF_HOME")
+    try:
+        os.environ["HF_HOME"] = "/stale/c_drive/hf"
+        worker_mod._configure_cache_dirs(custom_root / "models")
+        assert Path(os.environ["HF_HOME"]).resolve() == (custom_root / "models" / "hf").resolve()
+    finally:
+        if old_hf is None:
+            os.environ.pop("HF_HOME", None)
+        else:
+            os.environ["HF_HOME"] = old_hf
+
+    # Standard install_packages routes --target into <custom_root>/models/site-packages when custom dir is active
+    pip_cmds: list[list[str]] = []
+    monkeypatch.setattr(
+        ocr_mod.subprocess,
+        "run",
+        lambda cmd, **kw: (pip_cmds.append(list(cmd)), type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())[1],
+    )
+    ocr_mod.install_packages(["easyocr>=1.7,<2"])
+    assert "--target" in pip_cmds[0]
+    target_idx = pip_cmds[0].index("--target")
+    assert Path(pip_cmds[0][target_idx + 1]).resolve() == (custom_root / "models" / "site-packages").resolve()
+
+    # 6. Active job lock blocks directory switch with HTTP 409
+    with ocr_mod._INSTALL_LOCK:
+        busy_res = local_client.put("/api/storage-settings", json={"custom_path": ""})
+        assert busy_res.status_code == 409
+
+    # 7. Switch back to default path with migration restores everything back cleanly
+    back_res = local_client.put(
+        "/api/storage-settings",
+        json={"custom_path": "", "migrate_existing": True, "cleanup_source": True},
+    )
+    assert back_res.status_code == 200
+    assert back_res.json()["storage"]["mode"] == "default"
+    assert (default_root / "projects" / pid / "project.json").is_file()
+    assert (default_root / "models" / "hezar" / "crnn_fa_v2.safetensors").is_file()
+
+
+def test_v400_unplugged_custom_drive_fallback_remote_guard_and_app_relocation(tmp_path, monkeypatch):
+    import base64
+    import importlib.util
+    import json
+    from pathlib import Path
+    import shutil
+    import sys
+    import comic_studio.paths as paths_mod
+
+    default_root = tmp_path / "default_home"
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(default_root))
+    monkeypatch.delenv("COMIC_STUDIO_CONFIG", raising=False)
+    paths_mod._CONFIG_CACHE = None
+
+    # 1. Simulate unplugged/unavailable custom drive: app starts safely on default_root & preserves custom_data_dir!
+    blocking_file = tmp_path / "not_a_directory_file"
+    blocking_file.write_text("blocks mkdir", encoding="utf-8")
+    unplugged_path = blocking_file / "ComicOCROnUnpluggedDrive"
+    default_root.mkdir(parents=True, exist_ok=True)
+    (default_root / "storage-config.json").write_text(
+        json.dumps({"custom_data_dir": str(unplugged_path)}),
+        encoding="utf-8",
+    )
+    paths_mod._CONFIG_CACHE = None
+
+    local_client = TestClient(create_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+    st = local_client.get("/api/storage-settings")
+    assert st.status_code == 200
+    st_json = st.json()
+    assert st_json["mode"] == "default"
+    assert st_json["customPath"] == str(unplugged_path)
+    assert "در دسترس نیست" in st_json["fallbackWarning"]
+
+    # 2. Remote LAN client cannot mutate host storage settings or open native folder picker even with valid password
+    pw = "S" * 24
+    monkeypatch.setenv("COMIC_STUDIO_ACCESS_PASSWORD", pw)
+    auth_hdr = {"Authorization": "Basic " + base64.b64encode(f"comic:{pw}".encode()).decode()}
+    lan_client = TestClient(create_app(), base_url="http://192.168.1.10:8765", client=("192.168.1.55", 51000))
+    r_put = lan_client.put("/api/storage-settings", json={"custom_path": ""}, headers=auth_hdr)
+    assert r_put.status_code == 403
+    r_pick = lan_client.post("/api/storage-settings/pick-folder", json={}, headers=auth_hdr)
+    assert r_pick.status_code == 403
+    monkeypatch.delenv("COMIC_STUDIO_ACCESS_PASSWORD", raising=False)
+
+    # 3. Relocating `python_app` to another directory self-heals stale editable finders in `run.py`
+    relocated_app = tmp_path / "DriveD" / "MovedComicApp" / "python_app"
+    (relocated_app / "comic_studio").mkdir(parents=True)
+    shutil.copy2(paths_mod.APP_DIR / "run.py", relocated_app / "run.py")
+    (relocated_app / "comic_studio" / "__init__.py").write_text('MARKER = "FROM_MOVED_DRIVE_D"\n', encoding="utf-8")
+
+    spec = importlib.util.spec_from_file_location("relocated_run_mod", relocated_app / "run.py")
+    assert spec and spec.loader
+    relocated_run = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(relocated_run)
+
+    class _StaleEditableFinder:
+        MAPPING = {"comic_studio": str(tmp_path / "OldDeletedDriveC" / "python_app" / "comic_studio")}
+
+    old_sys_path = list(sys.path)
+    old_meta_path = list(sys.meta_path)
+    old_pkg = sys.modules.get("comic_studio")
+    try:
+        sys.meta_path.insert(0, _StaleEditableFinder())
+        relocated_run._ensure_local_package_resolution()
+        assert not any(isinstance(f, _StaleEditableFinder) for f in sys.meta_path)
+        assert Path(sys.path[0]).resolve() == relocated_app.resolve()
+    finally:
+        sys.path[:] = old_sys_path
+        sys.meta_path[:] = old_meta_path
+        if old_pkg is not None:
+            sys.modules["comic_studio"] = old_pkg
+
+
+def test_v401_real_progress_bars_across_paged_ocr_import_backup_and_weight_download(client, tmp_path, monkeypatch):
+    import threading
+    from comic_studio.activity import reporting
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_managed as managed_mod
+
+    # 1. File import emits real monotonic per-file progress in (0, 1]
+    client.post("/api/activity/clear")
+    pid = client.post("/api/projects", json={"name": "پروژهٔ پیشرفت واقعی"}).json()["id"]
+    files = [
+        ("files", ("p1.png", png_bytes((240, 160), "white"), "image/png")),
+        ("files", ("p2.png", png_bytes((240, 160), "white"), "image/png")),
+        ("files", ("p3.png", png_bytes((240, 160), "white"), "image/png")),
+    ]
+    r_imp = client.post(f"/api/projects/{pid}/files", files=files)
+    assert r_imp.status_code == 200
+    images = r_imp.json()["images"]
+    assert len(images) == 3
+
+    imp_entries = client.get("/api/activity").json()["entries"]
+    imp_progs = [e["progress"] for e in imp_entries if isinstance(e.get("progress"), (int, float))]
+    assert len(imp_progs) >= 3
+    assert imp_progs == sorted(imp_progs), f"import progress must be monotonic: {imp_progs}"
+    assert any(0.25 <= p <= 0.40 for p in imp_progs)
+    assert imp_progs[-1] == pytest.approx(1.0)
+
+    # 2. Multi-page UI OCR (batch_index / batch_total) NEVER emits 1.0 on page 1 or 2 of 3
+    monkeypatch.setattr(
+        ocr_mod,
+        "recognize_image",
+        lambda *_a, **_kw: [{"id": 1, "text": "HELLO", "confidence": 0.92, "x0": 10, "y0": 10, "x1": 90, "y1": 35}],
+    )
+    client.post("/api/activity/clear")
+    r_ocr1 = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={
+            "image_ids": [images[0]["id"]],
+            "engine": "rapidocr-v6",
+            "language": "eng",
+            "keep_engine_loaded": True,
+            "batch_index": 1,
+            "batch_total": 3,
+        },
+    )
+    assert r_ocr1.status_code == 200
+    p1_entries = client.get("/api/activity").json()["entries"]
+    p1_progs = [e["progress"] for e in p1_entries if isinstance(e.get("progress"), (int, float))]
+    assert p1_progs and max(p1_progs) <= 0.30, f"page 1 of 3 must never report 100%: {p1_progs}"
+    assert not any("OCR تمام شد" in e["message"] for e in p1_entries)
+
+    r_ocr2 = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={
+            "image_ids": [images[1]["id"]],
+            "engine": "rapidocr-v6",
+            "language": "eng",
+            "keep_engine_loaded": True,
+            "batch_index": 2,
+            "batch_total": 3,
+        },
+    )
+    assert r_ocr2.status_code == 200
+    p2_entries = client.get("/api/activity").json()["entries"]
+    p2_progs = [e["progress"] for e in p2_entries if isinstance(e.get("progress"), (int, float))]
+    assert max(p2_progs) <= 0.62, f"page 2 of 3 must stay within ~60%: {p2_progs}"
+
+    r_ocr3 = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={
+            "image_ids": [images[2]["id"]],
+            "engine": "rapidocr-v6",
+            "language": "eng",
+            "keep_engine_loaded": False,
+            "batch_index": 3,
+            "batch_total": 3,
+        },
+    )
+    assert r_ocr3.status_code == 200
+    all_ocr_entries = client.get("/api/activity").json()["entries"]
+    all_ocr_progs = [e["progress"] for e in all_ocr_entries if isinstance(e.get("progress"), (int, float))]
+    assert all_ocr_progs == sorted(all_ocr_progs), f"paged OCR progress must never go backwards: {all_ocr_progs}"
+    assert 0.85 <= all_ocr_progs[-1] < 1.0, f"server leaves final slice for browser text placement: {all_ocr_progs}"
+    assert sum(1 for e in all_ocr_entries if "OCR تمام شد" in e["message"]) == 1
+
+    # 3. Backup & Restore emit real per-file monotonic progress
+    client.post("/api/activity/clear")
+    b_res = client.post(f"/api/projects/{pid}/backup", json={"drafts": []})
+    assert b_res.status_code == 200
+    bk_progs = [e["progress"] for e in client.get("/api/activity").json()["entries"] if isinstance(e.get("progress"), (int, float))]
+    assert len(bk_progs) >= 3 and bk_progs == sorted(bk_progs) and bk_progs[-1] == pytest.approx(1.0)
+
+    # 4. IsolatedOcrEngine weight-only download does NOT jump falsely to 65%/80% at 0 MB downloaded
+    fake_models = tmp_path / "models_test"
+    monkeypatch.setattr(managed_mod, "models_dir", lambda: fake_models)
+    eng = managed_mod.IsolatedOcrEngine("glm-ocr", ["eng"], threading.Lock(), ocr_mod.OcrLine, ocr_mod.OcrError)
+    monkeypatch.setattr(type(eng), "runtime_installed", property(lambda self: True))
+    monkeypatch.setattr(type(eng), "model_ready", property(lambda self: False))
+    monkeypatch.setattr(type(eng), "installed_version", property(lambda self: "0.1.5"))
+    seen_dl_progs: list[float] = []
+
+    def _fake_prepare_weights(_lang: str) -> str:
+        w_lo, w_hi = eng._active_wt_span
+        assert w_lo <= 0.10, f"weight-only download must start near 8%, not jump to 80%: {w_lo}"
+        assert w_hi == pytest.approx(0.96)
+        return "rev-v401"
+
+    monkeypatch.setattr(eng, "_prepare_weights", _fake_prepare_weights)
+    with reporting(lambda _m, _k="info", p=None: seen_dl_progs.append(p) if isinstance(p, (int, float)) else None):
+        eng.download("eng")
+    assert seen_dl_progs[0] == pytest.approx(0.04)
+    assert seen_dl_progs[1] == pytest.approx(0.08)
+    assert seen_dl_progs[-1] == pytest.approx(1.0)
+
+
+def test_v403_backup_prepare_stream_cleanup_restore_empty_projects_office_locks_and_exif(client, tmp_path):
+    import shutil
+    from comic_studio.paths import data_dir, project_root
+
+    # 1. EXIF-rotated phone JPEG (raw 120x80 with Orientation=6 -> normalized upright 80x120)
+    proj = client.post("/api/projects", json={"name": "پروژهٔ بک‌آپ ریشه‌ای"}).json()
+    pid = proj["id"]
+    raw_sensor = Image.new("RGB", (120, 80), "navy")
+    exif = raw_sensor.getexif()
+    exif[0x0112] = 6  # Rotate 90 CW -> upright 80x120
+    jbuf = io.BytesIO()
+    raw_sensor.save(jbuf, format="JPEG", exif=exif.tobytes())
+
+    imp = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("phone-vertical.jpg", jbuf.getvalue(), "image/jpeg"))],
+    )
+    assert imp.status_code == 200, imp.text
+    img_item = imp.json()["images"][0]
+    assert (img_item["width"], img_item["height"]) == (80, 120)
+
+    rendered_upright = png_bytes((80, 120), "white")
+    ren_res = client.post(
+        f"/api/projects/{pid}/images/{img_item['id']}/rendered",
+        content=rendered_upright,
+        headers={"Content-Type": "image/png"},
+    )
+    assert ren_res.status_code == 200, ren_res.text
+    latest_updated_at = ren_res.json()["updatedAt"]
+
+    # 2. Office lock files (~$*.docx / ~$*.pptx) and dot-temp files in exports/ are ignored during backup
+    exports_dir = project_root(pid) / "exports"
+    (exports_dir / "clean-doc.txt").write_text("متن خروجی واقعی", encoding="utf-8")
+    (exports_dir / "~$clean-doc.docx").write_bytes(b"office-lock-junk")
+    (exports_dir / ".clean-doc.pdf.999.tmp").write_bytes(b"partial-temp")
+
+    # 3. Prepared zero-RAM streaming backup mode (?prepare=true -> GET & re-download -> DELETE cleanup)
+    prep = client.post(
+        f"/api/projects/{pid}/backup?prepare=true",
+        json={"drafts": [], "expected_updated_at": latest_updated_at},
+    )
+    assert prep.status_code == 200, prep.text
+    prep_json = prep.json()
+    token = prep_json["token"]
+    assert prep_json["filename"].endswith("-backup.zip")
+    assert prep_json["size"] > 0
+
+    dl1 = client.get(f"/api/projects/{pid}/backup/{token}")
+    dl2 = client.get(f"/api/projects/{pid}/backup/{token}")
+    assert dl1.status_code == 200 and dl2.status_code == 200
+    assert dl1.content == dl2.content
+
+    with zipfile.ZipFile(io.BytesIO(dl1.content)) as zf:
+        names = set(zf.namelist())
+        assert "exports/clean-doc.txt" in names
+        assert "exports/~$clean-doc.docx" not in names
+        assert "exports/.clean-doc.pdf.999.tmp" not in names
+        assert f"images/{img_item['id']}-edited.png" in names
+
+    del_tok = client.delete(f"/api/projects/{pid}/backup/{token}")
+    assert del_tok.status_code == 204
+    assert client.get(f"/api/projects/{pid}/backup/{token}").status_code == 404
+    assert not list((data_dir() / "backup-temp").glob("*.zip"))
+
+    # 4. Restore works cleanly even if <data_dir>/projects was removed on disk
+    fresh_drive = tmp_path / "empty_drive_without_projects"
+    r_sw = client.put(
+        "/api/storage-settings",
+        json={"custom_path": str(fresh_drive), "migrate_existing": False, "cleanup_source": False},
+    )
+    assert r_sw.status_code == 200
+    shutil.rmtree(fresh_drive / "projects", ignore_errors=True)
+    assert not (fresh_drive / "projects").exists()
+
+    restored = client.post(
+        "/api/projects/restore",
+        files={"file": ("backup.zip", dl1.content, "application/zip")},
+    )
+    assert restored.status_code == 201, restored.text
+    restored_proj = restored.json()["project"]
+    assert (fresh_drive / "projects" / restored_proj["id"] / "project.json").is_file()
+    assert (restored_proj["images"][0]["width"], restored_proj["images"][0]["height"]) == (80, 120)
+
+    # 5. Startup sweeps orphan files in backup-temp/ and restore-staging/
+    orphan_zip = fresh_drive / "backup-temp" / "project-orphan.zip"
+    orphan_zip.parent.mkdir(parents=True, exist_ok=True)
+    orphan_zip.write_bytes(b"stale")
+    orphan_stage = fresh_drive / "restore-staging" / "project-orphan"
+    orphan_stage.mkdir(parents=True, exist_ok=True)
+    with scoped_client(create_app()):
+        assert not orphan_zip.exists()
+        assert not orphan_stage.exists()
+
+
+def test_v405_manual_blocks_watermarks_erase_original_and_bundled_models(client, tmp_path, monkeypatch):
+    import base64
+    import io
+    import zipfile
+    from PIL import Image
+    import comic_studio.paths as paths_mod
+    import comic_studio.main as main_mod
+    from comic_studio.local_nmt import LocalNmtManager
+    from comic_studio.ocr import RapidEngine
+    from comic_studio.watermark_render import apply_watermark_pil, has_active_watermark, shape_visual_text
+
+    # 1. Persian shaping + PIL watermark rendering (Text + Transparent PNG Logo across corner & tile)
+    shaped = shape_visual_text("سلام دنیا 123")
+    assert shaped and len(shaped) >= 8
+    logo_buf = io.BytesIO()
+    Image.new("RGBA", (32, 32), (255, 40, 40, 210)).save(logo_buf, "PNG")
+    logo_data_url = "data:image/png;base64," + base64.b64encode(logo_buf.getvalue()).decode("ascii")
+    logos_map = {"logo-1": {"id": "logo-1", "name": "قرمز", "dataUrl": logo_data_url}}
+    base_img = Image.new("RGB", (320, 240), (245, 245, 245))
+    wm_cfg = {
+        "enabled": True,
+        "text": "ترجمه اختصاصی",
+        "logoId": "logo-1",
+        "logoScalePct": 12,
+        "position": "bottom-left",
+        "sizePct": 5,
+        "opacity": 85,
+        "outline": True,
+        "bgPill": True,
+    }
+    assert has_active_watermark(wm_cfg)
+    stamped = apply_watermark_pil(base_img, wm_cfg, logos_map)
+    assert stamped.size == base_img.size
+    assert stamped.tobytes() != base_img.tobytes()
+
+    tiled = apply_watermark_pil(base_img, {**wm_cfg, "position": "tile", "tileGapPct": 25}, logos_map)
+    assert tiled.tobytes() != base_img.tobytes()
+
+    # 2. Create a dark-patterned page and save manual blocks + watermark + eraseOriginal=False
+    project = client.post("/api/projects", json={"name": "آزمون ۴.۰۵"}).json()
+    pid = project["id"]
+    dark_page = Image.new("RGB", (300, 220), (20, 30, 45))
+    img_buf = io.BytesIO()
+    dark_page.save(img_buf, "PNG")
+    uploaded = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("cover.png", img_buf.getvalue(), "image/png"))],
+    )
+    assert uploaded.status_code == 200
+    proj_state = uploaded.json()
+    img_item = proj_state["images"][0]
+
+    proj_state["settings"]["eraseOriginal"] = False
+    proj_state["settings"]["watermarkLogos"] = logos_map
+    img_item["watermark"] = wm_cfg
+    img_item["blocks"] = [
+        {
+            "id": 1,
+            "manual": True,
+            "manualLang": "fa",
+            "text": "",
+            "tr": "متن دستی فارسی روی جلد",
+            "richHtml": "",
+            "conf": 100,
+            "enabled": True,
+            "bg": "auto",
+            "textMode": "translation",
+            "dir": "rtl",
+            "align": "center",
+            "x0": 30, "y0": 25, "x1": 240, "y1": 85,
+            "tx0": 30, "ty0": 25, "tx1": 240, "ty1": 85,
+            "lineH": 26,
+        },
+        {
+            "id": 2,
+            "manual": True,
+            "manualLang": "en",
+            "text": "",
+            "tr": "Special Edition",
+            "richHtml": "",
+            "conf": 100,
+            "enabled": True,
+            "bg": "none",
+            "textMode": "translation",
+            "dir": "ltr",
+            "align": "center",
+            "x0": 40, "y0": 100, "x1": 220, "y1": 145,
+            "tx0": 40, "ty0": 100, "tx1": 220, "ty1": 145,
+            "lineH": 22,
+        },
+    ]
+    saved = client.put(f"/api/projects/{pid}/state", json={"state": proj_state})
+    assert saved.status_code == 200
+    reloaded = saved.json()
+    assert reloaded["images"][0]["watermark"]["text"] == "ترجمه اختصاصی"
+    assert reloaded["images"][0]["blocks"][0]["manual"] is True
+
+    # 3. Backup + Restore preserves watermark and manual blocks
+    backup_zip = client.post(f"/api/projects/{pid}/backup", json={})
+    assert backup_zip.status_code == 200
+    restored = client.post(
+        "/api/projects/restore",
+        files={"file": ("wm-backup.zip", backup_zip.content, "application/zip")},
+    )
+    assert restored.status_code == 201
+    restored_img = restored.json()["project"]["images"][0]
+    assert restored_img["watermark"]["logoId"] == "logo-1"
+    assert len(restored_img["blocks"]) == 2
+
+    # 4. Exports (TXT, Visual DOCX, Visual PPTX, ZIP, PDF) include manual blocks & watermark, and honor eraseOriginal=False
+    img_ids = [img_item["id"]]
+    txt_res = client.post(f"/api/projects/{pid}/export", json={"kind": "txt", "name": "out", "image_ids": img_ids})
+    assert txt_res.status_code == 200
+    txt_body = txt_res.content.decode("utf-8")
+    assert "(متن دستی): متن دستی فارسی روی جلد" in txt_body
+    assert "Special Edition" in txt_body
+
+    docx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "docx", "name": "out", "image_ids": img_ids, "docx_layout": "visual", "overlay_mode": "translation"},
+    )
+    assert docx_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(docx_res.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "متن دستی فارسی روی جلد" in doc_xml
+        assert "Special Edition" in doc_xml
+        bg_media = [n for n in zf.namelist() if n.startswith("word/media/")]
+        assert bg_media
+        with Image.open(io.BytesIO(zf.read(bg_media[0]))) as doc_bg:
+            # With eraseOriginal=False and bg="auto", pixel (60, 50) inside block 1 keeps original dark (20,30,45) color
+            r, g, b = doc_bg.convert("RGB").getpixel((60, 50))
+            assert r < 60 and g < 70 and b < 80
+
+    pptx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "pptx", "name": "out", "image_ids": img_ids, "pptx_layout": "visual", "overlay_mode": "ocr"},
+    )
+    assert pptx_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(pptx_res.content)) as zf:
+        slide_xml = zf.read("ppt/slides/slide1.xml").decode("utf-8")
+        # Even in OCR mode, manual blocks with empty source text still export their custom text
+        assert "متن دستی فارسی روی جلد" in slide_xml
+
+    zip_res = client.post(f"/api/projects/{pid}/export", json={"kind": "images", "name": "out", "image_ids": img_ids, "image_format": "png"})
+    assert zip_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(zip_res.content)) as zf:
+        exported_png = zf.read(zf.namelist()[0])
+        with Image.open(io.BytesIO(exported_png)) as exp_im:
+            assert exp_im.convert("RGB").tobytes() != dark_page.tobytes()
+
+    pdf_res = client.post(f"/api/projects/{pid}/export", json={"kind": "pdf", "name": "out", "image_ids": img_ids})
+    assert pdf_res.status_code == 200 and pdf_res.content.startswith(b"%PDF")
+
+    # 5. Re-running OCR via HTTP endpoint preserves manual blocks with fresh non-colliding IDs
+    monkeypatch.setattr(
+        main_mod,
+        "recognize_image",
+        lambda *_a, **_kw: [
+            {"id": 1, "text": "Detected Bubble", "tr": "", "conf": 95.0, "x0": 10, "y0": 10, "x1": 120, "y1": 45, "lineH": 22, "enabled": True}
+        ],
+    )
+    ocr_res = client.post(
+        f"/api/projects/{pid}/ocr",
+        json={"engine": "rapidocr-v6", "language": "eng", "image_ids": [img_item["id"]], "page_mode": "comic"},
+    )
+    assert ocr_res.status_code == 200
+    after_ocr_blocks = ocr_res.json()["images"][0]["blocks"]
+    assert len(after_ocr_blocks) == 3
+    ids = [b["id"] for b in after_ocr_blocks]
+    assert len(ids) == len(set(ids))
+    manual_preserved = [b for b in after_ocr_blocks if b.get("manual") is True]
+    assert len(manual_preserved) == 2
+
+    # 6. Bundled offline models directory is discovered by RapidEngine & LocalNmtManager while keeping model_dir writable
+    bundled_root = tmp_path / "frozen_bundle" / "bundled_models"
+    (bundled_root / "rapidocr").mkdir(parents=True)
+    for fname in ("ch_PP-OCRv5_det_mobile.onnx", "latin_PP-OCRv5_rec_mobile.onnx", "arabic_PP-OCRv5_rec_mobile.onnx"):
+        (bundled_root / "rapidocr" / fname).write_bytes(b"fake-onnx")
+    nmt_bundle = bundled_root / "local-nmt" / "nllb-600m"
+    nmt_bundle.mkdir(parents=True)
+    (nmt_bundle / "model.bin").write_bytes(b"x" * 2048)
+    (nmt_bundle / "config.json").write_text("{}", encoding="utf-8")
+    (nmt_bundle / "sentencepiece.bpe.model").write_bytes(b"sp" * 600)
+    (nmt_bundle / "shared_vocabulary.txt").write_text("a\nb\n", encoding="utf-8")
+
+    empty_user_models = tmp_path / "empty_user_models"
+    monkeypatch.setattr(paths_mod, "bundled_models_dir", lambda: bundled_root)
+    monkeypatch.setattr("comic_studio.ocr.bundled_models_dir", lambda: bundled_root)
+    monkeypatch.setattr("comic_studio.local_nmt.bundled_models_dir", lambda: bundled_root)
+    monkeypatch.setattr("comic_studio.local_nmt.models_dir", lambda: empty_user_models)
+
+    rapid_eng = RapidEngine("rapidocr-v5", "v5")
+    assert "eng" in rapid_eng.ready_languages and "fas" in rapid_eng.ready_languages
+    assert rapid_eng.model_ready is True
+    nmt_mgr = LocalNmtManager()
+    assert nmt_mgr.is_model_files_present("nllb-600m") is True
+    assert nmt_mgr.resolved_model_dir("nllb-600m") == nmt_bundle
+    assert nmt_mgr.model_dir("nllb-600m") == empty_user_models / "local-nmt" / "nllb-600m"
+
+
+def test_v408_api_key_priority_reorder_preserves_secrets_and_changes_failover_order(client, monkeypatch):
+    from comic_studio.translation import TranslationError, TranslationService
+
+    # 1. Save 3 named API keys with distinct secrets and per-key network policies
+    initial_save = client.put(
+        "/api/ai-settings",
+        json={
+            "provider": "openrouter",
+            "providers": {
+                "openrouter": {
+                    "model": "openai/gpt-4o-mini",
+                    "profiles": [
+                        {
+                            "id": "k-alpha",
+                            "name": "کلید آلفا",
+                            "api_key": "sk-alpha-secret-001",
+                            "timeout_seconds": 30,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 1200,
+                        },
+                        {
+                            "id": "k-beta",
+                            "name": "کلید بتا",
+                            "api_key": "sk-beta-secret-002",
+                            "timeout_seconds": 45,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 1600,
+                        },
+                        {
+                            "id": "k-gamma",
+                            "name": "کلید گاما",
+                            "api_key": "sk-gamma-secret-003",
+                            "timeout_seconds": 75,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 2400,
+                        },
+                    ],
+                }
+            },
+        },
+    )
+    assert initial_save.status_code == 200, initial_save.text
+    for raw_secret in ("sk-alpha-secret-001", "sk-beta-secret-002", "sk-gamma-secret-003"):
+        assert raw_secret not in initial_save.text
+
+    # Capture context-preview signature BEFORE reordering priority
+    project, item = make_project(client)
+    project["images"][0]["blocks"] = [{"id": 1, "text": "Hello priority world", "tr": "", "enabled": True}]
+    assert client.put(f"/api/projects/{project['id']}/state", json={"state": project}).status_code == 200
+    pre_preview = client.post(
+        f"/api/projects/{project['id']}/context-preview",
+        json={"image_ids": [item["id"]], "provider": "openrouter", "source_language": "eng"},
+    )
+    assert pre_preview.status_code == 200, pre_preview.text
+    old_signature = pre_preview.json()["signature"]
+
+    # 2. Reorder priority in UI payload to [k-gamma, k-alpha, k-beta] WITHOUT re-sending stored secrets
+    reordered_save = client.put(
+        "/api/ai-settings",
+        json={
+            "provider": "openrouter",
+            "providers": {
+                "openrouter": {
+                    "model": "openai/gpt-4o-mini",
+                    "profiles": [
+                        {
+                            "id": "k-gamma",
+                            "name": "کلید گاما",
+                            "api_key": "",
+                            "timeout_seconds": 75,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 2400,
+                        },
+                        {
+                            "id": "k-alpha",
+                            "name": "کلید آلفا",
+                            "api_key": "",
+                            "timeout_seconds": 30,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 1200,
+                        },
+                        {
+                            "id": "k-beta",
+                            "name": "کلید بتا",
+                            "api_key": "",
+                            "timeout_seconds": 45,
+                            "retry_count": 0,
+                            "retry_wait_seconds": 0,
+                            "source_limit": 1600,
+                        },
+                    ],
+                }
+            },
+        },
+    )
+    assert reordered_save.status_code == 200, reordered_save.text
+    public_profiles = reordered_save.json()["providers"]["openrouter"]["profiles"]
+    assert [p["id"] for p in public_profiles] == ["k-gamma", "k-alpha", "k-beta"]
+    assert [p["hasApiKey"] for p in public_profiles] == [True, True, True]
+    assert [p["timeout_seconds"] for p in public_profiles] == [75, 30, 45]
+    assert [p["source_limit"] for p in public_profiles] == [2400, 1200, 1600]
+
+    # 3. Changing priority refreshes context-preview signature so stale order is detected cleanly
+    post_preview = client.post(
+        f"/api/projects/{project['id']}/context-preview",
+        json={"image_ids": [item["id"]], "provider": "openrouter", "source_language": "eng"},
+    )
+    assert post_preview.status_code == 200, post_preview.text
+    assert post_preview.json()["signature"] != old_signature
+
+    # 4. Verify live failover tries k-gamma FIRST (priority 1), then falls back to k-alpha (priority 2)
+    tried_profiles: list[tuple[str, str, str]] = []
+
+    def fake_openai(self, text, source_language, profile, **kwargs):
+        tried_profiles.append((profile["profile_id"], profile["api_key"], profile["profile_name"]))
+        if profile["profile_id"] == "k-gamma":
+            raise TranslationError("سهمیهٔ کلید گاما تمام شده است (429).")
+        return "سلام دنیای اولویت"
+
+    monkeypatch.setattr(TranslationService, "_openai", fake_openai)
+    single_prev = client.post(
+        "/api/translate-text/preview",
+        json={"text": "Hello priority world", "provider": "openrouter", "source_language": "eng"},
+    )
+    assert single_prev.status_code == 200, single_prev.text
+    translated = client.post(
+        "/api/translate-text",
+        json={
+            "text": "Hello priority world",
+            "provider": "openrouter",
+            "source_language": "eng",
+            "confirmation": single_prev.json()["signature"],
+        },
+    )
+    assert translated.status_code == 200, translated.text
+    assert translated.json() == {"text": "سلام دنیای اولویت"}
+    assert tried_profiles == [
+        ("k-gamma", "sk-gamma-secret-003", "کلید گاما"),
+        ("k-alpha", "sk-alpha-secret-001", "کلید آلفا"),
+    ]
+
+
+def test_v409_lossless_pdf_import_native_embedded_resolution_and_export_roundtrip(client):
+    import io
+    import zipfile
+    import pymupdf as fitz
+    from PIL import Image, ImageChops
+
+    # 1. High-DPI (~450 DPI) detailed raster image embedded inside a compact PDF page (288x400 pt -> 1800x2500 px = 6.25x scale)
+    src_img = Image.effect_mandelbrot((1800, 2500), (-2.1, -1.5, 0.9, 1.5), 36).convert("RGB")
+    src_buf = io.BytesIO()
+    src_img.save(src_buf, "PNG")
+    src_png = src_buf.getvalue()
+
+    pdf_doc = fitz.open()
+    p1 = pdf_doc.new_page(width=288.0, height=400.0)
+    p1.insert_image(fitz.Rect(0.0, 0.0, 288.0, 400.0), stream=src_png)
+
+    # Page 2: Rotated 90° page with native 900x1400 image -> rotated view is 1400x900
+    rot_img = Image.effect_mandelbrot((900, 1400), (-1.8, -1.2, 0.8, 1.2), 24).convert("RGB")
+    rot_buf = io.BytesIO()
+    rot_img.save(rot_buf, "PNG")
+    p2 = pdf_doc.new_page(width=450.0, height=700.0)
+    p2.insert_image(fitz.Rect(0.0, 0.0, 450.0, 700.0), stream=rot_buf.getvalue())
+    p2.set_rotation(90)
+
+    # Page 3: Pure vector text page (200x300 pt -> 4.0x = 800x1200 px archival quality)
+    p3 = pdf_doc.new_page(width=200.0, height=300.0)
+    p3.insert_text((24, 90), "Crisp Vector Typography", fontsize=18)
+
+    raw_pdf = pdf_doc.tobytes()
+    pdf_doc.close()
+
+    proj = client.post("/api/projects", json={"name": "v4.09 Lossless PDF"}).json()
+    pid = proj["id"]
+    imp = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("highres.pdf", raw_pdf, "application/pdf"))],
+    )
+    assert imp.status_code == 200, imp.text
+    imgs = imp.json()["images"]
+    assert len(imgs) == 3
+
+    # Page 1 must keep exact 1800x2500 native dimensions (NOT downscaled to 576x800 or 1152x1600) with ZERO pixel loss
+    assert (imgs[0]["width"], imgs[0]["height"]) == (1800, 2500)
+    p1_content = client.get(f"/api/projects/{pid}/images/{imgs[0]['id']}/content").content
+    with Image.open(io.BytesIO(p1_content)) as imported_p1:
+        assert ImageChops.difference(src_img, imported_p1.convert("RGB")).getbbox() is None
+
+    # Page 2 (rotated 90°) must keep exact 1400x900 rotated dimensions with ZERO pixel loss
+    assert (imgs[1]["width"], imgs[1]["height"]) == (1400, 900)
+    p2_content = client.get(f"/api/projects/{pid}/images/{imgs[1]['id']}/content").content
+    expected_rot = rot_img.rotate(-90, expand=True)
+    with Image.open(io.BytesIO(p2_content)) as imported_p2:
+        assert ImageChops.difference(expected_rot, imported_p2.convert("RGB")).getbbox() is None
+
+    # Page 3 (vector text) must render at crisp 4.0x (800x1200)
+    assert (imgs[2]["width"], imgs[2]["height"]) == (800, 1200)
+
+    # 2. Export Page 1 back to PDF & ZIP and verify ZERO pixel loss in both exports, plus re-importing the exported PDF!
+    exp_pdf = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "pdf", "image_ids": [imgs[0]["id"]], "name": "roundtrip-hq"},
+    )
+    assert exp_pdf.status_code == 200, exp_pdf.text
+    exported_pdf_bytes = exp_pdf.content
+    with fitz.open(stream=exported_pdf_bytes, filetype="pdf") as out_doc:
+        assert len(out_doc) == 1
+        out_info = out_doc[0].get_image_info(xrefs=True)[0]
+        assert (out_info["width"], out_info["height"]) == (1800, 2500)
+        extracted = out_doc.extract_image(out_info["xref"])
+        with Image.open(io.BytesIO(extracted["image"])) as out_im:
+            assert ImageChops.difference(src_img, out_im.convert("RGB")).getbbox() is None
+
+    # Re-import that exported PDF into a fresh project -> still exact 1800x2500 with ZERO pixel loss!
+    proj2 = client.post("/api/projects", json={"name": "v4.09 Roundtrip 2"}).json()
+    imp2 = client.post(
+        f"/api/projects/{proj2['id']}/files",
+        files=[("files", ("roundtrip-hq.pdf", exported_pdf_bytes, "application/pdf"))],
+    )
+    assert imp2.status_code == 200, imp2.text
+    re_img = imp2.json()["images"][0]
+    assert (re_img["width"], re_img["height"]) == (1800, 2500)
+    re_content = client.get(f"/api/projects/{proj2['id']}/images/{re_img['id']}/content").content
+    with Image.open(io.BytesIO(re_content)) as re_opened:
+        assert ImageChops.difference(src_img, re_opened.convert("RGB")).getbbox() is None
+
+    exp_zip = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "images", "image_ids": [imgs[0]["id"]], "name": "roundtrip-zip", "image_format": "png"},
+    )
+    assert exp_zip.status_code == 200, exp_zip.text
+    zip_bytes = exp_zip.content
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        names = zf.namelist()
+        assert len(names) == 1
+        with Image.open(io.BytesIO(zf.read(names[0]))) as zip_im:
+            assert zip_im.size == (1800, 2500)
+            assert ImageChops.difference(src_img, zip_im.convert("RGB")).getbbox() is None
+
+
+def test_v409_grouped_pages_translated_as_single_logical_page(client, monkeypatch):
+    from comic_studio.translation import TranslationService
+
+    # Create project with 4 images: images 0, 1, 2 grouped in Group 1; image 3 ungrouped
+    proj = client.post("/api/projects", json={"name": "v4.09 Grouped Translation"}).json()
+    pid = proj["id"]
+    up = client.post(
+        f"/api/projects/{pid}/files",
+        files=[
+            ("files", ("slice-1.png", png_bytes(), "image/png")),
+            ("files", ("slice-2.png", png_bytes(), "image/png")),
+            ("files", ("slice-3.png", png_bytes(), "image/png")),
+            ("files", ("page-4.png", png_bytes(), "image/png")),
+        ],
+    )
+    assert up.status_code == 200, up.text
+    state = up.json()
+    for idx, text in enumerate([
+        "Wait, look at",
+        "that glowing door!",
+        "Let us open it together.",
+        "Meanwhile outside the castle...",
+    ]):
+        state["images"][idx]["groupId"] = 1 if idx < 3 else None
+        state["images"][idx]["ocrCompleted"] = True
+        state["images"][idx]["blocks"] = [{"id": 1, "text": text, "tr": "", "enabled": True}]
+    saved_state = client.put(f"/api/projects/{pid}/state", json={"state": state})
+    assert saved_state.status_code == 200, saved_state.text
+    all_ids = [im["id"] for im in saved_state.json()["images"]]
+
+    # Configure AI provider with ample source_limit so Group 1 fits in a single page request
+    assert client.put(
+        "/api/ai-settings",
+        json={
+            "provider": "openai",
+            "providers": {
+                "openai": {
+                    "model": "gpt-4o-mini",
+                    "profiles": [{"id": "g-key", "name": "Main", "api_key": "sk-group-test", "source_limit": 2000}],
+                }
+            },
+        },
+    ).status_code == 200
+
+    # 1. Direct plan preview (/translation-preview) must combine Group 1 (3 images) into Call 1 and ungrouped Page 4 into Call 2
+    plan_prev = client.post(
+        f"/api/projects/{pid}/translation-preview",
+        json={"image_ids": all_ids, "provider": "openai", "source_language": "eng"},
+    )
+    assert plan_prev.status_code == 200, plan_prev.text
+    plan_json = plan_prev.json()
+    assert plan_json["requestCount"] == 2
+    assert "گروه 1" in plan_json["requests"][0]["imageName"]
+    assert "Wait, look at\nthat glowing door!\nLet us open it together." in plan_json["requests"][0]["text"]
+    assert plan_json["requests"][1]["imageName"] == "page-4.png"
+
+    # 2. Rolling context engine (/context-preview -> /context-start -> /context-step) must send all 3 Group 1 slices in Step 1!
+    ctx_prev = client.post(
+        f"/api/projects/{pid}/context-preview",
+        json={
+            "image_ids": all_ids,
+            "provider": "openai",
+            "source_language": "eng",
+            "skill": "",
+            "summary": "",
+            "reuse_repeated": True,
+        },
+    )
+    assert ctx_prev.status_code == 200, ctx_prev.text
+    ctx_json = ctx_prev.json()
+    assert "گروه 1" in ctx_json["requests"][0]["imageName"]
+    assert "صفحات هم‌گروه" in ctx_json["note"]
+    assert "Wait, look at\nthat glowing door!\nLet us open it together." in ctx_json["requests"][0]["text"]
+    assert "Meanwhile outside" not in ctx_json["requests"][0]["text"]
+
+    sent_batches: list[list[str]] = []
+
+    def fake_translate_context(self, request, text, source_texts, provider, policy, **kwargs):
+        sent_batches.append(list(source_texts))
+        if len(sent_batches) == 1:
+            return ("صبر کن، نگاه کن به\nآن درِ درخشان!\nبیا با هم بازش کنیم.", "قهرمانان جلوی درِ درخشان ایستادند.")
+        return ("در همین حال بیرون قلعه...", "صحنه به بیرون قلعه منتقل شد.")
+
+    monkeypatch.setattr(TranslationService, "translate_context", fake_translate_context)
+
+    started = client.post(
+        f"/api/projects/{pid}/context-start",
+        json={
+            "image_ids": all_ids,
+            "provider": "openai",
+            "source_language": "eng",
+            "skill": "",
+            "summary": "",
+            "reuse_repeated": True,
+            "confirmation": ctx_json["signature"],
+        },
+    )
+    assert started.status_code == 200, started.text
+    run_id = started.json()["runId"]
+
+    # Step 1 translates ALL 3 grouped images together in ONE request and distributes back to each image!
+    step1 = client.post(
+        f"/api/projects/{pid}/context-step",
+        json={"run_id": run_id, "completed": 0, "skill": ""},
+    )
+    assert step1.status_code == 200, step1.text
+    s1 = step1.json()
+    assert s1["done"] is False
+    assert sorted(s1["affectedImageIds"]) == sorted(all_ids[:3])
+    assert sent_batches == [["Wait, look at", "that glowing door!", "Let us open it together."]]
+    imgs_after_s1 = s1["project"]["images"]
+    assert [imgs_after_s1[i]["blocks"][0]["tr"] for i in range(4)] == [
+        "صبر کن، نگاه کن به",
+        "آن درِ درخشان!",
+        "بیا با هم بازش کنیم.",
+        "",
+    ]
+
+    # Step 2 translates ungrouped image 4 using Group 1's rolling summary
+    step2 = client.post(
+        f"/api/projects/{pid}/context-step",
+        json={"run_id": run_id, "completed": 1, "skill": ""},
+    )
+    assert step2.status_code == 200, step2.text
+    s2 = step2.json()
+    assert s2["done"] is True
+    assert s2["affectedImageIds"] == [all_ids[3]]
+    assert s2["project"]["images"][3]["blocks"][0]["tr"] == "در همین حال بیرون قلعه..."
+
+    # 3. Changing group membership after preview invalidates stale confirmation signature cleanly (409)
+    fresh_prev = client.post(
+        f"/api/projects/{pid}/context-preview",
+        json={
+            "image_ids": all_ids,
+            "provider": "openai",
+            "source_language": "eng",
+            "skill": "",
+            "summary": "",
+            "reuse_repeated": True,
+        },
+    )
+    assert fresh_prev.status_code == 200
+    cur_proj = client.get(f"/api/projects/{pid}").json()
+    cur_proj["images"][2]["groupId"] = None
+    assert client.put(f"/api/projects/{pid}/state", json={"state": cur_proj}).status_code == 200
+    stale_start = client.post(
+        f"/api/projects/{pid}/context-start",
+        json={
+            "image_ids": all_ids,
+            "provider": "openai",
+            "source_language": "eng",
+            "skill": "",
+            "summary": "",
+            "reuse_repeated": True,
+            "confirmation": fresh_prev.json()["signature"],
+        },
+    )
+    assert stale_start.status_code == 409
+
+
+def test_v410_audit_watermark_parity_bundled_models_crop_txt_surya_cache_and_preview_error(client, tmp_path, monkeypatch):
+    """v4.10 end-to-end audit regression test covering watermark logo/opacity/RTL parity, bundled_models, Surya cache, crop TXT, image_content edited flag, and previewError propagation."""
+    import base64
+    import json
+    import os
+    import comic_studio.paths as paths_mod
+    from comic_studio.ocr_worker import _SuryaAdapter
+    from comic_studio.watermark_render import apply_watermark_pil, has_active_watermark
+
+    # 1. Logo-only & text+logo watermark parity (UI dict schema without `mode`, dict `logos_map`, 0..100 opacity, RTL logo-right)
+    logo_buf = io.BytesIO()
+    Image.new("RGBA", (40, 40), (255, 0, 0, 255)).save(logo_buf, "PNG")
+    logo_url = "data:image/png;base64," + base64.b64encode(logo_buf.getvalue()).decode("ascii")
+    logos_map = {"logo-red": {"id": "logo-red", "name": "قرمز", "dataUrl": logo_url}}
+
+    logo_only_wm = {
+        "enabled": True,
+        "text": "",
+        "logoId": "logo-red",
+        "logoScalePct": 25,
+        "position": "center",
+        "opacity": 50,
+    }
+    assert has_active_watermark(logo_only_wm) is True
+    white = Image.new("RGB", (240, 240), (255, 255, 255))
+    stamped_logo = apply_watermark_pil(white, logo_only_wm, logos_map)
+    cx_r, cx_g, cx_b = stamped_logo.getpixel((120, 120))
+    # 50% red over white => R stays ~255 while G/B sit near ~127 (neither untouched 255 nor 100%-opaque 0)
+    assert cx_r >= 245 and 100 <= cx_g <= 155 and 100 <= cx_b <= 155
+
+    rtl_combo = apply_watermark_pil(
+        white,
+        {"enabled": True, "text": "ترجمه کمیک", "logoId": "logo-red", "logoScalePct": 16, "sizePct": 6, "position": "center", "opacity": 100, "color": "#00ff00", "outline": False},
+        logos_map,
+    )
+    red_xs = [x for y in range(240) for x in range(240) if rtl_combo.getpixel((x, y))[0] > 220 and rtl_combo.getpixel((x, y))[1] < 40]
+    green_xs = [x for y in range(240) for x in range(240) if rtl_combo.getpixel((x, y))[1] > 200 and rtl_combo.getpixel((x, y))[0] < 60]
+    assert red_xs and green_xs
+    assert (sum(red_xs) / len(red_xs)) > (sum(green_xs) / len(green_xs)), "In RTL, logo must sit to the right of Persian text"
+
+    # 2. bundled_models_dir discovers `bundled_models` (underscore) staged by build_offline_package.py
+    fake_app_dir = tmp_path / "frozen_app"
+    underscore_bundle = fake_app_dir / "bundled_models"
+    underscore_bundle.mkdir(parents=True)
+    monkeypatch.delenv("COMIC_STUDIO_BUNDLED_MODELS", raising=False)
+    monkeypatch.setattr(paths_mod, "APP_DIR", fake_app_dir)
+    assert paths_mod.bundled_models_dir() == underscore_bundle
+
+    # 3. Surya custom-storage cache resolves llamacpp_server.{log,json} inside models_root/cache
+    surya_models_root = tmp_path / "custom_drive" / "models"
+    surya_dir = surya_models_root / "cache" / "datalab" / "surya"
+    surya_dir.mkdir(parents=True)
+    (surya_dir / "llamacpp_server.log").write_text("booting\nCUDA out of memory\n", encoding="utf-8")
+    (surya_dir / "llamacpp_server.json").write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(surya_models_root / "cache"))
+    adapter = _SuryaAdapter(surya_models_root)
+    assert "CUDA out of memory" in adapter._read_llama_server_error_tail()
+    adapter.close()
+    assert not (surya_dir / "llamacpp_server.json").exists()
+
+    # 4. image_content(cropped=True) honors edited=False vs edited=True AND renders unedited watermarked previews, while build_txt filters cropped-out blocks
+    proj = client.post("/api/projects", json={"name": "v4.10 Audit"}).json()
+    pid = proj["id"]
+    orig_blue = png_bytes((200, 200), "blue")
+    up = client.post(f"/api/projects/{pid}/files", files=[("files", ("page1.png", orig_blue, "image/png"))])
+    assert up.status_code == 200
+    proj = up.json()
+    iid = proj["images"][0]["id"]
+
+    # Save an edited red render, then set crop + inside/outside blocks
+    edited_red = png_bytes((200, 200), "red")
+    assert client.post(f"/api/projects/{pid}/images/{iid}/rendered", content=edited_red, headers={"Content-Type": "image/png"}).status_code == 200
+    proj = client.get(f"/api/projects/{pid}").json()
+    proj["images"][0]["crop"] = {"x": 20, "y": 40, "w": 120, "h": 120}
+    proj["images"][0]["blocks"] = [
+        {"id": 1, "text": "NOISY HEADER", "tr": "سرصفحه مزاحم", "x0": 25, "y0": 4, "x1": 110, "y1": 24, "enabled": True},
+        {"id": 2, "text": "CLEAN BODY", "tr": "متن اصلی داخل کادر", "x0": 30, "y0": 60, "x1": 120, "y1": 100, "enabled": True},
+    ]
+    assert client.put(f"/api/projects/{pid}/state", json={"state": proj}).status_code == 200
+
+    raw_crop_res = client.get(f"/api/projects/{pid}/images/{iid}/content?cropped=true")
+    ed_crop_res = client.get(f"/api/projects/{pid}/images/{iid}/content?edited=true&cropped=true")
+    with Image.open(io.BytesIO(raw_crop_res.content)) as im_raw, Image.open(io.BytesIO(ed_crop_res.content)) as im_ed:
+        assert im_raw.size == (120, 120) and im_ed.size == (120, 120)
+        assert im_raw.getpixel((10, 10))[:3] == (0, 0, 255), "edited=False must crop original blue image, not edited red"
+        assert im_ed.getpixel((10, 10))[:3] == (255, 0, 0), "edited=True must crop edited red image"
+
+    txt_export = client.post(f"/api/projects/{pid}/export", json={"kind": "txt", "image_ids": [iid], "name": "cropped-txt"})
+    assert txt_export.status_code == 200
+    txt_body = txt_export.content.decode("utf-8")
+    assert "CLEAN BODY" in txt_body and "متن اصلی داخل کادر" in txt_body
+    assert "NOISY HEADER" not in txt_body and "سرصفحه مزاحم" not in txt_body
+
+    # Revert edited render, attach logo-only watermark, remove crop -> /content?cropped=true renders watermark!
+    assert client.post(f"/api/projects/{pid}/images/{iid}/revert").status_code == 200
+    proj = client.get(f"/api/projects/{pid}").json()
+    proj["settings"] = proj.get("settings") or {}
+    proj["settings"]["watermarkLogos"] = logos_map
+    proj["images"][0]["crop"] = None
+    proj["images"][0]["watermark"] = logo_only_wm
+    assert client.put(f"/api/projects/{pid}/state", json={"state": proj}).status_code == 200
+    wm_prev_res = client.get(f"/api/projects/{pid}/images/{iid}/content?cropped=true")
+    with Image.open(io.BytesIO(wm_prev_res.content)) as wm_im:
+        assert wm_im.getpixel((100, 100))[0] > 100, "Unedited watermarked page preview must composite red logo"
+
+    # 5. context_start & context_text_translate surface actionable previewError instead of generic empty-text error
+    import comic_studio.local_nmt as nmt_mod
+    monkeypatch.setattr(nmt_mod, "models_dir", lambda: tmp_path / "empty_nmt_models")
+    prev_local = client.post(
+        f"/api/projects/{pid}/context-preview",
+        json={"image_ids": [iid], "provider": "local", "source_language": "eng", "skill": "", "summary": "", "reuse_repeated": True},
+    )
+    assert prev_local.status_code == 200
+    prev_json = prev_local.json()
+    assert prev_json["previewError"] and "دانلود" in prev_json["previewError"]
+    start_local = client.post(
+        f"/api/projects/{pid}/context-start",
+        json={"image_ids": [iid], "provider": "local", "source_language": "eng", "skill": "", "summary": "", "reuse_repeated": True, "confirmation": prev_json["signature"]},
+    )
+    assert start_local.status_code == 400
+    assert start_local.json()["detail"] == prev_json["previewError"]
+    assert "متنی برای ترجمه وجود ندارد" not in start_local.json()["detail"]
+
+    # Single-box context_text_preview & context_text_translate also surface actionable previewError instead of generic empty-text error
+    single_prev = client.post(
+        "/api/translate-text/context-preview",
+        json={"text": "Hello world!", "provider": "local", "source_language": "eng", "target_language": "fa"},
+    )
+    assert single_prev.status_code == 200
+    single_json = single_prev.json()
+    assert single_json["previewError"] and "دانلود" in single_json["previewError"]
+    single_exec = client.post(
+        "/api/translate-text/context",
+        json={
+            "text": "Hello world!",
+            "provider": "local",
+            "source_language": "eng",
+            "target_language": "fa",
+            "confirmation": single_json["signature"],
+        },
+    )
+    assert single_exec.status_code == 400
+    assert single_exec.json()["detail"] == single_json["previewError"]
+    assert "متنی برای ترجمه وجود ندارد" not in single_exec.json()["detail"]
+
+
+def test_v411_export_prepare_stream_non_empty_guard_pdf_fallback_moved_box_erase_and_pure_asgi(client, tmp_path, monkeypatch):
+    """v4.11 regression test for empty-export fix, prepared direct-stream downloads, PDF C-save fallback, moved-box erase, and pure ASGI middleware."""
+    import re
+    from pathlib import Path
+    from starlette.middleware.base import BaseHTTPMiddleware
+    import comic_studio.exporter as exp_mod
+    from comic_studio.paths import project_root
+
+    # 1. Pure ASGI middleware: zero BaseHTTPMiddleware wrappers that buffer/truncate large FileResponse streams
+    assert all(
+        not (isinstance(m.cls, type) and issubclass(m.cls, BaseHTTPMiddleware))
+        for m in client.app.user_middleware
+    ), "app must not use BaseHTTPMiddleware around streaming FileResponse routes"
+
+    # Create project with Persian default-like name + dark text in top-left box moved to bottom-right with custom hex bg
+    proj = client.post("/api/projects", json={"name": "پروژهٔ کمیک ۴.۱۱"}).json()
+    pid = proj["id"]
+
+    canvas_img = Image.new("RGB", (240, 240), (255, 255, 255))
+    # Draw black ink at original OCR box (20..100, 20..60) so we can verify moved-box source erasing in Visual DOCX
+    for x in range(30, 90):
+        for y in range(30, 50):
+            canvas_img.putpixel((x, y), (0, 0, 0))
+    buf = io.BytesIO()
+    canvas_img.save(buf, "PNG")
+    proj = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("page1.png", buf.getvalue(), "image/png"))],
+    ).json()
+    iid = proj["images"][0]["id"]
+    proj["images"][0]["blocks"] = [
+        {
+            "id": 1,
+            "text": "ORIGINAL INK",
+            "tr": "متن جابه‌جاشده",
+            "enabled": True,
+            "x0": 20,
+            "y0": 20,
+            "x1": 100,
+            "y1": 60,
+            "tx0": 120,
+            "ty0": 140,
+            "tx1": 220,
+            "ty1": 210,
+            "bg": "#ff2244",
+        }
+    ]
+    assert client.put(f"/api/projects/{pid}/state", json={"state": proj}).status_code == 200
+
+    # 2. Prepared export token flow (X-Export-Prepare: 1) works across all 5 formats & supports repeat downloads
+    for kind, magic in [
+        ("pdf", b"%PDF-"),
+        ("images", b"PK\x03\x04"),
+        ("txt", "\ufeff".encode("utf-8")),
+        ("docx", b"PK\x03\x04"),
+        ("pptx", b"PK\x03\x04"),
+    ]:
+        prep = client.post(
+            f"/api/projects/{pid}/export",
+            headers={"X-Export-Prepare": "1"},
+            json={"kind": kind, "image_ids": [iid], "name": "پروژهٔ کمیک"},
+        )
+        assert prep.status_code == 200, (kind, prep.text)
+        prep_json = prep.json()
+        assert re.fullmatch(r"[0-9a-f]{32}", prep_json["token"])
+        assert prep_json["size"] > 0
+        dl1 = client.get(f"/api/projects/{pid}/export/{prep_json['token']}")
+        dl2 = client.get(f"/api/projects/{pid}/export/{prep_json['token']}")
+        assert dl1.status_code == 200 and dl2.status_code == 200
+        assert len(dl1.content) == prep_json["size"] and dl1.content == dl2.content
+        assert dl1.content.startswith(magic)
+
+        if kind == "docx":
+            with zipfile.ZipFile(io.BytesIO(dl1.content)) as zf:
+                bg_png = zf.read("word/media/page_001.png")
+            with Image.open(io.BytesIO(bg_png)) as bg_im:
+                # Original OCR box (40, 40) was erased back to white; moved target box (160, 170) filled with #ff2244
+                assert bg_im.getpixel((40, 40))[:3] == (255, 255, 255)
+                r_px, g_px, b_px = bg_im.getpixel((160, 170))[:3]
+                assert r_px > 230 and g_px < 60 and b_px < 90
+
+        # Discard token via DELETE -> 404 on token URL, while exports/ file on disk remains intact for project backups
+        assert client.delete(f"/api/projects/{pid}/export/{prep_json['token']}").status_code == 204
+        assert client.get(f"/api/projects/{pid}/export/{prep_json['token']}").status_code == 404
+        saved_export = project_root(pid) / "exports" / prep_json["filename"]
+        assert saved_export.is_file() and saved_export.stat().st_size == prep_json["size"]
+
+    # 3. _atomic_export_path refuses 0-byte temp outputs and never clobbers an existing good export
+    existing_out = tmp_path / "good-export.pdf"
+    existing_out.write_bytes(b"%PDF-1.7-valid")
+    with pytest.raises(ValueError, match="خالی"):
+        with exp_mod._atomic_export_path(existing_out) as _tmp_zero:
+            pass  # leaves 0-byte mkstemp placeholder untouched
+    assert existing_out.read_bytes() == b"%PDF-1.7-valid"
+
+    # 4. Server-side 0-byte export guard returns HTTP 500 with Persian message instead of 200 OK empty body
+    empty_file = tmp_path / "empty-broken.txt"
+    empty_file.write_bytes(b"")
+    orig_build_txt = exp_mod.build_txt
+    import comic_studio.main as main_mod
+    monkeypatch.setattr(main_mod, "build_txt", lambda *_a, **_kw: empty_file)
+    zero_res = client.post(f"/api/projects/{pid}/export", json={"kind": "txt", "image_ids": [iid]})
+    assert zero_res.status_code == 500
+    assert "خالی" in zero_res.json()["detail"]
+    monkeypatch.setattr(main_mod, "build_txt", orig_build_txt)
+
+    # 5. build_pdf falls back to document.tobytes() when PyMuPDF C path save fails on special Windows/UNC paths
+    import pymupdf as fitz
+    orig_doc_save = fitz.Document.save
+
+    def broken_c_save(self, *args, **kwargs):
+        if args and isinstance(args[0], (str, Path)):
+            raise RuntimeError("Simulated Win32 C path save failure")
+        return orig_doc_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Document, "save", broken_c_save)
+    fallback_pdf = client.post(f"/api/projects/{pid}/export", json={"kind": "pdf", "image_ids": [iid], "name": "fallback-test"})
+    monkeypatch.setattr(fitz.Document, "save", orig_doc_save)
+    assert fallback_pdf.status_code == 200
+    assert fallback_pdf.content.startswith(b"%PDF-") and len(fallback_pdf.content) > 500
+
+    # 6. image_payload ignores 0-byte or reverted stale -edited.png files
+    stale_edited = project_root(pid) / "images" / f"{iid}-edited.png"
+    stale_edited.write_bytes(b"")
+    data_bytes, ext_str, w_out, h_out = exp_mod.image_payload(client.app.state if hasattr(client.app.state, "get") else exp_mod.ProjectStore(), pid, proj["images"][0])
+    assert len(data_bytes) > 100 and ext_str == "png" and (w_out, h_out) == (240, 240)
+    stale_edited.unlink(missing_ok=True)
+
+
+def test_v412_exporter_shapes_rotation_corner_radius_and_font_family(client):
+    """v4.12 regression test for custom fontFamily, box shapes, cornerRadius, and angle in Visual & Flowing DOCX/PPTX."""
+    import zipfile
+
+    proj = client.post("/api/projects", json={"name": "پروژه ۴.۱۲"}).json()
+    pid = proj["id"]
+    big_img = Image.new("RGB", (260, 220), (255, 255, 255))
+    img_buf = io.BytesIO()
+    big_img.save(img_buf, "PNG")
+    state = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("page412.png", img_buf.getvalue(), "image/png"))],
+    ).json()
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1,
+            "x0": 20, "y0": 20, "x1": 220, "y1": 80,
+            "tx0": 25, "ty0": 25, "tx1": 225, "ty1": 85,
+            "text": "HELLO HERO",
+            "tr": "سلام قهرمان",
+            "richHtml": '<p><span style="font-family:Tahoma">سلام</span> قهرمان</p>',
+            "enabled": True,
+            "bg": "#fff3b0",
+            "color": "#dd2255",
+            "fontFamily": "Impact",
+            "shape": "rect",
+            "cornerRadius": 40,
+            "angle": 30,
+            "dir": "rtl",
+            "align": "center",
+        },
+        {
+            "id": 2,
+            "x0": 30, "y0": 100, "x1": 210, "y1": 160,
+            "text": "",
+            "tr": "فکر عمیق!",
+            "richHtml": "",
+            "enabled": True,
+            "manual": True,
+            "manualLang": "fa",
+            "bg": "white",
+            "fontFamily": "Comic Sans MS",
+            "shape": "cloud",
+            "cornerRadius": 0,
+            "angle": -15,
+            "dir": "rtl",
+            "align": "center",
+        },
+    ]
+    iid = state["images"][0]["id"]
+    put_res = client.put(f"/api/projects/{pid}/state", json={"state": state})
+    assert put_res.status_code == 200
+
+    docx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "docx", "image_ids": [iid], "docx_layout": "visual", "docx_mode": "translation"},
+    )
+    assert docx_res.status_code == 200, docx_res.text
+    with zipfile.ZipFile(io.BytesIO(docx_res.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert 'w:ascii="Tahoma"' in doc_xml
+        assert 'w:ascii="Impact"' in doc_xml
+        assert 'w:ascii="Comic Sans MS"' in doc_xml
+        assert "rotation:30.00;" in doc_xml
+        assert "rotation:-15.00;" in doc_xml
+
+    pptx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "pptx", "image_ids": [iid], "pptx_layout": "visual", "pptx_mode": "translation"},
+    )
+    assert pptx_res.status_code == 200, pptx_res.text
+    with zipfile.ZipFile(io.BytesIO(pptx_res.content)) as zf:
+        slide_xml = zf.read("ppt/slides/slide1.xml").decode("utf-8")
+        assert 'rot="1800000"' in slide_xml  # +30 deg * 60000
+        assert 'rot="20700000"' in slide_xml  # -15 deg -> 345 deg * 60000
+        assert 'prst="roundRect"' in slide_xml and 'val 20000' in slide_xml  # 40% * 500
+        assert 'prst="cloud"' in slide_xml
+        assert 'typeface="Tahoma"' in slide_xml
+        assert 'typeface="Comic Sans MS"' in slide_xml
+
+
+def test_v413_full_audit_backend_fixes(client, tmp_path, monkeypatch):
+    """v4.13 regression test covering bundled rapidocr-v5 validation, frozen PyInstaller anti-recursion,
+    manual-box styling preservation in context_run, 0-byte edited PNG guards, browser preferences, and data-font export."""
+    import sys
+    from PIL import Image
+    import comic_studio.browser as browser_mod
+    import comic_studio.context_run as context_run_mod
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_managed as managed_mod
+    from comic_studio.paths import project_root
+
+    # 1. Bundled rapidocr-v5 validates against _effective_v5_dir (offline .exe) & hides non-functional uninstall
+    bundled = tmp_path / "bundled_models"
+    (bundled / "rapidocr").mkdir(parents=True)
+    (bundled / "rapidocr" / "ch_PP-OCRv5_det_mobile.onnx").write_bytes(b"ONNX-DET-WEIGHTS")
+    (bundled / "rapidocr" / "latin_PP-OCRv5_rec_mobile.onnx").write_bytes(b"ONNX-REC-WEIGHTS")
+    monkeypatch.setenv("COMIC_STUDIO_BUNDLED_MODELS", str(bundled))
+    v5 = ocr_mod.RapidEngine("rapidocr-v5", "v5")
+    monkeypatch.setattr(ocr_mod.RapidEngine, "runtime_installed", property(lambda _self: True))
+    assert "eng" in v5.ready_languages
+    # Must NOT raise OcrError when user writable models/rapidocr is empty!
+    v5._validate_ready("eng", allow_download=False)
+    assert managed_mod.engine_has_uninstallable_files("rapidocr-v5", v5) is False
+    monkeypatch.delenv("COMIC_STUDIO_BUNDLED_MODELS", raising=False)
+
+    # 2. Frozen PyInstaller mode never spawns sys.executable as python -m pip / venv
+    fake_exe = tmp_path / "ComicOCRStudio.exe"
+    fake_exe.write_bytes(b"MZ")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(fake_exe))
+    monkeypatch.setattr(ocr_mod.shutil, "which", lambda _name: None)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "no_py"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "no_py2"))
+    try:
+        ocr_mod._resolve_pip_python_executable(match_current_minor=True)
+        raise AssertionError("Expected OcrError when frozen without host Python")
+    except ocr_mod.OcrError as exc:
+        assert ".exe" in str(exc)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+    # 3. context_run.apply_translated_block_defaults preserves manual/cloned box custom size, align, bold, verticalAlign
+    manual_blk = {
+        "id": 1, "manual": True, "manualLang": "en", "textMode": "ocr",
+        "size": 28, "align": "center", "verticalAlign": "middle", "bold": True,
+    }
+    context_run_mod.apply_translated_block_defaults(manual_blk, "fa")
+    assert manual_blk["dir"] == "rtl"
+    assert manual_blk["textMode"] == "translation"
+    assert manual_blk["size"] == 28
+    assert manual_blk["align"] == "center"
+    assert manual_blk["verticalAlign"] == "middle"
+    assert manual_blk["bold"] is True
+
+    # 4. browser.save_preferences creates missing parent directories & writes atomically
+    pref_data = tmp_path / "fresh_prefs_dir"
+    monkeypatch.setattr(browser_mod, "data_dir", lambda: pref_data)
+    browser_mod.save_preferences("edge", "new")
+    assert browser_mod.load_preferences() == ("edge", "new")
+
+    # 5. store.py ignores 0-byte -edited.png and exporter.py supports data-font + Arial Black + manual box in OCR mode
+    proj = client.post("/api/projects", json={"name": "پروژه ۴.۱۳"}).json()
+    pid = proj["id"]
+    buf = io.BytesIO()
+    Image.new("RGB", (280, 220), (245, 245, 250)).save(buf, format="PNG")
+    up = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("page1.png", buf.getvalue(), "image/png"))],
+    )
+    assert up.status_code == 200
+    state = up.json()
+    iid = state["images"][0]["id"]
+    zero_edited = project_root(pid) / "images" / f"{iid}-edited.png"
+    zero_edited.write_bytes(b"")
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1, "x0": 20, "y0": 20, "x1": 240, "y1": 110,
+            "text": "", "tr": "کادر دستی فارسی در حالت OCR",
+            "richHtml": '<p><span data-font="Arial Black">کادر دستی فارسی در حالت OCR</span></p>',
+            "manual": True, "manualLang": "fa", "enabled": True, "dir": "rtl", "align": "center",
+        }
+    ]
+    saved_state = client.put(f"/api/projects/{pid}/state", json={"state": state}).json()
+    assert saved_state["images"][0]["edited"] is False
+    assert client.get(f"/api/projects/{pid}/images/{iid}/content?edited=true").status_code == 404
+    dup_state = client.post(f"/api/projects/{pid}/duplicate", json=[iid]).json()
+    assert len(dup_state["images"]) == 2
+    assert dup_state["images"][1]["edited"] is False
+
+    docx_ocr = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "docx", "image_ids": [iid], "docx_layout": "flowing", "docx_mode": "ocr"},
+    )
+    assert docx_ocr.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(docx_ocr.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "کادر دستی فارسی در حالت OCR" in doc_xml
+        assert 'w:ascii="Arial Black"' in doc_xml
+
+
+def test_v414_writing_shapes_pil_docx_and_pptx(client):
+    """v4.14 regression test covering all 14 writing shapes (star, burst, seal, cloud, thought,
+    speech, octagon, heart, banner, etc.) across PIL masks, Visual DOCX, and Visual PPTX exports.
+    """
+    from comic_studio.exporter import (
+        _ALLOWED_BOX_SHAPES,
+        _draw_shaped_box_pil,
+        _normalize_box_shape,
+        _pptx_prst_geom_xml,
+        _shape_insets_px,
+    )
+
+    assert len(_ALLOWED_BOX_SHAPES) == 14
+    for sh in _ALLOWED_BOX_SHAPES:
+        assert _normalize_box_shape(sh) == sh
+        canvas = Image.new("RGB", (220, 180), (30, 40, 50))
+        _draw_shaped_box_pil(
+            canvas, 20, 20, 200, 160, (255, 255, 255), shape=sh, corner_radius_pct=20.0, angle_deg=0.0
+        )
+        # Center of the main body (upper half for callouts) must receive the white fill
+        assert canvas.getpixel((110, 75)) == (255, 255, 255), f"shape {sh} did not fill interior"
+        canvas.close()
+
+    # Thought and speech reserve larger bottom insets than top insets
+    px_t, pt_t, pb_t = _shape_insets_px(200, 140, "thought", 0.0)
+    assert pb_t > pt_t and px_t >= 28.0
+    assert 'prst="star5"' in _pptx_prst_geom_xml("star", 0.0)
+    assert 'prst="star12"' in _pptx_prst_geom_xml("burst", 0.0)
+    assert 'prst="star8"' in _pptx_prst_geom_xml("seal", 0.0)
+    assert 'prst="cloudCallout"' in _pptx_prst_geom_xml("thought", 0.0)
+    assert 'prst="wedgeRoundRectCallout"' in _pptx_prst_geom_xml("speech", 0.0)
+    assert 'prst="heart"' in _pptx_prst_geom_xml("heart", 0.0)
+    assert 'prst="ribbon2"' in _pptx_prst_geom_xml("banner", 0.0)
+
+    proj = client.post("/api/projects", json={"name": "پروژه شکل‌های ۴.۱۴"}).json()
+    pid = proj["id"]
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 320), (40, 50, 60)).save(buf, format="PNG")
+    up = client.post(
+        f"/api/projects/{pid}/files",
+        files=[("files", ("shapes.png", buf.getvalue(), "image/png"))],
+    )
+    assert up.status_code == 200
+    state = up.json()
+    iid = state["images"][0]["id"]
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1, "x0": 20, "y0": 20, "x1": 180, "y1": 140,
+            "text": "", "tr": "ستارهٔ درخشان", "manual": True, "enabled": True,
+            "shape": "star", "bg": "#fff3b0", "angle": -10,
+        },
+        {
+            "id": 2, "x0": 200, "y0": 20, "x1": 380, "y1": 150,
+            "text": "", "tr": "ابر فکر حباب‌دار", "manual": True, "enabled": True,
+            "shape": "thought", "bg": "white", "angle": 0,
+        },
+        {
+            "id": 3, "x0": 20, "y0": 170, "x1": 200, "y1": 300,
+            "text": "", "tr": "فریاد انفجاری!", "manual": True, "enabled": True,
+            "shape": "burst", "bg": "#ffd6d6", "angle": 8,
+        },
+        {
+            "id": 4, "x0": 220, "y0": 170, "x1": 380, "y1": 300,
+            "text": "", "tr": "", "manual": True, "enabled": True,
+            "shape": "speech", "bg": "white", "angle": 0,
+        },
+    ]
+    assert client.put(f"/api/projects/{pid}/state", json={"state": state}).status_code == 200
+
+    pptx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "pptx", "image_ids": [iid], "pptx_layout": "visual", "pptx_mode": "translation"},
+    )
+    assert pptx_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(pptx_res.content)) as zf:
+        slide_xml = zf.read("ppt/slides/slide1.xml").decode("utf-8")
+        assert 'prst="star5"' in slide_xml
+        assert 'prst="cloudCallout"' in slide_xml
+        assert 'prst="star12"' in slide_xml
+        assert 'prst="wedgeRoundRectCallout"' in slide_xml
+        assert "ستارهٔ درخشان" in slide_xml
+        assert "ابر فکر حباب‌دار" in slide_xml
+
+    docx_res = client.post(
+        f"/api/projects/{pid}/export",
+        json={"kind": "docx", "image_ids": [iid], "docx_layout": "visual", "docx_mode": "translation"},
+    )
+    assert docx_res.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(docx_res.content)) as zf:
+        doc_xml = zf.read("word/document.xml").decode("utf-8")
+        assert "ستارهٔ درخشان" in doc_xml
+        assert "فریاد انفجاری!" in doc_xml
+        assert "comicbox_4" in doc_xml
+
+
+def test_v420_pending_resolve_requires_module_license_and_402_includes_vendor_contact(tmp_path, monkeypatch):
+    """v4.20: Applying a pending OCR/translation result enforces module license, and 402 JSON includes vendorContact."""
+    import time
+    from comic_studio import _public_key, pending_results
+    import comic_studio.license_guard as lg
+
+    priv_seed, pub_key = lg.ed25519_generate_keypair()
+    monkeypatch.setattr(_public_key, "PUBLIC_VERIFY_KEY_HEX", pub_key.hex())
+    hwid = lg.compute_hardware_id()
+
+    # Activate editing-only license (OCR and translation unlicensed) before calling API
+    issued_at = int(time.time()) - 120
+    edit_only_tok = lg.issue_license_token(
+        private_seed_hex=priv_seed.hex(),
+        hardware_id=hwid,
+        holder="کاربر ویرایش",
+        issued_at=issued_at,
+        modules={"editing": {"plan": "lifetime"}},
+    )
+    lg.SECURITY_GATE.activate_token(edit_only_tok, replace_all_modules=True)
+
+    local_client = TestClient(create_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+    proj, item = make_project(local_client)
+    pid = proj["id"]
+
+    # Seed a pending OCR result on disk and verify `apply` is blocked with 402 while `keep` is allowed
+    from comic_studio.store import ProjectStore
+
+    store_inst = ProjectStore()
+    cur_proj = store_inst.get(pid)
+    tok = pending_results.stage(
+        store_inst,
+        pid,
+        "ocr",
+        {
+            "outputs": [
+                {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "blocks": [{"id": "b1", "box": [10, 10, 80, 40], "text": "HELLO", "translated": ""}],
+                }
+            ],
+            "baseline": {item["id"]: "stale-sig"},
+        },
+    )["id"]
+    res_blocked = local_client.post(
+        f"/api/projects/{pid}/pending/{tok}/resolve",
+        json={"revision": cur_proj.get("updatedAt", ""), "choices": {item["id"]: "apply"}},
+    )
+    assert res_blocked.status_code == 402
+    assert res_blocked.json()["code"] == "MODULE_OCR_REQUIRED"
+
+    # Discarding the pending result via DELETE remains allowed without OCR license
+    del_res = local_client.delete(f"/api/projects/{pid}/pending/{tok}")
+    assert del_res.status_code == 204
+
+    # Also verify middleware 402 response carries vendorContact when completely unlicensed
+    past_start = int(time.time()) - 200_000
+    lg.SECURITY_GATE._save_state_record(
+        {
+            "v": 2,
+            "module_tokens": {},
+            "trial_started_at": past_start,
+            "trial_consumed": True,
+            "max_seen_utc": int(time.time()),
+        }
+    )
+    unlic_res = local_client.get("/api/projects")
+    assert unlic_res.status_code == 402
+    unlic_json = unlic_res.json()
+    assert isinstance(unlic_json.get("vendorContact"), dict)
+    assert unlic_json["vendorContact"].get("supportPhone")
+
+
+def test_v421_persian_preprocess_input_option_in_ocr_and_engine_test(tmp_path, monkeypatch):
+    """v4.21: #ocrPersianPreprocess exists in index.html, OcrRequest & EngineTestRequest accept
+    persian_preprocess (auto-defaulting True for language='fas' and honoring explicit False/True)."""
+    app_inst = create_app()
+    local_client = TestClient(app_inst, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+    html = local_client.get("/").text
+    assert 'id="ocrPersianPreprocess"' in html
+    assert "پیش‌پردازش ویژه فارسی" in html
+
+    proj, item = make_project(local_client)
+    pid = proj["id"]
+    assert proj["settings"]["persianPreprocess"] is False
+
+    seen_calls: list[dict[str, object]] = []
+
+    def fake_recognize(
+        engine,
+        image,
+        language,
+        contrast=True,
+        precise=True,
+        min_confidence=0.35,
+        *,
+        page_mode="auto",
+        persian_preprocess=False,
+    ):
+        seen_calls.append({
+            "language": language,
+            "page_mode": page_mode,
+            "persian_preprocess": persian_preprocess,
+        })
+        return [
+            {
+                "id": 1,
+                "text": "سلام دنیا",
+                "tr": "",
+                "richHtml": "",
+                "conf": 95.0,
+                "x0": 10.0,
+                "y0": 10.0,
+                "x1": 120.0,
+                "y1": 40.0,
+                "polygon": [[10.0, 10.0], [120.0, 10.0], [120.0, 40.0], [10.0, 40.0]],
+                "lineH": 30.0,
+                "sourceIndent": 0,
+                "enabled": True,
+                "bg": "auto",
+                "dir": "rtl",
+                "align": "right",
+                "bold": False,
+                "italic": False,
+                "underline": False,
+                "size": None,
+                "color": None,
+            }
+        ]
+
+    monkeypatch.setattr("comic_studio.main.recognize_image", fake_recognize)
+
+    # 1) Omitting persian_preprocess with language='fas' defaults to True automatically
+    res_auto = local_client.post(
+        f"/api/projects/{pid}/ocr",
+        json={"image_ids": [item["id"]], "engine": "tesseract", "language": "fas", "page_mode": "document"},
+    )
+    assert res_auto.status_code == 200
+    assert seen_calls[-1]["persian_preprocess"] is True
+
+    # 2) Explicit persian_preprocess=False is respected even when language='fas'
+    res_off = local_client.post(
+        f"/api/projects/{pid}/ocr",
+        json={
+            "image_ids": [item["id"]],
+            "engine": "tesseract",
+            "language": "fas",
+            "page_mode": "comic",
+            "persian_preprocess": False,
+        },
+    )
+    assert res_off.status_code == 200
+    assert seen_calls[-1]["persian_preprocess"] is False
+
+    # 3) Engine test endpoint also forwards persian_preprocess (defaults True for 'fas')
+    res_test = local_client.post(
+        "/api/engines/tesseract/test",
+        json={"project_id": pid, "image_id": item["id"], "language": "fas", "page_mode": "comic"},
+    )
+    assert res_test.status_code == 200
+    assert seen_calls[-1]["persian_preprocess"] is True
+
+
+
+
+
+
+
+
+
+
+
 
 
 

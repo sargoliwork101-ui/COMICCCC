@@ -16,10 +16,25 @@
       return (image ? ['https:', 'http:'] : ['https:', 'http:', 'mailto:', 'tel:']).includes(parsed.protocol) ? parsed.href : '';
     } catch { return ''; }
   }
+  const ALLOWED_FONTS = new Set([
+    'vazirmatn', 'tahoma', 'segoe ui', 'arial', 'arial black',
+    'times new roman', 'georgia', 'impact', 'comic sans ms', 'courier new',
+    'sans-serif', 'serif', 'monospace', 'cursive',
+  ]);
+  function safeFontFamily(value) {
+    const raw = String(value || '').trim();
+    if (!raw || /url\s*\(|expression\s*\(|[;{}<>\\]/i.test(raw)) return '';
+    const parts = raw.split(',').map((part) => part.trim().replace(/^['"]+|['"]+$/g, '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const valid = parts.filter((part) => ALLOWED_FONTS.has(part.toLowerCase()));
+    if (!valid.length) return '';
+    return valid.map((part) => (/\s/.test(part) ? `'${part}'` : part)).join(', ');
+  }
   function safeStyle(node) {
     const s = node.style; if (!s) return '';
     const out = []; const size = parseFloat(s.fontSize);
     if (Number.isFinite(size) && /px$/i.test(s.fontSize)) out.push(`font-size:${Math.max(8, Math.min(160, size))}px`);
+    const ff = safeFontFamily(s.fontFamily || node.getAttribute?.('data-font') || '');
+    if (ff) out.push(`font-family:${ff}`);
     const color = s.color;
     if (/^#[0-9a-f]{6}$/i.test(color)) out.push(`color:${color}`);
     else { const rgb = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i.exec(color); if (rgb && rgb.slice(1).every((x) => +x <= 255)) out.push(`color:#${rgb.slice(1).map((x) => (+x).toString(16).padStart(2, '0')).join('')}`); }

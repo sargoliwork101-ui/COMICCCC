@@ -6,12 +6,14 @@ import csv
 import importlib.util
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,10 +21,12 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageOps
 
-from .activity import emit
+from .activity import JobCancelledError, emit, is_job_cancelled
+from .persian_ocr_post import SINGLE_FA_LETTERS, is_known_persian_word, postprocess_persian_ocr_text
 from .ocr_managed import (
     ISOLATED_ENGINE_SPECS,
     IsolatedOcrEngine,
+    _kill_process_tree,
     _remove_path_safely,
     acknowledge_engine_update,
     check_remote_updates,
@@ -52,7 +56,14 @@ from .ocr_managed import (
     trim_process_memory,
     update_manifest_entry,
 )
-from .paths import models_dir
+from .paths import (
+    bundled_models_dir,
+    custom_site_packages_dir,
+    ensure_custom_site_packages_on_path,
+    is_custom_data_dir_active,
+    models_dir,
+)
+from .table_ocr import TableReadout, recognize_tables
 
 # Optional bright-white-text fallback. The original OCR path always runs first.
 EXTRA_PREPROCESS_SCALE = 3
@@ -60,6 +71,12 @@ EXTRA_PREPROCESS_THRESHOLD = 200
 EXTRA_PREPROCESS_MIN_CONFIDENCE = 0.55
 EXTRA_PREPROCESS_MIN_CHARS = 3
 EXTRA_PREPROCESS_ENABLED = True
+# RapidOCR's text detector resizes every input so that its SHORT side reaches 736px
+# (limit_type="min").  A wide, short bubble/container crop was therefore blown up to a
+# multi-megapixel canvas, so reading one bubble could cost more than reading the whole
+# page.  Crop level passes switch the detector to a "max" limit instead.
+DET_SHORT_SIDE_LIMIT = 736
+CROP_DET_MAX_SIDE = 1280
 # Optional comic-bubble fallback. These thresholds are intentionally easy to tune.
 BUBBLE_PREPROCESS_ENABLED = True
 BUBBLE_DARK_THRESHOLD = 110
@@ -78,6 +95,98 @@ _INSTALL_LOCK = threading.Lock()
 _ORIG_SUBPROCESS_RUN = subprocess.run
 _ORIG_INSTALL_TESSERACT = install_tesseract_runtime
 _STANDARD_CANCEL_EVENT = threading.Event()
+_ACTIVE_OCR_PROCS_LOCK = threading.Lock()
+_ACTIVE_OCR_PROCS: set[subprocess.Popen[Any]] = set()
+_KILLED_OCR_PROCS: set[int] = set()
+
+
+@contextlib.contextmanager
+def _install_lock(timeout: float = 6.0):
+    """Take the shared install lock, or fail fast with a readable message.
+
+    The lock is held while a model is downloaded or removed, which can take
+    minutes.  A second request used to wait for it in silence, so the app
+    looked frozen and the user had to restart it.  Now the wait is short and
+    the caller gets a clear Persian explanation instead of a silent hang.
+    """
+    if not _INSTALL_LOCK.acquire(timeout=max(0.0, float(timeout))):
+        raise OcrError(
+            "عملیات آماده‌سازی مدل دیگری در همین لحظه در حال اجراست؛ "
+            "کمی صبر کنید و دوباره تلاش کنید."
+        )
+    try:
+        yield
+    finally:
+        _INSTALL_LOCK.release()
+
+
+_ENGINE_IDLE_TIMEOUT_SECONDS = 300.0
+
+
+class _IdleReleaser:
+    """Release an engine's weights after a period of inactivity.
+
+    The isolated engines already unload themselves a few minutes after the
+    last use.  The built-in engines (RapidOCR / EasyOCR) kept their ONNX and
+    PyTorch weights in RAM forever, so a weak machine stayed busy - and slow -
+    even while the user only browsed the app.  The same idle release is
+    applied here so the memory comes back automatically.
+    """
+
+    def __init__(self, owner: Any, timeout: float = _ENGINE_IDLE_TIMEOUT_SECONDS) -> None:
+        self._owner = owner
+        self._timeout = float(timeout)
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
+        self._last_used = time.monotonic()
+        self._busy = 0
+
+    def cancel(self) -> None:
+        with self._lock:
+            timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def enter(self) -> None:
+        with self._lock:
+            self._busy += 1
+            self._last_used = time.monotonic()
+
+    def leave(self) -> None:
+        with self._lock:
+            self._busy = max(0, self._busy - 1)
+            self._last_used = time.monotonic()
+        self.arm()
+
+    def arm(self) -> None:
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            if self._timeout <= 0 or self._busy > 0:
+                return
+            timer = threading.Timer(self._timeout, self._reap)
+            timer.daemon = True
+            self._timer = timer
+        timer.start()
+
+    def _reap(self) -> None:
+        with self._lock:
+            self._timer = None
+            if self._busy > 0:
+                return
+            if time.monotonic() - self._last_used + 0.05 < self._timeout:
+                return
+        try:
+            self._owner.unload()
+        except Exception:
+            return
+        trim_process_memory()
+
+
+def _check_ocr_cancelled() -> None:
+    if is_job_cancelled():
+        raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
 
 
 def _call_install_tesseract_runtime() -> str:
@@ -167,8 +276,10 @@ def _run_standard_pip_streaming(
     stall_timeout: float = 180.0,
     start_p: float = 0.18,
     end_p: float = 0.66,
+    progress_cb: Callable[[str, float], None] | None = None,
+    label: str = "OCR",
 ) -> subprocess.CompletedProcess[str]:
-    from .ocr_managed import _dir_bytes_fast, _kill_process_tree
+    from .ocr_managed import _dir_bytes_fast, _kill_process_tree, _parse_size_to_bytes
 
     proc = subprocess.Popen(
         cmd,
@@ -188,22 +299,41 @@ def _run_standard_pip_streaming(
     stalled = [False]
     done = threading.Event()
     cur_p = [start_p]
-    span = max(0.05, end_p - start_p)
+    span = max(0.03, end_p - start_p)
+    has_torch = any("torch" in str(part).lower() for part in cmd)
+    has_ct2 = any("ctranslate2" in str(part).lower() for part in cmd)
+    expected_bytes = [float((2550 if has_torch else (45 if has_ct2 else 120)) * (1024 ** 2))]
+    announced_bytes = [0.0]
+    completed_wheel_bytes = [0.0]
+    active_wheel_bytes = [0.0]
+    collect_steps = [0]
+
+    def _is_cancelled() -> bool:
+        return cancel_event.is_set() or _STANDARD_CANCEL_EVENT.is_set()
+
+    def _emit_std(msg: str, ratio: float) -> None:
+        clamped = max(0.0, min(0.98, ratio))
+        cur_p[0] = max(cur_p[0], round(start_p + span * clamped, 3))
+        emit(msg, progress=cur_p[0])
+        if progress_cb is not None:
+            progress_cb(msg, cur_p[0])
 
     def _watchdog() -> None:
         while not done.wait(1.0):
-            if cancel_event.is_set():
+            if _is_cancelled():
                 _kill_process_tree(proc)
                 return
             now = time.monotonic()
-            if now - last_activity_at[0] >= 3.0:
+            if now - last_activity_at[0] >= 1.5:
                 b_now = _dir_bytes_fast(cdir)
                 if b_now > last_bytes[0]:
                     last_bytes[0] = b_now
                     last_activity_at[0] = now
-                    mb = max(0.1, (b_now - base_bytes) / (1024 * 1024))
-                    cur_p[0] = min(end_p - 0.02, cur_p[0] + span * 0.03)
-                    emit(f"در حال دریافت بسته‌های OCR ({mb:.1f} مگابایت)…", progress=round(cur_p[0], 3))
+                    gained_b = max(0.0, float(b_now - base_bytes))
+                    mb = max(0.1, gained_b / (1024 * 1024))
+                    denom = max(expected_bytes[0], announced_bytes[0] * 1.05, gained_b * 1.06)
+                    dl_ratio = min(1.0, max(gained_b, completed_wheel_bytes[0]) / max(1.0, denom))
+                    _emit_std(f"در حال دریافت بسته‌های {label} ({mb:.1f} مگابایت)…", 0.06 + 0.80 * dl_ratio)
                     continue
             if now - last_activity_at[0] >= stall_timeout:
                 stalled[0] = True
@@ -216,7 +346,7 @@ def _run_standard_pip_streaming(
         assert proc.stdout is not None
         for raw_line in proc.stdout:
             last_activity_at[0] = time.monotonic()
-            if cancel_event.is_set():
+            if _is_cancelled():
                 _kill_process_tree(proc)
                 return subprocess.CompletedProcess(cmd, 130, "", "Cancelled by user")
             line = raw_line.strip()
@@ -226,12 +356,24 @@ def _run_standard_pip_streaming(
             if len(tail) > 120:
                 tail.pop(0)
             low = line.lower()
-            if low.startswith("downloading ") or low.startswith("collecting "):
-                cur_p[0] = min(end_p - 0.03, cur_p[0] + span * 0.06)
-                emit(f"دریافت بسته: {line[:95]}", progress=round(cur_p[0], 3))
+            if low.startswith("downloading "):
+                completed_wheel_bytes[0] += active_wheel_bytes[0]
+                size_m = re.search(r"\(([\d.]+\s*[kKmMgG][bB])\)", line)
+                active_wheel_bytes[0] = _parse_size_to_bytes(size_m.group(1)) if size_m else 0.0
+                announced_bytes[0] += active_wheel_bytes[0]
+                expected_bytes[0] = max(expected_bytes[0], announced_bytes[0] * 1.05)
+                b_now = _dir_bytes_fast(cdir)
+                last_bytes[0] = max(last_bytes[0], b_now)
+                gained_b = max(0.0, float(b_now - base_bytes), completed_wheel_bytes[0])
+                dl_ratio = min(1.0, gained_b / max(1.0, expected_bytes[0]))
+                _emit_std(f"دریافت بسته: {line[:95]}", 0.06 + 0.80 * dl_ratio)
+            elif low.startswith("collecting "):
+                collect_steps[0] += 1
+                _emit_std(f"بررسی بسته: {line[:95]}", min(0.06, collect_steps[0] * 0.008))
             elif low.startswith("installing collected packages"):
-                cur_p[0] = max(cur_p[0], start_p + span * 0.85)
-                emit("در حال نصب بسته‌های دریافت‌شده روی سیستم…", progress=round(cur_p[0], 3))
+                completed_wheel_bytes[0] += active_wheel_bytes[0]
+                active_wheel_bytes[0] = 0.0
+                _emit_std(f"در حال نصب بسته‌های {label} روی سیستم…", 0.90)
         rc = proc.wait(timeout=30)
     except Exception:
         _kill_process_tree(proc)
@@ -241,7 +383,7 @@ def _run_standard_pip_streaming(
         watcher.join(timeout=2.0)
 
     joined = "\n".join(tail)
-    if cancel_event.is_set():
+    if _is_cancelled():
         return subprocess.CompletedProcess(cmd, 130, "", "Cancelled by user")
     if stalled[0]:
         joined = (joined + f"\nOperation timed out during pip installation (stalled >{int(stall_timeout)}s).").strip()
@@ -249,11 +391,71 @@ def _run_standard_pip_streaming(
     return subprocess.CompletedProcess(cmd, rc, joined if rc == 0 else "", "" if rc == 0 else joined)
 
 
-def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
+def _resolve_pip_python_executable(*, match_current_minor: bool = False) -> str:
+    """Return a real Python interpreter for `-m pip` / `-m venv`, avoiding PyInstaller `.exe` self-recursion."""
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    frozen_exe = os.path.abspath(sys.executable)
+    cur_major, cur_minor = sys.version_info[:2]
+    candidates: list[str] = []
+    for name in (f"python{cur_major}.{cur_minor}", "python", "python3"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    if os.name == "nt":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        prog_files = os.environ.get("ProgramFiles", "")
+        ordered_vers = [f"Python{cur_major}{cur_minor}", "Python313", "Python312", "Python311"]
+        for base in (local_app, prog_files):
+            if not base:
+                continue
+            for ver in dict.fromkeys(ordered_vers):
+                candidates.append(os.path.join(base, "Programs", "Python", ver, "python.exe"))
+                candidates.append(os.path.join(base, ver, "python.exe"))
+    check_expr = (
+        f"import sys; raise SystemExit(0 if sys.version_info[:2] == ({cur_major}, {cur_minor}) else 1)"
+        if match_current_minor
+        else "import sys; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 14) else 1)"
+    )
+    seen: set[str] = set()
+    for cand in candidates:
+        if not cand or "windowsapps" in cand.lower():
+            continue
+        abs_cand = os.path.abspath(cand)
+        key = abs_cand.lower() if os.name == "nt" else abs_cand
+        if key in seen or abs_cand == frozen_exe or not os.path.isfile(abs_cand):
+            continue
+        seen.add(key)
+        try:
+            probe = _ORIG_SUBPROCESS_RUN(
+                [abs_cand, "-c", check_expr],
+                capture_output=True, text=True, timeout=10, check=False, **_win_subprocess_kwargs(),
+            )
+            if probe.returncode == 0:
+                return abs_cand
+        except Exception:
+            continue
+    ver_hint = f"Python {cur_major}.{cur_minor}" if match_current_minor else "Python 3.11 تا 3.13"
+    raise OcrError(
+        f"در نسخهٔ نصبی آفلاین (.exe)، برای نصب بسته‌های پایتونی جدید نیاز به نصب بودن {ver_hint} روی ویندوز یا استفاده از پوشهٔ start_windows.bat است."
+    )
+
+
+def install_packages(
+    packages: list[str],
+    *,
+    upgrade: bool = False,
+    cancel_event: threading.Event | None = None,
+    progress_cb: Callable[[str, float], None] | None = None,
+    start_p: float = 0.18,
+    end_p: float = 0.66,
+    label: str = "OCR",
+) -> None:
     """Install a whitelisted runtime only after an explicit user preparation click."""
     if not packages:
         return
-    if _STANDARD_CANCEL_EVENT.is_set():
+    eff_cancel = cancel_event if cancel_event is not None else _STANDARD_CANCEL_EVENT
+    if eff_cancel.is_set() or _STANDARD_CANCEL_EVENT.is_set():
         raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
     from .ocr_managed import (
         PYPI_FALLBACK_MIRRORS,
@@ -263,13 +465,19 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
         sync_local_wheelhouse,
     )
 
+    py_exe = _resolve_pip_python_executable(match_current_minor=True)
     cdir = pip_cache_dir()
     wh = sync_local_wheelhouse()
+    target_site: Path | None = None
+    if is_custom_data_dir_active() or getattr(sys, "frozen", False):
+        target_site = custom_site_packages_dir()
+        with contextlib.suppress(OSError):
+            target_site.mkdir(parents=True, exist_ok=True)
     has_custom_index = bool(os.environ.get("PIP_INDEX_URL")) or ("--index-url" in packages) or ("-i" in packages)
 
     def _build_cmd(mirror_url: str | None = None) -> list[str]:
         cmd = [
-            sys.executable, "-m", "pip", "install",
+            py_exe, "-m", "pip", "install",
             "--timeout", "120",
             "--retries", "10",
             "--prefer-binary",
@@ -282,27 +490,38 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
             pass
         if mirror_url:
             cmd.extend(["--index-url", mirror_url])
-        if upgrade:
+        if target_site is not None:
+            cmd.extend(["--target", str(target_site), "--upgrade"])
+        elif upgrade:
             cmd.append("--upgrade")
         cmd.extend(packages)
         return cmd
 
     action_label = "به‌روزرسانی" if upgrade else "نصب"
-    emit(f"{action_label} بسته‌های OCR آغاز شد: {', '.join(packages)}", progress=0.18)
-    attempts: list[tuple[str | None, str | None]] = [(None, None), (None, "تلاش مجدد برای دریافت بسته‌های OCR از کش محلی…")]
+    start_msg = f"{action_label} بسته‌های {label} آغاز شد: {', '.join(packages)}"
+    emit(start_msg, progress=start_p)
+    if progress_cb is not None:
+        progress_cb(start_msg, start_p)
+    attempts: list[tuple[str | None, str | None]] = [
+        (None, None),
+        (None, f"تلاش مجدد برای دریافت بسته‌های {label} از کش محلی…"),
+    ]
     if not has_custom_index:
         for mirror_name, mirror_url in PYPI_FALLBACK_MIRRORS:
-            attempts.append((mirror_url, f"ادامهٔ نصب بسته‌های OCR از میرور جایگزین ({mirror_name})…"))
+            attempts.append((mirror_url, f"ادامهٔ نصب بسته‌های {label} از میرور جایگزین ({mirror_name})…"))
 
     result: subprocess.CompletedProcess[str] | None = None
     try:
-        with _INSTALL_LOCK:
+        with _install_lock():
             for idx, (mirror_url, notice) in enumerate(attempts):
-                if _STANDARD_CANCEL_EVENT.is_set():
+                if eff_cancel.is_set() or _STANDARD_CANCEL_EVENT.is_set():
                     raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
                 if idx > 0:
                     if notice:
-                        emit(notice, "warning", progress=0.25)
+                        retry_p = round(start_p + (end_p - start_p) * 0.15, 3)
+                        emit(notice, "warning", progress=retry_p)
+                        if progress_cb is not None:
+                            progress_cb(notice, retry_p)
                     time.sleep(1.0)
                     wh = sync_local_wheelhouse()
                 built_cmd = _build_cmd(mirror_url)
@@ -316,11 +535,18 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
                         built_cmd,
                         env=clean_pip_env(),
                         cdir=cdir,
-                        cancel_event=_STANDARD_CANCEL_EVENT,
+                        cancel_event=eff_cancel,
+                        start_p=start_p,
+                        end_p=end_p,
+                        progress_cb=progress_cb,
+                        label=label,
                     )
-                if _STANDARD_CANCEL_EVENT.is_set() or (result is not None and result.returncode == 130):
+                if eff_cancel.is_set() or _STANDARD_CANCEL_EVENT.is_set() or (result is not None and result.returncode == 130):
                     raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
                 if result.returncode == 0:
+                    if target_site is not None:
+                        ensure_custom_site_packages_on_path()
+                    importlib.invalidate_caches()
                     sync_local_wheelhouse()
                     break
                 combined_err = f"{result.stderr or ''}\n{result.stdout or ''}"
@@ -329,7 +555,7 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
     except OcrError:
         raise
     except Exception as exc:
-        emit(f"نصب بسته‌های OCR ناموفق بود: {exc}", "error")
+        emit(f"نصب بسته‌های {label} ناموفق بود: {exc}", "error")
         raise OcrError(f"Could not install the OCR runtime: {exc}") from exc
     assert result is not None
     if result.returncode:
@@ -340,10 +566,13 @@ def install_packages(packages: list[str], *, upgrade: bool = False) -> None:
         if "WinError 5" in details or "Access is denied" in details:
             details += ("\nComic OCR Studio: Windows denied write access. Close the app, start start_windows_admin.bat, "
                         "approve the UAC prompt, and retry the explicit OCR installation.")
-        emit(f"نصب بسته‌های OCR ناموفق بود: {details}", "error")
+        emit(f"نصب بسته‌های {label} ناموفق بود: {details}", "error")
         raise OcrError(f"OCR runtime installation failed: {details}")
     importlib.invalidate_caches()
-    emit("نصب بسته‌های OCR تمام شد", "success", progress=0.68)
+    done_p = round(min(0.99, end_p + 0.02), 3)
+    emit(f"نصب بسته‌های {label} تمام شد", "success", progress=done_p)
+    if progress_cb is not None:
+        progress_cb(f"نصب بسته‌های {label} تمام شد", done_p)
 
 
 def _lines_from_rapid(result: Any) -> list[OcrLine]:
@@ -424,12 +653,130 @@ def _detect_onnx_acceleration() -> dict[str, Any]:
     return {"mode": "cpu", "gpu": False, "params": {}}
 
 
+_PERSIAN_ZWNJ_AL_SHIELD = "\u077e"
+_PERSIAN_STRONG_RTL_RE = re.compile(r"[\u0590-\u065f\u066a-\u06ef\u06fa-\u08ff\ufb1d-\ufdff\ufe70-\ufeff]")
+_PERSIAN_VISUAL_LTR_ISLAND_RE = re.compile(
+    r"[A-Za-z][A-Za-z0-9._:/+\-#%&*=]*(?:[ \t,;:\-]+[A-Za-z0-9._:/+\-#%&*=]+)*"
+    r"|[\d\u0660-\u0669\u06f0-\u06f9]+(?:[.,:/\-][\d\u0660-\u0669\u06f0-\u06f9]+)*%?"
+)
+_PERSIAN_BRACKET_MIRROR = str.maketrans("()[]{}<>«»", ")(][}{><»«")
+_BIDI_CTX_LOCAL = threading.local()
+
+
+def _pure_persian_visual_to_logical(text: str) -> str:
+    """Pure-Python RTL visual-to-logical reordering (`base_dir='R'`) that preserves ZWNJ (`\\u200c`),
+    multi-word embedded English phrases (`Toe Fillet`, `Figure 8-35`, `IPC-610`), ASCII/Persian numbers
+    (`۱۲۳`, `۳.۱۴`, `2026`), and bracket mirroring (`()[]{}<>«»`)."""
+    if not text or not _PERSIAN_STRONG_RTL_RE.search(text):
+        return text
+    spans: list[tuple[bool, str]] = []
+    pos = 0
+    for match in _PERSIAN_VISUAL_LTR_ISLAND_RE.finditer(text):
+        if match.start() > pos:
+            spans.append((False, text[pos:match.start()]))
+        spans.append((True, match.group(0)))
+        pos = match.end()
+    if pos < len(text):
+        spans.append((False, text[pos:]))
+    out: list[str] = []
+    for is_ltr, seg in reversed(spans):
+        out.append(seg if is_ltr else seg[::-1].translate(_PERSIAN_BRACKET_MIRROR))
+    return "".join(out)
+
+
+def _persian_visual_to_logical(text_or_bytes: str | bytes, *args: Any, **kwargs: Any) -> str | bytes:
+    """Convert CTC visual-order RTL text into logical Unicode order with explicit `base_dir='R'`
+    while protecting ZWNJ (`\\u200c`) from `python-bidi`'s control-character stripping."""
+    is_bytes = isinstance(text_or_bytes, bytes)
+    encoding = str(kwargs.get("encoding", "utf-8"))
+    text = text_or_bytes.decode(encoding, errors="replace") if is_bytes else str(text_or_bytes)
+    if not text or not _PERSIAN_STRONG_RTL_RE.search(text):
+        return text.encode(encoding) if is_bytes else text
+    orig_gd = getattr(_BIDI_CTX_LOCAL, "orig_get_display", None)
+    if orig_gd is None:
+        try:
+            from bidi.algorithm import get_display as _imported_gd
+            if not getattr(_imported_gd, "_is_comic_fallback_shim", False) and not getattr(_imported_gd, "_is_comic_persian_wrapper", False):
+                orig_gd = _imported_gd
+        except Exception:
+            orig_gd = None
+    if orig_gd is not None:
+        try:
+            shielded = text.replace("\u200c", _PERSIAN_ZWNJ_AL_SHIELD)
+            reordered = orig_gd(shielded, base_dir="R")
+            if isinstance(reordered, bytes):
+                reordered = reordered.decode(encoding, errors="replace")
+            out = str(reordered).replace(_PERSIAN_ZWNJ_AL_SHIELD, "\u200c")
+            return out.encode(encoding) if is_bytes else out
+        except Exception:
+            pass
+    out = _pure_persian_visual_to_logical(text)
+    return out.encode(encoding) if is_bytes else out
+
+
+_persian_visual_to_logical._is_comic_persian_wrapper = True  # type: ignore[attr-defined]
+
+
+@contextlib.contextmanager
+def _persian_ctc_bidi_context(language: str):
+    """Ensure RapidOCR and EasyOCR use `base_dir='R'` + ZWNJ preservation when decoding Persian/Arabic CTC lines."""
+    if language not in {"fas", "ara"}:
+        yield
+        return
+    saved_bidi_gd = None
+    saved_easy_gd = None
+    saved_rapid_fns: list[tuple[Any, str, Any]] = []
+    bidi_alg_mod = None
+    easy_mod = None
+    try:
+        import bidi.algorithm as _ba
+        bidi_alg_mod = _ba
+        saved_bidi_gd = getattr(_ba, "get_display", None)
+        if saved_bidi_gd is not None and not getattr(saved_bidi_gd, "_is_comic_persian_wrapper", False):
+            _BIDI_CTX_LOCAL.orig_get_display = saved_bidi_gd
+            _ba.get_display = _persian_visual_to_logical  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        easy_mod = sys.modules.get("easyocr.easyocr")
+        if easy_mod is not None and hasattr(easy_mod, "get_display"):
+            saved_easy_gd = getattr(easy_mod, "get_display")
+            if not getattr(saved_easy_gd, "_is_comic_persian_wrapper", False):
+                if getattr(_BIDI_CTX_LOCAL, "orig_get_display", None) is None:
+                    _BIDI_CTX_LOCAL.orig_get_display = saved_easy_gd
+                setattr(easy_mod, "get_display", _persian_visual_to_logical)
+    except Exception:
+        pass
+    for mod_name in ("rapidocr.utils.utils", "rapidocr.ch_ppocr_rec.main"):
+        try:
+            rmod = sys.modules.get(mod_name)
+            if rmod is not None and hasattr(rmod, "reorder_bidi_for_display"):
+                orig_fn = getattr(rmod, "reorder_bidi_for_display")
+                if not getattr(orig_fn, "_is_comic_persian_wrapper", False):
+                    saved_rapid_fns.append((rmod, "reorder_bidi_for_display", orig_fn))
+                    setattr(rmod, "reorder_bidi_for_display", _persian_visual_to_logical)
+        except Exception:
+            pass
+    try:
+        yield
+    finally:
+        for rmod, attr_name, orig_fn in reversed(saved_rapid_fns):
+            with contextlib.suppress(Exception):
+                setattr(rmod, attr_name, orig_fn)
+        if bidi_alg_mod is not None and saved_bidi_gd is not None:
+            with contextlib.suppress(Exception):
+                bidi_alg_mod.get_display = saved_bidi_gd  # type: ignore[attr-defined]
+        if easy_mod is not None and saved_easy_gd is not None:
+            with contextlib.suppress(Exception):
+                setattr(easy_mod, "get_display", saved_easy_gd)
+        _BIDI_CTX_LOCAL.orig_get_display = None
+
+
 def _install_fallback_bidi_shim() -> None:
     """Provide a pure-Python visual-to-logical RTL `bidi.algorithm.get_display` fallback
     only if `python-bidi` could not be imported (e.g. offline/air-gapped runtime), so
     `rapidocr`'s `validate_rtl_dependency()` never aborts Persian (`fas` -> `arabic`) OCR."""
     import types
-    import unicodedata
 
     try:
         from bidi.algorithm import get_display as _gd  # noqa: F401
@@ -445,32 +792,16 @@ def _install_fallback_bidi_shim() -> None:
     except Exception:
         pass
 
-    _MIRROR = str.maketrans("()[]{}<>«»", ")(][}{><»«")
-
     def _fallback_get_display(text_or_bytes: str | bytes, *args: Any, **kwargs: Any) -> str | bytes:
         is_bytes = isinstance(text_or_bytes, bytes)
         encoding = str(kwargs.get("encoding", "utf-8"))
         text = text_or_bytes.decode(encoding, errors="replace") if is_bytes else str(text_or_bytes)
         if not text:
             return b"" if is_bytes else ""
-        has_rtl = any(unicodedata.bidirectional(ch) in {"R", "AL", "AN"} for ch in text)
-        if not has_rtl:
-            return text.encode(encoding) if is_bytes else text
-        # Reverse visual-order RTL line while keeping contiguous LTR/digit runs forward.
-        tokens: list[tuple[bool, str]] = []
-        for ch in text:
-            bd = unicodedata.bidirectional(ch)
-            is_ltr_tok = bd in {"L", "EN", "ES", "ET"} or ch.isascii() and ch.isalnum()
-            if tokens and tokens[-1][0] == is_ltr_tok:
-                tokens[-1] = (is_ltr_tok, tokens[-1][1] + ch)
-            else:
-                tokens.append((is_ltr_tok, ch))
-        rebuilt: list[str] = []
-        for is_ltr_tok, seg in reversed(tokens):
-            rebuilt.append(seg if is_ltr_tok else seg[::-1].translate(_MIRROR))
-        out = "".join(rebuilt)
+        out = _pure_persian_visual_to_logical(text)
         return out.encode(encoding) if is_bytes else out
 
+    _fallback_get_display._is_comic_fallback_shim = True  # type: ignore[attr-defined]
     bidi_pkg = sys.modules.get("bidi") or types.ModuleType("bidi")
     alg_mod = types.ModuleType("bidi.algorithm")
     bidi_pkg.get_display = _fallback_get_display  # type: ignore[attr-defined]
@@ -502,31 +833,34 @@ def _stream_download_with_mirrors(
         headers = {"User-Agent": "Comic-OCR-Studio", **extra_headers}
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=180) as resp, part_path.open("wb") as out:
+            with urllib.request.urlopen(req, timeout=30) as resp, part_path.open("wb") as out:
                 hdrs = getattr(resp, "headers", None)
                 raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
                 expected = int(raw_len) if raw_len and str(raw_len).isdigit() else 12 * 1024 * 1024
                 total = 0
+                last_emit_total = 0
                 while True:
-                    if _STANDARD_CANCEL_EVENT.is_set():
+                    if _STANDARD_CANCEL_EVENT.is_set() or is_job_cancelled():
                         raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
-                    chunk = resp.read(512 * 1024)
+                    chunk = resp.read(64 * 1024)
                     if not chunk:
                         break
                     total += len(chunk)
                     if total > max_bytes:
                         raise OcrError(f"Downloaded file {dest_path.name} exceeded safe size limit.")
                     out.write(chunk)
-                    ratio = min(1.0, total / max(1, expected))
-                    emit(
-                        f"دانلود {label}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
-                        progress=round(start_p + span_p * ratio, 3),
-                    )
+                    if total - last_emit_total >= 256 * 1024 or total >= expected:
+                        last_emit_total = total
+                        ratio = min(1.0, total / max(1, expected))
+                        emit(
+                            f"دانلود {label}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
+                            progress=round(start_p + span_p * ratio, 3),
+                        )
             if part_path.stat().st_size < min_bytes:
                 raise OcrError(f"Downloaded file {dest_path.name} is incomplete or empty.")
             os.replace(part_path, dest_path)
             return dest_path
-        except OcrError:
+        except (OcrError, JobCancelledError):
             part_path.unlink(missing_ok=True)
             raise
         except Exception as exc:
@@ -536,7 +870,37 @@ def _stream_download_with_mirrors(
     raise OcrError(f"Download failed for {label}: {last_exc}") from last_exc
 
 
+def _apply_det_input_cap(engine: Any, det_max_side: int | None) -> None:
+    """Bound the size of the ONNX text-detection canvas of a RapidOCR instance.
+
+    RapidOCR's detector resizes an input so that its short side reaches 736px
+    (``limit_type="min"``).  A wide, short bubble or table-cell crop is therefore
+    blown up to a multi-megapixel canvas, which made a single crop pass cost more
+    than reading the whole page.  Crop level passes switch the detector to a "max"
+    limit so the canvas never grows past ``det_max_side`` pixels on the long side.
+    The recognised text still comes from the full resolution image, so the read
+    result does not change.
+    """
+    det = getattr(engine, "text_det", None)
+    cfg = getattr(engine, "cfg", None)
+    det_cfg = getattr(cfg, "Det", None) if cfg is not None else None
+    if det_max_side:
+        limit_type, limit_len = "max", max(64, int(det_max_side))
+    else:
+        limit_type, limit_len = "min", DET_SHORT_SIDE_LIMIT
+    if det is not None:
+        with contextlib.suppress(Exception):
+            det.limit_type = limit_type
+            det.limit_side_len = limit_len
+    if det_cfg is not None:
+        with contextlib.suppress(Exception):
+            det_cfg.limit_type = limit_type
+            det_cfg.limit_side_len = limit_len
+
+
 class RapidEngine:
+    # The engine understands a bounded detection canvas (see _apply_det_input_cap).
+    supports_det_cap = True
     def __init__(self, engine_id: str, version: str) -> None:
         self.id = engine_id
         self.version = version
@@ -550,6 +914,8 @@ class RapidEngine:
         self._force_cpu: bool = False
         self._batch_slots: int = 1
         self._batch_threads: int | None = None
+        # Weights are released automatically after a few idle minutes.
+        self._idle = _IdleReleaser(self)
 
     @property
     def runtime_installed(self) -> bool:
@@ -570,7 +936,10 @@ class RapidEngine:
                 return ["eng", "jpn", "chi_sim"] if ready else []
             return [
                 language for language in LANGUAGES
-                if all((self._model_dir() / name).is_file() for name in self._expected_models(language))
+                if any(
+                    all((cand / name).is_file() for name in self._expected_models(language))
+                    for cand in self._candidate_v5_dirs()
+                )
             ]
         except Exception:
             return []
@@ -585,6 +954,7 @@ class RapidEngine:
             return bool(self._instances or any(self._idle_pool.values()) or any(self._created_counts.values()))
 
     def unload(self) -> None:
+        self._idle.cancel()
         with self._pool_cond:
             self._instances.clear()
             self._idle_pool.clear()
@@ -596,7 +966,7 @@ class RapidEngine:
             raise OcrError("موتور پایهٔ پیش‌فرض برنامه (PP-OCRv6 Small) همراه محیط اصلی است و نیازی به حذف ندارد.")
         self.cancel_install()
         self.unload()
-        with _INSTALL_LOCK:
+        with _install_lock():
             freed = _remove_path_safely(self._model_dir())
             remove_manifest_entry(self.id)
             remove_cached_engine_update(self.id)
@@ -636,7 +1006,32 @@ class RapidEngine:
     def _model_dir(self) -> Path:
         return models_dir() / "rapidocr"
 
+    def _candidate_v5_dirs(self) -> list[Path]:
+        dirs = [self._model_dir()]
+        bundled = bundled_models_dir()
+        if bundled is not None:
+            b_dir = bundled / "rapidocr"
+            if b_dir.is_dir():
+                dirs.append(b_dir)
+        return dirs
+
+    def _effective_v5_dir(self, language: str) -> Path:
+        expected = self._expected_models(language)
+        cands = self._candidate_v5_dirs()
+        for cand in cands:
+            if all((cand / name).is_file() and (cand / name).stat().st_size > 0 for name in expected):
+                return cand
+        for cand in cands:
+            if all((cand / name).is_file() for name in expected):
+                return cand
+        return self._model_dir()
+
     def _v6_model_dir(self) -> Path:
+        bundled = bundled_models_dir()
+        if bundled is not None:
+            b_v6 = bundled / "rapidocr-v6"
+            if all((b_v6 / name).is_file() and (b_v6 / name).stat().st_size > 0 for name in ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx")):
+                return b_v6
         import rapidocr
         return Path(rapidocr.__file__).parent / "models"
 
@@ -682,9 +1077,18 @@ class RapidEngine:
             "Det.lang_type": det_lang, "Rec.lang_type": rec_lang,
             "Det.engine_type": EngineType.ONNXRUNTIME, "Rec.engine_type": EngineType.ONNXRUNTIME,
         }
+        if language == "fas":
+            # Disable 0°/180° orientation classifier (trained on CJK/Latin) so cursive RTL Persian lines
+            # are never flipped upside-down, lower Global.text_score from 0.50 -> 0.22 so stylized/mixed
+            # Persian lines are not silently discarded before min_confidence, and widen DBNet polygon unclip
+            # so گ sarkesh & upper/lower Persian dots stay inside the recognition crop.
+            params["Global.use_cls"] = False
+            params["Global.text_score"] = 0.22
+            params["Det.unclip_ratio"] = 2.2
+            params["Det.box_thresh"] = 0.38
         if self.version == "v5":
-            # Keep user-downloaded models outside the virtual environment.
-            params["Global.model_root_dir"] = str(self._model_dir())
+            # Keep user-downloaded models outside the virtual environment (or use bundled offline models).
+            params["Global.model_root_dir"] = str(self._effective_v5_dir(language))
 
         cores = cpu_core_count()
         intra = max(1, min(cores, int(self._batch_threads))) if self._batch_threads else cores
@@ -787,10 +1191,14 @@ class RapidEngine:
         if not self.runtime_installed:
             raise OcrError("RapidOCR is not installed. Click the explicit preparation button to install it.")
         if not allow_download:
-            root = self._model_dir() if self.version == "v5" else self._v6_model_dir()
+            root = self._effective_v5_dir(language) if self.version == "v5" else self._v6_model_dir()
             missing = [name for name in self._expected_models(language) if not (root / name).is_file() or (root / name).stat().st_size == 0]
             if missing:
-                raise OcrError(f"{self.id} model is not ready. Use the explicit model download button first.")
+                raise OcrError(
+                    f"مدل {self.id} برای زبان {language} آماده نیست. "
+                    "در پنجرهٔ «مدیریت مدل‌های OCR» روی «آماده‌سازی / دانلود خودکار» بزنید "
+                    "(برای دانلود اینترنت لازم است)."
+                )
 
     def _get(self, language: str, allow_download: bool = False):
         self._validate_ready(language, allow_download)
@@ -833,6 +1241,15 @@ class RapidEngine:
 
     @contextlib.contextmanager
     def _checkout(self, language: str):
+        self._idle.enter()
+        try:
+            with self._checkout_locked(language) as engine:
+                yield engine
+        finally:
+            self._idle.leave()
+
+    @contextlib.contextmanager
+    def _checkout_locked(self, language: str):
         # Ensure primary instance is initialized (honoring any test monkeypatch on `_get`).
         primary = self._get(language)
         if self._batch_slots <= 1 or self.using_gpu:
@@ -955,7 +1372,7 @@ class RapidEngine:
             self.unload()
             trim_process_memory()
 
-    def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+    def recognize(self, image: Image.Image, language: str, *, det_max_side: int | None = None) -> list[OcrLine]:
         rgb = _to_white_backed_rgb(image) if getattr(image, "mode", "RGB") != "RGB" else image
         try:
             arr = np.asarray(rgb)
@@ -964,37 +1381,122 @@ class RapidEngine:
                 rgb.close()
         need_cpu_retry = False
         force_cpu_before = self._force_cpu
-        with self._checkout(language) as engine:
-            used_gpu_engine = self.using_gpu or (not force_cpu_before and self._force_cpu)
-            infer_ctx = self._gpu_infer_lock if used_gpu_engine else contextlib.nullcontext()
-            try:
-                with infer_ctx:
-                    if used_gpu_engine and self._force_cpu:
+        fa_call_kwargs: dict[str, Any] = (
+            {"use_cls": False, "text_score": 0.22, "unclip_ratio": 2.2, "box_thresh": 0.38}
+            if language == "fas"
+            else {"use_cls": False}
+        )
+        with _persian_ctc_bidi_context(language):
+            with self._checkout(language) as engine:
+                _apply_det_input_cap(engine, det_max_side)
+                used_gpu_engine = self.using_gpu or (not force_cpu_before and self._force_cpu)
+                infer_ctx = self._gpu_infer_lock if used_gpu_engine else contextlib.nullcontext()
+                try:
+                    with infer_ctx:
+                        if used_gpu_engine and self._force_cpu:
+                            need_cpu_retry = True
+                        else:
+                            try:
+                                result = engine(arr, **fa_call_kwargs)
+                            except TypeError:
+                                try:
+                                    result = engine(arr, use_cls=False)
+                                except TypeError:
+                                    result = engine(arr)
+                except Exception as exc:
+                    if used_gpu_engine:
+                        # Automatic fallback to multi-core CPU if GPU provider fails at runtime (e.g. VRAM limit)
+                        with self._gpu_infer_lock:
+                            if not self._force_cpu:
+                                self._force_cpu = True
+                                self.unload()
                         need_cpu_retry = True
                     else:
+                        raise OcrError(f"OCR failed: {exc}") from exc
+            if need_cpu_retry:
+                with self._checkout(language) as cpu_engine:
+                    _apply_det_input_cap(cpu_engine, det_max_side)
+                    try:
+                        result = cpu_engine(arr, **fa_call_kwargs)
+                    except TypeError:
                         try:
-                            result = engine(arr, use_cls=False)
+                            result = cpu_engine(arr, use_cls=False)
                         except TypeError:
-                            result = engine(arr)
-            except Exception as exc:
-                if used_gpu_engine:
-                    # Automatic fallback to multi-core CPU if GPU provider fails at runtime (e.g. VRAM limit)
-                    with self._gpu_infer_lock:
-                        if not self._force_cpu:
-                            self._force_cpu = True
-                            self.unload()
-                    need_cpu_retry = True
-                else:
-                    raise OcrError(f"OCR failed: {exc}") from exc
-        if need_cpu_retry:
-            with self._checkout(language) as cpu_engine:
+                            result = cpu_engine(arr)
+                    except Exception as cpu_exc:
+                        raise OcrError(f"OCR failed: {cpu_exc}") from cpu_exc
+        lines = _lines_from_rapid(result)
+        if language == "fas":
+            lines = [
+                OcrLine(
+                    normalize_persian_ocr_text(line.text),
+                    line.confidence,
+                    line.polygon,
+                    bold=bool(getattr(line, "bold", False)),
+                    italic=bool(getattr(line, "italic", False)),
+                    role=getattr(line, "role", None),
+                )
+                for line in lines
+                if normalize_persian_ocr_text(line.text)
+            ]
+            lines = _coalesce_rtl_ocr_lines(lines, arr)
+        return lines
+
+    def recognize_line_text(self, image: Image.Image, language: str) -> tuple[str, float]:
+        """Read a crop that already holds a single text line, without running text detection.
+
+        Table cells and other one-line crops do not need the detector: the detector only
+        finds the line that is already known.  Skipping it removes the most expensive
+        part of reading a page full of small cells.
+        """
+        rgb = _to_white_backed_rgb(image) if getattr(image, "mode", "RGB") != "RGB" else image
+        try:
+            arr = np.asarray(rgb)
+        finally:
+            if rgb is not image:
+                rgb.close()
+        text_score = 0.22 if language == "fas" else 0.5
+        with _persian_ctc_bidi_context(language):
+            with self._checkout(language) as engine:
+                _apply_det_input_cap(engine, None)
+                # RapidOCR keeps the switches of the last call inside the instance, so the
+                # "no detector" mode has to be switched off again for the next page.
+                saved = {
+                    name: getattr(engine, name)
+                    for name in ("use_det", "use_cls", "use_rec", "text_score")
+                    if hasattr(engine, name)
+                }
                 try:
-                    result = cpu_engine(arr, use_cls=False)
+                    result = engine(arr, use_det=False, use_cls=False, text_score=text_score)
                 except TypeError:
-                    result = cpu_engine(arr)
-                except Exception as cpu_exc:
-                    raise OcrError(f"OCR failed: {cpu_exc}") from cpu_exc
-        return _lines_from_rapid(result)
+                    try:
+                        result = engine(arr, use_det=False, use_cls=False)
+                    except TypeError:
+                        result = engine(arr)
+                except Exception as exc:
+                    raise OcrError(f"OCR failed: {exc}") from exc
+                finally:
+                    for name, value in saved.items():
+                        with contextlib.suppress(Exception):
+                            setattr(engine, name, value)
+        texts = getattr(result, "txts", None)
+        scores = getattr(result, "scores", None)
+        if not texts:
+            return "", 0.0
+        best_text = ""
+        best_score = 0.0
+        for index, raw in enumerate(texts):
+            value = str(raw or "").strip()
+            if not value:
+                continue
+            score = float(scores[index]) if scores is not None and index < len(scores) else 0.0
+            if score > best_score or not best_text:
+                best_text, best_score = value, score
+        if language == "fas":
+            best_text = normalize_persian_ocr_text(best_text)
+            if not best_text:
+                return "", 0.0
+        return best_text, best_score
 
 
 class EasyEngine:
@@ -1006,9 +1508,12 @@ class EasyEngine:
         self._infer_lock = threading.Lock()
         self._using_gpu: bool = False
         self._force_cpu: bool = False
+        # Weights are released automatically after a few idle minutes.
+        self._idle = _IdleReleaser(self)
 
     @property
     def runtime_installed(self) -> bool:
+        ensure_custom_site_packages_on_path()
         return bool(importlib.util.find_spec("easyocr"))
 
     def _model_dir(self) -> Path:
@@ -1047,6 +1552,7 @@ class EasyEngine:
         _STANDARD_CANCEL_EVENT.set()
 
     def unload(self) -> None:
+        self._idle.cancel()
         with self._lock:
             self._readers.clear()
 
@@ -1054,12 +1560,18 @@ class EasyEngine:
         self.cancel_install()
         self.unload()
         freed = 0
-        with _INSTALL_LOCK:
+        with _install_lock():
             freed += _remove_path_safely(self._model_dir())
+            custom_site = models_dir() / "site-packages"
+            removed_from_custom_site = False
+            if custom_site.is_dir():
+                freed += _remove_path_safely(custom_site)
+                ensure_custom_site_packages_on_path()
+                removed_from_custom_site = True
             try:
                 spec = importlib.util.find_spec("easyocr")
                 origin = getattr(spec, "origin", None) if spec is not None else None
-                if origin and Path(origin).is_file():
+                if origin and Path(origin).is_file() and not removed_from_custom_site:
                     pkg_dir = Path(origin).parent
                     try:
                         for child in pkg_dir.rglob("*"):
@@ -1076,9 +1588,9 @@ class EasyEngine:
                             check=False,
                             **_win_subprocess_kwargs(),
                         )
-                    for mod_name in [m for m in list(sys.modules) if m == "easyocr" or m.startswith("easyocr.")]:
-                        sys.modules.pop(mod_name, None)
-                    importlib.invalidate_caches()
+                for mod_name in [m for m in list(sys.modules) if m == "easyocr" or m.startswith("easyocr.")]:
+                    sys.modules.pop(mod_name, None)
+                importlib.invalidate_caches()
             except Exception:
                 pass
             remove_manifest_entry(self.id)
@@ -1172,7 +1684,11 @@ class EasyEngine:
         if not download:
             missing = [name for name in self._expected_models(language) if not (self._model_dir() / name).is_file()]
             if missing and not (self._model_dir() / f".ready-{language}").is_file():
-                raise OcrError("EasyOCR model for this language is not ready. Click the explicit preparation button first.")
+                raise OcrError(
+                    f"مدل EasyOCR برای زبان {language} آماده نیست. "
+                    "در پنجرهٔ «مدیریت مدل‌های OCR» روی «آماده‌سازی / دانلود خودکار» بزنید "
+                    "(برای دانلود اینترنت لازم است)."
+                )
         lang = {"eng": "en", "fas": "fa", "kor": "ko", "jpn": "ja", "chi_sim": "ch_sim"}.get(language, "en")
         reader_langs = ["fa", "en"] if lang == "fa" else [lang]
         with self._lock:
@@ -1238,18 +1754,20 @@ class EasyEngine:
 
     def download(self, language: str = "eng") -> None:
         _STANDARD_CANCEL_EVENT.clear()
+        had_runtime = self.runtime_installed
         dl_est = compute_engine_download_estimate(
             self.id,
-            runtime_installed=self.runtime_installed,
+            runtime_installed=had_runtime,
             model_ready=self.model_ready,
         )
         dl_label = format_download_size_fa(dl_est["totalDownloadGb"])
-        emit(f"شروع آماده‌سازی مدل EasyOCR ({language} — کل حجم دانلود: {dl_label})…", progress=0.06)
+        emit(f"شروع آماده‌سازی مدل EasyOCR ({language} — کل حجم دانلود: {dl_label})…", progress=0.05)
         self._ensure_runtime()
         try:
             if _STANDARD_CANCEL_EVENT.is_set():
                 raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
-            emit(f"آماده‌سازی EasyOCR برای {language}؛ فقط مدل همین زبان دریافت می‌شود", progress=0.62)
+            wt_start_p = 0.12 if had_runtime else 0.70
+            emit(f"آماده‌سازی EasyOCR برای {language}؛ فقط مدل همین زبان دریافت می‌شود", progress=wt_start_p)
             self._reader(language, True)
             self._model_dir().mkdir(parents=True, exist_ok=True)
             (self._model_dir() / f".ready-{language}").write_text("downloaded by user request\n", encoding="utf-8")
@@ -1302,6 +1820,13 @@ class EasyEngine:
             trim_process_memory()
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+        self._idle.enter()
+        try:
+            return self._recognize_loaded(image, language)
+        finally:
+            self._idle.leave()
+
+    def _recognize_loaded(self, image: Image.Image, language: str) -> list[OcrLine]:
         rgb = _to_white_backed_rgb(image) if getattr(image, "mode", "RGB") != "RGB" else image
         try:
             arr = np.asarray(rgb)
@@ -1316,12 +1841,27 @@ class EasyEngine:
             grad_ctx = torch.inference_mode if hasattr(torch, "inference_mode") else torch.no_grad
         except Exception:
             pass
+        extra_fa_kwargs: dict[str, Any] = (
+            {
+                "add_margin": 0.18,
+                "width_ths": 0.88,
+                "ycenter_ths": 0.6,
+                "height_ths": 0.6,
+                "text_threshold": 0.6,
+                "low_text": 0.30,
+            }
+            if language == "fas"
+            else {}
+        )
         try:
-            with self._infer_lock, grad_ctx():
+            with self._infer_lock, grad_ctx(), _persian_ctc_bidi_context(language):
                 try:
-                    result = reader.readtext(arr, detail=1, paragraph=False, batch_size=batch_sz)
+                    result = reader.readtext(arr, detail=1, paragraph=False, batch_size=batch_sz, **extra_fa_kwargs)
                 except TypeError:
-                    result = reader.readtext(arr, detail=1, paragraph=False)
+                    try:
+                        result = reader.readtext(arr, detail=1, paragraph=False, batch_size=batch_sz)
+                    except TypeError:
+                        result = reader.readtext(arr, detail=1, paragraph=False)
         except Exception as exc:
             if self._using_gpu and not self._force_cpu:
                 self._force_cpu = True
@@ -1329,21 +1869,26 @@ class EasyEngine:
                 self.unload()
                 cpu_reader = self._reader(language, False)
                 try:
-                    with self._infer_lock, grad_ctx():
+                    with self._infer_lock, grad_ctx(), _persian_ctc_bidi_context(language):
                         try:
-                            result = cpu_reader.readtext(arr, detail=1, paragraph=False, batch_size=4)
+                            result = cpu_reader.readtext(arr, detail=1, paragraph=False, batch_size=4, **extra_fa_kwargs)
                         except TypeError:
-                            result = cpu_reader.readtext(arr, detail=1, paragraph=False)
+                            try:
+                                result = cpu_reader.readtext(arr, detail=1, paragraph=False, batch_size=4)
+                            except TypeError:
+                                result = reader.readtext(arr, detail=1, paragraph=False)
                 except Exception as cpu_exc:
                     raise OcrError(f"EasyOCR failed: {cpu_exc}") from cpu_exc
             else:
                 raise OcrError(f"EasyOCR failed: {exc}") from exc
-        finally:
-            del arr
         lines = []
         for box, text, score in result:
-            if str(text).strip():
-                lines.append(OcrLine(str(text).strip(), float(score), _polygon(box)))
+            cleaned = normalize_persian_ocr_text(str(text)) if language == "fas" else str(text).strip()
+            if cleaned:
+                lines.append(OcrLine(cleaned, float(score), _polygon(box)))
+        if language == "fas" and len(lines) >= 2:
+            lines = _coalesce_rtl_ocr_lines(lines, arr)
+        del arr
         return lines
 
 
@@ -1366,7 +1911,7 @@ def _tesseract_executable() -> str | None:
     return None
 
 
-def _lines_from_tesseract(payload: str) -> list[OcrLine]:
+def _lines_from_tesseract(payload: str, language: str = "eng") -> list[OcrLine]:
     """Turn Tesseract TSV words into physical lines and bounding boxes."""
     groups: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     reader = csv.DictReader(
@@ -1386,6 +1931,7 @@ def _lines_from_tesseract(payload: str) -> list[OcrLine]:
         key = tuple(str(row.get(k, "")) for k in ("page_num", "block_num", "par_num", "line_num"))
         groups.setdefault(key, []).append(row)
     lines = []
+    is_persian = language == "fas"
     for words in groups.values():
         try:
             boxes = [(float(row["left"]), float(row["top"]), float(row["width"]), float(row["height"])) for row in words]
@@ -1396,10 +1942,286 @@ def _lines_from_tesseract(payload: str) -> list[OcrLine]:
             confidence = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
         except (KeyError, TypeError, ValueError):
             continue
-        text = " ".join((row.get("text") or "").strip() for row in words).strip()
+        ordered_words = words
+        if is_persian and len(words) >= 2:
+            # If Tesseract emitted Persian words in visual left-to-right coordinate order, sort right-to-left.
+            first_cx = boxes[0][0] + boxes[0][2] * 0.5
+            last_cx = boxes[-1][0] + boxes[-1][2] * 0.5
+            has_rtl_chars = any(
+                "\u0600" <= ch <= "\u06ff" or "\ufb50" <= ch <= "\ufefc"
+                for row in words for ch in (row.get("text") or "")
+            )
+            if has_rtl_chars and first_cx + 4.0 < last_cx:
+                paired = sorted(zip(boxes, words), key=lambda pair: -(pair[0][0] + pair[0][2]))
+                ordered_words = [w for _, w in paired]
+        text = " ".join((row.get("text") or "").strip() for row in ordered_words).strip()
+        if is_persian and text:
+            text = normalize_persian_ocr_text(text)
         if text:
             lines.append(OcrLine(text, confidence, [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]))
     return lines
+
+
+_ORIG_SUBPROCESS_RUN = subprocess.run
+
+
+def _is_legacy_fast_persian_traineddata(path: Path) -> bool:
+    """Detect legacy int8 `tessdata_fast/fas.traineddata` (~431 KB) so Studio upgrades it
+    to full float32 `tessdata_best/fas.traineddata` (~3.33 MB) while leaving tiny unit-test
+    mock files (<100 KB) untouched."""
+    try:
+        if not path.is_file():
+            return False
+        sz = path.stat().st_size
+        return 100_000 <= sz < 1_500_000
+    except OSError:
+        return False
+
+
+def _is_hard_network_failure(exc: Exception) -> bool:
+    """True when the failure means "this machine has no working internet at all"
+    (DNS failure / connection refused), so trying the remaining mirrors is pointless
+    and would only stall the OCR run."""
+    import socket
+    import urllib.error
+
+    if isinstance(exc, socket.gaierror):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, (socket.gaierror, ConnectionRefusedError)):
+            return True
+    return False
+
+
+def _parse_tsv_word_spans(tsv_text: str) -> list[dict[str, Any]]:
+    words: list[dict[str, Any]] = []
+    reader = csv.DictReader(io.StringIO(tsv_text), delimiter="\t", quoting=csv.QUOTE_NONE, restkey="_extra")
+    for row in reader:
+        raw_text = row.get("text") or ""
+        extra = row.get("_extra")
+        if isinstance(extra, list) and extra:
+            raw_text = "\t".join([raw_text, *(str(part) for part in extra)])
+        txt = raw_text.strip()
+        if row.get("level") != "5" or not txt:
+            continue
+        try:
+            x = int(float(row["left"]))
+            y = int(float(row["top"]))
+            w = int(float(row["width"]))
+            h = int(float(row["height"]))
+            conf = float(row.get("conf", "-1"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if conf >= 0.0 and w > 0 and h > 0:
+            words.append({"x0": x, "x1": x + w, "y0": y, "y1": y + h, "conf": conf, "text": txt})
+    return words
+
+
+def _persian_line_needs_bilingual_check(fa_text: str, fa_words: list[dict[str, Any]]) -> bool:
+    """Return True when a single-line Persian OCR result exhibits mixed-script/Latin garble cues
+    (such as digits fused to Perso-Arabic letters `۱۳0-۸-610`/`۳90۲6`, pipe `|`, `%` garble, or
+    low-confidence unknown non-lexicon words) that warrant 1-shot ENG TSV X-interval arbitration."""
+    if not fa_text:
+        return False
+    if re.search(r"(?:[0-9۰-۹]+[\u0621-\u06cc]+|[\u0621-\u06cc]+[0-9۰-۹]+|\||%[\d۰-۹]|[۹9][۵56۶8۸]\d)", fa_text):
+        return True
+    for fw in fa_words:
+        wtxt = str(fw.get("text") or "").strip("«»\"'()[]{}،؛.:!؟?…-")
+        if not wtxt:
+            continue
+        if float(fw.get("conf", 100.0)) < 68.0 and not is_known_persian_word(wtxt) and wtxt not in SINGLE_FA_LETTERS:
+            return True
+    return False
+
+
+def _fuse_bilingual_persian_english_tsv(
+    fa_words: list[dict[str, Any]],
+    en_words: list[dict[str, Any]],
+) -> str:
+    """Arbitrate single-line `fas` TSV vs `eng` TSV by horizontal X-interval overlap and calibrated
+    confidence: keeps 100% of genuine Persian words while splicing high-confidence technical English
+    phrases (`Figure 8-35`, `IPC-A-610`, `Toe Fillet`, `25%`) in proper LTR run order inside RTL text."""
+    if not fa_words:
+        return ""
+    accepted_en: list[dict[str, Any]] = []
+    for ew in en_words:
+        etxt = str(ew.get("text") or "").strip()
+        econf = float(ew.get("conf", 0.0))
+        if econf < 84.0 or not etxt:
+            continue
+        # Reject standalone punctuation/speck noise (`.`, `,`, `|`, `-`)
+        if not any(ch.isalnum() for ch in etxt):
+            continue
+        if not re.match(r"^[A-Za-z0-9%][A-Za-z0-9\-./%°()_:]*$", etxt):
+            continue
+        is_strong_en = (
+            any(c.isupper() for c in etxt)
+            or ("%" in etxt and any(c.isdigit() for c in etxt))
+            or ("-" in etxt and any(c.isdigit() for c in etxt))
+            or (len(etxt) >= 4 and etxt.isalpha())
+        )
+        if not is_strong_en:
+            continue
+        ov_fa: list[dict[str, Any]] = []
+        ew_w = max(1, int(ew["x1"]) - int(ew["x0"]))
+        for fw in fa_words:
+            fw_w = max(1, int(fw["x1"]) - int(fw["x0"]))
+            inter = min(int(ew["x1"]), int(fw["x1"])) - max(int(ew["x0"]), int(fw["x0"]))
+            if inter > 0.25 * min(ew_w, fw_w):
+                ov_fa.append(fw)
+        # Never override a valid high-confidence Persian word that has zero digit/pipe garble
+        if ov_fa and all(
+            (is_known_persian_word(str(fw["text"])) or str(fw["text"]).strip("،؛.:!؟") in SINGLE_FA_LETTERS)
+            and not re.search(r"[0-9۰-۹]|\|", str(fw["text"]))
+            and float(fw.get("conf", 0.0)) >= 80.0
+            for fw in ov_fa
+        ):
+            continue
+        accepted_en.append(ew)
+
+    if not accepted_en:
+        # Order FAS words right-to-left if needed
+        ordered_fa = sorted(fa_words, key=lambda t: -0.5 * (float(t["x0"]) + float(t["x1"])))
+        return " ".join(str(fw["text"]) for fw in ordered_fa)
+
+    kept_fa: list[dict[str, Any]] = []
+    for fw in fa_words:
+        fw_w = max(1, int(fw["x1"]) - int(fw["x0"]))
+        covered = any(
+            (min(int(fw["x1"]), int(ew["x1"])) - max(int(fw["x0"]), int(ew["x0"]))) > 0.30 * fw_w
+            for ew in accepted_en
+        )
+        if not covered:
+            kept_fa.append({**fw, "lang": "fa"})
+
+    en_tagged = [{**ew, "lang": "en"} for ew in accepted_en]
+    all_toks = sorted(kept_fa + en_tagged, key=lambda t: -0.5 * (float(t["x0"]) + float(t["x1"])))
+    runs: list[dict[str, Any]] = []
+    for tok in all_toks:
+        if runs and runs[-1]["lang"] == tok["lang"]:
+            runs[-1]["items"].append(tok)
+        else:
+            runs.append({"lang": tok["lang"], "items": [tok]})
+    out_tokens: list[str] = []
+    for run in runs:
+        if run["lang"] == "en":
+            run["items"].sort(key=lambda z: float(z["x0"]))
+        for item in run["items"]:
+            out_tokens.append(str(item["text"]))
+    return " ".join(out_tokens)
+
+
+def _segment_persian_line_bands(image: Image.Image) -> list[tuple[int, int, int, int]]:
+    """Segment horizontal Perso-Arabic kursi line bands (attaching floating upper/lower dots &
+    `گ` sarkesh strokes while rejecting frame border lines) so `PSM 13` (`RAW_LINE`) can recover
+    lines silently dropped by Tesseract's legacy `Textord` layout pass."""
+    try:
+        import cv2
+    except Exception:
+        return []
+    base = _to_white_backed_rgb(image)
+    try:
+        gray = cv2.cvtColor(np.asarray(base, dtype=np.uint8), cv2.COLOR_RGB2GRAY)
+    finally:
+        if base is not image:
+            base.close()
+    h, w = gray.shape[:2]
+    if h < 22 or w < 45:
+        return []
+    # Auto-invert if light text on dark background
+    if float(np.median(gray)) < 105.0:
+        gray = (255 - gray).astype(np.uint8)
+    # Fast blank-image exit so empty canvases / mock unit-test images incur zero extra passes
+    # (text ink on full document pages often occupies only 0.2%–1.5% of total pixels, so check p99 - p0.05!)
+    if float(np.percentile(gray, 99.0)) - float(np.percentile(gray, 0.05)) < 25.0:
+        return []
+    block_sz = max(35, (int(round(min(h, w) * 0.035)) | 1))
+    bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, block_sz, 18)
+    bw[:3, :] = 0
+    bw[-3:, :] = 0
+    bw[:, :3] = 0
+    bw[:, -3:] = 0
+    if int(np.count_nonzero(bw)) < 40:
+        return []
+    bw_clean = cv2.morphologyEx(bw, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    if int(np.count_nonzero(bw_clean)) < 30:
+        bw_clean = bw
+    kw = max(22, min(72, w // 26))
+    horiz = cv2.morphologyEx(bw_clean, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (kw, 5)))
+    num_lbl, _, stats, _ = cv2.connectedComponentsWithStats(horiz, connectivity=8)
+    raw_lines: list[list[int]] = []
+    for idx in range(1, num_lbl):
+        lx = int(stats[idx, cv2.CC_STAT_LEFT])
+        ly = int(stats[idx, cv2.CC_STAT_TOP])
+        lw = int(stats[idx, cv2.CC_STAT_WIDTH])
+        lh = int(stats[idx, cv2.CC_STAT_HEIGHT])
+        area = int(stats[idx, cv2.CC_STAT_AREA])
+        if lw < 18 or lh < 10 or lh > int(h * 0.55) or area < 75:
+            continue
+        sub_bw = bw_clean[ly:ly + lh, lx:lx + lw]
+        col_trans = float(np.mean(np.sum(np.abs(np.diff(sub_bw > 0, axis=1)), axis=1)))
+        # Reject solid horizontal frame borders / rules (`col_trans < 2.2` when wide & flat)
+        if col_trans < 2.2 and lw > lh * 4:
+            continue
+        raw_lines.append([lx, ly, lx + lw, ly + lh])
+    if not raw_lines:
+        return []
+
+    # Attach floating Perso-Arabic upper/lower dots (`پ چ ژ ش ت ث ی ن`) & `گ` sarkesh strokes to nearest kursi band
+    dot_lbl, _, dstats, dcent = cv2.connectedComponentsWithStats(bw, connectivity=8)
+    for j in range(1, dot_lbl):
+        dx = int(dstats[j, cv2.CC_STAT_LEFT])
+        dy = int(dstats[j, cv2.CC_STAT_TOP])
+        dw = int(dstats[j, cv2.CC_STAT_WIDTH])
+        dh = int(dstats[j, cv2.CC_STAT_HEIGHT])
+        darea = int(dstats[j, cv2.CC_STAT_AREA])
+        if dw > 48 or dh > 34 or darea < 2:
+            continue
+        cx, cy = float(dcent[j][0]), float(dcent[j][1])
+        best_i = -1
+        best_dist = 1e9
+        for i_ln, (rx0, ry0, rx1, ry1) in enumerate(raw_lines):
+            rh = max(12, ry1 - ry0)
+            if rx0 - rh <= cx <= rx1 + rh:
+                v_dist = 0.0 if ry0 <= cy <= ry1 else min(abs(cy - ry0), abs(cy - ry1))
+                if v_dist <= rh * 0.62 and v_dist < best_dist:
+                    best_dist = v_dist
+                    best_i = i_ln
+        if best_i >= 0:
+            raw_lines[best_i][0] = min(raw_lines[best_i][0], dx)
+            raw_lines[best_i][1] = min(raw_lines[best_i][1], dy)
+            raw_lines[best_i][2] = max(raw_lines[best_i][2], dx + dw)
+            raw_lines[best_i][3] = max(raw_lines[best_i][3], dy + dh)
+
+    raw_lines.sort(key=lambda b: (0.5 * (b[1] + b[3]), -b[2]))
+    merged: list[list[int]] = []
+    for b in raw_lines:
+        placed = False
+        bh = b[3] - b[1]
+        bcy = 0.5 * (b[1] + b[3])
+        for m in merged:
+            mh = m[3] - m[1]
+            mcy = 0.5 * (m[1] + m[3])
+            v_ov = min(b[3], m[3]) - max(b[1], m[1])
+            h_gap = max(0, max(b[0], m[0]) - min(b[2], m[2]))
+            if abs(bcy - mcy) <= 0.42 * max(bh, mh) and v_ov >= 0.35 * min(bh, mh) and h_gap <= max(bh, mh) * 2.8:
+                m[0] = min(m[0], b[0])
+                m[1] = min(m[1], b[1])
+                m[2] = max(m[2], b[2])
+                m[3] = max(m[3], b[3])
+                placed = True
+                break
+        if not placed:
+            merged.append(b)
+    merged.sort(key=lambda b: (b[1], -b[2]))
+    out_bands: list[tuple[int, int, int, int]] = []
+    for x0, y0, x1, y1 in merged:
+        lh = max(10, y1 - y0)
+        px = max(8, int(round(lh * 0.25)))
+        py = max(6, int(round(lh * 0.22)))
+        out_bands.append((max(0, x0 - px), max(0, y0 - py), min(w, x1 + px), min(h, y1 + py)))
+    return out_bands
 
 
 class TesseractEngine:
@@ -1409,6 +2231,8 @@ class TesseractEngine:
         self._system_languages: set[str] | None = None
         self._system_languages_exe: str | None = None
         self._lock = threading.Lock()
+        self._language_prepare_lock = threading.Lock()
+        self._auto_prepare_failures: dict[str, str] = {}
         self._omp_threads_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
             f"tesseract_omp_threads_{id(self)}", default=None,
         )
@@ -1473,12 +2297,44 @@ class TesseractEngine:
         self._system_languages_exe = executable
         return self._system_languages
 
+    def _system_has_acceptable_fas(self, system_langs: set[str]) -> bool:
+        if "fas" not in system_langs:
+            return False
+        exe = _tesseract_executable()
+        if not exe:
+            return True
+        candidates: list[Path] = []
+        env_prefix = os.environ.get("TESSDATA_PREFIX")
+        if env_prefix:
+            candidates.append(Path(env_prefix) / "fas.traineddata")
+            candidates.append(Path(env_prefix) / "tessdata" / "fas.traineddata")
+        exe_parent = Path(exe).resolve().parent
+        candidates.append(exe_parent / "tessdata" / "fas.traineddata")
+        candidates.append(exe_parent.parent / "share" / "tessdata" / "fas.traineddata")
+        for cand in candidates:
+            if cand.is_file():
+                # Reject 431 KB int8 `tessdata_fast/fas.traineddata` shipped in system/portable bundles
+                # so Studio upgrades to 3.33 MB float32 `tessdata_best/fas.traineddata`.
+                return not _is_legacy_fast_persian_traineddata(cand)
+        return True
+
     @property
     def ready_languages(self) -> list[str]:
         if not self.runtime_installed:
             return []
         system = self._get_system_languages()
-        return [language for language in LANGUAGES if language in system or all((self._model_dir() / name).is_file() for name in self._expected_models(language))]
+        ready: list[str] = []
+        for language in LANGUAGES:
+            if language == "fas":
+                local_fas = self._model_dir() / "fas.traineddata"
+                if local_fas.is_file():
+                    if not _is_legacy_fast_persian_traineddata(local_fas):
+                        ready.append("fas")
+                elif self._system_has_acceptable_fas(system):
+                    ready.append("fas")
+            elif language in system or all((self._model_dir() / name).is_file() for name in self._expected_models(language)):
+                ready.append(language)
+        return ready
 
     @property
     def model_ready(self) -> bool:
@@ -1499,7 +2355,7 @@ class TesseractEngine:
     def uninstall(self) -> int:
         self.cancel_install()
         self.unload()
-        with _INSTALL_LOCK:
+        with _install_lock():
             freed = 0
             freed += _remove_path_safely(self._model_dir())
             freed += _remove_path_safely(models_dir() / "tesseract-bin")
@@ -1512,13 +2368,29 @@ class TesseractEngine:
         trim_process_memory()
         return freed
 
-    def _download_language_file(self, language: str) -> Path:
+    def _download_language_file(self, language: str, *, timeout: float = 30.0) -> Path:
         if language not in LANGUAGES:
             raise OcrError(f"Unsupported Tesseract language: {language}")
         if _STANDARD_CANCEL_EVENT.is_set():
             raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
         self._model_dir().mkdir(parents=True, exist_ok=True)
-        sources: list[tuple[str, dict[str, str]]] = [
+        # For Persian (`fas`), use full float32 `tessdata_best` (~3.33 MB) instead of int8 `tessdata_fast` (431 KB):
+        # int8 quantization collapses `گ`'s twin sarkesh strokes into `ک`, whereas float32 `tessdata_best` distinguishes them cleanly.
+        best_sources: list[tuple[str, dict[str, str]]] = (
+            [
+                (
+                    f"https://api.github.com/repos/tesseract-ocr/tessdata_best/contents/{language}.traineddata",
+                    {"Accept": "application/vnd.github.raw"},
+                ),
+                (f"https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/{language}.traineddata", {}),
+                (f"https://github.com/tesseract-ocr/tessdata_best/raw/main/{language}.traineddata", {}),
+                (f"https://hf-mirror.com/datasets/tesseract-ocr/tessdata_best/resolve/main/{language}.traineddata", {}),
+                (f"https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_best@main/{language}.traineddata", {}),
+            ]
+            if language == "fas"
+            else []
+        )
+        sources: list[tuple[str, dict[str, str]]] = best_sources + [
             (f"https://github.com/tesseract-ocr/tessdata_fast/raw/main/{language}.traineddata", {}),
             (
                 f"https://api.github.com/repos/tesseract-ocr/tessdata_fast/contents/{language}.traineddata",
@@ -1540,41 +2412,48 @@ class TesseractEngine:
                 emit(f"ادامهٔ دانلود فایل زبان Tesseract ({language}) از میرور جایگزین…", "warning", progress=0.22)
             try:
                 request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio", **extra_headers})
-                with urllib.request.urlopen(request, timeout=180) as response, temporary.open("wb") as output:
+                with urllib.request.urlopen(request, timeout=timeout) as response, temporary.open("wb") as output:
                     hdrs = getattr(response, "headers", None)
                     raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
                     expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 12 * 1024 * 1024
                     total = 0
+                    last_emit_total = 0
                     while True:
-                        if _STANDARD_CANCEL_EVENT.is_set():
+                        if _STANDARD_CANCEL_EVENT.is_set() or is_job_cancelled():
                             raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
-                        chunk = response.read(1024 * 1024)
+                        chunk = response.read(64 * 1024)
                         if not chunk:
                             break
                         total += len(chunk)
-                        ratio = min(1.0, total / max(1, expected_bytes))
-                        emit(
-                            f"Tesseract {language}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
-                            progress=round(0.24 + 0.66 * ratio, 3),
-                        )
                         if total > 50 * 1024 * 1024:
                             raise OcrError("The selected Tesseract language file is unexpectedly large.")
                         output.write(chunk)
+                        if total - last_emit_total >= 256 * 1024 or total >= expected_bytes:
+                            last_emit_total = total
+                            ratio = min(1.0, total / max(1, expected_bytes))
+                            emit(
+                                f"Tesseract {language}: {total / (1024 * 1024):.1f} مگابایت دریافت شد",
+                                progress=round(0.24 + 0.66 * ratio, 3),
+                            )
                 if temporary.stat().st_size < 1000:
                     raise OcrError("The downloaded Tesseract language file is empty or invalid.")
                 os.replace(temporary, target)
                 self._ensure_tsv_config()
                 emit(f"فایل زبان Tesseract ({language}) ذخیره شد", "success", progress=0.94)
                 return target
-            except OcrError:
+            except (OcrError, JobCancelledError):
                 temporary.unlink(missing_ok=True)
                 raise
             except Exception as exc:
                 temporary.unlink(missing_ok=True)
                 last_exc = exc
+                if _is_hard_network_failure(exc):
+                    # No usable internet on this machine: stop instead of stalling on every mirror.
+                    break
                 continue
         raise OcrError(
-            f"Tesseract language download failed for {language}: {last_exc}. The official tessdata_fast host must be reachable."
+            f"دانلود فایل زبان Tesseract ({language}) ناموفق بود: {last_exc}. "
+            "باید به اینترنت دسترسی داشته باشید تا فایل زبان از منبع رسمی دریافت شود."
         ) from last_exc
 
     def download(self, language: str = "eng") -> None:
@@ -1593,6 +2472,11 @@ class TesseractEngine:
             self._system_languages = None
             self._system_languages_exe = None
         target = self._download_language_file(language)
+        # When preparing Persian (`fas`), also ensure `eng.traineddata` is present locally if missing
+        # so isolated English technical spans (`Figure 8-35`, `IPC-A-610`, `Toe Fillet`) can be arbitrated.
+        if language == "fas" and "eng" not in self.ready_languages:
+            with contextlib.suppress(Exception):
+                self._download_language_file("eng")
         ver = detect_builtin_installed_version(self.id, self)
         remote_rev = fetch_tessdata_revision([language])
         local_hash = sha256_short(target)
@@ -1628,6 +2512,8 @@ class TesseractEngine:
                 self._system_languages = None
                 self._system_languages_exe = None
             local_langs = [lang for lang in LANGUAGES if (self._model_dir() / f"{lang}.traineddata").is_file()]
+            if "fas" in self.ready_languages and "fas" not in local_langs:
+                local_langs.append("fas")
             target_langs = local_langs or [language if language in LANGUAGES else "eng"]
             last_target: Path | None = None
             for selected in target_langs:
@@ -1648,12 +2534,123 @@ class TesseractEngine:
             self.unload()
             trim_process_memory()
 
-    def _recognize_with_psm(self, image: Image.Image, language: str, psm: str) -> list[OcrLine]:
+    def _auto_prepare_language(self, language: str) -> None:
+        """Fetch a missing Tesseract language file automatically instead of failing the OCR run.
+
+        Root cause of the old hard failure: running Persian OCR raised
+        ``Tesseract language fas is not ready. Use the explicit model download
+        button first.`` and stopped, even though Studio already knows how to
+        download that file from the official mirrors.  Now the first OCR run
+        downloads the language file (Persian = full float32 ``tessdata_best``,
+        ~3.3 MB) and continues; a failed attempt is remembered for the session
+        so a batch never repeats the same slow download for every page.
+        """
+        if language in self.ready_languages:
+            return
+        cached_failure = self._auto_prepare_failures.get(language)
+        if cached_failure:
+            raise OcrError(cached_failure)
+        if not self.runtime_installed:
+            raise OcrError(
+                "موتور Tesseract روی این دستگاه نصب نیست. در پنجرهٔ «مدیریت مدل‌های OCR» "
+                "موتور Tesseract را انتخاب کنید و روی «آماده‌سازی / دانلود خودکار» بزنید."
+            )
+        with self._language_prepare_lock:
+            if language in self.ready_languages:
+                return
+            cached_failure = self._auto_prepare_failures.get(language)
+            if cached_failure:
+                raise OcrError(cached_failure)
+            emit(
+                f"فایل زبان «{language}» برای Tesseract روی این دستگاه پیدا نشد؛ دانلود خودکار از منبع رسمی آغاز شد",
+                "warning",
+            )
+            _STANDARD_CANCEL_EVENT.clear()
+            try:
+                self._download_language_file(language, timeout=15.0)
+            except JobCancelledError:
+                raise
+            except OcrError as exc:
+                message = (
+                    f"دانلود خودکار فایل زبان Tesseract برای «{language}» ناموفق بود. "
+                    "در پنجرهٔ «مدیریت مدل‌های OCR» روی «آماده‌سازی / دانلود خودکار» بزنید "
+                    "(برای دانلود اینترنت لازم است) یا از بستهٔ آفلاینی که فایل زبان فارسی را دارد استفاده کنید. "
+                    f"جزئیات فنی: {exc}"
+                )
+                self._auto_prepare_failures[language] = message
+                raise OcrError(message) from exc
+            if language == "fas":
+                # The Persian reader also arbitrates isolated English technical spans
+                # (`Figure 8-35`, `IPC-A-610`), so `eng` is fetched as well when missing.
+                with contextlib.suppress(Exception):
+                    if "eng" not in self.ready_languages:
+                        self._download_language_file("eng", timeout=15.0)
+            if language not in self.ready_languages:
+                message = (
+                    f"فایل زبان Tesseract برای «{language}» حتی پس از دانلود هم آماده نشد. "
+                    "در پنجرهٔ «مدیریت مدل‌های OCR» روی «آماده‌سازی / دانلود خودکار» بزنید."
+                )
+                self._auto_prepare_failures[language] = message
+                raise OcrError(message)
+        self._auto_prepare_failures.pop(language, None)
+        emit(f"فایل زبان Tesseract برای «{language}» آماده شد و خواندن متن ادامه پیدا کرد", "success")
+
+    def _run_tesseract_tsv(self, image: Image.Image, language: str, psm: str) -> str:
+        _check_ocr_cancelled()
         executable = _tesseract_executable()
         if not executable:
-            raise OcrError("Tesseract is not installed. Install the binary and use the explicit language download button.")
+            raise OcrError(
+                "موتور Tesseract روی این دستگاه نصب نیست. در پنجرهٔ «مدیریت مدل‌های OCR» "
+                "موتور Tesseract را انتخاب کنید و روی «آماده‌سازی / دانلود خودکار» بزنید."
+            )
         if language not in self.ready_languages:
-            raise OcrError(f"Tesseract language {language} is not ready. Use the explicit model download button first.")
+            self._auto_prepare_language(language)
+
+        local_traineddata = (self._model_dir() / f"{language}.traineddata").is_file()
+        # Optional zero-subprocess C-API fast path when `tesserocr` is installed and no test mock is active
+        if (
+            local_traineddata
+            and subprocess.run is _ORIG_SUBPROCESS_RUN
+            and importlib.util.find_spec("tesserocr") is not None
+        ):
+            try:
+                import tesserocr  # type: ignore[import-not-found]
+
+                psm_map = {
+                    "3": tesserocr.PSM.AUTO,
+                    "4": tesserocr.PSM.SINGLE_COLUMN,
+                    "6": tesserocr.PSM.SINGLE_BLOCK,
+                    "7": tesserocr.PSM.SINGLE_LINE,
+                    "11": tesserocr.PSM.SPARSE_TEXT,
+                    "13": tesserocr.PSM.RAW_LINE,
+                }
+                oem = tesserocr.OEM.LSTM_ONLY if language == "fas" else tesserocr.OEM.DEFAULT
+                rgb = _to_white_backed_rgb(image)
+                try:
+                    with tesserocr.PyTessBaseAPI(
+                        path=str(self._model_dir()),
+                        lang=language,
+                        psm=psm_map.get(str(psm), tesserocr.PSM.SINGLE_BLOCK),
+                        oem=oem,
+                    ) as api:
+                        if language == "fas":
+                            api.SetVariable("preserve_interword_spaces", "1")
+                        api.SetImage(rgb)
+                        api.SetSourceResolution(300)
+                        raw_tsv = api.GetTSVText(0) or ""
+                        if raw_tsv and not raw_tsv.startswith("level\t"):
+                            raw_tsv = (
+                                "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+                                "left\ttop\twidth\theight\tconf\ttext\n"
+                                + raw_tsv
+                            )
+                        return raw_tsv
+                finally:
+                    if rgb is not image:
+                        rgb.close()
+            except Exception:
+                pass
+
         buffer = io.BytesIO()
         rgb = _to_white_backed_rgb(image)
         try:
@@ -1668,7 +2665,8 @@ class TesseractEngine:
             "--dpi", "300",
             "-c", "tessedit_create_tsv=1",
         ]
-        local_traineddata = (self._model_dir() / f"{language}.traineddata").is_file()
+        if language == "fas":
+            command.extend(["--oem", "1", "-c", "preserve_interword_spaces=1"])
         if local_traineddata:
             self._ensure_tsv_config()
             command.extend(["--tessdata-dir", str(self._model_dir())])
@@ -1678,23 +2676,231 @@ class TesseractEngine:
             tess_env["TESSDATA_PREFIX"] = str(self._model_dir())
         omp_limit = self._omp_threads if self._omp_threads is not None else min(4, cpu_core_count())
         tess_env["OMP_THREAD_LIMIT"] = str(max(1, omp_limit))
+        _check_ocr_cancelled()
+        if subprocess.run is not _ORIG_SUBPROCESS_RUN:
+            try:
+                result = subprocess.run(command, input=buffer.getvalue(), env=tess_env, capture_output=True, timeout=180, check=False, **_win_subprocess_kwargs())
+            except JobCancelledError:
+                raise
+            except Exception as exc:
+                raise OcrError(f"Tesseract failed: {exc}") from exc
+            _check_ocr_cancelled()
+            if result.returncode:
+                details = (result.stderr or result.stdout or b"Tesseract failed")[-1800:]
+                raise OcrError(f"Tesseract failed: {details.decode('utf-8', 'replace') if isinstance(details, bytes) else details}")
+            return result.stdout.decode("utf-8", "replace") if isinstance(result.stdout, bytes) else result.stdout
+
+        proc: subprocess.Popen[bytes] | None = None
+        proc_id_key = 0
         try:
-            result = subprocess.run(command, input=buffer.getvalue(), env=tess_env, capture_output=True, timeout=180, check=False, **_win_subprocess_kwargs())
+            proc = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=tess_env,
+                start_new_session=(os.name != "nt"),
+                **_win_subprocess_kwargs(),
+            )
+            proc_id_key = id(proc)
+            with _ACTIVE_OCR_PROCS_LOCK:
+                _ACTIVE_OCR_PROCS.add(proc)
+            if is_job_cancelled():
+                _kill_process_tree(proc)
+                raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
+            stdout_bytes, stderr_bytes = proc.communicate(input=buffer.getvalue(), timeout=180)
+        except JobCancelledError:
+            if proc is not None:
+                _kill_process_tree(proc)
+            raise
         except Exception as exc:
+            if proc is not None:
+                _kill_process_tree(proc)
+            with _ACTIVE_OCR_PROCS_LOCK:
+                was_killed = proc_id_key in _KILLED_OCR_PROCS
+                _KILLED_OCR_PROCS.discard(proc_id_key)
+            if was_killed or is_job_cancelled():
+                raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.") from exc
             raise OcrError(f"Tesseract failed: {exc}") from exc
-        if result.returncode:
-            details = (result.stderr or result.stdout or b"Tesseract failed")[-1800:]
-            raise OcrError(f"Tesseract failed: {details.decode('utf-8', 'replace') if isinstance(details, bytes) else details}")
-        return _lines_from_tesseract(result.stdout.decode("utf-8", "replace") if isinstance(result.stdout, bytes) else result.stdout)
+        finally:
+            if proc is not None:
+                with _ACTIVE_OCR_PROCS_LOCK:
+                    _ACTIVE_OCR_PROCS.discard(proc)
+        with _ACTIVE_OCR_PROCS_LOCK:
+            was_killed = proc_id_key in _KILLED_OCR_PROCS
+            _KILLED_OCR_PROCS.discard(proc_id_key)
+        if was_killed or is_job_cancelled():
+            raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
+        if proc.returncode:
+            details = (stderr_bytes or stdout_bytes or b"Tesseract failed")[-1800:]
+            raise OcrError(f"Tesseract failed: {details.decode('utf-8', 'replace')}")
+        return stdout_bytes.decode("utf-8", "replace")
+
+    def _recognize_with_psm(self, image: Image.Image, language: str, psm: str) -> list[OcrLine]:
+        tsv_out = self._run_tesseract_tsv(image, language, psm)
+        return _lines_from_tesseract(tsv_out, language=language)
+
+    @staticmethod
+    def _persian_lines_quality(lines: list[OcrLine]) -> float:
+        if not lines:
+            return 0.0
+        chars = sum(sum(ch.isalnum() for ch in ln.text) for ln in lines)
+        if chars == 0:
+            return 0.0
+        avg_conf = sum(float(ln.confidence) for ln in lines) / len(lines)
+        frag_penalty = max(0, len(lines) - 1) * 3.5
+        return max(0.0, chars * (avg_conf ** 1.15) - frag_penalty)
+
+    def _recognize_persian_line_strip(
+        self,
+        strip_image: Image.Image,
+        offset_x: int = 0,
+        offset_y: int = 0,
+    ) -> OcrLine | None:
+        """Recognize a segmented horizontal Persian line strip with `PSM 13` (`RAW_LINE`, pure LSTM
+        bypassing `Textord`) and apply 1-shot `ENG` TSV X-interval arbitration when mixed technical
+        English/numeric garble cues are detected."""
+        pad_x, pad_y = 16, 12
+        base_rgb = _to_white_backed_rgb(strip_image)
+        try:
+            padded = ImageOps.expand(base_rgb, border=(pad_x, pad_y, pad_x, pad_y), fill=(255, 255, 255))
+        finally:
+            if base_rgb is not strip_image:
+                base_rgb.close()
+        try:
+            fa_tsv = self._run_tesseract_tsv(padded, "fas", "13")
+            fa_words = _parse_tsv_word_spans(fa_tsv)
+            if not fa_words:
+                fa_tsv = self._run_tesseract_tsv(padded, "fas", "7")
+                fa_words = _parse_tsv_word_spans(fa_tsv)
+            if not fa_words:
+                return None
+            fa_lines = _lines_from_tesseract(fa_tsv, language="fas")
+            fa_text = " ".join(ln.text for ln in fa_lines).strip()
+            final_text = fa_text
+            if _persian_line_needs_bilingual_check(fa_text, fa_words) and "eng" in self.ready_languages:
+                with contextlib.suppress(Exception):
+                    en_tsv = self._run_tesseract_tsv(padded, "eng", "7")
+                    en_words = _parse_tsv_word_spans(en_tsv)
+                    if en_words:
+                        fused = _fuse_bilingual_persian_english_tsv(fa_words, en_words)
+                        fused_norm = normalize_persian_ocr_text(fused)
+                        if fused_norm:
+                            final_text = fused_norm
+            if not final_text:
+                return None
+            sw, sh = strip_image.size
+            x0 = max(0.0, min(float(sw - 1), min(float(w["x0"]) - pad_x for w in fa_words))) + offset_x
+            y0 = max(0.0, min(float(sh - 1), min(float(w["y0"]) - pad_y for w in fa_words))) + offset_y
+            x1 = max(x0 + 2.0, min(float(sw) + offset_x, max(float(w["x1"]) - pad_x for w in fa_words) + offset_x))
+            y1 = max(y0 + 2.0, min(float(sh) + offset_y, max(float(w["y1"]) - pad_y for w in fa_words) + offset_y))
+            confs = [float(w["conf"]) / 100.0 for w in fa_words if float(w["conf"]) >= 0.0]
+            mean_conf = sum(confs) / len(confs) if confs else 0.75
+            return OcrLine(final_text, mean_conf, [[x0, y0], [x1, y0], [x1, y1], [x0, y1]])
+        finally:
+            padded.close()
+
+    def _recognize_persian_with_kursi_recovery(self, image: Image.Image, primary_psm: str) -> list[OcrLine]:
+        lines = self._recognize_with_psm(image, "fas", primary_psm)
+        # Segment ink-bearing kursi line bands to recover lines dropped by Textord or garbled on mixed FA+EN rows
+        bands = _segment_persian_line_bands(image)
+        if not bands:
+            if lines:
+                return lines
+            fallback_psms = ("7", "13", "11") if (image.height < 160 and image.width > image.height * 1.8) else ("6", "13", "11")
+            for alt_psm in fallback_psms:
+                if alt_psm == primary_psm:
+                    continue
+                alt_lines = self._recognize_with_psm(image, "fas", alt_psm)
+                if alt_lines:
+                    return alt_lines
+            return []
+
+        # Map each primary line to segmented bands and recover missed / degraded / mixed-script bands with PSM 13
+        used_primary: set[int] = set()
+        recovered_lines: list[OcrLine] = []
+        for bx0, by0, bx1, by1 in bands:
+            bh = max(1.0, float(by1 - by0))
+            bw = max(1.0, float(bx1 - bx0))
+            overlapping_idxs: list[int] = []
+            for idx, pln in enumerate(lines):
+                px0, py0, px1, py1 = pln.box
+                v_ov = min(float(by1), py1) - max(float(by0), py0)
+                h_ov = min(float(bx1), px1) - max(float(bx0), px0)
+                if v_ov >= 0.35 * min(bh, max(1.0, py1 - py0)) and h_ov >= 0.22 * min(bw, max(1.0, px1 - px0)):
+                    overlapping_idxs.append(idx)
+
+            ov_lines = [lines[i] for i in overlapping_idxs]
+            ov_text = " ".join(ln.text for ln in ov_lines).strip()
+            ov_conf = (sum(ln.confidence for ln in ov_lines) / len(ov_lines)) if ov_lines else 0.0
+            needs_strip_pass = (
+                not ov_lines
+                or ov_conf < 0.78
+                or len(ov_lines) >= 3
+                or _persian_line_needs_bilingual_check(ov_text, [])
+            )
+            if not needs_strip_pass:
+                for i in overlapping_idxs:
+                    if i not in used_primary:
+                        used_primary.add(i)
+                        recovered_lines.append(lines[i])
+                continue
+
+            strip_crop = image.crop((bx0, by0, bx1, by1))
+            try:
+                strip_ln = self._recognize_persian_line_strip(strip_crop, offset_x=bx0, offset_y=by0)
+            finally:
+                strip_crop.close()
+
+            if strip_ln is not None and (
+                not ov_lines
+                or _persian_line_needs_bilingual_check(ov_text, [])
+                or self._persian_lines_quality([strip_ln]) >= self._persian_lines_quality(ov_lines) * 0.92
+            ):
+                used_primary.update(overlapping_idxs)
+                recovered_lines.append(strip_ln)
+            else:
+                for i in overlapping_idxs:
+                    if i not in used_primary:
+                        used_primary.add(i)
+                        recovered_lines.append(lines[i])
+
+        for idx, pln in enumerate(lines):
+            if idx not in used_primary:
+                recovered_lines.append(pln)
+
+        _sort_ocr_lines_reading_order(recovered_lines, is_rtl_lang=True)
+        return recovered_lines
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+        if language == "fas":
+            is_crop = image.height < 260 or image.width < 520
+            primary_psm = "6" if is_crop else "3"
+            return self._recognize_persian_with_kursi_recovery(image, primary_psm)
         return self._recognize_with_psm(image, language, "11")
 
     def recognize_document(self, image: Image.Image, language: str) -> list[OcrLine]:
+        if language == "fas":
+            return self._recognize_persian_with_kursi_recovery(image, "3")
         return self._recognize_with_psm(image, language, "3")
 
     def recognize_bubble(self, image: Image.Image, language: str) -> list[OcrLine]:
-        return self._recognize_with_psm(image, language, "6")
+        if language == "fas" and _estimate_persian_text_line_count(image) == 1:
+            single_lines = self._recognize_with_psm(image, language, "7")
+            if single_lines and (sum(ln.confidence for ln in single_lines) / len(single_lines)) >= 0.65:
+                return single_lines
+            # Bypass Textord baseline rejection on single-line Persian bubble crops using PSM 13 (`RAW_LINE`)
+            raw_lines = self._recognize_with_psm(image, language, "13")
+            best_single = single_lines if self._persian_lines_quality(single_lines) >= self._persian_lines_quality(raw_lines) else raw_lines
+            if best_single and (sum(ln.confidence for ln in best_single) / len(best_single)) >= 0.55:
+                return best_single
+            block_lines = self._recognize_with_psm(image, language, "6")
+            return best_single if self._persian_lines_quality(best_single) >= self._persian_lines_quality(block_lines) else block_lines
+        lines = self._recognize_with_psm(image, language, "6")
+        if not lines and language == "fas" and image.height < 180:
+            raw_lines = self._recognize_with_psm(image, language, "13")
+            return raw_lines or self._recognize_with_psm(image, language, "7")
+        return lines
 
 
 class ManualEngine:
@@ -2567,6 +3773,31 @@ class EngineRegistry:
         if callable(canceller):
             canceller()
 
+    def cancel_all_installs(self) -> None:
+        _STANDARD_CANCEL_EVENT.set()
+        for engine_id in list(self.engines.keys()):
+            self.cancel_install(engine_id)
+
+    def reset_ocr_cancel(self) -> None:
+        with _ACTIVE_OCR_PROCS_LOCK:
+            _KILLED_OCR_PROCS.clear()
+
+    def cancel_ocr(self, engine_id: str | None = None) -> None:
+        """Preemptively abort active OCR inference subprocesses/workers across built-in and isolated engines."""
+        with _ACTIVE_OCR_PROCS_LOCK:
+            procs = list(_ACTIVE_OCR_PROCS)
+            for p in procs:
+                _KILLED_OCR_PROCS.add(id(p))
+        for proc in procs:
+            _kill_process_tree(proc)
+        target_ids = [engine_id] if engine_id and engine_id in self.engines else list(self.engines.keys())
+        for eid in target_ids:
+            engine = self.engines.get(eid)
+            canceller = getattr(engine, "cancel_ocr", None)
+            if callable(canceller):
+                with contextlib.suppress(Exception):
+                    canceller()
+
     def download(self, engine_id: str, language: str = "eng") -> None:
         self.unload_all(except_id=engine_id)
         try:
@@ -2629,6 +3860,590 @@ def _to_white_backed_rgb(image: Image.Image) -> Image.Image:
     return rgb
 
 
+PERSIAN_PREPROCESS_BORDER_PAD = 18
+_PERSIAN_BIDI_MARKS_RE = re.compile(r"[\u061c\u0640\u200b\u200d\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+# Canonicalize non-joining Kurdish/Uyghur/Urdu lookalikes (such as `ە` U+06D5 Right_Joining AE which breaks
+# Persian word joining inside `بهم` -> `بەم`!) and all Arabic/Pashto/Sindhi Kaf & Gaf variants emitted by
+# multilingual Arabic/Persian CTC dictionaries (`RapidOCR`, `EasyOCR`, `Tesseract`).
+_PERSIAN_CHAR_MAP = str.maketrans({
+    # Yeh variants -> Persian Yeh `ی` (\u06cc, Dual_Joining)
+    "\u064a": "\u06cc",  # Arabic Yeh ي
+    "\u0649": "\u06cc",  # Alef Maksura ى
+    "\u06d2": "\u06cc",  # Urdu Yeh Barree ے (Right_Joining -> breaks mid-word joining unless mapped!)
+    "\u06d0": "\u06cc",  # Pashto/Uyghur Yeh ې
+    "\u06cd": "\u06cc",  # Pashto Tail Yeh ۍ
+    "\u06ce": "\u06cc",  # Kurdish Yeh with small V ێ
+    "\u06d3": "\u06cc\u0654",  # Yeh Barree with Hamza above ۓ -> یٔ
+    # Kaf variants -> Persian Keheh `ک` (\u06a9, Dual_Joining)
+    "\u0643": "\u06a9",  # Arabic Kaf ك
+    "\u06aa": "\u06a9",  # Swash Kaf ڪ
+    "\u06ab": "\u06a9",  # Kaf with ring ګ
+    "\u06ac": "\u06a9",  # Kaf with dot above ڬ
+    "\u06ad": "\u06a9",  # Ng ڭ
+    "\u06ae": "\u06a9",  # Kaf with three dots below ڮ
+    "\u063b": "\u06a9",  # Keheh with two dots above ػ
+    "\u063c": "\u06a9",  # Keheh with three dots below ؼ
+    # Gaf variants -> Persian Gaf `گ` (\u06af, Dual_Joining)
+    "\u06b0": "\u06af",  # Gaf with ring ڰ
+    "\u06b1": "\u06af",  # Ngoeh ڱ
+    "\u06b2": "\u06af",  # Gaf with two dots below ڲ
+    "\u06b3": "\u06af",  # Gueh ڳ
+    "\u06b4": "\u06af",  # Gaf with three dots above ڴ
+    # Heh variants -> Persian Heh `ه` (\u0647, Dual_Joining) & Heh+Ezafe `هٔ`
+    "\u06d5": "\u0647",  # Kurdish/Uyghur AE ە (visually identical to ه but Right_Joining -> breaks `بهم`!)
+    "\u06c1": "\u0647",  # Urdu Heh Goal ہ
+    "\u06be": "\u0647",  # Heh Doachashmee ھ
+    "\u06ff": "\u0647",  # Heh with inverted V ۿ
+    "\u06c0": "\u0647\u0654",  # Heh with Yeh above ۀ -> هٔ
+    "\u06c2": "\u0647\u0654",  # Heh Goal with Hamza above ۂ -> هٔ
+    "\u06c3": "\u0647\u0654",  # Teh Marbuta Goal ۃ -> هٔ
+    # Arabic-Indic digits (٠-٩) -> Persian digits (۰-۹): Iranian documents never use the
+    # Arabic-Indic shapes and mixed digit shapes inside tables break the number reading.
+    "\u0660": "\u06f0",
+    "\u0661": "\u06f1",
+    "\u0662": "\u06f2",
+    "\u0663": "\u06f3",
+    "\u0664": "\u06f4",
+    "\u0665": "\u06f5",
+    "\u0666": "\u06f6",
+    "\u0667": "\u06f7",
+    "\u0668": "\u06f8",
+    "\u0669": "\u06f9",
+})
+_PERSIAN_CONTEXTUAL_COMMA_RE = re.compile(r"(?<=[\u0600-\u06ff])\s*,\s*(?=[\u0600-\u06ff0-9۰-۹])")
+_PERSIAN_LONELY_GUILLEMET_COMMA_RE = re.compile(r"(?<=[\u0621-\u06cc])»(?=\s+[\u0621-\u06cc])")
+# Tesseract often misreads Persian word-final Ezafe `هٔ` as `هُ` / `هٌ` or `ة` on common `-ه` Persian stems.
+_PERSIAN_HEH_DAMMA_EZAFE_RE = re.compile(r"(?<=[\u0621-\u06cc]{2})\u0647[\u064f\u064c](?=\s|$|[،؛.!؟:»)\]])")
+_PERSIAN_TEH_MARBUTA_EZAFE_RE = re.compile(
+    r"(خان|بار|صفح|مقال|مجل|نسخ|نقط|جمل|کلم|فاصل|واژ|گون|نمون|زمین|نتیج|مرحل|مسئل|حاشی|زاوی|لای|پروژ|جزو|قص|شاخ|برگ|تک|پرد|چهر|شیو|هم|تاز|ساد|آماد|آیند|گذشت|نویسند|خوانند|پروند|انداز|فرشت|ستار)\u0629[\u064b-\u0652]?(?=\s|$|[،؛.!؟:»)\]])"
+)
+# Collapse OCR-inserted spaces across runs of 3+ single Persian letters (excluding standalone conjunction `و`),
+# e.g. `ب ه م` -> `بهم`, `ف ا ر س ی` -> `فارسی`, `ک ت ا ب` -> `کتاب`.
+_PERSIAN_SHATTERED_LETTERS_RE = re.compile(
+    r"(?<![\u0621-\u06cc\w])(?!و(?:\s|$))[\u0621-\u06cc](?:[ \t]+(?!و(?:\s|$))[\u0621-\u06cc]){2,}(?![\u0621-\u06cc\w])"
+)
+_PERSIAN_SHATTERED_FUNCTION_WORDS_RE = re.compile(
+    r"(?<![\u0621-\u06cc\w])(ب[ \t]+ه|ک[ \t]+ه|چ[ \t]+ه|ن[ \t]+ه)(?![\u0621-\u06cc\w])"
+)
+# Space-around-ZWNJ cleanup + morphological ZWNJ restoration for `نمی`/`می` verb prefixes & plural/comparative suffixes.
+_PERSIAN_ZWNJ_PAD_RE = re.compile(r"[ \t]*\u200c+[ \t]*")
+_PERSIAN_NEMI_SPACE_RE = re.compile(r"(?<![\u0621-\u06cc\w])(نمی)[ \t]+(?=[\u0621-\u06cc]{2,})")
+_PERSIAN_MI_VERB_SPACE_RE = re.compile(
+    r"(?<![\u0621-\u06cc\w])(می)[ \t]+(?=(?:چسب|توان|گو|کن|شو|باش|ده|گیر|آی|رو|دان|خواه|بین|دار|زن|ساز|رس|مان|خوان|نویس|کش|بر|آور|فرما|گذار|گذر|پرداز|شناس|نشین|افت|ایست|گرد|یاب|خور|فرست|پرس|ترس|خند)[\u0621-\u06cc]*|[\u0621-\u06cc]{2,}(?:م|یم|ید|ند)(?![\u0621-\u06cc]))"
+)
+_PERSIAN_SUFFIX_SPACE_RE = re.compile(
+    r"(?<=[\u0621-\u06cc]{2})[ \t]+(هایی|هایم|هایت|هایش|هایمان|هایتان|هایشان|ترین)(?![\u0621-\u06cc])"
+)
+
+_PERSIAN_DUAL_JOINING_CONSONANTS = frozenset("بپتثجچحخسشصضطظعغفقکگلمن")
+_PERSIAN_STANDALONE_SHORT_WORDS = frozenset({
+    "و", "به", "از", "در", "با", "بر", "تا", "را", "که", "چه", "نه", "هم", "هر",
+    "من", "ما", "تو", "او", "آن", "این", "یک", "دو", "سه", "یا", "ای", "بی", "می",
+    "کم", "گم", "دل", "دم", "سر", "پا", "لب", "شب", "زن", "کل", "پر", "پس", "چپ", "حق", "خط", "سد", "شد", "صف", "طی", "فن", "قد", "مد", "نم",
+})
+_PERSIAN_ZWNJ_SUFFIX_TOKENS = frozenset({
+    "ها", "های", "هایی", "هایم", "هایت", "هایش", "هایمان", "هایتان", "هایشان",
+    "تر", "ترین", "ام", "ات", "اش", "مان", "تان", "شان",
+})
+
+
+def _choose_persian_join_sep(right_txt: str, left_txt: str, h_gap: float, avg_h: float) -> str:
+    """Choose `""`, `"\\u200c"`, or `" "` when joining two adjacent RTL fragments on the same row."""
+    r_clean = right_txt.strip()
+    l_clean = left_txt.strip()
+    if not r_clean or not l_clean:
+        return " "
+    if re.search(r"(?<![\u0621-\u06cc])ن?می$", r_clean) and re.match(r"^[\u0621-\u06cc]{2,}", l_clean):
+        return "\u200c"
+    if l_clean in _PERSIAN_ZWNJ_SUFFIX_TOKENS and re.search(r"[\u0621-\u06cc]$", r_clean):
+        return "\u200c"
+    safe_h = max(8.0, float(avg_h))
+    r_last_word = r_clean.split()[-1]
+    l_first_word = l_clean.split()[0]
+    if (
+        h_gap <= 0.08 * safe_h
+        and r_last_word not in _PERSIAN_STANDALONE_SHORT_WORDS
+        and re.search(r"[\u0621-\u06cc]$", r_last_word)
+        and re.match(r"^[\u0621-\u06cc]", l_first_word)
+    ):
+        return ""
+    if (
+        h_gap <= 0.16 * safe_h
+        and r_last_word not in _PERSIAN_STANDALONE_SHORT_WORDS
+        and r_last_word[-1] in _PERSIAN_DUAL_JOINING_CONSONANTS
+        and re.match(r"^[\u0621-\u06cc]", l_first_word)
+    ):
+        return ""
+    return " "
+
+
+def _has_vertical_border_between(
+    arr: np.ndarray | None,
+    left_box: tuple[float, float, float, float],
+    right_box: tuple[float, float, float, float],
+) -> bool:
+    """Return True if a comic speech-bubble border wall or sharp background jump separates two same-row boxes."""
+    if arr is None or arr.ndim < 2:
+        return False
+    h, w = arr.shape[:2]
+    gray = arr.mean(axis=2) if arr.ndim == 3 else arr.astype(np.float32)
+    lx0, ly0, lx1, ly1 = left_box
+    rx0, ry0, rx1, ry1 = right_box
+    y0 = max(0, min(h - 1, int(round(min(ly0, ry0)))))
+    y1 = max(y0 + 1, min(h, int(round(max(ly1, ry1)))))
+    gx0 = max(0, min(w - 1, int(round(lx1)) - 1))
+    gx1 = max(gx0 + 1, min(w, int(round(rx0)) + 1))
+    if y1 - y0 < 8:
+        return False
+    l_patch = gray[y0:y1, max(0, int(lx0)):max(1, min(w, int(lx1)))]
+    r_patch = gray[y0:y1, max(0, int(rx0)):max(1, min(w, int(rx1)))]
+    if l_patch.size >= 16 and r_patch.size >= 16:
+        l_bg = float(np.percentile(l_patch, 80.0))
+        r_bg = float(np.percentile(r_patch, 80.0))
+        if abs(l_bg - r_bg) > 38.0:
+            return True
+        ref_bg = 0.5 * (l_bg + r_bg)
+    else:
+        ref_bg = float(np.median(gray[y0:y1, gx0:gx1])) if gx1 > gx0 else 240.0
+    if gx1 - gx0 >= 2:
+        strip = gray[y0:y1, gx0:gx1]
+        wall_cols = np.mean(np.abs(strip - ref_bg) > 42.0, axis=0)
+        if float(np.max(wall_cols)) >= 0.72:
+            return True
+    return False
+
+
+def _coalesce_rtl_ocr_lines(
+    lines: list[OcrLine],
+    image_arr: np.ndarray | None = None,
+    *,
+    max_gap_ratio: float = 0.92,
+) -> list[OcrLine]:
+    """Merge horizontal word/sub-word `OcrLine` fragments sitting on the same Persian line in RTL order,
+    while refusing to cross speech-bubble borders or wide inter-bubble gaps."""
+    if len(lines) < 2:
+        return lines
+    indexed = list(enumerate(lines))
+    indexed.sort(key=lambda item: ((item[1].box[1] + item[1].box[3]) * 0.5, -item[1].box[2]))
+    rows: list[list[OcrLine]] = []
+    for _, ln in indexed:
+        bx0, by0, bx1, by1 = ln.box
+        bh = max(4.0, by1 - by0)
+        bcy = 0.5 * (by0 + by1)
+        placed = False
+        for row in rows:
+            ry0 = min(r.box[1] for r in row)
+            ry1 = max(r.box[3] for r in row)
+            rh = float(np.median([max(4.0, r.box[3] - r.box[1]) for r in row]))
+            rcy = float(np.mean([0.5 * (r.box[1] + r.box[3]) for r in row]))
+            v_ov = min(by1, ry1) - max(by0, ry0)
+            if abs(bcy - rcy) <= 0.38 * max(bh, rh) and v_ov >= 0.42 * min(bh, rh) and 0.52 <= (bh / rh) <= 1.92:
+                row.append(ln)
+                placed = True
+                break
+        if not placed:
+            rows.append([ln])
+
+    merged_out: list[OcrLine] = []
+    for row in rows:
+        if len(row) == 1:
+            merged_out.append(row[0])
+            continue
+        # Order RTL (rightmost `x1` first)
+        row.sort(key=lambda r: -r.box[2])
+        cur = row[0]
+        for nxt in row[1:]:
+            cx0, cy0, cx1, cy1 = cur.box
+            nx0, ny0, nx1, ny1 = nxt.box
+            avg_h = 0.5 * (max(4.0, cy1 - cy0) + max(4.0, ny1 - ny0))
+            # `cur` is on the right, `nxt` is on the left -> horizontal gap is `cx0 - nx1`
+            h_gap = cx0 - nx1
+            both_rtl = bool(_PERSIAN_STRONG_RTL_RE.search(cur.text) or _PERSIAN_STRONG_RTL_RE.search(nxt.text))
+            if (
+                both_rtl
+                and -0.35 * avg_h <= h_gap <= max_gap_ratio * avg_h
+                and not _has_vertical_border_between(image_arr, nxt.box, cur.box)
+            ):
+                sep = _choose_persian_join_sep(cur.text, nxt.text, h_gap, avg_h)
+                joined_txt = normalize_persian_ocr_text(f"{cur.text}{sep}{nxt.text}")
+                c_chars = max(1, len(cur.text.strip()))
+                n_chars = max(1, len(nxt.text.strip()))
+                w_conf = (cur.confidence * c_chars + nxt.confidence * n_chars) / (c_chars + n_chars)
+                mx0, my0 = min(cx0, nx0), min(cy0, ny0)
+                mx1, my1 = max(cx1, nx1), max(cy1, ny1)
+                cur = OcrLine(
+                    joined_txt,
+                    w_conf,
+                    [[mx0, my0], [mx1, my0], [mx1, my1], [mx0, my1]],
+                    bold=bool(getattr(cur, "bold", False) or getattr(nxt, "bold", False)),
+                    italic=bool(getattr(cur, "italic", False) or getattr(nxt, "italic", False)),
+                    role=getattr(cur, "role", None) or getattr(nxt, "role", None),
+                )
+            else:
+                merged_out.append(cur)
+                cur = nxt
+        merged_out.append(cur)
+    return merged_out
+
+
+def _estimate_persian_text_line_count(image: Image.Image) -> int:
+    """Estimate how many horizontal text rows exist inside a crop/bubble image, coalescing floating
+    upper/lower Persian dot bands (نقطه / سرکش) into their parent baseline so single-line Persian
+    bubbles are never mis-segmented into 2–3 fragments by Tesseract `--psm 6`."""
+    w, h = image.size
+    if w < 16 or h < 10:
+        return 0
+    gray = np.asarray(image.convert("L"), dtype=np.uint8)
+    # Ignore outermost border quiet-zone / frame edge
+    trim_y = min(max(2, int(h * 0.08)), h // 4)
+    trim_x = min(max(2, int(w * 0.04)), w // 5)
+    sub = gray[trim_y:h - trim_y, trim_x:w - trim_x]
+    if sub.size < 64:
+        return 0
+    bg = float(np.percentile(sub, 82.0))
+    fg_min = float(np.percentile(sub, 2.0))
+    if bg - fg_min < 28.0:
+        return 0
+    ink = sub < (bg - max(22.0, 0.28 * (bg - fg_min)))
+    row_density = ink.mean(axis=1)
+    peak = float(np.max(row_density)) if row_density.size else 0.0
+    if peak < 0.015:
+        return 0
+    active = row_density >= max(0.012, peak * 0.16)
+    bands: list[list[int]] = []
+    in_band = False
+    start = 0
+    for idx, val in enumerate(active):
+        if val and not in_band:
+            start = idx
+            in_band = True
+        elif not val and in_band:
+            bands.append([start, idx])
+            in_band = False
+    if in_band:
+        bands.append([start, len(active)])
+    if not bands:
+        return 0
+    # Merge nearby upper/lower diacritical dot bands into the core Persian baseline band
+    max_band_h = max(b[1] - b[0] for b in bands)
+    merge_gap = max(4, int(round(max_band_h * 0.55)))
+    merged_bands: list[list[int]] = [bands[0][:]]
+    for b0, b1 in bands[1:]:
+        prev0, prev1 = merged_bands[-1]
+        if b0 - prev1 <= merge_gap or min(b1 - b0, prev1 - prev0) <= max(3, int(round(max_band_h * 0.28))):
+            merged_bands[-1][1] = b1
+        else:
+            merged_bands.append([b0, b1])
+    significant = [b for b in merged_bands if (b[1] - b[0]) >= max(4, int(round(max_band_h * 0.32)))]
+    return len(significant)
+
+
+def _normalize_single_persian_line(line: str) -> str:
+    s = re.sub(r"[ \t\r\f\v]+", " ", line).strip()
+    if not s:
+        return ""
+    s = _PERSIAN_ZWNJ_PAD_RE.sub("\u200c", s)
+    s = _PERSIAN_HEH_DAMMA_EZAFE_RE.sub("\u0647\u0654", s)
+    s = _PERSIAN_TEH_MARBUTA_EZAFE_RE.sub("\\1\u0647\u0654", s)
+    s = re.sub(r"(?<![\u0621-\u06cc\w])ب[ \t]+ه[ \t]+ه[ \t]+م(?![\u0621-\u06cc\w])", "به هم", s)
+    s = _PERSIAN_SHATTERED_LETTERS_RE.sub(lambda m: re.sub(r"[ \t]+", "", m.group(0)), s)
+    s = _PERSIAN_SHATTERED_FUNCTION_WORDS_RE.sub(lambda m: re.sub(r"[ \t]+", "", m.group(0)), s)
+    s = _PERSIAN_NEMI_SPACE_RE.sub("\\1\u200c", s)
+    s = _PERSIAN_MI_VERB_SPACE_RE.sub("\\1\u200c", s)
+    s = _PERSIAN_SUFFIX_SPACE_RE.sub("\u200c\\1", s)
+    s = _PERSIAN_CONTEXTUAL_COMMA_RE.sub("، ", s)
+    if "«" not in s:
+        s = _PERSIAN_LONELY_GUILLEMET_COMMA_RE.sub("،", s)
+    s = postprocess_persian_ocr_text(s)
+    return re.sub(r"[ \t]+", " ", s).strip()
+
+
+def normalize_persian_ocr_text(text: str) -> str:
+    """Clean bidi control marks, Arabic presentation forms, non-joining lookalikes (`ە`/`ے`),
+    Kaf/Gaf variants, shattered single-letter spaces, and broken ZWNJ (`نیم‌فاصله`)."""
+    import unicodedata
+
+    if not text:
+        return ""
+    cleaned_chars: list[str] = []
+    for ch in str(text):
+        code = ord(ch)
+        if (0xFB50 <= code <= 0xFDFF) or (0xFE70 <= code <= 0xFEFC):
+            cleaned_chars.append(unicodedata.normalize("NFKC", ch))
+        else:
+            cleaned_chars.append(ch)
+    out = "".join(cleaned_chars)
+    out = _PERSIAN_BIDI_MARKS_RE.sub("", out)
+    out = out.translate(_PERSIAN_CHAR_MAP)
+    if "\n" in out:
+        norm_lines = [_normalize_single_persian_line(ln) for ln in out.splitlines()]
+        return "\n".join(ln for ln in norm_lines if ln)
+    return _normalize_single_persian_line(out)
+
+
+def estimate_persian_skew_angle(gray_bright_bg: np.ndarray, max_angle: float = 12.0) -> float:
+    """Estimate page skew angle (degrees) via horizontal projection-profile row-derivative energy
+    on the interior 88% of the page (ignoring scanner border frames). Returns 0.0 when upright."""
+    try:
+        import cv2
+    except Exception:
+        return 0.0
+    h, w = gray_bright_bg.shape[:2]
+    if min(h, w) < 100:
+        return 0.0
+    scale = min(1.0, 900.0 / max(h, w))
+    small = cv2.resize(
+        gray_bright_bg,
+        (max(32, int(round(w * scale))), max(32, int(round(h * scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
+    bh = max(4, int(round(small.shape[0] * 0.06)))
+    bw = max(4, int(round(small.shape[1] * 0.06)))
+    inner = small[bh:-bh, bw:-bw] if (small.shape[0] > 28 and small.shape[1] > 28) else small
+    bg = cv2.GaussianBlur(inner, (0, 0), sigmaX=14.0)
+    ink = np.clip(bg.astype(np.float32) - inner.astype(np.float32) - 12.0, 0.0, 255.0)
+    if int(np.count_nonzero(ink > 8.0)) < 80:
+        return 0.0
+    sh, sw = ink.shape[:2]
+    center = (sw * 0.5, sh * 0.5)
+
+    def _score(deg: float) -> float:
+        rot_m = cv2.getRotationMatrix2D(center, deg, 1.0)
+        rot = cv2.warpAffine(ink, rot_m, (sw, sh), flags=cv2.INTER_LINEAR, borderValue=0.0)
+        diff = np.diff(rot.sum(axis=1))
+        return float(np.dot(diff, diff))
+
+    zero_score = _score(0.0)
+    coarse_angles = [a * 0.5 for a in range(-int(max_angle * 2), int(max_angle * 2) + 1)]
+    best_a = max(coarse_angles, key=_score)
+    fine_angles = [best_a + d * 0.1 for d in range(-6, 7)]
+    best_a = max(fine_angles, key=_score)
+    if abs(best_a) < 0.40 or _score(best_a) < zero_score * 1.06:
+        return 0.0
+    return float(best_a)
+
+
+def _extract_persian_ink_gray(rgb: np.ndarray, gray_in: np.ndarray) -> np.ndarray:
+    """Convert RGB input to bright-paper / dark-ink grayscale, automatically rescuing isoluminant
+    colored text on colored boxes (e.g. red text on blue bubble) via local CIE LAB perceptual ΔE."""
+    h, w = gray_in.shape[:2]
+    work = gray_in.copy()
+    if h >= 4 and w >= 4:
+        border_vals = np.concatenate([work[0, :], work[-1, :], work[:, 0], work[:, -1]])
+        border_med = float(np.median(border_vals))
+        med = float(np.median(work))
+        if med < 110.0 and border_med < 120.0 and float(np.percentile(work, 99.4)) > med + 55.0:
+            work = (255 - work).astype(np.uint8)
+            return work
+
+    try:
+        import cv2
+    except Exception:
+        return work
+
+    if h < 20 or w < 20:
+        return work
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    sat_p90 = float(np.percentile(hsv[:, :, 1], 90.0))
+    if sat_p90 <= 45.0:
+        return work
+
+    # Estimate smooth local background via 4x-downsampled median filter (~60px receptive field) so even
+    # bold 15-20px Persian headline/kashida strokes never dominate the background color estimate.
+    sw, sh = max(7, w // 4), max(7, h // 4)
+    med_k = max(3, min(15, (min(sh, sw) // 2) * 2 + 1))
+    if med_k > min(sh, sw):
+        med_k = max(3, (min(sh, sw) - 1) | 1)
+    small_gray = cv2.resize(gray_in, (sw, sh), interpolation=cv2.INTER_AREA)
+    bg_gray = cv2.resize(cv2.medianBlur(small_gray, med_k), (w, h), interpolation=cv2.INTER_LINEAR)
+    luma_local_diff = np.abs(gray_in.astype(np.float32) - bg_gray.astype(np.float32))
+    luma_p99 = float(np.percentile(luma_local_diff, 99.0))
+    if luma_p99 >= 65.0:
+        # Standard luminance contrast is already strong; preserve crisp grayscale stroke edges
+        return work
+
+    small_rgb = cv2.resize(rgb, (sw, sh), interpolation=cv2.INTER_AREA)
+    bg_rgb = cv2.resize(cv2.medianBlur(small_rgb, med_k), (w, h), interpolation=cv2.INTER_LINEAR)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    bg_lab = cv2.cvtColor(bg_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    d_l = lab[:, :, 0] - bg_lab[:, :, 0]
+    d_a = lab[:, :, 1] - bg_lab[:, :, 1]
+    d_b = lab[:, :, 2] - bg_lab[:, :, 2]
+    delta_e = np.sqrt(d_l * d_l + 1.35 * (d_a * d_a + d_b * d_b))
+    # Suppress container border step-edges where `bg_rgb` itself jumps sharply across box boundaries
+    bg_grad_c = np.max(
+        np.abs(cv2.morphologyEx(bg_rgb, cv2.MORPH_GRADIENT, np.ones((7, 7), np.uint8)).astype(np.float32)),
+        axis=2,
+    )
+    bg_grad_c = cv2.dilate(bg_grad_c, np.ones((5, 5), np.uint8))
+    delta_e = np.where(bg_grad_c > 28.0, 0.0, delta_e)
+    chroma_p99 = float(np.percentile(delta_e, 99.2))
+    if chroma_p99 > 12.0 and chroma_p99 > luma_p99 * 0.85:
+        ink_strength = np.clip(delta_e * (255.0 / max(28.0, chroma_p99)), 0.0, 255.0)
+        return (255.0 - ink_strength).astype(np.uint8)
+    return work
+
+
+def persian_preprocess_with_transform(
+    image: Image.Image,
+    *,
+    precise: bool = True,
+    page_mode: str = "comic",
+    scale_override: float | None = None,
+    border_pad: int = PERSIAN_PREPROCESS_BORDER_PAD,
+    allow_deskew: bool = False,
+) -> tuple[Image.Image, float, int, float]:
+    """Full optics- & chromatics-aware Persian OCR preprocessor returning `(rgb_img, scale, pad, skew_deg)`:
+    1. Isoluminant CIE LAB perceptual ΔE ink extraction for colored text on colored boxes + auto-inversion for dark boxes.
+    2. Optional sub-degree projection-derivative deskew (`0.40°–12°`) with `BORDER_REPLICATE` (zero frame border artifacts).
+    3. Rational width-aware super-resolution (`2.0x` / `1.5x`) before spatial filtering to preserve `گ` sarkesh & dots.
+    4. Illumination-uniformity gate: clean digital pages preserve anti-aliased strokes, while shadowed scans flatten paper via `cv2.divide`.
+    5. Clean white quiet-zone border `pad`.
+    """
+    base = _to_white_backed_rgb(image)
+    try:
+        rgb_arr = np.asarray(base, dtype=np.uint8)
+        gray_pil = base.convert("L")
+        gray_in = np.asarray(gray_pil, dtype=np.uint8)
+        gray_pil.close()
+    finally:
+        if base is not image:
+            base.close()
+
+    h, w = gray_in.shape[:2]
+    if scale_override is not None:
+        scale = float(scale_override)
+    elif not precise:
+        scale = 1.0
+    elif w <= 950 or min(h, w) < 90:
+        scale = 2.0
+    elif w <= 1700:
+        scale = 1.5
+    else:
+        scale = 1.0
+    if w * scale > 4800:
+        scale = 1.0
+
+    pad = max(0, int(border_pad))
+    work = _extract_persian_ink_gray(rgb_arr, gray_in)
+    skew_deg = 0.0
+
+    try:
+        import cv2
+    except Exception:
+        pil_clean = ImageOps.autocontrast(Image.fromarray(work, mode="L"), cutoff=0)
+        if scale != 1.0:
+            pil_clean = pil_clean.resize(
+                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                Image.Resampling.LANCZOS,
+            )
+        if pad > 0:
+            pil_clean = ImageOps.expand(pil_clean, border=pad, fill=255)
+        out_rgb = pil_clean.convert("RGB")
+        pil_clean.close()
+        return out_rgb, scale, pad, 0.0
+
+    valid_mask: np.ndarray | None = None
+    if allow_deskew and min(h, w) >= 100:
+        skew_deg = estimate_persian_skew_angle(work)
+        if abs(skew_deg) >= 0.40:
+            rot_m = cv2.getRotationMatrix2D((w * 0.5, h * 0.5), skew_deg, 1.0)
+            work = cv2.warpAffine(work, rot_m, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+            vm = np.full((h, w), 255, dtype=np.uint8)
+            vm[:4, :] = 0
+            vm[-4:, :] = 0
+            vm[:, :4] = 0
+            vm[:, -4:] = 0
+            vm = cv2.warpAffine(vm, rot_m, (w, h), flags=cv2.INTER_NEAREST, borderValue=0)
+            valid_mask = cv2.erode(vm, np.ones((9, 9), np.uint8))
+
+    p2, p50, p90 = [float(np.percentile(work, q)) for q in (2.0, 50.0, 90.0)]
+    bg_pixels = work[work >= p50]
+    bg_std = float(np.std(bg_pixels)) if bg_pixels.size > 20 else 0.0
+    contrast_span = p90 - p2
+
+    if bg_std < 7.5 and contrast_span > 135.0:
+        # Clean uniform background (both comic & clean digital PDF/article): keep natural anti-aliasing
+        # around `گ` sarkesh, dots, and cursive connectors without destructive shadow-division clipping.
+        pil_g = ImageOps.autocontrast(Image.fromarray(work, mode="L"), cutoff=0)
+        if scale != 1.0:
+            pil_g = pil_g.resize(
+                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                Image.Resampling.LANCZOS,
+            )
+        arr = np.asarray(pil_g, dtype=np.uint8)
+        pil_g.close()
+        arr = cv2.bilateralFilter(arr, d=5, sigmaColor=14, sigmaSpace=10)
+        blur_c = cv2.GaussianBlur(arr, (0, 0), sigmaX=0.80)
+        arr = cv2.addWeighted(arr, 1.16, blur_c, -0.16, 0)
+        if valid_mask is not None:
+            vm_s = (
+                cv2.resize(valid_mask, (arr.shape[1], arr.shape[0]), interpolation=cv2.INTER_NEAREST)
+                if valid_mask.shape[:2] != arr.shape[:2]
+                else valid_mask
+            )
+            arr = np.where(vm_s > 0, arr, 255).astype(np.uint8)
+        padded = cv2.copyMakeBorder(arr, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255) if pad > 0 else arr
+        return Image.fromarray(padded, mode="L").convert("RGB"), scale, pad, skew_deg
+
+    if scale != 1.0:
+        work = cv2.resize(
+            work,
+            (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+            interpolation=cv2.INTER_CUBIC,
+        )
+    # Narrow sigmaSpace preserves the 1–2px gap between `گ`'s twin sarkesh strokes while cleaning JPEG blockiness.
+    denoised = cv2.bilateralFilter(work, d=5, sigmaColor=16, sigmaSpace=10)
+    m_pad = 36
+    work_pad = cv2.copyMakeBorder(denoised, m_pad, m_pad, m_pad, m_pad, cv2.BORDER_REPLICATE)
+    bg_est = cv2.morphologyEx(
+        work_pad,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (71, 71)),
+    )
+    bg_est = cv2.GaussianBlur(bg_est, (0, 0), sigmaX=24.0)[m_pad:-m_pad, m_pad:-m_pad]
+    bg_p10, bg_p90 = [float(np.percentile(bg_est, q)) for q in (10.0, 90.0)]
+    if (bg_p90 - bg_p10) > 10.0 or bg_p90 < 238.0:
+        norm = cv2.divide(denoised, np.maximum(bg_est, 40), scale=255)
+    else:
+        norm = denoised
+    p_ink = float(np.percentile(norm, 0.8))
+    lo = min(130.0, max(0.0, p_ink * 0.80)) if p_ink > 42.0 else 0.0
+    hi = 238.0 if ((bg_p90 - bg_p10) > 10.0 or bg_p90 < 238.0) else 248.0
+    cleaned = np.clip((norm.astype(np.float32) - lo) * (255.0 / max(30.0, hi - lo)), 0, 255).astype(np.uint8)
+    blur_u = cv2.GaussianBlur(cleaned, (0, 0), sigmaX=0.8)
+    sharp = cv2.addWeighted(cleaned, 1.20, blur_u, -0.20, 0)
+    if valid_mask is not None:
+        vm_s = (
+            cv2.resize(valid_mask, (sharp.shape[1], sharp.shape[0]), interpolation=cv2.INTER_NEAREST)
+            if valid_mask.shape[:2] != sharp.shape[:2]
+            else valid_mask
+        )
+        sharp = np.where(vm_s > 0, sharp, 255).astype(np.uint8)
+    padded = cv2.copyMakeBorder(sharp, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255) if pad > 0 else sharp
+    return Image.fromarray(padded, mode="L").convert("RGB"), scale, pad, skew_deg
+
+
+def persian_preprocess_image(
+    image: Image.Image,
+    *,
+    precise: bool = True,
+    page_mode: str = "comic",
+    scale_override: float | None = None,
+    border_pad: int = PERSIAN_PREPROCESS_BORDER_PAD,
+) -> tuple[Image.Image, float, int]:
+    """Dot-, sarkesh-, & chromatic-contrast-preserving Persian OCR preprocessing returning `(rgb_img, scale, pad)`."""
+    out_rgb, scale, pad, _ = persian_preprocess_with_transform(
+        image,
+        precise=precise,
+        page_mode=page_mode,
+        scale_override=scale_override,
+        border_pad=border_pad,
+        allow_deskew=False,
+    )
+    return out_rgb, scale, pad
+
+
 def preprocess(
     image: Image.Image,
     contrast: bool,
@@ -2650,12 +4465,36 @@ def preprocess(
     return image, scale
 
 
-def _blocks_from_lines(lines: list[OcrLine], coordinate_scale: float = 1.0) -> list[dict[str, Any]]:
+def _blocks_from_lines(
+    lines: list[OcrLine],
+    coordinate_scale: float = 1.0,
+    *,
+    coordinate_pad: float = 0.0,
+    bounds: tuple[int, int] | None = None,
+) -> list[dict[str, Any]]:
     """Build the unchanged public block schema from positioned OCR lines."""
     blocks = []
+    max_w = float(bounds[0]) if bounds else None
+    max_h = float(bounds[1]) if bounds else None
     for index, line in enumerate(lines, start=1):
-        x0, y0, x1, y1 = [value / coordinate_scale for value in line.box]
-        polygon = [[x / coordinate_scale, y / coordinate_scale] for x, y in line.polygon]
+        raw_x0, raw_y0, raw_x1, raw_y1 = line.box
+        x0 = (raw_x0 - coordinate_pad) / coordinate_scale
+        y0 = (raw_y0 - coordinate_pad) / coordinate_scale
+        x1 = (raw_x1 - coordinate_pad) / coordinate_scale
+        y1 = (raw_y1 - coordinate_pad) / coordinate_scale
+        if max_w is not None and max_h is not None:
+            x0 = max(0.0, min(max_w, x0))
+            x1 = max(x0 + 1.0, min(max_w, x1))
+            y0 = max(0.0, min(max_h, y0))
+            y1 = max(y0 + 1.0, min(max_h, y1))
+        polygon = []
+        for px, py in line.polygon:
+            ux = (px - coordinate_pad) / coordinate_scale
+            uy = (py - coordinate_pad) / coordinate_scale
+            if max_w is not None and max_h is not None:
+                ux = max(0.0, min(max_w, ux))
+                uy = max(0.0, min(max_h, uy))
+            polygon.append([ux, uy])
         line_h = max(8.0, y1 - y0)
         is_bold = bool(getattr(line, "bold", False))
         is_italic = bool(getattr(line, "italic", False))
@@ -2700,10 +4539,47 @@ def _recognize_crop_lines(
     if page_mode == "document":
         doc_rec = getattr(engine, "recognize_document", None)
         if callable(doc_rec):
-            return doc_rec(crop, language)
-    if isinstance(engine, IsolatedOcrEngine):
-        return engine.recognize(crop, language, page_mode=page_mode)
-    return engine.recognize(crop, language)
+            lines = doc_rec(crop, language)
+        elif isinstance(engine, IsolatedOcrEngine):
+            lines = engine.recognize(crop, language, page_mode=page_mode)
+        else:
+            lines = engine.recognize(crop, language)
+    elif isinstance(engine, IsolatedOcrEngine):
+        lines = engine.recognize(crop, language, page_mode=page_mode)
+    else:
+        lines = engine.recognize(crop, language)
+    if language == "fas" and lines:
+        normalized_lines: list[OcrLine] = []
+        for ln in lines:
+            cleaned = normalize_persian_ocr_text(ln.text)
+            if cleaned:
+                normalized_lines.append(
+                    OcrLine(
+                        cleaned,
+                        ln.confidence,
+                        ln.polygon,
+                        bold=bool(getattr(ln, "bold", False)),
+                        italic=bool(getattr(ln, "italic", False)),
+                        role=getattr(ln, "role", None),
+                    )
+                )
+        return normalized_lines
+    return lines
+
+
+def _sort_ocr_lines_reading_order(lines: list[OcrLine], *, is_rtl_lang: bool) -> None:
+    if len(lines) < 2:
+        return
+    heights = sorted(max(8.0, float(ln.box[3] - ln.box[1])) for ln in lines)
+    med_h = heights[len(heights) // 2]
+    row_bucket = max(12.0, round(med_h * 0.55))
+    lines.sort(
+        key=lambda line: (
+            round(((line.box[1] + line.box[3]) / 2.0) / row_bucket) * row_bucket,
+            -line.box[2] if is_rtl_lang else line.box[0],
+            line.box[1],
+        )
+    )
 
 
 def _recognize_image_primary(
@@ -2715,19 +4591,34 @@ def _recognize_image_primary(
     min_confidence: float = 0.35,
     input_scale: float = 1.0,
     page_mode: str = "auto",
+    *,
+    persian_preprocess: bool = False,
 ) -> list[dict[str, Any]]:
     """The established OCR path; input_scale only restores fallback geometry."""
     from .ocr_grouping import detect_page_mode, sort_document_reading_order
 
-    # Isolated VLM/layout engines handle their own vision scaling; skipping 2x Lanczos prevents multi-GB RAM spikes.
-    effective_precise = False if isinstance(engine, IsolatedOcrEngine) else precise
-    prepared, scale = preprocess(image, contrast, effective_precise, page_mode=page_mode)
+    is_isolated = isinstance(engine, IsolatedOcrEngine)
+    border_pad = 0
+    skew_deg = 0.0
+    if persian_preprocess:
+        # Heavy isolated VLM/layout engines manage their own high-res vision encoders, whereas lightweight
+        # Hezar CRAFT+CRNN benefits from upscaling small/medium crops while keeping RAM bounded.
+        is_hezar = is_isolated and getattr(engine, "id", "") == "hezar-ocr"
+        effective_precise = precise if (not is_isolated or (is_hezar and max(image.size) <= 1280)) else False
+        prepared, scale, border_pad, skew_deg = persian_preprocess_with_transform(
+            image, precise=effective_precise, page_mode=page_mode, allow_deskew=True,
+        )
+    else:
+        # Isolated VLM/layout engines handle their own vision scaling; skipping 2x Lanczos prevents multi-GB RAM spikes.
+        effective_precise = False if is_isolated else precise
+        prepared, scale = preprocess(image, contrast, effective_precise, page_mode=page_mode)
     width, height = prepared.size
     slice_height = 3000
     overlap = 100
     lines: list[OcrLine] = []
     try:
         for start in range(0, height, slice_height):
+            _check_ocr_cancelled()
             end = min(height, start + slice_height)
             read_y0 = max(0, start - overlap)
             read_y1 = min(height, end + overlap)
@@ -2758,16 +4649,46 @@ def _recognize_image_primary(
     finally:
         if prepared is not image:
             prepared.close()
+    if abs(skew_deg) >= 0.40 and lines:
+        with contextlib.suppress(Exception):
+            import cv2
+
+            rot_m = cv2.getRotationMatrix2D((image.width * 0.5, image.height * 0.5), skew_deg, 1.0)
+            m_inv = cv2.invertAffineTransform(rot_m)
+            unrotated_lines: list[OcrLine] = []
+            for ln in lines:
+                new_poly: list[list[float]] = []
+                for px, py in ln.polygon:
+                    dx = (float(px) - float(border_pad)) / max(1e-6, float(scale))
+                    dy = (float(py) - float(border_pad)) / max(1e-6, float(scale))
+                    ux = float(m_inv[0, 0] * dx + m_inv[0, 1] * dy + m_inv[0, 2])
+                    uy = float(m_inv[1, 0] * dx + m_inv[1, 1] * dy + m_inv[1, 2])
+                    new_poly.append([ux * float(scale) + float(border_pad), uy * float(scale) + float(border_pad)])
+                unrotated_lines.append(
+                    OcrLine(
+                        ln.text,
+                        ln.confidence,
+                        new_poly,
+                        bold=bool(getattr(ln, "bold", False)),
+                        italic=bool(getattr(ln, "italic", False)),
+                        role=getattr(ln, "role", None),
+                    )
+                )
+            lines = unrotated_lines
     # Reading order is stable: physical row first, then horizontal position (right-to-left for Persian/RTL).
     is_rtl_lang = language in {"fas", "ara"}
-    lines.sort(
-        key=lambda line: (
-            round(((line.box[1] + line.box[3]) / 2) / 12) * 12,
-            -line.box[2] if is_rtl_lang else line.box[0],
-            line.box[1],
-        )
+    _sort_ocr_lines_reading_order(lines, is_rtl_lang=is_rtl_lang)
+    orig_bounds = (
+        (max(1, int(round(image.width / input_scale))), max(1, int(round(image.height / input_scale))))
+        if border_pad > 0
+        else None
     )
-    blocks = _blocks_from_lines(lines, scale * input_scale)
+    blocks = _blocks_from_lines(
+        lines,
+        scale * input_scale,
+        coordinate_pad=float(border_pad),
+        bounds=orig_bounds,
+    )
     effective_mode = detect_page_mode(blocks, page_size=image.size) if page_mode == "auto" else page_mode
     if effective_mode == "document" and len(blocks) >= 2:
         blocks = sort_document_reading_order(blocks, page_size=image.size, rtl_columns=is_rtl_lang)
@@ -2852,10 +4773,20 @@ def _bubble_region_confidence(lines: list[OcrLine]) -> float:
     return 100.0 * sum(words * confidence for words, confidence in weighted) / total
 
 
-def _recognize_bubble_lines(engine: Any, image: Image.Image, language: str) -> list[OcrLine]:
+def _recognize_bubble_lines(
+    engine: Any,
+    image: Image.Image,
+    language: str,
+    *,
+    det_max_side: int | None = None,
+) -> list[OcrLine]:
     # Only Tesseract needs a different page-segmentation mode for a single bubble.
     recognizer = getattr(engine, "recognize_bubble", None)
-    return recognizer(image, language) if callable(recognizer) else engine.recognize(image, language)
+    if callable(recognizer):
+        return recognizer(image, language)
+    if det_max_side is not None and getattr(engine, "supports_det_cap", False):
+        return engine.recognize(image, language, det_max_side=det_max_side)
+    return engine.recognize(image, language)
 
 
 def _recognize_bubble(
@@ -2864,31 +4795,45 @@ def _recognize_bubble(
     language: str,
     min_confidence: float,
 ) -> list[dict[str, Any]]:
-    regions = _bubble_preprocess_regions(image)
+    _check_ocr_cancelled()
+    regions = sorted(_bubble_preprocess_regions(image), key=lambda region: (region[2], region[1]))
     blocks: list[dict[str, Any]] = []
-    for prepared, offset_x, offset_y in sorted(regions, key=lambda region: (region[2], region[1])):
-        try:
-            lines = [line for line in _recognize_bubble_lines(engine, prepared, language) if line.text.strip()]
-        finally:
-            prepared.close()
-        if not lines or _bubble_region_confidence(lines) < BUBBLE_MIN_REGION_CONFIDENCE:
-            continue
-        restored = []
-        for line in lines:
-            if line.confidence < min_confidence:
+    idx_r = 0
+    try:
+        for idx_r, (prepared, offset_x, offset_y) in enumerate(regions):
+            _check_ocr_cancelled()
+            try:
+                lines = [
+                    line
+                    for line in _recognize_bubble_lines(
+                        engine, prepared, language, det_max_side=CROP_DET_MAX_SIDE,
+                    )
+                    if line.text.strip()
+                ]
+            finally:
+                prepared.close()
+            if not lines or _bubble_region_confidence(lines) < BUBBLE_MIN_REGION_CONFIDENCE:
                 continue
-            polygon = [[
-                (x - BUBBLE_PADDING) / BUBBLE_SCALE + offset_x,
-                (y - BUBBLE_PADDING) / BUBBLE_SCALE + offset_y,
-            ] for x, y in line.polygon]
-            restored.append(OcrLine(line.text, line.confidence, polygon))
-        is_rtl_lang = language in {"fas", "ara"}
-        restored.sort(key=lambda line: (
-            round(((line.box[1] + line.box[3]) / 2) / 12) * 12,
-            -line.box[2] if is_rtl_lang else line.box[0],
-            line.box[1],
-        ))
-        blocks.extend(_blocks_from_lines(restored))
+            restored = []
+            for line in lines:
+                if line.confidence < min_confidence:
+                    continue
+                polygon = [[
+                    (x - BUBBLE_PADDING) / BUBBLE_SCALE + offset_x,
+                    (y - BUBBLE_PADDING) / BUBBLE_SCALE + offset_y,
+                ] for x, y in line.polygon]
+                restored.append(OcrLine(line.text, line.confidence, polygon))
+            is_rtl_lang = language in {"fas", "ara"}
+            restored.sort(key=lambda line: (
+                round(((line.box[1] + line.box[3]) / 2) / 12) * 12,
+                -line.box[2] if is_rtl_lang else line.box[0],
+                line.box[1],
+            ))
+            blocks.extend(_blocks_from_lines(restored))
+    finally:
+        for rem_prepared, _, _ in regions[idx_r:]:
+            with contextlib.suppress(Exception):
+                rem_prepared.close()
     for index, block in enumerate(blocks, start=1):
         block["id"] = index
     return blocks
@@ -3076,6 +5021,389 @@ def analyze_blocks_typography(
                 blk["_explicitBold"] = True
 
 
+def _persian_container_regions(image: Image.Image) -> list[tuple[Image.Image, int, int, int, int]]:
+    """Detect uniform-background comic speech bubbles and caption boxes (light, colored, AND dark)
+    and return isolated grayscale-filled crops `(clean_pil_rgb, x, y, bw, bh)` so rounded/colored
+    borders never confuse Persian line segmentation."""
+    import cv2
+
+    base = _to_white_backed_rgb(image)
+    try:
+        rgb = np.asarray(base, dtype=np.uint8)
+    finally:
+        if base is not image:
+            base.close()
+    h, w = rgb.shape[:2]
+    if h < 80 or w < 100:
+        return []
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    k3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    grad_rgb = np.max([cv2.morphologyEx(rgb[:, :, c], cv2.MORPH_GRADIENT, k3) for c in range(3)], axis=0)
+    _, wall = cv2.threshold(grad_rgb, 24, 255, cv2.THRESH_BINARY)
+    interior = cv2.bitwise_not(cv2.morphologyEx(wall, cv2.MORPH_CLOSE, k3))
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(interior, connectivity=4)
+    regions: list[tuple[Image.Image, int, int, int, int]] = []
+    for lbl in range(1, num_labels):
+        area = int(stats[lbl, cv2.CC_STAT_AREA])
+        if area < 1400 or area > h * w * 0.78:
+            continue
+        x = int(stats[lbl, cv2.CC_STAT_LEFT])
+        y = int(stats[lbl, cv2.CC_STAT_TOP])
+        bw = int(stats[lbl, cv2.CC_STAT_WIDTH])
+        bh = int(stats[lbl, cv2.CC_STAT_HEIGHT])
+        if bw < 45 or bh < 24 or (area / float(bw * bh)) < 0.35:
+            continue
+        if bw * bh > h * w * 0.72 or (bw >= w * 0.94 and bh >= h * 0.94):
+            continue
+        comp_mask = labels[y:y + bh, x:x + bw] == lbl
+        vals = gray[y:y + bh, x:x + bw][comp_mask]
+        if vals.size < 350:
+            continue
+        med = float(np.median(vals))
+        if float(np.mean(np.abs(vals.astype(np.float32) - med) <= 20.0)) < 0.62:
+            continue
+        comp_u8 = (comp_mask.astype(np.uint8)) * 255
+        cnts, _ = cv2.findContours(comp_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        filled = np.zeros_like(comp_u8)
+        cv2.drawContours(filled, cnts, -1, 255, thickness=cv2.FILLED)
+        filled = cv2.erode(filled, np.ones((4, 4), np.uint8))
+        crop_g = gray[y:y + bh, x:x + bw]
+        crop_c = rgb[y:y + bh, x:x + bw]
+        in_px = crop_g[filled > 0]
+        if in_px.size < 250:
+            continue
+        med_rgb = np.median(crop_c[comp_mask], axis=0)
+        in_rgb = crop_c[filled > 0]
+        chroma_diff = np.max(np.abs(in_rgb.astype(np.float32) - med_rgb[None, :]), axis=1)
+        contrast_px = float(np.mean(in_px < med - 32.0)) if med >= 105.0 else float(np.mean(in_px > med + 38.0))
+        chroma_px = float(np.mean(chroma_diff > 34.0))
+        if not (0.006 <= contrast_px <= 0.48 or 0.006 <= chroma_px <= 0.48):
+            continue
+        clean_crop = np.empty((bh, bw, 3), dtype=np.uint8)
+        clean_crop[:, :] = np.clip(np.round(med_rgb), 0, 255).astype(np.uint8)
+        clean_crop[filled > 0] = crop_c[filled > 0]
+        regions.append((Image.fromarray(clean_crop, mode="RGB"), x, y, bw, bh))
+    regions.sort(key=lambda r: (round((r[2] + r[4] * 0.5) / 24.0) * 24, -r[1]))
+    return regions
+
+
+def _blocks_overlap_strongly(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    ax0, ay0, ax1, ay1 = float(a["x0"]), float(a["y0"]), float(a["x1"]), float(a["y1"])
+    bx0, by0, bx1, by1 = float(b["x0"]), float(b["y0"]), float(b["x1"]), float(b["y1"])
+    ix = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    iy = max(0.0, min(ay1, by1) - max(ay0, by0))
+    if ix <= 0.0 or iy <= 0.0:
+        return False
+    inter = ix * iy
+    area_a = max(1.0, (ax1 - ax0) * (ay1 - ay0))
+    area_b = max(1.0, (bx1 - bx0) * (by1 - by0))
+    if inter / min(area_a, area_b) >= 0.42:
+        return True
+    v_ov = iy / max(1.0, min(ay1 - ay0, by1 - by0))
+    h_ov = ix / max(1.0, min(ax1 - ax0, bx1 - bx0))
+    return v_ov >= 0.55 and h_ov >= 0.45
+
+
+def _merge_non_overlapping_blocks(
+    primary: list[dict[str, Any]],
+    extra: list[dict[str, Any]],
+    *,
+    is_rtl_lang: bool = True,
+) -> list[dict[str, Any]]:
+    """Keep primary blocks, append newly discovered container blocks, and split/replace wide primary
+    blocks that illegally fused multiple bordered speech bubbles or captured border-wall garbage."""
+    valid_extra = [dict(c) for c in extra if str(c.get("text") or "").strip()]
+    if not valid_extra:
+        return primary
+    if not primary:
+        merged = list(valid_extra)
+    else:
+        merged = [dict(b) for b in primary]
+        # 1) Detect multi-bubble fusion: when 2+ isolated speech-bubble container blocks overlap the SAME
+        #    wide primary block, replace that fused multi-bubble block with its clean per-bubble blocks.
+        by_primary: dict[int, list[dict[str, Any]]] = {}
+        unmatched: list[dict[str, Any]] = []
+        for cand in valid_extra:
+            ov = [i for i, cur in enumerate(merged) if cur is not None and _blocks_overlap_strongly(cur, cand)]
+            if not ov:
+                unmatched.append(cand)
+            elif len(ov) == 1:
+                by_primary.setdefault(ov[0], []).append(cand)
+            else:
+                # Candidate overlaps multiple tiny fragments -> compare combined fragments vs candidate
+                frag_chars = sum(sum(ch.isalnum() for ch in str(merged[i].get("text") or "")) for i in ov if merged[i])
+                frag_conf = sum(float(merged[i].get("conf", 0.0)) for i in ov if merged[i]) / max(1, len(ov))
+                cand_chars = sum(ch.isalnum() for ch in str(cand.get("text") or ""))
+                cand_conf = float(cand.get("conf", 0.0))
+                if cand_chars >= max(4, int(frag_chars * 0.80)) and cand_conf >= frag_conf - 4.0:
+                    for i in ov:
+                        merged[i] = None  # type: ignore[assignment]
+                    unmatched.append(cand)
+
+        replaced_cands: list[dict[str, Any]] = []
+        for p_idx, cands in by_primary.items():
+            cur = merged[p_idx]
+            if cur is None:
+                continue
+            cur_txt = str(cur.get("text") or "").strip()
+            cur_chars = sum(ch.isalnum() for ch in cur_txt)
+            cur_conf = float(cur.get("conf", 0.0))
+            if len(cands) >= 2:
+                sum_chars = sum(sum(ch.isalnum() for ch in str(c.get("text") or "")) for c in cands)
+                avg_conf = sum(float(c.get("conf", 0.0)) for c in cands) / len(cands)
+                if sum_chars >= max(6, int(cur_chars * 0.60)) and avg_conf >= max(48.0, cur_conf - 15.0):
+                    merged[p_idx] = None  # type: ignore[assignment]
+                    replaced_cands.extend(cands)
+                continue
+            cand = cands[0]
+            cand_txt = str(cand.get("text") or "").strip()
+            cand_chars = sum(ch.isalnum() for ch in cand_txt)
+            cand_conf = float(cand.get("conf", 0.0))
+            has_border_noise = bool(re.match(r"^[|\[\]1Il!/\\]+|[|\[\]1Il!/\\]+$", cur_txt))
+            if (
+                (cand_chars >= cur_chars + 3 and cand_conf >= cur_conf - 6.0)
+                or (cand_chars >= cur_chars and cand_conf > cur_conf + 6.0)
+                or (cand_conf >= cur_conf + 8.0 and cand_chars >= max(4, int(cur_chars * 0.78)))
+                or (has_border_noise and cand_chars >= max(4, cur_chars - 3) and cand_conf >= cur_conf - 4.0)
+            ):
+                merged[p_idx] = dict(cand)
+
+        merged = [b for b in merged if b is not None] + unmatched + replaced_cands
+    if len(merged) >= 2:
+        heights = sorted(max(8.0, float(b["y1"]) - float(b["y0"])) for b in merged)
+        row_bucket = max(12.0, round(heights[len(heights) // 2] * 0.55))
+        merged.sort(
+            key=lambda b: (
+                round(((float(b["y0"]) + float(b["y1"])) / 2.0) / row_bucket) * row_bucket,
+                -float(b["x1"]) if is_rtl_lang else float(b["x0"]),
+                float(b["y0"]),
+            )
+        )
+    for idx, blk in enumerate(merged, start=1):
+        blk["id"] = idx
+    return merged
+
+
+def _container_candidate_score(lines: list[OcrLine], expected_lines: int) -> float:
+    if not lines:
+        return 0.0
+    chars = sum(sum(ch.isalnum() for ch in ln.text) for ln in lines)
+    if chars == 0:
+        return 0.0
+    conf_ratio = _bubble_region_confidence(lines) / 100.0
+    extra_frag = max(0, len(lines) - max(1, expected_lines))
+    return max(0.0, chars * (conf_ratio ** 1.15) - extra_frag * 4.5)
+
+
+def _recognize_persian_containers(
+    engine: Any,
+    image: Image.Image,
+    language: str,
+    min_confidence: float,
+    existing_blocks: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Run dot-preserving Persian preprocessing on isolated comic speech bubbles and dark/colored boxes."""
+    regions = _persian_container_regions(image)
+    if not regions:
+        return []
+    existing = existing_blocks or []
+    discovered: list[dict[str, Any]] = []
+    is_rtl_lang = language in {"fas", "ara"}
+    page_w, page_h = image.size
+    r_idx = 0
+    try:
+        for r_idx, (crop_rgb, ox, oy, bw, bh) in enumerate(regions):
+            _check_ocr_cancelled()
+            try:
+                # Skip containers already well-covered by high-confidence primary OCR blocks.
+                inside_existing = [
+                    b for b in existing
+                    if float(b["x0"]) >= ox - 12 and float(b["x1"]) <= ox + bw + 12
+                    and float(b["y0"]) >= oy - 12 and float(b["y1"]) <= oy + bh + 12
+                ]
+                ex_chars, ex_conf = _result_metrics(inside_existing)
+                if ex_chars >= 18 and ex_conf >= 0.80:
+                    continue
+
+                expected_rows = max(1, _estimate_persian_text_line_count(crop_rgb))
+                best_lines: list[OcrLine] = []
+                best_score = -1.0
+                best_scale = 1.5
+                best_pad = PERSIAN_PREPROCESS_BORDER_PAD
+                for sc in (2.0, 1.5):
+                    _check_ocr_cancelled()
+                    prep_img, used_scale, used_pad = persian_preprocess_image(
+                        crop_rgb, precise=True, page_mode="comic", scale_override=sc,
+                    )
+                    try:
+                        raw_lines = [
+                            ln
+                            for ln in _recognize_bubble_lines(
+                                engine, prep_img, language, det_max_side=CROP_DET_MAX_SIDE,
+                            )
+                            if ln.text.strip()
+                        ]
+                    finally:
+                        prep_img.close()
+                    if language == "fas":
+                        raw_lines = [
+                            OcrLine(normalize_persian_ocr_text(ln.text), ln.confidence, ln.polygon)
+                            for ln in raw_lines
+                            if normalize_persian_ocr_text(ln.text)
+                        ]
+                        if len(raw_lines) >= 2:
+                            raw_lines = _coalesce_rtl_ocr_lines(raw_lines, None)
+                    cand_score = _container_candidate_score(raw_lines, expected_rows)
+                    if cand_score > best_score + 0.5:
+                        best_lines = raw_lines
+                        best_score = cand_score
+                        best_scale = used_scale
+                        best_pad = used_pad
+                    if best_lines and len(best_lines) <= expected_rows and _bubble_region_confidence(best_lines) >= 84.0:
+                        break
+
+                if not best_lines or _bubble_region_confidence(best_lines) < 42.0:
+                    continue
+                restored: list[OcrLine] = []
+                for ln in best_lines:
+                    if ln.confidence < min_confidence:
+                        continue
+                    poly = [
+                        [
+                            max(0.0, min(float(page_w), (px - best_pad) / best_scale + ox)),
+                            max(0.0, min(float(page_h), (py - best_pad) / best_scale + oy)),
+                        ]
+                        for px, py in ln.polygon
+                    ]
+                    restored.append(OcrLine(ln.text, ln.confidence, poly))
+                _sort_ocr_lines_reading_order(restored, is_rtl_lang=is_rtl_lang)
+                discovered.extend(_blocks_from_lines(restored))
+            finally:
+                crop_rgb.close()
+    finally:
+        for rem_crop, *_ in regions[r_idx:]:
+            with contextlib.suppress(Exception):
+                rem_crop.close()
+    for idx, blk in enumerate(discovered, start=1):
+        blk["id"] = idx
+    return discovered
+
+
+def _block_box(block: dict[str, Any]) -> tuple[float, float, float, float]:
+    try:
+        return (float(block["x0"]), float(block["y0"]), float(block["x1"]), float(block["y1"]))
+    except (KeyError, TypeError, ValueError):
+        return (0.0, 0.0, 0.0, 0.0)
+
+
+def _table_cell_blocks(cells: list[Any]) -> list[dict[str, Any]]:
+    """Convert read table cells into the unchanged public block schema."""
+    blocks: list[dict[str, Any]] = []
+    for cell in cells:
+        x0, y0, x1, y1 = float(cell.x0), float(cell.y0), float(cell.x1), float(cell.y1)
+        line_h = max(8.0, y1 - y0)
+        blocks.append({
+            "id": len(blocks) + 1,
+            "text": str(cell.text),
+            "tr": "",
+            "richHtml": "",
+            "conf": round(float(cell.confidence) * 100, 2),
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "polygon": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+            "lineH": line_h,
+            "sourceIndent": min(40, max(0, round(x0 / max(4.0, line_h * 0.45)))),
+            "enabled": True,
+            "bg": "auto",
+            "dir": "rtl",
+            "align": "right",
+            "bold": False,
+            "italic": False,
+            "underline": False,
+            "size": None,
+            "color": None,
+        })
+    return blocks
+
+
+def _merge_table_blocks(blocks: list[dict[str, Any]], readout: TableReadout) -> list[dict[str, Any]]:
+    """Replace the garbled page-level text of every table with its per-cell text.
+
+    The cell blocks are inserted at the position of the first page block that
+    belonged to the table, so the surrounding page keeps its reading order and
+    the table keeps its own right-to-left row order.
+    """
+    if not readout.cells or not readout.regions:
+        return blocks
+    region_cells: dict[int, list[Any]] = {}
+    for cell in readout.cells:
+        region_cells.setdefault(int(cell.region_index), []).append(cell)
+    # Persian tables are read right-to-left: inside a row the rightmost cell comes first.
+    for cells in region_cells.values():
+        cells.sort(key=lambda c: (int(getattr(c, "row", 0)), -float(getattr(c, "x1", 0.0))))
+
+    def _block_hits_region(block: dict[str, Any], region: Any) -> bool:
+        bx0, by0, bx1, by1 = _block_box(block)
+        area = max(1.0, (bx1 - bx0) * (by1 - by0))
+        inter = max(0.0, min(bx1, float(region.x1)) - max(bx0, float(region.x0)))
+        inter *= max(0.0, min(by1, float(region.y1)) - max(by0, float(region.y0)))
+        return inter > 0.25 * area
+
+    out: list[dict[str, Any]] = []
+    replaced: set[int] = set()
+    for block in blocks:
+        hit: int | None = None
+        for index, region in enumerate(readout.regions):
+            if index in replaced:
+                continue
+            if _block_hits_region(block, region):
+                hit = index
+                break
+        if hit is None:
+            out.append(block)
+            continue
+        cells = region_cells.get(hit, [])
+        expected = len(readout.regions[hit].row_bands) * len(readout.regions[hit].col_bands)
+        if len(cells) < max(2, int(0.4 * expected)):
+            # The cell reading was too weak: keep the page level text of this table.
+            replaced.add(hit)
+            out.append(block)
+            continue
+        replaced.add(hit)
+        out.extend(_table_cell_blocks(cells))
+    for index in range(len(readout.regions)):
+        if index in replaced:
+            continue
+        cells = region_cells.get(index, [])
+        expected = len(readout.regions[index].row_bands) * len(readout.regions[index].col_bands)
+        if len(cells) < max(2, int(0.4 * expected)):
+            continue
+        out.extend(_table_cell_blocks(cells))
+    for index, block in enumerate(out, start=1):
+        block["id"] = index
+    return out
+
+
+def _apply_table_pass(
+    engine: Any,
+    image: Image.Image,
+    language: str,
+    blocks: list[dict[str, Any]],
+    min_confidence: float,
+) -> list[dict[str, Any]]:
+    """Read ruled tables cell by cell (Persian/Arabic) and merge them into the page."""
+    if language not in {"fas", "ara"}:
+        return blocks
+    try:
+        readout = recognize_tables(engine, image, language, min_confidence=min_confidence)
+    except JobCancelledError:
+        raise
+    except Exception:
+        return blocks
+    if not readout.cells:
+        return blocks
+    return _merge_table_blocks(blocks, readout)
+
+
 def recognize_image(
     engine: Any,
     image: Image.Image,
@@ -3085,29 +5413,85 @@ def recognize_image(
     min_confidence: float = 0.35,
     *,
     page_mode: str = "auto",
+    persian_preprocess: bool = False,
 ) -> list[dict[str, Any]]:
     """Run the established OCR first; optional fallbacks only compete after a weak result."""
+    from .license_guard import require_module_license
+
+    require_module_license("ocr")
+    _check_ocr_cancelled()
+
+    def _finalize(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merged = _apply_table_pass(engine, image, language, blocks, min_confidence)
+        analyze_blocks_typography(image, merged, page_mode=page_mode)
+        return merged
+
     primary = _recognize_image_primary(
-        engine, image, language, contrast, precise, min_confidence, page_mode=page_mode,
+        engine,
+        image,
+        language,
+        contrast,
+        precise,
+        min_confidence,
+        page_mode=page_mode,
+        persian_preprocess=persian_preprocess,
     )
+    _check_ocr_cancelled()
     if isinstance(engine, IsolatedOcrEngine):
-        analyze_blocks_typography(image, primary, page_mode=page_mode)
-        return primary
-    if not _needs_extra_preprocess(primary):
-        analyze_blocks_typography(image, primary, page_mode=page_mode)
-        return primary
+        return _finalize(primary)
     best = primary
+    if (
+        persian_preprocess
+        and BUBBLE_PREPROCESS_ENABLED
+        and page_mode != "document"
+        and image.width >= 200
+        and image.height >= 140
+    ):
+        try:
+            container_blocks = _recognize_persian_containers(
+                engine, image, language, min_confidence, existing_blocks=best,
+            )
+        except JobCancelledError:
+            raise
+        except Exception:
+            container_blocks = []
+        if container_blocks:
+            best = _merge_non_overlapping_blocks(
+                best, container_blocks, is_rtl_lang=(language in {"fas", "ara"}),
+            )
+    _check_ocr_cancelled()
+    if not _needs_extra_preprocess(best):
+        return _finalize(best)
     if page_mode == "document":
         emit("نتیجهٔ اولیهٔ مقاله/کتاب ضعیف بود؛ پیش‌پردازش تخصصی شفاف‌سازی کاغذ و متن اجرا می‌شود")
         try:
-            doc_image, doc_scale = _document_preprocess_image(image)
+            if persian_preprocess:
+                doc_image, doc_scale, doc_pad = persian_preprocess_image(
+                    image, precise=True, page_mode="document", scale_override=2.0,
+                )
+            else:
+                doc_image, doc_scale = _document_preprocess_image(image)
+                doc_pad = 0
             try:
                 doc_fallback = _recognize_image_primary(
                     engine, doc_image, language, False, False, min_confidence,
-                    input_scale=doc_scale, page_mode=page_mode,
+                    input_scale=doc_scale, page_mode=page_mode, persian_preprocess=False,
                 )
+                if doc_pad > 0 and doc_scale > 0:
+                    shift = doc_pad / doc_scale
+                    for blk in doc_fallback:
+                        blk["x0"] = max(0.0, float(blk["x0"]) - shift)
+                        blk["y0"] = max(0.0, float(blk["y0"]) - shift)
+                        blk["x1"] = min(float(image.width), max(blk["x0"] + 1.0, float(blk["x1"]) - shift))
+                        blk["y1"] = min(float(image.height), max(blk["y0"] + 1.0, float(blk["y1"]) - shift))
+                        blk["polygon"] = [
+                            [max(0.0, px - shift), max(0.0, py - shift)]
+                            for px, py in blk.get("polygon", [])
+                        ]
             finally:
                 doc_image.close()
+        except JobCancelledError:
+            raise
         except Exception:
             emit("پیش‌پردازش تخصصی مقاله ممکن نبود؛ نتیجهٔ اولیه حفظ شد", "warning")
         else:
@@ -3115,19 +5499,44 @@ def recognize_image(
                 emit("نتیجهٔ پیش‌پردازش تخصصی مقاله بهتر بود و انتخاب شد", "success")
                 best = doc_fallback
                 if not _needs_extra_preprocess(best):
-                    analyze_blocks_typography(image, best, page_mode=page_mode)
-                    return best
+                    return _finalize(best)
+    _check_ocr_cancelled()
     if EXTRA_PREPROCESS_ENABLED:
         emit("نتیجهٔ OCR اصلی ضعیف یا کوتاه است؛ پیش‌پردازش تکمیلی متن روشن اجرا می‌شود")
         try:
-            fallback_image = _extra_preprocess_image(image)
+            if persian_preprocess:
+                # Avoid destructive binary >200 threshold that erases anti-aliased Persian dots (نقطه).
+                inv_rgb = ImageOps.invert(_to_white_backed_rgb(image))
+                try:
+                    fallback_image, fb_scale, fb_pad = persian_preprocess_image(
+                        inv_rgb, precise=True, page_mode=page_mode, scale_override=2.0,
+                    )
+                finally:
+                    inv_rgb.close()
+            else:
+                fallback_image = _extra_preprocess_image(image)
+                fb_scale = float(EXTRA_PREPROCESS_SCALE)
+                fb_pad = 0
             try:
                 fallback = _recognize_image_primary(
                     engine, fallback_image, language, False, False, min_confidence,
-                    input_scale=EXTRA_PREPROCESS_SCALE, page_mode=page_mode,
+                    input_scale=fb_scale, page_mode=page_mode, persian_preprocess=False,
                 )
+                if fb_pad > 0 and fb_scale > 0:
+                    shift = fb_pad / fb_scale
+                    for blk in fallback:
+                        blk["x0"] = max(0.0, float(blk["x0"]) - shift)
+                        blk["y0"] = max(0.0, float(blk["y0"]) - shift)
+                        blk["x1"] = min(float(image.width), max(blk["x0"] + 1.0, float(blk["x1"]) - shift))
+                        blk["y1"] = min(float(image.height), max(blk["y0"] + 1.0, float(blk["y1"]) - shift))
+                        blk["polygon"] = [
+                            [max(0.0, px - shift), max(0.0, py - shift)]
+                            for px, py in blk.get("polygon", [])
+                        ]
             finally:
                 fallback_image.close()
+        except JobCancelledError:
+            raise
         except Exception:
             # An optional preprocessing backend must never break the established OCR result.
             emit("پیش‌پردازش تکمیلی ممکن نبود؛ نتیجهٔ OCR اصلی حفظ شد", "warning")
@@ -3137,10 +5546,13 @@ def recognize_image(
                 best = fallback
             else:
                 emit("نتیجهٔ OCR اصلی بهتر بود و حفظ شد")
-    if BUBBLE_PREPROCESS_ENABLED and page_mode != "document":
+    _check_ocr_cancelled()
+    if BUBBLE_PREPROCESS_ENABLED and page_mode != "document" and not persian_preprocess:
         emit("پیش‌پردازش حباب کمیک برای مقایسه اجرا می‌شود")
         try:
             bubble = _recognize_bubble(engine, image, language, min_confidence)
+        except JobCancelledError:
+            raise
         except Exception:
             emit("پیش‌پردازش حباب ممکن نبود؛ بهترین نتیجهٔ فعلی حفظ شد", "warning")
         else:
@@ -3149,5 +5561,5 @@ def recognize_image(
                 best = bubble
             else:
                 emit("نتیجهٔ حباب بهتر نبود؛ بهترین نتیجهٔ فعلی حفظ شد")
-    analyze_blocks_typography(image, best, page_mode=page_mode)
-    return best
+    _check_ocr_cancelled()
+    return _finalize(best)

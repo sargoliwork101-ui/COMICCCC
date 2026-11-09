@@ -45,10 +45,27 @@ def save_preferences(browser: str, window: str) -> None:
     """Persist one explicit interactive choice for later launches."""
     if browser not in BROWSER_LABELS or window not in WINDOW_MODES:
         raise ValueError("Invalid browser preferences")
+    import time
     path = data_dir() / "browser-preferences.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps({"browser": browser, "window": window}, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
+    payload = json.dumps({"browser": browser, "window": window}, indent=2)
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        for attempt in range(4):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 
 def _windows_candidates(browser: str) -> list[Path]:

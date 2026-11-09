@@ -5,7 +5,9 @@ const $ = (id) => document.getElementById(id);
 const G = window.StudioGroups;
 const GROUP_COLORS = ['#34d399', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa', '#2dd4bf', '#fb923c', '#e879f9'];
 const state = {
-  project: null, engines: [], ai: null, editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
+  project: null, engines: [], ai: null, storage: null, resources: null, licenseStatus: null, workspaceBooted: false, activityFeedStarted: false,
+  editorId: null, editorBitmap: null, editorScale: 1, editorFitScale: 1, editorPan: null, activeBlockId: null, selectedBlockIds: [],
+  copiedEditorBlocks: [], copiedEditorPasteStep: 0, copiedEditorSourceImageId: null,
   cropId: null, crop: null, cropPointer: null, modelBusy: null, dragId: null, dragIds: [],
   dragMode: null, groupEditId: null, groupSnapshot: null, lastSelectedId: null,
   previewId: null,
@@ -23,6 +25,7 @@ let activityPollTimer = null;
 let activityPollInFlight = false;
 let activityGeneration = 0;
 let activeProgressId = null;
+let jobProgressTransform = null;
 let sessionTimer = null;
 let sessionCloseSent = false;
 let heartbeatInFlight = false;
@@ -30,6 +33,8 @@ let sessionVisibilityBound = false;
 let localActivityId = 0;
 let editorCloseTask = null;
 let editorSessionSnapshot = null;
+let editorReturnScroll = null;
+let justEditedHighlightTimer = null;
 let savePending = false;
 let editorCanvasFrame = 0;
 let editorLoadSeq = 0;
@@ -41,6 +46,7 @@ let classicEditor = null;
 let helpController = null;
 let imageOverview = null;
 let jobBusy = false;
+let storageSwitchBusy = false;
 let translationRunning = false;
 let ocrRunning = false;
 let exportRunning = false;
@@ -71,10 +77,46 @@ let lastSyncedAiProvider = null;
 let translationPreviewTask = Promise.resolve();
 let overlayPreviewTask = Promise.resolve();
 let downloadUrl = null;
+let activeExportPrepared = null;
 let backupDownloadUrl = null;
+let activeBackupPrepared = null;
 let previewRevision = 0;
 const imageRenderTasks = new Map();
 const imagePreviewVersions = new Map();
+
+function clearExportDownloadLink() {
+  if (downloadUrl) {
+    URL.revokeObjectURL(downloadUrl);
+    downloadUrl = null;
+  }
+  if (activeExportPrepared) {
+    const { projectId, token } = activeExportPrepared;
+    activeExportPrepared = null;
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/export/${encodeURIComponent(token)}`, { method: 'DELETE' }).catch(() => {});
+  }
+  const link = $('downloadLink');
+  if (link) {
+    link.href = '#';
+    link.classList.add('hidden');
+  }
+}
+
+function clearBackupDownloadLink() {
+  if (backupDownloadUrl) {
+    URL.revokeObjectURL(backupDownloadUrl);
+    backupDownloadUrl = null;
+  }
+  if (activeBackupPrepared) {
+    const { projectId, token } = activeBackupPrepared;
+    activeBackupPrepared = null;
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/backup/${encodeURIComponent(token)}`, { method: 'DELETE' }).catch(() => {});
+  }
+  const link = $('backupDownloadLink');
+  if (link) {
+    link.href = '#';
+    link.classList.add('hidden');
+  }
+}
 
 function browserTabId() {
   try {
@@ -217,17 +259,27 @@ async function pollActivity() {
       if (modelFromOcrDialog && $('ocrStatus')) $('ocrStatus').textContent = latest.message;
       syncModelProgressUi(modelCurrentProgress, true, latest.message);
     }
+    if (storageSwitchBusy && latest?.message && $('storageStatus')) {
+      $('storageStatus').textContent = latest.message;
+    }
     if (latestWithProgress) {
-      const progVal = latestWithProgress.progress;
-      if (jobBusy) {
-        setProgress('jobProgress', progVal, true);
-        setProgress('dockProgress', progVal, true);
-        if ($('editorDialog')?.open) setProgress('editorProgress', progVal, true);
+      const rawProg = Math.max(0, Math.min(1, latestWithProgress.progress));
+      let jobProg = rawProg;
+      if (jobProgressTransform) {
+        const scaled = jobProgressTransform.offset + rawProg * jobProgressTransform.scale;
+        jobProg = Math.max(jobProgressTransform.floor || 0, Math.min(1, scaled));
+        jobProgressTransform.floor = Math.max(jobProgressTransform.floor || 0, jobProg);
       }
-      if (activeProgressId) setProgress(activeProgressId, progVal, true);
-      if (translationRunning) setProgress('translationProgress', progVal, true);
+      if (jobBusy) {
+        setProgress('jobProgress', jobProg, true);
+        setProgress('dockProgress', jobProg, true);
+        if ($('editorDialog')?.open) setProgress('editorProgress', jobProg, true);
+      }
+      if (activeProgressId) setProgress(activeProgressId, jobProg, true);
+      if (translationRunning) setProgress('translationProgress', jobProg, true);
+      if (storageSwitchBusy) setProgress('storageProgress', rawProg, true);
       if (state.modelBusy) {
-        const monotonic = typeof modelCurrentProgress === 'number' ? Math.max(modelCurrentProgress, progVal) : progVal;
+        const monotonic = typeof modelCurrentProgress === 'number' ? Math.max(modelCurrentProgress, rawProg) : rawProg;
         syncModelProgressUi(monotonic, true, latest?.message || latestWithProgress.message || modelCurrentLabel);
       }
     }
@@ -236,7 +288,7 @@ async function pollActivity() {
   finally { activityPollInFlight = false; }
 }
 function isActivityHighRate() {
-  return Boolean(jobBusy || state.modelBusy || translationRunning || exportRunning || checkingEngineUpdates);
+  return Boolean(jobBusy || state.modelBusy || translationRunning || exportRunning || checkingEngineUpdates || storageSwitchBusy);
 }
 function scheduleActivityPoll(immediate = false) {
   if (sessionCloseSent) return;
@@ -282,8 +334,14 @@ async function heartbeat() {
   if (sessionCloseSent || heartbeatInFlight) return;
   heartbeatInFlight = true;
   try {
-    await fetch('/api/session/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: TAB_ID }), cache: 'no-store' });
-  } catch { /* a closed server needs no further browser-side error */ }
+    const response = await fetch('/api/session/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: TAB_ID }), cache: 'no-store' });
+    if (response && response.ok) noteServerReachable();
+    else showServerUnreachable(`پاسخ سرور برای ضربان نشست: ${response ? response.status : 'بدون پاسخ'}`);
+  } catch (cause) {
+    // The local app is gone (closed while this tab was in the background).
+    // Tell the user instead of leaving a dead workspace behind.
+    showServerUnreachable(cause?.message || 'بدون پاسخ');
+  }
   finally { heartbeatInFlight = false; }
 }
 function startSession() {
@@ -301,6 +359,7 @@ function startSession() {
 function closeSession() {
   if (sessionCloseSent) return;
   sessionCloseSent = true;
+  stopTrialCountdown();
   if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
   if (activityPollTimer) { clearTimeout(activityPollTimer); activityPollTimer = null; }
   if (downloadUrl) { URL.revokeObjectURL(downloadUrl); downloadUrl = null; }
@@ -338,6 +397,52 @@ function toast(message, error = false) {
     }, 220);
   }, error ? 7000 : 3400);
 }
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0))); }
+// ---------- local app connection state ----------
+// The studio runs as a local server.  If that server goes away (the app was
+// closed, or it is still starting) the page stays open but every request
+// fails.  Instead of leaving the user with a dead workspace - which in the
+// past forced a close-and-relaunch - a clear banner is shown with a one
+// click recovery.
+let serverUnreachableShown = false;
+function showServerUnreachable(detail = '') {
+  const alert = $('serverAlert');
+  if (!alert) return;
+  const text = $('serverAlertText');
+  if (text) {
+    text.textContent = 'ارتباط با برنامهٔ محلی قطع شد. اگر برنامه را بسته‌اید، دوباره آن را باز کنید؛ در غیر این صورت روی «تلاش دوباره» بزنید.';
+  }
+  const detailEl = $('serverAlertDetail');
+  if (detailEl) {
+    const info = String(detail || '').trim();
+    detailEl.textContent = info;
+    detailEl.classList.toggle('hidden', !info);
+  }
+  alert.classList.remove('hidden');
+  serverUnreachableShown = true;
+}
+function hideServerUnreachable() {
+  const alert = $('serverAlert');
+  if (alert) alert.classList.add('hidden');
+  serverUnreachableShown = false;
+}
+function noteServerReachable() {
+  if (serverUnreachableShown) hideServerUnreachable();
+}
+async function retryServerConnection() {
+  const btn = $('serverAlertRetry');
+  const label = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'در حال تلاش…'; }
+  try {
+    await api('/api/health', { cache: 'no-store' });
+    hideServerUnreachable();
+    await bootApp({ retry: true });
+  } catch (error) {
+    showServerUnreachable();
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label || 'تلاش دوباره'; }
+  }
+}
 async function api(url, options = {}) {
   const method = String(options.method || 'GET').toUpperCase();
   let path = '';
@@ -350,9 +455,13 @@ async function api(url, options = {}) {
       abortErr.name = 'AbortError'; abortErr.cancelled = true;
       throw abortErr;
     }
+    // The local app is not answering any more (it was closed, or it is still
+    // starting).  Show the recovery banner instead of leaving a dead page.
+    showServerUnreachable(`${method} ${path}`);
     const error = new Error(`خطای ارتباط با برنامه (${method} ${path})؛ ${cause?.name || 'Error'}: ${cause?.message || cause}. سرور و اتصال را بررسی کنید.`);
     error.status = 0; throw error;
   }
+  noteServerReachable();
   const type = response.headers.get('content-type') || '';
   let payload = null, parseError = '';
   if (type.includes('json')) {
@@ -363,8 +472,16 @@ async function api(url, options = {}) {
   if (!response.ok || parseError) {
     const raw = payload && (payload.detail || payload.message);
     const detail = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.map(item => `${(item.loc || []).join('.')}: ${item.msg || item.type || 'خطای اعتبارسنجی'}`).join('؛ ') : raw ? JSON.stringify(raw) : parseError || 'سرور جزئیاتی برنگرداند.';
+    if (response.status === 499 || payload?.cancelled === true) {
+      const abortErr = new Error(detail || 'عملیات توسط کاربر لغو شد.');
+      abortErr.name = 'AbortError'; abortErr.cancelled = true; abortErr.status = 499;
+      throw abortErr;
+    }
     const error = new Error(`${method} ${path} — HTTP ${response.status}: ${detail}`);
-    error.status = response.status; error.errorId = payload?.error_id;
+    error.status = response.status; error.detailText = detail; error.code = payload?.code; error.errorId = payload?.error_id;
+    if ((response.status === 402 || (response.status === 401 && payload?.code === 'LOGIN_REQUIRED')) && !path.startsWith('/api/license/')) {
+      refreshAuthGateState().catch(() => {});
+    }
     if (payload?.kind === 'invalid_context_response') { error.responseText = payload.response_text; error.recoveryToken = payload.recovery_token; error.responseTruncated = payload.response_truncated; }
     if (payload?.kind === 'pending_result') { error.pendingId = payload.pending_id; error.pendingKind = payload.pending_kind; }
     if (payload?.kind === 'unstored_result') error.unstoredResult = `${payload.translation || ''}\nخلاصه: ${payload.summary || ''}`;
@@ -410,6 +527,7 @@ function showAppModal(options = {}) {
     variant = 'confirm',
     destructive = false,
     alertOnly = false,
+    focusConfirm = false,
     cancelJobKind = null,
     promptMode = false,
     inputLabel = 'نام پروژه',
@@ -459,7 +577,8 @@ function showAppModal(options = {}) {
         try { inputEl.focus({ preventScroll: true }); inputEl.select(); } catch { /* ignore */ }
         return;
       }
-      const target = (destructive && !alertOnly ? cancelBtn : confirmBtn) || confirmBtn;
+      const preferCancel = destructive && !alertOnly && !focusConfirm;
+      const target = (preferCancel ? cancelBtn : confirmBtn) || confirmBtn;
       try { target?.focus?.({ preventScroll: true }); } catch { /* ignore */ }
     });
   });
@@ -482,6 +601,7 @@ function appConfirm(message, options = {}) {
     cancelText: options.cancelText || 'انصراف',
     variant: options.variant || 'confirm',
     destructive: !!options.destructive,
+    focusConfirm: !!options.focusConfirm,
     alertOnly: false,
     cancelJobKind: options.cancelJobKind || null,
   });
@@ -519,20 +639,37 @@ window.appPrompt = appPrompt;
 window.appAlert = appAlert;
 window.alert = (msg) => { appAlert(String(msg ?? ''), { title: 'اعلان برنامه', variant: 'warning' }); };
 
+function notifyServerJobCancel(kind = 'all') {
+  try {
+    if (typeof fetch === 'function') {
+      Promise.resolve(
+        fetch('/api/jobs/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind }),
+        }),
+      ).catch(() => {});
+    }
+  } catch { /* ignore */ }
+}
+
 function abortRunningOcr() {
   if (!ocrRunning) return;
   ocrCancelledByUser = true;
   clearPendingTranslationOcr();
+  notifyServerJobCancel('ocr');
   try { ocrAbortController?.abort(); } catch { /* ignore */ }
 }
 function abortRunningTranslation() {
   if (!translationRunning && !translationDecisionBusy) return;
   translationCancelledByUser = true;
+  notifyServerJobCancel('translation');
   try { translationAbortController?.abort(); } catch { /* ignore */ }
 }
 function abortRunningExport() {
   if (!exportRunning) return;
   exportCancelledByUser = true;
+  notifyServerJobCancel('export');
   try { exportAbortController?.abort(); } catch { /* ignore */ }
 }
 function abortRunningModelJob() {
@@ -544,6 +681,7 @@ function abortRunningModelJob() {
       Promise.resolve(fetch(`/api/engines/${encodeURIComponent(busyId)}/cancel`, { method: 'POST' })).catch(() => {});
     }
   } catch { /* ignore */ }
+  notifyServerJobCancel('model');
   try { modelAbortController?.abort(); } catch { /* ignore */ }
 }
 function showDialog(id) {
@@ -563,6 +701,15 @@ function releaseImgElement(img) {
   img.removeAttribute('src');
   img.src = '';
 }
+function releaseWatermarkPreviewResources() {
+  if (wmPreviewBitmap && wmPreviewBitmap !== state.editorBitmap) {
+    try { wmPreviewBitmap.close?.(); } catch { /* ignore */ }
+  }
+  wmPreviewBitmap = null;
+  wmPreviewImageId = null;
+  const cv = $('wmPreviewCanvas');
+  if (cv) { cv.width = 0; cv.height = 0; }
+}
 function closeDialog(id) {
   const idx = openDialogStack.indexOf(id);
   if (idx >= 0) openDialogStack.splice(idx, 1);
@@ -572,6 +719,8 @@ function closeDialog(id) {
     state.previewId = null;
   } else if (id === 'cropDialog') {
     releaseImgElement($('cropImage'));
+  } else if (id === 'watermarkDialog') {
+    releaseWatermarkPreviewResources();
   }
 }
 function openHelpDialog(sectionId = null) {
@@ -584,6 +733,12 @@ function openHelpDialog(sectionId = null) {
   showDialog('helpDialog');
 }
 async function requestCancelOcrDialog() {
+  if ((!ocrRunning || ocrClosingNormally) && state.modelBusy && modelFromOcrDialog) {
+    const cancelledModel = await requestCancelModelJob({ closeModelsDialog: false });
+    if (!cancelledModel) return false;
+    closeDialog('ocrDialog');
+    return true;
+  }
   if (!ocrRunning || ocrClosingNormally) { closeDialog('ocrDialog'); return true; }
   const ok = await appConfirm('عملیات خواندن متن (OCR) در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
     title: 'توقف عملیات در حال اجرا',
@@ -591,6 +746,7 @@ async function requestCancelOcrDialog() {
     cancelText: 'خیر، ادامه دهد',
     variant: 'warning',
     destructive: true,
+    focusConfirm: true,
     cancelJobKind: 'ocr',
   });
   if (!ok) return false;
@@ -607,6 +763,7 @@ async function requestCancelTranslationDialog() {
     cancelText: 'خیر، ادامه دهد',
     variant: 'warning',
     destructive: true,
+    focusConfirm: true,
     cancelJobKind: 'translation',
   });
   if (!ok) return false;
@@ -622,6 +779,7 @@ async function requestCancelExport(dialogId = null) {
     cancelText: 'خیر، ادامه دهد',
     variant: 'warning',
     destructive: true,
+    focusConfirm: true,
     cancelJobKind: 'export',
   });
   if (!ok) return false;
@@ -629,19 +787,40 @@ async function requestCancelExport(dialogId = null) {
   if (dialogId) closeDialog(dialogId);
   return true;
 }
-async function requestCancelModelJob() {
-  if (!state.modelBusy) { closeDialog('modelsDialog'); return true; }
+async function requestCancelModelJob(options = {}) {
+  const shouldCloseModels = options.closeModelsDialog !== false;
+  if (!state.modelBusy) { if (shouldCloseModels) closeDialog('modelsDialog'); return true; }
   const ok = await appConfirm('عملیات آماده‌سازی یا آزمایش مدل OCR در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
     title: 'توقف عملیات مدل OCR',
     confirmText: 'بله، متوقف شود',
     cancelText: 'خیر، ادامه دهد',
     variant: 'warning',
     destructive: true,
+    focusConfirm: true,
     cancelJobKind: 'model',
   });
   if (!ok) return false;
   if (state.modelBusy) abortRunningModelJob();
-  closeDialog('modelsDialog');
+  if (shouldCloseModels && $('modelsDialog')?.open) closeDialog('modelsDialog');
+  return true;
+}
+async function requestCancelAiDialog() {
+  if (!localNmtBusyModel && !localNmtTestAbortController) { closeDialog('aiDialog'); return true; }
+  const ok = await appConfirm('دانلود یا آزمایش مترجم آفلاین در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
+    title: 'توقف عملیات مترجم آفلاین',
+    confirmText: 'بله، متوقف شود',
+    cancelText: 'خیر، ادامه دهد',
+    variant: 'warning',
+    destructive: true,
+    focusConfirm: true,
+    cancelJobKind: 'local-nmt',
+  });
+  if (!ok) return false;
+  await cancelLocalNmtPrepare();
+  if (localNmtTestAbortController) {
+    try { localNmtTestAbortController.abort(); } catch { /* ignore */ }
+  }
+  closeDialog('aiDialog');
   return true;
 }
 async function requestCancelActiveJob() {
@@ -651,7 +830,8 @@ async function requestCancelActiveJob() {
     const activeExportDlg = $('pptxExportDialog')?.open ? 'pptxExportDialog' : ($('docxExportDialog')?.open ? 'docxExportDialog' : ($('exportDialog')?.open ? 'exportDialog' : null));
     return requestCancelExport(activeExportDlg);
   }
-  if (state.modelBusy) return requestCancelModelJob();
+  if (state.modelBusy) return requestCancelModelJob({ closeModelsDialog: Boolean($('modelsDialog')?.open) });
+  if (localNmtBusyModel || localNmtTestAbortController) return requestCancelAiDialog();
   if (!jobBusy) return false;
   const ok = await appConfirm('عملیات در حال اجراست. آیا مطمئن هستید که می‌خواهید این کار را متوقف و لغو کنید؟', {
     title: 'توقف عملیات در حال اجرا',
@@ -659,9 +839,11 @@ async function requestCancelActiveJob() {
     cancelText: 'خیر، ادامه دهد',
     variant: 'warning',
     destructive: true,
+    focusConfirm: true,
     cancelJobKind: 'job',
   });
   if (!ok) return false;
+  notifyServerJobCancel('all');
   try { currentJobAbortController?.abort(); } catch { /* ignore */ }
   return true;
 }
@@ -670,7 +852,7 @@ function closeTopDialog() {
   const stackedId = [...openDialogStack].reverse().find((id) => $(id)?.open);
   const dialog = stackedId ? $(stackedId) : [...document.querySelectorAll('dialog[open]')].at(-1);
   if (!dialog) {
-    if (jobBusy || state.modelBusy) { requestCancelActiveJob().catch(() => {}); return true; }
+    if (jobBusy || state.modelBusy || localNmtBusyModel) { requestCancelActiveJob().catch(() => {}); return true; }
     return false;
   }
   if (dialog.id === 'editorDialog') closeEditor().catch((error) => toast(error.message, true));
@@ -680,6 +862,7 @@ function closeTopDialog() {
   else if (dialog.id === 'docxExportDialog') requestCancelExport('docxExportDialog').catch(() => {});
   else if (dialog.id === 'pptxExportDialog') requestCancelExport('pptxExportDialog').catch(() => {});
   else if (dialog.id === 'modelsDialog') requestCancelModelJob().catch(() => {});
+  else if (dialog.id === 'aiDialog') requestCancelAiDialog().catch(() => {});
   else if (dialog.id === 'translationPreviewDialog') cancelTranslationRequestPreview();
   else closeDialog(dialog.id);
   return true;
@@ -731,6 +914,7 @@ function setBusy(message) {
   if ($('editorProgressWrap')) {
     const showEditorBar = !!message && !!$('editorDialog')?.open;
     $('editorProgressWrap').classList.toggle('hidden', !showEditorBar);
+    $('editorCancelJobBtn')?.classList.toggle('hidden', !showEditorBar);
     setProgress('editorProgress', null, showEditorBar);
   }
   if (translationRunning) {
@@ -745,6 +929,7 @@ async function runJob(message, task, progressId = null) {
   await clearActivity(false);
   const jobController = new AbortController();
   currentJobAbortController = jobController;
+  jobProgressTransform = { offset: 0, scale: 1, floor: 0 };
   setBusy(message); activeProgressId = progressId;
   if (progressId) setProgress(progressId, null, true);
   appendLocalActivity(message); $('activityDetails').open = true;
@@ -760,6 +945,7 @@ async function runJob(message, task, progressId = null) {
   }
   finally {
     if (currentJobAbortController === jobController) currentJobAbortController = null;
+    jobProgressTransform = null;
     dismissJobCancelModal('job');
     if (progressId) setProgress(progressId, completed ? 1 : 0, false);
     setProgress('dockProgress', completed ? 1 : 0, false);
@@ -795,6 +981,11 @@ async function saveProject() {
   return task;
 }
 function adoptProject(project, options = {}) {
+  const prevProjectId = state.project?.id || null;
+  if (prevProjectId && prevProjectId !== project?.id) {
+    clearBackupDownloadLink();
+    clearExportDownloadLink();
+  }
   state.project = project;
   state.project.images = project.images || [];
   G.normalizeLayout(state.project.images);
@@ -818,6 +1009,11 @@ function adoptProject(project, options = {}) {
   }
   $('ocrContrast').checked = settings.contrast !== false;
   $('ocrPrecise').checked = settings.precise !== false;
+  if ($('ocrPersianPreprocess')) {
+    $('ocrPersianPreprocess').checked = settings.persianPreprocessCustomized === true
+      ? Boolean(settings.persianPreprocess)
+      : (ocrLang === 'fas' ? true : Boolean(settings.persianPreprocess));
+  }
   $('ocrGroupLines').checked = settings.groupOcrLines !== false;
   $('ocrErase').checked = settings.eraseOriginal !== false;
   const output = settings.output || {};
@@ -876,6 +1072,7 @@ function setOverlayMode(mode, redraw = true) {
 function normalizeBlockTextMode(mode) { return mode === 'ocr' ? 'ocr' : 'translation'; }
 function blockTextMode(block, mode = currentOverlayMode()) {
   if (block.textMode === 'ocr' || block.textMode === 'translation') return block.textMode;
+  if (block.manual && !String(block.text || '').trim() && (String(block.tr || '').trim() || String(block.richHtml || '').trim())) return 'translation';
   return mode === 'ocr' ? 'ocr' : 'translation';
 }
 function blockOverlayMode(block, mode = currentOverlayMode()) {
@@ -883,21 +1080,37 @@ function blockOverlayMode(block, mode = currentOverlayMode()) {
 }
 function overlayBlock(block, mode = currentOverlayMode()) {
   const effectiveMode = blockOverlayMode(block, mode);
-  if (effectiveMode === 'none') return { ...block, tr: '', richHtml: '' };
+  if (effectiveMode === 'none') return { ...block, tr: '', richHtml: '', manual: false };
   if (effectiveMode !== 'ocr') return block;
+  if (block.manual && !String(block.text || '').trim() && (String(block.tr || '').trim() || String(block.richHtml || '').trim())) return block;
   const ocrRtl = /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]/.test(block.text || '') && !/[A-Za-z]{3,}/.test(block.text || '');
+  const resolvedDir = (block.ocrDir === 'rtl' || block.ocrDir === 'ltr') ? block.ocrDir : (ocrRtl ? 'rtl' : 'ltr');
+  const ocrRich = String(block.ocrRichHtml || '').trim();
   return {
     ...block,
     tr: block.text || '',
-    richHtml: '',
-    dir: ocrRtl ? 'rtl' : 'ltr',
-    align: ['center', 'justify'].includes(block.align) ? block.align : (ocrRtl ? 'right' : 'left'),
-    _plainText: true,
+    richHtml: ocrRich,
+    dir: resolvedDir,
+    align: ['left', 'right', 'center', 'justify'].includes(block.align) ? block.align : (resolvedDir === 'rtl' ? 'right' : 'left'),
+    _plainText: !ocrRich,
   };
 }
 function overlayBlocks(item, mode = currentOverlayMode()) { return (item.blocks || []).map((block) => overlayBlock(block, mode)); }
 function hasRenderableText(block) { return !!block.tr?.trim() || !!(!block._plainText && block.richHtml && Typeset.richHtmlWords(block.richHtml).some((word) => String(word.t || '').trim())); }
-function hasOverlayText(item, mode = currentOverlayMode()) { return overlayBlocks(item, mode).some((block) => block.enabled && hasRenderableText(block)); }
+function hasRenderableShapeFill(block) {
+  if (!block || !block.manual) return false;
+  const bg = String(block.bg || '');
+  if (!bg || bg === 'none') return false;
+  return normalizeShapeKey(block.shape) !== 'rect' || normalizeRadiusPct(block.cornerRadius) > 0;
+}
+function hasActiveWatermark(wm) {
+  if (!wm || typeof wm !== 'object' || wm.enabled === false) return false;
+  if (typeof Typeset?.hasActiveWatermark === 'function') return Typeset.hasActiveWatermark(wm);
+  return Boolean(String(wm.text || '').trim() || wm.logoId || wm.logoDataUrl);
+}
+function hasOverlayText(item, mode = currentOverlayMode()) {
+  return overlayBlocks(item, mode).some((block) => block.enabled && (hasRenderableText(block) || hasRenderableShapeFill(block))) || hasActiveWatermark(item?.watermark);
+}
 function renderAll() { renderGrid(); updateEngineOptions(); }
 function makeSummaryPill(text, extraClass = '') {
   const pill = document.createElement('span');
@@ -935,7 +1148,7 @@ function updateSummary() {
   $('emptyState').classList.toggle('hidden', total > 0);
   $('ocrBtn').disabled = !total; $('translateBtn').disabled = !total;
   $('exportBtn').disabled = !total;
-  ['selectAllBtn', 'selectNoneBtn', 'invertBtn', 'groupBtn', 'ungroupBtn', 'duplicateBtn', 'deleteBtn',
+  ['selectAllBtn', 'selectNoneBtn', 'invertBtn', 'groupBtn', 'ungroupBtn', 'watermarkBtn', 'duplicateBtn', 'deleteBtn',
     'approveSelectedBtn', 'unapproveSelectedBtn', 'selectApprovedBtn', 'selectUnapprovedBtn'].forEach((id) => {
     const btn = $(id);
     if (btn) btn.disabled = !total;
@@ -972,16 +1185,109 @@ function setSelected(item, value, event = null) {
   state.lastSelectedId = item.id; updateSelectionDisplay(); scheduleSave();
 }
 
+function getWindowScrollPosition() {
+  const docEl = document.documentElement;
+  const body = document.body;
+  return {
+    x: Number(window.scrollX) || Number(window.pageXOffset) || Number(docEl?.scrollLeft) || Number(body?.scrollLeft) || 0,
+    y: Number(window.scrollY) || Number(window.pageYOffset) || Number(docEl?.scrollTop) || Number(body?.scrollTop) || 0,
+  };
+}
+function applyWindowScrollPosition(x, y) {
+  const tx = Math.max(0, Math.round(Number(x) || 0));
+  const ty = Math.max(0, Math.round(Number(y) || 0));
+  if (document.documentElement) {
+    document.documentElement.scrollTop = ty;
+    document.documentElement.scrollLeft = tx;
+  }
+  const isDefaultJsdomScroll = /jsdom/i.test(window.navigator?.userAgent || '')
+    && typeof window.scrollTo === 'function'
+    && String(window.scrollTo).includes('notImplemented');
+  if (!isDefaultJsdomScroll && typeof window.scrollTo === 'function') {
+    try {
+      window.scrollTo({ left: tx, top: ty, behavior: 'instant' });
+    } catch {
+      try { window.scrollTo(tx, ty); } catch { /* non-scrolling env */ }
+    }
+  }
+}
+function findGridCardById(imageId) {
+  const grid = $('grid');
+  if (!grid || imageId == null) return null;
+  const key = String(imageId);
+  return [...grid.querySelectorAll('.item')].find((c) => c.dataset?.id === key) || null;
+}
+function captureEditorReturnScroll(imageId) {
+  const pos = getWindowScrollPosition();
+  const mainWrap = $('mainwrap');
+  const card = findGridCardById(imageId);
+  const rect = card?.getBoundingClientRect?.();
+  return {
+    projectId: state.project?.id || null,
+    imageId: String(imageId),
+    scrollX: pos.x,
+    scrollY: pos.y,
+    mainScrollTop: Number(mainWrap?.scrollTop || 0) || 0,
+    mainScrollLeft: Number(mainWrap?.scrollLeft || 0) || 0,
+    cardTop: rect && Number.isFinite(rect.top) ? rect.top : null,
+    cardHeight: rect && Number.isFinite(rect.height) ? rect.height : 0,
+  };
+}
+function restoreEditorReturnScroll(saved) {
+  if (!saved || (saved.projectId && state.project?.id && saved.projectId !== state.project.id)) return;
+  const applyOnce = () => {
+    const mainWrap = $('mainwrap');
+    if (mainWrap) {
+      if (saved.mainScrollTop > 0 || mainWrap.scrollTop !== saved.mainScrollTop) mainWrap.scrollTop = saved.mainScrollTop;
+      if (saved.mainScrollLeft > 0 || mainWrap.scrollLeft !== saved.mainScrollLeft) mainWrap.scrollLeft = saved.mainScrollLeft;
+    }
+    applyWindowScrollPosition(saved.scrollX, saved.scrollY);
+    const card = findGridCardById(saved.imageId);
+    if (!card) return;
+    if (saved.cardTop !== null && saved.cardHeight > 0) {
+      const nowRect = card.getBoundingClientRect?.();
+      if (nowRect && nowRect.height > 0) {
+        const drift = nowRect.top - saved.cardTop;
+        if (Math.abs(drift) > 2) {
+          applyWindowScrollPosition(saved.scrollX, Math.max(0, saved.scrollY + drift));
+        }
+      }
+    }
+    const editBtn = card.querySelector('.act button:nth-child(2)') || card.querySelector('.act button');
+    if (editBtn?.focus) {
+      try { editBtn.focus({ preventScroll: true }); } catch { /* ignore */ }
+    }
+    clearTimeout(justEditedHighlightTimer);
+    document.querySelectorAll('#grid .item.just-edited').forEach((el) => el.classList.remove('just-edited'));
+    card.classList.add('just-edited');
+    justEditedHighlightTimer = setTimeout(() => { card.classList.remove('just-edited'); }, 1800);
+  };
+  applyOnce();
+  requestAnimationFrame(() => {
+    if ($('editorDialog')?.open) return;
+    const mainWrap = $('mainwrap');
+    if (mainWrap && saved.mainScrollTop > 0 && mainWrap.scrollTop !== saved.mainScrollTop) mainWrap.scrollTop = saved.mainScrollTop;
+    const cur = getWindowScrollPosition();
+    if (Math.abs(cur.y - saved.scrollY) > 2 || Math.abs(cur.x - saved.scrollX) > 2) {
+      applyWindowScrollPosition(saved.scrollX, saved.scrollY);
+    }
+  });
+}
+
 // ---------- Grid, group manager, and drag/drop ----------
 function renderGrid() {
   const grid = $('grid'); if (!state.project) return;
+  const savedWinScroll = getWindowScrollPosition();
+  const mainWrap = $('mainwrap');
+  const savedMainTop = Number(mainWrap?.scrollTop || 0) || 0;
+  const savedMainLeft = Number(mainWrap?.scrollLeft || 0) || 0;
   G.normalizeLayout(state.project.images);
   const prevImages = new Map();
   grid.querySelectorAll('.item').forEach((oldCard) => {
     const oldImg = oldCard.querySelector('.tw > img');
     if (oldCard.dataset?.id && oldImg) prevImages.set(oldCard.dataset.id, oldImg);
   });
-  grid.textContent = '';
+  const frag = document.createDocumentFragment();
   const infos = G.info(state.project.images); const byId = new Map(infos.map((info) => [info.key, info]));
   sortedImages().forEach((item, index) => {
     const info = G.validId(item.groupId) ? byId.get(G.idKey(item.groupId)) : null;
@@ -991,7 +1297,7 @@ function renderGrid() {
     if (info) card.style.setProperty('--group-color', groupColor(info.id));
     const frameShell = document.createElement('div'); frameShell.className = 'tw-shell';
     const frame = document.createElement('div'); frame.className = 'tw';
-    const nextSrc = imageUrl(item, !!item.edited, Boolean(item.crop));
+    const nextSrc = imageUrl(item, !!item.edited, Boolean(item.crop || (!item.edited && hasActiveWatermark(item.watermark))));
     const reusable = prevImages.get(item.id);
     let image;
     if (reusable && reusable.dataset?.renderedSrc === nextSrc) {
@@ -1028,6 +1334,13 @@ function renderGrid() {
       stamp.append(stampCheck, stampText);
       frameShell.appendChild(stamp);
     }
+    if (hasActiveWatermark(item.watermark)) {
+      const wmBadge = document.createElement('div');
+      wmBadge.className = 'watermark-badge';
+      wmBadge.textContent = 'واترمارک';
+      wmBadge.title = 'دارای واترمارک فعال روی این صفحه';
+      frameShell.appendChild(wmBadge);
+    }
     const tick = document.createElement('input'); tick.type = 'checkbox'; tick.className = 'tick'; tick.checked = !!item.selected; tick.setAttribute('aria-label', `انتخاب ${item.name}`);
     tick.addEventListener('click', (event) => {
       // The browser has already applied the new checkbox value; consume this one click without cancelling it.
@@ -1057,7 +1370,7 @@ function renderGrid() {
     });
     name.append(nameText, order, makeButton('↑', () => moveImageBy(item.id, -1), 'bt mini'), makeButton('↓', () => moveImageBy(item.id, 1), 'bt mini'));
     const meta = document.createElement('div'); meta.className = 'meta';
-    meta.textContent = `${item.width}×${item.height} · ${item.blocks?.length || 0} متن${item.crop ? ' · برش' : ''}${item.edited ? ' · ویرایش' : ''}${item.approved ? ' · تأیید ✓' : ''}`;
+    meta.textContent = `${item.width}×${item.height} · ${item.blocks?.length || 0} متن${item.crop ? ' · برش' : ''}${hasActiveWatermark(item.watermark) ? ' · واترمارک' : ''}${item.edited ? ' · ویرایش' : ''}${item.approved ? ' · تأیید ✓' : ''}`;
     card.append(frameShell, tick, act, name, meta);
     if (info) {
       const badge = document.createElement('span'); badge.className = 'grp'; badge.textContent = `گروه ${info.id}`; badge.title = `${info.members.length} عضو`; card.appendChild(badge);
@@ -1074,14 +1387,23 @@ function renderGrid() {
       event.dataTransfer?.setData('text/plain', item.id); if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
     });
     card.addEventListener('dragend', clearDrag);
-    grid.appendChild(card);
+    frag.appendChild(card);
   });
+  grid.replaceChildren(frag);
   prevImages.forEach((staleImg) => releaseImgElement(staleImg));
   prevImages.clear();
   renderGroupPanel(); updateSummary(); scheduleOutlines();
+  if (mainWrap) {
+    if (savedMainTop > 0 && mainWrap.scrollTop !== savedMainTop) mainWrap.scrollTop = savedMainTop;
+    if (savedMainLeft > 0 && mainWrap.scrollLeft !== savedMainLeft) mainWrap.scrollLeft = savedMainLeft;
+  }
+  const afterScroll = getWindowScrollPosition();
+  if ((savedWinScroll.y > 0 || savedWinScroll.x > 0) && (afterScroll.y !== savedWinScroll.y || afterScroll.x !== savedWinScroll.x)) {
+    applyWindowScrollPosition(savedWinScroll.x, savedWinScroll.y);
+  }
 }
 function moveImageBy(imageId, delta) { G.moveUnit(state.project.images, imageId, delta); renderGrid(); scheduleSave(); }
-async function duplicateImages(ids) { if (!ids.length) return; await saveProject(); adoptProject(await api(`/api/projects/${state.project.id}/duplicate`, jsonOptions('POST', ids))); }
+async function duplicateImages(ids) { if (!ids.length) return; if (!isModuleLicensed('editing')) { await ensureModuleLicensed('editing'); return; } await saveProject(); adoptProject(await api(`/api/projects/${state.project.id}/duplicate`, jsonOptions('POST', ids))); }
 async function deleteImages(ids) {
   if (!ids.length) return;
   const ok = await appConfirm(`آیا مطمئن هستید که می‌خواهید ${ids.length} تصویر انتخاب‌شده را از پروژه حذف کنید؟`, {
@@ -1229,6 +1551,19 @@ function requestProjectLoad(id) {
 async function waitForProjectLoads() {
   while (projectLoadTasks.size) await Promise.all([...projectLoadTasks]);
 }
+async function waitForPendingRenders(projectId = null) {
+  await waitForProjectLoads();
+  if (editorCloseTask) await editorCloseTask.catch(() => {});
+  await overlayPreviewTask.catch(() => {});
+  const prefix = projectId ? `${projectId}:` : '';
+  while (true) {
+    const pending = [...imageRenderTasks.entries()]
+      .filter(([key]) => !prefix || key.startsWith(prefix))
+      .map(([, task]) => task);
+    if (!pending.length) break;
+    await Promise.allSettled(pending);
+  }
+}
 function collectOutputSettings() {
   if (!state.project) return; state.project.settings = state.project.settings || {};
   const projName = String(state.project.name || '').trim() || 'پروژهٔ کمیک';
@@ -1246,6 +1581,8 @@ function collectOcrSettings() {
     ocrPageMode: normalizePageMode($('ocrPageMode')?.value),
     contrast: $('ocrContrast').checked,
     precise: $('ocrPrecise').checked,
+    persianPreprocess: Boolean($('ocrPersianPreprocess')?.checked),
+    persianPreprocessCustomized: Boolean(state.project.settings.persianPreprocessCustomized),
     groupOcrLines: $('ocrGroupLines').checked,
     eraseOriginal: $('ocrErase').checked,
   });
@@ -1541,8 +1878,19 @@ function resolveEngineExecMeta(engine) {
     descriptionNote: 'اجرا روی سیستم شما به‌صورت آفلاین',
   };
 }
+function isDirectMtProvider(provider) {
+  return provider === 'free' || provider === 'local';
+}
 function resolveTranslationExecMeta(provider, baseUrl = '') {
   const normProvider = String(provider || 'free').trim() || 'free';
+  if (normProvider === 'local') {
+    return {
+      mode: 'local',
+      short: 'آفلاین داخلی',
+      badge: 'اجرا روی سیستم شما (آفلاین — بدون اینترنت)',
+      banner: 'محل اجرا: ۱۰۰٪ روی سیستم شما (آفلاین و رایگان) — پس از یک‌بار دانلود اولیه، ترجمهٔ یک جمله، یک کادر یا صفحه‌های کامل بدون نیاز به اینترنت و بدون نیاز به کارت گرافیک روی پردازنده (CPU) انجام می‌شود.',
+    };
+  }
   const effectiveLocal = normProvider !== 'free' && normProvider !== 'gemini' && isLocalEndpointUrl(baseUrl);
   if (effectiveLocal) {
     return {
@@ -1689,6 +2037,22 @@ function applyCachedEngineOrder(engines, cachedIds) {
   return ordered;
 }
 
+function engineInstallState(engine, language) {
+  if (!engine?.runtimeInstalled) {
+    return { state: 'uninstalled', icon: '⬇' };
+  }
+  const readyLangs = Array.isArray(engine.readyLanguages) ? engine.readyLanguages : [];
+  if (language && readyLangs.includes(language)) {
+    return { state: 'ready', icon: '✓' };
+  }
+  return { state: 'partial', icon: '◐' };
+}
+
+function formatOcrEngineOptionLabel(engine, language) {
+  const inst = engineInstallState(engine, language);
+  return `${inst.icon} ${engine.name}`;
+}
+
 function updateEngineOptions(preferredEngine = '', options = {}) {
   const select = $('ocrEngine'); if (!select) return;
   const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
@@ -1710,12 +2074,14 @@ function updateEngineOptions(preferredEngine = '', options = {}) {
   orderedEngines.forEach((engine) => {
     const suit = engineSuitability(engine, pageMode, language);
     const execMeta = resolveEngineExecMeta(engine);
+    const inst = engineInstallState(engine, language);
     const option = document.createElement('option');
     option.value = engine.id;
     option.className = `ocr-opt-${suit.tier}`;
     option.dataset.suitability = suit.tier;
     option.dataset.executionMode = execMeta.mode;
-    option.textContent = engine.name;
+    option.dataset.installState = inst.state;
+    option.textContent = `${inst.icon} ${engine.name}`;
     select.appendChild(option);
   });
   const chosenId = pickBestEngineForLanguage(language, pageMode, previous);
@@ -1745,10 +2111,12 @@ function updateOcrEngineStatus() {
       if (!opt) return;
       const suit = engineSuitability(eng, pageMode, curLang);
       const engExec = resolveEngineExecMeta(eng);
+      const inst = engineInstallState(eng, curLang);
       opt.className = `ocr-opt-${suit.tier}`;
       opt.dataset.suitability = suit.tier;
       opt.dataset.executionMode = engExec.mode;
-      opt.textContent = eng.name;
+      opt.dataset.installState = inst.state;
+      opt.textContent = `${inst.icon} ${eng.name}`;
       select.appendChild(opt);
     });
     select.value = keepSelectedId;
@@ -1796,35 +2164,103 @@ function projectBrowserDrafts(project) {
   const prefix = `comic-studio-draft:${encodeURIComponent(project.id)}:`;
   const valid = new Set(project.images.flatMap((image) => (image.blocks || []).filter((block) => block.id !== undefined).map((block) => `${image.id}\0${String(block.id)}`)));
   const drafts = [];
+  let keys = [];
   try {
     for (let index = 0; index < localStorage.length; index += 1) {
-      const key = localStorage.key(index); if (!key?.startsWith(prefix)) continue;
-      const parts = key.slice(prefix.length).split(':'); if (parts.length !== 3) continue;
-      const [imageId, blockId] = parts.slice(0, 2).map(decodeURIComponent); const mode = parts[2];
-      if (!valid.has(`${imageId}\0${blockId}`) || !['ocr', 'translation'].includes(mode)) continue;
-      const value = JSON.parse(localStorage.getItem(key));
-      if (!value || typeof value.html !== 'string') throw new Error('پیش‌نویس مرورگر نامعتبر است');
-      drafts.push({ imageId, blockId, mode, value });
+      const key = localStorage.key(index);
+      if (key?.startsWith(prefix)) keys.push(key);
     }
-  } catch { throw new Error('خواندن پیش‌نویس‌های این مرورگر ممکن نبود؛ بک‌آپ ناقص ساخته نشد.'); }
+  } catch {
+    return drafts;
+  }
+  for (const key of keys) {
+    const parts = key.slice(prefix.length).split(':');
+    if (parts.length !== 3) continue;
+    let imageId;
+    let blockId;
+    try {
+      [imageId, blockId] = parts.slice(0, 2).map(decodeURIComponent);
+    } catch {
+      continue;
+    }
+    const mode = parts[2];
+    if (!valid.has(`${imageId}\0${blockId}`) || !['ocr', 'translation'].includes(mode)) continue;
+    try {
+      const value = JSON.parse(localStorage.getItem(key));
+      if (value && typeof value.html === 'string') {
+        drafts.push({ imageId, blockId, mode, value });
+      }
+    } catch {
+      /* ignore unreadable/corrupted stale draft entry */
+    }
+  }
   return drafts;
 }
 async function backupCurrentProject() {
   if (!state.project) return;
   await runJob('در حال ساخت بک‌آپ پروژه…', async (signal) => {
-    await overlayPreviewTask;
-    const project = state.project; let revision;
-    do { const saving = saveProject(); revision = saveRevision; await saving; } while (state.project === project && revision !== saveRevision);
+    const checkNotCancelled = () => {
+      if (signal?.aborted) {
+        throw Object.assign(new Error('عملیات به درخواست شما لغو شد.'), { name: 'AbortError', cancelled: true });
+      }
+    };
+    await waitForPendingRenders(state.project?.id);
+    checkNotCancelled();
+    const project = state.project;
+    if (!project) return;
+    const mismatchedIds = sortedImages().filter((item) => hasOverlayText(item) !== !!item.edited).map((item) => item.id);
+    if (mismatchedIds.length) {
+      await renderImagesText(mismatchedIds, null, checkNotCancelled);
+    }
+    let revision;
+    do {
+      await waitForPendingRenders(project.id);
+      checkNotCancelled();
+      const saving = saveProject();
+      revision = saveRevision;
+      await saving;
+    } while (
+      state.project === project &&
+      (revision !== saveRevision || [...imageRenderTasks.keys()].some((k) => k.startsWith(`${project.id}:`)))
+    );
     if (state.project !== project) throw new Error('پروژه تغییر کرد؛ دوباره بک‌آپ بگیرید.');
     const drafts = projectBrowserDrafts(project);
-    const response = await fetch(`/api/projects/${project.id}/backup`, { ...jsonOptions('POST', { drafts, expected_updated_at: project.updatedAt }), signal });
-    if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `ساخت بک‌آپ ممکن نشد (HTTP ${response.status})`); }
-    const blob = await response.blob(); if (!blob.size) throw new Error('فایل بک‌آپ خالی است');
-    if (state.project !== project || revision !== saveRevision) throw new Error('پروژه هنگام ساخت بک‌آپ تغییر کرد؛ برای ثبت آخرین تغییرها دوباره بک‌آپ بگیرید.');
-    if (backupDownloadUrl) URL.revokeObjectURL(backupDownloadUrl);
-    backupDownloadUrl = URL.createObjectURL(blob);
-    const link = $('backupDownloadLink'); link.href = backupDownloadUrl;
-    link.download = `${safeName(project.name) || 'comic-studio'}-backup.zip`; link.textContent = 'دانلود دوبارهٔ بک‌آپ'; link.classList.remove('hidden'); link.click();
+    const response = await fetch(`/api/projects/${encodeURIComponent(project.id)}/backup?prepare=true`, {
+      ...jsonOptions('POST', { drafts, expected_updated_at: project.updatedAt }),
+      signal,
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload?.detail || `ساخت بک‌آپ ممکن نشد (HTTP ${response.status})`);
+    }
+    const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
+    const fallbackName = `${safeName(project.name) || 'comic-studio'}-backup.zip`;
+    const link = $('backupDownloadLink');
+    if (contentType.includes('application/json')) {
+      const payload = await response.json();
+      if (!payload?.token) throw new Error('فایل بک‌آپ آماده نشد.');
+      if (state.project !== project || revision !== saveRevision) {
+        fetch(`/api/projects/${encodeURIComponent(project.id)}/backup/${encodeURIComponent(payload.token)}`, { method: 'DELETE' }).catch(() => {});
+        throw new Error('پروژه هنگام ساخت بک‌آپ تغییر کرد؛ برای ثبت آخرین تغییرها دوباره بک‌آپ بگیرید.');
+      }
+      clearBackupDownloadLink();
+      activeBackupPrepared = { projectId: project.id, token: payload.token };
+      link.href = `/api/projects/${encodeURIComponent(project.id)}/backup/${encodeURIComponent(payload.token)}`;
+      link.download = payload.filename || fallbackName;
+    } else {
+      const blob = await response.blob();
+      if (!blob.size) throw new Error('فایل بک‌آپ خالی است');
+      if (state.project !== project || revision !== saveRevision) {
+        throw new Error('پروژه هنگام ساخت بک‌آپ تغییر کرد؛ برای ثبت آخرین تغییرها دوباره بک‌آپ بگیرید.');
+      }
+      clearBackupDownloadLink();
+      backupDownloadUrl = URL.createObjectURL(blob);
+      link.href = backupDownloadUrl;
+      link.download = fallbackName;
+    }
+    link.textContent = 'دانلود دوبارهٔ بک‌آپ';
+    link.classList.remove('hidden');
+    link.click();
     toast('بک‌آپ پروژه آماده شد؛ کلیدهای API داخل آن نیستند.');
   });
 }
@@ -1838,7 +2274,12 @@ async function restoreProjectBackup(file) {
   });
   if (!ok) return;
   await runJob('در حال بازیابی بک‌آپ…', async (signal) => {
-    await saveProject(); const previous = state.project;
+    await waitForPendingRenders(state.project?.id);
+    const saveExistingSafely = () => saveProject().catch((err) => {
+      if (err?.status !== 404) throw err;
+    });
+    await saveExistingSafely();
+    const previous = state.project;
     const form = new FormData(); form.append('file', file);
     const result = await api('/api/projects/restore', { method: 'POST', body: form, signal });
     let failedDrafts = 0;
@@ -1849,10 +2290,24 @@ async function restoreProjectBackup(file) {
     // Flush any edits made while the upload ran; never overwrite another opened project.
     let opened = false;
     while (state.project === previous) {
-      const saving = saveProject(); const revision = saveRevision; await saving;
+      const saving = saveExistingSafely();
+      const revision = saveRevision;
+      await saving;
       if (state.project === previous && revision === saveRevision) { adoptProject(result.project); opened = true; break; }
     }
-    await refreshProjectList(); setMenuOpen(false);
+    await refreshProjectList();
+    if (opened) {
+      const checkCancel = () => {
+        if (signal?.aborted) {
+          const err = new Error('بازیابی بک‌آپ لغو شد.');
+          err.name = 'AbortError'; err.cancelled = true;
+          throw err;
+        }
+      };
+      const mismatchedIds = sortedImages().filter((item) => hasOverlayText(item) !== !!item.edited).map((item) => item.id);
+      if (mismatchedIds.length) await renderImagesText(mismatchedIds, null, checkCancel);
+    }
+    setMenuOpen(false);
     if (failedDrafts) toast(`پروژه بازیابی شد، ولی ${failedDrafts} پیش‌نویس در حافظهٔ مرورگر ذخیره نشد؛ فایل ZIP را نگه دارید.`, true);
     else toast(opened ? 'بک‌آپ به‌صورت پروژهٔ جدید بازیابی شد.' : 'بک‌آپ بازیابی شد؛ پروژهٔ جدید را از فهرست پروژه‌ها باز کنید.');
   });
@@ -1931,6 +2386,7 @@ function reportOcrError(error) {
 }
 async function runOcr() {
   if (ocrRunning) return;
+  if (!isModuleLicensed('ocr')) { await ensureModuleLicensed('ocr'); return; }
   const pending = pendingTranslationAfterOcr;
   const controller = new AbortController();
   ocrAbortController = controller; ocrCancelledByUser = false; ocrClosingNormally = false;
@@ -1962,6 +2418,7 @@ async function runOcr() {
         page_mode: normalizePageMode($('ocrPageMode')?.value),
         contrast: $('ocrContrast').checked,
         precise: $('ocrPrecise').checked,
+        persian_preprocess: Boolean($('ocrPersianPreprocess')?.checked),
         group_lines: $('ocrGroupLines').checked,
         min_confidence: confidence === '' ? .35 : Number(confidence),
       };
@@ -1975,39 +2432,47 @@ async function runOcr() {
           throw new Error('OCR در سرور ذخیره شد، اما پروژه یا انتخاب تغییر کرد؛ ترجمه ادامه نیافت. برای دیدن نتیجه پروژه را دوباره باز کنید.');
         }
       };
-      if (ids.length === 1) {
+      const applyActiveJobProgress = (p) => {
+        const clamped = Math.max(0, Math.min(1, p));
+        if (jobProgressTransform) {
+          jobProgressTransform.floor = Math.max(jobProgressTransform.floor || 0, clamped);
+        }
+        const effective = jobProgressTransform ? Math.max(jobProgressTransform.floor, clamped) : clamped;
+        setProgress('ocrProgress', effective, true);
+        setProgress('jobProgress', effective, true);
+        setProgress('dockProgress', effective, true);
+        if ($('editorDialog')?.open) setProgress('editorProgress', effective, true);
+      };
+      const totalPages = ids.length;
+      for (let idx = 0; idx < totalPages; idx += 1) {
+        checkOcrNotCancelled();
+        const pageId = ids[idx];
+        const isLastPage = idx + 1 >= totalPages;
+        if (!isLastPage) usedKeepEngineLoaded = true;
+        if (idx > 0) applyActiveJobProgress(idx / totalPages);
         const result = await api(`/api/projects/${state.project.id}/ocr`, {
-          ...jsonOptions('POST', { ...basePayload, image_ids: ids, keep_engine_loaded: false }),
+          ...jsonOptions('POST', {
+            ...basePayload,
+            image_ids: [pageId],
+            keep_engine_loaded: !isLastPage,
+            batch_index: idx + 1,
+            batch_total: totalPages,
+          }),
           signal: controller.signal,
         });
+        if (isLastPage) usedKeepEngineLoaded = false;
         checkOcrNotCancelled();
         verifyPendingOcrState();
         adoptProject(result, { skipGrid: true });
         setOverlayMode('ocr', false);
-        await renderImagesText(ids, null, checkOcrNotCancelled);
-        completedOcrPages = 1;
-      } else {
-        for (let idx = 0; idx < ids.length; idx += 1) {
-          checkOcrNotCancelled();
-          const pageId = ids[idx];
-          const isLastPage = idx + 1 >= ids.length;
-          if (!isLastPage) usedKeepEngineLoaded = true;
-          const result = await api(`/api/projects/${state.project.id}/ocr`, {
-            ...jsonOptions('POST', { ...basePayload, image_ids: [pageId], keep_engine_loaded: !isLastPage }),
-            signal: controller.signal,
-          });
-          if (isLastPage) usedKeepEngineLoaded = false;
-          checkOcrNotCancelled();
-          verifyPendingOcrState();
-          adoptProject(result, { skipGrid: true });
-          setOverlayMode('ocr', false);
-          await renderImagesText([pageId], null, checkOcrNotCancelled);
-          completedOcrPages += 1;
-          const p = completedOcrPages / ids.length;
-          setProgress('ocrProgress', p, true);
-          setProgress('jobProgress', p, true);
-          setProgress('dockProgress', p, true);
-        }
+        applyActiveJobProgress((idx + 0.80) / totalPages);
+        await renderImagesText(
+          [pageId],
+          (done, tot) => applyActiveJobProgress((idx + 0.80 + 0.20 * (done / Math.max(1, tot))) / totalPages),
+          checkOcrNotCancelled,
+        );
+        completedOcrPages += 1;
+        applyActiveJobProgress(completedOcrPages / totalPages);
       }
     }, 'ocrProgress');
     ocrSucceeded = true; ocrClosingNormally = true;
@@ -2023,15 +2488,18 @@ async function runOcr() {
     }
     reportOcrError(error); if (error.pendingId) openPendingResults(error.pendingId); throw error;
   } finally {
-    if (usedKeepEngineLoaded) {
-      usedKeepEngineLoaded = false;
-      await api('/api/engines/unload', { method: 'POST' }).catch(() => {});
-    }
     if (!ocrSucceeded) setProgress('ocrProgress', 0, false);
     if (ocrAbortController === controller) ocrAbortController = null;
     ocrClosingNormally = false; ocrRunning = false; $('startOcrBtn').disabled = false; $('cancelOcrBtn')?.classList.add('hidden');
     dismissJobCancelModal('ocr');
-    refreshEngineMemory().catch(() => {});
+    if (usedKeepEngineLoaded) {
+      usedKeepEngineLoaded = false;
+      api('/api/engines/unload', { method: 'POST' })
+        .then(() => refreshEngineMemory().catch(() => {}))
+        .catch(() => {});
+    } else {
+      refreshEngineMemory().catch(() => {});
+    }
   }
 }
 
@@ -2039,7 +2507,7 @@ function savedTranslationSkill(projectId) {
   try { return localStorage.getItem(`comic-studio-ai-skill:${projectId}`); } catch { return null; }
 }
 function rememberTranslationSkill(projectId, preview) {
-  if (preview.provider === 'free') return;
+  if (isDirectMtProvider(preview.provider)) return;
   try { localStorage.setItem(`comic-studio-ai-skill:${projectId}`, preview.skill ?? ''); } catch { /* the next preview can still use the default */ }
 }
 function saveDraftTranslationSkill(projectId) {
@@ -2049,6 +2517,7 @@ function saveDraftTranslationSkill(projectId) {
 function parseTranslationTarget(raw) {
   const value = String(raw || '').trim();
   if (!value || value === 'free') return { provider: 'free', profileId: '', value: 'free' };
+  if (value === 'local') return { provider: 'local', profileId: '', value: 'local' };
   const sep = value.indexOf('::');
   const provider = sep >= 0 ? value.slice(0, sep) : value;
   const profileId = sep >= 0 ? value.slice(sep + 2) : '';
@@ -2067,7 +2536,7 @@ function resolvePreferredTranslationTarget(overrideTarget = null) {
     return parsedOverride;
   }
   const candidate = parseTranslationTarget(preferredTranslationTarget || currentAiProvider);
-  if (candidate.provider === 'free') return candidate;
+  if (isDirectMtProvider(candidate.provider)) return candidate;
   const profiles = state.ai?.providers?.[candidate.provider]?.profiles || [];
   if (candidate.profileId) {
     if (profiles.some((p) => p.hasApiKey && String(p.id) === candidate.profileId)) return candidate;
@@ -2084,7 +2553,7 @@ function resolvePreferredTranslationTarget(overrideTarget = null) {
 function renderTranslationServiceSelector(activeProvider, activeProfileId = '') {
   const select = $('translationPreviewService');
   if (!select) return;
-  const activeValue = activeProvider && activeProvider !== 'free' && activeProfileId
+  const activeValue = activeProvider && !isDirectMtProvider(activeProvider) && activeProfileId
     ? `${activeProvider}::${activeProfileId}`
     : (activeProvider || 'free');
   select.textContent = '';
@@ -2092,10 +2561,18 @@ function renderTranslationServiceSelector(activeProvider, activeProfileId = '') 
     const opt = document.createElement('option');
     opt.value = value;
     opt.dataset.executionMode = execMode;
-    opt.textContent = label;
+    textLabel: {
+      opt.textContent = label;
+    }
     select.appendChild(opt);
   };
   addOpt('free', 'سرویس رایگان — Google Translate + MyMemory', 'online');
+  const localCfgModel = state.ai?.local_nmt?.model || 'nllb-600m';
+  const localModels = state.ai?.local_nmt_status?.models || [];
+  const activeLocalMeta = localModels.find((m) => m.id === localCfgModel);
+  const localShort = activeLocalMeta?.shortLabel || (localCfgModel === 'nllb-1.3b' ? 'NLLB-200 (1.3B)' : 'NLLB-200 (600M)');
+  const localReadySuffix = activeLocalMeta?.ready ? '✓ آماده بدون اینترنت' : (localModels.length ? '⬇ نیازمند دانلود اولیه' : 'آفلاین بدون اینترنت');
+  addOpt('local', `مترجم آفلاین داخلی — ${localShort} (${localReadySuffix})`, 'local');
   AI_PROVIDER_IDS.forEach((providerId) => {
     const info = aiInfo(providerId);
     const label = info.label || AI_FALLBACKS[providerId]?.label || providerId;
@@ -2106,10 +2583,11 @@ function renderTranslationServiceSelector(activeProvider, activeProfileId = '') 
       const pName = activeProfiles[0].name?.trim() || 'API 1';
       addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (${pName})`, execMeta.mode);
     } else if (activeProfiles.length >= 2) {
-      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (همهٔ ${activeProfiles.length} کلید فعال به ترتیب)`, execMeta.mode);
+      addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (همهٔ ${activeProfiles.length} کلید فعال به ترتیب اولویت)`, execMeta.mode);
       activeProfiles.forEach((p, idx) => {
         const pName = p.name?.trim() || `API ${idx + 1}`;
-        addOpt(`${providerId}::${p.id}`, `${label}${model ? ` — مدل: ${model}` : ''} · فقط «${pName}»`, execMeta.mode);
+        const faRank = (idx + 1).toLocaleString('fa-IR');
+        addOpt(`${providerId}::${p.id}`, `${label}${model ? ` — مدل: ${model}` : ''} · اولویت ${faRank}: «${pName}»`, execMeta.mode);
       });
     } else if (activeProvider === providerId) {
       addOpt(providerId, `${label}${model ? ` — مدل: ${model}` : ''} (بدون کلید API ذخیره‌شده)`, execMeta.mode);
@@ -2147,7 +2625,7 @@ async function switchTranslationPreviewService(nextTargetValue) {
         ...(translationPreviewData || {}),
         provider: parsed.provider,
         profileId: parsed.profileId,
-        contextMode: parsed.provider !== 'free',
+        contextMode: !isDirectMtProvider(parsed.provider),
         requests: [],
         previewError: errMsg,
       };
@@ -2200,9 +2678,237 @@ function openAiSettingsFromPreviewDialog() {
   if (state.project?.id) saveDraftTranslationSkill(state.project.id);
   cancelTranslationRequestPreview();
   loadAiSettings().then(() => {
-    if (activeProv && AI_PROVIDER_IDS.includes(activeProv)) showAiProvider(activeProv, false);
+    if (activeProv && (activeProv === 'local' || AI_PROVIDER_IDS.includes(activeProv))) showAiProvider(activeProv, false);
     showDialog('aiDialog');
   }).catch((error) => toast(error.message, true));
+}
+function formatStorageBytesFa(bytes) {
+  const n = Number(bytes || 0);
+  if (!Number.isFinite(n) || n <= 0) return 'کمتر از ۱ مگابایت';
+  if (n < 1024 * 1024) return 'کمتر از ۱ مگابایت';
+  if (n < 1024 ** 3) return `${Math.max(1, Math.round(n / (1024 * 1024)))} مگابایت`;
+  return `${(n / (1024 ** 3)).toFixed(2)} گیگابایت`;
+}
+function syncStorageCheckboxState() {
+  const mig = $('storageMigrateExisting');
+  const clean = $('storageCleanupOld');
+  const wrap = $('storageCleanupOldWrap');
+  if (!mig || !clean) return;
+  clean.disabled = !mig.checked || storageSwitchBusy;
+  if (wrap) wrap.style.opacity = mig.checked ? '1' : '0.55';
+}
+function renderStorageSettings(info) {
+  if (!info) return;
+  state.storage = info;
+  if ($('storageModeBadge')) {
+    $('storageModeBadge').textContent = info.customActive ? 'مسیر سفارشی فعال' : 'اختیاری · پیش‌فرض خودکار';
+  }
+  if ($('storageActivePath')) $('storageActivePath').textContent = info.activePath || '—';
+  if ($('storageAppDir')) $('storageAppDir').textContent = info.appDir || '—';
+  if ($('storageDiskStats')) {
+    const usedLabel = formatStorageBytesFa(info.usedBytes || 0);
+    const freeLabel = typeof info.freeDiskGb === 'number' ? `${info.freeDiskGb} گیگابایت` : 'نامشخص';
+    $('storageDiskStats').textContent = `حجم مصرفی فعلی: ${usedLabel} · فضای آزاد درایو فعلی: ${freeLabel}`;
+  }
+  if ($('storageCustomPath')) $('storageCustomPath').value = info.customPath || '';
+  if ($('storageWarningBanner')) {
+    const warn = String(info.fallbackWarning || '').trim();
+    $('storageWarningBanner').textContent = warn;
+    $('storageWarningBanner').classList.toggle('hidden', !warn);
+  }
+  if ($('storageResetDefaultBtn')) {
+    $('storageResetDefaultBtn').classList.toggle('hidden', !info.customPath);
+  }
+  syncStorageCheckboxState();
+}
+function formatResourcePercent(value) {
+  return `${Number(value || 0).toLocaleString('fa-IR')}٪`;
+}
+function formatResourceRam(mb) {
+  const amount = Number(mb || 0);
+  if (amount >= 1024) return `${(amount / 1024).toLocaleString('fa-IR', { maximumFractionDigits: 1 })} گیگابایت`;
+  return `${amount.toLocaleString('fa-IR')} مگابایت`;
+}
+function renderResourceBudget(summary) {
+  if (!summary) return;
+  const manual = summary.mode === 'manual';
+  if ($('resourcesAutoMode')) $('resourcesAutoMode').checked = !manual;
+  if ($('resourcesCpuPercent')) $('resourcesCpuPercent').value = String(summary.cpuPercent ?? 60);
+  if ($('resourcesRamPercent')) $('resourcesRamPercent').value = String(summary.ramPercent ?? 60);
+  if ($('resourcesModeBadge')) {
+    $('resourcesModeBadge').textContent = manual ? 'دستی' : 'خودکار';
+    $('resourcesModeBadge').classList.toggle('is-local', !manual);
+  }
+  if ($('resourcesCpuInfo')) $('resourcesCpuInfo').textContent = `${Number(summary.cpuCores || 0).toLocaleString('fa-IR')} هسته`;
+  if ($('resourcesRamInfo')) $('resourcesRamInfo').textContent = summary.ramGb
+    ? `${Number(summary.ramGb).toLocaleString('fa-IR', { maximumFractionDigits: 1 })} گیگابایت`
+    : 'نامشخص';
+  if ($('resourcesEffectiveInfo')) {
+    $('resourcesEffectiveInfo').textContent = manual
+      ? `${Number(summary.allowedCores || 0).toLocaleString('fa-IR')} هسته از ${Number(summary.cpuCores || 0).toLocaleString('fa-IR')} · ${formatResourceRam(summary.allowedRamMb)} حافظه`
+      : 'خودکار (برنامه خودش متناسب با سیستم تصمیم می‌گیرد)';
+  }
+  syncResourceSliderLabels();
+  $('resourcesManualBox')?.classList.toggle('hidden', !manual);
+  [$('resourcesCpuPercent'), $('resourcesRamPercent')].forEach((el) => { if (el) el.disabled = !manual; });
+}
+function syncResourceSliderLabels() {
+  if ($('resourcesCpuValue')) $('resourcesCpuValue').textContent = formatResourcePercent($('resourcesCpuPercent')?.value ?? 60);
+  if ($('resourcesRamValue')) $('resourcesRamValue').textContent = formatResourcePercent($('resourcesRamPercent')?.value ?? 60);
+}
+async function openResourcesDialog() {
+  if (!$('resourcesDialog')) return;
+  if ($('resourcesStatus')) $('resourcesStatus').textContent = '';
+  try {
+    const summary = await api('/api/resources');
+    state.resources = summary;
+    renderResourceBudget(summary);
+  } catch (error) {
+    if ($('resourcesStatus')) $('resourcesStatus').textContent = error?.detailText || error?.message || String(error);
+  }
+  showDialog('resourcesDialog');
+  setMenuOpen(false);
+}
+async function submitResourceBudget() {
+  const auto = Boolean($('resourcesAutoMode')?.checked);
+  const cpuPercent = Number($('resourcesCpuPercent')?.value ?? 60);
+  const ramPercent = Number($('resourcesRamPercent')?.value ?? 60);
+  const btn = $('resourcesSaveBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const summary = await api('/api/resources', jsonOptions('PUT', {
+      mode: auto ? 'auto' : 'manual',
+      cpuPercent: Math.min(100, Math.max(10, Math.round(cpuPercent))),
+      ramPercent: Math.min(100, Math.max(10, Math.round(ramPercent))),
+    }));
+    state.resources = summary;
+    renderResourceBudget(summary);
+    if ($('resourcesStatus')) $('resourcesStatus').textContent = 'تنظیم منابع ذخیره شد و از همین حالا اعمال می‌شود.';
+    toast(auto ? 'منابع سیستم به حالت خودکار برگشت' : 'سهمیهٔ رم و پردازنده ذخیره شد');
+  } catch (error) {
+    const msg = error?.detailText || error?.message || String(error);
+    if ($('resourcesStatus')) $('resourcesStatus').textContent = msg;
+    toast(msg, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+async function openStorageDialog() {
+  if (!$('storageDialog')) return;
+  setProgress('storageProgress', 0, false);
+  if ($('storageStatus')) $('storageStatus').textContent = '';
+  const info = await api('/api/storage-settings');
+  renderStorageSettings(info);
+  showDialog('storageDialog');
+  setMenuOpen(false);
+}
+async function browseStorageFolder() {
+  if (storageSwitchBusy) return;
+  const btn = $('storageBrowseBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const currentInput = $('storageCustomPath')?.value?.trim() || state.storage?.activePath || '';
+    const res = await api('/api/storage-settings/pick-folder', jsonOptions('POST', { initial_dir: currentInput }));
+    if (res && !res.cancelled && res.path) {
+      if ($('storageCustomPath')) $('storageCustomPath').value = res.path;
+      if ($('storageStatus')) $('storageStatus').textContent = 'پوشه انتخاب شد؛ برای ثبت نهایی روی «ذخیره و اعمال مسیر» کلیک کنید.';
+    }
+  } catch (error) {
+    const msg = error?.message || String(error);
+    if ($('storageStatus')) $('storageStatus').textContent = msg;
+    toast(msg, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+function setStorageControlsDisabled(disabled) {
+  ['storageCustomPath', 'storageBrowseBtn', 'storageMigrateExisting', 'storageSaveBtn', 'storageResetDefaultBtn'].forEach((id) => {
+    if ($(id)) $(id).disabled = disabled;
+  });
+  syncStorageCheckboxState();
+}
+async function submitStorageSettings(overrideCustomPath = null) {
+  if (storageSwitchBusy) return;
+  if (jobBusy || ocrRunning || translationRunning || exportRunning || state.modelBusy) {
+    toast('در حال حاضر عملیات دیگری فعال است؛ پس از پایان آن مسیر ذخیره‌سازی را تغییر دهید.', true);
+    return;
+  }
+  const nextPath = String(overrideCustomPath !== null ? overrideCustomPath : ($('storageCustomPath')?.value || '')).trim();
+  const migrateExisting = Boolean($('storageMigrateExisting')?.checked);
+  const cleanupSource = migrateExisting && Boolean($('storageCleanupOld')?.checked);
+  const currentCustom = String(state.storage?.customPath || '').trim();
+  if (nextPath === currentCustom && !(nextPath === '' && state.storage?.customActive)) {
+    if (!nextPath) {
+      toast('برنامه هم‌اکنون روی مسیر پیش‌فرض قرار دارد.');
+      closeDialog('storageDialog');
+      return;
+    }
+  }
+
+  const targetDisplay = nextPath || state.storage?.defaultPath || 'مسیر پیش‌فرض';
+  const modeExplain = migrateExisting
+    ? (cleanupSource
+      ? 'فایل‌ها، پروژه‌ها و مدل‌های فعلی به‌صورت امن کپی و تأیید سلامت می‌شوند و سپس فضای مسیر قبلی آزاد خواهد شد.'
+      : 'یک کپی کامل از فایل‌ها، پروژه‌ها و مدل‌های فعلی به مسیر جدید منتقل می‌شود و فایل‌های مسیر قبلی نیز حفظ می‌شوند.')
+    : 'فایل‌های قبلی جابه‌جا نمی‌شوند و فقط از این لحظه به بعد دانلودها و پروژه‌های جدید در مسیر انتخابی ذخیره می‌شوند.';
+
+  const confirmed = await appConfirm(
+    nextPath
+      ? `آیا می‌خواهید مسیر ذخیره‌سازی و دانلودها روی پوشهٔ زیر تنظیم شود؟\n${targetDisplay}`
+      : `آیا می‌خواهید به مسیر پیش‌فرض برنامه برگردید؟\n${targetDisplay}`,
+    {
+      title: nextPath ? 'تأیید تغییر مسیر ذخیره‌سازی' : 'بازگشت به مسیر پیش‌فرض',
+      hint: modeExplain,
+      confirmText: 'بله، اعمال شود',
+      cancelText: 'انصراف',
+      variant: 'confirm',
+    },
+  );
+  if (!confirmed) return;
+
+  storageSwitchBusy = true;
+  setStorageControlsDisabled(true);
+  setProgress('storageProgress', migrateExisting ? 0 : null, true);
+  scheduleActivityPoll(true);
+  if ($('storageStatus')) {
+    $('storageStatus').textContent = migrateExisting
+      ? 'در حال انتقال امن فایل‌ها و فعال‌سازی مسیر جدید… لطفاً تا پایان عملیات صبر کنید.'
+      : 'در حال بررسی و فعال‌سازی مسیر جدید…';
+  }
+  try {
+    if (state.project) await saveProject();
+    const result = await api('/api/storage-settings', jsonOptions('PUT', {
+      custom_path: nextPath,
+      migrate_existing: migrateExisting,
+      cleanup_source: cleanupSource,
+    }));
+    if (result?.storage) renderStorageSettings(result.storage);
+    renderedPageSignatures.clear();
+    imagePreviewVersions.clear();
+    if (Array.isArray(result?.engines)) state.engines = result.engines;
+    if (result?.ai) state.ai = result.ai;
+    if (result?.activeProject) adoptProject(result.activeProject);
+    if (Array.isArray(result?.projects)) await refreshProjectList(result.projects);
+    if (state.ai) await loadAiSettings(state.ai);
+    updateEngineOptions();
+    syncEngineUpdateUi();
+    if ($('modelsDialog')?.open) renderModels();
+    refreshEngineMemory().catch(() => {});
+    setProgress('storageProgress', 1, false);
+    const freedBytes = Number(result?.storage?.freedSourceBytes || 0);
+    const freedMsg = freedBytes >= 1024 * 1024 ? ` (${formatStorageBytesFa(freedBytes)} از مسیر قبلی آزاد شد)` : '';
+    toast(`مسیر ذخیره‌سازی با موفقیت اعمال شد${freedMsg}`);
+    closeDialog('storageDialog');
+  } catch (error) {
+    setProgress('storageProgress', 0, false);
+    const msg = error?.message || String(error);
+    if ($('storageStatus')) $('storageStatus').textContent = msg;
+    toast(msg, true);
+  } finally {
+    storageSwitchBusy = false;
+    scheduleActivityPoll(false);
+    setStorageControlsDisabled(false);
+  }
 }
 async function copyFieldText(inputEl, fieldLabel) {
   if (!inputEl) return;
@@ -2263,12 +2969,16 @@ function updateTranslationSkillStatus() {
   };
   updateBudgetCounter('translationSkill', 'translationSkillCounter', skillCount, preview?.skillLimit ?? 0, !!preview?.contextMode);
   updateBudgetCounter('translationContext', 'translationContextCounter', contextCount, preview?.contextLimit ?? 0, !!preview?.contextMode);
-  const changed = preview && ((preview.provider !== 'free' && (skill !== (preview.skill ?? '') || (preview.contextMode && context !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume));
+  const changed = preview && ((!isDirectMtProvider(preview.provider) && (skill !== (preview.skill ?? '') || (preview.contextMode && context !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume));
   const message = skillTooLong ? `متن راهنمای ترجمه (${skillCount} نویسه) بیش از سقف مجاز ${preview.skillLimit} نویسه است؛ پیش از ارسال کوتاه کنید یا سقف نویسه را افزایش دهید.` :
     contextTooLong ? `خلاصه (${contextCount} نویسه) بیش از سقف مجاز ${preview.contextLimit} نویسه است؛ پیش از ارسال کوتاه کنید یا سقف نویسه را افزایش دهید.` :
     changed ? 'اطلاعات تغییر کرد؛ ابتدا پیش‌نمایش تازه را بازبینی کنید.' : '';
   $('translationSkillStatus').textContent = message;
-  $('openAiLimitFromPreview')?.classList.toggle('hidden', !((preview?.previewError || overBudget) && preview?.provider !== 'free'));
+  const openLimitBtn = $('openAiLimitFromPreview');
+  if (openLimitBtn) {
+    openLimitBtn.classList.toggle('hidden', !((preview?.previewError || overBudget) && preview?.provider !== 'free'));
+    openLimitBtn.textContent = preview?.provider === 'local' ? 'دانلود و مدیریت مترجم آفلاین…' : 'تغییر سقف نویسه در تنظیمات AI';
+  }
   $('translationPreviewConfirm').textContent = overBudget ? 'تأیید و ارسال برای ترجمه' : (changed ? 'به‌روزرسانی پیش‌نمایش' : 'تأیید و ارسال برای ترجمه');
   $('translationPreviewConfirm').classList.toggle('over-budget-blocked', overBudget && !preview?.previewError);
   $('translationPreviewConfirm').setAttribute('aria-disabled', overBudget ? 'true' : 'false');
@@ -2284,7 +2994,7 @@ function showTranslationRequestPreview(preview, action, refresh = null, switchTa
     $('translationTargetLang').disabled = false;
     $('translationTargetLang').value = normalizeTargetLanguage(preview.targetLanguage || activeTargetLanguage());
   }
-  $('translationSkillWrap').classList.toggle('hidden', preview.provider === 'free');
+  $('translationSkillWrap').classList.toggle('hidden', isDirectMtProvider(preview.provider));
   $('translationContextWrap').classList.toggle('hidden', !preview.rollingMode);
   $('translationContextHead')?.classList.toggle('hidden', !preview.contextMode);
   $('translationContextClipActions')?.classList.toggle('hidden', !preview.contextMode);
@@ -2383,7 +3093,7 @@ async function confirmTranslationRequestPreview() {
     return;
   }
   $('translationPreviewConfirm').disabled = true;
-  const changed = (preview.provider !== 'free' && (skillText !== (preview.skill ?? '') || (preview.contextMode && contextText !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume);
+  const changed = (!isDirectMtProvider(preview.provider) && (skillText !== (preview.skill ?? '') || (preview.contextMode && contextText !== (preview.summary ?? '')))) || (preview.rollingMode && $('translationContextResume').checked !== !!preview.resume);
   if (changed) {
     $('translationSkill').disabled = true; $('translationSkillReset').disabled = true; $('translationContext').disabled = true; $('translationContextResume').disabled = true;
     setProgress('previewPrepProgress', null, true);
@@ -2416,6 +3126,7 @@ async function confirmTranslationRequestPreview() {
 }
 async function runTranslation(targetOverride = null) {
   if (translationRunning) return;
+  if (!isModuleLicensed('translation')) { await ensureModuleLicensed('translation'); return; }
   try {
     // Loading a project also uploads previews; do not race those writes against
     // the translation's optimistic version check or snapshot the old selection.
@@ -2424,6 +3135,7 @@ async function runTranslation(targetOverride = null) {
     if (!ids.length) throw new Error('حداقل یک تصویر را انتخاب کنید.');
     const missing = selected.filter(item => !item.ocrCompleted && !(item.blocks || []).length);
     if (missing.length) {
+      if (!isModuleLicensed('ocr')) { await ensureModuleLicensed('ocr'); return; }
       const old = state.project._aiContextRun;
       if (old?.jobs?.some(job => job.remaining)) {
         const proceed = await appConfirm('نوبت ترجمهٔ ناتمام وجود دارد. اجرای OCR روی تصاویر جدید می‌تواند ادامهٔ آن را نامعتبر کند و ممکن است برای نوبت تازه تأیید و ارسال دوباره لازم شود. آیا ادامه می‌دهید؟', {
@@ -2439,6 +3151,15 @@ async function runTranslation(targetOverride = null) {
       $('ocrTranslationNotice').classList.remove('hidden'); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden');
       $('ocrOnlySelected').disabled = true; updateEngineOptions(); showDialog('ocrDialog'); return;
     }
+    selected.forEach((item) => {
+      (item.blocks || []).forEach((block) => {
+        if (block.enabled === false) return;
+        const canPromoteManualSource = Boolean(block.manual && (block.manualLang === 'en' || block.dir === 'ltr'));
+        if (canPromoteManualSource && !String(block.text || '').trim() && String(block.tr || '').trim()) {
+          block.text = String(block.tr || '').trim();
+        }
+      });
+    });
     if (!selected.some(item => (item.blocks || []).some(block => block.enabled !== false && String(block.text || '').trim()))) {
       throw new Error('هیچ کادر فعال دارای متن در تصاویر انتخاب‌شده نیست. اگر OCR متنی پیدا نکرده، تنظیمات یا تصویر را بررسی و OCR را دوباره اجرا کنید.');
     }
@@ -2486,7 +3207,7 @@ async function runTranslation(targetOverride = null) {
       }
     };
     const switchTarget = (nextVal) => runTranslation(nextVal);
-    if (provider === 'free') {
+    if (isDirectMtProvider(provider)) {
       const previous = previousRun;
       const resume = !!(previous && previous.jobs?.some(job => job.remaining) && previous.provider === provider && (previous.targetLanguage || 'fa') === targetLanguage && JSON.stringify(previous.imageIds) === JSON.stringify(ids));
       const refresh = async (_skill, _summary, nextResume) => { await confirmRestart(nextResume); return api(`/api/projects/${projectId}/context-preview`, jsonOptions('POST', { ...request, skill: '', summary: '', resume: nextResume })); };
@@ -2497,7 +3218,7 @@ async function runTranslation(targetOverride = null) {
         preview = await refresh('', '', false);
         preview.note += ' نوبت ناتمام با تنظیمات فعلی سازگار نیست؛ تأیید نوبت تازه‌ای شروع می‌کند.';
       }
-      if (!preview.requests?.length) throw new Error('هیچ درخواست ترجمه‌ای ساخته نشد؛ کادرهای فعال و انتخاب تصاویر را بررسی کنید.');
+      if (!preview.requests?.length && !preview.previewError) throw new Error('هیچ درخواست ترجمه‌ای ساخته نشد؛ کادرهای فعال و انتخاب تصاویر را بررسی کنید.');
       const emptyPages = selected.filter(item => !(item.blocks || []).some(block => block.enabled !== false && String(block.text || '').trim()));
       if (emptyPages.length) preview.note += ` ${emptyPages.length} تصویر بدون متن فعال از ترجمه کنار گذاشته می‌شوند.`;
       showTranslationRequestPreview(preview, accepted => performContextTranslation(request, accepted), refresh, switchTarget);
@@ -2558,7 +3279,10 @@ async function performContextTranslation(request, preview, ongoing = null, corre
     }
   };
   try {
-    await runJob(request.provider === 'free' ? 'در حال ترجمهٔ رایگان…' : 'در حال ترجمه با حافظهٔ داستان…', async () => {
+    const jobTitle = request.provider === 'local'
+      ? 'در حال ترجمهٔ آفلاین روی سیستم شما…'
+      : (request.provider === 'free' ? 'در حال ترجمهٔ رایگان…' : 'در حال ترجمه با حافظهٔ داستان…');
+    await runJob(jobTitle, async () => {
       if (!run) {
         const started = await api(`/api/projects/${projectId}/context-start`, {
           ...jsonOptions('POST', { ...request, skill: preview.skill, summary: preview.summary, resume: preview.resume, confirmation: preview.signature }),
@@ -2569,7 +3293,10 @@ async function performContextTranslation(request, preview, ongoing = null, corre
       }
       while (true) {
         checkNotCancelled();
-        phase = 'translation'; $('translationStatus').textContent = request.provider === 'free' ? `در حال ترجمهٔ درخواست ${run.completed + 1}…` : `در حال ترجمهٔ درخواست ${run.completed + 1} با خلاصهٔ قبلی…`;
+        phase = 'translation';
+        $('translationStatus').textContent = request.provider === 'local'
+          ? `در حال ترجمهٔ آفلاین بخش ${run.completed + 1} روی سیستم شما…`
+          : (request.provider === 'free' ? `در حال ترجمهٔ درخواست ${run.completed + 1}…` : `در حال ترجمهٔ درخواست ${run.completed + 1} با خلاصهٔ قبلی…`);
         const result = await api(`/api/projects/${projectId}/context-step`, {
           ...jsonOptions('POST', {run_id: run.id, completed: run.completed, skill: preview.skill, ...(correction || {})}),
           signal: controller.signal,
@@ -2581,8 +3308,9 @@ async function performContextTranslation(request, preview, ongoing = null, corre
         run.completed = result.completed ?? run.completed;
         phase = 'preview'; setOverlayMode('translation', false);
         if (hasAffected) {
-          try { await renderImagesText(result.affectedImageIds); }
+          try { await renderImagesText(result.affectedImageIds, null, checkNotCancelled); }
           catch (error) {
+            if (error?.cancelled || error?.name === 'AbortError' || translationCancelledByUser) throw error;
             renderGrid();
             toast(`ترجمه ذخیره شد، اما همگام‌سازی پیش‌نمایش ناموفق بود: ${error.message || error}`, true);
           }
@@ -2592,7 +3320,7 @@ async function performContextTranslation(request, preview, ongoing = null, corre
       phase = 'save'; setOverlayMode('translation', false);
     }, 'translationProgress');
     translationClosingNormally = true;
-    closeDialog('translationDialog'); toast(request.provider === 'free' ? 'ترجمه ذخیره شد' : 'ترجمه و خلاصه ذخیره شد');
+    closeDialog('translationDialog'); toast(isDirectMtProvider(request.provider) ? 'ترجمه ذخیره شد' : 'ترجمه و خلاصه ذخیره شد');
   } catch (error) {
     if (translationCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
       toast(run?.completed ? `پنجره بسته شد؛ ${run.completed} بخش ذخیره‌شده باقی ماند و ادامهٔ ترجمه متوقف شد` : 'پنجرهٔ ترجمه بسته شد و عملیات متوقف گردید');
@@ -2617,10 +3345,74 @@ async function performContextTranslation(request, preview, ongoing = null, corre
 // ---------- Typeset preview and export ----------
 let fontLoadedOnce = false;
 const renderedPageSignatures = new Map();
+const watermarkLogoCache = new Map();
+function projectWatermarkLogos() {
+  const logos = state.project?.settings?.watermarkLogos;
+  return logos && typeof logos === 'object' ? logos : {};
+}
+function decodeDataUrlDrawable(dataUrl) {
+  return new Promise((resolve) => {
+    const raw = String(dataUrl || '').trim();
+    if (!raw || !raw.startsWith('data:image/')) { resolve(null); return; }
+    if (typeof Image === 'function') {
+      const img = new Image();
+      let settled = false;
+      const done = (val) => { if (!settled) { settled = true; clearTimeout(timer); resolve(val); } };
+      const timer = setTimeout(() => done(null), 1500);
+      img.onload = () => done(img);
+      img.onerror = () => done(null);
+      img.src = raw;
+      if (img.complete && img.naturalWidth > 0) done(img);
+      return;
+    }
+    resolve(null);
+  });
+}
+async function ensureWatermarkLogoDrawable(logoId, dataUrl) {
+  const key = `${logoId || 'inline'}:${String(dataUrl || '').length}:${String(dataUrl || '').slice(-32)}`;
+  if (watermarkLogoCache.has(key)) return watermarkLogoCache.get(key);
+  const drawable = await decodeDataUrlDrawable(dataUrl);
+  if (drawable) watermarkLogoCache.set(key, drawable);
+  return drawable;
+}
+async function ensureWatermarkLogosReady(wm) {
+  if (!hasActiveWatermark(wm)) return;
+  const logoId = String(wm.logoId || '').trim();
+  const logos = projectWatermarkLogos();
+  if (logoId && logos[logoId]?.dataUrl) {
+    const drawable = await ensureWatermarkLogoDrawable(logoId, logos[logoId].dataUrl);
+    if (drawable) logos[logoId]._drawable = drawable;
+  } else if (wm.logoDataUrl) {
+    const drawable = await ensureWatermarkLogoDrawable('inline', wm.logoDataUrl);
+    if (drawable) wm._logoDrawable = drawable;
+  }
+}
+function buildTypesetRenderOptions(item) {
+  const wm = hasActiveWatermark(item?.watermark) ? item.watermark : null;
+  return {
+    eraseOriginal: state.project?.settings?.eraseOriginal !== false,
+    watermark: wm,
+    watermarkLogos: projectWatermarkLogos(),
+  };
+}
+function watermarkSignaturePart(wm) {
+  if (!hasActiveWatermark(wm)) return null;
+  const logoId = String(wm.logoId || '').trim();
+  const logoEntry = logoId ? projectWatermarkLogos()[logoId] : null;
+  const logoLen = logoEntry?.dataUrl ? logoEntry.dataUrl.length : (wm.logoDataUrl ? String(wm.logoDataUrl).length : 0);
+  return [wm.text || '', wm.position || 'bottom-left', wm.sizePct ?? 3.5, wm.opacity ?? 55, wm.angle ?? '', wm.marginPct ?? 2.5, wm.tileGapPct ?? 22, wm.color || '#ffffff', wm.bold !== false, wm.outline !== false, wm.outlineColor || '#000000', !!wm.bgPill, wm.bgColor || '#000000', logoId, wm.logoScalePct ?? 9, logoLen];
+}
 function pageRenderSignature(item, mode = currentOverlayMode(), blocksOverride = null) {
   const blocks = blocksOverride || overlayBlocks(item, mode);
   const erase = state.project?.settings?.eraseOriginal !== false;
-  return JSON.stringify([mode, erase, blocks]);
+  return JSON.stringify([mode, erase, blocks, watermarkSignaturePart(item?.watermark)]);
+}
+function isPageRenderCurrent(item, mode = currentOverlayMode()) {
+  if (!state.project?.id || !item) return false;
+  const key = `${state.project.id}:${item.id}`;
+  const blocks = overlayBlocks(item, mode);
+  const active = blocks.some((block) => block.enabled && (hasRenderableText(block) || hasRenderableShapeFill(block))) || hasActiveWatermark(item?.watermark);
+  return Boolean(item.edited) === active && renderedPageSignatures.get(key) === pageRenderSignature(item, mode, blocks);
 }
 async function ensureFont() {
   if (fontLoadedOnce || !document.fonts?.load) return;
@@ -2629,29 +3421,53 @@ async function ensureFont() {
     fontLoadedOnce = true;
   } catch { /* fallback */ }
 }
+async function decodeProjectImageBitmap(rawBlob, item) {
+  let bitmap = await createImageBitmap(rawBlob);
+  if (
+    bitmap &&
+    bitmap.width &&
+    bitmap.height &&
+    item?.width &&
+    item?.height &&
+    (bitmap.width !== item.width || bitmap.height !== item.height)
+  ) {
+    try {
+      const unoriented = await createImageBitmap(rawBlob, { imageOrientation: 'none' });
+      if (unoriented && unoriented.width === item.width && unoriented.height === item.height) {
+        bitmap.close?.();
+        bitmap = unoriented;
+      } else {
+        unoriented?.close?.();
+      }
+    } catch { /* fallback if imageOrientation option is unsupported */ }
+  }
+  return bitmap;
+}
 async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false } = {}) {
   const key = `${projectId}:${item.id}`;
   const blocks = overlayBlocks(item, mode);
-  const active = blocks.some((block) => block.enabled && hasRenderableText(block));
+  const active = blocks.some((block) => block.enabled && (hasRenderableText(block) || hasRenderableShapeFill(block))) || hasActiveWatermark(item?.watermark);
   const signature = pageRenderSignature(item, mode, blocks);
   if (skipUnchanged && Boolean(item.edited) === active && renderedPageSignatures.get(key) === signature) {
     return;
   }
   if (!active) {
-    await api(`/api/projects/${projectId}/images/${item.id}/revert`, { method: 'POST' });
+    const reverted = await api(`/api/projects/${projectId}/images/${item.id}/revert`, { method: 'POST' });
     imagePreviewVersions.set(key, ++previewRevision);
     renderedPageSignatures.set(key, signature);
     const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null;
     if (current) current.edited = false;
+    if (state.project?.id === projectId && reverted?.updatedAt) state.project.updatedAt = reverted.updatedAt;
     return;
   }
   await ensureFont();
+  await ensureWatermarkLogosReady(item?.watermark);
   const response = await fetch(`/api/projects/${projectId}/images/${item.id}/content`);
   if (!response.ok) throw new Error('تصویر اصلی باز نشد');
   let rawBlob = await response.blob();
   let bitmap = null;
   try {
-    bitmap = await createImageBitmap(rawBlob);
+    bitmap = await decodeProjectImageBitmap(rawBlob, item);
   } finally {
     rawBlob = null;
   }
@@ -2659,7 +3475,7 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
   let pngBlob = null;
   try {
     try {
-      canvas = Typeset.render(bitmap, blocks);
+      canvas = Typeset.render(bitmap, blocks, buildTypesetRenderOptions(item));
     } finally {
       bitmap?.close?.();
       bitmap = null;
@@ -2674,8 +3490,9 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
     }
   }
   if (!pngBlob) throw new Error(`ساخت PNG برای «${item.name}» ممکن نشد؛ تصویر خیلی بزرگ یا حافظهٔ مرورگر کم است`);
+  let uploaded = null;
   try {
-    await api(`/api/projects/${projectId}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: pngBlob });
+    uploaded = await api(`/api/projects/${projectId}/images/${item.id}/rendered`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: pngBlob });
   } finally {
     pngBlob = null;
   }
@@ -2683,6 +3500,7 @@ async function renderAndUploadNow(item, projectId, mode, { skipUnchanged = false
   renderedPageSignatures.set(key, signature);
   const current = state.project?.id === projectId ? state.project.images.find((entry) => entry.id === item.id) : null;
   if (current) current.edited = true;
+  if (state.project?.id === projectId && uploaded?.updatedAt) state.project.updatedAt = uploaded.updatedAt;
 }
 function renderAndUpload(item, options = {}) {
   const projectId = state.project?.id;
@@ -2732,19 +3550,31 @@ function updateExportFields() {
   $('pptxExportFields')?.classList.toggle('hidden', kind !== 'pptx');
   $('exportOverlayModeWrap')?.classList.toggle('hidden', kind === 'txt' || kind === 'docx' || kind === 'pptx');
 }
-async function exportResult(kind = null, modeOverride = null, layoutOverride = null) {
+async function exportResult(kind = null, modeOverride = null, layoutOverride = null, externalSignal = null) {
   if (kind) { $('exportKind').value = kind; updateExportFields(); }
   if (!selectedImages().length) throw new Error('حداقل یک تصویر را برای خروجی انتخاب کنید');
   const controller = new AbortController();
   exportAbortController = controller; exportCancelledByUser = false; exportRunning = true;
+  const onExternalAbort = () => { exportCancelledByUser = true; controller.abort(); };
+  if (externalSignal) {
+    if (externalSignal.aborted) onExternalAbort();
+    else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+  }
   const checkNotCancelled = () => {
-    if (exportCancelledByUser || controller.signal.aborted) {
+    if (exportCancelledByUser || controller.signal.aborted || externalSignal?.aborted) {
       const err = new Error('ساخت خروجی لغو شد.'); err.name = 'AbortError'; err.cancelled = true; throw err;
     }
   };
+  $('cancelExportBtn')?.classList.remove('hidden');
+  if ($('startExportBtn')) $('startExportBtn').disabled = true;
+  if ($('docxExportCancel')) { $('docxExportCancel').textContent = 'لغو عملیات'; $('docxExportCancel').classList.add('danger'); }
+  if ($('pptxExportCancel')) { $('pptxExportCancel').textContent = 'لغو عملیات'; $('pptxExportCancel').classList.add('danger'); }
   try {
     await overlayPreviewTask;
+    await waitForPendingRenders(state.project?.id);
     checkNotCancelled();
+    const project = state.project;
+    if (!project) throw new Error('پروژه‌ای برای خروجی فعال نیست');
     const exportKind = $('exportKind').value;
     if (layoutOverride) {
       if (exportKind === 'pptx' && $('exportPptxLayout')) $('exportPptxLayout').value = layoutOverride;
@@ -2757,26 +3587,45 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
     const pptxLayout = layoutOverride || $('exportPptxLayout')?.value || 'visual';
     if (exportKind !== 'txt' && exportKind !== 'docx' && exportKind !== 'pptx') {
       const targets = selectedImages().filter((item) => hasOverlayText(item) || item.edited);
-      if (targets.length) {
+      const staleTargets = targets.filter((item) => !isPageRenderCurrent(item));
+      if (staleTargets.length) {
+        const renderShare = 0.45;
         await renderImagesText(
-          targets.map((item) => item.id),
+          staleTargets.map((item) => item.id),
           (done, total) => {
-            const p = (done / Math.max(1, total)) * 0.5;
+            const p = (done / Math.max(1, total)) * renderShare;
+            if (jobProgressTransform) jobProgressTransform.floor = Math.max(jobProgressTransform.floor || 0, p);
             if (activeProgressId) setProgress(activeProgressId, p, true);
             setProgress('jobProgress', p, true); setProgress('dockProgress', p, true);
           },
           checkNotCancelled,
           { skipUnchanged: true },
         );
+        if (jobProgressTransform) {
+          jobProgressTransform.offset = renderShare;
+          jobProgressTransform.scale = 1 - renderShare - 0.02;
+          jobProgressTransform.floor = renderShare;
+        }
       } else {
-        renderGrid();
+        if (targets.length) {
+          await renderImagesText(targets.map((item) => item.id), null, checkNotCancelled, { skipUnchanged: true });
+        } else {
+          renderGrid();
+        }
+        if (jobProgressTransform) {
+          jobProgressTransform.offset = 0;
+          jobProgressTransform.scale = 0.98;
+          jobProgressTransform.floor = 0;
+        }
       }
-    } else {
-      if (activeProgressId) setProgress(activeProgressId, 0.18, true);
-      setProgress('jobProgress', 0.18, true); setProgress('dockProgress', 0.18, true);
+      await waitForPendingRenders(project.id);
+    } else if (jobProgressTransform) {
+      jobProgressTransform.offset = 0;
+      jobProgressTransform.scale = 0.98;
+      jobProgressTransform.floor = 0;
     }
     checkNotCancelled();
-    const baseExportName = safeName($('exportName').value, safeName(state.project?.name || '', 'comic-translated'));
+    const baseExportName = safeName($('exportName').value, safeName(project.name || '', 'comic-translated'));
     const activeDocMode = exportKind === 'pptx' ? pptxMode : docxMode;
     const layoutExportName = exportKind === 'docx' && docxLayout === 'flowing' && !/-book$/i.test(baseExportName)
       ? `${baseExportName}-book`
@@ -2786,23 +3635,25 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
     const finalExportName = (exportKind === 'docx' || exportKind === 'pptx') && activeDocMode === 'ocr' && !/-(?:en|ocr)$/i.test(layoutExportName)
       ? `${layoutExportName}-en`
       : layoutExportName;
+    const reqOpts = jsonOptions('POST', {
+      kind: exportKind,
+      image_ids: selectedImages().map((item) => item.id),
+      name: finalExportName,
+      seamless: $('exportSeamless').checked,
+      uniform_size: $('exportUniform').checked,
+      two_per_page: $('exportTwo').checked,
+      image_format: $('exportFormat').value,
+      folder_name: $('exportFolder').value,
+      docx_mode: docxMode,
+      docx_layout: docxLayout,
+      pptx_mode: pptxMode,
+      pptx_layout: pptxLayout,
+    });
+    reqOpts.headers = { ...reqOpts.headers, 'X-Export-Prepare': '1' };
     let response;
     try {
-      response = await fetch(`/api/projects/${state.project.id}/export`, {
-        ...jsonOptions('POST', {
-          kind: exportKind,
-          image_ids: selectedImages().map((item) => item.id),
-          name: finalExportName,
-          seamless: $('exportSeamless').checked,
-          uniform_size: $('exportUniform').checked,
-          two_per_page: $('exportTwo').checked,
-          image_format: $('exportFormat').value,
-          folder_name: $('exportFolder').value,
-          docx_mode: docxMode,
-          docx_layout: docxLayout,
-          pptx_mode: pptxMode,
-          pptx_layout: pptxLayout,
-        }),
+      response = await fetch(`/api/projects/${encodeURIComponent(project.id)}/export`, {
+        ...reqOpts,
         signal: controller.signal,
       });
     } catch (cause) {
@@ -2810,19 +3661,41 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
       throw cause;
     }
     if (!response.ok) { const payload = await response.json().catch(() => null); throw new Error(payload?.detail || `خروجی ساخته نشد (HTTP ${response.status})`); }
-    const blob = await response.blob();
-    checkNotCancelled();
-    if (!blob.size) throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
+    const contentType = String(response.headers?.get?.('content-type') || '').toLowerCase();
+    const fallbackFilename = `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`;
+    const link = $('downloadLink');
+    let finalBytes = 0;
+    if (contentType.includes('application/json')) {
+      const payload = await response.json();
+      checkNotCancelled();
+      finalBytes = Number(payload?.size) || 0;
+      if (!payload?.token || finalBytes <= 0) {
+        throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
+      }
+      clearExportDownloadLink();
+      activeExportPrepared = { projectId: project.id, token: payload.token };
+      link.href = `/api/projects/${encodeURIComponent(project.id)}/export/${encodeURIComponent(payload.token)}`;
+      link.download = payload.filename || fallbackFilename;
+    } else {
+      const blob = await response.blob();
+      checkNotCancelled();
+      if (!blob.size) throw new Error('سرور فایل خروجی خالی فرستاد؛ گزارش کارها را بررسی و دوباره تلاش کنید');
+      finalBytes = blob.size;
+      const disposition = response.headers?.get?.('content-disposition') || '';
+      clearExportDownloadLink();
+      downloadUrl = URL.createObjectURL(blob);
+      link.href = downloadUrl;
+      link.download = parseExportFilename(disposition, fallbackFilename);
+    }
     if (activeProgressId) setProgress(activeProgressId, 1, false);
-    const disposition = response.headers.get('content-disposition') || '';
-    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
-    downloadUrl = URL.createObjectURL(blob);
-    const link = $('downloadLink'); link.href = downloadUrl; link.download = parseExportFilename(disposition, `${finalExportName}.${exportKind === 'images' ? 'zip' : exportKind}`);
     const linkLabel = link.querySelector('span');
     if (linkLabel) linkLabel.textContent = `دانلود ${link.download}`;
     else link.textContent = `دانلود ${link.download}`;
     link.classList.remove('hidden'); link.click();
-    closeDialog('exportDialog'); closeDialog('docxExportDialog'); closeDialog('pptxExportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${(blob.size / 1024).toFixed(0)} کیلوبایت`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
+    const sizeText = finalBytes >= 1024 * 1024
+      ? `${(finalBytes / (1024 * 1024)).toFixed(1)} مگابایت`
+      : `${Math.max(1, Math.round(finalBytes / 1024))} کیلوبایت`;
+    closeDialog('exportDialog'); closeDialog('docxExportDialog'); closeDialog('pptxExportDialog'); $('jobStatus').textContent = `خروجی ${exportKind.toUpperCase()} آماده شد · ${sizeText}`; toast('خروجی آماده شد؛ اگر دانلود خودکار نشد، پیوند «دانلود» را بزنید');
   } catch (error) {
     if (exportCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
       toast('ساخت خروجی به درخواست شما متوقف شد');
@@ -2830,8 +3703,13 @@ async function exportResult(kind = null, modeOverride = null, layoutOverride = n
     }
     throw error;
   } finally {
+    if (externalSignal) externalSignal.removeEventListener?.('abort', onExternalAbort);
     if (exportAbortController === controller) exportAbortController = null;
     exportRunning = false;
+    $('cancelExportBtn')?.classList.add('hidden');
+    if ($('startExportBtn')) $('startExportBtn').disabled = false;
+    if ($('docxExportCancel')) { $('docxExportCancel').textContent = 'انصراف'; $('docxExportCancel').classList.remove('danger'); }
+    if ($('pptxExportCancel')) { $('pptxExportCancel').textContent = 'انصراف'; $('pptxExportCancel').classList.remove('danger'); }
     dismissJobCancelModal('export');
   }
 }
@@ -2848,7 +3726,7 @@ async function runDocxChoiceExport(mode, layout = 'visual') {
   const layoutText = layout === 'flowing' ? 'متن پیوستهٔ کتابی' : 'تصویری';
   const modeText = mode === 'ocr' ? 'متن اصلی / OCR' : 'متن ترجمه‌شده';
   const label = `در حال ساخت فایل Word (${layoutText} — ${modeText})…`;
-  try { await runJob(label, () => exportResult('docx', mode, layout), 'docxProgress'); }
+  try { await runJob(label, (signal) => exportResult('docx', mode, layout, signal), 'docxProgress'); }
   finally { buttons.forEach((btn) => { btn.disabled = false; }); }
 }
 function openPptxExportPrompt() {
@@ -2864,7 +3742,7 @@ async function runPptxChoiceExport(mode, layout = 'visual') {
   const layoutText = layout === 'flowing' ? 'اسلاید ارائه' : 'اسلاید تصویری';
   const modeText = mode === 'ocr' ? 'متن اصلی / OCR' : 'متن ترجمه‌شده';
   const label = `در حال ساخت فایل PowerPoint (${layoutText} — ${modeText})…`;
-  try { await runJob(label, () => exportResult('pptx', mode, layout), 'pptxProgress'); }
+  try { await runJob(label, (signal) => exportResult('pptx', mode, layout, signal), 'pptxProgress'); }
   finally { buttons.forEach((btn) => { btn.disabled = false; }); }
 }
 
@@ -3206,6 +4084,11 @@ function renderModels(options = {}) {
         const test = makeButton('آزمایش روی تصویر', () => testEngine(engine.id));
         test.disabled = Boolean(state.modelBusy || !supported);
         buttons.appendChild(test);
+        if (isBusyThis) {
+          const cancelCardBtn = makeButton('لغو عملیات', () => requestCancelModelJob({ closeModelsDialog: false }).catch(() => {}));
+          cancelCardBtn.classList.add('danger', 'engine-cancel-btn');
+          buttons.appendChild(cancelCardBtn);
+        }
         if (canUninstallEngine(engine)) {
           const deleteBtn = makeButton('حذف مدل', () => uninstallEngine(engine).catch(() => {}));
           deleteBtn.classList.add('danger', 'engine-delete-btn');
@@ -3415,7 +4298,8 @@ async function uninstallEngine(engine) {
       hint: 'هر زمان دوباره به این مدل نیاز داشتید، می‌توانید آن را با یک کلیک دانلود و نصب کنید.',
       confirmText: 'حذف کامل مدل',
       cancelText: 'انصراف',
-      danger: true,
+      variant: 'danger',
+      destructive: true,
     },
   );
   if (!confirmed) return false;
@@ -3532,7 +4416,11 @@ async function testEngine(engineId) {
   modelAbortController = controller; modelCancelledByUser = false;
   state.modelBusy = engineId; scheduleActivityPoll(true); setProgress('modelProgress', null, true); renderModels(); $('modelTestResult').textContent = 'در حال اجرای آزمایش محلی…'; appendLocalActivity(`آزمایش موتور ${engineId} آغاز شد`);
   try {
-    const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: $('testLanguage').value, page_mode: normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value) }), signal: controller.signal });
+    const testLang = $('testLanguage').value;
+    const testPersianPrep = testLang === 'fas'
+      ? ($('ocrLanguage')?.value === 'fas' && $('ocrPersianPreprocess') ? Boolean($('ocrPersianPreprocess').checked) : true)
+      : Boolean($('ocrPersianPreprocess')?.checked && $('ocrLanguage')?.value === testLang);
+    const result = await api(`/api/engines/${engineId}/test`, { ...jsonOptions('POST', { project_id: state.project.id, image_id: item.id, language: testLang, page_mode: normalizePageMode($('modelsPageMode')?.value || $('ocrPageMode')?.value), persian_preprocess: testPersianPrep }), signal: controller.signal });
     if (result?.memory) engineMemorySummary = result.memory;
     setProgress('modelProgress', 1, false);
     $('modelTestResult').textContent = result.blocks.length ? result.blocks.map((block) => {
@@ -3593,7 +4481,7 @@ function captureAiProvider() {
   });
 }
 function syncAiExecUi() {
-  const baseUrlVal = aiEditorProvider === 'free' ? '' : ($('aiBaseUrl')?.value ?? '');
+  const baseUrlVal = isDirectMtProvider(aiEditorProvider) ? '' : ($('aiBaseUrl')?.value ?? '');
   const meta = resolveTranslationExecMeta(aiEditorProvider, baseUrlVal);
   applyExecBadgeElement($('aiExecBadge'), meta.mode, meta.badge);
   const banner = $('aiExecBanner');
@@ -3612,12 +4500,139 @@ function updateAiProviderUi() {
   $('aiModel').placeholder = info.defaultModel || info.model || '';
   syncAiExecUi();
 }
+let aiDragProfileIndex = -1;
+function moveAiProfile(fromIndex, toIndex, focusSelector = '') {
+  if (
+    fromIndex < 0 ||
+    fromIndex >= aiEditorProfiles.length ||
+    toIndex < 0 ||
+    toIndex >= aiEditorProfiles.length ||
+    fromIndex === toIndex
+  ) {
+    return false;
+  }
+  const [moved] = aiEditorProfiles.splice(fromIndex, 1);
+  aiEditorProfiles.splice(toIndex, 0, moved);
+  renderAiProfiles();
+  if ($('aiStatus')) {
+    $('aiStatus').textContent = 'اولویت کلیدهای API تغییر کرد؛ برای ثبت نهایی روی «ذخیره» بزنید.';
+  }
+  if (focusSelector) {
+    const container = $('aiProfiles');
+    const movedRow = [...(container?.querySelectorAll('.ai-profile-row') || [])].find((item) => item.dataset.profileId === moved.id);
+    const targetBtn = movedRow?.querySelector(focusSelector);
+    if (targetBtn && !targetBtn.disabled) targetBtn.focus?.();
+  }
+  return true;
+}
 function renderAiProfiles() {
   const container = $('aiProfiles');
   container.textContent = '';
+  const total = aiEditorProfiles.length;
   aiEditorProfiles.forEach((profile, index) => {
     const row = document.createElement('div');
-    row.className = 'ai-profile-row'; row.dataset.profileId = profile.id;
+    row.className = 'ai-profile-row';
+    row.dataset.profileId = profile.id;
+    row.dataset.priorityRank = String(index + 1);
+
+    const orderBar = document.createElement('div');
+    orderBar.className = 'ai-profile-order';
+    const orderMeta = document.createElement('div');
+    orderMeta.className = 'ai-profile-order-meta';
+    const faRank = (index + 1).toLocaleString('fa-IR');
+    const faFallback = index.toLocaleString('fa-IR');
+    const priorityBadge = document.createElement('span');
+    priorityBadge.className = `ai-priority-badge${index === 0 ? ' is-primary' : ''}`;
+    const rankLabel = index === 0 ? 'اولویت ۱ (کلید اصلی)' : `اولویت ${faRank} (جایگزین ${faFallback})`;
+    priorityBadge.textContent = total > 1 ? `⠿ ${rankLabel}` : rankLabel;
+    priorityBadge.title = index === 0
+      ? 'این کلید به‌عنوان اولویت اول برای ترجمه امتحان می‌شود'
+      : `در صورت خطا یا اتمام سهمیهٔ کلیدهای قبلی، این کلید در اولویت ${faRank} امتحان می‌شود`;
+    if (total > 1) {
+      priorityBadge.draggable = true;
+      priorityBadge.addEventListener('dragstart', (e) => {
+        aiDragProfileIndex = index;
+        row.classList.add('is-dragging');
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'move';
+          try { e.dataTransfer.setData('text/plain', profile.id); } catch (_) {}
+        }
+      });
+      priorityBadge.addEventListener('dragend', () => {
+        aiDragProfileIndex = -1;
+        container.querySelectorAll('.ai-profile-row').forEach((item) => {
+          item.classList.remove('is-dragging', 'is-drop-target');
+        });
+      });
+      row.addEventListener('dragover', (e) => {
+        if (aiDragProfileIndex < 0 || aiDragProfileIndex === index) return;
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+        row.classList.add('is-drop-target');
+      });
+      row.addEventListener('dragleave', (e) => {
+        if (!row.contains(e.relatedTarget)) row.classList.remove('is-drop-target');
+      });
+      row.addEventListener('drop', (e) => {
+        if (aiDragProfileIndex < 0) return;
+        e.preventDefault();
+        const fromIdx = aiDragProfileIndex;
+        aiDragProfileIndex = -1;
+        row.classList.remove('is-drop-target');
+        moveAiProfile(fromIdx, index);
+      });
+    }
+
+    const readyChip = document.createElement('span');
+    const syncReadyChip = () => {
+      const hasTyped = Boolean(profile.apiKey && profile.apiKey.trim());
+      const isReady = hasTyped || profile.hasApiKey === true;
+      readyChip.className = `ai-key-ready-chip${isReady ? ' is-ready' : ''}`;
+      readyChip.textContent = hasTyped
+        ? 'کلید جدید آمادهٔ ذخیره'
+        : (profile.hasApiKey ? 'کلید ذخیره‌شده ✓' : 'کلید وارد نشده');
+    };
+    syncReadyChip();
+    orderMeta.append(priorityBadge, readyChip);
+
+    const orderActions = document.createElement('div');
+    orderActions.className = 'ai-profile-order-actions';
+    const moveTopBtn = document.createElement('button');
+    moveTopBtn.type = 'button';
+    moveTopBtn.className = 'bt ai-profile-top';
+    moveTopBtn.textContent = '⇈ اولویت اول';
+    moveTopBtn.title = 'قرار دادن مستقیم این کلید در اولویت ۱ (کلید اصلی)';
+    moveTopBtn.setAttribute('aria-label', `انتقال API ${index + 1} به اولویت اول`);
+    moveTopBtn.disabled = index === 0;
+    moveTopBtn.addEventListener('click', () => {
+      moveAiProfile(index, 0, '.ai-profile-down');
+    });
+
+    const moveUpBtn = document.createElement('button');
+    moveUpBtn.type = 'button';
+    moveUpBtn.className = 'bt ai-profile-up';
+    moveUpBtn.textContent = '↑ بالاتر';
+    moveUpBtn.title = 'افزایش اولویت استفاده از این کلید';
+    moveUpBtn.setAttribute('aria-label', `افزایش اولویت API ${index + 1}`);
+    moveUpBtn.disabled = index === 0;
+    moveUpBtn.addEventListener('click', () => {
+      moveAiProfile(index, index - 1, index - 1 === 0 ? '.ai-profile-down' : '.ai-profile-up');
+    });
+
+    const moveDownBtn = document.createElement('button');
+    moveDownBtn.type = 'button';
+    moveDownBtn.className = 'bt ai-profile-down';
+    moveDownBtn.textContent = '↓ پایین‌تر';
+    moveDownBtn.title = 'کاهش اولویت استفاده از این کلید';
+    moveDownBtn.setAttribute('aria-label', `کاهش اولویت API ${index + 1}`);
+    moveDownBtn.disabled = index >= total - 1;
+    moveDownBtn.addEventListener('click', () => {
+      moveAiProfile(index, index + 1, index + 1 >= total - 1 ? '.ai-profile-up' : '.ai-profile-down');
+    });
+
+    orderActions.append(moveTopBtn, moveUpBtn, moveDownBtn);
+    orderBar.append(orderMeta, orderActions);
+
     const name = document.createElement('input');
     name.type = 'text'; name.className = 'ai-profile-name'; name.value = profile.name;
     name.placeholder = `API ${index + 1}`; name.setAttribute('aria-label', `نام دلخواه API ${index + 1}`);
@@ -3627,7 +4642,7 @@ function renderAiProfiles() {
     key.autocomplete = 'off'; key.spellcheck = false; key.value = profile.apiKey;
     key.placeholder = profile.hasApiKey ? 'کلید ذخیره شده؛ برای تغییر، کلید تازه بدهید' : 'کلید API';
     key.setAttribute('aria-label', `کلید API ${index + 1}`);
-    key.addEventListener('input', () => { profile.apiKey = key.value; $('aiStatus').textContent = ''; });
+    key.addEventListener('input', () => { profile.apiKey = key.value; syncReadyChip(); $('aiStatus').textContent = ''; });
     const test = document.createElement('button');
     test.type = 'button'; test.className = 'bt ai-profile-test'; test.textContent = 'تست';
     test.title = 'تست همین کلید و مدل بدون ارسال متن کمیک';
@@ -3643,28 +4658,34 @@ function renderAiProfiles() {
     });
     const status = document.createElement('span');
     status.className = 'ai-profile-status'; status.setAttribute('role', 'status');
+    status.textContent = profile._lastStatus || '';
     test.addEventListener('click', async () => {
       const provider = aiEditorProvider;
       const profileId = profile.id;
       const model = $('aiModel').value.trim();
       const baseUrl = $('aiBaseUrl').value.trim();
       if (!profile.apiKey.trim() && !profile.hasApiKey) {
-        status.textContent = 'ابتدا کلید API را وارد کنید.'; key.focus(); return;
+        profile._lastStatus = 'ابتدا کلید API را وارد کنید.';
+        status.textContent = profile._lastStatus; key.focus(); return;
       }
       test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی…'; $('copyAiError').classList.add('hidden'); setProgress('aiProgress', null, true);
       try {
         await saveAiSettings({ quiet: true });
-        setProgress('aiProgress', 0.45, true);
+        setProgress('aiProgress', 0.5, true);
         const result = await api('/api/ai-settings/test', jsonOptions('POST', {
           provider, profile_id: profileId, model, base_url: baseUrl,
         }));
         setProgress('aiProgress', 1, false);
         $('aiStatus').textContent = result.message;
+        const currentObj = aiEditorProfiles.find((item) => item.id === profileId);
+        if (currentObj) currentObj._lastStatus = 'اتصال برقرار است ✓';
         const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
         if (currentRow) currentRow.querySelector('.ai-profile-status').textContent = 'اتصال برقرار است ✓';
       } catch (error) {
         setProgress('aiProgress', 0, false);
         $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden');
+        const currentObj = aiEditorProfiles.find((item) => item.id === profileId);
+        if (currentObj) currentObj._lastStatus = error.message;
         const currentRow = [...container.querySelectorAll('.ai-profile-row')].find((item) => item.dataset.profileId === profileId);
         (currentRow?.querySelector('.ai-profile-status') || status).textContent = error.message;
       } finally {
@@ -3685,16 +4706,320 @@ function renderAiProfiles() {
     addSetting('تکرار اضافی (۰ تا ۵)', 'retry_count', 0, 5);
     addSetting('فاصلهٔ تلاش مجدد (ثانیه، ۰ تا ۳۰۰)', 'retry_wait_seconds', 0, 300);
     addSetting('سقف نویسهٔ کل درخواست AI (۱ تا ۱۰۰۰۰۰)', 'source_limit', 1, 100000);
-    row.append(name, key, test, remove, options, status); container.appendChild(row);
+    row.append(orderBar, name, key, test, remove, options, status); container.appendChild(row);
   });
 }
+const LOCAL_NMT_FALLBACK_MODELS = [
+  {
+    id: 'nllb-600m',
+    label: 'NLLB-200 سبک و سریع (600M · ~630 MB)',
+    shortLabel: 'NLLB-200 (600M)',
+    description: 'پیشنهادی برای همهٔ لپ‌تاپ‌ها و سیستم‌های معمولی روی پردازنده (CPU) بدون نیاز به کارت گرافیک؛ سریع و مناسب ترجمهٔ تک‌جمله و صفحه‌های کامل.',
+    approxSize: '~630 MB',
+    ramHint: '~750 MB',
+    ready: false,
+    filesPresent: false,
+    diskBytes: 0,
+    diskSizeLabel: '',
+  },
+  {
+    id: 'nllb-1.3b',
+    label: 'NLLB-200 دقیق‌تر (1.3B · ~1.35 GB)',
+    shortLabel: 'NLLB-200 (1.3B)',
+    description: 'جمله‌بندی دقیق‌تر برای جملات طولانی‌تر؛ قابل اجرا روی پردازنده (CPU) با حدود ۱.۶ گیگابایت رم آزاد در زمان ترجمه.',
+    approxSize: '~1.35 GB',
+    ramHint: '~1.6 GB',
+    ready: false,
+    filesPresent: false,
+    diskBytes: 0,
+    diskSizeLabel: '',
+  },
+];
+let localNmtBusyModel = null;
+let localNmtAbortController = null;
+let localNmtPollTimer = null;
+
+function currentLocalNmtStatus() {
+  const st = state.ai?.local_nmt_status;
+  const selectedModel = $('localNmtModelSelect')?.value || state.ai?.local_nmt?.model || 'nllb-600m';
+  const rawModels = Array.isArray(st?.models) && st.models.length ? st.models : LOCAL_NMT_FALLBACK_MODELS;
+  return {
+    runtimeInstalled: !!st?.runtimeInstalled,
+    loadedModel: st?.loadedModel || null,
+    busyModel: localNmtBusyModel || st?.busyModel || null,
+    busyStage: st?.busyStage || '',
+    busyProgress: Number(st?.busyProgress || 0),
+    models: rawModels.map((m) => ({
+      ...m,
+      selected: m.id === selectedModel,
+      loaded: m.id === (st?.loadedModel || null),
+    })),
+  };
+}
+
+function updateLocalNmtProgressUi(visible, label = '', progress = 0) {
+  const wrap = $('localNmtProgressWrap');
+  if (!wrap) return;
+  wrap.classList.toggle('hidden', !visible);
+  if (!visible) {
+    setProgress('localNmtProgressFill', 0, false);
+    if ($('localNmtProgressPercent')) $('localNmtProgressPercent').textContent = '0%';
+    return;
+  }
+  const clamped = Math.max(0, Math.min(1, Number(progress) || 0));
+  if ($('localNmtProgressLabel') && label) $('localNmtProgressLabel').textContent = label;
+  if ($('localNmtProgressPercent')) $('localNmtProgressPercent').textContent = `${Math.round(clamped * 100)}%`;
+  setProgress('localNmtProgressFill', clamped > 0 ? clamped : null, clamped <= 0);
+}
+
+function renderLocalNmtPanel() {
+  const cardsEl = $('localNmtCards');
+  if (!cardsEl) return;
+  const info = currentLocalNmtStatus();
+  const busy = Boolean(info.busyModel);
+  if ($('localNmtUnloadBtn')) {
+    $('localNmtUnloadBtn').disabled = busy;
+    $('localNmtUnloadBtn').textContent = info.loadedModel ? 'آزادسازی فوری از رم (در رم فعال)' : 'آزادسازی فوری از رم';
+  }
+  if ($('localNmtTestBtn')) $('localNmtTestBtn').disabled = busy;
+  cardsEl.textContent = '';
+  info.models.forEach((model) => {
+    const card = document.createElement('div');
+    card.className = `local-nmt-card${model.selected ? ' is-selected' : ''}`;
+    card.dataset.modelId = model.id;
+
+    const head = document.createElement('div');
+    head.className = 'local-nmt-card-head';
+    const title = document.createElement('strong');
+    title.className = 'local-nmt-card-title';
+    title.textContent = model.label;
+    const badge = document.createElement('span');
+    badge.className = `exec-badge ${model.ready ? 'is-local' : 'is-online'}`;
+    badge.textContent = model.ready
+      ? (model.loaded ? '✓ آماده · فعال در رم' : '✓ نصب‌شده (آمادهٔ کار آفلاین)')
+      : `⬇ نصب‌نشده (${model.approxSize})`;
+    head.append(title, badge);
+
+    const desc = document.createElement('p');
+    desc.className = 'local-nmt-card-desc';
+    desc.textContent = model.description;
+
+    const meta = document.createElement('div');
+    meta.className = 'local-nmt-card-meta';
+    meta.textContent = [
+      `حجم دانلود: ${model.approxSize}`,
+      model.ramHint ? `رم مصرفی حین کار: ${model.ramHint}` : '',
+      model.diskSizeLabel ? `حجم فعلی روی دیسک: ${model.diskSizeLabel}` : '',
+    ].filter(Boolean).join(' · ');
+
+    const actions = document.createElement('div');
+    actions.className = 'local-nmt-card-actions';
+
+    if (!model.ready) {
+      const dlBtn = document.createElement('button');
+      dlBtn.type = 'button';
+      dlBtn.className = 'bt primary local-nmt-download-btn';
+      dlBtn.disabled = busy;
+      dlBtn.textContent = info.busyModel === model.id ? 'در حال دانلود…' : 'دانلود و نصب خودکار';
+      dlBtn.addEventListener('click', () => { prepareLocalNmtModel(model.id).catch(() => {}); });
+      actions.appendChild(dlBtn);
+    } else {
+      const pickBtn = document.createElement('button');
+      pickBtn.type = 'button';
+      pickBtn.className = `bt ${model.selected ? 'primary' : ''} local-nmt-select-btn`.trim();
+      pickBtn.disabled = busy || model.selected;
+      pickBtn.textContent = model.selected ? '✓ مدل آفلاین فعال' : 'انتخاب این مدل';
+      pickBtn.addEventListener('click', () => {
+        if ($('localNmtModelSelect')) $('localNmtModelSelect').value = model.id;
+        renderLocalNmtPanel();
+      });
+      actions.appendChild(pickBtn);
+    }
+
+    if (model.filesPresent || model.diskBytes > 0) {
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'bt danger local-nmt-delete-btn';
+      delBtn.disabled = busy;
+      delBtn.textContent = 'حذف مدل از دیسک';
+      delBtn.addEventListener('click', () => { deleteLocalNmtModel(model.id, model.shortLabel || model.label).catch(() => {}); });
+      actions.appendChild(delBtn);
+    }
+
+    card.append(head, desc, meta, actions);
+    cardsEl.appendChild(card);
+  });
+}
+
+async function refreshLocalNmtStatusSilently() {
+  try {
+    const status = await api('/api/local-nmt/status');
+    if (state.ai && status && typeof status === 'object') {
+      state.ai.local_nmt_status = status;
+    }
+    renderLocalNmtPanel();
+    return status;
+  } catch {
+    return null;
+  }
+}
+
+async function prepareLocalNmtModel(modelId) {
+  if (localNmtBusyModel) return;
+  localNmtBusyModel = modelId;
+  if ($('localNmtModelSelect')) $('localNmtModelSelect').value = modelId;
+  $('aiStatus').textContent = 'آماده‌سازی و دانلود مدل آفلاین آغاز شد…';
+  $('copyAiError').classList.add('hidden');
+  updateLocalNmtProgressUi(true, 'در حال بررسی پیش‌نیازها و اتصال…', 0.02);
+  renderLocalNmtPanel();
+
+  const controller = new AbortController();
+  localNmtAbortController = controller;
+  localNmtPollTimer = setInterval(() => {
+    refreshLocalNmtStatusSilently().then((st) => {
+      if (st && st.busyModel) {
+        updateLocalNmtProgressUi(true, st.busyStage || 'در حال دانلود مدل آفلاین…', st.busyProgress || 0.05);
+      }
+    }).catch(() => {});
+    pollActivity().catch(() => {});
+  }, 400);
+
+  try {
+    const res = await api('/api/local-nmt/prepare', {
+      ...jsonOptions('POST', { model: modelId }),
+      signal: controller.signal,
+    });
+    if (state.ai && res?.status) state.ai.local_nmt_status = res.status;
+    updateLocalNmtProgressUi(true, 'مدل آفلاین آماده شد ✓', 1);
+    $('aiStatus').textContent = 'مدل مترجم آفلاین با موفقیت دانلود و آماده شد؛ از این پس ۱۰۰٪ بدون اینترنت کار می‌کند.';
+    toast('مدل مترجم آفلاین آمادهٔ استفاده است');
+  } catch (error) {
+    const cancelled = error?.name === 'AbortError' || String(error?.message || '').includes('لغو');
+    $('aiStatus').textContent = cancelled
+      ? 'دانلود مترجم آفلاین به درخواست شما لغو شد.'
+      : (error.message || String(error));
+    if (!cancelled) {
+      $('copyAiError').classList.remove('hidden');
+      toast(error.message || 'دانلود مدل آفلاین ناموفق بود', true);
+    }
+  } finally {
+    if (localNmtPollTimer) { clearInterval(localNmtPollTimer); localNmtPollTimer = null; }
+    if (localNmtAbortController === controller) localNmtAbortController = null;
+    localNmtBusyModel = null;
+    dismissJobCancelModal('local-nmt');
+    updateLocalNmtProgressUi(false);
+    await refreshLocalNmtStatusSilently();
+    pollActivity().catch(() => {});
+  }
+}
+
+let localNmtTestAbortController = null;
+
+async function cancelLocalNmtPrepare() {
+  if (localNmtAbortController) {
+    try { localNmtAbortController.abort(); } catch { /* ignore */ }
+  }
+  notifyServerJobCancel('model');
+  try { await api('/api/local-nmt/cancel', jsonOptions('POST', {})); } catch { /* ignore */ }
+}
+
+async function deleteLocalNmtModel(modelId, label) {
+  const ok = await appConfirm(`آیا مطمئن هستید که می‌خواهید فایل‌های مدل آفلاین «${label}» به‌طور کامل از روی دیسک پاک شوند؟`, {
+    title: 'حذف مدل مترجم آفلاین از دیسک',
+    confirmText: 'بله، حذف شود',
+    cancelText: 'انصراف',
+    variant: 'danger',
+    destructive: true,
+  });
+  if (!ok) return;
+  $('aiStatus').textContent = 'در حال آزادسازی از رم و حذف فایل‌های مدل از دیسک…';
+  try {
+    const res = await api('/api/local-nmt/delete', jsonOptions('POST', { model: modelId }));
+    if (state.ai && res?.status) state.ai.local_nmt_status = res.status;
+    renderLocalNmtPanel();
+    const freedText = res?.freedBytes ? ` (${formatStorageBytesFa(res.freedBytes)} آزاد شد)` : '';
+    $('aiStatus').textContent = `مدل «${label}» از دیسک حذف شد${freedText}.`;
+    toast(`مدل آفلاین حذف شد${freedText}`);
+  } catch (error) {
+    $('aiStatus').textContent = error.message || String(error);
+    $('copyAiError').classList.remove('hidden');
+    toast(error.message || 'حذف مدل ناموفق بود', true);
+  }
+}
+
+async function unloadLocalNmtRam() {
+  try {
+    const res = await api('/api/local-nmt/unload', jsonOptions('POST', {}));
+    if (state.ai && res?.status) state.ai.local_nmt_status = res.status;
+    renderLocalNmtPanel();
+    $('aiStatus').textContent = 'مدل مترجم آفلاین از حافظهٔ رم آزاد شد.';
+    toast('حافظهٔ رم مترجم آفلاین آزاد شد');
+  } catch (error) {
+    toast(error.message || 'آزادسازی رم ناموفق بود', true);
+  }
+}
+
+async function testLocalNmtSample() {
+  const modelId = $('localNmtModelSelect')?.value || state.ai?.local_nmt?.model || 'nllb-600m';
+  const sampleText = ($('localNmtTestSample')?.value || '').trim();
+  const targetLang = normalizeTargetLanguage($('aiTargetLanguage')?.value || activeTargetLanguage());
+  const sourceLang = $('ocrLanguage')?.value || 'eng';
+  const beamSize = Math.max(1, Math.min(4, Number($('localNmtBeamSize')?.value) || 2));
+  const keepLoaded = Boolean($('localNmtKeepLoaded')?.checked);
+  const btn = $('localNmtTestBtn');
+  if (btn) btn.disabled = true;
+  $('copyAiError').classList.add('hidden');
+  $('aiStatus').textContent = 'در حال ترجمهٔ آفلاین جملهٔ نمونه روی پردازندهٔ سیستم…';
+  setProgress('aiProgress', null, true);
+  const testCtrl = new AbortController();
+  localNmtTestAbortController = testCtrl;
+  try {
+    const res = await api('/api/local-nmt/test', {
+      ...jsonOptions('POST', {
+        model: modelId,
+        source_language: sourceLang,
+        target_language: targetLang,
+        sample_text: sampleText,
+        beam_size: beamSize,
+        keep_loaded: keepLoaded,
+      }),
+      signal: testCtrl.signal,
+    });
+    setProgress('aiProgress', 1, false);
+    $('aiStatus').textContent = res.message || `نمونهٔ ترجمه: ${res.translatedText}`;
+    await refreshLocalNmtStatusSilently();
+  } catch (error) {
+    setProgress('aiProgress', 0, false);
+    if (error?.cancelled || error?.name === 'AbortError' || testCtrl.signal.aborted) {
+      $('aiStatus').textContent = 'تست ترجمهٔ آفلاین لغو شد.';
+      return;
+    }
+    $('aiStatus').textContent = error.message || String(error);
+    $('copyAiError').classList.remove('hidden');
+    toast(error.message || 'تست ترجمهٔ آفلاین ناموفق بود', true);
+  } finally {
+    if (localNmtTestAbortController === testCtrl) localNmtTestAbortController = null;
+    dismissJobCancelModal('local-nmt');
+    if (btn) btn.disabled = Boolean(localNmtBusyModel);
+  }
+}
+
 function showAiProvider(provider, capture = true) {
   if (capture && provider !== aiEditorProvider) captureAiProvider();
-  aiEditorProvider = AI_PROVIDER_IDS.includes(provider) ? provider : 'free';
+  aiEditorProvider = (provider === 'local' || AI_PROVIDER_IDS.includes(provider)) ? provider : 'free';
   $('aiProvider').value = aiEditorProvider;
-  $('aiFields').classList.toggle('hidden', aiEditorProvider === 'free');
+  $('aiFields').classList.toggle('hidden', isDirectMtProvider(aiEditorProvider));
   $('freeFields').classList.toggle('hidden', aiEditorProvider !== 'free');
+  $('localNmtFields')?.classList.toggle('hidden', aiEditorProvider !== 'local');
   if (aiEditorProvider === 'free') { syncAiExecUi(); $('aiStatus').textContent = ''; $('copyAiError').classList.add('hidden'); return; }
+  if (aiEditorProvider === 'local') {
+    syncAiExecUi();
+    $('aiStatus').textContent = '';
+    $('copyAiError').classList.add('hidden');
+    renderLocalNmtPanel();
+    refreshLocalNmtStatusSilently().catch(() => {});
+    return;
+  }
   const info = aiInfo();
   const draft = aiEditorDrafts.get(aiEditorProvider);
   const sourceProfiles = draft?.profiles || info.profiles || [];
@@ -3731,10 +5056,35 @@ function freeSettingsPayload() {
   }
   return result;
 }
+function localNmtSettingsPayload() {
+  const model = $('localNmtModelSelect')?.value || state.ai?.local_nmt?.model || 'nllb-600m';
+  const rawBeam = ($('localNmtBeamSize')?.value ?? '2').trim();
+  const rawLimit = ($('localNmtSourceLimit')?.value ?? '4000').trim();
+  const beam = Number(rawBeam);
+  const limit = Number(rawLimit);
+  if (!/^\d+$/.test(rawBeam) || !Number.isSafeInteger(beam) || beam < 1 || beam > 4) {
+    throw new Error('دقت جست‌وجوی مترجم آفلاین (Beam) باید عدد صحیح بین ۱ تا ۴ باشد.');
+  }
+  if (!/^\d+$/.test(rawLimit) || !Number.isSafeInteger(limit) || limit < 200 || limit > 20000) {
+    throw new Error('سقف نویسهٔ مترجم آفلاین باید عدد صحیح بین ۲۰۰ تا ۲۰۰۰۰ باشد.');
+  }
+  return {
+    model,
+    beam_size: beam,
+    source_limit: limit,
+    keep_loaded: Boolean($('localNmtKeepLoaded')?.checked),
+  };
+}
 async function loadAiSettings(prefetched = null) {
   state.ai = (prefetched && typeof prefetched === 'object') ? prefetched : await api('/api/ai-settings');
   aiEditorDrafts.clear();
   renderFreeServices();
+  const localCfg = state.ai.local_nmt || {};
+  if ($('localNmtModelSelect')) $('localNmtModelSelect').value = localCfg.model || 'nllb-600m';
+  if ($('localNmtBeamSize')) $('localNmtBeamSize').value = localCfg.beam_size ?? 2;
+  if ($('localNmtSourceLimit')) $('localNmtSourceLimit').value = localCfg.source_limit ?? 4000;
+  if ($('localNmtKeepLoaded')) $('localNmtKeepLoaded').checked = Boolean(localCfg.keep_loaded);
+  renderLocalNmtPanel();
   $('aiReuseRepeated').checked = state.ai.reuse_repeated !== false;
   $('aiContextPercent').value = state.ai.context_percent ?? 15;
   $('aiSkillPercent').value = state.ai.skill_percent ?? 15;
@@ -3776,6 +5126,7 @@ function aiSettingsPayload() {
     provider: aiEditorProvider,
     target_language: normalizeTargetLanguage($('aiTargetLanguage')?.value || state.ai?.target_language || 'fa'),
     free_services: freeSettingsPayload(),
+    local_nmt: localNmtSettingsPayload(),
     reuse_repeated: $('aiReuseRepeated').checked,
     context_percent: contextPercent,
     skill_percent: skillPercent,
@@ -3847,17 +5198,24 @@ function discardInlineEditorForCancel() {
 }
 function boxOf(block) { return { x0: Number.isFinite(block.tx0) ? block.tx0 : block.x0, y0: Number.isFinite(block.ty0) ? block.ty0 : block.y0, x1: Number.isFinite(block.tx1) ? block.tx1 : block.x1, y1: Number.isFinite(block.ty1) ? block.ty1 : block.y1 }; }
 async function openEditor(imageId) {
+  if (!isModuleLicensed('editing')) { await ensureModuleLicensed('editing'); return; }
   const loadSeq = ++editorLoadSeq;
   await ensureFont();
   if (loadSeq !== editorLoadSeq) return;
   const item = state.project?.images.find((entry) => entry.id === imageId);
   if (!item) return;
   if (inlineDraft) closeInlineEditor(true); else syncInlineDockIdleState();
+  if (!$('editorDialog')?.open) {
+    editorReturnScroll = captureEditorReturnScroll(imageId);
+  } else if (editorReturnScroll) {
+    editorReturnScroll.imageId = String(imageId);
+  }
   state.editorId = imageId; state.activeBlockId = null; state.selectedBlockIds = []; state.editorPan = null;
   editorSessionSnapshot = {
     projectId: state.project.id,
     imageId: item.id,
     blocksJson: JSON.stringify(item.blocks || []),
+    watermarkJson: JSON.stringify(item.watermark || null),
     approved: !!item.approved,
     edited: !!item.edited,
     overlayMode: currentOverlayMode(),
@@ -3865,12 +5223,14 @@ async function openEditor(imageId) {
     serverPreviewTouched: false,
     autoSaved: false,
   };
-  $('editorStage').classList.remove('panning'); syncEditorApprovalHeader(item); $('blockList').textContent = ''; showDialog('editorDialog');
+  await ensureWatermarkLogosReady(item.watermark);
+  if (loadSeq !== editorLoadSeq) return;
+  $('editorStage').classList.remove('panning'); syncEditorApprovalHeader(item); syncEditorClipboardButtons(); $('blockList').textContent = ''; showDialog('editorDialog');
   let bitmap;
   try {
     const response = await fetch(imageUrl(item));
     if (response.ok === false) throw new Error('تصویر اصلی باز نشد');
-    bitmap = await createImageBitmap(await response.blob());
+    bitmap = await decodeProjectImageBitmap(await response.blob(), item);
   } catch (error) {
     if (loadSeq === editorLoadSeq && state.editorId === imageId) {
       state.editorId = null;
@@ -3982,7 +5342,7 @@ function drawEditorCanvas() {
     }
     return overlayBlock(block);
   });
-  const rendered = Typeset.render(state.editorBitmap, blocks); const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d');
+  const rendered = Typeset.render(state.editorBitmap, blocks, buildTypesetRenderOptions(item)); const canvas = $('editorCanvas'); const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(rendered, 0, 0);
   if (rendered && rendered !== canvas) { rendered.width = 0; rendered.height = 0; }
 }
@@ -4025,16 +5385,77 @@ function overlaySize(block, width, height) {
     return Math.max(8, Math.min(160, Number(block.size) || Math.min(42, Math.max(10, height / Math.max(1.8, String(block.tr || '').split('\n').length * 1.65)))));
   }
 }
+const EDITOR_FONT_OPTIONS = Object.freeze([
+  ['vazirmatn', 'Vazirmatn'],
+  ['tahoma', 'Tahoma'],
+  ['segoe ui', 'Segoe UI'],
+  ['arial', 'Arial'],
+  ['times new roman', 'Times New Roman'],
+  ['impact', 'Impact'],
+  ['comic sans ms', 'Comic Sans MS'],
+  ['courier new', 'Courier New'],
+]);
+function canonicalFontOption(raw) {
+  const clean = String(raw || '').split(',')[0].trim().replace(/^['"]+|['"]+$/g, '').replace(/\s+/g, ' ').toLowerCase();
+  const hit = EDITOR_FONT_OPTIONS.find(([key]) => key === clean);
+  return hit ? hit[1] : 'Vazirmatn';
+}
+function resolveBlockFontStack(fontFamily) {
+  if (typeof Typeset?.resolveFontStack === 'function') return Typeset.resolveFontStack(fontFamily);
+  const opt = canonicalFontOption(fontFamily);
+  if (opt === 'Vazirmatn') return 'Vazirmatn, Tahoma, sans-serif';
+  return `${/\s/.test(opt) ? `"${opt}"` : opt}, Vazirmatn, Tahoma, sans-serif`;
+}
+const EDITOR_BOX_SHAPES_FALLBACK = [
+  'rect', 'ellipse', 'pill', 'cloud', 'thought', 'speech',
+  'star', 'burst', 'seal', 'diamond', 'hexagon', 'octagon', 'heart', 'banner',
+];
+function normalizeShapeKey(shape) {
+  if (typeof Typeset?.normalizeBoxShape === 'function') return Typeset.normalizeBoxShape(shape);
+  const s = String(shape || '').trim().toLowerCase();
+  return EDITOR_BOX_SHAPES_FALLBACK.includes(s) ? s : 'rect';
+}
+function normalizeRadiusPct(value) {
+  if (typeof Typeset?.normalizeCornerRadius === 'function') return Typeset.normalizeCornerRadius(value);
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.max(0, Math.min(100, Math.round(n))) : 0;
+}
+function normalizeAngleDeg(value) {
+  if (typeof Typeset?.normalizeBoxAngle === 'function') return Typeset.normalizeBoxAngle(value);
+  const n = Number(value);
+  if (!Number.isFinite(n) || Math.abs(n) < 0.05) return 0;
+  let wrapped = ((n + 180) % 360 + 360) % 360 - 180;
+  if (wrapped === -180 && n > 0) wrapped = 180;
+  return Math.round(wrapped * 10) / 10;
+}
+function boxShapeInsets(bw, bh, block) {
+  const sh = normalizeShapeKey(block?.shape);
+  const cr = normalizeRadiusPct(block?.cornerRadius);
+  if (typeof Typeset?.shapeInsets === 'function') return Typeset.shapeInsets(bw, bh, sh, cr);
+  const baseX = Typeset?.boxInset ? Typeset.boxInset(bw) : Math.min(4, Math.max(0, bw * 0.02));
+  const baseY = Typeset?.boxInset ? Typeset.boxInset(bh) : Math.min(4, Math.max(0, bh * 0.02));
+  return { padX: baseX, padY: baseY, padTop: baseY, padBottom: baseY };
+}
+function shapeSvgPathForBox(w, h, shape, cornerRadius) {
+  if (typeof Typeset?.shapeSvgPath === 'function') return Typeset.shapeSvgPath(w, h, shape, cornerRadius);
+  const bw = Math.max(1, Number(w) || 1), bh = Math.max(1, Number(h) || 1);
+  const sh = normalizeShapeKey(shape);
+  if (sh === 'ellipse') return `M ${bw / 2} 0 A ${bw / 2} ${bh / 2} 0 1 1 ${bw / 2} ${bh} A ${bw / 2} ${bh / 2} 0 1 1 ${bw / 2} 0 Z`;
+  if (sh === 'diamond') return `M ${bw / 2} 0 L ${bw} ${bh / 2} L ${bw / 2} ${bh} L 0 ${bh / 2} Z`;
+  if (sh === 'hexagon') { const dx = bw * 0.18; return `M ${dx} 0 L ${bw - dx} 0 L ${bw} ${bh / 2} L ${bw - dx} ${bh} L ${dx} ${bh} L 0 ${bh / 2} Z`; }
+  return `M 0 0 H ${bw} V ${bh} H 0 Z`;
+}
 function styleRichElement(element, block, scale = 1, preview = false) {
   const box = clampedBoxOf(block); const style = Typeset.blockStyle(block);
   element.dir = style.dir; element.style.direction = style.dir; element.style.textAlign = style.align;
   element.style.justifyContent = style.verticalAlign === 'top' ? 'flex-start' : style.verticalAlign === 'bottom' ? 'flex-end' : 'center';
   // The sidebar is an editing surface, not the output: output size and colour affect only the image.
+  element.style.fontFamily = resolveBlockFontStack(block.fontFamily);
   element.style.fontSize = preview ? `${overlaySize(block, box.x1 - box.x0, box.y1 - box.y0) * scale}px` : '';
   element.style.fontWeight = style.bold ? '700' : '400'; element.style.fontStyle = style.italic ? 'italic' : 'normal';
   element.style.color = preview ? (style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff')) : '';
   element.style.caretColor = preview ? (style.color || (block.bg === 'white' ? '#0b0b0b' : '#fff')) : '';
-  element.style.textDecoration = style.underline ? 'underline' : '';
+  element.style.textDecoration = [style.underline ? 'underline' : '', style.strike ? 'line-through' : ''].filter(Boolean).join(' ');
 }
 function logicalFontSizeOf(element) {
   if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
@@ -4098,9 +5519,11 @@ function refreshInlineTypography() {
   const layoutZoom = 1;
   field.dataset.layoutZoom = '1';
   field.dataset.visualFontSize = String(baseSize * scale);
+  field.style.fontFamily = resolveBlockFontStack(draft.fontFamily);
   field.style.fontSize = `${baseSize}px`;
   field.style.lineHeight = '1.55'; field.style.fontWeight = style.bold ? '700' : '400';
-  field.style.fontStyle = style.italic ? 'italic' : 'normal'; field.style.textDecoration = style.underline ? 'underline' : '';
+  field.style.fontStyle = style.italic ? 'italic' : 'normal';
+  field.style.textDecoration = [style.underline ? 'underline' : '', style.strike ? 'line-through' : ''].filter(Boolean).join(' ');
   field.style.whiteSpace = 'pre-line'; field.style.textJustify = 'inter-word';
   field.style.letterSpacing = '0px'; field.style.wordSpacing = '0px'; field.style.fontKerning = 'auto';
   field.style.background = 'transparent'; field.style.color = 'transparent'; field.style.webkitTextFillColor = 'transparent'; field.style.caretColor = 'var(--a1)';
@@ -4114,7 +5537,8 @@ function refreshInlineTypography() {
     const eff = Math.max(8, Math.min(160, Math.round(baseSize * logical / ref)));
     el.style.fontSize = `${eff * layoutZoom}px`;
   });
-  const insetX = (Typeset.boxInset ? Typeset.boxInset(bw) : Math.min(4, Math.max(0, bw * 0.02))) * layoutZoom;
+  const shapePad = boxShapeInsets(bw, bh, draft);
+  const insetX = shapePad.padX * layoutZoom;
   const ind = Typeset.indentGeometry ? Typeset.indentGeometry(style, insetX, baseSize * layoutZoom) : { textIndentPx: 0, padLeft: insetX, padRight: insetX };
   field.style.right = 'auto'; field.style.bottom = 'auto';
   field.style.width = `${bw * layoutZoom}px`;
@@ -4126,8 +5550,13 @@ function refreshInlineTypography() {
   field.style.transform = `scale(${scale / layoutZoom})`;
   const rawScrollH = field.scrollHeight;
   const contentH = (rawScrollH > 0 ? rawScrollH : baseSize * layoutZoom * 1.55) / layoutZoom;
-  const insetY = Typeset.boxInset ? Typeset.boxInset(bh) : Math.min(4, Math.max(0, bh * 0.02));
-  const topUnscaled = style.verticalAlign === 'top' ? insetY : style.verticalAlign === 'bottom' ? bh - insetY - contentH : (bh - contentH) / 2;
+  const padTop = Number.isFinite(shapePad.padTop) ? shapePad.padTop : shapePad.padY;
+  const padBottom = Number.isFinite(shapePad.padBottom) ? shapePad.padBottom : shapePad.padY;
+  const topUnscaled = style.verticalAlign === 'top'
+    ? padTop
+    : style.verticalAlign === 'bottom'
+      ? bh - padBottom - contentH
+      : padTop + (bh - padTop - padBottom - contentH) / 2;
   field.style.left = `${-(host.clientLeft || 0)}px`;
   field.style.top = `${-(host.clientTop || 0) + topUnscaled * scale}px`;
   const fieldHLayout = Math.max(Math.max(1, bh - topUnscaled) * layoutZoom, rawScrollH + 4);
@@ -4139,6 +5568,79 @@ function refreshInlineTypography() {
   if (field.scrollLeft) field.scrollLeft = 0;
   scheduleEditorCanvasDraw();
 }
+const editorPageHistory = new Map();
+function recordEditorPageHistory() {
+  const item = editorItem();
+  if (!item) return;
+  const key = String(item.id);
+  let stateEntry = editorPageHistory.get(key);
+  if (!stateEntry) {
+    stateEntry = { stack: [], index: -1 };
+    editorPageHistory.set(key, stateEntry);
+  }
+  const snap = JSON.stringify({ blocks: item.blocks || [], selected: state.selectedBlockIds || [], active: state.activeBlockId || null });
+  if (stateEntry.index >= 0 && stateEntry.stack[stateEntry.index] === snap) return;
+  stateEntry.stack.splice(stateEntry.index + 1);
+  stateEntry.stack.push(snap);
+  if (stateEntry.stack.length > 40) stateEntry.stack.shift();
+  stateEntry.index = stateEntry.stack.length - 1;
+}
+function pushPostActionEditorPageHistory() {
+  recordEditorPageHistory();
+}
+function restoreEditorPageHistory(step) {
+  const item = editorItem();
+  if (!item) return;
+  const key = String(item.id);
+  const stateEntry = editorPageHistory.get(key);
+  if (!stateEntry || !stateEntry.stack.length) return;
+  const currentSnap = JSON.stringify({ blocks: item.blocks || [], selected: state.selectedBlockIds || [], active: state.activeBlockId || null });
+  if (stateEntry.stack[stateEntry.index] !== currentSnap) {
+    stateEntry.stack.splice(stateEntry.index + 1);
+    stateEntry.stack.push(currentSnap);
+    stateEntry.index = stateEntry.stack.length - 1;
+  }
+  const nextIndex = stateEntry.index + step;
+  if (nextIndex < 0 || nextIndex >= stateEntry.stack.length) return;
+  stateEntry.index = nextIndex;
+  try {
+    const parsed = JSON.parse(stateEntry.stack[nextIndex]);
+    item.blocks = parsed.blocks || [];
+    state.selectedBlockIds = parsed.selected || [];
+    state.activeBlockId = parsed.active || null;
+    syncEditorShapeControls();
+    syncVerticalAlignButtons();
+    buildBlockList();
+    drawEditor();
+    scheduleSave();
+  } catch {}
+}
+function resolveToolbarTargetBlocks({ autoSelectFirst = true } = {}) {
+  if (inlineDraft?.block) return [inlineDraft.block];
+  const selected = selectedEditorBlocks();
+  if (selected.length) return selected;
+  if (!autoSelectFirst) return [];
+  const item = editorItem();
+  const blocks = item?.blocks || [];
+  if (!blocks.length) return [];
+  const activeMatch = state.activeBlockId != null
+    ? blocks.find((b) => String(b.id) === String(state.activeBlockId) && b.enabled !== false)
+    : null;
+  const chosen = activeMatch || blocks.find((b) => b.enabled !== false) || blocks[0];
+  if (!chosen) return [];
+  selectEditorBlock(chosen.id, true);
+  return [chosen];
+}
+function ensureInlineTargetSession() {
+  if (inlineDraft) return true;
+  const targets = resolveToolbarTargetBlocks({ autoSelectFirst: true });
+  if (!targets.length) {
+    toast('ابتدا یک کادر متنی در صفحه ایجاد یا انتخاب کنید.', true);
+    return false;
+  }
+  openInlineEditor(targets[0]);
+  return Boolean(inlineDraft);
+}
 function syncVerticalAlignButtons() {
   const dock = $('inlineEditor');
   const buttons = document.querySelectorAll('.inline-valign-btn');
@@ -4146,13 +5648,11 @@ function syncVerticalAlignButtons() {
   const selected = selectedEditorBlocks();
   const multiSelected = selected.length > 1 || (selected.length === 1 && (!inlineDraft || selected[0] !== inlineDraft.block));
   let activeValue = null;
-  let enabled = false;
+  const hasContext = selected.length > 0 || !!inlineDraft;
   if (inlineDraft && !multiSelected) {
-    enabled = true;
     activeValue = ['top', 'bottom'].includes($('inlineVerticalAlign')?.value) ? $('inlineVerticalAlign').value : 'middle';
     dock?.classList.remove('has-selection');
   } else {
-    enabled = selected.length > 0 || !!inlineDraft;
     if (!inlineDraft) dock?.classList.toggle('has-selection', selected.length > 0);
     else dock?.classList.remove('has-selection');
     if (selected.length > 0) {
@@ -4164,13 +5664,14 @@ function syncVerticalAlignButtons() {
     }
   }
   buttons.forEach((btn) => {
-    btn.disabled = !enabled;
-    btn.setAttribute('aria-pressed', String(enabled && btn.dataset.valign === activeValue));
+    btn.disabled = false;
+    btn.setAttribute('aria-pressed', String(hasContext && btn.dataset.valign === activeValue));
   });
 }
 function setVerticalPlacement(value) {
   if (!['top', 'middle', 'bottom'].includes(value)) return;
-  const selected = selectedEditorBlocks();
+  const selected = inlineDraft ? selectedEditorBlocks() : resolveToolbarTargetBlocks({ autoSelectFirst: true });
+  if (!inlineDraft && selected.length) recordEditorPageHistory();
   let updatedOther = false;
   selected.forEach((block) => {
     if (block !== inlineDraft?.block) { block.verticalAlign = value; updatedOther = true; }
@@ -4188,14 +5689,68 @@ function setVerticalPlacement(value) {
   syncVerticalAlignButtons();
   drawEditor();
   scheduleSave();
+  pushPostActionEditorPageHistory();
 }
-function setInlineDockDisabled(disabled) {
-  ['inlinePreview', 'inlineEditorApply', 'inlineVerticalAlign', 'inlineLineSize', 'inlineSizeUp', 'inlineSizeDown', 'inlineLineReset',
-    'inlineEditorDirection', 'inlineEditorAlign', 'inlineEditorSize', 'inlineEditorColor', 'inlineEditorAutoColor']
-    .forEach((id) => { const el = $(id); if (el) el.disabled = disabled; });
+function syncEditorShapeControls() {
+  const selected = selectedEditorBlocks();
+  const target = inlineDraft?.block || selected[0] || null;
+  const hasTarget = Boolean(target);
+  ['editorBoxShape', 'editorBoxRadius', 'editorBoxAngle', 'editorRotateReset', 'editorBoxBg', 'editorBoxBgColor', 'editorTranslateBlock'].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = false;
+  });
+  const fontSel = $('inlineFontFamily');
+  const sizeInp = $('inlineLineSize');
+  const sizeUp = $('inlineSizeUp');
+  const sizeDown = $('inlineSizeDown');
+  if (!inlineDraft) {
+    if (fontSel) {
+      fontSel.disabled = false;
+      fontSel.value = hasTarget ? canonicalFontOption(target.fontFamily) : 'Vazirmatn';
+    }
+    if (sizeInp) {
+      sizeInp.disabled = false;
+      if (document.activeElement !== sizeInp) {
+        sizeInp.value = hasTarget && Number(target.size) > 0 ? String(Math.round(Number(target.size))) : '';
+      }
+    }
+    if (sizeUp) sizeUp.disabled = false;
+    if (sizeDown) sizeDown.disabled = false;
+  }
+  if (!hasTarget) {
+    if ($('editorBoxShape')) $('editorBoxShape').value = 'rect';
+    if ($('editorBoxRadius') && document.activeElement !== $('editorBoxRadius')) $('editorBoxRadius').value = '0';
+    if ($('editorBoxAngle') && document.activeElement !== $('editorBoxAngle')) $('editorBoxAngle').value = '0';
+    if ($('editorBoxBg')) $('editorBoxBg').value = 'auto';
+    $('editorBoxBgColor')?.classList.add('hidden');
+    $('editorBoxRadiusWrap')?.classList.remove('hidden');
+    return;
+  }
+  const shape = normalizeShapeKey(target.shape);
+  const radius = normalizeRadiusPct(target.cornerRadius);
+  const angle = normalizeAngleDeg(target.angle);
+  const bgRaw = String(target.bg || 'auto');
+  const isCustomBg = /^#[0-9a-fA-F]{6}$/.test(bgRaw);
+  if ($('editorBoxShape')) $('editorBoxShape').value = shape;
+  if ($('editorBoxRadiusWrap')) $('editorBoxRadiusWrap').classList.toggle('hidden', shape !== 'rect');
+  if ($('editorBoxRadius') && document.activeElement !== $('editorBoxRadius')) $('editorBoxRadius').value = String(radius);
+  if ($('editorBoxAngle') && document.activeElement !== $('editorBoxAngle')) $('editorBoxAngle').value = String(angle);
+  if ($('editorBoxBg')) $('editorBoxBg').value = isCustomBg ? 'custom' : (['auto', 'white', 'black', 'none'].includes(bgRaw) ? bgRaw : 'auto');
+  const bgColorEl = $('editorBoxBgColor');
+  if (bgColorEl) {
+    bgColorEl.classList.toggle('hidden', !isCustomBg);
+    if (isCustomBg) bgColorEl.value = bgRaw.toLowerCase();
+  }
+}
+function setInlineDockDisabled() {
+  // Editing capabilities remain enabled at all times across idle, selected, merged, copied, and OCR/translation states.
+  ['inlinePreview', 'inlineEditorApply', 'inlineVerticalAlign', 'inlineFontFamily', 'inlineLineSize', 'inlineSizeUp', 'inlineSizeDown', 'inlineLineReset',
+    'inlineEditorDirection', 'inlineEditorAlign', 'inlineEditorSize', 'inlineEditorFont', 'inlineEditorColor', 'inlineEditorAutoColor']
+    .forEach((id) => { const el = $(id); if (el) el.disabled = false; });
   document.querySelectorAll('#inlineEditor .classic-toolbar button, #inlineEditor .classic-toolbar select, #inlineEditor .classic-toolbar input, #inlineEditor .classic-tabs button')
-    .forEach((el) => { el.disabled = disabled; });
+    .forEach((el) => { el.disabled = false; });
   syncVerticalAlignButtons();
+  syncEditorShapeControls();
 }
 function syncInlineDockIdleState() {
   const dock = $('inlineEditor');
@@ -4204,19 +5759,32 @@ function syncInlineDockIdleState() {
   classicEditor?.resetToolbar?.();
   dock.classList.remove('hidden', 'show-output', 'plain-mode');
   dock.classList.add('is-idle');
+  $('editorBoxes')?.classList.remove('preview-hide-boxes');
   dock.querySelector('.inline-box-settings')?.removeAttribute('open');
   $('inlineEditorTitle').textContent = 'ویرایشگر متن آماده است · برای ویرایش، روی هر کادر متن در تصویر کلیک کنید';
   const badge = $('inlineTargetBadge');
   if (badge) { badge.textContent = ''; badge.classList.add('hidden'); badge.classList.remove('is-word'); }
   if ($('inlineLineSize')) $('inlineLineSize').value = '';
+  if ($('inlineFontFamily')) $('inlineFontFamily').value = 'Vazirmatn';
   setButtonLabel($('inlinePreview'), 'پیش‌نمایش دقیق');
   $('inlinePreview').setAttribute('aria-pressed', 'false');
   $('inlineEditorCancel').classList.add('hidden');
   $('inlineLineTools').classList.remove('hidden');
-  setInlineDockDisabled(true);
+  setInlineDockDisabled(false);
 }
 function setInlineOutputPreview(enabled) {
-  if (!inlineDraft) return;
+  if (!inlineDraft) {
+    const layer = $('editorBoxes');
+    const next = enabled !== undefined ? !!enabled : !layer?.classList.contains('preview-hide-boxes');
+    layer?.classList.toggle('preview-hide-boxes', next);
+    $('inlineEditor')?.classList.toggle('show-output', next);
+    const button = $('inlinePreview');
+    button?.setAttribute('aria-pressed', String(next));
+    setButtonLabel(button, next ? 'ادامهٔ ویرایش' : 'پیش‌نمایش دقیق');
+    drawEditorCanvas();
+    return;
+  }
+  $('editorBoxes')?.classList.remove('preview-hide-boxes');
   inlineDraft.showOutput = !!enabled;
   $('inlineEditor').classList.toggle('show-output', inlineDraft.showOutput);
   const activeBox = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
@@ -4233,7 +5801,12 @@ function setInlineOutputPreview(enabled) {
 }
 // A draft belongs to one image box; the docked toolbar stays permanently open at the top.
 function inlineBlockSnapshot(block) {
-  return JSON.stringify([block.text || '', block.tr || '', block.richHtml || '', block.dir || '', block.align || '', block.size ?? null, block.color || null, block.verticalAlign || '']);
+  return JSON.stringify([
+    block.text || '', block.tr || '', block.richHtml || '', block.ocrRichHtml || '',
+    block.dir || '', block.ocrDir || '', block.align || '',
+    block.size ?? null, block.color || null, block.verticalAlign || '',
+    block.fontFamily || '', block.bold !== false, !!block.italic, !!block.underline, !!block.strike,
+  ]);
 }
 function inlineDraftChanged() { return !!inlineEditSession?.isDirty(); }
 function closeInlineEditor(force = false) {
@@ -4312,7 +5885,7 @@ function inlineParagraphFrom(node) {
 }
 function hasInlineWordSelection() {
   const field = $('inlineEditorField'); const range = inlineDraft?.range;
-  return !!(inlineDraft && inlineDraft.mode !== 'ocr' && range && !range.collapsed && field.contains(range.startContainer) && field.contains(range.endContainer) && String(range.toString() || '').trim());
+  return !!(inlineDraft && range && !range.collapsed && field.contains(range.startContainer) && field.contains(range.endContainer) && String(range.toString() || '').trim());
 }
 function inlineSelectionSpan(range) {
   if (!range || range.collapsed) return null;
@@ -4377,34 +5950,52 @@ function inlineSelectionStyleState(range) {
 function syncInlineLineControls() {
   const badge = $('inlineTargetBadge');
   const sizeInput = $('inlineLineSize');
+  const fontSelect = $('inlineFontFamily');
   const typingSize = document.activeElement === sizeInput;
   updateInlineSelectionHighlight();
-  if (!inlineDraft || inlineDraft.mode === 'ocr') {
+  if (!inlineDraft) {
     if (badge) {
-      badge.textContent = inlineDraft?.mode === 'ocr' ? 'متن سادهٔ OCR' : '';
-      badge.classList.toggle('hidden', !inlineDraft);
+      badge.textContent = '';
+      badge.classList.add('hidden');
       badge.classList.remove('is-word');
-    }
-    if (inlineDraft?.mode === 'ocr' && !typingSize && sizeInput) {
-      sizeInput.value = inlineDraft.initialAutoSize && !inlineDraft.sizeTouched ? '' : $('inlineEditorSize').value;
     }
     return;
   }
+  const field = $('inlineEditorField');
+  const fieldIsEmpty = !String(field?.textContent || '').trim() && !field?.querySelector?.('div,p');
   if (hasInlineWordSelection()) {
     const raw = inlineDraft.range.toString().trim().replace(/\s+/g, ' ');
     const snippet = Array.from(raw).length > 18 ? `${Array.from(raw).slice(0, 18).join('')}…` : raw;
     if (badge) { badge.textContent = `بخش انتخابی: «${snippet}»`; badge.classList.remove('hidden'); badge.classList.add('is-word'); }
     const span = inlineSelectionSpan(inlineDraft.range) || (inlineDraft.range.startContainer.nodeType === Node.ELEMENT_NODE ? inlineDraft.range.startContainer : inlineDraft.range.startContainer.parentElement);
     const sizeVal = inlineInheritedLogicalSize(span);
-    if (!typingSize) sizeInput.value = sizeVal != null ? String(sizeVal) : '';
+    if (!typingSize && sizeInput) sizeInput.value = sizeVal != null ? String(sizeVal) : '';
+    if (fontSelect) {
+      const spanFont = inlineInheritedStyle(span, 'fontFamily');
+      fontSelect.value = canonicalFontOption(spanFont || $('inlineEditorFont')?.value || inlineDraft.block?.fontFamily);
+    }
     const hex = normalizeHexColor(inlineInheritedStyle(span, 'color'));
     if (hex && classicEditor?.colorInput) classicEditor.colorInput.value = hex;
+    return;
+  }
+  if (fieldIsEmpty) {
+    if (badge) { badge.textContent = 'هدف: کل کادر'; badge.classList.remove('hidden', 'is-word'); }
+    if (!typingSize && sizeInput) {
+      sizeInput.value = inlineDraft.initialAutoSize && !inlineDraft.sizeTouched ? '' : $('inlineEditorSize').value;
+    }
+    if (fontSelect) fontSelect.value = canonicalFontOption($('inlineEditorFont')?.value || inlineDraft.block?.fontFamily);
+    const boxHex = inlineDraft.color || effectiveInlineColor(inlineDraft.block);
+    if (boxHex && classicEditor?.colorInput) classicEditor.colorInput.value = boxHex;
     return;
   }
   if (badge) { badge.textContent = 'هدف: خط فعلی'; badge.classList.remove('hidden', 'is-word'); }
   const line = inlineParagraphFrom(inlineDraft.range?.startContainer);
   const lineSize = logicalFontSizeOf(line);
-  if (!typingSize) sizeInput.value = lineSize != null ? String(Math.round(lineSize)) : '';
+  if (!typingSize && sizeInput) sizeInput.value = lineSize != null ? String(Math.round(lineSize)) : (inlineDraft.sizeTouched ? $('inlineEditorSize').value : '');
+  if (fontSelect) {
+    const lineFont = line?.style?.fontFamily || '';
+    fontSelect.value = canonicalFontOption(lineFont || $('inlineEditorFont')?.value || inlineDraft.block?.fontFamily);
+  }
   const lineHex = normalizeHexColor(line?.style.color) || effectiveInlineColor(inlineDraft.block);
   if (lineHex && classicEditor?.colorInput) classicEditor.colorInput.value = lineHex;
 }
@@ -4475,10 +6066,133 @@ function applyInlineWordStyle(styles, options = {}) {
   recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
   return true;
 }
+function seedDefaultInlineCaret(field, atEnd = true) {
+  if (!field || typeof document.createRange !== 'function') return null;
+  const range = document.createRange();
+  let targetNode = field;
+  let targetOffset = atEnd ? field.childNodes.length : 0;
+  if (typeof document.createTreeWalker === 'function') {
+    const walker = document.createTreeWalker(field, NodeFilter.SHOW_TEXT);
+    let firstText = null;
+    let lastText = null;
+    let tn;
+    while ((tn = walker.nextNode())) {
+      if (!firstText) firstText = tn;
+      lastText = tn;
+    }
+    const chosenText = atEnd ? lastText : firstText;
+    if (chosenText) {
+      targetNode = chosenText;
+      targetOffset = atEnd ? (chosenText.nodeValue || '').length : 0;
+    } else {
+      const blocks = [...field.querySelectorAll('div,p,li,h1,h2,h3,h4,h5,h6,pre,blockquote')];
+      const chosenBlock = atEnd ? blocks.at(-1) : blocks[0];
+      if (chosenBlock) {
+        targetNode = chosenBlock;
+        targetOffset = atEnd ? chosenBlock.childNodes.length : 0;
+      }
+    }
+  }
+  try {
+    range.setStart(targetNode, targetOffset);
+    range.collapse(true);
+  } catch {
+    range.selectNodeContents(field);
+    range.collapse(!atEnd);
+  }
+  const selection = window.getSelection?.();
+  if (selection && document.activeElement === field) {
+    try { selection.removeAllRanges(); selection.addRange(range); } catch {}
+  }
+  if (inlineDraft) {
+    inlineDraft.range = range.cloneRange();
+    classicEditor?.syncRange?.(inlineDraft.range);
+  }
+  return range;
+}
+function ensureValidInlineRange() {
+  if (!inlineDraft) return null;
+  const field = $('inlineEditorField');
+  if (!field) return null;
+  if (inlineDraft.range && field.contains(inlineDraft.range.startContainer) && field.contains(inlineDraft.range.endContainer)) {
+    return inlineDraft.range;
+  }
+  const selection = window.getSelection?.();
+  if (selection?.rangeCount && field.contains(selection.anchorNode) && field.contains(selection.focusNode)) {
+    inlineDraft.range = selection.getRangeAt(0).cloneRange();
+    classicEditor?.syncRange?.(inlineDraft.range);
+    return inlineDraft.range;
+  }
+  return seedDefaultInlineCaret(field, true);
+}
+function wrapInlineRunInDiv(field, anchorNode, anchorOffset = 0) {
+  if (!field) return null;
+  const isBlockTag = (node) => node?.nodeType === Node.ELEMENT_NODE
+    && ['DIV', 'P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'PRE', 'BLOCKQUOTE', 'UL', 'OL', 'TABLE'].includes(node.tagName);
+  let topChild = null;
+  if (!anchorNode || anchorNode === field) {
+    const children = [...field.childNodes];
+    if (!children.length) {
+      const emptyDiv = document.createElement('div');
+      emptyDiv.appendChild(document.createElement('br'));
+      field.appendChild(emptyDiv);
+      return emptyDiv;
+    }
+    const clampedIdx = Math.max(0, Math.min(children.length - 1, anchorOffset >= children.length ? children.length - 1 : anchorOffset));
+    topChild = children[clampedIdx];
+  } else {
+    let cur = anchorNode;
+    while (cur && cur.parentNode && cur.parentNode !== field) cur = cur.parentNode;
+    if (cur && cur.parentNode === field) topChild = cur;
+  }
+  if (!topChild) {
+    const fallbackDiv = document.createElement('div');
+    while (field.firstChild) fallbackDiv.appendChild(field.firstChild);
+    if (!fallbackDiv.childNodes.length) fallbackDiv.appendChild(document.createElement('br'));
+    field.appendChild(fallbackDiv);
+    return fallbackDiv;
+  }
+  if (isBlockTag(topChild)) {
+    return inlineParagraphFrom(anchorNode) || topChild;
+  }
+  if (topChild.nodeName === 'BR') {
+    const prev = topChild.previousSibling;
+    if (prev && !isBlockTag(prev) && prev.nodeName !== 'BR') {
+      topChild = prev;
+    } else {
+      const brDiv = document.createElement('div');
+      brDiv.appendChild(document.createElement('br'));
+      field.replaceChild(brDiv, topChild);
+      return brDiv;
+    }
+  }
+  let runStart = topChild;
+  while (runStart.previousSibling && !isBlockTag(runStart.previousSibling) && runStart.previousSibling.nodeName !== 'BR') {
+    runStart = runStart.previousSibling;
+  }
+  const runNodes = [];
+  let cursorNode = runStart;
+  while (cursorNode && !isBlockTag(cursorNode) && cursorNode.nodeName !== 'BR') {
+    runNodes.push(cursorNode);
+    cursorNode = cursorNode.nextSibling;
+  }
+  const trailingBr = cursorNode?.nodeName === 'BR' ? cursorNode : null;
+  const leadingBr = runStart.previousSibling?.nodeName === 'BR' && isBlockTag(runStart.previousSibling.previousSibling)
+    ? runStart.previousSibling
+    : null;
+  const wrapper = document.createElement('div');
+  field.insertBefore(wrapper, runStart);
+  runNodes.forEach((n) => wrapper.appendChild(n));
+  if (trailingBr) trailingBr.remove();
+  if (leadingBr) leadingBr.remove();
+  if (!wrapper.childNodes.length) wrapper.appendChild(document.createElement('br'));
+  return wrapper;
+}
 function ensureInlineParagraph(options = {}) {
   const { restoreFocus = true } = options;
-  const field = $('inlineEditorField'); const range = inlineDraft?.range;
-  if (!inlineDraft || inlineDraft.mode === 'ocr' || !range || !field.contains(range.startContainer)) {
+  const field = $('inlineEditorField');
+  const range = ensureValidInlineRange();
+  if (!inlineDraft || !range || !field.contains(range.startContainer)) {
     toast('ابتدا داخل خط موردنظر کلیک کنید.', true); return null;
   }
   let existing = inlineParagraphFrom(range.startContainer);
@@ -4486,17 +6200,27 @@ function ensureInlineParagraph(options = {}) {
   const activeControl = !restoreFocus && document.activeElement && document.activeElement !== field
     ? { el: document.activeElement, start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd }
     : null;
-  field.focus(); const selection = window.getSelection(); const cursor = range.cloneRange(); cursor.collapse(true);
+  field.focus({ preventScroll: true }); const selection = window.getSelection(); const cursor = range.cloneRange(); cursor.collapse(true);
   selection.removeAllRanges(); selection.addRange(cursor);
   let line = inlineParagraphFrom(selection.anchorNode);
   if (!line) {
     // Browser paragraph boundaries include existing BRs, so only the chosen logical line is wrapped.
     inlineDraft.muteHistory = true;
-    try { document.execCommand('formatBlock', false, 'div'); } finally { inlineDraft.muteHistory = false; }
+    try { document.execCommand('formatBlock', false, 'div'); } catch {} finally { inlineDraft.muteHistory = false; }
     line = inlineParagraphFrom(selection.anchorNode);
     // Chromium leaves the BR immediately before its new DIV, which otherwise
     // turns one legacy line break into two in innerText and saved translations.
     if (line?.previousSibling?.nodeName === 'BR') line.previousSibling.remove();
+  }
+  if (!line) {
+    line = wrapInlineRunInDiv(field, cursor.startContainer, cursor.startOffset);
+    if (line) {
+      const nextCursor = document.createRange();
+      nextCursor.selectNodeContents(line);
+      nextCursor.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(nextCursor);
+    }
   }
   if (!line) { toast('انتخاب این خط ممکن نشد؛ دوباره داخل متن کلیک کنید.', true); return null; }
   rememberInlineRange();
@@ -4508,12 +6232,86 @@ function ensureInlineParagraph(options = {}) {
   }
   return line;
 }
+function cleanBlockRichOverrides(block, { stripBold = false, stripItalic = false, stripUnderline = false, stripStrike = false, stripColor = false, stripAlign = false, stripDir = false, stripSize = false, stripFont = false } = {}) {
+  ['richHtml', 'ocrRichHtml'].forEach((prop) => {
+    const raw = String(block[prop] || '').trim();
+    if (!raw) return;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = sanitizeHtml(raw);
+    if (stripBold) [...tmp.querySelectorAll('b,strong')].reverse().forEach((el) => el.replaceWith(...el.childNodes));
+    if (stripItalic) [...tmp.querySelectorAll('i,em')].reverse().forEach((el) => el.replaceWith(...el.childNodes));
+    if (stripUnderline) [...tmp.querySelectorAll('u')].reverse().forEach((el) => el.replaceWith(...el.childNodes));
+    if (stripStrike) [...tmp.querySelectorAll('s,strike,del')].reverse().forEach((el) => el.replaceWith(...el.childNodes));
+    tmp.querySelectorAll('*').forEach((el) => {
+      if (stripBold && el.style?.fontWeight) el.style.fontWeight = '';
+      if (stripItalic && el.style?.fontStyle) el.style.fontStyle = '';
+      if ((stripUnderline || stripStrike) && (el.style?.textDecoration || el.style?.textDecorationLine)) {
+        const parts = new Set((el.style.textDecoration || el.style.textDecorationLine || '').split(/\s+/).filter((x) => x === 'underline' || x === 'line-through'));
+        if (stripUnderline) parts.delete('underline');
+        if (stripStrike) parts.delete('line-through');
+        el.style.textDecoration = [...parts].join(' ');
+      }
+      if (stripColor && el.style?.color) el.style.color = '';
+      if (stripAlign && el.style?.textAlign) el.style.textAlign = '';
+      if (stripDir) { if (el.style?.direction) el.style.direction = ''; el.removeAttribute('dir'); }
+      if (stripSize) { applyLogicalFontSize(el, ''); }
+      if (stripFont && el.style?.fontFamily) el.style.fontFamily = '';
+      if (el.getAttribute('style') != null && !el.getAttribute('style').trim()) el.removeAttribute('style');
+    });
+    [...tmp.querySelectorAll('span')].reverse().forEach((sp) => {
+      if (!sp.attributes.length) sp.replaceWith(...sp.childNodes);
+    });
+    const plainSource = prop === 'ocrRichHtml' ? String(block.text || '') : String(block.tr || '');
+    const cleaned = sanitizeHtml(tmp.innerHTML);
+    block[prop] = hasMeaningfulRichHtml(cleaned, plainSource) ? cleaned : '';
+  });
+}
+function hasMeaningfulRichHtml(htmlVal) {
+  const s = String(htmlVal || '').trim();
+  if (!s) return false;
+  if (/(?: |&nbsp;|\u00a0){2,}/.test(s)) return true;
+  if (/<(b|strong|i|em|u|s|strike|del|h[1-6]|ul|ol|li|blockquote|pre|table|tr|td|th|a|hr|img|span)\b/i.test(s)) return true;
+  if (/\s(style|dir)=/i.test(s)) return true;
+  return false;
+}
 function setInlineLineStyle(property, value, options = {}) {
+  if (!inlineDraft) {
+    const targets = resolveToolbarTargetBlocks({ autoSelectFirst: true });
+    if (!targets.length) return;
+    recordEditorPageHistory();
+    targets.forEach((b) => {
+      if (property === 'textAlign') {
+        b.align = value;
+        cleanBlockRichOverrides(b, { stripAlign: true });
+      } else if (property === 'direction') {
+        if (blockOverlayMode(b) === 'ocr') b.ocrDir = value;
+        else b.dir = value;
+        if (!b.align || b.align === (value === 'rtl' ? 'left' : 'right')) b.align = value === 'rtl' ? 'right' : 'left';
+        cleanBlockRichOverrides(b, { stripDir: true });
+      } else if (property === 'color') {
+        b.color = value;
+        cleanBlockRichOverrides(b, { stripColor: true });
+      } else if (property === 'fontSize') {
+        const parsed = Number.parseFloat(value || '');
+        b.size = value && Number.isFinite(parsed) && parsed >= 8 ? Math.max(8, Math.min(160, Math.round(parsed))) : null;
+        cleanBlockRichOverrides(b, { stripSize: true });
+      }
+    });
+    if (property === 'textAlign' && $('inlineEditorAlign')) $('inlineEditorAlign').value = value;
+    if (property === 'direction' && $('inlineEditorDirection')) $('inlineEditorDirection').value = value;
+    if (property === 'color' && $('inlineEditorColor')) $('inlineEditorColor').value = value;
+    syncEditorShapeControls();
+    buildBlockList();
+    drawEditor();
+    scheduleSave();
+    pushPostActionEditorPageHistory();
+    return;
+  }
   const field = $('inlineEditorField');
   const fullBoxSelected = hasInlineWordSelection()
     && inlineDraft.range.toString().trim() === field.textContent.trim()
     && field.textContent.trim().length > 0;
-  if (inlineDraft && inlineDraft.mode !== 'ocr' && (fullBoxSelected || (!field.textContent && !field.querySelector('div,p')))) {
+  if (inlineDraft && (fullBoxSelected || (!field.textContent && !field.querySelector('div,p')))) {
     if (property === 'textAlign') {
       $('inlineEditorAlign').value = value; field.style.textAlign = value;
       field.querySelectorAll('div,p').forEach((el) => { el.style.textAlign = ''; });
@@ -4531,9 +6329,69 @@ function setInlineLineStyle(property, value, options = {}) {
   if (options.restoreFocus !== false) rememberInlineRange();
   recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
 }
+function isInlineFieldEmpty() {
+  const field = $('inlineEditorField');
+  return !String(field?.textContent || '').trim() && !field?.querySelector?.('div,p');
+}
+function setSelectionOrBlockFont(fontValue, options = {}) {
+  const chosen = canonicalFontOption(fontValue);
+  const storedValue = chosen === 'Vazirmatn' ? '' : chosen;
+  if (!inlineDraft) {
+    const selected = resolveToolbarTargetBlocks({ autoSelectFirst: true });
+    if (!selected.length) return;
+    recordEditorPageHistory();
+    selected.forEach((b) => {
+      b.fontFamily = storedValue || null;
+      cleanBlockRichOverrides(b, { stripFont: true });
+    });
+    syncEditorShapeControls();
+    buildBlockList();
+    drawEditor();
+    scheduleSave();
+    pushPostActionEditorPageHistory();
+    return;
+  }
+  if (hasInlineWordSelection()) {
+    const field = $('inlineEditorField');
+    const selTxt = (window.getSelection?.()?.toString?.() || inlineDraft?.range?.toString?.() || '').replace(/\s+/g, ' ').trim();
+    const allTxt = (field?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (selTxt && selTxt === allTxt) {
+      if ($('inlineEditorFont')) $('inlineEditorFont').value = storedValue;
+      inlineDraft.fontFamily = storedValue || null;
+    }
+    applyInlineWordStyle({ fontFamily: storedValue ? (/\s/.test(chosen) ? `'${chosen}'` : chosen) : '' }, options);
+    return;
+  }
+  if ($('inlineEditorFont')) $('inlineEditorFont').value = storedValue;
+  inlineDraft.fontFamily = storedValue || null;
+  if (!isInlineFieldEmpty()) {
+    const field = $('inlineEditorField');
+    field?.querySelectorAll?.('[style]').forEach((el) => { if (el.style?.fontFamily) el.style.fontFamily = ''; });
+  }
+  recordInlineHistory();
+  syncInlineLineControls();
+  refreshInlineTypography();
+  classicEditor.notifyChange();
+}
 function setSelectionOrLineSize(value, options = {}) {
-  if (!inlineDraft) return;
-  if (inlineDraft.mode === 'ocr') {
+  if (!inlineDraft) {
+    const selected = resolveToolbarTargetBlocks({ autoSelectFirst: true });
+    if (!selected.length) return;
+    recordEditorPageHistory();
+    const parsed = Number.parseFloat(value || '');
+    const nextSize = value && Number.isFinite(parsed) && parsed >= 8 ? Math.max(8, Math.min(160, Math.round(parsed))) : null;
+    selected.forEach((b) => {
+      b.size = nextSize;
+      cleanBlockRichOverrides(b, { stripSize: true });
+    });
+    syncEditorShapeControls();
+    buildBlockList();
+    drawEditor();
+    scheduleSave();
+    pushPostActionEditorPageHistory();
+    return;
+  }
+  if (isInlineFieldEmpty()) {
     const parsed = Number.parseFloat(value || '');
     if (value && Number.isFinite(parsed) && parsed >= 8) {
       $('inlineEditorSize').value = String(Math.round(parsed));
@@ -4551,14 +6409,23 @@ function setSelectionOrLineSize(value, options = {}) {
   setInlineLineStyle('fontSize', value, options);
 }
 function stepSelectionOrLineSize(delta) {
-  if (!inlineDraft) return;
-  if (inlineDraft.mode === 'ocr') {
+  if (!inlineDraft) {
+    const selected = resolveToolbarTargetBlocks({ autoSelectFirst: true });
+    if (!selected.length) return;
+    const base = Number($('inlineLineSize')?.value) || effectiveInlineSize(selected[0]);
+    const next = Math.max(8, Math.min(160, Math.round(base + delta)));
+    if ($('inlineLineSize')) $('inlineLineSize').value = String(next);
+    setSelectionOrLineSize(`${next}px`);
+    return;
+  }
+  if (isInlineFieldEmpty()) {
     const cur = Number($('inlineEditorSize').value) || effectiveInlineSize(inlineDraft.block);
     const next = Math.max(8, Math.min(160, Math.round(cur + delta)));
     $('inlineLineSize').value = String(next);
     setSelectionOrLineSize(`${next}px`);
     return;
   }
+  ensureValidInlineRange();
   const currentInput = Number($('inlineLineSize').value);
   const inherited = inlineInheritedLogicalSize(inlineSelectionSpan(inlineDraft.range) || inlineDraft.range?.startContainer);
   const base = Number.isFinite(currentInput) && currentInput >= 8 ? currentInput : (inherited ?? effectiveInlineSize(inlineDraft.block));
@@ -4567,7 +6434,31 @@ function stepSelectionOrLineSize(delta) {
   setSelectionOrLineSize(`${next}px`);
 }
 function toggleInlineCommand(cmd) {
-  if (!inlineDraft || inlineDraft.mode === 'ocr') return;
+  if (!inlineDraft) {
+    const targets = resolveToolbarTargetBlocks({ autoSelectFirst: true });
+    if (!targets.length) return;
+    recordEditorPageHistory();
+    const firstStyle = Typeset.blockStyle(overlayBlock(targets[0]));
+    if (cmd === 'bold') {
+      const next = !(firstStyle.bold !== false);
+      targets.forEach((b) => { b.bold = next; cleanBlockRichOverrides(b, { stripBold: true }); });
+    } else if (cmd === 'italic') {
+      const next = !firstStyle.italic;
+      targets.forEach((b) => { b.italic = next; cleanBlockRichOverrides(b, { stripItalic: true }); });
+    } else if (cmd === 'underline') {
+      const next = !firstStyle.underline;
+      targets.forEach((b) => { b.underline = next; cleanBlockRichOverrides(b, { stripUnderline: true }); });
+    } else if (cmd === 'strikeThrough') {
+      const next = !firstStyle.strike;
+      targets.forEach((b) => { b.strike = next; cleanBlockRichOverrides(b, { stripStrike: true }); });
+    }
+    buildBlockList();
+    drawEditor();
+    scheduleSave();
+    pushPostActionEditorPageHistory();
+    return;
+  }
+  ensureValidInlineRange();
   if (hasInlineWordSelection()) {
     const cur = inlineSelectionStyleState(inlineDraft.range);
     if (cmd === 'bold') applyInlineWordStyle({ fontWeight: cur.bold ? 'normal' : 'bold' });
@@ -4577,6 +6468,14 @@ function toggleInlineCommand(cmd) {
       const nextStrike = cmd === 'strikeThrough' ? !cur.strike : cur.strike;
       applyInlineWordStyle({ textDecoration: [nextUnderline ? 'underline' : '', nextStrike ? 'line-through' : ''].filter(Boolean).join(' ') });
     }
+    return;
+  }
+  if (isInlineFieldEmpty()) {
+    if (cmd === 'bold') inlineDraft.bold = !inlineDraft.bold;
+    else if (cmd === 'italic') inlineDraft.italic = !inlineDraft.italic;
+    else if (cmd === 'underline') inlineDraft.underline = !inlineDraft.underline;
+    else if (cmd === 'strikeThrough') inlineDraft.strike = !inlineDraft.strike;
+    syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
     return;
   }
   const line = ensureInlineParagraph(); if (!line) return;
@@ -4595,7 +6494,50 @@ function toggleInlineCommand(cmd) {
   }
   rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
 }
+function formatInlineBlockTag(tagName) {
+  const cleanTag = String(tagName || 'p').toLowerCase();
+  if (!['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre'].includes(cleanTag)) return false;
+  if (!inlineDraft && !ensureInlineTargetSession()) return true;
+  ensureValidInlineRange();
+  const line = ensureInlineParagraph();
+  if (!line) return true;
+  if (line.tagName.toLowerCase() !== cleanTag) {
+    const replacement = document.createElement(cleanTag);
+    [...line.attributes].forEach((attr) => replacement.setAttribute(attr.name, attr.value));
+    while (line.firstChild) replacement.appendChild(line.firstChild);
+    line.replaceWith(replacement);
+    const nextRange = document.createRange();
+    nextRange.selectNodeContents(replacement);
+    nextRange.collapse(false);
+    const sel = window.getSelection?.();
+    if (sel) { sel.removeAllRanges(); sel.addRange(nextRange); }
+  }
+  rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+  return true;
+}
 function resetInlineLineStyle() {
+  if (!inlineDraft) {
+    const targets = resolveToolbarTargetBlocks({ autoSelectFirst: true });
+    if (!targets.length) return;
+    recordEditorPageHistory();
+    targets.forEach((b) => {
+      b.richHtml = '';
+      b.ocrRichHtml = '';
+      b.size = null;
+      b.color = null;
+      b.fontFamily = null;
+      b.italic = false;
+      b.underline = false;
+      b.strike = false;
+    });
+    syncEditorShapeControls();
+    buildBlockList();
+    drawEditor();
+    scheduleSave();
+    pushPostActionEditorPageHistory();
+    return;
+  }
+  ensureValidInlineRange();
   if (hasInlineWordSelection()) {
     const field = $('inlineEditorField'); field.focus();
     const range = inlineDraft.range.cloneRange(); const selection = window.getSelection();
@@ -4625,9 +6567,23 @@ function resetInlineLineStyle() {
     rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
     return;
   }
+  if (isInlineFieldEmpty()) {
+    inlineDraft.color = null;
+    inlineDraft.fontFamily = null;
+    inlineDraft.italic = false;
+    inlineDraft.underline = false;
+    inlineDraft.strike = false;
+    inlineDraft.sizeTouched = false;
+    inlineDraft.initialAutoSize = true;
+    if ($('inlineEditorFont')) $('inlineEditorFont').value = '';
+    $('inlineEditorSize').value = String(effectiveInlineSize({ ...inlineDraft.block, size: null }));
+    $('inlineEditorColor').value = effectiveInlineColor({ ...inlineDraft.block, color: null });
+    syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+    return;
+  }
   const line = ensureInlineParagraph(); if (!line) return;
   delete line.dataset.logicalSize;
-  ['textAlign', 'direction', 'fontSize', 'color', 'fontWeight', 'fontStyle', 'textDecoration'].forEach((key) => { line.style[key] = ''; });
+  ['textAlign', 'direction', 'fontSize', 'fontFamily', 'color', 'fontWeight', 'fontStyle', 'textDecoration'].forEach((key) => { line.style[key] = ''; });
   [...line.querySelectorAll('span,b,strong,i,em,u,s,strike,del')].reverse().forEach((el) => el.replaceWith(...el.childNodes));
   rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
 }
@@ -4787,84 +6743,117 @@ function expandInlineWordAtPoint(field, clientX, clientY) {
   return true;
 }
 function placeInlineCaret(field, event) {
-  if (!event || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+  if (!event || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return false;
   const pt = inlineCaretPoint(field, event.clientX, event.clientY);
-  if (!pt) return;
+  if (!pt) return false;
   const range = document.createRange(); range.setStart(pt.node, pt.offset); range.collapse(true);
   const selection = window.getSelection?.();
   if (selection) { selection.removeAllRanges(); selection.addRange(range); }
+  return true;
 }
 function openInlineEditor(block, clickEvent = null) {
   if (!block || !editorItem()) return;
-  if (inlineDraft?.block === block && inlineDraft.mode === blockOverlayMode(block)) { classicEditor.focus(); return; }
+  if (inlineDraft?.block === block && inlineDraft.mode === blockOverlayMode(block)) {
+    classicEditor.focus();
+    ensureValidInlineRange();
+    return;
+  }
   if (document.activeElement === $('inlineLineSize')) $('inlineLineSize').blur();
   if (!closeInlineEditor()) return;
   const mode = blockOverlayMode(block);
   if (mode === 'none') return;
+  $('editorBoxes')?.classList.remove('preview-hide-boxes');
   selectEditorBlock(block.id, true);
   const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((entry) => entry.dataset.id === String(block.id));
   if (!box) { toast('ابتدا نمایش این کادر را فعال کنید.', true); return; }
 
-  const field = $('inlineEditorField'); const direction = mode === 'ocr' ? 'ltr' : (block.dir === 'ltr' ? 'ltr' : 'rtl');
+  const field = $('inlineEditorField');
+  const displayOut = overlayBlock(block);
+  const direction = mode === 'ocr'
+    ? ((block.ocrDir === 'rtl' || block.ocrDir === 'ltr') ? block.ocrDir : (displayOut.dir || 'ltr'))
+    : (block.dir === 'ltr' ? 'ltr' : 'rtl');
   const hasMarks = mode !== 'ocr' && !block.richHtml && !!Typeset.hasInlineMarks?.(block.tr || '') && typeof Typeset.inlineMarksToHtml === 'function';
-  const originalHtml = mode === 'ocr' ? plainToHtml(block.text || '') : (block.richHtml || (hasMarks ? sanitizeHtml(Typeset.inlineMarksToHtml(block.tr || '')) : plainToHtml(block.tr || '')));
+  const originalHtml = mode === 'ocr'
+    ? (block.ocrRichHtml ? sanitizeHtml(block.ocrRichHtml) : plainToHtml(block.text || ''))
+    : (block.richHtml || (hasMarks ? sanitizeHtml(Typeset.inlineMarksToHtml(block.tr || '')) : plainToHtml(block.tr || '')));
   const draftKey = `comic-studio-draft:${encodeURIComponent(state.project.id)}:${encodeURIComponent(editorItem().id)}:${encodeURIComponent(block.id)}:${mode}`;
   setInlineDockDisabled(false);
-  classicEditor.setPlainMode(mode === 'ocr');
+  classicEditor.setPlainMode(false);
   field.removeAttribute('style'); field.dir = direction; field.style.direction = direction;
   $('inlineEditorTitle').textContent = `کادر ${block.id} · ویرایش مستقیم ${mode === 'ocr' ? 'متن اصلی' : 'ترجمه'} · ذخیرهٔ خودکار`;
   $('inlineEditorCancel').classList.add('hidden');
   $('inlineLineTools').classList.remove('hidden');
   if ($('inlineLineSize')) $('inlineLineSize').value = '';
-  ['inlineLineSize', 'inlineSizeUp', 'inlineSizeDown'].forEach((id) => { const el = $(id); if (el) el.disabled = false; });
-  if ($('inlineLineReset')) $('inlineLineReset').disabled = mode === 'ocr';
-  $('inlineEditorDirection').value = direction; $('inlineEditorDirection').disabled = mode === 'ocr';
-  $('inlineEditorAlign').value = mode === 'ocr' ? overlayBlock(block).align : (block.align || 'right');
+  ['inlineLineSize', 'inlineSizeUp', 'inlineSizeDown', 'inlineLineReset', 'inlineEditorDirection'].forEach((id) => { const el = $(id); if (el) el.disabled = false; });
+  $('inlineEditorDirection').value = direction;
+  $('inlineEditorAlign').value = mode === 'ocr' ? displayOut.align : (block.align || 'right');
   const verticalAlignTouched = ['top', 'middle', 'bottom'].includes(block.verticalAlign);
   $('inlineVerticalAlign').value = ['top', 'bottom'].includes(block.verticalAlign) ? block.verticalAlign : 'middle';
   const initialAutoSize = !(Number.isFinite(+block.size) && +block.size > 0);
   const initialSizeValue = String(effectiveInlineSize(block));
   $('inlineEditorSize').value = initialSizeValue;
+  if ($('inlineEditorFont')) $('inlineEditorFont').value = block.fontFamily ? canonicalFontOption(block.fontFamily) : '';
+  if ($('inlineFontFamily')) {
+    $('inlineFontFamily').disabled = false;
+    $('inlineFontFamily').value = canonicalFontOption(block.fontFamily);
+  }
   $('inlineEditorColor').value = effectiveInlineColor(block);
 
   inlineDraft = { block, mode, snapshot: inlineBlockSnapshot(block), html: originalHtml,
     dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
     verticalAlign: $('inlineVerticalAlign').value, verticalAlignTouched, size: initialSizeValue,
     initialAutoSize, initialSizeValue, sizeTouched: false,
+    fontFamily: block.fontFamily || null,
+    bold: block.bold !== false, italic: !!block.italic, underline: !!block.underline, strike: !!block.strike,
     color: block.color || null, originalColor: block.color || null,
     range: null, history: [], historyIndex: -1, muteHistory: false, conflictReported: false };
   const draftRestore = classicEditor.setContext(draftKey, originalHtml, inlineDraft.snapshot);
   if (draftRestore && typeof draftRestore.then === 'function') {
     draftRestore.then((restored) => {
       if (inlineDraft?.block !== block) return;
-      if (restored) { recordInlineHistory(); syncInlineLineControls(); }
+      if (restored) { ensureValidInlineRange(); recordInlineHistory(); syncInlineLineControls(); }
       classicEditor.focus();
     }).catch(() => {});
   }
-  const background = block.bg || 'auto';
-  box.style.setProperty('--editing-bg', background === 'white' ? '#fff' : background === 'black' ? '#101010' : 'var(--surface)');
-  box.style.setProperty('--editing-fg', background === 'white' ? '#202020' : background === 'black' ? '#fff' : 'var(--text)');
+  syncEditingBoxColors(box, block);
   box.classList.add('editing'); classicEditor.attachField(box);
 
   inlineEditSession = window.createInlineEditSession({
     block, mode, snapshot: inlineBlockSnapshot, getBaseline: () => inlineDraft?.snapshot,
     read: () => {
       const textVal = classicEditor.getText();
-      const htmlVal = mode === 'ocr' ? '' : classicEditor.getHTML();
+      const htmlVal = classicEditor.getHTML();
       const normNbsp = (s) => String(s || '').replace(/&nbsp;|\u00a0/g, ' ');
       const hasMultiSpace = /(?: |&nbsp;|\u00a0){2,}/.test(htmlVal);
       const plainEquiv = mode !== 'ocr' && !block.richHtml && !hasMarks && !hasMultiSpace && normNbsp(htmlVal) === normNbsp(sanitizeHtml(plainToHtml(textVal)));
+      const ocrMeaningful = mode === 'ocr' && hasMeaningfulRichHtml(htmlVal);
       const rawSize = $('inlineEditorSize').value.trim();
       const keepAuto = !!(inlineDraft?.initialAutoSize && !inlineDraft?.sizeTouched && rawSize === inlineDraft?.initialSizeValue);
       const keepLegacyVertical = !inlineDraft?.verticalAlignTouched && !['top', 'middle', 'bottom'].includes(block.verticalAlign);
-      return { text: textVal, richHtml: plainEquiv ? '' : htmlVal,
-        dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value,
+      const rawFont = ($('inlineEditorFont')?.value || '').trim();
+      const storedFont = rawFont && rawFont !== 'Vazirmatn' ? rawFont : null;
+      const curDir = $('inlineEditorDirection').value;
+      return {
+        text: textVal,
+        richHtml: mode === 'ocr' ? (block.richHtml || '') : (plainEquiv ? '' : htmlVal),
+        ocrRichHtml: mode === 'ocr' ? (ocrMeaningful ? htmlVal : '') : undefined,
+        dir: mode === 'ocr' ? (block.dir || 'rtl') : curDir,
+        ocrDir: mode === 'ocr' ? curDir : undefined,
+        align: $('inlineEditorAlign').value,
         verticalAlign: keepLegacyVertical ? undefined : $('inlineVerticalAlign').value,
-        size: keepAuto ? null : (rawSize ? Number(rawSize) : null), color: inlineDraft?.color ?? null };
+        size: keepAuto ? null : (rawSize ? Number(rawSize) : null), color: inlineDraft?.color ?? null,
+        fontFamily: storedFont,
+        bold: inlineDraft ? inlineDraft.bold : block.bold !== false,
+        italic: inlineDraft ? inlineDraft.italic : !!block.italic,
+        underline: inlineDraft ? inlineDraft.underline : !!block.underline,
+        strike: inlineDraft ? !!inlineDraft.strike : !!block.strike,
+      };
     },
     onCommit: (savedBlock, revision) => {
       inlineDraft.snapshot = revision;
-      inlineDraft.html = mode === 'ocr' ? plainToHtml(savedBlock.text || '') : (savedBlock.richHtml || plainToHtml(savedBlock.tr || ''));
+      inlineDraft.html = mode === 'ocr'
+        ? (savedBlock.ocrRichHtml || plainToHtml(savedBlock.text || ''))
+        : (savedBlock.richHtml || plainToHtml(savedBlock.tr || ''));
       inlineDraft.dir = $('inlineEditorDirection').value; inlineDraft.align = $('inlineEditorAlign').value;
       inlineDraft.verticalAlign = $('inlineVerticalAlign').value;
       inlineDraft.initialAutoSize = !(Number.isFinite(+savedBlock.size) && +savedBlock.size > 0);
@@ -4874,6 +6863,11 @@ function openInlineEditor(block, clickEvent = null) {
         inlineDraft.initialSizeValue = nextShown;
       }
       inlineDraft.size = $('inlineEditorSize').value;
+      inlineDraft.fontFamily = savedBlock.fontFamily || null;
+      inlineDraft.bold = savedBlock.bold !== false;
+      inlineDraft.italic = !!savedBlock.italic;
+      inlineDraft.underline = !!savedBlock.underline;
+      inlineDraft.strike = !!savedBlock.strike;
       inlineDraft.originalColor = inlineDraft.color = savedBlock.color || null; inlineDraft.conflictReported = false;
       $('inlineEditorCancel').classList.add('hidden');
       buildBlockList(); scheduleEditorCanvasDraw(); scheduleSave();
@@ -4883,11 +6877,15 @@ function openInlineEditor(block, clickEvent = null) {
       inlineDraft.conflictReported = true; $('inlineEditorCancel').classList.remove('hidden');
     },
   });
-  $('inlineEditor').classList.remove('hidden', 'is-idle');
-  $('inlineEditor').classList.toggle('plain-mode', mode === 'ocr');
+  $('inlineEditor').classList.remove('hidden', 'is-idle', 'plain-mode');
   syncVerticalAlignButtons();
   positionInlineEditor(); classicEditor.focus();
-  placeInlineCaret(field, clickEvent); rememberInlineRange(); recordInlineHistory(); syncInlineLineControls();
+  const placed = placeInlineCaret(field, clickEvent);
+  rememberInlineRange();
+  if (!placed || !inlineDraft.range || !field.contains(inlineDraft.range.startContainer)) {
+    seedDefaultInlineCaret(field, true);
+  }
+  recordInlineHistory(); syncInlineLineControls();
 }
 function autoApplyInlineDraft() {
   if (!inlineDraft || !inlineEditSession) return true;
@@ -4935,7 +6933,9 @@ function updateEditorSelection() {
   $('editorMergeText')?.classList.toggle('is-ready', selectedBlocks.length >= 2);
   $('editorSplitText')?.classList.toggle('is-ready', selectedBlocks.some((block) => isBlockSplittable(block)));
   if ($('editorSelectionStatus')) $('editorSelectionStatus').textContent = selected.size ? `${selected.size.toLocaleString('fa-IR')} متن انتخاب شده · مرجع: متن ${state.selectedBlockIds[0]}` : 'متنی انتخاب نشده';
+  syncEditorClipboardButtons();
   syncVerticalAlignButtons();
+  syncEditorShapeControls();
 }
 function selectEditorBlock(blockId, scroll = true, additive = false) {
   const key = String(blockId); const selected = new Set(editorSelectedKeys());
@@ -4967,22 +6967,54 @@ function clearEditorSelection() { if (inlineDraft && !closeInlineEditor()) retur
 function joinedOcrText(blocks) {
   return blocks.map((block) => String(block.text || '').trim().replace(/\s+/g, ' ')).filter(Boolean).join(' ');
 }
+function mergeRichHtmlChunks(chunks) {
+  const valid = chunks.map((c) => String(c || '').trim()).filter(Boolean);
+  if (!valid.length) return '';
+  const hasBlock = valid.some((c) => /<(div|p|h[1-6]|blockquote|pre|ul|ol|table|hr)\b/i.test(c));
+  if (!hasBlock) return sanitizeHtml(valid.join('<br>'));
+  const normalized = valid.map((c) => (
+    /^\s*<(div|p|h[1-6]|blockquote|pre|ul|ol|table|hr)\b/i.test(c) ? c : `<div>${c}</div>`
+  ));
+  return sanitizeHtml(normalized.join(''));
+}
 function mergeSelectedText() {
   if (inlineDraft && !closeInlineEditor()) return;
   const item = editorItem(); const blocks = selectedEditorBlocks();
   if (!item || blocks.length < 2) { toast('برای ادغام، حداقل دو کادر را انتخاب کنید (با Ctrl+کلیک روی کادرها)', true); return; }
+  recordEditorPageHistory();
   const ordered = [...blocks].sort((a, b) => boxOf(a).y0 - boxOf(b).y0 || boxOf(a).x0 - boxOf(b).x0);
-  const x0 = Math.min(...ordered.map((b) => b.x0)); const y0 = Math.min(...ordered.map((b) => b.y0));
-  const x1 = Math.max(...ordered.map((b) => b.x1)); const y1 = Math.max(...ordered.map((b) => b.y1));
+  const rawX0 = Math.min(...ordered.map((b) => Number.isFinite(b.x0) ? b.x0 : boxOf(b).x0));
+  const rawY0 = Math.min(...ordered.map((b) => Number.isFinite(b.y0) ? b.y0 : boxOf(b).y0));
+  const rawX1 = Math.max(...ordered.map((b) => Number.isFinite(b.x1) ? b.x1 : boxOf(b).x1));
+  const rawY1 = Math.max(...ordered.map((b) => Number.isFinite(b.y1) ? b.y1 : boxOf(b).y1));
   const snapshots = JSON.parse(JSON.stringify(ordered));
   const hasTr = snapshots.some((b) => String(b.tr || '').trim() || String(b.richHtml || '').trim());
   const mergedTr = hasTr ? snapshots.map((b) => String(b.tr || '').trim()).filter(Boolean).join('\n') : '';
   const mergedRichHtml = hasTr && snapshots.some((b) => String(b.richHtml || '').trim())
-    ? sanitizeHtml(snapshots.filter((b) => String(b.tr || '').trim() || String(b.richHtml || '').trim())
-      .map((b) => String(b.richHtml || '').trim() || plainToHtml(String(b.tr || '').trim())).join('<br>'))
+    ? mergeRichHtmlChunks(snapshots.filter((b) => String(b.tr || '').trim() || String(b.richHtml || '').trim())
+      .map((b) => String(b.richHtml || '').trim() || plainToHtml(String(b.tr || '').trim())))
     : '';
-  const merged = { ...snapshots[0], text: joinedOcrText(snapshots), tr: mergedTr, richHtml: mergedRichHtml, x0, y0, x1, y1,
-    polygon: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], sourceLines: snapshots };
+  const mergedOcrRichHtml = snapshots.some((b) => String(b.ocrRichHtml || '').trim())
+    ? mergeRichHtmlChunks(snapshots.filter((b) => String(b.text || '').trim() || String(b.ocrRichHtml || '').trim())
+      .map((b) => String(b.ocrRichHtml || '').trim() || plainToHtml(String(b.text || '').trim())))
+    : '';
+  const merged = {
+    ...snapshots[0],
+    enabled: true,
+    manual: snapshots.every((b) => Boolean(b.manual)),
+    text: joinedOcrText(snapshots),
+    tr: mergedTr,
+    richHtml: mergedRichHtml,
+    ocrRichHtml: mergedOcrRichHtml,
+    x0: rawX0, y0: rawY0, x1: rawX1, y1: rawY1,
+    polygon: [[rawX0, rawY0], [rawX1, rawY0], [rawX1, rawY1], [rawX0, rawY1]],
+    sourceLines: snapshots,
+  };
+  if (hasTr && snapshots.some((b) => b.textMode !== 'ocr') && merged.textMode === 'ocr') {
+    delete merged.textMode;
+  }
+  const normAngles = snapshots.map((b) => normalizeAngleDeg(b.angle));
+  if (normAngles.some((ang) => ang !== normAngles[0])) merged.angle = 0;
   if (ordered.some((b) => Number.isFinite(b.tx0) || Number.isFinite(b.ty0) || Number.isFinite(b.tx1) || Number.isFinite(b.ty1))) {
     merged.tx0 = Math.min(...ordered.map((b) => boxOf(b).x0));
     merged.ty0 = Math.min(...ordered.map((b) => boxOf(b).y0));
@@ -4997,6 +7029,7 @@ function mergeSelectedText() {
   item.blocks.splice(firstIndex, 0, merged);
   state.selectedBlockIds = [String(merged.id)]; state.activeBlockId = String(merged.id);
   buildBlockList(); drawEditor(); scheduleSave();
+  pushPostActionEditorPageHistory();
   toast('کادرهای انتخابی ادغام شدند');
 }
 function buildProportionalSplitBlocks(block, item, ocrLines, trLines, nextIdRef) {
@@ -5012,6 +7045,7 @@ function buildProportionalSplitBlocks(block, item, ocrLines, trLines, nextIdRef)
     clone.text = ocrLines.length === count ? ocrLines[idx] : (idx === 0 ? String(block.text || '') : '');
     clone.tr = trLines.length === count ? trLines[idx] : '';
     clone.richHtml = '';
+    clone.ocrRichHtml = '';
     clone.x0 = b.x0; clone.y0 = sy0; clone.x1 = b.x1; clone.y1 = sy1;
     clone.polygon = [[b.x0, sy0], [b.x1, sy0], [b.x1, sy1], [b.x0, sy1]];
     clone.lineH = Math.max(14, Math.min(block.lineH || 24, Math.round((sy1 - sy0) * 0.8)));
@@ -5019,45 +7053,71 @@ function buildProportionalSplitBlocks(block, item, ocrLines, trLines, nextIdRef)
     return clone;
   });
 }
+function ensureUniqueSplitIds(entries, block, item, nextIdRef) {
+  if (!Array.isArray(entries)) return entries;
+  const usedIds = new Set((item?.blocks || []).filter((b) => b !== block).map((b) => String(b.id)));
+  entries.forEach((entry, idx) => {
+    entry.enabled = entry.enabled !== false;
+    const curKey = entry.id != null ? String(entry.id) : '';
+    if (!curKey || usedIds.has(curKey)) {
+      if (idx === 0 && block?.id != null && !usedIds.has(String(block.id))) {
+        entry.id = block.id;
+      } else {
+        entry.id = ++nextIdRef.maxId;
+      }
+    }
+    usedIds.add(String(entry.id));
+  });
+  return entries;
+}
 function splitSingleEditorBlock(block, item, nextIdRef) {
   const hasSource = Array.isArray(block.sourceLines) && block.sourceLines.length >= 2;
   const hasTr = Boolean(String(block.tr || '').trim() || String(block.richHtml || '').trim());
   const trLines = nonEmptyLines(block.tr);
   const ocrLines = nonEmptyLines(block.text);
+  const inheritedKeys = ['dir', 'ocrDir', 'align', 'size', 'verticalAlign', 'color', 'bg', 'fontFamily', 'bold', 'italic', 'underline', 'strike', 'shape', 'cornerRadius', 'angle'];
   if (!hasTr) {
     if (hasSource && String(block.text || '') === joinedOcrText(block.sourceLines)) {
-      return JSON.parse(JSON.stringify(block.sourceLines));
+      const originals = JSON.parse(JSON.stringify(block.sourceLines));
+      originals.forEach((entry) => {
+        inheritedKeys.forEach((k) => { if (entry[k] === undefined && block[k] !== undefined) entry[k] = block[k]; });
+      });
+      return ensureUniqueSplitIds(originals, block, item, nextIdRef);
     }
     if (hasSource && ocrLines.length === block.sourceLines.length) {
       const originals = JSON.parse(JSON.stringify(block.sourceLines));
-      originals.forEach((entry, idx) => { entry.text = ocrLines[idx]; entry.tr = ''; entry.richHtml = ''; });
-      return originals;
+      originals.forEach((entry, idx) => {
+        inheritedKeys.forEach((k) => { if (entry[k] === undefined && block[k] !== undefined) entry[k] = block[k]; });
+        entry.text = ocrLines[idx]; entry.tr = ''; entry.richHtml = ''; entry.ocrRichHtml = '';
+      });
+      return ensureUniqueSplitIds(originals, block, item, nextIdRef);
     }
-    if (ocrLines.length >= 2) return buildProportionalSplitBlocks(block, item, ocrLines, [], nextIdRef);
+    if (ocrLines.length >= 2) return ensureUniqueSplitIds(buildProportionalSplitBlocks(block, item, ocrLines, [], nextIdRef), block, item, nextIdRef);
     return null;
   }
   if (hasSource && trLines.length === block.sourceLines.length) {
     const originals = JSON.parse(JSON.stringify(block.sourceLines));
     originals.forEach((entry, idx) => {
-      ['dir', 'align', 'size', 'verticalAlign', 'color', 'bg'].forEach((k) => { if (entry[k] === undefined && block[k] !== undefined) entry[k] = block[k]; });
+      inheritedKeys.forEach((k) => { if (entry[k] === undefined && block[k] !== undefined) entry[k] = block[k]; });
       const prevTr = String(entry.tr || '').trim();
       entry.tr = trLines[idx];
       if (prevTr !== trLines[idx]) entry.richHtml = '';
       if (ocrLines.length === originals.length) entry.text = ocrLines[idx];
     });
-    return originals;
+    return ensureUniqueSplitIds(originals, block, item, nextIdRef);
   }
   if (hasSource && trLines.length === 1 && block.sourceLines.every((s) => String(s.tr || '').trim())
     && trLines[0] === block.sourceLines.map((s) => String(s.tr || '').trim()).join(' ')) {
-    return JSON.parse(JSON.stringify(block.sourceLines));
+    return ensureUniqueSplitIds(JSON.parse(JSON.stringify(block.sourceLines)), block, item, nextIdRef);
   }
-  if (trLines.length >= 2) return buildProportionalSplitBlocks(block, item, ocrLines, trLines, nextIdRef);
+  if (trLines.length >= 2) return ensureUniqueSplitIds(buildProportionalSplitBlocks(block, item, ocrLines, trLines, nextIdRef), block, item, nextIdRef);
   return null;
 }
 function splitSelectedText() {
   if (inlineDraft && !closeInlineEditor()) return;
   const item = editorItem(); const blocks = selectedEditorBlocks();
   if (!item || !blocks.length) { toast('ابتدا کادر موردنظر برای جداکردن را انتخاب کنید', true); return; }
+  recordEditorPageHistory();
   const nextIdRef = { maxId: Math.max(0, ...(item.blocks || []).map((entry) => Number(entry.id) || 0)) };
   const newSelection = [];
   let splitCount = 0;
@@ -5079,6 +7139,7 @@ function splitSelectedText() {
   }
   state.selectedBlockIds = newSelection; state.activeBlockId = newSelection[0] || null;
   buildBlockList(); drawEditor(); scheduleSave();
+  pushPostActionEditorPageHistory();
   toast('خط‌های کادر با موفقیت به کادرهای جداگانه تبدیل شدند');
 }
 function sameSizeSelectedBoxes() {
@@ -5149,6 +7210,119 @@ function setBlockTextMode(block, mode) {
   const selector = card?.querySelector('[data-text-mode]'); if (selector) selector.value = block.textMode;
   renderEditorBoxes(); scheduleEditorCanvasDraw(); scheduleSave();
 }
+function syncEditorBoxVisualGeometry(el, block, box, scale) {
+  const wPx = Math.max(1, (box.x1 - box.x0) * scale);
+  const hPx = Math.max(1, (box.y1 - box.y0) * scale);
+  const shape = normalizeShapeKey(block?.shape);
+  const radiusPct = normalizeRadiusPct(block?.cornerRadius);
+  const angle = normalizeAngleDeg(block?.angle);
+  el.style.left = `${box.x0 * scale}px`;
+  el.style.top = `${box.y0 * scale}px`;
+  el.style.width = `${wPx}px`;
+  el.style.height = `${hPx}px`;
+  el.dataset.shape = shape;
+  el.dataset.boxAngle = String(angle);
+  el.dataset.boxRadius = String(radiusPct);
+  const item = editorItem();
+  el.classList.toggle('compact-box', wPx < 155);
+  el.classList.toggle('edge-right', Boolean(item && ((item.width - box.x1) * scale) < 24));
+  el.style.transformOrigin = '50% 50%';
+  el.style.transform = angle ? `rotate(${angle}deg)` : '';
+  const halfShort = Math.min(wPx, hPx) / 2;
+  if (shape === 'pill') {
+    el.style.borderRadius = `${halfShort.toFixed(1)}px`;
+  } else if (shape === 'ellipse') {
+    el.style.borderRadius = '50%';
+  } else if (shape === 'rect' && radiusPct > 0) {
+    el.style.borderRadius = `${((radiusPct / 100) * halfShort).toFixed(1)}px`;
+  } else {
+    el.style.borderRadius = '';
+  }
+  const svg = el.querySelector('.box-shape-svg');
+  if (svg && shape !== 'rect') {
+    svg.setAttribute('viewBox', `0 0 ${Math.max(1, Math.round(wPx))} ${Math.max(1, Math.round(hPx))}`);
+    const pathEl = svg.querySelector('path');
+    if (pathEl) pathEl.setAttribute('d', shapeSvgPathForBox(Math.max(1, Math.round(wPx)), Math.max(1, Math.round(hPx)), shape, radiusPct));
+  }
+  const tooSmallForCornerHandles = wPx < 24 || hPx < 22 || shape !== 'rect';
+  const maxInset = Math.max(6, halfShort - 2);
+  const insetPx = Math.min(maxInset, Math.max(6, (radiusPct / 100) * halfShort));
+  el.querySelectorAll('.corner-radius-handle').forEach((handle) => {
+    if (tooSmallForCornerHandles) {
+      handle.style.visibility = 'hidden';
+      return;
+    }
+    handle.style.visibility = '';
+    const corner = handle.dataset.radiusCorner || '';
+    const off = `${Math.max(2, Math.round(insetPx - 4))}px`;
+    handle.style.top = corner.startsWith('n') ? off : '';
+    handle.style.bottom = corner.startsWith('s') ? off : '';
+    handle.style.left = corner.endsWith('w') ? off : '';
+    handle.style.right = corner.endsWith('e') ? off : '';
+  });
+}
+function syncEditingBoxColors(boxEl, block) {
+  if (!boxEl || !block) return;
+  const background = String(block.bg || 'auto');
+  if (background === 'white') {
+    boxEl.style.setProperty('--editing-bg', '#fff');
+    boxEl.style.setProperty('--editing-fg', '#202020');
+  } else if (background === 'black') {
+    boxEl.style.setProperty('--editing-bg', '#101010');
+    boxEl.style.setProperty('--editing-fg', '#fff');
+  } else if (/^#[0-9a-fA-F]{6}$/.test(background)) {
+    const rv = parseInt(background.slice(1, 3), 16);
+    const gv = parseInt(background.slice(3, 5), 16);
+    const bv = parseInt(background.slice(5, 7), 16);
+    const bright = (rv * 299 + gv * 587 + bv * 114) / 1000 > 150;
+    boxEl.style.setProperty('--editing-bg', background);
+    boxEl.style.setProperty('--editing-fg', bright ? '#202020' : '#fff');
+  } else {
+    boxEl.style.setProperty('--editing-bg', 'var(--surface)');
+    boxEl.style.setProperty('--editing-fg', 'var(--text)');
+  }
+}
+function applyBoxShapeSettings(patch) {
+  const targets = selectedEditorBlocks();
+  const singleTarget = inlineDraft?.block ? [inlineDraft.block] : [];
+  const blocks = targets.length ? targets : (singleTarget.length ? singleTarget : resolveToolbarTargetBlocks({ autoSelectFirst: true }));
+  if (!blocks.length) {
+    toast('ابتدا یک کادر را روی تصویر انتخاب کنید.', true);
+    return;
+  }
+  if (!inlineDraft) recordEditorPageHistory();
+  blocks.forEach((b) => {
+    if ('shape' in patch) {
+      b.shape = normalizeShapeKey(patch.shape);
+      if (b.manual && (!b.bg || b.bg === 'none') && b.shape !== 'rect') b.bg = 'white';
+    }
+    if ('cornerRadius' in patch) {
+      b.cornerRadius = normalizeRadiusPct(patch.cornerRadius);
+      if (b.manual && (!b.bg || b.bg === 'none') && b.cornerRadius > 0) b.bg = 'white';
+    }
+    if ('angle' in patch) b.angle = normalizeAngleDeg(patch.angle);
+    if ('bg' in patch) b.bg = patch.bg;
+  });
+  buildBlockList();
+  drawEditor();
+  if (inlineDraft && blocks.includes(inlineDraft.block)) {
+    const activeEditingBox = document.querySelector('#editorBoxes .editor-box.editing');
+    syncEditingBoxColors(activeEditingBox, inlineDraft.block);
+    refreshInlineTypography();
+  }
+  syncEditorShapeControls();
+  scheduleSave();
+  if (!inlineDraft) pushPostActionEditorPageHistory();
+}
+function translateSelectedEditorBlock() {
+  const item = editorItem();
+  const target = inlineDraft?.block || (item ? resolveToolbarTargetBlocks(item)[0] : null) || null;
+  if (!target) {
+    toast('ابتدا کادر موردنظر را روی تصویر انتخاب کنید تا برای ترجمه ارسال شود.', true);
+    return;
+  }
+  retranslateBlock(target).catch((err) => toast(err?.message || String(err), true));
+}
 function renderEditorBoxes() {
   const item = editorItem(); const layer = $('editorBoxes'); if (!item || !layer) return;
   const mode = currentOverlayMode(); const selected = new Set(editorSelectedKeys());
@@ -5163,13 +7337,44 @@ function renderEditorBoxes() {
     let el = existing.get(key);
     if (!el) {
       el = document.createElement('div'); el.className = 'editor-box'; el.dataset.id = key;
-      const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
+      const move = document.createElement('button'); move.type = 'button'; move.className = 'box-move'; move.textContent = `⠿ متن ${block.id}`; move.dataset.move = '1'; move.title = 'برای جابه‌جایی کادر بکشید (با نگه داشتن Ctrl+Shift از کادر کپی بگیرید)'; move.setAttribute('aria-label', `جابه‌جایی کادر متن ${block.id}`);
       const visibility = document.createElement('button'); visibility.type = 'button'; visibility.className = 'box-visibility'; visibility.textContent = '👁'; visibility.title = 'پنهان‌کردن فقط همین خط روی تصویر'; visibility.setAttribute('aria-label', `پنهان‌کردن متن ${block.id} روی تصویر`); visibility.addEventListener('pointerdown', (event) => event.stopPropagation()); visibility.addEventListener('click', (event) => { event.stopPropagation(); setBlockVisibility(el._block, false); });
       const language = document.createElement('button'); language.type = 'button'; language.className = 'box-language'; language.setAttribute('aria-label', `تغییر زبان متن ${block.id} روی تصویر`); language.addEventListener('pointerdown', (event) => event.stopPropagation()); language.addEventListener('click', (event) => { event.stopPropagation(); setBlockTextMode(el._block, el.dataset.mode === 'ocr' ? 'translation' : 'ocr'); });
-      el.append(move, visibility, language);
+      const copyBtn = document.createElement('button'); copyBtn.type = 'button'; copyBtn.className = 'box-copy'; copyBtn.textContent = '⧉'; copyBtn.title = 'کپی و تکثیر فوری همین کادر با تمام ویژگی‌ها (یا نگه داشتن Ctrl+Shift و کشیدن/کلیک)'; copyBtn.setAttribute('aria-label', `کپی و تکثیر کادر متن ${block.id}`); copyBtn.addEventListener('pointerdown', (event) => event.stopPropagation()); copyBtn.addEventListener('click', (event) => { event.stopPropagation(); duplicateEditorBlocks([el._block]); });
+      const translateBtn = document.createElement('button'); translateBtn.type = 'button'; translateBtn.className = 'box-translate'; translateBtn.textContent = '🌐'; translateBtn.title = 'ارسال همین کادر برای ترجمهٔ تکی'; translateBtn.setAttribute('aria-label', `ترجمهٔ تکی کادر متن ${block.id}`); translateBtn.addEventListener('pointerdown', (event) => event.stopPropagation()); translateBtn.addEventListener('click', (event) => { event.stopPropagation(); retranslateBlock(el._block); });
+      const rotateHandle = document.createElement('i'); rotateHandle.className = 'rotate-handle'; rotateHandle.dataset.rotateHandle = '1'; rotateHandle.textContent = '↻'; rotateHandle.title = 'برای چرخاندن کادر بکشید (Shift = مضرب ۱۵ درجه · دابل‌کلیک = بازنشانی به ۰ درجه)'; rotateHandle.setAttribute('aria-label', `چرخاندن کادر متن ${block.id}`);
+      rotateHandle.addEventListener('dblclick', (event) => { event.preventDefault(); event.stopPropagation(); if (el._block) { el._block.angle = 0; buildBlockList(); drawEditor(); syncEditorShapeControls(); scheduleSave(); } });
+      const shapeSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      shapeSvg.setAttribute('class', 'box-shape-svg');
+      shapeSvg.setAttribute('preserveAspectRatio', 'none');
+      shapeSvg.setAttribute('aria-hidden', 'true');
+      shapeSvg.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'path'));
+      el.append(move, visibility, language, copyBtn, translateBtn, rotateHandle, shapeSvg);
+      ['nw', 'ne', 'se', 'sw'].forEach((corner) => {
+        const crHandle = document.createElement('i');
+        crHandle.className = `corner-radius-handle ${corner}`;
+        crHandle.dataset.radiusCorner = corner;
+        crHandle.title = 'برای گرد کردن گوشه‌های مستطیل بکشید (دابل‌کلیک برای تیز کردن گوشه‌ها)';
+        crHandle.addEventListener('dblclick', (event) => {
+          event.preventDefault(); event.stopPropagation();
+          if (el._block) { el._block.cornerRadius = 0; buildBlockList(); drawEditor(); syncEditorShapeControls(); scheduleSave(); }
+        });
+        el.appendChild(crHandle);
+      });
       ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach((dir) => { const handle = document.createElement('i'); handle.className = `resize-handle ${dir}`; handle.dataset.dir = dir; el.appendChild(handle); });
       el.addEventListener('pointerdown', (event) => {
-        const activeBlock = el._block; const additive = event.ctrlKey || event.metaKey; const dragTarget = event.target.closest('[data-move],[data-dir]') || event.target === el;
+        const activeBlock = el._block;
+        const isCtrlOrMeta = event.ctrlKey || event.metaKey;
+        const isCloneGesture = isCtrlOrMeta && event.shiftKey && event.button === 0 && !event.target.closest('.box-visibility,.box-language,.box-copy,.box-translate,[data-dir],[data-rotate-handle],[data-radius-corner]');
+        if (isCloneGesture) {
+          if (inlineDraft && !closeInlineEditor()) return;
+          if (!editorSelectedKeys().includes(String(activeBlock.id))) {
+            selectEditorBlock(activeBlock.id, true, false);
+          }
+          startBoxCloneGesture(event, activeBlock);
+          return;
+        }
+        const additive = isCtrlOrMeta; const dragTarget = event.target.closest('[data-move],[data-dir],[data-rotate-handle],[data-radius-corner]') || event.target === el;
         if (inlineDraft && additive) {
           if (!closeInlineEditor()) return;
         } else if (inlineDraft && inlineDraft.block !== activeBlock && !additive) {
@@ -5183,7 +7388,7 @@ function renderEditorBoxes() {
     // Reuse the actual editing node so zoom, redraw and other controls do not destroy the caret or undo history.
     el._block = block;
     el.classList.toggle('selected', selected.has(key)); el.classList.toggle('active', String(state.activeBlockId) === key); el.classList.toggle('empty', !hasRenderableText(display));
-    el.style.left = `${box.x0 * scale}px`; el.style.top = `${box.y0 * scale}px`; el.style.width = `${(box.x1 - box.x0) * scale}px`; el.style.height = `${(box.y1 - box.y0) * scale}px`;
+    syncEditorBoxVisualGeometry(el, block, box, scale);
     const language = el.querySelector('.box-language'); language.dataset.language = displayMode; language.textContent = displayMode === 'ocr' ? 'EN' : 'فا'; language.title = displayMode === 'ocr' ? 'این متن انگلیسی/OCR است؛ برای نمایش فارسی کلیک کنید' : 'این متن فارسی/ترجمه است؛ برای نمایش انگلیسی کلیک کنید';
     let text = el.querySelector('.editor-box-text');
     if (!text || el.dataset.mode !== displayMode || text._block !== block) {
@@ -5253,25 +7458,81 @@ function renderEditorBoxes() {
 }
 function startBoxDrag(event, block, el) {
   if (event.button !== 0) return;
-  const resize = event.target.closest('[data-dir]'); const moveHandle = event.target.closest('[data-move]');
+  const rotateTarget = event.target.closest('[data-rotate-handle]');
+  const radiusTarget = event.target.closest('[data-radius-corner]');
+  const resize = event.target.closest('[data-dir]');
+  const moveHandle = event.target.closest('[data-move]');
   // Text remains editable: dragging starts on the visible handle or the box border, not inside the text itself.
-  if (!resize && !moveHandle && event.target !== el) return;
+  if (!rotateTarget && !radiusTarget && !resize && !moveHandle && event.target !== el) return;
   const item = editorItem(); if (!item) return;
   event.preventDefault(); event.stopPropagation();
-  const direction = resize?.dataset.dir || 'move'; const start = boxOf(block); const origin = { x: event.clientX, y: event.clientY }; const scale = state.editorScale || 1;
+  const mode = rotateTarget ? 'rotate' : radiusTarget ? 'corner-radius' : (resize?.dataset.dir || 'move');
+  const cornerKey = radiusTarget?.dataset.radiusCorner || '';
+  const start = boxOf(block);
+  const origin = { x: event.clientX, y: event.clientY };
+  const scale = state.editorScale || 1;
+  const stageRect = $('editorStage')?.getBoundingClientRect?.() || { left: 0, top: 0 };
+  const centerImgX = (start.x0 + start.x1) / 2;
+  const centerImgY = (start.y0 + start.y1) / 2;
+  const centerClientX = stageRect.left + centerImgX * scale;
+  const centerClientY = stageRect.top + centerImgY * scale;
+  const initialAngle = normalizeAngleDeg(block.angle);
+  const initialRadius = normalizeRadiusPct(block.cornerRadius);
+  const startPointerRad = Math.atan2(origin.y - centerClientY, origin.x - centerClientX);
   const selected = selectedEditorBlocks();
-  const movingBlocks = direction === 'move' && selected.includes(block) ? selected : [block];
+  const movingBlocks = mode === 'move' && selected.includes(block) ? selected : [block];
   const movingStarts = movingBlocks.map((movingBlock) => ({ block: movingBlock, start: boxOf(movingBlock) }));
   let changed = false; let finished = false;
   el.setPointerCapture(event.pointerId); el.classList.add('dragging');
+  if (radiusTarget) radiusTarget.classList.add('dragging');
   const move = (ev) => {
-    const dx = (ev.clientX - origin.x) / scale; const dy = (ev.clientY - origin.y) / scale;
-    if (direction === 'move') {
+    if (mode === 'rotate') {
+      const curPointerRad = Math.atan2(ev.clientY - centerClientY, ev.clientX - centerClientX);
+      let deltaDeg = ((curPointerRad - startPointerRad) * 180) / Math.PI;
+      while (deltaDeg > 180) deltaDeg -= 360;
+      while (deltaDeg < -180) deltaDeg += 360;
+      let rawDeg = initialAngle + deltaDeg;
+      while (rawDeg > 180) rawDeg -= 360;
+      while (rawDeg < -180) rawDeg += 360;
+      const snapped = ev.shiftKey ? Math.round(rawDeg / 15) * 15 : rawDeg;
+      block.angle = normalizeAngleDeg(snapped);
+      syncEditorBoxVisualGeometry(el, block, boxOf(block), scale);
+      syncEditorShapeControls();
+      if (inlineDraft?.block === block) positionInlineEditor();
+      scheduleEditorCanvasDraw();
+      changed = true;
+      return;
+    }
+    if (mode === 'corner-radius') {
+      const bw = Math.max(2, start.x1 - start.x0);
+      const bh = Math.max(2, start.y1 - start.y0);
+      const halfShort = Math.max(1, Math.min(bw, bh) / 2);
+      const relScreenX = (ev.clientX - centerClientX) / scale;
+      const relScreenY = (ev.clientY - centerClientY) / scale;
+      const rad = -(initialAngle * Math.PI) / 180;
+      const localX = (relScreenX * Math.cos(rad) - relScreenY * Math.sin(rad)) + bw / 2;
+      const localY = (relScreenX * Math.sin(rad) + relScreenY * Math.cos(rad)) + bh / 2;
+      const distX = cornerKey.endsWith('e') ? (bw - localX) : localX;
+      const distY = cornerKey.startsWith('s') ? (bh - localY) : localY;
+      const inward = Math.max(0, Math.min(halfShort, (Math.max(0, distX) + Math.max(0, distY)) / 2));
+      const pct = normalizeRadiusPct((inward / halfShort) * 100);
+      block.shape = 'rect';
+      block.cornerRadius = pct;
+      if (block.manual && (!block.bg || block.bg === 'none') && pct > 0) block.bg = 'white';
+      syncEditorBoxVisualGeometry(el, block, boxOf(block), scale);
+      syncEditorShapeControls();
+      if (inlineDraft?.block === block) positionInlineEditor();
+      scheduleEditorCanvasDraw();
+      changed = true;
+      return;
+    }
+    const rawDx = (ev.clientX - origin.x) / scale; const rawDy = (ev.clientY - origin.y) / scale;
+    if (mode === 'move') {
       const minDx = Math.max(...movingStarts.map((entry) => -entry.start.x0));
       const maxDx = Math.min(...movingStarts.map((entry) => item.width - entry.start.x1));
       const minDy = Math.max(...movingStarts.map((entry) => -entry.start.y0));
       const maxDy = Math.min(...movingStarts.map((entry) => item.height - entry.start.y1));
-      const groupDx = Math.max(minDx, Math.min(maxDx, dx)); const groupDy = Math.max(minDy, Math.min(maxDy, dy));
+      const groupDx = Math.max(minDx, Math.min(maxDx, rawDx)); const groupDy = Math.max(minDy, Math.min(maxDy, rawDy));
       movingStarts.forEach((entry) => {
         const moving = entry.block; const initial = entry.start; const width = initial.x1 - initial.x0; const height = initial.y1 - initial.y0;
         moving.tx0 = initial.x0 + groupDx; moving.tx1 = moving.tx0 + width; moving.ty0 = initial.y0 + groupDy; moving.ty1 = moving.ty0 + height;
@@ -5279,22 +7540,32 @@ function startBoxDrag(event, block, el) {
         if (boxEl) { boxEl.style.left = `${moving.tx0 * scale}px`; boxEl.style.top = `${moving.ty0 * scale}px`; }
       });
     } else {
+      const rad = -(initialAngle * Math.PI) / 180;
+      const dx = initialAngle ? (rawDx * Math.cos(rad) - rawDy * Math.sin(rad)) : rawDx;
+      const dy = initialAngle ? (rawDx * Math.sin(rad) + rawDy * Math.cos(rad)) : rawDy;
       let { x0, y0, x1, y1 } = start; const minW = Math.min(20, item.width); const minH = Math.min(16, item.height);
-      if (direction.includes('w')) x0 = Math.max(0, Math.min(start.x1 - minW, start.x0 + dx));
-      if (direction.includes('e')) x1 = Math.min(item.width, Math.max(start.x0 + minW, start.x1 + dx));
-      if (direction.includes('n')) y0 = Math.max(0, Math.min(start.y1 - minH, start.y0 + dy));
-      if (direction.includes('s')) y1 = Math.min(item.height, Math.max(start.y0 + minH, start.y1 + dy));
+      if (mode.includes('w')) x0 = Math.max(0, Math.min(start.x1 - minW, start.x0 + dx));
+      if (mode.includes('e')) x1 = Math.min(item.width, Math.max(start.x0 + minW, start.x1 + dx));
+      if (mode.includes('n')) y0 = Math.max(0, Math.min(start.y1 - minH, start.y0 + dy));
+      if (mode.includes('s')) y1 = Math.min(item.height, Math.max(start.y0 + minH, start.y1 + dy));
       block.tx0 = x0; block.tx1 = x1; block.ty0 = y0; block.ty1 = y1;
     }
-    el.style.left = `${block.tx0 * scale}px`; el.style.top = `${block.ty0 * scale}px`; el.style.width = `${(block.tx1 - block.tx0) * scale}px`; el.style.height = `${(block.ty1 - block.ty0) * scale}px`;
+    syncEditorBoxVisualGeometry(el, block, boxOf(block), scale);
     if (inlineDraft?.block === block) positionInlineEditor();
     scheduleEditorCanvasDraw(); changed = true;
   };
   const stop = () => {
     if (finished) return; finished = true;
     el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', stop); el.removeEventListener('pointercancel', stop); el.removeEventListener('lostpointercapture', stop);
-    el.classList.remove('dragging'); if (el.hasPointerCapture?.(event.pointerId)) el.releasePointerCapture(event.pointerId);
-    if (changed) { if (inlineDraft?.block === block) refreshInlineTypography(); drawEditor(); scheduleSave(); }
+    el.classList.remove('dragging');
+    if (radiusTarget) radiusTarget.classList.remove('dragging');
+    if (el.hasPointerCapture?.(event.pointerId)) el.releasePointerCapture(event.pointerId);
+    if (changed) {
+      if (initialRadius !== normalizeRadiusPct(block.cornerRadius) || initialAngle !== normalizeAngleDeg(block.angle)) buildBlockList();
+      if (inlineDraft?.block === block) refreshInlineTypography();
+      drawEditor();
+      scheduleSave();
+    }
   };
   el.addEventListener('pointermove', move); el.addEventListener('pointerup', stop); el.addEventListener('pointercancel', stop); el.addEventListener('lostpointercapture', stop);
 }
@@ -5327,6 +7598,11 @@ function applyTranslatedBlockDefaults(block, text, targetLang = null) {
   block.richHtml = '';
   const resolvedDir = targetLang ? targetLanguageDir(targetLang) : (block.dir === 'ltr' ? 'ltr' : 'rtl');
   block.dir = resolvedDir;
+  if (block.textMode === 'ocr') block.textMode = 'translation';
+  if (block.manual) {
+    if (!['left', 'center', 'right', 'justify'].includes(block.align)) block.align = 'center';
+    return;
+  }
   if (block.pageRole === 'heading') {
     const rawLh = Number(block.lineH) || Math.max(16, (Number(block.y1) || 0) - (Number(block.y0) || 0)) || 22;
     block.align = resolvedDir === 'ltr' ? 'left' : 'right';
@@ -5342,8 +7618,21 @@ function applyTranslatedBlockDefaults(block, text, targetLang = null) {
   if (block._detectedItalic) block.italic = true;
 }
 async function retranslateBlock(block, targetOverride = null) {
+  if (!block) return;
+  if (!isModuleLicensed('translation')) { await ensureModuleLicensed('translation'); return; }
   if (inlineDraft?.block === block && !closeInlineEditor()) return;
-  const text = block.text || ''; const snapshot = inlineBlockSnapshot(block);
+  let text = String(block.text || '').trim();
+  const canUseManualTypedSource = Boolean(block.manual && (block.manualLang === 'en' || block.dir === 'ltr'));
+  if (!text && canUseManualTypedSource && String(block.tr || '').trim()) {
+    text = String(block.tr || '').trim();
+    block.text = text;
+    scheduleSave();
+  }
+  if (!text) {
+    toast('این کادر متن اصلی (OCR) برای ترجمه ندارد.', true);
+    return;
+  }
+  const snapshot = inlineBlockSnapshot(block);
   const target = resolvePreferredTranslationTarget(targetOverride);
   const provider = target.provider; const profileId = target.profileId; const sourceLanguage = $('ocrLanguage').value;
   const targetLanguage = activeTargetLanguage();
@@ -5351,7 +7640,7 @@ async function retranslateBlock(block, targetOverride = null) {
     const projectId = state.project.id;
     const request = { text, source_lines: block.sourceLines || null, source_language: sourceLanguage, target_language: targetLanguage, provider, ...(profileId ? { profile_id: profileId } : {}) };
     const switchTarget = (nextVal) => retranslateBlock(block, nextVal);
-    if (provider === 'free') {
+    if (isDirectMtProvider(provider)) {
       const refresh = () => api('/api/translate-text/context-preview', jsonOptions('POST', { ...request, skill: '', summary: '' }));
       const preview = await refresh();
       showTranslationRequestPreview(preview, async accepted => {
@@ -5406,11 +7695,368 @@ function makeBlockToolButton(svgInner, label, handler, extraClass = '') {
   btn.addEventListener('click', handler);
   return btn;
 }
+function nextEditorBlockId(item) {
+  let maxId = 0;
+  (item?.blocks || []).forEach((b) => {
+    const n = Number.parseInt(b?.id, 10);
+    if (Number.isFinite(n) && n > maxId) maxId = n;
+  });
+  return maxId + 1;
+}
+function syncEditorClipboardButtons() {
+  const hasSelection = selectedEditorBlocks().length > 0;
+  const clipCount = Array.isArray(state.copiedEditorBlocks) ? state.copiedEditorBlocks.length : 0;
+  $('editorCopyBlock')?.classList.toggle('is-ready', hasSelection);
+  $('editorDuplicateBlock')?.classList.toggle('is-ready', hasSelection);
+  const pasteBtn = $('editorPasteBlock');
+  if (pasteBtn) {
+    pasteBtn.disabled = clipCount === 0;
+    pasteBtn.classList.toggle('is-ready', clipCount > 0);
+    pasteBtn.title = clipCount > 0
+      ? `چسباندن ${clipCount.toLocaleString('fa-IR')} کادر کپی‌شده با تمام ویژگی‌ها روی این صفحه (Ctrl+V)`
+      : 'ابتدا یک یا چند کادر را کپی کنید (Ctrl+C)';
+  }
+}
+function cloneBlockForClipboard(block) {
+  const raw = JSON.parse(JSON.stringify(block));
+  const box = boxOf(block);
+  const w = Math.max(16, (Number(box.x1) || 0) - (Number(box.x0) || 0));
+  const h = Math.max(16, (Number(box.y1) || 0) - (Number(box.y0) || 0));
+  delete raw.id;
+  delete raw.polygon;
+  delete raw.mergedFrom;
+  raw._clipBox = { x0: Number(box.x0) || 0, y0: Number(box.y0) || 0, w, h };
+  return raw;
+}
+function translateSourceLinesGeometry(sourceLines, deltaX, deltaY, { markManual = true } = {}) {
+  if (!Array.isArray(sourceLines)) return;
+  sourceLines.forEach((entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    delete entry.id;
+    if (markManual) entry.manual = true;
+    entry.enabled = true;
+    ['x0', 'x1', 'tx0', 'tx1'].forEach((k) => { if (Number.isFinite(entry[k])) entry[k] = Math.round(entry[k] + deltaX); });
+    ['y0', 'y1', 'ty0', 'ty1'].forEach((k) => { if (Number.isFinite(entry[k])) entry[k] = Math.round(entry[k] + deltaY); });
+    if (Array.isArray(entry.polygon)) {
+      entry.polygon = entry.polygon.map((pt) => (Array.isArray(pt) && pt.length >= 2
+        ? [Math.round((Number(pt[0]) || 0) + deltaX), Math.round((Number(pt[1]) || 0) + deltaY)]
+        : pt));
+    }
+  });
+}
+function instantiateClonedBlocksOnItem(item, templates, { dx = 0, dy = 0, clampGroup = true } = {}) {
+  if (!item || !Array.isArray(templates) || !templates.length) return [];
+  if (currentOverlayMode() === 'none') setOverlayMode('translation', false);
+  if (editorItem() === item) recordEditorPageHistory();
+  item.blocks = Array.isArray(item.blocks) ? item.blocks : [];
+  const pageW = Math.max(20, Number(item.width) || 800);
+  const pageH = Math.max(20, Number(item.height) || 1000);
+  const sized = templates.map((tpl) => {
+    const cb = tpl._clipBox || { x0: Number(tpl.tx0 ?? tpl.x0) || 0, y0: Number(tpl.ty0 ?? tpl.y0) || 0, w: 120, h: 48 };
+    const w = Math.max(Math.min(16, pageW), Math.min(pageW, Math.round(cb.w)));
+    const h = Math.max(Math.min(16, pageH), Math.min(pageH, Math.round(cb.h)));
+    const baseX0 = Math.max(0, Math.min(pageW - w, Math.round(cb.x0)));
+    const baseY0 = Math.max(0, Math.min(pageH - h, Math.round(cb.y0)));
+    return { tpl, cb, baseX0, baseY0, w, h };
+  });
+  let effDx = dx;
+  let effDy = dy;
+  if (clampGroup) {
+    const minAllowedDx = Math.max(...sized.map((s) => -s.baseX0));
+    const maxAllowedDx = Math.min(...sized.map((s) => pageW - (s.baseX0 + s.w)));
+    const minAllowedDy = Math.max(...sized.map((s) => -s.baseY0));
+    const maxAllowedDy = Math.min(...sized.map((s) => pageH - (s.baseY0 + s.h)));
+    effDx = Math.max(minAllowedDx, Math.min(maxAllowedDx, dx));
+    effDy = Math.max(minAllowedDy, Math.min(maxAllowedDy, dy));
+  }
+  const created = sized.map(({ tpl, cb, baseX0, baseY0, w, h }) => {
+    const copy = JSON.parse(JSON.stringify(tpl));
+    delete copy._clipBox;
+    delete copy.polygon;
+    delete copy.mergedFrom;
+    const x0 = Math.max(0, Math.min(pageW - w, Math.round(baseX0 + effDx)));
+    const y0 = Math.max(0, Math.min(pageH - h, Math.round(baseY0 + effDy)));
+    if (Array.isArray(copy.sourceLines) && copy.sourceLines.length) {
+      translateSourceLinesGeometry(copy.sourceLines, x0 - (Number(cb.x0) || 0), y0 - (Number(cb.y0) || 0), { markManual: true });
+    }
+    copy.id = nextEditorBlockId(item);
+    copy.manual = true;
+    copy.manualLang = copy.manualLang || (copy.dir === 'ltr' ? 'en' : 'fa');
+    copy.enabled = true;
+    copy.x0 = x0;
+    copy.y0 = y0;
+    copy.x1 = x0 + w;
+    copy.y1 = y0 + h;
+    copy.tx0 = x0;
+    copy.ty0 = y0;
+    copy.tx1 = x0 + w;
+    copy.ty1 = y0 + h;
+    item.blocks.push(copy);
+    return copy;
+  });
+  state.selectedBlockIds = created.map((b) => String(b.id));
+  state.activeBlockId = String(created.at(-1).id);
+  buildBlockList();
+  drawEditor();
+  scheduleSave();
+  if (editorItem() === item) pushPostActionEditorPageHistory();
+  return created;
+}
+function copyEditorBlocks(targetBlocks = null, { silent = false } = {}) {
+  const item = editorItem();
+  if (!item) return false;
+  const activeBeforeClose = inlineDraft?.block || null;
+  if (inlineDraft && !closeInlineEditor()) return false;
+  let blocks = Array.isArray(targetBlocks) && targetBlocks.length ? targetBlocks : resolveToolbarTargetBlocks(item);
+  if (!blocks.length && activeBeforeClose && item.blocks?.includes(activeBeforeClose)) blocks = [activeBeforeClose];
+  if (!blocks.length) {
+    if (!silent) toast('ابتدا یک یا چند کادر را برای کپی انتخاب کنید.', true);
+    return false;
+  }
+  state.copiedEditorBlocks = blocks.map(cloneBlockForClipboard);
+  state.copiedEditorPasteStep = 0;
+  state.copiedEditorSourceImageId = item.id;
+  syncEditorClipboardButtons();
+  if (!silent) {
+    toast(blocks.length === 1
+      ? 'کادر با تمام ویژگی‌ها کپی شد (با Ctrl+V یا دکمهٔ «چسباندن» قرار دهید)'
+      : `${blocks.length.toLocaleString('fa-IR')} کادر با تمام ویژگی‌ها کپی شد (Ctrl+V برای چسباندن)`);
+  }
+  return true;
+}
+function pasteCopiedEditorBlocks() {
+  const item = editorItem();
+  if (!item) return [];
+  if (!Array.isArray(state.copiedEditorBlocks) || !state.copiedEditorBlocks.length) {
+    toast('هنوز کادری کپی نشده است؛ ابتدا یک کادر را انتخاب و کپی (Ctrl+C) کنید.', true);
+    return [];
+  }
+  if (inlineDraft && !closeInlineEditor()) return [];
+  const samePage = state.copiedEditorSourceImageId === item.id;
+  if (samePage) {
+    state.copiedEditorPasteStep = (state.copiedEditorPasteStep % 8) + 1;
+  } else {
+    // First paste onto another page keeps exact coordinates; subsequent pastes on that page step +22px.
+    state.copiedEditorSourceImageId = item.id;
+    state.copiedEditorPasteStep = 0;
+  }
+  const offset = state.copiedEditorPasteStep * 22;
+  const created = instantiateClonedBlocksOnItem(item, state.copiedEditorBlocks, { dx: offset, dy: offset });
+  if (created.length) {
+    toast(created.length === 1 ? 'کادر با تمام ویژگی‌ها چسبانده شد' : `${created.length.toLocaleString('fa-IR')} کادر چسبانده شد`);
+  }
+  return created;
+}
+function duplicateEditorBlocks(targetBlocks = null) {
+  const item = editorItem();
+  if (!item) return [];
+  const activeBeforeClose = inlineDraft?.block || null;
+  if (inlineDraft && !closeInlineEditor()) return [];
+  let blocks = Array.isArray(targetBlocks) && targetBlocks.length ? targetBlocks : resolveToolbarTargetBlocks(item);
+  if (!blocks.length && activeBeforeClose && item.blocks?.includes(activeBeforeClose)) blocks = [activeBeforeClose];
+  if (!blocks.length) {
+    toast('ابتدا یک یا چند کادر را برای تکثیر انتخاب کنید.', true);
+    return [];
+  }
+  copyEditorBlocks(blocks, { silent: true });
+  state.copiedEditorPasteStep = 1;
+  const created = instantiateClonedBlocksOnItem(item, state.copiedEditorBlocks, { dx: 22, dy: 22 });
+  if (created.length) {
+    toast(created.length === 1 ? 'یک نسخهٔ کپی از کادر ساخته شد' : `کپی ${created.length.toLocaleString('fa-IR')} کادر ساخته شد`);
+  }
+  return created;
+}
+function startBoxCloneGesture(event, activeBlock) {
+  const item = editorItem();
+  if (!item) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const currentSelected = selectedEditorBlocks();
+  const sourceBlocks = currentSelected.includes(activeBlock) ? currentSelected : [activeBlock];
+  const templates = sourceBlocks.map(cloneBlockForClipboard);
+  const origin = { x: event.clientX, y: event.clientY };
+  const scale = state.editorScale || 1;
+  let clonedEntries = null;
+  let finished = false;
+
+  const onMove = (ev) => {
+    const dist = Math.hypot(ev.clientX - origin.x, ev.clientY - origin.y);
+    if (!clonedEntries) {
+      if (dist < 3) return;
+      state.copiedEditorBlocks = templates;
+      state.copiedEditorPasteStep = 0;
+      state.copiedEditorSourceImageId = item.id;
+      syncEditorClipboardButtons();
+      const created = instantiateClonedBlocksOnItem(item, templates, { dx: 0, dy: 0 });
+      if (!created.length) return;
+      clonedEntries = created.map((blk) => ({ block: blk, start: boxOf(blk) }));
+    }
+    const dx = (ev.clientX - origin.x) / scale;
+    const dy = (ev.clientY - origin.y) / scale;
+    const minDx = Math.max(...clonedEntries.map((entry) => -entry.start.x0));
+    const maxDx = Math.min(...clonedEntries.map((entry) => item.width - entry.start.x1));
+    const minDy = Math.max(...clonedEntries.map((entry) => -entry.start.y0));
+    const maxDy = Math.min(...clonedEntries.map((entry) => item.height - entry.start.y1));
+    const groupDx = Math.max(minDx, Math.min(maxDx, dx));
+    const groupDy = Math.max(minDy, Math.min(maxDy, dy));
+    clonedEntries.forEach((entry) => {
+      const moving = entry.block;
+      const initial = entry.start;
+      const width = initial.x1 - initial.x0;
+      const height = initial.y1 - initial.y0;
+      const nx0 = Math.round(initial.x0 + groupDx);
+      const ny0 = Math.round(initial.y0 + groupDy);
+      const stepDx = nx0 - (Number(moving.x0) || 0);
+      const stepDy = ny0 - (Number(moving.y0) || 0);
+      if ((stepDx || stepDy) && Array.isArray(moving.sourceLines) && moving.sourceLines.length) {
+        translateSourceLinesGeometry(moving.sourceLines, stepDx, stepDy, { markManual: true });
+      }
+      moving.x0 = nx0; moving.x1 = nx0 + width; moving.y0 = ny0; moving.y1 = ny0 + height;
+      moving.tx0 = nx0; moving.tx1 = nx0 + width; moving.ty0 = ny0; moving.ty1 = ny0 + height;
+      const boxEl = [...document.querySelectorAll('#editorBoxes .editor-box')].find((candidate) => candidate.dataset.id === String(moving.id));
+      if (boxEl) {
+        boxEl.classList.add('dragging');
+        boxEl.style.left = `${nx0 * scale}px`;
+        boxEl.style.top = `${ny0 * scale}px`;
+      }
+    });
+    scheduleEditorCanvasDraw();
+  };
+
+  const onStop = () => {
+    if (finished) return;
+    finished = true;
+    window.removeEventListener('pointermove', onMove, true);
+    window.removeEventListener('pointerup', onStop, true);
+    window.removeEventListener('pointercancel', onStop, true);
+    document.querySelectorAll('#editorBoxes .editor-box.dragging').forEach((el) => el.classList.remove('dragging'));
+    if (!clonedEntries) {
+      duplicateEditorBlocks(sourceBlocks);
+    } else {
+      buildBlockList();
+      drawEditor();
+      scheduleSave();
+      toast(clonedEntries.length === 1 ? 'کپی کادر با تمام ویژگی‌ها در محل جدید قرار گرفت' : `کپی ${clonedEntries.length.toLocaleString('fa-IR')} کادر در محل جدید قرار گرفت`);
+    }
+  };
+
+  window.addEventListener('pointermove', onMove, true);
+  window.addEventListener('pointerup', onStop, true);
+  window.addEventListener('pointercancel', onStop, true);
+}
+function addManualEditorBlock(lang = 'fa') {
+  const item = editorItem();
+  if (!item) return null;
+  if (inlineDraft && !closeInlineEditor()) return null;
+  if (currentOverlayMode() === 'none') setOverlayMode('translation', false);
+  item.blocks = Array.isArray(item.blocks) ? item.blocks : [];
+  const scale = state.editorScale || 1;
+  const preview = document.querySelector('.editor-preview');
+  const viewW = preview?.clientWidth || 0;
+  const viewH = preview?.clientHeight || 0;
+  const centerX = viewW > 40 ? ((preview.scrollLeft || 0) + viewW / 2) / scale : item.width / 2;
+  const centerY = viewH > 40 ? ((preview.scrollTop || 0) + viewH / 2) / scale : item.height / 2;
+  const w = Math.max(Math.min(90, item.width), Math.min(420, Math.round(item.width * 0.28)));
+  const h = Math.max(Math.min(44, item.height), Math.min(170, Math.round(item.height * 0.09)));
+  let x0 = Math.round(Math.max(0, Math.min(item.width - w, centerX - w / 2)));
+  let y0 = Math.round(Math.max(0, Math.min(item.height - h, centerY - h / 2)));
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const colliding = item.blocks.some((b) => {
+      const bx = boxOf(b);
+      return Math.abs(bx.x0 - x0) < 12 && Math.abs(bx.y0 - y0) < 12;
+    });
+    if (!colliding) break;
+    x0 = Math.max(0, Math.min(item.width - w, x0 + 18));
+    y0 = Math.max(0, Math.min(item.height - h, y0 + 18));
+  }
+  const isEn = lang === 'en';
+  const newBlock = {
+    id: nextEditorBlockId(item),
+    manual: true,
+    manualLang: isEn ? 'en' : 'fa',
+    text: '',
+    tr: '',
+    richHtml: '',
+    conf: 100,
+    enabled: true,
+    bg: 'none',
+    textMode: 'translation',
+    dir: isEn ? 'ltr' : 'rtl',
+    align: 'center',
+    verticalAlign: 'middle',
+    bold: true,
+    italic: false,
+    size: null,
+    color: null,
+    pageRole: 'paragraph',
+    lineH: Math.max(18, Math.min(38, Math.round(h * 0.42))),
+    x0, y0, x1: x0 + w, y1: y0 + h,
+    tx0: x0, ty0: y0, tx1: x0 + w, ty1: y0 + h,
+  };
+  item.blocks.push(newBlock);
+  state.activeBlockId = String(newBlock.id);
+  state.selectedBlockIds = [String(newBlock.id)];
+  buildBlockList();
+  drawEditor();
+  scheduleSave();
+  openInlineEditor(newBlock);
+  return newBlock;
+}
+async function deleteEditorBlocks(targetBlocks = null) {
+  const item = editorItem();
+  if (!item) return false;
+  const blocksToRemove = Array.isArray(targetBlocks) && targetBlocks.length
+    ? targetBlocks
+    : (selectedEditorBlocks().length ? selectedEditorBlocks() : resolveToolbarTargetBlocks(item));
+  if (!blocksToRemove.length) {
+    toast('ابتدا یک یا چند کادر را برای حذف انتخاب کنید.', true);
+    return false;
+  }
+  if (inlineDraft && blocksToRemove.includes(inlineDraft.block) && !closeInlineEditor()) return false;
+  const hasAnyContent = blocksToRemove.some((b) => String(b.tr || '').trim() || String(b.text || '').trim() || String(b.richHtml || '').trim() || String(b.ocrRichHtml || '').trim());
+  if (hasAnyContent) {
+    const label = blocksToRemove.length === 1 ? `کادر شمارهٔ ${blocksToRemove[0].id}` : `${blocksToRemove.length} کادر انتخاب‌شده`;
+    const ok = await appConfirm(`آیا مطمئن هستید که می‌خواهید ${label} را به‌طور کامل از این صفحه حذف کنید؟`, {
+      title: 'حذف کادر متن',
+      confirmText: 'بله، حذف شود',
+      cancelText: 'انصراف',
+      variant: 'danger',
+      destructive: true,
+    });
+    if (!ok) return false;
+  }
+  const removeSet = new Set(blocksToRemove);
+  item.blocks = (item.blocks || []).filter((b) => !removeSet.has(b));
+  const remainingIds = new Set(item.blocks.map((b) => String(b.id)));
+  state.selectedBlockIds = (state.selectedBlockIds || []).filter((id) => remainingIds.has(String(id)));
+  if (!remainingIds.has(String(state.activeBlockId))) state.activeBlockId = state.selectedBlockIds.at(-1) || null;
+  buildBlockList();
+  drawEditor();
+  scheduleSave();
+  toast(blocksToRemove.length === 1 ? 'کادر حذف شد' : `${blocksToRemove.length} کادر حذف شد`);
+  return true;
+}
 function buildBlockList() {
-  const item = editorItem(); const list = $('blockList'); list.textContent = ''; const selected = new Set(editorSelectedKeys()); if (!item?.blocks?.length) { list.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید.'; updateEditorSelection(); return; }
+  const item = editorItem(); const list = $('blockList'); list.textContent = ''; const selected = new Set(editorSelectedKeys());
+  if (!item?.blocks?.length) {
+    const emptyWrap = document.createElement('div');
+    emptyWrap.className = 'block-empty-state';
+    const msg = document.createElement('div');
+    msg.textContent = 'ابتدا OCR را روی این تصویر اجرا کنید یا همین حالا با دکمه‌های زیر کادر متن دلخواه (فارسی یا انگلیسی) روی صفحه بگذارید:';
+    const actionsRow = document.createElement('div');
+    actionsRow.className = 'block-empty-actions';
+    actionsRow.append(
+      makeButton('+ متن فارسی', () => addManualEditorBlock('fa'), 'bt primary'),
+      makeButton('+ متن انگلیسی', () => addManualEditorBlock('en'), 'bt'),
+    );
+    emptyWrap.append(msg, actionsRow);
+    list.appendChild(emptyWrap);
+    updateEditorSelection();
+    return;
+  }
   item.blocks.forEach((block) => {
     const card = document.createElement('section'); card.className = `block-card${block.enabled ? '' : ' disabled'}${selected.has(String(block.id)) ? ' selected' : ''}${String(state.activeBlockId) === String(block.id) ? ' active' : ''}`; card.dataset.id = block.id; card.addEventListener('pointerdown', (event) => { const additive = event.ctrlKey || event.metaKey; if (additive && inlineDraft && !closeInlineEditor()) return; selectEditorBlock(block.id, false, additive); });
-    const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabled.dataset.visibility = 'sidebar'; enabled.setAttribute('aria-label', `نمایش متن ${block.id} روی تصویر`); enabledLabel.append(enabled, document.createTextNode(` نمایش متن ${block.id} روی تصویر · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
+    const head = document.createElement('div'); head.className = 'block-head'; const enabledLabel = document.createElement('label'); const enabled = document.createElement('input'); enabled.type = 'checkbox'; enabled.checked = !!block.enabled; enabled.dataset.visibility = 'sidebar'; enabled.setAttribute('aria-label', `نمایش متن ${block.id} روی تصویر`); enabledLabel.append(enabled, document.createTextNode(block.manual ? ` نمایش متن ${block.id} روی تصویر · کادر دستی` : ` نمایش متن ${block.id} روی تصویر · اطمینان ${Math.round(block.conf || 0)}٪`)); head.appendChild(enabledLabel);
     const isHeading = block.pageRole === 'heading';
     const roleBtn = document.createElement('button');
     roleBtn.type = 'button';
@@ -5445,18 +8091,32 @@ function buildBlockList() {
       scheduleSave();
     });
     head.appendChild(roleBtn);
-    const bg = document.createElement('select'); [['auto', 'پس‌زمینه خودکار'], ['white', 'سفید'], ['black', 'مشکی'], ['none', 'بدون پاک‌کردن']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; bg.appendChild(option); }); bg.value = block.bg || 'auto'; head.appendChild(bg);
+    const bg = document.createElement('select'); [['auto', 'پس‌زمینه خودکار'], ['white', 'سفید'], ['black', 'مشکی'], ['none', 'بدون پاک‌کردن']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; bg.appendChild(option); });
+    if (/^#[0-9a-fA-F]{6}$/.test(String(block.bg || ''))) {
+      const customOpt = document.createElement('option');
+      customOpt.value = String(block.bg);
+      customOpt.textContent = `رنگ ${String(block.bg).toUpperCase()}`;
+      bg.appendChild(customOpt);
+    }
+    bg.value = block.bg || 'auto'; head.appendChild(bg);
     const languageRow = document.createElement('div'); languageRow.className = 'block-tools block-language-tools';
     const languageLabel = document.createElement('label'); languageLabel.className = 'block-language-label'; languageLabel.appendChild(document.createTextNode('نمایش همین متن:'));
     const language = document.createElement('select'); language.dataset.textMode = 'sidebar'; language.setAttribute('aria-label', `زبان نمایش متن ${block.id} روی تصویر`); [['translation', 'فارسی / ترجمه'], ['ocr', 'انگلیسی / OCR']].forEach(([value, label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; language.appendChild(option); }); language.value = blockTextMode(block); languageLabel.appendChild(language); languageRow.appendChild(languageLabel);
     const metaBadges = [];
+    if (block.manual) metaBadges.push(['دستی', 'کادر اضافه‌شدهٔ دستی — در اجرای مجدد OCR حفظ می‌شود', 'block-manual-chip']);
+    if (block.fontFamily && canonicalFontOption(block.fontFamily) !== 'Vazirmatn') metaBadges.push([canonicalFontOption(block.fontFamily), `فونت انتخابی کادر: ${canonicalFontOption(block.fontFamily)}`]);
+    const shKey = normalizeShapeKey(block.shape);
+    const shapeNames = { ellipse: 'بیضی', pill: 'کپسولی', diamond: 'لوزی', hexagon: 'شش‌ضلعی', cloud: 'ابر کمیک' };
+    if (shKey !== 'rect' && shapeNames[shKey]) metaBadges.push([shapeNames[shKey], `شکل کادر: ${shapeNames[shKey]}`]);
+    else if (shKey === 'rect' && normalizeRadiusPct(block.cornerRadius) > 0) metaBadges.push([`گوشه ${normalizeRadiusPct(block.cornerRadius)}٪`, 'گوشه‌های گرد مستطیل']);
+    if (normalizeAngleDeg(block.angle) !== 0) metaBadges.push([`↻ ${normalizeAngleDeg(block.angle)}°`, `زاویهٔ چرخش کادر: ${normalizeAngleDeg(block.angle)} درجه`]);
     if (block.bold) metaBadges.push(['B', 'تشخیص/قالب پررنگ (Bold)']);
     if (block.italic) metaBadges.push(['I', 'تشخیص/قالب کج (Italic)']);
     if ((Number(block.firstLineIndent) || 0) >= 0.5 || (!isHeading && (Number(block.sourceIndent) || 0) >= 2)) metaBadges.push(['↳ تورفتگی', 'دارای تورفتگی نسبت به حاشیهٔ ستون']);
     if ((Number(block.hangingIndent) || 0) >= 0.5 || (Number(block.blockOutdent) || 0) >= 0.5) metaBadges.push(['↰ بیرون‌زدگی', 'دارای بیرون‌زدگی خط اول / حاشیه']);
-    metaBadges.forEach(([txt, tip]) => {
+    metaBadges.forEach(([txt, tip, extraCls]) => {
       const chip = document.createElement('span');
-      chip.className = 'block-style-chip';
+      chip.className = `block-style-chip${extraCls ? ` ${extraCls}` : ''}`;
       chip.textContent = txt;
       chip.title = tip;
       languageRow.appendChild(chip);
@@ -5474,9 +8134,11 @@ function buildBlockList() {
     translation.addEventListener('click', openBlockTranslation);
     translation.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openBlockTranslation(); } });
     const actions = document.createElement('div'); actions.className = 'block-tools block-card-actions';
+    const trBtnLabel = String(block.tr || '').trim() && String(block.text || '').trim() ? 'ترجمهٔ دوباره' : 'ترجمهٔ این کادر';
     actions.append(
+      makeBlockToolButton('<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V5a2 2 0 0 1 2-2h11"/><path d="M14.5 11.5v6"/><path d="M11.5 14.5h6"/>', 'تکثیر کادر', () => duplicateEditorBlocks([block]), 'block-duplicate-btn'),
       makeBlockToolButton('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', 'کپی متن اصلی', () => copyBlockText(block.text || '').catch((e) => toast(e.message, true))),
-      makeBlockToolButton('<path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"/><path d="M16 16h5v5"/>', 'ترجمهٔ دوباره', () => retranslateBlock(block), 'block-retranslate-btn'),
+      makeBlockToolButton('<path d="M21 12a9 9 0 0 0-15.5-6.36L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 15.5 6.36L21 16"/><path d="M16 16h5v5"/>', trBtnLabel, () => retranslateBlock(block), 'block-retranslate-btn'),
       makeBlockToolButton('<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>', 'پاک‌کردن ترجمه', async () => {
         if (inlineDraft?.block === block && !closeInlineEditor()) return;
         const ok = await appConfirm('آیا مطمئن هستید که می‌خواهید ترجمهٔ این کادر را پاک کنید؟', {
@@ -5489,6 +8151,9 @@ function buildBlockList() {
         if (!ok) return;
         block.tr = ''; block.richHtml = ''; buildBlockList(); drawEditor(); scheduleSave();
       }, 'block-clear-btn'),
+      makeBlockToolButton('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>', 'حذف کادر', () => {
+        deleteEditorBlocks([block]).catch((e) => toast(e.message, true));
+      }, 'block-clear-btn block-delete-btn'),
     );
     enabled.addEventListener('change', () => setBlockVisibility(block, enabled.checked)); language.addEventListener('change', () => setBlockTextMode(block, language.value)); bg.addEventListener('change', () => { block.bg = bg.value; drawEditor(); scheduleSave(); });
     card.append(head, languageRow, source, translation, actions); list.appendChild(card);
@@ -5508,17 +8173,20 @@ async function closeEditor(markApproved = false) {
   editorCloseTask = (async () => {
     const item = editorItem();
     if (item ? !applyInlineEditor() : !!inlineDraft) return;
+    const returnScroll = editorReturnScroll ? { ...editorReturnScroll } : (item ? captureEditorReturnScroll(item.id) : null);
     editorLoadSeq += 1;
     if (item) {
       if (markApproved === true) item.approved = true;
       await overlayPreviewTask;
       await saveProject();
       await renderAndUpload(item);
-      renderGrid();
     }
     editorSessionSnapshot = null;
+    editorReturnScroll = null;
     if (editorCanvasFrame) { cancelAnimationFrame(editorCanvasFrame); editorCanvasFrame = 0; }
     closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; $('editorCanvas').width = $('editorCanvas').height = 0; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
+    if (item) renderGrid();
+    restoreEditorReturnScroll(returnScroll);
     if (item && markApproved === true) toast('تغییرات ذخیره شد و مهر تأیید نهایی روی صفحه ثبت گردید');
   })();
   try { await editorCloseTask; } finally { editorCloseTask = null; }
@@ -5529,16 +8197,20 @@ async function cancelEditor() {
   editorCloseTask = (async () => {
     const item = editorItem();
     const snap = editorSessionSnapshot;
+    const returnScroll = editorReturnScroll ? { ...editorReturnScroll } : (item ? captureEditorReturnScroll(item.id) : null);
     const hadInlineDraft = !!inlineDraft;
     const hadPendingSave = savePending;
     discardInlineEditorForCancel();
     clearTimeout(saveTimer); savePending = false;
     editorLoadSeq += 1;
+    let shouldRenderGrid = false;
     if (item && snap && state.project?.id === snap.projectId && item.id === snap.imageId) {
       const changedBlocks = JSON.stringify(item.blocks || []) !== snap.blocksJson;
+      const changedWatermark = JSON.stringify(item.watermark || null) !== snap.watermarkJson;
       const changedApproved = !!item.approved !== snap.approved;
       const changedMode = currentOverlayMode() !== snap.overlayMode;
       item.blocks = JSON.parse(snap.blocksJson);
+      item.watermark = JSON.parse(snap.watermarkJson || 'null');
       item.approved = snap.approved;
       restoreProjectImageDrafts(snap.projectId, snap.imageId, snap.draftEntries);
       if (changedMode) {
@@ -5547,17 +8219,20 @@ async function cancelEditor() {
         $('overlayMode').value = snap.overlayMode;
         $('exportOverlayMode').value = snap.overlayMode;
       }
-      if (changedBlocks || changedApproved || changedMode || hadInlineDraft || hadPendingSave || snap.autoSaved || snap.serverPreviewTouched) {
+      if (changedBlocks || changedWatermark || changedApproved || changedMode || hadInlineDraft || hadPendingSave || snap.autoSaved || snap.serverPreviewTouched) {
         await overlayPreviewTask;
         await saveProject();
         if (changedMode) await renderImagesText();
         else await renderAndUpload(item);
       }
-      renderGrid();
+      shouldRenderGrid = true;
     }
     editorSessionSnapshot = null;
+    editorReturnScroll = null;
     if (editorCanvasFrame) { cancelAnimationFrame(editorCanvasFrame); editorCanvasFrame = 0; }
     closeDialog('editorDialog'); state.editorBitmap?.close?.(); state.editorBitmap = null; $('editorCanvas').width = $('editorCanvas').height = 0; state.editorId = null; state.editorPan = null; state.activeBlockId = null; state.selectedBlockIds = [];
+    if (shouldRenderGrid) renderGrid();
+    restoreEditorReturnScroll(returnScroll);
     toast('ویرایش این صفحه بدون ذخیرهٔ تغییرات بسته شد');
   })();
   try { await editorCloseTask; } finally { editorCloseTask = null; }
@@ -5571,6 +8246,7 @@ async function revertEditor() {
 // ---------- Crop with aspect ratio, moving, and eight handles ----------
 function cropItem() { return state.project?.images.find((item) => item.id === state.cropId); }
 function openCrop(imageId) {
+  if (!isModuleLicensed('editing')) { ensureModuleLicensed('editing').catch(() => {}); return; }
   const item = state.project?.images.find((entry) => entry.id === imageId);
   if (!item) return;
   state.cropId = imageId;
@@ -5617,12 +8293,401 @@ async function copyPreview() {
   try { const response = await fetch(imageUrl(item, !!item.edited, true)); const bitmap = await createImageBitmap(await response.blob()); const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height; canvas.getContext('2d').drawImage(bitmap, 0, 0); bitmap.close(); const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png')); canvas.width = canvas.height = 0; if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') throw new Error('مرورگر اجازهٔ کپی تصویر نمی‌دهد'); await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); toast('تصویر کپی شد'); } catch (error) { toast(error.message || 'کپی تصویر ممکن نبود', true); }
 }
 
+// ---------- Watermark (Text + Transparent Logo) ----------
+let wmPreviewBitmap = null;
+let wmPreviewImageId = null;
+let wmAngleTouched = false;
+
+function defaultWatermarkConfig() {
+  return {
+    enabled: true,
+    text: '',
+    logoId: '',
+    logoScalePct: 9,
+    position: 'bottom-left',
+    sizePct: 3.5,
+    opacity: 55,
+    angle: 0,
+    marginPct: 2.5,
+    tileGapPct: 22,
+    color: '#ffffff',
+    bold: true,
+    outline: true,
+    outlineColor: '#000000',
+    bgPill: false,
+    bgColor: '#000000',
+  };
+}
+
+function watermarkTargetPages(scope = null) {
+  const images = sortedImages();
+  const chosen = scope || $('wmTargetScope')?.value || 'selected';
+  if (chosen === 'editor') {
+    const ed = editorItem();
+    return ed ? [ed] : [];
+  }
+  if (chosen === 'all') return images;
+  const sel = selectedImages();
+  return sel.length ? sel : images;
+}
+
+function populateWatermarkLogoSelect(selectedId = '') {
+  const sel = $('wmLogoSelect');
+  if (!sel) return;
+  const logos = projectWatermarkLogos();
+  sel.textContent = '';
+  const noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = 'بدون لوگو (فقط متن)';
+  sel.appendChild(noneOpt);
+  Object.values(logos).forEach((entry) => {
+    if (!entry || !entry.id) return;
+    const opt = document.createElement('option');
+    opt.value = entry.id;
+    opt.textContent = entry.name || entry.id;
+    sel.appendChild(opt);
+  });
+  sel.value = selectedId && logos[selectedId] ? selectedId : '';
+  if ($('wmLogoDeleteBtn')) $('wmLogoDeleteBtn').disabled = !sel.value;
+}
+
+function readWatermarkDialogForm() {
+  return {
+    enabled: true,
+    text: String($('wmText')?.value || ''),
+    logoId: String($('wmLogoSelect')?.value || ''),
+    logoScalePct: Number($('wmLogoScale')?.value) || 9,
+    position: String($('wmPosition')?.value || 'bottom-left'),
+    sizePct: Number($('wmSize')?.value) || 3.5,
+    opacity: Number($('wmOpacity')?.value) || 55,
+    angle: Number($('wmAngle')?.value) || 0,
+    marginPct: Number($('wmMargin')?.value) || 2.5,
+    tileGapPct: Number($('wmTileGap')?.value) || 22,
+    color: String($('wmColor')?.value || '#ffffff'),
+    bold: Boolean($('wmBold')?.checked),
+    outline: Boolean($('wmOutline')?.checked),
+    outlineColor: String($('wmOutlineColor')?.value || '#000000'),
+    bgPill: Boolean($('wmBgPill')?.checked),
+    bgColor: String($('wmBgColor')?.value || '#000000'),
+  };
+}
+
+function syncWatermarkRangeOutputs() {
+  if ($('wmLogoScaleOut') && $('wmLogoScale')) $('wmLogoScaleOut').textContent = `${$('wmLogoScale').value}%`;
+  if ($('wmSizeOut') && $('wmSize')) $('wmSizeOut').textContent = `${$('wmSize').value}%`;
+  if ($('wmOpacityOut') && $('wmOpacity')) $('wmOpacityOut').textContent = `${$('wmOpacity').value}%`;
+  if ($('wmAngleOut') && $('wmAngle')) $('wmAngleOut').textContent = `${$('wmAngle').value}°`;
+  if ($('wmMarginOut') && $('wmMargin')) $('wmMarginOut').textContent = `${$('wmMargin').value}%`;
+  if ($('wmTileGapOut') && $('wmTileGap')) $('wmTileGapOut').textContent = `${$('wmTileGap').value}%`;
+  const pos = $('wmPosition')?.value || 'bottom-left';
+  $('wmMarginWrap')?.classList.toggle('hidden', pos === 'center' || pos === 'diagonal' || pos === 'tile');
+  $('wmTileGapWrap')?.classList.toggle('hidden', pos !== 'tile');
+  if ($('wmLogoDeleteBtn') && $('wmLogoSelect')) $('wmLogoDeleteBtn').disabled = !$('wmLogoSelect').value;
+}
+
+function fillWatermarkDialogForm(wm) {
+  const cfg = { ...defaultWatermarkConfig(), ...(wm && typeof wm === 'object' ? wm : {}) };
+  if ($('wmText')) $('wmText').value = cfg.text || '';
+  populateWatermarkLogoSelect(cfg.logoId || '');
+  if ($('wmLogoScale')) $('wmLogoScale').value = String(cfg.logoScalePct ?? 9);
+  if ($('wmPosition')) $('wmPosition').value = cfg.position || 'bottom-left';
+  if ($('wmSize')) $('wmSize').value = String(cfg.sizePct ?? 3.5);
+  if ($('wmOpacity')) $('wmOpacity').value = String(cfg.opacity ?? 55);
+  const effectiveAngle = cfg.angle !== undefined && cfg.angle !== null && cfg.angle !== ''
+    ? Number(cfg.angle)
+    : ((cfg.position === 'diagonal' || cfg.position === 'tile') ? -30 : 0);
+  if ($('wmAngle')) $('wmAngle').value = String(Number.isFinite(effectiveAngle) ? effectiveAngle : 0);
+  if ($('wmMargin')) $('wmMargin').value = String(cfg.marginPct ?? 2.5);
+  if ($('wmTileGap')) $('wmTileGap').value = String(cfg.tileGapPct ?? 22);
+  if ($('wmColor')) $('wmColor').value = /^#[0-9a-fA-F]{6}$/.test(String(cfg.color || '')) ? cfg.color : '#ffffff';
+  if ($('wmBold')) $('wmBold').checked = cfg.bold !== false;
+  if ($('wmOutline')) $('wmOutline').checked = cfg.outline !== false;
+  if ($('wmOutlineColor')) $('wmOutlineColor').value = /^#[0-9a-fA-F]{6}$/.test(String(cfg.outlineColor || '')) ? cfg.outlineColor : '#000000';
+  if ($('wmBgPill')) $('wmBgPill').checked = Boolean(cfg.bgPill);
+  if ($('wmBgColor')) $('wmBgColor').value = /^#[0-9a-fA-F]{6}$/.test(String(cfg.bgColor || '')) ? cfg.bgColor : '#000000';
+  wmAngleTouched = Boolean(cfg.angle && Number(cfg.angle) !== 0 && Number(cfg.angle) !== -30);
+  syncWatermarkRangeOutputs();
+}
+
+async function loadWatermarkPreviewBitmap(sampleItem) {
+  if (!sampleItem) return null;
+  if (state.editorId === sampleItem.id && state.editorBitmap) return state.editorBitmap;
+  if (wmPreviewBitmap && wmPreviewImageId === sampleItem.id) return wmPreviewBitmap;
+  try {
+    const res = await fetch(imageUrl(sampleItem, false));
+    if (!res.ok) return null;
+    const bmp = await decodeProjectImageBitmap(await res.blob(), sampleItem);
+    if (wmPreviewBitmap && wmPreviewBitmap !== state.editorBitmap) wmPreviewBitmap.close?.();
+    wmPreviewBitmap = bmp;
+    wmPreviewImageId = sampleItem.id;
+    return bmp;
+  } catch {
+    return null;
+  }
+}
+
+async function drawWatermarkDialogPreview() {
+  const cv = $('wmPreviewCanvas');
+  if (!cv) return;
+  const targets = watermarkTargetPages();
+  const sample = targets[0] || sortedImages()[0] || null;
+  if ($('wmPreviewCaption')) {
+    $('wmPreviewCaption').textContent = sample
+      ? `پیش‌نمایش زنده روی «${sample.name}» (${targets.length.toLocaleString('fa-IR')} صفحهٔ هدف)`
+      : 'پیش‌نمایش زنده';
+  }
+  const wm = readWatermarkDialogForm();
+  await ensureWatermarkLogosReady(wm);
+  const bmp = await loadWatermarkPreviewBitmap(sample);
+  const srcW = bmp?.width || sample?.width || 600;
+  const srcH = bmp?.height || sample?.height || 840;
+  const maxSide = 520;
+  const ratio = Math.min(1, maxSide / Math.max(srcW, srcH, 1));
+  const W = Math.max(180, Math.round(srcW * ratio));
+  const H = Math.max(180, Math.round(srcH * ratio));
+  cv.width = W;
+  cv.height = H;
+  const ctx = cv.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect?.(0, 0, W, H);
+  if (bmp) {
+    ctx.drawImage?.(bmp, 0, 0, W, H);
+  } else if (typeof ctx.fillRect === 'function') {
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (hasActiveWatermark(wm) && typeof Typeset?.drawWatermark === 'function') {
+    Typeset.drawWatermark(ctx, W, H, wm, projectWatermarkLogos());
+  }
+}
+
+function readBlobAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (typeof FileReader === 'function') {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('خواندن فایل لوگو ناموفق بود'));
+      reader.readAsDataURL(file);
+      return;
+    }
+    if (typeof file.arrayBuffer === 'function') {
+      file.arrayBuffer().then((buf) => {
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        bytes.forEach((b) => { bin += String.fromCharCode(b); });
+        resolve(`data:${file.type || 'image/png'};base64,${btoa(bin)}`);
+      }, reject);
+      return;
+    }
+    reject(new Error('خواندن فایل لوگو پشتیبانی نمی‌شود'));
+  });
+}
+
+async function handleWatermarkLogoUpload(file) {
+  if (!file || !state.project) return;
+  if (file.size > 6 * 1024 * 1024) {
+    toast('حجم فایل لوگو نباید بیشتر از ۶ مگابایت باشد.', true);
+    return;
+  }
+  const dataUrl = await readBlobAsDataUrl(file);
+  if (!dataUrl.startsWith('data:image/')) {
+    toast('فقط فایل‌های تصویری (PNG، WebP، SVG، JPG) برای لوگو مجاز هستند.', true);
+    return;
+  }
+  state.project.settings = state.project.settings || {};
+  state.project.settings.watermarkLogos = projectWatermarkLogos();
+  const logoId = `logo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const cleanLabel = String(file.name || 'logo.png').replace(/\.[^.]+$/, '').slice(0, 48) || 'لوگو';
+  state.project.settings.watermarkLogos[logoId] = {
+    id: logoId,
+    name: cleanLabel,
+    dataUrl,
+  };
+  await ensureWatermarkLogoDrawable(logoId, dataUrl);
+  populateWatermarkLogoSelect(logoId);
+  scheduleSave();
+  await drawWatermarkDialogPreview();
+  toast(`لوگوی «${cleanLabel}» اضافه و انتخاب شد`);
+}
+
+async function deleteSelectedWatermarkLogo() {
+  const logoId = String($('wmLogoSelect')?.value || '').trim();
+  if (!logoId || !state.project) return;
+  const logos = projectWatermarkLogos();
+  const entry = logos[logoId];
+  if (!entry) return;
+  const usedCount = (state.project.images || []).filter((img) => img.watermark?.logoId === logoId).length;
+  const msg = usedCount
+    ? `لوگوی «${entry.name}» روی ${usedCount.toLocaleString('fa-IR')} صفحه استفاده شده است. آیا از فهرست لوگوها و آن صفحات حذف شود؟`
+    : `آیا لوگوی «${entry.name}» از فهرست لوگوهای پروژه حذف شود؟`;
+  const ok = await appConfirm(msg, {
+    title: 'حذف لوگوی واترمارک',
+    confirmText: 'بله، حذف شود',
+    cancelText: 'انصراف',
+    variant: 'danger',
+    destructive: true,
+  });
+  if (!ok) return;
+  delete logos[logoId];
+  for (const [cacheKey, drawable] of [...watermarkLogoCache.entries()]) {
+    if (cacheKey === logoId || cacheKey.startsWith(`${logoId}:`)) {
+      try { drawable?.close?.(); } catch { /* ignore */ }
+      watermarkLogoCache.delete(cacheKey);
+    }
+  }
+  const affectedIds = [];
+  (state.project.images || []).forEach((img) => {
+    if (img.watermark?.logoId === logoId) {
+      img.watermark.logoId = '';
+      if (!hasActiveWatermark(img.watermark)) img.watermark = null;
+      affectedIds.push(img.id);
+    }
+  });
+  populateWatermarkLogoSelect('');
+  await saveProject();
+  if (affectedIds.length) await renderImagesText(affectedIds);
+  if (state.editorId) drawEditorCanvas();
+  await drawWatermarkDialogPreview();
+  toast('لوگو حذف شد');
+}
+
+async function openWatermarkDialog(fromEditor = false) {
+  if (!isModuleLicensed('editing')) { await ensureModuleLicensed('editing'); return; }
+  if (!state.project?.images?.length) {
+    toast('ابتدا حداقل یک صفحه یا فایل به پروژه وارد کنید.', true);
+    return;
+  }
+  await ensureFont();
+  const scopeSelect = $('wmTargetScope');
+  const totalCount = state.project.images.length;
+  const selCount = selectedImages().length;
+  const inEditor = Boolean(fromEditor && editorItem());
+  if (scopeSelect) {
+    scopeSelect.textContent = '';
+    if (inEditor) {
+      const optEd = document.createElement('option');
+      optEd.value = 'editor';
+      optEd.textContent = `فقط همین صفحهٔ در حال ویرایش (${editorItem().name})`;
+      scopeSelect.appendChild(optEd);
+    }
+    if (selCount > 0) {
+      const optSel = document.createElement('option');
+      optSel.value = 'selected';
+      optSel.textContent = `صفحات انتخاب‌شده (${selCount.toLocaleString('fa-IR')} از ${totalCount.toLocaleString('fa-IR')} صفحه)`;
+      scopeSelect.appendChild(optSel);
+    }
+    const optAll = document.createElement('option');
+    optAll.value = 'all';
+    optAll.textContent = `همهٔ صفحات پروژه (${totalCount.toLocaleString('fa-IR')} صفحه)`;
+    scopeSelect.appendChild(optAll);
+    scopeSelect.value = inEditor ? 'editor' : (selCount > 0 ? 'selected' : 'all');
+  }
+  const initialSource = (inEditor && editorItem()?.watermark)
+    || selectedImages().find((img) => hasActiveWatermark(img.watermark))?.watermark
+    || state.project.images.find((img) => hasActiveWatermark(img.watermark))?.watermark
+    || state.project.settings?.watermarkPreset
+    || defaultWatermarkConfig();
+  fillWatermarkDialogForm(initialSource);
+  showDialog('watermarkDialog');
+  await drawWatermarkDialogPreview();
+}
+
+async function applyWatermarkFromDialog() {
+  if (!state.project) return;
+  const wm = readWatermarkDialogForm();
+  if (!hasActiveWatermark(wm)) {
+    toast('لطفاً متن واترمارک را بنویسید یا یک لوگو انتخاب کنید (برای پاک‌کردن، دکمهٔ «حذف واترمارک» را بزنید).', true);
+    return;
+  }
+  const scope = $('wmTargetScope')?.value || 'selected';
+  const targets = watermarkTargetPages(scope);
+  if (!targets.length) {
+    toast('صفحه‌ای برای اعمال واترمارک انتخاب نشده است.', true);
+    return;
+  }
+  await ensureWatermarkLogosReady(wm);
+  state.project.settings = state.project.settings || {};
+  state.project.settings.watermarkPreset = { ...wm };
+  targets.forEach((img) => {
+    img.watermark = { ...wm, enabled: true };
+  });
+  closeDialog('watermarkDialog');
+  if (scope === 'editor' && editorItem() && targets.length === 1 && targets[0].id === state.editorId) {
+    drawEditorCanvas();
+    scheduleSave();
+    toast('واترمارک روی این صفحه قرار گرفت');
+    return;
+  }
+  if (state.editorId && targets.some((t) => t.id === state.editorId)) {
+    drawEditorCanvas();
+  }
+  await runJob(`در حال اعمال واترمارک روی ${targets.length.toLocaleString('fa-IR')} صفحه…`, async (signal) => {
+    const checkCancel = () => {
+      if (signal?.aborted) {
+        const err = new Error('اعمال واترمارک لغو شد.');
+        err.name = 'AbortError'; err.cancelled = true;
+        throw err;
+      }
+    };
+    await saveProject();
+    await renderImagesText(targets.map((t) => t.id), null, checkCancel);
+  }, 'jobProgress');
+  renderGrid();
+  toast(`واترمارک روی ${targets.length.toLocaleString('fa-IR')} صفحه اعمال شد`);
+}
+
+async function removeWatermarkFromDialog() {
+  if (!state.project) return;
+  const scope = $('wmTargetScope')?.value || 'selected';
+  const targets = watermarkTargetPages(scope);
+  const activeTargets = targets.filter((img) => hasActiveWatermark(img.watermark));
+  if (!activeTargets.length) {
+    closeDialog('watermarkDialog');
+    toast('صفحات انتخابی واترمارک فعالی ندارند');
+    return;
+  }
+  const ok = await appConfirm(`آیا واترمارک از ${activeTargets.length.toLocaleString('fa-IR')} صفحه حذف شود؟`, {
+    title: 'حذف واترمارک',
+    confirmText: 'بله، حذف شود',
+    cancelText: 'انصراف',
+    variant: 'danger',
+    destructive: true,
+  });
+  if (!ok) return;
+  activeTargets.forEach((img) => { img.watermark = null; });
+  closeDialog('watermarkDialog');
+  if (scope === 'editor' && editorItem() && activeTargets.length === 1 && activeTargets[0].id === state.editorId) {
+    drawEditorCanvas();
+    scheduleSave();
+    toast('واترمارک این صفحه حذف شد');
+    return;
+  }
+  if (state.editorId && activeTargets.some((t) => t.id === state.editorId)) {
+    drawEditorCanvas();
+  }
+  await runJob(`در حال حذف واترمارک از ${activeTargets.length.toLocaleString('fa-IR')} صفحه…`, async (signal) => {
+    const checkCancel = () => {
+      if (signal?.aborted) {
+        const err = new Error('حذف واترمارک لغو شد.');
+        err.name = 'AbortError'; err.cancelled = true;
+        throw err;
+      }
+    };
+    await saveProject();
+    await renderImagesText(activeTargets.map((t) => t.id), null, checkCancel);
+  }, 'jobProgress');
+  renderGrid();
+  toast(`واترمارک از ${activeTargets.length.toLocaleString('fa-IR')} صفحه حذف شد`);
+}
+
 // ---------- Events and startup ----------
 function bindEvents() {
   const finishBrowserSession = () => { if (inlineDraft && !sessionCloseSent) classicEditor.saveDraft(); closeSession(); };
   window.addEventListener('pagehide', finishBrowserSession);
   window.addEventListener('beforeunload', finishBrowserSession);
   window.addEventListener('pageshow', (event) => { if (event.persisted) startSession(); });
+  $('serverAlertRetry')?.addEventListener('click', () => { retryServerConnection(); });
+  $('serverAlertDismiss')?.addEventListener('click', () => { hideServerUnreachable(); });
   bindGridDrop();
   $('menuBtn').addEventListener('click', () => setMenuOpen($('menu').classList.contains('hidden')));
   const closeMenuOutside = (event) => {
@@ -5657,6 +8722,7 @@ function bindEvents() {
         else if (dlg.id === 'docxExportDialog') requestCancelExport('docxExportDialog').catch(() => {});
         else if (dlg.id === 'pptxExportDialog') requestCancelExport('pptxExportDialog').catch(() => {});
         else if (dlg.id === 'modelsDialog') requestCancelModelJob().catch(() => {});
+        else if (dlg.id === 'aiDialog') requestCancelAiDialog().catch(() => {});
         else if (dlg.id === 'translationPreviewDialog') cancelTranslationRequestPreview();
         else closeDialog(dlg.id);
       });
@@ -5674,6 +8740,9 @@ function bindEvents() {
   $('appModalDialog')?.addEventListener('cancel', (event) => { event.preventDefault(); resolveActiveModal(false); });
   $('appModalDialog')?.addEventListener('close', () => { if (activeModalState && !$('appModalDialog')?.open) resolveActiveModal(false); });
   $('dockCancelJobBtn')?.addEventListener('click', () => requestCancelActiveJob().catch(() => {}));
+  $('editorCancelJobBtn')?.addEventListener('click', () => requestCancelActiveJob().catch(() => {}));
+  $('ocrQuickCancelBtn')?.addEventListener('click', () => requestCancelModelJob({ closeModelsDialog: false }).catch(() => {}));
+  $('cancelExportBtn')?.addEventListener('click', () => requestCancelExport('exportDialog').catch(() => {}));
   $('themeBtn').addEventListener('click', () => { document.body.classList.toggle('light'); localStorage.setItem('comic-studio-theme', document.body.classList.contains('light') ? 'light' : 'dark'); });
   $('backupProjectBtn').addEventListener('click', () => backupCurrentProject().catch(() => {}));
   $('restoreProjectBtn').addEventListener('click', () => $('restoreProjectInput').click());
@@ -5823,21 +8892,70 @@ function bindEvents() {
       $('dragGuideBtn')?.setAttribute('aria-expanded', 'false');
     }
   });
-  $('ocrBtn').addEventListener('click', () => { clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog'); });
+  $('ocrBtn').addEventListener('click', () => {
+    if (!isModuleLicensed('ocr')) { ensureModuleLicensed('ocr').catch(() => {}); return; }
+    clearPendingTranslationOcr(); $('ocrStatus').textContent = ''; $('copyOcrError').classList.add('hidden'); updateEngineOptions(); showDialog('ocrDialog');
+  });
   $('ocrEngine').addEventListener('change', () => { collectOcrSettings(); updateOcrEngineStatus(); scheduleSave(); });
+  $('ocrPersianPreprocess')?.addEventListener('change', () => {
+    if (state.project) {
+      state.project.settings = state.project.settings || {};
+      state.project.settings.persianPreprocessCustomized = true;
+    }
+    collectOcrSettings();
+    scheduleSave();
+  });
   $('ocrLanguage').addEventListener('change', () => {
     const nextLang = $('ocrLanguage').value;
     if ($('modelsLanguage')) $('modelsLanguage').value = nextLang;
     if ($('testLanguage')) $('testLanguage').value = nextLang;
-    updateEngineOptions($('ocrEngine').value, { resort: true });
+    if ($('ocrPersianPreprocess') && state.project?.settings?.persianPreprocessCustomized !== true) {
+      $('ocrPersianPreprocess').checked = nextLang === 'fas';
+    }
+    const pageMode = normalizePageMode($('ocrPageMode')?.value || state.project?.settings?.ocrPageMode);
+    const prevId = $('ocrEngine').value;
+    const prevEng = state.engines.find((entry) => entry.id === prevId);
+    const prevSupports = Boolean(prevEng && (prevEng.languages || []).includes(nextLang));
+    const prevReady = Boolean(prevSupports && prevEng.runtimeInstalled && (prevEng.readyLanguages || []).includes(nextLang));
+    const prevTier = prevEng ? engineSuitability(prevEng, pageMode, nextLang).tier : 'weak';
+    const anyReadyForLang = state.engines.some(
+      (entry) => entry.selectable !== false && entry.runtimeInstalled && (entry.readyLanguages || []).includes(nextLang),
+    );
+    const anyBestReadyForLang = state.engines.some(
+      (entry) => entry.selectable !== false
+        && entry.runtimeInstalled
+        && (entry.readyLanguages || []).includes(nextLang)
+        && engineSuitability(entry, pageMode, nextLang).tier === 'best',
+    );
+    const shouldAutoUpgrade = !prevSupports
+      || (!prevReady && anyReadyForLang)
+      || (prevTier !== 'best' && anyBestReadyForLang);
+    const targetEngine = shouldAutoUpgrade
+      ? pickBestEngineForLanguage(nextLang, pageMode, '')
+      : prevId;
+    updateEngineOptions(targetEngine, { resort: true });
     collectOcrSettings();
     scheduleSave();
     if ($('modelsDialog')?.open) renderModels({ resort: true });
   });
   $('ocrPageMode')?.addEventListener('change', () => {
-    collectOcrSettings();
+    const lang = $('ocrLanguage')?.value || state.project?.settings?.ocrLanguage || 'eng';
+    const nextMode = normalizePageMode($('ocrPageMode')?.value);
+    const curId = $('ocrEngine')?.value || '';
+    const curEng = state.engines.find((entry) => entry.id === curId);
+    const curTier = curEng ? engineSuitability(curEng, nextMode, lang).tier : 'weak';
+    const hasBestReady = state.engines.some(
+      (entry) => entry.selectable !== false
+        && entry.runtimeInstalled
+        && (entry.readyLanguages || []).includes(lang)
+        && engineSuitability(entry, nextMode, lang).tier === 'best',
+    );
+    const nextTarget = (curTier !== 'best' && hasBestReady)
+      ? pickBestEngineForLanguage(lang, nextMode, '')
+      : '';
     if ($('modelsPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
-    updateEngineOptions('', { resort: true });
+    updateEngineOptions(nextTarget, { resort: true });
+    collectOcrSettings();
     scheduleSave();
     if ($('modelsDialog')?.open) renderModels({ resort: true });
   });
@@ -5851,7 +8969,7 @@ function bindEvents() {
   });
   $('startOcrBtn').addEventListener('click', () => runOcr().catch(() => {})); $('cancelOcrBtn')?.addEventListener('click', () => requestCancelOcrDialog().catch(() => {})); $('cancelTranslationBtn')?.addEventListener('click', () => requestCancelTranslationDialog().catch(() => {})); $('translateBtn').addEventListener('click', () => runTranslation().catch(() => {}));
   $('ocrDialog').addEventListener('cancel', (event) => {
-    if (ocrRunning && !ocrClosingNormally) { event.preventDefault(); requestCancelOcrDialog().catch(() => {}); }
+    if ((ocrRunning && !ocrClosingNormally) || (state.modelBusy && modelFromOcrDialog)) { event.preventDefault(); requestCancelOcrDialog().catch(() => {}); }
   });
   $('ocrDialog').addEventListener('close', () => {
     if (ocrRunning && !ocrClosingNormally) abortRunningOcr();
@@ -5907,6 +9025,9 @@ function bindEvents() {
   $('modelsDialog')?.addEventListener('cancel', (event) => {
     if (state.modelBusy) { event.preventDefault(); requestCancelModelJob().catch(() => {}); }
   });
+  $('aiDialog')?.addEventListener('cancel', (event) => {
+    if (localNmtBusyModel || localNmtTestAbortController) { event.preventDefault(); requestCancelAiDialog().catch(() => {}); }
+  });
   $('copyAiError').addEventListener('click', () => copyBlockText($('aiStatus').textContent).catch((error) => toast(error.message, true)));
   $('copyTranslationSkill')?.addEventListener('click', () => copyFieldText($('translationSkill'), 'راهنمای ترجمه').catch((error) => toast(error.message || String(error), true)));
   $('pasteTranslationSkill')?.addEventListener('click', () => pasteIntoField($('translationSkill')).catch((error) => toast(error.message || String(error), true)));
@@ -5918,23 +9039,14 @@ function bindEvents() {
   $('translationSkillReset').addEventListener('click', () => { $('translationSkill').value = translationPreviewData?.defaultSkill ?? ''; updateTranslationSkillStatus(); });
   $('translationPreviewConfirm').addEventListener('click', () => confirmTranslationRequestPreview().catch(() => {})); $('translationPreviewCancel').addEventListener('click', cancelTranslationRequestPreview); $('translationPreviewDialog').addEventListener('close', () => { if (!$('translationPreviewDialog').open) { translationPreviewAction = null; translationPreviewRefresh = null; translationPreviewSwitchTarget = null; translationPreviewData = null; } });
   $('modelsBtn').addEventListener('click', () => {
+    setMenuOpen(false);
+    if (!isModuleLicensed('ocr')) { ensureModuleLicensed('ocr').catch(() => {}); return; }
     if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = false;
     if ($('modelsPageMode') && $('ocrPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
     if ($('modelsLanguage') && $('ocrLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
     if ($('testLanguage') && $('ocrLanguage')) $('testLanguage').value = $('ocrLanguage').value;
     renderModels();
     showDialog('modelsDialog');
-    setMenuOpen(false);
-    refreshEngineMemory().catch(() => {});
-  });
-  $('deleteModelsMenuBtn')?.addEventListener('click', () => {
-    if ($('modelsInstalledOnly')) $('modelsInstalledOnly').checked = true;
-    if ($('modelsPageMode') && $('ocrPageMode')) $('modelsPageMode').value = $('ocrPageMode').value;
-    if ($('modelsLanguage') && $('ocrLanguage')) $('modelsLanguage').value = $('ocrLanguage').value;
-    if ($('testLanguage') && $('ocrLanguage')) $('testLanguage').value = $('ocrLanguage').value;
-    renderModels();
-    showDialog('modelsDialog');
-    setMenuOpen(false);
     refreshEngineMemory().catch(() => {});
   });
   $('modelsInstalledOnly')?.addEventListener('change', () => renderModels());
@@ -5948,14 +9060,38 @@ function bindEvents() {
   });
   $('modelsPageMode')?.addEventListener('change', () => renderModels({ resort: true }));
   $('freeModelsRamBtn')?.addEventListener('click', () => freeModelsRam().catch(() => {}));
+  $('modelsStorageBtn')?.addEventListener('click', () => openStorageDialog().catch((error) => toast(error.message || String(error), true)));
+  $('storageBtn')?.addEventListener('click', () => openStorageDialog().catch((error) => toast(error.message || String(error), true)));
+  $('storageBrowseBtn')?.addEventListener('click', () => browseStorageFolder().catch(() => {}));
+  $('storageMigrateExisting')?.addEventListener('change', syncStorageCheckboxState);
+  $('storageSaveBtn')?.addEventListener('click', () => submitStorageSettings(null).catch(() => {}));
+  $('storageResetDefaultBtn')?.addEventListener('click', () => submitStorageSettings('').catch(() => {}));
+  $('storageDialog')?.addEventListener('cancel', (event) => {
+    if (storageSwitchBusy) event.preventDefault();
+  });
+  $('resourcesBtn')?.addEventListener('click', () => openResourcesDialog().catch((error) => toast(error.message || String(error), true)));
+  $('resourcesSaveBtn')?.addEventListener('click', () => submitResourceBudget().catch(() => {}));
+  $('resourcesAutoMode')?.addEventListener('change', () => {
+    const manual = !$('resourcesAutoMode')?.checked;
+    $('resourcesManualBox')?.classList.toggle('hidden', !manual);
+    [$('resourcesCpuPercent'), $('resourcesRamPercent')].forEach((el) => { if (el) el.disabled = !manual; });
+    if ($('resourcesModeBadge')) {
+      $('resourcesModeBadge').textContent = manual ? 'دستی' : 'خودکار';
+      $('resourcesModeBadge').classList.toggle('is-local', !manual);
+    }
+  });
+  $('resourcesCpuPercent')?.addEventListener('input', syncResourceSliderLabels);
+  $('resourcesRamPercent')?.addEventListener('input', syncResourceSliderLabels);
   $('checkModelUpdatesBtn')?.addEventListener('click', () => checkEngineUpdates({ force: true, silent: false }).catch(() => {}));
   $('updateAllModelsBtn')?.addEventListener('click', () => updateAllEngines().catch(() => {}));
   $('modelsActiveCancelBtn')?.addEventListener('click', () => requestCancelModelJob().catch(() => {}));
   $('engineUpdateNowBtn')?.addEventListener('click', () => {
+    if (!isModuleLicensed('ocr')) { ensureModuleLicensed('ocr').catch(() => {}); return; }
     if (!$('modelsDialog').open) { renderModels(); showDialog('modelsDialog'); }
     updateAllEngines().catch(() => {});
   });
   $('engineUpdateOpenModelsBtn')?.addEventListener('click', () => {
+    if (!isModuleLicensed('ocr')) { ensureModuleLicensed('ocr').catch(() => {}); return; }
     renderModels();
     showDialog('modelsDialog');
     refreshEngineMemory().catch(() => {});
@@ -5964,11 +9100,60 @@ function bindEvents() {
   if (!helpController && window.ComicHelpGuide?.createHelpController) {
     helpController = window.ComicHelpGuide.createHelpController();
   }
-  $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(null));
+  $('helpTopBtn')?.addEventListener('click', () => openHelpDialog(document.body.classList.contains('auth-locked') ? 'license-login-security' : null));
+  $('licenseTopStatusBtn')?.addEventListener('click', () => { openLicenseDialog().catch((error) => toast(error.detailText || error.message, true)); });
+  $('licenseBtn')?.addEventListener('click', () => { setMenuOpen(false); openLicenseDialog().catch((error) => toast(error.detailText || error.message, true)); });
+  $('trialBannerOpenLicBtn')?.addEventListener('click', () => { openLicenseDialog({ focusRenew: true }).catch((error) => toast(error.detailText || error.message, true)); });
+  $('lockAppMenuBtn')?.addEventListener('click', () => { setMenuOpen(false); lockWorkspaceNow().catch((error) => toast(error.detailText || error.message, true)); });
+  $('lockNowInsideDialogBtn')?.addEventListener('click', () => { closeDialog('licenseDialog'); lockWorkspaceNow().catch((error) => toast(error.detailText || error.message, true)); });
+  $('licenseDialogDoneBtn')?.addEventListener('click', () => closeDialog('licenseDialog'));
+  $('copyGateHwidBtn')?.addEventListener('click', () => copyTextWithToast($('gateHardwareId')?.textContent || '', 'کد سیستم در کلیپ‌بورد کپی شد'));
+  $('copyDialogHwidBtn')?.addEventListener('click', () => copyTextWithToast($('licInfoHwid')?.textContent || '', 'کد سیستم در کلیپ‌بورد کپی شد'));
+  $('copyGateOrderMsgBtn')?.addEventListener('click', () => copyTextWithToast(buildCustomerOrderRequestText($('gateHardwareId')?.textContent || ''), 'متن آمادهٔ سفارش لایسنس کپی شد؛ آن را برای فروشنده ارسال کنید'));
+  $('copyDialogOrderMsgBtn')?.addEventListener('click', () => copyTextWithToast(buildCustomerOrderRequestText($('licInfoHwid')?.textContent || ''), 'متن آمادهٔ سفارش لایسنس کپی شد؛ آن را برای فروشنده ارسال کنید'));
+  $('pasteGateLicenseBtn')?.addEventListener('click', async () => {
+    try {
+      const clip = await navigator.clipboard?.readText?.();
+      if (clip && $('gateLicenseKeyInput')) {
+        $('gateLicenseKeyInput').value = clip.trim();
+        toast('کلید لایسنس چسبانده شد');
+      } else {
+        toast('کلیپ‌بورد خالی است یا مرورگر اجازهٔ خواندن مستقیم نداد (با Ctrl+V بچسبانید)', true);
+      }
+    } catch {
+      toast('با کلیدهای Ctrl+V کلید لایسنس را در کادر بچسبانید', true);
+    }
+  });
+  $('activateGateLicenseBtn')?.addEventListener('click', () => submitGateLicenseActivation().catch(() => {}));
+  $('switchToActivatePaneBtn')?.addEventListener('click', () => {
+    if (state.licenseStatus) applyAuthGateUi(state.licenseStatus, { forceActivatePane: true });
+  });
+  $('backToLoginPaneBtn')?.addEventListener('click', () => {
+    if (state.licenseStatus) applyAuthGateUi(state.licenseStatus, { forceActivatePane: false });
+  });
+  $('toggleGatePwdVisBtn')?.addEventListener('click', () => {
+    const inp = $('gateLoginPasswordInput');
+    if (!inp) return;
+    const isPwd = inp.type === 'password';
+    inp.type = isPwd ? 'text' : 'password';
+    if ($('toggleGatePwdVisBtn')) $('toggleGatePwdVisBtn').textContent = isPwd ? 'پنهان' : 'نمایش';
+  });
+  $('gateLoginSubmitBtn')?.addEventListener('click', () => submitGatePasswordLogin().catch(() => {}));
+  $('gateLoginPasswordInput')?.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); submitGatePasswordLogin().catch(() => {}); }
+  });
+  $('saveLocalPwdBtn')?.addEventListener('click', () => saveLocalPasswordFromDialog().catch(() => {}));
+  $('removeLocalPwdBtn')?.addEventListener('click', () => removeLocalPasswordFromDialog().catch(() => {}));
+  $('dialogActivateNewBtn')?.addEventListener('click', () => activateNewLicenseFromDialog().catch(() => {}));
   $('editorOpenFullHelpBtn')?.addEventListener('click', () => openHelpDialog('visual-editor'));
   $('helpDialogClose')?.addEventListener('click', (event) => { event.preventDefault(); closeDialog('helpDialog'); });
-  $('aiBtn').addEventListener('click', () => { setProgress('aiProgress', 0, false); loadAiSettings().then(() => { showDialog('aiDialog'); setMenuOpen(false); }).catch((error) => toast(error.message, true)); }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiBaseUrl')?.addEventListener('input', syncAiExecUi); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
-  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', () => exportResult(), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', () => exportResult('pdf'), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', () => exportResult('images'), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', () => exportResult('txt'), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'visual').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'visual').catch(() => {})); $('docxChoiceFlowingTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'flowing').catch(() => {})); $('docxChoiceFlowingOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'flowing').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {})); $('exportPptxBtn')?.addEventListener('click', () => openPptxExportPrompt()); $('pptxChoiceTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'visual').catch(() => {})); $('pptxChoiceOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'visual').catch(() => {})); $('pptxChoiceFlowingTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'flowing').catch(() => {})); $('pptxChoiceFlowingOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'flowing').catch(() => {})); $('pptxExportCancel')?.addEventListener('click', () => requestCancelExport('pptxExportDialog').catch(() => {}));
+  $('aiBtn').addEventListener('click', () => {
+    setMenuOpen(false);
+    if (!isModuleLicensed('translation')) { ensureModuleLicensed('translation').catch(() => {}); return; }
+    setProgress('aiProgress', 0, false);
+    loadAiSettings().then(() => { showDialog('aiDialog'); }).catch((error) => toast(error.message, true));
+  }); $('aiProvider').addEventListener('change', () => showAiProvider($('aiProvider').value)); $('aiBaseUrl')?.addEventListener('input', syncAiExecUi); $('localNmtModelSelect')?.addEventListener('change', () => renderLocalNmtPanel()); $('localNmtCancelBtn')?.addEventListener('click', () => cancelLocalNmtPrepare().catch(() => {})); $('localNmtUnloadBtn')?.addEventListener('click', () => unloadLocalNmtRam().catch(() => {})); $('localNmtTestBtn')?.addEventListener('click', () => testLocalNmtSample().catch(() => {})); $('aiAddProfile').addEventListener('click', () => { aiEditorProfiles.push(makeAiProfile()); renderAiProfiles(); }); $('saveAiBtn').addEventListener('click', async () => { $('saveAiBtn').disabled = true; setProgress('aiProgress', null, true); try { await saveAiSettings(); setProgress('aiProgress', 1, false); closeDialog('aiDialog'); } catch (error) { setProgress('aiProgress', 0, false); $('aiStatus').textContent = error.message; $('copyAiError').classList.remove('hidden'); toast(error.message, true); } finally { $('saveAiBtn').disabled = false; } });
+  $('exportBtn').addEventListener('click', () => { updateExportFields(); showDialog('exportDialog'); }); $('exportKind').addEventListener('change', updateExportFields); $('overlayMode').addEventListener('change', () => setOverlayMode($('overlayMode').value)); $('exportOverlayMode').addEventListener('change', () => setOverlayMode($('exportOverlayMode').value)); $('startExportBtn').addEventListener('click', () => runJob('در حال ساخت خروجی…', (signal) => exportResult(null, null, null, signal), 'exportProgress').catch(() => {})); $('exportPdfBtn').addEventListener('click', () => runJob('در حال ساخت PDF…', (signal) => exportResult('pdf', null, null, signal), 'exportProgress').catch(() => {})); $('exportImagesBtn').addEventListener('click', () => runJob('در حال ساخت ZIP…', (signal) => exportResult('images', null, null, signal), 'exportProgress').catch(() => {})); $('exportTxtBtn').addEventListener('click', () => runJob('در حال ساخت TXT…', (signal) => exportResult('txt', null, null, signal), 'exportProgress').catch(() => {})); $('exportDocxBtn')?.addEventListener('click', () => openDocxExportPrompt()); $('docxChoiceTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'visual').catch(() => {})); $('docxChoiceOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'visual').catch(() => {})); $('docxChoiceFlowingTranslation')?.addEventListener('click', () => runDocxChoiceExport('translation', 'flowing').catch(() => {})); $('docxChoiceFlowingOcr')?.addEventListener('click', () => runDocxChoiceExport('ocr', 'flowing').catch(() => {})); $('docxExportCancel')?.addEventListener('click', () => requestCancelExport('docxExportDialog').catch(() => {})); $('exportPptxBtn')?.addEventListener('click', () => openPptxExportPrompt()); $('pptxChoiceTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'visual').catch(() => {})); $('pptxChoiceOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'visual').catch(() => {})); $('pptxChoiceFlowingTranslation')?.addEventListener('click', () => runPptxChoiceExport('translation', 'flowing').catch(() => {})); $('pptxChoiceFlowingOcr')?.addEventListener('click', () => runPptxChoiceExport('ocr', 'flowing').catch(() => {})); $('pptxExportCancel')?.addEventListener('click', () => requestCancelExport('pptxExportDialog').catch(() => {}));
   $('editorSelectAll').addEventListener('click', selectAllEditorBlocks); $('editorSelectNone').addEventListener('click', clearEditorSelection);
   $('editorMergeText').addEventListener('click', mergeSelectedText); $('editorSplitText').addEventListener('click', splitSelectedText);
   $('editorSameSize').addEventListener('click', sameSizeSelectedBoxes);
@@ -5990,10 +9175,12 @@ function bindEvents() {
   $('editorDialog').addEventListener('cancel', (event) => { event.preventDefault(); if (classicEditor?.hasOpenModal?.()) classicEditor.closeModal(); else if (imageOverview) exitImageOverview().catch((error) => toast(error.message, true)); else if (inlineDraft) closeInlineEditor(); else closeEditor(false).catch((error) => toast(error.message, true)); });
   $('inlineEditorApply').addEventListener('click', applyInlineEditor);
   $('inlinePreview').addEventListener('mousedown', (event) => event.preventDefault());
-  $('inlinePreview').addEventListener('click', () => setInlineOutputPreview(!inlineDraft?.showOutput));
+  $('inlinePreview').addEventListener('click', () => setInlineOutputPreview(inlineDraft ? !inlineDraft.showOutput : undefined));
   $('inlineEditorCancel').addEventListener('click', () => closeInlineEditor(true));
   classicEditor = window.createEditor('#inlineEditorField', {
     clearFormatId: 'inlineLineReset',
+    onEnsureTarget: () => ensureInlineTargetSession(),
+    formatBlock: (tag) => formatInlineBlockTag(tag),
     confirmDraft: (message) => appConfirm(message, {
       title: 'بازیابی پیش‌نویس ذخیره‌شده',
       confirmText: 'بله، بازیابی شود',
@@ -6001,14 +9188,23 @@ function bindEvents() {
       variant: 'warning',
     }),
     serializeHTML: serializeInlineFieldHtml,
-    undo: () => restoreInlineHistory(-1), redo: () => restoreInlineHistory(1),
+    undo: () => { if (inlineDraft) restoreInlineHistory(-1); else restoreEditorPageHistory(-1); },
+    redo: () => { if (inlineDraft) restoreInlineHistory(1); else restoreEditorPageHistory(1); },
     inlineCommand: (cmd) => toggleInlineCommand(cmd),
     clearFormat: () => resetInlineLineStyle(),
     align: (value) => setInlineLineStyle('textAlign', value),
     direction: (value) => setInlineLineStyle('direction', value),
     color: (value) => {
+      if (!inlineDraft) { setInlineLineStyle('color', value, { restoreFocus: false }); return true; }
+      ensureValidInlineRange();
       if (hasInlineWordSelection()) return applyInlineWordStyle({ color: value }, { restoreFocus: false });
-      if (inlineDraft?.range?.collapsed) { setInlineLineStyle('color', value, { restoreFocus: false }); return true; }
+      if (isInlineFieldEmpty()) {
+        inlineDraft.color = value;
+        if ($('inlineEditorColor')) $('inlineEditorColor').value = value;
+        syncInlineLineControls(); refreshInlineTypography(); classicEditor.notifyChange();
+        return true;
+      }
+      if (inlineDraft.range?.collapsed) { setInlineLineStyle('color', value, { restoreFocus: false }); return true; }
       return false;
     },
     onFullscreen: (enabled) => {
@@ -6018,8 +9214,42 @@ function bindEvents() {
       else if (box) { classicEditor.attachField(box); refreshInlineTypography(); }
     },
     onChange: () => { if (inlineDraft) { rememberInlineRange(); recordInlineHistory(); syncInlineLineControls(); refreshInlineTypography(); autoApplyInlineDraft(); updateEditorSelection(); } },
-    getDraftMetadata: () => inlineDraft ? { dir: $('inlineEditorDirection').value, align: $('inlineEditorAlign').value, verticalAlign: $('inlineVerticalAlign').value, size: (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && $('inlineEditorSize').value.trim() === inlineDraft.initialSizeValue) ? '' : $('inlineEditorSize').value, color: inlineDraft.color } : null,
-    onRestore: (meta) => { if (!inlineDraft || !meta) return; if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir; if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align; if (['top','middle','bottom'].includes(meta.verticalAlign)) { inlineDraft.verticalAlignTouched = true; $('inlineVerticalAlign').value = meta.verticalAlign; } if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; } else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; } if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); } $('inlineEditorField').dir = $('inlineEditorDirection').value; $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value; syncVerticalAlignButtons(); },
+    getDraftMetadata: () => inlineDraft ? {
+      dir: $('inlineEditorDirection').value,
+      align: $('inlineEditorAlign').value,
+      verticalAlign: $('inlineVerticalAlign').value,
+      size: (inlineDraft.initialAutoSize && !inlineDraft.sizeTouched && $('inlineEditorSize').value.trim() === inlineDraft.initialSizeValue) ? '' : $('inlineEditorSize').value,
+      color: inlineDraft.color,
+      fontFamily: ($('inlineEditorFont')?.value || '').trim() || inlineDraft.fontFamily || '',
+      bold: inlineDraft.bold,
+      italic: inlineDraft.italic,
+      underline: inlineDraft.underline,
+      strike: !!inlineDraft.strike,
+    } : null,
+    onRestore: (meta) => {
+      if (!inlineDraft || !meta) return;
+      if (['rtl', 'ltr'].includes(meta.dir)) $('inlineEditorDirection').value = meta.dir;
+      if (['right','left','center','justify'].includes(meta.align)) $('inlineEditorAlign').value = meta.align;
+      if (['top','middle','bottom'].includes(meta.verticalAlign)) { inlineDraft.verticalAlignTouched = true; $('inlineVerticalAlign').value = meta.verticalAlign; }
+      if (meta.size === '') { inlineDraft.sizeTouched = false; inlineDraft.initialAutoSize = true; const shown = String(effectiveInlineSize(inlineDraft.block)); $('inlineEditorSize').value = shown; inlineDraft.initialSizeValue = shown; }
+      else if (+meta.size >= 8 && +meta.size <= 160) { inlineDraft.sizeTouched = true; inlineDraft.initialAutoSize = false; $('inlineEditorSize').value = meta.size; }
+      if (meta.color === null || /^#[0-9a-f]{6}$/i.test(meta.color || '')) { inlineDraft.color = meta.color; $('inlineEditorColor').value = meta.color || effectiveInlineColor(inlineDraft.block); }
+      if (typeof meta.fontFamily === 'string') {
+        const canon = meta.fontFamily ? canonicalFontOption(meta.fontFamily) : '';
+        const stored = canon && canon !== 'Vazirmatn' ? canon : '';
+        inlineDraft.fontFamily = stored || null;
+        if ($('inlineEditorFont')) $('inlineEditorFont').value = stored;
+        if ($('inlineFontFamily')) $('inlineFontFamily').value = canon || 'Vazirmatn';
+      }
+      if (typeof meta.bold === 'boolean') inlineDraft.bold = meta.bold;
+      if (typeof meta.italic === 'boolean') inlineDraft.italic = meta.italic;
+      if (typeof meta.underline === 'boolean') inlineDraft.underline = meta.underline;
+      if (typeof meta.strike === 'boolean') inlineDraft.strike = meta.strike;
+      $('inlineEditorField').dir = $('inlineEditorDirection').value;
+      $('inlineEditorField').style.textAlign = $('inlineEditorAlign').value;
+      syncVerticalAlignButtons();
+      refreshInlineTypography();
+    },
   });
   const inlineField = $('inlineEditorField');
   inlineField.addEventListener('scroll', () => {
@@ -6067,13 +9297,19 @@ function bindEvents() {
     rememberInlineRange(); syncInlineLineControls();
   });
   $('inlineEditor').addEventListener('pointerdown', (event) => {
-    if (inlineDraft?.showOutput && !event.target.closest('#inlinePreview, #inlineEditorApply, #inlineEditorCancel, .editor-zoom-controls')) setInlineOutputPreview(false);
+    if ((inlineDraft?.showOutput || $('editorBoxes')?.classList.contains('preview-hide-boxes'))
+      && !event.target.closest('#inlinePreview, #inlineEditorApply, #inlineEditorCancel, .editor-zoom-controls')) {
+      setInlineOutputPreview(false);
+    }
     const boxDetails = $('inlineEditor').querySelector('.inline-box-settings');
     if (boxDetails?.open && !event.target.closest('.inline-box-settings')) boxDetails.removeAttribute('open');
   }, true);
   $('inlineEditor').addEventListener('click', () => requestAnimationFrame(positionInlineEditor));
   $('inlineEditor').querySelector('details')?.addEventListener('toggle', () => requestAnimationFrame(positionInlineEditor));
   syncInlineDockIdleState();
+  $('inlineFontFamily')?.addEventListener('change', () => {
+    setSelectionOrBlockFont($('inlineFontFamily').value, { restoreFocus: false });
+  });
   $('inlineLineSize').addEventListener('input', () => {
     const value = $('inlineLineSize').value.trim(); const size = Number(value);
     if (value && Number.isFinite(size) && size >= 8 && size <= 160) setSelectionOrLineSize(`${Math.round(size)}px`, { restoreFocus: false });
@@ -6094,17 +9330,45 @@ function bindEvents() {
   document.querySelectorAll('.inline-box-layout-tools button, .inline-merge-split-tools button').forEach((btn) => btn.addEventListener('mousedown', (event) => event.preventDefault()));
   $('inlineSizeUp')?.addEventListener('click', () => stepSelectionOrLineSize(2));
   $('inlineSizeDown')?.addEventListener('click', () => stepSelectionOrLineSize(-2));
-  $('inlineEditorDirection').addEventListener('change', () => { inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; classicEditor.notifyChange(); });
-  $('inlineEditorAlign').addEventListener('change', () => { inlineField.style.textAlign = $('inlineEditorAlign').value; classicEditor.notifyChange(); });
-  $('inlineVerticalAlign').addEventListener('change', () => { if (inlineDraft) inlineDraft.verticalAlignTouched = true; syncVerticalAlignButtons(); if (inlineDraft) classicEditor.notifyChange(); });
+  $('inlineEditorDirection').addEventListener('change', () => {
+    if (!inlineDraft) { setInlineLineStyle('direction', $('inlineEditorDirection').value); return; }
+    inlineField.dir = $('inlineEditorDirection').value; inlineField.style.direction = inlineField.dir; classicEditor.notifyChange();
+  });
+  $('inlineEditorAlign').addEventListener('change', () => {
+    if (!inlineDraft) { setInlineLineStyle('textAlign', $('inlineEditorAlign').value); return; }
+    inlineField.style.textAlign = $('inlineEditorAlign').value; classicEditor.notifyChange();
+  });
+  $('inlineVerticalAlign').addEventListener('change', () => {
+    if (!inlineDraft) { setVerticalPlacement($('inlineVerticalAlign').value); return; }
+    inlineDraft.verticalAlignTouched = true; syncVerticalAlignButtons(); classicEditor.notifyChange();
+  });
   document.querySelectorAll('.inline-valign-btn').forEach((btn) => {
     btn.addEventListener('mousedown', (event) => event.preventDefault());
     btn.addEventListener('click', () => setVerticalPlacement(btn.dataset.valign));
   });
-  $('inlineEditorColor').addEventListener('input', () => { if (inlineDraft) { inlineDraft.color = $('inlineEditorColor').value; classicEditor.notifyChange(); } });
-  $('inlineEditorAutoColor').addEventListener('click', () => { if (inlineDraft) { inlineDraft.color = null; $('inlineEditorColor').value = effectiveInlineColor({ ...inlineDraft.block, color: null }); classicEditor.notifyChange(); } });
+  $('inlineEditorColor').addEventListener('input', () => {
+    if (!inlineDraft) { setInlineLineStyle('color', $('inlineEditorColor').value); return; }
+    inlineDraft.color = $('inlineEditorColor').value; classicEditor.notifyChange();
+  });
+  $('inlineEditorAutoColor').addEventListener('click', () => {
+    if (!inlineDraft) {
+      const targets = resolveToolbarTargetBlocks({ autoSelectFirst: true });
+      if (!targets.length) return;
+      recordEditorPageHistory();
+      targets.forEach((b) => { b.color = null; cleanBlockRichOverrides(b, { stripColor: true }); });
+      $('inlineEditorColor').value = effectiveInlineColor({ ...targets[0], color: null });
+      buildBlockList(); drawEditor(); scheduleSave();
+      pushPostActionEditorPageHistory();
+      return;
+    }
+    inlineDraft.color = null; $('inlineEditorColor').value = effectiveInlineColor({ ...inlineDraft.block, color: null }); classicEditor.notifyChange();
+  });
   $('inlineEditorSize').addEventListener('input', () => {
-    if (!inlineDraft) return;
+    if (!inlineDraft) {
+      const raw = $('inlineEditorSize').value.trim();
+      setSelectionOrLineSize(raw ? `${raw}px` : '', { restoreFocus: false });
+      return;
+    }
     inlineDraft.sizeTouched = $('inlineEditorSize').value.trim() !== '';
     inlineDraft.initialAutoSize = !inlineDraft.sizeTouched;
     classicEditor.notifyChange();
@@ -6157,12 +9421,120 @@ function bindEvents() {
       }
     }).catch((error) => toast(error.message, true));
   });
+  $('ocrErase')?.addEventListener('change', () => {
+    if (!state.project) return;
+    state.project.settings = state.project.settings || {};
+    state.project.settings.eraseOriginal = $('ocrErase').checked;
+    if (state.editorId) { drawEditorCanvas(); scheduleSave(); }
+    else queueOverlayPreviewRefresh();
+  });
+  $('watermarkBtn')?.addEventListener('click', () => openWatermarkDialog(false).catch((e) => toast(e.message, true)));
+  $('editorWatermarkBtn')?.addEventListener('click', () => openWatermarkDialog(true).catch((e) => toast(e.message, true)));
+  $('editorAddFaText')?.addEventListener('click', () => addManualEditorBlock('fa'));
+  $('editorAddEnText')?.addEventListener('click', () => addManualEditorBlock('en'));
+  $('editorTranslateBlock')?.addEventListener('click', () => translateSelectedEditorBlock());
+  $('editorCopyBlock')?.addEventListener('click', () => copyEditorBlocks());
+  $('editorPasteBlock')?.addEventListener('click', () => pasteCopiedEditorBlocks());
+  $('editorDuplicateBlock')?.addEventListener('click', () => duplicateEditorBlocks());
+  $('editorDeleteBlock')?.addEventListener('click', () => { deleteEditorBlocks().catch((e) => toast(e.message, true)); });
+  $('editorBoxShape')?.addEventListener('change', () => {
+    applyBoxShapeSettings({ shape: $('editorBoxShape').value });
+  });
+  $('editorBoxRadius')?.addEventListener('input', () => {
+    const raw = $('editorBoxRadius').value.trim();
+    if (raw === '') return;
+    applyBoxShapeSettings({ cornerRadius: normalizeRadiusPct(raw) });
+  });
+  $('editorBoxRadius')?.addEventListener('change', () => {
+    applyBoxShapeSettings({ cornerRadius: normalizeRadiusPct($('editorBoxRadius').value) });
+  });
+  $('editorBoxAngle')?.addEventListener('input', () => {
+    const raw = $('editorBoxAngle').value.trim();
+    if (raw === '' || raw === '-') return;
+    const n = Number(raw);
+    if (Number.isFinite(n)) applyBoxShapeSettings({ angle: normalizeAngleDeg(n) });
+  });
+  $('editorBoxAngle')?.addEventListener('change', () => {
+    applyBoxShapeSettings({ angle: normalizeAngleDeg($('editorBoxAngle').value) });
+  });
+  $('editorRotateReset')?.addEventListener('click', () => {
+    applyBoxShapeSettings({ angle: 0 });
+  });
+  $('editorBoxBg')?.addEventListener('change', () => {
+    const val = $('editorBoxBg').value;
+    if (val === 'custom') {
+      const hex = ($('editorBoxBgColor')?.value || '#ffffff').toLowerCase();
+      $('editorBoxBgColor')?.classList.remove('hidden');
+      applyBoxShapeSettings({ bg: hex });
+      return;
+    }
+    $('editorBoxBgColor')?.classList.add('hidden');
+    applyBoxShapeSettings({ bg: val });
+  });
+  $('editorBoxBgColor')?.addEventListener('input', () => {
+    const hex = ($('editorBoxBgColor')?.value || '#ffffff').toLowerCase();
+    if ($('editorBoxBg')) $('editorBoxBg').value = 'custom';
+    applyBoxShapeSettings({ bg: hex });
+  });
+  $('wmCancelBtn')?.addEventListener('click', () => closeDialog('watermarkDialog'));
+  $('watermarkDialog')?.addEventListener('close', () => releaseWatermarkPreviewResources());
+  $('wmApplyBtn')?.addEventListener('click', () => { applyWatermarkFromDialog().catch((e) => toast(e.message, true)); });
+  $('wmRemoveBtn')?.addEventListener('click', () => { removeWatermarkFromDialog().catch((e) => toast(e.message, true)); });
+  $('wmLogoInput')?.addEventListener('change', (ev) => {
+    const file = ev.target.files?.[0];
+    ev.target.value = '';
+    if (file) handleWatermarkLogoUpload(file).catch((e) => toast(e.message, true));
+  });
+  $('wmLogoDeleteBtn')?.addEventListener('click', () => { deleteSelectedWatermarkLogo().catch((e) => toast(e.message, true)); });
+  $('wmPosition')?.addEventListener('change', () => {
+    const pos = $('wmPosition').value;
+    if (!wmAngleTouched && $('wmAngle')) {
+      $('wmAngle').value = (pos === 'diagonal' || pos === 'tile') ? '-30' : '0';
+    }
+    syncWatermarkRangeOutputs();
+    drawWatermarkDialogPreview().catch(() => {});
+  });
+  $('wmAngle')?.addEventListener('input', () => {
+    wmAngleTouched = true;
+    syncWatermarkRangeOutputs();
+    drawWatermarkDialogPreview().catch(() => {});
+  });
+  ['wmTargetScope', 'wmText', 'wmLogoSelect', 'wmLogoScale', 'wmSize', 'wmOpacity', 'wmMargin', 'wmTileGap', 'wmColor', 'wmBold', 'wmOutline', 'wmOutlineColor', 'wmBgPill', 'wmBgColor'].forEach((id) => {
+    const el = $(id);
+    if (!el) return;
+    const evtName = el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input';
+    el.addEventListener(evtName, () => {
+      syncWatermarkRangeOutputs();
+      drawWatermarkDialogPreview().catch(() => {});
+    });
+  });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'F1') {
       event.preventDefault();
       event.stopPropagation();
-      if ($('helpDialog')?.open) closeDialog('helpDialog');
-      else openHelpDialog($('editorDialog')?.open ? 'visual-editor' : null);
+      if ($('helpDialog')?.open) {
+        closeDialog('helpDialog');
+        return;
+      }
+      const topDlg = [...openDialogStack].reverse().find((id) => $(id)?.open);
+      const sectionByDialog = {
+        licenseDialog: 'license-login-security',
+        storageDialog: 'storage-memory-network',
+        modelsDialog: 'ocr-models',
+        ocrDialog: 'ocr-modes',
+        aiDialog: 'ai-translation-settings',
+        translationPreviewDialog: 'translation-preview-context',
+        translationDialog: 'translation-preview-context',
+        exportDialog: 'exports-docx-pdf',
+        docxExportDialog: 'exports-docx-pdf',
+        pptxExportDialog: 'exports-docx-pdf',
+        cropDialog: 'import-grid-crop',
+        watermarkDialog: 'import-grid-crop',
+        pendingDialog: 'conflicts-cancel-errors',
+        editorDialog: 'visual-editor',
+      };
+      const defaultHelpSec = document.body.classList.contains('auth-locked') ? 'license-login-security' : null;
+      openHelpDialog((topDlg && sectionByDialog[topDlg]) || ($('editorDialog')?.open ? 'visual-editor' : defaultHelpSec));
       return;
     }
     if (event.key === 'Escape') {
@@ -6182,31 +9554,715 @@ function bindEvents() {
       else setMenuOpen(false);
       return;
     }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && state.editorId) { event.preventDefault(); applyEditor().catch((error) => toast(error.message, true)); }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && state.editorId && $('editorDialog')?.open) {
+      const rawKey = (event.key || '').toLowerCase();
+      const isSaveKey = event.code === 'KeyS' || rawKey === 's';
+      if (isSaveKey) { event.preventDefault(); applyEditor().catch((error) => toast(error.message, true)); return; }
+      const isCopyKey = event.code === 'KeyC' || rawKey === 'c';
+      const isPasteKey = event.code === 'KeyV' || rawKey === 'v';
+      if (isCopyKey || isPasteKey) {
+        const topDlg = [...openDialogStack].reverse().find((id) => $(id)?.open);
+        const editorIsTop = (!topDlg || topDlg === 'editorDialog') && !$('appModalDialog')?.open && !classicEditor?.hasOpenModal?.();
+        const targetEl = event.target && typeof event.target.closest === 'function' ? event.target : null;
+        const inEditable = Boolean(inlineDraft) || Boolean(targetEl?.closest('input, textarea, select, [contenteditable="true"]'));
+        const hasDomTextSelection = Boolean(window.getSelection?.()?.toString?.()?.trim());
+        if (editorIsTop && !inEditable && !(isCopyKey && hasDomTextSelection)) {
+          if (isCopyKey && selectedEditorBlocks().length) {
+            event.preventDefault();
+            copyEditorBlocks();
+            return;
+          }
+          if (isPasteKey && state.copiedEditorBlocks?.length) {
+            event.preventDefault();
+            pasteCopiedEditorBlocks();
+            return;
+          }
+        }
+      }
+    }
     if (event.key === 'Enter' && state.cropId && $('cropDialog').open && !event.target.matches('input,select')) { event.preventDefault(); $('cropApply').click(); }
   });
   syncAiExecUi();
   if (localStorage.getItem('comic-studio-theme') === 'light') document.body.classList.add('light');
 }
-async function init() {
-  bindEvents(); startActivityFeed(); startSession();
+async function copyTextWithToast(rawText, okMsg) {
+  const text = String(rawText || '').trim();
+  if (!text) return;
   try {
-    const [projects, engines, ai] = await Promise.all([api('/api/projects'), api('/api/engines'), api('/api/ai-settings')]);
-    state.engines = engines; state.ai = ai;
-    const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
-    adoptProject(project);
-    await refreshProjectList(projects.length ? projects : null);
-    await loadAiSettings(ai);
-    const unrenderedIds = sortedImages().filter((item) => hasOverlayText(item) && !item.edited).map((item) => item.id);
-    if (unrenderedIds.length) await renderImagesText(unrenderedIds);
-    syncEngineUpdateUi();
-    const shouldCheckUpdates = !startupUpdateChecked && state.engines.some((entry) => entry.runtimeInstalled);
-    if (shouldCheckUpdates) {
-      startupUpdateChecked = true;
-      checkEngineUpdates({ force: false, silent: true }).catch(() => {});
-    } else {
-      refreshEngineMemory().catch(() => {});
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      toast(okMsg);
+      return;
     }
-  } catch (error) { toast(`راه‌اندازی ناموفق: ${error.message}`, true); }
+  } catch { /* fallback below */ }
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', 'readonly');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  try { document.execCommand('copy'); toast(okMsg); }
+  catch { toast('کپی خودکار ممکن نشد؛ کد را انتخاب و با Ctrl+C کپی کنید', true); }
+  finally { area.remove(); }
+}
+
+const DEFAULT_SUPPORT_PHONE = '09361111111';
+const MODULE_TITLES_FA = {
+  ocr: 'استخراج متن (OCR آفلاین)',
+  translation: 'ترجمه',
+  editing: 'ویرایش (ویرایشگر، برش و واترمارک)',
+};
+let trialCountdownTimer = null;
+
+function isModuleLicensed(moduleId) {
+  const st = state.licenseStatus;
+  if (!st) return true;
+  if (!st.licensed) return false;
+  if (!st.modules || typeof st.modules !== 'object' || !(moduleId in st.modules)) return true;
+  return Boolean(st.modules[moduleId]?.active);
+}
+
+async function ensureModuleLicensed(moduleId) {
+  if (isModuleLicensed(moduleId)) return true;
+  const phone = state.licenseStatus?.supportPhone || DEFAULT_SUPPORT_PHONE;
+  const modTitle = MODULE_TITLES_FA[moduleId] || moduleId;
+  const openLic = await appConfirm(
+    `لایسنس بخش «${modTitle}» روی سیستم شما فعال نیست یا مهلت آن پایان یافته است.\n\nبرای تهیه یا تمدید لایسنس این بخش، با شمارهٔ ${phone} تماس بگیرید و سپس کلید دریافتی را ثبت کنید.`,
+    {
+      title: `نیاز به لایسنس بخش «${modTitle}»`,
+      confirmText: 'ثبت کلید لایسنس',
+      cancelText: 'بستن',
+      variant: 'warning',
+    },
+  );
+  if (openLic) {
+    await openLicenseDialog({ focusRenew: true });
+  }
+  return false;
+}
+
+function formatDurationDetailedFa(seconds) {
+  const sec = Math.max(0, Number(seconds) || 0);
+  if (sec <= 0) return '۰ دقیقه';
+  const totalMins = Math.max(1, Math.ceil(sec / 60));
+  const days = Math.floor(totalMins / 1440);
+  const hrs = Math.floor((totalMins % 1440) / 60);
+  const mins = totalMins % 60;
+  if (days > 0) {
+    return hrs > 0
+      ? `${days.toLocaleString('fa-IR')} روز و ${hrs.toLocaleString('fa-IR')} ساعت`
+      : `${days.toLocaleString('fa-IR')} روز`;
+  }
+  if (hrs > 0 && mins > 0) return `${hrs.toLocaleString('fa-IR')} ساعت و ${mins.toLocaleString('fa-IR')} دقیقه`;
+  if (hrs > 0) return `${hrs.toLocaleString('fa-IR')} ساعت`;
+  return `${mins.toLocaleString('fa-IR')} دقیقه`;
+}
+
+function formatTrialRemainingText(seconds) {
+  return formatDurationDetailedFa(seconds);
+}
+
+function liveRemainingSecondsFor(entry) {
+  if (!entry) return null;
+  if (entry.expiresAt != null && Number(entry.expiresAt) > 0) {
+    return Math.max(0, Math.ceil(Number(entry.expiresAt) - Date.now() / 1000));
+  }
+  if (typeof entry.remainingSeconds === 'number') {
+    return Math.max(0, Math.floor(entry.remainingSeconds));
+  }
+  if (typeof entry.daysRemaining === 'number') {
+    return Math.max(0, Math.floor(entry.daysRemaining * 86400));
+  }
+  return null;
+}
+
+function computeTopbarLicenseSummary(status) {
+  if (!status || !status.licensed || !status.unlocked) {
+    return { visible: false, text: '', warn: false, detail: '—' };
+  }
+  if (status.isTrial) {
+    const expSec = Number(status.trialExpiresAt || status.license?.expiresAt || 0);
+    const rem = expSec > 0
+      ? Math.max(0, Math.ceil(expSec - Date.now() / 1000))
+      : Number(status.trialRemainingSeconds || 0);
+    const dur = formatDurationDetailedFa(rem);
+    return {
+      visible: true,
+      text: `آزمایشی: ${dur} مانده`,
+      warn: true,
+      detail: `${dur} باقی‌مانده (نسخهٔ آزمایشی ۲۴ ساعته)`,
+      expiredNow: expSec > 0 && rem <= 0,
+    };
+  }
+  const mods = status.modules && typeof status.modules === 'object' ? status.modules : null;
+  const shortNames = { ocr: 'OCR', translation: 'ترجمه', editing: 'ویرایش' };
+  if (mods) {
+    const activeIds = ['ocr', 'translation', 'editing'].filter((m) => mods[m]?.active);
+    if (!activeIds.length) return { visible: false, text: '', warn: false, detail: 'پایان‌یافته' };
+    const remList = activeIds.map((m) => ({ id: m, mod: mods[m], rem: liveRemainingSecondsFor(mods[m]) }));
+    const expiredNow = remList.some((x) => x.mod.expiresAt != null && x.rem !== null && x.rem <= 0);
+    const timed = remList.filter((x) => x.mod.expiresAt != null && x.rem !== null);
+    if (!timed.length) {
+      const label = activeIds.length === 3
+        ? 'اعتبار لایسنس: دائمی ✓'
+        : `لایسنس دائمی: ${activeIds.map((m) => shortNames[m]).join(' + ')}`;
+      return {
+        visible: true,
+        text: label,
+        warn: false,
+        detail: activeIds.length === 3 ? 'دائمی (مادام‌العمر — هر ۳ بخش)' : `دائمی (${activeIds.map((m) => shortNames[m]).join('، ')})`,
+        expiredNow,
+      };
+    }
+    const minRem = Math.min(...timed.map((x) => x.rem));
+    const uniqueExps = new Set(remList.map((x) => (x.mod.expiresAt == null ? 'life' : String(x.mod.expiresAt))));
+    const warn = minRem < 3 * 86400;
+    if (activeIds.length === 3 && uniqueExps.size === 1) {
+      const dur = formatDurationDetailedFa(minRem);
+      return {
+        visible: true,
+        text: `اعتبار لایسنس: ${dur} مانده`,
+        warn,
+        detail: `${dur} باقی‌مانده (هر ۳ بخش)`,
+        expiredNow,
+      };
+    }
+    const parts = remList.map((x) => (
+      x.mod.expiresAt == null
+        ? `${shortNames[x.id]}: دائمی`
+        : `${shortNames[x.id]}: ${formatDurationDetailedFa(x.rem)}`
+    ));
+    return {
+      visible: true,
+      text: `اعتبار: ${parts.join(' · ')}`,
+      warn,
+      detail: parts.map((p) => `${p} باقی‌مانده`.replace('دائمی باقی‌مانده', 'دائمی')).join(' | '),
+      expiredNow,
+    };
+  }
+  // Fallback when `status.modules` is omitted (e.g. legacy mock status)
+  const lic = status.license;
+  if (!lic || lic.plan === 'lifetime' || lic.expiresAt == null) {
+    return { visible: true, text: 'اعتبار لایسنس: دائمی ✓', warn: false, detail: 'دائمی (مادام‌العمر)' };
+  }
+  const rem = liveRemainingSecondsFor(lic) ?? 0;
+  const dur = formatDurationDetailedFa(rem);
+  return {
+    visible: true,
+    text: `اعتبار لایسنس: ${dur} مانده`,
+    warn: rem < 3 * 86400,
+    detail: `${dur} باقی‌مانده`,
+    expiredNow: lic.expiresAt != null && rem <= 0,
+  };
+}
+
+function stopTrialCountdown() {
+  if (trialCountdownTimer !== null) {
+    clearInterval(trialCountdownTimer);
+    trialCountdownTimer = null;
+  }
+}
+
+function buildCustomerOrderRequestText(explicitHwid = '') {
+  const hwid = String(explicitHwid || state.licenseStatus?.hardwareId || $('gateHardwareId')?.textContent || $('licInfoHwid')?.textContent || '').trim();
+  return [
+    'سلام و وقت بخیر',
+    'درخواست تهیه / تمدید لایسنس نرم‌افزار Comic OCR Studio را دارم.',
+    `🖥 کد شناسایی سیستم من: ${hwid}`,
+    'لطفاً شرایط دریافت لایسنس را ارسال فرمایید.',
+  ].join('\n');
+}
+
+function renderVendorChannelsInto(container, vc) {
+  if (!container) return;
+  container.textContent = '';
+  const info = vc && typeof vc === 'object' ? vc : {};
+  const addChip = (label, val, isLtr = true, href = '') => {
+    const clean = String(val || '').trim();
+    if (!clean) return;
+    const el = document.createElement(href ? 'a' : 'span');
+    el.className = 'vendor-channel-chip';
+    if (href) {
+      el.href = href;
+      el.target = '_blank';
+      el.rel = 'noopener noreferrer';
+    }
+    const lbl = document.createElement('span');
+    lbl.textContent = `${label}:`;
+    const bdi = document.createElement('bdi');
+    if (isLtr) bdi.dir = 'ltr';
+    bdi.textContent = clean;
+    el.append(lbl, bdi);
+    container.appendChild(el);
+  };
+
+  if (info.whatsapp) addChip('💬 واتساپ / پیامک', info.whatsapp, true);
+  if (info.telegram) {
+    const tgRaw = String(info.telegram).trim();
+    let tgHref = '';
+    if (/^https?:\/\//i.test(tgRaw)) tgHref = tgRaw;
+    else if (tgRaw.startsWith('@') && tgRaw.length > 1) tgHref = `https://t.me/${tgRaw.slice(1)}`;
+    else if (/^(t\.me|telegram\.me)\/[A-Za-z0-9_+/.-]+$/i.test(tgRaw)) tgHref = `https://${tgRaw}`;
+    addChip('✈️ تلگرام', tgRaw, true, tgHref);
+  }
+  if (info.domesticMessenger) addChip('📱 پیام‌رسان داخلی', info.domesticMessenger, false);
+  if (info.supportHours) addChip('🕒 پاسخ‌گویی', info.supportHours, false);
+  if (info.website) {
+    const webRaw = String(info.website).trim();
+    let webHref = '';
+    if (/^https?:\/\//i.test(webRaw)) webHref = webRaw;
+    else if (/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+(\/[^\s]*)?$/.test(webRaw)) webHref = `https://${webRaw}`;
+    addChip('🌐 وب‌سایت', webRaw, true, webHref);
+  }
+  if (info.customNote) {
+    const note = document.createElement('div');
+    note.className = 'vendor-channel-note';
+    note.textContent = String(info.customNote).trim();
+    container.appendChild(note);
+  }
+  container.classList.toggle('hidden', container.childNodes.length === 0);
+}
+
+function syncTrialBannerAndModulesUi(status) {
+  const vc = status?.vendorContact && typeof status.vendorContact === 'object' ? status.vendorContact : {};
+  const phone = vc.supportPhone || status?.supportPhone || DEFAULT_SUPPORT_PHONE;
+  if ($('gateSupportPhone')) $('gateSupportPhone').textContent = phone;
+  if ($('licSupportPhone')) $('licSupportPhone').textContent = phone;
+  if ($('trialNoticePhone')) $('trialNoticePhone').textContent = `📞 ${phone}`;
+  renderVendorChannelsInto($('gateVendorChannels'), vc);
+  renderVendorChannelsInto($('licVendorChannels'), vc);
+
+  const banner = $('trialNoticeBanner');
+  const showBanner = Boolean(status?.licensed && status?.unlocked && status?.isTrial);
+  banner?.classList.toggle('hidden', !showBanner);
+  stopTrialCountdown();
+
+  const refreshLiveCountdowns = () => {
+    const topInfo = computeTopbarLicenseSummary(status);
+    if (topInfo.expiredNow) {
+      stopTrialCountdown();
+      refreshAuthGateState().catch(() => {});
+      return;
+    }
+    const topBtn = $('licenseTopStatusBtn');
+    if (topBtn) {
+      topBtn.classList.toggle('hidden', !topInfo.visible);
+      topBtn.classList.toggle('is-warn', Boolean(topInfo.warn));
+      topBtn.title = topInfo.visible ? `${topInfo.detail} — برای مشاهدهٔ جزئیات کلیک کنید` : '';
+    }
+    if ($('licenseTopStatusText') && topInfo.visible) {
+      $('licenseTopStatusText').textContent = topInfo.text;
+    }
+    if ($('licInfoRemaining')) {
+      $('licInfoRemaining').textContent = topInfo.detail || '—';
+      $('licInfoRemaining').classList.toggle('is-warn', Boolean(topInfo.warn));
+    }
+    if (showBanner && banner) {
+      const expSec = Number(status.trialExpiresAt || 0);
+      const rem = expSec > 0
+        ? Math.max(0, Math.ceil(expSec - Date.now() / 1000))
+        : Number(status.trialRemainingSeconds || 0);
+      const remText = formatTrialRemainingText(rem);
+      if ($('trialNoticeBadge')) $('trialNoticeBadge').textContent = `نسخهٔ آزمایشی ۲۴ ساعته (${remText} باقی‌مانده)`;
+      if ($('trialNoticeText')) {
+        $('trialNoticeText').textContent = `شما در حال استفاده از نسخهٔ آزمایشی ۲۴ ساعته هستید (${remText} باقی‌مانده) — برای ادامهٔ استفاده از برنامه باید لایسنس تهیه کنید و با شمارهٔ ${phone} تماس بگیرید.`;
+      }
+    }
+    if ($('licenseDialog')?.open) {
+      renderLicenseModulePills(status);
+    }
+  };
+
+  refreshLiveCountdowns();
+  const hasAnyTimed = Boolean(
+    status?.licensed && status?.unlocked && (
+      status.isTrial
+      || status.license?.expiresAt != null
+      || (status.modules && Object.values(status.modules).some((m) => m?.active && m?.expiresAt != null))
+    )
+  );
+  if (hasAnyTimed) {
+    trialCountdownTimer = setInterval(refreshLiveCountdowns, 30000);
+    if (typeof trialCountdownTimer?.unref === 'function') trialCountdownTimer.unref();
+  }
+
+  const ocrOk = isModuleLicensed('ocr');
+  const trOk = isModuleLicensed('translation');
+  const edOk = isModuleLicensed('editing');
+  $('ocrBtn')?.classList.toggle('mod-locked', !ocrOk);
+  $('modelsBtn')?.classList.toggle('mod-locked', !ocrOk);
+  $('translateBtn')?.classList.toggle('mod-locked', !trOk);
+  $('aiBtn')?.classList.toggle('mod-locked', !trOk);
+  $('watermarkBtn')?.classList.toggle('mod-locked', !edOk);
+  $('duplicateBtn')?.classList.toggle('mod-locked', !edOk);
+}
+
+function formatLicensePlanDetail(lic) {
+  if (!lic) return '—';
+  if (lic.plan === 'trial24h') return lic.planLabel || 'نسخهٔ آزمایشی ۲۴ ساعته';
+  if (lic.plan === 'lifetime' || lic.expiresAt == null) return lic.planLabel || 'دائمی (مادام‌العمر)';
+  const liveSec = liveRemainingSecondsFor(lic);
+  const rem = liveSec !== null
+    ? `${formatDurationDetailedFa(liveSec)} باقی‌مانده`
+    : (typeof lic.daysRemaining === 'number' ? `${lic.daysRemaining.toLocaleString('fa-IR')} روز باقی‌مانده` : '');
+  let expDate = '';
+  try {
+    expDate = new Date(Number(lic.expiresAt) * 1000).toLocaleDateString('fa-IR');
+  } catch { expDate = ''; }
+  const tail = [rem, expDate ? `تا ${expDate}` : ''].filter(Boolean).join(' · ');
+  return tail ? `${lic.planLabel || 'مدت‌دار'} (${tail})` : (lic.planLabel || 'مدت‌دار');
+}
+
+function formatModuleBadgeText(modInfo) {
+  if (!modInfo || !modInfo.active) {
+    return modInfo?.source === 'expired' ? 'پایان اعتبار (نیازمند تمدید)' : 'غیرفعال';
+  }
+  if (modInfo.source === 'trial' || modInfo.plan === 'trial24h') {
+    const rem = liveRemainingSecondsFor(modInfo) ?? 0;
+    return `آزمایشی ۲۴ ساعته (${formatDurationDetailedFa(rem)} مانده)`;
+  }
+  if (modInfo.plan === 'lifetime' || modInfo.expiresAt == null) {
+    return 'فعال ✓ (دائمی)';
+  }
+  const rem = liveRemainingSecondsFor(modInfo);
+  const dur = rem !== null
+    ? `${formatDurationDetailedFa(rem)} باقی‌مانده`
+    : (typeof modInfo.daysRemaining === 'number' ? `${modInfo.daysRemaining.toLocaleString('fa-IR')} روز باقی‌مانده` : (modInfo.planLabel || 'مدت‌دار'));
+  let expDate = '';
+  if (modInfo.expiresAt != null) {
+    try { expDate = new Date(Number(modInfo.expiresAt) * 1000).toLocaleDateString('fa-IR'); } catch { expDate = ''; }
+  }
+  return expDate ? `فعال ✓ (${dur} · تا ${expDate})` : `فعال ✓ (${dur})`;
+}
+
+function renderLicenseModulePills(status) {
+  if (!status) return;
+  const mods = status.modules || null;
+  for (const modId of ['ocr', 'translation', 'editing']) {
+    const pill = $(`licMod_${modId}`);
+    if (!pill) continue;
+    const modEntry = mods && typeof mods === 'object' && (modId in mods)
+      ? mods[modId]
+      : (status.licensed ? { active: true, plan: status.license?.plan || 'lifetime', expiresAt: status.license?.expiresAt, daysRemaining: status.license?.daysRemaining } : { active: false });
+    pill.textContent = formatModuleBadgeText(modEntry);
+    pill.classList.toggle('is-active', Boolean(modEntry?.active && modEntry?.source !== 'trial' && modEntry?.plan !== 'trial24h'));
+    pill.classList.toggle('is-trial', Boolean(modEntry?.active && (modEntry?.source === 'trial' || modEntry?.plan === 'trial24h')));
+    pill.classList.toggle('is-off', !modEntry?.active);
+  }
+}
+
+function applyAuthGateUi(status, { forceActivatePane = false } = {}) {
+  if (!status || typeof status !== 'object') return;
+  state.licenseStatus = status;
+  const hwid = status.hardwareId || '';
+  if ($('gateHardwareId') && hwid) $('gateHardwareId').textContent = hwid;
+  if ($('licInfoHwid') && hwid) $('licInfoHwid').textContent = hwid;
+  $('lockAppMenuBtn')?.classList.toggle('hidden', !(status.licensed && status.passwordEnabled));
+  syncTrialBannerAndModulesUi(status);
+
+  if (status.licensed && status.unlocked) {
+    document.body.classList.remove('auth-locked');
+    $('authGateOverlay')?.classList.add('hidden');
+    if ($('gateActivateError')) $('gateActivateError').classList.add('hidden');
+    if ($('gateLoginError')) $('gateLoginError').classList.add('hidden');
+    return;
+  }
+
+  setMenuOpen(false);
+  [...openDialogStack].reverse().forEach((dlgId) => {
+    if (dlgId !== 'helpDialog' && dlgId !== 'appModalDialog' && $(dlgId)?.open) closeDialog(dlgId);
+  });
+  document.body.classList.add('auth-locked');
+  $('authGateOverlay')?.classList.remove('hidden');
+
+  const showLogin = Boolean(status.licensed && !status.unlocked && !forceActivatePane);
+  $('authActivatePane')?.classList.toggle('hidden', showLogin);
+  $('authLoginPane')?.classList.toggle('hidden', !showLogin);
+  $('backToLoginPaneBtn')?.classList.toggle('hidden', !(status.licensed && !status.unlocked && forceActivatePane));
+  $('gateResetPwdWrap')?.classList.toggle('hidden', !status.passwordEnabled);
+
+  const badge = $('authGateBadge');
+  if (badge) {
+    badge.textContent = showLogin
+      ? 'قفل‌شده با رمز شخصی'
+      : (status.reason === 'trial_expired'
+        ? 'پایان مهلت آزمایشی ۲۴ ساعته'
+        : status.reason === 'license_expired'
+          ? 'پایان اعتبار لایسنس'
+          : status.reason === 'clock_tampered'
+            ? 'خطای تاریخ و ساعت سیستم'
+            : 'نیازمند فعال‌سازی لایسنس');
+    badge.classList.toggle('is-ok', showLogin);
+  }
+  if ($('authGateMessage')) {
+    const phone = status.supportPhone || DEFAULT_SUPPORT_PHONE;
+    const msg = forceActivatePane && status.licensed
+      ? 'در این بخش می‌توانید کد سیستم خود را مشاهده کنید، کلید تمدید وارد کنید یا در صورت فراموشی رمز ورود، با کلید لایسنس اصلی رمز را بازنشانی نمایید.'
+      : (status.message || `برنامه هنوز روی این سیستم فعال نشده است. برای دریافت لایسنس با شمارهٔ ${phone} تماس بگیرید.`);
+    $('authGateMessage').textContent = msg;
+    $('authGateMessage').classList.toggle('is-warn', status.reason === 'trial_expired' || status.reason === 'license_expired' || status.reason === 'clock_tampered');
+  }
+  if (showLogin) {
+    const holder = status.license?.holder || 'کاربر رسمی';
+    const planDesc = formatLicensePlanDetail(status.license);
+    if ($('gateHolderSummary')) {
+      $('gateHolderSummary').textContent = `لایسنس فعال به نام «${holder}» · اعتبار: ${planDesc}`;
+    }
+    setTimeout(() => { try { $('gateLoginPasswordInput')?.focus({ preventScroll: true }); } catch { /* ignore */ } }, 40);
+  }
+}
+
+async function refreshAuthGateState() {
+  const status = await api('/api/license/status');
+  applyAuthGateUi(status);
+  return status;
+}
+
+async function bootUnlockedWorkspace() {
+  if (!state.activityFeedStarted) {
+    state.activityFeedStarted = true;
+    startActivityFeed();
+  }
+  if (state.workspaceBooted) {
+    const projects = await api('/api/projects');
+    if (!state.project && projects.length) {
+      const p = await api(`/api/projects/${projects[0].id}`);
+      adoptProject(p);
+    }
+    await refreshProjectList(projects.length ? projects : null);
+    return;
+  }
+  const enginesTask = api('/api/engines');
+  const aiTask = api('/api/ai-settings');
+  enginesTask.catch(() => {});
+  aiTask.catch(() => {});
+  const projects = await api('/api/projects');
+  const project = projects.length ? await api(`/api/projects/${projects[0].id}`) : await api('/api/projects', jsonOptions('POST', { name: 'پروژهٔ کمیک' }));
+  adoptProject(project);
+  const [engines, ai] = await Promise.all([enginesTask, aiTask]);
+  state.engines = engines; state.ai = ai;
+  state.workspaceBooted = true;
+  updateEngineOptions(state.project?.settings?.ocrEngine || 'rapidocr-v6');
+  await refreshProjectList(projects.length ? projects : null);
+  await loadAiSettings(ai);
+  const unrenderedIds = sortedImages().filter((item) => hasOverlayText(item) && !item.edited).map((item) => item.id);
+  if (unrenderedIds.length) {
+    const startupRenderTask = renderImagesText(unrenderedIds);
+    projectLoadTasks.add(startupRenderTask);
+    startupRenderTask.finally(() => projectLoadTasks.delete(startupRenderTask)).catch(() => {});
+    startupRenderTask.catch(() => {});
+  }
+  syncEngineUpdateUi();
+  const shouldCheckUpdates = !startupUpdateChecked && isModuleLicensed('ocr') && state.engines.some((entry) => entry.runtimeInstalled);
+  if (shouldCheckUpdates) {
+    startupUpdateChecked = true;
+    setTimeout(() => { checkEngineUpdates({ force: false, silent: true }).catch(() => {}); }, 800);
+  } else {
+    setTimeout(() => { refreshEngineMemory().catch(() => {}); }, 500);
+  }
+}
+
+async function submitGateLicenseActivation() {
+  const rawKey = ($('gateLicenseKeyInput')?.value || '').trim();
+  const errEl = $('gateActivateError');
+  if (errEl) errEl.classList.add('hidden');
+  if (!rawKey) {
+    if (errEl) { errEl.textContent = 'لطفاً ابتدا کلید لایسنس (شروع با CLIC1.) را در کادر بالا وارد کنید.'; errEl.classList.remove('hidden'); }
+    return;
+  }
+  const btn = $('activateGateLicenseBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const resetPwd = Boolean($('gateResetLocalPwd')?.checked);
+    const status = await api('/api/license/activate', jsonOptions('POST', { license_key: rawKey, reset_local_password: resetPwd }));
+    if ($('gateLicenseKeyInput')) $('gateLicenseKeyInput').value = '';
+    if ($('gateResetLocalPwd')) $('gateResetLocalPwd').checked = false;
+    applyAuthGateUi(status);
+    if (status.licensed && status.unlocked) {
+      await bootUnlockedWorkspace();
+      toast('لایسنس با موفقیت فعال شد؛ خوش آمدید!');
+    }
+  } catch (error) {
+    if (errEl) { errEl.textContent = error.detailText || error.message; errEl.classList.remove('hidden'); }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function submitGatePasswordLogin() {
+  const pwd = $('gateLoginPasswordInput')?.value || '';
+  const errEl = $('gateLoginError');
+  if (errEl) errEl.classList.add('hidden');
+  if (!pwd) {
+    if (errEl) { errEl.textContent = 'لطفاً رمز ورود خود را وارد کنید.'; errEl.classList.remove('hidden'); }
+    return;
+  }
+  const btn = $('gateLoginSubmitBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const status = await api('/api/license/login', jsonOptions('POST', { password: pwd }));
+    if ($('gateLoginPasswordInput')) $('gateLoginPasswordInput').value = '';
+    applyAuthGateUi(status);
+    if (status.licensed && status.unlocked) {
+      await bootUnlockedWorkspace();
+      toast('خوش آمدید');
+    }
+  } catch (error) {
+    if (errEl) { errEl.textContent = error.detailText || error.message; errEl.classList.remove('hidden'); }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function populateLicenseDialog(status) {
+  if (!status) return;
+  if ($('licInfoStatus')) {
+    $('licInfoStatus').textContent = status.isTrial
+      ? 'نسخهٔ آزمایشی ۲۴ ساعته'
+      : (status.licensed ? 'فعال ✓' : 'غیرفعال');
+  }
+  if ($('licInfoHolder')) $('licInfoHolder').textContent = status.license?.holder || '—';
+  const topInfo = computeTopbarLicenseSummary(status);
+  if ($('licInfoRemaining')) {
+    $('licInfoRemaining').textContent = topInfo.detail || '—';
+    $('licInfoRemaining').classList.toggle('is-warn', Boolean(topInfo.warn));
+  }
+  if ($('licInfoPlan')) $('licInfoPlan').textContent = formatLicensePlanDetail(status.license);
+  if ($('licInfoHwid')) $('licInfoHwid').textContent = status.hardwareId || '';
+  const vc = status.vendorContact && typeof status.vendorContact === 'object' ? status.vendorContact : {};
+  if ($('licSupportPhone')) $('licSupportPhone').textContent = vc.supportPhone || status.supportPhone || DEFAULT_SUPPORT_PHONE;
+  renderVendorChannelsInto($('licVendorChannels'), vc);
+
+  renderLicenseModulePills(status);
+
+  const anyInactive = Boolean(status.isTrial || !isModuleLicensed('ocr') || !isModuleLicensed('translation') || !isModuleLicensed('editing'));
+  if ($('licRenewDetails') && anyInactive) $('licRenewDetails').open = true;
+
+  const pwdOn = Boolean(status.passwordEnabled);
+  if ($('licPwdStateBadge')) {
+    $('licPwdStateBadge').textContent = pwdOn ? 'فعال (محافظت با رمز)' : 'غیرفعال (ورود مستقیم)';
+    $('licPwdStateBadge').classList.toggle('is-active', pwdOn);
+  }
+  $('licCurrentPwdWrap')?.classList.toggle('hidden', !pwdOn);
+  $('removeLocalPwdBtn')?.classList.toggle('hidden', !pwdOn);
+  $('lockNowInsideDialogBtn')?.classList.toggle('hidden', !pwdOn);
+  if ($('licCurrentPwdInput')) $('licCurrentPwdInput').value = '';
+  if ($('licNewPwdInput')) $('licNewPwdInput').value = '';
+  if ($('licConfirmPwdInput')) $('licConfirmPwdInput').value = '';
+  if ($('licPwdFeedback')) $('licPwdFeedback').classList.add('hidden');
+}
+
+async function openLicenseDialog({ focusRenew = false } = {}) {
+  const status = await refreshAuthGateState();
+  if (!status.licensed || !status.unlocked) return;
+  populateLicenseDialog(status);
+  if (focusRenew && $('licRenewDetails')) $('licRenewDetails').open = true;
+  showDialog('licenseDialog');
+  if (focusRenew) {
+    setTimeout(() => { try { $('dialogNewLicenseInput')?.focus({ preventScroll: true }); } catch { /* ignore */ } }, 40);
+  }
+}
+
+async function saveLocalPasswordFromDialog() {
+  const cur = $('licCurrentPwdInput')?.value || '';
+  const next = $('licNewPwdInput')?.value || '';
+  const confirm = $('licConfirmPwdInput')?.value || '';
+  const fb = $('licPwdFeedback');
+  const showFb = (msg, isErr) => {
+    if (!fb) return;
+    fb.textContent = msg;
+    fb.style.color = isErr ? 'var(--danger)' : '#34d399';
+    fb.classList.remove('hidden');
+  };
+  if (next.length < 4) { showFb('رمز ورود جدید باید حداقل ۴ کاراکتر باشد.', true); return; }
+  if (next !== confirm) { showFb('رمز جدید و تکرار آن یکسان نیستند.', true); return; }
+  try {
+    const status = await api('/api/license/password', jsonOptions('PUT', { current_password: cur, new_password: next }));
+    applyAuthGateUi(status);
+    populateLicenseDialog(status);
+    showFb('رمز ورود شخصی با موفقیت ذخیره و فعال شد.', false);
+    toast('رمز ورود محلی فعال شد');
+  } catch (error) {
+    showFb(error.detailText || error.message, true);
+  }
+}
+
+async function removeLocalPasswordFromDialog() {
+  const cur = $('licCurrentPwdInput')?.value || '';
+  const fb = $('licPwdFeedback');
+  if (!cur) {
+    if (fb) { fb.textContent = 'برای حذف رمز ورود، ابتدا رمز فعلی را در کادر «رمز ورود فعلی» بنویسید.'; fb.style.color = 'var(--danger)'; fb.classList.remove('hidden'); }
+    return;
+  }
+  const ok = await appConfirm('آیا رمز ورود محلی حذف شود تا برنامه بدون پرسیدن رمز باز شود؟', {
+    title: 'حذف رمز ورود محلی',
+    confirmText: 'بله، حذف شود',
+    cancelText: 'انصراف',
+    variant: 'danger',
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    const status = await api('/api/license/password', jsonOptions('PUT', { current_password: cur, new_password: '' }));
+    applyAuthGateUi(status);
+    populateLicenseDialog(status);
+    toast('رمز ورود محلی حذف شد');
+  } catch (error) {
+    if (fb) { fb.textContent = error.detailText || error.message; fb.style.color = 'var(--danger)'; fb.classList.remove('hidden'); }
+  }
+}
+
+async function activateNewLicenseFromDialog() {
+  const rawKey = ($('dialogNewLicenseInput')?.value || '').trim();
+  if (!rawKey) { toast('ابتدا کلید لایسنس جدید را وارد کنید', true); return; }
+  try {
+    const status = await api('/api/license/activate', jsonOptions('POST', { license_key: rawKey, reset_local_password: false }));
+    if ($('dialogNewLicenseInput')) $('dialogNewLicenseInput').value = '';
+    applyAuthGateUi(status);
+    populateLicenseDialog(status);
+    toast(`کلید لایسنس جدید با موفقیت ثبت شد (${status.license?.planLabel || ''})`);
+  } catch (error) {
+    toast(error.detailText || error.message, true);
+  }
+}
+
+async function lockWorkspaceNow() {
+  if (savePending) {
+    try { await saveProject(); } catch { /* ignore */ }
+  }
+  const status = await api('/api/license/logout', { method: 'POST' });
+  applyAuthGateUi(status);
+  toast('برنامه قفل شد');
+}
+
+async function bootApp(options = {}) {
+  // Root cause of "the app does not come up": a single failed request during
+  // start-up left the workspace half loaded and the only way out was to
+  // close and launch the app again.  The boot is retried a few times and, if
+  // it still fails, a clear message with a recovery button is shown.
+  const attempts = 3;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const authStatus = await refreshAuthGateState();
+      if (!authStatus?.licensed || !authStatus?.unlocked) { hideServerUnreachable(); return; }
+      await bootUnlockedWorkspace();
+      hideServerUnreachable();
+      return;
+    } catch (error) {
+      if (error?.name === 'AbortError') return;
+      lastError = error;
+      if (error?.status === 0) showServerUnreachable();
+      if (attempt < attempts) await sleep(attempt * 700);
+    }
+  }
+  const detail = lastError?.detailText || lastError?.message || 'خطای نامشخص';
+  toast(`راه‌اندازی ناموفق: ${detail}`, true);
+  showServerUnreachable(detail);
+}
+async function init() {
+  bindEvents(); startSession();
+  await bootApp();
 }
 init();

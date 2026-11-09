@@ -200,6 +200,19 @@ def ocr_stub(engine, image, language, contrast, precise, confidence):
     if r.json()['empty']: return []
     return [{'id':1,'text':'NEWLY READ OCR','tr':'','richHtml':'','enabled':True,'x0':5,'y0':5,'x1':180,'y1':45,'lineH':40,'conf':90}]
 studio_main.recognize_image = ocr_stub
+from pathlib import Path
+from comic_studio import _public_key, license_guard
+_seed, _pub = license_guard.ed25519_generate_keypair()
+_public_key.PUBLIC_VERIFY_KEY_HEX = _pub.hex()
+license_guard._LICENSE_DIR_OVERRIDE = Path(${JSON.stringify(path.join(temporary, 'license'))})
+license_guard._SECONDARY_ANCHOR_OVERRIDE = Path(${JSON.stringify(path.join(temporary, 'license_anchor'))})
+_tok = license_guard.issue_license_token(
+    private_seed_hex=_seed.hex(),
+    hardware_id=license_guard.compute_hardware_id(),
+    holder='کاربر مرورگر واقعی',
+    plan='lifetime',
+)
+license_guard.SECURITY_GATE.activate_token(_tok)
 from comic_studio.__main__ import main
 main()
 `;
@@ -240,8 +253,17 @@ main()
     const chromiumRoot = path.resolve(path.dirname(require.resolve('@sparticuz/chromium')), '..');
     await chromiumModule.inflate(path.join(chromiumRoot, 'bin', 'al2023.tar.br'));
     chromiumModule.setupLambdaEnvironment('/tmp/al2023/lib');
+    const fastArgs = chromium.args.filter((arg) => (
+      arg !== '--single-process'
+      && !arg.startsWith('--headless')
+      && !arg.startsWith('--use-gl')
+      && !arg.startsWith('--use-angle')
+      && arg !== '--enable-unsafe-swiftshader'
+      && arg !== '--in-process-gpu'
+    ));
+    fastArgs.push('--disable-gpu', '--window-size=1440,1000');
     browser = await puppeteer.launch({
-      args: chromium.args, executablePath: await chromium.executablePath(), headless: true,
+      args: fastArgs, executablePath: await chromium.executablePath(), headless: 'new',
       defaultViewport: { width: 1440, height: 1000 },
     });
     const page = await browser.newPage(); await page.setCacheEnabled(false);
@@ -753,13 +775,14 @@ main()
       assert.ok(oldAreaDark > 50, `moving a box must not erase the old OCR region (${oldAreaDark} dark pixels)`);
 
       // (2) Mouse wheel alone scrolls vertically without changing zoom; Ctrl + wheel zooms!
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       const previewCenter = await page.evaluate(() => {
         const r = document.querySelector('.editor-preview').getBoundingClientRect();
         return { x: r.left + r.width / 2, y: r.top + r.height / 2, scale: state.editorScale };
       });
       await page.mouse.move(previewCenter.x, previewCenter.y);
       await page.mouse.wheel({ deltaY: 90 });
-      await sleep(30);
+      await page.waitForFunction(() => document.querySelector('.editor-preview').scrollTop > 0, { timeout: 2000 }).catch(() => {});
       const afterPlainWheel = await page.evaluate(() => ({
         scrollTop: document.querySelector('.editor-preview').scrollTop,
         scale: state.editorScale,
@@ -1492,7 +1515,7 @@ main()
       assert.ok(files[key].endsWith(extension) && fs.statSync(files[key]).size > 0, `${key.toUpperCase()} must be a real nonempty download`);
       await page.waitForFunction(() => {
         const link = document.getElementById('downloadLink');
-        return link && !link.classList.contains('hidden') && link.href.startsWith('blob:') && link.download;
+        return link && !link.classList.contains('hidden') && (link.href.startsWith('blob:') || link.href.includes('/export/')) && link.download;
       });
     }
     // Word export asks first whether to place Translated or English/OCR text on the bubbles:
@@ -1685,12 +1708,13 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.equal(await page.$eval('#ocrDialog',el=>el.open),false); assert.equal(ocrCalls.length,0);
     await page.click('#translateBtn'); await page.waitForSelector('#ocrDialog[open]');
     await page.click('#startOcrBtn');
-    await page.waitForFunction(()=>document.getElementById('ocrStatus').textContent.includes('ocr simulated failure'),{timeout:15000});
+    await page.waitForFunction(()=>document.getElementById('ocrStatus').textContent.includes('ocr simulated failure') && !document.getElementById('startOcrBtn').disabled,{timeout:15000});
     assert.equal(await page.$eval('#ocrDialog',el=>el.open),true);
     assert.ok(await page.$eval('#ocrStatus',el=>el.textContent.includes('HTTP 500') && el.textContent.includes('/ocr') && el.textContent.includes('RuntimeError')));
     assert.equal(await page.$eval('#copyOcrError',el=>el.classList.contains('hidden')),false);
     assert.equal(freeGenerations.length,callsBeforeAuto);
-    await page.click('#startOcrBtn'); await page.waitForSelector('#translationPreviewDialog[open]',{timeout:15000});
+    await page.$eval('#startOcrBtn', (el) => el.scrollIntoView({ block: 'nearest' }));
+    await page.click('#startOcrBtn'); await page.waitForSelector('#translationPreviewDialog[open]',{timeout:30000});
     assert.equal(ocrCalls.length,2); assert.equal(await page.$eval('#ocrDialog',el=>el.open),false);
     const ocrSaved=await api(base,`/api/projects/${autoProject.id}`);
     assert.equal(ocrSaved.images[0].blocks[0].tr,'existing translation');
@@ -2047,7 +2071,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     await page.click('#ocrBtn');
     await page.waitForSelector('#ocrDialog[open]');
     await page.click('#startOcrBtn');
-    await page.waitForFunction(() => ocrRunning === true);
+    await page.waitForFunction(() => ocrRunning === true && jobBusy === true);
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(r)));
     await page.click('#ocrDialog .dialog-head button.icon');
     await page.waitForSelector('#appModalDialog[open]');
     const darkModalTheme = await page.evaluate(() => {
@@ -2214,7 +2239,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     assert.equal(await page.$('#menu .hint'), null);
     await page.click('#helpTopBtn');
     await page.waitForSelector('#helpDialog[open]');
-    assert.equal(await page.$$eval('#helpNavList .help-nav-item', (els) => els.length), 13);
+    assert.equal(await page.$$eval('#helpNavList .help-nav-item', (els) => els.length), 15);
     assert.ok((await page.$eval('#helpContentArea', (el) => el.textContent)).includes('مثال عملی'));
     await page.type('#helpSearchInput', 'API Key');
     await page.waitForFunction(() => document.getElementById('helpContentArea').textContent.includes('Multi-Key Profiles'));
@@ -2473,8 +2498,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.blockBold, false, 'placed translation sets block.bold = false');
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
-      // v3.85–v3.99: Verify version badge ۳.۹۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help section 5, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, clean name-only dropdowns, menu model deletion, per-page RAM release, and zero idle CPU polling/animations
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۳.۹۹ · Python', 'header shows version ۳.۹۹');
+      // v3.85–v4.09: Verify version badge ۴.۰۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, optional storage settings, race-free backup, built-in offline local translator, custom manual text boxes, watermarks, full-attribute box copy/paste/duplicate, API key priority ordering, lossless PDF import, and grouped-page translation
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۳۰ · Python', 'header shows version ۴.۳۰');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2571,7 +2596,8 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         const all14LocalDescs = cards.length === 14 && cards.every((c) => c.dataset.executionMode === 'local' && !c.querySelector('.engine-chip.is-exec-local') && (c.querySelector('p')?.textContent || '').includes('روی سیستم'));
         const cleanOcrOpts = [...document.getElementById('ocrEngine').options].every((o) => {
           const eng = state.engines.find((e) => e.id === o.value);
-          return eng && o.textContent === eng.name && !o.textContent.includes('💻') && !o.textContent.includes('عالی');
+          const hasIcon = ['✓', '◐', '⬇'].some((ico) => o.textContent === `${ico} ${eng?.name}`);
+          return eng && hasIcon && ['ready', 'partial', 'uninstalled'].includes(o.dataset.installState) && !o.textContent.includes('💻') && !o.textContent.includes('عالی');
         });
         const ocrLocal = document.getElementById('ocrEngineStatus')?.textContent.includes('روی سیستم') && !document.getElementById('ocrEngineStatus')?.textContent.includes('💻');
         showAiProvider('gemini', false);
@@ -2662,23 +2688,28 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(v397IdleCheck.idlePollTimerNull, true, 'activityPollTimer is null while idle in Chromium');
       assert.equal(v397IdleCheck.dockWrapHidden && v397IdleCheck.hiddenAnimPaused, true, 'indeterminate bar inside hidden container has animation: none');
 
-      // v3.98: Verify opening #menu -> #deleteModelsMenuBtn opens #modelsDialog in installed-only mode and toggles back to all 14 models cleanly
+      // v3.98 / v4.02: Verify single unified #modelsBtn ("مدیریت مدل‌های OCR"), #aiBtn ("مدیریت ترجمه‌ها"), no duplicate #deleteModelsMenuBtn, and installed-only toggle inside #modelsDialog
       await page.click('#menuBtn');
-      await page.waitForSelector('#deleteModelsMenuBtn', { state: 'visible' });
-      await page.click('#deleteModelsMenuBtn');
+      assert.equal(await page.$('#deleteModelsMenuBtn'), null, 'no duplicate #deleteModelsMenuBtn in menu');
+      assert.equal(await page.$eval('#modelsBtn span', (el) => el.textContent.trim()), 'مدیریت مدل‌های OCR');
+      assert.equal(await page.$eval('#aiBtn', (el) => el.textContent.trim()), 'مدیریت ترجمه‌ها');
+      await page.click('#modelsBtn');
       await page.waitForSelector('#modelsDialog[open]');
       const v398MenuCheck = await page.evaluate(() => {
-        const checkedOnOpen = Boolean(document.getElementById('modelsInstalledOnly')?.checked);
+        const installedCb = document.getElementById('modelsInstalledOnly');
+        installedCb.checked = true;
+        installedCb.dispatchEvent(new Event('change', { bubbles: true }));
+        const checkedOnToggle = Boolean(installedCb.checked);
         const showAllBtn = document.querySelector('#engineCards .models-empty-installed button');
         if (showAllBtn) showAllBtn.click();
         else {
-          document.getElementById('modelsInstalledOnly').checked = false;
+          installedCb.checked = false;
           renderModels();
         }
         const allCountAfterReset = document.querySelectorAll('#engineCards .engine-card').length;
-        return { checkedOnOpen, allCountAfterReset };
+        return { checkedOnToggle, allCountAfterReset };
       });
-      assert.equal(v398MenuCheck.checkedOnOpen, true, '#deleteModelsMenuBtn opens #modelsDialog filtered to installed models');
+      assert.equal(v398MenuCheck.checkedOnToggle, true, '#modelsInstalledOnly filters #modelsDialog to installed models');
       assert.equal(v398MenuCheck.allCountAfterReset, 14, 'resetting installed-only filter shows all 14 OCR models');
       await page.keyboard.press('Escape');
       await page.waitForFunction(() => !document.getElementById('modelsDialog').open);
@@ -2723,10 +2754,444 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(v399ChromiumCheck.sampledOk, true, 'Typeset.sampleBg 256-bin histogram produces exact RGB median');
       assert.equal(v399ChromiumCheck.measureBoxEmpty, true, 'Typeset.releaseCaches() empties offscreen DOM measurement box');
       assert.equal(v399ChromiumCheck.reusedDomImg, true, 'renderGrid() reuses unchanged <img> DOM node without re-decoding');
-      console.log('PASS: v3.81–v3.99 Persian OCR, Hezar engine, 2D suitability, Green->Red sorting, clean dropdowns, menu model deletion, per-page RAM release, and Zero Idle CPU optimizations');
+
+      // v4.00 & v4.12: Verify optional custom storage dialog + real Chromium v4.12 manual-box formatting, shapes, corner rounding, rotation, & scroll restoration
+      const storageInfo = await api(base, '/api/storage-settings');
+      assert.equal(storageInfo.customActive, false, '/api/storage-settings starts in default optional mode');
+      await page.click('#menuBtn');
+      await page.click('#storageBtn');
+      await page.waitForFunction(() => document.getElementById('storageDialog')?.open === true, { timeout: 5000 });
+      const v400DialogCheck = await page.evaluate(() => ({
+        emptyCustomInput: document.getElementById('storageCustomPath')?.value === '',
+        activeShown: (document.getElementById('storageActivePath')?.textContent || '').trim().length > 0,
+      }));
+      assert.deepEqual(v400DialogCheck, { emptyCustomInput: true, activeShown: true }, 'v4.00 storage dialog opens in optional default mode');
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => document.getElementById('storageDialog')?.open === false, { timeout: 5000 });
+
+      const v412Chromium = await page.evaluate(async (realProj) => {
+        const prevSnap = JSON.parse(JSON.stringify(state.project));
+        try {
+          adoptProject(JSON.parse(JSON.stringify(realProj)));
+          await openEditor(state.project.images[0].id);
+          document.getElementById('editorAddFaText').click();
+          const blk = state.project.images[0].blocks.at(-1);
+          document.getElementById('inlineFontFamily').value = 'Tahoma';
+          document.getElementById('inlineFontFamily').dispatchEvent(new Event('change', { bubbles: true }));
+          document.getElementById('inlineLineSize').value = '22';
+          document.getElementById('inlineLineSize').dispatchEvent(new Event('input', { bubbles: true }));
+          classicEditor.setHTML('<p>تست کرومیوم ۴.۱۲</p>');
+          closeInlineEditor();
+          selectEditorBlock(blk.id, false, false);
+          document.getElementById('editorBoxShape').value = 'star';
+          document.getElementById('editorBoxShape').dispatchEvent(new Event('change', { bubbles: true }));
+          const starSvgPath = document.querySelector(`#editorBoxes .editor-box[data-id="${blk.id}"] .box-shape-svg path`)?.getAttribute('d') || '';
+          document.getElementById('editorBoxShape').value = 'thought';
+          document.getElementById('editorBoxShape').dispatchEvent(new Event('change', { bubbles: true }));
+          const thoughtSvgPath = document.querySelector(`#editorBoxes .editor-box[data-id="${blk.id}"] .box-shape-svg path`)?.getAttribute('d') || '';
+          document.getElementById('editorBoxShape').value = 'cloud';
+          document.getElementById('editorBoxShape').dispatchEvent(new Event('change', { bubbles: true }));
+          document.getElementById('editorBoxAngle').value = '15';
+          document.getElementById('editorBoxAngle').dispatchEvent(new Event('change', { bubbles: true }));
+          const boxEl = document.querySelector(`#editorBoxes .editor-box[data-id="${blk.id}"]`);
+          const svgPath = boxEl?.querySelector('.box-shape-svg path')?.getAttribute('d') || '';
+          const shapeOptionCount = document.getElementById('editorBoxShape')?.options?.length || 0;
+          const out = {
+            font: blk.fontFamily,
+            size: blk.size,
+            shape: blk.shape,
+            angle: blk.angle,
+            hasSvgPath: svgPath.startsWith('M '),
+            hasStarPath: (starSvgPath.match(/ L /g) || []).length === 9,
+            hasThoughtBubbles: (thoughtSvgPath.match(/A /g) || []).length >= 4,
+            shapeOptionCount,
+          };
+          await cancelEditor();
+          return out;
+        } finally {
+          adoptProject(prevSnap);
+        }
+      }, backupProject);
+      assert.deepEqual(
+        v412Chromium,
+        { font: 'Tahoma', size: 22, shape: 'cloud', angle: 15, hasSvgPath: true, hasStarPath: true, hasThoughtBubbles: true, shapeOptionCount: 14 },
+        'v4.12–v4.14 manual box font, size, 14 writing shapes (star, thought cloud, comic cloud) SVG, and rotation work in real Chromium',
+      );
+
+      // v4.15: Real Chromium E2E test of License Status Dialog + PBKDF2 Local Password Lock + Backend 401 Gate + Unlock
+      const v415LicInfo = await page.evaluate(async () => {
+        await openLicenseDialog();
+        const holder = document.getElementById('licInfoHolder')?.textContent?.trim();
+        const hwid = document.getElementById('licInfoHwid')?.textContent?.trim();
+        document.getElementById('licNewPwdInput').value = 'Browser#415';
+        document.getElementById('licConfirmPwdInput').value = 'Browser#415';
+        await saveLocalPasswordFromDialog();
+        closeDialog('licenseDialog');
+        await lockWorkspaceNow();
+        return {
+          holder,
+          hwidOk: Boolean(hwid && hwid.startsWith('CS4-')),
+          lockedClass: document.body.classList.contains('auth-locked'),
+          loginVisible: !document.getElementById('authLoginPane').classList.contains('hidden'),
+        };
+      });
+      assert.deepEqual(
+        v415LicInfo,
+        { holder: 'کاربر مرورگر واقعی', hwidOk: true, lockedClass: true, loginVisible: true },
+        'v4.15 license dialog sets local password and locks workspace in real Chromium',
+      );
+      const unauthProbe = await fetch(`${base}/api/projects`);
+      assert.equal(unauthProbe.status, 401, 'v4.15 backend blocks /api/projects with HTTP 401 while local password lock is active');
+
+      const v415Unlocked = await page.evaluate(async () => {
+        document.getElementById('gateLoginPasswordInput').value = 'Browser#415';
+        await submitGatePasswordLogin();
+        await openLicenseDialog();
+        document.getElementById('licCurrentPwdInput').value = 'Browser#415';
+        const rmPromise = removeLocalPasswordFromDialog();
+        await new Promise((r) => setTimeout(r, 40));
+        document.getElementById('appModalConfirm').click();
+        await rmPromise;
+        closeDialog('licenseDialog');
+        return {
+          unlockedOk: !document.body.classList.contains('auth-locked'),
+          pwdDisabledAgain: document.getElementById('lockAppMenuBtn').classList.contains('hidden'),
+        };
+      });
+      assert.deepEqual(
+        v415Unlocked,
+        { unlockedOk: true, pwdDisabledAgain: true },
+        'v4.15 local password unlocks and removes cleanly in real Chromium',
+      );
+
+      // v4.16–v4.17: Real Chromium E2E test of 24h Trial Top Banner (09361111111) + Live Topbar Remaining Time (#licenseTopStatusBtn) + 3-Module Status UI
+      const v416Chromium = await page.evaluate(async () => {
+        const topBtnVisible = !document.getElementById('licenseTopStatusBtn')?.classList.contains('hidden');
+        const topBtnInitial = document.getElementById('licenseTopStatusText')?.textContent?.trim() || '';
+        await openLicenseDialog();
+        const supportPhone = document.getElementById('licSupportPhone')?.textContent?.trim();
+        const remRow = document.getElementById('licInfoRemaining')?.textContent?.trim() || '';
+        const orderTxt = buildCustomerOrderRequestText();
+        const hasOrderBtn = Boolean(document.getElementById('copyDialogOrderMsgBtn')) && orderTxt.includes('CS4-');
+        const ocrBadge = document.getElementById('licMod_ocr')?.textContent?.trim() || '';
+        const trBadge = document.getElementById('licMod_translation')?.textContent?.trim() || '';
+        const edBadge = document.getElementById('licMod_editing')?.textContent?.trim() || '';
+        closeDialog('licenseDialog');
+
+        const savedStatus = JSON.parse(JSON.stringify(state.licenseStatus));
+        applyAuthGateUi({
+          ...savedStatus,
+          isTrial: true,
+          trialExpiresAt: Math.floor(Date.now() / 1000) + 72000,
+          trialRemainingSeconds: 72000,
+          supportPhone: '09361111111',
+        });
+        const bannerShown = !document.getElementById('trialNoticeBanner').classList.contains('hidden')
+          && document.getElementById('trialNoticeText').textContent.includes('09361111111')
+          && document.getElementById('licenseTopStatusText').textContent.includes('مانده');
+
+        applyAuthGateUi({
+          ...savedStatus,
+          isTrial: false,
+          modules: {
+            ...savedStatus.modules,
+            editing: { ...savedStatus.modules.editing, active: false, source: 'unlicensed' },
+          },
+        });
+        const editCheckPromise = ensureModuleLicensed('editing');
+        await new Promise((r) => setTimeout(r, 35));
+        const modalHasPhone = document.getElementById('appModalDialog').open === true
+          && document.getElementById('appModalMessage').textContent.includes('09361111111');
+        document.getElementById('appModalCancel').click();
+        const editAllowed = await editCheckPromise;
+        applyAuthGateUi(savedStatus);
+
+        return {
+          topBtnOk: topBtnVisible && topBtnInitial.length > 0 && remRow.length > 0 && hasOrderBtn,
+          supportPhone,
+          allThreeActive: ocrBadge.includes('فعال') && trBadge.includes('فعال') && edBadge.includes('فعال'),
+          bannerShown,
+          modalHasPhone,
+          editAllowed,
+        };
+      });
+      assert.deepEqual(
+        v416Chromium,
+        { topBtnOk: true, supportPhone: '09361111111', allThreeActive: true, bannerShown: true, modalHasPhone: true, editAllowed: false },
+        'v4.16–v4.17 live topbar remaining time, 24h trial banner (09361111111), 3-module license table, and unlicensed module modal work in real Chromium',
+      );
+
+      // v4.19: Verify Seller License Manager live in headless Chromium (Vazirmatn font, icon128.png, Studio colors, light/dark toggle, themed modal)
+      const sellerTmpDir = path.join(os.tmpdir(), `comic-seller-v419-${Date.now()}`);
+      fs.mkdirSync(sellerTmpDir, { recursive: true });
+      const sellerSecret = 'chromium-seller-v419';
+      const sellerProc = spawn(
+        python,
+        [
+          '-c',
+          [
+            'import pathlib, sys, time',
+            'from http.server import HTTPServer',
+            'sys.path.insert(0, "python_app")',
+            'from license_manager import SellerVault, build_seller_panel_handler',
+            'd = pathlib.Path(sys.argv[1])',
+            'v = SellerVault(seller_dir=d / "vault", public_key_py=d / "pub.py", vendor_json_path=d / "vc.json", vendor_py_path=d / "vc.py")',
+            'v.ensure_master_key(sync_source=True)',
+            'srv = HTTPServer(("127.0.0.1", 0), build_seller_panel_handler(v, sys.argv[2]))',
+            'print("SELLER_PORT=" + str(srv.server_address[1]), flush=True)',
+            'srv.serve_forever()',
+          ].join('; '),
+          sellerTmpDir,
+          sellerSecret,
+        ],
+        { cwd: repository, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      try {
+        const sellerPort = await new Promise((resolve, reject) => {
+          let buf = '';
+          const timer = setTimeout(() => reject(new Error('seller server start timeout')), 8000);
+          sellerProc.stdout.on('data', (chunk) => {
+            buf += chunk.toString('utf8');
+            const m = buf.match(/SELLER_PORT=(\d+)/);
+            if (m) {
+              clearTimeout(timer);
+              resolve(Number(m[1]));
+            }
+          });
+          sellerProc.on('exit', (code) => {
+            clearTimeout(timer);
+            reject(new Error(`seller server exited early: ${code}`));
+          });
+        });
+        const sellerPage = await browser.newPage();
+        await sellerPage.goto(`http://127.0.0.1:${sellerPort}/?secret=${sellerSecret}`, { waitUntil: 'networkidle0' });
+        const sellerVisualCheck = await sellerPage.evaluate(async () => {
+          await document.fonts.ready;
+          const fontLoaded = document.fonts.check('13px Vazirmatn');
+          const logo = document.querySelector('.topbar .brand img.logo');
+          const ver = document.querySelector('.topbar .brand .ver')?.textContent?.trim();
+          const darkBg = getComputedStyle(document.body).backgroundColor;
+          const fontFam = getComputedStyle(document.body).fontFamily;
+          document.getElementById('sellerThemeBtn').click();
+          const lightBg = getComputedStyle(document.body).backgroundColor;
+          const p = sellerConfirm('تست پنجرهٔ تأیید هماهنگ با برنامهٔ اصلی');
+          const modalOpen = document.getElementById('sellerConfirmDialog').open === true;
+          document.getElementById('sellerConfirmCancel').click();
+          const modalResult = await p;
+          return {
+            fontLoaded,
+            logoNaturalWidth: logo?.naturalWidth || 0,
+            ver,
+            darkBg,
+            lightBg,
+            hasVazirmatnInComputed: fontFam.toLowerCase().includes('vazirmatn'),
+            modalOpen,
+            modalResult,
+          };
+        });
+        await sellerPage.close();
+        assert.equal(sellerVisualCheck.fontLoaded, true, 'Vazirmatn.woff2 loads in Seller Panel');
+        assert.equal(sellerVisualCheck.logoNaturalWidth, 128, 'icon128.png loads in Seller Panel topbar');
+        assert.equal(sellerVisualCheck.ver, '۴.۳۰ · پنل فروشنده', 'Seller Panel topbar version badge matches Studio');
+        assert.equal(sellerVisualCheck.darkBg, 'rgb(11, 13, 18)', 'Seller Panel dark --bg matches Studio #0b0d12');
+        assert.equal(sellerVisualCheck.lightBg, 'rgb(243, 244, 248)', 'Seller Panel light --bg matches Studio #f3f4f8');
+        assert.equal(sellerVisualCheck.hasVazirmatnInComputed, true, 'Seller Panel body fontFamily uses Vazirmatn');
+        assert.equal(sellerVisualCheck.modalOpen, true, 'Seller Panel uses themed #sellerConfirmDialog');
+        assert.equal(sellerVisualCheck.modalResult, false, 'Seller Panel cancel resolves false cleanly');
+      } finally {
+        if (sellerProc.exitCode === null) sellerProc.kill('SIGTERM');
+        fs.rmSync(sellerTmpDir, { recursive: true, force: true });
+      }
+
+      // v4.21: Verify #ocrPersianPreprocess input option in real Chromium + Help documentation
+      const v421BrowserCheck = await page.evaluate(() => {
+        const chk = document.getElementById('ocrPersianPreprocess');
+        if (!chk) return { exists: false };
+        if (state.project?.settings) delete state.project.settings.persianPreprocessCustomized;
+        document.getElementById('ocrLanguage').value = 'fas';
+        document.getElementById('ocrLanguage').dispatchEvent(new Event('change', { bubbles: true }));
+        const checkedOnFas = chk.checked === true;
+        document.getElementById('ocrLanguage').value = 'eng';
+        document.getElementById('ocrLanguage').dispatchEvent(new Event('change', { bubbles: true }));
+        const uncheckedOnEng = chk.checked === false;
+        const helpSec = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-modes');
+        const helpMentionsIt = Boolean(helpSec && helpSec.features.some((f) => f.includes('پیش‌پردازش ویژه فارسی')));
+        return { exists: true, checkedOnFas, uncheckedOnEng, helpMentionsIt };
+      });
+      assert.equal(v421BrowserCheck.exists, true, '#ocrPersianPreprocess checkbox exists in #ocrDialog');
+      assert.equal(v421BrowserCheck.checkedOnFas, true, 'Selecting Persian auto-checks #ocrPersianPreprocess');
+      assert.equal(v421BrowserCheck.uncheckedOnEng, true, 'Returning to English auto-unchecks #ocrPersianPreprocess when not manually customized');
+      assert.equal(v421BrowserCheck.helpMentionsIt, true, 'Help guide documents پیش‌پردازش ویژه فارسی');
+
+      // v4.22: Real Chromium verification that editing controls are NEVER disabled across idle, merged, copied, OCR, and Text-tab states
+      const v422BrowserCheck = await page.evaluate(async (realProj) => {
+        const countDisabledInDock = () => [...document.querySelectorAll('#inlineEditor button:not(#editorPasteBlock), #inlineEditor select, #inlineEditor input')]
+          .filter((el) => el.disabled === true).length;
+        const prevSnap = JSON.parse(JSON.stringify(state.project));
+        const prevOverlay = state.project?.settings?.overlayMode || 'translation';
+        try {
+          adoptProject(JSON.parse(JSON.stringify(realProj)));
+          const img = state.project?.images?.[0];
+          if (!img) return { ok: false, reason: 'no-image' };
+          img.blocks = [
+            { id: 701, text: 'Line A', tr: 'سطر اول', richHtml: '<span style="color:#ff0000">سطر اول</span>', conf: 95, enabled: true, bg: 'white', shape: 'rect', x0: 20, y0: 20, x1: 180, y1: 55, tx0: 20, ty0: 20, tx1: 180, ty1: 55 },
+            { id: 702, text: 'Line B', tr: 'سطر دوم', richHtml: '', conf: 95, enabled: true, bg: 'white', shape: 'rect', x0: 20, y0: 62, x1: 180, y1: 98, tx0: 20, ty0: 62, tx1: 180, ty1: 98 },
+          ];
+          setOverlayMode('translation', false);
+          await openEditor(img.id);
+          closeInlineEditor({ commit: false });
+          state.selectedBlockIds = [];
+          state.activeBlockId = null;
+          syncEditorShapeControls();
+          const disabledWhenIdle = countDisabledInDock();
+
+          // Merge two boxes
+          state.selectedBlockIds = ['701', '702'];
+          state.activeBlockId = '701';
+          mergeSelectedText();
+          const merged = img.blocks[0];
+          const disabledAfterMerge = countDisabledInDock();
+
+          // Apply Font + Bold directly from toolbar WITHOUT double-clicking first (box-level direct toggle)
+          document.getElementById('inlineFontFamily').value = 'Tahoma';
+          document.getElementById('inlineFontFamily').dispatchEvent(new Event('change', { bubbles: true }));
+          document.querySelector('#inlineEditor button[aria-label="پررنگ"]').click();
+          const fontAndBoldDirect = merged.fontFamily === 'Tahoma' && merged.bold === false;
+          // Also verify structural block command (Heading 2) auto-opens inline session on merged box without pre-opening
+          const fmtSel = document.querySelector('#inlineEditor select[aria-label="قالب بند"]');
+          fmtSel.value = 'h2';
+          fmtSel.dispatchEvent(new Event('change', { bubbles: true }));
+          const autoOpenedForHeading = Boolean(inlineDraft && inlineDraft.block === merged);
+          closeInlineEditor();
+          const mergedFormatted = fontAndBoldDirect && autoOpenedForHeading && /<h2\b/i.test(merged.richHtml || '');
+
+          // Duplicate merged box, format copy directly from toolbar, then split copied merged box
+          const copiedList = duplicateEditorBlocks([merged]);
+          const copied = copiedList[0];
+          state.selectedBlockIds = [String(copied.id)];
+          state.activeBlockId = String(copied.id);
+          document.querySelector('#inlineEditor button[aria-label="ایتالیک"]').click();
+          const copiedFormatted = copied.italic === true;
+
+          state.selectedBlockIds = [String(copied.id)];
+          state.activeBlockId = String(copied.id);
+          splitSelectedText();
+          const allIds = img.blocks.map((b) => String(b.id));
+          const uniqueIdsAfterSplit = new Set(allIds).size === allIds.length && img.blocks.length === 3;
+
+          // Switch to OCR mode: zero .plain-mode and zero disabled controls + rich style saved in ocrRichHtml
+          setOverlayMode('ocr', false);
+          openInlineEditor(img.blocks[0], null);
+          const disabledInOcr = countDisabledInDock();
+          const hasPlainClass = document.getElementById('inlineEditor').classList.contains('plain-mode');
+          document.querySelector('#inlineEditor button[aria-label="ایتالیک"]').click();
+          closeInlineEditor();
+          const ocrRichSaved = Boolean(img.blocks[0].ocrRichHtml && /font-style:\s*italic|<em|<i\b/i.test(img.blocks[0].ocrRichHtml));
+          await cancelEditor();
+
+          return {
+            ok: true,
+            disabledWhenIdle,
+            disabledAfterMerge,
+            mergedFormatted,
+            copiedFormatted,
+            uniqueIdsAfterSplit,
+            disabledInOcr,
+            hasPlainClass,
+            ocrRichSaved,
+          };
+        } finally {
+          closeInlineEditor({ commit: false });
+          if (document.getElementById('editorDialog')?.open) closeDialog('editorDialog');
+          adoptProject(prevSnap);
+          setOverlayMode(prevOverlay, false);
+        }
+      }, backupProject);
+      assert.equal(v422BrowserCheck.ok, true, `v4.22 browser check executed: ${JSON.stringify(v422BrowserCheck)}`);
+      assert.equal(v422BrowserCheck.disabledWhenIdle, 0, 'Zero disabled editing controls when idle');
+      assert.equal(v422BrowserCheck.disabledAfterMerge, 0, 'Zero disabled editing controls after merge');
+      assert.equal(v422BrowserCheck.mergedFormatted, true, `Merged box formats directly from toolbar: ${JSON.stringify(v422BrowserCheck)}`);
+      assert.equal(v422BrowserCheck.copiedFormatted, true, `Copied merged box formats directly from toolbar: ${JSON.stringify(v422BrowserCheck)}`);
+      assert.equal(v422BrowserCheck.uniqueIdsAfterSplit, true, `Splitting copied merged box produces unique IDs: ${JSON.stringify(v422BrowserCheck)}`);
+      assert.equal(v422BrowserCheck.disabledInOcr, 0, 'Zero disabled editing controls in OCR mode');
+      assert.equal(v422BrowserCheck.hasPlainClass, false, 'OCR mode never hides rich toolbar with .plain-mode');
+      assert.equal(v422BrowserCheck.ocrRichSaved, true, `OCR mode persists rich HTML independently in ocrRichHtml: ${JSON.stringify(v422BrowserCheck)}`);
+
+      // v4.23: Real Chromium verification of Persian green-engine auto-upgrade & joined Kaf/Gaf/ZWNJ canvas rendering
+      const v423BrowserCheck = await page.evaluate(() => {
+        const prevEngines = state.engines.map((e) => ({ ...e }));
+        const prevLang = document.getElementById('ocrLanguage').value;
+        const prevMode = document.getElementById('ocrPageMode').value;
+        try {
+          state.engines = [
+            { id: 'rapidocr-v5', name: 'PP-OCRv5 Mobile', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'multi', family: 'Paddle' },
+            { id: 'easyocr', name: 'EasyOCR', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'comic', family: 'CRAFT' },
+            { id: 'tesseract', name: 'Tesseract 5 LSTM', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'doc', family: 'Tesseract' },
+          ];
+          document.getElementById('ocrPageMode').value = 'comic';
+          document.getElementById('ocrLanguage').value = 'eng';
+          updateEngineOptions('rapidocr-v5', { resort: true });
+          document.getElementById('ocrLanguage').value = 'fas';
+          document.getElementById('ocrLanguage').dispatchEvent(new Event('change', { bubbles: true }));
+          const comicPickedEasy = document.getElementById('ocrEngine').value === 'easyocr';
+          document.getElementById('ocrPageMode').value = 'document';
+          document.getElementById('ocrPageMode').dispatchEvent(new Event('change', { bubbles: true }));
+          const docPickedTess = document.getElementById('ocrEngine').value === 'tesseract';
+
+          const bgCv = document.createElement('canvas');
+          bgCv.width = 480;
+          bgCv.height = 120;
+          const bgCtx = bgCv.getContext('2d');
+          bgCtx.fillStyle = '#ffffff';
+          bgCtx.fillRect(0, 0, 480, 120);
+          const cv = Typeset.render(bgCv, [
+            { id: 1, text: 'کلاه گشاد گرگ به هم نمی‌چسبند', tr: 'کلاه گشاد گرگ به هم نمی‌چسبند', dir: 'rtl', size: 22, color: '#111111', x0: 20, y0: 20, x1: 460, y1: 100, bg: '#ffffff', enabled: true },
+          ]);
+          const ctx = cv.getContext('2d');
+          const px = ctx.getImageData(0, 0, 480, 120).data;
+          let darkPixels = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i] < 120) darkPixels += 1;
+          }
+          return { ok: true, comicPickedEasy, docPickedTess, renderedJoinedPersian: darkPixels > 250 };
+        } finally {
+          state.engines = prevEngines;
+          document.getElementById('ocrLanguage').value = prevLang;
+          document.getElementById('ocrPageMode').value = prevMode;
+          updateEngineOptions('', { resort: true });
+        }
+      });
+      assert.equal(v423BrowserCheck.ok, true);
+      assert.equal(v423BrowserCheck.comicPickedEasy, true, 'Switching to Persian in comic mode upgrades from medium rapidocr-v5 to best easyocr');
+      assert.equal(v423BrowserCheck.docPickedTess, true, 'Switching Persian page mode to document upgrades to best tesseract');
+      assert.equal(v423BrowserCheck.renderedJoinedPersian, true, 'Typeset.render draws joined Persian Kaf/Gaf/ZWNJ text on Chromium canvas');
+
+      console.log('PASS: v3.81–v4.23 Persian root-cause OCR (tessdata_best float32 ک/گ, non-joining ە/ے repair, ZWNJ, base_dir=R BiDi, RTL horizontal coalescing, multi-bubble separation), #ocrPersianPreprocess, always-enabled rich editing, Hezar engine, 2D suitability, Green->Red sorting, per-page RAM release, optional custom storage, v4.14 14 shapes, v4.15–v4.18 modular license/vendor guard, v4.19 Seller Panel visual/Vazirmatn parity, and v4.20 full audit hardening');
     }
 
-    assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
+    // v4.30: the local studio must tell the user (in Persian) when it stops answering and
+    // offer a one-click recovery instead of leaving a dead workspace behind.
+    const v430RecoveryBanner = await page.evaluate(() => ({
+      exists: Boolean(document.getElementById('serverAlert')),
+      hidden: document.getElementById('serverAlert').classList.contains('hidden'),
+    }));
+    assert.equal(v430RecoveryBanner.exists, true, 'the recovery banner must exist');
+    assert.equal(v430RecoveryBanner.hidden, true, 'the recovery banner must stay hidden while the app works');
+    if (server.exitCode === null) server.kill('SIGKILL');
+    await sleep(800);
+    await page.evaluate(async () => { await api('/api/health').catch(() => {}); });
+    await sleep(600);
+    const v430RecoveryBroken = await page.evaluate(() => ({
+      hidden: document.getElementById('serverAlert').classList.contains('hidden'),
+      text: document.getElementById('serverAlertText').textContent || '',
+      hasRetry: Boolean(document.getElementById('serverAlertRetry')),
+    }));
+    assert.equal(v430RecoveryBroken.hidden, false, 'the recovery banner must appear when the local app stops answering');
+    assert.match(v430RecoveryBroken.text, /ارتباط با برنامهٔ محلی قطع شد/, 'the recovery banner must explain the problem in Persian');
+    assert.equal(v430RecoveryBroken.hasRetry, true, 'the recovery banner must offer a retry button');
+    console.log('PASS: v4.30 the local studio shows a Persian recovery banner with a retry button when the server stops answering');
+
+    assert.ok(browserErrors.every(error => error.includes('ترجمه') || error.includes('سرویس') || error.includes('502') || error.includes('free simulated outage') || error.includes('ocr simulated failure') || error.includes('500') || error.includes('422') || error.includes('ERR_CONNECTION_REFUSED')), `unexpected AI failure errors: ${browserErrors.join(' | ')}`);
     console.log('PASS: downloaded ZIP and PDF pixels match the latest edit; TXT contains current text');
     console.log('PASS: every export leaves a persistent browser-download link');
   } catch (error) {

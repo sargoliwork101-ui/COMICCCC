@@ -666,7 +666,8 @@ async function getDisplaySource(it) {
     cv.getContext('2d').drawImage(bmp, x, y, w, h, 0, 0, w, h);
     const blob = await canvasToBlob(cv, 'image/png');
     cv.width = cv.height = 0;
-    const info = sniff(new Uint8Array(await blob.arrayBuffer()));
+    const headBlob = typeof blob.slice === 'function' ? blob.slice(0, 64) : blob;
+    const info = sniff(new Uint8Array(await headBlob.arrayBuffer()));
     it.cropCache = { i: it.i, blob, info, w, h, base, key };
     return it.cropCache;
   } finally { bmp.close(); }
@@ -1654,14 +1655,18 @@ async function decodeSlices(it, maxSrcH) {
     for (let y = 0; y < bmp.height; y += stepH) {
       const sh = Math.min(stepH, bmp.height - y);
       const canvas = document.createElement('canvas');
-      canvas.width = bmp.width;
-      canvas.height = sh;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(bmp, 0, y, bmp.width, sh, 0, 0, bmp.width, sh);
-      const data = canvas.toDataURL(asPng ? 'image/png' : 'image/jpeg', 1);
-      canvas.width = canvas.height = 0;
+      let data;
+      try {
+        canvas.width = bmp.width;
+        canvas.height = sh;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(bmp, 0, y, bmp.width, sh, 0, 0, bmp.width, sh);
+        data = canvas.toDataURL(asPng ? 'image/png' : 'image/jpeg', 1);
+      } finally {
+        canvas.width = canvas.height = 0;
+      }
       segs.push({ data, fmt: asPng ? 'PNG' : 'JPEG', w: bmp.width, h: sh, alias: `i${it.pdfKey || it.uid || it.i}_${y}` });
     }
   } finally { bmp.close(); }
@@ -1686,14 +1691,16 @@ async function fallback(seg) {
   const blob = typeof seg.data === 'string' ? await (await fetch(seg.data)).blob() : new Blob([seg.data]);
   const bmp = await createImageBitmap(blob, { imageOrientation: 'none' });
   const canvas = document.createElement('canvas');
-  canvas.width = bmp.width; canvas.height = bmp.height;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(bmp, 0, 0);
-  bmp.close();
-  const data = canvas.toDataURL('image/jpeg', 1);
-  canvas.width = canvas.height = 0;
-  return { data, fmt: 'JPEG' };
+  try {
+    canvas.width = bmp.width; canvas.height = bmp.height;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    try { ctx.drawImage(bmp, 0, 0); } finally { bmp.close(); }
+    const data = canvas.toDataURL('image/jpeg', 1);
+    return { data, fmt: 'JPEG' };
+  } finally {
+    canvas.width = canvas.height = 0;
+  }
 }
 
 async function composeVertically(group, pageKey) {
@@ -1707,24 +1714,30 @@ async function composeVertically(group, pageKey) {
   const widths = targetWidths.map((width) => Math.min(w, Math.max(1, Math.round(width * scale))));
   const heights = rawHeights.map((h) => Math.max(1, Math.round(h * scale)));
   const h = heights.reduce((sum, n) => sum + n, 0);
-  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-  const ctx = cv.getContext('2d');
-  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
-  let y = 0;
-  for (let k = 0; k < sources.length; k++) {
-    if (jobCancelRequested) break;
-    const bmp = await createImageBitmap(sources[k].blob, { imageOrientation: 'none' });
-    const x = Math.round((w - widths[k]) / 2);
-    try { ctx.drawImage(bmp, x, y, widths[k], heights[k]); }
-    finally { bmp.close(); }
-    y += heights[k];
+  const cv = document.createElement('canvas');
+  let blob;
+  try {
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
+    let y = 0;
+    for (let k = 0; k < sources.length; k++) {
+      if (jobCancelRequested) break;
+      const bmp = await createImageBitmap(sources[k].blob, { imageOrientation: 'none' });
+      const x = Math.round((w - widths[k]) / 2);
+      try { ctx.drawImage(bmp, x, y, widths[k], heights[k]); }
+      finally { bmp.close(); }
+      y += heights[k];
+    }
+    blob = await canvasToBlob(cv, 'image/png');
+  } finally {
+    cv.width = cv.height = 0;
   }
-  const blob = await canvasToBlob(cv, 'image/png');
-  cv.width = cv.height = 0;
+  const headBlob = typeof blob.slice === 'function' ? blob.slice(0, 64) : blob;
   return {
     i: group[0].i, pdfKey: pageKey, pageOrder: Math.min(...group.map((it) => it.pdfOrder || it.i + 1)),
     sequence: Math.min(...group.map((it) => it.sequence)), blob, w, h,
-    info: sniff(new Uint8Array(await blob.arrayBuffer()))
+    info: sniff(new Uint8Array(await headBlob.arrayBuffer()))
   };
 }
 
@@ -1893,16 +1906,18 @@ async function exportBlob(it, fmt) {
   if (!want || srcExt === want) return { blob: src.blob, ext: srcExt };
   if (!canConvert(src.w, src.h)) return { blob: src.blob, ext: srcExt, note: 'ابعاد برای تبدیل بیش از حد بزرگ است؛ فایل اصلی ذخیره شد' };
   const bmp = await createImageBitmap(src.blob, { imageOrientation: 'none' });
+  const cv = document.createElement('canvas');
   try {
-    const cv = document.createElement('canvas');
     cv.width = bmp.width; cv.height = bmp.height;
     const ctx = cv.getContext('2d');
     if (want === 'jpg') { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height); }
     ctx.drawImage(bmp, 0, 0);
     const blob = await canvasToBlob(cv, want === 'png' ? 'image/png' : 'image/jpeg', 1);
-    cv.width = cv.height = 0;
     return { blob, ext: want };
-  } finally { bmp.close(); }
+  } finally {
+    cv.width = cv.height = 0;
+    bmp.close();
+  }
 }
 
 const WIN_RESERVED_FOLDER_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
@@ -1999,10 +2014,15 @@ async function onSaveImages() {
         if (ex.note) errors.push(`${base}: ${ex.note}`);
         if (useDownloads) {
           const url = URL.createObjectURL(ex.blob);
-          await chrome.downloads.download({
-            url, filename: `${sub || 'comic'}/${base}.${ext}`, conflictAction: 'uniquify', saveAs: false
-          });
-          setTimeout(() => URL.revokeObjectURL(url), 120000);
+          try {
+            await chrome.downloads.download({
+              url, filename: `${sub || 'comic'}/${base}.${ext}`, conflictAction: 'uniquify', saveAs: false
+            });
+            setTimeout(() => URL.revokeObjectURL(url), 120000);
+          } catch (dlErr) {
+            URL.revokeObjectURL(url);
+            throw dlErr;
+          }
         } else {
           const fname = await uniqueName(dir, base, ext);
           const fh = await dir.getFileHandle(fname, { create: true });

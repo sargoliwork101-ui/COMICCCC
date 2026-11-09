@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from comic_studio.ocr import (
     ENGINE_INFO, EasyEngine, OcrError, OcrLine, RapidEngine, TesseractEngine,
@@ -59,7 +61,12 @@ def test_v5_does_not_download_during_normal_ocr(tmp_path, monkeypatch):
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
     engine = RapidEngine("rapidocr-v5", "v5")
     monkeypatch.setattr(RapidEngine, "runtime_installed", property(lambda self: True))
-    with pytest.raises(Exception, match="explicit model download"):
+
+    def forbidden_download(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("RapidOCR must not download a model during a normal OCR run")
+
+    monkeypatch.setattr(engine, "download", forbidden_download)
+    with pytest.raises(Exception, match="دانلود خودکار"):
         engine._get("eng")
 
 
@@ -67,7 +74,12 @@ def test_v6_missing_model_does_not_download_during_normal_ocr(tmp_path, monkeypa
     engine = RapidEngine("rapidocr-v6", "v6")
     monkeypatch.setattr(RapidEngine, "runtime_installed", property(lambda self: True))
     monkeypatch.setattr(engine, "_v6_model_dir", lambda: tmp_path)
-    with pytest.raises(Exception, match="explicit model download"):
+
+    def forbidden_download(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("RapidOCR must not download a model during a normal OCR run")
+
+    monkeypatch.setattr(engine, "download", forbidden_download)
+    with pytest.raises(Exception, match="دانلود خودکار"):
         engine._get("eng")
 
 
@@ -217,13 +229,28 @@ def test_tesseract_bubble_uses_psm6_without_changing_normal_psm(tmp_path, monkey
     assert commands[1][commands[1].index("--psm") + 1] == "6"
 
 
-def test_tesseract_normal_ocr_never_downloads_a_missing_language(tmp_path, monkeypatch):
+def test_tesseract_normal_ocr_prepares_a_missing_language_instead_of_failing(tmp_path, monkeypatch):
+    """v4.28: a normal OCR run must prepare the missing language file itself.
+
+    Before v4.28 this raised `Tesseract language fas is not ready. Use the explicit
+    model download button first.` and killed the whole Persian OCR request with HTTP 503.
+    """
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
     engine = TesseractEngine()
     engine._system_languages = set()
     monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
-    with pytest.raises(OcrError, match="explicit model download"):
+    prepared: list[str] = []
+
+    def fake_prepare(language: str) -> None:
+        prepared.append(language)
+        raise OcrError("آماده‌سازیِ نمایشی برای آزمون")
+
+    monkeypatch.setattr(engine, "_auto_prepare_language", fake_prepare)
+    with pytest.raises(OcrError) as error:
         engine.recognize(Image.new("RGB", (40, 20)), "eng")
+    assert prepared == ["eng"]
+    assert "not ready" not in str(error.value)
+    assert "explicit model download" not in str(error.value)
 
 
 def test_tesseract_explicit_download_uses_selected_language(tmp_path, monkeypatch):
@@ -496,6 +523,7 @@ def test_isolated_engine_prepare_serve_and_update_lifecycle(tmp_path, monkeypatc
         "p = argparse.ArgumentParser()\n"
         "p.add_argument('--engine'); p.add_argument('--models-root'); p.add_argument('--language', default='eng')\n"
         "p.add_argument('--prepare', action='store_true'); p.add_argument('--serve', action='store_true')\n"
+        "p.add_argument('--parent-pid', type=int, default=0)\n"
         "args = p.parse_args()\n"
         "if args.prepare:\n"
         "    print(json.dumps({'ok': True, 'modelRevision': 'rev-1'}), flush=True)\n"
@@ -2901,6 +2929,584 @@ def test_v399_worker_memory_trim_and_onnx_session_options():
         eng.unload()
 
 
+def test_v421_persian_preprocess_normalization_containers_and_engines(tmp_path, monkeypatch):
+    import cv2
+    from PIL import ImageDraw
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_worker as worker_mod
+    from comic_studio.ocr_grouping import organize_ocr_blocks
+
+    # 1. Persian text normalization: strips bidi marks, converts Arabic ي/ى/ك & Presentation Forms, preserves ZWNJ
+    dirty = "\u200f\ufb58\u064a\u0634\u200c\u067e\u0631\u062f\u0627\u0632\u0634 \u0643\u0645\u064a\u0643, \u0639\u0627\u0644\u0649\u200e"
+    cleaned = ocr_mod.normalize_persian_ocr_text(dirty)
+    assert cleaned == "پیش\u200cپردازش کمیک، عالی"
+    assert "\u200c" in cleaned and "\u200f" not in cleaned and "\u200e" not in cleaned
+
+    # 2. persian_preprocess_image: auto-inverts dark caption boxes, flattens heavy scan shadows, adds white quiet-zone,
+    #    and upscales tall narrow webtoon strips (>4MP total pixels) based on width!
+    dark_box = Image.new("RGB", (260, 90), (24, 26, 34))
+    dr = ImageDraw.Draw(dark_box)
+    dr.rectangle((60, 32, 200, 56), fill=(242, 242, 246))
+    prep_dark, sc_dark, pad_dark = ocr_mod.persian_preprocess_image(dark_box, precise=True, page_mode="comic")
+    try:
+        arr_dark = np.asarray(prep_dark)
+        assert sc_dark == 2.0
+        assert pad_dark == ocr_mod.PERSIAN_PREPROCESS_BORDER_PAD
+        assert prep_dark.size == (260 * 2 + pad_dark * 2, 90 * 2 + pad_dark * 2)
+        # Border and inverted background are white, while inverted ink center is dark
+        assert np.all(arr_dark[:pad_dark, :, 0] == 255)
+        assert float(arr_dark[pad_dark + 5, pad_dark + 5, 0]) > 220.0
+        assert float(arr_dark[pad_dark + 88, pad_dark + 260, 0]) < 45.0
+    finally:
+        prep_dark.close()
+
+    # Shadowed book scan (left side dark 75, right side bright 235) -> flattened paper >= 235 everywhere
+    yy, xx = np.mgrid[0:180, 0:320]
+    shaded = np.clip(75.0 + 160.0 * (xx / 320.0), 0, 255).astype(np.uint8)
+    shaded[70:86, 40:280] = np.maximum(15, (shaded[70:86, 40:280] * 0.32).astype(np.uint8))
+    prep_shade, sc_shade, pad_shade = ocr_mod.persian_preprocess_image(
+        Image.fromarray(shaded, mode="L").convert("RGB"), precise=True, page_mode="document",
+    )
+    try:
+        arr_shade = np.asarray(prep_shade)[pad_shade:-pad_shade, pad_shade:-pad_shade, 0]
+        assert sc_shade == 2.0
+        # Shadowed top-left paper corner is flattened to white (>= 240), while ink bar remains dark
+        assert float(np.median(arr_shade[10:40, 10:60])) >= 240.0
+        assert float(np.min(arr_shade[135:175, 100:500])) < 60.0
+    finally:
+        prep_shade.close()
+
+    # Coordinate restoration through recognize_image(..., persian_preprocess=True) un-pads & un-scales accurately
+    class CoordEchoEngine:
+        def recognize(self, img: Image.Image, lang: str):
+            # Simulate a line at native (20..120, 15..45) -> scaled by 2.0 + 18px border pad = (58..258, 48..108)
+            p = ocr_mod.PERSIAN_PREPROCESS_BORDER_PAD
+            return [ocr_mod.OcrLine("متن\u200f \u0643\u062a\u0627\u0628", 0.92, [[20 * 2 + p, 15 * 2 + p], [120 * 2 + p, 15 * 2 + p], [120 * 2 + p, 45 * 2 + p], [20 * 2 + p, 45 * 2 + p]])]
+
+    restored_blocks = ocr_mod.recognize_image(
+        CoordEchoEngine(), Image.new("RGB", (180, 90), "white"), "fas",
+        contrast=True, precise=True, persian_preprocess=True,
+    )
+    assert len(restored_blocks) == 1
+    assert restored_blocks[0]["text"] == "متن کتاب"
+    assert restored_blocks[0]["x0"] == pytest.approx(20.0)
+    assert restored_blocks[0]["y0"] == pytest.approx(15.0)
+    assert restored_blocks[0]["x1"] == pytest.approx(120.0)
+    assert restored_blocks[0]["y1"] == pytest.approx(45.0)
+
+    # 3. Multi-container Persian comic extraction detects BOTH colored AND dark speech bubbles and merges them
+    comic_arr = np.full((360, 480, 3), 90, dtype=np.uint8)
+    cv2.rectangle(comic_arr, (30, 30), (220, 150), (180, 210, 240), thickness=-1)
+    cv2.rectangle(comic_arr, (30, 30), (220, 150), (20, 30, 45), thickness=3)
+    cv2.rectangle(comic_arr, (65, 72), (185, 92), (30, 40, 70), thickness=-1)
+    cv2.rectangle(comic_arr, (260, 190), (450, 310), (26, 28, 38), thickness=-1)
+    cv2.rectangle(comic_arr, (260, 190), (450, 310), (238, 238, 245), thickness=3)
+    cv2.rectangle(comic_arr, (295, 235), (415, 255), (240, 240, 248), thickness=-1)
+    containers = ocr_mod._persian_container_regions(Image.fromarray(comic_arr))
+    assert len(containers) == 2
+    for c_im, *_ in containers:
+        c_im.close()
+
+    # 4. Tesseract Persian uses --psm 6/3 + --oem 1 + preserve_interword_spaces=1 and RTL word order (while English keeps --psm 11)
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    monkeypatch.setattr(ocr_mod.TesseractEngine, "ready_languages", property(lambda self: ["eng", "fas"]))
+    tess_cmds: list[list[str]] = []
+
+    def fake_tess_run(cmd, **kw):
+        tess_cmds.append(cmd)
+        tsv = (
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+            "5\t1\t1\t1\t1\t30\t10\t40\t18\t91\t\u062f\u0646\u064a\u0627\n"
+            "5\t1\t1\t1\t1\t90\t10\t40\t18\t93\t\u0633\u0644\u0627\u0645\n"
+        )
+        return subprocess.CompletedProcess(cmd, 0, tsv.encode("utf-8"), b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_tess_run)
+    tess_eng = ocr_mod.TesseractEngine()
+    fa_lines = tess_eng.recognize(Image.new("RGB", (200, 80), "white"), "fas")
+    en_lines = tess_eng.recognize(Image.new("RGB", (200, 80), "white"), "eng")
+    assert tess_cmds[0][tess_cmds[0].index("--psm") + 1] == "6"
+    assert "preserve_interword_spaces=1" in tess_cmds[0]
+    assert tess_cmds[1][tess_cmds[1].index("--psm") + 1] == "11"
+    assert fa_lines[0].text == "سلام دنیا"
+    assert en_lines[0].text == "دنيا سلام"
+
+    # 5. Hezar >2560px CraftImageProcessor bug workaround + RTL same-row word-box merging
+    hz = worker_mod._HezarOcrAdapter(tmp_path / "hz")
+    seen_det_sizes: list[tuple[int, int]] = []
+
+    class FakeCraftLarge:
+        def predict(self, img):
+            seen_det_sizes.append(img.size)
+            # Two word boxes on the same row in LTR order -> must merge RTL ("سلام خوبی؟") and rescale 2x back to 3200px!
+            return [{"boxes": [(50, 40, 80, 28), (150, 42, 90, 28)]}]
+
+    class FakeCrnnWords:
+        def predict(self, crops):
+            return [{"text": "خوبی؟"}, {"text": "سلام"}]
+
+    monkeypatch.setattr(hz, "_ensure_loaded", lambda force_cpu=False: (FakeCraftLarge(), FakeCrnnWords()))
+    tall_img = tmp_path / "tall_fa.png"
+    Image.new("RGB", (1600, 5120), "white").save(tall_img)
+    hz_lines = hz.recognize(str(tall_img), "fas", None)
+    assert seen_det_sizes == [(800, 2560)]
+    assert len(hz_lines) == 1
+    assert hz_lines[0]["text"] == "سلام خوبی؟"
+    assert hz_lines[0]["polygon"] == [[100.0, 80.0], [480.0, 80.0], [480.0, 140.0], [100.0, 140.0]]
+
+    # 6. RTL comic bubble ordering orders right bubble before left bubble on the same horizontal band
+    rtl_bubbles = [
+        {"id": 1, "text": "حباب چپ", "conf": 92, "x0": 40, "y0": 52, "x1": 180, "y1": 90, "lineH": 38},
+        {"id": 2, "text": "حباب راست", "conf": 94, "x0": 320, "y0": 50, "x1": 470, "y1": 88, "lineH": 38},
+    ]
+    ordered_comic, c_mode = organize_ocr_blocks(rtl_bubbles, page_mode="comic", group_lines=True, page_size=(520, 400))
+    assert c_mode == "comic"
+    assert [b["text"] for b in ordered_comic] == ["حباب راست", "حباب چپ"]
+
+
+def test_v423_persian_root_cause_joining_kaf_gaf_bidi_tessdata_best_and_containers(tmp_path, monkeypatch):
+    import io
+    import cv2
+    import comic_studio.ocr as ocr_mod
+    import comic_studio.ocr_worker as worker_mod
+
+    # 1. Non-joining lookalikes (`ە` U+06D5 Right_Joining AE, `ے` U+06D2, `ہ`/`ھ`), Kaf/Gaf variants (`ڪ ګ ڬ ڭ ڮ ڰ ڱ ڲ ڳ ڴ`),
+    #    Ezafe (`کتابخانة` / `دربارهُ`), shattered single-letter spaces (`ب ه م`), and ZWNJ (`نمی چسبند` / `می گوید`)
+    raw_broken = (
+        "ب\u06d5م و چ\u06beر\u06d5 در کتابخان\u0629 مل\u06d2 دربار\u0647\u064f "
+        "\u06aaلاه \u06b0شاد \u06b3ر\u06af \u06abوچ\u06ac صحبت م\u064a گویند و حروف ف ا ر س ی ب ه ه م نم\u064a چسبند"
+    )
+    norm = ocr_mod.normalize_persian_ocr_text(raw_broken)
+    assert "\u06d5" not in norm and "\u06d2" not in norm and "\u06be" not in norm
+    assert "بهم" in norm and "چهره" in norm
+    assert "کتابخانهٔ ملی" in norm and "دربارهٔ" in norm
+    assert "کلاه گشاد گرگ کوچک" in norm
+    assert "می\u200cگویند" in norm
+    assert "فارسی به هم نمی\u200cچسبند" in norm
+    # Standalone conjunction `و` must never be glued to neighbors
+    assert "بهم و چهره" in norm
+
+    # 2. CTC visual-to-logical (`base_dir='R'`) preserves ZWNJ, multi-word English (`Toe Fillet`, `Figure 8-35`),
+    #    leading Latin tokens (`IPC-610`), Persian digits (`۱۲۳`), and bracket mirroring (`()«»`)
+    assert ocr_mod._persian_visual_to_logical("IPC-610 درادناتسا") == "استاندارد IPC-610"
+    assert (
+        ocr_mod._persian_visual_to_logical("یراک\u200cمیحل رد Toe Fillet درادناتسا")
+        == "استاندارد Toe Fillet در لحیم\u200cکاری"
+    )
+    assert ocr_mod._persian_visual_to_logical("۴۵۶ و ۱۲۳ هحفص") == "صفحه ۱۲۳ و ۴۵۶"
+    assert ocr_mod._persian_visual_to_logical("(2026 لاس) باتک") == "کتاب (سال 2026)"
+    assert ocr_mod._persian_visual_to_logical("Figure 3.2: Toe Fillet") == "Figure 3.2: Toe Fillet"
+
+    # 3. Tesseract Persian downloads float32 `tessdata_best/fas.traineddata` first (while English uses `tessdata_fast`),
+    #    and single-line Persian bubbles use `--psm 7` instead of slicing upper/lower dots with `--psm 6`
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    ocr_mod._STANDARD_CANCEL_EVENT.clear()
+    tess = ocr_mod.TesseractEngine()
+    seen_urls: list[str] = []
+
+    class FakeTessResp:
+        headers = {"Content-Length": "4096"}
+
+        def __init__(self):
+            self._buf = io.BytesIO(b"T" * 4096)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, sz=-1):
+            return self._buf.read(sz)
+
+    def fake_urlopen(req, timeout=180):
+        seen_urls.append(req.full_url)
+        return FakeTessResp()
+
+    monkeypatch.setattr("comic_studio.ocr.urllib.request.urlopen", fake_urlopen)
+    tess._download_language_file("fas")
+    assert seen_urls and "tessdata_best" in seen_urls[0] and seen_urls[0].endswith("/fas.traineddata")
+    seen_urls.clear()
+    tess._download_language_file("eng")
+    assert seen_urls and "tessdata_fast" in seen_urls[0] and seen_urls[0].endswith("/eng.traineddata")
+
+    # Single-line Persian bubble image (with main baseline + floating upper/lower dot rows) -> 1 line -> `--psm 7`
+    bubble_arr = np.full((76, 320, 3), 255, dtype=np.uint8)
+    cv2.rectangle(bubble_arr, (36, 33), (284, 43), (20, 20, 20), thickness=-1)  # baseline
+    for dx in range(55, 265, 28):
+        cv2.circle(bubble_arr, (dx, 24), 2, (20, 20, 20), -1)  # upper Persian dots
+        cv2.circle(bubble_arr, (dx + 8, 52), 2, (20, 20, 20), -1)  # lower Persian dots
+    single_bubble_img = Image.fromarray(bubble_arr)
+    assert ocr_mod._estimate_persian_text_line_count(single_bubble_img) == 1
+
+    bubble_psms: list[str] = []
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    monkeypatch.setattr(
+        tess,
+        "_recognize_with_psm",
+        lambda im, lg, psm: (
+            bubble_psms.append(psm)
+            or [ocr_mod.OcrLine("چرا حروف فارسی به هم نمی\u200cچسبند؟", 0.91, [[20, 20], [300, 20], [300, 56], [20, 56]])]
+        ),
+    )
+    b_lines = tess.recognize_bubble(single_bubble_img, "fas")
+    assert bubble_psms == ["7"]
+    assert b_lines[0].text == "چرا حروف فارسی به هم نمی\u200cچسبند؟"
+
+    # 4. `_coalesce_rtl_ocr_lines` reconnects sub-word/ZWNJ fragments on the same row, EXCEPT across a bubble border wall!
+    split_canvas = np.full((80, 420, 3), 250, dtype=np.uint8)
+    same_bubble_frags = [
+        ocr_mod.OcrLine("چسبند؟", 0.89, [[40, 25], [110, 25], [110, 52], [40, 52]]),
+        ocr_mod.OcrLine("نمی", 0.91, [[114, 25], [150, 25], [150, 52], [114, 52]]),
+        ocr_mod.OcrLine("رسی", 0.88, [[165, 25], [205, 25], [205, 52], [165, 52]]),
+        ocr_mod.OcrLine("فا", 0.90, [[206, 25], [228, 25], [228, 52], [206, 52]]),
+    ]
+    coalesced = ocr_mod._coalesce_rtl_ocr_lines(same_bubble_frags, split_canvas)
+    assert len(coalesced) == 1
+    assert coalesced[0].text == "فارسی نمی\u200cچسبند؟"
+
+    # Draw a dark vertical bubble border wall at x=160 -> fragments on opposite sides MUST stay separate!
+    cv2.line(split_canvas, (160, 10), (160, 70), (15, 15, 15), 3)
+    bordered_frags = [
+        ocr_mod.OcrLine("حباب چپ", 0.90, [[40, 25], [148, 25], [148, 52], [40, 52]]),
+        ocr_mod.OcrLine("حباب راست", 0.92, [[172, 25], [280, 25], [280, 52], [172, 52]]),
+    ]
+    unmerged_across_wall = ocr_mod._coalesce_rtl_ocr_lines(bordered_frags, split_canvas)
+    assert [ln.text for ln in unmerged_across_wall] == ["حباب راست", "حباب چپ"]
+
+    # 5. `_merge_non_overlapping_blocks` splits a wide primary block that illegally fused two separate speech bubbles
+    fused_primary = [
+        {"id": 1, "text": "| چرا حروف فا ز کلاه گشاد گرگ |", "conf": 72.0, "x0": 500.0, "y0": 170.0, "x1": 1070.0, "y1": 225.0}
+    ]
+    clean_containers = [
+        {"id": 1, "text": "چرا حروف فارسی به هم نمی\u200cچسبند؟", "conf": 90.5, "x0": 785.0, "y0": 175.0, "x1": 1060.0, "y1": 220.0},
+        {"id": 2, "text": "کلاه گشاد گرگ کوچک گم شد!", "conf": 90.2, "x0": 508.0, "y0": 175.0, "x1": 742.0, "y1": 220.0},
+    ]
+    repaired_blocks = ocr_mod._merge_non_overlapping_blocks(fused_primary, clean_containers, is_rtl_lang=True)
+    assert [b["text"] for b in repaired_blocks] == [
+        "چرا حروف فارسی به هم نمی\u200cچسبند؟",
+        "کلاه گشاد گرگ کوچک گم شد!",
+    ]
+
+    # 6. `_HezarOcrAdapter` splits wide ink-bearing line crops along vertical whitespace valleys before `128x32` CRNN
+    #    (preventing horizontal `گ->ک` squishing) and joins sub-words/ZWNJ intelligently
+    hz = worker_mod._HezarOcrAdapter(tmp_path / "hz_v423")
+    wide_arr = np.full((90, 420, 3), 255, dtype=np.uint8)
+    # 3 distinct word ink islands inside one wide CRAFT box (x=30..370, h=24 -> aspect > 12!)
+    cv2.rectangle(wide_arr, (40, 34), (125, 54), (20, 20, 20), thickness=-1)
+    cv2.rectangle(wide_arr, (150, 34), (245, 54), (20, 20, 20), thickness=-1)
+    cv2.rectangle(wide_arr, (270, 34), (360, 54), (20, 20, 20), thickness=-1)
+    wide_path = tmp_path / "wide_hezar.png"
+    Image.fromarray(wide_arr).save(wide_path)
+
+    seen_crop_widths: list[int] = []
+
+    class FakeCraftWide:
+        def predict(self, img):
+            return [{"boxes": [(35, 32, 330, 24)]}]
+
+    class FakeCrnnSubwords:
+        def predict(self, crops):
+            for c in crops:
+                seen_crop_widths.append(c.size[0])
+            # Left-to-right crops correspond to: left word "چسبند", middle "نمی", right "کلاه گشاد"
+            labels = ["چسبند", "نمی", "کلاه گشاد"]
+            return [{"text": labels[i % len(labels)]} for i in range(len(crops))]
+
+    monkeypatch.setattr(hz, "_ensure_loaded", lambda force_cpu=False: (FakeCraftWide(), FakeCrnnSubwords()))
+    hz_out = hz.recognize(str(wide_path), "fas", None)
+    assert len(seen_crop_widths) >= 2 and all(cw < 260 for cw in seen_crop_widths)
+    assert len(hz_out) == 1
+    assert "نمی\u200cچسبند" in hz_out[0]["text"]
+
+
+def test_v424_sota_persian_ocr_rasm_lexicon_lab_chromatic_deskew_psm13_and_bilingual_tsv(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+    import cv2
+    import comic_studio.ocr as ocr_mod
+    from comic_studio.persian_ocr_post import is_known_persian_word, postprocess_persian_ocr_text
+
+    repo_py = Path(__file__).resolve().parent.parent
+    if str(repo_py) not in sys.path:
+        sys.path.insert(0, str(repo_py))
+    from offline_packaging.build_offline_package import pyinstaller_command
+
+    # 1. SOTA Persian post-OCR: dotless Rasm homograph repair, ZWNJ compounds, run-on splitter, and verb safety
+    assert is_known_persian_word("دهند") and is_known_persian_word("ندارد") and is_known_persian_word("بگیرند")
+    assert not is_known_persian_word("نگهیان") and not is_known_persian_word("پرایر")
+
+    repaired_comic = ocr_mod.normalize_persian_ocr_text(
+        "نگهیان فریاد زد: «برگردید عقب! هیچ\u200cکس اجازه\u0654 عبور از گذرگاه بزرگ را نداردل»"
+    )
+    assert repaired_comic == "نگهبان فریاد زد: «برگردید عقب! هیچ\u200cکس اجازه\u0654 عبور از گذرگاه بزرگ را ندارد!»"
+
+    repaired_tech = postprocess_persian_ocr_text(
+        "پژوهشکران دانشکاه صنعتی کزارش دادند که سرکش حرف گافو نقطه\u200cهای پء چ و ژرا در شکل Figure 8-35 "
+        "استاندارد IPC-A-610 مقدار Toe Fillet پرایر %25 بررسی کرده 9 درباره کتابخانة مرجع و چشمانداز بزگ\u200cترین پروژه تصمیمبگیرند."
+    )
+    assert (
+        repaired_tech
+        == "پژوهشگران دانشگاه صنعتی گزارش دادند که سرکش حرف گاف و نقطه\u200cهای پ، چ و ژ را در شکل Figure 8-35 "
+        "استاندارد IPC-A-610 مقدار Toe Fillet برابر 25% بررسی کرده و درباره کتابخانه\u0654 مرجع و چشم\u200cانداز بزرگ\u200cترین پروژه تصمیم بگیرند."
+    )
+
+    # 2. Isoluminant CIE LAB ΔE chromatic ink extraction (#e63946 red ink inside #1e5aa8 blue comic box)
+    chroma_arr = np.full((140, 320, 3), 245, dtype=np.uint8)
+    cv2.rectangle(chroma_arr, (20, 20), (300, 120), (30, 90, 168), thickness=-1)  # #1e5aa8 blue box
+    cv2.rectangle(chroma_arr, (60, 58), (260, 78), (230, 57, 70), thickness=-1)  # #e63946 red text bar
+    chroma_img = Image.fromarray(chroma_arr, mode="RGB")
+    containers = ocr_mod._persian_container_regions(chroma_img)
+    assert len(containers) == 1
+    c_rgb, *_ = containers[0]
+    try:
+        prep_chroma, _, c_pad = ocr_mod.persian_preprocess_image(c_rgb, precise=True, page_mode="comic")
+        try:
+            p_arr = np.asarray(prep_chroma)[c_pad:-c_pad, c_pad:-c_pad, 0]
+            # Blue interior becomes bright paper (>210), while isoluminant red stroke becomes dark ink (<95)!
+            assert float(np.median(p_arr[12:28, 20:80])) > 210.0
+            assert float(np.min(p_arr[70:120, 90:420])) < 95.0
+        finally:
+            prep_chroma.close()
+    finally:
+        c_rgb.close()
+
+    # 3. Sub-degree projection-derivative deskew + exact inverse 2D affine coordinate mapping
+    upright = np.full((260, 420), 248, dtype=np.uint8)
+    for row_y in (65, 110, 155, 200):
+        for seg_x in range(60, 350, 42):
+            cv2.rectangle(upright, (seg_x, row_y), (seg_x + 28, row_y + 10), 25, thickness=-1)
+    rot_m = cv2.getRotationMatrix2D((210.0, 130.0), -5.0, 1.0)
+    tilted = cv2.warpAffine(upright, rot_m, (420, 260), flags=cv2.INTER_LINEAR, borderValue=248)
+    est_deg = ocr_mod.estimate_persian_skew_angle(tilted)
+    assert 4.0 <= est_deg <= 6.0
+
+    # Verify inverse coordinate unrotation in recognize_image(..., persian_preprocess=True)
+    tilted_rgb = Image.fromarray(tilted, mode="L").convert("RGB")
+    target_orig_pt = (100.0, 70.0)
+    fwd_m = cv2.getRotationMatrix2D((210.0, 130.0), est_deg, 1.0)
+    deskewed_x = float(fwd_m[0, 0] * target_orig_pt[0] + fwd_m[0, 1] * target_orig_pt[1] + fwd_m[0, 2])
+    deskewed_y = float(fwd_m[1, 0] * target_orig_pt[0] + fwd_m[1, 1] * target_orig_pt[1] + fwd_m[1, 2])
+
+    class DeskewEchoEngine:
+        def recognize(self, img: Image.Image, lang: str):
+            p = ocr_mod.PERSIAN_PREPROCESS_BORDER_PAD
+            sx0, sy0 = deskewed_x * 2.0 + p, deskewed_y * 2.0 + p
+            sx1, sy1 = sx0 + 80.0, sy0 + 20.0
+            return [ocr_mod.OcrLine("پژوهشگران دانشگاه", 0.93, [[sx0, sy0], [sx1, sy0], [sx1, sy1], [sx0, sy1]])]
+
+    monkeypatch.setattr("comic_studio.license_guard.require_module_license", lambda *a, **kw: None)
+    unrot_blocks = ocr_mod.recognize_image(
+        DeskewEchoEngine(), tilted_rgb, "fas", contrast=True, precise=True, persian_preprocess=True,
+    )
+    assert len(unrot_blocks) == 1
+    assert unrot_blocks[0]["polygon"][0][0] == pytest.approx(target_orig_pt[0], abs=2.5)
+    assert unrot_blocks[0]["polygon"][0][1] == pytest.approx(target_orig_pt[1], abs=2.5)
+
+    # 4. Legacy 431 KB `tessdata_fast/fas.traineddata` guard + kursi PSM 13 line recovery + bilingual FAS/ENG TSV arbitration
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    tess_dir = tmp_path / "models" / "tesseract"
+    tess_dir.mkdir(parents=True, exist_ok=True)
+    (tess_dir / "fas.traineddata").write_bytes(b"\x00" * 431_500)  # legacy int8 tessdata_fast size
+    (tess_dir / "eng.traineddata").write_bytes(b"\x00" * 2_000_000)
+    tess = ocr_mod.TesseractEngine()
+    tess._system_languages = set()
+    assert "fas" not in tess.ready_languages  # forces upgrade to 3.33 MB float32 tessdata_best!
+    (tess_dir / "fas.traineddata").write_bytes(b"\x00" * 3_325_955)
+    assert "fas" in tess.ready_languages and "eng" in tess.ready_languages
+
+    # Build a 2-line Persian document image where PSM 3 drops line 2, and PSM 13 + ENG TSV arbitrates line 2!
+    doc_arr = np.full((180, 480, 3), 255, dtype=np.uint8)
+    for lx in range(60, 420, 26):
+        cv2.rectangle(doc_arr, (lx, 42), (lx + 18, 56), (20, 20, 20), thickness=-1)
+        cv2.rectangle(doc_arr, (lx, 112), (lx + 18, 126), (20, 20, 20), thickness=-1)
+    doc_img = Image.fromarray(doc_arr, mode="RGB")
+    bands = ocr_mod._segment_persian_line_bands(doc_img)
+    assert len(bands) == 2
+
+    seen_calls: list[tuple[str, str]] = []
+
+    def fake_tsv(im: Image.Image, lang: str, psm: str) -> str:
+        seen_calls.append((lang, psm))
+        hdr = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+        if lang == "fas" and psm == "3":
+            # Simulate Textord dropping the second Persian line completely!
+            return hdr + "5\t1\t1\t1\t1\t1\t50\t40\t360\t18\t92.0\tپژوهشگران دانشگاه صنعتی\n"
+        if lang == "fas" and psm == "13":
+            # Line 2 has mixed FA + garbled technical English (`۱۳0-۸-610` and `۰۹۸25`)
+            return (
+                hdr
+                + "5\t1\t1\t1\t1\t1\t300\t12\t90\t18\t91.0\tاستاندارد\n"
+                + "5\t1\t1\t1\t1\t2\t170\t12\t110\t18\t61.0\t۱۳0-۸-610\n"
+                + "5\t1\t1\t1\t1\t3\t105\t12\t50\t18\t88.0\tپرایر\n"
+                + "5\t1\t1\t1\t1\t4\t30\t12\t60\t18\t44.0\t۰۹۸25\n"
+            )
+        if lang == "eng" and psm == "7":
+            return (
+                hdr
+                + "5\t1\t1\t1\t1\t1\t30\t12\t60\t18\t93.5\t%25\n"
+                + "5\t1\t1\t1\t1\t2\t105\t12\t50\t18\t42.0\tysl\n"
+                + "5\t1\t1\t1\t1\t3\t170\t12\t110\t18\t95.2\tIPC-A-610\n"
+                + "5\t1\t1\t1\t1\t4\t300\t12\t90\t18\t18.0\tslastiwl\n"
+            )
+        return hdr
+
+    monkeypatch.setattr(tess, "_run_tesseract_tsv", fake_tsv)
+    doc_lines = tess.recognize_document(doc_img, "fas")
+    assert ("fas", "13") in seen_calls and ("eng", "7") in seen_calls
+    assert [ln.text for ln in doc_lines] == [
+        "پژوهشگران دانشگاه صنعتی",
+        "استاندارد IPC-A-610 برابر 25%",
+    ]
+
+    # 5. Offline PyInstaller command bundles `comic_studio/assets` (`persian_ocr_lexicon.json.gz` + `Vazirmatn.woff2`)
+    repo_py = Path(__file__).resolve().parent.parent
+    pyi_cmd = pyinstaller_command(
+        entry_script=repo_py / "run.py",
+        dist_dir=tmp_path / "dist",
+        work_dir=tmp_path / "work",
+        spec_dir=tmp_path / "spec",
+        icon_path=tmp_path / "app.ico",
+        static_dir=repo_py / "comic_studio" / "static",
+        staged_models_dir=tmp_path / "empty_models",
+    )
+    assert any("comic_studio/assets" in arg for arg in pyi_cmd)
+
+
+def test_v425_surya_mtmd_chunk_vulkan_mmproj_sentinel_and_crop_root_cause(tmp_path, monkeypatch):
+    import json
+    import sys
+    import types
+    from types import SimpleNamespace
+    from PIL import Image, ImageDraw
+    import comic_studio.ocr_managed as managed
+    import comic_studio.ocr_worker as worker
+
+    # 1. Vulkan llama-bin + Intel/AMD (`LLAMA_CPP_NGL == "0"`) AND NVIDIA Vulkan (`LLAMA_CPP_NGL == "99"`):
+    #    both MUST set `LLAMA_CPP_NO_MMPROJ_OFFLOAD == "true"` and `-b 2048 -ub 2048 --flash-attn off`
+    #    so Surya 2.5's head_dim=72 CLIP vision graph never faults on Vulkan!
+    fake_models = tmp_path / "models"
+    llama_bin = fake_models / "envs" / "surya" / "llama-bin"
+    llama_bin.mkdir(parents=True, exist_ok=True)
+    (llama_bin / "llama-server.exe").write_bytes(b"MZ")
+    (llama_bin / "ggml-vulkan.dll").write_bytes(b"MZ")
+
+    monkeypatch.setattr(managed, "models_dir", lambda: fake_models)
+    monkeypatch.setattr(managed, "_is_windows", lambda: True)
+    monkeypatch.setattr(managed.sys, "platform", "win32")
+    for k in ("LLAMA_CPP_NGL", "LLAMA_CPP_NO_MMPROJ_OFFLOAD", "LLAMA_CPP_EXTRA_ARGS", "LLAMA_CPP_BINARY"):
+        monkeypatch.delenv(k, raising=False)
+
+    monkeypatch.setattr(managed, "inspect_hardware", lambda: {"hasNvidiaGpu": True, "hasGpu": True, "vramGb": 8.0})
+    eng_nv = managed.IsolatedOcrEngine("surya", ["eng", "fas"], threading.Lock(), OcrLine, OcrError)
+    env_nv = eng_nv._worker_env()
+    assert env_nv["LLAMA_CPP_NGL"] == "99"
+    assert env_nv["LLAMA_CPP_NO_MMPROJ_OFFLOAD"] == "true"
+    assert "-b 2048 -ub 2048" in env_nv["LLAMA_CPP_EXTRA_ARGS"]
+    assert "--flash-attn off" in env_nv["LLAMA_CPP_EXTRA_ARGS"]
+    assert "--device none" not in env_nv["LLAMA_CPP_EXTRA_ARGS"]
+
+    monkeypatch.setattr(managed, "inspect_hardware", lambda: {"hasNvidiaGpu": False, "hasGpu": True, "vramGb": 4.0})
+    env_igpu = eng_nv._worker_env()
+    assert env_igpu["LLAMA_CPP_NGL"] == "0"
+    assert env_igpu["LLAMA_CPP_NO_MMPROJ_OFFLOAD"] == "true"
+    assert "--device none" in env_igpu["LLAMA_CPP_EXTRA_ARGS"]
+
+    # 2. Stale sentinel cleanup across USERPROFILE/.cache/datalab/surya/llamacpp_server.json
+    fake_userprofile = tmp_path / "win_user"
+    stale_sentinel = fake_userprofile / ".cache" / "datalab" / "surya" / "llamacpp_server.json"
+    stale_sentinel.parent.mkdir(parents=True, exist_ok=True)
+    stale_sentinel.write_text(json.dumps({"port": 51999, "pid": 999999, "backend": "llamacpp"}), encoding="utf-8")
+    monkeypatch.setenv("USERPROFILE", str(fake_userprofile))
+    monkeypatch.setattr(managed, "_run_Subprocess", lambda *a, **kw: None)
+    managed._stop_lingering_surya_server()
+    assert not stale_sentinel.exists(), "Stale USERPROFILE llamacpp_server.json must be removed"
+
+    # 3. _SuryaAdapter syncs LLAMA_CPP_NO_MMPROJ_OFFLOAD + LLAMA_CPP_EXTRA_ARGS and recovers even when NGL started at "0"!
+    fake_settings = SimpleNamespace(
+        SURYA_INFERENCE_BACKEND="auto",
+        SURYA_INFERENCE_PARALLEL=8,
+        SURYA_INFERENCE_CTX_SIZE=16384,
+        SURYA_MAX_TOKENS_FULL_PAGE=12288,
+        SURYA_INFERENCE_LOGPROBS=True,
+        SURYA_INFERENCE_KEEP_ALIVE=True,
+        LLAMA_CPP_NGL=0,
+        LLAMA_CPP_NO_MMPROJ_OFFLOAD=False,
+        LLAMA_CPP_EXTRA_ARGS=None,
+    )
+    fake_surya = types.ModuleType("surya")
+    fake_surya_settings = types.ModuleType("surya.settings")
+    fake_surya_settings.settings = fake_settings
+    monkeypatch.setitem(sys.modules, "surya", fake_surya)
+    monkeypatch.setitem(sys.modules, "surya.settings", fake_surya_settings)
+    monkeypatch.setenv("LLAMA_CPP_BINARY", str(llama_bin / "llama-server.exe"))
+    monkeypatch.setenv("LLAMA_CPP_NGL", "0")
+    monkeypatch.delenv("LLAMA_CPP_NO_MMPROJ_OFFLOAD", raising=False)
+    monkeypatch.delenv("LLAMA_CPP_EXTRA_ARGS", raising=False)
+
+    adapter = worker._SuryaAdapter(fake_models)
+    adapter._sync_surya_runtime_settings()
+    assert fake_settings.LLAMA_CPP_NO_MMPROJ_OFFLOAD is True
+    assert "--device none" in fake_settings.LLAMA_CPP_EXTRA_ARGS
+    assert "-ub 2048" in fake_settings.LLAMA_CPP_EXTRA_ARGS
+
+    # 4. Oversized page (3600x2400) + degenerate layout slivers + `mtmd chunk` error when NGL=="0" ->
+    #    auto-recovers on pure-CPU 1568px cap and unmaps polygon coordinates accurately back to 3600x2400!
+    big_path = tmp_path / "big_comic.png"
+    big_im = Image.new("RGB", (3600, 2400), (255, 255, 255))
+    draw = ImageDraw.Draw(big_im)
+    draw.rectangle([360, 240, 1800, 480], fill=(20, 20, 20))
+    big_im.save(big_path)
+    big_im.close()
+
+    # Verify _sanitize_layout_for_surya drops <4px noise slivers and expands tiny 10x10 boxes to >=28x28
+    sliver_box = SimpleNamespace(label="Text", polygon=[[10, 10], [500, 10], [500, 12], [10, 12]])
+    tiny_box = SimpleNamespace(label="Text", polygon=[[100, 100], [110, 100], [110, 110], [100, 110]])
+    san = adapter._sanitize_layout_for_surya(SimpleNamespace(bboxes=[sliver_box, tiny_box]), 1000, 800)
+    assert len(san.bboxes) == 1
+    xs = [p[0] for p in san.bboxes[0].polygon]
+    ys = [p[1] for p in san.bboxes[0].polygon]
+    assert (max(xs) - min(xs)) >= 28.0 and (max(ys) - min(ys)) >= 28.0
+
+    # Simulate first pass failing with `error=True` (`failed to process mtmd chunk, res = -1`) even when NGL=="0",
+    # then succeeding after `_restart_on_pure_cpu()` at 1568px cap!
+    monkeypatch.setenv("LLAMA_CPP_NGL", "0")
+    monkeypatch.setenv("LLAMA_CPP_NO_MMPROJ_OFFLOAD", "false")
+    seen_sizes: list[tuple[int, int]] = []
+
+    def _mtmd_fail_then_recover(imgs, layout_results=None):
+        im0 = imgs[0]
+        seen_sizes.append(im0.size)
+        if worker.os.environ.get("LLAMA_CPP_NO_MMPROJ_OFFLOAD") != "true":
+            return [SimpleNamespace(error=True, blocks=[SimpleNamespace(html="", text="", label="Full-Page", bbox=[0, 0, im0.size[0], im0.size[1]], error=True)])]
+        # On 1568x1045 downscaled image, box [156.8, 104.5, 784.0, 209.0] maps back to [360, 240, 1800, 480]
+        return [
+            SimpleNamespace(
+                error=False,
+                blocks=[
+                    SimpleNamespace(
+                        html="<p>متن فارسی بازیابی‌شده</p>",
+                        label="Text",
+                        bbox=[156.8, 104.5, 784.0, 209.0],
+                        confidence=0.95,
+                        error=False,
+                    )
+                ],
+            )
+        ]
+
+    adapter._predictor = _mtmd_fail_then_recover
+    monkeypatch.setattr(adapter, "_ensure_loaded", lambda: None)
+    monkeypatch.setattr(adapter, "_detect_fast_layout_inprocess", lambda _im: None)
+    out = adapter.recognize(str(big_path), "fas", None)
+    assert seen_sizes[0][0] == 2240 and seen_sizes[1][0] == 1568
+    assert worker.os.environ.get("LLAMA_CPP_NO_MMPROJ_OFFLOAD") == "true"
+    assert "--device none" in (worker.os.environ.get("LLAMA_CPP_EXTRA_ARGS") or "")
+    assert len(out) == 1 and out[0]["text"] == "متن فارسی بازیابی‌شده"
+    assert abs(out[0]["polygon"][0][0] - 360.0) <= 3.0
+    assert abs(out[0]["polygon"][2][0] - 1800.0) <= 3.0
 
 
 
@@ -2918,3 +3524,490 @@ def test_v399_worker_memory_trim_and_onnx_session_options():
 
 
 
+
+
+
+
+
+
+
+
+def test_v426_job_cancel_preempts_ocr_translation_and_export(tmp_path, monkeypatch):
+    """v4.26: the "لغو" button must actually stop running work, not just close the window."""
+    from fastapi.testclient import TestClient
+
+    from comic_studio import activity as activity_mod
+    from comic_studio.main import create_app
+    from comic_studio.ocr import EngineRegistry
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+
+    # 1) Cooperative cancellation: a running job raises JobCancelledError as soon as the cancel event is set.
+    cancel_event = threading.Event()
+    with activity_mod.cancellation_scope(cancel_event):
+        assert not activity_mod.is_job_cancelled()
+        cancel_event.set()
+        assert activity_mod.is_job_cancelled()
+        with pytest.raises(activity_mod.JobCancelledError):
+            activity_mod.check_cancelled("عملیات لغو شد.")
+
+    # 2) An interruptible sleep wakes up immediately when cancelled instead of waiting the full delay.
+    cancel_event = threading.Event()
+    cancel_event.set()
+    started = time.monotonic()
+    with pytest.raises(activity_mod.JobCancelledError):
+        activity_mod.sleep_interruptible(30.0, cancel_event, "عملیات لغو شد.")
+    assert time.monotonic() - started < 1.0
+
+    # 3) The isolated-engine worker can be killed without waiting for its stdout readline() to return.
+    from comic_studio.ocr_managed import IsolatedOcrEngine
+
+    engine = IsolatedOcrEngine(
+        engine_id="got-ocr-2",
+        languages=["eng"],
+        install_lock=threading.Lock(),
+        line_factory=OcrLine,
+        error_cls=OcrError,
+    )
+    worker_script = tmp_path / "fake_worker.py"
+    worker_script.write_text(
+        "import sys, time\n"
+        "print('ready', flush=True)\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line:\n"
+        "        break\n"
+        "    time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("comic_studio.ocr_managed._worker_script_path", lambda: worker_script)
+    monkeypatch.setattr(engine, "_env_python", lambda: Path(sys.executable))
+
+    proc = engine._ensure_worker()
+    assert proc.poll() is None
+    engine.cancel_ocr()
+    deadline = time.monotonic() + 5.0
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert proc.poll() is not None, "cancel_ocr() must terminate the worker process immediately"
+
+    # 4) The registry exposes a global OCR cancel that also stops Tesseract subprocesses.
+    registry = EngineRegistry()
+    assert callable(getattr(registry, "cancel_ocr", None))
+    assert callable(getattr(registry, "cancel_all_installs", None))
+
+    # 5) The HTTP API exposes an immediate job-cancel route.
+    client = TestClient(create_app(), base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
+    resp = client.post("/api/jobs/cancel", json={"kind": "all"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    resp = client.post("/api/jobs/cancel", json={"kind": "ocr"})
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "ocr"
+
+
+def test_v427_persian_table_ocr_cell_grid_rtl_order_and_digits(tmp_path, monkeypatch):
+    """v4.27: Persian tables must be read cell by cell (right-to-left), not as one garbled line."""
+    import cv2
+    import comic_studio.ocr as ocr_mod
+    from comic_studio.table_ocr import detect_table_regions, recognize_tables
+
+    monkeypatch.setattr("comic_studio.license_guard.require_module_license", lambda *a, **kw: None)
+
+    # 1. A ruled Persian table: 3 columns x 4 rows.
+    canvas = np.full((620, 900, 3), 255, dtype=np.uint8)
+    col_edges = [80, 320, 560, 820]
+    row_edges = [80, 195, 310, 425, 540]
+    for x in col_edges:
+        cv2.line(canvas, (x, row_edges[0]), (x, row_edges[-1]), (0, 0, 0), 3)
+    for y in row_edges:
+        cv2.line(canvas, (col_edges[0], y), (col_edges[-1], y), (0, 0, 0), 3)
+    for row in range(4):
+        for col in range(3):
+            # Every cell gets its own number of ink groups so the fake OCR can
+            # report which cell it is reading.
+            groups = row * 3 + col + 1
+            base_x = col_edges[col] + 25
+            base_y = row_edges[row] + 35
+            for k in range(groups):
+                cv2.rectangle(canvas, (base_x + k * 26, base_y), (base_x + k * 26 + 16, base_y + 24), (20, 20, 20), -1)
+    table_img = Image.fromarray(canvas, mode="RGB")
+
+    regions = detect_table_regions(table_img)
+    assert len(regions) == 1
+    region = regions[0]
+    assert len(region.row_bands) == 4
+    assert len(region.col_bands) == 3
+
+    # 2. Every cell is read on its own with a single-line Tesseract pass.
+    words = ["یک", "دو", "سه", "چهار", "پنج", "شش", "هفت", "هشت", "نه", "ده", "یازده", "دوازده"]
+
+    class FakeTableEngine:
+        id = "tesseract"
+
+        def recognize(self, image, language):  # page level: Tesseract glues the whole table
+            return [ocr_mod.OcrLine("جدولبه‌هم‌ریخته", 0.55, [[80, 80], [820, 80], [820, 540], [80, 540]])]
+
+        def _run_tesseract_tsv(self, image, language, psm):
+            arr = np.asarray(image.convert("L"))
+            dark = arr < 128
+            column_has_ink = dark.sum(axis=0) > 0
+            groups = 0
+            previous = False
+            for flag in column_has_ink:
+                if flag and not previous:
+                    groups += 1
+                previous = bool(flag)
+            rows_with_ink = np.nonzero(dark.any(axis=1))[0]
+            text = words[groups - 1] if 1 <= groups <= len(words) else ""
+            header = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+            if not text or rows_with_ink.size == 0:
+                return header
+            top = int(rows_with_ink[0])
+            bottom = int(rows_with_ink[-1]) + 1
+            return header + f"5\t1\t1\t1\t1\t1\t0\t{top}\t50\t{bottom - top}\t95.0\t{text}\n"
+
+    readout = recognize_tables(FakeTableEngine(), table_img, "fas")
+    assert len(readout.cells) == 12
+    assert {cell.text for cell in readout.cells} <= set(words)
+    assert all(cell.text for cell in readout.cells)
+
+    # 3. The garbled page level line is replaced by the per-cell blocks, right-to-left.
+    blocks = ocr_mod.recognize_image(FakeTableEngine(), table_img, "fas", page_mode="document")
+    assert len(blocks) == 12
+    assert all(block["text"] in words for block in blocks)
+    first_row = [b for b in blocks if b["y0"] < 200]
+    assert len(first_row) == 3
+    # Inside a row the right-most cell is read first (Persian reading order).
+    assert first_row[0]["x0"] > first_row[1]["x0"] > first_row[2]["x0"]
+    assert [b["id"] for b in blocks] == list(range(1, 13))
+
+    # 4. Arabic-Indic digits are normalized to Persian digits inside Persian text.
+    assert ocr_mod.normalize_persian_ocr_text("سال ٢٠٢٤") == "سال ۲۰۲۴"
+
+
+def test_v428_tesseract_persian_language_auto_prepare_and_offline_bundle_guard(tmp_path, monkeypatch):
+    """v4.28: a Persian OCR run must download the missing `fas` file instead of dying with HTTP 503."""
+    import sys
+    from pathlib import Path
+    import comic_studio.ocr as ocr_mod
+    from comic_studio.ocr import OcrError, TesseractEngine
+
+    repo_py = Path(__file__).resolve().parent.parent
+    if str(repo_py) not in sys.path:
+        sys.path.insert(0, str(repo_py))
+    from offline_packaging.build_offline_package import verify_bundled_language_models
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    tess_dir = tmp_path / "models" / "tesseract"
+    tess_dir.mkdir(parents=True, exist_ok=True)
+    (tess_dir / "eng.traineddata").write_bytes(b"\x00" * 2_000_000)
+
+    # 1. The missing Persian file is downloaded automatically and the engine becomes ready.
+    engine = TesseractEngine()
+    engine._system_languages = set()
+    assert "fas" not in engine.ready_languages
+    downloads: list[str] = []
+
+    def fake_download(language: str, *, timeout: float = 30.0):
+        downloads.append(language)
+        (tess_dir / f"{language}.traineddata").write_bytes(b"\x00" * 3_325_955)
+        return tess_dir / f"{language}.traineddata"
+
+    monkeypatch.setattr(engine, "_download_language_file", fake_download)
+    engine._auto_prepare_language("fas")
+    assert downloads == ["fas"]
+    assert "fas" in engine.ready_languages
+
+    # 2. A failed download is remembered so a batch never repeats the slow download per page.
+    (tess_dir / "fas.traineddata").unlink(missing_ok=True)
+    failing = TesseractEngine()
+    failing._system_languages = set()
+    attempts: list[str] = []
+
+    def failing_download(language: str, *, timeout: float = 30.0):
+        attempts.append(language)
+        raise OcrError("network unreachable")
+
+    monkeypatch.setattr(failing, "_download_language_file", failing_download)
+    with pytest.raises(OcrError) as first_error:
+        failing._auto_prepare_language("fas")
+    message = str(first_error.value)
+    assert "fas" in message and "مدیریت مدل‌های OCR" in message
+    with pytest.raises(OcrError):
+        failing._auto_prepare_language("fas")
+    assert attempts == ["fas"]
+
+    # 3. The Tesseract run path prepares the language instead of failing outright.
+    runner = TesseractEngine()
+    runner._system_languages = set()
+    prepared: list[str] = []
+
+    def recorder(language: str):
+        prepared.append(language)
+        raise OcrError("stop after preparation")
+
+    monkeypatch.setattr(runner, "_auto_prepare_language", recorder)
+    with pytest.raises(OcrError):
+        runner._run_tesseract_tsv(Image.new("RGB", (12, 12), "white"), "fas", "7")
+    assert prepared == ["fas"]
+
+    # 4. The offline builder refuses to ship an app that cannot read Persian.
+    bundle = tmp_path / "bundle_tess"
+    bundle.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(RuntimeError) as missing_error:
+        verify_bundled_language_models(bundle)
+    assert "fas.traineddata" in str(missing_error.value)
+    (bundle / "eng.traineddata").write_bytes(b"\x00" * 2_000_000)
+    (bundle / "fas.traineddata").write_bytes(b"\x00" * 431_500)  # legacy int8 tessdata_fast
+    with pytest.raises(RuntimeError) as legacy_error:
+        verify_bundled_language_models(bundle)
+    assert "tessdata_best" in str(legacy_error.value)
+    (bundle / "fas.traineddata").write_bytes(b"\x00" * 3_325_955)
+    verify_bundled_language_models(bundle)
+
+
+def test_v430_the_install_lock_fails_fast_instead_of_hanging_the_app():
+    """A second model preparation must not wait in silence for minutes.
+
+    The lock is held while a model is downloaded.  The old code waited for it
+    without a word, so the app looked frozen and the user restarted it.
+    """
+    from comic_studio.ocr import _INSTALL_LOCK, _install_lock
+
+    _INSTALL_LOCK.acquire()
+    try:
+        started = time.monotonic()
+        with pytest.raises(OcrError) as excinfo:
+            with _install_lock(timeout=0.05):
+                pass
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0, "the lock must not block for minutes"
+        assert "در حال اجراست" in str(excinfo.value)
+    finally:
+        _INSTALL_LOCK.release()
+    # The lock is free again afterwards.
+    with _install_lock(timeout=0.5):
+        pass
+
+
+def test_v430_the_ocr_worker_notices_that_the_studio_process_is_gone():
+    """An orphaned worker must not keep gigabytes of RAM busy for nobody."""
+    from comic_studio.ocr_worker import _process_alive
+
+    assert _process_alive(os.getpid()) is True
+    assert _process_alive(0) is True  # unknown parent -> keep working
+    assert _process_alive(999999999) is False
+
+
+def test_v430_the_worker_watchdog_stops_a_worker_whose_parent_is_gone(tmp_path):
+    import textwrap
+
+    package_root = Path(__file__).resolve().parents[1]
+    script = tmp_path / "watchdog_child.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            import sys, time
+            sys.path.insert(0, {str(package_root)!r})
+            from comic_studio.ocr_worker import _start_parent_watchdog
+            _start_parent_watchdog(999999999)
+            print('started', flush=True)
+            time.sleep(60)
+            """
+        ),
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=30,
+    )
+    elapsed = time.monotonic() - started
+    assert "started" in result.stdout
+    assert elapsed < 20.0, "the worker must stop itself when the studio is gone"
+
+
+class _FakeDetector:
+    def __init__(self) -> None:
+        self.limit_type = "min"
+        self.limit_side_len = 736
+
+
+class _FakeRapidInstance:
+    """A RapidOCR look-alike that records the detection canvas of every call."""
+
+    def __init__(self) -> None:
+        self.text_det = _FakeDetector()
+        self.cfg = SimpleNamespace(Det=SimpleNamespace(limit_type="min", limit_side_len=736))
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, arr, **kwargs):
+        self.calls.append((self.text_det.limit_type, self.text_det.limit_side_len))
+        return SimpleNamespace(
+            boxes=np.array([[[1, 2], [20, 2], [20, 12], [1, 12]]]),
+            txts=["hello"], scores=np.array([0.9]),
+        )
+
+
+def test_v431_a_bounded_detection_canvas_is_used_for_crop_passes_only():
+    """A wide, short bubble crop must not blow the detector up to a huge canvas."""
+    from comic_studio.ocr import CROP_DET_MAX_SIDE, DET_SHORT_SIDE_LIMIT, _apply_det_input_cap
+
+    instance = _FakeRapidInstance()
+    _apply_det_input_cap(instance, CROP_DET_MAX_SIDE)
+    assert instance.text_det.limit_type == "max"
+    assert instance.text_det.limit_side_len == CROP_DET_MAX_SIDE
+    # The next page level pass must get the normal detector behaviour back.
+    _apply_det_input_cap(instance, None)
+    assert instance.text_det.limit_type == "min"
+    assert instance.text_det.limit_side_len == DET_SHORT_SIDE_LIMIT
+
+
+def test_v431_the_rapid_engine_bounds_the_canvas_of_a_crop_pass(monkeypatch):
+    from comic_studio.ocr import CROP_DET_MAX_SIDE
+
+    engine = RapidEngine("rapidocr-v6", "v6")
+    instance = _FakeRapidInstance()
+
+    @contextlib.contextmanager
+    def fake_checkout(language):
+        yield instance
+
+    monkeypatch.setattr(engine, "_checkout", fake_checkout)
+    image = Image.new("RGB", (400, 120), "white")
+    engine.recognize(image, "eng", det_max_side=CROP_DET_MAX_SIDE)
+    engine.recognize(image, "eng")
+    assert instance.calls[0] == ("max", CROP_DET_MAX_SIDE)
+    assert instance.calls[1] == ("min", 736)
+
+
+def test_v431_the_persian_container_pass_uses_the_bounded_canvas(monkeypatch):
+    from comic_studio import ocr
+    from comic_studio.ocr import CROP_DET_MAX_SIDE, _recognize_persian_containers
+
+    seen: list[int | None] = []
+
+    class FakeCappedEngine:
+        supports_det_cap = True
+
+        def recognize(self, image, language, page_mode="auto", *, det_max_side=None):
+            seen.append(det_max_side)
+            return [OcrLine("متن", 0.9, [[0, 0], [10, 0], [10, 10], [0, 10]])]
+
+    crop = Image.new("RGB", (200, 60), "white")
+    monkeypatch.setattr(
+        ocr, "_persian_container_regions", lambda image: [(crop, 10, 20, 200, 60)],
+    )
+    page = Image.new("RGB", (600, 400), "white")
+    _recognize_persian_containers(FakeCappedEngine(), page, "fas", 0.35)
+    assert seen, "the container pass must read every container"
+    assert all(value == CROP_DET_MAX_SIDE for value in seen)
+
+
+def test_v431_a_table_cell_is_read_without_running_the_text_detector():
+    from comic_studio.table_ocr import _read_cell_generic
+
+    class FakeCellEngine:
+        def __init__(self) -> None:
+            self.detector_calls = 0
+
+        def recognize(self, image, language):
+            self.detector_calls += 1
+            return [OcrLine("with detector", 0.9, [[0, 0], [10, 0], [10, 10], [0, 10]])]
+
+    engine = FakeCellEngine()
+    crop = Image.new("RGB", (120, 40), "white")
+    text, conf, bounds = _read_cell_generic(engine, crop, "fas")
+    assert text == "with detector"
+    assert engine.detector_calls == 1  # an engine without the fast reader keeps the old path
+    assert bounds == (0.0, 0.0, 10.0, 10.0)
+
+    class FakeFastEngine(FakeCellEngine):
+        def recognize_line_text(self, image, language):
+            return ("fast cell", 0.75)
+
+    fast = FakeFastEngine()
+    text, conf, bounds = _read_cell_generic(fast, crop, "fas", single_line=True)
+    assert text == "fast cell"
+    assert fast.detector_calls == 0, "the text detector must not run for a known cell"
+    assert bounds == (0.0, 0.0, 0.0, 0.0)
+    # A cell with several lines keeps the detector, because the detector separates them.
+    text, conf, bounds = _read_cell_generic(fast, crop, "fas", single_line=False)
+    assert text == "with detector"
+    assert fast.detector_calls == 1
+
+
+def test_v431_reading_a_single_line_does_not_switch_off_the_detector():
+    """The "no detector" mode must not stay on inside the engine instance."""
+    from comic_studio.ocr import RapidEngine
+
+    class _StatefulInstance:
+        def __init__(self) -> None:
+            self.text_det = _FakeDetector()
+            self.cfg = SimpleNamespace(Det=SimpleNamespace(limit_type="min", limit_side_len=736))
+            self.use_det = True
+            self.use_cls = True
+            self.use_rec = True
+            self.text_score = 0.5
+            self.calls: list[dict] = []
+
+        def __call__(self, arr, **kwargs):
+            self.calls.append(dict(kwargs))
+            # RapidOCR keeps the switches of the last call inside the instance.
+            for name in ("use_det", "use_cls", "use_rec", "text_score"):
+                if name in kwargs:
+                    setattr(self, name, kwargs[name])
+            return SimpleNamespace(txts=["hello"], scores=np.array([0.9]))
+
+    engine = RapidEngine("rapidocr-v6", "v6")
+    instance = _StatefulInstance()
+
+    @contextlib.contextmanager
+    def fake_checkout(language):
+        yield instance
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(engine, "_checkout", fake_checkout)
+    try:
+        text, score = engine.recognize_line_text(Image.new("RGB", (80, 30), "white"), "eng")
+    finally:
+        monkey.undo()
+    assert text == "hello"
+    assert instance.calls[0]["use_det"] is False
+    # The next page must still use the text detector.
+    assert instance.use_det is True
+    assert instance.use_cls is True
+    assert instance.text_score == 0.5
+
+
+def test_v431_a_table_cell_counts_its_text_lines():
+    from comic_studio.table_ocr import _cell_has_single_text_line, _cell_text_line_count
+
+    single = np.zeros((40, 300), dtype=np.uint8)
+    single[14:26, 40:200] = 255
+    assert _cell_text_line_count(single) == 1
+    assert _cell_has_single_text_line(single) is True
+
+    two = np.zeros((90, 300), dtype=np.uint8)
+    two[10:22, 40:200] = 255
+    two[50:62, 40:200] = 255
+    assert _cell_text_line_count(two) == 2
+    assert _cell_has_single_text_line(two) is False
+
+    # Persian dots above/below a line are not a line of their own.
+    dotted = np.zeros((60, 300), dtype=np.uint8)
+    dotted[20:34, 40:200] = 255
+    dotted[12:17, 120:126] = 255
+    dotted[36:40, 150:156] = 255
+    assert _cell_text_line_count(dotted) == 1
+
+
+def test_v431_a_table_cell_is_cropped_around_its_own_text():
+    from comic_studio.table_ocr import _tight_ink_box
+
+    ink = np.zeros((40, 200), dtype=np.uint8)
+    ink[12:22, 60:140] = 255
+    top, bottom, left, right = _tight_ink_box(ink)
+    assert (top, bottom, left, right) == (12, 22, 60, 140)
+    assert _tight_ink_box(np.zeros((0, 0), dtype=np.uint8)) == (0, 0, 0, 0)

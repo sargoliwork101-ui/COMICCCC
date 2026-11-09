@@ -8,8 +8,10 @@ import functools
 import hmac
 import inspect
 import ipaddress
+import math
 import os
 import re
+import secrets
 import traceback
 import copy
 import threading
@@ -26,17 +28,43 @@ from starlette.concurrency import run_in_threadpool
 from starlette.background import BackgroundTask
 
 from . import APP_NAME, APP_VERSION
-from .activity import ActivityLog, reporting
-from .backup import BackupError, make_backup, restore_backup
-from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, crop_box, image_payload
-from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, recognize_image
+from .activity import ActivityLog, JobCancelledError, cancellation_scope, reporting
+from .backup import BackupError, cleanup_backup_temp, make_backup, restore_backup
+from .exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt, clean_name, crop_box, image_payload
+from .watermark_render import has_active_watermark
+from .ocr import ENGINE_INFO, LANGUAGES, EngineRegistry, OcrError, _INSTALL_LOCK, recognize_image
 from .ocr_grouping import group_ocr_lines, organize_ocr_blocks
-from .ocr_managed import configure_native_runtime, iter_parallel_ordered, trim_process_memory
-from .paths import STATIC_DIR, project_root
+from .ocr_managed import (
+    _stop_lingering_surya_server,
+    configure_native_runtime,
+    invalidate_engine_runtime_caches,
+    iter_parallel_ordered,
+    reset_disk_free_cache,
+    trim_process_memory,
+)
+from .paths import (
+    STATIC_DIR,
+    apply_storage_directory,
+    inspect_storage_status,
+    pick_folder_dialog,
+    project_root,
+)
 from . import context_run, pending_results
+from . import resources
+from .license_guard import (
+    SUPPORT_PHONE,
+    LicenseError,
+    SECURITY_GATE,
+    SESSION_COOKIE_NAME,
+    get_support_phone,
+    get_vendor_contact_info,
+    require_module_license,
+)
+from .local_nmt import DEFAULT_LOCAL_NMT_MODEL, LOCAL_NMT_MODELS, LocalNmtError
 from .schemas import (
-    AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest, OcrRequest, ProjectCreate,
-    SessionRequest, StateUpdate, TextTranslateRequest, TranslateRequest,
+    AiConnectionTest, AiSettings, BackupRequest, ContextPreviewRequest, ContextStartRequest, ContextStepRequest, ContextTextRequest, EngineDownloadRequest, EngineTestRequest, EngineUpdateCheckRequest, EngineUpdateRequest, ExportRequest,
+    LicenseActivateRequest, LocalLoginRequest, LocalNmtModelActionRequest, LocalNmtTestRequest, LocalPasswordUpdateRequest, OcrRequest, ProjectCreate,
+    ResourceBudget, SessionRequest, StateUpdate, StorageFolderPickRequest, StorageSettingsUpdate, TextTranslateRequest, TranslateRequest,
 )
 from .sessions import SessionManager
 from .store import ProjectChangedError, ProjectStore
@@ -107,8 +135,20 @@ class PendingResultConflict(Exception):
         self.kind = kind
 
 
+class _CleanupFileResponse(FileResponse):
+    """Stream a temporary file and guarantee deletion even if the client disconnects mid-download."""
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with contextlib.suppress(OSError):
+                Path(self.path).unlink(missing_ok=True)
+
+
 def create_app() -> FastAPI:
-    configure_native_runtime()
+    configure_native_runtime(eager_cv2=False)
+    cleanup_backup_temp(max_age_seconds=0.0)
     app = FastAPI(title=APP_NAME, version=APP_VERSION)
     store = ProjectStore()
     registry = EngineRegistry()
@@ -116,6 +156,74 @@ def create_app() -> FastAPI:
     activity = ActivityLog()
     sessions = SessionManager()
     context_locks: dict[str, asyncio.Lock] = {}
+    storage_switch_lock = asyncio.Lock()
+    active_jobs_lock = threading.Lock()
+    active_jobs_count = 0
+    next_job_token = 0
+    active_job_entries: dict[int, tuple[str, threading.Event, Any]] = {}
+
+    def cancel_active_jobs(target_kind: str = "all") -> int:
+        with active_jobs_lock:
+            entries = [
+                (kind, ev, cb)
+                for kind, ev, cb in active_job_entries.values()
+                if target_kind == "all" or kind == target_kind
+            ]
+        count = 0
+        for _kind, ev, cb in entries:
+            if not ev.is_set():
+                ev.set()
+                count += 1
+            if callable(cb):
+                with contextlib.suppress(Exception):
+                    cb()
+        if target_kind in {"all", "ocr"}:
+            cancel_ocr_fn = getattr(registry, "cancel_ocr", None)
+            if callable(cancel_ocr_fn):
+                with contextlib.suppress(Exception):
+                    cancel_ocr_fn()
+        if target_kind in {"all", "translation"}:
+            cancel_tr_fn = getattr(translations, "cancel_active", None)
+            if callable(cancel_tr_fn):
+                with contextlib.suppress(Exception):
+                    cancel_tr_fn()
+        if target_kind in {"all", "model"}:
+            cancel_inst_fn = getattr(registry, "cancel_all_installs", None)
+            if callable(cancel_inst_fn):
+                with contextlib.suppress(Exception):
+                    cancel_inst_fn()
+            with contextlib.suppress(Exception):
+                translations.local_nmt.cancel_prepare()
+        return count
+    prepared_backups_lock = threading.Lock()
+    prepared_backups: dict[str, dict[str, Any]] = {}
+    prepared_exports_lock = threading.Lock()
+    prepared_exports: dict[str, dict[str, Any]] = {}
+
+    def _clear_prepared_backups(target_project_id: str | None = None, token: str | None = None) -> None:
+        with prepared_backups_lock:
+            keys = [
+                k for k, entry in prepared_backups.items()
+                if (token is None or k == token)
+                and (target_project_id is None or entry.get("project_id") == target_project_id)
+            ]
+            paths = [prepared_backups.pop(k)["path"] for k in keys]
+        for p in paths:
+            with contextlib.suppress(OSError):
+                Path(p).unlink(missing_ok=True)
+
+    def _clear_prepared_exports(target_project_id: str | None = None, token: str | None = None) -> None:
+        now = time.monotonic()
+        with prepared_exports_lock:
+            keys = [
+                k for k, entry in prepared_exports.items()
+                if (token is not None and k == token and (target_project_id is None or entry.get("project_id") == target_project_id))
+                or (token is None and target_project_id is not None and entry.get("project_id") == target_project_id)
+                or (token is None and target_project_id is None)
+                or (now - float(entry.get("created", 0.0)) > 7200.0)
+            ]
+            for k in keys:
+                prepared_exports.pop(k, None)
     # Recovery state is short-lived, process-local and never contains the raw response.
     recoveries: dict[str, dict[str, Any]] = {}
     recovery_locks: dict[str, asyncio.Lock] = {}
@@ -143,87 +251,206 @@ def create_app() -> FastAPI:
     app.state.sessions = sessions
     activity.add("برنامه آماده است")
 
-    @app.middleware("http")
-    async def protect_local_data(request: Request, call_next: Any) -> Response:
-        # Loopback is the default trusted use case. LAN clients are denied by
-        # default. If configured, Basic authentication protects *all* requests,
-        # including those arriving through a loopback reverse proxy.
-        password = os.environ.get("COMIC_STUDIO_ACCESS_PASSWORD", "")
-        if password:
-            if len(password) < 20:
-                return JSONResponse({"detail": "COMIC_STUDIO_ACCESS_PASSWORD must contain at least 20 characters."}, status_code=503)
-            header = request.headers.get("authorization", "")
-            valid = False
-            try:
-                scheme, encoded = header.split(" ", 1)
-                if scheme.lower() == "basic" and len(encoded) <= 8192:
-                    decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
-                    username, supplied = decoded.split(":", 1)
-                    valid = hmac.compare_digest(username.encode("utf-8"), b"comic") and hmac.compare_digest(supplied.encode("utf-8"), password.encode("utf-8"))
-            except (ValueError, UnicodeError, binascii.Error):
-                pass
-            if not valid:
-                return JSONResponse({"detail": "Authentication required."}, status_code=401,
-                                    headers={"WWW-Authenticate": 'Basic realm="Comic OCR Studio", charset="UTF-8"', "Cache-Control": "no-store"})
-        else:
-            local = _is_loopback_peer(request.client.host if request.client else "")
-            if not local:
-                return JSONResponse({"detail": "Remote access is disabled. Configure COMIC_STUDIO_ACCESS_PASSWORD and HTTPS or a trusted VPN."}, status_code=403,
-                                    headers={"Cache-Control": "no-store"})
-            # Reject arbitrary DNS names on an unauthenticated loopback server;
-            # otherwise a malicious site can rebind its hostname to localhost.
-            local_host = _is_loopback_host_header(request.headers.get("host", ""))
-            if not local_host:
-                return JSONResponse({"detail": "Unauthenticated access requires a loopback hostname."}, status_code=403,
-                                    headers={"Cache-Control": "no-store"})
-        # Browsers normally send Origin on mutations. Reject a foreign origin;
-        # clients such as local command-line tools may legitimately omit it.
-        origin = request.headers.get("origin")
-        if request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
-            try:
-                parsed = urlsplit(origin)
-                same = (parsed.scheme in {"http", "https"} and parsed.scheme == request.url.scheme
+    class _SecurityAndNoStoreMiddleware:
+        """Pure ASGI security + UI cache-control middleware without BaseHTTPMiddleware stream wrapping."""
+
+        def __init__(self, inner_app: Any) -> None:
+            self.app = inner_app
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            if scope.get("type") != "http":
+                await self.app(scope, receive, send)
+                return
+            request = Request(scope)
+            # Loopback is the default trusted use case. LAN clients are denied by
+            # default. If configured, Basic authentication protects *all* requests,
+            # including those arriving through a loopback reverse proxy.
+            password = os.environ.get("COMIC_STUDIO_ACCESS_PASSWORD", "")
+            if password:
+                if len(password) < 20:
+                    resp = JSONResponse({"detail": "COMIC_STUDIO_ACCESS_PASSWORD must contain at least 20 characters."}, status_code=503)
+                    await resp(scope, receive, send)
+                    return
+                header = request.headers.get("authorization", "")
+                valid = False
+                try:
+                    scheme, encoded = header.split(" ", 1)
+                    if scheme.lower() == "basic" and len(encoded) <= 8192:
+                        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+                        username, supplied = decoded.split(":", 1)
+                        valid = hmac.compare_digest(username.encode("utf-8"), b"comic") and hmac.compare_digest(supplied.encode("utf-8"), password.encode("utf-8"))
+                except (ValueError, UnicodeError, binascii.Error):
+                    pass
+                if not valid:
+                    resp = JSONResponse(
+                        {"detail": "Authentication required."},
+                        status_code=401,
+                        headers={"WWW-Authenticate": 'Basic realm="Comic OCR Studio", charset="UTF-8"', "Cache-Control": "no-store"},
+                    )
+                    await resp(scope, receive, send)
+                    return
+            else:
+                local = _is_loopback_peer(request.client.host if request.client else "")
+                if not local:
+                    resp = JSONResponse(
+                        {"detail": "Remote access is disabled. Configure COMIC_STUDIO_ACCESS_PASSWORD and HTTPS or a trusted VPN."},
+                        status_code=403,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await resp(scope, receive, send)
+                    return
+                # Reject arbitrary DNS names on an unauthenticated loopback server;
+                # otherwise a malicious site can rebind its hostname to localhost.
+                local_host = _is_loopback_host_header(request.headers.get("host", ""))
+                if not local_host:
+                    resp = JSONResponse(
+                        {"detail": "Unauthenticated access requires a loopback hostname."},
+                        status_code=403,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await resp(scope, receive, send)
+                    return
+            # Browsers normally send Origin on mutations. Reject a foreign origin;
+            # clients such as local command-line tools may legitimately omit it.
+            origin = request.headers.get("origin")
+            if request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
+                try:
+                    parsed = urlsplit(origin)
+                    same = (
+                        parsed.scheme in {"http", "https"}
+                        and parsed.scheme == request.url.scheme
                         and parsed.netloc.lower() == request.headers.get("host", "").lower()
-                        and not parsed.path and not parsed.query and not parsed.fragment
-                        and parsed.username is None and parsed.password is None)
-            except ValueError:
-                same = False
-            if not same:
-                return JSONResponse({"detail": "Cross-origin requests are not allowed."}, status_code=403)
-        return await call_next(request)
+                        and not parsed.path
+                        and not parsed.query
+                        and not parsed.fragment
+                        and parsed.username is None
+                        and parsed.password is None
+                    )
+                except ValueError:
+                    same = False
+                if not same:
+                    resp = JSONResponse({"detail": "Cross-origin requests are not allowed."}, status_code=403)
+                    await resp(scope, receive, send)
+                    return
 
-    @app.middleware("http")
-    async def prevent_stale_interface(request: Request, call_next: Any) -> Response:
-        response = await call_next(request)
-        if request.url.path == "/" or request.url.path.endswith((".html", ".js", ".css")):
-            response.headers["Cache-Control"] = "no-store"
-        return response
+            req_path = str(scope.get("path") or "")
+            if req_path.startswith("/api/") and req_path not in {
+                "/api/health",
+                "/api/session/heartbeat",
+                "/api/session/close",
+                "/api/license/status",
+                "/api/license/activate",
+                "/api/license/login",
+                "/api/license/logout",
+            }:
+                session_cookie = request.cookies.get(SESSION_COOKIE_NAME)
+                gate_state = SECURITY_GATE.inspect_status(session_token=session_cookie)
+                if not gate_state.get("licensed"):
+                    resp = JSONResponse(
+                        {
+                            "detail": gate_state.get("message") or "لایسنس معتبری روی این سیستم فعال نیست.",
+                            "code": str(gate_state.get("reason") or "LICENSE_REQUIRED").upper(),
+                            "licensed": False,
+                            "unlocked": False,
+                            "supportPhone": gate_state.get("supportPhone") or get_support_phone(),
+                            "vendorContact": gate_state.get("vendorContact") or get_vendor_contact_info(),
+                            "modules": gate_state.get("modules"),
+                        },
+                        status_code=402,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await resp(scope, receive, send)
+                    return
+                if not gate_state.get("unlocked"):
+                    resp = JSONResponse(
+                        {
+                            "detail": gate_state.get("message") or "ابتدا رمز ورود محلی را وارد کنید.",
+                            "code": "LOGIN_REQUIRED",
+                            "licensed": True,
+                            "unlocked": False,
+                        },
+                        status_code=401,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await resp(scope, receive, send)
+                    return
 
-    async def run_reported(function: Any, *args: Any, pulse_label: str | None = None, **kwargs: Any) -> Any:
+            if req_path == "/" or req_path.endswith((".html", ".js", ".css")):
+                async def send_no_store(message: Any) -> None:
+                    if message.get("type") == "http.response.start":
+                        headers = [h for h in message.get("headers", []) if h[0].lower() != b"cache-control"]
+                        headers.append((b"cache-control", b"no-store"))
+                        message = {**message, "headers": headers}
+                    await send(message)
+
+                await self.app(scope, receive, send_no_store)
+                return
+
+            await self.app(scope, receive, send)
+
+    app.add_middleware(_SecurityAndNoStoreMiddleware)
+
+    async def run_reported(
+        function: Any,
+        *args: Any,
+        pulse_label: str | None = None,
+        progress_span: tuple[float, float] | None = None,
+        job_kind: str = "generic",
+        http_request: Request | None = None,
+        on_cancel: Any = None,
+        cancel_event: threading.Event | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal active_jobs_count, next_job_token
         stop_pulse = threading.Event()
+        job_cancel_ev = cancel_event if cancel_event is not None else threading.Event()
         started = time.monotonic()
         last_state: dict[str, Any] = {"ts": started, "progress": None, "detail": ""}
         pulse = None
+        with active_jobs_lock:
+            active_jobs_count += 1
+            next_job_token += 1
+            job_token = next_job_token
+            active_job_entries[job_token] = (job_kind, job_cancel_ev, on_cancel)
+
+        def _trigger_cancel() -> None:
+            if not job_cancel_ev.is_set():
+                job_cancel_ev.set()
+            stop_pulse.set()
+            if callable(on_cancel):
+                with contextlib.suppress(Exception):
+                    on_cancel()
+
+        def _map_progress(raw_p: float | None) -> float | None:
+            if raw_p is None or not isinstance(raw_p, (int, float)) or not math.isfinite(float(raw_p)):
+                return raw_p
+            clamped = max(0.0, min(1.0, float(raw_p)))
+            if progress_span is not None:
+                lo, hi = progress_span
+                return round(lo + (hi - lo) * clamped, 4)
+            return clamped
 
         def tracked_report(message: str, kind: str = "info", progress: float | None = None) -> None:
+            if job_cancel_ev.is_set() and kind not in {"warning", "error"}:
+                return
             last_state["ts"] = time.monotonic()
-            if progress is not None:
-                last_state["progress"] = progress
+            mapped_p = _map_progress(progress)
+            if mapped_p is not None:
+                last_state["progress"] = mapped_p
             cleaned_msg = str(message or "").strip().rstrip("….")
             if cleaned_msg and "همچنان در حال انجام است" not in cleaned_msg:
                 last_state["detail"] = cleaned_msg[:90]
-            activity.add(message, kind, progress)
+            activity.add(message, kind, mapped_p)
 
         if pulse_label:
             def report_alive() -> None:
                 while not stop_pulse.wait(5):
+                    if job_cancel_ev.is_set():
+                        return
                     now = time.monotonic()
                     if now - float(last_state["ts"]) < 4.2:
                         continue
                     cur_p = last_state["progress"]
-                    if isinstance(cur_p, (int, float)) and 0.0 < cur_p < 0.93:
-                        cur_p = round(min(0.93, float(cur_p) + 0.008), 3)
-                        last_state["progress"] = cur_p
                     detail = str(last_state.get("detail") or "").strip()
                     detail_part = f" ({detail})" if detail and detail != pulse_label else ""
                     activity.add(
@@ -232,13 +459,43 @@ def create_app() -> FastAPI:
                     )
             pulse = threading.Thread(target=report_alive, daemon=True)
             pulse.start()
+
+        disconnect_task: asyncio.Task[None] | None = None
+        done_async_ev = asyncio.Event()
+        if http_request is not None:
+            async def _watch_http_disconnect() -> None:
+                while not done_async_ev.is_set() and not job_cancel_ev.is_set():
+                    try:
+                        await asyncio.wait_for(done_async_ev.wait(), timeout=0.2)
+                        return
+                    except asyncio.TimeoutError:
+                        try:
+                            if await http_request.is_disconnected():
+                                _trigger_cancel()
+                                return
+                        except Exception:
+                            return
+
+            disconnect_task = asyncio.create_task(_watch_http_disconnect())
+
+        def _invoke_with_scopes() -> Any:
+            with reporting(tracked_report), cancellation_scope(job_cancel_ev):
+                return function(*args, **kwargs)
+
         try:
-            with reporting(tracked_report):
-                return await run_in_threadpool(function, *args, **kwargs)
+            return await run_in_threadpool(_invoke_with_scopes)
         finally:
+            done_async_ev.set()
             stop_pulse.set()
+            if disconnect_task is not None:
+                disconnect_task.cancel()
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await disconnect_task
             if pulse:
                 pulse.join(timeout=0.1)
+            with active_jobs_lock:
+                active_job_entries.pop(job_token, None)
+                active_jobs_count = max(0, active_jobs_count - 1)
 
     def context_progress(run: dict[str, Any]) -> float:
         jobs = run.get('jobs', [])
@@ -264,6 +521,19 @@ def create_app() -> FastAPI:
     async def ocr_error(_: Request, exc: OcrError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=503)
 
+    @app.exception_handler(LicenseError)
+    async def license_error(_: Request, exc: LicenseError) -> JSONResponse:
+        return JSONResponse(
+            {
+                "detail": exc.message,
+                "code": exc.code,
+                "supportPhone": get_support_phone(),
+                "vendorContact": get_vendor_contact_info(),
+            },
+            status_code=exc.status_code,
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.exception_handler(InvalidContextResponse)
     async def invalid_context_response(_: Request, exc: InvalidContextResponse) -> JSONResponse:
         return JSONResponse({"detail": str(exc), "kind": "invalid_context_response", "response_text": exc.response_text,
@@ -283,6 +553,14 @@ def create_app() -> FastAPI:
     async def translation_error(_: Request, exc: TranslationError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=502)
 
+    @app.exception_handler(JobCancelledError)
+    async def job_cancelled_error(_: Request, exc: JobCancelledError) -> JSONResponse:
+        return JSONResponse(
+            {"detail": str(exc) or "عملیات به درخواست شما لغو شد.", "cancelled": True},
+            status_code=499,
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.exception_handler(ProjectChangedError)
     async def project_changed(_: Request, exc: ProjectChangedError) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=409)
@@ -291,13 +569,13 @@ def create_app() -> FastAPI:
     async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         """Redact known credentials; exception messages can still contain private data."""
         reference = uuid.uuid4().hex[:12]
-        secrets = [os.environ.get('COMIC_STUDIO_ACCESS_PASSWORD', '')]
+        sensitive_values = [os.environ.get('COMIC_STUDIO_ACCESS_PASSWORD', '')]
         try:
             settings = translations._secret()
-            secrets.extend(p['api_key'] for config in settings['providers'].values() for p in config['profiles'] if p.get('api_key'))
+            sensitive_values.extend(p['api_key'] for config in settings['providers'].values() for p in config['profiles'] if p.get('api_key'))
         except Exception:
             pass
-        detail = _redact_diagnostic(str(exc), secrets)
+        detail = _redact_diagnostic(str(exc), sensitive_values)
         detail = re.sub(r'(https?://[^\s?]+)\?[^\s]+', r'\1?[REDACTED]', detail)
         frames = traceback.extract_tb(exc.__traceback__)
         location = f"{Path(frames[-1].filename).name}:{frames[-1].lineno} ({frames[-1].name})" if frames else 'unknown'
@@ -307,7 +585,72 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
-        return {"name": APP_NAME, "version": APP_VERSION, "offlineOcr": True, "scraping": False}
+        # `shutdownPending` tells the launcher that this instance is closing down
+        # (its last browser tab was closed).  A second launcher must not hand the
+        # browser over to a dying instance, otherwise the user gets a dead page.
+        return {
+            "name": APP_NAME,
+            "version": APP_VERSION,
+            "offlineOcr": True,
+            "scraping": False,
+            "shutdownPending": bool(sessions.shutdown_pending),
+            "activeTabs": int(sessions.active_count),
+            # Tabs that went quiet (a frozen background tab must not look like
+            # a closed one - it would stop the server while the user is away).
+            "silentTabs": int(sessions.silent_count),
+        }
+
+    def _set_session_cookie(response: JSONResponse, token: str, request: Request) -> JSONResponse:
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=token,
+            httponly=True,
+            samesite="strict",
+            secure=(request.url.scheme == "https"),
+            path="/",
+        )
+        return response
+
+    @app.get("/api/license/status")
+    def license_status(request: Request) -> JSONResponse:
+        state = SECURITY_GATE.inspect_status(session_token=request.cookies.get(SESSION_COOKIE_NAME))
+        return JSONResponse(state, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/license/activate")
+    def license_activate(values: LicenseActivateRequest, request: Request) -> JSONResponse:
+        state, session_token = SECURITY_GATE.activate_token(
+            values.license_key,
+            reset_local_password=bool(values.reset_local_password),
+            replace_all_modules=bool(values.replace_all_modules),
+        )
+        plan_lbl = (state.get("license") or {}).get("planLabel", "")
+        activity.add(f"لایسنس برنامه با موفقیت فعال شد ({plan_lbl})", "success")
+        resp = JSONResponse(state, headers={"Cache-Control": "no-store"})
+        return _set_session_cookie(resp, session_token, request)
+
+    @app.post("/api/license/login")
+    def license_login(values: LocalLoginRequest, request: Request) -> JSONResponse:
+        state, session_token = SECURITY_GATE.login_with_password(values.password)
+        resp = JSONResponse(state, headers={"Cache-Control": "no-store"})
+        return _set_session_cookie(resp, session_token, request)
+
+    @app.post("/api/license/logout")
+    def license_logout(request: Request) -> JSONResponse:
+        SECURITY_GATE.revoke_session(request.cookies.get(SESSION_COOKIE_NAME))
+        state = SECURITY_GATE.inspect_status(session_token=None)
+        resp = JSONResponse(state, headers={"Cache-Control": "no-store"})
+        resp.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+        return resp
+
+    @app.put("/api/license/password")
+    def license_password_update(values: LocalPasswordUpdateRequest, request: Request) -> JSONResponse:
+        state, session_token = SECURITY_GATE.configure_local_password(
+            current_password=values.current_password,
+            new_password=values.new_password,
+            session_token=request.cookies.get(SESSION_COOKIE_NAME),
+        )
+        resp = JSONResponse(state, headers={"Cache-Control": "no-store"})
+        return _set_session_cookie(resp, session_token, request)
 
     @app.get("/api/activity")
     def activity_feed(after: int = 0) -> dict[str, Any]:
@@ -316,6 +659,14 @@ def create_app() -> FastAPI:
     @app.post("/api/activity/clear")
     def clear_activity() -> dict[str, Any]:
         return {"ok": True, "next": activity.clear()}
+
+    @app.post("/api/jobs/cancel")
+    def cancel_jobs_route(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+        raw_kind = str((payload or {}).get("kind") or "all").strip().lower()
+        target_kind = raw_kind if raw_kind in {"all", "ocr", "translation", "export", "import", "backup", "model", "generic"} else "all"
+        cancelled_count = cancel_active_jobs(target_kind)
+        activity.add("درخواست توقف فوری عملیات ثبت شد.", "warning")
+        return {"ok": True, "kind": target_kind, "cancelledCount": cancelled_count}
 
     @app.post("/api/session/heartbeat")
     def session_heartbeat(values: SessionRequest) -> dict[str, Any]:
@@ -335,10 +686,20 @@ def create_app() -> FastAPI:
         return store.create(values.name if values else "پروژهٔ کمیک")
 
     @app.post("/api/projects/restore", status_code=201)
-    async def restore_project(file: UploadFile = File(...)) -> dict[str, Any]:
+    async def restore_project(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
         activity.add("بازیابی بک‌آپ پروژه آغاز شد")
         try:
-            state, drafts = await run_reported(restore_backup, store, file.file, pulse_label="بازیابی بک‌آپ")
+            state, drafts = await run_reported(
+                restore_backup,
+                store,
+                file.file,
+                pulse_label="بازیابی بک‌آپ",
+                job_kind="backup",
+                http_request=request,
+            )
+        except JobCancelledError:
+            activity.add("بازیابی بک‌آپ به درخواست شما متوقف شد.", "warning")
+            raise
         except BackupError as exc:
             activity.add(f"بازیابی بک‌آپ ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
@@ -346,16 +707,69 @@ def create_app() -> FastAPI:
         return {"project": state, "drafts": drafts}
 
     @app.post("/api/projects/{project_id}/backup")
-    async def backup_project(project_id: str, values: BackupRequest) -> FileResponse:
-        project(project_id)
+    async def backup_project(project_id: str, values: BackupRequest, request: Request, prepare: bool = False) -> Response:
+        proj = project(project_id)
         activity.add("ساخت بک‌آپ پروژه آغاز شد")
         try:
-            path = await run_reported(make_backup, store, project_id, values.drafts, values.expected_updated_at, pulse_label="ساخت بک‌آپ")
+            path = await run_reported(
+                make_backup,
+                store,
+                project_id,
+                values.drafts,
+                values.expected_updated_at,
+                pulse_label="ساخت بک‌آپ",
+                job_kind="backup",
+                http_request=request,
+            )
+        except JobCancelledError:
+            activity.add("ساخت بک‌آپ به درخواست شما متوقف شد.", "warning")
+            raise
         except BackupError as exc:
             activity.add(f"ساخت بک‌آپ ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
         activity.add("بک‌آپ پروژه آماده است", "success", 1.0)
-        return FileResponse(path, media_type="application/zip", filename="comic-studio-project-backup.zip", background=BackgroundTask(path.unlink, missing_ok=True))
+        download_name = f"{clean_name(str(proj.get('name') or ''), 'comic-studio')}-backup.zip"
+        if prepare:
+            token = secrets.token_hex(16)
+            size = path.stat().st_size
+            with prepared_backups_lock:
+                stale_paths = [entry["path"] for entry in prepared_backups.values()]
+                prepared_backups.clear()
+                prepared_backups[token] = {
+                    "project_id": project_id,
+                    "path": path,
+                    "filename": download_name,
+                    "created": time.monotonic(),
+                }
+            for old_path in stale_paths:
+                if old_path != path:
+                    with contextlib.suppress(OSError):
+                        Path(old_path).unlink(missing_ok=True)
+            return JSONResponse({"token": token, "filename": download_name, "size": size}, headers={"Cache-Control": "no-store"})
+        return _CleanupFileResponse(path, media_type="application/zip", filename="comic-studio-project-backup.zip")
+
+    @app.get("/api/projects/{project_id}/backup/{token}")
+    def download_prepared_backup(project_id: str, token: str) -> FileResponse:
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise HTTPException(404, "فایل بک‌آپ آماده پیدا نشد؛ دوباره بک‌آپ بگیرید.")
+        with prepared_backups_lock:
+            entry = prepared_backups.get(token)
+            if not entry or entry.get("project_id") != project_id:
+                entry = None
+            elif time.monotonic() - float(entry.get("created", 0.0)) > 3600.0:
+                prepared_backups.pop(token, None)
+                with contextlib.suppress(OSError):
+                    Path(entry["path"]).unlink(missing_ok=True)
+                entry = None
+        if not entry or not Path(entry["path"]).is_file():
+            raise HTTPException(404, "فایل بک‌آپ منقضی یا پاک شده است؛ دوباره بک‌آپ بگیرید.")
+        return FileResponse(entry["path"], media_type="application/zip", filename=entry["filename"])
+
+    @app.delete("/api/projects/{project_id}/backup/{token}", status_code=204)
+    def discard_prepared_backup(project_id: str, token: str) -> Response:
+        if re.fullmatch(r"[0-9a-f]{32}", token):
+            _clear_prepared_backups(target_project_id=project_id, token=token)
+        return Response(status_code=204)
 
     @app.get("/api/projects/{project_id}")
     def get_project(project_id: str) -> dict[str, Any]:
@@ -367,13 +781,41 @@ def create_app() -> FastAPI:
             store.delete_project(project_id)
         except KeyError as exc:
             raise HTTPException(404, "پروژهٔ موردنظر پیدا نشد.") from exc
+        _clear_prepared_backups(target_project_id=project_id)
+        _clear_prepared_exports(target_project_id=project_id)
         if project_id in context_locks and not context_locks[project_id].locked():
             context_locks.pop(project_id, None)
         return Response(status_code=204)
 
+    def _state_update_mutates_editing(current: dict[str, Any], incoming: dict[str, Any]) -> bool:
+        """Return True iff `incoming` modifies editor-owned fields (blocks, crop, watermark)."""
+        cur_settings = current.get("settings") if isinstance(current.get("settings"), dict) else {}
+        inc_settings = incoming.get("settings") if isinstance(incoming.get("settings"), dict) else None
+        if inc_settings is not None:
+            for wm_key in ("watermarkLogos", "watermarkPreset"):
+                if wm_key in inc_settings and (inc_settings.get(wm_key) or None) != (cur_settings.get(wm_key) or None):
+                    return True
+        existing = {str(item.get("id", "")): item for item in current.get("images", []) if isinstance(item, dict)}
+        for candidate in incoming.get("images", []) or []:
+            if not isinstance(candidate, dict):
+                continue
+            old = existing.get(str(candidate.get("id", "")))
+            if old is None:
+                continue
+            for edit_key in ("blocks", "crop", "watermark", "pageMode", "approved"):
+                if edit_key not in candidate:
+                    continue
+                new_val = bool(candidate[edit_key]) if edit_key == "approved" else candidate[edit_key]
+                old_val = bool(old.get(edit_key, False)) if edit_key == "approved" else old.get(edit_key)
+                if new_val != old_val:
+                    return True
+        return False
+
     @app.put("/api/projects/{project_id}/state")
     def update_state(project_id: str, update: StateUpdate) -> dict[str, Any]:
-        project(project_id)
+        current = project(project_id)
+        if _state_update_mutates_editing(current, update.state):
+            require_module_license("editing")
         return store.update_state(project_id, update.state)
 
     @app.get("/api/projects/{project_id}/pending")
@@ -396,6 +838,9 @@ def create_app() -> FastAPI:
         if not isinstance(revision, str) or not isinstance(choices, dict) or any(not isinstance(k, str) or v not in ('keep', 'apply') for k,v in choices.items()):
             raise HTTPException(400, 'انتخاب‌های رفع تعارض معتبر نیستند.')
         try:
+            with store._lock:
+                entry = pending_results.load(store, project_id, token)
+            require_module_license('ocr' if entry.get('kind') == 'ocr' else 'translation')
             return pending_results.resolve(store, project_id, token, revision, choices)
         except KeyError as exc:
             raise HTTPException(404, 'نتیجهٔ منتظر پیدا نشد.') from exc
@@ -411,7 +856,7 @@ def create_app() -> FastAPI:
         return Response(status_code=204)
 
     @app.post("/api/projects/{project_id}/files")
-    async def import_files(project_id: str, files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    async def import_files(project_id: str, request: Request, files: list[UploadFile] = File(...)) -> dict[str, Any]:
         project(project_id)
         payloads = []
         for upload in files:
@@ -421,9 +866,19 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "هیچ فایلی انتخاب نشده است.")
         activity.add(f"دریافت و آماده‌سازی {len(payloads)} فایل آغاز شد")
         try:
-            result = await run_reported(store.import_files, project_id, payloads, pulse_label="ورود و آماده‌سازی فایل")
+            result = await run_reported(
+                store.import_files,
+                project_id,
+                payloads,
+                pulse_label="ورود و آماده‌سازی فایل",
+                job_kind="import",
+                http_request=request,
+            )
             activity.add(f"{len(result.get('images', []))} تصویر در پروژه آماده است", "success", 1.0)
             return result
+        except JobCancelledError:
+            activity.add("ورود فایل به درخواست شما متوقف شد.", "warning")
+            raise
         except (ValueError, RuntimeError) as exc:
             activity.add(f"ورود فایل ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
@@ -439,11 +894,12 @@ def create_app() -> FastAPI:
         try:
             if cropped:
                 item = store._image_meta(project_id, image_id)
-                if crop_box(item) is not None:
-                    data, _, _, _ = image_payload(store, project_id, item, "png")
-                    return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
                 edited_candidate = project_root(project_id) / "images" / f"{image_id}-edited.png"
-                path = edited_candidate if edited_candidate.exists() else store.image_path(project_id, image_id, False)
+                use_edited = bool(edited and edited_candidate.exists())
+                if crop_box(item) is not None or ((not use_edited) and has_active_watermark(item.get("watermark"))):
+                    data, _, _, _ = image_payload(store, project_id, item, "png", allow_edited=use_edited)
+                    return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
+                path = edited_candidate if use_edited else store.image_path(project_id, image_id, False)
             else:
                 path = store.image_path(project_id, image_id, edited)
         except (KeyError, FileNotFoundError) as exc:
@@ -486,6 +942,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/duplicate")
     def duplicate(project_id: str, ids: list[str] = Body(...)) -> dict[str, Any]:
+        require_module_license("editing")
         project(project_id)
         return store.duplicate(project_id, ids)
 
@@ -508,6 +965,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engines/unload")
     async def unload_engines_memory() -> dict[str, Any]:
+        await run_in_threadpool(translations.local_nmt.unload)
         summary = await run_in_threadpool(registry.unload_all)
         freed = float(summary.get("freedRamMb") or 0.0)
         unloaded_count = len(summary.get("unloadedEngines") or [])
@@ -525,6 +983,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engines/check-updates")
     async def check_engine_updates(values: EngineUpdateCheckRequest | None = None) -> dict[str, Any]:
+        require_module_license("ocr")
         force = bool(values.force) if values else False
         report = await run_in_threadpool(registry.check_updates, force)
         count = int(report.get("updatesCount") or 0)
@@ -555,11 +1014,16 @@ def create_app() -> FastAPI:
         cancel_fn = getattr(registry, "cancel_install", None)
         if callable(cancel_fn):
             cancel_fn(engine_id)
+        cancel_ocr_fn = getattr(registry, "cancel_ocr", None)
+        if callable(cancel_ocr_fn):
+            cancel_ocr_fn(engine_id)
+        cancel_active_jobs("model")
         activity.add(f"درخواست توقف عملیات مدل {engine_id} ثبت شد", "warning")
         return {"ok": True, "engineId": engine_id}
 
     @app.post("/api/engines/{engine_id}/download", response_model=None)
     async def download_engine(request: Request, engine_id: str, values: EngineDownloadRequest | None = None) -> Response | dict[str, Any]:
+        require_module_license("ocr")
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
         if info.get("action") == "guide":
@@ -586,9 +1050,23 @@ def create_app() -> FastAPI:
         done_ev = asyncio.Event()
         watch_task = asyncio.create_task(_watch_client_cancel(request, engine_id, done_ev))
         try:
-            await run_reported(registry.download, engine_id, language, pulse_label=f"آماده‌سازی {info['name']}")
+            await run_reported(
+                registry.download,
+                engine_id,
+                language,
+                pulse_label=f"آماده‌سازی {info['name']}",
+                job_kind="model",
+                http_request=request,
+                on_cancel=lambda: registry.cancel_install(engine_id),
+            )
+        except JobCancelledError:
+            activity.add(f"آماده‌سازی {info['name']} به درخواست شما متوقف شد.", "warning")
+            raise
         except Exception as exc:
-            activity.add(f"آماده‌سازی {info['name']} ناموفق بود: {exc}", "error")
+            if "لغو" in str(exc):
+                activity.add(f"آماده‌سازی {info['name']} به درخواست شما متوقف شد.", "warning")
+            else:
+                activity.add(f"آماده‌سازی {info['name']} ناموفق بود: {exc}", "error")
             raise
         finally:
             done_ev.set()
@@ -600,6 +1078,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engines/{engine_id}/update")
     async def update_engine_route(request: Request, engine_id: str, values: EngineUpdateRequest | None = None) -> dict[str, Any]:
+        require_module_license("ocr")
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
         language = values.language if values else (info["languages"][0] if info["languages"] else "eng")
@@ -609,9 +1088,23 @@ def create_app() -> FastAPI:
         done_ev = asyncio.Event()
         watch_task = asyncio.create_task(_watch_client_cancel(request, engine_id, done_ev))
         try:
-            await run_reported(registry.update, engine_id, language, pulse_label=f"به‌روزرسانی {info['name']}")
+            await run_reported(
+                registry.update,
+                engine_id,
+                language,
+                pulse_label=f"به‌روزرسانی {info['name']}",
+                job_kind="model",
+                http_request=request,
+                on_cancel=lambda: registry.cancel_install(engine_id),
+            )
+        except JobCancelledError:
+            activity.add(f"به‌روزرسانی {info['name']} به درخواست شما متوقف شد.", "warning")
+            raise
         except Exception as exc:
-            activity.add(f"به‌روزرسانی {info['name']} ناموفق بود: {exc}", "error")
+            if "لغو" in str(exc):
+                activity.add(f"به‌روزرسانی {info['name']} به درخواست شما متوقف شد.", "warning")
+            else:
+                activity.add(f"به‌روزرسانی {info['name']} ناموفق بود: {exc}", "error")
             raise
         finally:
             done_ev.set()
@@ -623,6 +1116,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/engines/{engine_id}/uninstall")
     async def uninstall_engine_route(engine_id: str) -> dict[str, Any]:
+        require_module_license("ocr")
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
         if info.get("action") == "guide":
@@ -656,15 +1150,20 @@ def create_app() -> FastAPI:
         precise: bool,
         min_confidence: float,
         page_mode: str = "auto",
+        persian_preprocess: bool = False,
     ) -> list[dict[str, Any]]:
+        kwargs: dict[str, Any] = {}
         if _supports_kwarg(recognize_image, "page_mode"):
-            return recognize_image(
-                engine, image, language, contrast, precise, min_confidence, page_mode=page_mode,
-            )
-        return recognize_image(engine, image, language, contrast, precise, min_confidence)
+            kwargs["page_mode"] = page_mode
+        if persian_preprocess and _supports_kwarg(recognize_image, "persian_preprocess"):
+            kwargs["persian_preprocess"] = True
+        return recognize_image(
+            engine, image, language, contrast, precise, min_confidence, **kwargs,
+        )
 
     @app.post("/api/engines/{engine_id}/test")
-    async def test_engine(engine_id: str, values: EngineTestRequest) -> dict[str, Any]:
+    async def test_engine(engine_id: str, values: EngineTestRequest, http_request: Request) -> dict[str, Any]:
+        require_module_license("ocr")
         engine = registry.get(engine_id)
         if not ENGINE_INFO[engine_id].get("selectable", False):
             raise HTTPException(400, "این مدل به محیط اجرای جداگانه (external runtime) نیاز دارد و موتور مستقیم OCR نیست.")
@@ -676,15 +1175,23 @@ def create_app() -> FastAPI:
         except (KeyError, FileNotFoundError) as exc:
             raise HTTPException(404, "تصویر موردنظر پیدا نشد.") from exc
         from PIL import Image
+        registry.reset_ocr_cancel()
+        await run_in_threadpool(configure_native_runtime, True)
         await run_in_threadpool(registry.unload_all, engine_id)
         with Image.open(path) as im:
             image = im.copy()
             page_size = image.size
+        use_persian_prep = bool(
+            values.language == "fas" if values.persian_preprocess is None else values.persian_preprocess
+        )
         activity.add(f"آزمایش {ENGINE_INFO[engine_id]['name']} روی {path.name} آغاز شد")
         try:
             raw_blocks = await run_reported(
-                _invoke_recognize, engine, image, values.language, True, True, 0.2, values.page_mode,
+                _invoke_recognize, engine, image, values.language, True, True, 0.2, values.page_mode, use_persian_prep,
                 pulse_label=f"آزمایش {ENGINE_INFO[engine_id]['name']}",
+                job_kind="ocr",
+                http_request=http_request,
+                on_cancel=lambda: registry.cancel_ocr(engine_id),
             )
             blocks, _ = organize_ocr_blocks(
                 raw_blocks,
@@ -692,6 +1199,9 @@ def create_app() -> FastAPI:
                 group_lines=True,
                 page_size=page_size,
             )
+        except JobCancelledError:
+            activity.add(f"آزمایش {ENGINE_INFO[engine_id]['name']} به درخواست شما متوقف شد.", "warning")
+            raise
         except Exception as exc:
             activity.add(f"آزمایش موتور ناموفق بود: {exc}", "error")
             raise
@@ -703,6 +1213,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/ocr")
     async def run_ocr(project_id: str, values: OcrRequest, http_request: Request) -> dict[str, Any]:
+        require_module_license("ocr")
         with store._lock:
             state = project(project_id)
             expected_updated_at = state.get("updatedAt", "")
@@ -721,13 +1232,40 @@ def create_app() -> FastAPI:
                 entry = pending_results.load(store, project_id, pending['id'])
                 if set(ids).intersection(output['id'] for output in entry['outputs']):
                     raise PendingResultConflict(pending['id'], 'ocr')
+        registry.reset_ocr_cancel()
+        await run_in_threadpool(configure_native_runtime, True)
         await run_in_threadpool(registry.unload_all, values.engine)
         target_items = [item for item in state["images"] if item["id"] in ids]
         total_targets = len(target_items)
+        is_ui_paged_batch = values.batch_index is not None and values.batch_total is not None
+        ui_batch_total = max(1, int(values.batch_total)) if is_ui_paged_batch else total_targets
+        ui_batch_index = min(ui_batch_total, max(1, int(values.batch_index))) if is_ui_paged_batch else 1
         erase_original = bool(state.get("settings", {}).get("eraseOriginal", True))
-        activity.add(f"خواندن متن در {total_targets} تصویر آغاز شد")
+        use_persian_prep = bool(
+            values.language == "fas" if values.persian_preprocess is None else values.persian_preprocess
+        )
+        if not is_ui_paged_batch or ui_batch_index == 1:
+            prep_tag = " (با پیش‌پردازش ویژه فارسی)" if use_persian_prep else ""
+            activity.add(
+                f"خواندن متن در {ui_batch_total} تصویر آغاز شد{prep_tag}",
+                progress=0.0 if is_ui_paged_batch else None,
+            )
+
+        def _page_progress_bounds(step: int) -> tuple[float, float]:
+            if is_ui_paged_batch:
+                lo = (ui_batch_index - 1) / ui_batch_total
+                hi = (ui_batch_index - 0.20) / ui_batch_total
+                return round(lo, 4), round(hi, 4)
+            lo = (step - 1) / max(1, total_targets)
+            hi = step / max(1, total_targets)
+            return round(lo, 4), round(hi, 4)
 
         def _apply_page_ocr_result(item: dict[str, Any], raw_blocks: list[dict[str, Any]], page_size: tuple[int, int], step: int) -> None:
+            preserved_manual = [
+                copy.deepcopy(b)
+                for b in item.get("blocks", [])
+                if isinstance(b, dict) and b.get("manual") is True
+            ]
             for block in raw_blocks:
                 block["bg"] = "auto" if erase_original else "none"
             organized, resolved_mode = organize_ocr_blocks(
@@ -736,15 +1274,29 @@ def create_app() -> FastAPI:
                 group_lines=values.group_lines,
                 page_size=page_size,
             )
+            if preserved_manual:
+                next_manual_id = max(
+                    (
+                        int(b["id"])
+                        for b in organized
+                        if isinstance(b.get("id"), int) or (isinstance(b.get("id"), str) and b["id"].isdigit())
+                    ),
+                    default=0,
+                ) + 1
+                for mb in preserved_manual:
+                    mb["id"] = next_manual_id
+                    next_manual_id += 1
+                    organized.append(mb)
             item["blocks"] = organized
             item["pageMode"] = resolved_mode
             item["ocrCompleted"] = True
             item["edited"] = False
             item["approved"] = False
             mode_label = "کتاب/مقاله" if resolved_mode == "document" else "کمیک/حباب"
+            _, done_p = _page_progress_bounds(step)
             activity.add(
                 f"در «{item['name']}» {len(organized)} تکه متن ({mode_label}) پیدا شد",
-                progress=step / total_targets,
+                progress=done_p,
             )
             def _format_ocr_log_entry(blk: dict[str, Any]) -> str:
                 raw_txt = str(blk.get("text") or "").strip("\r\n")
@@ -774,16 +1326,24 @@ def create_app() -> FastAPI:
             else contextlib.nullcontext(1)
         )
         keep_loaded_ok = False
+        ocr_cancel_ev = threading.Event()
         try:
             from PIL import Image
 
             with batch_ctx as batch_workers:
                 if int(batch_workers) <= 1:
                     for completed, item in enumerate(target_items, start=1):
-                        if await http_request.is_disconnected():
-                            activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
+                        if ocr_cancel_ev.is_set() or await http_request.is_disconnected():
+                            activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
                             return store.get(project_id)
-                        activity.add(f"در حال خواندن تصویر {completed} از {total_targets}: {item['name']}")
+                        disp_idx = ui_batch_index if is_ui_paged_batch else completed
+                        disp_tot = ui_batch_total if is_ui_paged_batch else total_targets
+                        p_lo, p_hi = _page_progress_bounds(completed)
+                        start_page_p = round(p_lo + (p_hi - p_lo) * 0.06, 4)
+                        activity.add(
+                            f"در حال خواندن تصویر {disp_idx} از {disp_tot}: {item['name']}",
+                            progress=start_page_p,
+                        )
                         path = store.image_path(project_id, item["id"])
                         with Image.open(path) as im:
                             image = im.copy()
@@ -791,23 +1351,25 @@ def create_app() -> FastAPI:
                             blocks = await run_reported(
                                 _invoke_recognize, engine, image, values.language,
                                 values.contrast, values.precise, values.min_confidence, values.page_mode,
+                                use_persian_prep,
                                 pulse_label=f"در حال خواندن {item['name']}",
+                                progress_span=(start_page_p, round(p_lo + (p_hi - p_lo) * 0.92, 4)),
+                                job_kind="ocr",
+                                http_request=http_request,
+                                on_cancel=lambda: registry.cancel_ocr(values.engine),
+                                cancel_event=ocr_cancel_ev,
                             )
                             page_size = image.size
                         finally:
                             image.close()
+                        if ocr_cancel_ev.is_set() or await http_request.is_disconnected():
+                            activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
+                            return store.get(project_id)
                         _apply_page_ocr_result(item, blocks, page_size, completed)
                         if completed < total_targets:
                             await run_in_threadpool(trim_process_memory)
                 else:
-                    cancel_event = threading.Event()
-
-                    async def _watch_disconnect() -> None:
-                        while not cancel_event.is_set():
-                            if await http_request.is_disconnected():
-                                cancel_event.set()
-                                return
-                            await asyncio.sleep(0.15)
+                    cancel_event = ocr_cancel_ev
 
                     def _run_parallel_ocr() -> bool:
                         def _ocr_single_page(idx: int, item: dict[str, Any]) -> tuple[list[dict[str, Any]], tuple[int, int]] | None:
@@ -822,6 +1384,7 @@ def create_app() -> FastAPI:
                                 blocks = _invoke_recognize(
                                     engine, image, values.language,
                                     values.contrast, values.precise, values.min_confidence, values.page_mode,
+                                    use_persian_prep,
                                 )
                                 return blocks, page_size
                             finally:
@@ -836,24 +1399,19 @@ def create_app() -> FastAPI:
                             _apply_page_ocr_result(item, raw_blocks, page_size, idx + 1)
                         return not cancel_event.is_set()
 
-                    watcher = asyncio.create_task(_watch_disconnect())
-                    try:
-                        finished_ok = await run_reported(
-                            _run_parallel_ocr,
-                            pulse_label=f"خواندن موازی {total_targets} تصویر",
-                        )
-                    finally:
-                        cancel_event.set()
-                        watcher.cancel()
-                        try:
-                            await watcher
-                        except asyncio.CancelledError:
-                            pass
+                    finished_ok = await run_reported(
+                        _run_parallel_ocr,
+                        pulse_label=f"خواندن موازی {total_targets} تصویر",
+                        job_kind="ocr",
+                        http_request=http_request,
+                        on_cancel=lambda: registry.cancel_ocr(values.engine),
+                        cancel_event=cancel_event,
+                    )
                     if not finished_ok:
-                        activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
+                        activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
                         return store.get(project_id)
-            if await http_request.is_disconnected():
-                activity.add("فرایند OCR با بستن پنجره متوقف شد.", "warning")
+            if ocr_cancel_ev.is_set() or await http_request.is_disconnected():
+                activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
                 return store.get(project_id)
             with store._lock:
                 entry = pending_results.stage(store, project_id, 'ocr', {
@@ -867,6 +1425,9 @@ def create_app() -> FastAPI:
                 merged = pending_results.resolve(store, project_id, entry['id'], view['revision'], {})
                 state = merged['project']
             keep_loaded_ok = bool(values.keep_engine_loaded)
+        except JobCancelledError:
+            activity.add("فرایند OCR به درخواست شما متوقف شد.", "warning")
+            return store.get(project_id)
         except Exception as exc:
             activity.add(f"خواندن متن ناموفق بود: {exc}", "error")
             raise
@@ -875,13 +1436,20 @@ def create_app() -> FastAPI:
                 await run_in_threadpool(trim_process_memory)
             else:
                 await run_in_threadpool(registry.unload_all)
-        activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
+        if not is_ui_paged_batch:
+            activity.add("OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است", "success", 1.0)
+        elif ui_batch_index >= ui_batch_total:
+            activity.add(
+                "OCR تمام شد؛ متن هر تصویر در گزارش بالا آمده است",
+                "success",
+                round((ui_batch_index - 0.18) / ui_batch_total, 4),
+            )
         return state
 
     def translation_settings(provider: str, skill: str | None, target_language: str = "fa") -> dict[str, Any]:
         return {
             **translations.public_settings(),
-            "_translation_skill": normalize_ai_skill(skill) if provider != "free" else "",
+            "_translation_skill": normalize_ai_skill(skill) if provider not in {"free", "local"} else "",
             "_target_language": normalize_target_language(target_language),
         }
 
@@ -893,23 +1461,43 @@ def create_app() -> FastAPI:
             return fn(*args, target_language=tl)
         return fn(*args)
 
+    def _direct_mt_limit(provider: str, settings: dict[str, Any], selected_profile_id: str | None = None) -> int:
+        if provider == 'free':
+            return min(s['source_limit'] for s in settings['free_services'].values())
+        if provider == 'local':
+            return int(settings.get('local_nmt', {}).get('source_limit', 4000))
+        return effective_ai_limit(provider, settings, selected_profile_id)
+
+    def _local_nmt_missing_message(settings: dict[str, Any]) -> str:
+        model_id = str(settings.get('local_nmt', {}).get('model') or DEFAULT_LOCAL_NMT_MODEL)
+        model_label = LOCAL_NMT_MODELS.get(model_id, LOCAL_NMT_MODELS[DEFAULT_LOCAL_NMT_MODEL])['short_label']
+        if not translations.local_nmt.is_ready(model_id):
+            return (
+                f"مدل آفلاین «{model_label}» هنوز روی سیستم آماده نشده است. "
+                "از دکمهٔ «مدیریت ترجمه‌ها…» در همین نوار بالا یک‌بار روی «دانلود و نصب خودکار» کلیک کنید تا پس از آن همیشه بدون اینترنت کار کند."
+            )
+        return ''
+
     def context_preparation(state: dict[str, Any], values: ContextPreviewRequest) -> tuple[dict[str, Any], Any, list[dict[str, Any]]]:
-        if values.provider not in {'free', 'openai', 'gemini', 'openrouter', 'avalai'}:
+        if values.provider not in {'free', 'local', 'openai', 'gemini', 'openrouter', 'avalai'}:
             raise HTTPException(400, "سرویس ترجمه معتبر نیست.")
         if values.provider == 'free' and (values.skill or values.summary):
             raise TranslationError('مترجم رایگان از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
+        if values.provider == 'local' and (values.skill or values.summary):
+            raise TranslationError('مترجم آفلاین داخلی از اسکیل یا خلاصهٔ AI پشتیبانی نمی‌کند.')
         target_lang = normalize_target_language(values.target_language)
         selected_ids = set(image_ids(state, values.image_ids))
         ids = [item['id'] for item in sorted(state['images'], key=lambda item: item.get('order', 0)) if item['id'] in selected_ids]
         if not ids:
             raise HTTPException(400, "حداقل یک تصویر را انتخاب کنید.")
         settings = translations.public_settings()
-        selected_profile_id = (values.profile_id or '').strip() if values.provider != 'free' else ''
+        selected_profile_id = (values.profile_id or '').strip() if values.provider not in {'free', 'local'} else ''
         if selected_profile_id:
             configured_profiles = settings.get('providers', {}).get(values.provider, {}).get('profiles', [])
             if not any(str(p.get('id') or '') == selected_profile_id and p.get('hasApiKey') for p in configured_profiles):
                 raise HTTPException(400, "کلید API انتخاب‌شده در تنظیمات این سرویس ثبت یا فعال نیست.")
         policy = provider_policy(settings, values.provider, selected_profile_id or None)
+        is_direct_mt = values.provider in {'free', 'local'}
         if values.resume:
             run = state.get(RUN_KEY)
             if not isinstance(run, dict) or not any(j.get('remaining') for j in run.get('jobs', [])):
@@ -924,8 +1512,8 @@ def create_app() -> FastAPI:
             run = copy.deepcopy(run)
             run['baseResumeRunHash'] = digest(state.get(RUN_KEY))
             run['context'] = values.summary; run['skillHash'] = digest(values.skill); run['policyHash'] = digest(policy)
-            run['limit'] = min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None)
-            run['contextPercent'] = 0 if values.provider == 'free' else settings['context_percent']; run['skillPercent'] = 0 if values.provider == 'free' else settings['skill_percent']
+            run['limit'] = _direct_mt_limit(values.provider, settings, selected_profile_id or None)
+            run['contextPercent'] = 0 if is_direct_mt else settings['context_percent']; run['skillPercent'] = 0 if is_direct_mt else settings['skill_percent']
         else:
             previous = state.get(RUN_KEY)
             if isinstance(previous, dict) and any(job.get('remaining') for job in previous.get('jobs', []) if isinstance(job, dict)) and not values.restart_existing:
@@ -935,13 +1523,17 @@ def create_app() -> FastAPI:
             if legacy and not values.restart_legacy:
                 raise HTTPException(409, 'پیشرفت ناتمام نسخهٔ قبلی وجود دارد. برای جلوگیری از ارسال تکراری، ادامه را با نسخهٔ قبلی انجام دهید یا صریحاً شروع دوباره را تأیید کنید.')
             run = create_run(state, ids, values.provider, values.source_language, values.skill, values.summary,
-                             min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None),
-                             0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
+                             _direct_mt_limit(values.provider, settings, selected_profile_id or None),
+                             0 if is_direct_mt else settings['context_percent'], 0 if is_direct_mt else settings['skill_percent'],
                              values.reuse_repeated, policy, profile_id=selected_profile_id or None, target_language=target_lang)
             run['legacyRestart'] = values.restart_legacy
             run['legacyHash'] = digest([{'imageId': item['id'], 'page': item.get(AI_PAGE_PROGRESS_KEY),
                                          'parts': [block.get(AI_PARTS_KEY) for block in item.get('blocks', [])]}
                                         for item in selected])
+        if values.provider == 'local' and not run.get('previewError'):
+            missing_msg = _local_nmt_missing_message(settings)
+            if missing_msg:
+                run['previewError'] = missing_msg
         # A summary changed by another request after preview must not be
         # silently replaced by the stale summary accepted in this tab.
         run['baseSummaryHash'] = digest(state.get(SUMMARY_KEY, ''))
@@ -960,6 +1552,9 @@ def create_app() -> FastAPI:
     def context_view(run: dict[str, Any], request: Any, chosen: list[dict[str, Any]], provider: str) -> dict[str, Any]:
         text = combine_translation_texts([entry['text'] for entry in chosen])
         first = run['jobs'][chosen[0]['job']] if chosen else {}
+        first_page_name = first.get('unitName') or first.get('imageName', '')
+        grouped_unit_ids = {job['unitId'] for job in run.get('jobs', []) if job.get('unitId')}
+        group_notice = f" صفحات هم‌گروه ({len(grouped_unit_ids)} گروه) به‌عنوان یک صفحهٔ یکپارچه ارسال می‌شوند." if grouped_unit_ids else ''
         selected_profile_id = run.get('profileId') or None
         public_cfg = translations.public_settings()
         policy = provider_policy(public_cfg, provider, selected_profile_id)
@@ -973,11 +1568,28 @@ def create_app() -> FastAPI:
             return {'provider':'free', 'profileId': '', 'targetLanguage': target_lang, 'targetLanguageLabel': target_label,
                     'rollingMode':True, 'contextMode':False, 'skill':'', 'summary':'', 'defaultSkill':'',
                     'blockCount':len(run['jobs']), 'requestCount':1 if chosen else 0, 'systemPrompt':'',
-                    'requests':[{'index':1, 'text':text, 'characters':request.character_count(text), 'imageName':first.get('imageName','')}] if chosen else [],
+                    'requests':[{'index':1, 'text':text, 'characters':request.character_count(text), 'imageName':first_page_name}] if chosen else [],
                     'providerLabel':'Google Translate؛ در صورت خطا MyMemory', 'base_url':'https://translate.googleapis.com/translate_a/single',
                     'fallback_url':'https://api.mymemory.translated.net/get', 'model':'',
-                    'note':f"زبان مقصد: {target_label}. متن صفحه‌ها جداگانه و ترتیبی ارسال و ذخیره می‌شود؛ تأیید یک‌بار برای کل نوبت است. سقف مؤثر {run['limit']} نویسه و برای MyMemory حداکثر ۵۰۰ بایت UTF-8 است. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری. خلاصه و اسکیل AI در حالت رایگان استفاده نمی‌شوند. تنظیمات: {limits}.",
+                    'note':f"زبان مقصد: {target_label}.{group_notice} متن صفحه‌ها جداگانه و ترتیبی ارسال و ذخیره می‌شود؛ تأیید یک‌بار برای کل نوبت است. سقف مؤثر {run['limit']} نویسه و برای MyMemory حداکثر ۵۰۰ بایت UTF-8 است. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری. خلاصه و اسکیل AI در حالت رایگان استفاده نمی‌شوند. تنظیمات: {limits}.",
+                    'previewError': run.get('previewError', ''),
                     'signature':digest(run), 'totalLimit':run['limit'], 'resume':bool(run.get('id'))}
+        if provider == 'local':
+            model_id = str(policy.get('model') or DEFAULT_LOCAL_NMT_MODEL)
+            model_info = LOCAL_NMT_MODELS.get(model_id, LOCAL_NMT_MODELS[DEFAULT_LOCAL_NMT_MODEL])
+            return {'provider': 'local', 'profileId': '', 'targetLanguage': target_lang, 'targetLanguageLabel': target_label,
+                    'rollingMode': True, 'contextMode': False, 'skill': '', 'summary': '', 'defaultSkill': '',
+                    'blockCount': len(run['jobs']), 'requestCount': 1 if chosen else 0, 'systemPrompt': '',
+                    'requests': [{'index': 1, 'text': text, 'characters': request.character_count(text), 'imageName': first_page_name}] if chosen else [],
+                    'providerLabel': f"مترجم آفلاین داخلی — {model_info['short_label']} (بدون اینترنت)",
+                    'base_url': '', 'fallback_url': '', 'model': model_id,
+                    'note': (
+                        f"زبان مقصد: {target_label}.{group_notice} ترجمه ۱۰۰٪ آفلاین و رایگان روی سیستم خودتان با مدل «{model_info['label']}» "
+                        f"(دقت جست‌وجو Beam={policy.get('beam_size', 2)}، سقف هر گام {run['limit']} نویسه) انجام می‌شود و هیچ متنی به اینترنت فرستاده نمی‌شود. "
+                        f"{sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری."
+                    ),
+                    'previewError': run.get('previewError', ''),
+                    'signature': digest(run), 'totalLimit': run['limit'], 'resume': bool(run.get('id'))}
         active = [profile for profile in policy['profiles'] if profile['hasApiKey']]
         mode_label = 'حالت JSON سرویس' if context_uses_json(provider, policy['base_url'], policy.get('response_mode', 'auto')) else 'متن معمولی'
         policies = '؛ '.join(f"API {index}: زمان انتظار {p['timeout_seconds']}، تکرار {p['retry_count']}، فاصله {p['retry_wait_seconds']} ثانیه، سقف {p['source_limit']}" for index, p in enumerate(active, 1))
@@ -991,14 +1603,15 @@ def create_app() -> FastAPI:
                 'skill': '', 'defaultSkill': '', 'blockCount': len(run['jobs']),
                 'requestCount': 1 if chosen else 0, 'systemPrompt': request.system,
                 'requests': [{'index': 1, 'text': request.user_message(text), 'characters': request.character_count(text),
-                              'imageName': first.get('imageName', '')}] if chosen else [],
+                              'imageName': first_page_name}] if chosen else [],
                 'providerLabel': provider_title, 'model': policy['model'], 'base_url': policy['base_url'],
-                'note': f"زبان مقصد: {target_label}. درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.{trim_notice}",
+                'note': f"زبان مقصد: {target_label}.{group_notice} درخواست اول دقیقاً نمایش داده شده؛ درخواست‌های بعدی با خلاصهٔ ساخته‌شده محاسبه می‌شوند و با همین تأیید به ترتیب ارسال خواهند شد. سقف کل {run['limit']}؛ سقف خلاصه {request.context_limit} و اسکیل {request.skill_limit} نویسه است. در هر درخواست مقدار استفاده‌نشده به متن مبدأ می‌رسد. {sum(len(job['refs']) - 1 for job in run['jobs'])} کادر تکراری با نتیجهٔ یکسان اعمال می‌شود. قالب پاسخ: {mode_label}. تکرار یا تلاش کلید دیگر ممکن است هزینه داشته باشد. تنظیمات: {policies or 'کلید فعالی ثبت نشده است'}.{trim_notice}",
                 'signature': digest(run), 'rollingMode': True, 'contextMode': True, 'summary': run['context'], 'skillLimit': request.skill_limit,
                 'contextLimit': request.context_limit, 'totalLimit': run['limit'], 'contextPercent': run['contextPercent'], 'skillPercent': run['skillPercent'], 'previewError': run.get('previewError', ''), 'resume': bool(run.get('id'))}
 
     @app.post("/api/projects/{project_id}/context-preview")
     def context_preview(project_id: str, values: ContextPreviewRequest) -> dict[str, Any]:
+        require_module_license("translation")
         run, request, chosen = context_preparation(project(project_id), values)
         result = context_view(run, request, chosen, values.provider)
         result['skill'] = values.skill
@@ -1008,6 +1621,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/context-start")
     def context_start(project_id: str, values: ContextStartRequest) -> dict[str, Any]:
+        require_module_license("translation")
         for pending in pending_results.list_pending(store, project_id):
             if pending['kind'] == 'translation':
                 raise PendingResultConflict(pending['id'], 'translation')
@@ -1016,12 +1630,12 @@ def create_app() -> FastAPI:
         if values.confirmation != digest(run):
             raise HTTPException(409, "اطلاعات یا تنظیمات پس از پیش‌نمایش تغییر کرده است؛ دوباره بررسی و تأیید کنید.")
         if not chosen:
-            raise HTTPException(400, "متنی برای ترجمه وجود ندارد.")
+            raise HTTPException(400, str(run.get('previewError') or "متنی برای ترجمه وجود ندارد."))
         def merge_latest_if_safe(latest: dict[str, Any]) -> None:
             nonlocal state, expected
             if latest.get('updatedAt', '') == expected:
                 return
-            policy_now = provider_policy(translations.public_settings(), values.provider, (values.profile_id or '').strip() or None if values.provider != 'free' else None)
+            policy_now = provider_policy(translations.public_settings(), values.provider, (values.profile_id or '').strip() or None if values.provider not in {'free', 'local'} else None)
             verify_run(latest, run, values.skill, policy_now)
             if digest(latest.get(SUMMARY_KEY, '')) != run.get('baseSummaryHash'):
                 raise ProjectChangedError('خلاصهٔ پروژه پس از پیش‌نمایش تغییر کرده است؛ پیش‌نمایش تازه را بررسی کنید.')
@@ -1046,7 +1660,7 @@ def create_app() -> FastAPI:
                         item.pop(AI_PAGE_PROGRESS_KEY, None)
                         for block in item.get('blocks', []): block.pop(AI_PARTS_KEY, None)
         state[RUN_KEY] = run
-        if run['provider'] != 'free' and run['context']: state[SUMMARY_KEY] = run['context']
+        if run['provider'] not in {'free', 'local'} and run['context']: state[SUMMARY_KEY] = run['context']
         try:
             store.save_if_unchanged(state, expected)
         except ProjectChangedError:
@@ -1059,12 +1673,15 @@ def create_app() -> FastAPI:
                         item.pop(AI_PAGE_PROGRESS_KEY, None)
                         for block in item.get('blocks', []): block.pop(AI_PARTS_KEY, None)
             state[RUN_KEY] = run
-            if run['provider'] != 'free' and run['context']: state[SUMMARY_KEY] = run['context']
+            if run['provider'] not in {'free', 'local'} and run['context']: state[SUMMARY_KEY] = run['context']
             store.save_if_unchanged(state, expected)
         return {'project': state, 'runId': run['id'], 'completed': run['completed']}
 
     @app.post("/api/projects/{project_id}/context-step")
     async def context_step(project_id: str, values: ContextStepRequest, http_request: Request) -> dict[str, Any]:
+        require_module_license("translation")
+        translations.reset_cancel()
+        step_cancel_ev = threading.Event()
         lock = context_locks.setdefault(project_id, asyncio.Lock())
         async with lock:
             state = project(project_id); expected = state.get('updatedAt', '')
@@ -1075,7 +1692,7 @@ def create_app() -> FastAPI:
                 if pending['kind'] == 'translation':
                     raise PendingResultConflict(pending['id'], 'translation')
             settings = translations.public_settings()
-            if run['provider'] != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
+            if run['provider'] not in {'free', 'local'} and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
                 raise ProjectChangedError('درصدهای خلاصه یا اسکیل تغییر کرده‌اند؛ نوبت متوقف شد.')
             policy = provider_policy(settings, run['provider'], run.get('profileId') or None)
             verify_run(state, run, values.skill, policy)
@@ -1090,7 +1707,14 @@ def create_app() -> FastAPI:
                             _call_with_target_lang, translations.condense_context, context_to_condense, target_context_length,
                             run['provider'], policy, target_language=run.get('targetLanguage', 'fa'),
                             pulse_label='در حال فشرده‌سازی خلاصهٔ قبلی',
+                            job_kind='translation',
+                            http_request=http_request,
+                            on_cancel=translations.cancel_active,
+                            cancel_event=step_cancel_ev,
                         )
+                    except JobCancelledError:
+                        activity.add("عملیات ترجمه به درخواست شما متوقف شد.", "warning")
+                        raise
                     except Exception as exc:
                         activity.add(f"فشرده‌سازی AI انجام نشد؛ برای جلوگیری از توقف از نسخهٔ کوتاه‌شده استفاده می‌شود. {exc}", 'warning')
                     if condensed:
@@ -1106,18 +1730,27 @@ def create_app() -> FastAPI:
                 return {'project': state, 'done': True, 'affectedImageIds': []}
             source_texts = [entry['text'] for entry in chosen]
             text = combine_translation_texts(source_texts)
-            label = f"درخواست {run['completed'] + 1} برای «{run['jobs'][chosen[0]['job']]['imageName']}»؛ {request.character_count(text)} از {run['limit']} نویسه"
-            label += f"؛ {len(text.encode('utf-8'))} از ۵۰۰ بایت" if run['provider'] == 'free' else f"؛ خلاصه {len(run['context'])} از {request.context_limit} نویسه"
-            if values.recovery_token is not None:
-                activity.add(f"بررسی محلی پاسخ اصلاح‌شده برای درخواست {run['completed'] + 1}، بدون ارسال مجدد به AI.", progress=context_progress(run))
+            first_job = run['jobs'][chosen[0]['job']]
+            step_page_name = first_job.get('unitName') or first_job['imageName']
+            label = f"درخواست {run['completed'] + 1} برای «{step_page_name}»؛ {request.character_count(text)} از {run['limit']} نویسه"
+            if run['provider'] == 'free':
+                label += f"؛ {len(text.encode('utf-8'))} از ۵۰۰ بایت"
+            elif run['provider'] == 'local':
+                label += "؛ اجرای ۱۰۰٪ آفلاین روی سیستم شما"
             else:
-                activity.add(label + '.', progress=context_progress(run))
+                label += f"؛ خلاصه {len(run['context'])} از {request.context_limit} نویسه"
+            cur_cp = context_progress(run)
+            step_start_prog = cur_cp if cur_cp > 0 else None
+            if values.recovery_token is not None:
+                activity.add(f"بررسی محلی پاسخ اصلاح‌شده برای درخواست {run['completed'] + 1}، بدون ارسال مجدد به AI.", progress=step_start_prog)
+            else:
+                activity.add(label + '.', progress=step_start_prog)
                 activity.add(f"متن دقیق درخواست {run['completed'] + 1} (بدون هدر احراز هویت):\nدستور سیستم:\n{request.system}\nپیام کاربر:\n{request.user_message(text)}")
             if (values.recovery_token is None) != (values.corrected_response is None):
                 raise HTTPException(400, 'نشانه و متن پاسخ اصلاح‌شده باید همراه هم ارسال شوند.')
             if values.recovery_token is not None:
                 entry = recovery_get(values.recovery_token, 'project')
-                if run['provider'] == 'free' or (entry['project_id'], entry['run_id'], entry['completed'], entry['updated_at']) != (project_id, values.run_id, values.completed, expected):
+                if run['provider'] in {'free', 'local'} or (entry['project_id'], entry['run_id'], entry['completed'], entry['updated_at']) != (project_id, values.run_id, values.completed, expected):
                     raise ProjectChangedError('پروژه یا نوبت پس از دریافت پاسخ تغییر کرده است؛ اصلاح اعمال نشد.')
                 from .context_budget import parse_context_response
                 try:
@@ -1126,23 +1759,82 @@ def create_app() -> FastAPI:
                     error = InvalidContextResponse(str(exc), values.corrected_response)
                     error.recovery_token = values.recovery_token
                     raise error from exc
-            elif await http_request.is_disconnected():
-                activity.add("ادامهٔ ترجمه با بستن پنجره متوقف شد.", "warning")
+            elif step_cancel_ev.is_set() or await http_request.is_disconnected():
+                if run['provider'] == 'local' and not settings.get('local_nmt', {}).get('keep_loaded', False):
+                    await run_in_threadpool(translations.local_nmt.unload)
+                activity.add("ادامهٔ ترجمه به درخواست شما متوقف شد.", "warning")
                 return {'project': state, 'done': False, 'affectedImageIds': [], 'completed': run['completed']}
             elif run['provider'] == 'free':
-                translated = await run_reported(
-                    _call_with_target_lang, translations.translate_free_batch,
-                    request, text, source_texts, run['language'], policy,
-                    target_language=run.get('targetLanguage', 'fa'),
-                    pulse_label='ترجمهٔ رایگان',
-                )
+                try:
+                    translated = await run_reported(
+                        _call_with_target_lang, translations.translate_free_batch,
+                        request, text, source_texts, run['language'], policy,
+                        target_language=run.get('targetLanguage', 'fa'),
+                        pulse_label='ترجمهٔ رایگان',
+                        job_kind='translation',
+                        http_request=http_request,
+                        on_cancel=translations.cancel_active,
+                        cancel_event=step_cancel_ev,
+                    )
+                except JobCancelledError:
+                    activity.add("ادامهٔ ترجمه به درخواست شما متوقف شد.", "warning")
+                    raise
+                summary = ''
+            elif run['provider'] == 'local':
+                try:
+                    translated = await run_reported(
+                        functools.partial(
+                            translations.translate_local_batch,
+                            request,
+                            text,
+                            source_texts,
+                            run['language'],
+                            policy,
+                            target_language=run.get('targetLanguage', 'fa'),
+                            keep_loaded_override=True,
+                        ),
+                        pulse_label='ترجمهٔ آفلاین داخلی',
+                        job_kind='translation',
+                        http_request=http_request,
+                        on_cancel=translations.cancel_active,
+                        cancel_event=step_cancel_ev,
+                    )
+                except JobCancelledError:
+                    if not settings.get('local_nmt', {}).get('keep_loaded', False):
+                        await run_in_threadpool(translations.local_nmt.unload)
+                    activity.add("ادامهٔ ترجمهٔ آفلاین به درخواست شما متوقف شد.", "warning")
+                    raise
+                except Exception:
+                    if not settings.get('local_nmt', {}).get('keep_loaded', False):
+                        await run_in_threadpool(translations.local_nmt.unload)
+                    raise
                 summary = ''
             else:
                 try:
-                    translated, summary = await run_reported(translations.translate_context, request, text, source_texts, run['provider'], policy, pulse_label='ترجمه و خلاصه')
+                    translated, summary = await run_reported(
+                        translations.translate_context,
+                        request,
+                        text,
+                        source_texts,
+                        run['provider'],
+                        policy,
+                        pulse_label='ترجمه و خلاصه',
+                        job_kind='translation',
+                        http_request=http_request,
+                        on_cancel=translations.cancel_active,
+                        cancel_event=step_cancel_ev,
+                    )
+                except JobCancelledError:
+                    activity.add("ادامهٔ ترجمه به درخواست شما متوقف شد.", "warning")
+                    raise
                 except InvalidContextResponse as exc:
                     exc.recovery_token = recovery_store({'kind':'project', 'project_id': project_id, 'run_id': values.run_id, 'completed': values.completed, 'updated_at': expected})
                     raise
+            if step_cancel_ev.is_set() or await http_request.is_disconnected():
+                if run['provider'] == 'local' and not settings.get('local_nmt', {}).get('keep_loaded', False):
+                    await run_in_threadpool(translations.local_nmt.unload)
+                activity.add("ادامهٔ ترجمه به درخواست شما متوقف شد؛ نتیجهٔ مرحلهٔ لغوشده ذخیره نشد.", "warning")
+                raise JobCancelledError("عملیات ترجمه به درخواست شما متوقف شد.")
             with store._lock:
                 wanted = {(str(ref['imageId']), str(ref['blockId'])) for part in chosen for ref in run['jobs'][part['job']]['refs']}
                 originals = {f"{item['id']}:{block.get('id')}": {'text':str(block.get('text') or ''), 'tr':str(block.get('tr') or '')}
@@ -1178,54 +1870,62 @@ def create_app() -> FastAPI:
                 else:
                     state = merged['project']; run = state[RUN_KEY]; affected = merged['affectedImageIds']; done = merged['done']
             if values.recovery_token: recoveries.pop(values.recovery_token, None)
-            activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] == 'free' else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success', context_progress(run))
+            activity.add(f"درخواست {run['completed']} ذخیره شد." if run['provider'] in {'free', 'local'} else f"درخواست {run['completed']} و خلاصهٔ {len(summary)} نویسه‌ای ذخیره شد.", 'success', context_progress(run))
             sent_payload = {'system': request.system, 'user': request.user_message(text), 'characters': request.character_count(text)}
-            if done or affected:
+            if done and run['provider'] == 'local' and not settings.get('local_nmt', {}).get('keep_loaded', False):
+                await run_in_threadpool(translations.local_nmt.unload)
+            elif done or affected:
                 await run_in_threadpool(trim_process_memory)
             return {'project': state, 'done': done, 'affectedImageIds': affected, 'completed': run['completed'],
                     'sent': sent_payload}
 
     def prepare_context_text(values: ContextTextRequest) -> tuple[dict[str, Any], dict[str, Any], Any, list[dict[str, Any]]]:
-        if values.provider not in {'free', 'openai', 'gemini', 'openrouter', 'avalai'}:
+        if values.provider not in {'free', 'local', 'openai', 'gemini', 'openrouter', 'avalai'}:
             raise HTTPException(400, 'سرویس ترجمه معتبر نیست.')
         state = {'images': [{'id': 'single', 'name': 'بازترجمهٔ یک کادر', 'order': 0,
                             'blocks': [{'id': 1, 'text': values.text, 'enabled': True, 'sourceLines': values.source_lines}]}]}
         settings = translations.public_settings()
-        selected_profile_id = (values.profile_id or '').strip() if values.provider != 'free' else ''
+        is_direct_mt = values.provider in {'free', 'local'}
+        selected_profile_id = (values.profile_id or '').strip() if not is_direct_mt else ''
         if selected_profile_id:
             configured_profiles = settings.get('providers', {}).get(values.provider, {}).get('profiles', [])
             if not any(str(p.get('id') or '') == selected_profile_id and p.get('hasApiKey') for p in configured_profiles):
                 raise HTTPException(400, 'کلید API انتخاب‌شده در تنظیمات این سرویس ثبت یا فعال نیست.')
         run = create_run(state, ['single'], values.provider, values.source_language, values.skill, values.summary,
-                         min(s['source_limit'] for s in settings['free_services'].values()) if values.provider == 'free' else effective_ai_limit(values.provider, settings, selected_profile_id or None),
-                         0 if values.provider == 'free' else settings['context_percent'], 0 if values.provider == 'free' else settings['skill_percent'],
+                         _direct_mt_limit(values.provider, settings, selected_profile_id or None),
+                         0 if is_direct_mt else settings['context_percent'], 0 if is_direct_mt else settings['skill_percent'],
                          False, provider_policy(settings, values.provider, selected_profile_id or None),
                          profile_id=selected_profile_id or None, target_language=values.target_language)
-        if values.provider != 'free':
-            try:
-                if run.get('previewError'):
-                    raise TranslationError(run['previewError'])
-                request, chosen = next_request(run, values.skill)
-            except TranslationError as exc:
-                request, chosen = build_run_request(run, values.skill), []
-                run['previewError'] = str(exc)
-        else:
+        if values.provider == 'local' and not run.get('previewError'):
+            missing_msg = _local_nmt_missing_message(settings)
+            if missing_msg:
+                run['previewError'] = missing_msg
+        try:
+            if run.get('previewError'):
+                raise TranslationError(run['previewError'])
             request, chosen = next_request(run, values.skill)
+        except TranslationError as exc:
+            request, chosen = build_run_request(run, values.skill), []
+            run['previewError'] = str(exc)
         return state, run, request, chosen
 
     @app.post('/api/translate-text/context-preview')
     def context_text_preview(values: ContextTextRequest) -> dict[str, Any]:
+        require_module_license("translation")
         state, run, request, chosen = prepare_context_text(values)
         result = context_view(run, request, chosen, values.provider)
         result['skill'] = values.skill; result['singleContext'] = True
         from .translation import DEFAULT_AI_SKILL
         result['defaultSkill'] = DEFAULT_AI_SKILL
-        if values.provider != 'free': result['note'] += ' خلاصهٔ بازترجمهٔ تکی در حافظهٔ اصلی داستان ذخیره نمی‌شود.'
+        if values.provider not in {'free', 'local'}: result['note'] += ' خلاصهٔ بازترجمهٔ تکی در حافظهٔ اصلی داستان ذخیره نمی‌شود.'
+        elif values.provider == 'local': result['note'] += ' ترجمهٔ این تک‌جمله / تک‌کادر مستقیماً روی سیستم شما (آفلاین) انجام می‌شود.'
         else: result['note'] += ' بازترجمهٔ تکی پس از پایان همهٔ بخش‌ها ذخیره می‌شود؛ تکرار پس از خطا از ابتداست.'
         return result
 
     @app.post('/api/translate-text/context')
-    async def context_text_translate(values: ContextTextRequest) -> dict[str, str]:
+    async def context_text_translate(values: ContextTextRequest, http_request: Request) -> dict[str, str]:
+        require_module_license("translation")
+        translations.reset_cancel()
         if (values.recovery_token is None) != (values.corrected_response is None):
             raise HTTPException(400, 'نشانه و متن پاسخ اصلاح‌شده باید همراه هم ارسال شوند.')
         signature = digest(values.model_dump(exclude={'recovery_token', 'corrected_response'}))
@@ -1236,7 +1936,7 @@ def create_app() -> FastAPI:
                 if not values.confirmation or values.confirmation != digest(run):
                     raise HTTPException(409, 'متن یا تنظیمات پس از پیش‌نمایش تغییر کرده است.')
                 if not chosen:
-                    raise HTTPException(400, 'متنی برای ترجمه وجود ندارد.')
+                    raise HTTPException(400, str(run.get('previewError') or 'متنی برای ترجمه وجود ندارد.'))
             else:
                 if entry['signature'] != signature:
                     raise HTTPException(409, 'متن یا تنظیمات پاسخ اصلاح‌شده تغییر کرده است.')
@@ -1247,7 +1947,7 @@ def create_app() -> FastAPI:
                 settings = translations.public_settings()
                 policy = provider_policy(settings, values.provider, run.get('profileId') or None)
                 verify_run(state, run, values.skill, policy)
-                if values.provider != 'free' and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
+                if values.provider not in {'free', 'local'} and (settings['context_percent'] != run['contextPercent'] or settings['skill_percent'] != run['skillPercent']):
                     raise ProjectChangedError('درصدها پس از تأیید تغییر کرده‌اند.')
                 sources = [item['text'] for item in chosen]
                 text = combine_translation_texts(sources)
@@ -1267,11 +1967,42 @@ def create_app() -> FastAPI:
                             request, text, sources, values.source_language, policy,
                             target_language=values.target_language,
                             pulse_label='بازترجمهٔ رایگان',
+                            job_kind='translation',
+                            http_request=http_request,
+                            on_cancel=translations.cancel_active,
+                        )
+                        summary = ''
+                    elif values.provider == 'local':
+                        translated = await run_reported(
+                            functools.partial(
+                                translations.translate_local_batch,
+                                request,
+                                text,
+                                sources,
+                                values.source_language,
+                                policy,
+                                target_language=values.target_language,
+                            ),
+                            pulse_label='بازترجمهٔ آفلاین داخلی',
+                            job_kind='translation',
+                            http_request=http_request,
+                            on_cancel=translations.cancel_active,
                         )
                         summary = ''
                     else:
                         try:
-                            translated, summary = await run_reported(translations.translate_context, request, text, sources, values.provider, policy, pulse_label='بازترجمه و خلاصه')
+                            translated, summary = await run_reported(
+                                translations.translate_context,
+                                request,
+                                text,
+                                sources,
+                                values.provider,
+                                policy,
+                                pulse_label='بازترجمه و خلاصه',
+                                job_kind='translation',
+                                http_request=http_request,
+                                on_cancel=translations.cancel_active,
+                            )
                         except InvalidContextResponse as exc:
                             exc.recovery_token = recovery_store({'kind':'single', 'state':state, 'run':run, 'signature':signature})
                             raise
@@ -1291,10 +2022,10 @@ def create_app() -> FastAPI:
                     if values.recovery_token not in recoveries: recovery_locks.pop(values.recovery_token, None)
         return await execute()
 
-    def legacy_free_context(values: TranslateRequest) -> ContextPreviewRequest:
+    def legacy_direct_context(values: TranslateRequest) -> ContextPreviewRequest:
         return ContextPreviewRequest(
             image_ids=values.image_ids,
-            provider='free',
+            provider=values.provider,
             source_language=values.source_language,
             target_language=values.target_language,
             reuse_repeated=values.reuse_repeated if values.reuse_repeated is not None else translations.public_settings()['reuse_repeated'],
@@ -1302,8 +2033,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/translation-preview")
     def translation_preview(project_id: str, values: TranslateRequest) -> dict[str, Any]:
-        if values.provider == 'free':
-            return context_preview(project_id, legacy_free_context(values))
+        require_module_license("translation")
+        if values.provider in {'free', 'local'}:
+            return context_preview(project_id, legacy_direct_context(values))
         state = project(project_id)
         ids = image_ids(state, values.image_ids)
         settings = translation_settings(values.provider, values.skill, values.target_language)
@@ -1313,11 +2045,14 @@ def create_app() -> FastAPI:
 
     @app.post("/api/projects/{project_id}/translate")
     async def run_translation(project_id: str, values: TranslateRequest, http_request: Request) -> dict[str, Any]:
+        require_module_license("translation")
         if await http_request.is_disconnected():
             raise HTTPException(499, "عملیات ترجمه توسط کاربر لغو شد.")
-        if values.provider == 'free':
-            options = legacy_free_context(values)
+        if values.provider in {'free', 'local'}:
+            options = legacy_direct_context(values)
             run, request, chosen = context_preparation(project(project_id), options)
+            if run.get('previewError'):
+                raise HTTPException(400, run['previewError'])
             if not chosen:
                 return project(project_id)
             signature = digest(run)
@@ -1409,6 +2144,9 @@ def create_app() -> FastAPI:
                         _call_with_target_lang, translations.translate, call["text"], values.source_language, values.provider, page_sources, settings["_translation_skill"],
                         target_language=values.target_language,
                         pulse_label=f"ترجمهٔ درخواست {page_index} از {page_total}",
+                        job_kind="translation",
+                        http_request=http_request,
+                        on_cancel=translations.cancel_active,
                     )
                     page_result = distribute_translation(page_sources, translated)
                     completed_block = True
@@ -1459,6 +2197,9 @@ def create_app() -> FastAPI:
                     store.save_if_unchanged(state, expected_updated_at)
                 except OSError as exc:
                     raise ResultStorageError("\n".join(translated_blocks), "") from exc
+        except JobCancelledError:
+            activity.add("عملیات ترجمه به درخواست شما متوقف شد.", "warning")
+            raise
         except Exception as exc:
             if completed_ai:
                 message = f"{completed_ai} درخواست ذخیره شد؛ درخواست ناموفق ذخیره نشد و درخواست‌های پس از آن ارسال نشدند. "
@@ -1480,32 +2221,37 @@ def create_app() -> FastAPI:
 
     @app.post("/api/translate-text/preview")
     def translate_text_preview(values: TextTranslateRequest) -> dict[str, Any]:
-        if values.provider == 'free':
+        require_module_license("translation")
+        if values.provider in {'free', 'local'}:
             return context_text_preview(ContextTextRequest(
                 text=values.text,
                 source_lines=values.source_lines,
                 source_language=values.source_language,
                 target_language=values.target_language,
-                provider='free',
+                provider=values.provider,
             ))
         settings = translation_settings(values.provider, values.skill, values.target_language)
         plan = build_single_plan(values.text, values.provider, settings, values.source_lines)
         return plan_preview(plan, values.provider, values.source_language, settings)
 
     @app.post("/api/translate-text")
-    async def translate_text(values: TextTranslateRequest) -> dict[str, str]:
-        if values.provider == 'free':
+    async def translate_text(values: TextTranslateRequest, http_request: Request) -> dict[str, str]:
+        require_module_license("translation")
+        translations.reset_cancel()
+        if values.provider in {'free', 'local'}:
             request = ContextTextRequest(
                 text=values.text,
                 source_lines=values.source_lines,
                 source_language=values.source_language,
                 target_language=values.target_language,
-                provider='free',
+                provider=values.provider,
             )
             preview = context_text_preview(request)
+            if preview.get('previewError'):
+                raise HTTPException(400, preview['previewError'])
             if values.confirmation and values.confirmation != preview['signature']:
                 raise HTTPException(409, 'متن یا تنظیمات پس از پیش‌نمایش تغییر کرده است.')
-            result = await context_text_translate(request.model_copy(update={'confirmation': preview['signature']}))
+            result = await context_text_translate(request.model_copy(update={'confirmation': preview['signature']}), http_request)
             return {'text': result['text']}
         settings = translation_settings(values.provider, values.skill, values.target_language)
         if values.confirmation:
@@ -1522,22 +2268,46 @@ def create_app() -> FastAPI:
                     translated_part = await run_reported(
                         _call_with_target_lang, translations.translate, call["text"], values.source_language, values.provider,
                         target_language=values.target_language,
+                        job_kind="translation",
+                        on_cancel=translations.cancel_active,
                     )
                 else:
                     translated_part = await run_reported(
                         _call_with_target_lang, translations.translate, call["text"], values.source_language, values.provider, None, normalize_ai_skill(values.skill),
                         target_language=values.target_language,
+                        job_kind="translation",
+                        on_cancel=translations.cancel_active,
                     )
                 responses.append(translated_part)
             translated = responses[0] if responses else ""
             if responses:
                 for index, join in enumerate(plan["calls"][0].get("joins", []), start=1):
                     translated += join + responses[index]
+        except JobCancelledError:
+            activity.add("ترجمهٔ دوباره به درخواست شما متوقف شد.", "warning")
+            raise
         except Exception as exc:
             activity.add(f"ترجمهٔ دوباره ناموفق بود: {exc}", "error")
             raise
         activity.add("ترجمهٔ دوبارهٔ خط تمام شد", "success")
         return {"text": translated}
+
+    @app.get("/api/resources")
+    def resources_status() -> dict[str, Any]:
+        """The user's CPU/RAM budget plus a summary of the current machine."""
+        return resources.budget_summary()
+
+    @app.put("/api/resources")
+    def save_resources(values: ResourceBudget) -> dict[str, Any]:
+        """Store how much of the machine the app may use (v4.29)."""
+        saved = resources.save_budget(values.model_dump())
+        summary = resources.budget_summary()
+        activity.add(
+            "سهمیهٔ پردازنده و حافظهٔ برنامه به‌روزرسانی شد "
+            f"({summary['mode']} — پردازنده {summary['cpuPercent']}٪، حافظه {summary['ramPercent']}٪)",
+            "success",
+        )
+        return summary
 
     @app.get("/api/ai-settings")
     def ai_settings() -> dict[str, Any]:
@@ -1545,18 +2315,214 @@ def create_app() -> FastAPI:
 
     @app.put("/api/ai-settings")
     def save_ai_settings(values: AiSettings) -> dict[str, Any]:
+        require_module_license("translation")
         try:
             return translations.save_settings(values.model_dump(exclude_none=True))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
     @app.post("/api/ai-settings/test")
-    async def test_ai_settings(values: AiConnectionTest | None = None) -> dict[str, Any]:
+    async def test_ai_settings(values: AiConnectionTest | None = None, http_request: Request = None) -> dict[str, Any]:
+        require_module_license("translation")
         overrides = values.model_dump(exclude_none=True) if values else {}
-        return await run_in_threadpool(translations.test_connection, overrides)
+        return await run_reported(
+            translations.test_connection,
+            overrides,
+            pulse_label="تست اتصال سرویس ترجمه",
+            job_kind="translation",
+            http_request=http_request,
+            on_cancel=translations.cancel_active,
+        )
+
+    @app.get("/api/local-nmt/status")
+    def local_nmt_status() -> dict[str, Any]:
+        cfg = translations.public_settings().get("local_nmt", {})
+        return translations.local_nmt.status(cfg.get("model", DEFAULT_LOCAL_NMT_MODEL))
+
+    @app.post("/api/local-nmt/prepare")
+    async def prepare_local_nmt(request: Request, values: LocalNmtModelActionRequest | None = None) -> dict[str, Any]:
+        require_module_license("translation")
+        model_id = values.model if values else DEFAULT_LOCAL_NMT_MODEL
+        done_ev = asyncio.Event()
+
+        async def _watch_nmt_disconnect() -> None:
+            while not done_ev.is_set():
+                try:
+                    await asyncio.wait_for(done_ev.wait(), timeout=0.6)
+                    return
+                except asyncio.TimeoutError:
+                    try:
+                        if await request.is_disconnected():
+                            translations.local_nmt.cancel_prepare()
+                            return
+                    except Exception:
+                        return
+
+        watch_task = asyncio.create_task(_watch_nmt_disconnect())
+        try:
+            status_payload = await run_reported(
+                translations.local_nmt.prepare,
+                model_id,
+                pulse_label="دانلود و آماده‌سازی مترجم آفلاین",
+                job_kind="model",
+                http_request=request,
+                on_cancel=translations.local_nmt.cancel_prepare,
+            )
+            return {"ok": True, "status": status_payload, "memory": registry.memory_status()}
+        except JobCancelledError:
+            activity.add("دانلود مترجم آفلاین به درخواست شما متوقف شد.", "warning")
+            raise
+        except LocalNmtError as exc:
+            activity.add(f"آماده‌سازی مترجم آفلاین متوقف شد: {exc}", "warning" if "لغو" in str(exc) else "error")
+            raise HTTPException(400, str(exc)) from exc
+        finally:
+            done_ev.set()
+            watch_task.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await watch_task
+
+    @app.post("/api/local-nmt/cancel")
+    def cancel_local_nmt_prepare() -> dict[str, Any]:
+        result = translations.local_nmt.cancel_prepare()
+        activity.add("درخواست لغو دانلود مترجم آفلاین ثبت شد.", "warning")
+        return result
+
+    @app.post("/api/local-nmt/delete")
+    async def delete_local_nmt_model(values: LocalNmtModelActionRequest) -> dict[str, Any]:
+        require_module_license("translation")
+        try:
+            summary = await run_reported(
+                translations.local_nmt.delete_model,
+                values.model,
+                pulse_label="حذف مدل مترجم آفلاین",
+            )
+            return {**summary, "memory": registry.memory_status()}
+        except LocalNmtError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/local-nmt/unload")
+    async def unload_local_nmt() -> dict[str, Any]:
+        summary = await run_in_threadpool(translations.local_nmt.unload)
+        activity.add("مدل مترجم آفلاین از حافظهٔ رم آزاد شد.", "success")
+        return {**summary, "status": translations.local_nmt.status(), "memory": registry.memory_status()}
+
+    @app.post("/api/local-nmt/test")
+    async def test_local_nmt(values: LocalNmtTestRequest | None = None, http_request: Request = None) -> dict[str, Any]:
+        require_module_license("translation")
+        req = values or LocalNmtTestRequest()
+        try:
+            return await run_reported(
+                functools.partial(
+                    translations.local_nmt.test_translation,
+                    model_id=req.model,
+                    source_language=req.source_language,
+                    target_language=req.target_language,
+                    sample_text=req.sample_text,
+                    beam_size=req.beam_size,
+                    keep_loaded=req.keep_loaded,
+                ),
+                pulse_label="تست ترجمهٔ آفلاین یک جمله",
+                job_kind="translation",
+                http_request=http_request,
+                on_cancel=translations.local_nmt.cancel_inference,
+            )
+        except JobCancelledError:
+            activity.add("تست ترجمهٔ آفلاین به درخواست شما متوقف شد.", "warning")
+            raise
+        except LocalNmtError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    def _require_local_storage_admin(request: Request) -> None:
+        peer_host = request.client.host if request.client else ""
+        if not (_is_loopback_peer(peer_host) or peer_host == "testclient"):
+            raise HTTPException(403, "تغییر مسیر ذخیره‌سازی فقط از روی همین کامپیوتر مجاز است.")
+
+    @app.get("/api/storage-settings")
+    def storage_settings() -> dict[str, Any]:
+        return inspect_storage_status()
+
+    @app.post("/api/storage-settings/pick-folder")
+    async def pick_storage_folder(
+        request: Request,
+        values: StorageFolderPickRequest | None = None,
+    ) -> dict[str, Any]:
+        _require_local_storage_admin(request)
+        init_dir = (values.initial_dir or "").strip() if values else ""
+        try:
+            chosen = await run_in_threadpool(pick_folder_dialog, init_dir or None)
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        clean = str(chosen or "").strip()
+        return {"cancelled": not bool(clean), "path": clean}
+
+    @app.put("/api/storage-settings")
+    async def update_storage_settings(
+        request: Request,
+        values: StorageSettingsUpdate,
+    ) -> dict[str, Any]:
+        _require_local_storage_admin(request)
+        if storage_switch_lock.locked():
+            raise HTTPException(409, "تغییر مسیر ذخیره‌سازی هم‌اکنون در حال انجام است.")
+        async with storage_switch_lock:
+            with active_jobs_lock:
+                jobs_busy = active_jobs_count > 0
+            if jobs_busy or _INSTALL_LOCK.locked() or any(lock.locked() for lock in context_locks.values()):
+                raise HTTPException(
+                    409,
+                    "در حال حاضر یک عملیات (دانلود مدل، OCR، ترجمه یا خروجی) فعال است؛ پس از پایان یا لغو آن مسیر ذخیره‌سازی را تغییر دهید.",
+                )
+
+            def _perform_switch() -> dict[str, Any]:
+                translations.local_nmt.unload()
+                registry.unload_all()
+                _stop_lingering_surya_server()
+                result = apply_storage_directory(
+                    values.custom_path,
+                    migrate_existing=values.migrate_existing,
+                    cleanup_source=values.cleanup_source,
+                    progress_cb=lambda msg, prog: activity.add(msg, progress=prog),
+                )
+                store.reset_caches()
+                invalidate_engine_runtime_caches()
+                reset_disk_free_cache()
+                _clear_prepared_backups()
+                _clear_prepared_exports()
+                cleanup_backup_temp(max_age_seconds=0.0)
+                recoveries.clear()
+                trim_process_memory()
+                return result
+
+            try:
+                storage_result = await run_reported(
+                    _perform_switch,
+                    pulse_label="انتقال و تنظیم مسیر ذخیره‌سازی",
+                )
+            except ValueError as exc:
+                activity.add(f"تغییر مسیر ذخیره‌سازی ناموفق بود: {exc}", "error")
+                raise HTTPException(400, str(exc)) from exc
+            except OSError as exc:
+                activity.add(f"خطا در انتقال یا ذخیرهٔ مسیر جدید: {exc}", "error")
+                raise HTTPException(500, f"تغییر مسیر ذخیره‌سازی با خطای فایل مواجه شد: {exc}") from exc
+
+            projects_list = store.list()
+            active_project = store.get(projects_list[0]["id"]) if projects_list else store.create("پروژهٔ کمیک")
+            if not projects_list:
+                projects_list = store.list()
+            activity.add(
+                f"مسیر ذخیره‌سازی فعال: {storage_result['activePath']}",
+                "success",
+                1.0,
+            )
+            return {
+                "storage": storage_result,
+                "projects": projects_list,
+                "activeProject": active_project,
+                "engines": registry.status(),
+                "ai": translations.public_settings(),
+            }
 
     @app.post("/api/projects/{project_id}/export")
-    async def export(project_id: str, values: ExportRequest) -> FileResponse:
+    async def export(project_id: str, values: ExportRequest, request_obj: Request, prepare: bool = False) -> Response:
         state = project(project_id)
         if not values.image_ids:
             raise HTTPException(400, "حداقل یک تصویر را برای خروجی انتخاب کنید.")
@@ -1564,15 +2530,18 @@ def create_app() -> FastAPI:
         activity.add(f"ساخت خروجی {values.kind.upper()} آغاز شد")
         try:
             if values.kind == "pdf":
-                path = await run_reported(build_pdf, store, state, request, pulse_label="ساخت PDF")
+                path = await run_reported(build_pdf, store, state, request, pulse_label="ساخت PDF", job_kind="export", http_request=request_obj)
             elif values.kind == "images":
-                path = await run_reported(build_images_zip, store, state, request, pulse_label="ساخت ZIP")
+                path = await run_reported(build_images_zip, store, state, request, pulse_label="ساخت ZIP", job_kind="export", http_request=request_obj)
             elif values.kind == "docx":
-                path = await run_reported(build_docx, store, state, request, pulse_label="ساخت فایل Word")
+                path = await run_reported(build_docx, store, state, request, pulse_label="ساخت فایل Word", job_kind="export", http_request=request_obj)
             elif values.kind == "pptx":
-                path = await run_reported(build_pptx, store, state, request, pulse_label="ساخت فایل PowerPoint")
+                path = await run_reported(build_pptx, store, state, request, pulse_label="ساخت فایل PowerPoint", job_kind="export", http_request=request_obj)
             else:
-                path = await run_reported(build_txt, store, state, request, pulse_label="ساخت TXT")
+                path = await run_reported(build_txt, store, state, request, pulse_label="ساخت TXT", job_kind="export", http_request=request_obj)
+        except JobCancelledError:
+            activity.add(f"ساخت خروجی {values.kind.upper()} به درخواست شما متوقف شد.", "warning")
+            raise
         except ValueError as exc:
             activity.add(f"ساخت خروجی ناموفق بود: {exc}", "error")
             raise HTTPException(400, str(exc)) from exc
@@ -1582,6 +2551,14 @@ def create_app() -> FastAPI:
         finally:
             if values.kind in {"pdf", "images", "docx", "pptx"}:
                 await run_in_threadpool(trim_process_memory)
+        try:
+            size = path.stat().st_size if path.is_file() else 0
+        except OSError:
+            size = 0
+        if size <= 0:
+            msg = "فایل خروجی روی دیسک خالی یا ناقص ساخته شد؛ فضای خالی درایو و گزارش کارها را بررسی کنید."
+            activity.add(f"ساخت خروجی ناموفق بود: {msg}", "error")
+            raise HTTPException(500, msg)
         activity.add(f"خروجی {values.kind.upper()} آماده شد", "success", 1.0)
         media_type = {
             "pdf": "application/pdf",
@@ -1590,7 +2567,65 @@ def create_app() -> FastAPI:
             "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         }[values.kind]
-        return FileResponse(path, media_type=media_type, filename=path.name)
+        want_prepare = prepare or request_obj.headers.get("x-export-prepare") == "1"
+        if want_prepare:
+            now = time.monotonic()
+            token = secrets.token_hex(16)
+            with prepared_exports_lock:
+                stale = [
+                    k for k, entry in prepared_exports.items()
+                    if now - float(entry.get("created", 0.0)) > 7200.0
+                ]
+                for k in stale:
+                    prepared_exports.pop(k, None)
+                while len(prepared_exports) >= 32:
+                    oldest_key = next(iter(prepared_exports))
+                    prepared_exports.pop(oldest_key, None)
+                prepared_exports[token] = {
+                    "project_id": project_id,
+                    "path": path,
+                    "filename": path.name,
+                    "media_type": media_type,
+                    "created": now,
+                }
+            return JSONResponse(
+                {"token": token, "filename": path.name, "size": size},
+                headers={"Cache-Control": "no-store"},
+            )
+        return FileResponse(path, media_type=media_type, filename=path.name, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/projects/{project_id}/export/{token}")
+    def download_prepared_export(project_id: str, token: str) -> FileResponse:
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise HTTPException(404, "فایل خروجی آماده پیدا نشد؛ دوباره خروجی بگیرید.")
+        with prepared_exports_lock:
+            entry = prepared_exports.get(token)
+            if not entry or entry.get("project_id") != project_id:
+                entry = None
+            elif time.monotonic() - float(entry.get("created", 0.0)) > 7200.0:
+                prepared_exports.pop(token, None)
+                entry = None
+        if not entry:
+            raise HTTPException(404, "نشانی دانلود خروجی منقضی شده است؛ دوباره خروجی بگیرید.")
+        export_path = Path(entry["path"])
+        try:
+            valid_file = export_path.is_file() and export_path.stat().st_size > 0
+        except OSError:
+            valid_file = False
+        if not valid_file:
+            raise HTTPException(404, "فایل خروجی روی دیسک پیدا نشد؛ دوباره خروجی بگیرید.")
+        return FileResponse(
+            export_path,
+            media_type=entry["media_type"],
+            filename=entry["filename"],
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.delete("/api/projects/{project_id}/export/{token}", status_code=204)
+    def discard_prepared_export(project_id: str, token: str) -> Response:
+        if re.fullmatch(r"[0-9a-f]{32}", token):
+            _clear_prepared_exports(target_project_id=project_id, token=token)
+        return Response(status_code=204)
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
@@ -1600,4 +2635,13 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
+_default_app: FastAPI | None = None
+
+
+def __getattr__(name: str) -> Any:
+    global _default_app
+    if name == "app":
+        if _default_app is None:
+            _default_app = create_app()
+        return _default_app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

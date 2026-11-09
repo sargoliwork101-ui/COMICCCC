@@ -33,6 +33,7 @@ let imageGate = null;
 let aiSaveFailure = false;
 let activityFeed = { entries: [], next: 0 };
 let renderedBlocks = null;
+let renderedOptions = null;
 let canvasRenderCount = 0;
 let renderedUploads = 0;
 let saveGate = null;
@@ -40,6 +41,7 @@ const stateSaveRequests = [];
 const ocrRequests = [];
 let projectGetCount = 0;
 const exportRequests = [];
+const jobCancelRequests = [];
 const aiSaveRequests = [];
 const aiTestRequests = [];
 const translationPreviewCalls = [];
@@ -62,6 +64,25 @@ const jsonResponse = (payload, status = 200) => ({
   headers: { get: () => 'application/json' },
   json: async () => payload,
 });
+let mockLicensePwd = '';
+let mockLicenseState = {
+  licensed: true,
+  unlocked: true,
+  reason: 'ok',
+  message: '',
+  hardwareId: 'CS4-ABCD-EFGH-2345-6789',
+  passwordEnabled: false,
+  license: {
+    holder: 'کاربر آزمایشی',
+    plan: 'lifetime',
+    planLabel: 'دائمی (مادام‌العمر)',
+    issuedAt: 1793491200,
+    expiresAt: null,
+    daysTotal: null,
+    daysRemaining: null,
+    licenseId: 'lic001',
+  },
+};
 const makeTranslationPreview = (body, single = false) => {
   const provider = body.provider || 'free';
   const liveProject = vm.runInContext('state.project', context);
@@ -80,8 +101,37 @@ const makeTranslationPreview = (body, single = false) => {
 window.fetch = async (url, options = {}) => {
   const parsed = new URL(url, 'http://127.0.0.1:8765');
   const pathname = parsed.pathname;
+  if (pathname === '/api/license/status') return jsonResponse(mockLicenseState);
+  if (pathname === '/api/license/activate' && options.method === 'POST') {
+    const req = JSON.parse(options.body || '{}');
+    if (!String(req.license_key || '').startsWith('CLIC1.')) return jsonResponse({ detail: 'کلید لایسنس معتبر نیست.' }, 400);
+    if (req.reset_local_password) { mockLicensePwd = ''; mockLicenseState.passwordEnabled = false; }
+    mockLicenseState = { ...mockLicenseState, licensed: true, unlocked: true, reason: 'ok', message: '' };
+    return jsonResponse(mockLicenseState);
+  }
+  if (pathname === '/api/license/login' && options.method === 'POST') {
+    const req = JSON.parse(options.body || '{}');
+    if (mockLicensePwd && req.password !== mockLicensePwd) return jsonResponse({ detail: 'رمز ورود اشتباه است.', code: 'WRONG_PASSWORD' }, 401);
+    mockLicenseState = { ...mockLicenseState, unlocked: true, reason: 'ok', message: '' };
+    return jsonResponse(mockLicenseState);
+  }
+  if (pathname === '/api/license/logout' && options.method === 'POST') {
+    mockLicenseState = { ...mockLicenseState, unlocked: !mockLicenseState.passwordEnabled, reason: mockLicenseState.passwordEnabled ? 'login_required' : 'ok' };
+    return jsonResponse(mockLicenseState);
+  }
+  if (pathname === '/api/license/password' && options.method === 'PUT') {
+    const req = JSON.parse(options.body || '{}');
+    if (mockLicensePwd && req.current_password !== mockLicensePwd) return jsonResponse({ detail: 'رمز فعلی نادرست است.' }, 400);
+    mockLicensePwd = String(req.new_password || '');
+    mockLicenseState = { ...mockLicenseState, passwordEnabled: Boolean(mockLicensePwd), unlocked: true };
+    return jsonResponse(mockLicenseState);
+  }
   if (pathname === '/api/projects' && (!options.method || options.method === 'GET')) return jsonResponse([summary]);
   if (pathname === '/api/projects' && options.method === 'POST') return jsonResponse(project, 201);
+  if (pathname === '/api/jobs/cancel' && options.method === 'POST') {
+    jobCancelRequests.push(JSON.parse(options.body || '{}'));
+    return jsonResponse({ ok: true, kind: JSON.parse(options.body || '{}').kind || 'all', cancelledCount: 1 });
+  }
   if (pathname === `/api/projects/${project.id}`) { projectGetCount += 1; return jsonResponse(project); }
   if (pathname === '/api/engines') return jsonResponse([engine]);
   if (pathname === '/api/ai-settings/test' && options.method === 'POST') {
@@ -200,10 +250,13 @@ window.Typeset = {
   indentGeometry: realTypeset.indentGeometry,
   hasInlineMarks: realTypeset.hasInlineMarks,
   inlineMarksToHtml: realTypeset.inlineMarksToHtml,
+  hasActiveWatermark: realTypeset.hasActiveWatermark,
+  drawWatermark: realTypeset.drawWatermark,
   richHtmlWords(html) { return String(html || '').includes('<hr>') ? [{ t: '────────' }] : []; },
-  render(bitmap, blocks) {
+  render(bitmap, blocks, opts) {
     canvasRenderCount += 1;
     renderedBlocks = blocks;
+    renderedOptions = opts || null;
     return { width: 320, height: 200, toBlob(callback) { callback(new window.Blob(['png'], { type: 'image/png' })); } };
   },
 };
@@ -817,7 +870,7 @@ function check(name, condition) {
     check('AI previewError opens translationPreviewDialog with clear error and AI settings shortcut instead of throwing empty-requests failure', $('translationPreviewDialog').open === true && !$('translationDialog').open && !$('translationPreviewError').classList.contains('hidden') && !$('openAiLimitFromPreview').classList.contains('hidden') && $('translationPreviewConfirm').disabled === true);
     $('translationPreviewCancel').click();
     await vm.runInContext('openEditor(state.project.images[0].id)', context);
-    check('inline editor stays permanently visible in idle state on openEditor', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && $('inlineEditorSize').disabled === true);
+    check('inline editor stays permanently visible and enabled in idle state on openEditor', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && $('inlineEditorSize').disabled === false);
     check('box alignment and same-size controls live inside inlineEditor below a divider with zero duplicate controls', !!$('inlineEditor').querySelector('.inline-section-divider') && !!$('inlineEditor').querySelector('.inline-box-layout-tools #editorSameSize') && !!$('inlineEditor').querySelector('.inline-box-layout-tools #editorAlignLeft') && !window.document.querySelector('.editor-side .editor-multi-tools') && !window.document.querySelector('.inline-box-settings') && window.document.querySelectorAll('#inlineLineReset').length === 1 && ![...$('blockList').querySelectorAll('button')].some((b) => b.textContent === 'ویرایش همین متن'));
     $('blockList').querySelector('.block-tr-edit').click();
     check('clicking sidebar translation line opens on-image inline editor directly', !$('inlineEditor').classList.contains('is-idle') && !!$('editorBoxes').querySelector('.editor-box.editing'));
@@ -915,6 +968,23 @@ function check(name, condition) {
     check('confirming translation cancel closes translationDialog without reopening and resets busy state', $('appModalDialog').open === false && $('translationDialog').open === false && vm.runInContext('translationRunning === false && jobBusy === false', context) && $('translateBtn').disabled === false);
     releaseTr1(); translationGate = null;
 
+    // v4.29: the "لغو" buttons must really stop the running work (server-side preemption), and every
+    // long-running dialog now exposes its own visible cancel button.
+    check('export, editor and OCR-quick cancel buttons exist for in-flight work', Boolean($('cancelExportBtn')) && Boolean($('editorCancelJobBtn')) && Boolean($('ocrQuickCancelBtn')));
+    check('cancel buttons start hidden and are only shown while their job runs', $('cancelExportBtn').classList.contains('hidden') && $('editorCancelJobBtn').classList.contains('hidden'));
+    jobCancelRequests.length = 0;
+    let releaseOcr2; ocrGate = new Promise((r) => { releaseOcr2 = r; });
+    $('ocrBtn').click();
+    $('startOcrBtn').click();
+    await new Promise((r) => setTimeout(r, 20));
+    $('ocrDialog').querySelector('.dialog-head button').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('the stop confirmation focuses the "بله، متوقف شود" button so Enter confirms it', $('appModalDialog').open === true && window.document.activeElement === $('appModalConfirm') && $('appModalConfirm').textContent.includes('متوقف'));
+    $('appModalConfirm').click();
+    await new Promise((r) => setTimeout(r, 25));
+    check('confirming OCR cancel asks the server to stop the running job immediately', jobCancelRequests.some((entry) => entry.kind === 'ocr'));
+    releaseOcr2(); ocrGate = null;
+
     // Alert & delete confirmation use themed #appModalDialog with Persian text (no native confirm/alert).
     let nativeConfirmCalled = 0;
     window.confirm = () => { nativeConfirmCalled += 1; return true; };
@@ -981,7 +1051,7 @@ function check(name, condition) {
         if (!body.force) {
           return jsonResponse({ kind: 'hardware_warning', detail: 'NVIDIA GPU required', warnings: mockCatalog[1].hardwareCheck.warnings, hardwareCheck: mockCatalog[1].hardwareCheck }, 409);
         }
-        mockCatalog = mockCatalog.map((item) => item.id === 'olmocr' ? { ...item, runtimeInstalled: true, modelReady: true, readyLanguages: [body.language || 'eng'], installedVersion: '0.4.27' } : item);
+        mockCatalog = mockCatalog.map((item) => item.id === 'olmocr' ? { ...item, runtimeInstalled: true, modelReady: true, readyLanguages: [body.language || 'eng'], installedVersion: '0.4.29' } : item);
         return jsonResponse({ ok: true, language: body.language || 'eng', engines: mockCatalog });
       }
       if (parsed.pathname === '/api/engines/rapidocr-v6/update' && options.method === 'POST') {
@@ -1025,14 +1095,14 @@ function check(name, condition) {
     window.fetch = origFetchV369;
   }
 
-  // v3.71: Interactive section-by-section Help Center (#helpDialog, #helpTopBtn, #helpMenuBtn, F1, search, examples)
+  // v3.71 / v4.02 / v4.15: Interactive section-by-section Help Center (#helpDialog, #helpTopBtn, F1, 15 sections, search, examples)
   {
-    check('all 13 Help sections include practical examples and untranslated terms', window.ComicHelpGuide.HELP_SECTIONS.length === 13 && window.ComicHelpGuide.HELP_SECTIONS.every((s) => s.example && s.example.title.includes('مثال عملی') && s.example.body.length > 60 && s.features?.length >= 3 && s.steps?.length >= 3));
+    check('all 15 Help sections include practical examples and untranslated terms', window.ComicHelpGuide.HELP_SECTIONS.length === 15 && window.ComicHelpGuide.HELP_SECTIONS.every((s) => s.example && s.example.title.includes('مثال عملی') && s.example.body.length > 60 && s.features?.length >= 3 && s.steps?.length >= 3));
     $('helpTopBtn').click();
-    check('clicking topbar Help button opens #helpDialog with 13 chapter nav items', $('helpDialog').open === true && window.document.querySelectorAll('#helpNavList .help-nav-item').length === 13);
+    check('clicking topbar Help button opens #helpDialog with 15 chapter nav items', $('helpDialog').open === true && window.document.querySelectorAll('#helpNavList .help-nav-item').length === 15);
     check('chapter mode renders active chapter with practical example box', window.document.querySelectorAll('#helpContentArea .help-article').length === 1 && $('helpContentArea').textContent.includes('مثال عملی'));
     $('helpViewAllBtn').click();
-    check('view-all mode renders all 13 sections simultaneously', window.document.querySelectorAll('#helpContentArea .help-article').length === 13);
+    check('view-all mode renders all 15 sections simultaneously', window.document.querySelectorAll('#helpContentArea .help-article').length === 15);
     $('helpSearchInput').value = 'Flowing Book';
     $('helpSearchInput').dispatchEvent(new window.Event('input', { bubbles: true }));
     check('searching untranslated term Flowing Book filters matching Help section', window.document.querySelectorAll('#helpContentArea .help-article').length >= 1 && $('helpContentArea').textContent.includes('Flowing Book Layout'));
@@ -1625,7 +1695,8 @@ function check(name, condition) {
         });
         const cleanDropdownNames = [...$('ocrEngine').options].every((o) => {
           const eng = state.engines.find((e) => e.id === o.value);
-          return eng && o.textContent === eng.name && !o.textContent.includes('💻') && !o.textContent.includes('عالی');
+          const validIcon = ['✓', '◐', '⬇'].some((ico) => o.textContent === ico + ' ' + (eng ? eng.name : ''));
+          return eng && validIcon && !o.textContent.includes('💻') && !o.textContent.includes('عالی');
         });
         const ocrDescOk = $('ocrEngine')?.dataset.executionMode === 'local' && $('ocrEngineStatus')?.textContent.includes('روی سیستم') && !$('ocrEngineStatus')?.textContent.includes('💻');
 
@@ -1732,7 +1803,7 @@ function check(name, condition) {
           const tessQuickBtn = $('ocrQuickPrepareBtn')?.textContent || '';
 
           return (
-            glmOptText === 'GLM-OCR' &&
+            glmOptText === '⬇ GLM-OCR' &&
             statusText.includes('کل حجم دانلود خودکار:') &&
             statusText.includes('پیش‌نیازها:') &&
             quickBtnText.includes('نصب و دانلود خودکار همین مدل (کل حجم دانلود:') &&
@@ -1925,7 +1996,10 @@ function check(name, condition) {
         };
         try {
           setMenuOpen(true);
-          $('deleteModelsMenuBtn').click();
+          const noDuplicateDeleteMenuBtn = !$('deleteModelsMenuBtn');
+          $('modelsBtn').click();
+          $('modelsInstalledOnly').checked = true;
+          $('modelsInstalledOnly').dispatchEvent(new window.Event('change', { bubbles: true }));
           const filteredChecked = Boolean($('modelsInstalledOnly')?.checked);
           const visibleCardsBefore = [...document.querySelectorAll('#engineCards .engine-card h3')].map((h) => h.textContent);
           const delBtn = document.querySelector('#engineCards .engine-card .engine-delete-btn');
@@ -1943,7 +2017,7 @@ function check(name, condition) {
           $('modelsInstalledOnly').checked = false;
           renderModels();
           closeDialog('modelsDialog');
-          return filteredChecked && hasOnlySurya && modalOpen && uninstallCalls.length === 1 && emptyShownAfterDelete && resultHasFreedGb;
+          return noDuplicateDeleteMenuBtn && filteredChecked && hasOnlySurya && modalOpen && uninstallCalls.length === 1 && emptyShownAfterDelete && resultHasFreedGb;
         } finally {
           window.fetch = origFetch;
           state.engines = prevEngines;
@@ -2033,6 +2107,2465 @@ function check(name, condition) {
       JSON.stringify(v399PerPageCheck),
     );
   }
+
+  // v4.00: Version 4.00 + Optional Custom Storage & Downloads Directory Settings UI (#storageBtn, #modelsStorageBtn, #storageDialog)
+  {
+    const v400StorageCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProject = state.project;
+        const verText = document.querySelector('.topbar .ver')?.textContent || '';
+        let putPayload = null;
+        let pickCalled = false;
+        const mockJson = (payload) => ({
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => payload,
+        });
+        window.fetch = async (url, opts = {}) => {
+          const parsed = new URL(url, 'http://127.0.0.1:8765');
+          if (parsed.pathname === '/api/storage-settings' && (!opts.method || opts.method === 'GET')) {
+            return mockJson({
+              mode: 'default',
+              activePath: 'C:\\\\Users\\\\User\\\\.comic-ocr-studio',
+              defaultPath: 'C:\\\\Users\\\\User\\\\.comic-ocr-studio',
+              customPath: '',
+              customActive: false,
+              fallbackWarning: '',
+              appDir: 'D:\\\\ComicApp\\\\python_app',
+              usedBytes: 1500 * 1024 * 1024,
+              freeDiskGb: 18.5,
+            });
+          }
+          if (parsed.pathname === '/api/storage-settings/pick-folder' && opts.method === 'POST') {
+            pickCalled = true;
+            return mockJson({ cancelled: false, path: 'D:\\\\ComicOCRData' });
+          }
+          if (parsed.pathname === '/api/storage-settings' && opts.method === 'PUT') {
+            putPayload = JSON.parse(opts.body || '{}');
+            return mockJson({
+              storage: {
+                mode: 'custom',
+                activePath: 'D:\\\\ComicOCRData',
+                defaultPath: 'C:\\\\Users\\\\User\\\\.comic-ocr-studio',
+                customPath: 'D:\\\\ComicOCRData',
+                customActive: true,
+                fallbackWarning: '',
+                appDir: 'D:\\\\ComicApp\\\\python_app',
+                usedBytes: 1500 * 1024 * 1024,
+                freeDiskGb: 420.0,
+                migratedBytes: 1500 * 1024 * 1024,
+                freedSourceBytes: 1500 * 1024 * 1024,
+              },
+              projects: [{ id: 'projd1', name: 'پروژهٔ منتقل‌شده', updatedAt: '2026-11-07T00:00:00Z', images: 0 }],
+              activeProject: {
+                id: 'projd1',
+                name: 'پروژهٔ منتقل‌شده',
+                images: [],
+                settings: { ocrEngine: 'rapidocr-v6', ocrLanguage: 'eng', ocrPageMode: 'comic', provider: 'free', targetLanguage: 'fa', output: {} },
+              },
+              engines: state.engines,
+              ai: state.ai,
+            });
+          }
+          if (parsed.pathname.startsWith('/api/projects/') && opts.method === 'PUT') {
+            return mockJson(state.project);
+          }
+          if (parsed.pathname === '/api/engines/memory') {
+            return mockJson({ processRamMb: 110, workerRamMb: 0, totalRamMb: 110, loadedEngines: [], loadedCount: 0 });
+          }
+          return origFetch(url, opts);
+        };
+        try {
+          $('storageBtn').click();
+          await new Promise((r) => setTimeout(r, 20));
+          const openedOk = $('storageDialog').open === true
+            && $('storageActivePath').textContent === 'C:\\\\Users\\\\User\\\\.comic-ocr-studio'
+            && $('storageAppDir').textContent === 'D:\\\\ComicApp\\\\python_app';
+
+          $('storageBrowseBtn').click();
+          await new Promise((r) => setTimeout(r, 20));
+          const pickedPath = $('storageCustomPath').value;
+
+          const savePromise = submitStorageSettings(null);
+          await new Promise((r) => setTimeout(r, 15));
+          const usedAppModal = $('appModalDialog').open === true;
+          $('appModalConfirm').click();
+          await savePromise;
+
+          return {
+            verHas426: verText.includes('۴.۳۰'),
+            hasModelsShortcut: Boolean($('modelsStorageBtn')),
+            openedOk,
+            pickCalled,
+            pickedPath,
+            usedAppModal,
+            putPayload,
+            closedAfterSave: $('storageDialog').open === false,
+            switchedProjectId: state.project?.id,
+            customActiveAfter: state.storage?.customActive === true,
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('storageDialog')?.open) closeDialog('storageDialog');
+          if (prevProject) adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.00/v4.30 displays version 4.30 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      v400StorageCheck.verHas426 === true
+        && v400StorageCheck.hasModelsShortcut === true
+        && v400StorageCheck.openedOk === true
+        && v400StorageCheck.pickCalled === true
+        && v400StorageCheck.pickedPath === 'D:\\ComicOCRData'
+        && v400StorageCheck.usedAppModal === true
+        && v400StorageCheck.putPayload?.custom_path === 'D:\\ComicOCRData'
+        && v400StorageCheck.putPayload?.migrate_existing === true
+        && v400StorageCheck.putPayload?.cleanup_source === true
+        && v400StorageCheck.closedAfterSave === true
+        && v400StorageCheck.switchedProjectId === 'projd1'
+        && v400StorageCheck.customActiveAfter === true,
+      JSON.stringify(v400StorageCheck),
+    );
+
+    // v4.01: Verify #ocrEngine install/readiness icons (✓ ready, ◐ installed runtime missing language, ⬇ uninstalled) + monotonic real progress bars
+    const v401UiCheck = await vm.runInContext(`
+      (async () => {
+        const prevEngines = state.engines;
+        try {
+          state.engines = [
+            {
+              id: 'rapidocr-v6',
+              name: 'PP-OCRv6 Small',
+              family: 'RapidOCR / ONNX',
+              selectable: true,
+              isolated: false,
+              languages: ['eng', 'chi_sim', 'jpn'],
+              runtimeInstalled: true,
+              modelReady: true,
+              readyLanguages: ['eng'],
+              totalDownloadGb: 0,
+              fullDownloadSizeGb: 0.04,
+            },
+            {
+              id: 'tesseract',
+              name: 'Tesseract 5 LSTM',
+              family: 'Tesseract',
+              selectable: true,
+              isolated: false,
+              languages: ['eng', 'fas'],
+              runtimeInstalled: true,
+              modelReady: true,
+              readyLanguages: ['eng'],
+              totalDownloadGb: 0.015,
+              fullDownloadSizeGb: 0.09,
+            },
+            {
+              id: 'glm-ocr',
+              name: 'GLM-OCR',
+              family: 'VLM',
+              selectable: true,
+              isolated: true,
+              languages: ['eng', 'fas'],
+              runtimeInstalled: false,
+              modelReady: false,
+              readyLanguages: [],
+              totalDownloadGb: 4.55,
+              fullDownloadSizeGb: 4.55,
+            },
+          ];
+
+          $('ocrLanguage').value = 'eng';
+          updateEngineOptions('rapidocr-v6', { resort: true });
+          const optRapidEng = document.querySelector('#ocrEngine option[value="rapidocr-v6"]');
+          const optTessEng = document.querySelector('#ocrEngine option[value="tesseract"]');
+          const optGlmEng = document.querySelector('#ocrEngine option[value="glm-ocr"]');
+          const engIconsOk = optRapidEng?.textContent === '✓ PP-OCRv6 Small' && optRapidEng?.dataset.installState === 'ready'
+            && optTessEng?.textContent === '✓ Tesseract 5 LSTM' && optTessEng?.dataset.installState === 'ready'
+            && optGlmEng?.textContent === '⬇ GLM-OCR' && optGlmEng?.dataset.installState === 'uninstalled';
+
+          // Switch language to Persian ('fas'): Tesseract has runtimeInstalled=true but 'fas' not in readyLanguages -> ◐
+          $('ocrLanguage').value = 'fas';
+          updateEngineOptions('tesseract', { resort: true });
+          const optTessFas = document.querySelector('#ocrEngine option[value="tesseract"]');
+          const optGlmFas = document.querySelector('#ocrEngine option[value="glm-ocr"]');
+          const fasIconsOk = optTessFas?.textContent === '◐ Tesseract 5 LSTM' && optTessFas?.dataset.installState === 'partial'
+            && optGlmFas?.textContent === '⬇ GLM-OCR' && optGlmFas?.dataset.installState === 'uninstalled';
+
+          // Verify jobProgressTransform prevents backward jumps when export transitions from 45% client render to 10% server build
+          jobBusy = true;
+          activeProgressId = 'exportProgress';
+          jobProgressTransform = { offset: 0.45, scale: 0.53, floor: 0.45 };
+          const origFetch = window.fetch;
+          let exportWidth = 0;
+          try {
+            window.fetch = async (url, opts) => {
+              if (String(url).startsWith('/api/activity')) {
+                const body = {
+                  entries: [{ id: 999001, message: 'چیدمان صفحهٔ ۱ از ۱۰ در PDF', kind: 'info', progress: 0.1, time: new Date().toISOString() }],
+                  next: 999001,
+                };
+                return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+              }
+              return origFetch(url, opts);
+            };
+            await pollActivity();
+            exportWidth = parseInt($('exportProgress').closest('.bar').getAttribute('aria-valuenow') || '0', 10);
+          } finally {
+            window.fetch = origFetch;
+            jobProgressTransform = null;
+            activeProgressId = null;
+            jobBusy = false;
+            setProgress('exportProgress', 0, false);
+            setProgress('jobProgress', 0, false);
+            setProgress('dockProgress', 0, false);
+          }
+
+          return {
+            engIconsOk,
+            fasIconsOk,
+            exportStayedAbove45: exportWidth === 50,
+          };
+        } finally {
+          state.engines = prevEngines;
+          $('ocrLanguage').value = 'eng';
+          updateEngineOptions('rapidocr-v6', { resort: true });
+        }
+      })()
+    `, context);
+    check(
+      'v4.01 renders single install/readiness icon (✓ ready, ◐ missing language file, ⬇ uninstalled) in #ocrEngine and scales multi-phase progress monotonically without backward jumps',
+      v401UiCheck.engIconsOk === true && v401UiCheck.fasIconsOk === true && v401UiCheck.exportStayedAbove45 === true,
+      JSON.stringify(v401UiCheck),
+    );
+
+    // v4.02: Verify unified "مدیریت مدل‌های OCR", "مدیریت ترجمه‌ها", zero duplicate menu items, 14-section Help guide with Storage/RAM chapter, and contextual F1 across dialogs
+    const v402Check = await vm.runInContext(`
+      (async () => {
+        const modelsMenuText = ($('modelsBtn')?.querySelector('span')?.textContent || '').trim();
+        const modelsDlgTitle = ($('modelsDialog')?.querySelector('h2')?.textContent || '').trim();
+        const noDuplicateMenu = !$('deleteModelsMenuBtn');
+        const aiMenuText = ($('aiBtn')?.textContent || '').trim();
+        const aiDlgTitle = ($('aiDialog')?.querySelector('h2')?.textContent || '').trim();
+        const previewAiShortcut = ($('openAiSettingsFromPreview')?.textContent || '').trim();
+
+        const storageChapter = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'storage-memory-network');
+        const hasStorageChapter = Boolean(storageChapter)
+          && storageChapter.num === '۱۳'
+          && storageChapter.features.some((f) => f.includes('python_app') && f.includes('start_windows.bat'));
+
+        // Contextual F1 on #modelsDialog -> 'ocr-models', #aiDialog -> 'ai-translation-settings', #storageDialog -> 'storage-memory-network'
+        showDialog('modelsDialog');
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+        const f1ModelsArticle = document.querySelector('#helpContentArea [data-help-article]')?.dataset.helpArticle;
+        closeDialog('helpDialog');
+        closeDialog('modelsDialog');
+
+        showDialog('aiDialog');
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+        const f1AiArticle = document.querySelector('#helpContentArea [data-help-article]')?.dataset.helpArticle;
+        closeDialog('helpDialog');
+        closeDialog('aiDialog');
+
+        showDialog('storageDialog');
+        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+        const f1StorageArticle = document.querySelector('#helpContentArea [data-help-article]')?.dataset.helpArticle;
+        closeDialog('helpDialog');
+        closeDialog('storageDialog');
+
+        return {
+          modelsMenuText,
+          modelsDlgTitle,
+          noDuplicateMenu,
+          aiMenuText,
+          aiDlgTitle,
+          previewAiShortcut,
+          hasStorageChapter,
+          f1ModelsArticle,
+          f1AiArticle,
+          f1StorageArticle,
+        };
+      })()
+    `, context);
+    check(
+      'v4.02 unifies menu into single مدیریت مدل‌های OCR and مدیریت ترجمه‌ها, expands Help to 14 complete chapters, and supports contextual F1 across dialogs',
+      v402Check.modelsMenuText === 'مدیریت مدل‌های OCR'
+        && v402Check.modelsDlgTitle === 'مدیریت مدل‌های OCR'
+        && v402Check.noDuplicateMenu === true
+        && v402Check.aiMenuText === 'مدیریت ترجمه‌ها'
+        && v402Check.aiDlgTitle === 'مدیریت ترجمه‌ها'
+        && v402Check.previewAiShortcut === 'مدیریت ترجمه‌ها…'
+        && v402Check.hasStorageChapter === true
+        && v402Check.f1ModelsArticle === 'ocr-models'
+        && v402Check.f1AiArticle === 'ai-translation-settings'
+        && v402Check.f1StorageArticle === 'storage-memory-network',
+      JSON.stringify(v402Check),
+    );
+
+    // v4.03: Verify backup awaits in-flight imageRenderTasks, syncs updatedAt from /rendered, uses ?prepare=true streaming link, tolerates corrupt draft, clears link on project switch, and restores safely even on 404 prior project
+    const v403BackupCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProj = state.project;
+        let backupReqBody = null;
+        let backupUrlCalled = '';
+        let deletedBackupUrl = '';
+        let renderFinishedBeforeBackup = false;
+        let releaseSlowRender = null;
+        const slowRenderGate = new Promise((r) => { releaseSlowRender = r; });
+        let restoredRenderedCount = 0;
+
+        try {
+          const testProj = {
+            id: 'projbkp1',
+            name: 'پروژه تست بک‌آپ',
+            updatedAt: '2026-11-07T08:00:00Z',
+            settings: { overlayMode: 'translation', output: {} },
+            images: [
+              {
+                id: 'imgbkp1',
+                name: 'p1.png',
+                file: 'imgbkp1.png',
+                width: 120,
+                height: 80,
+                format: 'PNG',
+                order: 0,
+                selected: true,
+                edited: false,
+                blocks: [{ id: 1, text: 'HI', tr: 'سلام', richHtml: '', enabled: true, bg: 'white', x0: 5, y0: 5, x1: 80, y1: 35, lineH: 30, dir: 'rtl', align: 'right' }],
+              },
+            ],
+          };
+          adoptProject(testProj);
+
+          // One valid draft + one corrupted draft in localStorage
+          localStorage.setItem('comic-studio-draft:projbkp1:imgbkp1:1:translation', JSON.stringify({ html: '<p>پیش‌نویس سالم</p>' }));
+          localStorage.setItem('comic-studio-draft:projbkp1:imgbkp1:1:ocr', '{corrupt-json');
+
+          window.fetch = async (url, opts = {}) => {
+            const u = String(url);
+            const method = (opts.method || 'GET').toUpperCase();
+            if (u === '/api/activity/clear' || u.startsWith('/api/activity')) {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify({ entries: [], next: 0 }), json: async () => ({ entries: [], next: 0 }) };
+            }
+            if (u === '/api/projects') {
+              const payload = [{ id: state.project.id, name: state.project.name, updatedAt: state.project.updatedAt, images: 1 }];
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            if (u.includes('/images/imgbkp1/content')) {
+              return { ok: true, status: 200, blob: async () => new window.Blob(['png']) };
+            }
+            if (u.includes('/images/imgbkp1/rendered') && method === 'POST') {
+              await slowRenderGate;
+              renderFinishedBeforeBackup = true;
+              const payload = { ok: true, updatedAt: '2026-11-07T08:01:00Z' };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            if (u === '/api/projects/projbkp1/state' && method === 'PUT') {
+              const body = JSON.parse(opts.body);
+              const nextTs = renderFinishedBeforeBackup ? '2026-11-07T08:02:00Z' : '2026-11-07T08:00:30Z';
+              const payload = Object.assign({}, body.state, { updatedAt: nextTs });
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            if (u.startsWith('/api/projects/projbkp1/backup') && method === 'POST') {
+              backupUrlCalled = u;
+              backupReqBody = JSON.parse(opts.body);
+              const payload = { token: '0123456789abcdef0123456789abcdef', filename: 'پروژه تست بک‌آپ-backup.zip', size: 4096 };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            if (u.startsWith('/api/projects/projbkp1/backup/') && method === 'DELETE') {
+              deletedBackupUrl = u;
+              return { ok: true, status: 204, headers: { get: () => '' }, text: async () => '' };
+            }
+            if (u === '/api/projects/missing404/state' && method === 'PUT') {
+              return { ok: false, status: 404, headers: { get: () => 'application/json' }, text: async () => JSON.stringify({ detail: 'پروژه پیدا نشد' }), json: async () => ({ detail: 'پروژه پیدا نشد' }) };
+            }
+            if (u === '/api/projects/restore' && method === 'POST') {
+              const restoredProj = {
+                id: 'projrestored9',
+                name: 'پروژه بازیابی‌شده',
+                updatedAt: '2026-11-07T09:00:00Z',
+                settings: { overlayMode: 'translation', output: {} },
+                images: [
+                  {
+                    id: 'imgrest1',
+                    name: 'r1.png',
+                    file: 'imgrest1.png',
+                    width: 120,
+                    height: 80,
+                    format: 'PNG',
+                    order: 0,
+                    selected: true,
+                    edited: false,
+                    blocks: [{ id: 5, text: 'R', tr: 'ترجمه بازیابی', richHtml: '', enabled: true, bg: 'white', x0: 5, y0: 5, x1: 80, y1: 35, lineH: 30, dir: 'rtl', align: 'right' }],
+                  },
+                ],
+              };
+              const payload = { project: restoredProj, drafts: [] };
+              return { ok: true, status: 201, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            if (u.includes('/images/imgrest1/content')) {
+              return { ok: true, status: 200, blob: async () => new window.Blob(['png']) };
+            }
+            if (u.includes('/images/imgrest1/rendered') && method === 'POST') {
+              restoredRenderedCount += 1;
+              const payload = { ok: true, updatedAt: '2026-11-07T09:00:05Z' };
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(payload), json: async () => payload };
+            }
+            return origFetch(url, opts);
+          };
+
+          // Start an in-flight background render BEFORE clicking backup
+          const bgRender = renderAndUpload(state.project.images[0]);
+          const backupTask = backupCurrentProject();
+          await new Promise((r) => setTimeout(r, 20));
+          const waitedForInFlightRender = backupReqBody === null;
+          releaseSlowRender();
+          await bgRender;
+          await backupTask;
+
+          const linkVisibleDuringProj = !$('backupDownloadLink').classList.contains('hidden');
+          const linkHrefDuringProj = $('backupDownloadLink').getAttribute('href');
+
+          // Simulate switching to a missing/deleted project (404 on save) and restoring backup
+          adoptProject({ id: 'missing404', name: 'حذف‌شده', updatedAt: 'old', settings: { output: {} }, images: [] });
+          await new Promise((r) => setTimeout(r, 10));
+          const linkHiddenAfterSwitch = $('backupDownloadLink').classList.contains('hidden');
+
+          const restoreTask = restoreProjectBackup(new window.Blob(['zip']));
+          await new Promise((r) => setTimeout(r, 15));
+          $('appModalConfirm').click();
+          await restoreTask;
+
+          return {
+            waitedForInFlightRender,
+            renderFinishedBeforeBackup,
+            usedPrepareQuery: backupUrlCalled.includes('prepare=true'),
+            expectedUpdatedAtSynced: backupReqBody?.expected_updated_at === '2026-11-07T08:02:00Z',
+            validDraftCount: backupReqBody?.drafts?.length,
+            linkVisibleDuringProj,
+            linkPointsToToken: String(linkHrefDuringProj || '').includes('/api/projects/projbkp1/backup/0123456789abcdef0123456789abcdef'),
+            linkHiddenAfterSwitch,
+            deletedPreparedOnSwitch: deletedBackupUrl.includes('/api/projects/projbkp1/backup/0123456789abcdef0123456789abcdef'),
+            restoredProjectId: state.project?.id,
+            restoredRenderedCount,
+          };
+        } finally {
+          localStorage.removeItem('comic-studio-draft:projbkp1:imgbkp1:1:translation');
+          localStorage.removeItem('comic-studio-draft:projbkp1:imgbkp1:1:ocr');
+          window.fetch = origFetch;
+          if (prevProj) adoptProject(prevProj);
+        }
+      })()
+    `, context);
+    check(
+      'v4.03 backup awaits in-flight renders, syncs updatedAt, streams via prepared token, skips corrupt localStorage draft, cleans up link on switch, and restores even if prior project 404s',
+      v403BackupCheck.waitedForInFlightRender === true
+        && v403BackupCheck.renderFinishedBeforeBackup === true
+        && v403BackupCheck.usedPrepareQuery === true
+        && v403BackupCheck.expectedUpdatedAtSynced === true
+        && v403BackupCheck.validDraftCount === 1
+        && v403BackupCheck.linkVisibleDuringProj === true
+        && v403BackupCheck.linkPointsToToken === true
+        && v403BackupCheck.linkHiddenAfterSwitch === true
+        && v403BackupCheck.deletedPreparedOnSwitch === true
+        && v403BackupCheck.restoredProjectId === 'projrestored9'
+        && v403BackupCheck.restoredRenderedCount === 1,
+      JSON.stringify(v403BackupCheck),
+    );
+
+    // v4.04: Verify built-in offline local NMT translator UI (download, test, unload, delete via appConfirm, save settings, and single-sentence + page preview)
+    const v404LocalNmtCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevAi = state.ai ? JSON.parse(JSON.stringify(state.ai)) : null;
+        let preparedModel = null;
+        let testedPayload = null;
+        let unloadedCount = 0;
+        let deletedModel = null;
+        let savedAiPayload = null;
+        let singlePreviewReq = null;
+        let singleExecReq = null;
+        let modelReady = false;
+
+        const buildStatus = () => ({
+          runtimeInstalled: modelReady,
+          activeModel: 'nllb-600m',
+          loadedModel: modelReady ? 'nllb-600m' : null,
+          busyModel: null,
+          busyStage: '',
+          busyProgress: 0,
+          models: [
+            {
+              id: 'nllb-600m',
+              label: 'NLLB-200 سبک و سریع (600M · ~630 MB)',
+              shortLabel: 'NLLB-200 (600M)',
+              description: 'سبک و قابل اجرا روی CPU بدون اینترنت.',
+              approxSize: '~630 MB',
+              ramHint: '~750 MB',
+              ready: modelReady,
+              filesPresent: modelReady,
+              diskBytes: modelReady ? 655000000 : 0,
+              diskSizeLabel: modelReady ? '625 MB' : '',
+            },
+            {
+              id: 'nllb-1.3b',
+              label: 'NLLB-200 دقیق‌تر (1.3B · ~1.35 GB)',
+              shortLabel: 'NLLB-200 (1.3B)',
+              description: 'دقیق‌تر روی CPU.',
+              approxSize: '~1.35 GB',
+              ramHint: '~1.6 GB',
+              ready: false,
+              filesPresent: false,
+              diskBytes: 0,
+              diskSizeLabel: '',
+            },
+          ],
+        });
+
+        try {
+          const okJson = (payload) => ({
+            ok: true,
+            status: 200,
+            headers: { get: () => 'application/json' },
+            text: async () => JSON.stringify(payload),
+            json: async () => payload,
+          });
+          window.fetch = async (url, opts = {}) => {
+            const u = String(url);
+            const method = (opts.method || 'GET').toUpperCase();
+            if (u.endsWith('/api/local-nmt/status')) {
+              return okJson(buildStatus());
+            }
+            if (u.endsWith('/api/local-nmt/prepare') && method === 'POST') {
+              const body = JSON.parse(opts.body || '{}');
+              preparedModel = body.model;
+              modelReady = true;
+              return okJson({ ok: true, status: buildStatus() });
+            }
+            if (u.endsWith('/api/local-nmt/test') && method === 'POST') {
+              testedPayload = JSON.parse(opts.body || '{}');
+              return okJson({
+                ok: true,
+                model: testedPayload.model,
+                sourceText: testedPayload.sample_text,
+                translatedText: 'سلام! یک لحظه صبر کن.',
+                message: 'مترجم آفلاین «NLLB-200 (600M)» آماده است ✓ — نمونهٔ ترجمه: «سلام! یک لحظه صبر کن.»',
+              });
+            }
+            if (u.endsWith('/api/local-nmt/unload') && method === 'POST') {
+              unloadedCount += 1;
+              return okJson({ ok: true, status: { ...buildStatus(), loadedModel: null } });
+            }
+            if (u.endsWith('/api/local-nmt/delete') && method === 'POST') {
+              const body = JSON.parse(opts.body || '{}');
+              deletedModel = body.model;
+              modelReady = false;
+              return okJson({ ok: true, freedBytes: 655000000, status: buildStatus() });
+            }
+            if (u.endsWith('/api/ai-settings') && method === 'PUT') {
+              savedAiPayload = JSON.parse(opts.body || '{}');
+              return okJson({ ...state.ai, ...savedAiPayload, local_nmt_status: buildStatus() });
+            }
+            if (u.endsWith('/api/translate-text/context-preview') && method === 'POST') {
+              singlePreviewReq = JSON.parse(opts.body || '{}');
+              return okJson({
+                provider: 'local',
+                providerLabel: 'مترجم آفلاین داخلی — NLLB-200 سبک و سریع (600M · ~630 MB)',
+                model: 'nllb-600m',
+                base_url: '',
+                fallback_url: '',
+                previewError: '',
+                note: 'ترجمه ۱۰۰٪ آفلاین روی سیستم شما انجام می‌شود.',
+                requestCount: 1,
+                blockCount: 1,
+                requests: [{ index: 1, call: 1, text: singlePreviewReq.text, characters: singlePreviewReq.text.length }],
+                signature: 'sig-local-single-1',
+              });
+            }
+            if (u.endsWith('/api/translate-text/context') && method === 'POST') {
+              singleExecReq = JSON.parse(opts.body || '{}');
+              return okJson({ text: 'سلام دنیا آفلاین!' });
+            }
+            return origFetch(url, opts);
+          };
+
+          await loadAiSettings({ ...state.ai, local_nmt: { model: 'nllb-600m', beam_size: 2, source_limit: 4000, keep_loaded: false }, local_nmt_status: buildStatus() });
+          showDialog('aiDialog');
+          showAiProvider('local');
+          const localFieldsVisible = !$('localNmtFields').classList.contains('hidden')
+            && $('freeFields').classList.contains('hidden')
+            && $('aiFields').classList.contains('hidden');
+          const execIsLocal = $('aiExecBadge').classList.contains('is-local');
+          const cardCount = document.querySelectorAll('#localNmtCards .local-nmt-card').length;
+
+          // 1-click download
+          await prepareLocalNmtModel('nllb-600m');
+          // 1-sentence offline sample test
+          $('localNmtTestSample').value = 'Hello! Wait a second.';
+          await testLocalNmtSample();
+          const testStatusHasFa = $('aiStatus').textContent.includes('سلام');
+          // RAM unload
+          await unloadLocalNmtRam();
+          // Save settings with provider='local'
+          await saveAiSettings();
+
+          // Single-sentence / single-block translation via retranslateBlock
+          const sampleBlock = state.project.images[0].blocks[0];
+          const prevTr = sampleBlock.tr;
+          sampleBlock.text = 'Offline single sentence!';
+          await retranslateBlock(sampleBlock);
+          const previewServiceValue = $('translationPreviewService')?.value;
+          const previewSkillHidden = $('translationSkillWrap')?.classList.contains('hidden');
+          const previewExecIsLocal = $('translationPreviewExecBadge')?.classList.contains('is-local');
+          await confirmTranslationRequestPreview();
+          const translatedSingle = sampleBlock.tr;
+          sampleBlock.tr = prevTr;
+
+          // Delete model via custom Persian appConfirm (zero native confirm)
+          modelReady = true;
+          state.ai.local_nmt_status = buildStatus();
+          renderLocalNmtPanel();
+          const delPromise = deleteLocalNmtModel('nllb-600m', 'NLLB-200 (600M)');
+          await new Promise((r) => setTimeout(r, 15));
+          const deleteUsedAppModal = $('appModalDialog').open === true;
+          $('appModalConfirm').click();
+          await delPromise;
+
+          return {
+            localFieldsVisible,
+            execIsLocal,
+            cardCount,
+            preparedModel,
+            testedModel: testedPayload?.model,
+            testStatusHasFa,
+            unloadedCount,
+            savedProvider: savedAiPayload?.provider,
+            savedModel: savedAiPayload?.local_nmt?.model,
+            previewServiceValue,
+            previewSkillHidden,
+            previewExecIsLocal,
+            singlePreviewProvider: singlePreviewReq?.provider,
+            singleExecProvider: singleExecReq?.provider,
+            translatedSingle,
+            deleteUsedAppModal,
+            deletedModel,
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('aiDialog')?.open) closeDialog('aiDialog');
+          if ($('translationPreviewDialog')?.open) closeDialog('translationPreviewDialog');
+          if (prevAi) state.ai = prevAi;
+        }
+      })()
+    `, context);
+    check(
+      'v4.04 built-in offline local NMT manages download/test/unload/delete via appConfirm and translates single sentences offline',
+      v404LocalNmtCheck.localFieldsVisible === true
+        && v404LocalNmtCheck.execIsLocal === true
+        && v404LocalNmtCheck.cardCount === 2
+        && v404LocalNmtCheck.preparedModel === 'nllb-600m'
+        && v404LocalNmtCheck.testedModel === 'nllb-600m'
+        && v404LocalNmtCheck.testStatusHasFa === true
+        && v404LocalNmtCheck.unloadedCount === 1
+        && v404LocalNmtCheck.savedProvider === 'local'
+        && v404LocalNmtCheck.savedModel === 'nllb-600m'
+        && v404LocalNmtCheck.previewServiceValue === 'local'
+        && v404LocalNmtCheck.previewSkillHidden === true
+        && v404LocalNmtCheck.previewExecIsLocal === true
+        && v404LocalNmtCheck.singlePreviewProvider === 'local'
+        && v404LocalNmtCheck.singleExecProvider === 'local'
+        && v404LocalNmtCheck.translatedSingle === 'سلام دنیا آفلاین!'
+        && v404LocalNmtCheck.deleteUsedAppModal === true
+        && v404LocalNmtCheck.deletedModel === 'nllb-600m',
+      JSON.stringify(v404LocalNmtCheck),
+    );
+
+    // v4.05: Verify custom Persian (RTL) & English (LTR) manual text boxes in #editorDialog, empty-source retranslate guard, appConfirm block deletion, Watermark (Text + Transparent Logo) apply/remove, and eraseOriginal=false forwarding
+    let drawnWatermarkFillCalls = 0;
+    let drawnWatermarkLogoCalls = 0;
+    const mockWmCtx = {
+      font: '',
+      fillStyle: '',
+      strokeStyle: '',
+      lineWidth: 1,
+      globalAlpha: 1,
+      textAlign: 'center',
+      textBaseline: 'middle',
+      save() {},
+      restore() {},
+      translate() {},
+      rotate() {},
+      beginPath() {},
+      roundRect() {},
+      fill() {},
+      fillRect() {},
+      measureText(t) { return { width: String(t || '').length * 8 }; },
+      strokeText() {},
+      fillText() { drawnWatermarkFillCalls += 1; },
+      drawImage() { drawnWatermarkLogoCalls += 1; },
+    };
+    const wmDrawnCorner = realTypeset.drawWatermark(
+      mockWmCtx,
+      400,
+      600,
+      { enabled: true, text: 'ترجمه اختصاصی', logoId: 'lg1', position: 'bottom-left', bgPill: true, outline: true },
+      { lg1: { _drawable: { width: 48, height: 48 } } },
+    );
+    const wmDrawnTile = realTypeset.drawWatermark(
+      mockWmCtx,
+      400,
+      600,
+      { enabled: true, text: 'TILE', position: 'tile', tileGapPct: 30 },
+      {},
+    );
+    const previewCallsBeforeManual = translationPreviewCalls.length;
+    const v405Check = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProject = state.project;
+        try {
+          window.fetch = async (url, options = {}) => {
+            const u = String(url);
+            if (u.includes('/content')) return { ok: true, status: 200, blob: async () => new Blob(['img'], { type: 'image/png' }) };
+            if (u.endsWith('/rendered') || u.endsWith('/revert')) return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true, updatedAt: '2026-11-07T12:00:00Z' }) };
+            if (u.endsWith('/state') && options.method === 'PUT') {
+              const saved = JSON.parse(options.body).state;
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => saved };
+            }
+            return origFetch(url, options);
+          };
+          adoptProject({
+            id: 'proj-v405',
+            name: 'پروژه ۴.۰۵',
+            updatedAt: '',
+            images: [{ id: 'img-v405', name: 'cover.png', file: 'cover.png', width: 320, height: 200, order: 0, selected: true, groupId: null, crop: null, blocks: [], watermark: null, edited: false }],
+            settings: { eraseOriginal: false, output: {} },
+          });
+          const img = state.project.images[0];
+
+        await openEditor(img.id);
+        const emptyHasQuickBtns = document.querySelectorAll('#blockList .block-empty-actions button').length === 2;
+
+        // Add Persian (RTL) & English (LTR) manual text boxes
+        $('editorAddFaText').click();
+        if (classicEditor) classicEditor.setHTML('<p>سلام کمیک</p>');
+        closeInlineEditor();
+
+        $('editorAddEnText').click();
+        if (classicEditor) classicEditor.setHTML('<p>BOOM!</p>');
+        closeInlineEditor();
+
+        const addedCount = img.blocks.length;
+        const faBlock = img.blocks[0];
+        const enBlock = img.blocks[1];
+        const manualBadgeShown = Boolean(document.querySelector('#blockList .block-manual-chip'));
+
+        // Empty OCR source text on manual block must guard retranslateBlock without hitting preview endpoint
+        await retranslateBlock(faBlock);
+
+        // Delete populated English manual block via appConfirm (#appModalDialog)
+        selectEditorBlock(enBlock.id, false, false);
+        const delTask = deleteEditorBlocks();
+        await new Promise((r) => setTimeout(r, 15));
+        const deleteUsedModal = $('appModalDialog').open === true;
+        $('appModalConfirm').click();
+        await delTask;
+        const countAfterDelete = img.blocks.length;
+
+        await closeEditor(false);
+
+        // Open Watermark dialog, upload a transparent PNG logo, set text + position, and apply
+        await openWatermarkDialog(false);
+        const wmDialogOpened = $('watermarkDialog').open === true;
+        const fakeLogoFile = new Blob([Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10])], { type: 'image/png' });
+        fakeLogoFile.name = 'team-logo.png';
+        await handleWatermarkLogoUpload(fakeLogoFile);
+        const uploadedLogoId = $('wmLogoSelect').value;
+        $('wmText').value = 'کانال کمیک‌ستان';
+        $('wmPosition').value = 'diagonal';
+        $('wmPosition').dispatchEvent(new Event('change'));
+        const autoDiagonalAngle = $('wmAngle').value;
+        await applyWatermarkFromDialog();
+
+        const hasWmOnPage = Boolean(img.watermark && img.watermark.text === 'کانال کمیک‌ستان' && img.watermark.logoId === uploadedLogoId);
+        const cardHasWmBadge = Boolean(document.querySelector('#grid .item .watermark-badge'));
+
+        // Remove watermark via appConfirm
+        await openWatermarkDialog(false);
+        const rmTask = removeWatermarkFromDialog();
+        await new Promise((r) => setTimeout(r, 15));
+        const removeUsedModal = $('appModalDialog').open === true;
+        $('appModalConfirm').click();
+        await rmTask;
+        const wmCleared = img.watermark === null;
+
+          return {
+            emptyHasQuickBtns,
+            addedCount,
+            faDir: faBlock?.dir,
+            faManual: faBlock?.manual === true,
+            enDir: enBlock?.dir,
+            enManual: enBlock?.manual === true,
+            manualBadgeShown,
+            deleteUsedModal,
+            countAfterDelete,
+            wmDialogOpened,
+            uploadedLogoOk: Boolean(uploadedLogoId && state.project.settings.watermarkLogos?.[uploadedLogoId]),
+            autoDiagonalAngle,
+            hasWmOnPage,
+            cardHasWmBadge,
+            removeUsedModal,
+            wmCleared,
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('watermarkDialog')?.open) closeDialog('watermarkDialog');
+          if ($('editorDialog')?.open) closeDialog('editorDialog');
+          if (prevProject) adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.05 supports custom Persian/English manual text boxes, appConfirm deletion, empty-source guard, Watermark (text + transparent logo), and eraseOriginal=false forwarding',
+      wmDrawnCorner === true
+        && wmDrawnTile === true
+        && drawnWatermarkFillCalls >= 5
+        && drawnWatermarkLogoCalls === 1
+        && translationPreviewCalls.length === previewCallsBeforeManual
+        && renderedOptions?.eraseOriginal === false
+        && v405Check.emptyHasQuickBtns === true
+        && v405Check.addedCount === 2
+        && v405Check.faDir === 'rtl'
+        && v405Check.faManual === true
+        && v405Check.enDir === 'ltr'
+        && v405Check.enManual === true
+        && v405Check.manualBadgeShown === true
+        && v405Check.deleteUsedModal === true
+        && v405Check.countAfterDelete === 1
+        && v405Check.wmDialogOpened === true
+        && v405Check.uploadedLogoOk === true
+        && v405Check.autoDiagonalAngle === '-30'
+        && v405Check.hasWmOnPage === true
+        && v405Check.cardHasWmBadge === true
+        && v405Check.removeUsedModal === true
+        && v405Check.wmCleared === true,
+      JSON.stringify({ v405Check, renderedOptions, drawnWatermarkFillCalls, drawnWatermarkLogoCalls }),
+    );
+
+    // v4.07: Verify full-attribute box copy/paste/duplicate via toolbar icons, on-box ⧉ icon, sidebar button, Ctrl+C / Ctrl+V (EN & FA keyboard layouts + cross-page paste + inline typing guard), Ctrl+Shift+Drag / Click cloning, and Help Guide documentation
+    const v407Check = await vm.runInContext(`
+      (async () => {
+        const prevProject = state.project ? JSON.parse(JSON.stringify(state.project)) : null;
+        const origFetch = window.fetch;
+        window.fetch = async (url, options = {}) => {
+          const u = String(url);
+          if (u.includes('/content')) {
+            return { ok: true, status: 200, blob: async () => new Blob(['img'], { type: 'image/png' }) };
+          }
+          if (u.endsWith('/state') && options.method === 'PUT') {
+            return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => JSON.parse(options.body).state };
+          }
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => 'application/json' },
+            json: async () => ({ ok: true, updatedAt: '2026-11-07T14:00:00Z' }),
+          };
+        };
+        try {
+          state.copiedEditorBlocks = [];
+          state.copiedEditorPasteStep = 0;
+          state.copiedEditorSourceImageId = null;
+          adoptProject({
+            id: 'proj-v407',
+            name: 'پروژه ۴.۰۷',
+            updatedAt: '2026-11-07T14:00:00Z',
+            groups: [],
+            settings: {
+              ocrEngine: 'rapidocr-v6',
+              ocrLanguage: 'eng',
+              ocrPageMode: 'comic',
+              eraseOriginal: true,
+              overlayMode: 'translation',
+            },
+            images: [
+              {
+                id: 'img-copy-1',
+                name: 'p1.png',
+                file: 'p1.png',
+                width: 320,
+                height: 200,
+                selected: true,
+                edited: false,
+                approved: false,
+                blocks: [
+                  {
+                    id: 1,
+                    text: 'BOOM!',
+                    tr: 'بوم بزرگ!',
+                    richHtml: '<span style="color:#ff2244;font-weight:bold">بوم بزرگ!</span>',
+                    conf: 98,
+                    enabled: true,
+                    bg: 'black',
+                    color: '#ff2244',
+                    bold: true,
+                    italic: true,
+                    size: 26,
+                    align: 'center',
+                    verticalAlign: 'bottom',
+                    dir: 'rtl',
+                    textMode: 'translation',
+                    pageRole: 'heading',
+                    lineH: 30,
+                    x0: 20, y0: 20, x1: 140, y1: 70,
+                    tx0: 20, ty0: 20, tx1: 140, ty1: 70,
+                  },
+                ],
+              },
+              {
+                id: 'img-copy-2',
+                name: 'p2.png',
+                file: 'p2.png',
+                width: 320,
+                height: 200,
+                selected: true,
+                edited: false,
+                approved: false,
+                blocks: [],
+              },
+            ],
+          });
+
+          await openEditor('img-copy-1');
+          const pasteDisabledInitially = $('editorPasteBlock').disabled === true;
+          selectEditorBlock(1, false, false);
+
+          // 1. Typing guard: while inline editor is open, Ctrl+C / Ctrl+V must NOT hijack text editing
+          openInlineEditor(state.project.images[0].blocks[0]);
+          const keyWhenTyping = new window.KeyboardEvent('keydown', { key: 'v', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true });
+          $('inlineEditorField').dispatchEvent(keyWhenTyping);
+          const countWhileTyping = state.project.images[0].blocks.length;
+          closeInlineEditor();
+
+          // 2. Persian keyboard layout Ctrl+C ('ز' + KeyC) & Ctrl+V ('ر' + KeyV) copies & pastes all attributes
+          document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ز', code: 'KeyC', ctrlKey: true, bubbles: true, cancelable: true }));
+          const pasteEnabledAfterCopy = $('editorPasteBlock').disabled === false;
+          document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ر', code: 'KeyV', ctrlKey: true, bubbles: true, cancelable: true }));
+          const pastedSamePage = state.project.images[0].blocks[1];
+          const samePageAttrsMatch = Boolean(
+            pastedSamePage
+            && pastedSamePage.id === 2
+            && pastedSamePage.tr === 'بوم بزرگ!'
+            && pastedSamePage.richHtml.includes('#ff2244')
+            && pastedSamePage.bg === 'black'
+            && pastedSamePage.color === '#ff2244'
+            && pastedSamePage.bold === true
+            && pastedSamePage.italic === true
+            && pastedSamePage.size === 26
+            && pastedSamePage.align === 'center'
+            && pastedSamePage.verticalAlign === 'bottom'
+            && pastedSamePage.pageRole === 'heading'
+            && (pastedSamePage.tx1 - pastedSamePage.tx0) === 120
+            && (pastedSamePage.ty1 - pastedSamePage.ty0) === 50
+            && pastedSamePage.tx0 === 42
+            && pastedSamePage.ty0 === 42
+          );
+
+          // 3. On-box mini icon (.box-copy ⧉) duplicates immediately without disturbing original
+          const box1CopyIcon = $('editorBoxes').querySelector('.editor-box[data-id="1"] .box-copy');
+          box1CopyIcon.click();
+          const countAfterOnBoxIcon = state.project.images[0].blocks.length;
+
+          // 4. Ctrl+Shift+Drag pulls out a live copy to exact target spot while keeping original box 1 at (20, 20)
+          const box1El = $('editorBoxes').querySelector('.editor-box[data-id="1"]');
+          const mkPtr = (type, x, y, opts = {}) => {
+            const ev = new window.Event(type, { bubbles: true, cancelable: true });
+            Object.defineProperties(ev, {
+              clientX: { value: x },
+              clientY: { value: y },
+              pointerId: { value: 9 },
+              button: { value: 0 },
+              ctrlKey: { value: Boolean(opts.ctrlKey) },
+              shiftKey: { value: Boolean(opts.shiftKey) },
+            });
+            return ev;
+          };
+          const scale = state.editorScale || 1;
+          box1El.dispatchEvent(mkPtr('pointerdown', 40, 40, { ctrlKey: true, shiftKey: true }));
+          window.dispatchEvent(mkPtr('pointermove', 40 + Math.round(90 * scale), 40 + Math.round(60 * scale), { ctrlKey: true, shiftKey: true }));
+          window.dispatchEvent(mkPtr('pointerup', 40 + Math.round(90 * scale), 40 + Math.round(60 * scale), { ctrlKey: true, shiftKey: true }));
+          const origStillIntact = state.project.images[0].blocks[0].tx0 === 20 && state.project.images[0].blocks[0].ty0 === 20;
+          const draggedClone = state.project.images[0].blocks.at(-1);
+          const draggedCloneAtTarget = draggedClone.tx0 === 110 && draggedClone.ty0 === 80 && draggedClone.size === 26 && draggedClone.color === '#ff2244';
+
+          // 5. Cross-page paste: open page 2 and click #editorPasteBlock -> lands at exact source coordinates (20, 20)
+          await openEditor('img-copy-2');
+          $('editorPasteBlock').click();
+          const page2Block = state.project.images[1].blocks[0];
+          const crossPageExact = Boolean(page2Block && page2Block.tx0 === 20 && page2Block.ty0 === 20 && page2Block.tr === 'بوم بزرگ!' && page2Block.bg === 'black');
+
+          // 6. Help guide documents Ctrl + C, Ctrl + V, and Ctrl + Shift box copying in Chapters 9 & 14
+          openHelpDialog('visual-editor');
+          const visualHelpText = $('helpContentArea').textContent;
+          openHelpDialog('shortcuts');
+          const shortcutsHelpText = $('helpContentArea').textContent;
+          closeDialog('helpDialog');
+
+          return {
+            pasteDisabledInitially,
+            countWhileTyping,
+            pasteEnabledAfterCopy,
+            samePageAttrsMatch,
+            countAfterOnBoxIcon,
+            origStillIntact,
+            draggedCloneAtTarget,
+            crossPageExact,
+            helpHasCopyDocs: visualHelpText.includes('Ctrl + Shift') && visualHelpText.includes('کپی کادر') && shortcutsHelpText.includes('Ctrl + C') && shortcutsHelpText.includes('Ctrl + Shift'),
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+          if ($('editorDialog')?.open) closeDialog('editorDialog');
+          if (prevProject) adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.07 supports full-attribute box copy/paste/duplicate via toolbar & on-box icons, Ctrl+C/Ctrl+V (EN/FA layouts + cross-page + typing guard), Ctrl+Shift+Drag cloning, and Help documentation',
+      v407Check.pasteDisabledInitially === true
+        && v407Check.countWhileTyping === 1
+        && v407Check.pasteEnabledAfterCopy === true
+        && v407Check.samePageAttrsMatch === true
+        && v407Check.countAfterOnBoxIcon === 3
+        && v407Check.origStillIntact === true
+        && v407Check.draggedCloneAtTarget === true
+        && v407Check.crossPageExact === true
+        && v407Check.helpHasCopyDocs === true,
+      JSON.stringify(v407Check),
+    );
+  }
+
+  // v4.08: Verify API key priority controls (↑ بالاتر, ↓ پایین‌تر, ⇈ اولویت اول, drag-and-drop badge, preserved secrets & limits, #translationPreviewService priority ranks, and Help Guide Chapter 7 & 8 documentation)
+  {
+    const v408Check = await vm.runInContext(`
+      (async () => {
+        const prevAi = JSON.parse(JSON.stringify(state.ai || {}));
+        try {
+          $('aiBtn').click();
+          $('aiProvider').value = 'openrouter';
+          $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+          // Step A: Save 2 keys on the server with actual secrets so stored secrets exist on backend
+          aiEditorProfiles = [
+            { id: 'prio-k1', name: 'کلید اول قدیمی', hasApiKey: false, apiKey: 'sk-saved-k1', timeout_seconds: '30', retry_count: '1', retry_wait_seconds: '10', source_limit: '1100' },
+            { id: 'prio-k2', name: 'کلید دوم پشتیبان', hasApiKey: false, apiKey: 'sk-saved-k2', timeout_seconds: '60', retry_count: '2', retry_wait_seconds: '15', source_limit: '2200' },
+          ];
+          renderAiProfiles();
+          await saveAiSettings();
+
+          // Step B: Reopen #aiDialog (password inputs are now empty "", hasApiKey === true) and add a 3rd fresh key
+          $('aiBtn').click();
+          $('aiProvider').value = 'openrouter';
+          $('aiProvider').dispatchEvent(new window.Event('change', { bubbles: true }));
+          aiEditorProfiles[0]._lastStatus = 'اتصال برقرار است ✓';
+          aiEditorProfiles.push({
+            id: 'prio-k3', name: 'کلید سوم پرسرعت', hasApiKey: false, apiKey: 'sk-fresh-k3', timeout_seconds: '90', retry_count: '0', retry_wait_seconds: '20', source_limit: '3300',
+          });
+          renderAiProfiles();
+
+          let rows = [...document.querySelectorAll('#aiProfiles .ai-profile-row')];
+          const initialBadges = rows.map((r) => r.querySelector('.ai-priority-badge')?.textContent || '');
+          const initialReadyChips = rows.map((r) => r.querySelector('.ai-key-ready-chip')?.textContent || '');
+          const firstRowUpDisabled = rows[0].querySelector('.ai-profile-up')?.disabled === true
+            && rows[0].querySelector('.ai-profile-top')?.disabled === true
+            && rows[0].querySelector('.ai-profile-down')?.disabled === false;
+          const lastRowDownDisabled = rows[2].querySelector('.ai-profile-down')?.disabled === true
+            && rows[2].querySelector('.ai-profile-up')?.disabled === false
+            && rows[2].querySelector('.ai-profile-top')?.disabled === false;
+
+          // 1. Click "⇈ اولویت اول" on row 3 (prio-k3) -> jumps straight to index 0!
+          rows[2].querySelector('.ai-profile-top').click();
+          rows = [...document.querySelectorAll('#aiProfiles .ai-profile-row')];
+          const orderAfterTop = rows.map((r) => r.dataset.profileId);
+
+          // 2. Click "↓ پایین‌تر" on row 2 (prio-k1) -> swaps with prio-k2 -> [prio-k3, prio-k2, prio-k1]
+          rows[1].querySelector('.ai-profile-down').click();
+          rows = [...document.querySelectorAll('#aiProfiles .ai-profile-row')];
+          const orderAfterDown = rows.map((r) => r.dataset.profileId);
+          const preservedStatusMovedToRow3 = rows[2].querySelector('.ai-profile-status')?.textContent === 'اتصال برقرار است ✓';
+
+          // 3. Click "↑ بالاتر" on row 3 (prio-k1) -> moves back to middle -> [prio-k3, prio-k1, prio-k2]
+          rows[2].querySelector('.ai-profile-up').click();
+          rows = [...document.querySelectorAll('#aiProfiles .ai-profile-row')];
+          const orderAfterUp = rows.map((r) => r.dataset.profileId);
+
+          // 4. Test HTML5 drag-and-drop on .ai-priority-badge: drag row 2 (index 2: prio-k2) onto row 1 (index 1: prio-k1) -> [prio-k3, prio-k2, prio-k1]
+          rows[2].querySelector('.ai-priority-badge').dispatchEvent(new window.Event('dragstart', { bubbles: true }));
+          const dropEv = new window.Event('drop', { bubbles: true, cancelable: true });
+          rows[1].dispatchEvent(dropEv);
+          rows[2]?.querySelector('.ai-priority-badge')?.dispatchEvent(new window.Event('dragend', { bubbles: true }));
+          rows = [...document.querySelectorAll('#aiProfiles .ai-profile-row')];
+          const orderAfterDrag = rows.map((r) => r.dataset.profileId);
+
+          // 5. Save AI settings and verify PUT payload order + preserved secrets + #translationPreviewService priority rank labels
+          await saveAiSettings();
+          const savedProfiles = state.ai?.providers?.openrouter?.profiles || [];
+          const savedIds = savedProfiles.map((p) => p.id);
+          const allSavedHaveKeys = savedProfiles.length === 3 && savedProfiles.every((p) => p.hasApiKey === true);
+          const savedTimeouts = savedProfiles.map((p) => Number(p.timeout_seconds));
+
+          renderTranslationServiceSelector('openrouter', '');
+          const previewOptions = [...$('translationPreviewService').options]
+            .filter((o) => o.value === 'openrouter' || o.value.startsWith('openrouter::'))
+            .map((o) => ({ value: o.value, text: o.textContent }));
+
+          // 6. Verify Help Guide Chapter 7 & Chapter 8 document API key priority clearly
+          openHelpDialog('ai-translation-settings');
+          const ch7Html = $('helpContentArea')?.textContent || '';
+          openHelpDialog('translation-preview-context');
+          const ch8Html = $('helpContentArea')?.textContent || '';
+          const headingHintOk = ($('aiDialog')?.innerHTML || '').includes('اولویت ۱ ابتدا امتحان می‌شود')
+            && ($('aiDialog')?.innerHTML || '').includes('⇈ اولویت اول');
+          const helpSynced = ch7Html.includes('⇈ اولویت اول')
+            && ch7Html.includes('↑ بالاتر')
+            && ch7Html.includes('↓ پایین‌تر')
+            && ch8Html.includes('به ترتیب اولویت');
+
+          return {
+            initialPrimaryBadgeOk: initialBadges[0].includes('اولویت ۱') && initialBadges[1].includes('اولویت ۲') && initialBadges[2].includes('اولویت ۳'),
+            readyChipsOk: initialReadyChips[0].includes('کلید ذخیره‌شده') && initialReadyChips[2].includes('کلید جدید آمادهٔ ذخیره'),
+            boundaryBtnsOk: firstRowUpDisabled && lastRowDownDisabled,
+            orderAfterTopOk: JSON.stringify(orderAfterTop) === JSON.stringify(['prio-k3', 'prio-k1', 'prio-k2']),
+            orderAfterDownOk: JSON.stringify(orderAfterDown) === JSON.stringify(['prio-k3', 'prio-k2', 'prio-k1']),
+            preservedStatusMovedToRow3,
+            orderAfterUpOk: JSON.stringify(orderAfterUp) === JSON.stringify(['prio-k3', 'prio-k1', 'prio-k2']),
+            orderAfterDragOk: JSON.stringify(orderAfterDrag) === JSON.stringify(['prio-k3', 'prio-k2', 'prio-k1']),
+            savedOrderOk: JSON.stringify(savedIds) === JSON.stringify(['prio-k3', 'prio-k2', 'prio-k1']),
+            allSavedHaveKeys,
+            savedTimeoutsOk: JSON.stringify(savedTimeouts) === JSON.stringify([90, 60, 30]),
+            previewRanksOk: previewOptions.length === 4
+              && previewOptions[0].text.includes('به ترتیب اولویت')
+              && previewOptions[1].value === 'openrouter::prio-k3' && previewOptions[1].text.includes('اولویت ۱')
+              && previewOptions[2].value === 'openrouter::prio-k2' && previewOptions[2].text.includes('اولویت ۲')
+              && previewOptions[3].value === 'openrouter::prio-k1' && previewOptions[3].text.includes('اولویت ۳'),
+            headingHintOk,
+            helpSynced,
+          };
+        } finally {
+          state.ai = prevAi;
+          aiEditorDrafts.clear();
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+          if ($('aiDialog')?.open) closeDialog('aiDialog');
+        }
+      })()
+    `, context);
+    check(
+      'v4.08 supports API key priority ordering via ⇈ اولویت اول / ↑ بالاتر / ↓ پایین‌تر & drag-and-drop while preserving saved secrets, updating #translationPreviewService ranks, and syncing Help Chapters 7 & 8',
+      v408Check.initialPrimaryBadgeOk === true
+        && v408Check.readyChipsOk === true
+        && v408Check.boundaryBtnsOk === true
+        && v408Check.orderAfterTopOk === true
+        && v408Check.orderAfterDownOk === true
+        && v408Check.preservedStatusMovedToRow3 === true
+        && v408Check.orderAfterUpOk === true
+        && v408Check.orderAfterDragOk === true
+        && v408Check.savedOrderOk === true
+        && v408Check.allSavedHaveKeys === true
+        && v408Check.savedTimeoutsOk === true
+        && v408Check.previewRanksOk === true
+        && v408Check.headingHintOk === true
+        && v408Check.helpSynced === true,
+      JSON.stringify(v408Check),
+    );
+  }
+
+  // v4.09: Verify Help Guide Chapters 3, 4, and 8 document lossless native-resolution PDF import and grouped-page unified translation, and preview displays group page label
+  {
+    const v409Check = await vm.runInContext(`
+      (async () => {
+        try {
+          openHelpDialog('import-grid-crop');
+          const ch3Text = $('helpContentArea')?.textContent || '';
+          openHelpDialog('page-groups');
+          const ch4Text = $('helpContentArea')?.textContent || '';
+          openHelpDialog('translation-preview-context');
+          const ch8Text = $('helpContentArea')?.textContent || '';
+          closeDialog('helpDialog');
+
+          showTranslationRequestPreview(
+            {
+              provider: 'openai',
+              providerLabel: 'OpenAI',
+              model: 'gpt-4o-mini',
+              base_url: 'https://api.openai.com/v1',
+              rollingMode: true,
+              contextMode: true,
+              blockCount: 3,
+              requestCount: 1,
+              skillLimit: 300,
+              contextLimit: 300,
+              totalLimit: 2000,
+              skill: '',
+              summary: '',
+              systemPrompt: 'Translate line by line.',
+              note: 'زبان مقصد: فارسی. صفحات هم‌گروه (1 گروه) به‌عنوان یک صفحهٔ یکپارچه ارسال می‌شوند.',
+              requests: [
+                {
+                  index: 1,
+                  imageName: 'گروه 1 (slice-1.png + slice-2.png)',
+                  characters: 58,
+                  text: 'Wait, look at\\nthat glowing door!',
+                },
+              ],
+            },
+            async () => {},
+            null,
+            null,
+          );
+          const summaryTitle = document.querySelector('#translationPreviewRequests .payload-request summary')?.textContent || '';
+          const noteText = $('translationPreviewNote')?.textContent || '';
+          cancelTranslationRequestPreview();
+
+          return {
+            ch3HasLosslessPdf: ch3Text.includes('Lossless Native-Resolution PDF Import') && ch3Text.includes('600 DPI'),
+            ch4HasGroupTranslate: ch4Text.includes('ارسال یکپارچه به ترجمه به‌عنوان یک صفحهٔ واحد') && ch4Text.includes('گروه ۱'),
+            ch8HasGroupTranslate: ch8Text.includes('تجمیع خودکار صفحات هم‌گروه به‌عنوان یک صفحهٔ واحد'),
+            previewShowsGroupHeader: summaryTitle.includes('گروه 1 (slice-1.png + slice-2.png)') && noteText.includes('صفحات هم‌گروه'),
+          };
+        } finally {
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+          if ($('translationPreviewDialog')?.open) cancelTranslationRequestPreview();
+        }
+      })()
+    `, context);
+    check(
+      'v4.09 displays unified group page headers in translation preview and documents lossless PDF import & grouped-page translation in Help Chapters 3, 4, and 8',
+      v409Check.ch3HasLosslessPdf === true
+        && v409Check.ch4HasGroupTranslate === true
+        && v409Check.ch8HasGroupTranslate === true
+        && v409Check.previewShowsGroupHeader === true,
+    );
+  }
+
+  // v4.10: Verify empty-project watermarkBtn guard, unedited watermarked thumbnail URL, and Help Chapters 3 & 13 audit updates
+  {
+    const v410Check = await vm.runInContext(`
+      (() => {
+        const savedImages = state.project.images.slice();
+        try {
+          state.project.images = [];
+          updateSummary();
+          const disabledWhenEmpty = $('watermarkBtn')?.disabled === true;
+          state.project.images = [{
+            ...savedImages[0],
+            edited: false,
+            crop: null,
+            watermark: { enabled: true, text: '', logoId: 'logo-1', opacity: 60 },
+          }];
+          updateSummary();
+          renderGrid();
+          const enabledWhenPopulated = $('watermarkBtn')?.disabled === false;
+          const thumbSrc = document.querySelector('#grid .item .tw > img')?.dataset?.renderedSrc || '';
+
+          openHelpDialog('import-grid-crop');
+          const ch3Text = $('helpContentArea')?.textContent || '';
+          openHelpDialog('storage-memory-network');
+          const ch13Text = $('helpContentArea')?.textContent || '';
+          closeDialog('helpDialog');
+
+          return {
+            disabledWhenEmpty,
+            enabledWhenPopulated,
+            thumbUsesCroppedPreview: thumbSrc.includes('cropped=true') && !thumbSrc.includes('edited=true'),
+            ch3MentionsCropFilterAndLogoWm: ch3Text.includes('کادرهای متنی بیرون از ناحیهٔ برش') && ch3Text.includes('فقط لوگوی شفاف'),
+            ch13MentionsSetupOnlyAndBundled: ch13Text.includes('--setup-only') && ch13Text.includes('bundled_models'),
+          };
+        } finally {
+          state.project.images = savedImages;
+          updateSummary();
+          renderGrid();
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+        }
+      })()
+    `, context);
+    check(
+      'v4.10 disables watermarkBtn on empty projects, previews unedited watermarked pages via cropped=true, and syncs Help Chapters 3 & 13',
+      v410Check.disabledWhenEmpty === true
+        && v410Check.enabledWhenPopulated === true
+        && v410Check.thumbUsesCroppedPreview === true
+        && v410Check.ch3MentionsCropFilterAndLogoWm === true
+        && v410Check.ch13MentionsSetupOnlyAndBundled === true,
+    );
+
+    const v411ExportStreamCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProject = JSON.parse(JSON.stringify(state.project));
+        let prepareHeaderSeen = null;
+        let waitedForPendingRender = false;
+        let renderFinishedBeforeExport = false;
+        let deleteTokenUrl = null;
+        let createObjCalls = 0;
+        const origCreateObj = window.URL.createObjectURL;
+        window.URL.createObjectURL = (...a) => { createObjCalls += 1; return origCreateObj(...a); };
+        try {
+          let resolvePending;
+          const pendingPromise = new Promise((r) => { resolvePending = r; });
+          const pKey = state.project.id + ':' + state.project.images[0].id;
+          imageRenderTasks.set(pKey, pendingPromise);
+          setTimeout(() => {
+            waitedForPendingRender = true;
+            imageRenderTasks.delete(pKey);
+            resolvePending();
+          }, 15);
+
+          const makeJson = (obj) => ({
+            ok: true,
+            status: 200,
+            headers: { get: () => 'application/json' },
+            text: async () => JSON.stringify(obj),
+            json: async () => obj,
+          });
+          const handleSubRoutes = (u, opts) => {
+            if (u.endsWith('/state') && opts.method === 'PUT') {
+              return makeJson({ updatedAt: '2026-11-07T12:00:00Z' });
+            }
+            if ((u.endsWith('/rendered') || u.endsWith('/revert')) && opts.method === 'POST') {
+              return makeJson({ ok: true, updatedAt: '2026-11-07T12:00:01Z' });
+            }
+            if (u.includes('/images/') && u.includes('/content')) {
+              return { ok: true, status: 200, headers: { get: () => 'image/png' }, blob: async () => new window.Blob() };
+            }
+            return null;
+          };
+
+          window.fetch = async (url, opts = {}) => {
+            const u = String(url);
+            if (u.endsWith('/export') && opts.method === 'POST') {
+              renderFinishedBeforeExport = waitedForPendingRender === true;
+              prepareHeaderSeen = opts.headers?.['X-Export-Prepare'] || opts.headers?.['x-export-prepare'] || null;
+              return {
+                ok: true,
+                status: 200,
+                headers: { get: (h) => String(h).toLowerCase() === 'content-type' ? 'application/json' : '' },
+                json: async () => ({ token: 'a'.repeat(32), filename: 'پروژهٔ کمیک.pdf', size: 2 * 1024 * 1024 }),
+              };
+            }
+            if (u.includes('/export/' + 'a'.repeat(32)) && opts.method === 'DELETE') {
+              deleteTokenUrl = u;
+              return { ok: true, status: 204, text: async () => '' };
+            }
+            const sub = handleSubRoutes(u, opts);
+            if (sub) return sub;
+            return origFetch(url, opts);
+          };
+
+          state.project.images[0].selected = true;
+          await exportResult('pdf');
+          const linkHrefAfterExport = $('downloadLink').getAttribute('href');
+          const linkDownloadAfterExport = $('downloadLink').getAttribute('download');
+          const statusAfterExport = $('jobStatus').textContent;
+
+          // Switching project clears #downloadLink and discards prepared token on server
+          adoptProject({ ...prevProject, id: 'other-proj-v411', name: 'Other' });
+          const linkHiddenAfterSwitch = $('downloadLink').classList.contains('hidden');
+
+          // Zero-byte prepared response surfaces exact Persian diagnostic
+          adoptProject(prevProject);
+          state.project.images[0].selected = true;
+          window.fetch = async (url, opts = {}) => {
+            const u = String(url);
+            if (u.endsWith('/export') && opts.method === 'POST') {
+              return {
+                ok: true,
+                status: 200,
+                headers: { get: (h) => String(h).toLowerCase() === 'content-type' ? 'application/json' : '' },
+                json: async () => ({ token: 'b'.repeat(32), filename: 'empty.pdf', size: 0 }),
+              };
+            }
+            const sub = handleSubRoutes(u, opts);
+            if (sub) return sub;
+            return origFetch(url, opts);
+          };
+          let zeroErr = '';
+          try { await exportResult('pdf'); } catch (e) { zeroErr = String(e?.message || e); }
+
+          openHelpDialog('exports-docx-pdf');
+          const ch11Text = $('helpContentArea')?.textContent || '';
+          closeDialog('helpDialog');
+
+          return {
+            prepareHeaderSeen,
+            renderFinishedBeforeExport,
+            createObjCalls,
+            usesDirectStreamUrl: linkHrefAfterExport === '/api/projects/' + prevProject.id + '/export/' + 'a'.repeat(32),
+            linkDownloadAfterExport,
+            statusHasMb: statusAfterExport.includes('مگابایت'),
+            linkHiddenAfterSwitch,
+            deletedPreparedToken: Boolean(deleteTokenUrl && deleteTokenUrl.endsWith('/export/' + 'a'.repeat(32))),
+            zeroErrHasEmptyMsg: zeroErr.includes('خالی'),
+            ch11MentionsStream: ch11Text.includes('مستقیماً روی دیسک استریم'),
+          };
+        } finally {
+          window.URL.createObjectURL = origCreateObj;
+          window.fetch = origFetch;
+          adoptProject(prevProject);
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+        }
+      })()
+    `, context);
+    check(
+      'v4.11 streams prepared exports directly without Blob RAM buffering, awaits pending renders, clears stale export links on project switch, and syncs Help Chapter 11',
+      v411ExportStreamCheck.prepareHeaderSeen === '1'
+        && v411ExportStreamCheck.renderFinishedBeforeExport === true
+        && v411ExportStreamCheck.createObjCalls === 0
+        && v411ExportStreamCheck.usesDirectStreamUrl === true
+        && v411ExportStreamCheck.linkDownloadAfterExport === 'پروژهٔ کمیک.pdf'
+        && v411ExportStreamCheck.statusHasMb === true
+        && v411ExportStreamCheck.linkHiddenAfterSwitch === true
+        && v411ExportStreamCheck.deletedPreparedToken === true
+        && v411ExportStreamCheck.zeroErrHasEmptyMsg === true
+        && v411ExportStreamCheck.ch11MentionsStream === true,
+    );
+  }
+
+  // v4.12: Verify full formatting on manually added boxes (even empty & in OCR mode), font family, non-rect shapes, interactive corner rounding, interactive rotation + Shift snap, single-box translation, and grid scroll restoration
+  {
+    const v412Check = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        const prevProject = state.project;
+        let singlePreviewText = null;
+        try {
+          window.fetch = async (url, options = {}) => {
+            const u = String(url);
+            if (u.includes('/content')) return { ok: true, status: 200, blob: async () => new Blob(['img'], { type: 'image/png' }) };
+            if (u.endsWith('/rendered') || u.endsWith('/revert')) return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ ok: true, updatedAt: '2026-11-07T14:00:00Z' }) };
+            if (u.endsWith('/state') && options.method === 'PUT') {
+              const saved = JSON.parse(options.body).state;
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => saved };
+            }
+            if (u.endsWith('/api/translate-text/context-preview') && options.method === 'POST') {
+              const body = JSON.parse(options.body);
+              singlePreviewText = body.text;
+              return {
+                ok: true, status: 200, headers: { get: () => 'application/json' },
+                json: async () => ({
+                  provider: 'free', providerLabel: 'Google Translate', model: '', base_url: '',
+                  blockCount: 1, requestCount: 1, requests: [{ index: 1, characters: body.text.length, text: body.text }],
+                  systemPrompt: '', signature: 'sig-v412', note: '', rollingMode: true, contextMode: false, skill: '', summary: '', resume: false, singleContext: true,
+                }),
+              };
+            }
+            if (u.endsWith('/api/translate-text/context') && options.method === 'POST') {
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => ({ text: 'ترجمهٔ تکی ۴.۱۲', summary: '' }) };
+            }
+            return origFetch(url, options);
+          };
+
+          adoptProject({
+            id: 'proj-v412',
+            name: 'پروژه ۴.۱۲',
+            updatedAt: '',
+            images: Array.from({ length: 6 }, (_, idx) => ({
+              id: 'img-v412-' + (idx + 1),
+              name: 'page-' + (idx + 1) + '.png',
+              file: 'page-' + (idx + 1) + '.png',
+              width: 320, height: 220, order: idx, selected: true, groupId: null, crop: null,
+              blocks: idx === 4 ? [{ id: 1, text: 'SINGLE BOX SOURCE', tr: '', enabled: true, bg: 'white', x0: 20, y0: 20, x1: 220, y1: 70, lineH: 30, dir: 'rtl', align: 'right' }] : [],
+              watermark: null, edited: false,
+            })),
+            settings: { eraseOriginal: true, output: {} },
+          });
+
+          // 1. Scroll position preserved across openEditor -> closeEditor, cancelEditor, and Esc
+          document.documentElement.scrollTop = 640;
+          if ($('mainwrap')) $('mainwrap').scrollTop = 280;
+          await openEditor('img-v412-5');
+
+          // 2. Manual Persian box in OCR mode & while STILL EMPTY supports font, size, bold, italic, underline, color, custom bg, shape, cornerRadius, and angle
+          setOverlayMode('ocr', false);
+          $('editorAddFaText').click();
+          const manualFa = state.project.images[4].blocks.at(-1);
+          const richEnabledOnManualInOcr = !$('inlineEditor').querySelector('.re-toolbar')?.classList.contains('is-disabled');
+          $('inlineFontFamily').value = 'Tahoma';
+          $('inlineFontFamily').dispatchEvent(new Event('change', { bubbles: true }));
+          $('inlineLineSize').value = '24';
+          $('inlineLineSize').dispatchEvent(new Event('input', { bubbles: true }));
+          $('inlineSizeUp').click();
+          toggleInlineCommand('bold');
+          toggleInlineCommand('italic');
+          toggleInlineCommand('underline');
+          $('inlineEditorColor').value = '#dd2255';
+          $('inlineEditorColor').dispatchEvent(new Event('input', { bubbles: true }));
+          classicEditor.setHTML('<p>متن دستی فرمت‌شده</p>');
+          closeInlineEditor();
+          setOverlayMode('translation', false);
+
+          // 3. Idle-selected box formatting (without opening inline editor) + shape, corner-radius drag, and Shift-snapped rotation drag
+          selectEditorBlock(manualFa.id, false, false);
+          $('editorBoxBg').value = 'custom';
+          $('editorBoxBg').dispatchEvent(new Event('change', { bubbles: true }));
+          $('editorBoxBgColor').value = '#fff3b0';
+          $('editorBoxBgColor').dispatchEvent(new Event('input', { bubbles: true }));
+
+          const mkPtr = (type, x, y, shiftKey = false) => {
+            const ev = new window.Event(type, { bubbles: true, cancelable: true });
+            Object.defineProperties(ev, { clientX: { value: x }, clientY: { value: y }, pointerId: { value: 7 }, button: { value: 0 }, shiftKey: { value: shiftKey } });
+            return ev;
+          };
+          const manualBoxEl = $('editorBoxes').querySelector('.editor-box[data-id="' + manualFa.id + '"]');
+          const seCorner = manualBoxEl.querySelector('[data-radius-corner="se"]');
+          const scale = state.editorScale || 1;
+          const bRect = boxOf(manualFa);
+          seCorner.dispatchEvent(mkPtr('pointerdown', bRect.x1 * scale, bRect.y1 * scale));
+          manualBoxEl.dispatchEvent(mkPtr('pointermove', (bRect.x1 - 14) * scale, (bRect.y1 - 14) * scale));
+          manualBoxEl.dispatchEvent(mkPtr('pointerup', (bRect.x1 - 14) * scale, (bRect.y1 - 14) * scale));
+          const draggedRadiusPct = manualFa.cornerRadius;
+
+          const rotHandle = manualBoxEl.querySelector('[data-rotate-handle]');
+          const cx = ((bRect.x0 + bRect.x1) / 2) * scale;
+          const cy = ((bRect.y0 + bRect.y1) / 2) * scale;
+          rotHandle.dispatchEvent(mkPtr('pointerdown', cx, cy - 40, true));
+          manualBoxEl.dispatchEvent(mkPtr('pointermove', cx + 40, cy, true));
+          manualBoxEl.dispatchEvent(mkPtr('pointerup', cx + 40, cy, true));
+          const snappedAngle90 = manualFa.angle;
+
+          $('editorBoxShape').value = 'cloud';
+          $('editorBoxShape').dispatchEvent(new Event('change', { bubbles: true }));
+          const chosenShape = manualFa.shape;
+
+          // 4. Single-box translation on English manual box directly from #editorTranslateBlock
+          $('editorAddEnText').click();
+          const manualEn = state.project.images[4].blocks.at(-1);
+          classicEditor.setHTML('<p>WATCH OUT!</p>');
+          closeInlineEditor();
+          selectEditorBlock(manualEn.id, false, false);
+          $('editorTranslateBlock').click();
+          await new Promise((r) => setTimeout(r, 25));
+          const previewOpened = $('translationPreviewDialog').open === true;
+          $('translationPreviewConfirm').click();
+          await new Promise((r) => setTimeout(r, 35));
+          const translatedSingleTr = manualEn.tr;
+
+          await closeEditor(true);
+          const scrollAfterApproveClose = document.documentElement.scrollTop;
+          const mainScrollAfterApproveClose = $('mainwrap')?.scrollTop || 0;
+          const cardHighlighted = Boolean(document.querySelector('#grid .item[data-id="img-v412-5"].just-edited'));
+
+          // Also verify cancelEditor restores scroll position
+          document.documentElement.scrollTop = 510;
+          await openEditor('img-v412-5');
+          document.documentElement.scrollTop = 0;
+          await cancelEditor();
+          const scrollAfterCancel = document.documentElement.scrollTop;
+
+          openHelpDialog('import-grid-crop');
+          const ch3Text = $('helpContentArea').textContent;
+          openHelpDialog('visual-editor');
+          const ch9Text = $('helpContentArea').textContent;
+          openHelpDialog('shortcuts');
+          const ch14Text = $('helpContentArea').textContent;
+          closeDialog('helpDialog');
+
+          return {
+            richEnabledOnManualInOcr,
+            manualFont: manualFa.fontFamily,
+            manualSize: manualFa.size,
+            manualBold: manualFa.bold,
+            manualItalic: manualFa.italic,
+            manualUnderline: manualFa.underline,
+            manualColor: manualFa.color,
+            manualBg: manualFa.bg,
+            draggedRadiusOk: draggedRadiusPct > 0 && draggedRadiusPct <= 100,
+            snappedAngle90,
+            chosenShape,
+            previewOpened,
+            singlePreviewText,
+            translatedSingleTr,
+            scrollAfterApproveClose,
+            mainScrollAfterApproveClose,
+            cardHighlighted,
+            scrollAfterCancel,
+            helpSynced: ch3Text.includes('اسکرول') && ch9Text.includes('ابر کمیک') && ch9Text.includes('ترجمهٔ کادر') && ch14Text.includes('Shift'),
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('helpDialog')?.open) closeDialog('helpDialog');
+          if ($('translationPreviewDialog')?.open) closeDialog('translationPreviewDialog');
+          if ($('editorDialog')?.open) closeDialog('editorDialog');
+          if (prevProject) adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.12 supports manual-box full formatting & fonts, shapes, corner-radius & Shift-rotation handles, single-box translation, and grid scroll restoration',
+      v412Check.richEnabledOnManualInOcr === true
+        && v412Check.manualFont === 'Tahoma'
+        && v412Check.manualSize === 26
+        && v412Check.manualBold === false
+        && v412Check.manualItalic === true
+        && v412Check.manualUnderline === true
+        && v412Check.manualColor === '#dd2255'
+        && v412Check.manualBg === '#fff3b0'
+        && v412Check.draggedRadiusOk === true
+        && v412Check.snappedAngle90 === 90
+        && v412Check.chosenShape === 'cloud'
+        && v412Check.previewOpened === true
+        && v412Check.singlePreviewText === 'WATCH OUT!'
+        && v412Check.translatedSingleTr === 'ترجمهٔ تکی ۴.۱۲'
+        && v412Check.scrollAfterApproveClose === 640
+        && v412Check.mainScrollAfterApproveClose === 280
+        && v412Check.cardHighlighted === true
+        && v412Check.scrollAfterCancel === 510
+        && v412Check.helpSynced === true,
+    );
+
+    // v4.13: Verify manual EN box promotion in batch runTranslation(), splitSingleEditorBlock full attribute inheritance,
+    // mergeSelectedText mismatched-angle reset, uninstallEngine danger modal styling, data-font sanitization, and watermark cleanup
+    const v413Check = await vm.runInContext(`
+      (async () => {
+        const prevProject = state.project ? JSON.parse(JSON.stringify(state.project)) : null;
+        const origFetch = window.fetch;
+        let batchPreviewOpened = false;
+        let batchPreviewText = '';
+        try {
+          window.fetch = async (url, opts) => {
+            const u = String(url);
+            if (u.endsWith('/state') && opts?.method === 'PUT') {
+              const body = JSON.parse(opts.body);
+              body.state.version = (body.state.version || 1) + 1;
+              return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => body.state };
+            }
+            if (u.endsWith('/context-preview') && opts?.method === 'POST') {
+              return {
+                ok: true, status: 200, headers: { get: () => 'application/json' },
+                json: async () => ({
+                  provider: 'free', providerLabel: 'Google Translate', model: '', base_url: '',
+                  blockCount: 1, requestCount: 1, requests: [{ index: 1, characters: 20, text: 'BATCH MANUAL ENGLISH' }],
+                  systemPrompt: '', signature: 'sig-v413', note: '', rollingMode: true, contextMode: false, skill: '', summary: '', resume: false,
+                }),
+              };
+            }
+            return origFetch(url, opts);
+          };
+
+          adoptProject({
+            id: 'projv413',
+            version: 1,
+            name: 'پروژه ۴.۱۳',
+            settings: { pageMode: 'comic', overlayTextMode: 'translation', targetLanguage: 'fa' },
+            images: [{
+              id: 'img413', name: 'page-1.png', file: 'img413.png', format: 'PNG',
+              width: 500, height: 700, order: 0, selected: true, ocrCompleted: false,
+              blocks: [{
+                id: 1, x0: 40, y0: 40, x1: 260, y1: 120,
+                text: '', tr: 'BATCH MANUAL ENGLISH', richHtml: '',
+                manual: true, manualLang: 'en', dir: 'ltr', align: 'center', size: 24,
+                enabled: true, eraseOriginal: false,
+              }],
+            }],
+          });
+
+          const runTrPromise = runTranslation({ provider: 'free', profileId: '' });
+          await new Promise((r) => setTimeout(r, 40));
+          batchPreviewOpened = $('translationPreviewDialog')?.open === true;
+          batchPreviewText = $('translationPreviewRequests')?.textContent || '';
+          const promotedText = state.project.images[0].blocks[0].text;
+          cancelTranslationRequestPreview();
+          await runTrPromise.catch(() => {});
+
+          // Test mergeSelectedText angle normalization & splitSingleEditorBlock full attribute inheritance
+          const mergedSample = {
+            id: 10, x0: 20, y0: 20, x1: 200, y1: 140,
+            text: 'Line A\\nLine B', tr: 'خط اول\\nخط دوم', richHtml: '',
+            fontFamily: 'Impact', bold: false, italic: true, underline: true,
+            shape: 'cloud', cornerRadius: 35, angle: 25, color: '#112233', bg: '#ddeeff',
+            sourceLines: [
+              { id: 10, x0: 20, y0: 20, x1: 200, y1: 75, text: 'Line A', tr: '' },
+              { id: 11, x0: 20, y0: 85, x1: 200, y1: 140, text: 'Line B', tr: '' },
+            ],
+          };
+          const splitParts = splitSingleEditorBlock(mergedSample, state.project.images[0], { maxId: 20 });
+
+          // Test uninstallEngine danger modal variant & destructive flag
+          let dangerModalCheck = false;
+          const uninstPromise = uninstallEngine({ id: 'easyocr', name: 'EasyOCR' });
+          await new Promise((r) => setTimeout(r, 20));
+          dangerModalCheck = $('appModalDialog')?.open === true && $('appModalConfirm')?.classList.contains('danger-solid') === true;
+          $('appModalCancel')?.click();
+          await uninstPromise;
+
+          // Test data-font sanitization
+          const sanHtml = window.ComicSanitize.sanitize('<span data-font="Georgia">متن تست</span>');
+
+          // Test watermark preview cleanup on closeDialog
+          let bmpClosed = false;
+          wmPreviewBitmap = { close() { bmpClosed = true; } };
+          wmPreviewImageId = 'other-img';
+          closeDialog('watermarkDialog');
+
+          return {
+            batchPreviewOpened,
+            batchPreviewHasManual: batchPreviewText.includes('BATCH MANUAL ENGLISH'),
+            promotedText,
+            splitCount: splitParts?.length || 0,
+            splitInheritedOk: Boolean(
+              splitParts?.[1]?.fontFamily === 'Impact'
+              && splitParts?.[1]?.shape === 'cloud'
+              && splitParts?.[1]?.cornerRadius === 35
+              && splitParts?.[1]?.angle === 25
+              && splitParts?.[1]?.italic === true
+              && splitParts?.[1]?.underline === true
+            ),
+            dangerModalCheck,
+            sanHtmlHasGeorgia: sanHtml.includes('font-family:Georgia'),
+            bmpClosed,
+            wmCleared: wmPreviewBitmap === null,
+          };
+        } finally {
+          window.fetch = origFetch;
+          if ($('translationPreviewDialog')?.open) closeDialog('translationPreviewDialog');
+          if (prevProject) adoptProject(prevProject);
+        }
+      })()
+    `, context);
+    check(
+      'v4.13 promotes manual EN boxes in batch runTranslation(), inherits shape/font/angle on Split, styles uninstallEngine modal as danger, sanitizes data-font, and frees watermark preview bitmap',
+      v413Check.batchPreviewOpened === true
+        && v413Check.batchPreviewHasManual === true
+        && v413Check.promotedText === 'BATCH MANUAL ENGLISH'
+        && v413Check.splitCount === 2
+        && v413Check.splitInheritedOk === true
+        && v413Check.dangerModalCheck === true
+        && v413Check.sanHtmlHasGeorgia === true
+        && v413Check.bmpClosed === true
+        && v413Check.wmCleared === true,
+      JSON.stringify(v413Check),
+    );
+
+    const v414ShapesCheck = await vm.runInContext(`
+      (() => {
+        const shapeOpts = [...($('editorBoxShape')?.options || [])].map((o) => o.value);
+        openHelpDialog('visual-editor');
+        const ch9Text = $('helpContentArea')?.textContent || '';
+        closeDialog('helpDialog');
+        const emptyManualStar = { id: 91, manual: true, enabled: true, tr: '', bg: 'white', shape: 'star' };
+        const emptyOcrStar = { id: 92, manual: false, enabled: true, tr: '', bg: 'white', shape: 'star' };
+        return {
+          shapeOpts,
+          hasOverlayForManualStar: hasOverlayText({ blocks: [emptyManualStar] }, 'translation'),
+          hasOverlayInNoneMode: hasOverlayText({ blocks: [emptyManualStar] }, 'none'),
+          hasOverlayForEmptyOcr: hasOverlayText({ blocks: [emptyOcrStar] }, 'translation'),
+          helpHasStarAndThought: ch9Text.includes('ستاره (۵پر)') && ch9Text.includes('ابر فکر') && ch9Text.includes('حباب گفتگو') && ch9Text.includes('ابر کمیک'),
+        };
+      })()
+    `, context);
+    check(
+      'v4.14 exposes all 14 writing shapes (star, burst, seal, cloud, thought, speech, heart, banner, etc.), renders manual shaped box fill before typing, and documents shapes in Help Chapter 9',
+      v414ShapesCheck.shapeOpts.length === 14
+        && ['star', 'burst', 'seal', 'cloud', 'thought', 'speech', 'heart', 'banner', 'octagon'].every((k) => v414ShapesCheck.shapeOpts.includes(k))
+        && v414ShapesCheck.hasOverlayForManualStar === true
+        && v414ShapesCheck.hasOverlayInNoneMode === false
+        && v414ShapesCheck.hasOverlayForEmptyOcr === false
+        && v414ShapesCheck.helpHasStarAndThought === true,
+      JSON.stringify(v414ShapesCheck),
+    );
+  }
+
+  // v4.15: Offline Hardware-Bound Activation Gate, Local Password Login & Chapter 15 Help
+  {
+    mockLicenseState = { ...mockLicenseState, licensed: false, unlocked: false, reason: 'unlicensed', message: 'برنامه هنوز فعال نشده است.' };
+    await vm.runInContext('refreshAuthGateState()', context);
+    check(
+      'v4.15 unlicensed state activates auth-locked body class and displays System Code in #authGateOverlay',
+      window.document.body.classList.contains('auth-locked')
+        && !$('authGateOverlay').classList.contains('hidden')
+        && !$('authActivatePane').classList.contains('hidden')
+        && $('gateHardwareId').textContent === 'CS4-ABCD-EFGH-2345-6789',
+    );
+    window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'F1', bubbles: true, cancelable: true }));
+    check(
+      'v4.15 pressing F1 on Activation Gate opens Help Chapter 15 (license-login-security)',
+      $('helpDialog').open === true && $('helpContentArea').textContent.includes('CLIC1.') && $('helpContentArea').textContent.includes('PBKDF2-SHA256'),
+    );
+    await vm.runInContext("closeDialog('helpDialog')", context);
+
+    $('gateLicenseKeyInput').value = 'CLIC1.validPayload.validSignature';
+    await vm.runInContext('submitGateLicenseActivation()', context);
+    check(
+      'v4.15 activating valid CLIC1. license unlocks workspace and hides #authGateOverlay',
+      !window.document.body.classList.contains('auth-locked') && $('authGateOverlay').classList.contains('hidden'),
+    );
+
+    await vm.runInContext('openLicenseDialog()', context);
+    check('v4.15 #licenseDialog opens showing holder and plan', $('licenseDialog').open === true && $('licInfoHolder').textContent === 'کاربر آزمایشی');
+    $('licNewPwdInput').value = 'Pass#415';
+    $('licConfirmPwdInput').value = 'Pass#415';
+    await vm.runInContext('saveLocalPasswordFromDialog()', context);
+    check('v4.15 setting local password reveals #lockAppMenuBtn', !$('lockAppMenuBtn').classList.contains('hidden'));
+    await vm.runInContext("closeDialog('licenseDialog')", context);
+
+    await vm.runInContext('lockWorkspaceNow()', context);
+    check(
+      'v4.15 locking workspace switches to #authLoginPane',
+      window.document.body.classList.contains('auth-locked')
+        && !$('authLoginPane').classList.contains('hidden')
+        && $('authActivatePane').classList.contains('hidden'),
+    );
+    $('gateLoginPasswordInput').value = 'WrongPass';
+    await vm.runInContext('submitGatePasswordLogin()', context);
+    check('v4.15 wrong password keeps workspace locked with Persian error', window.document.body.classList.contains('auth-locked') && !$('gateLoginError').classList.contains('hidden'));
+    $('gateLoginPasswordInput').value = 'Pass#415';
+    await vm.runInContext('submitGatePasswordLogin()', context);
+    check('v4.15 correct local password unlocks workspace', !window.document.body.classList.contains('auth-locked') && $('authGateOverlay').classList.contains('hidden'));
+
+    await vm.runInContext('openLicenseDialog()', context);
+    $('licCurrentPwdInput').value = 'Pass#415';
+    const rmTask = vm.runInContext('removeLocalPasswordFromDialog()', context);
+    await new Promise((r) => setTimeout(r, 15));
+    check('v4.15 removing local password uses themed #appModalDialog (zero native confirm)', $('appModalDialog').open === true);
+    $('appModalConfirm').click();
+    await rmTask;
+    await vm.runInContext("closeDialog('licenseDialog')", context);
+    check('v4.15 local password removed cleanly', $('lockAppMenuBtn').classList.contains('hidden'));
+
+    // v4.16: 24-Hour Trial Top Banner (09361111111) + Independent 3-Module Licensing Guards
+    mockLicenseState = {
+      ...mockLicenseState,
+      licensed: true,
+      unlocked: true,
+      isTrial: true,
+      trialExpiresAt: Math.floor(Date.now() / 1000) + 23 * 3600,
+      trialRemainingSeconds: 23 * 3600,
+      supportPhone: '09361111111',
+      modules: {
+        ocr: { active: true, source: 'trial', plan: 'trial24h', remainingSeconds: 23 * 3600 },
+        translation: { active: true, source: 'trial', plan: 'trial24h', remainingSeconds: 23 * 3600 },
+        editing: { active: true, source: 'trial', plan: 'trial24h', remainingSeconds: 23 * 3600 },
+      },
+      license: { holder: 'نسخهٔ آزمایشی ۲۴ ساعته', plan: 'trial24h', planLabel: 'آزمایشی ۲۴ ساعته' },
+    };
+    await vm.runInContext('refreshAuthGateState()', context);
+    check(
+      'v4.16 24-hour trial shows #trialNoticeBanner and v4.17 #licenseTopStatusBtn with remaining hours',
+      !$('trialNoticeBanner').classList.contains('hidden')
+        && $('trialNoticeText').textContent.includes('09361111111')
+        && $('trialNoticeText').textContent.includes('۲۴ ساعته')
+        && !$('licenseTopStatusBtn').classList.contains('hidden')
+        && $('licenseTopStatusText').textContent.includes('آزمایشی')
+        && $('licenseTopStatusText').textContent.includes('مانده'),
+    );
+
+    mockLicenseState = {
+      ...mockLicenseState,
+      isTrial: false,
+      trialRemainingSeconds: 0,
+      vendorContact: {
+        supportPhone: '09361111111',
+        whatsapp: '09361111111',
+        telegram: '@ComicSupportTest',
+        domesticMessenger: 'ایتا: @ComicIR',
+        supportHours: '۹ الی ۲۲',
+        website: 'https://comic.example.ir',
+        customNote: 'برای دریافت آنی پیام بدهید.',
+      },
+      modules: {
+        ocr: { active: true, source: 'license', plan: 'lifetime', expiresAt: null },
+        translation: { active: false, source: 'unlicensed', plan: 'none', expiresAt: null },
+        editing: { active: true, source: 'license', plan: 'subscription', expiresAt: Math.floor(Date.now() / 1000) + 30 * 86400, daysRemaining: 30 },
+      },
+      license: { holder: 'کاربر ماژولار', plan: 'modular', planLabel: 'ماژولار' },
+    };
+    await vm.runInContext('refreshAuthGateState()', context);
+    check(
+      'v4.16/v4.17 paid modular license hides trial banner, shows remaining license time in #licenseTopStatusBtn, and marks unlicensed module buttons with .mod-locked',
+      $('trialNoticeBanner').classList.contains('hidden')
+        && !$('licenseTopStatusBtn').classList.contains('hidden')
+        && $('licenseTopStatusText').textContent.includes('OCR: دائمی')
+        && $('licenseTopStatusText').textContent.includes('ویرایش:')
+        && !$('ocrBtn').classList.contains('mod-locked')
+        && $('translateBtn').classList.contains('mod-locked')
+        && !$('watermarkBtn').classList.contains('mod-locked'),
+    );
+    $('licenseTopStatusBtn').click();
+    await new Promise((r) => setTimeout(r, 20));
+    const orderMsgSample = await vm.runInContext("buildCustomerOrderRequestText('CS4-ABCD-EFGH-JKLM-NPQR')", context);
+    check(
+      'v4.17/v4.18 clicking #licenseTopStatusBtn opens #licenseDialog with #licInfoRemaining, vendor channels (Telegram/WhatsApp/Eitaa/Hours/Website), and ready order message',
+      $('licenseDialog').open === true
+        && $('licSupportPhone').textContent === '09361111111'
+        && $('licVendorChannels').textContent.includes('@ComicSupportTest')
+        && $('licVendorChannels').textContent.includes('ایتا: @ComicIR')
+        && $('licVendorChannels').textContent.includes('۹ الی ۲۲')
+        && $('licVendorChannels').textContent.includes('https://comic.example.ir')
+        && orderMsgSample.includes('CS4-ABCD-EFGH-JKLM-NPQR')
+        && $('licInfoRemaining').textContent.includes('OCR: دائمی')
+        && $('licMod_ocr').textContent.includes('دائمی')
+        && $('licMod_translation').textContent.includes('غیرفعال')
+        && $('licMod_editing').textContent.includes('۳۰'),
+    );
+    await vm.runInContext("closeDialog('licenseDialog')", context);
+
+    const guardTask = vm.runInContext("ensureModuleLicensed('translation')", context);
+    await new Promise((r) => setTimeout(r, 15));
+    check(
+      'v4.16 clicking unlicensed module opens #appModalDialog mentioning 09361111111 (zero native alert)',
+      $('appModalDialog').open === true && $('appModalMessage').textContent.includes('09361111111'),
+    );
+    $('appModalCancel').click();
+    const guardAllowed = await guardTask;
+    check('v4.16 ensureModuleLicensed returns false for unlicensed module', guardAllowed === false);
+
+    // v4.20: renderVendorChannelsInto linkifies t.me/... and bare domain safely, and lockWorkspaceNow flushes savePending before logout
+    const v420UiCheck = await vm.runInContext(`
+      (async () => {
+        const tmpBox = document.createElement('div');
+        renderVendorChannelsInto(tmpBox, {
+          telegram: 't.me/ComicSupportIR',
+          website: 'comicstudio.example.ir',
+        });
+        const links = [...tmpBox.querySelectorAll('a')].map((a) => a.href);
+
+        const order = [];
+        const origSave = saveProject;
+        const origFetch = window.fetch;
+        savePending = true;
+        saveProject = async () => { order.push('saveProject'); savePending = false; };
+        window.fetch = async (url, opts) => {
+          if (String(url).includes('/api/license/logout')) {
+            order.push('logout');
+            return {
+              ok: true,
+              status: 200,
+              headers: { get: () => 'application/json' },
+              json: async () => ({
+                licensed: true,
+                unlocked: false,
+                passwordEnabled: true,
+                reason: 'login_required',
+                hardwareId: 'CS4-ABCD-EFGH-JKLM-NPQR',
+                supportPhone: '09361111111',
+                modules: {
+                  ocr: { active: true, plan: 'lifetime', label: 'استخراج متن (OCR)' },
+                  translation: { active: false, label: 'ترجمه' },
+                  editing: { active: true, plan: 'lifetime', label: 'ویرایش' },
+                },
+              }),
+              text: async () => JSON.stringify({
+                licensed: true,
+                unlocked: false,
+                passwordEnabled: true,
+                reason: 'login_required',
+                hardwareId: 'CS4-ABCD-EFGH-JKLM-NPQR',
+                supportPhone: '09361111111',
+                modules: {
+                  ocr: { active: true, plan: 'lifetime', label: 'استخراج متن (OCR)' },
+                  translation: { active: false, label: 'ترجمه' },
+                  editing: { active: true, plan: 'lifetime', label: 'ویرایش' },
+                },
+              }),
+            };
+          }
+          return origFetch(url, opts);
+        };
+        try {
+          await lockWorkspaceNow();
+        } finally {
+          saveProject = origSave;
+          window.fetch = origFetch;
+          await applyAuthGateUi({
+            licensed: true,
+            unlocked: true,
+            passwordEnabled: false,
+            hardwareId: 'CS4-ABCD-EFGH-JKLM-NPQR',
+            supportPhone: '09361111111',
+            modules: {
+              ocr: { active: true, plan: 'lifetime', label: 'استخراج متن (OCR)' },
+              translation: { active: true, plan: 'lifetime', label: 'ترجمه' },
+              editing: { active: true, plan: 'lifetime', label: 'ویرایش' },
+            },
+          });
+        }
+        return { links, order };
+      })()
+    `, context);
+    check(
+      'v4.20 renderVendorChannelsInto linkifies t.me/... & bare domains safely and lockWorkspaceNow flushes saveProject before logout',
+      v420UiCheck.links.includes('https://t.me/ComicSupportIR')
+        && v420UiCheck.links.includes('https://comicstudio.example.ir/')
+        && v420UiCheck.order[0] === 'saveProject'
+        && v420UiCheck.order[1] === 'logout',
+      JSON.stringify(v420UiCheck),
+    );
+
+    // v4.21: Verify #ocrPersianPreprocess auto-enables on Persian ('fas'), switches from unready to ready Persian engine,
+    // respects manual user toggle, forwards persian_preprocess in OCR payload, and documents the option in Help guide
+    const v421UiCheck = await vm.runInContext(`
+      (async () => {
+        const prevEngines = state.engines;
+        const prevSettings = JSON.parse(JSON.stringify(state.project.settings || {}));
+        try {
+          state.engines = [
+            { id: 'rapidocr-v6', name: 'PP-OCRv6 Small', selectable: true, runtimeInstalled: true, languages: ['eng'], readyLanguages: ['eng'], description: 'fast', family: 'Paddle' },
+            { id: 'rapidocr-v5', name: 'PP-OCRv5 Mobile', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng'], description: 'multi', family: 'Paddle' },
+            { id: 'tesseract', name: 'Tesseract 5 LSTM', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'doc', family: 'Tesseract' },
+          ];
+          delete state.project.settings.persianPreprocessCustomized;
+          $('ocrLanguage').value = 'eng';
+          updateEngineOptions('rapidocr-v5');
+          $('ocrPersianPreprocess').checked = false;
+
+          // Switch language to Persian ('fas'): auto-checks #ocrPersianPreprocess AND switches from unready rapidocr-v5 to ready tesseract!
+          $('ocrLanguage').value = 'fas';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const autoCheckedOnFas = $('ocrPersianPreprocess').checked === true;
+          const switchedToReadyEngine = $('ocrEngine').value === 'tesseract';
+          const savedInSettings = state.project.settings.persianPreprocess === true;
+
+          // Switch back to English before manual customization -> auto-unchecks #ocrPersianPreprocess
+          $('ocrLanguage').value = 'eng';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const autoUncheckedOnEng = $('ocrPersianPreprocess').checked === false;
+
+          // Manually turn OFF #ocrPersianPreprocess on Persian -> manual choice stays respected across language switches
+          $('ocrLanguage').value = 'fas';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          $('ocrPersianPreprocess').checked = false;
+          $('ocrPersianPreprocess').dispatchEvent(new window.Event('change', { bubbles: true }));
+          $('ocrLanguage').value = 'fas';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const manualOverrideRespected = $('ocrPersianPreprocess').checked === false && state.project.settings.persianPreprocessCustomized === true;
+
+          // Help guide documents پیش‌پردازش ویژه فارسی in section ocr-modes
+          const helpOcrModes = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-modes');
+          const helpHasPersianPreprocess = Boolean(helpOcrModes && helpOcrModes.features.some((f) => f.includes('پیش‌پردازش ویژه فارسی')));
+
+          return {
+            autoCheckedOnFas,
+            switchedToReadyEngine,
+            savedInSettings,
+            autoUncheckedOnEng,
+            manualOverrideRespected,
+            helpHasPersianPreprocess,
+          };
+        } finally {
+          state.engines = prevEngines;
+          state.project.settings = prevSettings;
+          $('ocrLanguage').value = 'eng';
+          $('ocrPersianPreprocess').checked = false;
+          updateEngineOptions('rapidocr-v6', { resort: true });
+        }
+      })()
+    `, context);
+    check(
+      'v4.21 #ocrPersianPreprocess auto-enables on Persian, switches to ready Persian engine, respects manual toggle, and is documented in Help guide',
+      v421UiCheck.autoCheckedOnFas === true
+        && v421UiCheck.switchedToReadyEngine === true
+        && v421UiCheck.savedInSettings === true
+        && v421UiCheck.autoUncheckedOnEng === true
+        && v421UiCheck.manualOverrideRespected === true
+        && v421UiCheck.helpHasPersianPreprocess === true,
+      JSON.stringify(v421UiCheck),
+    );
+
+    const v422AlwaysEnabledCheck = await vm.runInContext(`
+      (async () => {
+        const prevImages = JSON.parse(JSON.stringify(state.project.images));
+        const prevSettings = JSON.parse(JSON.stringify(state.project.settings || {}));
+        const origFetch = window.fetch;
+        window.fetch = async (url, opts) => {
+          const u = String(url);
+          if (u.endsWith('/content')) return { ok: true, status: 200, headers: { get: () => 'image/png' }, blob: async () => new window.Blob() };
+          if (u.endsWith('/rendered') || (u.includes('/api/projects/') && opts?.method === 'PUT')) {
+            return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => state.project, text: async () => JSON.stringify(state.project) };
+          }
+          return origFetch(url, opts);
+        };
+        try {
+          const testImgId = prevImages[0]?.id || 'img-1';
+          state.project.settings.overlayMode = 'translation';
+          state.project.images = [{
+            ...(prevImages[0] || {}),
+            id: testImgId,
+            name: 'v422.png',
+            width: 600,
+            height: 800,
+            selected: true,
+            blocks: [
+              { id: 1, x0: 20, y0: 20, x1: 220, y1: 60, text: 'LINE ONE', tr: 'خط اول', richHtml: '<div style="color:#112233">خط اول</div>', enabled: true, bg: 'white', dir: 'rtl', align: 'right', bold: true },
+              { id: 2, x0: 20, y0: 70, x1: 220, y1: 110, text: 'LINE TWO', tr: 'خط دوم', richHtml: '<div>خط دوم</div>', enabled: true, bg: 'white', dir: 'rtl', align: 'right', bold: true },
+            ],
+          }];
+          await openEditor(testImgId);
+          clearEditorSelection();
+
+          const countDisabledControls = () => [...document.querySelectorAll(
+            '#inlineEditor button:not(#editorPasteBlock), #inlineEditor select, #inlineEditor input'
+          )].filter((el) => el.disabled).length;
+
+          // 1. Zero disabled editing controls even in idle state with 0 selected boxes
+          const disabledIdleNoSelection = countDisabledControls();
+
+          // 2. Merge two boxes -> merged box is selected (!inlineDraft). ALL controls enabled and work directly!
+          selectAllEditorBlocks();
+          mergeSelectedText();
+          const disabledAfterMerge = countDisabledControls();
+          const mergedBlock = state.project.images[0].blocks[0];
+          const cleanMergedHtml = !mergedBlock.richHtml.includes('</div><br><div');
+
+          // Direct toolbar formatting on selected merged box WITHOUT opening inlineDraft first:
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="پررنگ"]').click();
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="ایتالیک"]').click();
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="زیرخط"]').click();
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="خط‌خورده"]').click();
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="تراز وسط"]').click();
+          const colorInp = document.querySelector('#inlineEditor .classic-toolbar input[type="color"]');
+          colorInp.value = '#cc1144';
+          colorInp.dispatchEvent(new window.Event('input', { bubbles: true }));
+          const directMergedFormattingOk = (
+            mergedBlock.bold === false
+            && mergedBlock.italic === true
+            && mergedBlock.underline === true
+            && mergedBlock.strike === true
+            && mergedBlock.align === 'center'
+            && mergedBlock.color === '#cc1144'
+          );
+
+          // 3. Open merged box with clickEvent = null (sidebar / programmatic) and detached range recovery:
+          openInlineEditor(mergedBlock, null);
+          const seededRangeValid = Boolean(inlineDraft && inlineDraft.range && $('inlineEditorField').contains(inlineDraft.range.startContainer));
+          inlineDraft.range = null;
+          window.getSelection().removeAllRanges();
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="تراز چپ"]').click();
+          const formatSelect = document.querySelector('#inlineEditor .classic-toolbar select[aria-label="قالب بند"]');
+          formatSelect.value = 'h2';
+          formatSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
+          const headingAppliedOnDetachedRange = $('inlineEditorField').innerHTML.toLowerCase().includes('<h2');
+          closeInlineEditor();
+
+          // 4. Duplicate the merged box, then split ONLY the duplicate -> unique IDs & shifted coordinates!
+          const dupes = duplicateEditorBlocks([mergedBlock]);
+          const copiedMerged = dupes[0];
+          const disabledAfterCopy = countDisabledControls();
+          selectEditorBlock(copiedMerged.id, false, false);
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="پررنگ"]').click();
+          const copiedFormatWorked = copiedMerged.bold === true;
+          splitSelectedText();
+          const allBlocksAfterSplit = state.project.images[0].blocks;
+          const allIdsUnique = new Set(allBlocksAfterSplit.map((b) => String(b.id))).size === allBlocksAfterSplit.length;
+          const splitStayedShifted = allBlocksAfterSplit.length === 3
+            && allBlocksAfterSplit[1].x0 === 42
+            && allBlocksAfterSplit[1].y0 === 42
+            && allBlocksAfterSplit[2].x0 === 42
+            && allBlocksAfterSplit[2].y0 === 92;
+
+          // 5. OCR mode rich editing: toolbar NEVER enters plain-mode, plain edit stays _plainText=true, rich edit saves ocrRichHtml
+          setOverlayMode('ocr', true);
+          const ocrTarget = state.project.images[0].blocks[0];
+          openInlineEditor(ocrTarget, null);
+          const disabledInOcrMode = countDisabledControls();
+          const noPlainModeClass = !$('inlineEditor').classList.contains('plain-mode')
+            && !classicEditor.element.classList.contains('classic-plain-mode');
+          document.querySelector('#inlineEditor .classic-toolbar button[aria-label="ایتالیک"]').click();
+          closeInlineEditor();
+          const ocrOverlayRich = overlayBlock(ocrTarget, 'ocr');
+          const ocrRichSavedWithoutTouchingTr = Boolean(
+            ocrTarget.ocrRichHtml.includes('italic')
+            && ocrOverlayRich._plainText === false
+            && ocrTarget.tr.includes('خط اول')
+          );
+
+          // Switch to Text (HTML) tab -> toolbar controls remain enabled
+          openInlineEditor(ocrTarget, null);
+          document.querySelectorAll('#inlineEditor .classic-tabs [role="tab"]')[1].click();
+          const disabledInTextTab = countDisabledControls();
+          closeInlineEditor();
+          await closeEditor(false);
+
+          const helpVisual = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'visual-editor');
+          const helpUpdated = Boolean(helpVisual && helpVisual.features.some((f) => f.includes('همیشه فعال')));
+
+          return {
+            disabledIdleNoSelection,
+            disabledAfterMerge,
+            cleanMergedHtml,
+            directMergedFormattingOk,
+            seededRangeValid,
+            headingAppliedOnDetachedRange,
+            disabledAfterCopy,
+            copiedFormatWorked,
+            allIdsUnique,
+            splitStayedShifted,
+            disabledInOcrMode,
+            noPlainModeClass,
+            ocrRichSavedWithoutTouchingTr,
+            disabledInTextTab,
+            helpUpdated,
+          };
+        } finally {
+          window.fetch = origFetch;
+          state.project.images = prevImages;
+          state.project.settings = prevSettings;
+          setOverlayMode(prevSettings.overlayMode || 'translation', false);
+        }
+      })()
+    `, context);
+    check(
+      'v4.22 keeps all editing controls permanently enabled across idle, merged, copied, OCR, and Text-tab states with detached-range recovery and unique split IDs on copied merged boxes',
+      v422AlwaysEnabledCheck.disabledIdleNoSelection === 0
+        && v422AlwaysEnabledCheck.disabledAfterMerge === 0
+        && v422AlwaysEnabledCheck.cleanMergedHtml === true
+        && v422AlwaysEnabledCheck.directMergedFormattingOk === true
+        && v422AlwaysEnabledCheck.seededRangeValid === true
+        && v422AlwaysEnabledCheck.headingAppliedOnDetachedRange === true
+        && v422AlwaysEnabledCheck.disabledAfterCopy === 0
+        && v422AlwaysEnabledCheck.copiedFormatWorked === true
+        && v422AlwaysEnabledCheck.allIdsUnique === true
+        && v422AlwaysEnabledCheck.splitStayedShifted === true
+        && v422AlwaysEnabledCheck.disabledInOcrMode === 0
+        && v422AlwaysEnabledCheck.noPlainModeClass === true
+        && v422AlwaysEnabledCheck.ocrRichSavedWithoutTouchingTr === true
+        && v422AlwaysEnabledCheck.disabledInTextTab === 0
+        && v422AlwaysEnabledCheck.helpUpdated === true,
+      JSON.stringify(v422AlwaysEnabledCheck),
+    );
+
+    const v423PersianAutoUpgradeCheck = vm.runInContext(`
+      (() => {
+        const prevEngines = state.engines.map((e) => ({ ...e }));
+        const prevLang = $('ocrLanguage').value;
+        const prevMode = $('ocrPageMode').value;
+        try {
+          state.engines = [
+            { id: 'rapidocr-v5', name: 'PP-OCRv5 Mobile', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'multi', family: 'Paddle' },
+            { id: 'easyocr', name: 'EasyOCR', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'comic', family: 'CRAFT' },
+            { id: 'tesseract', name: 'Tesseract 5 LSTM', selectable: true, runtimeInstalled: true, languages: ['eng', 'fas'], readyLanguages: ['eng', 'fas'], description: 'doc', family: 'Tesseract' },
+          ];
+          $('ocrPageMode').value = 'comic';
+          $('ocrLanguage').value = 'eng';
+          updateEngineOptions('rapidocr-v5', { resort: true });
+          // Switch to Persian in comic mode -> must auto-upgrade from medium rapidocr-v5 to best easyocr!
+          $('ocrLanguage').value = 'fas';
+          $('ocrLanguage').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const upgradedComic = $('ocrEngine').value === 'easyocr';
+          // Switch pageMode to document while on Persian -> must auto-upgrade from weak easyocr to best tesseract!
+          $('ocrPageMode').value = 'document';
+          $('ocrPageMode').dispatchEvent(new window.Event('change', { bubbles: true }));
+          const upgradedDoc = $('ocrEngine').value === 'tesseract';
+          const helpOcrModes = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-modes');
+          const helpOcrModels = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-models');
+          const helpDocsKafGafAndJoining = Boolean(
+            helpOcrModes && helpOcrModes.features.some((f) => f.includes('تفاوت «ک» و «گ»') && f.includes('می‌چسبند'))
+            && helpOcrModels && helpOcrModels.features.some((f) => f.includes('tessdata_best'))
+          );
+          return { upgradedComic, upgradedDoc, helpDocsKafGafAndJoining };
+        } finally {
+          state.engines = prevEngines;
+          $('ocrLanguage').value = prevLang;
+          $('ocrPageMode').value = prevMode;
+          updateEngineOptions('', { resort: true });
+        }
+      })()
+    `, context);
+    check(
+      'v4.23 auto-upgrades from medium/weak engines to ready green Persian engines across language and page-mode switches and updates Help guide',
+      v423PersianAutoUpgradeCheck.upgradedComic === true
+        && v423PersianAutoUpgradeCheck.upgradedDoc === true
+        && v423PersianAutoUpgradeCheck.helpDocsKafGafAndJoining === true,
+      JSON.stringify(v423PersianAutoUpgradeCheck),
+    );
+
+    const v424PersianAdoptAndHelpCheck = await vm.runInContext(`
+      (() => {
+        const snap = JSON.parse(JSON.stringify(state.project));
+        try {
+          // 1. Saved Persian project where persianPreprocess defaulted to false (not manually customized) -> auto-enables!
+          const faProjAuto = JSON.parse(JSON.stringify(snap));
+          faProjAuto.settings = { ...faProjAuto.settings, ocrLanguage: 'fas', persianPreprocess: false };
+          delete faProjAuto.settings.persianPreprocessCustomized;
+          adoptProject(faProjAuto);
+          const autoEnabledOnSavedFa = $('ocrPersianPreprocess').checked === true;
+
+          // 2. Saved Persian project where user explicitly unchecked persianPreprocess (persianPreprocessCustomized: true) -> stays false!
+          const faProjManualOff = JSON.parse(JSON.stringify(snap));
+          faProjManualOff.settings = { ...faProjManualOff.settings, ocrLanguage: 'fas', persianPreprocess: false, persianPreprocessCustomized: true };
+          adoptProject(faProjManualOff);
+          const manualOffPreserved = $('ocrPersianPreprocess').checked === false;
+
+          // 3. Help Chapters 5 & 6 document v4.24 SOTA Persian OCR (PSM 13 RAW_LINE, LAB chromatic boxes, deskew, rasm lexicon)
+          const helpModes = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-modes');
+          const helpModels = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-models');
+          const helpHasV424Sota = Boolean(
+            helpModes && helpModes.features.some((f) => f.includes('LAB') && f.includes('اسکلت رسم‌الخط'))
+            && helpModels && helpModels.features.some((f) => f.includes('PSM 13 RAW_LINE'))
+          );
+          return { autoEnabledOnSavedFa, manualOffPreserved, helpHasV424Sota };
+        } finally {
+          adoptProject(snap);
+        }
+      })()
+    `, context);
+    check(
+      'v4.24 auto-enables #ocrPersianPreprocess on saved Persian projects unless manually customized and updates Help Chapters 5 & 6',
+      v424PersianAdoptAndHelpCheck.autoEnabledOnSavedFa === true
+        && v424PersianAdoptAndHelpCheck.manualOffPreserved === true
+        && v424PersianAdoptAndHelpCheck.helpHasV424Sota === true,
+      JSON.stringify(v424PersianAdoptAndHelpCheck),
+    );
+
+    // v4.27/v4.29: the in-app Help must document the Persian table reading and the automatic
+    // download of the missing Persian language file.
+    const v427TableHelpCheck = await vm.runInContext(`
+      (() => {
+        const helpModes = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-modes');
+        const helpHasV427Table = Boolean(
+          helpModes
+          && helpModes.features.some((f) => f.includes('سلول') && f.includes('جدول'))
+          && helpModes.example && helpModes.example.body.includes('جدول')
+        );
+        const helpHasV428AutoLang = Boolean(
+          helpModes
+          && helpModes.features.some((f) => f.includes('دانلود خودکار فایل زبان فارسی') && f.includes('fas'))
+        );
+        const verText = document.querySelector('.brand .ver')?.textContent || '';
+        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۳۰') };
+      })()
+    `, context);
+    check(
+      'v4.27/v4.29 document the cell-by-cell Persian table reading and the automatic Persian language download in Help chapter 6',
+      v427TableHelpCheck.helpHasV427Table === true
+        && v427TableHelpCheck.helpHasV428AutoLang === true
+        && v427TableHelpCheck.verHas428 === true,
+      JSON.stringify(v427TableHelpCheck),
+    );
+  }
+
+  // v4.29: the user can decide how much of the machine the studio may use (#resourcesBtn / #resourcesDialog).
+  {
+    const v429ResourcesCheck = await vm.runInContext(`
+      (async () => {
+        const origFetch = window.fetch;
+        let putPayload = null;
+        const mockJson = (payload) => ({
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => payload,
+        });
+        window.fetch = async (url, opts = {}) => {
+          const parsed = new URL(url, 'http://127.0.0.1:8765');
+          if (parsed.pathname === '/api/resources' && (!opts.method || opts.method === 'GET')) {
+            return mockJson({
+              mode: 'auto', cpuPercent: 60, ramPercent: 60, cpuCores: 8, ramGb: 16,
+              allowedCores: 8, allowedRamMb: 15000, minPercent: 10, maxPercent: 100,
+            });
+          }
+          if (parsed.pathname === '/api/resources' && opts.method === 'PUT') {
+            putPayload = JSON.parse(opts.body || '{}');
+            return mockJson({
+              mode: putPayload.mode, cpuPercent: putPayload.cpuPercent, ramPercent: putPayload.ramPercent,
+              cpuCores: 8, ramGb: 16, allowedCores: 2, allowedRamMb: 6000, minPercent: 10, maxPercent: 100,
+            });
+          }
+          return mockJson({});
+        };
+        $('resourcesBtn').click();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        const opened = $('resourcesDialog').open === true;
+        const autoChecked = $('resourcesAutoMode').checked === true;
+        const cpuInfo = $('resourcesCpuInfo').textContent || '';
+        const ramInfo = $('resourcesRamInfo').textContent || '';
+        $('resourcesAutoMode').checked = false;
+        $('resourcesAutoMode').dispatchEvent(new window.Event('change'));
+        $('resourcesCpuPercent').value = '30';
+        $('resourcesCpuPercent').dispatchEvent(new window.Event('input'));
+        const manualVisible = !$('resourcesManualBox').classList.contains('hidden');
+        const cpuLabel = $('resourcesCpuValue').textContent || '';
+        $('resourcesSaveBtn').click();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        window.fetch = origFetch;
+        if ($('resourcesDialog')?.open) closeDialog('resourcesDialog');
+        return { opened, autoChecked, cpuInfo, ramInfo, manualVisible, cpuLabel, putPayload };
+      })()
+    `, context);
+    check(
+      'v4.29 opens the CPU/RAM budget dialog from #resourcesBtn, shows the machine specs and saves the chosen percentages',
+      v429ResourcesCheck.opened === true
+        && v429ResourcesCheck.autoChecked === true
+        && /هسته/.test(v429ResourcesCheck.cpuInfo)
+        && /گیگابایت/.test(v429ResourcesCheck.ramInfo)
+        && v429ResourcesCheck.manualVisible === true
+        && /۳۰/.test(v429ResourcesCheck.cpuLabel)
+        && v429ResourcesCheck.putPayload
+        && v429ResourcesCheck.putPayload.mode === 'manual'
+        && v429ResourcesCheck.putPayload.cpuPercent === 30
+        && v429ResourcesCheck.putPayload.ramPercent === 60,
+      JSON.stringify(v429ResourcesCheck),
+    );
+  }
+
+  // v4.30 - the studio must survive a hiccup while starting and must tell the
+  // user when the local app stops answering (instead of a dead workspace).
+  const v430BootCheck = await vm.runInContext(`
+    (async () => {
+      const origFetch = window.fetch;
+      const mockJson = (payload) => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => payload });
+      let licenseCalls = 0;
+      window.fetch = async (url, opts = {}) => {
+        const parsed = new URL(url, 'http://127.0.0.1:8765');
+        if (parsed.pathname === '/api/license/status') {
+          licenseCalls += 1;
+          if (licenseCalls === 1) throw new TypeError('Failed to fetch');
+          return mockJson(${JSON.stringify(mockLicenseState)});
+        }
+        return origFetch(url, opts);
+      };
+      state.workspaceBooted = false;
+      await bootApp({ retry: true });
+      window.fetch = origFetch;
+      const alertEl = document.getElementById('serverAlert');
+      return { licenseCalls, alertHidden: alertEl.classList.contains('hidden'), booted: state.workspaceBooted };
+    })()
+  `, context);
+  check(
+    'v4.30 retries the start-up when the first request fails and boots the workspace anyway',
+    v430BootCheck.licenseCalls >= 2 && v430BootCheck.booted === true && v430BootCheck.alertHidden === true,
+    JSON.stringify(v430BootCheck),
+  );
+
+  const v430AlertCheck = await vm.runInContext(`
+    (async () => {
+      const origFetch = window.fetch;
+      const mockJson = (payload) => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => payload });
+      window.fetch = async () => { throw new TypeError('Failed to fetch'); };
+      showServerUnreachable('simulated outage');
+      const alertEl = document.getElementById('serverAlert');
+      const visible = !alertEl.classList.contains('hidden');
+      const text = document.getElementById('serverAlertText').textContent || '';
+      const detail = document.getElementById('serverAlertDetail').textContent || '';
+      window.fetch = async (url, opts = {}) => {
+        const parsed = new URL(url, 'http://127.0.0.1:8765');
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.36' });
+        return origFetch(url, opts);
+      };
+      document.getElementById('serverAlertRetry').click();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      window.fetch = origFetch;
+      return { visible, text, detail, hiddenAfterRetry: alertEl.classList.contains('hidden') };
+      return { visible, text, detail, hiddenAfterRetry: alertEl.classList.contains('hidden') };
+    })()
+  `, context);
+  check(
+    'v4.30 shows a Persian recovery banner when the local app stops answering and the retry button clears it',
+    v430AlertCheck.visible === true
+      && /ارتباط با برنامه/.test(v430AlertCheck.text)
+      && v430AlertCheck.detail === 'simulated outage'
+      && v430AlertCheck.hiddenAfterRetry === true,
+    JSON.stringify(v430AlertCheck),
+  );
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));

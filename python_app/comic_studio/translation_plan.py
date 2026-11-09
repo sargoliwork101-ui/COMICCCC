@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from .local_nmt import DEFAULT_LOCAL_NMT_MODEL, LOCAL_NMT_MODELS, normalize_local_nmt_settings
 from .translation import (
     AI_PROVIDERS, DEFAULT_AI_SKILL, DEFAULT_AI_SOURCE_LIMIT, MAX_FREE_QUERY_CHARS, TranslationError, combine_translation_texts,
     normalize_ai_skill, normalize_target_language, translation_request_view,
@@ -19,6 +20,8 @@ AI_REUSE_KEY = "_aiReusedTranslation"
 
 
 def effective_ai_limit(provider: str, settings: dict[str, Any], profile_id: str | None = None) -> int:
+    if provider == "local":
+        return normalize_local_nmt_settings(settings.get("local_nmt"))["source_limit"]
     profiles = settings.get("providers", {}).get(provider, {}).get("profiles", [])
     chosen_id = (profile_id or "").strip()
     limits = [
@@ -75,8 +78,9 @@ def target_snapshot(block: dict[str, Any]) -> str:
 
 def reuse_fingerprint(block: dict[str, Any], source: str, provider: str, language: str, settings: dict[str, Any]) -> str:
     config = settings.get("providers", {}).get(provider, {})
+    model_id = normalize_local_nmt_settings(settings.get("local_nmt")).get("model", "") if provider == "local" else config.get("model", "")
     tl = normalize_target_language(settings.get("_target_language", "fa"))
-    value = [provider, language, config.get("model", ""), config.get("base_url", ""), settings.get("_translation_skill", normalize_ai_skill(None)), source, target_snapshot(block)]
+    value = [provider, language, model_id, config.get("base_url", ""), settings.get("_translation_skill", normalize_ai_skill(None)), source, target_snapshot(block)]
     if tl != "fa":
         value.append(tl)
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -152,6 +156,48 @@ def mark_completed_call(call: dict[str, Any], plan: dict[str, Any], provider: st
         item.pop(AI_PAGE_PROGRESS_KEY, None)
 
 
+def logical_page_units(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group selected ordered images sharing a groupId (2+ members) into one logical page unit."""
+    by_group: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        raw_gid = item.get("groupId")
+        gid = str(raw_gid).strip() if raw_gid is not None else ""
+        if gid:
+            by_group.setdefault(gid, []).append(item)
+
+    units: list[dict[str, Any]] = []
+    consumed: set[str] = set()
+    for item in items:
+        raw_gid = item.get("groupId")
+        gid = str(raw_gid).strip() if raw_gid is not None else ""
+        members = by_group.get(gid)
+        if not gid or not members or len(members) < 2:
+            units.append({
+                "unit_id": str(item["id"]),
+                "unit_name": str(item.get("name") or ""),
+                "group_id": None,
+                "grouped": False,
+                "members": [item],
+            })
+            continue
+        if gid in consumed:
+            continue
+        consumed.add(gid)
+        names = [str(m.get("name") or m["id"]) for m in members]
+        if len(names) <= 3:
+            unit_name = f"گروه {gid} ({' + '.join(names)})"
+        else:
+            unit_name = f"گروه {gid} ({len(names)} تصویر: {names[0]} تا {names[-1]})"
+        units.append({
+            "unit_id": f"group:{gid}",
+            "unit_name": unit_name,
+            "group_id": gid,
+            "grouped": True,
+            "members": members,
+        })
+    return units
+
+
 def call_plan(plan: dict[str, Any], call: dict[str, Any]) -> dict[str, Any]:
     # All duplicate destinations are confirmed too, so a concurrent edit cannot
     # silently be overwritten by propagation of a reused translation.
@@ -166,7 +212,9 @@ def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: st
                        settings: dict[str, Any] | None = None) -> dict[str, Any]:
     ids = set(image_ids); settings = settings or {}
     limit = effective_ai_limit(provider, settings)
-    items = [item for item in sorted(state["images"], key=lambda entry: entry.get("order", 0)) if item["id"] in ids]
+    raw_items = [item for item in sorted(state["images"], key=lambda entry: entry.get("order", 0)) if item["id"] in ids]
+    units = logical_page_units(raw_items)
+    items = [member for unit in units for member in unit["members"]]
     entries = [(item, block, block_index) for item in items for block_index, block in enumerate(item.get("blocks", []))
                if block.get("enabled", True) and str(block.get("text", "")).strip()]
     blocks = [block for _, block, _ in entries]
@@ -197,31 +245,45 @@ def build_project_plan(state: dict[str, Any], image_ids: list[str], provider: st
         calls: list[dict[str, Any]] = []
     elif provider != "free":
         calls = []
-        for item in items:
-            indices = [i for i in sorted(groups) if owners[i] == item["id"]]
+        for unit in units:
+            member_ids = {m["id"] for m in unit["members"]}
+            lead_item = unit["members"][0]
+            indices = [i for i in sorted(groups) if owners[i] in member_ids]
             if not indices:
                 continue
-            common = {"image_id": item["id"], "image_name": item.get("name", "")}
+            common: dict[str, Any] = {
+                "image_id": lead_item["id"],
+                "image_name": unit["unit_name"],
+                **({"group_id": unit["group_id"], "member_ids": [m["id"] for m in unit["members"]]} if unit["grouped"] else {}),
+            }
             page_text = combine_translation_texts([source_texts[i] for i in indices])
             if len(page_text) <= limit:
                 calls.append({**common, "text": page_text, "indices": indices, "targets": [groups[i] for i in indices], "combined": True, "call_id": "page"})
                 continue
+            unit_block_positions = {
+                idx: pos
+                for pos, idx in enumerate(i for i in range(len(entries)) if owners[i] in member_ids)
+            }
+            def _para_pos(idx: int) -> int:
+                return unit_block_positions[idx] if unit["grouped"] else entries[idx][2]
             pending: list[int] = []
             def flush() -> None:
                 if not pending:
                     return
                 chunk = list(pending); pending.clear()
+                pos0 = _para_pos(chunk[0])
                 calls.append({**common, "text": combine_translation_texts([source_texts[i] for i in chunk]),
                               "indices": chunk, "targets": [groups[i] for i in chunk], "combined": True,
-                              "call_id": f"b{entries[chunk[0]][2]}", "paragraph": entries[chunk[0]][2] + 1})
+                              "call_id": f"b{pos0}", "paragraph": pos0 + 1})
             for index in indices:
                 source = source_texts[index]
                 if len(source) > limit:
                     flush()
+                    pos_idx = _para_pos(index)
                     parts, joins = split_ai_paragraph(source, limit, blocks[index].get("sourceLines"))
                     for part_index, part in enumerate(parts):
                         calls.append({**common, "text": part, "indices": [index], "targets": [groups[index]], "combined": False,
-                                      "call_id": f"p{entries[index][2]}.{part_index}", "paragraph": entries[index][2] + 1,
+                                      "call_id": f"p{pos_idx}.{part_index}", "paragraph": pos_idx + 1,
                                       "part_index": part_index, "part_count": len(parts), "joins": joins})
                 elif pending and len(combine_translation_texts([source_texts[i] for i in pending] + [source])) > limit:
                     flush(); pending.append(index)
@@ -258,16 +320,18 @@ def plan_signature(
     public_settings: dict[str, Any],
 ) -> str:
     config = public_settings.get("providers", {}).get(provider, {})
+    local_cfg = normalize_local_nmt_settings(public_settings.get("local_nmt")) if provider == "local" else {}
     tl = normalize_target_language(public_settings.get("_target_language", "fa"))
     canonical = {
         "provider": provider,
         "source_language": source_language,
         **({"target_language": tl} if tl != "fa" else {}),
-        "skill": public_settings.get("_translation_skill", normalize_ai_skill(None)) if provider != "free" else "",
-        "model": config.get("model", "") if provider != "free" else "",
-        "base_url": config.get("base_url", "") if provider != "free" else "",
+        "skill": public_settings.get("_translation_skill", normalize_ai_skill(None)) if provider not in {"free", "local"} else "",
+        "model": (local_cfg.get("model", "") if provider == "local" else (config.get("model", "") if provider != "free" else "")),
+        "base_url": config.get("base_url", "") if provider not in {"free", "local"} else "",
+        **({"local_policy": {"beam_size": local_cfg["beam_size"], "source_limit": local_cfg["source_limit"]}} if provider == "local" else {}),
         # Confirm retry/cost and timeout policy as well as the text and destination.
-        "profile_policy": [{"id": p.get("id", ""), "timeout_seconds": p.get("timeout_seconds", 90), "retry_count": p.get("retry_count", 0), "retry_wait_seconds": p.get("retry_wait_seconds", 20), "source_limit": p.get("source_limit", 1000), "hasApiKey": p.get("hasApiKey", False)} for p in config.get("profiles", [])] if provider != "free" else [],
+        "profile_policy": [{"id": p.get("id", ""), "timeout_seconds": p.get("timeout_seconds", 90), "retry_count": p.get("retry_count", 0), "retry_wait_seconds": p.get("retry_wait_seconds", 20), "source_limit": p.get("source_limit", 1000), "hasApiKey": p.get("hasApiKey", False)} for p in config.get("profiles", [])] if provider not in {"free", "local"} else [],
         "reuse_repeated": plan.get("reuse_repeated", False),
         "keys": plan["keys"],
         # Equal joined payloads can have different per-box line boundaries.
@@ -302,9 +366,15 @@ def plan_preview(
                     "part": call.get("part_index", 0) + 1, "partCount": call.get("part_count", 1)} if "image_id" in call else {}),
             })
     config = public_settings.get("providers", {}).get(provider, {})
+    local_cfg = normalize_local_nmt_settings(public_settings.get("local_nmt")) if provider == "local" else {}
     if provider == "free":
         label = "سرویس رایگان — Google Translate؛ هنگام خطا MyMemory"
         note = "هر query ابتدا به Google Translate می‌رود؛ فقط اگر خطا بدهد، همان query به MyMemory فرستاده می‌شود."
+    elif provider == "local":
+        model_id = local_cfg.get("model", DEFAULT_LOCAL_NMT_MODEL)
+        model_label = LOCAL_NMT_MODELS.get(model_id, LOCAL_NMT_MODELS[DEFAULT_LOCAL_NMT_MODEL])["label"]
+        label = f"مترجم آفلاین داخلی — {model_label}"
+        note = "ترجمه ۱۰۰٪ آفلاین و رایگان روی پردازندهٔ سیستم شما (بدون ارسال هیچ متنی به اینترنت) انجام می‌شود."
     else:
         label = AI_PROVIDERS.get(provider, {}).get("label", provider)
         note = (f"کادرهای همان صفحه تا سقف {plan.get('source_limit', MAX_AI_SOURCE_CHARS)} نویسه در هر درخواست تجمیع می‌شوند؛ تقسیم کادر بلند فقط در پایان خط و جمله یا بند انجام می‌شود. "
@@ -321,16 +391,22 @@ def plan_preview(
     pages = []
     tasks = []
     if provider != "free":
-        for item in plan["items"]:
-            page_calls = [call for call in plan["calls"] if call.get("image_id") == item["id"]]
+        for unit in logical_page_units(plan["items"]):
+            lead_item = unit["members"][0]
+            page_calls = [call for call in plan["calls"] if call.get("image_id") == lead_item["id"]]
             if not page_calls:
                 continue
-            # A standalone page signature must describe that page on its own,
+            # A standalone page/group signature must describe that logical page unit on its own,
             # not the cross-page duplicate map used by the multi-page tasks.
-            page_plan = build_project_plan({"images": [item]}, [item["id"]], provider,
+            unit_ids = [m["id"] for m in unit["members"]]
+            page_plan = build_project_plan({"images": unit["members"]}, unit_ids, provider,
                                            plan.get("reuse_repeated", False), source_language, public_settings)
-            pages.append({"imageId": item["id"], "imageName": item.get("name", ""),
-                          "signature": plan_signature(page_plan, provider, source_language, public_settings)})
+            pages.append({
+                "imageId": lead_item["id"],
+                "imageName": unit["unit_name"],
+                **({"groupId": unit["group_id"], "imageIds": unit_ids} if unit["grouped"] else {}),
+                "signature": plan_signature(page_plan, provider, source_language, public_settings),
+            })
         for call in plan["calls"]:
             if "image_id" not in call or saved_call(call, plan, provider, source_language, public_settings):
                 continue
@@ -346,11 +422,11 @@ def plan_preview(
         "duplicateCount": plan.get("duplicate_count", 0),
         "sourceLimit": plan.get("source_limit", MAX_AI_SOURCE_CHARS) if provider != "free" else None,
         "provider": provider,
-        "skill": public_settings.get("_translation_skill", normalize_ai_skill(None)) if provider != "free" else "",
-        "defaultSkill": DEFAULT_AI_SKILL if provider != "free" else "",
+        "skill": public_settings.get("_translation_skill", normalize_ai_skill(None)) if provider not in {"free", "local"} else "",
+        "defaultSkill": DEFAULT_AI_SKILL if provider not in {"free", "local"} else "",
         "providerLabel": label,
-        "model": config.get("model", "") if provider != "free" else "",
-        "base_url": config.get("base_url", "") if provider != "free" else "https://translate.googleapis.com/translate_a/single",
+        "model": local_cfg.get("model", "") if provider == "local" else (config.get("model", "") if provider != "free" else ""),
+        "base_url": "" if provider == "local" else (config.get("base_url", "") if provider != "free" else "https://translate.googleapis.com/translate_a/single"),
         "fallback_url": "https://api.mymemory.translated.net/get" if provider == "free" else "",
         "blockCount": len(plan["source_texts"]),
         "requestCount": len(requests),

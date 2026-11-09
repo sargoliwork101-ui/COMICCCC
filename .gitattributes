@@ -1,0 +1,10 @@
+# Batch files must have CRLF line endings on Windows: cmd.exe mis-parses some
+# constructs (labels, blocks, `set /p` prompts) when the file uses LF only.
+# The seller lost a whole build to that, so the endings are enforced here.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.iss text eol=crlf
+
+# Keep everything else as-is (LF in the repository, LF on every platform).
+* text=auto

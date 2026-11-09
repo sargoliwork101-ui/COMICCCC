@@ -13,13 +13,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pymupdf as fitz
-from PIL import Image
+from PIL import Image, ImageOps
 
+from .activity import check_cancelled, emit
 from .ocr_managed import compute_worker_count, iter_parallel_ordered, trim_process_memory
 from .paths import data_dir, project_root
 
 Image.MAX_IMAGE_PIXELS = 100_000_000
+DEFAULT_PDF_IMPORT_SCALE = 4.0
+MAX_PDF_RENDER_SIDE_PX = 16_000.0
+MAX_PDF_RENDER_PIXELS = 96_000_000.0
 ALLOWED_IMAGES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 
 
@@ -95,7 +98,14 @@ class ProjectStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._image_meta_cache: tuple[str, int, int, dict[str, dict[str, Any]]] | None = None
+        self._list_summary_cache: dict[str, tuple[int, int, dict[str, Any]]] = {}
         (data_dir() / "projects").mkdir(parents=True, exist_ok=True)
+
+    def reset_caches(self) -> None:
+        with self._lock:
+            self._image_meta_cache = None
+            self._list_summary_cache.clear()
+            (data_dir() / "projects").mkdir(parents=True, exist_ok=True)
 
     def create(self, name: str) -> dict[str, Any]:
         project_id = new_id()
@@ -114,6 +124,7 @@ class ProjectStore:
                 "ocrPageMode": "comic",
                 "contrast": True,
                 "precise": True,
+                "persianPreprocess": False,
                 "eraseOriginal": True,
                 "provider": "free",
                 "targetLanguage": "fa",
@@ -137,13 +148,30 @@ class ProjectStore:
 
     def list(self) -> list[dict[str, Any]]:
         result = []
+        active_keys: set[str] = set()
         for path in (data_dir() / "projects").glob("*/project.json"):
+            key = str(path)
+            active_keys.add(key)
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            cached = self._list_summary_cache.get(key)
+            if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+                result.append(dict(cached[2]))
+                continue
             state = read_json(path, {})
             if state.get("id"):
-                result.append({
+                summary = {
                     "id": state["id"], "name": state.get("name", "پروژه"),
                     "updatedAt": state.get("updatedAt", ""), "images": len(state.get("images", [])),
-                })
+                }
+                self._list_summary_cache[key] = (st.st_mtime_ns, st.st_size, summary)
+                result.append(dict(summary))
+        if len(self._list_summary_cache) > len(active_keys) + 8:
+            for stale_key in list(self._list_summary_cache):
+                if stale_key not in active_keys:
+                    self._list_summary_cache.pop(stale_key, None)
         return sorted(result, key=lambda item: item["updatedAt"], reverse=True)
 
     def get(self, project_id: str) -> dict[str, Any]:
@@ -167,6 +195,16 @@ class ProjectStore:
                     if isinstance(img, dict) and img.get("id")
                 }
                 self._image_meta_cache = (str(state["id"]), st.st_mtime_ns, st.st_size, meta_map)
+                self._list_summary_cache[str(path)] = (
+                    st.st_mtime_ns,
+                    st.st_size,
+                    {
+                        "id": state["id"],
+                        "name": state.get("name", "پروژه"),
+                        "updatedAt": state.get("updatedAt", ""),
+                        "images": len(state.get("images", [])),
+                    },
+                )
             except OSError:
                 self._image_meta_cache = None
             return state
@@ -211,10 +249,11 @@ class ProjectStore:
                 seen.add(image_id)
                 old = existing[image_id]
                 item = dict(old)
-                for key in ("order", "selected", "groupId", "crop", "blocks", "pageMode", "approved"):
+                for key in ("order", "selected", "groupId", "crop", "blocks", "pageMode", "approved", "watermark"):
                     if key in candidate:
                         item[key] = bool(candidate[key]) if key == "approved" else candidate[key]
-                item["edited"] = (project_root(project_id) / "images" / f"{image_id}-edited.png").exists()
+                edited_file = project_root(project_id) / "images" / f"{image_id}-edited.png"
+                item["edited"] = bool(edited_file.is_file() and edited_file.stat().st_size > 0)
                 merged.append(item)
             # An image omitted by the UI is deliberately removed from the project, not from source files on disk.
             current["images"] = merged
@@ -255,12 +294,12 @@ class ProjectStore:
     def image_path(self, project_id: str, image_id: str, edited: bool = False) -> Path:
         item = self._image_meta(project_id, image_id)
         path = project_root(project_id) / "images" / (f"{image_id}-edited.png" if edited else item["file"])
-        if not path.exists():
+        if not path.is_file() or (edited and path.stat().st_size == 0):
             raise FileNotFoundError(path)
         return path
 
     def save_rendered(self, project_id: str, image_id: str, content: bytes) -> dict[str, Any]:
-        if len(content) > 100 * 1024 * 1024:
+        if len(content) > 150 * 1024 * 1024:
             raise ValueError("Rendered image is too large")
         with Image.open(io.BytesIO(content)) as im:
             if (im.format or "").upper() != "PNG":
@@ -290,7 +329,7 @@ class ProjectStore:
             return self.save(state)
 
     @staticmethod
-    def _validate_image_bytes(filename: str, content: bytes) -> tuple[str, int, int]:
+    def _normalize_and_validate_image_bytes(filename: str, content: bytes) -> tuple[bytes, str, int, int]:
         if len(content) > 150 * 1024 * 1024:
             raise ValueError(f"Image is too large: {filename}")
         try:
@@ -301,8 +340,47 @@ class ProjectStore:
                 if width < 1 or height < 1 or width * height > 100_000_000:
                     raise ValueError(f"Invalid image dimensions: {filename}")
                 im.load()
+                try:
+                    orientation = int(im.getexif().get(0x0112, 1) or 1)
+                except Exception:
+                    orientation = 1
+                if orientation in {2, 3, 4, 5, 6, 7, 8}:
+                    transposed = ImageOps.exif_transpose(im)
+                    try:
+                        width, height = transposed.size
+                        if width < 1 or height < 1 or width * height > 100_000_000:
+                            raise ValueError(f"Invalid image dimensions: {filename}")
+                        out = io.BytesIO()
+                        save_fmt = image_format if image_format in {"JPEG", "PNG", "WEBP", "BMP", "GIF"} else "PNG"
+                        exif_bytes = transposed.info.get("exif")
+                        save_kwargs: dict[str, Any] = {}
+                        if exif_bytes:
+                            save_kwargs["exif"] = exif_bytes
+                        if save_fmt == "JPEG":
+                            rgb = transposed if transposed.mode in {"RGB", "L", "CMYK"} else transposed.convert("RGB")
+                            try:
+                                rgb.save(out, format="JPEG", quality=95, subsampling=0, **save_kwargs)
+                            finally:
+                                if rgb is not transposed:
+                                    rgb.close()
+                        elif save_fmt == "WEBP":
+                            transposed.save(out, format="WEBP", quality=95, **save_kwargs)
+                        else:
+                            transposed.save(out, format=save_fmt, **save_kwargs)
+                        content = out.getvalue()
+                        image_format = save_fmt
+                    finally:
+                        if transposed is not im:
+                            transposed.close()
         except (OSError, Image.DecompressionBombError) as exc:
             raise ValueError(f"Invalid or unsupported image: {filename}") from exc
+        if len(content) > 150 * 1024 * 1024:
+            raise ValueError(f"Image is too large: {filename}")
+        return content, image_format, width, height
+
+    @classmethod
+    def _validate_image_bytes(cls, filename: str, content: bytes) -> tuple[str, int, int]:
+        _, image_format, width, height = cls._normalize_and_validate_image_bytes(filename, content)
         return image_format, width, height
 
     def _commit_validated_image(
@@ -339,7 +417,12 @@ class ProjectStore:
             "edited": False,
         })
 
-    def import_files(self, project_id: str, files: list[tuple[str, bytes]], pdf_scale: float = 2.0) -> dict[str, Any]:
+    def import_files(
+        self,
+        project_id: str,
+        files: list[tuple[str, bytes]],
+        pdf_scale: float = DEFAULT_PDF_IMPORT_SCALE,
+    ) -> dict[str, Any]:
         state = self.get(project_id)
         original_count = len(state["images"])
         try:
@@ -348,32 +431,50 @@ class ProjectStore:
                 if suffix != ".pdf" and suffix not in ALLOWED_IMAGES:
                     raise ValueError(f"Unsupported file: {filename}")
 
+            total_inputs = max(1, len(files))
+            completed_inputs = 0
             image_batch: list[tuple[str, bytes]] = []
 
             def _flush_image_batch() -> None:
+                nonlocal completed_inputs
                 if not image_batch:
                     return
                 if len(image_batch) == 1:
                     fn, raw = image_batch[0]
                     self._import_image(state, fn, raw)
+                    completed_inputs += 1
+                    emit(
+                        f"آماده‌سازی تصویر {completed_inputs} از {total_inputs}: {Path(fn).name}",
+                        progress=round(completed_inputs / total_inputs * 0.96, 4),
+                    )
                 else:
                     workers, _ = compute_worker_count(len(image_batch), per_worker_mb=120, max_cap=8)
-                    for _, (fn, raw), (fmt, w, h) in iter_parallel_ordered(
+                    for _, (fn, _raw), (norm_bytes, fmt, w, h) in iter_parallel_ordered(
                         image_batch,
-                        lambda _i, pair: self._validate_image_bytes(pair[0], pair[1]),
+                        lambda _i, pair: self._normalize_and_validate_image_bytes(pair[0], pair[1]),
                         max_workers=workers,
                     ):
-                        self._commit_validated_image(state, fn, raw, fmt, w, h)
+                        self._commit_validated_image(state, fn, norm_bytes, fmt, w, h)
+                        completed_inputs += 1
+                        emit(
+                            f"آماده‌سازی تصویر {completed_inputs} از {total_inputs}: {Path(fn).name}",
+                            progress=round(completed_inputs / total_inputs * 0.96, 4),
+                        )
                 image_batch.clear()
 
             for filename, content in files:
+                check_cancelled("ورود فایل به درخواست کاربر لغو شد.")
                 suffix = Path(filename).suffix.lower()
                 if suffix == ".pdf":
                     _flush_image_batch()
-                    self._import_pdf(state, filename, content, pdf_scale)
+                    p_lo = completed_inputs / total_inputs * 0.96
+                    p_hi = (completed_inputs + 1) / total_inputs * 0.96
+                    self._import_pdf(state, filename, content, pdf_scale, progress_span=(p_lo, p_hi))
+                    completed_inputs += 1
                 else:
                     image_batch.append((filename, content))
             _flush_image_batch()
+            check_cancelled("ورود فایل به درخواست کاربر لغو شد.")
 
             # Import adds fresh IDs and never changes existing images. Merge
             # those additions into the latest project under the same lock so
@@ -412,10 +513,87 @@ class ProjectStore:
                 return image_id, file_name, image_path
         raise ValueError("Could not allocate a unique image ID")
 
-    def _import_pdf(self, state: dict[str, Any], filename: str, content: bytes, scale: float) -> None:
+    @staticmethod
+    def _compute_pdf_page_scales(page: Any, base_scale: float) -> tuple[float, float]:
+        """Compute lossless per-axis render scales for a PDF page.
+
+        - Pure full-page raster pages (comics, scans, exported image PDFs) render at exact 1:1
+          native embedded pixel dimensions so round-trip import -> export has zero pixel loss.
+        - Vector / text / hybrid pages render at `base_scale` (default 4.0x = 288 DPI) or higher
+          if an embedded figure on the page has even finer native pixel density.
+        """
+        rect = page.rect
+        rw = max(float(rect.width), 1.0)
+        rh = max(float(rect.height), 1.0)
+        rot90 = (int(getattr(page, "rotation", 0) or 0) % 180) == 90
+
+        valid_imgs: list[tuple[float, float, float, int, int]] = []
+        try:
+            raw_infos = page.get_image_info() or []
+        except Exception:
+            raw_infos = []
+
+        page_area = rw * rh
+        for info in raw_infos:
+            bbox = info.get("bbox")
+            if not bbox or len(bbox) < 4:
+                continue
+            bw = abs(float(bbox[2]) - float(bbox[0]))
+            bh = abs(float(bbox[3]) - float(bbox[1]))
+            iw = int(info.get("width") or 0)
+            ih = int(info.get("height") or 0)
+            if bw < 4.0 or bh < 4.0 or iw < 8 or ih < 8:
+                continue
+            tr = info.get("transform") or (bw, 0.0, 0.0, bh, 0.0, 0.0)
+            if len(tr) >= 4 and abs(float(tr[1])) > abs(float(tr[0])) and abs(float(tr[2])) > abs(float(tr[3])):
+                unrot_sx, unrot_sy = ih / bw, iw / bh
+            else:
+                unrot_sx, unrot_sy = iw / bw, ih / bh
+            img_sx, img_sy = (unrot_sy, unrot_sx) if rot90 else (unrot_sx, unrot_sy)
+            area_ratio = (bw * bh) / max(1.0, page_area)
+            valid_imgs.append((img_sx, img_sy, area_ratio, iw, ih))
+
+        has_vector_text = False
+        has_drawings = False
+        if len(valid_imgs) == 1 and valid_imgs[0][2] >= 0.90 and valid_imgs[0][3] >= 64 and valid_imgs[0][4] >= 64:
+            try:
+                has_vector_text = bool(page.get_text("text").strip())
+                if not has_vector_text:
+                    has_drawings = bool(page.get_drawings())
+            except Exception:
+                has_vector_text = True
+
+        if len(valid_imgs) == 1 and valid_imgs[0][2] >= 0.90 and valid_imgs[0][3] >= 64 and valid_imgs[0][4] >= 64 and not has_vector_text and not has_drawings:
+            sx, sy = valid_imgs[0][0], valid_imgs[0][1]
+        else:
+            max_embedded = max((max(ix, iy) for ix, iy, _, _, _ in valid_imgs), default=0.0)
+            uniform = max(float(base_scale), max_embedded)
+            sx = sy = uniform
+
+        cap = min(
+            1.0,
+            MAX_PDF_RENDER_SIDE_PX / max(rw * sx, 1.0),
+            MAX_PDF_RENDER_SIDE_PX / max(rh * sy, 1.0),
+            math.sqrt(MAX_PDF_RENDER_PIXELS / max((rw * sx) * (rh * sy), 1.0)),
+        )
+        sx = max(0.1, sx * cap)
+        sy = max(0.1, sy * cap)
+        return sx, sy
+
+    def _import_pdf(
+        self,
+        state: dict[str, Any],
+        filename: str,
+        content: bytes,
+        scale: float,
+        *,
+        progress_span: tuple[float, float] = (0.0, 0.96),
+    ) -> None:
         if len(content) > 500 * 1024 * 1024:
             raise ValueError("PDF is too large")
-        scale = max(1.0, min(4.0, float(scale)))
+        import pymupdf as fitz
+
+        scale = max(1.0, min(8.5, float(scale)))
         with fitz.open(stream=content, filetype="pdf") as check_doc:
             if check_doc.needs_pass:
                 raise ValueError("Password-protected PDF is not supported")
@@ -430,7 +608,7 @@ class ProjectStore:
         known = {item["id"] for item in state["images"]}
         slots = [self._allocate_image_slot(project_id, known, ".png") for _ in range(page_count)]
         stem = Path(filename).stem
-        workers, _ = compute_worker_count(page_count, per_worker_mb=140, max_cap=8)
+        workers, _ = compute_worker_count(page_count, per_worker_mb=240, max_cap=6)
 
         tls = threading.local()
         opened_docs: list[fitz.Document] = []
@@ -449,13 +627,8 @@ class ProjectStore:
             image_id, file_name, image_path = slots[page_index]
             doc = _get_thread_doc()
             page = doc[page_index]
-            rect = page.rect
-            page_scale = min(
-                scale, 16000.0 / max(rect.width, 1), 16000.0 / max(rect.height, 1),
-                math.sqrt(48_000_000.0 / max(rect.width * rect.height, 1)),
-            )
-            page_scale = max(0.1, page_scale)
-            pix = page.get_pixmap(matrix=fitz.Matrix(page_scale, page_scale), alpha=False)
+            scale_x, scale_y = self._compute_pdf_page_scales(page, scale)
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale_x, scale_y), alpha=False)
             width, height = int(pix.width), int(pix.height)
             if width < 1 or height < 1 or width * height > 100_000_000:
                 del pix
@@ -487,12 +660,18 @@ class ProjectStore:
             }
 
         written_paths: list[Path] = []
+        p_lo, p_hi = progress_span
         try:
             for step_idx, page_idx, entry in iter_parallel_ordered(list(range(page_count)), _render_one_page, max_workers=workers):
                 written_paths.append(slots[page_idx][2])
                 entry["order"] = self._next_order(state)
                 state["images"].append(entry)
-                if (step_idx + 1) % 16 == 0:
+                done_pages = step_idx + 1
+                emit(
+                    f"تبدیل صفحهٔ {done_pages} از {page_count} فایل PDF ({Path(filename).name})…",
+                    progress=round(p_lo + (p_hi - p_lo) * (done_pages / max(1, page_count)), 4),
+                )
+                if done_pages % 16 == 0:
                     trim_process_memory()
         except Exception:
             for _, _, slot_path in slots:
@@ -507,42 +686,8 @@ class ProjectStore:
             trim_process_memory()
 
     def _import_image(self, state: dict[str, Any], filename: str, content: bytes) -> None:
-        if len(content) > 150 * 1024 * 1024:
-            raise ValueError(f"Image is too large: {filename}")
-        try:
-            with Image.open(io.BytesIO(content)) as im:
-                raw_format = (im.format or "PNG").upper()
-                image_format = "JPEG" if raw_format == "MPO" else raw_format
-                width, height = im.size
-                if width < 1 or height < 1 or width * height > 100_000_000:
-                    raise ValueError(f"Invalid image dimensions: {filename}")
-                im.load()
-        except (OSError, Image.DecompressionBombError) as exc:
-            raise ValueError(f"Invalid or unsupported image: {filename}") from exc
-        extension = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "BMP": ".bmp", "GIF": ".gif"}.get(image_format, ".png")
-        known = {item['id'] for item in state['images']}
-        image_id, file_name, image_path = self._allocate_image_slot(state["id"], known, extension)
-        try:
-            image_path.write_bytes(content)
-        except OSError:
-            image_path.unlink(missing_ok=True)
-            raise
-        state["images"].append({
-            "id": image_id,
-            "name": Path(filename).name,
-            "file": file_name,
-            "width": width,
-            "height": height,
-            "format": image_format,
-            "bytes": len(content),
-            "order": self._next_order(state),
-            "selected": True,
-            "approved": False,
-            "groupId": None,
-            "crop": None,
-            "blocks": [],
-            "edited": False,
-        })
+        norm_bytes, image_format, width, height = self._normalize_and_validate_image_bytes(filename, content)
+        self._commit_validated_image(state, filename, norm_bytes, image_format, width, height)
 
     def duplicate(self, project_id: str, image_ids: list[str]) -> dict[str, Any]:
         with self._lock:
@@ -567,7 +712,7 @@ class ProjectStore:
                 new["approved"] = False
                 shutil.copyfile(project_root(project_id) / "images" / old["file"], project_root(project_id) / "images" / new["file"])
                 old_edited = project_root(project_id) / "images" / f"{old['id']}-edited.png"
-                has_edited = old_edited.exists()
+                has_edited = bool(old.get("edited") is not False and old_edited.is_file() and old_edited.stat().st_size > 0)
                 if has_edited:
                     shutil.copyfile(old_edited, project_root(project_id) / "images" / f"{new['id']}-edited.png")
                 new["edited"] = has_edited

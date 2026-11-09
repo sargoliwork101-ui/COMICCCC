@@ -1,6 +1,9 @@
 from pathlib import Path
 import re
 import tomllib
+from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,3 +77,462 @@ def test_windows_launcher_clears_pip_timeout_before_starting_server():
     assert run_app_section.index('set "PIP_TIMEOUT="') < run_app_section.index('"%VENV_PYTHON%" "%APP_DIR%\\run.py"')
 
 
+def test_windows_launcher_repairs_relocated_app_folder_offline_without_deleting_venv(tmp_path, monkeypatch):
+    import os
+    import site
+
+    assert "call :repair_relocated_venv" in NORMAL
+    repair_section = NORMAL.split("\n:repair_relocated_venv\n", 1)[1].split("\nexit /b 0", 1)[0]
+    assert "comic_ocr_studio_local.pth" in repair_section
+    assert '"%VENV_PYTHON%" -m pip install -e "%APP_DIR%" --no-deps --no-build-isolation --no-index' in repair_section
+    assert not re.search(r'(?im)^\s*(?:rmdir|rd)\s', NORMAL)
+
+    # Execute the stdlib relocation snippet against a simulated site-packages with stale Drive-C editable hooks
+    fake_sp = tmp_path / "site-packages"
+    fake_sp.mkdir()
+    stale_pth = fake_sp / "__editable__.comic_ocr_studio-3.0.99.pth"
+    stale_finder = fake_sp / "__editable___comic_ocr_studio_3_0_99_finder.py"
+    stale_pth.write_text("import __editable___comic_ocr_studio_3_0_99_finder", encoding="utf-8")
+    stale_finder.write_text("MAPPING = {'comic_studio': 'C:/OldPath/python_app/comic_studio'}", encoding="utf-8")
+    moved_app = str(tmp_path / "DriveD" / "python_app")
+
+    monkeypatch.setattr(site, "getsitepackages", lambda: [str(fake_sp)])
+    monkeypatch.setenv("APP_DIR", moved_app)
+    snippet = repair_section.split('"%VENV_PYTHON%" -c "', 1)[1].split('" >nul', 1)[0]
+    exec(snippet, {})
+
+    assert not stale_pth.exists()
+    assert not stale_finder.exists()
+    assert (fake_sp / "comic_ocr_studio_local.pth").read_text(encoding="utf-8").strip() == moved_app
+
+
+def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
+    import sys
+    import zipfile
+    from PIL import Image
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from offline_packaging.build_offline_package import (
+        SFX_MAGIC,
+        append_sfx_zip_payload,
+        generate_windows_ico,
+        pyinstaller_command,
+        read_sfx_trailer,
+        zip_directory,
+    )
+
+    assert 'ComicOCRStudio.exe' in NORMAL
+    assert ':fast_spec_check' in NORMAL
+    assert 'wheelhouse' in NORMAL.lower()
+    assert 'ctranslate2' in NORMAL and 'sentencepiece' in NORMAL
+
+    offline_bat = (ROOT / "build_windows_offline.bat").read_text(encoding="utf-8")
+    assert "offline_packaging.build_offline_package" in offline_bat
+    assert "--with-nmt" in offline_bat
+    assert "ComicOCRStudio-Offline-Setup-%APP_VERSION%" in offline_bat
+    assert 'set "APP_VERSION=4.36"' in offline_bat
+    assert "DisableDelayedExpansion" in offline_bat
+    assert '--find-links="%WHEELHOUSE_DIR%"' in offline_bat
+    assert 'start_windows.bat" --setup-only' in offline_bat
+    assert '"%~1"=="--setup-only"' in NORMAL
+    assert 'if defined SETUP_ONLY' in NORMAL
+
+    seller_bat = (ROOT / "start_license_manager.bat").read_text(encoding="utf-8")
+    assert '"%PYTHON_EXE%" %PYTHON_ARG% "%CD%\\license_manager.py" %*' in seller_bat
+    assert "\\WindowsApps\\" in seller_bat
+
+    iss_text = (ROOT / "offline_packaging" / "ComicOCRStudio.iss").read_text(encoding="utf-8")
+    assert "PrivilegesRequired=lowest" in iss_text
+    assert "ComicOCRStudio.exe" in iss_text
+
+    # Verify multi-resolution .ico generation from static/assets/icon128.png
+    ico_out = generate_windows_ico(
+        ROOT / "comic_studio" / "static" / "assets" / "icon128.png",
+        tmp_path / "ComicOCRStudio.ico",
+    )
+    assert ico_out.is_file() and ico_out.stat().st_size > 1000
+    with Image.open(ico_out) as ico_img:
+        assert ico_img.format == "ICO"
+
+    # Verify PyInstaller command includes bundled_models when staged models exist
+    staged = tmp_path / "bundled_models"
+    (staged / "rapidocr").mkdir(parents=True)
+    (staged / "rapidocr" / "dummy.onnx").write_bytes(b"onnx")
+    cmd = pyinstaller_command(
+        entry_script=ROOT / "run.py",
+        dist_dir=tmp_path / "dist",
+        work_dir=tmp_path / "work",
+        spec_dir=tmp_path,
+        icon_path=ico_out,
+        static_dir=ROOT / "comic_studio" / "static",
+        staged_models_dir=staged,
+    )
+    joined = " ".join(cmd)
+    assert "--onedir" in cmd and "--windowed" in cmd
+    assert "--optimize" in cmd and "license_manager" in cmd
+    assert "bundled_models" in joined
+    assert "ctranslate2" in joined and "sentencepiece" in joined
+    assert "cv2" in cmd
+
+    # Verify SFX self-extracting installer binary layout & trailer validation
+    sample_app = tmp_path / "app_dir"
+    sample_app.mkdir()
+    (sample_app / "ComicOCRStudio.exe").write_bytes(b"MZ-MOCK-EXE")
+    (sample_app / "README-OFFLINE-FA.txt").write_text("سلام", encoding="utf-8")
+    payload_zip = zip_directory(sample_app, tmp_path / "payload.zip")
+    stub_exe = tmp_path / "stub.exe"
+    stub_exe.write_bytes(b"MZ-STUB-INSTALLER-HEADER" * 8)
+    setup_exe = append_sfx_zip_payload(stub_exe, payload_zip, tmp_path / "Setup.exe")
+    offset, length = read_sfx_trailer(setup_exe)
+    assert offset == stub_exe.stat().st_size
+    assert length == payload_zip.stat().st_size
+    raw = setup_exe.read_bytes()
+    assert raw[-8:] == SFX_MAGIC
+    import io
+    with zipfile.ZipFile(io.BytesIO(raw[offset : offset + length])) as zf:
+        assert "ComicOCRStudio.exe" in zf.namelist()
+        assert "README-OFFLINE-FA.txt" in zf.namelist()
+
+
+
+
+
+def test_v427_offline_builder_survives_slow_pypi_and_can_write_the_exe_to_another_folder(tmp_path):
+    """v4.29: the EXE builder must not die on a slow pypi.org and must honour a custom output folder."""
+    import sys
+    from pathlib import Path
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from offline_packaging import build_offline_package as pkg
+
+    # 1. The PyInstaller bootstrap uses a long timeout + the public PyPI mirrors.
+    source = (ROOT / "offline_packaging" / "build_offline_package.py").read_text(encoding="utf-8")
+    assert "PIP_TIMEOUT_SECONDS = 120" in source
+    assert "PIP_RETRIES = 10" in source
+    assert "mirrors.aliyun.com/pypi/simple/" in source
+    assert "pypi.tuna.tsinghua.edu.cn/simple" in source
+    assert "def ensure_pyinstaller(" in source
+    assert callable(pkg.ensure_pyinstaller)
+
+    # 2. An already installed PyInstaller short-circuits the whole network dance.
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0)
+
+    original_run = pkg.subprocess.run
+    pkg.subprocess.run = fake_run
+    try:
+        assert pkg.ensure_pyinstaller(sys.executable) is True
+    finally:
+        pkg.subprocess.run = original_run
+    assert calls == [] or all("pip" not in " ".join(call) for call in calls)
+    assert not any("install" in " ".join(call) for call in calls)
+
+    # 3. The builder accepts a custom output folder and a custom build folder.
+    parser_flags = source.split("parser.add_argument(", 1)
+    assert any("--output-dir" in chunk for chunk in parser_flags)
+    assert any("--build-dir" in chunk for chunk in parser_flags)
+    assert "--ensure-pyinstaller" in source
+    assert 'dist_root = Path(args.output_dir).expanduser().resolve() if args.output_dir else REPO_PY_ROOT / "dist"' in source
+
+    # 4. The .bat asks for the output folder and keeps the mirror failover.
+    offline_bat = (ROOT / "build_windows_offline.bat").read_text(encoding="utf-8")
+    assert "--output-dir" in offline_bat
+    assert "--ensure-pyinstaller" in offline_bat
+    assert "mirrors.aliyun.com/pypi/simple/" in offline_bat
+    assert "pypi.tuna.tsinghua.edu.cn/simple" in offline_bat
+    assert "--timeout 120 --retries 10" in offline_bat
+    assert "OUT_DIR" in offline_bat
+
+
+# ---------------------------------------------------------------------------
+# v4.33 - the offline builder must never show a raw Python traceback
+# ---------------------------------------------------------------------------
+
+
+def _builder_module():
+    import sys
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    import offline_packaging.build_offline_package as builder
+
+    return builder
+
+
+def test_v433_the_offline_builder_never_shows_a_python_traceback(tmp_path, monkeypatch, capsys):
+    """v4.33: a failing build must print a clear message, not a Python stack trace."""
+    builder = _builder_module()
+
+    monkeypatch.setattr(builder, "ensure_pyinstaller", lambda *a, **k: False)
+    code = builder.main(["--output-dir", str(tmp_path / "dist"), "--build-dir", str(tmp_path / "build")])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "Traceback" not in out
+    assert "[ERROR]" in out
+    assert "PyInstaller" in out
+
+
+def test_v433_the_offline_builder_checks_the_ocr_models_before_shipping(tmp_path):
+    """v4.33: a bundle without the OCR models must stop the build (it would not read text)."""
+    builder = _builder_module()
+
+    staging = tmp_path / "bundled_models"
+    (staging / "rapidocr").mkdir(parents=True)
+    with pytest.raises(builder.BuildError) as excinfo:
+        builder.verify_bundled_ocr_models(staging)
+    assert "OCR models" in str(excinfo.value)
+
+    for name in (
+        "ch_PP-OCRv5_det_mobile.onnx",
+        "latin_PP-OCRv5_rec_mobile.onnx",
+        "arabic_PP-OCRv5_rec_mobile.onnx",
+    ):
+        (staging / "rapidocr" / name).write_bytes(b"onnx")
+    builder.verify_bundled_ocr_models(staging)
+
+
+def test_v433_the_offline_builder_checks_the_built_app_before_packaging(tmp_path):
+    """v4.33: the built app folder must contain the exe, the program files and the models."""
+    builder = _builder_module()
+
+    app_dir = tmp_path / "ComicOCRStudio"
+    with pytest.raises(builder.BuildError) as excinfo:
+        builder.verify_built_app(app_dir)
+    assert "not usable" in str(excinfo.value)
+
+    (app_dir / "_internal" / "comic_studio" / "static").mkdir(parents=True)
+    (app_dir / "_internal" / "comic_studio" / "static" / "index.html").write_text("<html></html>", encoding="utf-8")
+    (app_dir / "ComicOCRStudio.exe").write_bytes(b"MZ")
+    (app_dir / "_internal" / "bundled_models" / "rapidocr").mkdir(parents=True)
+    (app_dir / "_internal" / "bundled_models" / "rapidocr" / "det.onnx").write_bytes(b"onnx")
+    builder.verify_built_app(app_dir)
+
+
+def test_v433_the_offline_builder_self_test_runs_without_breaking(tmp_path, monkeypatch, capsys):
+    """v4.33: the new --preflight self-test answers every question before the long build."""
+    builder = _builder_module()
+
+    monkeypatch.setattr(builder, "_pyinstaller_installed", lambda *a, **k: True)
+    code = builder.run_preflight()
+    out = capsys.readouterr().out
+    assert code in (0, 1)
+    assert "Traceback" not in out
+    assert "بررسی آمادگی ساخت بستهٔ آفلاین" in out
+    assert "PyInstaller" in out
+
+
+def test_v433_the_offline_builder_only_collects_installed_packages(tmp_path):
+    """v4.33: `--collect-all <missing package>` used to abort the whole PyInstaller build."""
+    builder = _builder_module()
+
+    staged = tmp_path / "bundled_models"
+    staged.mkdir(parents=True)
+    cmd = builder.pyinstaller_command(
+        entry_script=ROOT / "run.py",
+        dist_dir=tmp_path / "dist",
+        work_dir=tmp_path / "work",
+        spec_dir=tmp_path,
+        icon_path=tmp_path / "icon.ico",
+        static_dir=ROOT / "comic_studio" / "static",
+        staged_models_dir=staged,
+    )
+    import importlib.util
+
+    for pkg in ("rapidocr", "onnxruntime", "ctranslate2", "sentencepiece", "pymupdf", "bidi"):
+        if importlib.util.find_spec(pkg) is None:
+            assert pkg not in cmd, f"{pkg} is not installed and must not be collected"
+
+
+def test_v434_the_readiness_checklist_never_contradicts_its_own_marks(tmp_path, monkeypatch, capsys):
+    """v4.34: a ready machine must not be reported as 'not ready' (the wording was inverted)."""
+    builder = _builder_module()
+
+    monkeypatch.setattr(builder, "_pyinstaller_installed", lambda *a, **k: True)
+    monkeypatch.setattr(builder, "find_iscc", lambda: Path("C:/Program Files (x86)/Inno Setup 6/ISCC.exe"))
+    monkeypatch.setattr(builder, "find_dotnet_csc", lambda: None)
+
+    # A seller machine where everything is in place.
+    models = tmp_path / "models"
+    (models / "rapidocr").mkdir(parents=True)
+    (models / "rapidocr" / "ch_PP-OCRv5_det_mobile.onnx").write_bytes(b"onnx")
+    (models / "tesseract").mkdir(parents=True)
+    for lang in ("eng", "fas"):
+        (models / "tesseract" / f"{lang}.traineddata").write_bytes(b"x" * 3_400_000)
+    monkeypatch.setattr(builder, "models_dir", lambda: models)
+
+    import license_manager
+
+    class _ReadyVault:
+        def key_status(self):
+            return {
+                "vaultPublicKey": "a" * 64,
+                "embeddedPublicKey": "a" * 64,
+                "backupExists": True,
+                "masterKeyPath": str(tmp_path / "seller_master_key.json"),
+                "backupPath": str(tmp_path / "backup" / "seller_master_key.json"),
+            }
+
+    monkeypatch.setattr(license_manager, "SellerVault", _ReadyVault)
+
+    code = builder.run_preflight()
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "Traceback" not in out
+    assert "مورد آماده نیست" not in out
+    assert "همه‌چیز آماده است" in out
+    # Every checklist line states the real state, never a sentence that contradicts its mark.
+    assert "PyInstaller (the packer that makes the .exe) - installed" in out
+    assert "[warn]" not in out
+    assert "OCR models (RapidOCR) - found in" in out
+    assert "Backup copy of the seller master key - found in" in out
+
+
+def test_v435_only_real_blockers_are_listed_as_not_ready(tmp_path, monkeypatch, capsys):
+    """v4.35: items the builder solves on its own must not be listed as 'not ready'."""
+    builder = _builder_module()
+
+    monkeypatch.setattr(builder, "_pyinstaller_installed", lambda *a, **k: False)
+    monkeypatch.setattr(builder, "find_iscc", lambda: None)
+    monkeypatch.setattr(builder, "find_dotnet_csc", lambda: None)
+
+    models = tmp_path / "models"
+    (models / "rapidocr").mkdir(parents=True)
+    (models / "rapidocr" / "ch_PP-OCRv5_det_mobile.onnx").write_bytes(b"onnx")
+    (models / "tesseract").mkdir(parents=True)
+    for lang in ("eng", "fas"):
+        (models / "tesseract" / f"{lang}.traineddata").write_bytes(b"x" * 3_400_000)
+    monkeypatch.setattr(builder, "models_dir", lambda: models)
+
+    import license_manager
+
+    class _VaultWithoutBackup:
+        def key_status(self):
+            return {
+                "vaultPublicKey": "a" * 64,
+                "embeddedPublicKey": "a" * 64,
+                "backupExists": False,
+                "issuedCount": 3,
+                "masterKeyPath": str(tmp_path / "seller_master_key.json"),
+                "backupPath": str(tmp_path / "backup" / "seller_master_key.json"),
+            }
+
+    monkeypatch.setattr(license_manager, "SellerVault", _VaultWithoutBackup)
+
+    code = builder.run_preflight()
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "همه‌چیز آماده است" in out
+    assert "مورد آماده نیست" not in out
+    # A missing backup copy is a heads-up, not a blocker.
+    assert "[warn] Backup copy of the seller master key" in out
+    assert "[note] PyInstaller" in out
+
+
+# ---------------------------------------------------------------------------
+# v4.36 - the seller lost a build because the .bat menu died silently
+# ---------------------------------------------------------------------------
+
+
+def test_v436_the_questions_are_asked_by_python_and_the_build_really_starts(monkeypatch, capsys):
+    """v4.36: the menu + output-folder question live in Python, not in the .bat.
+
+    On the seller's machine the old `set /p` menu closed the window right after
+    the output-folder question, so no build ever started. The builder now asks
+    the questions itself and every answer is echoed back.
+    """
+    builder = _builder_module()
+
+    asked: list[str] = []
+    answers = iter(["1", ""])
+
+    def fake_input(prompt: str = "") -> str:
+        asked.append(prompt)
+        try:
+            return next(answers)
+        except StopIteration:
+            return ""
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    captured: dict[str, object] = {}
+
+    def fake_run_build(args):
+        captured["output_dir"] = args.output_dir
+        captured["with_nmt"] = args.with_nmt
+        captured["download_wheelhouse"] = args.download_wheelhouse
+        return 0
+
+    monkeypatch.setattr(builder, "_run_build", fake_run_build)
+
+    code = builder.main(["--interactive"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert len(asked) == 2, out
+    assert "Enter choice" in asked[0]
+    assert "Output folder" in asked[1]
+    assert "Selected: 1" in out
+    assert str(builder.REPO_PY_ROOT / "dist") in out
+    assert captured["output_dir"] == str(builder.REPO_PY_ROOT / "dist")
+    assert captured["with_nmt"] is False
+    assert captured["download_wheelhouse"] is False
+
+
+def test_v436_the_menu_takes_the_full_offline_options(monkeypatch, capsys):
+    """v4.36: choices 2 and 3 must switch on the offline translator / wheelhouse."""
+    builder = _builder_module()
+
+    answers = iter(["3", "D:\\Builds"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    captured: dict[str, object] = {}
+
+    def fake_run_build(args):
+        captured["output_dir"] = args.output_dir
+        captured["with_nmt"] = args.with_nmt
+        captured["download_wheelhouse"] = args.download_wheelhouse
+        return 0
+
+    monkeypatch.setattr(builder, "_run_build", fake_run_build)
+
+    assert builder.main(["--interactive"]) == 0
+    out = capsys.readouterr().out
+    assert "Selected: 3" in out
+    assert captured["with_nmt"] is True
+    assert captured["download_wheelhouse"] is True
+    assert captured["output_dir"] == "D:\\Builds"
+
+
+def test_v436_the_batch_launcher_never_asks_questions_itself():
+    """v4.36: the .bat must not use `set /p` any more - it delegates to the builder."""
+    offline_bat = (ROOT / "build_windows_offline.bat").read_text(encoding="utf-8")
+    command_lines = [line.strip().lower() for line in offline_bat.splitlines() if not line.strip().lower().startswith("rem ")]
+    assert not any(line.startswith("set /p") for line in command_lines)
+    assert "--interactive" in offline_bat
+    assert "offline_packaging.build_offline_package" in offline_bat
+    # The window must never close silently: every exit path pauses first.
+    assert offline_bat.count("pause") >= 4
+
+
+def test_v436_batch_files_are_checked_out_with_crlf_endings():
+    """v4.36: cmd.exe mis-parses LF-only .bat files, so the endings are enforced."""
+    attrs = (ROOT.parent / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.bat text eol=crlf" in attrs
+
+
+def test_v436_every_builder_line_is_saved_in_a_log_file(tmp_path, monkeypatch):
+    """v4.36: a failing build must leave a log the seller can paste."""
+    builder = _builder_module()
+    log = tmp_path / "build_offline.log"
+    monkeypatch.setattr(builder, "_log_file", lambda: log)
+
+    builder.start_log("test run")
+    builder.say("hello from the builder")
+    builder.say("second line")
+
+    text = log.read_text(encoding="utf-8")
+    assert "test run" in text
+    assert "hello from the builder" in text
+    assert "second line" in text

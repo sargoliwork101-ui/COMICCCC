@@ -79,6 +79,10 @@ startBtn.addEventListener('click', async () => {
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || tab.id == null) {
+      showError('تب فعالی برای اسکن پیدا نشد. لطفاً ابتدا صفحهٔ موردنظر را باز کنید.');
+      return;
+    }
     // مرحلهٔ ۱: کاوش همهٔ فریم‌ها برای پیدا کردن فریم اصلی reader گوگل‌بوک (در صفحات edition داخل iframe است)
     let injectionTarget = { tabId: tab.id };
     try {
@@ -796,7 +800,7 @@ async function scrapeAndSend(pdfName, mode, opts) {
         const res = transport === 'inpage'
           ? await resolveGoogleBooksPageInPage(pid, startupPid)
           : await chrome.runtime.sendMessage({
-            type: 'WTPDF_GBOOKS_PAGE', pageUrl: location.href, pid
+            type: 'WTPDF_GBOOKS_PAGE', pageUrl: location.href, pid, lpgPid: startupPid
           });
         if (cancelled) return;
         if (res && res.ok && res.src) {
