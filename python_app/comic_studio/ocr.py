@@ -1071,7 +1071,11 @@ class RapidEngine:
             root = self._effective_v5_dir(language) if self.version == "v5" else self._v6_model_dir()
             missing = [name for name in self._expected_models(language) if not (root / name).is_file() or (root / name).stat().st_size == 0]
             if missing:
-                raise OcrError(f"{self.id} model is not ready. Use the explicit model download button first.")
+                raise OcrError(
+                    f"مدل {self.id} برای زبان {language} آماده نیست. "
+                    "در پنجرهٔ «مدیریت مدل‌های OCR» روی «آماده‌سازی / دانلود خودکار» بزنید "
+                    "(برای دانلود اینترنت لازم است)."
+                )
 
     def _get(self, language: str, allow_download: bool = False):
         self._validate_ready(language, allow_download)
@@ -1487,7 +1491,11 @@ class EasyEngine:
         if not download:
             missing = [name for name in self._expected_models(language) if not (self._model_dir() / name).is_file()]
             if missing and not (self._model_dir() / f".ready-{language}").is_file():
-                raise OcrError("EasyOCR model for this language is not ready. Click the explicit preparation button first.")
+                raise OcrError(
+                    f"مدل EasyOCR برای زبان {language} آماده نیست. "
+                    "در پنجرهٔ «مدیریت مدل‌های OCR» روی «آماده‌سازی / دانلود خودکار» بزنید "
+                    "(برای دانلود اینترنت لازم است)."
+                )
         lang = {"eng": "en", "fas": "fa", "kor": "ko", "jpn": "ja", "chi_sim": "ch_sim"}.get(language, "en")
         reader_langs = ["fa", "en"] if lang == "fa" else [lang]
         with self._lock:
@@ -1770,6 +1778,22 @@ def _is_legacy_fast_persian_traineddata(path: Path) -> bool:
         return False
 
 
+def _is_hard_network_failure(exc: Exception) -> bool:
+    """True when the failure means "this machine has no working internet at all"
+    (DNS failure / connection refused), so trying the remaining mirrors is pointless
+    and would only stall the OCR run."""
+    import socket
+    import urllib.error
+
+    if isinstance(exc, socket.gaierror):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, (socket.gaierror, ConnectionRefusedError)):
+            return True
+    return False
+
+
 def _parse_tsv_word_spans(tsv_text: str) -> list[dict[str, Any]]:
     words: list[dict[str, Any]] = []
     reader = csv.DictReader(io.StringIO(tsv_text), delimiter="\t", quoting=csv.QUOTE_NONE, restkey="_extra")
@@ -2007,6 +2031,8 @@ class TesseractEngine:
         self._system_languages: set[str] | None = None
         self._system_languages_exe: str | None = None
         self._lock = threading.Lock()
+        self._language_prepare_lock = threading.Lock()
+        self._auto_prepare_failures: dict[str, str] = {}
         self._omp_threads_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
             f"tesseract_omp_threads_{id(self)}", default=None,
         )
@@ -2142,7 +2168,7 @@ class TesseractEngine:
         trim_process_memory()
         return freed
 
-    def _download_language_file(self, language: str) -> Path:
+    def _download_language_file(self, language: str, *, timeout: float = 30.0) -> Path:
         if language not in LANGUAGES:
             raise OcrError(f"Unsupported Tesseract language: {language}")
         if _STANDARD_CANCEL_EVENT.is_set():
@@ -2186,7 +2212,7 @@ class TesseractEngine:
                 emit(f"ادامهٔ دانلود فایل زبان Tesseract ({language}) از میرور جایگزین…", "warning", progress=0.22)
             try:
                 request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio", **extra_headers})
-                with urllib.request.urlopen(request, timeout=30) as response, temporary.open("wb") as output:
+                with urllib.request.urlopen(request, timeout=timeout) as response, temporary.open("wb") as output:
                     hdrs = getattr(response, "headers", None)
                     raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
                     expected_bytes = int(raw_len) if raw_len and str(raw_len).isdigit() else 12 * 1024 * 1024
@@ -2221,9 +2247,13 @@ class TesseractEngine:
             except Exception as exc:
                 temporary.unlink(missing_ok=True)
                 last_exc = exc
+                if _is_hard_network_failure(exc):
+                    # No usable internet on this machine: stop instead of stalling on every mirror.
+                    break
                 continue
         raise OcrError(
-            f"Tesseract language download failed for {language}: {last_exc}. The official tessdata_fast host must be reachable."
+            f"دانلود فایل زبان Tesseract ({language}) ناموفق بود: {last_exc}. "
+            "باید به اینترنت دسترسی داشته باشید تا فایل زبان از منبع رسمی دریافت شود."
         ) from last_exc
 
     def download(self, language: str = "eng") -> None:
@@ -2304,13 +2334,77 @@ class TesseractEngine:
             self.unload()
             trim_process_memory()
 
+    def _auto_prepare_language(self, language: str) -> None:
+        """Fetch a missing Tesseract language file automatically instead of failing the OCR run.
+
+        Root cause of the old hard failure: running Persian OCR raised
+        ``Tesseract language fas is not ready. Use the explicit model download
+        button first.`` and stopped, even though Studio already knows how to
+        download that file from the official mirrors.  Now the first OCR run
+        downloads the language file (Persian = full float32 ``tessdata_best``,
+        ~3.3 MB) and continues; a failed attempt is remembered for the session
+        so a batch never repeats the same slow download for every page.
+        """
+        if language in self.ready_languages:
+            return
+        cached_failure = self._auto_prepare_failures.get(language)
+        if cached_failure:
+            raise OcrError(cached_failure)
+        if not self.runtime_installed:
+            raise OcrError(
+                "موتور Tesseract روی این دستگاه نصب نیست. در پنجرهٔ «مدیریت مدل‌های OCR» "
+                "موتور Tesseract را انتخاب کنید و روی «آماده‌سازی / دانلود خودکار» بزنید."
+            )
+        with self._language_prepare_lock:
+            if language in self.ready_languages:
+                return
+            cached_failure = self._auto_prepare_failures.get(language)
+            if cached_failure:
+                raise OcrError(cached_failure)
+            emit(
+                f"فایل زبان «{language}» برای Tesseract روی این دستگاه پیدا نشد؛ دانلود خودکار از منبع رسمی آغاز شد",
+                "warning",
+            )
+            _STANDARD_CANCEL_EVENT.clear()
+            try:
+                self._download_language_file(language, timeout=15.0)
+            except JobCancelledError:
+                raise
+            except OcrError as exc:
+                message = (
+                    f"دانلود خودکار فایل زبان Tesseract برای «{language}» ناموفق بود. "
+                    "در پنجرهٔ «مدیریت مدل‌های OCR» روی «آماده‌سازی / دانلود خودکار» بزنید "
+                    "(برای دانلود اینترنت لازم است) یا از بستهٔ آفلاینی که فایل زبان فارسی را دارد استفاده کنید. "
+                    f"جزئیات فنی: {exc}"
+                )
+                self._auto_prepare_failures[language] = message
+                raise OcrError(message) from exc
+            if language == "fas":
+                # The Persian reader also arbitrates isolated English technical spans
+                # (`Figure 8-35`, `IPC-A-610`), so `eng` is fetched as well when missing.
+                with contextlib.suppress(Exception):
+                    if "eng" not in self.ready_languages:
+                        self._download_language_file("eng", timeout=15.0)
+            if language not in self.ready_languages:
+                message = (
+                    f"فایل زبان Tesseract برای «{language}» حتی پس از دانلود هم آماده نشد. "
+                    "در پنجرهٔ «مدیریت مدل‌های OCR» روی «آماده‌سازی / دانلود خودکار» بزنید."
+                )
+                self._auto_prepare_failures[language] = message
+                raise OcrError(message)
+        self._auto_prepare_failures.pop(language, None)
+        emit(f"فایل زبان Tesseract برای «{language}» آماده شد و خواندن متن ادامه پیدا کرد", "success")
+
     def _run_tesseract_tsv(self, image: Image.Image, language: str, psm: str) -> str:
         _check_ocr_cancelled()
         executable = _tesseract_executable()
         if not executable:
-            raise OcrError("Tesseract is not installed. Install the binary and use the explicit language download button.")
+            raise OcrError(
+                "موتور Tesseract روی این دستگاه نصب نیست. در پنجرهٔ «مدیریت مدل‌های OCR» "
+                "موتور Tesseract را انتخاب کنید و روی «آماده‌سازی / دانلود خودکار» بزنید."
+            )
         if language not in self.ready_languages:
-            raise OcrError(f"Tesseract language {language} is not ready. Use the explicit model download button first.")
+            self._auto_prepare_language(language)
 
         local_traineddata = (self._model_dir() / f"{language}.traineddata").is_file()
         # Optional zero-subprocess C-API fast path when `tesserocr` is installed and no test mock is active

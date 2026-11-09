@@ -60,7 +60,12 @@ def test_v5_does_not_download_during_normal_ocr(tmp_path, monkeypatch):
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
     engine = RapidEngine("rapidocr-v5", "v5")
     monkeypatch.setattr(RapidEngine, "runtime_installed", property(lambda self: True))
-    with pytest.raises(Exception, match="explicit model download"):
+
+    def forbidden_download(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("RapidOCR must not download a model during a normal OCR run")
+
+    monkeypatch.setattr(engine, "download", forbidden_download)
+    with pytest.raises(Exception, match="دانلود خودکار"):
         engine._get("eng")
 
 
@@ -68,7 +73,12 @@ def test_v6_missing_model_does_not_download_during_normal_ocr(tmp_path, monkeypa
     engine = RapidEngine("rapidocr-v6", "v6")
     monkeypatch.setattr(RapidEngine, "runtime_installed", property(lambda self: True))
     monkeypatch.setattr(engine, "_v6_model_dir", lambda: tmp_path)
-    with pytest.raises(Exception, match="explicit model download"):
+
+    def forbidden_download(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("RapidOCR must not download a model during a normal OCR run")
+
+    monkeypatch.setattr(engine, "download", forbidden_download)
+    with pytest.raises(Exception, match="دانلود خودکار"):
         engine._get("eng")
 
 
@@ -218,13 +228,28 @@ def test_tesseract_bubble_uses_psm6_without_changing_normal_psm(tmp_path, monkey
     assert commands[1][commands[1].index("--psm") + 1] == "6"
 
 
-def test_tesseract_normal_ocr_never_downloads_a_missing_language(tmp_path, monkeypatch):
+def test_tesseract_normal_ocr_prepares_a_missing_language_instead_of_failing(tmp_path, monkeypatch):
+    """v4.28: a normal OCR run must prepare the missing language file itself.
+
+    Before v4.28 this raised `Tesseract language fas is not ready. Use the explicit
+    model download button first.` and killed the whole Persian OCR request with HTTP 503.
+    """
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
     engine = TesseractEngine()
     engine._system_languages = set()
     monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
-    with pytest.raises(OcrError, match="explicit model download"):
+    prepared: list[str] = []
+
+    def fake_prepare(language: str) -> None:
+        prepared.append(language)
+        raise OcrError("آماده‌سازیِ نمایشی برای آزمون")
+
+    monkeypatch.setattr(engine, "_auto_prepare_language", fake_prepare)
+    with pytest.raises(OcrError) as error:
         engine.recognize(Image.new("RGB", (40, 20)), "eng")
+    assert prepared == ["eng"]
+    assert "not ready" not in str(error.value)
+    assert "explicit model download" not in str(error.value)
 
 
 def test_tesseract_explicit_download_uses_selected_language(tmp_path, monkeypatch):
@@ -3657,3 +3682,85 @@ def test_v427_persian_table_ocr_cell_grid_rtl_order_and_digits(tmp_path, monkeyp
 
     # 4. Arabic-Indic digits are normalized to Persian digits inside Persian text.
     assert ocr_mod.normalize_persian_ocr_text("سال ٢٠٢٤") == "سال ۲۰۲۴"
+
+
+def test_v428_tesseract_persian_language_auto_prepare_and_offline_bundle_guard(tmp_path, monkeypatch):
+    """v4.28: a Persian OCR run must download the missing `fas` file instead of dying with HTTP 503."""
+    import sys
+    from pathlib import Path
+    import comic_studio.ocr as ocr_mod
+    from comic_studio.ocr import OcrError, TesseractEngine
+
+    repo_py = Path(__file__).resolve().parent.parent
+    if str(repo_py) not in sys.path:
+        sys.path.insert(0, str(repo_py))
+    from offline_packaging.build_offline_package import verify_bundled_language_models
+
+    monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path))
+    monkeypatch.setattr("comic_studio.ocr._tesseract_executable", lambda: "/usr/bin/tesseract")
+    tess_dir = tmp_path / "models" / "tesseract"
+    tess_dir.mkdir(parents=True, exist_ok=True)
+    (tess_dir / "eng.traineddata").write_bytes(b"\x00" * 2_000_000)
+
+    # 1. The missing Persian file is downloaded automatically and the engine becomes ready.
+    engine = TesseractEngine()
+    engine._system_languages = set()
+    assert "fas" not in engine.ready_languages
+    downloads: list[str] = []
+
+    def fake_download(language: str, *, timeout: float = 30.0):
+        downloads.append(language)
+        (tess_dir / f"{language}.traineddata").write_bytes(b"\x00" * 3_325_955)
+        return tess_dir / f"{language}.traineddata"
+
+    monkeypatch.setattr(engine, "_download_language_file", fake_download)
+    engine._auto_prepare_language("fas")
+    assert downloads == ["fas"]
+    assert "fas" in engine.ready_languages
+
+    # 2. A failed download is remembered so a batch never repeats the slow download per page.
+    (tess_dir / "fas.traineddata").unlink(missing_ok=True)
+    failing = TesseractEngine()
+    failing._system_languages = set()
+    attempts: list[str] = []
+
+    def failing_download(language: str, *, timeout: float = 30.0):
+        attempts.append(language)
+        raise OcrError("network unreachable")
+
+    monkeypatch.setattr(failing, "_download_language_file", failing_download)
+    with pytest.raises(OcrError) as first_error:
+        failing._auto_prepare_language("fas")
+    message = str(first_error.value)
+    assert "fas" in message and "مدیریت مدل‌های OCR" in message
+    with pytest.raises(OcrError):
+        failing._auto_prepare_language("fas")
+    assert attempts == ["fas"]
+
+    # 3. The Tesseract run path prepares the language instead of failing outright.
+    runner = TesseractEngine()
+    runner._system_languages = set()
+    prepared: list[str] = []
+
+    def recorder(language: str):
+        prepared.append(language)
+        raise OcrError("stop after preparation")
+
+    monkeypatch.setattr(runner, "_auto_prepare_language", recorder)
+    with pytest.raises(OcrError):
+        runner._run_tesseract_tsv(Image.new("RGB", (12, 12), "white"), "fas", "7")
+    assert prepared == ["fas"]
+
+    # 4. The offline builder refuses to ship an app that cannot read Persian.
+    bundle = tmp_path / "bundle_tess"
+    bundle.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(RuntimeError) as missing_error:
+        verify_bundled_language_models(bundle)
+    assert "fas.traineddata" in str(missing_error.value)
+    (bundle / "eng.traineddata").write_bytes(b"\x00" * 2_000_000)
+    (bundle / "fas.traineddata").write_bytes(b"\x00" * 431_500)  # legacy int8 tessdata_fast
+    with pytest.raises(RuntimeError) as legacy_error:
+        verify_bundled_language_models(bundle)
+    assert "tessdata_best" in str(legacy_error.value)
+    (bundle / "fas.traineddata").write_bytes(b"\x00" * 3_325_955)
+    verify_bundled_language_models(bundle)

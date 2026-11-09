@@ -2499,7 +2499,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(normalWeightCheck.styleBold, false, 'Typeset.blockStyle resolves bold = false (regular 400 weight)');
 
       // v3.85–v4.09: Verify version badge ۴.۰۹, async thumbnail decoding, hardware cpuCores endpoint, role pill toggle, Help sections, Persian OCR, 2D suitability, target language menu, total download size announcements, Green->Red sorting, #ocrEngine status icons, unified OCR/Translation management menu, per-page RAM release, zero idle CPU, optional storage settings, race-free backup, built-in offline local translator, custom manual text boxes, watermarks, full-attribute box copy/paste/duplicate, API key priority ordering, lossless PDF import, and grouped-page translation
-      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۲۷ · Python', 'header shows version ۴.۲۷');
+      assert.equal(await page.$eval('.brand .ver', (el) => el.textContent.trim()), '۴.۲۸ · Python', 'header shows version ۴.۲۸');
       const v389BrowserCheck = await page.evaluate(() => {
         const h = { id: 1, text: '8.3.5.7.1 Title', pageRole: 'heading', lineH: 28, x0: 10, y0: 10, x1: 220, y1: 38, enabled: true };
         applyTranslatedBlockDefaults(h, 'تیتر آزمایشی');
@@ -2992,7 +2992,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         await sellerPage.close();
         assert.equal(sellerVisualCheck.fontLoaded, true, 'Vazirmatn.woff2 loads in Seller Panel');
         assert.equal(sellerVisualCheck.logoNaturalWidth, 128, 'icon128.png loads in Seller Panel topbar');
-        assert.equal(sellerVisualCheck.ver, '۴.۲۷ · پنل فروشنده', 'Seller Panel topbar version badge matches Studio');
+        assert.equal(sellerVisualCheck.ver, '۴.۲۸ · پنل فروشنده', 'Seller Panel topbar version badge matches Studio');
         assert.equal(sellerVisualCheck.darkBg, 'rgb(11, 13, 18)', 'Seller Panel dark --bg matches Studio #0b0d12');
         assert.equal(sellerVisualCheck.lightBg, 'rgb(243, 244, 248)', 'Seller Panel light --bg matches Studio #f3f4f8');
         assert.equal(sellerVisualCheck.hasVazirmatnInComputed, true, 'Seller Panel body fontFamily uses Vazirmatn');

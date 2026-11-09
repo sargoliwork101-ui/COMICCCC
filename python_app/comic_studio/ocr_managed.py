@@ -3244,7 +3244,10 @@ class IsolatedOcrEngine:
         check_cancelled("عملیات OCR به درخواست کاربر لغو شد.")
         self._cancel_ocr.clear()
         if not self.runtime_installed or not self.model_ready:
-            raise self._error_cls(f"{self.id} is not ready. Click the explicit preparation button first.")
+            raise self._error_cls(
+                f"مدل {self.id} آماده نیست. در پنجرهٔ «مدیریت مدل‌های OCR» "
+                "روی «آماده‌سازی / دانلود خودکار» این مدل بزنید (برای دانلود اینترنت لازم است)."
+            )
         regions = detect_comic_text_regions(image, page_mode=page_mode) if self._spec.get("needs_regions") else None
         check_cancelled("عملیات OCR به درخواست کاربر لغو شد.")
         with tempfile.NamedTemporaryFile(prefix=f"comic-{self.id}-", suffix=".png", delete=False) as tmp:

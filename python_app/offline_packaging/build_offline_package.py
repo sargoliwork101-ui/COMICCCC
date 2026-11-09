@@ -58,7 +58,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.2.7.0")]
+[assembly: System.Reflection.AssemblyVersion("4.2.8.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -440,7 +440,51 @@ def ensure_pyinstaller(python_exe: str | None = None) -> bool:
     return False
 
 
-def stage_bundled_models(staging_dir: Path, *, include_nmt: bool = False, skip_download: bool = False) -> Path:
+def verify_bundled_language_models(tess_dir: Path, *, allow_missing: bool = False) -> None:
+    """Fail the build when the bundled app could not read Persian or English.
+
+    Root cause of the runtime error `Tesseract language fas is not ready`: the
+    offline bundle was built without the Persian language file (the download
+    had failed silently), so every Persian OCR run inside the built app died
+    with HTTP 503.  The build now stops with an actionable message instead of
+    shipping an app that cannot read Persian.
+    """
+    from comic_studio.ocr import _is_legacy_fast_persian_traineddata
+
+    problems: list[str] = []
+    for lang in ("eng", "fas"):
+        target = tess_dir / f"{lang}.traineddata"
+        if not target.is_file() or target.stat().st_size < 1000:
+            problems.append(f"{lang}.traineddata is missing")
+    fas_file = tess_dir / "fas.traineddata"
+    if fas_file.is_file() and _is_legacy_fast_persian_traineddata(fas_file):
+        problems.append(
+            "fas.traineddata is the old 431 KB int8 file (tessdata_fast); "
+            "the full float32 tessdata_best file (~3.33 MB) is required for correct Persian"
+        )
+    if not problems:
+        print("[ok] Bundled Tesseract language files (eng + fas) are present and up to date.")
+        return
+    message = (
+        "The offline bundle would ship without usable Tesseract language files:\n"
+        + "\n".join(f"  - {item}" for item in problems)
+        + "\nConnect to the internet and build again (the builder downloads them automatically),\n"
+        f"or copy them manually into '{models_dir() / 'tesseract'}' before building."
+    )
+    if allow_missing:
+        print("[warn] " + message.replace("\n", "\n       "))
+        print("[warn] The built app cannot read Persian until these files are added.")
+        return
+    raise RuntimeError(message)
+
+
+def stage_bundled_models(
+    staging_dir: Path,
+    *,
+    include_nmt: bool = False,
+    skip_download: bool = False,
+    allow_missing_language_models: bool = False,
+) -> Path:
     """Copy or prepare base RapidOCR models (and optionally NLLB-200 600M) into `staging_dir`."""
     if staging_dir.exists():
         shutil.rmtree(staging_dir)
@@ -470,6 +514,8 @@ def stage_bundled_models(staging_dir: Path, *, include_nmt: bool = False, skip_d
         shutil.copytree(rapid_src, rapid_dst, dirs_exist_ok=True)
     if tess_src.is_dir():
         shutil.copytree(tess_src, tess_dst, dirs_exist_ok=True)
+
+    verify_bundled_language_models(tess_dst, allow_missing=allow_missing_language_models)
 
     if include_nmt:
         nmt_src = user_models / "local-nmt" / "nllb-600m"
@@ -798,6 +844,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only install PyInstaller (with mirror fallback) and exit",
     )
+    parser.add_argument(
+        "--allow-missing-language-models",
+        action="store_true",
+        help="Do not stop the build when the bundled Tesseract language files (eng/fas) are missing",
+    )
     args = parser.parse_args(argv)
 
     build_root = Path(args.build_dir).expanduser().resolve() if args.build_dir else REPO_PY_ROOT / "build" / "offline_pkg"
@@ -831,6 +882,7 @@ def main(argv: list[str] | None = None) -> int:
         build_root / "bundled_models",
         include_nmt=args.with_nmt,
         skip_download=args.skip_model_download,
+        allow_missing_language_models=args.allow_missing_language_models,
     )
     print(f"[ok] Staged bundled offline models (with_nmt={args.with_nmt}): {staged_models}")
 

@@ -968,7 +968,7 @@ function check(name, condition) {
     check('confirming translation cancel closes translationDialog without reopening and resets busy state', $('appModalDialog').open === false && $('translationDialog').open === false && vm.runInContext('translationRunning === false && jobBusy === false', context) && $('translateBtn').disabled === false);
     releaseTr1(); translationGate = null;
 
-    // v4.27: the "لغو" buttons must really stop the running work (server-side preemption), and every
+    // v4.28: the "لغو" buttons must really stop the running work (server-side preemption), and every
     // long-running dialog now exposes its own visible cancel button.
     check('export, editor and OCR-quick cancel buttons exist for in-flight work', Boolean($('cancelExportBtn')) && Boolean($('editorCancelJobBtn')) && Boolean($('ocrQuickCancelBtn')));
     check('cancel buttons start hidden and are only shown while their job runs', $('cancelExportBtn').classList.contains('hidden') && $('editorCancelJobBtn').classList.contains('hidden'));
@@ -1051,7 +1051,7 @@ function check(name, condition) {
         if (!body.force) {
           return jsonResponse({ kind: 'hardware_warning', detail: 'NVIDIA GPU required', warnings: mockCatalog[1].hardwareCheck.warnings, hardwareCheck: mockCatalog[1].hardwareCheck }, 409);
         }
-        mockCatalog = mockCatalog.map((item) => item.id === 'olmocr' ? { ...item, runtimeInstalled: true, modelReady: true, readyLanguages: [body.language || 'eng'], installedVersion: '0.4.27' } : item);
+        mockCatalog = mockCatalog.map((item) => item.id === 'olmocr' ? { ...item, runtimeInstalled: true, modelReady: true, readyLanguages: [body.language || 'eng'], installedVersion: '0.4.28' } : item);
         return jsonResponse({ ok: true, language: body.language || 'eng', engines: mockCatalog });
       }
       if (parsed.pathname === '/api/engines/rapidocr-v6/update' && options.method === 'POST') {
@@ -2195,7 +2195,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas426: verText.includes('۴.۲۷'),
+            verHas426: verText.includes('۴.۲۸'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2214,7 +2214,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.27 displays version 4.27 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.28 displays version 4.28 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4416,7 +4416,8 @@ function check(name, condition) {
       JSON.stringify(v424PersianAdoptAndHelpCheck),
     );
 
-    // v4.27: the in-app Help must document the new cell-by-cell Persian table reading.
+    // v4.27/v4.28: the in-app Help must document the Persian table reading and the automatic
+    // download of the missing Persian language file.
     const v427TableHelpCheck = await vm.runInContext(`
       (() => {
         const helpModes = window.ComicHelpGuide.HELP_SECTIONS.find((s) => s.id === 'ocr-modes');
@@ -4425,13 +4426,19 @@ function check(name, condition) {
           && helpModes.features.some((f) => f.includes('سلول') && f.includes('جدول'))
           && helpModes.example && helpModes.example.body.includes('جدول')
         );
+        const helpHasV428AutoLang = Boolean(
+          helpModes
+          && helpModes.features.some((f) => f.includes('دانلود خودکار فایل زبان فارسی') && f.includes('fas'))
+        );
         const verText = document.querySelector('.brand .ver')?.textContent || '';
-        return { helpHasV427Table, verHas427: verText.includes('۴.۲۷') };
+        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۲۸') };
       })()
     `, context);
     check(
-      'v4.27 documents the cell-by-cell Persian table reading in Help chapter 6 and shows version 4.27',
-      v427TableHelpCheck.helpHasV427Table === true && v427TableHelpCheck.verHas427 === true,
+      'v4.27/v4.28 document the cell-by-cell Persian table reading and the automatic Persian language download in Help chapter 6',
+      v427TableHelpCheck.helpHasV427Table === true
+        && v427TableHelpCheck.helpHasV428AutoLang === true
+        && v427TableHelpCheck.verHas428 === true,
       JSON.stringify(v427TableHelpCheck),
     );
   }

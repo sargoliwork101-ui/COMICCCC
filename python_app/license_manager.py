@@ -977,7 +977,7 @@ _PANEL_HTML = """<!doctype html>
     <div class="brand">
       <img class="logo" src="/assets/icon128.png" alt="">
       <div>
-        <h1>Comic OCR Studio <span class="ver">۴.۲۷ · پنل فروشنده</span></h1>
+        <h1>Comic OCR Studio <span class="ver">۴.۲۸ · پنل فروشنده</span></h1>
         <span class="brand-sub">مدیریت کلید مادر ۲۵۶ بایتی، بانک مشتریان و صدور لایسنس ماژولار آفلاین</span>
       </div>
     </div>

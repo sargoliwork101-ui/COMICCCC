@@ -442,8 +442,11 @@ def _read_cell_tesseract(engine: Any, crop: Any, language: str) -> tuple[str, fl
         confs = [float(w.get("conf", 0.0)) for w in words if float(w.get("conf", -1)) >= 0]
         conf = (sum(confs) / len(confs) / 100.0) if confs else 0.0
         if language in _RTL_LANGUAGES and text and _persian_line_needs_bilingual_check(text, words):
+            # Only arbitrate with English when that language file is really present:
+            # the arbitration must never trigger a hidden download inside a table cell.
+            eng_ready = "eng" in (getattr(engine, "ready_languages", None) or [])
             try:
-                eng_tsv = engine._run_tesseract_tsv(crop, "eng", "7")
+                eng_tsv = engine._run_tesseract_tsv(crop, "eng", "7") if eng_ready else ""
             except Exception:
                 eng_tsv = ""
             eng_words = _parse_tsv_word_spans(eng_tsv) if eng_tsv else []
