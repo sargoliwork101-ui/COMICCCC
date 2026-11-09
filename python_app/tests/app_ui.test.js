@@ -4548,7 +4548,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.30' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.31' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();

@@ -71,6 +71,12 @@ EXTRA_PREPROCESS_THRESHOLD = 200
 EXTRA_PREPROCESS_MIN_CONFIDENCE = 0.55
 EXTRA_PREPROCESS_MIN_CHARS = 3
 EXTRA_PREPROCESS_ENABLED = True
+# RapidOCR's text detector resizes every input so that its SHORT side reaches 736px
+# (limit_type="min").  A wide, short bubble/container crop was therefore blown up to a
+# multi-megapixel canvas, so reading one bubble could cost more than reading the whole
+# page.  Crop level passes switch the detector to a "max" limit instead.
+DET_SHORT_SIDE_LIMIT = 736
+CROP_DET_MAX_SIDE = 1280
 # Optional comic-bubble fallback. These thresholds are intentionally easy to tune.
 BUBBLE_PREPROCESS_ENABLED = True
 BUBBLE_DARK_THRESHOLD = 110
@@ -864,7 +870,37 @@ def _stream_download_with_mirrors(
     raise OcrError(f"Download failed for {label}: {last_exc}") from last_exc
 
 
+def _apply_det_input_cap(engine: Any, det_max_side: int | None) -> None:
+    """Bound the size of the ONNX text-detection canvas of a RapidOCR instance.
+
+    RapidOCR's detector resizes an input so that its short side reaches 736px
+    (``limit_type="min"``).  A wide, short bubble or table-cell crop is therefore
+    blown up to a multi-megapixel canvas, which made a single crop pass cost more
+    than reading the whole page.  Crop level passes switch the detector to a "max"
+    limit so the canvas never grows past ``det_max_side`` pixels on the long side.
+    The recognised text still comes from the full resolution image, so the read
+    result does not change.
+    """
+    det = getattr(engine, "text_det", None)
+    cfg = getattr(engine, "cfg", None)
+    det_cfg = getattr(cfg, "Det", None) if cfg is not None else None
+    if det_max_side:
+        limit_type, limit_len = "max", max(64, int(det_max_side))
+    else:
+        limit_type, limit_len = "min", DET_SHORT_SIDE_LIMIT
+    if det is not None:
+        with contextlib.suppress(Exception):
+            det.limit_type = limit_type
+            det.limit_side_len = limit_len
+    if det_cfg is not None:
+        with contextlib.suppress(Exception):
+            det_cfg.limit_type = limit_type
+            det_cfg.limit_side_len = limit_len
+
+
 class RapidEngine:
+    # The engine understands a bounded detection canvas (see _apply_det_input_cap).
+    supports_det_cap = True
     def __init__(self, engine_id: str, version: str) -> None:
         self.id = engine_id
         self.version = version
@@ -1336,7 +1372,7 @@ class RapidEngine:
             self.unload()
             trim_process_memory()
 
-    def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+    def recognize(self, image: Image.Image, language: str, *, det_max_side: int | None = None) -> list[OcrLine]:
         rgb = _to_white_backed_rgb(image) if getattr(image, "mode", "RGB") != "RGB" else image
         try:
             arr = np.asarray(rgb)
@@ -1352,6 +1388,7 @@ class RapidEngine:
         )
         with _persian_ctc_bidi_context(language):
             with self._checkout(language) as engine:
+                _apply_det_input_cap(engine, det_max_side)
                 used_gpu_engine = self.using_gpu or (not force_cpu_before and self._force_cpu)
                 infer_ctx = self._gpu_infer_lock if used_gpu_engine else contextlib.nullcontext()
                 try:
@@ -1378,6 +1415,7 @@ class RapidEngine:
                         raise OcrError(f"OCR failed: {exc}") from exc
             if need_cpu_retry:
                 with self._checkout(language) as cpu_engine:
+                    _apply_det_input_cap(cpu_engine, det_max_side)
                     try:
                         result = cpu_engine(arr, **fa_call_kwargs)
                     except TypeError:
@@ -1403,6 +1441,62 @@ class RapidEngine:
             ]
             lines = _coalesce_rtl_ocr_lines(lines, arr)
         return lines
+
+    def recognize_line_text(self, image: Image.Image, language: str) -> tuple[str, float]:
+        """Read a crop that already holds a single text line, without running text detection.
+
+        Table cells and other one-line crops do not need the detector: the detector only
+        finds the line that is already known.  Skipping it removes the most expensive
+        part of reading a page full of small cells.
+        """
+        rgb = _to_white_backed_rgb(image) if getattr(image, "mode", "RGB") != "RGB" else image
+        try:
+            arr = np.asarray(rgb)
+        finally:
+            if rgb is not image:
+                rgb.close()
+        text_score = 0.22 if language == "fas" else 0.5
+        with _persian_ctc_bidi_context(language):
+            with self._checkout(language) as engine:
+                _apply_det_input_cap(engine, None)
+                # RapidOCR keeps the switches of the last call inside the instance, so the
+                # "no detector" mode has to be switched off again for the next page.
+                saved = {
+                    name: getattr(engine, name)
+                    for name in ("use_det", "use_cls", "use_rec", "text_score")
+                    if hasattr(engine, name)
+                }
+                try:
+                    result = engine(arr, use_det=False, use_cls=False, text_score=text_score)
+                except TypeError:
+                    try:
+                        result = engine(arr, use_det=False, use_cls=False)
+                    except TypeError:
+                        result = engine(arr)
+                except Exception as exc:
+                    raise OcrError(f"OCR failed: {exc}") from exc
+                finally:
+                    for name, value in saved.items():
+                        with contextlib.suppress(Exception):
+                            setattr(engine, name, value)
+        texts = getattr(result, "txts", None)
+        scores = getattr(result, "scores", None)
+        if not texts:
+            return "", 0.0
+        best_text = ""
+        best_score = 0.0
+        for index, raw in enumerate(texts):
+            value = str(raw or "").strip()
+            if not value:
+                continue
+            score = float(scores[index]) if scores is not None and index < len(scores) else 0.0
+            if score > best_score or not best_text:
+                best_text, best_score = value, score
+        if language == "fas":
+            best_text = normalize_persian_ocr_text(best_text)
+            if not best_text:
+                return "", 0.0
+        return best_text, best_score
 
 
 class EasyEngine:
@@ -4679,10 +4773,20 @@ def _bubble_region_confidence(lines: list[OcrLine]) -> float:
     return 100.0 * sum(words * confidence for words, confidence in weighted) / total
 
 
-def _recognize_bubble_lines(engine: Any, image: Image.Image, language: str) -> list[OcrLine]:
+def _recognize_bubble_lines(
+    engine: Any,
+    image: Image.Image,
+    language: str,
+    *,
+    det_max_side: int | None = None,
+) -> list[OcrLine]:
     # Only Tesseract needs a different page-segmentation mode for a single bubble.
     recognizer = getattr(engine, "recognize_bubble", None)
-    return recognizer(image, language) if callable(recognizer) else engine.recognize(image, language)
+    if callable(recognizer):
+        return recognizer(image, language)
+    if det_max_side is not None and getattr(engine, "supports_det_cap", False):
+        return engine.recognize(image, language, det_max_side=det_max_side)
+    return engine.recognize(image, language)
 
 
 def _recognize_bubble(
@@ -4699,7 +4803,13 @@ def _recognize_bubble(
         for idx_r, (prepared, offset_x, offset_y) in enumerate(regions):
             _check_ocr_cancelled()
             try:
-                lines = [line for line in _recognize_bubble_lines(engine, prepared, language) if line.text.strip()]
+                lines = [
+                    line
+                    for line in _recognize_bubble_lines(
+                        engine, prepared, language, det_max_side=CROP_DET_MAX_SIDE,
+                    )
+                    if line.text.strip()
+                ]
             finally:
                 prepared.close()
             if not lines or _bubble_region_confidence(lines) < BUBBLE_MIN_REGION_CONFIDENCE:
@@ -5127,7 +5237,10 @@ def _recognize_persian_containers(
                     )
                     try:
                         raw_lines = [
-                            ln for ln in _recognize_bubble_lines(engine, prep_img, language)
+                            ln
+                            for ln in _recognize_bubble_lines(
+                                engine, prep_img, language, det_max_side=CROP_DET_MAX_SIDE,
+                            )
                             if ln.text.strip()
                         ]
                     finally:

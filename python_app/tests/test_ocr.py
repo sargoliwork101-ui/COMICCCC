@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import subprocess
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from comic_studio.ocr import (
     ENGINE_INFO, EasyEngine, OcrError, OcrLine, RapidEngine, TesseractEngine,
@@ -3825,3 +3826,188 @@ def test_v430_the_worker_watchdog_stops_a_worker_whose_parent_is_gone(tmp_path):
     elapsed = time.monotonic() - started
     assert "started" in result.stdout
     assert elapsed < 20.0, "the worker must stop itself when the studio is gone"
+
+
+class _FakeDetector:
+    def __init__(self) -> None:
+        self.limit_type = "min"
+        self.limit_side_len = 736
+
+
+class _FakeRapidInstance:
+    """A RapidOCR look-alike that records the detection canvas of every call."""
+
+    def __init__(self) -> None:
+        self.text_det = _FakeDetector()
+        self.cfg = SimpleNamespace(Det=SimpleNamespace(limit_type="min", limit_side_len=736))
+        self.calls: list[tuple[str, int]] = []
+
+    def __call__(self, arr, **kwargs):
+        self.calls.append((self.text_det.limit_type, self.text_det.limit_side_len))
+        return SimpleNamespace(
+            boxes=np.array([[[1, 2], [20, 2], [20, 12], [1, 12]]]),
+            txts=["hello"], scores=np.array([0.9]),
+        )
+
+
+def test_v431_a_bounded_detection_canvas_is_used_for_crop_passes_only():
+    """A wide, short bubble crop must not blow the detector up to a huge canvas."""
+    from comic_studio.ocr import CROP_DET_MAX_SIDE, DET_SHORT_SIDE_LIMIT, _apply_det_input_cap
+
+    instance = _FakeRapidInstance()
+    _apply_det_input_cap(instance, CROP_DET_MAX_SIDE)
+    assert instance.text_det.limit_type == "max"
+    assert instance.text_det.limit_side_len == CROP_DET_MAX_SIDE
+    # The next page level pass must get the normal detector behaviour back.
+    _apply_det_input_cap(instance, None)
+    assert instance.text_det.limit_type == "min"
+    assert instance.text_det.limit_side_len == DET_SHORT_SIDE_LIMIT
+
+
+def test_v431_the_rapid_engine_bounds_the_canvas_of_a_crop_pass(monkeypatch):
+    from comic_studio.ocr import CROP_DET_MAX_SIDE
+
+    engine = RapidEngine("rapidocr-v6", "v6")
+    instance = _FakeRapidInstance()
+
+    @contextlib.contextmanager
+    def fake_checkout(language):
+        yield instance
+
+    monkeypatch.setattr(engine, "_checkout", fake_checkout)
+    image = Image.new("RGB", (400, 120), "white")
+    engine.recognize(image, "eng", det_max_side=CROP_DET_MAX_SIDE)
+    engine.recognize(image, "eng")
+    assert instance.calls[0] == ("max", CROP_DET_MAX_SIDE)
+    assert instance.calls[1] == ("min", 736)
+
+
+def test_v431_the_persian_container_pass_uses_the_bounded_canvas(monkeypatch):
+    from comic_studio import ocr
+    from comic_studio.ocr import CROP_DET_MAX_SIDE, _recognize_persian_containers
+
+    seen: list[int | None] = []
+
+    class FakeCappedEngine:
+        supports_det_cap = True
+
+        def recognize(self, image, language, page_mode="auto", *, det_max_side=None):
+            seen.append(det_max_side)
+            return [OcrLine("متن", 0.9, [[0, 0], [10, 0], [10, 10], [0, 10]])]
+
+    crop = Image.new("RGB", (200, 60), "white")
+    monkeypatch.setattr(
+        ocr, "_persian_container_regions", lambda image: [(crop, 10, 20, 200, 60)],
+    )
+    page = Image.new("RGB", (600, 400), "white")
+    _recognize_persian_containers(FakeCappedEngine(), page, "fas", 0.35)
+    assert seen, "the container pass must read every container"
+    assert all(value == CROP_DET_MAX_SIDE for value in seen)
+
+
+def test_v431_a_table_cell_is_read_without_running_the_text_detector():
+    from comic_studio.table_ocr import _read_cell_generic
+
+    class FakeCellEngine:
+        def __init__(self) -> None:
+            self.detector_calls = 0
+
+        def recognize(self, image, language):
+            self.detector_calls += 1
+            return [OcrLine("with detector", 0.9, [[0, 0], [10, 0], [10, 10], [0, 10]])]
+
+    engine = FakeCellEngine()
+    crop = Image.new("RGB", (120, 40), "white")
+    text, conf, bounds = _read_cell_generic(engine, crop, "fas")
+    assert text == "with detector"
+    assert engine.detector_calls == 1  # an engine without the fast reader keeps the old path
+    assert bounds == (0.0, 0.0, 10.0, 10.0)
+
+    class FakeFastEngine(FakeCellEngine):
+        def recognize_line_text(self, image, language):
+            return ("fast cell", 0.75)
+
+    fast = FakeFastEngine()
+    text, conf, bounds = _read_cell_generic(fast, crop, "fas", single_line=True)
+    assert text == "fast cell"
+    assert fast.detector_calls == 0, "the text detector must not run for a known cell"
+    assert bounds == (0.0, 0.0, 0.0, 0.0)
+    # A cell with several lines keeps the detector, because the detector separates them.
+    text, conf, bounds = _read_cell_generic(fast, crop, "fas", single_line=False)
+    assert text == "with detector"
+    assert fast.detector_calls == 1
+
+
+def test_v431_reading_a_single_line_does_not_switch_off_the_detector():
+    """The "no detector" mode must not stay on inside the engine instance."""
+    from comic_studio.ocr import RapidEngine
+
+    class _StatefulInstance:
+        def __init__(self) -> None:
+            self.text_det = _FakeDetector()
+            self.cfg = SimpleNamespace(Det=SimpleNamespace(limit_type="min", limit_side_len=736))
+            self.use_det = True
+            self.use_cls = True
+            self.use_rec = True
+            self.text_score = 0.5
+            self.calls: list[dict] = []
+
+        def __call__(self, arr, **kwargs):
+            self.calls.append(dict(kwargs))
+            # RapidOCR keeps the switches of the last call inside the instance.
+            for name in ("use_det", "use_cls", "use_rec", "text_score"):
+                if name in kwargs:
+                    setattr(self, name, kwargs[name])
+            return SimpleNamespace(txts=["hello"], scores=np.array([0.9]))
+
+    engine = RapidEngine("rapidocr-v6", "v6")
+    instance = _StatefulInstance()
+
+    @contextlib.contextmanager
+    def fake_checkout(language):
+        yield instance
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(engine, "_checkout", fake_checkout)
+    try:
+        text, score = engine.recognize_line_text(Image.new("RGB", (80, 30), "white"), "eng")
+    finally:
+        monkey.undo()
+    assert text == "hello"
+    assert instance.calls[0]["use_det"] is False
+    # The next page must still use the text detector.
+    assert instance.use_det is True
+    assert instance.use_cls is True
+    assert instance.text_score == 0.5
+
+
+def test_v431_a_table_cell_counts_its_text_lines():
+    from comic_studio.table_ocr import _cell_has_single_text_line, _cell_text_line_count
+
+    single = np.zeros((40, 300), dtype=np.uint8)
+    single[14:26, 40:200] = 255
+    assert _cell_text_line_count(single) == 1
+    assert _cell_has_single_text_line(single) is True
+
+    two = np.zeros((90, 300), dtype=np.uint8)
+    two[10:22, 40:200] = 255
+    two[50:62, 40:200] = 255
+    assert _cell_text_line_count(two) == 2
+    assert _cell_has_single_text_line(two) is False
+
+    # Persian dots above/below a line are not a line of their own.
+    dotted = np.zeros((60, 300), dtype=np.uint8)
+    dotted[20:34, 40:200] = 255
+    dotted[12:17, 120:126] = 255
+    dotted[36:40, 150:156] = 255
+    assert _cell_text_line_count(dotted) == 1
+
+
+def test_v431_a_table_cell_is_cropped_around_its_own_text():
+    from comic_studio.table_ocr import _tight_ink_box
+
+    ink = np.zeros((40, 200), dtype=np.uint8)
+    ink[12:22, 60:140] = 255
+    top, bottom, left, right = _tight_ink_box(ink)
+    assert (top, bottom, left, right) == (12, 22, 60, 140)
+    assert _tight_ink_box(np.zeros((0, 0), dtype=np.uint8)) == (0, 0, 0, 0)

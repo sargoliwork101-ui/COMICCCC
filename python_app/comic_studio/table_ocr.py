@@ -39,6 +39,8 @@ MAX_CELLS = 160                       # hard cap so a huge page can never hang t
 MIN_CELL_INK_RATIO = 0.004            # a cell with almost no ink is skipped
 TARGET_TEXT_HEIGHT = 46.0             # cells are upscaled to this ink height for Tesseract
 MAX_CELL_UPSCALE = 4.0
+CELL_CROP_MARGIN = 3                  # white margin kept around the text of a table cell
+CELL_DET_MAX_SIDE = 1280               # the text detector never looks at more than this many pixels
 
 _RTL_LANGUAGES = {"fas", "ara"}
 
@@ -406,6 +408,78 @@ def _engine_reads_cells(engine: Any) -> bool:
     return type(engine).__name__ in {"RapidEngine", "EasyEngine"}
 
 
+def _cell_text_line_count(sub: Any) -> int:
+    """Count the text lines of a table cell from its ink mask.
+
+    Small bands (the dots above/below a Persian line) do not count as a line of their
+    own, so a single line cell is never mistaken for a two line cell.
+    """
+    import numpy as np
+
+    if sub is None or sub.size == 0:
+        return 0
+    inner = sub
+    if getattr(inner, "shape", (0, 0))[1] > 8:
+        inner = inner[:, 2:-2]
+    rows = (inner > 0).sum(axis=1)
+    if rows.size == 0:
+        return 0
+    peak = float(rows.max())
+    if peak <= 0:
+        return 0
+    active = rows >= max(1.0, peak * 0.20)
+    bands: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, flag in enumerate(active):
+        if flag and start is None:
+            start = index
+        elif not flag and start is not None:
+            bands.append((start, index))
+            start = None
+    if start is not None:
+        bands.append((start, len(active)))
+    if not bands:
+        return 0
+    max_h = max(b1 - b0 for b0, b1 in bands)
+    min_band_h = max(2, int(round(max_h * 0.30)))
+    main = [band for band in bands if (band[1] - band[0]) >= min_band_h] or bands
+    merge_gap = max(2, int(round(max_h * 0.45)))
+    merged: list[list[int]] = [list(main[0])]
+    for b0, b1 in main[1:]:
+        prev0, prev1 = merged[-1]
+        if b0 - prev1 <= merge_gap:
+            merged[-1][1] = b1
+        else:
+            merged.append([b0, b1])
+    return len(merged)
+
+
+def _cell_has_single_text_line(sub: Any) -> bool:
+    """Tell whether a table cell holds a single line of text.
+
+    A single line cell can be read directly (no text detector needed).  A cell with
+    several lines keeps the detector, because the detector is what separates the lines.
+    """
+    try:
+        return _cell_text_line_count(sub) <= 1
+    except Exception:
+        return True
+
+
+def _tight_ink_box(sub: Any) -> tuple[int, int, int, int]:
+    """Return the (top, bottom, left, right) box of the ink inside a table cell."""
+    import numpy as np
+
+    if sub is None or sub.size == 0:
+        return 0, 0, 0, 0
+    mask = sub > 0
+    rows = np.nonzero(mask.sum(axis=1) > 0)[0]
+    cols = np.nonzero(mask.sum(axis=0) > 0)[0]
+    if rows.size == 0 or cols.size == 0:
+        return 0, 0, 0, 0
+    return int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
+
+
 def _cell_scale(ink: Any, box: tuple[int, int, int, int]) -> float:
     import numpy as np
 
@@ -467,9 +541,29 @@ def _read_cell_tesseract(engine: Any, crop: Any, language: str) -> tuple[str, fl
     return best_text, best_conf, (x0, y0, x1, y1)
 
 
-def _read_cell_generic(engine: Any, crop: Any, language: str) -> tuple[str, float, tuple[float, float, float, float]]:
+def _read_cell_generic(
+    engine: Any,
+    crop: Any,
+    language: str,
+    *,
+    single_line: bool = False,
+    det_max_side: int | None = None,
+) -> tuple[str, float, tuple[float, float, float, float]]:
+    # A table cell that holds one single line already knows where its text is, so the
+    # text detector is not needed here.  Engines that can read one line directly skip
+    # the (slow) detector.
+    line_reader = getattr(engine, "recognize_line_text", None)
+    if single_line and callable(line_reader):
+        try:
+            text, conf = line_reader(crop, language)
+        except Exception:
+            return "", 0.0, (0.0, 0.0, 0.0, 0.0)
+        return (str(text or "").strip(), float(conf or 0.0), (0.0, 0.0, 0.0, 0.0))
     try:
-        lines = engine.recognize(crop, language)
+        if det_max_side is not None and getattr(engine, "supports_det_cap", False):
+            lines = engine.recognize(crop, language, det_max_side=det_max_side)
+        else:
+            lines = engine.recognize(crop, language)
     except TypeError:
         try:
             lines = engine.recognize(crop, language, page_mode="auto")
@@ -552,22 +646,48 @@ def recognize_tables(
                     continue
                 scale = _cell_scale(ink, (x0, y0, x1, y1))
                 try:
-                    crop = image.crop((x0, y0, x1, y1))
+                    cell_view = image.crop((x0, y0, x1, y1))
                 except Exception:
                     continue
+                crop = cell_view
                 try:
                     if scale > 1.05:
-                        crop = crop.resize(
+                        cell_view = cell_view.resize(
                             (max(1, int(round((x1 - x0) * scale))), max(1, int(round((y1 - y0) * scale)))),
                             _resample_lanczos(),
                         )
+                        crop = cell_view
+                    # A cell that holds a single line does not need the text detector: the
+                    # line is already known.  Only the part of the cell that really carries
+                    # text is read, so the detector never expands a wide, short cell into a
+                    # huge canvas (which made every single cell of every table slow).
+                    single_line = _cell_has_single_text_line(sub)
+                    crop_x0, crop_y0 = x0, y0
+                    if single_line:
+                        tight_top, tight_bottom, tight_left, tight_right = _tight_ink_box(sub)
+                        left = max(0, int(round(tight_left * scale)) - CELL_CROP_MARGIN)
+                        top = max(0, int(round(tight_top * scale)) - CELL_CROP_MARGIN)
+                        right = min(cell_view.width, int(round(tight_right * scale)) + CELL_CROP_MARGIN)
+                        bottom = min(cell_view.height, int(round(tight_bottom * scale)) + CELL_CROP_MARGIN)
+                        if right - left >= 10 and bottom - top >= 8:
+                            crop = cell_view.crop((left, top, right, bottom))
+                            crop_x0 = x0 + left / max(1e-6, scale)
+                            crop_y0 = y0 + top / max(1e-6, scale)
                     if callable(getattr(engine, "_run_tesseract_tsv", None)):
                         text, conf, bounds = _read_cell_tesseract(engine, crop, language)
                     else:
-                        text, conf, bounds = _read_cell_generic(engine, crop, language)
+                        text, conf, bounds = _read_cell_generic(
+                            engine, crop, language,
+                            single_line=single_line, det_max_side=CELL_DET_MAX_SIDE,
+                        )
                 finally:
+                    if crop is not cell_view:
+                        try:
+                            crop.close()
+                        except Exception:
+                            pass
                     try:
-                        crop.close()
+                        cell_view.close()
                     except Exception:
                         pass
                 budget -= 1
@@ -581,10 +701,10 @@ def recognize_tables(
                     bx0, by0, bx1, by1 = float(x0), float(y0), float(x1), float(y1)
                 else:
                     inv = 1.0 / max(1e-6, scale)
-                    bx0 = x0 + bounds[0] * inv
-                    by0 = y0 + bounds[1] * inv
-                    bx1 = x0 + bounds[2] * inv
-                    by1 = y0 + bounds[3] * inv
+                    bx0 = crop_x0 + bounds[0] * inv
+                    by0 = crop_y0 + bounds[1] * inv
+                    bx1 = crop_x0 + bounds[2] * inv
+                    by1 = crop_y0 + bounds[3] * inv
                 bx0 = max(0.0, min(page_w, bx0))
                 bx1 = max(bx0 + 1.0, min(page_w, bx1))
                 by0 = max(0.0, min(page_h, by0))
