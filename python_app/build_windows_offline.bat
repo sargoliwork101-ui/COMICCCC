@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul 2>nul
-title Build Offline EXE ^& Setup - Comic OCR Studio 4.29
+title Build Offline EXE ^& Setup - Comic OCR Studio 4.30
 
 cd /d "%~dp0"
 set "APP_DIR=%CD%"
@@ -10,7 +10,7 @@ set "WHEELHOUSE_DIR=%APP_DIR%\wheelhouse"
 set "DEFAULT_OUT_DIR=%APP_DIR%\dist"
 
 echo ====================================================================
-echo   Comic OCR Studio 4.29 - Offline Windows EXE ^& Setup Builder
+echo   Comic OCR Studio 4.30 - Offline Windows EXE ^& Setup Builder
 echo ====================================================================
 echo.
 
@@ -35,7 +35,7 @@ if defined OUT_DIR goto output_selected
 echo.
 echo Folder that receives the built EXE files:
 echo   Standalone app : ^<output folder^>\ComicOCRStudio\ComicOCRStudio.exe
-echo   Offline Setup  : ^<output folder^>\ComicOCRStudio-Offline-Setup-4.29.exe
+echo   Offline Setup  : ^<output folder^>\ComicOCRStudio-Offline-Setup-4.30.exe
 echo.
 set /p "OUT_DIR=Output folder (press Enter for %DEFAULT_OUT_DIR%): "
 if not defined OUT_DIR set "OUT_DIR=%DEFAULT_OUT_DIR%"
@@ -85,7 +85,7 @@ echo.
 echo ====================================================================
 echo   BUILD COMPLETE!
 echo   1-Click Standalone EXE : "%OUT_DIR%\ComicOCRStudio\ComicOCRStudio.exe"
-echo   Offline Setup Installer: "%OUT_DIR%\ComicOCRStudio-Offline-Setup-4.29*.exe"
+echo   Offline Setup Installer: "%OUT_DIR%\ComicOCRStudio-Offline-Setup-4.30*.exe"
 echo ====================================================================
 pause
 exit /b 0

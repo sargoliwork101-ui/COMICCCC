@@ -334,8 +334,14 @@ async function heartbeat() {
   if (sessionCloseSent || heartbeatInFlight) return;
   heartbeatInFlight = true;
   try {
-    await fetch('/api/session/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: TAB_ID }), cache: 'no-store' });
-  } catch { /* a closed server needs no further browser-side error */ }
+    const response = await fetch('/api/session/heartbeat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: TAB_ID }), cache: 'no-store' });
+    if (response && response.ok) noteServerReachable();
+    else showServerUnreachable(`پاسخ سرور برای ضربان نشست: ${response ? response.status : 'بدون پاسخ'}`);
+  } catch (cause) {
+    // The local app is gone (closed while this tab was in the background).
+    // Tell the user instead of leaving a dead workspace behind.
+    showServerUnreachable(cause?.message || 'بدون پاسخ');
+  }
   finally { heartbeatInFlight = false; }
 }
 function startSession() {
@@ -391,6 +397,52 @@ function toast(message, error = false) {
     }, 220);
   }, error ? 7000 : 3400);
 }
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0))); }
+// ---------- local app connection state ----------
+// The studio runs as a local server.  If that server goes away (the app was
+// closed, or it is still starting) the page stays open but every request
+// fails.  Instead of leaving the user with a dead workspace - which in the
+// past forced a close-and-relaunch - a clear banner is shown with a one
+// click recovery.
+let serverUnreachableShown = false;
+function showServerUnreachable(detail = '') {
+  const alert = $('serverAlert');
+  if (!alert) return;
+  const text = $('serverAlertText');
+  if (text) {
+    text.textContent = 'ارتباط با برنامهٔ محلی قطع شد. اگر برنامه را بسته‌اید، دوباره آن را باز کنید؛ در غیر این صورت روی «تلاش دوباره» بزنید.';
+  }
+  const detailEl = $('serverAlertDetail');
+  if (detailEl) {
+    const info = String(detail || '').trim();
+    detailEl.textContent = info;
+    detailEl.classList.toggle('hidden', !info);
+  }
+  alert.classList.remove('hidden');
+  serverUnreachableShown = true;
+}
+function hideServerUnreachable() {
+  const alert = $('serverAlert');
+  if (alert) alert.classList.add('hidden');
+  serverUnreachableShown = false;
+}
+function noteServerReachable() {
+  if (serverUnreachableShown) hideServerUnreachable();
+}
+async function retryServerConnection() {
+  const btn = $('serverAlertRetry');
+  const label = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'در حال تلاش…'; }
+  try {
+    await api('/api/health', { cache: 'no-store' });
+    hideServerUnreachable();
+    await bootApp({ retry: true });
+  } catch (error) {
+    showServerUnreachable();
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label || 'تلاش دوباره'; }
+  }
+}
 async function api(url, options = {}) {
   const method = String(options.method || 'GET').toUpperCase();
   let path = '';
@@ -403,9 +455,13 @@ async function api(url, options = {}) {
       abortErr.name = 'AbortError'; abortErr.cancelled = true;
       throw abortErr;
     }
+    // The local app is not answering any more (it was closed, or it is still
+    // starting).  Show the recovery banner instead of leaving a dead page.
+    showServerUnreachable(`${method} ${path}`);
     const error = new Error(`خطای ارتباط با برنامه (${method} ${path})؛ ${cause?.name || 'Error'}: ${cause?.message || cause}. سرور و اتصال را بررسی کنید.`);
     error.status = 0; throw error;
   }
+  noteServerReachable();
   const type = response.headers.get('content-type') || '';
   let payload = null, parseError = '';
   if (type.includes('json')) {
@@ -8630,6 +8686,8 @@ function bindEvents() {
   window.addEventListener('pagehide', finishBrowserSession);
   window.addEventListener('beforeunload', finishBrowserSession);
   window.addEventListener('pageshow', (event) => { if (event.persisted) startSession(); });
+  $('serverAlertRetry')?.addEventListener('click', () => { retryServerConnection(); });
+  $('serverAlertDismiss')?.addEventListener('click', () => { hideServerUnreachable(); });
   bindGridDrop();
   $('menuBtn').addEventListener('click', () => setMenuOpen($('menu').classList.contains('hidden')));
   const closeMenuOutside = (event) => {
@@ -10178,12 +10236,33 @@ async function lockWorkspaceNow() {
   toast('برنامه قفل شد');
 }
 
+async function bootApp(options = {}) {
+  // Root cause of "the app does not come up": a single failed request during
+  // start-up left the workspace half loaded and the only way out was to
+  // close and launch the app again.  The boot is retried a few times and, if
+  // it still fails, a clear message with a recovery button is shown.
+  const attempts = 3;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const authStatus = await refreshAuthGateState();
+      if (!authStatus?.licensed || !authStatus?.unlocked) { hideServerUnreachable(); return; }
+      await bootUnlockedWorkspace();
+      hideServerUnreachable();
+      return;
+    } catch (error) {
+      if (error?.name === 'AbortError') return;
+      lastError = error;
+      if (error?.status === 0) showServerUnreachable();
+      if (attempt < attempts) await sleep(attempt * 700);
+    }
+  }
+  const detail = lastError?.detailText || lastError?.message || 'خطای نامشخص';
+  toast(`راه‌اندازی ناموفق: ${detail}`, true);
+  showServerUnreachable(detail);
+}
 async function init() {
   bindEvents(); startSession();
-  try {
-    const authStatus = await refreshAuthGateState();
-    if (!authStatus?.licensed || !authStatus?.unlocked) return;
-    await bootUnlockedWorkspace();
-  } catch (error) { toast(`راه‌اندازی ناموفق: ${error.detailText || error.message}`, true); }
+  await bootApp();
 }
 init();

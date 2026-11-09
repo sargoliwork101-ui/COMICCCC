@@ -177,7 +177,25 @@ def _acquire_listening_socket(host: str, port: int, *, timeout: float = 30.0) ->
     return None
 
 
-def _open_browser_when_listening(host: str, port: int, callback) -> None:
+def _app_answers(host: str, port: int, timeout: float = 0.6) -> bool:
+    """True when the studio itself answers on the port with its health JSON.
+
+    A TCP connect only proves that the socket is listening - the app may
+    still be starting (or may have died while starting).  The browser must
+    not be opened before the app really answers, otherwise the user gets a
+    dead page and has to launch the app a second time.
+    """
+    health_url = f"{_format_browser_url(host, port)}/api/health"
+    try:
+        req = urllib.request.Request(health_url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            return isinstance(payload, dict) and payload.get("name") == APP_NAME
+    except Exception:
+        return False
+
+
+def _open_browser_when_listening(host: str, port: int, callback, timeout: float = 20.0) -> None:
     """Open the browser only once the app really answers on the port.
 
     The old code opened the browser even when the server had died, which showed
@@ -186,15 +204,12 @@ def _open_browser_when_listening(host: str, port: int, callback) -> None:
     if threading.current_thread() is threading.main_thread():
         callback()
         return
-    connect_host = _probe_connect_host(host)
-    deadline = time.monotonic() + 20.0
+    deadline = time.monotonic() + max(0.1, float(timeout))
     while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((connect_host, port), timeout=0.05):
-                callback()
-                return
-        except OSError:
-            time.sleep(0.035)
+        if _app_answers(host, port):
+            callback()
+            return
+        time.sleep(0.05)
     print(
         "Comic OCR Studio did not start listening on the expected port; the browser was not opened.",
         file=sys.stderr,
@@ -210,7 +225,16 @@ def run_server(host: str, port: int, listening_socket: socket.socket | None = No
     """Run one server whose lifetime can follow the last open app tab."""
     from .main import create_app
 
-    app = create_app()
+    try:
+        app = create_app()
+    except Exception as exc:
+        # A failure here used to kill the process silently in the consoleless
+        # Windows build, so the user only saw "nothing happens".
+        _show_startup_error(
+            "Comic OCR Studio could not start because of an internal error.\n"
+            f"{type(exc).__name__}: {exc}"
+        )
+        raise SystemExit(1)
     stripped_host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
     try:
         local_bind = stripped_host.lower() == "localhost" or ipaddress.ip_address(stripped_host).is_loopback
@@ -228,6 +252,14 @@ def run_server(host: str, port: int, listening_socket: socket.socket | None = No
             server.run(sockets=[listening_socket])
         else:
             server.run()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        _show_startup_error(
+            "Comic OCR Studio stopped while starting its local server.\n"
+            f"{type(exc).__name__}: {exc}"
+        )
+        raise
     finally:
         app.state.sessions.stop()
 

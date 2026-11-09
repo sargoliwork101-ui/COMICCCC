@@ -94,6 +94,90 @@ _ACTIVE_OCR_PROCS: set[subprocess.Popen[Any]] = set()
 _KILLED_OCR_PROCS: set[int] = set()
 
 
+@contextlib.contextmanager
+def _install_lock(timeout: float = 6.0):
+    """Take the shared install lock, or fail fast with a readable message.
+
+    The lock is held while a model is downloaded or removed, which can take
+    minutes.  A second request used to wait for it in silence, so the app
+    looked frozen and the user had to restart it.  Now the wait is short and
+    the caller gets a clear Persian explanation instead of a silent hang.
+    """
+    if not _INSTALL_LOCK.acquire(timeout=max(0.0, float(timeout))):
+        raise OcrError(
+            "عملیات آماده‌سازی مدل دیگری در همین لحظه در حال اجراست؛ "
+            "کمی صبر کنید و دوباره تلاش کنید."
+        )
+    try:
+        yield
+    finally:
+        _INSTALL_LOCK.release()
+
+
+_ENGINE_IDLE_TIMEOUT_SECONDS = 300.0
+
+
+class _IdleReleaser:
+    """Release an engine's weights after a period of inactivity.
+
+    The isolated engines already unload themselves a few minutes after the
+    last use.  The built-in engines (RapidOCR / EasyOCR) kept their ONNX and
+    PyTorch weights in RAM forever, so a weak machine stayed busy - and slow -
+    even while the user only browsed the app.  The same idle release is
+    applied here so the memory comes back automatically.
+    """
+
+    def __init__(self, owner: Any, timeout: float = _ENGINE_IDLE_TIMEOUT_SECONDS) -> None:
+        self._owner = owner
+        self._timeout = float(timeout)
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
+        self._last_used = time.monotonic()
+        self._busy = 0
+
+    def cancel(self) -> None:
+        with self._lock:
+            timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def enter(self) -> None:
+        with self._lock:
+            self._busy += 1
+            self._last_used = time.monotonic()
+
+    def leave(self) -> None:
+        with self._lock:
+            self._busy = max(0, self._busy - 1)
+            self._last_used = time.monotonic()
+        self.arm()
+
+    def arm(self) -> None:
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            if self._timeout <= 0 or self._busy > 0:
+                return
+            timer = threading.Timer(self._timeout, self._reap)
+            timer.daemon = True
+            self._timer = timer
+        timer.start()
+
+    def _reap(self) -> None:
+        with self._lock:
+            self._timer = None
+            if self._busy > 0:
+                return
+            if time.monotonic() - self._last_used + 0.05 < self._timeout:
+                return
+        try:
+            self._owner.unload()
+        except Exception:
+            return
+        trim_process_memory()
+
+
 def _check_ocr_cancelled() -> None:
     if is_job_cancelled():
         raise JobCancelledError("عملیات OCR به درخواست کاربر لغو شد.")
@@ -422,7 +506,7 @@ def install_packages(
 
     result: subprocess.CompletedProcess[str] | None = None
     try:
-        with _INSTALL_LOCK:
+        with _install_lock():
             for idx, (mirror_url, notice) in enumerate(attempts):
                 if eff_cancel.is_set() or _STANDARD_CANCEL_EVENT.is_set():
                     raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
@@ -794,6 +878,8 @@ class RapidEngine:
         self._force_cpu: bool = False
         self._batch_slots: int = 1
         self._batch_threads: int | None = None
+        # Weights are released automatically after a few idle minutes.
+        self._idle = _IdleReleaser(self)
 
     @property
     def runtime_installed(self) -> bool:
@@ -832,6 +918,7 @@ class RapidEngine:
             return bool(self._instances or any(self._idle_pool.values()) or any(self._created_counts.values()))
 
     def unload(self) -> None:
+        self._idle.cancel()
         with self._pool_cond:
             self._instances.clear()
             self._idle_pool.clear()
@@ -843,7 +930,7 @@ class RapidEngine:
             raise OcrError("موتور پایهٔ پیش‌فرض برنامه (PP-OCRv6 Small) همراه محیط اصلی است و نیازی به حذف ندارد.")
         self.cancel_install()
         self.unload()
-        with _INSTALL_LOCK:
+        with _install_lock():
             freed = _remove_path_safely(self._model_dir())
             remove_manifest_entry(self.id)
             remove_cached_engine_update(self.id)
@@ -1118,6 +1205,15 @@ class RapidEngine:
 
     @contextlib.contextmanager
     def _checkout(self, language: str):
+        self._idle.enter()
+        try:
+            with self._checkout_locked(language) as engine:
+                yield engine
+        finally:
+            self._idle.leave()
+
+    @contextlib.contextmanager
+    def _checkout_locked(self, language: str):
         # Ensure primary instance is initialized (honoring any test monkeypatch on `_get`).
         primary = self._get(language)
         if self._batch_slots <= 1 or self.using_gpu:
@@ -1318,6 +1414,8 @@ class EasyEngine:
         self._infer_lock = threading.Lock()
         self._using_gpu: bool = False
         self._force_cpu: bool = False
+        # Weights are released automatically after a few idle minutes.
+        self._idle = _IdleReleaser(self)
 
     @property
     def runtime_installed(self) -> bool:
@@ -1360,6 +1458,7 @@ class EasyEngine:
         _STANDARD_CANCEL_EVENT.set()
 
     def unload(self) -> None:
+        self._idle.cancel()
         with self._lock:
             self._readers.clear()
 
@@ -1367,7 +1466,7 @@ class EasyEngine:
         self.cancel_install()
         self.unload()
         freed = 0
-        with _INSTALL_LOCK:
+        with _install_lock():
             freed += _remove_path_safely(self._model_dir())
             custom_site = models_dir() / "site-packages"
             removed_from_custom_site = False
@@ -1627,6 +1726,13 @@ class EasyEngine:
             trim_process_memory()
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
+        self._idle.enter()
+        try:
+            return self._recognize_loaded(image, language)
+        finally:
+            self._idle.leave()
+
+    def _recognize_loaded(self, image: Image.Image, language: str) -> list[OcrLine]:
         rgb = _to_white_backed_rgb(image) if getattr(image, "mode", "RGB") != "RGB" else image
         try:
             arr = np.asarray(rgb)
@@ -2155,7 +2261,7 @@ class TesseractEngine:
     def uninstall(self) -> int:
         self.cancel_install()
         self.unload()
-        with _INSTALL_LOCK:
+        with _install_lock():
             freed = 0
             freed += _remove_path_safely(self._model_dir())
             freed += _remove_path_safely(models_dir() / "tesseract-bin")

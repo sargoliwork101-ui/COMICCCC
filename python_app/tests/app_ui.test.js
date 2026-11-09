@@ -2195,7 +2195,7 @@ function check(name, condition) {
           await savePromise;
 
           return {
-            verHas426: verText.includes('۴.۲۹'),
+            verHas426: verText.includes('۴.۳۰'),
             hasModelsShortcut: Boolean($('modelsStorageBtn')),
             openedOk,
             pickCalled,
@@ -2214,7 +2214,7 @@ function check(name, condition) {
       })()
     `, context);
     check(
-      'v4.00/v4.29 displays version 4.29 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
+      'v4.00/v4.30 displays version 4.30 and supports optional custom storage/downloads directory picker, appConfirm confirmation, safe migration PUT, and live state reload',
       v400StorageCheck.verHas426 === true
         && v400StorageCheck.hasModelsShortcut === true
         && v400StorageCheck.openedOk === true
@@ -4431,7 +4431,7 @@ function check(name, condition) {
           && helpModes.features.some((f) => f.includes('دانلود خودکار فایل زبان فارسی') && f.includes('fas'))
         );
         const verText = document.querySelector('.brand .ver')?.textContent || '';
-        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۲۹') };
+        return { helpHasV427Table, helpHasV428AutoLang, verHas428: verText.includes('۴.۳۰') };
       })()
     `, context);
     check(
@@ -4506,6 +4506,66 @@ function check(name, condition) {
       JSON.stringify(v429ResourcesCheck),
     );
   }
+
+  // v4.30 - the studio must survive a hiccup while starting and must tell the
+  // user when the local app stops answering (instead of a dead workspace).
+  const v430BootCheck = await vm.runInContext(`
+    (async () => {
+      const origFetch = window.fetch;
+      const mockJson = (payload) => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => payload });
+      let licenseCalls = 0;
+      window.fetch = async (url, opts = {}) => {
+        const parsed = new URL(url, 'http://127.0.0.1:8765');
+        if (parsed.pathname === '/api/license/status') {
+          licenseCalls += 1;
+          if (licenseCalls === 1) throw new TypeError('Failed to fetch');
+          return mockJson(${JSON.stringify(mockLicenseState)});
+        }
+        return origFetch(url, opts);
+      };
+      state.workspaceBooted = false;
+      await bootApp({ retry: true });
+      window.fetch = origFetch;
+      const alertEl = document.getElementById('serverAlert');
+      return { licenseCalls, alertHidden: alertEl.classList.contains('hidden'), booted: state.workspaceBooted };
+    })()
+  `, context);
+  check(
+    'v4.30 retries the start-up when the first request fails and boots the workspace anyway',
+    v430BootCheck.licenseCalls >= 2 && v430BootCheck.booted === true && v430BootCheck.alertHidden === true,
+    JSON.stringify(v430BootCheck),
+  );
+
+  const v430AlertCheck = await vm.runInContext(`
+    (async () => {
+      const origFetch = window.fetch;
+      const mockJson = (payload) => ({ ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => payload });
+      window.fetch = async () => { throw new TypeError('Failed to fetch'); };
+      showServerUnreachable('simulated outage');
+      const alertEl = document.getElementById('serverAlert');
+      const visible = !alertEl.classList.contains('hidden');
+      const text = document.getElementById('serverAlertText').textContent || '';
+      const detail = document.getElementById('serverAlertDetail').textContent || '';
+      window.fetch = async (url, opts = {}) => {
+        const parsed = new URL(url, 'http://127.0.0.1:8765');
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.30' });
+        return origFetch(url, opts);
+      };
+      document.getElementById('serverAlertRetry').click();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      window.fetch = origFetch;
+      return { visible, text, detail, hiddenAfterRetry: alertEl.classList.contains('hidden') };
+      return { visible, text, detail, hiddenAfterRetry: alertEl.classList.contains('hidden') };
+    })()
+  `, context);
+  check(
+    'v4.30 shows a Persian recovery banner when the local app stops answering and the retry button clears it',
+    v430AlertCheck.visible === true
+      && /ارتباط با برنامه/.test(v430AlertCheck.text)
+      && v430AlertCheck.detail === 'simulated outage'
+      && v430AlertCheck.hiddenAfterRetry === true,
+    JSON.stringify(v430AlertCheck),
+  );
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;
   window.dispatchEvent(new window.Event('beforeunload'));

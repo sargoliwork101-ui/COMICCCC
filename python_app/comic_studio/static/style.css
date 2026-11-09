@@ -609,3 +609,11 @@ body.auth-locked #mainwrap,body.auth-locked #dock,body.auth-locked #menuBtn,body
 
 
 
+/* v4.30 - banner that appears when the local studio server stops answering. */
+.server-alert{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:120;display:flex;align-items:center;gap:14px;flex-wrap:wrap;width:min(720px,94vw);padding:11px 14px;border-radius:12px;border:1px solid color-mix(in srgb,var(--danger) 65%,var(--line-2));background:color-mix(in srgb,var(--danger) 14%,var(--surface-2));box-shadow:var(--shadow);color:var(--text);font-size:12.5px;line-height:1.8}
+.server-alert.hidden{display:none}
+.server-alert-body{display:flex;flex-direction:column;gap:3px;flex:1 1 320px;min-width:0;text-align:right}
+.server-alert-detail{color:var(--muted);font-size:11px;overflow-wrap:anywhere}
+.server-alert-actions{display:flex;align-items:center;gap:8px;flex:none}
+.server-alert-actions .bt{font-size:11.5px;padding:6px 12px}
+.server-alert-actions .icon{font-size:19px;line-height:1;padding:2px 8px;color:var(--muted)}

@@ -9,6 +9,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -2798,6 +2800,58 @@ def _create_adapter(engine_id: str, models_root: Path) -> _BaseAdapter:
     raise ValueError(f"Unsupported isolated engine: {engine_id}")
 
 
+def _process_alive(pid: int) -> bool:
+    """True while the given process still exists."""
+    if pid <= 0:
+        return True
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x100000, False, int(pid))  # SYNCHRONIZE
+            if not handle:
+                # ERROR_ACCESS_DENIED means the process exists but belongs to
+                # another user - it is still alive.
+                return ctypes.get_last_error() == 5
+            kernel32.CloseHandle(handle)
+            return True
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _start_parent_watchdog(parent_pid: int) -> None:
+    """Stop this worker when the studio process disappears.
+
+    The worker normally stops on stdin EOF, but a heavy recognition never
+    reads stdin: if the app was killed in the middle of it, the worker stayed
+    alive for minutes and kept gigabytes of RAM busy for nobody.  Watching
+    the parent process releases that memory at once.
+    """
+    if parent_pid <= 0:
+        return
+
+    def _watch() -> None:
+        while True:
+            time.sleep(1.0)
+            if _process_alive(parent_pid):
+                continue
+            with contextlib.suppress(Exception):
+                sys.stderr.write("the studio process is gone; the OCR worker stops itself\n")
+                sys.stderr.flush()
+            os._exit(0)
+
+    thread = threading.Thread(target=_watch, name="parent-watchdog", daemon=True)
+    thread.start()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Comic OCR Studio isolated OCR worker")
     parser.add_argument("--engine", required=True)
@@ -2805,7 +2859,9 @@ def main() -> int:
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--language", default="eng")
+    parser.add_argument("--parent-pid", type=int, default=0)
     args = parser.parse_args()
+    _start_parent_watchdog(args.parent_pid)
 
     protocol_out = sys.stdout
     models_root = Path(args.models_root).resolve()

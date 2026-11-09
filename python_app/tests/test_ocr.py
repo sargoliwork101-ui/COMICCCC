@@ -522,6 +522,7 @@ def test_isolated_engine_prepare_serve_and_update_lifecycle(tmp_path, monkeypatc
         "p = argparse.ArgumentParser()\n"
         "p.add_argument('--engine'); p.add_argument('--models-root'); p.add_argument('--language', default='eng')\n"
         "p.add_argument('--prepare', action='store_true'); p.add_argument('--serve', action='store_true')\n"
+        "p.add_argument('--parent-pid', type=int, default=0)\n"
         "args = p.parse_args()\n"
         "if args.prepare:\n"
         "    print(json.dumps({'ok': True, 'modelRevision': 'rev-1'}), flush=True)\n"
@@ -3764,3 +3765,63 @@ def test_v428_tesseract_persian_language_auto_prepare_and_offline_bundle_guard(t
     assert "tessdata_best" in str(legacy_error.value)
     (bundle / "fas.traineddata").write_bytes(b"\x00" * 3_325_955)
     verify_bundled_language_models(bundle)
+
+
+def test_v430_the_install_lock_fails_fast_instead_of_hanging_the_app():
+    """A second model preparation must not wait in silence for minutes.
+
+    The lock is held while a model is downloaded.  The old code waited for it
+    without a word, so the app looked frozen and the user restarted it.
+    """
+    from comic_studio.ocr import _INSTALL_LOCK, _install_lock
+
+    _INSTALL_LOCK.acquire()
+    try:
+        started = time.monotonic()
+        with pytest.raises(OcrError) as excinfo:
+            with _install_lock(timeout=0.05):
+                pass
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0, "the lock must not block for minutes"
+        assert "در حال اجراست" in str(excinfo.value)
+    finally:
+        _INSTALL_LOCK.release()
+    # The lock is free again afterwards.
+    with _install_lock(timeout=0.5):
+        pass
+
+
+def test_v430_the_ocr_worker_notices_that_the_studio_process_is_gone():
+    """An orphaned worker must not keep gigabytes of RAM busy for nobody."""
+    from comic_studio.ocr_worker import _process_alive
+
+    assert _process_alive(os.getpid()) is True
+    assert _process_alive(0) is True  # unknown parent -> keep working
+    assert _process_alive(999999999) is False
+
+
+def test_v430_the_worker_watchdog_stops_a_worker_whose_parent_is_gone(tmp_path):
+    import textwrap
+
+    package_root = Path(__file__).resolve().parents[1]
+    script = tmp_path / "watchdog_child.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            import sys, time
+            sys.path.insert(0, {str(package_root)!r})
+            from comic_studio.ocr_worker import _start_parent_watchdog
+            _start_parent_watchdog(999999999)
+            print('started', flush=True)
+            time.sleep(60)
+            """
+        ),
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=30,
+    )
+    elapsed = time.monotonic() - started
+    assert "started" in result.stdout
+    assert elapsed < 20.0, "the worker must stop itself when the studio is gone"

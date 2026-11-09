@@ -528,6 +528,25 @@ def _run_Subprocess(command: list[str] | str, **kwargs: Any) -> subprocess.Compl
     return subprocess.run(command, **kwargs)
 
 
+@contextlib.contextmanager
+def _install_lock_timeout(lock: threading.Lock, error_cls: type[Exception], timeout: float = 6.0):
+    """Take the shared install lock, or fail fast with a readable message.
+
+    The lock is held while a model is downloaded or removed, which can take
+    minutes.  Waiting for it in silence made the app look frozen, so a
+    second request now fails fast with a clear Persian explanation.
+    """
+    if not lock.acquire(timeout=max(0.0, float(timeout))):
+        raise error_cls(
+            "عملیات آماده‌سازی مدل دیگری در همین لحظه در حال اجراست؛ "
+            "کمی صبر کنید و دوباره تلاش کنید."
+        )
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def _kill_process_tree(proc: subprocess.Popen[Any]) -> None:
     """Terminate `proc` and any child processes cleanly across Windows and POSIX."""
     if proc.poll() is not None:
@@ -2221,7 +2240,7 @@ class IsolatedOcrEngine:
     def uninstall(self) -> int:
         self.cancel_install()
         self.close()
-        with self._install_lock:
+        with _install_lock_timeout(self._install_lock, self._error_cls):
             self.close()
             freed = uninstall_isolated_engine_files(self.id)
         trim_process_memory()
@@ -2700,7 +2719,7 @@ class IsolatedOcrEngine:
         env_dir = self._env_dir()
         py = self._env_python()
         hw = inspect_hardware()
-        with self._install_lock:
+        with _install_lock_timeout(self._install_lock, self._error_cls):
             cdir = pip_cache_dir()
             wheelhouse = sync_local_wheelhouse()
             find_links_args: list[str] = []
@@ -2900,6 +2919,7 @@ class IsolatedOcrEngine:
                 "--models-root", str(m_root),
                 "--prepare",
                 "--language", language,
+                "--parent-pid", str(os.getpid()),
             ],
             env=self._worker_env(),
             stdout=subprocess.PIPE,
@@ -3178,6 +3198,7 @@ class IsolatedOcrEngine:
                 "--engine", self.id,
                 "--models-root", str(models_dir()),
                 "--serve",
+                "--parent-pid", str(os.getpid()),
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

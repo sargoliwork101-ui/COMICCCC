@@ -595,6 +595,9 @@ def create_app() -> FastAPI:
             "scraping": False,
             "shutdownPending": bool(sessions.shutdown_pending),
             "activeTabs": int(sessions.active_count),
+            # Tabs that went quiet (a frozen background tab must not look like
+            # a closed one - it would stop the server while the user is away).
+            "silentTabs": int(sessions.silent_count),
         }
 
     def _set_session_cookie(response: JSONResponse, token: str, request: Request) -> JSONResponse:

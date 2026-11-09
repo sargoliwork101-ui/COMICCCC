@@ -58,7 +58,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.2.9.0")]
+[assembly: System.Reflection.AssemblyVersion("4.3.0.0")]
 
 namespace ComicStudioInstaller {
     static class Program {
