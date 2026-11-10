@@ -1341,6 +1341,31 @@ function renderGrid() {
       wmBadge.title = 'دارای واترمارک فعال روی این صفحه';
       frameShell.appendChild(wmBadge);
     }
+    // v4.43: tiny indicator that sits over the thumbnail and answers at a glance
+    // whether this page is translated, half-translated, or still untouched.
+    {
+      const blocks = Array.isArray(item.blocks) ? item.blocks : [];
+      const enabled = blocks.filter((entry) => entry && entry.enabled !== false);
+      const translated = enabled.filter((entry) => String(entry.tr || '').trim() || String(entry.richHtml || '').trim());
+      let tlClass = 'tl-none';
+      let tlText = 'ترجمه نشده';
+      let tlTitle = 'این صفحه هنوز هیچ کادر ترجمهٔ فعالی ندارد';
+      if (translated.length > 0 && translated.length >= enabled.length) {
+        const aiTouched = translated.some((entry) => entry.aiTranslated === true || entry.aiTranslated === '1' || entry.aiTranslated === 1);
+        tlClass = aiTouched ? 'tl-ai' : 'tl-manual';
+        tlText = aiTouched ? 'AI ترجمه' : 'ترجمه شد';
+        tlTitle = aiTouched ? 'همهٔ کادرها با ترجمهٔ هوش مصنوعی پر شده‌اند' : 'همهٔ کادرها ترجمهٔ دستی/فارسی دارند';
+      } else if (translated.length > 0) {
+        tlClass = 'tl-partial';
+        tlText = 'نیمه‌ترجمه';
+        tlTitle = `${translated.length} از ${enabled.length} کادر فعال ترجمه دارند`;
+      }
+      const tlBadge = document.createElement('div');
+      tlBadge.className = `translation-state-badge ${tlClass}`;
+      tlBadge.textContent = tlText;
+      tlBadge.title = tlTitle;
+      frameShell.appendChild(tlBadge);
+    }
     const tick = document.createElement('input'); tick.type = 'checkbox'; tick.className = 'tick'; tick.checked = !!item.selected; tick.setAttribute('aria-label', `انتخاب ${item.name}`);
     tick.addEventListener('click', (event) => {
       // The browser has already applied the new checkbox value; consume this one click without cancelling it.
@@ -3375,16 +3400,29 @@ async function ensureWatermarkLogoDrawable(logoId, dataUrl) {
   if (drawable) watermarkLogoCache.set(key, drawable);
   return drawable;
 }
+// v4.39: decoded logo images are runtime-only objects.  A plain assignment made
+// them *enumerable*, so saving the project serialized the DOM/image object as
+// "{}" straight into project.json; after the next launch the renderer received
+// that empty object as the logo and drawing the page crashed.  Attaching the
+// drawable as a non-enumerable property keeps it usable in memory while
+// JSON.stringify (the project save) simply skips it.
+function attachRuntimeDrawable(target, key, drawable) {
+  try {
+    Object.defineProperty(target, key, { value: drawable, writable: true, configurable: true, enumerable: false });
+  } catch {
+    target[key] = drawable;
+  }
+}
 async function ensureWatermarkLogosReady(wm) {
   if (!hasActiveWatermark(wm)) return;
   const logoId = String(wm.logoId || '').trim();
   const logos = projectWatermarkLogos();
   if (logoId && logos[logoId]?.dataUrl) {
     const drawable = await ensureWatermarkLogoDrawable(logoId, logos[logoId].dataUrl);
-    if (drawable) logos[logoId]._drawable = drawable;
+    if (drawable) attachRuntimeDrawable(logos[logoId], '_drawable', drawable);
   } else if (wm.logoDataUrl) {
     const drawable = await ensureWatermarkLogoDrawable('inline', wm.logoDataUrl);
-    if (drawable) wm._logoDrawable = drawable;
+    if (drawable) attachRuntimeDrawable(wm, '_logoDrawable', drawable);
   }
 }
 function buildTypesetRenderOptions(item) {
@@ -3399,8 +3437,13 @@ function watermarkSignaturePart(wm) {
   if (!hasActiveWatermark(wm)) return null;
   const logoId = String(wm.logoId || '').trim();
   const logoEntry = logoId ? projectWatermarkLogos()[logoId] : null;
-  const logoLen = logoEntry?.dataUrl ? logoEntry.dataUrl.length : (wm.logoDataUrl ? String(wm.logoDataUrl).length : 0);
-  return [wm.text || '', wm.position || 'bottom-left', wm.sizePct ?? 3.5, wm.opacity ?? 55, wm.angle ?? '', wm.marginPct ?? 2.5, wm.tileGapPct ?? 22, wm.color || '#ffffff', wm.bold !== false, wm.outline !== false, wm.outlineColor || '#000000', !!wm.bgPill, wm.bgColor || '#000000', logoId, wm.logoScalePct ?? 9, logoLen];
+  // v4.39: length alone cannot tell two different logos apart when they happen
+  // to serialize to the same dataURL length, and a stale signature then skips
+  // the re-render, so the old logo would still appear in the exported pages.
+  // Use the same content fingerprint as the drawable logo cache (length + tail).
+  const logoSrc = logoEntry?.dataUrl ? String(logoEntry.dataUrl) : String(wm.logoDataUrl || '');
+  const logoFingerprint = logoSrc ? `${logoSrc.length}:${logoSrc.slice(-32)}` : '';
+  return [wm.text || '', wm.position || 'bottom-left', wm.sizePct ?? 3.5, wm.opacity ?? 55, wm.angle ?? '', wm.marginPct ?? 2.5, wm.tileGapPct ?? 22, wm.color || '#ffffff', wm.bold !== false, wm.outline !== false, wm.outlineColor || '#000000', !!wm.bgPill, wm.bgColor || '#000000', logoId, wm.logoScalePct ?? 9, logoFingerprint];
 }
 function pageRenderSignature(item, mode = currentOverlayMode(), blocksOverride = null) {
   const blocks = blocksOverride || overlayBlocks(item, mode);
@@ -5814,7 +5857,16 @@ function closeInlineEditor(force = false) {
   if (!force && document.activeElement === $('inlineLineSize')) $('inlineLineSize').blur();
   const committed = inlineEditSession?.close({ discardConflict: force }) ?? false;
   if (!committed && !force) return false;
-  if (committed) classicEditor.clearDraft(); else classicEditor.saveDraft();
+  if (committed) {
+    classicEditor.clearDraft();
+    // v4.43: a manual edit after an AI translation means the text is no longer
+    // "pure AI output", so remove the marker (badge would lie otherwise).
+    const activeBlock = inlineEditSession?.block || null;
+    if (activeBlock && activeBlock.aiTranslated) {
+      delete activeBlock.aiTranslated;
+      drawEditor(); scheduleSave();
+    }
+  } else classicEditor.saveDraft();
   classicEditor.closeModal?.({ restoreFocus: false });
   classicEditor.exitFullscreen(); classicEditor.detachField();
   const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
@@ -7593,9 +7645,10 @@ async function runSingleBlockTranslation(task) {
     if ($('translationDialog').open) closeDialog('translationDialog');
   }
 }
-function applyTranslatedBlockDefaults(block, text, targetLang = null) {
+function applyTranslatedBlockDefaults(block, text, targetLang = null, viaAi = null) {
   block.tr = text;
   block.richHtml = '';
+  if (viaAi !== null) block.aiTranslated = !!viaAi;
   const resolvedDir = targetLang ? targetLanguageDir(targetLang) : (block.dir === 'ltr' ? 'ltr' : 'rtl');
   block.dir = resolvedDir;
   if (block.textMode === 'ocr') block.textMode = 'translation';
@@ -7648,7 +7701,7 @@ async function retranslateBlock(block, targetOverride = null) {
         const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill:'', summary:'', confirmation: accepted.signature }), signal }));
         if (!result || result.cancelled) return;
         if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-        applyTranslatedBlockDefaults(block, result.text, targetLanguage); buildBlockList(); drawEditor(); scheduleSave();
+        applyTranslatedBlockDefaults(block, result.text, targetLanguage, false); buildBlockList(); drawEditor(); scheduleSave();
       }, refresh, switchTarget);
       return;
     }
@@ -7675,7 +7728,7 @@ async function retranslateBlock(block, targetOverride = null) {
       const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) }), signal }));
       if (!result || result.cancelled) return;
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-      applyTranslatedBlockDefaults(block, result.text, targetLanguage); buildBlockList(); drawEditor(); scheduleSave();
+      applyTranslatedBlockDefaults(block, result.text, targetLanguage, true); buildBlockList(); drawEditor(); scheduleSave();
     }, refresh, switchTarget);
   } catch (error) {
     if (targetOverride && $('translationPreviewDialog').open) throw error;

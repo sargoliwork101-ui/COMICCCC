@@ -127,7 +127,7 @@ class SessionManager:
 
     def heartbeat(self, client_id: str) -> int:
         if not client_id:
-            raise ValueError("A browser tab id is required")
+            raise ValueError("شناسهٔ زبانهٔ مرورگر لازم است.")
         with self._lock:
             self._cancel_empty_locked()
             self._cancel_abandon_locked()
