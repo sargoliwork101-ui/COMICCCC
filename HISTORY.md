@@ -1,5 +1,14 @@
 # تاریخچهٔ تغییرات
 
+## 4.44 / افزونه 2.68 — 2026-11-10
+
+- **هفتمین دورهٔ ممیزی کامل برنامه (درخواست کاربر: «کل برنامه رو ممیزی کن»)** — این دور با تمرکز بر بخش‌های خوانده‌نشدهٔ قبلی و بازبینی صحت‌سنجی v4.43 انجام شد:
+  1. **root-cause: نسخهٔ ناهماهنگ**: در v4.43 فقط bat لایسنس‌ساز به 4.43 بمب شده بود اما `APP_VERSION` در `python_app/comic_studio/__init__.py` هنوز روی 4.42 بود و «/api/health» همان عدد را برمی‌گرداند؛ فایل‌های `start_windows.bat`، `build_windows_offline.bat`، `offline_packaging/ComicOCRStudio.iss` و User-Agent `local_nmt.py` هم هنوز روی 4.42 بودند. حالا همه جا (`__init__.py`، `manager.py`، README، CSS/JS version query، tests، bat، iss) یکدست روی **4.44/4.4.4** هستند.
+  2. **تست رگرسیون جدید برای «نشان‌گر وضعیت ترجمه»**: `test_v443_translation_badge_marks_ai_and_manual_edits_clear_it` تأیید می‌کند `apply_response` برای providerهای AI (نه free/local) فلگ `aiTranslated=True` می‌گذارد و CSS classهای `.translation-state-badge.tl-ai/.tl-manual/.tl-none` در `static/style.css` هستند.
+  3. **پالایش محیط تست**: `opencv-contrib-python` با `libGL` خوانده نشدنی و تضاد با `opencv-python-headless` کنار رفت — برای محیط‌های headless و EXE بدون GL (چون برنامه فقط برای detection/segmentation استفاده می‌شود) مسیر build با headless هم سازگار می‌ماند.
+  - **بررسی‌های سالم**: `SellerVault` در پوشهٔ خالی فروشنده کلید+backup ساخت، پوشهٔ با سابقه همچنان `SellerKeyLostError` می‌دهد؛ بازگردانی از `backup/seller_master_key.json` fingerprint را دقیق حفظ می‌کند؛ اجرای POSIX بدون watcher (که فقط Windows است) کار می‌کند؛ بخش‌های `ocr_grouping.py`، `watermark_render.py`، `popup.js` و `viewer.js` بازخوانی شدند و ایراد جدیدی پیدا نشد.
+- نسخهٔ استودیو **`4.44` (`4.4.4`)** (افزونهٔ کروم ثابت در **`2.68`**).
+
 ## 4.43 / افزونه 2.68 — 2026-11-01
 
 - **سه درخواست کاربر اجرا شد**:

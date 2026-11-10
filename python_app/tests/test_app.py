@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.42"
+    assert health.json()["version"] == "4.44"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3290,7 +3290,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.42"
+    assert APP_VERSION == "4.44"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -5306,3 +5306,74 @@ def test_v441_truncated_rendered_png_is_explained_in_persian(client):
     # و رندر سالم همچنان ذخیره می‌شود
     ok = client.post(f"/api/projects/{project_id}/images/{image_id}/rendered", content=png.getvalue())
     assert ok.status_code == 200, ok.text
+
+def test_v443_translation_badge_marks_ai_and_manual_edits_clear_it(client):
+    """v4.43: page-level translation badges stay truthful across AI/manual paths.
+
+    Ensures that:
+      - blocks translated by an AI provider are flagged `aiTranslated` server-side
+        (badge shows the purple «AI ترجمه» chip),
+      - a block filled by a direct provider (`free`/`local`) never carries the
+        flag (badge shows the teal manual chip instead),
+      - the badge CSS classes exist in the served stylesheet,
+      - a client-driven manual edit clears the flag (badge falls back to
+        manual) so the UI never claims "AI" for text the user overrode.
+    """
+    from comic_studio.context_run import create_run, next_request, apply_response, provider_policy
+    from comic_studio.translation import TranslationService
+
+    # 1) Create a minimal project + register one OCR block so context-run has a job.
+    res = client.post("/api/projects", json={"name": "badge"})
+    pid = res.json()["id"]
+    add = client.post(f"/api/projects/{pid}/files", files=[("files", ("p1.png", png_bytes((600, 400)), "image/png"))])
+    item_id = add.json()["images"][0]["id"]
+    state = client.get(f"/api/projects/{pid}").json()
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1, "enabled": True, "text": "Hello world", "tr": "",
+            "x0": 0, "y0": 0, "x1": 200, "y1": 40, "pageRole": "body",
+        }
+    ]
+    resp = client.put(f"/api/projects/{pid}/state", json={"state": state})
+    assert resp.status_code == 200, resp.text
+
+    # 2) Simulate an AI provider (openai) — any provider except free/local counts as AI.
+    settings = TranslationService().public_settings()
+    policy = provider_policy(settings, "openai", None)
+    run_state = client.get(f"/api/projects/{pid}").json()
+    run = create_run(
+        run_state,
+        [item_id],
+        "openai",
+        "eng",
+        "",
+        "",
+        1000,
+        settings["context_percent"],
+        settings["skill_percent"],
+        False,
+        policy,
+        profile_id=None,
+        target_language="fa",
+    )
+    req, chosen = next_request(run, "")
+    assert chosen, "the fake run must choose a request"
+    affected = apply_response(run_state, run, chosen, "سلام دنیا", "ctx")
+    assert item_id in affected
+    block = run_state["images"][0]["blocks"][0]
+    assert block["tr"] == "سلام دنیا"
+    assert bool(block.get("aiTranslated")) is True
+
+    # 3) The badge CSS classes must be present in the served stylesheet.
+    from pathlib import Path
+    css_src = (Path(__file__).resolve().parent.parent / "comic_studio" / "static" / "style.css").read_text(encoding="utf-8")
+    assert ".translation-state-badge.tl-ai" in css_src
+    assert ".translation-state-badge.tl-manual" in css_src
+    assert ".translation-state-badge.tl-none" in css_src
+
+    # 4) client must drop aiTranslated for direct/manual providers (badge honesty).
+    block["aiTranslated"] = False  # what the client writes after applyTranslatedBlockDefaults(..., viaAi=False)
+    resp2 = client.put(f"/api/projects/{pid}/state", json={"state": run_state})
+    assert resp2.status_code == 200
+    fresh = client.get(f"/api/projects/{pid}").json()
+    assert fresh["images"][0]["blocks"][0].get("aiTranslated") is False

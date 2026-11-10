@@ -3,7 +3,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
-title Comic OCR Studio 4.43 - Seller License Generator
+title Comic OCR Studio 4.44 - Seller License Generator
 
 rem Seller-only launcher (never shipped inside customer dist\ComicOCRStudio builds).
 rem The seller tool now lives in its own folder; the main app sits one level up.
