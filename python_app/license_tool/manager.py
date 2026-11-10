@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
+import ctypes.wintypes
 import csv
 import datetime as dt
 import hashlib
@@ -27,32 +29,32 @@ import math
 import os
 import re
 import secrets
-import socket
 import sys
 import tempfile
 import threading
 import time
 import webbrowser
+
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = Path(__file__).resolve().parent.parent  # python_app/
+_LICENSE_TOOL_DIR = Path(__file__).resolve().parent  # python_app/license_tool/
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
+
 
 from comic_studio.license_guard import (  # noqa: E402
     LICENSE_MODULES,
     MODULE_LABELS_FA,
-    SUPPORT_PHONE,
     VENDOR_CONTACT_KEYS,
     LicenseError,
     SECURITY_GATE,
     compute_hardware_id,
     ed25519_public_key,
-    get_support_phone,
     get_vendor_contact_info,
     issue_license_token,
     normalize_hardware_id,
@@ -60,6 +62,9 @@ from comic_studio.license_guard import (  # noqa: E402
     plan_label_fa,
     verify_license_token,
 )
+
+APP_VERSION = "4.45"
+
 
 PUBLIC_KEY_MODULE_PATH = APP_DIR / "comic_studio" / "_public_key.py"
 VENDOR_CONFIG_PY_PATH = APP_DIR / "comic_studio" / "_vendor_config.py"
@@ -348,11 +353,25 @@ class SellerVault:
             _atomic_write_json(self.master_key_backup_path, record)
 
     def _vault_looks_lost(self) -> bool:
-        """True when the vault is empty but the app already carries a real key / issued licenses."""
+        """True when the vault is missing but real history or an embedded key proves it existed.
+
+        v4.43: a completely empty seller dir (no history files, no backup, no
+        customers) is the *brand-new-seller* case and must NOT be treated as a
+        lost vault, otherwise the very first run of the manufacturer always gets
+        stuck on the recovery page instead of starting cleanly.
+        """
+        if not self.seller_dir.is_dir():
+            return False
+        try:
+            has_any_file = any(p.is_file() for p in self.seller_dir.rglob("*"))
+        except Exception:
+            has_any_file = False
+        if not has_any_file:
+            return False
         issued = len(self.list_history()) or len(self._load_raw_customers())
         embedded = self.embedded_public_key_hex()
         real_embedded = bool(embedded) and set(embedded) != {"0"}
-        return bool(issued) or (real_embedded and self.seller_dir.exists())
+        return bool(issued) or (real_embedded and bool(embedded))
 
     def _ensure_master_key_unlocked(
         self,
@@ -1235,7 +1254,7 @@ _PANEL_HTML = """<!doctype html>
     <div class="brand">
       <img class="logo" src="/assets/icon128.png" alt="">
       <div>
-        <h1>Comic OCR Studio <span class="ver">۴.۳۰ · پنل فروشنده</span></h1>
+        <h1>Comic OCR Studio <span class="ver">۴.۴۳ · پنل فروشنده</span></h1>
         <span class="brand-sub">مدیریت کلید مادر ۲۵۶ بایتی، بانک مشتریان و صدور لایسنس ماژولار آفلاین</span>
       </div>
     </div>
@@ -2544,12 +2563,20 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     try:
         key_info = vault.ensure_master_key(sync_source=True, allow_create=True)
     except SellerKeyLostError as exc:
-        print("=" * 72)
-        print("  Comic OCR Studio — پنل فروشنده")
-        print(f"  ⚠ {exc}")
-        print("  پنل باز می‌شود تا بتوانید از بخش «بازیابی کلید» فایل پشتیبان را برگردانید.")
-        print("=" * 72)
-        key_info = {"fingerprint": "—"}
+        # v4.43: a brand-new seller has NO master key yet and no issued history,
+        # so there is nothing to lose; start the panel with a fresh key instead
+        # of leaving it empty.  (The warning path remains for the *lost-key* case
+        # where the vault previously existed but the backup was removed.)
+        try:
+            vault.ensure_master_key(sync_source=True, allow_create=True)
+            key_info = {"fingerprint": vault.fingerprint}
+        except SellerKeyLostError:
+            print("=" * 72)
+            print("  Comic OCR Studio — پنل فروشنده")
+            print(f"  ⚠ {exc}")
+            print("  پنل باز می‌شود تا بتوانید از بخش «بازیابی کلید» فایل پشتیبان را برگردانید.")
+            print("=" * 72)
+            key_info = {"fingerprint": "—"}
     panel_secret = secrets.token_urlsafe(24)
     handler_cls = build_seller_panel_handler(vault, panel_secret)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
@@ -2566,12 +2593,83 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     if open_browser:
         with contextlib.suppress(Exception):
             webbrowser.open(url)
+
+    # v4.43: make sure the panel NEVER survives its own console. The raw
+    # `serve_forever()` loop could stay alive as a background zombie when the
+    # terminal window was closed, and the seller could not shut it down
+    # without Task Manager. A tiny watcher thread polls the parent console
+    # process; as soon as that exits, the HTTP server shuts down cleanly.
+    shutdown_holder: dict[str, bool] = {"requested": False}
+
+    def _start_parent_watcher() -> None:
+        """Poll the parent handle; tell the server to shut down when it exits."""
+        if os.name != "nt":
+            return
+        try:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        except Exception:
+            return
+
+        SYNCHRONIZE = 0x00100000
+
+        class _PROCESS_BASIC_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("Reserved1", ctypes.c_void_p),
+                ("PebBaseAddress", ctypes.c_void_p),
+                ("Reserved2", ctypes.c_void_p * 2),
+                ("UniqueProcessId", ctypes.c_void_p),
+                ("InheritedFromUniqueProcessId", ctypes.c_void_p),
+            ]
+
+        def _parent_pid(pid: int) -> int:
+            PROC_Q_LIMITED = 0x1000
+            handle = kernel32.OpenProcess(PROC_Q_LIMITED, False, pid)
+            if not handle:
+                return -1
+            try:
+                info = _PROCESS_BASIC_INFORMATION()
+                out_len = ctypes.c_ulong(0)
+                status = kernel32.NtQueryInformationProcess(
+                    handle, 0, ctypes.byref(info), ctypes.sizeof(info), ctypes.byref(out_len)
+                )
+                if status == 0 and info.InheritedFromUniqueProcessId:
+                    return int(info.InheritedFromUniqueProcessId)
+            finally:
+                kernel32.CloseHandle(handle)
+            return -1
+
+        pid = os.getpid()
+        while True:
+            parent = _parent_pid(pid)
+            if parent <= 0 or parent == pid:
+                return
+            pid = parent
+
+        def _watch_loop() -> None:
+            while True:
+                time.sleep(1.0)
+                handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+                if not handle:
+                    shutdown_holder["requested"] = True
+                    with contextlib.suppress(Exception):
+                        server.shutdown()
+                    return
+                kernel32.CloseHandle(handle)
+
+        watcher = threading.Thread(target=_watch_loop, name="seller-panel-parent-watch", daemon=True)
+        watcher.start()
+
+    with contextlib.suppress(Exception):
+        _start_parent_watcher()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nپنل فروشنده بسته شد.")
     finally:
         server.server_close()
+        if shutdown_holder.get("requested"):
+            print("\n[notice] پنجرهٔ پنل توسط کاربر بسته شد؛ برنامهٔ زمینهٔ لایسنس هم پایان یافت.")
 
 
 def main(argv: list[str] | None = None) -> int:

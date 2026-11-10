@@ -4548,7 +4548,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.36' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.45' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
@@ -4565,6 +4565,99 @@ function check(name, condition) {
       && v430AlertCheck.detail === 'simulated outage'
       && v430AlertCheck.hiddenAfterRetry === true,
     JSON.stringify(v430AlertCheck),
+  );
+
+  // v4.39: swapping a watermark logo for a *different* image that serializes to the very
+  // same dataURL length must still change the page-render signature, otherwise pages are
+  // never re-rendered and the old logo silently stays inside exported files.
+  const v439WmSigCheck = await vm.runInContext(`
+    (() => {
+      const logoA = 'data:image/png;base64,' + 'A'.repeat(96);
+      const logoB = 'data:image/png;base64,' + 'B'.repeat(96); // same length, different content
+      const mk = (url) => ({ enabled: true, text: 'کانال', position: 'bottom-left', logoDataUrl: url });
+      const sigA = JSON.stringify(watermarkSignaturePart(mk(logoA)));
+      const sigB = JSON.stringify(watermarkSignaturePart(mk(logoB)));
+      const sigAgain = JSON.stringify(watermarkSignaturePart(mk(logoA)));
+      const partNone = watermarkSignaturePart({ enabled: true, text: 'کانال', position: 'bottom-left' });
+      return {
+        swapChanges: sigA !== sigB,
+        stableForSameLogo: sigA === sigAgain,
+        fingerprintField: String((JSON.parse(sigA) || []).slice(-1)[0] || ''),
+        noLogoHasEmptyFingerprint: Array.isArray(partNone) && partNone[partNone.length - 1] === '',
+      };
+    })()
+  `, context);
+  check(
+    'v4.39 notices a same-length watermark logo swap in the render signature',
+    v439WmSigCheck.swapChanges === true
+      && v439WmSigCheck.stableForSameLogo === true
+      && v439WmSigCheck.fingerprintField.includes(':')
+      && v439WmSigCheck.noLogoHasEmptyFingerprint === true,
+    JSON.stringify(v439WmSigCheck),
+  );
+
+  // v4.39: projects saved while a logo watermark was rendered could persist a poisoned
+  // `"_drawable": {}`/`"_logoDrawable": {}` (a DOM image serialized as an empty object);
+  // after the next launch the renderer crashed on ctx.drawImage({}) and the page's
+  // translated render never finished.  The renderer must ignore dimensionless junk, and
+  // newly attached runtime drawables must never be written into the saved project JSON.
+  const v439PoisonCheck = await vm.runInContext(`
+    (() => {
+      const calls = [];
+      const fakeCtx = {
+        measureText: (t) => ({ width: String(t).length * 9 }),
+        drawImage: (...a) => { calls.push(a[0]); },
+        save() {}, restore() {}, translate() {}, rotate() {}, fillText() {}, strokeText() {},
+      };
+      const wm = { enabled: true, text: 'کانال', position: 'bottom-left', logoId: 'L1' };
+      const poisoned = { L1: { dataUrl: 'data:image/png;base64,AAAA', _drawable: {} } };
+      const ok = { L1: { dataUrl: 'data:image/png;base64,AAAA', _drawable: { width: 48, height: 32 } } };
+      let threw = false;
+      try { Typeset.drawWatermark(fakeCtx, 400, 300, wm, poisoned); } catch (e) { threw = true; }
+      const ignoredPoison = calls.length === 0;
+      Typeset.drawWatermark(fakeCtx, 400, 300, wm, ok);
+      const usedRealDrawable = calls.length === 1 && calls[0] && calls[0].width === 48;
+      const inlinePoison = { enabled: true, text: 'کانال', position: 'top-right', logoDataUrl: 'data:image/png;base64,BBBB', _logoDrawable: {} };
+      let threwInline = false;
+      try { Typeset.drawWatermark(fakeCtx, 400, 300, inlinePoison, {}); } catch (e) { threwInline = true; }
+      const ignoredInline = calls.length === 1;
+      return { threw, ignoredPoison, usedRealDrawable, threwInline, ignoredInline };
+    })()
+  `, context);
+  check(
+    'v4.39 renderer ignores a poisoned serialized logo drawable instead of crashing',
+    v439PoisonCheck.threw === false
+      && v439PoisonCheck.ignoredPoison === true
+      && v439PoisonCheck.usedRealDrawable === true
+      && v439PoisonCheck.threwInline === false
+      && v439PoisonCheck.ignoredInline === true,
+    JSON.stringify(v439PoisonCheck),
+  );
+
+  const v439SaveLeakCheck = await vm.runInContext(`
+    (async () => {
+      const origDecode = decodeDataUrlDrawable;
+      try {
+        decodeDataUrlDrawable = async () => ({ width: 40, height: 30 });
+        state.project.settings.watermarkLogos = { L9: { dataUrl: 'data:image/png;base64,AAAA' } };
+        const libWm = { enabled: true, logoId: 'L9' };
+        const inlineWm = { enabled: true, logoDataUrl: 'data:image/png;base64,CCCC', text: '' };
+        await ensureWatermarkLogosReady(libWm);
+        await ensureWatermarkLogosReady(inlineWm);
+        const entry = state.project.settings.watermarkLogos.L9;
+        const noneInJson = !JSON.stringify(state.project.settings).includes('_drawable') && !JSON.stringify(inlineWm).includes('_logoDrawable');
+        const stillUsable = entry._drawable && entry._drawable.width === 40 && inlineWm._logoDrawable && inlineWm._logoDrawable.height === 30;
+        return { noneInJson, stillUsable: Boolean(stillUsable) };
+      } finally {
+        decodeDataUrlDrawable = origDecode;
+        delete state.project.settings.watermarkLogos.L9;
+      }
+    })()
+  `, context);
+  check(
+    'v4.39 runtime logo drawables never leak into the saved project JSON',
+    v439SaveLeakCheck.noneInJson === true && v439SaveLeakCheck.stillUsable === true,
+    JSON.stringify(v439SaveLeakCheck),
   );
 
   const closeBeaconsBefore = beacons.filter((entry) => entry.url === '/api/session/close').length;

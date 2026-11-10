@@ -1684,9 +1684,9 @@ def install_tesseract_runtime(error_cls: type[Exception], cancel_event: threadin
                         progress=round(0.12 + 0.50 * ratio, 3),
                     )
                     if total > 220 * 1024 * 1024:
-                        raise error_cls("Downloaded Tesseract installer exceeded safe size limit.")
+                        raise error_cls("حجم فایل نصب Tesseract که دانلود شد از حد مجاز بیشتر است.")
             if part_path.stat().st_size < 1_000_000:
-                raise error_cls("Downloaded Tesseract installer is incomplete or invalid.")
+                raise error_cls("فایل نصب Tesseract که دانلود شد ناقص یا خراب است.")
             os.replace(part_path, installer_path)
             emit("نصب بی‌صدای Tesseract بدون نیاز به دسترسی ادمین در پوشهٔ برنامه آغاز شد…", progress=0.68)
             # 1) Non-elevated user-mode NSIS install (__COMPAT_LAYER=RunAsInvoker + /CurrentUser avoids WinError 740 on UB-Mannheim MultiUser.nsh).
@@ -3324,7 +3324,7 @@ class IsolatedOcrEngine:
                     raise self._error_cls(f"پردازشگر مدل {self.id} به شکل غیرمنتظره‌ای بسته شد.{suffix}")
                 payload = json.loads(raw_resp)
                 if not payload.get("ok"):
-                    raise self._error_cls(f"OCR failed ({self.id}): {payload.get('error')}")
+                    raise self._error_cls(f"خواندن متن با موتور {self.id} ناموفق بود: {payload.get('error')}")
                 persian_norm = None
                 if language == "fas":
                     with contextlib.suppress(Exception):
