@@ -31,10 +31,12 @@ REPO_PY_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_PY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_PY_ROOT))
 
-from comic_studio import APP_VERSION  # noqa: E402
+from comic_studio import APP_VERSION, __version__  # noqa: E402
 from comic_studio.paths import models_dir  # noqa: E402
 
 SFX_MAGIC = b"COS405PK"
+# چهاربخشی برای فرادادهٔ فایل نصاب C# (رشتهٔ «4.3.9» → «4.3.9.0») تا با هر بامپ نسخه خودکار به‌روز شود.
+SFX_ASSEMBLY_VERSION = f"{__version__}.0"
 
 
 class BuildError(RuntimeError):
@@ -107,6 +109,10 @@ PYPI_FALLBACK_MIRRORS: tuple[tuple[str, str], ...] = (
 )
 PIP_TIMEOUT_SECONDS = 120
 PIP_RETRIES = 10
+# Whole-process limit for the PyInstaller install.  pip's own timeout only
+# covers one socket read; a mirror that accepts the connection and then goes
+# silent used to freeze the builder forever with no message at all.
+PYINSTALLER_INSTALL_TIMEOUT_SECONDS = 15 * 60
 
 
 CSHARP_SFX_INSTALLER = r"""
@@ -121,7 +127,7 @@ using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
 [assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
-[assembly: System.Reflection.AssemblyVersion("4.3.6.0")]
+[assembly: System.Reflection.AssemblyVersion("__APP_ASSEMBLY_VERSION__")]
 
 namespace ComicStudioInstaller {
     static class Program {
@@ -406,7 +412,19 @@ def download_wheelhouse(pyproject_path: Path, wheelhouse_dir: Path) -> Path:
         str(wheelhouse_dir),
         *reqs,
     ]
-    subprocess.check_call(cmd, cwd=str(REPO_PY_ROOT))
+    try:
+        subprocess.run(
+            cmd,
+            cwd=str(REPO_PY_ROOT),
+            check=True,
+            timeout=PYINSTALLER_INSTALL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BuildError(
+            "Downloading the wheelhouse did not finish in time and was stopped.\n"
+            "Check the internet connection and run the build again; a local "
+            "'python_app\\wheelhouse' folder with the wheels is used automatically."
+        ) from exc
     return wheelhouse_dir
 
 
@@ -451,7 +469,7 @@ def ensure_pyinstaller(python_exe: str | None = None) -> bool:
     """
     exe = python_exe or sys.executable
     if _pyinstaller_installed(exe):
-        print("[ok] PyInstaller is already installed in the build environment.")
+        say("[ok] PyInstaller is already installed in the build environment.")
         return True
 
     base_cmd = [
@@ -485,17 +503,24 @@ def ensure_pyinstaller(python_exe: str | None = None) -> bool:
         if index_url:
             cmd.extend(["--index-url", index_url])
         cmd.append(PYINSTALLER_SPEC)
-        print(f"[pyinstaller] Installing from {label} ...")
+        say(f"[pyinstaller] Installing from {label} ...")
         try:
-            completed = subprocess.run(cmd, check=False)
+            completed = subprocess.run(cmd, check=False, timeout=PYINSTALLER_INSTALL_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            say(
+                f"[warn] The install from {label} did not finish within "
+                f"{PYINSTALLER_INSTALL_TIMEOUT_SECONDS // 60} minutes and was stopped; "
+                "trying the next source."
+            )
+            continue
         except Exception as exc:
-            print(f"[warn] pip could not be started for {label}: {exc}")
+            say(f"[warn] pip could not be started for {label}: {exc}")
             continue
         if completed.returncode == 0:
-            print(f"[ok] PyInstaller installed from {label}.")
+            say(f"[ok] PyInstaller installed from {label}.")
             return True
-        print(f"[warn] PyInstaller install from {label} failed (exit {completed.returncode}).")
-    print(
+        say(f"[warn] PyInstaller install from {label} failed (exit {completed.returncode}).")
+    say(
         "[ERROR] Could not install PyInstaller. Internet access to pypi.org (or one of the public\n"
         "        mirrors) is required, or place the PyInstaller .whl file inside the folder\n"
         "        'python_app\\wheelhouse' and run the build again."
@@ -526,7 +551,7 @@ def verify_bundled_language_models(tess_dir: Path, *, allow_missing: bool = Fals
             "the full float32 tessdata_best file (~3.33 MB) is required for correct Persian"
         )
     if not problems:
-        print("[ok] Bundled Tesseract language files (eng + fas) are present and up to date.")
+        say("[ok] Bundled Tesseract language files (eng + fas) are present and up to date.")
         return
     message = (
         "The offline bundle would ship without usable Tesseract language files:\n"
@@ -541,6 +566,65 @@ def verify_bundled_language_models(tess_dir: Path, *, allow_missing: bool = Fals
     raise BuildError(message)
 
 
+def _default_engine_model_files() -> tuple[str, ...]:
+    """Model files of the engine the app uses by default (`rapidocr-v6`).
+
+    The app starts with PP-OCRv6 Small; the v5 models are only the extra
+    Persian/Arabic recognizer.  The v6 weights live inside the `rapidocr`
+    package (`rapidocr/models`) and are bundled by `--collect-all rapidocr`,
+    or they can be staged next to the other models.
+    """
+    from comic_studio.ocr import RapidEngine
+
+    names = tuple(RapidEngine("rapidocr-v6", "v6")._expected_models("eng"))
+    if names:
+        return names
+    return ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx")
+
+
+def _find_default_engine_models(staging_dir: Path) -> tuple[Path | None, list[str]]:
+    """Return (folder that holds the default engine models, missing file names)."""
+    expected = list(_default_engine_model_files())
+    candidates: list[Path] = []
+    # v4.42: also check the flat staged copy of the user models folder. The builder
+    # previously looked ONLY at a dedicated 'rapidocr-v6' sub-folder or the vendored
+    # 'rapidocr/models' package; if the PP-OCRv6 files were copied into the flat
+    # staged 'rapidocr' folder by `stage_bundled_models`, the build still failed with
+    # "no model files" even though they were bundled.
+    staged_v6 = staging_dir / "rapidocr-v6"
+    if staged_v6.is_dir():
+        candidates.append(staged_v6)
+    candidates.append(staging_dir / "rapidocr")
+    try:
+        from comic_studio.ocr_managed import models_dir as _models_dir
+        candidates.append(_models_dir() / "rapidocr-v6")
+    except Exception:
+        pass
+    try:
+        import rapidocr
+
+        candidates.append(Path(rapidocr.__file__).resolve().parent / "models")
+    except Exception:
+        pass
+    for candidate in candidates:
+        missing = [
+            name
+            for name in expected
+            if not (candidate / name).is_file() or (candidate / name).stat().st_size <= 0
+        ]
+        if not missing:
+            return candidate, []
+    missing = [
+        name
+        for name in expected
+        if not any(
+            (candidate / name).is_file() and (candidate / name).stat().st_size > 0
+            for candidate in candidates
+        )
+    ]
+    return (candidates[0] if candidates else None), missing
+
+
 def verify_bundled_ocr_models(staging_dir: Path, *, allow_missing: bool = False) -> None:
     """Fail the build when the bundled OCR models are missing.
 
@@ -548,6 +632,12 @@ def verify_bundled_ocr_models(staging_dir: Path, *, allow_missing: bool = False)
     Tesseract language files and happily shipped a bundle **without the RapidOCR
     models**, so the installed app started but could not read a single line of text.
     Now the OCR models are verified exactly like the language files.
+
+    v4.38: the check also covers the engine the app uses **by default**
+    (`rapidocr-v6`).  The old check only looked at the v5 models, so a build
+    machine with an older `rapidocr` package (or a missing package at all)
+    produced a bundle whose default engine could not read anything - while the
+    builder still reported success.
     """
     problems: list[str] = []
     rapid_dir = staging_dir / "rapidocr"
@@ -563,6 +653,12 @@ def verify_bundled_ocr_models(staging_dir: Path, *, allow_missing: bool = False)
         for language, rec_name in (("English", "latin_PP-OCRv5_rec_mobile.onnx"), ("Persian", "arabic_PP-OCRv5_rec_mobile.onnx")):
             if rec_name not in present:
                 problems.append(f"the {language} OCR model ({rec_name}) is missing")
+    default_dir, default_missing = _find_default_engine_models(staging_dir)
+    if default_missing:
+        problems.append(
+            "the default OCR engine of the app (PP-OCRv6 Small) has no model files: "
+            + ", ".join(default_missing)
+        )
     if problems:
         message = (
             "The offline bundle would ship without usable OCR models:\n"
@@ -576,6 +672,7 @@ def verify_bundled_ocr_models(staging_dir: Path, *, allow_missing: bool = False)
             return
         raise BuildError(message)
     say("[ok] Bundled RapidOCR models (detector + English + Persian) are present.")
+    say(f"[ok] Default engine models (PP-OCRv6 Small) are present in '{default_dir}'.")
 
 
 def stage_bundled_models(
@@ -603,13 +700,13 @@ def stage_bundled_models(
             try:
                 engine.download(lang)
             except Exception as exc:
-                print(f"[warn] RapidOCR model download for {lang} skipped/failed: {exc}")
+                say(f"[warn] RapidOCR model download for {lang} skipped/failed: {exc}")
         tess_engine = TesseractEngine()
         for lang in ("eng", "fas"):
             try:
                 tess_engine._download_language_file(lang)
             except Exception as exc:
-                print(f"[warn] Tesseract traineddata download for {lang} skipped/failed: {exc}")
+                say(f"[warn] Tesseract traineddata download for {lang} skipped/failed: {exc}")
     if rapid_src.is_dir():
         shutil.copytree(rapid_src, rapid_dst, dirs_exist_ok=True)
     if tess_src.is_dir():
@@ -702,7 +799,7 @@ def pyinstaller_command(
     for pkg in ("rapidocr", "onnxruntime", "ctranslate2", "sentencepiece", "pymupdf", "bidi"):
         try:
             if importlib.util.find_spec(pkg) is None:
-                print(f"[warn] Optional package '{pkg}' is not installed - it will not be bundled.")
+                say(f"[warn] Optional package '{pkg}' is not installed - it will not be bundled.")
                 continue
         except Exception:
             continue
@@ -760,7 +857,9 @@ def write_offline_readme(target_dir: Path, *, include_nmt: bool) -> None:
         f"  {nmt_line}\r\n"
         "  - با بستن تب مرورگر، برنامه به‌صورت خودکار و تمیز بسته می‌شود.\r\n"
     )
-    (target_dir / "README-OFFLINE-FA.txt").write_text(text, encoding="utf-8")
+    # The BOM matters on Windows: without it Notepad shows the Persian text as
+    # broken characters. The TXT export of the program does the same thing.
+    (target_dir / "README-OFFLINE-FA.txt").write_text("\ufeff" + text, encoding="utf-8")
 
 
 def find_iscc() -> Path | None:
@@ -851,7 +950,7 @@ def build_windows_installer(
     iscc = find_iscc()
     iss_script = Path(__file__).resolve().parent / "ComicOCRStudio.iss"
     if iscc and iss_script.is_file():
-        print(f"[installer] Building Inno Setup installer with {iscc} ...")
+        say(f"[installer] Building Inno Setup installer with {iscc} ...")
         subprocess.check_call([
             str(iscc),
             f"/DAppVersion={APP_VERSION}",
@@ -865,15 +964,19 @@ def build_windows_installer(
             return output_exe
 
     payload_zip = dist_root / f"{base_name}.zip"
-    print(f"[installer] Compressing offline bundle archive {payload_zip.name} ...")
+    say(f"[installer] Compressing offline bundle archive {payload_zip.name} ...")
     zip_directory(app_dist_dir, payload_zip)
 
     csc = find_dotnet_csc()
     if csc:
-        print(f"[installer] Building native Windows GUI Setup .exe via {csc} ...")
+        say(f"[installer] Building native Windows GUI Setup .exe via {csc} ...")
         cs_source = build_root / "SetupStub.cs"
         stub_exe = build_root / "SetupStub.exe"
-        cs_code = CSHARP_SFX_INSTALLER.replace("__APP_VERSION__", APP_VERSION)
+        cs_code = (
+            CSHARP_SFX_INSTALLER
+            .replace("__APP_VERSION__", APP_VERSION)
+            .replace("__APP_ASSEMBLY_VERSION__", SFX_ASSEMBLY_VERSION)
+        )
         cs_source.write_text(cs_code, encoding="utf-8-sig")
         subprocess.check_call([
             str(csc),
@@ -1068,6 +1171,16 @@ def run_preflight(*, include_nmt: bool = False) -> int:
         "OCR models (RapidOCR)",
         rapid_ok,
         f"found in {rapid_dir}" if rapid_ok else f"not found in {rapid_dir} - connect to the internet and build again",
+    )
+    # The app reads with PP-OCRv6 Small by default; those weights live inside
+    # the `rapidocr` package and are bundled automatically.  Without them the
+    # installed app would start but read nothing.
+    default_dir, default_missing = _find_default_engine_models(models_dir())
+    check(
+        "Default OCR engine models (PP-OCRv6 Small)",
+        not default_missing,
+        (f"found in {default_dir}" if not default_missing
+         else f"missing ({', '.join(default_missing)}) - run 'pip install -U rapidocr' on this machine and build again"),
     )
     tess_dir = models_dir() / "tesseract"
     tess_ok = all((tess_dir / f"{lang}.traineddata").is_file() for lang in ("eng", "fas"))

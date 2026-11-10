@@ -94,6 +94,21 @@ def read_json(path: Path, default: Any) -> Any:
         return default
 
 
+def _client_blocks_are_stale(old: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """True when the browser sends boxes from before the server's OCR run.
+
+    The browser never clears the ``ocrCompleted`` flag - only the server sets
+    it after a successful OCR run.  A window that is behind therefore sends the
+    flag as false together with the boxes it knows, and applying those boxes
+    would erase the recognized text (and the translation) of that page.
+    """
+    if not old.get("ocrCompleted"):
+        return False
+    if candidate.get("ocrCompleted"):
+        return False
+    return True
+
+
 class ProjectStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -249,13 +264,25 @@ class ProjectStore:
                 seen.add(image_id)
                 old = existing[image_id]
                 item = dict(old)
+                stale_blocks = _client_blocks_are_stale(old, candidate)
                 for key in ("order", "selected", "groupId", "crop", "blocks", "pageMode", "approved", "watermark"):
                     if key in candidate:
+                        if key == "blocks" and stale_blocks:
+                            # The window has not seen the OCR run yet; its older
+                            # boxes must not replace the recognized text.
+                            continue
                         item[key] = bool(candidate[key]) if key == "approved" else candidate[key]
                 edited_file = project_root(project_id) / "images" / f"{image_id}-edited.png"
                 item["edited"] = bool(edited_file.is_file() and edited_file.stat().st_size > 0)
                 merged.append(item)
-            # An image omitted by the UI is deliberately removed from the project, not from source files on disk.
+            # Pages leave a project only through the explicit delete endpoint.
+            # A window that is behind (a second tab, or a tab that stayed open
+            # while another one imported pages) used to delete every page it
+            # had not seen yet - the imported pages silently vanished from the
+            # project while their files stayed on disk.
+            for image_id, old in existing.items():
+                if image_id not in seen:
+                    merged.append(dict(old))
             current["images"] = merged
             return self.save(current)
 
@@ -300,19 +327,26 @@ class ProjectStore:
 
     def save_rendered(self, project_id: str, image_id: str, content: bytes) -> dict[str, Any]:
         if len(content) > 150 * 1024 * 1024:
-            raise ValueError("Rendered image is too large")
-        with Image.open(io.BytesIO(content)) as im:
-            if (im.format or "").upper() != "PNG":
-                raise ValueError("Rendered image must be PNG")
-            rendered_size = im.size
-            im.verify()
+            raise ValueError("حجم تصویر ویرایش‌شده بیش از حد مجاز است.")
+        try:
+            with Image.open(io.BytesIO(content)) as im:
+                if (im.format or "").upper() != "PNG":
+                    raise ValueError("تصویر ویرایش‌شده باید از نوع PNG باشد.")
+                rendered_size = im.size
+                im.verify()
+        except ValueError:
+            # پیام‌های ValueError خودِ ما فارسی‌اند و از اینجا عبور می‌کنند.
+            raise
+        except Exception as exc:
+            # پیام خام PIL (مثل «Truncated File Read») لاتین است؛ کاربر فارسی می‌خواند.
+            raise ValueError("تصویر ویرایش‌شدهٔ PNG ناقص یا خراب است؛ دوباره تصویر را رندر کنید.") from exc
         with self._lock:
             state = self.get(project_id)
             target_item = next((item for item in state.get("images", []) if item["id"] == image_id), None)
             if target_item is None:
                 raise KeyError(image_id)
             if rendered_size != (target_item["width"], target_item["height"]):
-                raise ValueError("Rendered image dimensions do not match the source")
+                raise ValueError("اندازهٔ تصویر ویرایش‌شده با تصویر اصلی یکی نیست.")
             path = project_root(project_id) / "images" / f"{image_id}-edited.png"
             atomic_bytes(path, content)
             target_item["edited"] = True
@@ -331,14 +365,14 @@ class ProjectStore:
     @staticmethod
     def _normalize_and_validate_image_bytes(filename: str, content: bytes) -> tuple[bytes, str, int, int]:
         if len(content) > 150 * 1024 * 1024:
-            raise ValueError(f"Image is too large: {filename}")
+            raise ValueError(f"حجم تصویر «{filename}» بیش از حد مجاز است (حداکثر ۱۵۰ مگابایت).")
         try:
             with Image.open(io.BytesIO(content)) as im:
                 raw_format = (im.format or "PNG").upper()
                 image_format = "JPEG" if raw_format == "MPO" else raw_format
                 width, height = im.size
                 if width < 1 or height < 1 or width * height > 100_000_000:
-                    raise ValueError(f"Invalid image dimensions: {filename}")
+                    raise ValueError(f"ابعاد تصویر «{filename}» معتبر نیست یا بیش از حد بزرگ است.")
                 im.load()
                 try:
                     orientation = int(im.getexif().get(0x0112, 1) or 1)
@@ -349,7 +383,7 @@ class ProjectStore:
                     try:
                         width, height = transposed.size
                         if width < 1 or height < 1 or width * height > 100_000_000:
-                            raise ValueError(f"Invalid image dimensions: {filename}")
+                            raise ValueError(f"ابعاد تصویر «{filename}» پس از چرخش معتبر نیست یا بیش از حد بزرگ است.")
                         out = io.BytesIO()
                         save_fmt = image_format if image_format in {"JPEG", "PNG", "WEBP", "BMP", "GIF"} else "PNG"
                         exif_bytes = transposed.info.get("exif")
@@ -373,9 +407,9 @@ class ProjectStore:
                         if transposed is not im:
                             transposed.close()
         except (OSError, Image.DecompressionBombError) as exc:
-            raise ValueError(f"Invalid or unsupported image: {filename}") from exc
+            raise ValueError(f"تصویر «{filename}» خراب است یا قالب آن پشتیبانی نمی‌شود.") from exc
         if len(content) > 150 * 1024 * 1024:
-            raise ValueError(f"Image is too large: {filename}")
+            raise ValueError(f"حجم تصویر «{filename}» پس از چرخش بیش از حد مجاز است (حداکثر ۱۵۰ مگابایت).")
         return content, image_format, width, height
 
     @classmethod
@@ -429,7 +463,7 @@ class ProjectStore:
             for filename, _ in files:
                 suffix = Path(filename).suffix.lower()
                 if suffix != ".pdf" and suffix not in ALLOWED_IMAGES:
-                    raise ValueError(f"Unsupported file: {filename}")
+                    raise ValueError(f"قالب فایل «{filename}» پشتیبانی نمی‌شود؛ فقط تصویر یا PDF می‌توانید وارد کنید.")
 
             total_inputs = max(1, len(files))
             completed_inputs = 0
@@ -511,7 +545,7 @@ class ProjectStore:
             if image_id not in known and not any(images_dir.glob(f"{image_id}.*")):
                 known.add(image_id)
                 return image_id, file_name, image_path
-        raise ValueError("Could not allocate a unique image ID")
+        raise ValueError("شناسهٔ یکتا برای تصویر ساخته نشد؛ دوباره تلاش کنید.")
 
     @staticmethod
     def _compute_pdf_page_scales(page: Any, base_scale: float) -> tuple[float, float]:
@@ -590,16 +624,22 @@ class ProjectStore:
         progress_span: tuple[float, float] = (0.0, 0.96),
     ) -> None:
         if len(content) > 500 * 1024 * 1024:
-            raise ValueError("PDF is too large")
+            raise ValueError("حجم فایل PDF بیش از حد مجاز است.")
         import pymupdf as fitz
 
+        stem = Path(filename).stem
         scale = max(1.0, min(8.5, float(scale)))
-        with fitz.open(stream=content, filetype="pdf") as check_doc:
+        try:
+            opened_check_doc = fitz.open(stream=content, filetype="pdf")
+        except Exception as exc:
+            # پیام خام PyMuPDF (مثل Failed to open stream) لاتین است؛ کاربر باید فارسی بخواند.
+            raise ValueError(f"فایل PDF «{stem}» خراب است یا قالب آن پشتیبانی نمی‌شود.") from exc
+        with opened_check_doc as check_doc:
             if check_doc.needs_pass:
-                raise ValueError("Password-protected PDF is not supported")
+                raise ValueError("فایل PDF رمزگذاری‌شده پشتیبانی نمی‌شود.")
             page_count = len(check_doc)
             if page_count > 1000:
-                raise ValueError("PDF has too many pages")
+                raise ValueError("تعداد صفحه‌های فایل PDF بیش از حد مجاز است.")
 
         if page_count == 0:
             return
@@ -607,7 +647,6 @@ class ProjectStore:
         project_id = state["id"]
         known = {item["id"] for item in state["images"]}
         slots = [self._allocate_image_slot(project_id, known, ".png") for _ in range(page_count)]
-        stem = Path(filename).stem
         workers, _ = compute_worker_count(page_count, per_worker_mb=240, max_cap=6)
 
         tls = threading.local()
@@ -625,14 +664,18 @@ class ProjectStore:
 
         def _render_one_page(_idx: int, page_index: int) -> dict[str, Any]:
             image_id, file_name, image_path = slots[page_index]
-            doc = _get_thread_doc()
-            page = doc[page_index]
-            scale_x, scale_y = self._compute_pdf_page_scales(page, scale)
-            pix = page.get_pixmap(matrix=fitz.Matrix(scale_x, scale_y), alpha=False)
+            try:
+                doc = _get_thread_doc()
+                page = doc[page_index]
+                scale_x, scale_y = self._compute_pdf_page_scales(page, scale)
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale_x, scale_y), alpha=False)
+            except Exception as exc:
+                # خطاهای خام PyMuPDF لاتین‌اند؛ کاربر باید صفحهٔ آسیب‌دیده را فارسی بخواند.
+                raise ValueError(f"خواندن صفحهٔ {page_index + 1} از فایل PDF «{stem}» ممکن نشد؛ فایل آسیب‌دیده است.") from exc
             width, height = int(pix.width), int(pix.height)
             if width < 1 or height < 1 or width * height > 100_000_000:
                 del pix
-                raise ValueError(f"Invalid image dimensions: {stem} — صفحهٔ {page_index + 1}.png")
+                raise ValueError(f"ابعاد صفحهٔ {page_index + 1} از فایل «{stem}» معتبر نیست یا بیش از حد بزرگ است.")
             png = pix.tobytes("png")
             byte_len = len(png)
             del pix

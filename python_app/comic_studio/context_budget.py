@@ -36,7 +36,7 @@ class ContextBudget:
             if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
                 raise ValueError(f"{name} must be an integer between {low} and {high}")
         if self.context_percent + self.skill_percent > 100:
-            raise ValueError("context and skill percentages must not exceed 100 together")
+            raise ValueError("درصد زمینهٔ داستان و درصد اسکیل باید روی‌هم بیشتر از ۱۰۰ نباشند.")
 
     @property
     def context_limit(self) -> int:
@@ -95,7 +95,7 @@ def build_context_request(
     pre-existing skill nor a previous summary is truncated to make it fit.
     """
     if not all(isinstance(value, str) for value in (language, skill, previous_context)):
-        raise ValueError("language, skill and previous_context must be strings")
+        raise ValueError("زبان، اسکیل و زمینهٔ قبلی باید متن باشند.")
     if len(skill) > budget.skill_limit:
         raise TranslationError(f"راهنمای ترجمه {len(skill)} نویسه دارد و از سقف {budget.skill_limit} نویسه بیشتر است؛ پیش از ارسال آن را کوتاه کنید یا درصد اسکیل را تغییر دهید.")
     if len(previous_context) > budget.context_limit:
@@ -233,7 +233,7 @@ def parse_context_response(response: str, source_texts: list[str], context_limit
         result: dict[str, object] = {}
         for key, item in pairs:
             if key in result:
-                raise ValueError("duplicate JSON key")
+                raise ValueError("کلید تکراری در پاسخ JSON وجود دارد.")
             result[key] = item
         return result
 

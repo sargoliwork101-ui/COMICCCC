@@ -610,7 +610,7 @@ class LocalNmtManager:
         last_exc: Exception | None = None
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        headers = {"User-Agent": "ComicOCRStudio/4.36"}
+        headers = {"User-Agent": "ComicOCRStudio/4.42"}
         client = httpx.Client(headers=headers, follow_redirects=True, transport=self._transport)
         with self._clients_lock:
             self._active_clients.add(client)

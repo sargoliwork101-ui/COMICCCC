@@ -126,7 +126,6 @@ def test_actual_openai_and_gemini_payload_are_bounded_and_summary_is_validated(t
     import httpx
     from comic_studio.context_budget import ContextBudget, build_context_request
     from comic_studio.context_run import provider_policy
-    from comic_studio.translation import TranslationError
     monkeypatch.setenv('COMIC_STUDIO_DATA', str(tmp_path))
     service = TranslationService()
     captured = []
@@ -236,7 +235,7 @@ def test_rolling_summary_auto_shortens_to_fit_next_safe_request():
     from comic_studio.context_run import create_run, next_request
     import copy
     budget = ContextBudget(1000, 15, 0)
-    empty = build_context_request(budget, 'English', '', '')
+    build_context_request(budget, 'English', '', '')
     source = 'A' * 499 + '.'
     state = {'images':[{'id':'p','name':'page','order':0,'blocks':[{'id':1,'text':source,'enabled':True}]}]}
     run = create_run(copy.deepcopy(state), ['p'], 'openai', 'eng', '', 'x' * 90, 1000, 15, 0, False, {})
@@ -568,7 +567,6 @@ def test_commit_before_cleanup_never_reapplies_or_resends(tmp_path, monkeypatch)
         route, project, step = _pending_setup(client)
         original_remove = pending_results.remove
         monkeypatch.setattr(pending_results, 'remove', lambda *a: (_ for _ in ()).throw(OSError('crash after commit')))
-        import pytest
         committed = client.post(route+'/context-step', json=step)
         assert committed.status_code == 200, committed.text
         monkeypatch.setattr(pending_results, 'remove', original_remove)
