@@ -1,5 +1,14 @@
 # تاریخچهٔ تغییرات
 
+## 4.43 / افزونه 2.68 — 2026-11-01
+
+- **سه درخواست کاربر اجرا شد**:
+  1. **پنل فروشنده با بستن پنجرهٔ CMD پاک‌سازی می‌شود**: یک watcher thread از طریق Win32 `OpenProcess`/`NtQueryInformationProcess` به process والد پالایش می‌کند؛ اگر پنجرهٔ ترمینال/کنسول بسته شود، واچر `server.shutdown()` می‌خواهد و `ThreadingHTTPServer` همان‌جا تخلیه می‌شود — دیگر پردازهٔ zombie لایسنس باقی نمی‌ماند.
+  2. **فایل‌های سازندهٔ لایسنس جدا شدند**: `python_app/license_tool/manager.py` + `python_app/license_tool/start_license_manager.bat` + `python_app/license_tool/__init__.py`. راه‌انداز ریشهٔ `start_license_manager.bat` فقط forward به لانچر جدید است تا مسیر قدیمی برای کاربران کهنجار باز باشد. build_offline_package، test_license_guard, test_windows_launcher و docstring `_public_key.py`/`_vendor_config.py` به محل جدید به‌روز شدند. SECURITY packet مشتری همچنان `license_manager.py`/bat را از dist فیلتر می‌کند چون پوشهٔ license_tool در exclusion list است.
+  3. **برچسب وضعیت ترجمه روی thumbnail**: در v4.43 `app.js` برای هر کارت یک نشان‌گر کوچک (`.translation-state-badge`) اضافه کرد که «ترجمه نشده» (خاکستری)، «نیمه‌ترجمه» (نارنجی)، «ترجمه شد» (فیروزه ای) یا «AI ترجمه» (بنفش) را نشان می‌دهد. پردازش در `context_run.py::apply_response` فیلد `block.aiTranslated` را برای ترجمه‌های دارای provider فعال ('free'/'local' = مستقیم، بقیه = AI) می‌گذارد، و وقتی کاربر متن AI را در inline editor ویرایش می‌کند، active آن برداشته می‌شود تا نشان‌گر صادق بماند.
+- **خطای SSLError زرد pip/pyinstaller**: این پیام pip است و از اینترنت کاربر می‌آید؛ ریشهٔ موجه: چک کنید وزن‌هایکه offline در `wheelhouse` شما هستند، یا با اینترنتی سالم دوباره اجرا کنید، یا فایل PyInstaller `.whl` را دستی در `python_app/wheelhouse/` کپی کنید (v4.42 مسیر fallback را بهینه کرد).
+- نسخهٔ استودیو **`4.43` (`4.4.3`)** (افزونهٔ کروم ثابت در **`2.68`**).
+
 ## 4.42 / افزونه 2.68 — 2026-11-01
 
 - **رفع ریشه‌ای خطای ساخت بستهٔ آفلاین (درخواست کاربر: «با فایل .bat سازنده مشکل دارم، اونو اصلاح کن»)**:

@@ -832,7 +832,7 @@ def pyinstaller_command(
         "tensorflow",
         "paddle",
         "pytest",
-        "license_manager",
+        "license_tool",
     ):
         cmd.extend(["--exclude-module", excluded])
 
@@ -1050,8 +1050,7 @@ def verify_no_seller_secrets_in_dist(app_dist_dir: Path) -> None:
         ".seller-key.json",
         "seller_customers",
         "issued_licenses",
-        "license_manager.py",
-        "start_license_manager.bat",
+        "license_tool",
     )
     for item in app_dist_dir.rglob("*"):
         low = item.name.lower()
@@ -1198,7 +1197,7 @@ def run_preflight(*, include_nmt: bool = False) -> int:
         )
 
     try:
-        from license_manager import SellerVault
+        from license_tool.manager import SellerVault
 
         vault = SellerVault()
         status = vault.key_status()
@@ -1262,7 +1261,7 @@ def run_preflight(*, include_nmt: bool = False) -> int:
         if any(("OCR models" in p) or ("Language files" in p) or ("translator" in p) for p in problems):
             say("  راه‌حل مدل‌ها: یک‌بار اینترنت را وصل کنید و دوباره اجرا کنید (مدل‌ها خودکار دانلود می‌شوند).")
         if any("Seller master key" in p for p in problems):
-            say("  راه‌حل کلید مادر: پنل فروشنده (start_license_manager.bat) را باز کنید یا فایل پشتیبان کلید را برگردانید.")
+            say("  راه‌حل کلید مادر: پنل فروشنده (license_tool\\start_license_manager.bat) را باز کنید یا فایل پشتیبان کلید را برگردانید.")
         say("  تا آن زمان ساخت بستهٔ آفلاین انجام نمی‌شود.")
     else:
         say("  همه‌چیز آماده است — ساخت بستهٔ آفلاین باید با موفقیت انجام شود.")
@@ -1433,7 +1432,7 @@ def _run_build(args: argparse.Namespace) -> int:
             "       'python_app\\wheelhouse' and run the build again."
         )
 
-    from license_manager import SellerKeyLostError, SellerVault
+    from license_tool.manager import SellerKeyLostError, SellerVault
 
     vault = SellerVault()
     key_state_before = vault.key_status()
@@ -1467,7 +1466,7 @@ def _run_build(args: argparse.Namespace) -> int:
     if embedded_now and embedded_now != str(seller_info["public_key_hex"]).lower():
         raise BuildError(
             "The key embedded in the app does NOT match the seller's master key.\n"
-            "       Restore the seller key (or run start_license_manager.bat once) and build again -\n"
+            "       Restore the seller key (or run license_tool/start_license_manager.bat once) and build again -\n"
             "       shipping this build would break every license your customers already have."
         )
     if not key_status.get("backupExists"):

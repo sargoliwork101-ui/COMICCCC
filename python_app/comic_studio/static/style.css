@@ -512,6 +512,17 @@ body.light .wm-preview-stage{background:repeating-conic-gradient(#e2e8f0 0% 25%,
 #wmPreviewCanvas{max-width:100%;max-height:400px;width:auto;height:auto;display:block}
 .watermark-badge{position:absolute;bottom:7px;left:7px;z-index:3;display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700;background:rgba(15,23,42,.78);color:#e2e8f0;border:1px solid rgba(148,163,184,.35);pointer-events:none}
 body.light .watermark-badge{background:rgba(255,255,255,.88);color:#1e293b;border-color:rgba(100,116,139,.35)}
+
+/* v4.43: tiny badge that sits on an image thumbnail and shows whether the page is translated. */
+.item .translation-state-badge{position:absolute;top:5px;left:5px;z-index:3;display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:999px;font-size:9.5px;font-weight:800;line-height:1.4;border:1.5px solid transparent;pointer-events:none;backdrop-filter:blur(3px)}
+.item .translation-state-badge.tl-none{background:rgba(15,23,42,.62);color:#cbd5e1;border-color:#47556955}
+.item .translation-state-badge.tl-manual{background:rgba(21,94,117,.82);color:#a5f3fc;border-color:#67e8f977}
+.item .translation-state-badge.tl-ai{background:rgba(76,29,149,.85);color:#ddd6fe;border-color:#c4b5fd66}
+.item .translation-state-badge.tl-partial{background:rgba(124,45,18,.84);color:#fed7aa;border-color:#fdba7477}
+body.light .item .translation-state-badge.tl-none{background:rgba(255,255,255,.85);color:#334155;border-color:rgba(100,116,139,.45)}
+body.light .item .translation-state-badge.tl-manual{background:rgba(187,247,208,.9);color:#134e4a;border-color:rgba(22,101,52,.35)}
+body.light .item .translation-state-badge.tl-ai{background:rgba(233,213,255,.92);color:#4c1d95;border-color:rgba(91,33,182,.3)}
+body.light .item .translation-state-badge.tl-partial{background:rgba(254,215,170,.9);color:#7c2d12;border-color:rgba(194,65,12,.3)}
 .inline-editor.is-idle.has-selection .inline-line-tools{opacity:1}
 .inline-font-label{display:inline-flex;align-items:center;gap:5px}
 .inline-font-label select{width:auto;min-width:108px;max-width:142px;padding:3px 6px;font-size:11px;border-radius:6px}

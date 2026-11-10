@@ -144,8 +144,11 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     assert '"%~1"=="--setup-only"' in NORMAL
     assert 'if defined SETUP_ONLY' in NORMAL
 
-    seller_bat = (ROOT / "start_license_manager.bat").read_text(encoding="utf-8")
-    assert '"%PYTHON_EXE%" %PYTHON_ARG% "%CD%\\license_manager.py" %*' in seller_bat
+    # v4.43: the seller tool lives in a dedicated folder and the root launcher just forwards.
+    seller_bat_forwarder = (ROOT / "start_license_manager.bat").read_text(encoding="utf-8")
+    assert "license_tool\\start_license_manager.bat" in seller_bat_forwarder
+    seller_bat = (ROOT / "license_tool" / "start_license_manager.bat").read_text(encoding="utf-8")
+    assert '"%PYTHON_EXE%" %PYTHON_ARG% "%CD%\\manager.py" %*' in seller_bat
     assert "\\WindowsApps\\" in seller_bat
 
     iss_text = (ROOT / "offline_packaging" / "ComicOCRStudio.iss").read_text(encoding="utf-8")
@@ -176,7 +179,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     )
     joined = " ".join(cmd)
     assert "--onedir" in cmd and "--windowed" in cmd
-    assert "--optimize" in cmd and "license_manager" in cmd
+    assert "--optimize" in cmd and "license_tool" in cmd
     assert "bundled_models" in joined
     assert "ctranslate2" in joined and "sentencepiece" in joined
     assert "cv2" in cmd
@@ -435,7 +438,7 @@ def test_v434_the_readiness_checklist_never_contradicts_its_own_marks(tmp_path, 
         (models / "tesseract" / f"{lang}.traineddata").write_bytes(b"x" * 3_400_000)
     monkeypatch.setattr(builder, "models_dir", lambda: models)
 
-    import license_manager
+    import license_tool.manager as license_manager
 
     class _ReadyVault:
         def key_status(self):
@@ -480,7 +483,7 @@ def test_v435_only_real_blockers_are_listed_as_not_ready(tmp_path, monkeypatch, 
         (models / "tesseract" / f"{lang}.traineddata").write_bytes(b"x" * 3_400_000)
     monkeypatch.setattr(builder, "models_dir", lambda: models)
 
-    import license_manager
+    import license_tool.manager as license_manager
 
     class _VaultWithoutBackup:
         def key_status(self):

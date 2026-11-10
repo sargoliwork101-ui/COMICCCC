@@ -1341,6 +1341,31 @@ function renderGrid() {
       wmBadge.title = 'دارای واترمارک فعال روی این صفحه';
       frameShell.appendChild(wmBadge);
     }
+    // v4.43: tiny indicator that sits over the thumbnail and answers at a glance
+    // whether this page is translated, half-translated, or still untouched.
+    {
+      const blocks = Array.isArray(item.blocks) ? item.blocks : [];
+      const enabled = blocks.filter((entry) => entry && entry.enabled !== false);
+      const translated = enabled.filter((entry) => String(entry.tr || '').trim() || String(entry.richHtml || '').trim());
+      let tlClass = 'tl-none';
+      let tlText = 'ترجمه نشده';
+      let tlTitle = 'این صفحه هنوز هیچ کادر ترجمهٔ فعالی ندارد';
+      if (translated.length > 0 && translated.length >= enabled.length) {
+        const aiTouched = translated.some((entry) => entry.aiTranslated === true || entry.aiTranslated === '1' || entry.aiTranslated === 1);
+        tlClass = aiTouched ? 'tl-ai' : 'tl-manual';
+        tlText = aiTouched ? 'AI ترجمه' : 'ترجمه شد';
+        tlTitle = aiTouched ? 'همهٔ کادرها با ترجمهٔ هوش مصنوعی پر شده‌اند' : 'همهٔ کادرها ترجمهٔ دستی/فارسی دارند';
+      } else if (translated.length > 0) {
+        tlClass = 'tl-partial';
+        tlText = 'نیمه‌ترجمه';
+        tlTitle = `${translated.length} از ${enabled.length} کادر فعال ترجمه دارند`;
+      }
+      const tlBadge = document.createElement('div');
+      tlBadge.className = `translation-state-badge ${tlClass}`;
+      tlBadge.textContent = tlText;
+      tlBadge.title = tlTitle;
+      frameShell.appendChild(tlBadge);
+    }
     const tick = document.createElement('input'); tick.type = 'checkbox'; tick.className = 'tick'; tick.checked = !!item.selected; tick.setAttribute('aria-label', `انتخاب ${item.name}`);
     tick.addEventListener('click', (event) => {
       // The browser has already applied the new checkbox value; consume this one click without cancelling it.
@@ -5832,7 +5857,16 @@ function closeInlineEditor(force = false) {
   if (!force && document.activeElement === $('inlineLineSize')) $('inlineLineSize').blur();
   const committed = inlineEditSession?.close({ discardConflict: force }) ?? false;
   if (!committed && !force) return false;
-  if (committed) classicEditor.clearDraft(); else classicEditor.saveDraft();
+  if (committed) {
+    classicEditor.clearDraft();
+    // v4.43: a manual edit after an AI translation means the text is no longer
+    // "pure AI output", so remove the marker (badge would lie otherwise).
+    const activeBlock = inlineEditSession?.block || null;
+    if (activeBlock && activeBlock.aiTranslated) {
+      delete activeBlock.aiTranslated;
+      drawEditor(); scheduleSave();
+    }
+  } else classicEditor.saveDraft();
   classicEditor.closeModal?.({ restoreFocus: false });
   classicEditor.exitFullscreen(); classicEditor.detachField();
   const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
@@ -7611,9 +7645,10 @@ async function runSingleBlockTranslation(task) {
     if ($('translationDialog').open) closeDialog('translationDialog');
   }
 }
-function applyTranslatedBlockDefaults(block, text, targetLang = null) {
+function applyTranslatedBlockDefaults(block, text, targetLang = null, viaAi = null) {
   block.tr = text;
   block.richHtml = '';
+  if (viaAi !== null) block.aiTranslated = !!viaAi;
   const resolvedDir = targetLang ? targetLanguageDir(targetLang) : (block.dir === 'ltr' ? 'ltr' : 'rtl');
   block.dir = resolvedDir;
   if (block.textMode === 'ocr') block.textMode = 'translation';
@@ -7666,7 +7701,7 @@ async function retranslateBlock(block, targetOverride = null) {
         const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill:'', summary:'', confirmation: accepted.signature }), signal }));
         if (!result || result.cancelled) return;
         if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-        applyTranslatedBlockDefaults(block, result.text, targetLanguage); buildBlockList(); drawEditor(); scheduleSave();
+        applyTranslatedBlockDefaults(block, result.text, targetLanguage, false); buildBlockList(); drawEditor(); scheduleSave();
       }, refresh, switchTarget);
       return;
     }
@@ -7693,7 +7728,7 @@ async function retranslateBlock(block, targetOverride = null) {
       const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) }), signal }));
       if (!result || result.cancelled) return;
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-      applyTranslatedBlockDefaults(block, result.text, targetLanguage); buildBlockList(); drawEditor(); scheduleSave();
+      applyTranslatedBlockDefaults(block, result.text, targetLanguage, true); buildBlockList(); drawEditor(); scheduleSave();
     }, refresh, switchTarget);
   } catch (error) {
     if (targetOverride && $('translationPreviewDialog').open) throw error;

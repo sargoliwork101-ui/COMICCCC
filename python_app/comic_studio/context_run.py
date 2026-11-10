@@ -439,6 +439,10 @@ def apply_response(state: dict[str, Any], run: dict[str, Any], chosen: list[dict
         for ref in job['refs']:
             block = lookup[(str(ref['imageId']), str(ref['blockId']))]
             block['tr'] = job['accumulated']; block['richHtml'] = ''
+            # v4.43: persist whether this block was produced by an AI agent or
+            # by a plain/direct/fallback path. The flag lets the image grid
+            # show a tiny "AI" badge without re-querying translation logs.
+            block['aiTranslated'] = run['provider'] not in {'free', 'local'}
             apply_translated_block_defaults(block, target_language=target_lang)
             # Old checkpoints describe different payloads, not this context run.
             block.pop('_aiTranslationParts', None); block.pop('_aiReusedTranslation', None)
