@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.47"
+    assert health.json()["version"] == "4.48"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3290,7 +3290,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.47"
+    assert APP_VERSION == "4.48"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -5426,6 +5426,39 @@ def test_v444_transport_error_log_is_human_readable_and_mentions_retry_hint():
 
     # The hint table itself must stay non-empty (typos strip the explanation).
     assert len(_TRANSPORT_ERROR_HINTS) >= 8, "keep the transport-hint table broad so users see context"
+
+
+def test_v448_retry_hint_matches_free_retry_behavior():
+    """v4.48 — the "no auto-retry" hint must not contradict v4.45's free retry.
+
+    v4.45 grants one bonus automatic retry for connect-phase failures even
+    when retry_count is 0. The v4.44 hint texts unconditionally claimed that
+    no automatic retry happened — for httpx.ConnectError/ConnectTimeout/
+    PoolTimeout that was a lie told to the user at the worst moment (an
+    error toast). The three emission sites now share _transport_retry_hint,
+    which distinguishes: free retry already spent vs. retry gated by policy.
+    """
+    import httpx
+    from comic_studio.translation import _transport_retry_hint
+
+    # 1) Connect-phase failure with retry_count=0: one free retry was spent —
+    #    the hint must say so and must NOT claim "انجام نشد".
+    for exc in (httpx.ConnectError("refused"), httpx.ConnectTimeout("timed out"), httpx.PoolTimeout("pool empty")):
+        hint = _transport_retry_hint(exc, {"retry_count": 0}, " DUMMY-TAIL")
+        assert "تلاش مجدد خودکار انجام نشد" not in hint
+        assert "یک تلاش مجدد خودکار رایگان" in hint
+        assert hint.endswith(" DUMMY-TAIL")
+
+    # 2) Mid-flight failures with retry_count=0: still policy-gated, the hint
+    #    correctly states that no automatic retry happened.
+    for exc in (httpx.ReadTimeout("slow"), httpx.ReadError("broken"), httpx.RemoteProtocolError("dropped")):
+        hint = _transport_retry_hint(exc, {"retry_count": 0}, " DUMMY-TAIL")
+        assert "تلاش مجدد خودکار انجام نشد" in hint
+        assert hint.endswith(" DUMMY-TAIL")
+
+    # 3) Any configured retry allowance silences the hint for every family.
+    for exc in (httpx.ConnectError("refused"), httpx.ReadTimeout("slow")):
+        assert _transport_retry_hint(exc, {"retry_count": 1}, " DUMMY-TAIL") == ""
 
 
 def test_v445_free_transport_retry_always_runs_even_when_retry_count_is_zero():

@@ -898,7 +898,7 @@ function check(name, condition) {
     $('inlineEditorApply').click();
     check('finishing box edit keeps the inline editor docked in idle state instead of hiding it', !$('inlineEditor').classList.contains('hidden') && $('inlineEditor').classList.contains('is-idle') && !$('editorBoxes').querySelector('.editor-box.editing'));
     check('merge and split tools live in their own separated group outside align/layout tools', !!$('inlineEditor').querySelector('.inline-box-ops-row > #inlineMergeSplitTools #editorMergeText') && !!$('inlineEditor').querySelector('.inline-box-ops-row > #inlineMergeSplitTools #editorSplitText') && !$('inlineEditor').querySelector('.inline-box-layout-tools #editorMergeText') && !$('inlineEditor').querySelector('.inline-box-layout-tools #editorSplitText'));
-    // v4.47: arrow keys nudge the selected box pixel-by-pixel and Ctrl+Z undoes box moves.
+    // v4.48: arrow keys nudge the selected box pixel-by-pixel and Ctrl+Z undoes box moves.
     await vm.runInContext(`(async () => {
       state.project.images[0].blocks = [{ id: 77, text: 'NUDGE', tr: '', richHtml: '', enabled: true, x0: 100, y0: 100, x1: 200, y1: 150, lineH: 20, bg: 'white', dir: 'rtl', align: 'justify', size: 12, verticalAlign: 'top' }];
       state.selectedBlockIds = ['77']; state.activeBlockId = '77';
@@ -4583,7 +4583,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.47' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.48' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();

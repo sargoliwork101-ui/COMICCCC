@@ -489,6 +489,27 @@ def _is_free_transport_retry(exc: Exception) -> bool:
     return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
 
 
+def _transport_retry_hint(exc: httpx.TransportError, profile: dict[str, Any], tail: str) -> str:
+    """v4.48 — make the "no auto-retry" hint honest about v4.45's free retry.
+
+    ``_run_with_retries`` grants ONE bonus automatic retry for connect-phase
+    failures (ConnectError / ConnectTimeout / PoolTimeout) even when the
+    profile's ``retry_count`` is 0. The v4.44 message texts were written
+    before that and unconditionally claimed «تلاش مجدد خودکار انجام نشد» —
+    factually wrong for the connect family, since one retry *did* run. When
+    the hint is emitted we already know every allowance is exhausted, so the
+    message must distinguish: free-retry already spent vs. none granted by
+    policy. ``tail`` is the site-specific advice sentence that follows.
+    """
+    if profile.get("retry_count", 0):
+        return ""
+    if _is_free_transport_retry(exc):
+        lead = "یک تلاش مجدد خودکار رایگان برای خطای مرحلهٔ اتصال انجام شد، ولی خطا همچنان باقی است."
+    else:
+        lead = f"چون تعداد تکرار خودکار این پروفایل روی {profile.get('retry_count', 0)} تنظیم شده، تلاش مجدد خودکار انجام نشد."
+    return lead + tail
+
+
 def _run_with_retries(action: Any, profile: dict[str, Any], provider: str, secrets: list[str]) -> Any:
     retries = profile.get("retry_count", DEFAULT_AI_RETRIES)
     free_transport_retry_used = False
@@ -988,12 +1009,10 @@ class TranslationService:
                     self._check_cancelled()
                     message = _safe_error(exc, selected, secrets)
                     if isinstance(exc, httpx.TransportError):
-                        retry_note = (
-                            f"چون تعداد تکرار خودکار این پروفایل روی {profile['retry_count']} تنظیم شده، تلاش مجدد خودکار انجام نشد. "
-                            "اگر این خطا گاه‌به‌گاه رخ می‌دهد و با یک تلاش دستی دوم برطرف می‌شود، "
-                            "در پنجرهٔ تنظیمات این سرویس گزینهٔ «تعداد تکرار خودکار هر درخواست» را یک یا دو قرار دهید تا چنین خطاهای گذرا خودکار جبران شوند."
-                            if profile['retry_count'] == 0
-                            else ""
+                        retry_note = _transport_retry_hint(
+                            exc, profile,
+                            " اگر این خطا گاه‌به‌گاه رخ می‌دهد و با یک تلاش دستی دوم برطرف می‌شود، "
+                            "در پنجرهٔ تنظیمات این سرویس گزینهٔ «تعداد تکرار خودکار هر درخواست» را یک یا دو قرار دهید تا چنین خطاهای گذرا خودکار جبران شوند.",
                         )
                         emit(
                             f"پاسخ {name} به‌علت خطای ارتباطی دریافت نشد: {message}؛ کلید بعدی خودکار امتحان نشد."
@@ -1085,15 +1104,14 @@ class TranslationService:
                 self._check_cancelled()
                 message = _safe_error(exc, provider, secrets)
                 if isinstance(exc, httpx.TransportError):
-                    retry_hint = (
-                        f" چون تکرار خودکار این پروفایل روی {profile['retry_count']} تنظیم شده، تلاش مجدد خودکار انجام نشد؛"
+                    retry_hint = _transport_retry_hint(
+                        exc, profile,
                         " اگر این خطا گاه‌به‌گاه رخ می‌دهد و با یک تلاش دستی دوم برطرف می‌شود،"
-                        " در تنظیمات سرویس «تعداد تکرار خودکار هر درخواست» را افزایش دهید."
-                        if profile.get('retry_count', 0) == 0 else ""
+                        " در تنظیمات سرویس «تعداد تکرار خودکار هر درخواست» را افزایش دهید.",
                     )
                     raise TranslationError(
                         f"ارتباط {name} قطع شد؛ ممکن است درخواست پردازش یا هزینه حساب شده باشد. "
-                        f"کلید بعدی خودکار امتحان نشد. جزئیات: {message}.{retry_hint}"
+                        f"کلید بعدی خودکار امتحان نشد. جزئیات: {message}." + (f" {retry_hint}" if retry_hint else "")
                     ) from exc
                 if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {400, 422} and context_uses_json(provider, profile['base_url'], profile['response_mode']):
                     raise TranslationError(f"درخواست JSON رد شد؛ شاید مدل از این حالت پشتیبانی نکند. حالت پاسخ را در تنظیمات به «متن معمولی» تغییر دهید و دوباره بررسی کنید. کلید بعدی امتحان نشد. {message}") from exc
@@ -1190,13 +1208,12 @@ class TranslationService:
                 self._check_cancelled()
                 message = _safe_error(exc, provider, secrets)
                 if isinstance(exc, httpx.TransportError):
-                    retry_hint = (
-                        f" چون تکرار خودکار این پروفایل روی {profile.get('retry_count', 0)} صفر است، تلاش مجدد خودکار انجام نشد؛"
-                        " همان محتوا با تکرار دستی معمولاً می‌گذرد چون سرور دیگر سرد نیست."
-                        if profile.get('retry_count', 0) == 0 else ""
+                    retry_hint = _transport_retry_hint(
+                        exc, profile,
+                        " همان محتوا با تکرار دستی معمولاً می‌گذرد چون سرور دیگر سرد نیست.",
                     )
                     raise TranslationError(
-                        f"ارتباط هنگام فشرده‌سازی خلاصه قطع شد؛ درخواست ترجمه ارسال نشد. {message}.{retry_hint}"
+                        f"ارتباط هنگام فشرده‌سازی خلاصه قطع شد؛ درخواست ترجمه ارسال نشد. {message}." + (f" {retry_hint}" if retry_hint else "")
                     ) from exc
                 failures.append(f"{name}: {message}")
                 if profile_index + 1 < len(profiles):
