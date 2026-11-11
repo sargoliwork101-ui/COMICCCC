@@ -8,6 +8,12 @@ import pytest
 from PIL import Image, ImageDraw
 from support_client import scoped_client
 
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from comic_studio import _public_key, license_guard
 from comic_studio.exporter import build_docx, build_images_zip, build_pdf, build_pptx, build_txt
 from comic_studio.license_guard import (
@@ -287,7 +293,7 @@ def test_seller_vault_key_sync_issuance_backup_and_dist_leak_guard(tmp_path):
     py_root = Path(__file__).resolve().parents[1]
     if str(py_root) not in sys.path:
         sys.path.insert(0, str(py_root))
-    from license_manager import SellerVault
+    from license_tool.manager import SellerVault
     from offline_packaging.build_offline_package import verify_no_seller_secrets_in_dist
 
     fake_pub_py = tmp_path / "_public_key.py"
@@ -390,7 +396,7 @@ def test_modular_three_part_licensing_durations_cumulative_and_route_gates(tmp_p
     py_root = Path(__file__).resolve().parents[1]
     if str(py_root) not in sys.path:
         sys.path.insert(0, str(py_root))
-    from license_manager import SellerVault, parse_modules_cli_spec
+    from license_tool.manager import SellerVault, parse_modules_cli_spec
 
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(tmp_path / "data"))
     fake_pub_py = tmp_path / "_pub.py"
@@ -536,7 +542,7 @@ def test_seller_vault_256b_master_key_customer_crm_and_panel_http(tmp_path: Path
     import urllib.error
     import urllib.request
     from http.server import ThreadingHTTPServer
-    from license_manager import (
+    from license_tool.manager import (
         MASTER_SECRET_BYTES,
         SellerVault,
         build_seller_panel_handler,
@@ -760,7 +766,7 @@ def test_seller_panel_visual_and_font_parity_with_main_app(tmp_path: Path) -> No
     import threading
     import urllib.request
     from http.server import HTTPServer
-    from license_manager import SellerVault, build_seller_panel_handler
+    from license_tool.manager import SellerVault, build_seller_panel_handler
 
     vault = SellerVault(
         seller_dir=tmp_path / "seller_vault_v419",
@@ -820,7 +826,10 @@ def test_seller_panel_visual_and_font_parity_with_main_app(tmp_path: Path) -> No
 
         assert '<header class="topbar">' in html
         assert '<img class="logo" src="/assets/icon128.png"' in html
-        assert '<span class="ver">۴.۳۰ · پنل فروشنده</span>' in html
+        # v4.46: the badge renders from APP_VERSION at serve time, so derive the
+        # expected Persian-digit string instead of pinning a stale literal.
+        from license_tool.manager import APP_VERSION, _FA_DIGITS
+        assert f'<span class="ver">{APP_VERSION.translate(_FA_DIGITS)} · پنل فروشنده</span>' in html
         assert '<meta name="referrer" content="no-referrer">' in html
         assert 'id="sellerThemeBtn"' in html
         assert "comic-studio-theme" in html
@@ -865,7 +874,7 @@ def test_v420_hwid_persian_digits_non_downgrade_activation_and_seller_csv_harden
     app_root = Path(__file__).resolve().parents[1]
     if str(app_root) not in sys.path:
         sys.path.insert(0, str(app_root))
-    import license_manager as lm
+    import license_tool.manager as lm
 
     # 1. Persian/Arabic digits & Unicode dashes normalize cleanly in System Codes
     norm_hw = lg.normalize_hardware_id("cs۴–۲۳۴۵—۶۷۸۹−abcd‐efgh")
@@ -1009,7 +1018,7 @@ def test_v432_a_damaged_embedded_public_key_file_is_repaired(tmp_path: Path) -> 
     py_root = Path(__file__).resolve().parents[1]
     if str(py_root) not in sys.path:
         sys.path.insert(0, str(py_root))
-    from license_manager import SellerVault
+    from license_tool.manager import SellerVault
 
     pub_py = tmp_path / "_public_key.py"
     pub_py.write_text(
@@ -1050,7 +1059,7 @@ def test_v432_the_seller_master_key_is_backed_up_and_restored_automatically(tmp_
     py_root = Path(__file__).resolve().parents[1]
     if str(py_root) not in sys.path:
         sys.path.insert(0, str(py_root))
-    from license_manager import SellerVault
+    from license_tool.manager import SellerVault
 
     pub_py = tmp_path / "_public_key.py"
     pub_py.write_text(
@@ -1081,7 +1090,7 @@ def test_v432_a_lost_seller_key_is_never_silently_replaced(tmp_path: Path) -> No
     py_root = Path(__file__).resolve().parents[1]
     if str(py_root) not in sys.path:
         sys.path.insert(0, str(py_root))
-    from license_manager import SellerKeyLostError, SellerVault
+    from license_tool.manager import SellerKeyLostError, SellerVault
 
     pub_py = tmp_path / "_public_key.py"
     pub_py.write_text(
@@ -1124,7 +1133,7 @@ def test_v432_the_seller_panel_reports_a_missing_master_key(tmp_path: Path) -> N
     py_root = Path(__file__).resolve().parents[1]
     if str(py_root) not in sys.path:
         sys.path.insert(0, str(py_root))
-    from license_manager import SellerVault, build_seller_panel_handler
+    from license_tool.manager import SellerVault, build_seller_panel_handler
 
     pub_py = tmp_path / "_public_key.py"
     pub_py.write_text(
@@ -1179,7 +1188,7 @@ def test_v432_a_damaged_seller_vault_file_is_restored_from_the_backup(tmp_path: 
     py_root = Path(__file__).resolve().parents[1]
     if str(py_root) not in sys.path:
         sys.path.insert(0, str(py_root))
-    from license_manager import SellerVault
+    from license_tool.manager import SellerVault
 
     pub_py = tmp_path / "_public_key.py"
     pub_py.write_text(

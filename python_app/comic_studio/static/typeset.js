@@ -1315,15 +1315,26 @@
     }
   }
 
+  // v4.39: projects saved by older versions can carry a poisoned `"_drawable": {}`
+  // (a DOM image serialized as an empty object).  Treat anything without real
+  // dimensions as "no drawable" instead of handing it to ctx.drawImage (which
+  // would throw and fail the whole page render).
+  function usableLogoDrawable(candidate) {
+    if (!candidate || typeof candidate !== 'object') return false;
+    const w = Number(candidate.naturalWidth || candidate.width || 0);
+    const h = Number(candidate.naturalHeight || candidate.height || 0);
+    return Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0;
+  }
+
   function resolveLogoDrawable(wm, logosMap) {
     if (!wm || typeof wm !== 'object') return null;
     const map = logosMap && typeof logosMap === 'object' ? logosMap : null;
-    if (wm._logoDrawable) return wm._logoDrawable;
+    if (usableLogoDrawable(wm._logoDrawable)) return wm._logoDrawable;
     const logoId = String(wm.logoId || '').trim();
     if (logoId && map) {
       const entry = map instanceof Map ? map.get(logoId) : map[logoId];
       if (!entry) return null;
-      if (entry._drawable) return entry._drawable;
+      if (usableLogoDrawable(entry._drawable)) return entry._drawable;
       if (typeof entry.width === 'number' && typeof entry.height === 'number' && !entry.dataUrl) return entry;
     }
     return null;

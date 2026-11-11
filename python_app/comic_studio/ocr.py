@@ -31,14 +31,12 @@ from .ocr_managed import (
     acknowledge_engine_update,
     check_remote_updates,
     cleanup_superseded_engine_files,
-    clear_cached_engine_update,
     compute_engine_download_estimate,
     compute_engine_update_fields,
     compute_worker_count,
     cpu_core_count,
     detect_builtin_installed_version,
     engine_has_uninstallable_files,
-    engine_meta,
     evaluate_engine_hardware,
     fetch_tessdata_revision,
     format_download_size_fa,
@@ -54,7 +52,6 @@ from .ocr_managed import (
     remove_manifest_entry,
     sha256_short,
     trim_process_memory,
-    update_manifest_entry,
 )
 from .paths import (
     bundled_models_dir,
@@ -1183,13 +1180,13 @@ class RapidEngine:
             if not installed_gpu and not self.runtime_installed:
                 install_packages(["rapidocr>=3.10,<3.11", "onnxruntime>=1.20,<2", "python-bidi>=0.4.2,<1"])
         if not self.runtime_installed:
-            raise OcrError("RapidOCR was installed but cannot be imported. Restart the application and try again.")
+            raise OcrError("RapidOCR نصب شده اما وارد برنامه نمی‌شود. برنامه را ببندید و دوباره اجرا کنید.")
 
     def _validate_ready(self, language: str, allow_download: bool = False) -> None:
         if language not in ENGINE_INFO.get(self.id, {}).get("languages", LANGUAGES):
-            raise OcrError(f"Unsupported {self.id} language: {language}")
+            raise OcrError(f"زبان «{language}» برای موتور «{self.id}» پشتیبانی نمی‌شود؛ موتور دیگری انتخاب کنید.")
         if not self.runtime_installed:
-            raise OcrError("RapidOCR is not installed. Click the explicit preparation button to install it.")
+            raise OcrError("موتور RapidOCR روی این دستگاه نصب نیست. در پنجرهٔ «مدیریت مدل‌های OCR» روی «آماده‌سازی / دانلود خودکار» بزنید.")
         if not allow_download:
             root = self._effective_v5_dir(language) if self.version == "v5" else self._v6_model_dir()
             missing = [name for name in self._expected_models(language) if not (root / name).is_file() or (root / name).stat().st_size == 0]
@@ -1231,9 +1228,9 @@ class RapidEngine:
                         except OcrError:
                             raise
                         except Exception as mirror_exc:
-                            raise OcrError(f"Could not initialize {self.id}: {mirror_exc}") from mirror_exc
+                            raise OcrError(f"آماده‌سازی موتور {self.id} ناموفق بود: {mirror_exc}") from mirror_exc
                     else:
-                        raise OcrError(f"Could not initialize {self.id}: {exc}") from exc
+                        raise OcrError(f"آماده‌سازی موتور {self.id} ناموفق بود: {exc}") from exc
                 self._instances[language] = inst
                 self._idle_pool.setdefault(language, []).append(inst)
                 self._created_counts[language] = max(1, self._created_counts.get(language, 0))
@@ -1276,7 +1273,7 @@ class RapidEngine:
                 with self._pool_cond:
                     self._created_counts[language] = max(0, self._created_counts.get(language, 1) - 1)
                     self._pool_cond.notify_all()
-                raise OcrError(f"Could not initialize {self.id} worker: {exc}") from exc
+                raise OcrError(f"راه‌اندازی موتور {self.id} ناموفق بود: {exc}") from exc
         try:
             yield chosen
         finally:
@@ -1412,7 +1409,7 @@ class RapidEngine:
                                 self.unload()
                         need_cpu_retry = True
                     else:
-                        raise OcrError(f"OCR failed: {exc}") from exc
+                        raise OcrError(f"خواندن متن ناموفق بود: {exc}") from exc
             if need_cpu_retry:
                 with self._checkout(language) as cpu_engine:
                     _apply_det_input_cap(cpu_engine, det_max_side)
@@ -1424,7 +1421,7 @@ class RapidEngine:
                         except TypeError:
                             result = cpu_engine(arr)
                     except Exception as cpu_exc:
-                        raise OcrError(f"OCR failed: {cpu_exc}") from cpu_exc
+                        raise OcrError(f"خواندن متن ناموفق بود: {cpu_exc}") from cpu_exc
         lines = _lines_from_rapid(result)
         if language == "fas":
             lines = [
@@ -1474,7 +1471,7 @@ class RapidEngine:
                     except TypeError:
                         result = engine(arr)
                 except Exception as exc:
-                    raise OcrError(f"OCR failed: {exc}") from exc
+                    raise OcrError(f"خواندن متن ناموفق بود: {exc}") from exc
                 finally:
                     for name, value in saved.items():
                         with contextlib.suppress(Exception):
@@ -1620,7 +1617,7 @@ class EasyEngine:
             if not installed_cuda:
                 install_packages(["easyocr>=1.7,<2", "torch>=2.2,<3"])
         if not self.runtime_installed:
-            raise OcrError("EasyOCR was installed but cannot be imported. Restart the application and try again.")
+            raise OcrError("EasyOCR نصب شده اما وارد برنامه نمی‌شود. برنامه را ببندید و دوباره اجرا کنید.")
 
     def _download_easyocr_models_from_mirrors(self, language: str) -> None:
         import zipfile
@@ -1680,7 +1677,7 @@ class EasyEngine:
 
     def _reader(self, language: str, download: bool):
         if not self.runtime_installed:
-            raise OcrError("EasyOCR is not installed. Click the explicit preparation button to install it.")
+            raise OcrError("موتور EasyOCR روی این دستگاه نصب نیست. در پنجرهٔ «مدیریت مدل‌های OCR» روی «آماده‌سازی / دانلود خودکار» بزنید.")
         if not download:
             missing = [name for name in self._expected_models(language) if not (self._model_dir() / name).is_file()]
             if missing and not (self._model_dir() / f".ready-{language}").is_file():
@@ -1748,8 +1745,8 @@ class EasyEngine:
                             except OcrError:
                                 raise
                             except Exception as mirror_exc:
-                                raise OcrError(f"Could not initialize EasyOCR: {mirror_exc}") from mirror_exc
-                        raise OcrError(f"Could not initialize EasyOCR: {init_err}") from init_err
+                                raise OcrError(f"آماده‌سازی موتور EasyOCR ناموفق بود: {mirror_exc}") from mirror_exc
+                        raise OcrError(f"آماده‌سازی موتور EasyOCR ناموفق بود: {init_err}") from init_err
         return self._readers[lang]
 
     def download(self, language: str = "eng") -> None:
@@ -1878,9 +1875,9 @@ class EasyEngine:
                             except TypeError:
                                 result = reader.readtext(arr, detail=1, paragraph=False)
                 except Exception as cpu_exc:
-                    raise OcrError(f"EasyOCR failed: {cpu_exc}") from cpu_exc
+                    raise OcrError(f"خواندن متن با EasyOCR ناموفق بود: {cpu_exc}") from cpu_exc
             else:
-                raise OcrError(f"EasyOCR failed: {exc}") from exc
+                raise OcrError(f"خواندن متن با EasyOCR ناموفق بود: {exc}") from exc
         lines = []
         for box, text, score in result:
             cleaned = normalize_persian_ocr_text(str(text)) if language == "fas" else str(text).strip()
@@ -2370,7 +2367,7 @@ class TesseractEngine:
 
     def _download_language_file(self, language: str, *, timeout: float = 30.0) -> Path:
         if language not in LANGUAGES:
-            raise OcrError(f"Unsupported Tesseract language: {language}")
+            raise OcrError(f"زبان «{language}» برای Tesseract پشتیبانی نمی‌شود.")
         if _STANDARD_CANCEL_EVENT.is_set():
             raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
         self._model_dir().mkdir(parents=True, exist_ok=True)
@@ -2426,7 +2423,7 @@ class TesseractEngine:
                             break
                         total += len(chunk)
                         if total > 50 * 1024 * 1024:
-                            raise OcrError("The selected Tesseract language file is unexpectedly large.")
+                            raise OcrError("فایل زبان Tesseract انتخاب‌شده غیرمنتظره بزرگ است.")
                         output.write(chunk)
                         if total - last_emit_total >= 256 * 1024 or total >= expected_bytes:
                             last_emit_total = total
@@ -2436,7 +2433,7 @@ class TesseractEngine:
                                 progress=round(0.24 + 0.66 * ratio, 3),
                             )
                 if temporary.stat().st_size < 1000:
-                    raise OcrError("The downloaded Tesseract language file is empty or invalid.")
+                    raise OcrError("فایل زبان Tesseract که دانلود شد خالی یا خراب است.")
                 os.replace(temporary, target)
                 self._ensure_tsv_config()
                 emit(f"فایل زبان Tesseract ({language}) ذخیره شد", "success", progress=0.94)
@@ -2458,7 +2455,7 @@ class TesseractEngine:
 
     def download(self, language: str = "eng") -> None:
         if language not in LANGUAGES:
-            raise OcrError(f"Unsupported Tesseract language: {language}")
+            raise OcrError(f"زبان «{language}» برای Tesseract پشتیبانی نمی‌شود.")
         _STANDARD_CANCEL_EVENT.clear()
         dl_est = compute_engine_download_estimate(
             self.id,
@@ -2921,10 +2918,10 @@ class ManualEngine:
         return False
 
     def download(self, language: str = "eng") -> None:
-        raise OcrError("This model needs its official runtime and a separate compatible adapter. Use the official guide linked in the model card; no files were downloaded.")
+        raise OcrError("این مدل به محیط اجرایی رسمی و یک واسط سازگار جداگانه نیاز دارد. از راهنمای رسمی داخل صفحهٔ مدل استفاده کنید؛ هیچ فایلی دانلود نشد.")
 
     def recognize(self, image: Image.Image, language: str) -> list[OcrLine]:
-        raise OcrError("This model is listed for manual/external setup and is not a direct comic line-OCR engine in this application.")
+        raise OcrError("این مدل برای راه‌اندازی دستی بیرونی فهرست شده و موتور مستقیم خواندن متن کمیک در این برنامه نیست.")
 
 
 def _isolated_info(

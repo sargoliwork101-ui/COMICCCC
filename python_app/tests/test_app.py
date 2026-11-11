@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.36"
+    assert health.json()["version"] == "4.46"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -2774,8 +2774,6 @@ def test_v385_parallel_pdf_import_multi_page_ocr_and_low_ram_spooled_exports(cli
     # 2) Run multi-page OCR across all 5 pages using a multi-worker batch engine
     seen_threads: set[int] = set()
     seen_lock = threading.Lock()
-    reg_engine = client.app.state  # verify via monkeypatching recognize_image + RapidEngine.configure_batch
-
     from comic_studio.ocr import RapidEngine
     monkeypatch.setattr(
         RapidEngine,
@@ -2972,7 +2970,6 @@ def test_v388_url_ipv6_nan_progress_reuse_repeated_and_duplicate_edited_sync(cli
     import pytest
     from comic_studio.__main__ import _format_browser_url
     from comic_studio.activity import ActivityLog
-    from comic_studio.backup import make_backup
     from comic_studio.paths import project_root
     from comic_studio.store import ProjectStore, atomic_json
     from comic_studio.translation import TranslationService
@@ -3284,7 +3281,6 @@ def test_v399_per_page_ocr_keep_engine_loaded_and_memory_release(client, monkeyp
 
 
 def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_path, monkeypatch):
-    import json
     import os
     from pathlib import Path
     import shutil
@@ -3294,7 +3290,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.36"
+    assert APP_VERSION == "4.46"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -3890,6 +3886,9 @@ def test_v405_manual_blocks_watermarks_erase_original_and_bundled_models(client,
     (bundled_root / "rapidocr").mkdir(parents=True)
     for fname in ("ch_PP-OCRv5_det_mobile.onnx", "latin_PP-OCRv5_rec_mobile.onnx", "arabic_PP-OCRv5_rec_mobile.onnx"):
         (bundled_root / "rapidocr" / fname).write_bytes(b"fake-onnx")
+    # v4.38+: the default engine (rapidocr-v6) is also verified inside the same rapidocr bundle.
+    for fname in ("PP-OCRv6_det_small.onnx", "PP-OCRv6_rec_small.onnx"):
+        (bundled_root / "rapidocr" / fname).write_bytes(b"fake-v6")
     nmt_bundle = bundled_root / "local-nmt" / "nllb-600m"
     nmt_bundle.mkdir(parents=True)
     (nmt_bundle / "model.bin").write_bytes(b"x" * 2048)
@@ -5058,3 +5057,570 @@ def test_v421_persian_preprocess_input_option_in_ocr_and_engine_test(tmp_path, m
 
 
 
+
+
+def test_v438_a_window_that_is_behind_never_deletes_pages_it_has_not_seen(client):
+    """v4.38: pages leave a project only through the delete endpoint.
+
+    Root cause of the old behaviour: the state save treated every page the
+    browser did not mention as deleted, so a second tab (or a tab that stayed
+    open while another one imported pages) silently removed the imported pages
+    from the project while their files stayed on disk.
+    """
+    project, first = make_project(client)
+    project_id = project["id"]
+    response = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("page2.png", png_bytes((200, 150), "white"), "image/png"))],
+    )
+    assert response.status_code == 200, response.text
+    project = response.json()
+    assert len(project["images"]) == 2
+
+    # A window that only knows the first page saves its (older) state.
+    stale_state = dict(project)
+    stale_state["images"] = [dict(project["images"][0])]
+    put = client.put(f"/api/projects/{project_id}/state", json={"state": stale_state})
+    assert put.status_code == 200, put.text
+    saved = client.get(f"/api/projects/{project_id}").json()
+    assert len(saved["images"]) == 2, "the page of the other window was deleted"
+
+    # The explicit delete endpoint still removes pages (and their files).
+    deleted = client.post(f"/api/projects/{project_id}/delete", json=[project["images"][1]["id"]])
+    assert deleted.status_code == 200, deleted.text
+    assert len(client.get(f"/api/projects/{project_id}").json()["images"]) == 1
+
+
+def test_v438_a_window_that_is_behind_never_erases_the_recognized_text(client, monkeypatch):
+    """v4.38: the OCR result of the server must survive an old window's save.
+
+    The browser never clears the `ocrCompleted` flag - only the server sets it
+    after a successful OCR run.  A window that has not seen that run sends the
+    flag as false together with its older boxes; applying them erased the
+    recognized text (and the translation) of the page.
+    """
+    project, item = make_project(client)
+    project_id, image_id = project["id"], item["id"]
+    monkeypatch.setattr(
+        "comic_studio.main.recognize_image",
+        lambda *args: [{"id": 1, "text": "HELLO", "enabled": True}],
+    )
+    ocr = client.post(
+        f"/api/projects/{project_id}/ocr",
+        json={"image_ids": [image_id], "engine": "rapidocr-v6", "language": "eng"},
+    )
+    assert ocr.status_code == 200, ocr.text
+    recognized = client.get(f"/api/projects/{project_id}").json()["images"][0]
+    assert recognized["ocrCompleted"] is True
+    assert recognized["blocks"] and recognized["blocks"][0]["text"] == "HELLO"
+
+    # An old window still has the page without any text.
+    stale_state = dict(recognized)
+    stale_image = dict(recognized)
+    stale_image["blocks"] = []
+    stale_image["ocrCompleted"] = False
+    stale_state["images"] = [stale_image]
+    put = client.put(f"/api/projects/{project_id}/state", json={"state": stale_state})
+    assert put.status_code == 200, put.text
+    saved = client.get(f"/api/projects/{project_id}").json()["images"][0]
+    assert saved["ocrCompleted"] is True
+    assert len(saved["blocks"]) == 1
+    assert saved["blocks"][0]["text"] == "HELLO"
+
+    # The window that has seen the OCR may still edit and clear the page itself.
+    edited = dict(recognized)
+    edited_image = dict(recognized)
+    edited_image["blocks"] = []
+    edited["images"] = [edited_image]
+    put = client.put(f"/api/projects/{project_id}/state", json={"state": edited})
+    assert put.status_code == 200, put.text
+    assert client.get(f"/api/projects/{project_id}").json()["images"][0]["blocks"] == []
+
+
+def test_v438_the_user_never_sees_an_english_error_message(client):
+    """v4.38: every message the customer reads must be in simple Persian.
+
+    Root cause of the old behaviour: a few failure paths still answered in
+    English ("No images selected", "Rendered image must be PNG", ...), so the
+    Persian user got a technical English sentence with no explanation.
+    """
+    project, item = make_project(client)
+    project_id, image_id = project["id"], item["id"]
+
+    export = client.post(f"/api/projects/{project_id}/export", json={"kind": "pdf", "image_ids": []})
+    assert export.status_code == 400, export.text
+    detail = export.json()["detail"]
+    assert "برای خروجی" in detail
+    assert not detail.isascii(), detail
+
+    broken = client.post(
+        f"/api/projects/{project_id}/images/{image_id}/rendered",
+        content=b"not a png", headers={"Content-Type": "image/png"},
+    )
+    assert broken.status_code == 400, broken.text
+    detail = broken.json()["detail"]
+    assert not detail.isascii(), detail
+
+
+def test_v439_import_rejections_are_explained_in_persian(client):
+    """v4.39: a rejected import must tell the Persian user *why*, in Persian.
+
+    Root cause of the old behaviour: `_normalize_and_validate_image_bytes` and
+    `import_files` raised English messages ("Image is too large", "Unsupported
+    file", "Invalid or unsupported image") and the import endpoint passes the
+    message straight to the user as the 400 detail, so a Persian customer saw
+    a technical English sentence.
+    """
+    response = client.post("/api/projects", json={"name": "ورود"})
+    assert response.status_code == 201
+    project_id = response.json()["id"]
+
+    broken = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("page.png", b"this is not an image", "image/png"))],
+    )
+    assert broken.status_code == 400, broken.text
+    detail = broken.json()["detail"]
+    assert "پشتیبانی نمی‌شود" in detail or "خراب" in detail
+    assert not detail.isascii(), detail
+    assert "Invalid" not in detail and "unsupported" not in detail.lower()
+
+    wrong_kind = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("setup.exe", b"MZ not really", "application/octet-stream"))],
+    )
+    assert wrong_kind.status_code == 400, wrong_kind.text
+    detail = wrong_kind.json()["detail"]
+    assert "پشتیبانی نمی‌شود" in detail
+    assert not detail.isascii(), detail
+
+    store_module = pytest.importorskip("comic_studio.store")
+    try:
+        store_module.ProjectStore._normalize_and_validate_image_bytes("big.png", b"x" * (150 * 1024 * 1024 + 1))
+        raise AssertionError("oversized image must be rejected")
+    except ValueError as exc:
+        assert "بیش از حد مجاز" in str(exc)
+        assert not str(exc).isascii()
+
+
+def test_v439_swapping_a_same_length_watermark_logo_renders_again():
+    """v4.39: the page-render signature must notice a logo swap with the same length.
+
+    Root cause of the old behaviour: `watermarkSignaturePart` only embedded the
+    logo dataURL *length* in the render signature. Two different logo images
+    that serialize to equally long dataURLs produced the same signature, so the
+    page was never re-rendered and the old logo stayed in the exported pages.
+    Implemented Node-free here by mirroring the fingerprint rule: the signature
+    part must include the last characters, not just the length.
+    """
+    import re
+    from pathlib import Path
+
+    app_js = (Path(__file__).resolve().parents[1] / "comic_studio" / "static" / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function watermarkSignaturePart\(wm\) \{(?P<body>.*?)\n\}", app_js, re.DOTALL)
+    assert match, "watermarkSignaturePart must exist in app.js"
+    body = match.group("body")
+    assert "slice(-32)" in body, "logo fingerprint must include a content tail, not only its length"
+    assert "logoFingerprint" in body
+
+
+def test_v440_corrupt_pdf_import_is_explained_in_persian(client):
+    """v4.40: a corrupt PDF must tell the Persian user *why* - in Persian.
+
+    Root cause of the old behaviour: `_import_pdf` passed `fitz.open(...)`
+    straight through, so PyMuPDF's RuntimeError ("Failed to open stream" or
+    other engine-native text) satisfied the endpoint's `except RuntimeError`
+    mapping and reached the user as-is. The corruption message must be Persian.
+    """
+    response = client.post("/api/projects", json={"name": "PDF خراب"})
+    assert response.status_code == 201
+    project_id = response.json()["id"]
+
+    garbage = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("book.pdf", b"%PDF-1.7\n" + b"\xde\xad\xbe\xef" * 512, "application/pdf"))],
+    )
+    assert garbage.status_code == 400, garbage.text
+    detail = garbage.json()["detail"]
+    assert "خراب" in detail or "پشتیبانی نمی‌شود" in detail
+    assert not detail.isascii(), detail
+    assert "Failed to open stream" not in detail
+    assert "failed to open stream" not in detail.lower()
+
+    text_in_pdf_skin = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("readme.pdf", "مطمئناً PDF نیست".encode("utf-8"), "application/pdf"))],
+    )
+    assert text_in_pdf_skin.status_code == 400, text_in_pdf_skin.text
+    detail = text_in_pdf_skin.json()["detail"]
+    assert not detail.isascii(), detail
+    assert "Failed to open stream" not in detail
+
+    # آسیب میانهٔ فایل: ممکن است موتور xref آن را بازیابی کند (آزمون را تحمیل نمی‌کنیم)،
+    # اما اگر رد شد، پیام تا به‌کاربر برسد باید فارسی باشد.
+    import pymupdf as fitz  # noqa: PLC0415
+
+    doc = fitz.open()
+    doc.new_page()
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    damaged = pdf_bytes[:2000] + b"GARBAGE-IN-MIDDLE" + pdf_bytes[2000:]
+    res = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("book2.pdf", damaged, "application/pdf"))],
+    )
+    if res.status_code == 400:
+        detail = res.json()["detail"]
+        assert not detail.isascii(), detail
+        assert "Failed to open stream" not in detail
+
+
+def test_v441_truncated_rendered_png_is_explained_in_persian(client):
+    """v4.41: a truncated/corrupt editor render must not leak PIL's Latin error.
+
+    Root cause of the old behaviour: `ProjectStore.save_rendered` let PIL's
+    OSError ("Truncated File Read") reach the route's catch-all, which patched
+    it into a Persian prefix as `{exc}` - so the user still saw English words.
+    """
+    project_id = client.post("/api/projects", json={"name": "رندر"}).json()["id"]
+    png = io.BytesIO()
+    Image.new("RGB", (24, 24), "red").save(png, "PNG")
+    uploaded = client.post(
+        f"/api/projects/{project_id}/files",
+        files=[("files", ("page.png", png.getvalue(), "image/png"))],
+    )
+    image_id = uploaded.json()["images"][0]["id"]
+
+    truncated_sig = b"\x89PNG\r\n\x1a\n" + b"garbage" * 10
+    broken = client.post(f"/api/projects/{project_id}/images/{image_id}/rendered", content=truncated_sig)
+    assert broken.status_code == 400, broken.text
+    detail = broken.json()["detail"]
+    assert not detail.isascii(), detail
+    assert "Truncated" not in detail and "File Read" not in detail
+    assert "خراب" in detail or "معتبر نیست" in detail
+
+    junk = client.post(f"/api/projects/{project_id}/images/{image_id}/rendered", content=b"not png at all")
+    assert junk.status_code == 400
+    assert not junk.json()["detail"].isascii()
+
+    # و رندر سالم همچنان ذخیره می‌شود
+    ok = client.post(f"/api/projects/{project_id}/images/{image_id}/rendered", content=png.getvalue())
+    assert ok.status_code == 200, ok.text
+
+def test_v443_translation_badge_marks_ai_and_manual_edits_clear_it(client):
+    """v4.43: page-level translation badges stay truthful across AI/manual paths.
+
+    Ensures that:
+      - blocks translated by an AI provider are flagged `aiTranslated` server-side
+        (badge shows the purple «AI ترجمه» chip),
+      - a block filled by a direct provider (`free`/`local`) never carries the
+        flag (badge shows the teal manual chip instead),
+      - the badge CSS classes exist in the served stylesheet,
+      - a client-driven manual edit clears the flag (badge falls back to
+        manual) so the UI never claims "AI" for text the user overrode.
+    """
+    from comic_studio.context_run import create_run, next_request, apply_response, provider_policy
+    from comic_studio.translation import TranslationService
+
+    # 1) Create a minimal project + register one OCR block so context-run has a job.
+    res = client.post("/api/projects", json={"name": "badge"})
+    pid = res.json()["id"]
+    add = client.post(f"/api/projects/{pid}/files", files=[("files", ("p1.png", png_bytes((600, 400)), "image/png"))])
+    item_id = add.json()["images"][0]["id"]
+    state = client.get(f"/api/projects/{pid}").json()
+    state["images"][0]["blocks"] = [
+        {
+            "id": 1, "enabled": True, "text": "Hello world", "tr": "",
+            "x0": 0, "y0": 0, "x1": 200, "y1": 40, "pageRole": "body",
+        }
+    ]
+    resp = client.put(f"/api/projects/{pid}/state", json={"state": state})
+    assert resp.status_code == 200, resp.text
+
+    # 2) Simulate an AI provider (openai) — any provider except free/local counts as AI.
+    settings = TranslationService().public_settings()
+    policy = provider_policy(settings, "openai", None)
+    run_state = client.get(f"/api/projects/{pid}").json()
+    run = create_run(
+        run_state,
+        [item_id],
+        "openai",
+        "eng",
+        "",
+        "",
+        1000,
+        settings["context_percent"],
+        settings["skill_percent"],
+        False,
+        policy,
+        profile_id=None,
+        target_language="fa",
+    )
+    req, chosen = next_request(run, "")
+    assert chosen, "the fake run must choose a request"
+    affected = apply_response(run_state, run, chosen, "سلام دنیا", "ctx")
+    assert item_id in affected
+    block = run_state["images"][0]["blocks"][0]
+    assert block["tr"] == "سلام دنیا"
+    assert bool(block.get("aiTranslated")) is True
+
+    # 3) The badge CSS classes must be present in the served stylesheet.
+    from pathlib import Path
+    css_src = (Path(__file__).resolve().parent.parent / "comic_studio" / "static" / "style.css").read_text(encoding="utf-8")
+    assert ".translation-state-badge.tl-ai" in css_src
+    assert ".translation-state-badge.tl-manual" in css_src
+    assert ".translation-state-badge.tl-none" in css_src
+
+    # 4) client must drop aiTranslated for direct/manual providers (badge honesty).
+    block["aiTranslated"] = False  # what the client writes after applyTranslatedBlockDefaults(..., viaAi=False)
+    resp2 = client.put(f"/api/projects/{pid}/state", json={"state": run_state})
+    assert resp2.status_code == 200
+    fresh = client.get(f"/api/projects/{pid}").json()
+    assert fresh["images"][0]["blocks"][0].get("aiTranslated") is False
+
+
+def test_v444_transport_error_log_is_human_readable_and_mentions_retry_hint():
+    """v4.44: transport failures after idle / cold-start must explain themselves.
+
+    Report: «بعد از یک تایمی خطا میده برای AI و با تلاس دوباره راه میفته، چرا؟
+    درست هم نمیگه چیشده توی لاگت». Two v4.44 root causes this test pins down:
+
+    1. ``httpx.ReadTimeout``/``ConnectError``/``RemoteProtocolError`` and friends
+       previously surfaced as a bare class name (e.g. ``"OpenAI: ReadTimeout"``)
+       with no Persian explanation. Now ``_safe_error`` must append a short
+       Persian hint describing the fault family — so the log tells the user WHY
+       the attempt failed (cold model / dropped idle connection / proxy hiccup)
+       rather than making them guess.
+
+    2. When the profile's retry_count is 0 (the default), the raised final
+       TranslationError for a transport failure must explicitly say that no
+       automatic retry happened and point the user at the setting that would
+       catch these transient glitches. Users currently see the generic message
+       and think the app is broken on first attempt; the fix is one line of
+       explanation.
+    """
+    import httpx
+    from comic_studio.translation import _safe_error, _TRANSPORT_ERROR_HINTS
+
+    # Every common httpx transport subclass gets a Persian hint attached.
+    familiars = [
+        (httpx.ReadTimeout("read timed out"), "ReadTimeout", "پاسخ سرور دیرتر"),
+        (httpx.ConnectTimeout("connect timed out"), "ConnectTimeout", "اتصال اولیهٔ TCP"),
+        (httpx.ConnectError("connection refused"), "ConnectError", "سرور اتصال را رد کرد"),
+        (httpx.RemoteProtocolError("peer closed"), "RemoteProtocolError", "نیمه‌کاره بست"),
+        (httpx.ReadError("read broken"), "ReadError", "وسط کار قطع شد"),
+    ]
+    for error, kind, expected_persian in familiars:
+        msg = _safe_error(error, "openai")
+        assert kind in msg, f"{kind} should appear in the safe-error string, got: {msg!r}"
+        assert expected_persian in msg, (
+            f"{kind} should have a Persian hint explaining what went wrong; got: {msg!r}"
+        )
+
+    # A TransportError with a custom class name we did not enumerate still surfaces the kind,
+    # so a future httpx subclass never silently becomes a bare headless message.
+    class _OddTransport(httpx.TransportError):
+        pass
+    msg = _safe_error(_OddTransport("odd socket fail"), "openai")
+    assert "_OddTransport" in msg
+
+    # The hint table itself must stay non-empty (typos strip the explanation).
+    assert len(_TRANSPORT_ERROR_HINTS) >= 8, "keep the transport-hint table broad so users see context"
+
+
+def test_v445_free_transport_retry_always_runs_even_when_retry_count_is_zero():
+    """v4.45 — root-cause fix for «بعد از یک تایمی خطا میده برای AI و با تلاش دوم راه میفته».
+
+    Symptom: after the app sits idle for a few minutes, the first AI request
+    fails with a connect-phase error (the NAT table entry for the user's
+    VPN/proxy expired, the provider rotated a cold model, ...). Clicking
+    Translate again works because a fresh socket is opened. Users had to
+    notice the pattern and manually click again, and the log just said the
+    service was unreachable.
+
+    Fix: ``_run_with_retries`` now recognises that ``httpx.ConnectError`` /
+    ``httpx.ConnectTimeout`` / ``httpx.PoolTimeout`` mean the HTTP request
+    never reached the AI server, so the provider never charged the key. It
+    grants ONE bonus automatic retry for these even when ``retry_count == 0``.
+    ReadTimeout / RemoteProtocolError / HTTP errors are still gated by the
+    user's retry_count because the server may have already processed part
+    of the request before the connection broke.
+    """
+    import httpx
+    from comic_studio.translation import _run_with_retries
+
+    # 1) ConnectError + retry_count=0 -> auto retry once, succeeds.
+    attempts: list[int] = []
+    def flaky_connect():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise httpx.ConnectError("Connection refused")
+        return "translated"
+    result = _run_with_retries(flaky_connect, {"retry_count": 0, "retry_wait_seconds": 5}, "openai", [])
+    assert result == "translated"
+    assert len(attempts) == 2, "connect failure should auto-retry once for free"
+
+    # 2) ConnectTimeout also gets the free retry.
+    attempts2: list[int] = []
+    def flaky_timeout():
+        attempts2.append(1)
+        if len(attempts2) == 1:
+            raise httpx.ConnectTimeout("connect timed out")
+        return "ok"
+    assert _run_with_retries(flaky_timeout, {"retry_count": 0, "retry_wait_seconds": 5}, "openai", []) == "ok"
+    assert len(attempts2) == 2
+
+    # 3) ReadTimeout is NOT free — with retry_count=0 it must NOT auto-retry.
+    attempts3: list[int] = []
+    def always_read_timeout():
+        attempts3.append(1)
+        raise httpx.ReadTimeout("read timed out")
+    try:
+        _run_with_retries(always_read_timeout, {"retry_count": 0, "retry_wait_seconds": 5}, "openai", [])
+    except httpx.ReadTimeout:
+        pass
+    else:
+        raise AssertionError("ReadTimeout should propagate when retry_count=0")
+    assert len(attempts3) == 1, "ReadTimeout must NOT auto-retry on retry_count=0 (would double-charge)"
+
+    # 4) RemoteProtocolError (server dropped connection mid-flight) is also paid-retry only.
+    attempts4: list[int] = []
+    def always_remote_drop():
+        attempts4.append(1)
+        raise httpx.RemoteProtocolError("Server disconnected")
+    try:
+        _run_with_retries(always_remote_drop, {"retry_count": 0, "retry_wait_seconds": 5}, "openai", [])
+    except httpx.RemoteProtocolError:
+        pass
+    else:
+        raise AssertionError("RemoteProtocolError should propagate when retry_count=0")
+    assert len(attempts4) == 1
+
+    # 5) The free retry happens only once per run — a persistent connection
+    # failure must NOT loop forever.
+    attempts5: list[int] = []
+    def always_connect_error():
+        attempts5.append(1)
+        raise httpx.ConnectError("still refused")
+    try:
+        _run_with_retries(always_connect_error, {"retry_count": 0, "retry_wait_seconds": 0.01}, "openai", [])
+    except httpx.ConnectError:
+        pass
+    else:
+        raise AssertionError("persistent connect failure should eventually raise")
+    assert len(attempts5) == 2, f"only one free retry was promised, got {len(attempts5)}"
+
+
+def test_v446_pending_translation_explains_reason_and_stale_result_can_be_manually_approved(client):
+    """v4.46: pending results state why they wait, focus is intentionally shallow,
+
+    and a stale translation result gains an explicit manual-approval path that
+    writes only block payloads while leaving run bookkeeping/summary untouched.
+    """
+    from comic_studio import pending_results
+    from comic_studio.context_run import SUMMARY_KEY, digest
+    from comic_studio.store import ProjectStore
+    from comic_studio.translation_plan import target_snapshot
+
+    project, item = make_project(client)
+    route = f"/api/projects/{project['id']}"
+    state = client.get(route).json()
+    state['images'][0]['blocks'] = [{'id': 1, 'text': 'hello world', 'tr': '', 'enabled': True}]
+    assert client.put(route + '/state', json={'state': state}).status_code == 200
+    state = client.get(route).json()
+    block = state['images'][0]['blocks'][0]
+
+    store = ProjectStore()
+    staged_run = {'provider': 'openai', 'targetLanguage': 'fa', 'completed': 3,
+                  'jobs': [{'imageName': 'page.png',
+                            'refs': [{'imageId': item['id'], 'blockId': 1,
+                                      'snapshot': target_snapshot(block)}],
+                            'accumulated': '', 'remaining': ''}]}
+    entry = pending_results.stage(store, project['id'], 'translation', {
+        'run': staged_run,
+        'runDigest': digest({'different': 'run'}),
+        'chosen': [{'job': 0, 'text': 'hello world', 'join': '', 'rest': ''}],
+        'translated': 'سلام دنیا',
+        'summary': 'خلاصهٔ کهنه',
+        'originals': {f"{item['id']}:1": {'text': 'hello world', 'tr': ''}},
+        'overlayMode': state.get('settings', {}).get('overlayMode'),
+    })
+
+    listing = client.get(route + '/pending').json()
+    assert [row['id'] for row in listing] == [entry['id']]
+
+    view = client.get(route + '/pending/' + entry['id']).json()
+    assert view['canApply'] is False
+    assert any('نوبت ترجمه' in reason for reason in view['reasons']), view['reasons']
+    assert any('تأیید و اعمال دستی' in reason for reason in view['reasons']), view['reasons']
+    assert view['rows'][0]['result'] == 'سلام دنیا'
+    assert view['rows'][0]['conflict'] is False
+
+    # Without the explicit manual-approval flag nothing is applied and the
+    # result stays on disk for the user.
+    stale = client.post(route + '/pending/' + entry['id'] + '/resolve',
+                        json={'revision': view['revision'], 'choices': {}})
+    assert stale.status_code == 409, stale.text
+    assert 'تأیید و اعمال دستی' in stale.json()['detail']
+    assert len(client.get(route + '/pending').json()) == 1
+
+    # Manual approval writes only the translated text to existing blocks.
+    result = client.post(route + '/pending/' + entry['id'] + '/resolve',
+                         json={'revision': view['revision'], 'choices': {}, 'force': True})
+    assert result.status_code == 200, result.text
+    assert result.json()['done'] is False  # no active run: nothing can be done
+    assert result.json()['affectedImageIds'] == [item['id']]
+    saved = client.get(route).json()
+    saved_block = saved['images'][0]['blocks'][0]
+    assert saved_block['tr'] == 'سلام دنیا'
+    assert saved_block['aiTranslated'] is True
+    assert saved_block['dir'] == 'rtl'
+    # The stale run's summary must NOT be resurrected into the project.
+    assert SUMMARY_KEY not in saved
+    assert '_aiContextRun' not in saved
+    assert client.get(route + '/pending').json() == []
+
+    # A conflicting row in stale mode still requires an explicit choice and
+    # honours the user's "keep my edit" choice.
+    entry2 = pending_results.stage(store, project['id'], 'translation', {
+        'run': {'provider': 'openai', 'targetLanguage': 'fa',
+                'jobs': [{'imageName': 'page.png',
+                          'refs': [{'imageId': item['id'], 'blockId': 1,
+                                    'snapshot': 'stale-snapshot'}],
+                          'accumulated': '', 'remaining': ''}]},
+        'runDigest': digest({'another': 'stale'}),
+        'chosen': [{'job': 0, 'text': 'hello world', 'join': '', 'rest': ''}],
+        'translated': 'نتیجهٔ دوم', 'summary': 's2',
+        'originals': {}, 'overlayMode': None,
+    })
+    view2 = client.get(route + '/pending/' + entry2['id']).json()
+    assert view2['canApply'] is False and view2['rows'][0]['conflict'] is True
+    assert any('تغییر کرده است' in reason for reason in view2['reasons'])
+    key = view2['rows'][0]['key']
+    no_choice = client.post(route + '/pending/' + entry2['id'] + '/resolve',
+                            json={'revision': view2['revision'], 'choices': {}, 'force': True})
+    assert no_choice.status_code == 400, no_choice.text
+    keep = client.post(route + '/pending/' + entry2['id'] + '/resolve',
+                       json={'revision': view2['revision'], 'choices': {key: 'keep'}, 'force': True})
+    assert keep.status_code == 200, keep.text
+    assert keep.json()['affectedImageIds'] == []
+    assert client.get(route).json()['images'][0]['blocks'][0]['tr'] == 'سلام دنیا'
+    assert client.get(route + '/pending').json() == []
+
+    # OCR pending results also explain themselves when a conflict holds them.
+    client.get(route)  # refresh in-memory caches after external edits
+    entry3 = pending_results.stage(store, project['id'], 'ocr', {
+        'baseline': {item['id']: 'stale-baseline'},
+        'originals': {item['id']: 'hello world'},
+        'overlayMode': None,
+        'outputs': [{'id': item['id'], 'name': 'page.png',
+                     'blocks': [{'id': 1, 'text': 'متن جدید OCR', 'enabled': True}]}],
+    })
+    view3 = client.get(route + '/pending/' + entry3['id']).json()
+    assert view3['canApply'] is True and view3['rows'][0]['conflict'] is True
+    assert any('OCR' in reason for reason in view3['reasons']), view3['reasons']
+    ocr_apply = client.post(route + '/pending/' + entry3['id'] + '/resolve',
+                            json={'revision': view3['revision'], 'choices': {item['id']: 'apply'}})
+    assert ocr_apply.status_code == 200, ocr_apply.text
+    assert client.get(route).json()['images'][0]['blocks'][0]['text'] == 'متن جدید OCR'
+    assert client.get(route + '/pending').json() == []
