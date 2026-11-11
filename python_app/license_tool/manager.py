@@ -63,7 +63,7 @@ from comic_studio.license_guard import (  # noqa: E402
     verify_license_token,
 )
 
-APP_VERSION = "4.48"
+APP_VERSION = "4.49"
 
 
 PUBLIC_KEY_MODULE_PATH = APP_DIR / "comic_studio" / "_public_key.py"

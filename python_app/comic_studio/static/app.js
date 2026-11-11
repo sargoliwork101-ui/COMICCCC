@@ -925,6 +925,10 @@ function setBusy(message) {
   scheduleActivityPoll(!!message);
   document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button:not(#dockCancelJobBtn), #backupProjectBtn, #restoreProjectBtn, #restoreProjectInput, #newProjectBtn, #deleteProjectBtn, #projectSelect, #projectName').forEach((el) => { el.disabled = !!message; });
 }
+const STALE_CONTEXT_START_DETAIL = 'اطلاعات یا تنظیمات پس از پیش‌نمایش تغییر کرده است؛ دوباره بررسی و تأیید کنید.';
+function isStaleContextStartConflict(error) {
+  return error?.status === 409 && error?.detailText === STALE_CONTEXT_START_DETAIL;
+}
 async function runJob(message, task, progressId = null) {
   await clearActivity(false);
   const jobController = new AbortController();
@@ -941,6 +945,7 @@ async function runJob(message, task, progressId = null) {
       const abortErr = error?.cancelled ? error : Object.assign(new Error('عملیات به درخواست شما لغو شد.'), { name: 'AbortError', cancelled: true });
       throw abortErr;
     }
+    if (isStaleContextStartConflict(error)) throw error;
     console.error(error); appendLocalActivity(`خطا: ${error.message || error}`, 'error'); toast(error.message || error, true); throw error;
   }
   finally {
@@ -3255,7 +3260,7 @@ async function runTranslation(targetOverride = null) {
       if (!preview.requests?.length && !preview.previewError) throw new Error('هیچ درخواست ترجمه‌ای ساخته نشد؛ کادرهای فعال و انتخاب تصاویر را بررسی کنید.');
       const emptyPages = selected.filter(item => !(item.blocks || []).some(block => block.enabled !== false && String(block.text || '').trim()));
       if (emptyPages.length) preview.note += ` ${emptyPages.length} تصویر بدون متن فعال از ترجمه کنار گذاشته می‌شوند.`;
-      showTranslationRequestPreview(preview, accepted => performContextTranslation(request, accepted), refresh, switchTarget);
+      showTranslationRequestPreview(preview, accepted => performContextTranslation(request, accepted, null, null, refresh, switchTarget), refresh, switchTarget);
       return;
     }
     const allActiveProfiles = state.ai?.providers?.[provider]?.profiles?.filter(p => p.hasApiKey) || [];
@@ -3289,7 +3294,7 @@ async function runTranslation(targetOverride = null) {
     if (emptyPages.length) preview.note += ` ${emptyPages.length} تصویر بدون متن فعال از ترجمه کنار گذاشته می‌شوند.`;
     if (safeSkill !== skill) preview.displaySkill = skill;
     if (safeSummary !== summary) preview.displaySummary = summary;
-    showTranslationRequestPreview(preview, accepted => { rememberTranslationSkill(projectId, accepted); return performContextTranslation(request, accepted); }, refresh, switchTarget);
+    showTranslationRequestPreview(preview, accepted => { rememberTranslationSkill(projectId, accepted); return performContextTranslation(request, accepted, null, null, refresh, switchTarget); }, refresh, switchTarget);
   } catch (error) {
     if (error?.cancelled || error?.name === 'AbortError') return;
     if (targetOverride && $('translationPreviewDialog').open) throw error;
@@ -3300,7 +3305,7 @@ async function runTranslation(targetOverride = null) {
     showDialog('translationDialog'); toast(message, true);
   }
 }
-async function performContextTranslation(request, preview, ongoing = null, correction = null) {
+async function performContextTranslation(request, preview, ongoing = null, correction = null, refreshPreview = null, switchTarget = null) {
   translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
   $('copyUnstoredResult').classList.add('hidden'); $('copyUnstoredResult').dataset.result = '';
   const controller = new AbortController();
@@ -3361,7 +3366,31 @@ async function performContextTranslation(request, preview, ongoing = null, corre
       api(`/api/projects/${projectId}`).then((fresh) => { if (state.project?.id === projectId && !inlineDraft) adoptProject(fresh); }).catch(() => {});
       return;
     }
-    const uncertainty = phase === 'translation' ? 'وضعیت درخواست جاری در قطع ارتباط ممکن است نامشخص باشد و تکرار هزینه داشته باشد.' : 'درخواست‌های موفق ذخیره شده‌اند؛ پروژه را بررسی کنید.';
+    if (!run && isStaleContextStartConflict(error) && typeof refreshPreview === 'function') {
+      try {
+        // The server deliberately rejects a stale confirmation before making
+        // any provider request. Rebuild the exact preview from current server
+        // state, then require the user to approve that new payload explicitly.
+        const refreshed = await refreshPreview(preview.skill ?? '', preview.summary ?? '', Boolean(preview.resume));
+        refreshed.note = `${refreshed.note || ''} اطلاعات پروژه یا تنظیمات پس از پیش‌نمایش تغییر کرده بود؛ این پیش‌نمایش تازه را دوباره بررسی و تأیید کنید. `.trim();
+        closeDialog('translationDialog');
+        showTranslationRequestPreview(
+          refreshed,
+          accepted => performContextTranslation(request, accepted, null, null, refreshPreview, switchTarget),
+          refreshPreview,
+          switchTarget,
+        );
+        toast('اطلاعات یا تنظیمات تغییر کرده بود؛ پیش‌نمایش تازه آماده است و هنوز هیچ درخواستی ارسال نشده.');
+        return;
+      } catch (refreshError) {
+        error.message = `${error.message || 'پیش‌نمایش منقضی شده است.'} ساخت پیش‌نمایش تازه نیز ناموفق بود: ${refreshError.message || refreshError}`;
+      }
+    }
+    const uncertainty = phase === 'start'
+      ? 'هیچ درخواست ترجمه‌ای به سرویس ارسال نشده است؛ نتیجه‌ای هم ذخیره نشده.'
+      : phase === 'translation'
+        ? 'وضعیت درخواست جاری در قطع ارتباط ممکن است نامشخص باشد و تکرار هزینه داشته باشد.'
+        : 'درخواست‌های موفق ذخیره شده‌اند؛ پروژه را بررسی کنید.';
     error.message = `${run?.completed || 0} درخواست ذخیره شد؛ ترجمه متوقف شد. ${uncertainty} ${error.message || ''}`;
     $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message}`;
     if (run) offerResponseRepair(error, repair => performContextTranslation(request, preview, run, repair));

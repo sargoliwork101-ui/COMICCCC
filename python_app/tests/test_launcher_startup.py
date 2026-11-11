@@ -185,7 +185,7 @@ def test_v430_the_browser_waits_for_the_app_to_answer_not_only_for_the_socket():
 
     # 3) The app answers with its health payload - now the browser may open.
     live_port = _free_port()
-    server = _serve_health(live_port, {"name": "Comic OCR Studio", "version": "4.48"})
+    server = _serve_health(live_port, {"name": "Comic OCR Studio", "version": "4.49"})
     try:
         assert _app_answers("127.0.0.1", live_port) is True
         worker = threading.Thread(

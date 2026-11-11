@@ -28,6 +28,8 @@ let activityClears = 0;
 let revertCalls = 0;
 let translationGate = null;
 let previewFailure = null;
+let contextStartStaleOnce = false;
+let contextStepCalls = 0;
 let ocrGate = null;
 let imageGate = null;
 let aiSaveFailure = false;
@@ -185,9 +187,14 @@ window.fetch = async (url, options = {}) => {
   }
   if (pathname === `/api/projects/${project.id}/context-start`) {
     translationCalls.push(JSON.parse(options.body));
+    if (contextStartStaleOnce) {
+      contextStartStaleOnce = false;
+      return jsonResponse({detail:'اطلاعات یا تنظیمات پس از پیش‌نمایش تغییر کرده است؛ دوباره بررسی و تأیید کنید.'},409);
+    }
     return jsonResponse({project: vm.runInContext('state.project', context), runId:'mock-run', completed:0});
   }
   if (pathname === `/api/projects/${project.id}/context-step`) {
+    contextStepCalls += 1;
     if (translationGate) await waitAbortable(translationGate, options.signal);
     return jsonResponse({project:overlayProject('NEW OCR', 'ترجمهٔ تازه'), done:true, completed:1, affectedImageIds:[project.images[0].id]});
   }
@@ -726,13 +733,24 @@ function check(name, condition) {
   check('preview refresh errors remain visible and copyable with HTTP details', $('translationPreviewDialog').open && $('translationPreviewError').textContent.includes('HTTP 503') && $('translationPreviewError').textContent.includes('simulated preview outage') && !$('copyTranslationPreviewError').classList.contains('hidden') && $('translationPreviewConfirm').textContent.includes('به‌روزرسانی') && translationCalls.length === sendsBeforePreparationFailure);
   $('translationPreviewCancel').click(); previewFailure = null; vm.runInContext("state.ai.provider = 'free'", context);
 
+  const stalePreviewCallsBefore = translationPreviewCalls.length;
+  const staleStartCallsBefore = translationCalls.length;
+  const staleStepCallsBefore = contextStepCalls;
+  contextStartStaleOnce = true;
+  await vm.runInContext('runTranslation()', context);
+  $('translationPreviewConfirm').click(); await sleep(20);
+  await vm.runInContext('translationPreviewTask', context);
+  check('a stale context confirmation refreshes the preview and requires a second approval without sending a provider request', $('translationPreviewDialog').open && !$('translationDialog').open && translationPreviewCalls.length === stalePreviewCallsBefore + 2 && translationCalls.length === staleStartCallsBefore + 1 && contextStepCalls === staleStepCallsBefore && $('translationPreviewNote').textContent.includes('پیش‌نمایش تازه'));
+  $('translationPreviewCancel').click();
+
   vm.runInContext("window._projectBeforeOcrRace = JSON.parse(JSON.stringify(state.project)); state.project.images[0].blocks = []; delete state.project.images[0].ocrCompleted", context);
+  const sendsBeforeOcrRace = translationCalls.length;
   await vm.runInContext('runTranslation()', context);
   let releaseOcr; ocrGate = new Promise(resolve => { releaseOcr = resolve; });
   const raceOcr = vm.runInContext('runOcr().catch(() => {})', context);
   await sleep(20); vm.runInContext('state.project.images[0].selected = false', context);
   ocrGate = null; releaseOcr(); await raceOcr;
-  check('changed selection after OCR response cannot start translation or replace the current project', $('ocrDialog').open && $('ocrStatus').textContent.includes('OCR در سرور ذخیره شد') && !$('translationPreviewDialog').open && translationCalls.length === sendsBeforePreparationFailure && vm.runInContext('state.project.images[0].selected === false && state.project.images[0].blocks.length === 0', context));
+  check('changed selection after OCR response cannot start translation or replace the current project', $('ocrDialog').open && $('ocrStatus').textContent.includes('OCR در سرور ذخیره شد') && !$('translationPreviewDialog').open && translationCalls.length === sendsBeforeOcrRace && vm.runInContext('state.project.images[0].selected === false && state.project.images[0].blocks.length === 0', context));
   vm.runInContext("closeDialog('ocrDialog'); clearPendingTranslationOcr(); state.project = window._projectBeforeOcrRace; renderAll()", context);
 
   const revertsBeforeSelector = revertCalls;
@@ -4583,7 +4601,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.48' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.49' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();
