@@ -13,11 +13,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .context_run import RUN_KEY, SUMMARY_KEY, apply_response, digest
+from .context_run import RUN_KEY, apply_response, apply_translated_block_defaults, digest
 from .paths import project_root
 from .store import ProjectChangedError, ProjectStore, atomic_json, read_json, utc_now
 from .translation import distribute_translation
-from .translation_plan import target_snapshot
+from .translation_plan import AI_PARTS_KEY, AI_REUSE_KEY, target_snapshot
 
 
 def _directory(project_id: str) -> Path:
@@ -136,20 +136,45 @@ def inspect(store: ProjectStore, project_id: str, entry: dict[str, Any]) -> dict
                              'conflict': block is None or target_snapshot(block) != ref['snapshot'],
                              'source': part['text'], 'original': entry.get('originals', {}).get(key, {}).get('tr', ''), 'currentSource': str((block or {}).get('text') or ''),
                              'current': str((block or {}).get('tr') or ''), 'result': job.get('accumulated', '') + result + part.get('join', '')})
+    # v4.46: tell the user in plain language why this result waits for
+    # approval instead of having been applied silently.
+    reasons: list[str] = []
+    conflicts = any(row.get('conflict') for row in rows)
+    missing = any(row.get('missing') for row in rows)
+    if entry['kind'] == 'ocr':
+        if conflicts:
+            reasons.append('در فاصلهٔ اجرای OCR روی متن یا کادرهای این صفحه‌ها تغییراتی ثبت شده است؛ برای اینکه ویرایش شما بی‌صدا با نتیجهٔ تازه بازنویسی نشود، نتیجه برای تأیید شما نگه داشته شده است.')
+        if missing:
+            reasons.append('برخی صفحه‌های این نتیجه پس از پایان OCR از پروژه حذف شده‌اند؛ آن بخش‌ها قابل اعمال نیستند.')
+        if not rows:
+            reasons.append('این نتیجه برای جلوگیری از از دست رفتن پاسخ دریافتی نگهداری شده است.')
+    else:
+        if not can_apply:
+            reasons.append('پس از آماده‌شدن این نتیجه، نوبت ترجمه تغییر کرده است؛ برای همین اعمال خودکار غیرفعال است. با دکمهٔ «تأیید و اعمال دستی» فقط متن نتیجه روی کادرهای موجود نوشته می‌شود و نوبت ترجمه و خلاصهٔ داستان دست‌نخورده می‌مانند؛ بدون آن دکمه فقط کپی یا حذف ممکن است.')
+        if conflicts:
+            reasons.append('در فاصلهٔ انتظار برای پاسخ سرویس، متن یا ترجمهٔ برخی کادرها تغییر کرده است؛ برای هر تعارض «حفظ ویرایش فعلی» یا «استفاده از نتیجهٔ آماده» را انتخاب کنید و سپس آن را تأیید کنید.')
+        if missing:
+            reasons.append('برخی کادرها یا صفحه‌های این نتیجه پس از آماده‌شدن آن حذف شده‌اند؛ آن بخش‌ها قابل اعمال نیستند.')
+    if not reasons:
+        reasons.append('این نتیجهٔ ذخیره‌شده با وضعیت فعلی پروژه سازگار است؛ با زدن «ثبت انتخاب‌ها» مستقیماً اعمال می‌شود.')
     return {'id': entry['id'], 'kind': entry['kind'], 'createdAt': entry['createdAt'], 'revision': state.get('updatedAt', ''),
-            'canApply': can_apply, 'rows': rows, 'summary': entry.get('summary', '')}
+            'canApply': can_apply, 'rows': rows, 'summary': entry.get('summary', ''), 'reasons': reasons}
 
 
 def resolve(store: ProjectStore, project_id: str, token: str, revision: str,
-            choices: dict[str, str]) -> dict[str, Any]:
+            choices: dict[str, str], *, force: bool = False) -> dict[str, Any]:
     with store._lock:
         entry = load(store, project_id, token)
         state = store.get(project_id)
         if state.get('updatedAt') != revision:
             raise ProjectChangedError('پروژه پس از نمایش تعارض تغییر کرده است؛ دوباره مقایسه کنید.')
         view = inspect(store, project_id, entry)
-        if not view['canApply']:
-            raise ProjectChangedError('نوبت ترجمه تغییر کرده است. نتیجه هنوز نگهداری شده و قابل کپی است، اما خودکار اعمال نمی‌شود.')
+        # v4.46: when the translation run changed after this result arrived, the
+        # user can still explicitly approve it. Without that explicit flag the
+        # result stays stored and nothing is applied.
+        stale_translation = entry['kind'] == 'translation' and not view['canApply']
+        if stale_translation and not force:
+            raise ProjectChangedError('نوبت ترجمه تغییر کرده است. نتیجه هنوز نگهداری شده و قابل کپی است؛ اگر می‌خواهید همین نتیجه روی کادرهای موجود نوشته شود، در پنجرهٔ «نتیجه‌های منتظر بررسی» دکمهٔ «تأیید و اعمال دستی» را بزنید.')
         for row in view['rows']:
             if row['conflict'] and choices.get(row['key']) not in {'keep', 'apply'}:
                 raise ValueError('برای هر تعارض باید یک گزینه انتخاب شود.')
@@ -173,20 +198,67 @@ def resolve(store: ProjectStore, project_id: str, token: str, revision: str,
             for image_id in replace:
                 (project_root(project_id) / 'images' / f'{image_id}-edited.png').unlink(missing_ok=True)
             done = True; affected = replace
+        elif stale_translation:
+            # v4.46 manual approval: the old run's bookkeeping is stale, so
+            # only the durable block payloads are written. The story summary
+            # and the run counters/progress are deliberately left untouched;
+            # the marker still records this token as committed for cleanup.
+            blocks = _lookup(state)
+            rows_by_key = {row['key']: row for row in view['rows']}
+            staged_run = entry['run']
+            target_lang = staged_run.get('targetLanguage', 'fa')
+            provider = staged_run.get('provider')
+            affected_ids: set[str] = set()
+            for part in entry['chosen']:
+                job = staged_run['jobs'][part['job']]
+                for ref in job['refs']:
+                    key = f"{ref['imageId']}:{ref['blockId']}"
+                    row = rows_by_key.get(key)
+                    if row is None or row['missing']:
+                        continue
+                    if row['conflict'] and choices.get(key) == 'keep':
+                        continue
+                    block = blocks.get((str(ref['imageId']), str(ref['blockId'])))
+                    if block is None:
+                        continue
+                    block['tr'] = row['result']; block['richHtml'] = ''
+                    block['aiTranslated'] = provider not in {'free', 'local'}
+                    apply_translated_block_defaults(block, target_language=target_lang)
+                    block.pop(AI_PARTS_KEY, None); block.pop(AI_REUSE_KEY, None)
+                    affected_ids.add(str(ref['imageId']))
+            affected = sorted(affected_ids)
+            if affected_ids:
+                for image in state.get('images', []):
+                    if str(image.get('id')) in affected_ids:
+                        image['approved'] = False
+            current_run = state.get(RUN_KEY)
+            if isinstance(current_run, dict):
+                current_run['lastPendingResult'] = token
+            if state.get('settings', {}).get('overlayMode') == entry.get('overlayMode'):
+                state['settings']['overlayMode'] = 'translation'
+            store.save(state)
+            done = isinstance(current_run, dict) and not any(
+                job.get('remaining') for job in current_run.get('jobs', []) if isinstance(job, dict)
+            )
         else:
             run = state[RUN_KEY]; blocks = _lookup(state)
+            rows_by_key = {row['key']: row for row in view['rows']}
             for part in entry['chosen']:
                 job = run['jobs'][part['job']]; kept = []
                 for ref in job['refs']:
                     key = f"{ref['imageId']}:{ref['blockId']}"
                     block = blocks.get((str(ref['imageId']), str(ref['blockId'])))
-                    row = next(item for item in view['rows'] if item['key'] == key)
-                    if block is None or (row['conflict'] and choices[key] == 'keep'):
+                    row = rows_by_key.get(key)
+                    if row is None:
+                        # The row disappeared between preview and apply: keep the
+                        # block untouched instead of failing the whole request.
+                        continue
+                    if block is None or (row['conflict'] and choices.get(key) == 'keep'):
                         continue
                     ref['snapshot'] = target_snapshot(block)
                     kept.append(ref)
                 job['refs'] = kept
-            skipped = any(row['missing'] or (row['conflict'] and choices[row['key']] == 'keep') for row in view['rows'])
+            skipped = any(row['missing'] or (row['conflict'] and choices.get(row['key']) == 'keep') for row in view['rows'])
             # A summary produced from skipped/changed material must not silently
             # replace the user's existing story context.
             summary = run['context'] if skipped else entry['summary']

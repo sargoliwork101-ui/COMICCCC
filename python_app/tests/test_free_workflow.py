@@ -64,7 +64,19 @@ def test_free_provider_retry_then_fallback_and_500_byte_constraint(tmp_path, mon
     monkeypatch.setattr(httpx, 'Client',FakeClient)
     req = FreeRequest(500)
     assert service.translate_free_batch(req,'hello',['hello'],'eng',provider_policy(settings,'free')) == 'سلام'
-    assert len(calls)==3 and [x[2] for x in calls] == [90,90,90]
+    # v4.45 splits the connect timeout (10 s) from read/write/pool (profile's seconds).
+    # The test used to pin `timeout=90` (a bare number); now compare Timeout() fields
+    # so the "free retry" split is locked in.
+    def _as_timeout(v):
+        if isinstance(v, httpx.Timeout):
+            return v
+        return httpx.Timeout(v) if isinstance(v, (int, float)) else v
+    timeouts = [_as_timeout(x[2]) for x in calls]
+    assert len(calls) == 3
+    for t in timeouts:
+        assert isinstance(t, httpx.Timeout), f"expected httpx.Timeout, got {type(t).__name__}"
+        assert t.connect == 10.0, f"connect must be the split 10-second timeout, got {t.connect}"
+        assert t.read == 90 or t.read == 90.0, f"read must keep the profile's 90 s budget, got {t.read}"
     with pytest.raises(TranslationError):
         service.translate_free_batch(req,'آ'*251,['آ'*251],'eng',provider_policy(settings,'free'))
     assert len(calls)==3
@@ -184,6 +196,11 @@ def test_free_invalid_line_mapping_retries_before_fallback(tmp_path, monkeypatch
     monkeypatch.setattr(httpx,'Client',FakeClient)
     monkeypatch.setattr('comic_studio.translation.time.sleep',lambda seconds: waits.append(seconds))
     assert service.translate_free_batch(FreeRequest(500),'one\ntwo',['one','two'],'eng',provider_policy(settings,'free')) == 'اول\nدوم'
-    assert [c[1] for c in calls] == [25,25,40]
+    timeouts = [c[1] for c in calls]
+    assert len(timeouts) == 3
+    for t, expected_read in zip(timeouts, [25, 25, 40]):
+        assert isinstance(t, httpx.Timeout), f"v4.45 splits connect/read; expected Timeout, got {type(t).__name__}"
+        assert t.connect == 10.0, f"connect timeout must be split to 10 s, got {t.connect}"
+        assert t.read == expected_read, f"read timeout must keep the per-step budget, got {t.read} vs {expected_read}"
     assert all(c[2]=='one\ntwo' for c in calls)
     assert waits == [3,3]

@@ -2933,7 +2933,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
             'import pathlib, sys, time',
             'from http.server import HTTPServer',
             'sys.path.insert(0, "python_app")',
-            'from license_manager import SellerVault, build_seller_panel_handler',
+            'from license_tool.manager import SellerVault, build_seller_panel_handler',
             'd = pathlib.Path(sys.argv[1])',
             'v = SellerVault(seller_dir=d / "vault", public_key_py=d / "pub.py", vendor_json_path=d / "vc.json", vendor_py_path=d / "vc.py")',
             'v.ensure_master_key(sync_source=True)',
@@ -2992,7 +2992,13 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         await sellerPage.close();
         assert.equal(sellerVisualCheck.fontLoaded, true, 'Vazirmatn.woff2 loads in Seller Panel');
         assert.equal(sellerVisualCheck.logoNaturalWidth, 128, 'icon128.png loads in Seller Panel topbar');
-        assert.equal(sellerVisualCheck.ver, '۴.۳۰ · پنل فروشنده', 'Seller Panel topbar version badge matches Studio');
+        const managerSource = fs.readFileSync(path.join(repository, 'python_app/license_tool/manager.py'), 'utf8');
+        const appVersionMatch = managerSource.match(/APP_VERSION = "(\d+\.\d+)"/);
+        assert.ok(appVersionMatch, 'APP_VERSION must be discoverable in license_tool/manager.py');
+        // v4.46: the expected badge is derived from APP_VERSION so a version
+        // bump can never leave this assertion silently stale again.
+        const expectedBadge = `${appVersionMatch[1].replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[Number(d)])} · پنل فروشنده`;
+        assert.equal(sellerVisualCheck.ver, expectedBadge, 'Seller Panel topbar version badge matches Studio');
         assert.equal(sellerVisualCheck.darkBg, 'rgb(11, 13, 18)', 'Seller Panel dark --bg matches Studio #0b0d12');
         assert.equal(sellerVisualCheck.lightBg, 'rgb(243, 244, 248)', 'Seller Panel light --bg matches Studio #f3f4f8');
         assert.equal(sellerVisualCheck.hasVazirmatnInComputed, true, 'Seller Panel body fontFamily uses Vazirmatn');

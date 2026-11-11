@@ -56,6 +56,16 @@ class TranslationError(RuntimeError):
     pass
 
 
+# v4.45: httpx timeout is a single knob — the same value covers TCP connect,
+# TLS handshake, response-read, and write phases. A single 90-second connect
+# timeout means the user waits 90 seconds just to learn the server is
+# unreachable, and on flaky networks (Iranian proxies, VPNs, mobile hotspots)
+# that long wait doesn't help. Splitting connect (10 s) from read/write/pool
+# (the profile's setting) makes "server gone after idle" fail fast, while
+# still giving the model the full window to generate its answer.
+AI_CONNECT_TIMEOUT = 10.0
+
+
 class InvalidContextResponse(TranslationError):
     """Received output failed validation; raw text is never included in logs."""
     def __init__(self, message: str, response_text: str):
@@ -73,6 +83,26 @@ DEFAULT_AI_RETRIES = 0
 DEFAULT_AI_RETRY_WAIT = 20
 MAX_AI_RETRY_WAIT = 300
 DEFAULT_AI_SOURCE_LIMIT = 1000
+
+# Persian explanations for the transport-error classes that typically mean
+# "nothing was processed / nothing was charged" — a manual retry succeeds
+# because a fresh socket is opened. Mentioning these kinds explicitly in logs
+# lets the user understand what happened and why their retry worked.
+_TRANSPORT_ERROR_HINTS: dict[str, str] = {
+    "ReadTimeout": "پاسخ سرور دیرتر از مدت انتظار برنگشت، معمولاً یعنی مدل سرد است یا صف سرور شلوغ است",
+    "WriteTimeout": "ارسال کامل درخواست به سرور در مدت انتظار تمام نشد",
+    "ConnectTimeout": "اتصال اولیهٔ TCP به سرور در مدت انتظار برقرار نشد",
+    "PoolTimeout": "همهٔ اتصال‌های باز به این سرویس اشغال بودند",
+    "ConnectError": "سرور اتصال را رد کرد یا آدرس در دسترس نبود؛ اگر VPN یا پروکسی دارید، با افت مواجه شده است",
+    "ReadError": "خواندن پاسخ سرور وسط کار قطع شد؛ سرور یا شبکه اتصال را رها کرد",
+    "WriteError": "نوشتن بدنهٔ درخواست به سرور کامل نشد",
+    "RemoteProtocolError": "سرور بدون فرستادن پاسخ کامل، اتصال را نیمه‌کاره بست",
+    "CloseError": "بستن امن اتصال ناموفق بود",
+    "CookieConflict": "کوکی‌های دریافتی با یکدیگر ناسازگار بودند",
+    "DecodingError": "بدنهٔ پاسخ سرور قابل رمزگشایی نبود",
+    "TooManyRedirects": "سرور زنجیرهٔ هدایت طولانی برگرداند",
+    "ProxyError": "پروکسی میان‌راه خطا داد یا جواب نداد",
+}
 MAX_AI_SOURCE_LIMIT = 100_000
 MAX_AI_SKILL_CHARS = 4000
 DEFAULT_AI_SKILL = "ترجمه را روان و متناسب با لحن کمیک یا کتاب بنویس؛ نام‌ها، اصطلاحات، اعداد و آواها را حفظ کن."
@@ -186,7 +216,7 @@ def split_free_query(text: str, limit: int = MAX_FREE_QUERY_CHARS) -> list[str]:
     """Close at the last sentence end within the limit; never fill it with a partial next sentence."""
     remaining = str(text or "").strip()
     if limit < 1:
-        raise ValueError("Query limit must be positive")
+        raise ValueError("سقف تعداد درخواست باید بزرگ‌تر از صفر باشد.")
     if not remaining:
         return []
     chunks = []
@@ -405,7 +435,13 @@ def _safe_error(error: Exception, provider: str, secrets: list[str] | None = Non
         return _redact_diagnostic(str(error), secrets)
     detail = _redact_diagnostic(str(error), secrets)
     kind = type(error).__name__
-    return f"{label}: {kind}" + (f"؛ جزئیات: {detail}" if detail else "؛ سرویس جزئیات بیشتری برنگرداند.")
+    hint = _TRANSPORT_ERROR_HINTS.get(kind, "")
+    base = f"{label}: {kind}"
+    if hint:
+        base += f" — {hint}"
+    if detail:
+        return base + f"؛ جزئیات: {detail}"
+    return base + ("؛ سرویس جزئیات بیشتری برنگرداند." if not hint else ".")
 
 
 def context_uses_json(provider: str, base: str, mode: str) -> bool:
@@ -437,9 +473,35 @@ def _sleep_translation(seconds: float, cancel_ev: threading.Event | None = None)
     sleep_interruptible(seconds, cancel_ev, "عملیات ترجمه به درخواست کاربر لغو شد.")
 
 
+def _is_free_transport_retry(exc: Exception) -> bool:
+    """v4.45: connection-phase failures are always safe to retry.
+
+    ConnectError, ConnectTimeout, and PoolTimeout mean the HTTP request never
+    reached the AI server — the provider never processed the payload and
+    therefore never charged the key. Re-trying these cannot double-bill the
+    user, so we allow one automatic retry even when ``retry_count`` is 0.
+
+    ReadTimeout / ReadError / RemoteProtocolError / HTTP 4xx-5xx are NOT in
+    this set: the server may have started processing before the connection
+    broke, so retrying could cost money — the user must explicitly opt in via
+    the retry_count setting for those kinds.
+    """
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+
+
 def _run_with_retries(action: Any, profile: dict[str, Any], provider: str, secrets: list[str]) -> Any:
     retries = profile.get("retry_count", DEFAULT_AI_RETRIES)
-    for attempt in range(retries + 1):
+    free_transport_retry_used = False
+    # v4.45: connection-phase failures (ConnectError / ConnectTimeout /
+    # PoolTimeout) mean the HTTP request never reached the AI server — the
+    # provider never processed the payload and never charged the key. Grant
+    # ONE bonus automatic retry for these even when the profile's retry_count
+    # is 0; this is exactly the user's complaint "fails once after idle,
+    # second manual try works" — the second try succeeded because the NAT
+    # route or the server cold-start had settled.
+    max_attempts = retries + 1
+    attempt = 0
+    while attempt < max_attempts:
         check_cancelled("عملیات ترجمه به درخواست کاربر لغو شد.")
         try:
             return action()
@@ -447,7 +509,9 @@ def _run_with_retries(action: Any, profile: dict[str, Any], provider: str, secre
             raise
         except Exception as exc:
             check_cancelled("عملیات ترجمه به درخواست کاربر لغو شد.")
-            if not _retryable(exc) or attempt >= retries:
+
+            grant_free = not free_transport_retry_used and _is_free_transport_retry(exc)
+            if (not _retryable(exc) or attempt >= retries) and not grant_free:
                 if isinstance(exc, InvalidContextResponse):
                     if retries == 0:
                         exc.args = (f"{exc} تکرار خودکار برای این API روی صفر تنظیم شده بود؛ پاسخ برای اصلاح محلی نگه داشته شد.",)
@@ -456,12 +520,31 @@ def _run_with_retries(action: Any, profile: dict[str, Any], provider: str, secre
                         exc.args = (f"{exc} پاسخ پس از {attempt + 1} تلاش نامعتبر ماند؛ همهٔ تکرارهای تنظیم‌شده تمام شد. برای جلوگیری از هزینهٔ ناخواسته، دیگر خودکار ارسال نمی‌شود.",)
                         emit(f"پاسخ AI پس از {attempt + 1} تلاش همچنان از نظر قالب/محتوا نامعتبر بود؛ تکرارهای تنظیم‌شده تمام شد. پاسخ نهایی برای اصلاح محلی نگه داشته شد؛ درخواست دیگری ارسال نمی‌شود.", "error")
                 raise
-            wait = profile.get("retry_wait_seconds", DEFAULT_AI_RETRY_WAIT)
-            if isinstance(exc, InvalidContextResponse):
-                emit(f"پاسخ AI از نظر قالب/محتوا نامعتبر بود: {_safe_error(exc, provider, secrets)}؛ پس از {wait} ثانیه همان API دوباره امتحان می‌شود ({attempt + 1} از {retries}). هر بار ممکن است هزینه داشته باشد.", "warning")
+
+            if grant_free:
+                free_transport_retry_used = True
+                # The request never arrived, so there is no server-side work
+                # in flight; a short 3 s pause is enough for VPN/NAT routing
+                # or the provider's cold-start rotation to settle.
+                wait = min(3.0, profile.get("retry_wait_seconds", DEFAULT_AI_RETRY_WAIT))
+                emit(
+                    f"اتصال به سرویس برقرار نشد ({_safe_error(exc, provider, secrets)})؛ "
+                    f"چون درخواست هرگز به سرور نرسید، هزینه‌ای ثبت نشده است. "
+                    f"خودکار یک بار پس از {wait:.0f} ثانیه دوباره تلاش می‌کنم…",
+                    "warning",
+                )
             else:
-                emit(f"تلاش {attempt + 1} ناموفق بود: {_safe_error(exc, provider, secrets)}؛ پس از {wait} ثانیه، تکرار {attempt + 1} از {retries} برای همین API (ممکن است هزینه تکرار شود).", "warning")
+                wait = profile.get("retry_wait_seconds", DEFAULT_AI_RETRY_WAIT)
+                if isinstance(exc, InvalidContextResponse):
+                    emit(f"پاسخ AI از نظر قالب/محتوا نامعتبر بود: {_safe_error(exc, provider, secrets)}؛ پس از {wait} ثانیه همان API دوباره امتحان می‌شود ({attempt + 1} از {retries}). هر بار ممکن است هزینه داشته باشد.", "warning")
+                else:
+                    emit(f"تلاش {attempt + 1} ناموفق بود: {_safe_error(exc, provider, secrets)}؛ پس از {wait} ثانیه، تکرار {attempt + 1} از {retries} برای همین API (ممکن است هزینه تکرار شود).", "warning")
             _sleep_translation(wait)
+            if grant_free:
+                # Don't spend the caller-visible retry budget on a free retry.
+                max_attempts += 1
+                continue
+        attempt += 1
     raise AssertionError("unreachable")
 
 
@@ -561,7 +644,7 @@ def translation_request_view(
     if provider == "local":
         return {"texts": [clean] if clean else [], "systemPrompt": ""}
     if provider not in AI_PROVIDERS:
-        raise TranslationError("Unknown translation provider")
+        raise TranslationError("سرویس ترجمهٔ انتخاب‌شده معتبر نیست.")
     system_prompt, source = _ai_prompt(source_language, skill, target_language=target_language)
     return {"texts": [f"Source language: {source}\n\n{clean}"], "systemPrompt": system_prompt}
 
@@ -608,6 +691,9 @@ class TranslationService:
     @contextlib.contextmanager
     def _tracked_client(self, **kwargs: Any):
         self._check_cancelled()
+        timeout = kwargs.get("timeout")
+        if isinstance(timeout, (int, float)):
+            kwargs["timeout"] = httpx.Timeout(timeout, connect=AI_CONNECT_TIMEOUT)
         client = httpx.Client(**kwargs)
         with self._clients_lock:
             self._active_clients.add(client)
@@ -711,7 +797,7 @@ class TranslationService:
         current = _normalize_settings(read_json(self.path, {}))
         provider = str(values.get("provider", current["provider"]) or "free").strip().lower()
         if provider not in {"free", "local", *AI_PROVIDERS}:
-            raise ValueError("Unknown translation provider")
+            raise ValueError("سرویس ترجمهٔ انتخاب‌شده معتبر نیست.")
         context_percent = _setting_int(values.get("context_percent", current["context_percent"]), 15, 0, 100, strict=True)
         skill_percent = _setting_int(values.get("skill_percent", current["skill_percent"]), 15, 0, 100, strict=True)
         if context_percent + skill_percent > 100:
@@ -902,9 +988,25 @@ class TranslationService:
                     self._check_cancelled()
                     message = _safe_error(exc, selected, secrets)
                     if isinstance(exc, httpx.TransportError):
-                        emit(f"پاسخ {name} به‌علت خطای ارتباطی دریافت نشد: {message}؛ کلید بعدی خودکار امتحان نشد.", "error")
+                        retry_note = (
+                            f"چون تعداد تکرار خودکار این پروفایل روی {profile['retry_count']} تنظیم شده، تلاش مجدد خودکار انجام نشد. "
+                            "اگر این خطا گاه‌به‌گاه رخ می‌دهد و با یک تلاش دستی دوم برطرف می‌شود، "
+                            "در پنجرهٔ تنظیمات این سرویس گزینهٔ «تعداد تکرار خودکار هر درخواست» را یک یا دو قرار دهید تا چنین خطاهای گذرا خودکار جبران شوند."
+                            if profile['retry_count'] == 0
+                            else ""
+                        )
+                        emit(
+                            f"پاسخ {name} به‌علت خطای ارتباطی دریافت نشد: {message}؛ کلید بعدی خودکار امتحان نشد."
+                            + (f" {retry_note}" if retry_note else ""),
+                            "error",
+                        )
                         previous = (" خطاهای کلیدهای قبلی: " + "؛ ".join(failures)) if failures else ""
-                        raise TranslationError(f"ارتباط {name} قطع شد (سقف انتظار هر مرحله {profile['timeout_seconds']} ثانیه، حداکثر {profile['retry_count']} تکرار)؛ ممکن است سرویس درخواست را پردازش یا هزینه را حساب کرده باشد. کلید بعدی خودکار امتحان نشد. جزئیات واقعی: {message}{previous}") from exc
+                        raise TranslationError(
+                            f"ارتباط {name} قطع شد (سقف انتظار هر مرحله {profile['timeout_seconds']} ثانیه، حداکثر {profile['retry_count']} تکرار)؛ "
+                            f"ممکن است سرویس درخواست را پردازش یا هزینه را حساب کرده باشد. کلید بعدی خودکار امتحان نشد. "
+                            f"جزئیات واقعی: {message}{previous}"
+                            + (f" {retry_note}" if retry_note else "")
+                        ) from exc
                     failures.append(f"{name}: {message}")
                     emit(f"تلاش با {name} ناموفق بود: {message}", "error")
                     if profile_index + 1 < len(profiles):
@@ -913,7 +1015,7 @@ class TranslationService:
                         _sleep_translation(wait, self._cancel_event)
             raise TranslationError("هیچ‌یک از کلیدهای این سرویس پاسخ قابل‌استفاده‌ای ندادند. " + "؛ ".join(failures))
         else:
-            raise TranslationError("Unknown translation provider")
+            raise TranslationError("سرویس ترجمهٔ انتخاب‌شده معتبر نیست.")
         return normalize_translation_text(translated)
 
     def translate_context(self, request: Any, text: str, source_texts: list[str], provider: str, expected_policy: dict[str, Any]) -> tuple[str, str]:
@@ -983,7 +1085,16 @@ class TranslationService:
                 self._check_cancelled()
                 message = _safe_error(exc, provider, secrets)
                 if isinstance(exc, httpx.TransportError):
-                    raise TranslationError(f"ارتباط {name} قطع شد؛ ممکن است درخواست پردازش یا هزینه حساب شده باشد. کلید بعدی خودکار امتحان نشد. جزئیات: {message}") from exc
+                    retry_hint = (
+                        f" چون تکرار خودکار این پروفایل روی {profile['retry_count']} تنظیم شده، تلاش مجدد خودکار انجام نشد؛"
+                        " اگر این خطا گاه‌به‌گاه رخ می‌دهد و با یک تلاش دستی دوم برطرف می‌شود،"
+                        " در تنظیمات سرویس «تعداد تکرار خودکار هر درخواست» را افزایش دهید."
+                        if profile.get('retry_count', 0) == 0 else ""
+                    )
+                    raise TranslationError(
+                        f"ارتباط {name} قطع شد؛ ممکن است درخواست پردازش یا هزینه حساب شده باشد. "
+                        f"کلید بعدی خودکار امتحان نشد. جزئیات: {message}.{retry_hint}"
+                    ) from exc
                 if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in {400, 422} and context_uses_json(provider, profile['base_url'], profile['response_mode']):
                     raise TranslationError(f"درخواست JSON رد شد؛ شاید مدل از این حالت پشتیبانی نکند. حالت پاسخ را در تنظیمات به «متن معمولی» تغییر دهید و دوباره بررسی کنید. کلید بعدی امتحان نشد. {message}") from exc
                 failures.append(f"{name}: {message}")
@@ -1079,7 +1190,14 @@ class TranslationService:
                 self._check_cancelled()
                 message = _safe_error(exc, provider, secrets)
                 if isinstance(exc, httpx.TransportError):
-                    raise TranslationError(f"ارتباط هنگام فشرده‌سازی خلاصه قطع شد؛ درخواست ترجمه ارسال نشد. {message}") from exc
+                    retry_hint = (
+                        f" چون تکرار خودکار این پروفایل روی {profile.get('retry_count', 0)} صفر است، تلاش مجدد خودکار انجام نشد؛"
+                        " همان محتوا با تکرار دستی معمولاً می‌گذرد چون سرور دیگر سرد نیست."
+                        if profile.get('retry_count', 0) == 0 else ""
+                    )
+                    raise TranslationError(
+                        f"ارتباط هنگام فشرده‌سازی خلاصه قطع شد؛ درخواست ترجمه ارسال نشد. {message}.{retry_hint}"
+                    ) from exc
                 failures.append(f"{name}: {message}")
                 if profile_index + 1 < len(profiles):
                     wait = profile['retry_wait_seconds']
@@ -1245,11 +1363,11 @@ class TranslationService:
             errors.append("MyMemory returned no translation")
         except Exception as exc:
             errors.append(str(exc))
-        raise TranslationError("Free translation failed: " + "; ".join(errors[-2:]))
+        raise TranslationError("ترجمهٔ رایگان ناموفق بود: " + "؛ ".join(errors[-2:]))
 
     def _openai(self, text: str, source_language: str, settings: dict[str, Any]) -> str:
         if not settings.get("api_key"):
-            raise TranslationError("API key is not configured")
+            raise TranslationError("کلید API این سرویس تنظیم نشده است.")
         provider = str(settings.get("provider") or "openai")
         if provider not in AI_PROVIDERS or provider == "gemini":
             provider = "openai"
@@ -1282,7 +1400,7 @@ class TranslationService:
 
     def _gemini(self, text: str, source_language: str, settings: dict[str, Any]) -> str:
         if not settings.get("api_key"):
-            raise TranslationError("API key is not configured")
+            raise TranslationError("کلید API این سرویس تنظیم نشده است.")
         base_url = _normalize_base_url(settings.get("base_url"), "gemini")
         model = _normalize_model(settings.get("model"), "gemini")
         system_prompt, source = _ai_prompt(
@@ -1329,7 +1447,7 @@ class TranslationService:
             except LocalNmtError as exc:
                 raise TranslationError(str(exc)) from exc
         if provider not in AI_PROVIDERS:
-            raise TranslationError("Unknown translation provider")
+            raise TranslationError("سرویس ترجمهٔ انتخاب‌شده معتبر نیست.")
         config = dict(settings["providers"][provider])
         if overrides.get("model") is not None:
             config["model"] = overrides["model"]
