@@ -328,7 +328,7 @@ def test_huggingface_repo_update_promotes_only_complete_model_and_removes_old_fi
 
     def successful_snapshot_download(**kwargs):
         staging = Path(kwargs["local_dir"])
-        calls.append(staging)
+        calls.append(dict(kwargs))
         assert (old_root / "old-weight.bin").is_file()
         (staging / "new-weight.bin").write_bytes(b"complete-new-version")
         return str(staging)
@@ -345,7 +345,8 @@ def test_huggingface_repo_update_promotes_only_complete_model_and_removes_old_fi
     assert (old_root / "new-weight.bin").read_bytes() == b"complete-new-version"
     assert not (old_root / "old-weight.bin").exists()
     assert revision == f"hf:{'b' * 12}"
-    assert not calls[0].exists()
+    assert calls[0]["revision"] == "b" * 40
+    assert not Path(calls[0]["local_dir"]).exists()
     assert not list(old_root.parent.glob(".owner__model.ocr-backup-*"))
 
 
