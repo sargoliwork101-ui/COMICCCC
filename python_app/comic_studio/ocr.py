@@ -2936,6 +2936,7 @@ def _isolated_info(
     requirements: str,
     *,
     languages: list[str] | None = None,
+    remote_code_repository: str | None = None,
 ) -> dict[str, Any]:
     spec = ISOLATED_ENGINE_SPECS[engine_id]
     return {
@@ -2954,6 +2955,8 @@ def _isolated_info(
         "repository": repository,
         "requirements": requirements,
         "install": "نصب و دانلود کاملاً خودکار در محیط ایزوله با یک کلیک",
+        "remoteCodeExecution": bool(remote_code_repository),
+        "remoteCodeRepository": remote_code_repository,
     }
 
 
@@ -3559,6 +3562,7 @@ ENGINE_INFO = {
         "https://github.com/zai-org/GLM-OCR",
         "نصب خودکار در محیط جدا؛ قابل اجرا روی CPU و کارت گرافیک NVIDIA (حجم حدود ۲٫۴ گیگابایت).",
         languages=["eng", "fas", "kor", "jpn", "chi_sim"],
+        remote_code_repository="zai-org/GLM-OCR",
     ),
     "dots-ocr": _isolated_info(
         "dots-ocr",
@@ -3568,6 +3572,7 @@ ENGINE_INFO = {
         "https://github.com/rednote-hilab/dots.ocr",
         "مدل سنگین؛ نیازمند کارت گرافیک NVIDIA با حداقل ۸ گیگابایت حافظه و حدود ۴٫۵ گیگابایت دانلود.",
         languages=["eng", "fas", "kor", "jpn", "chi_sim"],
+        remote_code_repository="rednote-hilab/dots.mocr (یا rednote-hilab/dots.ocr)",
     ),
     "deepseek-ocr-2": _isolated_info(
         "deepseek-ocr-2",
@@ -3577,6 +3582,7 @@ ENGINE_INFO = {
         "https://github.com/deepseek-ai/DeepSeek-OCR-2",
         "مدل سنگین؛ نیازمند کارت گرافیک NVIDIA با حداقل ۱۲ گیگابایت حافظه و حدود ۷٫۵ گیگابایت دانلود.",
         languages=["eng", "fas", "kor", "jpn", "chi_sim"],
+        remote_code_repository="deepseek-ai/DeepSeek-OCR-2",
     ),
     "olmocr": _isolated_info(
         "olmocr",
@@ -3586,6 +3592,7 @@ ENGINE_INFO = {
         "https://github.com/allenai/olmocr",
         "مدل بسیار سنگین؛ نیازمند کارت گرافیک NVIDIA با حداقل ۱۶ گیگابایت حافظه و حدود ۱۵ گیگابایت دانلود.",
         languages=["eng", "fas", "kor", "jpn", "chi_sim"],
+        remote_code_repository="allenai/olmOCR-2-7B-1025",
     ),
     "hunyuan-ocr": _isolated_info(
         "hunyuan-ocr",
@@ -3595,6 +3602,7 @@ ENGINE_INFO = {
         "https://github.com/Tencent-Hunyuan/HunyuanOCR",
         "مدل بسیار سنگین؛ نیازمند کارت گرافیک حرفه‌ای NVIDIA با حداقل ۲۴ گیگابایت حافظه و حدود ۲۰ گیگابایت دانلود.",
         languages=["eng", "fas", "kor", "jpn", "chi_sim"],
+        remote_code_repository="tencent/HunyuanOCR",
     ),
 }
 

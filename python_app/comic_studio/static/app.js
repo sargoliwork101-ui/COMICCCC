@@ -4127,8 +4127,25 @@ function renderModels(options = {}) {
   }
   syncEngineUpdateUi();
 }
+async function confirmRemoteCodeModel(engine, operation) {
+  if (!engine?.remoteCodeExecution) return true;
+  const source = engine.remoteCodeRepository || 'مخزن رسمی این مدل در Hugging Face';
+  const action = operation === 'update' ? 'به‌روزرسانی' : 'دریافت';
+  return appConfirm(
+    `برای ${action} «${engine.name}»، برنامه فایل‌های مدل را از مخزن «${source}» می‌گیرد. برای کارکرد این مدل، برنامه به کد همراه آن اجازهٔ اجرا می‌دهد؛ آن کد با دسترسی‌های خود برنامه روی رایانهٔ شما اجرا می‌شود. نسخهٔ هر دریافت به یک شناسهٔ ثابت محدود می‌شود. فقط اگر به این ناشر اعتماد دارید ادامه دهید.`,
+    {
+      title: `هشدار امنیتی پیش از ${action} مدل`,
+      hint: 'این تأیید فقط برای همین عملیات است؛ به‌روزرسانی بعدی دوباره از شما می‌پرسد.',
+      confirmText: `اعتماد دارم؛ ${action} شود`,
+      cancelText: 'انصراف',
+      variant: 'warning',
+      destructive: true,
+    },
+  );
+}
 async function downloadEngine(engine, options = {}) {
   if (state.modelBusy) return false;
+  if (!await confirmRemoteCodeModel(engine, 'download')) return false;
   const rawLang = options.languageOverride || $('modelsLanguage')?.value || $('testLanguage')?.value || $('ocrLanguage')?.value || 'eng';
   const language = (engine.languages || []).includes(rawLang)
     ? rawLang
@@ -4156,7 +4173,11 @@ async function downloadEngine(engine, options = {}) {
   syncModelProgressUi(null, true, startMsg);
   scheduleActivityPoll(false);
   const performRequest = (forceFlag) => api(`/api/engines/${engine.id}/download`, {
-    ...jsonOptions('POST', forceFlag ? { language, force: true } : { language }),
+    ...jsonOptions('POST', {
+      language,
+      ...(forceFlag ? { force: true } : {}),
+      ...(engine.remoteCodeExecution ? { accept_remote_code_risk: true } : {}),
+    }),
     signal: controller.signal,
   });
   let succeeded = false;
@@ -4224,6 +4245,7 @@ async function downloadEngine(engine, options = {}) {
 }
 async function updateEngine(engine, options = {}) {
   if (state.modelBusy) return false;
+  if (!await confirmRemoteCodeModel(engine, 'update')) return false;
   const targetLang = options.languageOverride || (engine.languages?.includes($('testLanguage')?.value) ? $('testLanguage').value : (engine.languages?.[0] || 'eng'));
   ++engineMutationSeq;
   modelFromOcrDialog = Boolean(options.fromOcrDialog);
@@ -4242,7 +4264,10 @@ async function updateEngine(engine, options = {}) {
   let succeeded = false;
   try {
     const result = await api(`/api/engines/${engine.id}/update`, {
-      ...jsonOptions('POST', { language: targetLang }),
+      ...jsonOptions('POST', {
+        language: targetLang,
+        ...(engine.remoteCodeExecution ? { accept_remote_code_risk: true } : {}),
+      }),
       signal: controller.signal,
     });
     ++engineMutationSeq;

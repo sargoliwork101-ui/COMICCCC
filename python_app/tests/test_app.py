@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.36"
+    assert health.json()["version"] == "4.54"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -592,7 +592,7 @@ def test_all_models_auto_download_hardware_gate_and_updates_api(client, monkeypa
     assert engines["olmocr"]["hardwareCheck"]["compatible"] is False
 
     # Heavy GPU model without force returns 409 hardware_warning with Persian message
-    warn_res = client.post("/api/engines/olmocr/download", json={"language": "eng"})
+    warn_res = client.post("/api/engines/olmocr/download", json={"language": "eng", "accept_remote_code_risk": True})
     assert warn_res.status_code == 409
     warn_body = warn_res.json()
     assert warn_body["kind"] == "hardware_warning"
@@ -604,13 +604,13 @@ def test_all_models_auto_download_hardware_gate_and_updates_api(client, monkeypa
         "comic_studio.ocr.EngineRegistry.download",
         lambda self, engine_id, language: downloaded.append((engine_id, language)),
     )
-    forced_res = client.post("/api/engines/olmocr/download", json={"language": "eng", "force": True})
+    forced_res = client.post("/api/engines/olmocr/download", json={"language": "eng", "force": True, "accept_remote_code_risk": True})
     assert forced_res.status_code == 200
     assert forced_res.json()["ok"] is True
     assert downloaded == [("olmocr", "eng")]
 
     # CPU-friendly advanced model downloads directly without needing force
-    cpu_adv_res = client.post("/api/engines/glm-ocr/download", json={"language": "eng"})
+    cpu_adv_res = client.post("/api/engines/glm-ocr/download", json={"language": "eng", "accept_remote_code_risk": True})
     assert cpu_adv_res.status_code == 200
     assert cpu_adv_res.json()["ok"] is True
     assert downloaded[-1] == ("glm-ocr", "eng")
@@ -633,10 +633,49 @@ def test_all_models_auto_download_hardware_gate_and_updates_api(client, monkeypa
         "comic_studio.ocr.EngineRegistry.update",
         lambda self, engine_id, language="eng": updated.append((engine_id, language)),
     )
-    upd_res = client.post("/api/engines/glm-ocr/update", json={"language": "kor"})
+    upd_res = client.post("/api/engines/glm-ocr/update", json={"language": "kor", "accept_remote_code_risk": True})
     assert upd_res.status_code == 200
     assert upd_res.json()["ok"] is True
     assert updated == [("glm-ocr", "kor")]
+
+
+def test_remote_code_ocr_models_require_explicit_download_and_update_approval(client, monkeypatch):
+    from comic_studio.ocr import ENGINE_INFO
+
+    protected = {"glm-ocr", "dots-ocr", "deepseek-ocr-2", "olmocr", "hunyuan-ocr"}
+    assert all(ENGINE_INFO[engine_id]["remoteCodeExecution"] for engine_id in protected)
+    catalog = {entry["id"]: entry for entry in client.get("/api/engines").json()}
+    for engine_id in protected:
+        assert ENGINE_INFO[engine_id]["remoteCodeRepository"]
+        assert catalog[engine_id]["remoteCodeExecution"] is True
+        assert catalog[engine_id]["remoteCodeRepository"] == ENGINE_INFO[engine_id]["remoteCodeRepository"]
+        denied_download = client.post(f"/api/engines/{engine_id}/download", json={"language": "eng"})
+        denied_update = client.post(f"/api/engines/{engine_id}/update", json={"language": "eng"})
+        assert denied_download.status_code == 428
+        assert denied_update.status_code == 428
+
+    downloaded = []
+    updated = []
+    monkeypatch.setattr(
+        "comic_studio.ocr.EngineRegistry.download",
+        lambda self, engine_id, language: downloaded.append((engine_id, language)),
+    )
+    monkeypatch.setattr(
+        "comic_studio.ocr.EngineRegistry.update",
+        lambda self, engine_id, language="eng": updated.append((engine_id, language)),
+    )
+    approved_download = client.post(
+        "/api/engines/glm-ocr/download",
+        json={"language": "eng", "accept_remote_code_risk": True},
+    )
+    approved_update = client.post(
+        "/api/engines/glm-ocr/update",
+        json={"language": "eng", "accept_remote_code_risk": True},
+    )
+    assert approved_download.status_code == 200
+    assert approved_update.status_code == 200
+    assert downloaded == [("glm-ocr", "eng")]
+    assert updated == [("glm-ocr", "eng")]
 
 
 def test_pdf_import(client):
@@ -3294,7 +3333,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.36"
+    assert APP_VERSION == "4.54"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"

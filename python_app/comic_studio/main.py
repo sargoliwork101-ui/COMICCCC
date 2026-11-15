@@ -1028,6 +1028,8 @@ def create_app() -> FastAPI:
         info = ENGINE_INFO[engine_id]
         if info.get("action") == "guide":
             return {"ok": False, "guide": True, "engine": {"id": engine_id, **info}, "engines": registry.status()}
+        if info.get("remoteCodeExecution") and not (values and values.accept_remote_code_risk):
+            raise HTTPException(428, "پیش از دریافت این مدل باید دربارهٔ اجرای کد همراه آن آگاهانه تأیید کنید.")
         language = values.language if values else "eng"
         force = bool(values.force) if values else False
         if info.get("isolated") and info["languages"] and language not in info["languages"]:
@@ -1081,6 +1083,8 @@ def create_app() -> FastAPI:
         require_module_license("ocr")
         registry.get(engine_id)
         info = ENGINE_INFO[engine_id]
+        if info.get("remoteCodeExecution") and not (values and values.accept_remote_code_risk):
+            raise HTTPException(428, "پیش از به‌روزرسانی این مدل باید دربارهٔ اجرای کد همراه آن آگاهانه تأیید کنید.")
         language = values.language if values else (info["languages"][0] if info["languages"] else "eng")
         if info["languages"] and language not in info["languages"]:
             language = info["languages"][0]

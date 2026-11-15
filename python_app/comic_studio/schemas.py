@@ -116,10 +116,12 @@ class EngineTestRequest(BaseModel):
 class EngineDownloadRequest(BaseModel):
     language: str = "eng"
     force: bool = False
+    accept_remote_code_risk: bool = False
 
 
 class EngineUpdateRequest(BaseModel):
     language: str = "eng"
+    accept_remote_code_risk: bool = False
 
 
 class EngineUpdateCheckRequest(BaseModel):

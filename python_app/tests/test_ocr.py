@@ -9,10 +9,11 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from comic_studio.ocr import (
     ENGINE_INFO, EasyEngine, OcrError, OcrLine, RapidEngine, TesseractEngine,
@@ -1766,9 +1767,14 @@ def test_surya_adapter_prepare_downloads_gguf_directly_without_spawning_server(m
     rev = adapter.prepare("eng")
 
     assert rev == "0.23.0"
-    assert ("datalab-to/surya-ocr-2.5-gguf", "surya-2.5-mmproj.gguf") in downloaded_files
-    assert ("datalab-to/surya-ocr-2.5-gguf", "surya-2.5.gguf") in downloaded_files
-    assert "datalab-to/surya_layout2" in downloaded_snaps
+    files_by_name = {filename: (repo, kwargs) for repo, filename, kwargs in downloaded_files}
+    assert files_by_name["surya-2.5-mmproj.gguf"][0] == "datalab-to/surya-ocr-2.5-gguf"
+    assert files_by_name["surya-2.5.gguf"][0] == "datalab-to/surya-ocr-2.5-gguf"
+    assert files_by_name["surya-2.5-mmproj.gguf"][1]["revision"] == "d" * 40
+    assert files_by_name["surya-2.5.gguf"][1]["revision"] == "d" * 40
+    layout_repo, layout_kwargs = downloaded_snaps[0]
+    assert layout_repo == "datalab-to/surya_layout2"
+    assert layout_kwargs["revision"] == "d" * 40
 
 
 def test_pip_streaming_stall_watchdog_and_cancel_kill_hung_child(monkeypatch, tmp_path):
@@ -4011,3 +4017,53 @@ def test_v431_a_table_cell_is_cropped_around_its_own_text():
     top, bottom, left, right = _tight_ink_box(ink)
     assert (top, bottom, left, right) == (12, 22, 60, 140)
     assert _tight_ink_box(np.zeros((0, 0), dtype=np.uint8)) == (0, 0, 0, 0)
+
+
+def test_indirect_mineru_huggingface_downloads_are_pinned_and_restored(monkeypatch):
+    import types
+    from comic_studio import ocr_worker
+
+    calls = []
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.snapshot_download = lambda **kwargs: calls.append(("snapshot", dict(kwargs)))
+    fake_hub.hf_hub_download = lambda **kwargs: calls.append(("file", dict(kwargs)))
+    mineru_module = types.ModuleType("mineru.model.download")
+    mineru_module.snapshot_download = fake_hub.snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.setitem(sys.modules, "mineru.model.download", mineru_module)
+    resolver_calls = []
+
+    def resolve(repo_id, endpoint=None):
+        resolver_calls.append((repo_id, endpoint))
+        return "e" * 40, endpoint
+
+    original_snapshot = fake_hub.snapshot_download
+    original_file = fake_hub.hf_hub_download
+    with ocr_worker._pin_huggingface_downloads(resolve):
+        fake_hub.snapshot_download(repo_id="owner/snapshot")
+        fake_hub.hf_hub_download(repo_id="owner/file", filename="weights.bin")
+        mineru_module.snapshot_download(repo_id="owner/alias")
+    assert [call[0] for call in calls] == ["snapshot", "file", "snapshot"]
+    assert all(call[1]["revision"] == "e" * 40 for call in calls)
+    assert resolver_calls == [("owner/snapshot", None), ("owner/file", None), ("owner/alias", None)]
+    assert fake_hub.snapshot_download is original_snapshot
+    assert fake_hub.hf_hub_download is original_file
+    assert mineru_module.snapshot_download is original_snapshot
+
+
+def test_huggingface_download_refuses_unresolved_moving_revision(tmp_path, monkeypatch):
+    import types
+    from comic_studio import ocr_worker
+
+    calls = []
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.HfApi = lambda endpoint=None: SimpleNamespace(model_info=lambda repo_id, timeout=8.0: SimpleNamespace(sha="main"))
+    fake_hub.snapshot_download = lambda **kwargs: calls.append(kwargs)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    adapter = ocr_worker._BaseAdapter(tmp_path)
+    adapter.hf_repo = "owner/model"
+
+    with pytest.raises(RuntimeError, match="immutable Hugging Face revision"):
+        adapter._download_hf_repo_resilient("owner/model")
+    assert calls == []
+    assert not (tmp_path / "hf-repos" / "owner__model").exists()

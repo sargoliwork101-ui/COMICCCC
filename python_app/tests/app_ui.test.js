@@ -1022,6 +1022,7 @@ function check(name, condition) {
         downloadSizeGb: 15, requiresNvidiaGpu: true, minVramGb: 16,
         runtimeInstalled: false, modelReady: false, readyLanguages: [],
         installedVersion: null, latestVersion: null, updateAvailable: false, updateSummary: '',
+        remoteCodeExecution: true, remoteCodeRepository: 'allenai/olmOCR-2-7B-1025',
         hardwareCheck: {
           compatible: false,
           warnings: ['این مدل برای اجرا به کارت گرافیک NVIDIA با حداقل 16 گیگابایت حافظهٔ گرافیکی نیاز دارد، اما کارت گرافیک NVIDIA روی این سیستم شناسایی نشد.'],
@@ -1070,22 +1071,34 @@ function check(name, condition) {
     await new Promise((r) => setTimeout(r, 20));
     check('modelsDialog shows hardware summary, update banner, and both standard + isolated model groups', $('modelsDialog').open === true && $('modelsHardwareSummary').textContent.includes('بدون کارت گرافیک مجزای NVIDIA') && !$('modelsUpdateBanner').classList.contains('hidden') && !$('updateAllModelsBtn').classList.contains('hidden') && $('engineCards').querySelectorAll('.model-group').length === 2);
 
-    // Click prepare on heavy GPU model olmOCR -> Persian hardware warning modal opens BEFORE downloading
+    // A model that executes its repository code must get a separate, informed approval.
     const olmCard = [...$('engineCards').querySelectorAll('.engine-card')].find((el) => el.querySelector('h3')?.textContent === 'olmOCR');
     const olmPrepareBtn = [...olmCard.querySelectorAll('.card-buttons button')].find((b) => b.textContent.includes('آماده‌سازی'));
     olmPrepareBtn.click();
     await new Promise((r) => setTimeout(r, 20));
-    check('clicking prepare on heavy GPU model opens Persian hardware warning modal before downloading', $('appModalDialog').open === true && $('appModalDialog').dataset.variant === 'warning' && $('appModalMessage').textContent.includes('NVIDIA') && engineDownloadCalls.length === 0);
+    check('remote-code model first shows a Persian security warning naming its source before download', $('appModalDialog').open === true && $('appModalDialog').dataset.variant === 'warning' && $('appModalTitle').textContent.includes('امنیتی') && $('appModalMessage').textContent.includes('allenai/olmOCR-2-7B-1025') && $('appModalMessage').textContent.includes('کد همراه') && engineDownloadCalls.length === 0);
     $('appModalCancel').click();
     await new Promise((r) => setTimeout(r, 20));
-    check('declining hardware warning cancels download cleanly without sending network download request', $('appModalDialog').open === false && engineDownloadCalls.length === 0);
+    check('declining remote-code approval cancels before any model download', $('appModalDialog').open === false && engineDownloadCalls.length === 0);
 
-    // Confirming hardware warning sends force=true and prepares olmOCR
+    // Approving code execution is not an approval to bypass the separate hardware warning.
     olmPrepareBtn.click();
     await new Promise((r) => setTimeout(r, 20));
     $('appModalConfirm').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('approving remote-code risk still shows the separate hardware warning', $('appModalDialog').open === true && $('appModalMessage').textContent.includes('NVIDIA') && engineDownloadCalls.length === 0);
+    $('appModalCancel').click();
+    await new Promise((r) => setTimeout(r, 20));
+    check('declining the hardware warning after security approval still sends no download', $('appModalDialog').open === false && engineDownloadCalls.length === 0);
+
+    // Both explicit approvals are required before sending the pinned model request.
+    olmPrepareBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    $('appModalConfirm').click();
+    await new Promise((r) => setTimeout(r, 20));
+    $('appModalConfirm').click();
     await new Promise((r) => setTimeout(r, 30));
-    check('confirming hardware warning sends force=true and marks isolated engine ready', engineDownloadCalls.length === 1 && engineDownloadCalls[0].force === true && vm.runInContext(`state.engines.find(e => e.id === 'olmocr').runtimeInstalled === true`, context));
+    check('download request records explicit remote-code approval and force=true only after both warnings', engineDownloadCalls.length === 1 && engineDownloadCalls[0].force === true && engineDownloadCalls[0].accept_remote_code_risk === true && vm.runInContext(`state.engines.find(e => e.id === 'olmocr').runtimeInstalled === true`, context));
 
     // Clicking 1-click update updates rapidocr-v6 and hides update banner + badge
     $('updateAllModelsBtn').click();
@@ -4548,7 +4561,7 @@ function check(name, condition) {
       const detail = document.getElementById('serverAlertDetail').textContent || '';
       window.fetch = async (url, opts = {}) => {
         const parsed = new URL(url, 'http://127.0.0.1:8765');
-        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.36' });
+        if (parsed.pathname === '/api/health') return mockJson({ name: 'Comic OCR Studio', version: '4.54' });
         return origFetch(url, opts);
       };
       document.getElementById('serverAlertRetry').click();

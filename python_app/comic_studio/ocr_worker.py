@@ -306,6 +306,131 @@ def _is_hf_network_or_hub_error(exc: BaseException) -> bool:
     )
 
 
+def _prune_hf_repo_cache(models_root: Path, repo_id: str, *, keep_revision: str | None = None) -> int:
+    """Prune stale snapshots while retaining the exact revision just downloaded."""
+    import shutil
+
+    repo_cache = models_root / "hf" / "hub" / f"models--{repo_id.replace('/', '--')}"
+    snapshots = repo_cache / "snapshots"
+    ref_main = repo_cache / "refs" / "main"
+    if not snapshots.is_dir():
+        return 0
+    active_rev = ref_main.read_text(encoding="utf-8", errors="ignore").strip() if ref_main.is_file() else ""
+    keep_revisions = {revision for revision in (active_rev, keep_revision) if revision and (snapshots / revision).is_dir()}
+    if not keep_revisions:
+        return 0
+
+    freed = 0
+    for snapshot in snapshots.iterdir():
+        if snapshot.is_dir() and snapshot.name not in keep_revisions:
+            for file_path in snapshot.rglob("*"):
+                if file_path.is_file() and not file_path.is_symlink():
+                    with contextlib.suppress(OSError):
+                        freed += file_path.stat().st_size
+            shutil.rmtree(snapshot, ignore_errors=True)
+
+    blobs = repo_cache / "blobs"
+    if blobs.is_dir():
+        referenced: set[str] = set()
+        for revision in keep_revisions:
+            for cached_file in (snapshots / revision).rglob("*"):
+                if cached_file.is_symlink():
+                    with contextlib.suppress(OSError):
+                        referenced.add(cached_file.resolve(strict=False).name)
+        if referenced:
+            for blob in blobs.iterdir():
+                if blob.is_file() and blob.name not in referenced:
+                    with contextlib.suppress(OSError):
+                        freed += blob.stat().st_size
+                        blob.unlink(missing_ok=True)
+    return freed
+
+
+@contextlib.contextmanager
+def _pin_huggingface_downloads(resolve_commit: Any):
+    """Force indirect Hugging Face calls (such as MinerU's downloader) onto immutable commits."""
+    try:
+        import huggingface_hub
+    except ImportError:
+        # Optional downloader stubs and installations without the Hugging Face extra do not use
+        # this API. Real Hugging Face model paths require the hub package and are pinned below.
+        yield
+        return
+
+    api_names = ("snapshot_download", "hf_hub_download")
+    originals = {name: getattr(huggingface_hub, name, None) for name in api_names}
+    wrappers: dict[str, Any] = {}
+    for name, original in originals.items():
+        if not callable(original):
+            continue
+
+        def make_pinned(original_func: Any):
+            def pinned(*args: Any, **kwargs: Any) -> Any:
+                repo_id = kwargs.get("repo_id") or (args[0] if args else None)
+                if not isinstance(repo_id, str) or not repo_id.strip():
+                    raise RuntimeError("Refusing a Hugging Face download without a repository ID.")
+                revision = str(kwargs.get("revision") or "").strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{40}", revision):
+                    endpoint = kwargs.get("endpoint") or None
+                    sha, resolved_endpoint = resolve_commit(repo_id, endpoint=endpoint)
+                    kwargs["revision"] = sha
+                    if resolved_endpoint and not endpoint:
+                        kwargs["endpoint"] = resolved_endpoint
+                return original_func(*args, **kwargs)
+            return pinned
+
+        wrappers[name] = make_pinned(original)
+
+    changed: list[tuple[Any, str, Any]] = []
+    for name, wrapper in wrappers.items():
+        setattr(huggingface_hub, name, wrapper)
+        changed.append((huggingface_hub, name, wrapper))
+    # Some model packages import the Hub functions into their module namespace at import time.
+    # Replace those aliases too, but only when they still point at the original callable.
+    module_aliases = {"snapshot_download", "hf_snapshot_download", "hf_hub_download"}
+    for module in tuple(sys.modules.values()):
+        if module is None or not str(getattr(module, "__name__", "")).startswith("mineru"):
+            continue
+        for alias in module_aliases:
+            try:
+                value = getattr(module, alias, None)
+                base_name = "hf_hub_download" if alias == "hf_hub_download" else "snapshot_download"
+                if value is originals.get(base_name) and base_name in wrappers:
+                    setattr(module, alias, wrappers[base_name])
+                    changed.append((module, alias, wrappers[base_name]))
+            except Exception:
+                continue
+    try:
+        yield
+    finally:
+        for module, name, wrapper in reversed(changed):
+            with contextlib.suppress(Exception):
+                if getattr(module, name, None) is wrapper:
+                    original = originals.get(name)
+                    if original is None and module is not huggingface_hub:
+                        # Alias name differs from the actual Hub function name.
+                        original = originals.get("snapshot_download")
+                    setattr(module, name, original)
+
+
+def _activate_staged_directory(staging_dir: Path, target_dir: Path) -> None:
+    """Swap a completely downloaded directory into place, restoring the old directory on failure."""
+    import shutil
+    import uuid
+
+    backup_dir = target_dir.with_name(f".{target_dir.name}.ocr-backup-{uuid.uuid4().hex}")
+    if target_dir.exists():
+        os.replace(target_dir, backup_dir)
+    try:
+        os.replace(staging_dir, target_dir)
+    except Exception:
+        if backup_dir.exists() and not target_dir.exists():
+            os.replace(backup_dir, target_dir)
+        raise
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
 class _BaseAdapter:
     hf_repo: str | None = None
     hf_ignore_patterns: tuple[str, ...] | None = None
@@ -321,22 +446,29 @@ class _BaseAdapter:
         raw = target.replace("/", "__")
         return re.sub(r"[^A-Za-z0-9_-]+", "_", raw)
 
-    def _resolve_hf_repo_revision(self, repo_id: str, endpoint: str | None = None) -> str | None:
-        ref_file = self.models_root / "hf" / "hub" / f"models--{repo_id.replace('/', '--')}" / "refs" / "main"
-        if ref_file.is_file():
-            sha = ref_file.read_text(encoding="utf-8", errors="ignore").strip()
-            if len(sha) >= 12:
-                return f"hf:{sha[:12]}"
-        try:
-            from huggingface_hub import HfApi
-            api = HfApi(endpoint=endpoint) if endpoint else HfApi()
-            info = api.model_info(repo_id, timeout=8.0)
-            sha = str(getattr(info, "sha", "") or "").strip()
-            if len(sha) >= 12:
-                return f"hf:{sha[:12]}"
-        except Exception:
-            pass
-        return None
+    def _resolve_hf_commit_sha(self, repo_id: str, endpoint: str | None = None) -> tuple[str, str | None]:
+        """Resolve a model's moving default branch to one immutable commit before downloading."""
+        from huggingface_hub import HfApi
+
+        configured_endpoint = endpoint or os.environ.get("HF_ENDPOINT") or None
+        endpoints = [configured_endpoint] if configured_endpoint else [None, "https://hf-mirror.com"]
+        errors: list[Exception] = []
+        for candidate in endpoints:
+            try:
+                api = HfApi(endpoint=candidate) if candidate else HfApi()
+                info = api.model_info(repo_id, timeout=8.0)
+                sha = str(getattr(info, "sha", "") or "").strip().lower()
+                if not re.fullmatch(r"[0-9a-f]{40}", sha):
+                    raise RuntimeError(f"Hugging Face returned no valid immutable commit for {repo_id}.")
+                return sha, candidate
+            except Exception as exc:
+                errors.append(exc)
+                if candidate is not None or not _is_hf_network_or_hub_error(exc):
+                    break
+        reason = errors[-1] if errors else "unknown error"
+        raise RuntimeError(
+            f"Could not resolve an immutable Hugging Face revision for {repo_id}; refusing an unpinned download: {reason}"
+        ) from (errors[-1] if errors else None)
 
     def _download_hf_repo_resilient(
         self,
@@ -348,29 +480,61 @@ class _BaseAdapter:
         from huggingface_hub import snapshot_download
 
         local_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name(repo_id)
-        local_dir.mkdir(parents=True, exist_ok=True)
-        dl_kwargs: dict[str, Any] = {"repo_id": repo_id, "local_dir": str(local_dir)}
+        local_dir.parent.mkdir(parents=True, exist_ok=True)
+        # Never let snapshot_download mutate the currently usable repository in place. Download
+        # into a sibling directory on the same volume, then promote it only after the whole
+        # snapshot succeeds. This keeps the previous model usable after a failed/cancelled update
+        # and avoids retaining two full revisions after a successful promotion.
+        import uuid
+
+        revision, used_endpoint = self._resolve_hf_commit_sha(repo_id)
+        staging_dir = local_dir.with_name(f".{local_dir.name}.ocr-stage-{uuid.uuid4().hex}")
+        backup_dir = local_dir.with_name(f".{local_dir.name}.ocr-backup-{uuid.uuid4().hex}")
+        staging_dir.mkdir(parents=True)
+        dl_kwargs: dict[str, Any] = {"repo_id": repo_id, "local_dir": str(staging_dir), "revision": revision}
         if ignore_patterns:
             dl_kwargs["ignore_patterns"] = list(ignore_patterns)
-        used_endpoint: str | None = os.environ.get("HF_ENDPOINT") or None
-        print(f"Downloading {repo_id} (15%)...", file=sys.stderr, flush=True)
+        print(f"Downloading {repo_id} at immutable revision {revision[:12]} (15%)...", file=sys.stderr, flush=True)
         try:
-            snapshot_download(max_workers=3, **dl_kwargs)
-        except Exception as first_exc:
-            if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("HF_ENDPOINT"):
+            try:
+                if used_endpoint:
+                    snapshot_download(max_workers=3, endpoint=used_endpoint, **dl_kwargs)
+                else:
+                    snapshot_download(max_workers=3, **dl_kwargs)
+            except Exception as first_exc:
+                if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("HF_ENDPOINT") or used_endpoint:
+                    raise
+                used_endpoint = "https://hf-mirror.com"
+                print(f"Retrying {repo_id} via hf-mirror.com at revision {revision[:12]} (30%)...", file=sys.stderr, flush=True)
+                snapshot_download(max_workers=2, endpoint=used_endpoint, **dl_kwargs)
+
+            # Directory renames are atomic on the same filesystem. If activation fails after the
+            # old directory is moved aside, restore it before reporting the update failure.
+            if local_dir.exists():
+                os.replace(local_dir, backup_dir)
+            try:
+                os.replace(staging_dir, local_dir)
+            except Exception:
+                if backup_dir.exists() and not local_dir.exists():
+                    os.replace(backup_dir, local_dir)
                 raise
-            used_endpoint = "https://hf-mirror.com"
-            print(f"Retrying {repo_id} via hf-mirror.com (30%)...", file=sys.stderr, flush=True)
-            snapshot_download(max_workers=2, endpoint=used_endpoint, **dl_kwargs)
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+        except Exception:
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            if backup_dir.exists() and not local_dir.exists():
+                with contextlib.suppress(OSError):
+                    os.replace(backup_dir, local_dir)
+            raise
         # Remove huggingface_hub's local_dir `.cache/` metadata tree so libraries like `hezar`
         # that walk `local_dir` recursively for `*.yaml` never trip on `.cache/huggingface/download/...`
         dl_cache = local_dir / ".cache"
         if dl_cache.is_dir():
             with contextlib.suppress(OSError):
                 shutil.rmtree(dl_cache, ignore_errors=True)
-        print(f"Model {repo_id} weights ready (100%).", file=sys.stderr, flush=True)
-        rev = self._resolve_hf_repo_revision(repo_id, endpoint=used_endpoint) or "ready"
-        return str(local_dir), rev
+        print(f"Model {repo_id} weights ready at revision {revision[:12]} (100%).", file=sys.stderr, flush=True)
+        return str(local_dir), f"hf:{revision[:12]}"
 
     def prepare(self, language: str) -> str:
         _widen_requests_default_timeout(120.0)
@@ -883,13 +1047,25 @@ class _SuryaAdapter(_BaseAdapter):
             ckpt_repo = str(getattr(surya_settings, "SURYA_MODEL_CHECKPOINT", "datalab-to/surya-ocr-2.5"))
             fast_layout = str(getattr(surya_settings, "FAST_LAYOUT_MODEL_CHECKPOINT", "") or "")
 
+            resolved_hf_revisions: dict[str, tuple[str, str | None]] = {}
+
+            def _revision_for(repo_id: str) -> tuple[str, str | None]:
+                if repo_id not in resolved_hf_revisions:
+                    resolved_hf_revisions[repo_id] = self._resolve_hf_commit_sha(repo_id)
+                return resolved_hf_revisions[repo_id]
+
             def _hf_file_resilient(repo_id: str, filename: str) -> str:
+                revision, endpoint = _revision_for(repo_id)
+                kwargs: dict[str, Any] = {"repo_id": repo_id, "filename": filename, "revision": revision}
+                if endpoint:
+                    kwargs["endpoint"] = endpoint
                 try:
-                    return hf_hub_download(repo_id=repo_id, filename=filename)
+                    return hf_hub_download(**kwargs)
                 except Exception as first_exc:
-                    if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("HF_ENDPOINT"):
+                    if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("HF_ENDPOINT") or endpoint:
                         raise
-                    return hf_hub_download(repo_id=repo_id, filename=filename, endpoint="https://hf-mirror.com")
+                    kwargs["endpoint"] = "https://hf-mirror.com"
+                    return hf_hub_download(**kwargs)
 
             print("Downloading Surya config metadata (10%)...", file=sys.stderr, flush=True)
             with contextlib.suppress(Exception):
@@ -898,15 +1074,28 @@ class _SuryaAdapter(_BaseAdapter):
             _hf_file_resilient(gguf_repo, mmproj_file)
             print(f"Downloading {model_file} from {gguf_repo} (60%)...", file=sys.stderr, flush=True)
             _hf_file_resilient(gguf_repo, model_file)
+            cache_repos = {gguf_repo, ckpt_repo}
             if fast_layout.startswith("hf://"):
                 layout_repo = fast_layout[5:].split("/")[0] + "/" + fast_layout[5:].split("/")[1]
+                cache_repos.add(layout_repo)
                 print(f"Downloading layout model {layout_repo} (88%)...", file=sys.stderr, flush=True)
                 with contextlib.suppress(Exception):
+                    revision, endpoint = _revision_for(layout_repo)
+                    download_args = {"repo_id": layout_repo, "revision": revision, "max_workers": 3}
+                    if endpoint:
+                        download_args["endpoint"] = endpoint
                     try:
-                        snapshot_download(repo_id=layout_repo, max_workers=3)
-                    except Exception:
-                        if not os.environ.get("HF_ENDPOINT"):
-                            snapshot_download(repo_id=layout_repo, max_workers=2, endpoint="https://hf-mirror.com")
+                        snapshot_download(**download_args)
+                    except Exception as first_exc:
+                        if not endpoint and not os.environ.get("HF_ENDPOINT") and _is_hf_network_or_hub_error(first_exc):
+                            download_args["endpoint"] = "https://hf-mirror.com"
+                            download_args["max_workers"] = 2
+                            snapshot_download(**download_args)
+            # The model files are immutable HF cache blobs. Keep old snapshots until every required
+            # Surya weight has downloaded, then prune revisions no longer referenced by refs/main.
+            for repo_id in cache_repos:
+                revision = resolved_hf_revisions.get(repo_id, (None, None))[0]
+                _prune_hf_repo_cache(self.models_root, repo_id, keep_revision=revision)
             print("Surya weights verified (100%).", file=sys.stderr, flush=True)
             return importlib.metadata.version("surya-ocr")
 
@@ -1357,77 +1546,102 @@ class _MinerUAdapter(_BaseAdapter):
     def prepare(self, language: str) -> str:
         _widen_requests_default_timeout(120.0)
         import importlib.metadata
+        import shutil
         import subprocess
+        import tempfile
 
-        # 1. MinerU 4.x official Python model downloader with verification & multi-source fallback
+        target_dir = self.models_root / "mineru"
+        self.models_root.mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(tempfile.mkdtemp(prefix=".mineru.ocr-stage-", dir=self.models_root))
+        previous_home = os.environ.get("MINERU_HOME")
+        os.environ["MINERU_HOME"] = str(staging_dir)
+        hf_pin_scope = None
         try:
-            from mineru.model.download import download_model_repo, verify_model_repo
-            from mineru.model.registry import model_repos_for_tier
+            hf_pin_scope = _pin_huggingface_downloads(self._resolve_hf_commit_sha)
+            hf_pin_scope.__enter__()
+            # Each update starts in an empty isolated cache. Existing model files stay live
+            # until every MinerU sub-repository has downloaded and passed its own verifier.
+            try:
+                from mineru.model.download import download_model_repo, verify_model_repo
+                from mineru.model.registry import model_repos_for_tier
 
-            repos = list(model_repos_for_tier("basic"))
-            total = max(1, len(repos))
-            for idx, repo_key in enumerate(repos):
-                pct = int(15 + (idx / total) * 75)
-                if self._mineru_repo_is_ready(verify_model_repo(repo_key)):
-                    print(f"MinerU {repo_key} already verified ({pct}%).", file=sys.stderr, flush=True)
-                    continue
-                print(f"Downloading MinerU {repo_key} ({pct}%)...", file=sys.stderr, flush=True)
-                last_exc: Exception | None = None
-                attempts: list[tuple[str, str | None]] = [("huggingface", None)]
-                if not os.environ.get("HF_ENDPOINT"):
-                    attempts.append(("huggingface", "https://hf-mirror.com"))
-                attempts.append(("modelscope", None))
-                for src_name, mirror_ep in attempts:
-                    prev_ep = os.environ.get("HF_ENDPOINT")
-                    try:
-                        if mirror_ep:
-                            os.environ["HF_ENDPOINT"] = mirror_ep
-                        download_model_repo(repo_key, source=src_name)
-                        if self._mineru_repo_is_ready(verify_model_repo(repo_key)):
-                            last_exc = None
+                repos = list(model_repos_for_tier("basic"))
+                total = max(1, len(repos))
+                for idx, repo_key in enumerate(repos):
+                    pct = int(15 + (idx / total) * 75)
+                    if self._mineru_repo_is_ready(verify_model_repo(repo_key)):
+                        print(f"MinerU {repo_key} already verified in staging ({pct}%).", file=sys.stderr, flush=True)
+                        continue
+                    print(f"Downloading MinerU {repo_key} ({pct}%)...", file=sys.stderr, flush=True)
+                    last_exc: Exception | None = None
+                    attempts: list[tuple[str, str | None]] = [("huggingface", None)]
+                    if not os.environ.get("HF_ENDPOINT"):
+                        attempts.append(("huggingface", "https://hf-mirror.com"))
+                    attempts.append(("modelscope", None))
+                    for src_name, mirror_ep in attempts:
+                        prev_ep = os.environ.get("HF_ENDPOINT")
+                        try:
+                            if mirror_ep:
+                                os.environ["HF_ENDPOINT"] = mirror_ep
+                            download_model_repo(repo_key, source=src_name)
+                            if self._mineru_repo_is_ready(verify_model_repo(repo_key)):
+                                last_exc = None
+                                break
+                            last_exc = RuntimeError(f"MinerU model '{repo_key}' incomplete after download from {src_name}")
+                        except Exception as exc:
+                            last_exc = exc
+                        finally:
+                            if mirror_ep:
+                                if prev_ep is None:
+                                    os.environ.pop("HF_ENDPOINT", None)
+                                else:
+                                    os.environ["HF_ENDPOINT"] = prev_ep
+                    if last_exc is not None:
+                        raise RuntimeError(f"Failed to download MinerU sub-model '{repo_key}': {last_exc}") from last_exc
+                print("MinerU weights verified (100%).", file=sys.stderr, flush=True)
+            except ImportError:
+                # Legacy CLI fallback is also directed to the isolated staging directory via MINERU_HOME.
+                dl_bin = shutil_which_in_venv("mineru-models-download")
+                if dl_bin:
+                    cli_candidates = [
+                        [dl_bin, "--tier", "basic"],
+                        [dl_bin, "-s", "huggingface", "-m", "auto"],
+                        [dl_bin, "-s", "modelscope", "-m", "auto"],
+                    ]
+                    last_err = ""
+                    succeeded = False
+                    for cmd in cli_candidates:
+                        proc = subprocess.run(
+                            cmd,
+                            stdout=sys.stderr,
+                            stderr=sys.stderr,
+                            text=True,
+                            timeout=1800,
+                            check=False,
+                        )
+                        if proc.returncode == 0:
+                            succeeded = True
                             break
-                        last_exc = RuntimeError(f"MinerU model '{repo_key}' incomplete after download from {src_name}")
-                    except Exception as exc:
-                        last_exc = exc
-                    finally:
-                        if mirror_ep:
-                            if prev_ep is None:
-                                os.environ.pop("HF_ENDPOINT", None)
-                            else:
-                                os.environ["HF_ENDPOINT"] = prev_ep
-                if last_exc is not None:
-                    raise RuntimeError(f"Failed to download MinerU sub-model '{repo_key}': {last_exc}") from last_exc
-            print("MinerU weights verified (100%).", file=sys.stderr, flush=True)
-            return importlib.metadata.version("mineru")
-        except ImportError:
-            pass
+                        last_err = f"exit code {proc.returncode} for {' '.join(cmd)}"
+                    if not succeeded:
+                        raise RuntimeError(f"MinerU model download CLI failed ({last_err})")
 
-        # 2. Legacy / CLI fallback with strict exit-code verification
-        dl_bin = shutil_which_in_venv("mineru-models-download")
-        if dl_bin:
-            cli_candidates = [
-                [dl_bin, "--tier", "basic"],
-                [dl_bin, "-s", "huggingface", "-m", "auto"],
-                [dl_bin, "-s", "modelscope", "-m", "auto"],
-            ]
-            last_err = ""
-            succeeded = False
-            for cmd in cli_candidates:
-                proc = subprocess.run(
-                    cmd,
-                    stdout=sys.stderr,
-                    stderr=sys.stderr,
-                    text=True,
-                    timeout=1800,
-                    check=False,
-                )
-                if proc.returncode == 0:
-                    succeeded = True
-                    break
-                last_err = f"exit code {proc.returncode} for {' '.join(cmd)}"
-            if not succeeded:
-                raise RuntimeError(f"MinerU model download CLI failed ({last_err})")
-        return importlib.metadata.version("mineru")
+            if not any(path.is_file() for path in staging_dir.rglob("*")):
+                raise RuntimeError("MinerU reported success but produced no model files in the staging directory")
+            version = importlib.metadata.version("mineru")
+            _activate_staged_directory(staging_dir, target_dir)
+            return version
+        finally:
+            try:
+                if hf_pin_scope is not None:
+                    hf_pin_scope.__exit__(*sys.exc_info())
+            finally:
+                if previous_home is None:
+                    os.environ.pop("MINERU_HOME", None)
+                else:
+                    os.environ["MINERU_HOME"] = previous_home
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir, ignore_errors=True)
 
     @staticmethod
     def _extract_mineru_payload(
