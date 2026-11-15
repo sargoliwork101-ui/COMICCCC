@@ -44,7 +44,7 @@ def load_preferences() -> tuple[str, str] | None:
 def save_preferences(browser: str, window: str) -> None:
     """Persist one explicit interactive choice for later launches."""
     if browser not in BROWSER_LABELS or window not in WINDOW_MODES:
-        raise ValueError("Invalid browser preferences")
+        raise ValueError("انتخاب مرورگر معتبر نیست.")
     import time
     path = data_dir() / "browser-preferences.json"
     path.parent.mkdir(parents=True, exist_ok=True)

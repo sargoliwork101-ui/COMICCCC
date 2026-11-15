@@ -628,7 +628,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
         self._pipeline: Any = None
         self._device: str = "cpu"
 
-    def _get_pipeline(self, *, force_cpu: bool = False) -> Any:
+    def _get_pipeline(self, *, force_cpu: bool = False, force_latest: bool = False) -> Any:
         if self._pipeline is None:
             _configure_paddle_cpu_safe_env()
             from paddleocr import PaddleOCRVL
@@ -637,13 +637,18 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
             except Exception:
                 _pvl_mod = None
 
-            chosen_ver = _select_paddleocr_vl_version(_pvl_mod, self.models_root) if _pvl_mod is not None else None
-            candidates: list[str | None] = []
-            if chosen_ver:
-                candidates.append(chosen_ver)
-            for fallback_ver in ("v1.6", "v1.5", "v1", None):
-                if fallback_ver not in candidates:
-                    candidates.append(fallback_ver)
+            chosen_ver = (
+                _select_paddleocr_vl_version(_pvl_mod, None if force_latest else self.models_root)
+                if _pvl_mod is not None
+                else None
+            )
+            candidates: list[str | None] = [chosen_ver] if force_latest else []
+            if not force_latest:
+                if chosen_ver:
+                    candidates.append(chosen_ver)
+                for fallback_ver in ("v1.6", "v1.5", "v1", None):
+                    if fallback_ver not in candidates:
+                        candidates.append(fallback_ver)
 
             paddle_device: str | None = "cpu" if force_cpu else None
             if not force_cpu:
@@ -728,7 +733,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
         _configure_paddle_cpu_safe_env()
         print("Preparing PaddleOCR-VL sub-models (20%)...", file=sys.stderr, flush=True)
         try:
-            self._get_pipeline()
+            self._get_pipeline(force_latest=True)
         except Exception as first_exc:
             if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("PADDLE_PDX_HUGGING_FACE_ENDPOINT"):
                 raise
@@ -741,7 +746,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
             except Exception:
                 pass
             self._pipeline = None
-            self._get_pipeline()
+            self._get_pipeline(force_latest=True)
         self._pipeline = None
         _release_worker_caches()
         print("PaddleOCR-VL weights ready (100%).", file=sys.stderr, flush=True)

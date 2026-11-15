@@ -67,7 +67,6 @@ def test_v429_probe_tells_a_dying_studio_instance_apart_from_a_live_one():
     """The launcher must not hand the browser over to an instance that is closing."""
     import json
     import threading
-    import urllib.request
 
     port = _free_port()
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
