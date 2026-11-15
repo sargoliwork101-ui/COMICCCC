@@ -306,6 +306,63 @@ def _is_hf_network_or_hub_error(exc: BaseException) -> bool:
     )
 
 
+def _prune_hf_repo_cache(models_root: Path, repo_id: str) -> int:
+    """After a successful model update, discard stale cached revisions for one HF repository."""
+    import shutil
+
+    repo_cache = models_root / "hf" / "hub" / f"models--{repo_id.replace('/', '--')}"
+    snapshots = repo_cache / "snapshots"
+    ref_main = repo_cache / "refs" / "main"
+    if not snapshots.is_dir() or not ref_main.is_file():
+        return 0
+    active_rev = ref_main.read_text(encoding="utf-8", errors="ignore").strip()
+    active_snapshot = snapshots / active_rev
+    if not active_rev or not active_snapshot.is_dir():
+        return 0
+
+    freed = 0
+    for snapshot in snapshots.iterdir():
+        if snapshot.is_dir() and snapshot.name != active_rev:
+            for file_path in snapshot.rglob("*"):
+                if file_path.is_file() and not file_path.is_symlink():
+                    with contextlib.suppress(OSError):
+                        freed += file_path.stat().st_size
+            shutil.rmtree(snapshot, ignore_errors=True)
+
+    blobs = repo_cache / "blobs"
+    if blobs.is_dir():
+        referenced: set[str] = set()
+        for cached_file in active_snapshot.rglob("*"):
+            if cached_file.is_symlink():
+                with contextlib.suppress(OSError):
+                    referenced.add(cached_file.resolve(strict=False).name)
+        if referenced:
+            for blob in blobs.iterdir():
+                if blob.is_file() and blob.name not in referenced:
+                    with contextlib.suppress(OSError):
+                        freed += blob.stat().st_size
+                        blob.unlink(missing_ok=True)
+    return freed
+
+
+def _activate_staged_directory(staging_dir: Path, target_dir: Path) -> None:
+    """Swap a completely downloaded directory into place, restoring the old directory on failure."""
+    import shutil
+    import uuid
+
+    backup_dir = target_dir.with_name(f".{target_dir.name}.ocr-backup-{uuid.uuid4().hex}")
+    if target_dir.exists():
+        os.replace(target_dir, backup_dir)
+    try:
+        os.replace(staging_dir, target_dir)
+    except Exception:
+        if backup_dir.exists() and not target_dir.exists():
+            os.replace(backup_dir, target_dir)
+        raise
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+
 class _BaseAdapter:
     hf_repo: str | None = None
     hf_ignore_patterns: tuple[str, ...] | None = None
@@ -348,20 +405,50 @@ class _BaseAdapter:
         from huggingface_hub import snapshot_download
 
         local_dir = self.models_root / "hf-repos" / self._safe_repo_folder_name(repo_id)
-        local_dir.mkdir(parents=True, exist_ok=True)
-        dl_kwargs: dict[str, Any] = {"repo_id": repo_id, "local_dir": str(local_dir)}
+        local_dir.parent.mkdir(parents=True, exist_ok=True)
+        # Never let snapshot_download mutate the currently usable repository in place. Download
+        # into a sibling directory on the same volume, then promote it only after the whole
+        # snapshot succeeds. This keeps the previous model usable after a failed/cancelled update
+        # and avoids retaining two full revisions after a successful promotion.
+        import uuid
+
+        staging_dir = local_dir.with_name(f".{local_dir.name}.ocr-stage-{uuid.uuid4().hex}")
+        backup_dir = local_dir.with_name(f".{local_dir.name}.ocr-backup-{uuid.uuid4().hex}")
+        staging_dir.mkdir(parents=True)
+        dl_kwargs: dict[str, Any] = {"repo_id": repo_id, "local_dir": str(staging_dir)}
         if ignore_patterns:
             dl_kwargs["ignore_patterns"] = list(ignore_patterns)
         used_endpoint: str | None = os.environ.get("HF_ENDPOINT") or None
         print(f"Downloading {repo_id} (15%)...", file=sys.stderr, flush=True)
         try:
-            snapshot_download(max_workers=3, **dl_kwargs)
-        except Exception as first_exc:
-            if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("HF_ENDPOINT"):
+            try:
+                snapshot_download(max_workers=3, **dl_kwargs)
+            except Exception as first_exc:
+                if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("HF_ENDPOINT"):
+                    raise
+                used_endpoint = "https://hf-mirror.com"
+                print(f"Retrying {repo_id} via hf-mirror.com (30%)...", file=sys.stderr, flush=True)
+                snapshot_download(max_workers=2, endpoint=used_endpoint, **dl_kwargs)
+
+            # Directory renames are atomic on the same filesystem. If activation fails after the
+            # old directory is moved aside, restore it before reporting the update failure.
+            if local_dir.exists():
+                os.replace(local_dir, backup_dir)
+            try:
+                os.replace(staging_dir, local_dir)
+            except Exception:
+                if backup_dir.exists() and not local_dir.exists():
+                    os.replace(backup_dir, local_dir)
                 raise
-            used_endpoint = "https://hf-mirror.com"
-            print(f"Retrying {repo_id} via hf-mirror.com (30%)...", file=sys.stderr, flush=True)
-            snapshot_download(max_workers=2, endpoint=used_endpoint, **dl_kwargs)
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+        except Exception:
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            if backup_dir.exists() and not local_dir.exists():
+                with contextlib.suppress(OSError):
+                    os.replace(backup_dir, local_dir)
+            raise
         # Remove huggingface_hub's local_dir `.cache/` metadata tree so libraries like `hezar`
         # that walk `local_dir` recursively for `*.yaml` never trip on `.cache/huggingface/download/...`
         dl_cache = local_dir / ".cache"
@@ -464,7 +551,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
         self._pipeline: Any = None
         self._device: str = "cpu"
 
-    def _get_pipeline(self, *, force_cpu: bool = False) -> Any:
+    def _get_pipeline(self, *, force_cpu: bool = False, force_latest: bool = False) -> Any:
         if self._pipeline is None:
             _configure_paddle_cpu_safe_env()
             from paddleocr import PaddleOCRVL
@@ -473,13 +560,18 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
             except Exception:
                 _pvl_mod = None
 
-            chosen_ver = _select_paddleocr_vl_version(_pvl_mod, self.models_root) if _pvl_mod is not None else None
-            candidates: list[str | None] = []
-            if chosen_ver:
-                candidates.append(chosen_ver)
-            for fallback_ver in ("v1.6", "v1.5", "v1", None):
-                if fallback_ver not in candidates:
-                    candidates.append(fallback_ver)
+            chosen_ver = (
+                _select_paddleocr_vl_version(_pvl_mod, None if force_latest else self.models_root)
+                if _pvl_mod is not None
+                else None
+            )
+            candidates: list[str | None] = [chosen_ver] if force_latest else []
+            if not force_latest:
+                if chosen_ver:
+                    candidates.append(chosen_ver)
+                for fallback_ver in ("v1.6", "v1.5", "v1", None):
+                    if fallback_ver not in candidates:
+                        candidates.append(fallback_ver)
 
             paddle_device: str | None = "cpu" if force_cpu else None
             if not force_cpu:
@@ -564,7 +656,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
         _configure_paddle_cpu_safe_env()
         print("Preparing PaddleOCR-VL sub-models (20%)...", file=sys.stderr, flush=True)
         try:
-            self._get_pipeline()
+            self._get_pipeline(force_latest=True)
         except Exception as first_exc:
             if not _is_hf_network_or_hub_error(first_exc) or os.environ.get("PADDLE_PDX_HUGGING_FACE_ENDPOINT"):
                 raise
@@ -577,7 +669,7 @@ class _PaddleOcrVlAdapter(_BaseAdapter):
             except Exception:
                 pass
             self._pipeline = None
-            self._get_pipeline()
+            self._get_pipeline(force_latest=True)
         self._pipeline = None
         _release_worker_caches()
         print("PaddleOCR-VL weights ready (100%).", file=sys.stderr, flush=True)
@@ -898,8 +990,10 @@ class _SuryaAdapter(_BaseAdapter):
             _hf_file_resilient(gguf_repo, mmproj_file)
             print(f"Downloading {model_file} from {gguf_repo} (60%)...", file=sys.stderr, flush=True)
             _hf_file_resilient(gguf_repo, model_file)
+            cache_repos = {gguf_repo, ckpt_repo}
             if fast_layout.startswith("hf://"):
                 layout_repo = fast_layout[5:].split("/")[0] + "/" + fast_layout[5:].split("/")[1]
+                cache_repos.add(layout_repo)
                 print(f"Downloading layout model {layout_repo} (88%)...", file=sys.stderr, flush=True)
                 with contextlib.suppress(Exception):
                     try:
@@ -907,6 +1001,10 @@ class _SuryaAdapter(_BaseAdapter):
                     except Exception:
                         if not os.environ.get("HF_ENDPOINT"):
                             snapshot_download(repo_id=layout_repo, max_workers=2, endpoint="https://hf-mirror.com")
+            # The model files are immutable HF cache blobs. Keep old snapshots until every required
+            # Surya weight has downloaded, then prune revisions no longer referenced by refs/main.
+            for repo_id in cache_repos:
+                _prune_hf_repo_cache(self.models_root, repo_id)
             print("Surya weights verified (100%).", file=sys.stderr, flush=True)
             return importlib.metadata.version("surya-ocr")
 
@@ -1357,77 +1455,95 @@ class _MinerUAdapter(_BaseAdapter):
     def prepare(self, language: str) -> str:
         _widen_requests_default_timeout(120.0)
         import importlib.metadata
+        import shutil
         import subprocess
+        import tempfile
 
-        # 1. MinerU 4.x official Python model downloader with verification & multi-source fallback
+        target_dir = self.models_root / "mineru"
+        self.models_root.mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(tempfile.mkdtemp(prefix=".mineru.ocr-stage-", dir=self.models_root))
+        previous_home = os.environ.get("MINERU_HOME")
+        os.environ["MINERU_HOME"] = str(staging_dir)
         try:
-            from mineru.model.download import download_model_repo, verify_model_repo
-            from mineru.model.registry import model_repos_for_tier
+            # Each update starts in an empty isolated cache. Existing model files stay live
+            # until every MinerU sub-repository has downloaded and passed its own verifier.
+            try:
+                from mineru.model.download import download_model_repo, verify_model_repo
+                from mineru.model.registry import model_repos_for_tier
 
-            repos = list(model_repos_for_tier("basic"))
-            total = max(1, len(repos))
-            for idx, repo_key in enumerate(repos):
-                pct = int(15 + (idx / total) * 75)
-                if self._mineru_repo_is_ready(verify_model_repo(repo_key)):
-                    print(f"MinerU {repo_key} already verified ({pct}%).", file=sys.stderr, flush=True)
-                    continue
-                print(f"Downloading MinerU {repo_key} ({pct}%)...", file=sys.stderr, flush=True)
-                last_exc: Exception | None = None
-                attempts: list[tuple[str, str | None]] = [("huggingface", None)]
-                if not os.environ.get("HF_ENDPOINT"):
-                    attempts.append(("huggingface", "https://hf-mirror.com"))
-                attempts.append(("modelscope", None))
-                for src_name, mirror_ep in attempts:
-                    prev_ep = os.environ.get("HF_ENDPOINT")
-                    try:
-                        if mirror_ep:
-                            os.environ["HF_ENDPOINT"] = mirror_ep
-                        download_model_repo(repo_key, source=src_name)
-                        if self._mineru_repo_is_ready(verify_model_repo(repo_key)):
-                            last_exc = None
+                repos = list(model_repos_for_tier("basic"))
+                total = max(1, len(repos))
+                for idx, repo_key in enumerate(repos):
+                    pct = int(15 + (idx / total) * 75)
+                    if self._mineru_repo_is_ready(verify_model_repo(repo_key)):
+                        print(f"MinerU {repo_key} already verified in staging ({pct}%).", file=sys.stderr, flush=True)
+                        continue
+                    print(f"Downloading MinerU {repo_key} ({pct}%)...", file=sys.stderr, flush=True)
+                    last_exc: Exception | None = None
+                    attempts: list[tuple[str, str | None]] = [("huggingface", None)]
+                    if not os.environ.get("HF_ENDPOINT"):
+                        attempts.append(("huggingface", "https://hf-mirror.com"))
+                    attempts.append(("modelscope", None))
+                    for src_name, mirror_ep in attempts:
+                        prev_ep = os.environ.get("HF_ENDPOINT")
+                        try:
+                            if mirror_ep:
+                                os.environ["HF_ENDPOINT"] = mirror_ep
+                            download_model_repo(repo_key, source=src_name)
+                            if self._mineru_repo_is_ready(verify_model_repo(repo_key)):
+                                last_exc = None
+                                break
+                            last_exc = RuntimeError(f"MinerU model '{repo_key}' incomplete after download from {src_name}")
+                        except Exception as exc:
+                            last_exc = exc
+                        finally:
+                            if mirror_ep:
+                                if prev_ep is None:
+                                    os.environ.pop("HF_ENDPOINT", None)
+                                else:
+                                    os.environ["HF_ENDPOINT"] = prev_ep
+                    if last_exc is not None:
+                        raise RuntimeError(f"Failed to download MinerU sub-model '{repo_key}': {last_exc}") from last_exc
+                print("MinerU weights verified (100%).", file=sys.stderr, flush=True)
+            except ImportError:
+                # Legacy CLI fallback is also directed to the isolated staging directory via MINERU_HOME.
+                dl_bin = shutil_which_in_venv("mineru-models-download")
+                if dl_bin:
+                    cli_candidates = [
+                        [dl_bin, "--tier", "basic"],
+                        [dl_bin, "-s", "huggingface", "-m", "auto"],
+                        [dl_bin, "-s", "modelscope", "-m", "auto"],
+                    ]
+                    last_err = ""
+                    succeeded = False
+                    for cmd in cli_candidates:
+                        proc = subprocess.run(
+                            cmd,
+                            stdout=sys.stderr,
+                            stderr=sys.stderr,
+                            text=True,
+                            timeout=1800,
+                            check=False,
+                        )
+                        if proc.returncode == 0:
+                            succeeded = True
                             break
-                        last_exc = RuntimeError(f"MinerU model '{repo_key}' incomplete after download from {src_name}")
-                    except Exception as exc:
-                        last_exc = exc
-                    finally:
-                        if mirror_ep:
-                            if prev_ep is None:
-                                os.environ.pop("HF_ENDPOINT", None)
-                            else:
-                                os.environ["HF_ENDPOINT"] = prev_ep
-                if last_exc is not None:
-                    raise RuntimeError(f"Failed to download MinerU sub-model '{repo_key}': {last_exc}") from last_exc
-            print("MinerU weights verified (100%).", file=sys.stderr, flush=True)
-            return importlib.metadata.version("mineru")
-        except ImportError:
-            pass
+                        last_err = f"exit code {proc.returncode} for {' '.join(cmd)}"
+                    if not succeeded:
+                        raise RuntimeError(f"MinerU model download CLI failed ({last_err})")
 
-        # 2. Legacy / CLI fallback with strict exit-code verification
-        dl_bin = shutil_which_in_venv("mineru-models-download")
-        if dl_bin:
-            cli_candidates = [
-                [dl_bin, "--tier", "basic"],
-                [dl_bin, "-s", "huggingface", "-m", "auto"],
-                [dl_bin, "-s", "modelscope", "-m", "auto"],
-            ]
-            last_err = ""
-            succeeded = False
-            for cmd in cli_candidates:
-                proc = subprocess.run(
-                    cmd,
-                    stdout=sys.stderr,
-                    stderr=sys.stderr,
-                    text=True,
-                    timeout=1800,
-                    check=False,
-                )
-                if proc.returncode == 0:
-                    succeeded = True
-                    break
-                last_err = f"exit code {proc.returncode} for {' '.join(cmd)}"
-            if not succeeded:
-                raise RuntimeError(f"MinerU model download CLI failed ({last_err})")
-        return importlib.metadata.version("mineru")
+            if not any(path.is_file() for path in staging_dir.rglob("*")):
+                raise RuntimeError("MinerU reported success but produced no model files in the staging directory")
+            version = importlib.metadata.version("mineru")
+            _activate_staged_directory(staging_dir, target_dir)
+            return version
+        finally:
+            if previous_home is None:
+                os.environ.pop("MINERU_HOME", None)
+            else:
+                os.environ["MINERU_HOME"] = previous_home
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
 
     @staticmethod
     def _extract_mineru_payload(

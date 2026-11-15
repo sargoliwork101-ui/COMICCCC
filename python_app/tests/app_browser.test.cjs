@@ -343,12 +343,12 @@ main()
     await page.waitForFunction(() => state.ai.provider === 'free'); assert.equal(await page.$eval('#aiDialog', el => el.open), false, 'successful settings save closes the dialog'); await page.keyboard.press('Escape');
     console.log('PASS: real AI dialog tests the selected model through Python without exposing its API key');
 
-    project = await api(base, `/api/projects/${projectId}`);
     await api(base, `/api/projects/${projectId}/images/${imageId}/revert`, { method: 'POST' });
+    project = await api(base, `/api/projects/${projectId}`);
     project.settings.overlayMode = 'none'; project.images[0].edited = false;
     project.images[0].blocks.forEach((block) => { delete block.textMode; });
     project.images[0].blocks[0].tr = 'OLD TRANSLATION'; project.images[0].blocks[0].richHtml = '';
-    await api(base, `/api/projects/${projectId}/state`, {
+    project = await api(base, `/api/projects/${projectId}/state`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: project }),
     });
     const translated = JSON.parse(JSON.stringify(project));
@@ -378,7 +378,7 @@ main()
     };
     const onResponse = (response) => { if (second && response.request() === second) secondDone(); };
     page.on('request', onRequest); page.on('response', onResponse);
-    await page.reload({ waitUntil: 'networkidle0' }); await page.waitForSelector('#grid .item');
+    await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForSelector('#grid .item');
     await page.click('#exportBtn'); await page.select('#exportOverlayMode', 'ocr');
     const heldStarted = Date.now(); while (!held && Date.now() - heldStarted < 5000) await sleep(50);
     assert.ok(held, 'the older preview request must be pending for the ordering regression');
@@ -400,6 +400,12 @@ main()
     assert.equal(translationRequests.length, 1, 'only explicit confirmation may execute the previewed translation');
     assert.match(translationRequests[0].confirmation || '', /^[a-f0-9]{64}$/, 'execution must carry the exact preview signature');
     assert.equal(await previewDifference(page), 0, 'an older delayed upload must not replace the latest translation');
+    await page.waitForSelector('#appModalDialog[open]');
+    assert.ok(await page.$eval('#appModalMessage', (element) => element.textContent.includes('OLD TRANSLATION') && element.textContent.includes('NEW TRANSLATION ۳٫۲۱')),
+      'retranslation must ask the user to compare the previous and fresh values');
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(() => !document.getElementById('appModalDialog').open);
+    await page.evaluate(() => translationPreviewTask);
     page.off('request', onRequest); page.off('response', onResponse); await page.setRequestInterception(false);
     console.log('PASS: delayed older preview cannot overwrite the latest translated render');
 
@@ -1505,7 +1511,7 @@ main()
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].verticalAlign === 'top' && state.project.images[0].blocks[1].verticalAlign === 'bottom'), true, 'mixed vertical positions survive preview and export setup');
     console.log('PASS: real editor events preserve latest edits, same-size multi-alignment, mixed languages, and visibility');
 
-    await page.reload({ waitUntil: 'networkidle0' }); await page.waitForSelector('#grid .item img');
+    await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForSelector('#grid .item img');
     await page.waitForFunction(() => state.project.images[0].edited === true, { timeout: 5000 });
     assert.equal(await previewDifference(page), 0, 'saved edits must survive reload in the visible preview');
 
@@ -1677,12 +1683,20 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.ok(firstFree.includes('ABCD') && firstFree.length>4 && !firstFree.includes('SECOND PAGE'));
     assert.equal(await page.$eval('#translationSkillWrap',el=>el.classList.contains('hidden')),true);
     await page.click('#translationPreviewConfirm');
+    await page.waitForSelector('#appModalDialog[open]', { timeout: 30000 });
+    assert.ok(await page.$eval('#appModalMessage', el => el.textContent.includes('ترجمهٔ تازه') && el.textContent.includes('ترجمهٔ قبلی')),
+      'completed pages must offer a review even when a later page fails');
+    await page.click('#appModalConfirm');
     await page.waitForFunction(()=>!translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'),{timeout:15000});
     assert.deepEqual(freeGenerations.map(q=>q.includes('SECOND PAGE')?'SECOND PAGE':q),[firstFree,'C'.repeat(120),'SECOND PAGE']);
     let freeSaved=await api(base,`/api/projects/${freeProject.id}`);
     assert.equal(freeSaved.images[0].blocks[1].tr,'ترجمه'); assert.equal(freeSaved.images[1].blocks[0].tr,'old');
     assert.equal(freeSaved.images[0].blocks[1].align,'justify'); assert.equal(freeSaved.images[0].blocks[1].size,12); assert.equal(freeSaved.images[0].blocks[1].verticalAlign,'top');
-    await page.click('#retryTranslation'); await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
+    await page.click('#retryTranslation');
+    await page.waitForSelector('#appModalDialog[open]', { timeout: 30000 });
+    assert.ok(await page.$eval('#appModalMessage', el => el.textContent.includes('SECOND PAGE') && el.textContent.includes('ترجمهٔ تازه')));
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
     assert.equal(freeGenerations.length,4); assert.equal(freeGenerations[3],'SECOND PAGE');
     freeSaved=await api(base,`/api/projects/${freeProject.id}`); assert.equal(freeSaved.images[1].blocks[0].tr,'ترجمه');
     assert.equal(freeSaved.images[1].blocks[0].align,'justify'); assert.equal(freeSaved.images[1].blocks[0].size,12); assert.equal(freeSaved.images[1].blocks[0].verticalAlign,'top');
@@ -1720,7 +1734,13 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.equal(ocrSaved.images[0].blocks[0].tr,'existing translation');
     assert.equal(ocrSaved.images[1].blocks[0].text,'NEWLY READ OCR'); assert.equal(ocrSaved.images[1].ocrCompleted,true);
     assert.ok(await page.$eval('#translationPreviewRequests',el=>el.textContent.includes('EXISTING OCR')));
-    await page.click('#translationPreviewConfirm'); await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
+    await page.click('#translationPreviewConfirm');
+    await page.waitForSelector('#appModalDialog[open]', { timeout: 30000 });
+    assert.ok(await page.$eval('#appModalMessage', el => el.textContent.includes('existing translation') && el.textContent.includes('ترجمه')),
+      'OCR-triggered translation must compare the existing translation before replacing it');
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
+    await page.evaluate(() => translationPreviewTask);
     assert.deepEqual(freeGenerations.slice(callsBeforeAuto),['EXISTING OCR','NEWLY READ OCR']);
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     assert.equal(ocrCalls.length,2,'already read pages skip OCR'); await page.click('#translationPreviewCancel');
@@ -1769,6 +1789,9 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     await page.evaluate(async id=>{await loadAiSettings();await refreshProjectList();const el=document.getElementById('projectSelect');el.value=id;el.dispatchEvent(new Event('change',{bubbles:true}));},recoveryProject.id);
     await page.waitForFunction(id=>state.project.id===id,{},recoveryProject.id);
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]'); await page.click('#translationPreviewConfirm');
+    await page.waitForSelector('#appModalDialog[open]', { timeout: 30000 });
+    assert.ok(await page.$eval('#appModalMessage', el => el.textContent.includes('صفحه حصار')));
+    await page.click('#appModalConfirm');
     await page.waitForFunction(()=>!translationRunning && !document.getElementById('responseRepair').classList.contains('hidden'),{timeout:15000});
     assert.equal(aiGenerations.length,3,'the malformed response retries according to the configured policy');
     assert.ok((await page.$eval('#responseRepairText',el=>el.value)).includes('خصوصی پاسخ'));
@@ -1778,7 +1801,11 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     await page.waitForFunction(()=>document.getElementById('responseRepairStatus').textContent.includes('معتبر'));
     assert.equal(aiGenerations.length,3);
     await page.$eval('#repairTranslation',el=>{el.value='اصلاح شد';}); await page.$eval('#repairSummary',el=>{el.value='خلاصه';});
-    await page.click('#applyResponseFields'); await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
+    await page.click('#applyResponseFields');
+    await page.waitForSelector('#appModalDialog[open]', { timeout: 30000 });
+    assert.ok(await page.$eval('#appModalMessage', el => el.textContent.includes('اصلاح شد') && el.textContent.includes('ترجمهٔ قبلی')));
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(()=>!translationRunning && !document.getElementById('translationDialog').open,{timeout:15000});
     assert.equal(aiGenerations.length,3); assert.equal((await api(base,`/api/projects/${recoveryProject.id}`)).images[1].blocks[0].tr,'اصلاح شد');
     await page.waitForFunction(() => !translationDecisionBusy);
     // Single-block editing exercises the separate continuation path.
@@ -1792,6 +1819,11 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.equal(aiGenerations.length,5);
     await page.$eval('#repairTranslation',el=>{el.value='تکی اصلاح شد';}); await page.$eval('#repairSummary',el=>{el.value='خلاصه';});
     await page.click('#applyResponseFields'); await page.waitForFunction(()=>!document.getElementById('translationDialog').open,{timeout:15000});
+    await page.waitForSelector('#appModalDialog[open]', { timeout: 30000 });
+    const singleRepairReview = await page.$eval('#appModalMessage', el => el.textContent);
+    assert.ok(singleRepairReview.includes('تکی اصلاح شد'), `unexpected single-block review: ${singleRepairReview}`);
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(() => !translationDecisionBusy);
     assert.equal(aiGenerations.length,5); assert.equal(await page.evaluate(()=>state.project.images[1].blocks[0].tr),'تکی اصلاح شد');
     await page.click('#editorClose'); await page.waitForFunction(()=>!state.editorId);
     console.log('PASS: fenced AI output and manually repaired project/single responses require no extra AI request');
@@ -1828,6 +1860,9 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     await page.click('#translationPreviewConfirm');
     const aiStart = Date.now(); while (!aiGenerations.length && Date.now() - aiStart < 5000) await sleep(20);
     assert.equal(aiGenerations.length, 1); await sleep(150); assert.equal(aiGenerations.length, 1, 'page two must wait for page one response');
+    await page.waitForSelector('#appModalDialog[open]', { timeout: 30000 });
+    assert.ok(await page.$eval('#appModalMessage', el => el.textContent.includes('BROWSER PAGE ONE') && el.textContent.includes('ترجمهٔ تازه')));
+    await page.click('#appModalConfirm');
     await page.waitForFunction(() => !translationRunning && document.getElementById('translationStatus').textContent.includes('متوقف شد'), {timeout:15000});
     assert.equal(aiGenerations.length, 4); assert.ok(aiSystems.every(system => system === approvedSystem)); assert.ok(aiGenerations[0].includes('BROWSER PAGE ONE') && aiGenerations[1].includes('BROWSER EXTRA') && aiGenerations[2].includes('BROWSER PAGE TWO') && aiGenerations[3].includes('BROWSER PAGE TWO')); assert.ok(aiGenerations.every((text, i) => [...text].length + [...aiSystems[i]].length <= 650)); assert.ok(!aiGenerations[0].includes('Context:') && aiGenerations[1].includes('جان دوست مری است'));
     const storedPages = await api(base, `/api/projects/${pageProject.id}`);
@@ -1897,8 +1932,20 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     assert.equal(aiGenerations.length, 2);
     assert.ok(await page.$eval('#retryTranslation', el => !el.classList.contains('hidden')));
     await page.click('#retryTranslation');
+    await page.waitForSelector('#appModalDialog[open]', { timeout: 30000 });
+    assert.ok(await page.$eval('#appModalMessage', el => el.textContent.includes('HEADER SAME') && el.textContent.includes('عنوان مشترک')));
+    const firstReviewMessage = await page.$eval('#appModalMessage', el => el.textContent);
+    await page.click('#appModalConfirm');
+    await page.waitForFunction(previous => {
+      const dialog = document.getElementById('appModalDialog');
+      return !dialog.open || document.getElementById('appModalMessage').textContent !== previous;
+    }, {timeout:30000}, firstReviewMessage);
+    if (await page.$eval('#appModalDialog', el => el.open)) {
+      assert.ok(await page.$eval('#appModalMessage', el => el.textContent.includes('DEDUP SECOND') && el.textContent.includes('عنوان مشترک')));
+      await page.click('#appModalConfirm');
+    }
     try { await page.waitForFunction(() => !translationRunning && !document.getElementById('translationDialog').open, {timeout:15000}); }
-    catch (error) { console.error('Dedup translation status:', await page.$eval('#translationDialog', el => el.textContent), 'requests:', aiGenerations); throw error; }
+    catch (error) { console.error('Dedup final status:', await page.$eval('#appModalDialog', el => ({open:el.open,title:document.getElementById('appModalTitle').textContent,message:document.getElementById('appModalMessage').textContent})), await page.$eval('#translationDialog', el => el.textContent), aiGenerations); throw error; }
     const dedupStored = await api(base, `/api/projects/${dedupProject.id}`);
     assert.deepEqual(dedupStored.images.map(image=>image.blocks[0].tr), ['عنوان مشترک', 'عنوان مشترک']);
     assert.equal(aiGenerations.length, 4);
@@ -1920,7 +1967,18 @@ with zipfile.ZipFile(docx_ocr_path) as archive:
     await page.click('#translateBtn'); await page.waitForSelector('#translationPreviewDialog[open]');
     const independentStart = aiGenerations.length;
     await page.click('#translationPreviewConfirm');
-    await page.waitForFunction(() => !translationRunning && !document.getElementById('translationDialog').open, {timeout:15000});
+    await page.waitForSelector('#appModalDialog[open]', {timeout:30000});
+    for (let reviewIndex=0; reviewIndex<4; reviewIndex++) {
+      const reviewMessage = await page.$eval('#appModalMessage', el => el.textContent);
+      assert.ok(reviewMessage.includes('ترجمهٔ قبلی') && reviewMessage.includes('ترجمهٔ تازه'));
+      await page.click('#appModalConfirm');
+      await page.waitForFunction(previous => {
+        const dialog = document.getElementById('appModalDialog');
+        return !dialog.open || document.getElementById('appModalMessage').textContent !== previous;
+      }, {timeout:30000}, reviewMessage);
+      if (!(await page.$eval('#appModalDialog', el => el.open))) break;
+    }
+    await page.waitForFunction(() => !translationRunning && !document.getElementById('translationDialog').open && !translationDecisionBusy, {timeout:15000});
     assert.equal(aiGenerations.slice(independentStart).filter(text=>text.includes('HEADER SAME')).length, 2);
     console.log('PASS: repeated title is sent once and applied to both pages; opt-out sends it per page');
 
@@ -2933,7 +2991,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
             'import pathlib, sys, time',
             'from http.server import HTTPServer',
             'sys.path.insert(0, "python_app")',
-            'from license_manager import SellerVault, build_seller_panel_handler',
+            'from license_tool.manager import SellerVault, build_seller_panel_handler',
             'd = pathlib.Path(sys.argv[1])',
             'v = SellerVault(seller_dir=d / "vault", public_key_py=d / "pub.py", vendor_json_path=d / "vc.json", vendor_py_path=d / "vc.py")',
             'v.ensure_master_key(sync_source=True)',
@@ -2992,7 +3050,13 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
         await sellerPage.close();
         assert.equal(sellerVisualCheck.fontLoaded, true, 'Vazirmatn.woff2 loads in Seller Panel');
         assert.equal(sellerVisualCheck.logoNaturalWidth, 128, 'icon128.png loads in Seller Panel topbar');
-        assert.equal(sellerVisualCheck.ver, '۴.۳۰ · پنل فروشنده', 'Seller Panel topbar version badge matches Studio');
+        const managerSource = fs.readFileSync(path.join(repository, 'python_app/license_tool/manager.py'), 'utf8');
+        const appVersionMatch = managerSource.match(/APP_VERSION = "(\d+\.\d+)"/);
+        assert.ok(appVersionMatch, 'APP_VERSION must be discoverable in license_tool/manager.py');
+        // v4.46: the expected badge is derived from APP_VERSION so a version
+        // bump can never leave this assertion silently stale again.
+        const expectedBadge = `${appVersionMatch[1].replace(/[0-9]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[Number(d)])} · پنل فروشنده`;
+        assert.equal(sellerVisualCheck.ver, expectedBadge, 'Seller Panel topbar version badge matches Studio');
         assert.equal(sellerVisualCheck.darkBg, 'rgb(11, 13, 18)', 'Seller Panel dark --bg matches Studio #0b0d12');
         assert.equal(sellerVisualCheck.lightBg, 'rgb(243, 244, 248)', 'Seller Panel light --bg matches Studio #f3f4f8');
         assert.equal(sellerVisualCheck.hasVazirmatnInComputed, true, 'Seller Panel body fontFamily uses Vazirmatn');
@@ -3024,6 +3088,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
       assert.equal(v421BrowserCheck.helpMentionsIt, true, 'Help guide documents پیش‌پردازش ویژه فارسی');
 
       // v4.22: Real Chromium verification that editing controls are NEVER disabled across idle, merged, copied, OCR, and Text-tab states
+      const latestBackupProjectForV422 = await api(base, `/api/projects/${backupProject.id}`);
       const v422BrowserCheck = await page.evaluate(async (realProj) => {
         const countDisabledInDock = () => [...document.querySelectorAll('#inlineEditor button:not(#editorPasteBlock), #inlineEditor select, #inlineEditor input')]
           .filter((el) => el.disabled === true).length;
@@ -3106,7 +3171,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
           adoptProject(prevSnap);
           setOverlayMode(prevOverlay, false);
         }
-      }, backupProject);
+      }, latestBackupProjectForV422);
       assert.equal(v422BrowserCheck.ok, true, `v4.22 browser check executed: ${JSON.stringify(v422BrowserCheck)}`);
       assert.equal(v422BrowserCheck.disabledWhenIdle, 0, 'Zero disabled editing controls when idle');
       assert.equal(v422BrowserCheck.disabledAfterMerge, 0, 'Zero disabled editing controls after merge');

@@ -147,6 +147,7 @@ class ExportRequest(BaseModel):
 
 class StateUpdate(BaseModel):
     state: dict[str, Any]
+    expected_updated_at: str | None = None
 
 
 class ContextPreviewRequest(BaseModel):

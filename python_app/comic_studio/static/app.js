@@ -65,6 +65,7 @@ let currentJobAbortController = null;
 let activeModalState = null;
 let modalQueue = Promise.resolve();
 let pendingTranslationAfterOcr = null;
+let activeTranslationReviewSnapshot = null;
 let translationRetryAction = null;
 let translationRepairAction = null;
 let translationDecisionBusy = false;
@@ -925,6 +926,10 @@ function setBusy(message) {
   scheduleActivityPoll(!!message);
   document.querySelectorAll('.main-actions button, .main-actions .file-button, #dock button:not(#dockCancelJobBtn), #backupProjectBtn, #restoreProjectBtn, #restoreProjectInput, #newProjectBtn, #deleteProjectBtn, #projectSelect, #projectName').forEach((el) => { el.disabled = !!message; });
 }
+const STALE_CONTEXT_START_DETAIL = 'اطلاعات یا تنظیمات پس از پیش‌نمایش تغییر کرده است؛ دوباره بررسی و تأیید کنید.';
+function isStaleContextStartConflict(error) {
+  return error?.status === 409 && error?.detailText === STALE_CONTEXT_START_DETAIL;
+}
 async function runJob(message, task, progressId = null) {
   await clearActivity(false);
   const jobController = new AbortController();
@@ -941,6 +946,7 @@ async function runJob(message, task, progressId = null) {
       const abortErr = error?.cancelled ? error : Object.assign(new Error('عملیات به درخواست شما لغو شد.'), { name: 'AbortError', cancelled: true });
       throw abortErr;
     }
+    if (isStaleContextStartConflict(error)) throw error;
     console.error(error); appendLocalActivity(`خطا: ${error.message || error}`, 'error'); toast(error.message || error, true); throw error;
   }
   finally {
@@ -967,9 +973,12 @@ async function saveProject() {
   G.normalizeLayout(project.images);
   const revision = ++saveRevision;
   // Capture the state now, but serialize requests so a slow older save cannot overwrite a newer one.
-  const options = jsonOptions('PUT', { state: project });
+  // The expected server revision is read when this queued request actually starts;
+  // an earlier save in the same tab may have advanced it in the meantime.
+  const stateSnapshot = JSON.parse(JSON.stringify(project));
   const task = saveTask.catch(() => {}).then(async () => {
-    const result = await api(`/api/projects/${project.id}/state`, options);
+    const expectedUpdatedAt = project.updatedAt || stateSnapshot.updatedAt || '';
+    const result = await api(`/api/projects/${project.id}/state`, jsonOptions('PUT', { state: stateSnapshot, expected_updated_at: expectedUpdatedAt }));
     // Keep the live object identity: cards and editor fields must never point at a detached snapshot.
     if (state.project === project) {
       project.updatedAt = result.updatedAt || project.updatedAt;
@@ -1340,6 +1349,31 @@ function renderGrid() {
       wmBadge.textContent = 'واترمارک';
       wmBadge.title = 'دارای واترمارک فعال روی این صفحه';
       frameShell.appendChild(wmBadge);
+    }
+    // v4.43: tiny indicator that sits over the thumbnail and answers at a glance
+    // whether this page is translated, half-translated, or still untouched.
+    {
+      const blocks = Array.isArray(item.blocks) ? item.blocks : [];
+      const enabled = blocks.filter((entry) => entry && entry.enabled !== false);
+      const translated = enabled.filter((entry) => String(entry.tr || '').trim() || String(entry.richHtml || '').trim());
+      let tlClass = 'tl-none';
+      let tlText = 'ترجمه نشده';
+      let tlTitle = 'این صفحه هنوز هیچ کادر ترجمهٔ فعالی ندارد';
+      if (translated.length > 0 && translated.length >= enabled.length) {
+        const aiTouched = translated.some((entry) => entry.aiTranslated === true || entry.aiTranslated === '1' || entry.aiTranslated === 1);
+        tlClass = aiTouched ? 'tl-ai' : 'tl-manual';
+        tlText = aiTouched ? 'AI ترجمه' : 'ترجمه شد';
+        tlTitle = aiTouched ? 'همهٔ کادرها با ترجمهٔ هوش مصنوعی پر شده‌اند' : 'همهٔ کادرها ترجمهٔ دستی/فارسی دارند';
+      } else if (translated.length > 0) {
+        tlClass = 'tl-partial';
+        tlText = 'نیمه‌ترجمه';
+        tlTitle = `${translated.length} از ${enabled.length} کادر فعال ترجمه دارند`;
+      }
+      const tlBadge = document.createElement('div');
+      tlBadge.className = `translation-state-badge ${tlClass}`;
+      tlBadge.textContent = tlText;
+      tlBadge.title = tlTitle;
+      frameShell.appendChild(tlBadge);
     }
     const tick = document.createElement('input'); tick.type = 'checkbox'; tick.className = 'tick'; tick.checked = !!item.selected; tick.setAttribute('aria-label', `انتخاب ${item.name}`);
     tick.addEventListener('click', (event) => {
@@ -2322,6 +2356,7 @@ async function openPendingResults(token = null) {
   const projectId = state.project.id; pendingReview = null;
   $('pendingList').textContent = ''; $('pendingDetail').textContent = ''; $('pendingDetail').classList.add('hidden');
   $('pendingStatus').textContent = ''; for (const id of ['pendingCopy','pendingDiscard','pendingApply']) $(id).classList.add('hidden');
+  $('pendingApply').textContent = 'ثبت انتخاب‌ها';
   showDialog('pendingDialog');
   try {
     if (!token) {
@@ -2334,14 +2369,21 @@ async function openPendingResults(token = null) {
     const view = await api(`/api/projects/${projectId}/pending/${token}`);
     if (state.project?.id !== projectId || !$('pendingDialog').open) return;
     pendingReview = {projectId, view}; $('pendingDetail').classList.remove('hidden');
-    const heading = document.createElement('p'); heading.textContent = view.canApply ? 'برای موارد دارای تعارض، انتخاب خود را مشخص کنید؛ سایر موارد به‌طور خودکار حفظ و ثبت می‌شوند.' : 'نوبت ترجمه تغییر کرده است؛ نتیجه قابل اعمال خودکار نیست. می‌توانید آن را کپی کنید.'; $('pendingDetail').append(heading);
+    const heading = document.createElement('p'); heading.textContent = view.canApply ? 'برای موارد دارای تعارض، انتخاب خود را مشخص کنید؛ سایر موارد به‌طور خودکار حفظ و ثبت می‌شوند.' : 'نوبت ترجمه پس از آماده‌شدن این نتیجه تغییر کرده است؛ اعمال خودکار غیرفعال است. با «تأیید و اعمال دستی» نتیجه فقط روی کادرهای موجود نوشته می‌شود؛ خلاف آن فقط کپی یا حذف ممکن است.'; $('pendingDetail').append(heading);
+    if (Array.isArray(view.reasons) && view.reasons.length) {
+      const reasonBox = document.createElement('section'); reasonBox.className = 'block-card pending-reasons';
+      const reasonTitle = document.createElement('strong'); reasonTitle.textContent = 'چرا این نتیجه برای تأیید شما نگه داشته شد؟'; reasonBox.append(reasonTitle);
+      const reasonList = document.createElement('ul');
+      view.reasons.forEach((text) => { const item = document.createElement('li'); item.textContent = text; reasonList.append(item); });
+      reasonBox.append(reasonList); $('pendingDetail').append(reasonBox);
+    }
     view.rows.forEach((row, index) => {
       const box = document.createElement('section'); box.className = 'block-card';
       const title = document.createElement('strong'); title.textContent = `${index + 1}. ${row.name || 'تصویر'} — ${row.missing ? 'حذف‌شده' : row.conflict ? 'تعارض' : 'بدون تعارض'}`; box.append(title);
       for (const [label, value] of [['متن مبدأ ارسال‌شده', row.source], ['متن مبدأ فعلی', row.currentSource], ['متن قبلی', row.original], ['متن فعلی', row.current], ['نتیجهٔ آماده', row.result]]) {
         if (value == null) continue; const heading = document.createElement('p'); heading.textContent = label; const pre = document.createElement('pre'); pre.className = 'diagnostic-message'; pre.dir = 'auto'; pre.textContent = value || '—'; box.append(heading, pre);
       }
-      if (row.conflict && !row.missing && view.canApply) {
+      if (row.conflict && !row.missing) {
         const label = document.createElement('label'); label.textContent = 'انتخاب شما';
         const select = document.createElement('select'); select.dataset.pendingKey = row.key;
         for (const [value, text] of [['keep','حفظ ویرایش فعلی'],['apply','استفاده از نتیجهٔ آماده']]) { const option = document.createElement('option'); option.value = value; option.textContent = text; select.append(option); }
@@ -2350,7 +2392,8 @@ async function openPendingResults(token = null) {
       $('pendingDetail').append(box);
     });
     if (view.summary) { const p = document.createElement('p'); p.className = 'diagnostic-message'; p.textContent = `خلاصهٔ آماده: ${view.summary}`; $('pendingDetail').append(p); }
-    $('pendingCopy').classList.remove('hidden'); $('pendingDiscard').classList.remove('hidden'); $('pendingApply').classList.toggle('hidden', !view.canApply);
+    $('pendingCopy').classList.remove('hidden'); $('pendingDiscard').classList.remove('hidden'); $('pendingApply').classList.remove('hidden');
+    $('pendingApply').textContent = view.canApply ? 'ثبت انتخاب‌ها' : 'تأیید و اعمال دستی (نوبت تغییر کرده)';
   } catch (error) { $('pendingStatus').textContent = error.message || String(error); }
 }
 async function applyPendingResult() {
@@ -2360,7 +2403,7 @@ async function applyPendingResult() {
   $('pendingApply').disabled = true; $('pendingDiscard').disabled = true;
   let committed = false;
   try {
-    const result = await api(`/api/projects/${review.projectId}/pending/${review.view.id}/resolve`, jsonOptions('POST', {revision:review.view.revision, choices}));
+    const result = await api(`/api/projects/${review.projectId}/pending/${review.view.id}/resolve`, jsonOptions('POST', {revision:review.view.revision, choices, force: review.view.canApply === false}));
     committed = true;
     if (state.project?.id !== review.projectId) throw new Error('نتیجه ثبت شد اما پروژهٔ باز تغییر کرد؛ برای دیدن نتیجه پروژه را دوباره باز کنید.');
     const afterOcr = result.kind === 'ocr' ? pendingTranslationAfterOcr : null;
@@ -2384,6 +2427,134 @@ function reportOcrError(error) {
   $('ocrStatus').textContent = message; $('copyOcrError').classList.remove('hidden');
   appendLocalActivity(message, 'error'); toast(message, true);
 }
+const TRANSLATION_REVIEW_FIELDS = ['tr', 'richHtml', 'aiTranslated', 'dir', 'textMode', 'align', 'size', 'verticalAlign', 'bold', 'italic'];
+function captureOcrReviewSnapshot(imageIds) {
+  const project = state.project;
+  if (!project) return null;
+  const selected = new Set(imageIds.map(String));
+  return {projectId: project.id, images: new Map((project.images || []).filter(item => selected.has(String(item.id))).map(item => [String(item.id), {
+    name: String(item.name || ''), blocks: JSON.parse(JSON.stringify(item.blocks || [])), pageMode: item.pageMode, ocrCompleted: item.ocrCompleted,
+  }]))};
+}
+function reviewBlockText(blocks, includeTranslation = true) {
+  return (blocks || []).map((block, index) => {
+    const source = String(block?.text || '').trim();
+    const translated = String(block?.tr || '').trim();
+    const rich = String(block?.richHtml || '').trim();
+    if (!source && !translated && !rich) return '';
+    return `کادر ${index + 1}\nمتن: ${source || '—'}${includeTranslation ? `\nترجمه: ${translated || rich || '—'}` : ''}`;
+  }).filter(Boolean).join('\n\n') || 'متنی پیدا نشد.';
+}
+async function reviewOcrReplacements(snapshot, imageIds) {
+  if (!snapshot || state.project?.id !== snapshot.projectId) return;
+  const idSet = new Set(imageIds.map(String));
+  const currentById = new Map((state.project.images || []).map(item => [String(item.id), item]));
+  const changed = [];
+  for (const [id, before] of snapshot.images) {
+    if (!idSet.has(id)) continue;
+    const now = currentById.get(id);
+    if (!now) continue;
+    const hadText = before.blocks.some(block => String(block?.text || '').trim() || String(block?.tr || '').trim() || String(block?.richHtml || '').trim());
+    if (!hadText) continue;
+    const oldText = reviewBlockText(before.blocks, true);
+    const newText = reviewBlockText(now.blocks, true);
+    if (oldText !== newText) changed.push({id, before, now, oldText, newText});
+  }
+  if (!changed.length) return;
+  const restoreIds = [];
+  for (let index = 0; index < changed.length; index += 1) {
+    const page = changed[index];
+    const useNew = $('appModalDialog') ? await appConfirm(
+      `نسخهٔ قبلی:\n${page.oldText}\n\nنتیجهٔ تازهٔ OCR:\n${page.newText}`,
+      {title: `بررسی صفحهٔ ${index + 1} از ${changed.length} — ${page.before.name || 'صفحه'}`,
+       hint: 'این صفحه پیش از اجرای دوباره متن یا ترجمه داشت. انتخاب پیش‌فرض، حفظ نسخهٔ قبلی است.',
+       confirmText: 'استفاده از نتیجهٔ تازه', cancelText: 'حفظ نسخهٔ قبلی', variant: 'warning', destructive: true},
+    ) : false;
+    if (useNew) continue;
+    const current = currentById.get(page.id);
+    if (!current) continue;
+    current.blocks = JSON.parse(JSON.stringify(page.before.blocks));
+    current.pageMode = page.before.pageMode;
+    current.ocrCompleted = page.before.ocrCompleted;
+    restoreIds.push(page.id);
+  }
+  if (restoreIds.length) {
+    await saveProject();
+    renderGrid();
+    await renderImagesText(restoreIds);
+    toast(`نسخهٔ قبلی برای ${restoreIds.length} صفحه حفظ شد.`);
+  }
+}
+function captureTranslationReviewSnapshot(imageIds) {
+  const project = state.project;
+  if (!project) return null;
+  const selected = new Set(imageIds.map(String));
+  const images = new Map();
+  for (const item of project.images || []) {
+    if (!selected.has(String(item.id))) continue;
+    const blocks = new Map();
+    for (const block of item.blocks || []) {
+      if (!String(block?.tr || '').trim() && !String(block?.richHtml || '').trim()) continue;
+      const saved = {};
+      for (const key of TRANSLATION_REVIEW_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(block, key)) saved[key] = block[key];
+      }
+      blocks.set(String(block.id), {source: String(block.text || ''), values: saved});
+    }
+    if (blocks.size) images.set(String(item.id), {name: String(item.name || ''), blocks});
+  }
+  return {projectId: project.id, images};
+}
+async function reviewTranslationReplacements(snapshot) {
+  if (!snapshot || state.project?.id !== snapshot.projectId) return;
+  const currentById = new Map((state.project.images || []).map(item => [String(item.id), item]));
+  const changed = [];
+  for (const [id, before] of snapshot.images) {
+    const item = currentById.get(id);
+    if (!item) continue;
+    const currentBlocks = new Map((item.blocks || []).map(block => [String(block.id), block]));
+    const rows = [];
+    for (const [blockId, old] of before.blocks) {
+      const current = currentBlocks.get(blockId);
+      if (!current) continue;
+      const nextText = String(current.tr || current.richHtml || '').trim();
+      const oldText = String(old.values.tr || old.values.richHtml || '').trim();
+      if (nextText === oldText) continue;
+      rows.push({source: old.source, oldText, newText: nextText, blockId, current});
+    }
+    if (rows.length) changed.push({id, before, item, rows});
+  }
+  if (!changed.length) return;
+  const restoreIds = [];
+  for (let index = 0; index < changed.length; index += 1) {
+    const page = changed[index];
+    const details = page.rows.map((row, rowIndex) => `کادر ${rowIndex + 1}\nمتن مبدأ: ${row.source || '—'}\nترجمهٔ قبلی: ${row.oldText || '—'}\nترجمهٔ تازه: ${row.newText || '—'}`).join('\n\n');
+    const useNew = $('appModalDialog') ? await appConfirm(
+      details,
+      {title: `بررسی ترجمهٔ صفحهٔ ${index + 1} از ${changed.length} — ${page.before.name || 'صفحه'}`,
+       hint: 'ترجمهٔ تازه پس از پایان کل کار آماده شده است. برای هر صفحه جداگانه تصمیم بگیرید؛ بستن این پنجره هم نسخهٔ قبلی را نگه می‌دارد.',
+       confirmText: 'جایگزینی با ترجمهٔ تازه', cancelText: 'حفظ ترجمهٔ قبلی', variant: 'warning', destructive: true},
+    ) : false;
+    if (useNew) continue;
+    const currentBlocks = new Map((page.item.blocks || []).map(block => [String(block.id), block]));
+    for (const row of page.rows) {
+      const block = currentBlocks.get(row.blockId);
+      const old = page.before.blocks.get(row.blockId);
+      if (!block || !old) continue;
+      for (const key of TRANSLATION_REVIEW_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(old.values, key)) block[key] = old.values[key];
+        else delete block[key];
+      }
+    }
+    restoreIds.push(page.id);
+  }
+  if (restoreIds.length) {
+    await saveProject();
+    renderGrid();
+    await renderImagesText(restoreIds);
+    toast(`ترجمهٔ قبلی برای ${restoreIds.length} صفحه حفظ شد.`);
+  }
+}
 async function runOcr() {
   if (ocrRunning) return;
   if (!isModuleLicensed('ocr')) { await ensureModuleLicensed('ocr'); return; }
@@ -2395,6 +2566,9 @@ async function runOcr() {
   let ocrSucceeded = false;
   let usedKeepEngineLoaded = false;
   let completedOcrPages = 0;
+  let ocrReviewSnapshot = null;
+  let ocrReviewIds = [];
+  let ocrReviewFinished = false;
   try {
     if (pending && (state.project?.id !== pending.projectId || JSON.stringify(selectedImages().map(item => item.id)) !== JSON.stringify(pending.imageIds))) {
       throw new Error('پروژه یا تصاویر انتخاب‌شده تغییر کردند؛ پنجره را ببندید و دوباره ترجمه را شروع کنید.');
@@ -2406,6 +2580,8 @@ async function runOcr() {
     }
     const ids = pending ? pending.missingIds : ($('ocrOnlySelected').checked ? selectedImages().map((item) => item.id) : sortedImages().map((item) => item.id));
     if (!ids.length) throw new Error('حداقل یک تصویر را انتخاب کنید.');
+    ocrReviewIds = ids.slice();
+    ocrReviewSnapshot = captureOcrReviewSnapshot(ids);
     if (pending && ids.some(id => {
       const item = state.project.images.find(image => image.id === id);
       return !item || item.ocrCompleted || (item.blocks || []).length;
@@ -2464,6 +2640,7 @@ async function runOcr() {
         checkOcrNotCancelled();
         verifyPendingOcrState();
         adoptProject(result, { skipGrid: true });
+        completedOcrPages += 1;
         setOverlayMode('ocr', false);
         applyActiveJobProgress((idx + 0.80) / totalPages);
         await renderImagesText(
@@ -2471,15 +2648,21 @@ async function runOcr() {
           (done, tot) => applyActiveJobProgress((idx + 0.80 + 0.20 * (done / Math.max(1, tot))) / totalPages),
           checkOcrNotCancelled,
         );
-        completedOcrPages += 1;
         applyActiveJobProgress(completedOcrPages / totalPages);
       }
     }, 'ocrProgress');
+    ocrReviewFinished = true;
+    await reviewOcrReplacements(ocrReviewSnapshot, ids);
     ocrSucceeded = true; ocrClosingNormally = true;
     clearPendingTranslationOcr(); closeDialog('ocrDialog');
-    toast('متن OCR روی تصویر آمد؛ برای بررسی و ویرایش، دکمهٔ ✎ را بزنید');
+    toast('OCR تمام شد؛ نتیجهٔ صفحه‌های دارای متن قبلی با نسخهٔ پیشین مقایسه شد.');
     if (pending) await runTranslation();
   } catch (error) {
+    if (!ocrReviewFinished && ocrReviewSnapshot && completedOcrPages > 0) {
+      ocrReviewFinished = true;
+      try { await reviewOcrReplacements(ocrReviewSnapshot, ocrReviewIds); }
+      catch (reviewError) { toast(`مقایسهٔ نسخه‌های OCR کامل نشد؛ نتیجه‌ها ذخیره‌اند و پروژه را بررسی کنید. ${reviewError.message || reviewError}`, true); }
+    }
     if (state.project) renderGrid();
     if (ocrCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
       clearPendingTranslationOcr();
@@ -3164,6 +3347,7 @@ async function runTranslation(targetOverride = null) {
       throw new Error('هیچ کادر فعال دارای متن در تصاویر انتخاب‌شده نیست. اگر OCR متنی پیدا نکرده، تنظیمات یا تصویر را بررسی و OCR را دوباره اجرا کنید.');
     }
     await saveProject();
+    activeTranslationReviewSnapshot = captureTranslationReviewSnapshot(ids);
     const target = resolvePreferredTranslationTarget(targetOverride);
     const provider = target.provider; const profileId = target.profileId; const projectId = state.project.id;
     const targetLanguage = activeTargetLanguage();
@@ -3221,7 +3405,7 @@ async function runTranslation(targetOverride = null) {
       if (!preview.requests?.length && !preview.previewError) throw new Error('هیچ درخواست ترجمه‌ای ساخته نشد؛ کادرهای فعال و انتخاب تصاویر را بررسی کنید.');
       const emptyPages = selected.filter(item => !(item.blocks || []).some(block => block.enabled !== false && String(block.text || '').trim()));
       if (emptyPages.length) preview.note += ` ${emptyPages.length} تصویر بدون متن فعال از ترجمه کنار گذاشته می‌شوند.`;
-      showTranslationRequestPreview(preview, accepted => performContextTranslation(request, accepted), refresh, switchTarget);
+      showTranslationRequestPreview(preview, accepted => performContextTranslation(request, accepted, null, null, refresh, switchTarget), refresh, switchTarget);
       return;
     }
     const allActiveProfiles = state.ai?.providers?.[provider]?.profiles?.filter(p => p.hasApiKey) || [];
@@ -3255,7 +3439,7 @@ async function runTranslation(targetOverride = null) {
     if (emptyPages.length) preview.note += ` ${emptyPages.length} تصویر بدون متن فعال از ترجمه کنار گذاشته می‌شوند.`;
     if (safeSkill !== skill) preview.displaySkill = skill;
     if (safeSummary !== summary) preview.displaySummary = summary;
-    showTranslationRequestPreview(preview, accepted => { rememberTranslationSkill(projectId, accepted); return performContextTranslation(request, accepted); }, refresh, switchTarget);
+    showTranslationRequestPreview(preview, accepted => { rememberTranslationSkill(projectId, accepted); return performContextTranslation(request, accepted, null, null, refresh, switchTarget); }, refresh, switchTarget);
   } catch (error) {
     if (error?.cancelled || error?.name === 'AbortError') return;
     if (targetOverride && $('translationPreviewDialog').open) throw error;
@@ -3266,7 +3450,13 @@ async function runTranslation(targetOverride = null) {
     showDialog('translationDialog'); toast(message, true);
   }
 }
-async function performContextTranslation(request, preview, ongoing = null, correction = null) {
+async function performContextTranslation(request, preview, ongoing = null, correction = null, refreshPreview = null, switchTarget = null) {
+  // A partial run may have already shown reviews for completed pages before
+  // the user retries. Use those accepted/restored values as the baseline so
+  // newly completed pages in the resumed run still get reviewed exactly once.
+  if (ongoing && !activeTranslationReviewSnapshot) {
+    activeTranslationReviewSnapshot = captureTranslationReviewSnapshot(request.image_ids || []);
+  }
   translationRetryAction = null; $('retryTranslation').classList.add('hidden'); $('translationErrorChoice').classList.add('hidden');
   $('copyUnstoredResult').classList.add('hidden'); $('copyUnstoredResult').dataset.result = '';
   const controller = new AbortController();
@@ -3320,14 +3510,60 @@ async function performContextTranslation(request, preview, ongoing = null, corre
       phase = 'save'; setOverlayMode('translation', false);
     }, 'translationProgress');
     translationClosingNormally = true;
-    closeDialog('translationDialog'); toast(isDirectMtProvider(request.provider) ? 'ترجمه ذخیره شد' : 'ترجمه و خلاصه ذخیره شد');
+    closeDialog('translationDialog');
+    const completedReviewSnapshot = activeTranslationReviewSnapshot;
+    activeTranslationReviewSnapshot = null;
+    await reviewTranslationReplacements(completedReviewSnapshot);
+    toast(isDirectMtProvider(request.provider) ? 'ترجمه ذخیره شد' : 'ترجمه و خلاصه ذخیره شد');
   } catch (error) {
     if (translationCancelledByUser || error?.cancelled || error?.name === 'AbortError') {
+      translationClosingNormally = true; closeDialog('translationDialog');
       toast(run?.completed ? `پنجره بسته شد؛ ${run.completed} بخش ذخیره‌شده باقی ماند و ادامهٔ ترجمه متوقف شد` : 'پنجرهٔ ترجمه بسته شد و عملیات متوقف گردید');
-      api(`/api/projects/${projectId}`).then((fresh) => { if (state.project?.id === projectId && !inlineDraft) adoptProject(fresh); }).catch(() => {});
+      try {
+        const fresh = await api(`/api/projects/${projectId}`);
+        if (state.project?.id === projectId && !inlineDraft) {
+          adoptProject(fresh);
+          const cancelledReviewSnapshot = activeTranslationReviewSnapshot;
+          activeTranslationReviewSnapshot = null;
+          await reviewTranslationReplacements(cancelledReviewSnapshot);
+        }
+      } catch { /* the saved project can be reviewed after it is reopened */ }
+      activeTranslationReviewSnapshot = null;
       return;
     }
-    const uncertainty = phase === 'translation' ? 'وضعیت درخواست جاری در قطع ارتباط ممکن است نامشخص باشد و تکرار هزینه داشته باشد.' : 'درخواست‌های موفق ذخیره شده‌اند؛ پروژه را بررسی کنید.';
+    if (!run && isStaleContextStartConflict(error) && typeof refreshPreview === 'function') {
+      try {
+        // The server deliberately rejects a stale confirmation before making
+        // any provider request. Rebuild the exact preview from current server
+        // state, then require the user to approve that new payload explicitly.
+        const refreshed = await refreshPreview(preview.skill ?? '', preview.summary ?? '', Boolean(preview.resume));
+        refreshed.note = `${refreshed.note || ''} اطلاعات پروژه یا تنظیمات پس از پیش‌نمایش تغییر کرده بود؛ این پیش‌نمایش تازه را دوباره بررسی و تأیید کنید. `.trim();
+        closeDialog('translationDialog');
+        showTranslationRequestPreview(
+          refreshed,
+          accepted => performContextTranslation(request, accepted, null, null, refreshPreview, switchTarget),
+          refreshPreview,
+          switchTarget,
+        );
+        toast('اطلاعات یا تنظیمات تغییر کرده بود؛ پیش‌نمایش تازه آماده است و هنوز هیچ درخواستی ارسال نشده.');
+        return;
+      } catch (refreshError) {
+        error.message = `${error.message || 'پیش‌نمایش منقضی شده است.'} ساخت پیش‌نمایش تازه نیز ناموفق بود: ${refreshError.message || refreshError}`;
+      }
+    }
+    if (run?.completed && activeTranslationReviewSnapshot) {
+      try {
+        const fresh = await api(`/api/projects/${projectId}`);
+        if (state.project?.id === projectId && !inlineDraft) adoptProject(fresh);
+        await reviewTranslationReplacements(activeTranslationReviewSnapshot);
+      } catch { /* a pending result remains available for review later */ }
+      activeTranslationReviewSnapshot = null;
+    }
+    const uncertainty = phase === 'start'
+      ? 'هیچ درخواست ترجمه‌ای به سرویس ارسال نشده است؛ نتیجه‌ای هم ذخیره نشده.'
+      : phase === 'translation'
+        ? 'وضعیت درخواست جاری در قطع ارتباط ممکن است نامشخص باشد و تکرار هزینه داشته باشد.'
+        : 'درخواست‌های موفق ذخیره شده‌اند؛ پروژه را بررسی کنید.';
     error.message = `${run?.completed || 0} درخواست ذخیره شد؛ ترجمه متوقف شد. ${uncertainty} ${error.message || ''}`;
     $('translationStatus').textContent = `ترجمه ناموفق بود: ${error.message}`;
     if (run) offerResponseRepair(error, repair => performContextTranslation(request, preview, run, repair));
@@ -3375,16 +3611,29 @@ async function ensureWatermarkLogoDrawable(logoId, dataUrl) {
   if (drawable) watermarkLogoCache.set(key, drawable);
   return drawable;
 }
+// v4.39: decoded logo images are runtime-only objects.  A plain assignment made
+// them *enumerable*, so saving the project serialized the DOM/image object as
+// "{}" straight into project.json; after the next launch the renderer received
+// that empty object as the logo and drawing the page crashed.  Attaching the
+// drawable as a non-enumerable property keeps it usable in memory while
+// JSON.stringify (the project save) simply skips it.
+function attachRuntimeDrawable(target, key, drawable) {
+  try {
+    Object.defineProperty(target, key, { value: drawable, writable: true, configurable: true, enumerable: false });
+  } catch {
+    target[key] = drawable;
+  }
+}
 async function ensureWatermarkLogosReady(wm) {
   if (!hasActiveWatermark(wm)) return;
   const logoId = String(wm.logoId || '').trim();
   const logos = projectWatermarkLogos();
   if (logoId && logos[logoId]?.dataUrl) {
     const drawable = await ensureWatermarkLogoDrawable(logoId, logos[logoId].dataUrl);
-    if (drawable) logos[logoId]._drawable = drawable;
+    if (drawable) attachRuntimeDrawable(logos[logoId], '_drawable', drawable);
   } else if (wm.logoDataUrl) {
     const drawable = await ensureWatermarkLogoDrawable('inline', wm.logoDataUrl);
-    if (drawable) wm._logoDrawable = drawable;
+    if (drawable) attachRuntimeDrawable(wm, '_logoDrawable', drawable);
   }
 }
 function buildTypesetRenderOptions(item) {
@@ -3399,8 +3648,13 @@ function watermarkSignaturePart(wm) {
   if (!hasActiveWatermark(wm)) return null;
   const logoId = String(wm.logoId || '').trim();
   const logoEntry = logoId ? projectWatermarkLogos()[logoId] : null;
-  const logoLen = logoEntry?.dataUrl ? logoEntry.dataUrl.length : (wm.logoDataUrl ? String(wm.logoDataUrl).length : 0);
-  return [wm.text || '', wm.position || 'bottom-left', wm.sizePct ?? 3.5, wm.opacity ?? 55, wm.angle ?? '', wm.marginPct ?? 2.5, wm.tileGapPct ?? 22, wm.color || '#ffffff', wm.bold !== false, wm.outline !== false, wm.outlineColor || '#000000', !!wm.bgPill, wm.bgColor || '#000000', logoId, wm.logoScalePct ?? 9, logoLen];
+  // v4.39: length alone cannot tell two different logos apart when they happen
+  // to serialize to the same dataURL length, and a stale signature then skips
+  // the re-render, so the old logo would still appear in the exported pages.
+  // Use the same content fingerprint as the drawable logo cache (length + tail).
+  const logoSrc = logoEntry?.dataUrl ? String(logoEntry.dataUrl) : String(wm.logoDataUrl || '');
+  const logoFingerprint = logoSrc ? `${logoSrc.length}:${logoSrc.slice(-32)}` : '';
+  return [wm.text || '', wm.position || 'bottom-left', wm.sizePct ?? 3.5, wm.opacity ?? 55, wm.angle ?? '', wm.marginPct ?? 2.5, wm.tileGapPct ?? 22, wm.color || '#ffffff', wm.bold !== false, wm.outline !== false, wm.outlineColor || '#000000', !!wm.bgPill, wm.bgColor || '#000000', logoId, wm.logoScalePct ?? 9, logoFingerprint];
 }
 function pageRenderSignature(item, mode = currentOverlayMode(), blocksOverride = null) {
   const blocks = blocksOverride || overlayBlocks(item, mode);
@@ -5615,6 +5869,44 @@ function restoreEditorPageHistory(step) {
     scheduleSave();
   } catch {}
 }
+// v4.47: arrow keys nudge the selected box(es) by 1 image pixel (10 with
+// Shift). A hold-repeat batch counts as one undo step because the snapshot is
+// recorded only on the fresh keydown of each press.
+function nudgeSelectedEditorBlocks(event) {
+  const step = event.shiftKey ? 10 : 1;
+  const dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
+  const dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
+  if (!dx && !dy) return false;
+  const item = editorItem(); if (!item) return false;
+  let blocks = selectedEditorBlocks();
+  if (!blocks.length && state.activeBlockId != null) {
+    const active = (item.blocks || []).find((block) => String(block.id) === String(state.activeBlockId));
+    if (active) blocks = [active];
+  }
+  blocks = blocks.filter((block) => block && block.enabled !== false);
+  if (!blocks.length) return false;
+  if (!event.repeat) recordEditorPageHistory();
+  const starts = blocks.map((block) => ({ block, start: boxOf(block) }));
+  const minDx = Math.max(...starts.map((entry) => -entry.start.x0));
+  const maxDx = Math.min(...starts.map((entry) => (Number(item.width) || 0) - entry.start.x1));
+  const minDy = Math.max(...starts.map((entry) => -entry.start.y0));
+  const maxDy = Math.min(...starts.map((entry) => (Number(item.height) || 0) - entry.start.y1));
+  const groupDx = Math.max(minDx, Math.min(maxDx, dx));
+  const groupDy = Math.max(minDy, Math.min(maxDy, dy));
+  if (!groupDx && !groupDy) return true; // At the canvas edge: swallow the key, do not scroll the page.
+  const scale = state.editorScale || 1;
+  const boxEls = new Map([...document.querySelectorAll('#editorBoxes .editor-box')].map((el) => [String(el.dataset.id), el]));
+  starts.forEach(({ block, start }) => {
+    block.tx0 = start.x0 + groupDx; block.tx1 = start.x1 + groupDx;
+    block.ty0 = start.y0 + groupDy; block.ty1 = start.y1 + groupDy;
+    const el = boxEls.get(String(block.id));
+    if (el) syncEditorBoxVisualGeometry(el, block, boxOf(block), scale);
+  });
+  syncEditorShapeControls();
+  scheduleEditorCanvasDraw();
+  scheduleSave();
+  return true;
+}
 function resolveToolbarTargetBlocks({ autoSelectFirst = true } = {}) {
   if (inlineDraft?.block) return [inlineDraft.block];
   const selected = selectedEditorBlocks();
@@ -5814,7 +6106,16 @@ function closeInlineEditor(force = false) {
   if (!force && document.activeElement === $('inlineLineSize')) $('inlineLineSize').blur();
   const committed = inlineEditSession?.close({ discardConflict: force }) ?? false;
   if (!committed && !force) return false;
-  if (committed) classicEditor.clearDraft(); else classicEditor.saveDraft();
+  if (committed) {
+    classicEditor.clearDraft();
+    // v4.43: a manual edit after an AI translation means the text is no longer
+    // "pure AI output", so remove the marker (badge would lie otherwise).
+    const activeBlock = inlineEditSession?.block || null;
+    if (activeBlock && activeBlock.aiTranslated) {
+      delete activeBlock.aiTranslated;
+      drawEditor(); scheduleSave();
+    }
+  } else classicEditor.saveDraft();
   classicEditor.closeModal?.({ restoreFocus: false });
   classicEditor.exitFullscreen(); classicEditor.detachField();
   const box = [...document.querySelectorAll('#editorBoxes .editor-box')].find((el) => el.dataset.id === String(inlineDraft.block.id));
@@ -7466,6 +7767,9 @@ function startBoxDrag(event, block, el) {
   if (!rotateTarget && !radiusTarget && !resize && !moveHandle && event.target !== el) return;
   const item = editorItem(); if (!item) return;
   event.preventDefault(); event.stopPropagation();
+  // v4.47: record the pre-drag snapshot so Ctrl+Z restores the box after a
+  // move/resize/rotate even when it was the editor's very first action.
+  recordEditorPageHistory();
   const mode = rotateTarget ? 'rotate' : radiusTarget ? 'corner-radius' : (resize?.dataset.dir || 'move');
   const cornerKey = radiusTarget?.dataset.radiusCorner || '';
   const start = boxOf(block);
@@ -7593,9 +7897,10 @@ async function runSingleBlockTranslation(task) {
     if ($('translationDialog').open) closeDialog('translationDialog');
   }
 }
-function applyTranslatedBlockDefaults(block, text, targetLang = null) {
+function applyTranslatedBlockDefaults(block, text, targetLang = null, viaAi = null) {
   block.tr = text;
   block.richHtml = '';
+  if (viaAi !== null) block.aiTranslated = !!viaAi;
   const resolvedDir = targetLang ? targetLanguageDir(targetLang) : (block.dir === 'ltr' ? 'ltr' : 'rtl');
   block.dir = resolvedDir;
   if (block.textMode === 'ocr') block.textMode = 'translation';
@@ -7633,6 +7938,7 @@ async function retranslateBlock(block, targetOverride = null) {
     return;
   }
   const snapshot = inlineBlockSnapshot(block);
+  const pageReviewSnapshot = captureTranslationReviewSnapshot([state.project.images.find(item => (item.blocks || []).includes(block))?.id].filter(Boolean));
   const target = resolvePreferredTranslationTarget(targetOverride);
   const provider = target.provider; const profileId = target.profileId; const sourceLanguage = $('ocrLanguage').value;
   const targetLanguage = activeTargetLanguage();
@@ -7648,7 +7954,8 @@ async function retranslateBlock(block, targetOverride = null) {
         const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill:'', summary:'', confirmation: accepted.signature }), signal }));
         if (!result || result.cancelled) return;
         if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-        applyTranslatedBlockDefaults(block, result.text, targetLanguage); buildBlockList(); drawEditor(); scheduleSave();
+        applyTranslatedBlockDefaults(block, result.text, targetLanguage, false); buildBlockList(); drawEditor(); scheduleSave();
+        await reviewTranslationReplacements(pageReviewSnapshot);
       }, refresh, switchTarget);
       return;
     }
@@ -7675,7 +7982,8 @@ async function retranslateBlock(block, targetOverride = null) {
       const result = await runSingleBlockTranslation((signal) => api('/api/translate-text/context', { ...jsonOptions('POST', { ...request, skill: accepted.skill, summary: accepted.summary, confirmation: accepted.signature, ...(repair || {}) }), signal }));
       if (!result || result.cancelled) return;
       if (inlineDraft?.block === block || inlineBlockSnapshot(block) !== snapshot) { toast('در حین ترجمه کادر تغییر کرد؛ نتیجه جایگزین نشد.', true); return; }
-      applyTranslatedBlockDefaults(block, result.text, targetLanguage); buildBlockList(); drawEditor(); scheduleSave();
+      applyTranslatedBlockDefaults(block, result.text, targetLanguage, true); buildBlockList(); drawEditor(); scheduleSave();
+      await reviewTranslationReplacements(pageReviewSnapshot);
     }, refresh, switchTarget);
   } catch (error) {
     if (targetOverride && $('translationPreviewDialog').open) throw error;
@@ -9553,6 +9861,38 @@ function bindEvents() {
       if (closeTopDialog()) { event.preventDefault(); event.stopPropagation(); }
       else setMenuOpen(false);
       return;
+    }
+    // v4.47: Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y must undo/redo box moves too, not
+    // only text edits — the rich-editor field handles its own keys and stops
+    // propagation, so here we only serve page-level history when the user is
+    // not typing inside an editable field.
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && state.editorId && $('editorDialog')?.open) {
+      const loweredKey = (event.key || '').toLowerCase();
+      const isUndoKey = !event.shiftKey && (event.code === 'KeyZ' || loweredKey === 'z');
+      const isRedoKey = event.code === 'KeyY' || loweredKey === 'y' || (event.shiftKey && (event.code === 'KeyZ' || loweredKey === 'z'));
+      if (isUndoKey || isRedoKey) {
+        const topDlg = [...openDialogStack].reverse().find((id) => $(id)?.open);
+        const editorIsTop = (!topDlg || topDlg === 'editorDialog') && !$('appModalDialog')?.open && !classicEditor?.hasOpenModal?.();
+        const targetEl = event.target && typeof event.target.closest === 'function' ? event.target : null;
+        const inEditable = Boolean(inlineDraft) || Boolean(targetEl?.closest('input, textarea, select, [contenteditable="true"]'));
+        if (editorIsTop && !inEditable) {
+          event.preventDefault(); event.stopPropagation();
+          restoreEditorPageHistory(isRedoKey ? 1 : -1);
+          return;
+        }
+      }
+    }
+    // v4.47: arrow keys nudge the selected box(es) pixel by pixel.
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)
+        && state.editorId && $('editorDialog')?.open && !inlineDraft) {
+      const topDlg = [...openDialogStack].reverse().find((id) => $(id)?.open);
+      const editorIsTop = (!topDlg || topDlg === 'editorDialog') && !$('appModalDialog')?.open && !classicEditor?.hasOpenModal?.();
+      const targetEl = event.target && typeof event.target.closest === 'function' ? event.target : null;
+      const inEditable = Boolean(targetEl?.closest('input, textarea, select, [contenteditable="true"]'));
+      if (editorIsTop && !inEditable && nudgeSelectedEditorBlocks(event)) {
+        event.preventDefault(); event.stopPropagation();
+        return;
+      }
     }
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && state.editorId && $('editorDialog')?.open) {
       const rawKey = (event.key || '').toLowerCase();
