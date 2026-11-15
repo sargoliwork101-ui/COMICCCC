@@ -63,7 +63,7 @@ from comic_studio.license_guard import (  # noqa: E402
     verify_license_token,
 )
 
-APP_VERSION = "4.49"
+APP_VERSION = "4.50"
 
 
 PUBLIC_KEY_MODULE_PATH = APP_DIR / "comic_studio" / "_public_key.py"
@@ -2563,6 +2563,98 @@ def build_seller_panel_handler(vault: SellerVault, panel_secret: str) -> type[Ba
     return Handler
 
 
+def _start_parent_watcher(server: ThreadingHTTPServer, shutdown_holder: dict[str, bool]) -> None:
+    """Stop the seller panel when the process that launched it exits on Windows."""
+    if os.name != "nt":
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        ntdll = ctypes.windll.ntdll  # type: ignore[attr-defined]
+    except Exception as exc:
+        raise RuntimeError("پایش پنجرهٔ فروشنده در ویندوز در دسترس نیست؛ برای جلوگیری از باقی‌ماندن پنل، اجرا متوقف شد.") from exc
+
+    SYNCHRONIZE = 0x00100000
+    PROC_Q_LIMITED = 0x1000
+
+    class _PROCESS_BASIC_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("Reserved1", ctypes.c_void_p),
+            ("PebBaseAddress", ctypes.c_void_p),
+            ("Reserved2", ctypes.c_void_p * 2),
+            ("UniqueProcessId", ctypes.c_void_p),
+            ("InheritedFromUniqueProcessId", ctypes.c_void_p),
+        ]
+
+    def _set_signature(function: Any, argtypes: list[Any], restype: Any) -> None:
+        # ctypes DLL function pointers accept prototypes; Python fakes used by
+        # tests do not, so leave those callables untouched.
+        with contextlib.suppress(AttributeError, TypeError):
+            function.argtypes = argtypes
+            function.restype = restype
+
+    wintypes = ctypes.wintypes
+    open_process = kernel32.OpenProcess
+    close_handle = kernel32.CloseHandle
+    query_process = ntdll.NtQueryInformationProcess
+    wait_for_single_object = kernel32.WaitForSingleObject
+    _set_signature(open_process, [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE)
+    _set_signature(close_handle, [wintypes.HANDLE], wintypes.BOOL)
+    _set_signature(
+        query_process,
+        [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.ULONG, ctypes.POINTER(wintypes.ULONG)],
+        wintypes.LONG,
+    )
+    _set_signature(wait_for_single_object, [wintypes.HANDLE, wintypes.DWORD], wintypes.DWORD)
+
+    def _parent_pid(pid: int) -> int:
+        handle = open_process(PROC_Q_LIMITED, False, pid)
+        if not handle:
+            return -1
+        try:
+            info = _PROCESS_BASIC_INFORMATION()
+            out_len = wintypes.ULONG(0)
+            status = query_process(
+                handle, 0, ctypes.byref(info), ctypes.sizeof(info), ctypes.byref(out_len)
+            )
+            if status == 0 and info.InheritedFromUniqueProcessId:
+                return int(info.InheritedFromUniqueProcessId)
+        finally:
+            close_handle(handle)
+        return -1
+
+    # Watch the direct launcher (usually cmd.exe / PowerShell), not the root
+    # ancestor chain. Walking until the chain ends returns from this function
+    # before the watcher thread is created, which leaves the HTTP server alive.
+    parent_pid = _parent_pid(os.getpid())
+    if parent_pid <= 0 or parent_pid == os.getpid():
+        raise RuntimeError("فرایند اجراکنندهٔ پنل فروشنده پیدا نشد؛ برای جلوگیری از باقی‌ماندن پنل، اجرا متوقف شد.")
+    parent_handle = open_process(SYNCHRONIZE, False, parent_pid)
+    if not parent_handle:
+        raise RuntimeError("دسترسی پایش فرایند اجراکنندهٔ پنل فروشنده ممکن نیست؛ اجرا متوقف شد.")
+
+    def _watch_loop() -> None:
+        try:
+            while True:
+                wait_result = wait_for_single_object(parent_handle, 1000)
+                if wait_result == 0x00000102:  # WAIT_TIMEOUT: launcher still exists
+                    continue
+                shutdown_holder["requested"] = True
+                with contextlib.suppress(Exception):
+                    server.shutdown()
+                return
+        finally:
+            with contextlib.suppress(Exception):
+                kernel32.CloseHandle(parent_handle)
+
+    try:
+        watcher = threading.Thread(target=_watch_loop, name="seller-panel-parent-watch", daemon=True)
+        watcher.start()
+    except Exception:
+        with contextlib.suppress(Exception):
+            kernel32.CloseHandle(parent_handle)
+        raise
+
+
 def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     try:
         key_info = vault.ensure_master_key(sync_source=True, allow_create=True)
@@ -2598,73 +2690,14 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
         with contextlib.suppress(Exception):
             webbrowser.open(url)
 
-    # v4.43: make sure the panel NEVER survives its own console. The raw
-    # `serve_forever()` loop could stay alive as a background zombie when the
-    # terminal window was closed, and the seller could not shut it down
-    # without Task Manager. A tiny watcher thread polls the parent console
-    # process; as soon as that exits, the HTTP server shuts down cleanly.
     shutdown_holder: dict[str, bool] = {"requested": False}
-
-    def _start_parent_watcher() -> None:
-        """Poll the parent handle; tell the server to shut down when it exits."""
-        if os.name != "nt":
-            return
-        try:
-            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        except Exception:
-            return
-
-        SYNCHRONIZE = 0x00100000
-
-        class _PROCESS_BASIC_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("Reserved1", ctypes.c_void_p),
-                ("PebBaseAddress", ctypes.c_void_p),
-                ("Reserved2", ctypes.c_void_p * 2),
-                ("UniqueProcessId", ctypes.c_void_p),
-                ("InheritedFromUniqueProcessId", ctypes.c_void_p),
-            ]
-
-        def _parent_pid(pid: int) -> int:
-            PROC_Q_LIMITED = 0x1000
-            handle = kernel32.OpenProcess(PROC_Q_LIMITED, False, pid)
-            if not handle:
-                return -1
-            try:
-                info = _PROCESS_BASIC_INFORMATION()
-                out_len = ctypes.c_ulong(0)
-                status = kernel32.NtQueryInformationProcess(
-                    handle, 0, ctypes.byref(info), ctypes.sizeof(info), ctypes.byref(out_len)
-                )
-                if status == 0 and info.InheritedFromUniqueProcessId:
-                    return int(info.InheritedFromUniqueProcessId)
-            finally:
-                kernel32.CloseHandle(handle)
-            return -1
-
-        pid = os.getpid()
-        while True:
-            parent = _parent_pid(pid)
-            if parent <= 0 or parent == pid:
-                return
-            pid = parent
-
-        def _watch_loop() -> None:
-            while True:
-                time.sleep(1.0)
-                handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-                if not handle:
-                    shutdown_holder["requested"] = True
-                    with contextlib.suppress(Exception):
-                        server.shutdown()
-                    return
-                kernel32.CloseHandle(handle)
-
-        watcher = threading.Thread(target=_watch_loop, name="seller-panel-parent-watch", daemon=True)
-        watcher.start()
-
-    with contextlib.suppress(Exception):
-        _start_parent_watcher()
+    try:
+        _start_parent_watcher(server, shutdown_holder)
+    except Exception:
+        # If the Windows parent watcher cannot be installed, do not leave a
+        # local server running that could outlive its seller console.
+        server.server_close()
+        raise
 
     try:
         server.serve_forever()

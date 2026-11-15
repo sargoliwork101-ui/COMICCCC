@@ -1203,3 +1203,65 @@ def test_v432_a_damaged_seller_vault_file_is_restored_from_the_backup(tmp_path: 
     recovered = vault.ensure_master_key(sync_source=True)
     assert recovered["public_key_hex"] == rec["public_key_hex"]
     assert recovered["private_seed_hex"] == rec["private_seed_hex"]
+
+
+def test_seller_parent_watcher_stops_server_when_direct_launcher_exits(monkeypatch):
+    """The seller server watches its direct launcher; it must not walk up to PID 1 and return."""
+    import ctypes
+    import types
+    import license_tool.manager as lm
+
+    class FakeKernel32:
+        def __init__(self):
+            self.opened = []
+            self.closed = []
+            self.waits = 0
+
+        def OpenProcess(self, access, inherit, pid):
+            self.opened.append((access, pid))
+            return {111: 1001, 222: 2002}.get(pid, 0)
+
+        def CloseHandle(self, handle):
+            self.closed.append(handle)
+            return True
+
+        def WaitForSingleObject(self, handle, timeout):
+            self.waits += 1
+            return 0x00000102 if self.waits == 1 else 0  # timeout, then direct parent exited
+
+    class FakeNtdll:
+        @staticmethod
+        def NtQueryInformationProcess(handle, info_class, info, size, out_len):
+            ctypes.cast(info, ctypes.POINTER(ctypes.c_void_p))[5] = 222
+            return 0
+
+    class ImmediateThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    class FakeServer:
+        def __init__(self):
+            self.shutdown_calls = 0
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+
+    kernel32 = FakeKernel32()
+    server = FakeServer()
+    state = {"requested": False}
+    monkeypatch.setattr(lm.os, "name", "nt")
+    monkeypatch.setattr(lm.os, "getpid", lambda: 111)
+    monkeypatch.setattr(lm.ctypes, "windll", types.SimpleNamespace(kernel32=kernel32, ntdll=FakeNtdll()), raising=False)
+    monkeypatch.setattr(lm.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(lm.threading, "Thread", ImmediateThread)
+
+    lm._start_parent_watcher(server, state)
+
+    assert kernel32.opened == [(0x1000, 111), (0x00100000, 222)]
+    assert kernel32.waits == 2
+    assert kernel32.closed == [1001, 2002]
+    assert server.shutdown_calls == 1
+    assert state["requested"] is True
