@@ -867,6 +867,39 @@ def _stream_download_with_mirrors(
     raise OcrError(f"Download failed for {label}: {last_exc}") from last_exc
 
 
+def _activate_staged_model_files(staged_files: list[tuple[Path, Path]]) -> None:
+    """Promote a fully downloaded set of model files, rolling back if any replacement fails."""
+    import uuid
+
+    activated: list[tuple[Path, Path | None]] = []
+    try:
+        for staged_path, target_path in staged_files:
+            backup_path: Path | None = None
+            if target_path.exists():
+                backup_path = target_path.with_name(f".{target_path.name}.ocr-backup-{uuid.uuid4().hex}")
+                os.replace(target_path, backup_path)
+            try:
+                os.replace(staged_path, target_path)
+            except Exception:
+                if backup_path is not None and backup_path.exists() and not target_path.exists():
+                    os.replace(backup_path, target_path)
+                raise
+            activated.append((target_path, backup_path))
+    except Exception:
+        for target_path, backup_path in reversed(activated):
+            with contextlib.suppress(OSError):
+                target_path.unlink(missing_ok=True)
+            if backup_path is not None and backup_path.exists():
+                with contextlib.suppress(OSError):
+                    os.replace(backup_path, target_path)
+        raise
+    else:
+        for _, backup_path in activated:
+            if backup_path is not None:
+                with contextlib.suppress(OSError):
+                    backup_path.unlink(missing_ok=True)
+
+
 def _apply_det_input_cap(engine: Any, det_max_side: int | None) -> None:
     """Bound the size of the ONNX text-detection canvas of a RapidOCR instance.
 
@@ -1126,7 +1159,7 @@ class RapidEngine:
                 install_packages(["python-bidi>=0.4.2,<1"])
         _install_fallback_bidi_shim()
 
-    def _download_v5_models_from_mirrors(self, language: str) -> None:
+    def _download_v5_models_from_mirrors(self, language: str, *, force_refresh: bool = False) -> None:
         if self.version != "v5":
             return
         root = self._model_dir()
@@ -1138,27 +1171,41 @@ class RapidEngine:
             dest_cls = root / bundled_cls.name
             if bundled_cls.is_file() and not dest_cls.is_file():
                 shutil.copy2(bundled_cls, dest_cls)
-        for fname in self._expected_models(language):
-            target = root / fname
-            if target.is_file() and target.stat().st_size >= 10_000:
-                continue
-            if target.is_file():
-                target.unlink(missing_ok=True)
-            sub = "det" if "_det_" in fname else "rec"
-            rel = f"onnx/PP-OCRv5/{sub}/{fname}"
-            urls = [
-                (f"https://huggingface.co/RapidAI/RapidOCR/resolve/v3.10.0/{rel}", {}),
-                (f"https://hf-mirror.com/RapidAI/RapidOCR/resolve/v3.10.0/{rel}", {}),
-                (f"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/{rel}", {}),
-            ]
-            _stream_download_with_mirrors(
-                urls,
-                target,
-                label=f"{self.id} ({fname})",
-                min_bytes=10_000,
-                start_p=0.74,
-                span_p=0.16,
-            )
+        staging_dir: Path | None = None
+        staged_models: list[tuple[Path, Path]] = []
+        if force_refresh:
+            import tempfile
+            staging_dir = Path(tempfile.mkdtemp(prefix=".rapidocr-refresh-", dir=root))
+        try:
+            for fname in self._expected_models(language):
+                target = root / fname
+                if target.is_file() and target.stat().st_size >= 10_000 and not force_refresh:
+                    continue
+                if target.is_file() and target.stat().st_size < 10_000 and not force_refresh:
+                    target.unlink(missing_ok=True)
+                sub = "det" if "_det_" in fname else "rec"
+                rel = f"onnx/PP-OCRv5/{sub}/{fname}"
+                urls = [
+                    (f"https://huggingface.co/RapidAI/RapidOCR/resolve/v3.10.0/{rel}", {}),
+                    (f"https://hf-mirror.com/RapidAI/RapidOCR/resolve/v3.10.0/{rel}", {}),
+                    (f"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/{rel}", {}),
+                ]
+                download_target = (staging_dir / fname) if staging_dir else target
+                _stream_download_with_mirrors(
+                    urls,
+                    download_target,
+                    label=f"{self.id} ({fname})",
+                    min_bytes=10_000,
+                    start_p=0.74,
+                    span_p=0.16,
+                )
+                if staging_dir:
+                    staged_models.append((download_target, target))
+            if staged_models:
+                _activate_staged_model_files(staged_models)
+        finally:
+            if staging_dir is not None:
+                shutil.rmtree(staging_dir, ignore_errors=True)
 
     def _ensure_runtime(self) -> None:
         if not self.runtime_installed:
@@ -1360,6 +1407,8 @@ class RapidEngine:
                     if _STANDARD_CANCEL_EVENT.is_set():
                         raise OcrError("عملیات به‌روزرسانی مدل لغو شد.")
                     emit(f"بررسی و آماده‌سازی فایل‌های مدل {self.id} ({selected})…", progress=round(0.74 + 0.18 * (idx / max(1, len(target_langs))), 2))
+                    if self.version == "v5":
+                        self._download_v5_models_from_mirrors(selected, force_refresh=True)
                     self._warm(self._get(selected, allow_download=True))
             cleanup_superseded_engine_files(self.id)
             ver = detect_builtin_installed_version(self.id, self)
@@ -1619,7 +1668,7 @@ class EasyEngine:
         if not self.runtime_installed:
             raise OcrError("EasyOCR نصب شده اما وارد برنامه نمی‌شود. برنامه را ببندید و دوباره اجرا کنید.")
 
-    def _download_easyocr_models_from_mirrors(self, language: str) -> None:
+    def _download_easyocr_models_from_mirrors(self, language: str, *, force_refresh: bool = False) -> None:
         import zipfile
 
         root = self._model_dir()
@@ -1632,48 +1681,70 @@ class EasyEngine:
             "japanese_g2.pth": "japanese_g2.zip",
             "zh_sim_g2.pth": "zh_sim_g2.zip",
         }
-        for pth_name in self._expected_models(language):
-            target_pth = root / pth_name
-            if target_pth.is_file() and target_pth.stat().st_size >= 100_000:
-                continue
-            zip_name = zip_map.get(pth_name)
-            if not zip_name:
-                continue
-            tmp_zip = root / f".{zip_name}.dl"
-            urls = [
-                (f"https://huggingface.co/xiaoyao9184/easyocr/resolve/main/{pth_name}", {}),
-                (f"https://hf-mirror.com/xiaoyao9184/easyocr/resolve/main/{pth_name}", {}),
-                (f"https://github.com/JaidedAI/EasyOCR/releases/download/pre-v1.1.6/{zip_name}", {}),
-            ]
-            last_err: Exception | None = None
-            for url, hdrs in urls:
+        staging_dir: Path | None = None
+        staged_models: list[tuple[Path, Path]] = []
+        if force_refresh:
+            import tempfile
+            staging_dir = Path(tempfile.mkdtemp(prefix=".easyocr-refresh-", dir=root))
+        try:
+            for pth_name in self._expected_models(language):
+                target_pth = root / pth_name
+                if target_pth.is_file() and target_pth.stat().st_size >= 100_000 and not force_refresh:
+                    continue
+                zip_name = zip_map.get(pth_name)
+                if not zip_name:
+                    continue
+                download_pth = staging_dir / pth_name if staging_dir else target_pth
+                work_dir = staging_dir or root
+                tmp_zip = work_dir / f".{zip_name}.dl"
+                part_pth = work_dir / f".{pth_name}.part"
+                urls = [
+                    (f"https://huggingface.co/xiaoyao9184/easyocr/resolve/main/{pth_name}", {}),
+                    (f"https://hf-mirror.com/xiaoyao9184/easyocr/resolve/main/{pth_name}", {}),
+                    (f"https://github.com/JaidedAI/EasyOCR/releases/download/pre-v1.1.6/{zip_name}", {}),
+                ]
+                last_err: Exception | None = None
                 try:
-                    if url.endswith(".zip"):
-                        _stream_download_with_mirrors([(url, hdrs)], tmp_zip, label=f"EasyOCR ({pth_name})", min_bytes=50_000)
-                        with zipfile.ZipFile(tmp_zip) as zf:
-                            for member in zf.namelist():
-                                if Path(member).name == pth_name:
-                                    part_pth = root / f".{pth_name}.part"
-                                    with zf.open(member) as src, part_pth.open("wb") as dst:
-                                        shutil.copyfileobj(src, dst)
-                                    os.replace(part_pth, target_pth)
-                                    break
-                        tmp_zip.unlink(missing_ok=True)
-                    else:
-                        _stream_download_with_mirrors([(url, hdrs)], target_pth, label=f"EasyOCR ({pth_name})", min_bytes=100_000)
-                    if target_pth.is_file() and target_pth.stat().st_size >= 100_000:
-                        last_err = None
-                        break
-                except OcrError as oe:
+                    for url, hdrs in urls:
+                        try:
+                            if url.endswith(".zip"):
+                                _stream_download_with_mirrors([(url, hdrs)], tmp_zip, label=f"EasyOCR ({pth_name})", min_bytes=50_000)
+                                with zipfile.ZipFile(tmp_zip) as zf:
+                                    for member in zf.namelist():
+                                        if Path(member).name == pth_name:
+                                            with zf.open(member) as src, part_pth.open("wb") as dst:
+                                                shutil.copyfileobj(src, dst)
+                                            os.replace(part_pth, download_pth)
+                                            break
+                                tmp_zip.unlink(missing_ok=True)
+                            else:
+                                _stream_download_with_mirrors([(url, hdrs)], download_pth, label=f"EasyOCR ({pth_name})", min_bytes=100_000)
+                            if download_pth.is_file() and download_pth.stat().st_size >= 100_000:
+                                last_err = None
+                                break
+                        except OcrError as oe:
+                            if _STANDARD_CANCEL_EVENT.is_set():
+                                raise
+                            last_err = oe
+                        except Exception as exc:
+                            last_err = exc
+                        finally:
+                            tmp_zip.unlink(missing_ok=True)
+                            part_pth.unlink(missing_ok=True)
+                    if force_refresh and (not download_pth.is_file() or download_pth.stat().st_size < 100_000):
+                        last_err = last_err or OcrError(f"Downloaded EasyOCR model {pth_name} was incomplete")
+                    if last_err is not None and (force_refresh or not target_pth.is_file()):
+                        raise OcrError(f"Could not download EasyOCR model {pth_name}: {last_err}") from last_err
+                    if staging_dir and download_pth.is_file() and download_pth.stat().st_size >= 100_000:
+                        staged_models.append((download_pth, target_pth))
+                finally:
                     tmp_zip.unlink(missing_ok=True)
-                    if _STANDARD_CANCEL_EVENT.is_set():
-                        raise
-                    last_err = oe
-                except Exception as exc:
-                    tmp_zip.unlink(missing_ok=True)
-                    last_err = exc
-            if last_err is not None and not target_pth.is_file():
-                raise OcrError(f"Could not download EasyOCR model {pth_name}: {last_err}") from last_err
+                    part_pth.unlink(missing_ok=True)
+            if staged_models:
+                _activate_staged_model_files(staged_models)
+        finally:
+            if staging_dir is not None:
+                shutil.rmtree(staging_dir, ignore_errors=True)
 
     def _reader(self, language: str, download: bool):
         if not self.runtime_installed:
@@ -1805,6 +1876,7 @@ class EasyEngine:
                 emit(f"بستهٔ اجرایی EasyOCR ({cur_ver}) در آخرین نسخه است…", progress=0.68)
             for idx, selected in enumerate(target_langs):
                 emit(f"آماده‌سازی وزن‌های EasyOCR برای {selected}…", progress=round(0.72 + 0.20 * (idx / max(1, len(target_langs))), 2))
+                self._download_easyocr_models_from_mirrors(selected, force_refresh=True)
                 self._reader(selected, True)
                 self._model_dir().mkdir(parents=True, exist_ok=True)
                 (self._model_dir() / f".ready-{selected}").write_text("downloaded by user request\n", encoding="utf-8")
@@ -2365,12 +2437,19 @@ class TesseractEngine:
         trim_process_memory()
         return freed
 
-    def _download_language_file(self, language: str, *, timeout: float = 30.0) -> Path:
+    def _download_language_file(
+        self,
+        language: str,
+        *,
+        timeout: float = 30.0,
+        target_dir: Path | None = None,
+    ) -> Path:
         if language not in LANGUAGES:
             raise OcrError(f"زبان «{language}» برای Tesseract پشتیبانی نمی‌شود.")
         if _STANDARD_CANCEL_EVENT.is_set():
             raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
-        self._model_dir().mkdir(parents=True, exist_ok=True)
+        model_dir = target_dir or self._model_dir()
+        model_dir.mkdir(parents=True, exist_ok=True)
         # For Persian (`fas`), use full float32 `tessdata_best` (~3.33 MB) instead of int8 `tessdata_fast` (431 KB):
         # int8 quantization collapses `گ`'s twin sarkesh strokes into `ک`, whereas float32 `tessdata_best` distinguishes them cleanly.
         best_sources: list[tuple[str, dict[str, str]]] = (
@@ -2397,8 +2476,8 @@ class TesseractEngine:
             (f"https://hf-mirror.com/datasets/tesseract-ocr/tessdata_fast/resolve/main/{language}.traineddata", {}),
             (f"https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_fast@main/{language}.traineddata", {}),
         ]
-        temporary = self._model_dir() / f".{language}.traineddata.part"
-        target = self._model_dir() / f"{language}.traineddata"
+        temporary = model_dir / f".{language}.traineddata.part"
+        target = model_dir / f"{language}.traineddata"
         emit(f"دانلود فایل زبان Tesseract ({language}) از منبع رسمی آغاز شد", progress=0.20)
         last_exc: Exception | None = None
         for attempt_idx, (url, extra_headers) in enumerate(sources):
@@ -2489,6 +2568,7 @@ class TesseractEngine:
     def update(self, language: str = "eng") -> None:
         _STANDARD_CANCEL_EVENT.clear()
         emit("شروع به‌روزرسانی خودکار Tesseract…", progress=0.06)
+        staging_dir: Path | None = None
         try:
             if os.name == "nt":
                 cur_ver = detect_builtin_installed_version(self.id, self)
@@ -2512,9 +2592,16 @@ class TesseractEngine:
             if "fas" in self.ready_languages and "fas" not in local_langs:
                 local_langs.append("fas")
             target_langs = local_langs or [language if language in LANGUAGES else "eng"]
-            last_target: Path | None = None
+            import tempfile
+            self._model_dir().mkdir(parents=True, exist_ok=True)
+            staging_dir = Path(tempfile.mkdtemp(prefix=".tesseract-refresh-", dir=self._model_dir()))
+            staged_languages: list[tuple[Path, Path]] = []
             for selected in target_langs:
-                last_target = self._download_language_file(selected)
+                staged_path = self._download_language_file(selected, target_dir=staging_dir)
+                staged_languages.append((staged_path, self._model_dir() / f"{selected}.traineddata"))
+            _activate_staged_model_files(staged_languages)
+            self._ensure_tsv_config()
+            last_target: Path | None = self._model_dir() / f"{target_langs[-1]}.traineddata" if target_langs else None
             cleanup_superseded_engine_files(self.id)
             ver = detect_builtin_installed_version(self.id, self)
             remote_rev = fetch_tessdata_revision(target_langs)
@@ -2528,6 +2615,8 @@ class TesseractEngine:
             )
             emit(f"مدل Tesseract با موفقیت به نسخهٔ {ver or 'جدید'} به‌روزرسانی شد", "success", progress=1.0)
         finally:
+            if staging_dir is not None:
+                shutil.rmtree(staging_dir, ignore_errors=True)
             self.unload()
             trim_process_memory()
 

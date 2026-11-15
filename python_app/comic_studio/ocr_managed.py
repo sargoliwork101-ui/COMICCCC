@@ -859,10 +859,21 @@ def cleanup_superseded_engine_files(engine_id: str) -> int:
         return 0
 
     # 1. Clean incomplete/temporary download remnants across models_dir
-    for pattern in ("*.part", "*.tmp", "*.incomplete", "*.bak"):
+    for pattern in ("*.part", "*.tmp", "*.incomplete", "*.bak", "*.ocr-backup-*"):
         for leftover in root.rglob(pattern):
             if leftover.is_file():
                 freed += _remove_path_safely(leftover)
+    for base_dir, patterns in (
+        (root / "rapidocr", (".rapidocr-refresh-*",)),
+        (root / "easyocr", (".easyocr-refresh-*",)),
+        (root / "tesseract", (".tesseract-refresh-*",)),
+        (root, (".mineru.ocr-stage-*",)),
+        (root / "hf-repos", (".*.ocr-stage-*", ".*.ocr-backup-*")),
+    ):
+        for pattern in patterns:
+            for stale_dir in base_dir.glob(pattern):
+                if stale_dir.is_dir():
+                    freed += _remove_path_safely(stale_dir)
 
     # 2. Isolated venv cleanup: remove broken `~pkg` remnants from Windows upgrades & duplicate older .dist-info
     spec = ISOLATED_ENGINE_SPECS.get(engine_id)
@@ -906,6 +917,12 @@ def cleanup_superseded_engine_files(engine_id: str) -> int:
             legacy_dir = root / "hf-repos" / legacy_name
             if safe_name != legacy_name and safe_dir.is_dir() and any(safe_dir.iterdir()) and legacy_dir.is_dir():
                 freed += _remove_path_safely(legacy_dir)
+            # A crashed/forced-closed update can leave a sibling staging/backup tree behind.
+            # Successful update cleanup is the safe point to remove those superseded copies.
+            for pattern in (".*.ocr-stage-*", ".*.ocr-backup-*"):
+                for stale_dir in (root / "hf-repos").glob(pattern):
+                    if stale_dir.is_dir():
+                        freed += _remove_path_safely(stale_dir)
             # Clean local_dir `.cache/huggingface/download` temp chunks
             for dl_cache in (safe_dir / ".cache", legacy_dir / ".cache"):
                 if dl_cache.is_dir():
@@ -944,13 +961,14 @@ def cleanup_superseded_engine_files(engine_id: str) -> int:
                     freed += _remove_path_safely(archive)
             official = paddlex_dir / "official_models"
             if official.is_dir():
-                has_newer_vl = any(
-                    (official / name).is_dir()
-                    for name in ("PaddleOCR-VL-1.5-0.9B", "PaddleOCR-VL-1.6-0.9B")
-                )
+                has_v15 = (official / "PaddleOCR-VL-1.5-0.9B").is_dir()
+                has_v16 = (official / "PaddleOCR-VL-1.6-0.9B").is_dir()
                 old_v1 = official / "PaddleOCR-VL-0.9B"
-                if has_newer_vl and old_v1.is_dir():
+                if (has_v15 or has_v16) and old_v1.is_dir():
                     freed += _remove_path_safely(old_v1)
+                old_v15 = official / "PaddleOCR-VL-1.5-0.9B"
+                if has_v16 and old_v15.is_dir():
+                    freed += _remove_path_safely(old_v15)
 
     # 5. MinerU temporary download chunks & Hunyuan legacy excluded subfolders
     if engine_id == "mineru-2-5-pro":

@@ -44,7 +44,7 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.50"
+    assert health.json()["version"] == "4.51"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
@@ -3290,7 +3290,7 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.50"
+    assert APP_VERSION == "4.51"
 
     default_root = tmp_path / "default_c_drive"
     custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
@@ -3503,8 +3503,13 @@ def test_v400_unplugged_custom_drive_fallback_remote_guard_and_app_relocation(tm
 def test_v401_real_progress_bars_across_paged_ocr_import_backup_and_weight_download(client, tmp_path, monkeypatch):
     import threading
     from comic_studio.activity import reporting
+    import comic_studio.main as main_mod
     import comic_studio.ocr as ocr_mod
     import comic_studio.ocr_managed as managed_mod
+    from comic_studio.ocr import RapidEngine
+
+    # This test mocks OCR inference; it must not depend on optional RapidOCR packages on the test host.
+    monkeypatch.setattr(RapidEngine, "runtime_installed", property(lambda self: True))
 
     # 1. File import emits real monotonic per-file progress in (0, 1]
     client.post("/api/activity/clear")
@@ -3528,7 +3533,7 @@ def test_v401_real_progress_bars_across_paged_ocr_import_backup_and_weight_downl
 
     # 2. Multi-page UI OCR (batch_index / batch_total) NEVER emits 1.0 on page 1 or 2 of 3
     monkeypatch.setattr(
-        ocr_mod,
+        main_mod,
         "recognize_image",
         lambda *_a, **_kw: [{"id": 1, "text": "HELLO", "confidence": 0.92, "x0": 10, "y0": 10, "x1": 90, "y1": 35}],
     )
@@ -3718,6 +3723,10 @@ def test_v405_manual_blocks_watermarks_erase_original_and_bundled_models(client,
     from comic_studio.local_nmt import LocalNmtManager
     from comic_studio.ocr import RapidEngine
     from comic_studio.watermark_render import apply_watermark_pil, has_active_watermark, shape_visual_text
+
+    # The bundled model paths are synthetic fixtures; readiness should not depend on optional
+    # RapidOCR/ONNX packages being installed in this test environment.
+    monkeypatch.setattr(RapidEngine, "runtime_installed", property(lambda self: True))
 
     # 1. Persian shaping + PIL watermark rendering (Text + Transparent PNG Logo across corner & tile)
     shaped = shape_visual_text("سلام دنیا 123")

@@ -378,7 +378,7 @@ main()
     };
     const onResponse = (response) => { if (second && response.request() === second) secondDone(); };
     page.on('request', onRequest); page.on('response', onResponse);
-    await page.reload({ waitUntil: 'networkidle0' }); await page.waitForSelector('#grid .item');
+    await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForSelector('#grid .item');
     await page.click('#exportBtn'); await page.select('#exportOverlayMode', 'ocr');
     const heldStarted = Date.now(); while (!held && Date.now() - heldStarted < 5000) await sleep(50);
     assert.ok(held, 'the older preview request must be pending for the ordering regression');
@@ -1505,7 +1505,7 @@ main()
     assert.equal(await page.evaluate(() => state.project.images[0].blocks[0].verticalAlign === 'top' && state.project.images[0].blocks[1].verticalAlign === 'bottom'), true, 'mixed vertical positions survive preview and export setup');
     console.log('PASS: real editor events preserve latest edits, same-size multi-alignment, mixed languages, and visibility');
 
-    await page.reload({ waitUntil: 'networkidle0' }); await page.waitForSelector('#grid .item img');
+    await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForSelector('#grid .item img');
     await page.waitForFunction(() => state.project.images[0].edited === true, { timeout: 5000 });
     assert.equal(await previewDifference(page), 0, 'saved edits must survive reload in the visible preview');
 
