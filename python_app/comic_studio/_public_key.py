@@ -4,7 +4,7 @@ IMPORTANT SECURITY NOTE:
 - Only the 32-byte PUBLIC verification key lives in the client application.
 - The corresponding 32-byte PRIVATE signing key NEVER ships with the app or repository;
   it stays exclusively inside the seller's private folder (`~/.comic-ocr-studio-seller/`).
-- Running `python_app/license_manager.py` (or `start_license_manager.bat`) on the seller's
+- Running `python_app/license_tool/manager.py` (or `license_tool/start_license_manager.bat`) on the seller's
   computer automatically creates the seller's private master key (if absent) and syncs
   its public verification key into `PUBLIC_VERIFY_KEY_HEX` below before building `.exe`.
 """
