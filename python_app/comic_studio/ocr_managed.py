@@ -1609,7 +1609,7 @@ def _fetch_json(url: str, timeout: float = 8.0) -> Any:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Comic-OCR-Studio",
+            "User-Agent": "HaSaYa-Studio",
             "Accept": "application/json",
         },
     )
@@ -1682,7 +1682,7 @@ def install_tesseract_runtime(error_cls: type[Exception], cancel_event: threadin
         elevation_err: OSError | None = None
         try:
             emit(f"دریافت خودکار موتور اجرایی Tesseract ({version_tag}) برای ویندوز آغاز شد", progress=0.10)
-            req = urllib.request.Request(installer_url, headers={"User-Agent": "Comic-OCR-Studio"})
+            req = urllib.request.Request(installer_url, headers={"User-Agent": "HaSaYa-Studio"})
             with urllib.request.urlopen(req, timeout=300) as resp, part_path.open("wb") as out:
                 hdrs = getattr(resp, "headers", None)
                 raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None
@@ -2420,7 +2420,7 @@ class IsolatedOcrEngine:
         suffix = ".tar.gz" if asset_name.lower().endswith(".tar.gz") else ".zip"
         arc_tmp = llama_dir / f".llama-bin{suffix}.part"
         try:
-            req = urllib.request.Request(wanted_url, headers={"User-Agent": "Comic-OCR-Studio"})
+            req = urllib.request.Request(wanted_url, headers={"User-Agent": "HaSaYa-Studio"})
             with urllib.request.urlopen(req, timeout=30) as resp, arc_tmp.open("wb") as out:
                 hdrs = getattr(resp, "headers", None)
                 raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None

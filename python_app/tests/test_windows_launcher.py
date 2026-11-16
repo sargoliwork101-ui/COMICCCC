@@ -122,7 +122,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
         zip_directory,
     )
 
-    assert 'ComicOCRStudio.exe' in NORMAL
+    assert 'HaSaYaStudio.exe' in NORMAL
     assert ':fast_spec_check' in NORMAL
     assert 'wheelhouse' in NORMAL.lower()
     assert 'ctranslate2' in NORMAL and 'sentencepiece' in NORMAL
@@ -130,8 +130,8 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     offline_bat = (ROOT / "build_windows_offline.bat").read_text(encoding="utf-8")
     assert "offline_packaging.build_offline_package" in offline_bat
     assert "--with-nmt" in offline_bat
-    assert "ComicOCRStudio-Offline-Setup-%APP_VERSION%" in offline_bat
-    assert 'set "APP_VERSION=4.54"' in offline_bat
+    assert "HaSaYaStudio-Offline-Setup-%APP_VERSION%" in offline_bat
+    assert 'set "APP_VERSION=4.55"' in offline_bat
 
     # v4.40: فرادادهٔ نسخهٔ نصاب C# باید از نسخهٔ پایتون تغذیه شود، نه رشتهٔ ثابت قدیمی.
     builder = (ROOT / "offline_packaging" / "build_offline_package.py").read_text(encoding="utf-8")
@@ -153,12 +153,12 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
 
     iss_text = (ROOT / "offline_packaging" / "ComicOCRStudio.iss").read_text(encoding="utf-8")
     assert "PrivilegesRequired=lowest" in iss_text
-    assert "ComicOCRStudio.exe" in iss_text
+    assert "HaSaYaStudio.exe" in iss_text
 
     # Verify multi-resolution .ico generation from static/assets/icon128.png
     ico_out = generate_windows_ico(
         ROOT / "comic_studio" / "static" / "assets" / "icon128.png",
-        tmp_path / "ComicOCRStudio.ico",
+        tmp_path / "HaSaYaStudio.ico",
     )
     assert ico_out.is_file() and ico_out.stat().st_size > 1000
     with Image.open(ico_out) as ico_img:
@@ -187,7 +187,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     # Verify SFX self-extracting installer binary layout & trailer validation
     sample_app = tmp_path / "app_dir"
     sample_app.mkdir()
-    (sample_app / "ComicOCRStudio.exe").write_bytes(b"MZ-MOCK-EXE")
+    (sample_app / "HaSaYaStudio.exe").write_bytes(b"MZ-MOCK-EXE")
     (sample_app / "README-OFFLINE-FA.txt").write_text("سلام", encoding="utf-8")
     payload_zip = zip_directory(sample_app, tmp_path / "payload.zip")
     stub_exe = tmp_path / "stub.exe"
@@ -200,7 +200,7 @@ def test_v405_launcher_fast_path_wheelhouse_and_offline_packaging(tmp_path):
     assert raw[-8:] == SFX_MAGIC
     import io
     with zipfile.ZipFile(io.BytesIO(raw[offset : offset + length])) as zf:
-        assert "ComicOCRStudio.exe" in zf.namelist()
+        assert "HaSaYaStudio.exe" in zf.namelist()
         assert "README-OFFLINE-FA.txt" in zf.namelist()
 
 
@@ -371,14 +371,14 @@ def test_v433_the_offline_builder_checks_the_built_app_before_packaging(tmp_path
     """v4.33: the built app folder must contain the exe, the program files and the models."""
     builder = _builder_module()
 
-    app_dir = tmp_path / "ComicOCRStudio"
+    app_dir = tmp_path / "HaSaYaStudio"
     with pytest.raises(builder.BuildError) as excinfo:
         builder.verify_built_app(app_dir)
     assert "not usable" in str(excinfo.value)
 
     (app_dir / "_internal" / "comic_studio" / "static").mkdir(parents=True)
     (app_dir / "_internal" / "comic_studio" / "static" / "index.html").write_text("<html></html>", encoding="utf-8")
-    (app_dir / "ComicOCRStudio.exe").write_bytes(b"MZ")
+    (app_dir / "HaSaYaStudio.exe").write_bytes(b"MZ")
     (app_dir / "_internal" / "bundled_models" / "rapidocr").mkdir(parents=True)
     (app_dir / "_internal" / "bundled_models" / "rapidocr" / "det.onnx").write_bytes(b"onnx")
     builder.verify_built_app(app_dir)
@@ -657,7 +657,7 @@ def test_v437_the_offline_readme_opens_correctly_in_notepad(tmp_path):
     builder.write_offline_readme(target, include_nmt=False)
     raw = (target / "README-OFFLINE-FA.txt").read_bytes()
     assert raw.startswith(b"\xef\xbb\xbf"), "the offline read-me must start with a UTF-8 BOM"
-    assert "Comic OCR Studio" in raw.decode("utf-8-sig")
+    assert "HaSaYa Studio" in raw.decode("utf-8-sig")
 
 
 def test_v437_the_context_helper_never_reads_a_later_loop_value():

@@ -93,7 +93,7 @@ def test_v429_probe_tells_a_dying_studio_instance_apart_from_a_live_one():
             finally:
                 conn.close()
 
-    payload = {"name": "Comic OCR Studio", "version": "4.29", "shutdownPending": True}
+    payload = {"name": "HaSaYa Studio", "version": "4.29", "shutdownPending": True}
     worker = threading.Thread(target=serve, args=(payload,), daemon=True)
     worker.start()
     try:
@@ -185,7 +185,7 @@ def test_v430_the_browser_waits_for_the_app_to_answer_not_only_for_the_socket():
 
     # 3) The app answers with its health payload - now the browser may open.
     live_port = _free_port()
-    server = _serve_health(live_port, {"name": "Comic OCR Studio", "version": "4.54"})
+    server = _serve_health(live_port, {"name": "HaSaYa Studio", "version": "4.55"})
     try:
         assert _app_answers("127.0.0.1", live_port) is True
         worker = threading.Thread(

@@ -10133,7 +10133,7 @@ function buildCustomerOrderRequestText(explicitHwid = '') {
   const hwid = String(explicitHwid || state.licenseStatus?.hardwareId || $('gateHardwareId')?.textContent || $('licInfoHwid')?.textContent || '').trim();
   return [
     'سلام و وقت بخیر',
-    'درخواست تهیه / تمدید لایسنس نرم‌افزار Comic OCR Studio را دارم.',
+    'درخواست تهیه / تمدید لایسنس نرم‌افزار HaSaYa Studio را دارم.',
     `🖥 کد شناسایی سیستم من: ${hwid}`,
     'لطفاً شرایط دریافت لایسنس را ارسال فرمایید.',
   ].join('\n');

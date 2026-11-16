@@ -1,36 +1,36 @@
-; Inno Setup Script for Comic OCR Studio (100% Offline Windows Installer)
+; Inno Setup Script for HaSaYa Studio (100% Offline Windows Installer)
 ; Automatically invoked by offline_packaging/build_offline_package.py when ISCC.exe is installed.
 
 #ifndef AppVersion
-  #define AppVersion "4.54"
+  #define AppVersion "4.55"
 #endif
 #ifndef SourceDistDir
-  #define SourceDistDir "..\dist\ComicOCRStudio"
+  #define SourceDistDir "..\dist\HaSaYaStudio"
 #endif
 #ifndef IconPath
-  #define IconPath "..\build\ComicOCRStudio.ico"
+  #define IconPath "..\build\HaSaYaStudio.ico"
 #endif
 #ifndef OutputDirPath
   #define OutputDirPath "..\dist"
 #endif
 #ifndef OutputBaseName
-  #define OutputBaseName "ComicOCRStudio-Offline-Setup-4.54"
+  #define OutputBaseName "HaSaYaStudio-Offline-Setup-4.55"
 #endif
 
 [Setup]
 AppId={{D9C48341-7C9E-4982-9F88-405C0B1C57A0}
-AppName=Comic OCR Studio
+AppName=HaSaYa Studio
 AppVersion={#AppVersion}
-AppVerName=Comic OCR Studio {#AppVersion}
-AppPublisher=Comic OCR Studio
-DefaultDirName={autopf}\ComicOCRStudio
-DefaultGroupName=Comic OCR Studio
+AppVerName=HaSaYa Studio {#AppVersion}
+AppPublisher=HaSaYa Studio
+DefaultDirName={autopf}\HaSaYaStudio
+DefaultGroupName=HaSaYa Studio
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir={#OutputDirPath}
 OutputBaseFilename={#OutputBaseName}
 SetupIconFile={#IconPath}
-UninstallDisplayIcon={app}\ComicOCRStudio.exe
+UninstallDisplayIcon={app}\HaSaYaStudio.exe
 Compression=lzma2/fast
 SolidCompression=yes
 WizardStyle=modern
@@ -47,9 +47,9 @@ Name: "desktopicon"; Description: "Create a &Desktop shortcut (ساخت میان
 Source: "{#SourceDistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Comic OCR Studio"; Filename: "{app}\ComicOCRStudio.exe"; WorkingDir: "{app}"
-Name: "{group}\Uninstall Comic OCR Studio"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Comic OCR Studio"; Filename: "{app}\ComicOCRStudio.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\HaSaYa Studio"; Filename: "{app}\HaSaYaStudio.exe"; WorkingDir: "{app}"
+Name: "{group}\Uninstall HaSaYa Studio"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\HaSaYa Studio"; Filename: "{app}\HaSaYaStudio.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\ComicOCRStudio.exe"; Description: "Launch Comic OCR Studio (اجرای فوری برنامه)"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\HaSaYaStudio.exe"; Description: "Launch HaSaYa Studio (اجرای فوری برنامه)"; Flags: nowait postinstall skipifsilent

@@ -284,7 +284,7 @@ def create_app() -> FastAPI:
                     resp = JSONResponse(
                         {"detail": "Authentication required."},
                         status_code=401,
-                        headers={"WWW-Authenticate": 'Basic realm="Comic OCR Studio", charset="UTF-8"', "Cache-Control": "no-store"},
+                        headers={"WWW-Authenticate": 'Basic realm="HaSaYa Studio", charset="UTF-8"', "Cache-Control": "no-store"},
                     )
                     await resp(scope, receive, send)
                     return

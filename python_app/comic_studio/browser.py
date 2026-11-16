@@ -126,7 +126,7 @@ def ask_preferences(
     input_fn: Callable[[str], str] = input,
     print_fn: Callable[[str], None] = print,
 ) -> tuple[str, str]:
-    print_fn("\nWhich browser should open Comic OCR Studio?")
+    print_fn("\nWhich browser should open HaSaYa Studio?")
     choices = [("1", "default"), ("2", "edge"), ("3", "chrome"), ("4", "firefox"), ("5", "none")]
     for key, browser in choices:
         print_fn(f"  {key}. {BROWSER_LABELS[browser]}")

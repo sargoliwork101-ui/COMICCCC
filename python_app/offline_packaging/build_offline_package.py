@@ -1,4 +1,4 @@
-"""Build standalone Windows `.exe` (`ComicOCRStudio.exe`) and 1-click offline Setup `.exe`.
+"""Build standalone Windows `.exe` (`HaSaYaStudio.exe`) and 1-click offline Setup `.exe`.
 
 Supports two bundle modes (matching user preference):
   1. Default (`--base`): Standalone app + bundled base RapidOCR models (100% offline OCR, compact size).
@@ -6,8 +6,8 @@ Supports two bundle modes (matching user preference):
      (100% offline OCR + Persian/English translation with zero internet access).
 
 Produces:
-  - `dist/ComicOCRStudio/ComicOCRStudio.exe` (PyInstaller `onedir` fast-start GUI executable)
-  - `dist/ComicOCRStudio-Offline-Setup-<version>.exe` (via Inno Setup `ISCC.exe` if present,
+  - `dist/HaSaYaStudio/HaSaYaStudio.exe` (PyInstaller `onedir` fast-start GUI executable)
+  - `dist/HaSaYaStudio-Offline-Setup-<version>.exe` (via Inno Setup `ISCC.exe` if present,
     falling back automatically to Windows built-in `.NET` `csc.exe` self-extracting GUI installer)
   - Optional `wheelhouse/` download (`--download-wheelhouse`) for portable `.bat` offline installs.
 """
@@ -125,8 +125,8 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: System.Reflection.AssemblyTitle("Comic OCR Studio Offline Setup")]
-[assembly: System.Reflection.AssemblyProduct("Comic OCR Studio")]
+[assembly: System.Reflection.AssemblyTitle("HaSaYa Studio Offline Setup")]
+[assembly: System.Reflection.AssemblyProduct("HaSaYa Studio")]
 [assembly: System.Reflection.AssemblyVersion("__APP_ASSEMBLY_VERSION__")]
 
 namespace ComicStudioInstaller {
@@ -146,12 +146,12 @@ namespace ComicStudioInstaller {
             }
             string defaultDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Programs", "ComicOCRStudio"
+                "Programs", "HaSaYaStudio"
             );
             string targetDir = string.IsNullOrWhiteSpace(customDir) ? defaultDir : customDir;
             if (silent) {
                 ExtractPayload(Application.ExecutablePath, targetDir, null);
-                CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Comic OCR Studio.lnk"), Path.Combine(targetDir, "ComicOCRStudio.exe"), targetDir);
+                CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "HaSaYa Studio.lnk"), Path.Combine(targetDir, "HaSaYaStudio.exe"), targetDir);
                 return 0;
             }
             Application.EnableVisualStyles();
@@ -178,7 +178,7 @@ namespace ComicStudioInstaller {
                     throw new InvalidOperationException("محدودهٔ آرشیو نصاب نامعتبر است.");
 
                 Directory.CreateDirectory(destDir);
-                string tempZip = Path.Combine(Path.GetTempPath(), "ComicOCRStudio-Setup-" + Guid.NewGuid().ToString("N") + ".zip");
+                string tempZip = Path.Combine(Path.GetTempPath(), "HaSaYaStudio-Setup-" + Guid.NewGuid().ToString("N") + ".zip");
                 try {
                     fs.Seek(zipOffset, SeekOrigin.Begin);
                     using (var outZip = new FileStream(tempZip, FileMode.Create, FileAccess.Write, FileShare.None)) {
@@ -230,7 +230,7 @@ namespace ComicStudioInstaller {
                 shortcut.TargetPath = targetExe;
                 shortcut.WorkingDirectory = workDir;
                 shortcut.IconLocation = targetExe + ",0";
-                shortcut.Description = "Comic OCR Studio - Offline OCR & Translation";
+                shortcut.Description = "HaSaYa Studio - Offline OCR & Translation";
                 shortcut.Save();
             } catch { }
         }
@@ -247,7 +247,7 @@ namespace ComicStudioInstaller {
         private readonly Button browseBtn;
 
         public SetupForm(string initialDir) {
-            Text = "نصب آفلاین Comic OCR Studio " + "__APP_VERSION__";
+            Text = "نصب آفلاین HaSaYa Studio " + "__APP_VERSION__";
             Size = new Size(560, 340);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -258,7 +258,7 @@ namespace ComicStudioInstaller {
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             var title = new Label {
-                Text = "نصاب آفلاین و یک‌کلیکی Comic OCR Studio نسخهٔ __APP_VERSION__",
+                Text = "نصاب آفلاین و یک‌کلیکی HaSaYa Studio نسخهٔ __APP_VERSION__",
                 Font = new Font("Tahoma", 11f, FontStyle.Bold),
                 AutoSize = false,
                 Bounds = new Rectangle(20, 16, 505, 28)
@@ -283,9 +283,9 @@ namespace ComicStudioInstaller {
                 Bounds = new Rectangle(20, 100, 98, 28)
             };
             browseBtn.Click += (s, e) => {
-                using (var dlg = new FolderBrowserDialog { SelectedPath = dirBox.Text, Description = "پوشهٔ نصب Comic OCR Studio را انتخاب کنید" }) {
+                using (var dlg = new FolderBrowserDialog { SelectedPath = dirBox.Text, Description = "پوشهٔ نصب HaSaYa Studio را انتخاب کنید" }) {
                     if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrWhiteSpace(dlg.SelectedPath))
-                        dirBox.Text = Path.Combine(dlg.SelectedPath, "ComicOCRStudio");
+                        dirBox.Text = Path.Combine(dlg.SelectedPath, "HaSaYaStudio");
                 }
             };
             desktopChk = new CheckBox {
@@ -294,7 +294,7 @@ namespace ComicStudioInstaller {
                 Bounds = new Rectangle(20, 140, 505, 24)
             };
             launchChk = new CheckBox {
-                Text = "اجرای فوری Comic OCR Studio بلافاصله پس از پایان نصب",
+                Text = "اجرای فوری HaSaYa Studio بلافاصله پس از پایان نصب",
                 Checked = true,
                 Bounds = new Rectangle(20, 168, 505, 24)
             };
@@ -343,12 +343,12 @@ namespace ComicStudioInstaller {
                             }));
                         } catch { }
                     });
-                    string exeTarget = Path.Combine(dest, "ComicOCRStudio.exe");
+                    string exeTarget = Path.Combine(dest, "HaSaYaStudio.exe");
                     if (desktopChk.Checked) {
-                        Program.CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Comic OCR Studio.lnk"), exeTarget, dest);
-                        string startPrograms = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Comic OCR Studio");
+                        Program.CreateShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "HaSaYa Studio.lnk"), exeTarget, dest);
+                        string startPrograms = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "HaSaYa Studio");
                         Directory.CreateDirectory(startPrograms);
-                        Program.CreateShortcut(Path.Combine(startPrograms, "Comic OCR Studio.lnk"), exeTarget, dest);
+                        Program.CreateShortcut(Path.Combine(startPrograms, "HaSaYa Studio.lnk"), exeTarget, dest);
                     }
                     BeginInvoke((Action)(() => {
                         bar.Value = 100;
@@ -356,7 +356,7 @@ namespace ComicStudioInstaller {
                         if (launchChk.Checked && File.Exists(exeTarget)) {
                             try { Process.Start(new ProcessStartInfo(exeTarget) { WorkingDirectory = dest }); } catch { }
                         } else {
-                            MessageBox.Show(this, "نصب آفلاین Comic OCR Studio با موفقیت انجام شد.", "پایان نصب", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            MessageBox.Show(this, "نصب آفلاین HaSaYa Studio با موفقیت انجام شد.", "پایان نصب", MessageBoxButtons.OK, MessageBoxIcon.Information);
                         }
                         ExitCode = 0;
                         Close();
@@ -773,7 +773,7 @@ def pyinstaller_command(
         "--optimize",
         "1",
         "--name",
-        "ComicOCRStudio",
+        "HaSaYaStudio",
         "--distpath",
         str(dist_dir),
         "--workpath",
@@ -847,10 +847,10 @@ def write_offline_readme(target_dir: Path, *, include_nmt: bool) -> None:
         else "- موتور پایهٔ OCR آفلاین داخل بسته قرار دارد؛ مدل مترجم آفلاین را نیز هر زمان بخواهید از داخل برنامه می‌توانید اضافه کنید."
     )
     text = (
-        f"Comic OCR Studio v{APP_VERSION} — نسخهٔ اجرایی آفلاین ویندوز\r\n"
+        f"HaSaYa Studio v{APP_VERSION} — نسخهٔ اجرایی آفلاین ویندوز\r\n"
         "=============================================================\r\n\r\n"
         "روش اجرا (فقط یک کلیک):\r\n"
-        "  روی فایل ComicOCRStudio.exe دوبار کلیک کنید.\r\n"
+        "  روی فایل HaSaYaStudio.exe دوبار کلیک کنید.\r\n"
         "  برنامه بلافاصله سرور محلی را بالا آورده و در مرورگر شما باز می‌شود.\r\n\r\n"
         "ویژگی‌های بسته:\r\n"
         "  - بدون نیاز به نصب پایتون و بدون نیاز به اتصال اینترنت.\r\n"
@@ -944,7 +944,7 @@ def build_windows_installer(
     icon_path: Path,
     suffix: str = "",
 ) -> Path:
-    base_name = f"ComicOCRStudio-Offline-Setup-{APP_VERSION}{suffix}"
+    base_name = f"HaSaYaStudio-Offline-Setup-{APP_VERSION}{suffix}"
     output_exe = dist_root / f"{base_name}.exe"
 
     iscc = find_iscc()
@@ -1069,11 +1069,11 @@ def verify_built_app(app_dist_dir: Path, *, expect_models: bool = True) -> None:
     if not app_dist_dir.is_dir():
         problems.append(f"the output folder '{app_dist_dir}' was not created")
     else:
-        exe = app_dist_dir / "ComicOCRStudio.exe"
+        exe = app_dist_dir / "HaSaYaStudio.exe"
         if not exe.is_file():
-            linux_exe = app_dist_dir / "ComicOCRStudio"
+            linux_exe = app_dist_dir / "HaSaYaStudio"
             if not linux_exe.is_file():
-                problems.append("the ComicOCRStudio executable is missing from the output folder")
+                problems.append("the HaSaYaStudio executable is missing from the output folder")
         internal = app_dist_dir / "_internal"
         base = internal if internal.is_dir() else app_dist_dir
         if not (base / "comic_studio" / "static" / "index.html").is_file():
@@ -1106,7 +1106,7 @@ def run_preflight(*, include_nmt: bool = False) -> int:
     that the builder solves on its own are shown as a note, not as a problem.
     """
     say("=" * 72)
-    say(f"  Comic OCR Studio v{APP_VERSION} - بررسی آمادگی ساخت بستهٔ آفلاین")
+    say(f"  HaSaYa Studio v{APP_VERSION} - بررسی آمادگی ساخت بستهٔ آفلاین")
     say("=" * 72)
     problems: list[str] = []
     notes: list[str] = []
@@ -1296,7 +1296,7 @@ def interactive_menu() -> tuple[str, str]:
     ``mode`` is one of ``"1"``, ``"2"``, ``"3"`` or ``"4"`` (self-test only).
     """
     say("=" * 72)
-    say(f"  Comic OCR Studio v{APP_VERSION} - Offline Windows EXE & Setup Builder")
+    say(f"  HaSaYa Studio v{APP_VERSION} - Offline Windows EXE & Setup Builder")
     say("=" * 72)
     say("")
     say("Select offline package variant to build:")
@@ -1316,8 +1316,8 @@ def interactive_menu() -> tuple[str, str]:
     default_out = str(REPO_PY_ROOT / "dist")
     say("")
     say("Folder that receives the built EXE files:")
-    say(r"  Standalone app : <output folder>\ComicOCRStudio\ComicOCRStudio.exe")
-    say(rf"  Offline Setup  : <output folder>\ComicOCRStudio-Offline-Setup-{APP_VERSION}.exe")
+    say(r"  Standalone app : <output folder>\HaSaYaStudio\HaSaYaStudio.exe")
+    say(rf"  Offline Setup  : <output folder>\HaSaYaStudio-Offline-Setup-{APP_VERSION}.exe")
     say("")
     out_dir = _ask(f"Output folder (press Enter for {default_out}): ", default_out)
     out_path = Path(out_dir).expanduser()
@@ -1327,7 +1327,7 @@ def interactive_menu() -> tuple[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=f"Build Comic OCR Studio v{APP_VERSION} Offline .exe & Setup")
+    parser = argparse.ArgumentParser(description=f"Build HaSaYa Studio v{APP_VERSION} Offline .exe & Setup")
     parser.add_argument("--with-nmt", action="store_true", help="Bundle 600M offline NLLB-200 translator inside the offline installer")
     parser.add_argument("--skip-model-download", action="store_true", help="Only bundle models already present in local models directory")
     parser.add_argument("--download-wheelhouse", action="store_true", help="Populate python_app/wheelhouse with offline pip wheels")
@@ -1364,7 +1364,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _reconfigure_console()
-    start_log(f"Comic OCR Studio v{APP_VERSION} offline builder - {' '.join(sys.argv[1:]) or 'no arguments'}")
+    start_log(f"HaSaYa Studio v{APP_VERSION} offline builder - {' '.join(sys.argv[1:]) or 'no arguments'}")
 
     if args.interactive:
         mode, out_dir = interactive_menu()
@@ -1479,7 +1479,7 @@ def _run_build(args: argparse.Namespace) -> int:
     icon_png = REPO_PY_ROOT / "comic_studio" / "static" / "assets" / "icon128.png"
     if not icon_png.is_file():
         raise BuildError(f"The program icon is missing: {icon_png}")
-    icon_ico = generate_windows_ico(icon_png, build_root / "ComicOCRStudio.ico")
+    icon_ico = generate_windows_ico(icon_png, build_root / "HaSaYaStudio.ico")
     say(f"[ok] Generated multi-size Windows icon: {icon_ico}")
 
     staged_models = stage_bundled_models(
@@ -1502,7 +1502,7 @@ def _run_build(args: argparse.Namespace) -> int:
     say("[pyinstaller] Running: " + " ".join(cmd))
     subprocess.check_call(cmd, cwd=str(REPO_PY_ROOT))
 
-    app_dist_dir = dist_root / "ComicOCRStudio"
+    app_dist_dir = dist_root / "HaSaYaStudio"
     verify_built_app(app_dist_dir, expect_models=not args.allow_missing_language_models)
     guard_bin = build_native_license_guard(app_dist_dir, build_root, seller_info["public_key_hex"])
     if guard_bin is not None:

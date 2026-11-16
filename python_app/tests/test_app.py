@@ -44,11 +44,11 @@ def make_project(client: TestClient) -> tuple[dict, dict]:
 def test_health_and_static_shell(client):
     health = client.get("/api/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "4.54"
+    assert health.json()["version"] == "4.55"
     assert health.json()["scraping"] is False
     assert client.get("/").status_code == 200
     index_html = client.get("/").text
-    assert "Comic OCR Studio" in index_html
+    assert "HaSaYa Studio" in index_html
     assert '<span class="ver">۴.۳۰ · Python</span>' in index_html
     assert 'id="licenseTopStatusBtn"' in index_html
     assert 'id="copyGateOrderMsgBtn"' in index_html
@@ -3344,10 +3344,10 @@ def test_v400_optional_custom_storage_migration_validation_and_roundtrip(tmp_pat
     import comic_studio.ocr_worker as worker_mod
     import comic_studio.ocr as ocr_mod
 
-    assert APP_VERSION == "4.54"
+    assert APP_VERSION == "4.55"
 
     default_root = tmp_path / "default_c_drive"
-    custom_root = tmp_path / "custom_d_drive" / "ComicOCRStudio"
+    custom_root = tmp_path / "custom_d_drive" / "HaSaYaStudio"
     monkeypatch.setenv("COMIC_STUDIO_DATA", str(default_root))
     monkeypatch.delenv("COMIC_STUDIO_CONFIG", raising=False)
     paths_mod._CONFIG_CACHE = None
@@ -4762,7 +4762,7 @@ def test_v413_full_audit_backend_fixes(client, tmp_path, monkeypatch):
     monkeypatch.delenv("COMIC_STUDIO_BUNDLED_MODELS", raising=False)
 
     # 2. Frozen PyInstaller mode never spawns sys.executable as python -m pip / venv
-    fake_exe = tmp_path / "ComicOCRStudio.exe"
+    fake_exe = tmp_path / "HaSaYaStudio.exe"
     fake_exe.write_bytes(b"MZ")
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(fake_exe))

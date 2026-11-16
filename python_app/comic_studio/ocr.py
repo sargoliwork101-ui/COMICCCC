@@ -558,10 +558,10 @@ def install_packages(
     if result.returncode:
         details = (result.stderr or result.stdout or "pip failed")[-1800:].strip()
         if "WinError 32" in details or "being used by another process" in details:
-            details += ("\nComic OCR Studio: a second Python/pip installer or antivirus may be locking the temporary file. "
+            details += ("\nHaSaYa Studio: a second Python/pip installer or antivirus may be locking the temporary file. "
                         "Close other Python/installer windows, restart Windows if needed, and retry one installation only.")
         if "WinError 5" in details or "Access is denied" in details:
-            details += ("\nComic OCR Studio: Windows denied write access. Close the app, start start_windows_admin.bat, "
+            details += ("\nHaSaYa Studio: Windows denied write access. Close the app, start start_windows_admin.bat, "
                         "approve the UAC prompt, and retry the explicit OCR installation.")
         emit(f"نصب بسته‌های {label} ناموفق بود: {details}", "error")
         raise OcrError(f"OCR runtime installation failed: {details}")
@@ -827,7 +827,7 @@ def _stream_download_with_mirrors(
             raise OcrError("عملیات آماده‌سازی مدل لغو شد.")
         if idx > 0:
             emit(f"ادامهٔ دریافت {label} از سرور جایگزین ({idx + 1}/{len(urls)})…", "warning", progress=round(start_p, 3))
-        headers = {"User-Agent": "Comic-OCR-Studio", **extra_headers}
+        headers = {"User-Agent": "HaSaYa-Studio", **extra_headers}
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=30) as resp, part_path.open("wb") as out:
@@ -2487,7 +2487,7 @@ class TesseractEngine:
             if attempt_idx > 0:
                 emit(f"ادامهٔ دانلود فایل زبان Tesseract ({language}) از میرور جایگزین…", "warning", progress=0.22)
             try:
-                request = urllib.request.Request(url, headers={"User-Agent": "Comic-OCR-Studio", **extra_headers})
+                request = urllib.request.Request(url, headers={"User-Agent": "HaSaYa-Studio", **extra_headers})
                 with urllib.request.urlopen(request, timeout=timeout) as response, temporary.open("wb") as output:
                     hdrs = getattr(response, "headers", None)
                     raw_len = hdrs.get("Content-Length") if hdrs and hasattr(hdrs, "get") else None

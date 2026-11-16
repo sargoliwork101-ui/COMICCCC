@@ -326,9 +326,9 @@ def test_seller_vault_key_sync_issuance_backup_and_dist_leak_guard(tmp_path):
     assert restored["public_key_hex"] == key_info["public_key_hex"]
 
     # Dist bundle leak guard catches any accidental seller file in dist/
-    clean_dist = tmp_path / "dist" / "ComicOCRStudio"
+    clean_dist = tmp_path / "dist" / "HaSaYaStudio"
     clean_dist.mkdir(parents=True)
-    (clean_dist / "ComicOCRStudio.exe").write_bytes(b"MZ")
+    (clean_dist / "HaSaYaStudio.exe").write_bytes(b"MZ")
     verify_no_seller_secrets_in_dist(clean_dist)
 
     (clean_dist / "seller_master_key.json").write_text("{}", encoding="utf-8")

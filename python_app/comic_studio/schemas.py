@@ -74,7 +74,7 @@ class LocalNmtTestRequest(BaseModel):
 
 
 class ResourceBudget(BaseModel):
-    """How much of the machine Comic OCR Studio may use (v4.29)."""
+    """How much of the machine HaSaYa Studio may use (v4.29)."""
 
     model_config = ConfigDict(populate_by_name=True)
 

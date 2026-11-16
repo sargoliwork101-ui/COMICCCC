@@ -1,4 +1,4 @@
-"""Embedded Ed25519 public verification key for Comic OCR Studio licenses.
+"""Embedded Ed25519 public verification key for HaSaYa Studio licenses.
 
 IMPORTANT SECURITY NOTE:
 - Only the 32-byte PUBLIC verification key lives in the client application.

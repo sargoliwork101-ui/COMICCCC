@@ -218,7 +218,7 @@ class SellerKeyLostError(RuntimeError):
 # be swapped by anyone to forge licenses), so instead of hoping the file is never damaged
 # we rewrite it in this canonical, validated and atomic form whenever the seller's vault
 # is used (panel start-up, or `.exe` build).
-_PUBLIC_KEY_MODULE_TEMPLATE = '''"""Embedded Ed25519 public verification key for Comic OCR Studio licenses.
+_PUBLIC_KEY_MODULE_TEMPLATE = '''"""Embedded Ed25519 public verification key for HaSaYa Studio licenses.
 
 IMPORTANT SECURITY NOTE:
 - Only the 32-byte PUBLIC verification key lives in the client application.
@@ -524,7 +524,7 @@ class SellerVault:
         """Write customer-facing contact channels into `comic_studio/_vendor_config.py` for `.exe` bundling."""
         norm = normalize_vendor_contact_dict(info)
         lines = [
-            '"""Embedded customer-facing vendor contact & support channels for Comic OCR Studio.',
+            '"""Embedded customer-facing vendor contact & support channels for HaSaYa Studio.',
             "",
             "HOW TO CUSTOMIZE BEFORE BUILDING `.exe`:",
             "1. Visual method (recommended): Run `start_license_manager.bat` and open the tab",
@@ -532,7 +532,7 @@ class SellerVault:
             "   and click «ذخیره و همگام‌سازی برای ساخت EXE».",
             "2. Direct file method: Edit `python_app/vendor_contact.json` with Notepad; running",
             "   `build_windows_offline.bat` automatically syncs `vendor_contact.json` into this module",
-            "   before compiling `ComicOCRStudio.exe`.",
+            "   before compiling `HaSaYaStudio.exe`.",
             '"""',
             "",
             "from __future__ import annotations",
@@ -1095,7 +1095,7 @@ _PANEL_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Comic OCR Studio — پنل مدیریت مشتریان و صدور لایسنس</title>
+  <title>HaSaYa Studio — پنل مدیریت مشتریان و صدور لایسنس</title>
   <link rel="icon" type="image/png" href="/assets/icon128.png">
   <style>
     @font-face{font-family:Vazirmatn;src:url('/assets/Vazirmatn.woff2') format('woff2');font-weight:100 900;font-display:swap}
@@ -1120,7 +1120,7 @@ _PANEL_HTML = """<!doctype html>
     input,textarea{user-select:text;-webkit-user-select:text}
     code{font:700 11.5px/1.5 Consolas,"Courier New",monospace;padding:1px 6px;border-radius:6px;background:color-mix(in srgb,var(--a2) 13%,var(--bg));border:1px solid color-mix(in srgb,var(--a2) 34%,var(--line));color:var(--a2)}
 
-    /* Sticky Topbar — exact match with Comic OCR Studio main window */
+    /* Sticky Topbar — exact match with HaSaYa Studio main window */
     .topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 18px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--surface) 88%,transparent);backdrop-filter:blur(14px);flex-wrap:wrap}
     .topbar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
     .brand{display:flex;align-items:center;gap:10px}
@@ -1129,7 +1129,7 @@ _PANEL_HTML = """<!doctype html>
     .brand-sub{display:block;font-size:11px;color:var(--muted)}
     .ver{font-size:11px;padding:1px 8px;border-radius:999px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--a1);font-weight:700}
 
-    /* Buttons & Icons — exact match with Comic OCR Studio (.bt / .btn-ico) */
+    /* Buttons & Icons — exact match with HaSaYa Studio (.bt / .btn-ico) */
     .btn-ico{width:15px;height:15px;flex:0 0 auto;stroke:currentColor;fill:none;stroke-width:1.85;stroke-linecap:round;stroke-linejoin:round}
     button,.bt{border:1px solid var(--line-2);background:var(--surface-2);color:var(--text);border-radius:9px;padding:7px 12px;cursor:pointer;transition:.16s;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;font-weight:600;font-size:12.5px}
     button:hover:not(:disabled),.bt:hover:not(:disabled){border-color:var(--a1);transform:translateY(-1px)}
@@ -1255,7 +1255,7 @@ _PANEL_HTML = """<!doctype html>
     <div class="brand">
       <img class="logo" src="/assets/icon128.png" alt="">
       <div>
-        <h1>Comic OCR Studio <span class="ver">__APP_VERSION_FA__ · پنل فروشنده</span></h1>
+        <h1>HaSaYa Studio <span class="ver">__APP_VERSION_FA__ · پنل فروشنده</span></h1>
         <span class="brand-sub">مدیریت کلید مادر ۲۵۶ بایتی، بانک مشتریان و صدور لایسنس ماژولار آفلاین</span>
       </div>
     </div>
@@ -1794,7 +1794,7 @@ _PANEL_HTML = """<!doctype html>
       if (vendorContact.website) contactTail.push(`🌐 وب‌سایت: ${vendorContact.website}`);
       return [
         `سلام ${item.holder || ''} عزیز، وقت بخیر 🌸`,
-        `لایسنس رسمی برنامهٔ Comic OCR Studio برای سیستم شما صادر شد:`,
+        `لایسنس رسمی برنامهٔ HaSaYa Studio برای سیستم شما صادر شد:`,
         `👤 نام خریدار: ${item.holder}`,
         item.phone ? `📱 شماره تماس ثبت‌شده: ${item.phone}` : null,
         `🖥 کد سیستم: ${item.hardwareId}`,
@@ -1987,7 +1987,7 @@ _PANEL_HTML = """<!doctype html>
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = blobUrl;
-        a.download = `ComicOCRStudio-Customers-${new Date().toISOString().slice(0,10)}.csv`;
+        a.download = `HaSaYaStudio-Customers-${new Date().toISOString().slice(0,10)}.csv`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
         notify('فایل اکسل (CSV) لیست مشتریان دانلود شد.');
@@ -2251,7 +2251,7 @@ _PANEL_HTML = """<!doctype html>
         const blobUrl = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = blobUrl;
-        a.download = `ComicOCRStudio-SellerVault-${data.backup.fingerprint}.seller-key.json`;
+        a.download = `HaSaYaStudio-SellerVault-${data.backup.fingerprint}.seller-key.json`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
         notify('پشتیبان کامل کلید مادر ۲۵۶ بایتی + لیست مشتریان دانلود شد.');
@@ -2668,7 +2668,7 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
             key_info = {"fingerprint": vault.fingerprint}
         except SellerKeyLostError:
             print("=" * 72)
-            print("  Comic OCR Studio — پنل فروشنده")
+            print("  HaSaYa Studio — پنل فروشنده")
             print(f"  ⚠ {exc}")
             print("  پنل باز می‌شود تا بتوانید از بخش «بازیابی کلید» فایل پشتیبان را برگردانید.")
             print("=" * 72)
@@ -2679,7 +2679,7 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
     port = int(server.server_address[1])
     url = f"http://127.0.0.1:{port}/?secret={panel_secret}"
     print("=" * 72)
-    print("  Comic OCR Studio — پنل مدرن مدیریت مشتریان و صدور لایسنس (فروشنده)")
+    print("  HaSaYa Studio — پنل مدرن مدیریت مشتریان و صدور لایسنس (فروشنده)")
     print(f"  شناسهٔ کلید مادر ۲۵۶ بایتی + Ed25519 شما: {key_info['fingerprint']}")
     print(f"  مسیر خصوصی گاوصندوق فروشنده: {vault.seller_dir}")
     print(f"  نسخهٔ پشتیبان کلید مادر: {vault.master_key_backup_path}")
@@ -2710,7 +2710,7 @@ def run_seller_panel(vault: SellerVault, *, open_browser: bool = True) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Comic OCR Studio Seller Modular License Generator & CRM")
+    parser = argparse.ArgumentParser(description="HaSaYa Studio Seller Modular License Generator & CRM")
     parser.add_argument("--seller-dir", default="", help="Optional custom seller key vault directory")
     parser.add_argument("--init-seller", action="store_true", help="Create/sync seller master key and exit")
     parser.add_argument("--set-master-key", default="", help="Set your own custom Master Key (passphrase or 512-char hex)")

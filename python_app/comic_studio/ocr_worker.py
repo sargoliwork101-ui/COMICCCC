@@ -3072,7 +3072,7 @@ def _start_parent_watchdog(parent_pid: int) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Comic OCR Studio isolated OCR worker")
+    parser = argparse.ArgumentParser(description="HaSaYa Studio isolated OCR worker")
     parser.add_argument("--engine", required=True)
     parser.add_argument("--models-root", required=True)
     parser.add_argument("--prepare", action="store_true")
