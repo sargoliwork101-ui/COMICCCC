@@ -71,9 +71,12 @@ function check(name, condition, extra) {
     check('API key is sent in the header, never in URL or text payload',
       request.options.headers['x-goog-api-key'] === 'secret-test-key' &&
       !request.url.includes('secret-test-key') && !request.options.body.includes('secret-test-key'));
-    check('request contains complete comic TXT and custom Skill',
-      body.contents[0].parts[0].text.includes('COMIC_TXT') && body.contents[0].parts[0].text.includes('Please listen.') &&
-      body.systemInstruction.parts[0].text.includes('لحن صمیمی'));
+    const payloadLines = body.contents[0].parts[0].text.split('\n');
+    const sourceRows = JSON.parse(payloadLines.slice(2).join('\n'));
+    check('request sends every comic entry as ordered JSON with stable IDs and the custom Skill',
+      payloadLines[0] === 'COMIC_TXT' && payloadLines[1] === 'Expected entry count: 3' && sourceRows.length === 3 &&
+      sourceRows[0].id === 'p0001-b001' && sourceRows[0].text === 'I trusted you.' &&
+      sourceRows[2].text === 'Please listen.' && body.systemInstruction.parts[0].text.includes('لحن صمیمی'));
     check('request requires structured JSON and forwards cancellation signal',
       body.generationConfig.responseMimeType === 'application/json' && request.options.signal === signal);
     check('request omits cookies and referer',
@@ -238,33 +241,27 @@ function check(name, condition, extra) {
     check('OpenRouter content parts are parsed correctly', result.get(entries[0].id) === 'ترجمهٔ OpenRouter');
   }
   {
-    let translationRequest = null, connectionRequest = null;
-    const result = await AiTranslateTools.translateBatch({
-      provider: 'avalai', apiKey: 'avalai-private-key', model: 'gpt-6-luna', entries: [entries[0]],
-      fetchFn: async (url, options) => {
-        translationRequest = { url, options };
-        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({
-          translations: [{ id: entries[0].id, translation: 'ترجمهٔ AvalAI' }]
-        }) } }] }) };
-      }
+    const connectionPayload = () => ({
+      translations: [{ id: 'connection-test', translation: 'سلام. این یک آزمون ترجمه است.' }]
     });
-    const body = JSON.parse(translationRequest.options.body);
-    check('AvalAI translation uses its exact endpoint, model, and Bearer key',
-      translationRequest.url === 'https://api.avalai.ir/v1/chat/completions' && body.model === 'gpt-6-luna' &&
-      translationRequest.options.headers.Authorization === 'Bearer avalai-private-key' &&
-      !translationRequest.url.includes('openai.com') && !translationRequest.url.includes('openrouter.ai'));
-    check('AvalAI chat response maps back to the stable bubble ID', result.get(entries[0].id) === 'ترجمهٔ AvalAI');
+    let translationRequest = null, connectionRequest = null;
     const connection = await AiTranslateTools.testConnection({
       provider: 'avalai', apiKey: 'avalai-private-key', model: 'gpt-6-luna',
       fetchFn: async (url, options) => {
         connectionRequest = { url, options };
-        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'gpt-6-luna' }] }) };
+        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify(connectionPayload()) } }] }) };
       }
     });
-    check('AvalAI connection test checks gpt-6-luna through its authenticated model list',
-      connection.model === 'gpt-6-luna' && connectionRequest.url === 'https://api.avalai.ir/v1/models' &&
-      connectionRequest.options.method === 'GET' && connectionRequest.options.body === undefined &&
+    const body = JSON.parse(connectionRequest.options.body);
+    check('connection test performs a real fixed-sample translation through the configured model',
+      connection.model === 'gpt-6-luna' && connection.sampleTranslation === 'سلام. این یک آزمون ترجمه است.' &&
+      connectionRequest.url === 'https://api.avalai.ir/v1/chat/completions' && body.model === 'gpt-6-luna' &&
+      connectionRequest.options.method === 'POST' && body.messages[1].content.includes('Hello. This is a translation test.') &&
       connectionRequest.options.headers.Authorization === 'Bearer avalai-private-key');
+    check('sample translation sends no page/comic text and keeps the key out of the URL and body',
+      !body.messages[1].content.includes('Private webpage') && !connectionRequest.url.includes('avalai-private-key') &&
+      !connectionRequest.options.body.includes('avalai-private-key') && connectionRequest.options.credentials === 'omit' &&
+      connectionRequest.options.referrerPolicy === 'no-referrer');
   }
   {
     const calls = [];
@@ -272,24 +269,30 @@ function check(name, condition, extra) {
       provider: 'openai', apiKey: 'openai-test-key', model: 'gpt-4.1-mini',
       fetchFn: async (url, options) => {
         calls.push({ provider: 'openai', url, options });
-        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'gpt-4.1-mini' }] }) };
+        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+          translations: [{ id: 'connection-test', translation: 'سلام از OpenAI' }]
+        }) } }] }) };
       }
     });
     const openRouter = await AiTranslateTools.testConnection({
       provider: 'openrouter', apiKey: 'openrouter-test-key', model: 'anthropic/claude-3.5-haiku',
       fetchFn: async (url, options) => {
         calls.push({ provider: 'openrouter', url, options });
-        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'anthropic/claude-3.5-haiku' }] }) };
+        return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({
+          translations: [{ id: 'connection-test', translation: 'سلام از OpenRouter' }]
+        }) } }] }) };
       }
     });
-    check('connection tests check the selected OpenAI and OpenRouter models without generation',
+    check('OpenAI and OpenRouter sample tests call their own generation endpoints with selected models',
       openAi.model === 'gpt-4.1-mini' && openRouter.model === 'anthropic/claude-3.5-haiku' &&
-      calls[0].url === 'https://api.openai.com/v1/models' &&
-      calls[1].url === 'https://openrouter.ai/api/v1/models' &&
-      calls.every((call) => call.options.method === 'GET' && call.options.body === undefined));
-    check('non-Gemini connection tests use their own Bearer keys',
+      calls[0].url === 'https://api.openai.com/v1/chat/completions' &&
+      calls[1].url === 'https://openrouter.ai/api/v1/chat/completions' &&
+      calls.every((call) => call.options.method === 'POST' &&
+        JSON.parse(call.options.body).messages[1].content.includes('Hello. This is a translation test.')));
+    check('OpenAI providers keep their own Bearer keys private',
       calls[0].options.headers.Authorization === 'Bearer openai-test-key' &&
-      calls[1].options.headers.Authorization === 'Bearer openrouter-test-key');
+      calls[1].options.headers.Authorization === 'Bearer openrouter-test-key' &&
+      calls.every((call) => !call.options.body.includes('test-key')));
   }
   {
     const calls = [], signal = { marker: 'connection-signal' };
@@ -297,27 +300,36 @@ function check(name, condition, extra) {
       apiKey: 'connection-private-key', model: 'models/gemini-3.8-flash', signal,
       fetchFn: async (url, options) => {
         calls.push({ url, options });
-        return { ok: true, status: 200, json: async () => ({ name: 'models/gemini-3.8-flash' }) };
+        return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify([
+          { id: 'connection-test', translation: 'سلام. آزمون ترجمه موفق بود.' }
+        ]) }] } }] }) };
       }
     });
-    const request = calls[0];
-    check('connection test uses one lightweight model GET, never generateContent',
-      calls.length === 1 && request.options.method === 'GET' &&
-      request.url === 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash' &&
-      !request.url.includes('generateContent') && request.options.body === undefined);
-    check('connection test keeps the key in headers and preserves privacy options',
+    const request = calls[0], requestBody = JSON.parse(request.options.body);
+    check('Gemini connection test actually runs generateContent and parses its structured Persian response',
+      calls.length === 1 && request.options.method === 'POST' &&
+      request.url === 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent' &&
+      requestBody.generationConfig.responseMimeType === 'application/json' &&
+      requestBody.contents[0].parts[0].text.includes('Hello. This is a translation test.') &&
+      result.model === 'gemini-3.8-flash' && /آزمون ترجمه/.test(result.sampleTranslation));
+    check('Gemini sample test keeps its key in headers and forwards privacy/cancel options',
       request.options.headers['x-goog-api-key'] === 'connection-private-key' &&
-      !request.url.includes('connection-private-key') && request.options.credentials === 'omit' &&
-      request.options.referrerPolicy === 'no-referrer' && request.options.signal === signal);
-    check('connection test validates the selected model response', result.model === 'gemini-3.8-flash');
+      !request.url.includes('connection-private-key') && !request.options.body.includes('connection-private-key') &&
+      request.options.credentials === 'omit' && request.options.referrerPolicy === 'no-referrer' && request.options.signal === signal);
   }
   {
-    let calls = 0, blankError = null, modelError = null;
-    const fetchFn = async () => { calls++; };
+    let calls = 0, blankError = null, modelError = null, emptyError = null;
+    const fetchFn = async () => {
+      calls++;
+      return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: '[]' }] } }] }) };
+    };
     await AiTranslateTools.testConnection({ apiKey: ' ', fetchFn }).catch((error) => { blankError = error; });
     await AiTranslateTools.testConnection({ apiKey: 'x', model: '../bad', fetchFn }).catch((error) => { modelError = error; });
-    check('connection test rejects blank keys and invalid models before a request',
-      calls === 0 && blankError && /کلید/.test(blankError.message) && modelError && /مدل/.test(modelError.message));
+    await AiTranslateTools.testConnection({ apiKey: 'x', fetchFn }).catch((error) => { emptyError = error; });
+    check('sample test rejects blank keys and invalid models before making requests',
+      calls === 1 && blankError && /کلید/.test(blankError.message) && modelError && /مدل/.test(modelError.message));
+    check('sample test rejects a successful HTTP response that contains no translated text',
+      emptyError && /پاسخ قابل‌استفاده|برنگرداند/.test(emptyError.message));
   }
   {
     let denied = null, offline = null;
@@ -327,12 +339,11 @@ function check(name, condition, extra) {
     await AiTranslateTools.testConnection({
       apiKey: 'x', fetchFn: async () => { throw new Error('socket failed'); }
     }).catch((error) => { offline = error; });
-    check('connection test reports denied keys without exposing the secret',
+    check('generation test reports denied keys without exposing the secret',
       denied && /کلید API/.test(AiTranslateTools.safeError(denied)) &&
       !AiTranslateTools.safeError(denied).includes('denied-private-key'));
-    check('connection test turns network failure into a clear Persian message', offline && /ارتباط با/.test(offline.message));
+    check('generation test turns network failure into a clear Persian message', offline && /ارتباط با/.test(offline.message));
   }
-
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL AI TRANSLATION TESTS PASSED');
   process.exit(failures ? 1 : 0);
 })().catch((error) => { console.error('TEST CRASH:', error); process.exit(2); });

@@ -35,7 +35,12 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   window.fetch = async (url, options) => {
     calls.fetch.push({ url, options });
     const data = url.includes('generativelanguage.googleapis.com')
-      ? { name: 'models/gemini-2.5-flash' } : { data: [{ id: 'gpt-4o-mini' }] };
+      ? { candidates: [{ content: { parts: [{ text: JSON.stringify([
+        { id: 'connection-test', translation: 'سلام. این یک آزمون ترجمه است.' }
+      ]) }] } }] }
+      : { choices: [{ message: { content: JSON.stringify({ translations: [
+        { id: 'connection-test', translation: 'سلام. این یک آزمون ترجمه است.' }
+      ] }) } }] };
     return { ok: true, status: 200, json: async () => data };
   };
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/core/ai-translate.js'), 'utf8'), dom.getInternalVMContext(), { filename: 'ai-translate.js' });
@@ -89,10 +94,11 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
 
   $('profiles').querySelector('button[aria-label="تست اتصال کلید 1"]').click();
   await pause();
-  check('test action checks the selected API connection without placing the key in its URL',
-    calls.fetch.length === 1 && calls.fetch[0].url === 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash' &&
-    calls.fetch[0].options.headers['x-goog-api-key'] === 'new-secret' && !calls.fetch[0].url.includes('new-secret') &&
-    /اتصال برقرار است/.test($('profiles').querySelector('.profile-status').textContent));
+  check('test action verifies real Gemini translation using a fixed sample and keeps the API key private',
+    calls.fetch.length === 1 && calls.fetch[0].url === 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent' &&
+    calls.fetch[0].options.method === 'POST' && calls.fetch[0].options.headers['x-goog-api-key'] === 'new-secret' &&
+    !calls.fetch[0].url.includes('new-secret') && JSON.parse(calls.fetch[0].options.body).contents[0].parts[0].text.includes('Hello. This is a translation test.') &&
+    /آزمون ترجمه موفق/.test($('profiles').querySelector('.profile-status').textContent));
   check('status gives feedback after saving', /ذخیره شد/.test($('settingsStatus').textContent));
 
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL AI SETTINGS TESTS PASSED');

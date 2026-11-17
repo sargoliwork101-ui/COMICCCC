@@ -33,6 +33,7 @@
           originalPickable: block.classList.contains('wtpdf-page-translation-pickable'),
           originalPicked: block.classList.contains('wtpdf-page-translation-picked'),
           originalStatus: block.getAttribute('data-wtpdf-translation-status'),
+          versionBadge: null,
           records: [],
           versions: [],
           activeVersion: 0,
@@ -58,17 +59,33 @@
     style.dataset.wtpdfPageTranslationUi = 'style';
     style.textContent = `
       [data-wtpdf-page-translation-ui="toolbar"]{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;
-        display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:7px;max-width:calc(100vw - 24px);padding:9px 12px;
-        border-radius:12px;background:#18212f;color:#fff;border:1px solid #64748b;box-shadow:0 8px 32px #0007;
-        font:600 13px/1.5 system-ui,sans-serif;direction:rtl;}
-      [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"]{max-width:min(30vw,360px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-      [data-wtpdf-page-translation-ui="toolbar"] [data-role="version-count"]{white-space:nowrap;color:#a7f3d0;font-size:12px;}
+        width:min(980px,calc(100vw - 24px));display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;
+        padding:10px 14px;border-radius:14px;background:#18212f;color:#f8fafc;border:1px solid #64748b;box-shadow:0 8px 32px #0007;
+        font:500 13px/1.55 system-ui,sans-serif;direction:rtl;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-role="heading"]{display:flex;align-items:center;gap:9px;min-width:0;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-role="heading"] strong{font-size:14px;white-space:nowrap;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-role="hint"]{color:#cbd5e1;font-size:12px;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-role="actions"]{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"]{grid-column:1/-1;min-width:0;padding:7px 10px;border-radius:9px;background:#263449;color:#e2e8f0;font-size:12px;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"][data-kind="error"]{background:#4a1d2b;color:#fecdd3;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"][data-kind="success"]{background:#123c32;color:#bbf7d0;}
       [data-wtpdf-page-translation-ui="toolbar"] button,[data-wtpdf-page-translation-ui="toolbar"] select{font:600 12px/1.4 system-ui,sans-serif;
-        border:1px solid #94a3b8;border-radius:8px;background:#273449;color:#fff;padding:7px 9px;cursor:pointer;}
-      [data-wtpdf-page-translation-ui="toolbar"] select{max-width:210px;}
-      [data-wtpdf-page-translation-ui="toolbar"] button:hover{background:#35445e;}
-      [data-wtpdf-page-translation-ui="toolbar"] button:focus-visible,[data-wtpdf-page-translation-ui="toolbar"] select:focus-visible{outline:2px solid #a5b4fc;outline-offset:2px;}
+        border:1px solid #64748b;border-radius:8px;background:#273449;color:#fff;padding:7px 9px;cursor:pointer;}
+      [data-wtpdf-page-translation-ui="toolbar"] select{max-width:220px;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-action="translate-selected"]{background:#4f46e5;border-color:#818cf8;}
+      [data-wtpdf-page-translation-ui="toolbar"] button:hover,[data-wtpdf-page-translation-ui="toolbar"] [data-action="translate-selected"]:hover{background:#35445e;}
+      [data-wtpdf-page-translation-ui="toolbar"] button:focus-visible,[data-wtpdf-page-translation-ui="toolbar"] select:focus-visible,
+      [data-wtpdf-page-translation-ui="toolbar"] summary:focus-visible{outline:2px solid #a5b4fc;outline-offset:2px;}
       [data-wtpdf-page-translation-ui="toolbar"] button:disabled,[data-wtpdf-page-translation-ui="toolbar"] select:disabled{opacity:.55;cursor:not-allowed;}
+      [data-wtpdf-page-translation-ui="toolbar"] details{position:relative;}
+      [data-wtpdf-page-translation-ui="toolbar"] summary{list-style:none;cursor:pointer;border:1px solid #64748b;border-radius:8px;background:#273449;padding:7px 9px;font-size:12px;}
+      [data-wtpdf-page-translation-ui="toolbar"] summary::-webkit-details-marker{display:none;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-role="more-menu"]{position:absolute;top:calc(100% + 6px);inset-inline-end:0;z-index:2;min-width:190px;display:grid;gap:5px;
+        padding:8px;border:1px solid #64748b;border-radius:10px;background:#18212f;box-shadow:0 8px 24px #0008;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-role="more-menu"] button{text-align:right;}
+      .wtpdf-page-translation-version-badge{display:block!important;width:max-content!important;max-width:100%!important;margin:0 0 5px auto!important;
+        padding:2px 8px!important;border:1px solid #6b7280!important;border-radius:999px!important;background:#172033!important;color:#f8fafc!important;
+        font:600 11px/1.5 system-ui,sans-serif!important;direction:rtl!important;opacity:.96!important;}
       .wtpdf-page-translation-pickable{outline:2px dashed #fbbf24!important;outline-offset:3px;cursor:pointer!important;}
       .wtpdf-page-translation-pickable:hover{background-color:#fbbf2430!important;}
       .wtpdf-page-translation-picked{outline:3px solid #22c55e!important;outline-offset:3px;background-color:#22c55e24!important;}
@@ -76,19 +93,26 @@
       [data-wtpdf-translation-status="partial"]:not(.wtpdf-page-translation-picked){outline:2px solid #fbbf24!important;outline-offset:3px;}
       [data-wtpdf-translation-status="failed"]:not(.wtpdf-page-translation-picked){outline:2px solid #f87171!important;outline-offset:3px;}
       [data-wtpdf-translation-status="translating"]:not(.wtpdf-page-translation-picked){outline:2px solid #93c5fd!important;outline-offset:3px;}
-      @media(max-width:720px){[data-wtpdf-page-translation-ui="toolbar"]{top:6px;max-width:calc(100vw - 12px);gap:5px;padding:7px;}
-        [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"]{max-width:92vw;flex-basis:100%;text-align:center;}}
+      @media(max-width:720px){[data-wtpdf-page-translation-ui="toolbar"]{top:6px;width:calc(100vw - 12px);grid-template-columns:1fr;gap:7px;padding:8px;}
+        [data-wtpdf-page-translation-ui="toolbar"] [data-role="heading"]{flex-wrap:wrap;}
+        [data-wtpdf-page-translation-ui="toolbar"] [data-role="actions"]{width:100%;}
+        [data-wtpdf-page-translation-ui="toolbar"] select{max-width:min(55vw,220px);}}
     `;
     const toolbar = document.createElement('div');
     toolbar.dataset.wtpdfPageTranslationUi = 'toolbar';
     toolbar.setAttribute('role', 'region');
     toolbar.setAttribute('aria-label', 'انتخاب و ترجمهٔ متن صفحه');
-    const status = document.createElement('span');
+    const heading = document.createElement('div');
+    heading.dataset.role = 'heading';
+    const title = document.createElement('strong');
+    title.textContent = 'ترجمهٔ صفحه';
+    const hint = document.createElement('span');
+    hint.dataset.role = 'hint';
+    hint.textContent = '۱) متن را انتخاب کنید  ۲) موتور را برگزینید  ۳) ترجمه را بزنید';
+    heading.append(title, hint);
+    const status = document.createElement('div');
     status.dataset.role = 'status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
-    status.textContent = `برای شروع روی پاراگراف‌های دلخواه کلیک کنید · ${state.groups.length} پاراگراف شناسایی شد.`;
-    const versionCount = document.createElement('span');
-    versionCount.dataset.role = 'version-count';
-    versionCount.setAttribute('aria-live', 'polite');
+    status.textContent = `برای شروع روی متن پاراگراف‌های دلخواه کلیک کنید؛ ${toPersianNumber(state.groups.length)} پاراگراف شناسایی شد.`;
     const engineSelect = document.createElement('select');
     engineSelect.dataset.role = 'translation-engine';
     engineSelect.setAttribute('aria-label', 'انتخاب موتور ترجمه');
@@ -102,6 +126,8 @@
     pickToggle.type = 'button'; pickToggle.dataset.action = 'pick-toggle';
     const translate = document.createElement('button');
     translate.type = 'button'; translate.dataset.action = 'translate-selected'; translate.textContent = 'ترجمهٔ انتخاب‌ها';
+    const actions = document.createElement('div');
+    actions.dataset.role = 'actions';
     const retry = document.createElement('button');
     retry.type = 'button'; retry.dataset.action = 'retry-failed'; retry.textContent = 'تلاش دوباره';
     retry.title = 'فقط بخش‌های ناموفقِ پاراگراف‌های انتخاب‌شده را دوباره می‌فرستد.';
@@ -116,13 +142,38 @@
     const restore = document.createElement('button');
     restore.type = 'button'; restore.dataset.action = 'restore'; restore.textContent = 'بازگردانی';
     restore.title = 'فقط کپی را به متن و جهت اولیه برمی‌گرداند و نوار ترجمه را می‌بندد؛ صفحهٔ اصلی تغییر نمی‌کند. برای دیدن متن اصلی بدون بستن نوار، «متن اصلی» را بزنید.';
-    toolbar.append(status, versionCount, engineSelect, pickToggle, translate, retry, versionPrev, versionNext, original, translated, restore);
+    [retry, versionPrev, versionNext, original, translated, restore].forEach((button) => button.setAttribute('type', 'button'));
+    const moreDetails = document.createElement('details');
+    moreDetails.dataset.role = 'more';
+    const moreSummary = document.createElement('summary');
+    moreSummary.textContent = 'ابزارهای بیشتر';
+    const moreMenu = document.createElement('div');
+    moreMenu.dataset.role = 'more-menu';
+    moreMenu.append(retry, versionPrev, versionNext, original, translated, restore);
+    moreDetails.append(moreSummary, moreMenu);
+    actions.append(engineSelect, pickToggle, translate, moreDetails);
+    toolbar.append(heading, actions, status);
     document.documentElement.append(style, toolbar);
-    return { style, toolbar, status, versionCount, engineSelect, pickToggle, translate, retry, versionPrev, versionNext, original, translated, restore };
+    return { style, toolbar, heading, hint, status, engineSelect, pickToggle, translate, retry, versionPrev, versionNext, original, translated, restore, moreDetails };
   }
 
   function versionTextMap(records, values, translatedIds) {
     return tools.showVersion(records, values, translatedIds);
+  }
+
+  function updateVersionBadge(group) {
+    if (!group.versionBadge || !group.versionBadge.isConnected) {
+      const badge = document.createElement('span');
+      badge.className = 'wtpdf-page-translation-version-badge';
+      badge.dataset.wtpdfPageTranslationUi = 'version-badge';
+      badge.setAttribute('aria-live', 'polite');
+      group.versionBadge = badge;
+      group.block.insertBefore(badge, group.block.firstChild);
+    }
+    const saved = Math.max(0, group.versions.length - 1);
+    group.versionBadge.textContent = `${toPersianNumber(saved)} ترجمهٔ ذخیره‌شده`;
+    group.versionBadge.setAttribute('aria-label', `${toPersianNumber(saved)} ترجمهٔ ذخیره‌شده برای ${group.label}`);
+    group.versionBadge.title = `برای این پاراگراف ${toPersianNumber(saved)} ترجمه ذخیره شده است؛ حداکثر ${toPersianNumber(MAX_TRANSLATION_VERSIONS)} نسخه نگه‌داری می‌شود.`;
   }
 
   const PAGE_ENGINE_OPTIONS = [
@@ -135,23 +186,13 @@
   function refreshGroupStatuses(state) {
     state.groups.forEach((group) => {
       group.block.dataset.wtpdfTranslationStatus = group.status;
+      updateVersionBadge(group);
     });
   }
 
   function refreshToolbarControls(state) {
     if (!state.ui) return;
     const selected = state.groups.filter((group) => state.selectedGroups.has(group.id));
-    const countGroups = selected.length ? selected : state.groups;
-    const savedVersions = countGroups.reduce((total, group) => total + Math.max(0, group.versions.length - 1), 0);
-    const countLabel = selected.length === 1
-      ? `برای این پاراگراف: ${toPersianNumber(savedVersions)} ترجمه`
-      : selected.length > 1
-        ? `مجموع ${toPersianNumber(savedVersions)} ترجمه در ${toPersianNumber(selected.length)} پاراگراف انتخاب‌شده`
-        : `در کل صفحه: ${toPersianNumber(savedVersions)} ترجمهٔ نگه‌داشته‌شده`;
-    state.ui.versionCount.textContent = countLabel;
-    state.ui.versionCount.title = countGroups.length
-      ? `${countGroups.map((group) => `${group.label}: ${toPersianNumber(Math.max(0, group.versions.length - 1))}`).join(' · ')}؛ برای هر پاراگراف حداکثر ${toPersianNumber(MAX_TRANSLATION_VERSIONS)} ترجمه نگه‌داری می‌شود.`
-      : `برای هر پاراگراف حداکثر ${toPersianNumber(MAX_TRANSLATION_VERSIONS)} ترجمه نگه‌داری می‌شود.`;
     const canRetry = selected.some((group) => group.failedPartIds && group.failedPartIds.size);
     const canStepBack = selected.some((group) => group.activeVersion > 0);
     const canStepForward = selected.some((group) => group.activeVersion < group.versions.length - 1);
@@ -187,9 +228,14 @@
   }
 
   function updatePickStatus(state) {
+    state.ui.status.dataset.kind = 'prompt';
     state.ui.status.textContent = state.pickMode
-      ? `روی پاراگراف‌ها کلیک کنید تا انتخاب شوند یا از انتخاب خارج شوند · ${state.selectedGroups.size} انتخاب‌شده · پایان با Escape`
-      : `${state.selectedGroups.size} پاراگراف انتخاب شده؛ برای تغییر روی صفحه «انتخاب روی صفحه» را بزنید.`;
+      ? state.selectedGroups.size
+        ? `${toPersianNumber(state.selectedGroups.size)} پاراگراف انتخاب شده؛ برای ادامه «پایان انتخاب» را بزنید.`
+        : 'برای شروع، روی متن پاراگراف‌های دلخواه کلیک کنید؛ با «پایان انتخاب» آمادهٔ ترجمه شوید.'
+      : state.selectedGroups.size
+        ? `${toPersianNumber(state.selectedGroups.size)} پاراگراف آماده است؛ موتور را بررسی و «ترجمهٔ انتخاب‌ها» را بزنید.`
+        : 'انتخابی ندارید؛ «انتخاب روی صفحه» را بزنید و متن دلخواه را مشخص کنید.';
     refreshToolbarControls(state);
   }
 
@@ -278,9 +324,11 @@
     refreshGroupStatuses(state);
     refreshToolbarControls(state);
     const engineLabel = PAGE_ENGINE_LABELS[state.translationEngine];
+    state.ui.status.dataset.kind = 'prompt';
+    state.ui.status.title = '';
     state.ui.status.textContent = retryOnly
-      ? `در حال تلاش دوباره با ${engineLabel} برای ${selected.length} پاراگراف...`
-      : `در حال ترجمه با ${engineLabel}؛ ${selected.length} پاراگراف انتخاب شده...`;
+      ? `در حال تلاش دوباره با ${engineLabel} برای ${toPersianNumber(selected.length)} پاراگراف...`
+      : `در حال ترجمه با ${engineLabel}؛ ${toPersianNumber(selected.length)} پاراگراف انتخاب شده...`;
     sendProgress(state.jobId, 'working', { total: batches.length, textNodes: entries.length });
     try {
       const translations = new Map();
@@ -294,11 +342,18 @@
           });
           if (!response || !response.ok) throw new Error(response && response.error || 'سرویس ترجمه پاسخ نداد.');
           if (response.provider) providerResults.add(response.provider);
-          (response.translations || []).forEach((row) => {
-            if (row && typeof row.id === 'string' && typeof row.text === 'string' && row.text.trim()) {
-              translations.set(row.id, row.text);
+          const expectedIds = new Set(batches[index].map((entry) => entry.id));
+          let received = 0;
+          (Array.isArray(response.translations) ? response.translations : []).forEach((row) => {
+            if (row && expectedIds.has(row.id) && typeof row.text === 'string' && row.text.trim()) {
+              translations.set(row.id, row.text.trim());
+              received++;
             }
           });
+          if (!received) throw new Error(response.error || `${engineLabel} پاسخ ترجمهٔ قابل‌استفاده‌ای برنگرداند.`);
+          if (received < expectedIds.size) {
+            batchErrors.push(`${engineLabel}: ${toPersianNumber(expectedIds.size - received)} متن از این بسته در پاسخ نبود.`);
+          }
         } catch (error) {
           batchErrors.push(error && error.message ? error.message : 'خطای ارتباط با سرویس ترجمه');
         }
@@ -342,18 +397,24 @@
       state.selectedGroups = selectedIds;
       state.initialSelection = false;
       refreshGroupStatuses(state);
-      const summary = `${completedParagraphs} کامل، ${partialParagraphs} ناقص، ${failedParagraphs} ناموفق`;
+      const summary = `${toPersianNumber(completedParagraphs)} کامل، ${toPersianNumber(partialParagraphs)} ناقص، ${toPersianNumber(failedParagraphs)} ناموفق`;
       const actualEngine = [...providerResults].join(' / ') || engineLabel;
-      state.ui.status.textContent = `${actualEngine} · ${summary}. ترجمه‌های موفق و نسخه‌های قبلی حفظ شدند.`;
+      state.ui.status.dataset.kind = failedParagraphs || partialParagraphs ? 'error' : 'success';
+      state.ui.status.textContent = `${actualEngine}: ${summary}. ترجمه‌های موفق و نسخه‌های قبلی حفظ شدند.`;
       sendProgress(state.jobId, failedParagraphs || partialParagraphs ? 'error' : 'done', {
         completed: batches.length, total: batches.length, textNodes: entries.length
       });
-      if (batchErrors.length) state.ui.status.title = batchErrors.join('\n');
-      if (!updatedParagraphs) state.ui.status.textContent += ' دوباره تلاش کنید یا موتور دیگری برگزینید.';
+      if (batchErrors.length) {
+        const detail = batchErrors.slice(0, 3).join(' · ').slice(0, 420);
+        state.ui.status.title = detail;
+        state.ui.status.textContent += ` جزئیات: ${detail}`;
+      }
+      if (!updatedParagraphs) state.ui.status.textContent += ' هیچ ترجمه‌ای دریافت نشد؛ پیام بالا را بررسی کنید و دوباره تلاش کنید یا موتور دیگری برگزینید.';
     } catch (error) {
       const message = error && error.message ? error.message : 'ترجمه ناموفق بود.';
       selected.forEach((group) => { if (group.status === 'translating') group.status = 'failed'; });
       refreshGroupStatuses(state);
+      state.ui.status.dataset.kind = 'error';
       state.ui.status.textContent = `${message} ترجمه‌های قبلی حفظ شدند؛ می‌توانید دوباره تلاش کنید.`;
       sendProgress(state.jobId, 'error', { textNodes: entries.length });
     } finally {
@@ -380,6 +441,7 @@
     state.groups.forEach((group) => {
       group.block.classList.toggle('wtpdf-page-translation-pickable', group.originalPickable);
       group.block.classList.toggle('wtpdf-page-translation-picked', group.originalPicked);
+      if (group.versionBadge && group.versionBadge.isConnected) group.versionBadge.remove();
       if (group.originalStatus == null) delete group.block.dataset.wtpdfTranslationStatus;
       else group.block.setAttribute('data-wtpdf-translation-status', group.originalStatus);
     });
@@ -398,6 +460,7 @@
     const records = tools.collectTextNodes(document.body, document);
     const groups = buildGroups(records);
     if (!groups.length) return { ok: false, error: 'متن قابل‌انتخابی در این صفحه پیدا نشد.' };
+    groups.forEach(updateVersionBadge);
     const state = {
       running: false, records, groups, groupByBlock: new Map(groups.map((group) => [group.block, group])),
       jobId: String(jobId || ''), selectedGroups: new Set(),

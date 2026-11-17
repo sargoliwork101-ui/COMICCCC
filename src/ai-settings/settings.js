@@ -53,7 +53,7 @@ function renderProfiles() {
     const test = document.createElement('button');
     test.type = 'button'; test.className = 'btn secondary'; test.textContent = 'تست';
     test.setAttribute('aria-label', `تست اتصال کلید ${index + 1}`);
-    test.title = 'فقط اتصال کلید و مدل را بررسی می‌کند؛ متن صفحه ارسال نمی‌شود.';
+    test.title = 'با یک جملهٔ ثابت، دریافت پاسخ واقعی ترجمه را می‌سنجد؛ متن صفحه ارسال نمی‌شود.';
     test.addEventListener('click', async () => {
       captureProvider();
       const provider = $('provider').value;
@@ -62,8 +62,8 @@ function renderProfiles() {
       if (!apiKey) { status.textContent = 'ابتدا کلید API را وارد کنید.'; status.className = 'profile-status bad'; key.focus(); return; }
       test.disabled = true; test.textContent = '…'; status.textContent = 'در حال بررسی اتصال…';
       try {
-        await AiTranslateTools.testConnection({ provider, apiKey, model });
-        status.textContent = 'اتصال برقرار است ✓'; status.className = 'profile-status ok';
+        const result = await AiTranslateTools.testConnection({ provider, apiKey, model });
+        status.textContent = `آزمون ترجمه موفق ✓ ${result.sampleTranslation}`; status.className = 'profile-status ok';
       } catch (error) {
         status.textContent = AiTranslateTools.safeError(error); status.className = 'profile-status bad';
       } finally {

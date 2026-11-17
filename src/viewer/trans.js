@@ -69,7 +69,7 @@ function renderAiProfiles() {
     keyInput.addEventListener('change', saveAiSettings);
     const test = document.createElement('button');
     test.type = 'button'; test.className = 'mini ai-profile-test'; test.textContent = 'تست';
-    test.title = 'تست اتصال این کلید با مدل انتخاب‌شده؛ بدون ارسال متن کمیک';
+    test.title = 'ترجمهٔ یک جملهٔ آزمایشی ثابت را می‌سنجد؛ متن کمیک یا صفحه ارسال نمی‌شود.';
     test.setAttribute('aria-label', `تست اتصال API ${index + 1}`);
     test.onclick = async () => {
       const apiKey = profile.apiKey.trim();
@@ -78,10 +78,10 @@ function renderAiProfiles() {
       if (!apiKey) { showStatus('ابتدا کلید API را وارد کنید.', 'bad'); keyInput.focus(); return; }
       const unchanged = () => aiProvider === provider && profile.apiKey.trim() === apiKey &&
         ($('trAiModel').value.trim() || AiTranslateTools.DEFAULT_MODELS[provider]) === model;
-      test.disabled = true; test.textContent = '…'; showStatus('در حال بررسی ارتباط...');
+      test.disabled = true; test.textContent = '…'; showStatus('در حال آزمودن تولید ترجمه...');
       try {
-        await AiTranslateTools.testConnection({ provider, apiKey, model });
-        showStatus(unchanged() ? 'اتصال برقرار است ✓' : 'کلید یا مدل تغییر کرد؛ دوباره تست کنید.', unchanged() ? 'ok' : '');
+        const result = await AiTranslateTools.testConnection({ provider, apiKey, model });
+        showStatus(unchanged() ? `آزمون ترجمه موفق ✓ ${result.sampleTranslation}` : 'کلید یا مدل تغییر کرد؛ دوباره تست کنید.', unchanged() ? 'ok' : '');
       } catch (error) {
         showStatus(unchanged() ? AiTranslateTools.safeError(error) : 'کلید یا مدل تغییر کرد؛ دوباره تست کنید.', unchanged() ? 'bad' : '');
       } finally {
