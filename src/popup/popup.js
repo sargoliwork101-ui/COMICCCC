@@ -52,6 +52,14 @@ if (translatePageBtn) {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab || !Number.isInteger(tab.id) || !tab.url) throw new Error('صفحهٔ فعالی برای ترجمه پیدا نشد.');
+      try {
+        const existingCopy = await chrome.tabs.sendMessage(tab.id, { type: 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION' });
+        if (existingCopy && existingCopy.translatedCopy) {
+          translatePageBtn.disabled = false;
+          try { window.close(); } catch { /* browser popup may already be closing */ }
+          return;
+        }
+      } catch { /* ordinary page: open the consent screen and make a translated copy */ }
       const pageUrl = new URL(tab.url);
       const isWebStore = pageUrl.hostname === 'chromewebstore.google.com' ||
         (pageUrl.hostname === 'chrome.google.com' && pageUrl.pathname.startsWith('/webstore'));

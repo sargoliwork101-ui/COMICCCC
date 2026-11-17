@@ -13,6 +13,10 @@
     'FOOTER', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER', 'LI', 'MAIN', 'NAV',
     'P', 'SECTION', 'SUMMARY', 'TD', 'TH'
   ]);
+  const PARAGRAPH_BLOCKS = new Set([
+    'ADDRESS', 'BLOCKQUOTE', 'DD', 'DIV', 'DT', 'FIGCAPTION', 'H1', 'H2', 'H3',
+    'H4', 'H5', 'H6', 'LI', 'P', 'SUMMARY', 'TD', 'TH'
+  ]);
   const directionSnapshots = new WeakMap();
 
   function splitText(text, id, maxChars = MAX_SEGMENT_CHARS) {
@@ -75,7 +79,7 @@
       const core = original.slice(leading.length, original.length - trailing.length);
       if (core.length < 2 || !LETTER_RE.test(core)) continue;
       const id = `p${String(records.length + 1).padStart(6, '0')}`;
-      records.push({ id, node, original, leading, trailing, parts: splitText(core, id) });
+      records.push({ id, node, block: paragraphTarget(node), original, leading, trailing, parts: splitText(core, id) });
     }
     return records;
   }
@@ -101,6 +105,16 @@
     return batches;
   }
 
+  function paragraphTarget(node) {
+    let element = node && node.parentElement;
+    let fallback = element;
+    while (element && element.tagName !== 'BODY' && element.tagName !== 'HTML') {
+      if (PARAGRAPH_BLOCKS.has(element.tagName)) return element;
+      element = element.parentElement;
+    }
+    return fallback || element;
+  }
+
   function directionTarget(node) {
     let element = node && node.parentElement;
     let fallback = element;
@@ -108,7 +122,7 @@
       if (element.hasAttribute('dir') || DIRECTION_BLOCKS.has(element.tagName)) return element;
       element = element.parentElement;
     }
-    return fallback || element;
+    return fallback || (node && node.ownerDocument && node.ownerDocument.body) || element;
   }
 
   function setTranslatedDirection(records) {
@@ -142,6 +156,7 @@
     const map = translations instanceof Map ? translations : new Map(Object.entries(translations || {}));
     (Array.isArray(records) ? records : []).forEach((record) => {
       record.hasTranslation = (record.parts || []).some((part) => String(map.get(part.id) || '').trim());
+      record.latestHasTranslation = record.hasTranslation;
       const content = (record.parts || []).map((part) => {
         const translated = String(map.get(part.id) || '').trim();
         return (translated || part.text) + (part.after || '');
@@ -153,15 +168,25 @@
     return records;
   }
 
-  function showOriginal(records) {
+  function showVersion(records, values, translatedIds = new Set()) {
+    const map = values instanceof Map ? values : new Map(Object.entries(values || {}));
+    const translated = translatedIds instanceof Set ? translatedIds : new Set(translatedIds || []);
     (Array.isArray(records) ? records : []).forEach((record) => {
-      if (record.node && record.node.isConnected) record.node.nodeValue = record.original;
+      const text = String(map.has(record.id) ? map.get(record.id) : record.original);
+      record.hasTranslation = translated.has(record.id);
+      if (record.node && record.node.isConnected) record.node.nodeValue = text;
     });
-    restoreDirections(records);
+    if (translated.size) setTranslatedDirection(records);
+    else restoreDirections(records);
+  }
+
+  function showOriginal(records) {
+    showVersion(records, new Map((Array.isArray(records) ? records : []).map((record) => [record.id, record.original])));
   }
 
   function showTranslations(records) {
     (Array.isArray(records) ? records : []).forEach((record) => {
+      record.hasTranslation = record.latestHasTranslation === true;
       if (record.node && record.node.isConnected && typeof record.translated === 'string') record.node.nodeValue = record.translated;
     });
     setTranslatedDirection(records);
@@ -175,7 +200,7 @@
   const api = {
     MAX_SEGMENT_CHARS, MAX_BATCH_ITEMS, MAX_BATCH_CHARS,
     collectTextNodes, createEntries, splitText, splitBatches,
-    applyTranslations, showOriginal, showTranslations, restoreOriginal
+    applyTranslations, showVersion, showOriginal, showTranslations, restoreOriginal
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.PageTranslationTools = api;

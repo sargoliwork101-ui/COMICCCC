@@ -24,7 +24,7 @@ async function bootPage(url, sourceTab) {
     tabs: {
       get: async (id) => ({ ...sourceTab, id }),
       duplicate: async (id) => { calls.duplicate.push(id); return { id: 44, status: 'complete', url: sourceTab.url }; },
-      sendMessage: async (id, message) => { calls.send.push({ id, message }); return { ok: true, textNodes: 4, translatedParts: 4, failedParts: 0 }; },
+      sendMessage: async (id, message) => { calls.send.push({ id, message }); return { ok: true, readyForSelection: true, paragraphs: 4, textNodes: 4 }; },
       update: async (id, update) => ({ id, ...update }),
       onUpdated: { addListener() {}, removeListener() {} }
     },
@@ -61,10 +61,10 @@ async function bootPage(url, sourceTab) {
     check('only the translation helper and isolated content script are injected into the duplicate',
       calls.inject.length === 1 && calls.inject[0].target.tabId === 44 &&
       calls.inject[0].files.join(',') === 'src/core/page-translation.js,src/page-translator/content.js', calls.inject);
-    check('translated copy starts the page-translation job and returns a clear completion status',
-      calls.send.length === 1 && calls.send[0].id === 44 &&
-      calls.send[0].message.type === 'WTPDF_PAGE_TRANSLATE_START' &&
-      /ترجمه/.test(window.document.getElementById('pageStatus').textContent), calls);
+  check('translated copy starts in paragraph-selection mode and reports the available paragraphs',
+    calls.send.length === 1 && calls.send[0].id === 44 &&
+    calls.send[0].message.type === 'WTPDF_PAGE_TRANSLATE_START' &&
+    /4 پاراگراف/.test(window.document.getElementById('pageStatus').textContent), calls);
   }
   {
     const app = await bootPage('chrome-extension://ext/src/page-translator/page.html?tabId=35&host=example.test', {

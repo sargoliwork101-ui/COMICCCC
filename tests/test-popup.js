@@ -258,6 +258,26 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
       openedUrl === 'chrome-extension://ext/src/page-translator/page.html?tabId=33&host=news.example.test', openedUrl);
   }
   {
+    const sameTabDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const sameTabWindow = sameTabDom.window;
+    let created = 0, requested = null;
+    sameTabWindow.chrome = {
+      runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
+      tabs: {
+        query: async () => [{ id: 37, url: 'https://news.example.test/translated-copy' }],
+        sendMessage: async (_id, message) => { requested = message; return { ok: true, translatedCopy: true }; },
+        create: async () => { created++; }
+      }
+    };
+    vm.runInContext(popupCode, sameTabDom.getInternalVMContext(), { filename: 'popup.js' });
+    sameTabWindow.document.getElementById('translatePageBtn').click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('retranslate from the popup opens paragraph selection in the existing copy tab',
+      requested && requested.type === 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION' && created === 0, { requested, created });
+  }
+  {
     const blockedDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
       url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
     });

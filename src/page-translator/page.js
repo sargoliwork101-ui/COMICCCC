@@ -42,9 +42,9 @@ function onTranslationProgress(message, sender) {
   if (message.state === 'working') {
     setStatus(`در حال ترجمهٔ متن صفحه... بستهٔ ${message.completed || 0} از ${message.total || 0}`);
   } else if (message.state === 'done') {
-    setStatus('ترجمهٔ صفحه آماده شد؛ کپی ترجمه‌شده در زبانهٔ تازه باز است.', 'ok');
+    setStatus('ترجمهٔ انتخاب‌شده‌ها تمام شد؛ نسخهٔ هر پاراگراف را از داخل همان صفحه عوض کنید.', 'ok');
   } else if (message.state === 'error') {
-    setStatus('ترجمه در زبانهٔ تازه کامل نشد؛ پیام خطا را همان‌جا ببینید.', 'error');
+    setStatus('ترجمه کامل نشد؛ پیام خطا و ترجمه‌های قبلی در همان صفحه حفظ شده‌اند.', 'error');
   }
 }
 chrome.runtime.onMessage.addListener(onTranslationProgress);
@@ -81,7 +81,7 @@ startElement.addEventListener('click', async () => {
       type: 'WTPDF_PAGE_TRANSLATE_START', jobId: activeJobId
     });
     if (!result || !result.ok) throw new Error(result && result.error || 'ترجمهٔ صفحه کامل نشد.');
-    setStatus(`ترجمهٔ صفحه آماده شد؛ ${result.textNodes} بخش متن بررسی شد. کپی ترجمه‌شده در زبانهٔ تازه باز است.`, 'ok');
+    setStatus(`کپی در زبانهٔ تازه آماده است؛ ${result.paragraphs || 0} پاراگراف برای انتخاب پیدا شد. متن‌ها را از همان صفحه انتخاب و ترجمه کنید.`, 'ok');
     try { await chrome.tabs.update(cloneTabId, { active: true }); } catch { /* کپی قبلاً فعال است */ }
   } catch (error) {
     setStatus(error && error.message ? error.message : String(error), 'error');
