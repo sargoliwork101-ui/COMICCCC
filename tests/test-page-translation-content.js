@@ -1,4 +1,4 @@
-// Integration tests for paragraph selection, in-page retranslations, and per-paragraph versions.
+// Integration tests for direct on-page selection, translation retries, and version controls.
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -49,57 +49,48 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   let result = null;
   const keepOpen = listener({ type: 'WTPDF_PAGE_TRANSLATE_START', jobId: 'job-1' }, {}, (response) => { result = response; });
   await pause();
-  check('copy opens a paragraph chooser without translating everything immediately',
-    keepOpen === false && result && result.ok && result.readyForSelection && requests.length === 0 &&
-    window.document.querySelectorAll('[data-group-select]').length === 2);
-  check('paragraphs start unselected so no text is sent by accident',
-    [...window.document.querySelectorAll('[data-group-select]')].every((input) => !input.checked) &&
-    !window.document.querySelector('[data-role="paragraph"]').textContent.includes('Do not translate controls'));
+  const toolbar = window.document.querySelector('[data-wtpdf-page-translation-ui="toolbar"]');
+  const pickToggle = window.document.querySelector('[data-action="pick-toggle"]');
+  const group = (id) => window.__wtpdfPageTranslation.groups.find((item) => item.id === id);
+  check('new copy immediately enters on-page selection with no paragraph-selection window',
+    keepOpen === false && result && result.ok && result.readyForSelection && window.__wtpdfPageTranslation.pickMode &&
+    !!toolbar && !window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]') &&
+    !/پاراگراف‌هایی را که می‌خواهید ترجمه کنید انتخاب کنید/.test(window.document.body.textContent) && requests.length === 0);
+  check('selection toolbar exposes engine and translation controls without listing page text',
+    !!toolbar.querySelector('[data-role="translation-engine"]') && !!toolbar.querySelector('[data-action="translate-selected"]') &&
+    !toolbar.textContent.includes('Hello') && !toolbar.textContent.includes('This paragraph'));
 
-  const firstCheckbox = window.document.querySelector('[data-group-select="group-1"]');
-  const secondCheckbox = window.document.querySelector('[data-group-select="group-2"]');
-  window.document.querySelector('[data-action="pick-on-page"]').click();
-  check('page-pick mode hides the list and highlights selectable paragraphs',
-    window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]').hidden &&
-    window.document.getElementById('article').classList.contains('wtpdf-page-translation-pickable') &&
-    !window.document.querySelector('[data-action="finish-pick"]').hidden &&
-    window.document.querySelector('[data-action="original"]').disabled &&
-    window.document.querySelector('[data-action="translated"]').disabled);
   const clickBlock = (element) => element.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
   clickBlock(window.document.getElementById('article'));
   clickBlock(window.document.getElementById('second'));
-  check('clicking page paragraphs selects them and shows a selected highlight',
-    firstCheckbox.checked && secondCheckbox.checked &&
-    window.document.getElementById('article').classList.contains('wtpdf-page-translation-picked'));
-  clickBlock(window.document.getElementById('second'));
-  check('clicking a selected paragraph again removes it from the selection',
-    firstCheckbox.checked && !secondCheckbox.checked &&
-    !window.document.getElementById('second').classList.contains('wtpdf-page-translation-picked'));
-  window.document.querySelector('[data-action="finish-pick"]').click();
-  check('finishing page-pick mode returns to the chooser and removes temporary highlights',
-    !window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]').hidden &&
-    !window.document.getElementById('article').classList.contains('wtpdf-page-translation-pickable') &&
-    !window.document.querySelector('[data-action="original"]').disabled &&
-    !window.document.querySelector('[data-action="translated"]').disabled);
-  window.document.querySelector('[data-action="pick-on-page"]').click();
+  check('clicking page paragraphs selects and highlights them directly',
+    window.__wtpdfPageTranslation.selectedGroups.size === 2 &&
+    window.document.getElementById('article').classList.contains('wtpdf-page-translation-picked') &&
+    window.document.getElementById('second').classList.contains('wtpdf-page-translation-picked'));
+  pickToggle.click();
+  check('ending selection keeps the chosen paragraphs highlighted and enables translation',
+    !window.__wtpdfPageTranslation.pickMode && window.__wtpdfPageTranslation.selectedGroups.size === 2 &&
+    !toolbar.querySelector('[data-action="translate-selected"]').disabled &&
+    !window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]'));
+  pickToggle.click();
   clickBlock(window.document.getElementById('second'));
   window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-  check('Escape also exits page-pick mode and keeps the current choices',
-    !window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]').hidden &&
-    firstCheckbox.checked && secondCheckbox.checked &&
-    !window.document.getElementById('second').classList.contains('wtpdf-page-translation-pickable'));
-  secondCheckbox.checked = false;
-  secondCheckbox.dispatchEvent(new window.Event('change', { bubbles: true }));
-  const engineSelect = window.document.querySelector('[data-role="translation-engine"]');
+  check('Escape ends on-page selection while keeping only the page clicks that remain selected',
+    !window.__wtpdfPageTranslation.pickMode && window.__wtpdfPageTranslation.selectedGroups.size === 1 &&
+    window.__wtpdfPageTranslation.selectedGroups.has('group-1') &&
+    window.document.getElementById('article').classList.contains('wtpdf-page-translation-picked') &&
+    !window.document.getElementById('second').classList.contains('wtpdf-page-translation-picked'));
+
+  const engineSelect = toolbar.querySelector('[data-role="translation-engine"]');
   engineSelect.value = 'google'; engineSelect.dispatchEvent(new window.Event('change', { bubbles: true }));
-  window.document.querySelector('[data-action="translate-selected"]').click();
+  toolbar.querySelector('[data-action="translate-selected"]').click();
   await new Promise((resolve) => setTimeout(resolve, 20));
-  check('only the checked paragraph is sent to the selected engine',
+  check('only the clicked paragraph is sent to the selected engine',
     requests.length === 1 && requests[0].engine === 'google' && requests[0].entries.every((entry) =>
       /Hello|world|from this page/.test(entry.text)) && requests[0].entries.every((entry) => !/This paragraph/.test(entry.text)));
-  check('paragraph status distinguishes a successful translation from an unselected paragraph',
-    window.document.querySelector('[data-status-for="group-1"]').dataset.state === 'translated' &&
-    window.document.querySelector('[data-status-for="group-2"]').dataset.state === 'pending');
+  check('translation status is attached to the selected page block, not a chooser list',
+    group('group-1').status === 'translated' && group('group-2').status === 'pending' &&
+    window.document.getElementById('article').dataset.wtpdfTranslationStatus === 'translated');
   check('successful paragraph receives its first RTL translation while unselected text remains unchanged',
     window.document.querySelector('#article').textContent.includes('V1(') &&
     window.document.querySelector('#article').getAttribute('dir') === 'rtl' &&
@@ -107,79 +98,73 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     window.document.querySelector('#second').textContent === 'This paragraph can remain unchanged.' &&
     !window.document.querySelector('#second').hasAttribute('dir'));
 
-  let firstVersions = window.document.querySelector('[data-version-for="group-1"]');
-  const secondVersions = window.document.querySelector('[data-version-for="group-2"]');
-  check('each paragraph has its own version selector and original text remains an option',
-    firstVersions.options.length === 2 && firstVersions.options[0].textContent === 'متن اصلی' && secondVersions.options.length === 1);
-  firstVersions.value = '0'; firstVersions.dispatchEvent(new window.Event('change', { bubbles: true }));
-  check('choosing original text for one paragraph restores only that block and its direction',
+  check('toolbar can move the selected paragraph between original and translated versions',
+    group('group-1').versions.length === 2 && toolbar.querySelector('[data-action="version-prev"]').disabled === false);
+  toolbar.querySelector('[data-action="version-prev"]').click();
+  check('previous-version control restores original text for the selected paragraph',
     window.document.querySelector('#article').textContent === 'Hello world from this page.' &&
-    !window.document.querySelector('#article').hasAttribute('dir') && window.document.querySelector('#second').textContent.startsWith('This paragraph'));
-  firstVersions.value = '1'; firstVersions.dispatchEvent(new window.Event('change', { bubbles: true }));
-  check('choosing a saved translation displays it and restores RTL',
-    window.document.querySelector('#article').textContent.includes('V1(') && window.document.querySelector('#article').getAttribute('dir') === 'rtl');
+    !window.document.querySelector('#article').hasAttribute('dir'));
+  toolbar.querySelector('[data-action="version-next"]').click();
+  check('next-version control reapplies the saved RTL translation',
+    window.document.querySelector('#article').textContent.includes('V1(') &&
+    window.document.querySelector('#article').getAttribute('dir') === 'rtl');
 
-  window.document.querySelector('[data-action="select"]')?.click();
-  const sameTabResponse = listener({ type: 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION' }, {}, (response) => { result = response; });
+  const sameTabResponse = listener({ type: 'WTPDF_PAGE_TRANSLATE_OPEN_SELECTION', engine: 'google' }, {}, (response) => { result = response; });
   await pause();
-  check('retranslation request is handled by the existing translated tab',
-    sameTabResponse === false && result && result.ok && result.translatedCopy && requests.length === 1);
-  firstVersions = window.document.querySelector('[data-version-for="group-1"]');
-  window.document.querySelector('[data-group-select="group-2"]').checked = false;
-  window.document.querySelector('[data-group-select="group-1"]').checked = true;
-  window.document.querySelector('[data-action="translate-selected"]').click();
+  check('reopen request reactivates direct page selection without showing a chooser',
+    sameTabResponse === false && result && result.ok && result.translatedCopy &&
+    window.__wtpdfPageTranslation.pickMode && !window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]'));
+  pickToggle.click();
+  toolbar.querySelector('[data-action="translate-selected"]').click();
   await new Promise((resolve) => setTimeout(resolve, 20));
-  check('retranslation creates another version in place without changing the page or tab',
+  check('retranslation creates another version in place without a panel or new tab',
     requests.length === 2 && window.document.querySelector('#article').textContent.includes('V2(') &&
-    window.document.querySelectorAll('[data-wtpdf-page-translation-ui="toolbar"]').length === 1);
-  firstVersions = window.document.querySelector('[data-version-for="group-1"]');
-  check('previous and new translations are both selectable for the same paragraph', firstVersions.options.length === 3);
-  firstVersions.value = '1'; firstVersions.dispatchEvent(new window.Event('change', { bubbles: true }));
-  check('per-paragraph selector restores the previous translation', window.document.querySelector('#article').textContent.includes('V1('));
-  firstVersions.value = '2'; firstVersions.dispatchEvent(new window.Event('change', { bubbles: true }));
-  check('per-paragraph selector can switch back to the new translation', window.document.querySelector('#article').textContent.includes('V2('));
+    window.document.querySelectorAll('[data-wtpdf-page-translation-ui="toolbar"]').length === 1 &&
+    !window.document.querySelector('[data-wtpdf-page-translation-ui="panel"]'));
+  toolbar.querySelector('[data-action="version-prev"]').click();
+  check('previous version remains selectable from the compact toolbar', window.document.querySelector('#article').textContent.includes('V1('));
+  toolbar.querySelector('[data-action="version-next"]').click();
+  check('latest version can be restored after reviewing an older one', window.document.querySelector('#article').textContent.includes('V2('));
 
   responseMode = 'fail';
-  window.document.querySelector('[data-action="translate-selected"]').click();
+  toolbar.querySelector('[data-action="translate-selected"]').click();
   await new Promise((resolve) => setTimeout(resolve, 20));
-  check('failed request marks the paragraph and keeps the previous successful version visible',
-    window.document.querySelector('[data-status-for="group-1"]').dataset.state === 'failed' &&
-    window.document.querySelector('#article').textContent.includes('V2(') &&
-    window.document.querySelector('[data-version-for="group-1"]').options.length === 3);
+  check('failed request marks the selected paragraph and keeps the previous translation visible',
+    group('group-1').status === 'failed' && window.document.querySelector('#article').textContent.includes('V2(') &&
+    !toolbar.querySelector('[data-action="retry-failed"]').disabled);
   responseMode = 'partial';
-  window.document.querySelector('[data-action="retry-failed"]').click();
+  toolbar.querySelector('[data-action="retry-failed"]').click();
   await new Promise((resolve) => setTimeout(resolve, 20));
-  check('retry of a failed paragraph records partial completion without losing its saved version',
-    requests[3].entries.length === 3 &&
-    window.document.querySelector('[data-status-for="group-1"]').dataset.state === 'partial' &&
+  check('retry of a failed paragraph records partial completion without losing saved versions',
+    requests[3].entries.length === 3 && group('group-1').status === 'partial' &&
     window.document.querySelector('#article').textContent.includes('V4(') &&
-    window.document.querySelector('#article').textContent.includes('world') &&
-    window.document.querySelector('[data-version-for="group-1"]').options.length === 4);
+    window.document.querySelector('#article').textContent.includes('world'));
   responseMode = 'full';
-  window.document.querySelector('[data-action="retry-failed"]').click();
+  toolbar.querySelector('[data-action="retry-failed"]').click();
   await new Promise((resolve) => setTimeout(resolve, 20));
   check('retry sends only the missing text segment and combines it with earlier successes',
     requests[4].entries.length === 1 && /world/.test(requests[4].entries[0].text) &&
-    window.document.querySelector('[data-status-for="group-1"]').dataset.state === 'translated' &&
-    window.document.querySelector('#article').textContent.includes('V4(') &&
+    group('group-1').status === 'translated' && window.document.querySelector('#article').textContent.includes('V4(') &&
     window.document.querySelector('#article').textContent.includes('V5(world)'));
-  firstVersions = window.document.querySelector('[data-version-for="group-1"]');
-  firstVersions.value = '2'; firstVersions.dispatchEvent(new window.Event('change', { bubbles: true }));
+  toolbar.querySelector('[data-action="version-prev"]').click();
+  toolbar.querySelector('[data-action="version-prev"]').click();
   check('older complete translation remains selectable after failed and partial retries',
-    window.document.querySelector('#article').textContent.includes('V2(') && firstVersions.options.length === 5);
+    window.document.querySelector('#article').textContent.includes('V2('));
+  toolbar.querySelector('[data-action="version-next"]').click();
+  toolbar.querySelector('[data-action="version-next"]').click();
 
-  window.document.querySelector('[data-action="original"]').click();
+  toolbar.querySelector('[data-action="original"]').click();
   check('global original control restores all paragraphs and original directions',
     window.document.querySelector('#article').textContent === 'Hello world from this page.' &&
     !window.document.querySelector('#article').hasAttribute('dir') &&
     window.document.querySelector('#second').textContent === 'This paragraph can remain unchanged.');
-  window.document.querySelector('[data-action="translated"]').click();
+  toolbar.querySelector('[data-action="translated"]').click();
   check('global translation control restores each paragraph’s latest saved version',
     window.document.querySelector('#article').textContent.includes('V4(') &&
     window.document.querySelector('#article').textContent.includes('V5(world)'));
   check('translation progress never includes paragraph text', progress.length > 0 && progress.every((item) => !Object.hasOwn(item, 'text')));
-  window.document.querySelector('[data-action="restore"]').click();
-  check('restore removes the toolbar and chooser and returns the original page text',
+  toolbar.querySelector('[data-action="restore"]').click();
+  check('restore removes the compact toolbar and returns original page text',
     !window.document.querySelector('[data-wtpdf-page-translation-ui]') &&
     window.document.querySelector('#article').textContent === 'Hello world from this page.' &&
     !window.document.querySelector('#article').hasAttribute('dir'));
