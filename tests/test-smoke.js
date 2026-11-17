@@ -449,6 +449,17 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('translate all fail -> ok false', r.ok === false && r.text === '', r);
   }
   {
+    let calls = 0, aborted = 0;
+    const fetchFn = async (_url, options) => {
+      calls++;
+      options.signal.addEventListener('abort', () => { aborted++; }, { once: true });
+      return new Promise(() => {});
+    };
+    const r = await TranslateTools.translate('hi', 'en', fetchFn, 'google', 5);
+    check('stalled fallback translation requests time out and do not keep the translation job waiting',
+      r.ok === false && calls === 2 && aborted === 2, { ok: r.ok, calls, aborted });
+  }
+  {
     const twoColorCtx = {
       getImageData: (_x, _y, w, h) => {
         const data = new Uint8ClampedArray(w * h * 4);

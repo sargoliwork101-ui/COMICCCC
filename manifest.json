@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "HASAYA",
-  "version": "2.82",
+  "version": "2.83",
   "description": "HASAYA — دانلود کمیک و وب‌تون به‌صورت PDF یا تصاویر جدا، با کیفیت اصلی",
   "permissions": [
     "activeTab",

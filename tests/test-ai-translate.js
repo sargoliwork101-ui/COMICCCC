@@ -48,7 +48,7 @@ function check(name, condition, extra) {
 
   {
     const calls = [];
-    const signal = { marker: 'abort-signal' };
+    const signal = new AbortController().signal;
     const fetchFn = async (url, options) => {
       calls.push({ url, options });
       return {
@@ -81,7 +81,8 @@ function check(name, condition, extra) {
       sourceRows[0].id === 'p0001-b001' && sourceRows[0].text === 'I trusted you.' &&
       sourceRows[2].text === 'Please listen.' && body.systemInstruction.parts[0].text.includes('لحن صمیمی'));
     check('request requires structured JSON and forwards cancellation signal',
-      body.generationConfig.responseMimeType === 'application/json' && request.options.signal === signal);
+      body.generationConfig.responseMimeType === 'application/json' &&
+      request.options.signal instanceof AbortSignal && request.options.signal !== signal);
     check('request omits cookies and referer',
       request.options.credentials === 'omit' && request.options.referrerPolicy === 'no-referrer');
   }
@@ -115,6 +116,40 @@ function check(name, condition, extra) {
     check('safe quota message never exposes the API key', !AiTranslateTools.safeError(caught).includes('private-key'));
   }
 
+  {
+    const calls = [];
+    let firstRequestAborted = false;
+    const fetchFn = async (url, options) => {
+      const key = options.headers['x-goog-api-key'];
+      calls.push(key);
+      if (key === 'hung-key') {
+        options.signal.addEventListener('abort', () => { firstRequestAborted = true; }, { once: true });
+        return new Promise(() => {}); // Simulate an upstream/VPN request that never returns or honors abort.
+      }
+      const text = JSON.stringify([{ id: entries[0].id, translation: 'رسید' }]);
+      return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text }] } }] }) };
+    };
+    const result = await AiTranslateTools.translateWithFailover({
+      entries: [entries[0]], timeoutMs: 10,
+      profiles: [
+        { name: 'پاسخ‌نداده', apiKey: 'hung-key' },
+        { name: 'پاسخ‌گو', apiKey: 'working-key' }
+      ], fetchFn
+    });
+    check('a stalled Gemini request times out, aborts its network request, and advances to the next API key',
+      firstRequestAborted && calls.join(',') === 'hung-key,working-key' && result.profileName === 'پاسخ‌گو',
+      { firstRequestAborted, calls, profileName: result.profileName });
+  }
+  {
+    let caught = null;
+    await AiTranslateTools.translateBatch({
+      entries: [entries[0]], apiKey: 'hung-key', timeoutMs: 10,
+      fetchFn: async () => new Promise(() => {})
+    }).catch((error) => { caught = error; });
+    check('a single stalled AI request returns a readable timeout error instead of hanging the UI',
+      caught && caught.name === 'TimeoutError' && /۶۰ ثانیه|پاسخ .* پس از/.test(AiTranslateTools.safeError(caught)),
+      caught && caught.message);
+  }
   {
     const calls = [];
     const fetchFn = async (url, options) => {
@@ -298,7 +333,7 @@ function check(name, condition, extra) {
       calls.every((call) => !call.options.body.includes('test-key')));
   }
   {
-    const calls = [], signal = { marker: 'connection-signal' };
+    const calls = [], signal = new AbortController().signal;
     const result = await AiTranslateTools.testConnection({
       apiKey: 'connection-private-key', model: 'models/gemini-3.8-flash', signal,
       fetchFn: async (url, options) => {
@@ -318,7 +353,16 @@ function check(name, condition, extra) {
     check('Gemini sample test keeps its key in headers and forwards privacy/cancel options',
       request.options.headers['x-goog-api-key'] === 'connection-private-key' &&
       !request.url.includes('connection-private-key') && !request.options.body.includes('connection-private-key') &&
-      request.options.credentials === 'omit' && request.options.referrerPolicy === 'no-referrer' && request.options.signal === signal);
+      request.options.credentials === 'omit' && request.options.referrerPolicy === 'no-referrer' &&
+      request.options.signal instanceof AbortSignal && request.options.signal !== signal);
+  }
+  {
+    let caught = null;
+    await AiTranslateTools.testConnection({
+      apiKey: 'hung-key', timeoutMs: 10, fetchFn: async () => new Promise(() => {})
+    }).catch((error) => { caught = error; });
+    check('connection test also times out when Gemini never responds',
+      caught && caught.name === 'TimeoutError' && /پاسخ .* پس از/.test(caught.message));
   }
   {
     let calls = 0, blankError = null, modelError = null, emptyError = null;
