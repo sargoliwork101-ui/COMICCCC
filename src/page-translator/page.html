@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ترجمهٔ صفحهٔ وب · PIC TO PDF</title>
+  <link rel="stylesheet" href="../shared/style.css">
+  <link rel="stylesheet" href="page.css">
+</head>
+<body>
+  <main class="page-card">
+    <div class="page-brand"><img src="../../assets/icons/icon48.png" alt=""><span>PIC TO PDF</span></div>
+    <h1>ساخت نسخهٔ فارسی از صفحه</h1>
+    <p class="site-line">صفحهٔ انتخاب‌شده: <strong id="sourceHost">در حال بررسی...</strong></p>
+    <p>افزونه یک کپی از صفحه را در زبانه‌ای تازه باز می‌کند و متن‌های قابل‌خواندن را ترجمه می‌کند. صفحهٔ اصلی دست‌نخورده می‌ماند؛ عکس‌ها و چیدمان حفظ می‌شوند و می‌توانید در کپی، متن اصلی را هم ببینید یا صفحه را بازگردانید.</p>
+    <div class="privacy-note" role="note">
+      <strong>دربارهٔ حریم خصوصی</strong>
+      <p>فقط متن‌های قابل‌خواندن صفحه برای ترجمه فرستاده می‌شوند؛ نشانی صفحه، کدها، فرم‌ها و کلیدهای API ارسال نمی‌شوند. اگر ترجمهٔ هوش مصنوعی در تنظیمات فعال باشد، متن به سرویس انتخاب‌شدهٔ شما فرستاده می‌شود؛ در غیر این صورت از Google Translate و در صورت نیاز MyMemory استفاده می‌شود. متن حساس را ترجمه نکنید.</p>
+    </div>
+    <label class="consent-row" for="translationConsent">
+      <input type="checkbox" id="translationConsent">
+      <span>می‌دانم که متن صفحه برای ترجمه به سرویس آنلاین فرستاده می‌شود و موافقم.</span>
+    </label>
+    <button id="startTranslationBtn" class="btn" type="button" disabled>ساخت کپی و ترجمه</button>
+    <p id="pageStatus" role="status" aria-live="polite">برای شروع، موافقت خود را با ارسال متن برای ترجمه اعلام کنید.</p>
+  </main>
+  <script src="page.js"></script>
+</body>
+</html>

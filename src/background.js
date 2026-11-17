@@ -1,3 +1,6 @@
+/* global importScripts */
+if (typeof importScripts === 'function') importScripts('core/translate.js', 'core/ai-translate.js');
+
 // Jobهای تازه ممکن است متعلق به تب‌های بازیابی‌شدهٔ مرورگر باشند؛ فقط داده‌های بیشتر از ۷ روز پاک می‌شوند.
 const JOB_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 async function pruneOrphanJobs() {
@@ -213,8 +216,99 @@ if (chrome.tabs && chrome.tabs.onRemoved && typeof chrome.tabs.onRemoved.addList
   });
 }
 
+const WEBPAGE_TRANSLATION_SETTINGS_KEY = 'gemini_translation_settings_v1';
+const WEBPAGE_ENTRY_ID = /^p\d{6}(?:-s\d{3})?$/;
+const WEBPAGE_MAX_ENTRIES = 20;
+const WEBPAGE_MAX_CHARS = 5000;
+
+function validateWebpageEntries(rawEntries) {
+  if (!Array.isArray(rawEntries) || rawEntries.length < 1 || rawEntries.length > WEBPAGE_MAX_ENTRIES) {
+    throw new Error('تعداد متن‌های این بسته برای ترجمه معتبر نیست.');
+  }
+  const seen = new Set();
+  let totalChars = 0;
+  const entries = rawEntries.map((entry) => {
+    const id = String(entry && entry.id || '');
+    const text = String(entry && entry.text || '').trim();
+    if (!WEBPAGE_ENTRY_ID.test(id) || seen.has(id) || !text || text.length > 1000) {
+      throw new Error('شناسه یا متن یکی از بخش‌های صفحه برای ترجمه معتبر نیست.');
+    }
+    seen.add(id);
+    totalChars += text.length;
+    return { id, page: 1, text };
+  });
+  if (totalChars > WEBPAGE_MAX_CHARS) throw new Error('حجم این بستهٔ ترجمه بیش از حد مجاز است.');
+  return entries;
+}
+
+function webpageAiConfig(settings) {
+  const provider = settings && typeof settings.provider === 'string' ? settings.provider : 'gemini';
+  const providerData = settings && settings.providers && settings.providers[provider];
+  let profiles = providerData && Array.isArray(providerData.profiles) ? providerData.profiles : [];
+  if (!profiles.length && provider === 'gemini' && !settings.providers) {
+    if (Array.isArray(settings.profiles)) profiles = settings.profiles;
+    else if (typeof settings.apiKey === 'string' && settings.apiKey.trim()) {
+      profiles = [{ name: 'کلید اصلی', apiKey: settings.apiKey }];
+    }
+  }
+  const defaultSkill = typeof AiTranslateTools !== 'undefined' ? AiTranslateTools.DEFAULT_SKILL : '';
+  return {
+    provider,
+    model: providerData && providerData.model || settings.model || '',
+    profiles: profiles.map((profile, index) => ({
+      id: String(profile && profile.id || `api-${index + 1}`),
+      name: String(profile && profile.name || `API ${index + 1}`),
+      apiKey: String(profile && profile.apiKey || '')
+    })).filter((profile) => profile.apiKey.trim()),
+    skill: typeof settings.skill === 'string' && settings.skill !== defaultSkill ? settings.skill : ''
+  };
+}
+
+async function translateWebpageBatch(rawEntries) {
+  const entries = validateWebpageEntries(rawEntries);
+  const stored = await chrome.storage.local.get(WEBPAGE_TRANSLATION_SETTINGS_KEY);
+  const settings = stored[WEBPAGE_TRANSLATION_SETTINGS_KEY] || {};
+  if (settings.enabled === true) {
+    if (typeof AiTranslateTools === 'undefined') throw new Error('موتور ترجمهٔ هوش مصنوعی بارگذاری نشد.');
+    const config = webpageAiConfig(settings);
+    const result = await AiTranslateTools.translateWithFailover({
+      ...config, entries, sourceLang: 'auto', context: 'webpage'
+    });
+    return {
+      ok: true,
+      provider: 'هوش مصنوعی',
+      translations: [...result.translations.entries()].map(([id, text]) => ({ id, text }))
+    };
+  }
+  if (typeof TranslateTools === 'undefined') throw new Error('موتور ترجمهٔ آنلاین بارگذاری نشد.');
+  const translations = [];
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(3, entries.length) }, async () => {
+    while (next < entries.length) {
+      const entry = entries[next++];
+      const result = await TranslateTools.translate(entry.text, 'auto');
+      if (result && result.ok && result.text) translations.push({ id: entry.id, text: result.text });
+    }
+  }));
+  return { ok: true, provider: 'Google Translate', translations };
+}
+
 // دریافت لیست تصاویر از صفحه و باز کردن تب ساخت PDF
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === 'WTPDF_TRANSLATE_PAGE_BATCH') {
+    if (!sender || !sender.tab || !/^https?:$/.test((() => { try { return new URL(sender.tab.url).protocol; } catch { return ''; } })())) {
+      sendResponse({ ok: false, error: 'ترجمه فقط در صفحه‌های وب معمولی اجرا می‌شود.' });
+      return false;
+    }
+    translateWebpageBatch(msg.entries)
+      .then(sendResponse)
+      .catch((error) => {
+        const message = typeof AiTranslateTools !== 'undefined' && typeof AiTranslateTools.safeError === 'function'
+          ? AiTranslateTools.safeError(error) : (error && error.message ? error.message : String(error));
+        sendResponse({ ok: false, error: message });
+      });
+    return true;
+  }
   // اسکن اختصاصی Google Books از طریق API رسمی reader (اجرا در service worker برای دورزدن CORS)
   if (msg && msg.type === 'WTPDF_GBOOKS_SCAN') {
     const tabId = sender.tab ? sender.tab.id : null;

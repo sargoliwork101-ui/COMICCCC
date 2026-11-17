@@ -103,6 +103,8 @@ const check = (n, c, e) => { if (c) console.log('PASS:', n); else { failures++; 
   check('start button present', !!pdoc.getElementById('startBtn'));
   check('PDF-to-image action is clearly visible in popup',
     !!pdoc.getElementById('pdfConvertBtn') && /تبدیل PDF به تصویر/.test(pdoc.getElementById('pdfConvertBtn').textContent));
+  check('translated-copy action is available for the current HTML page',
+    !!pdoc.getElementById('translatePageBtn') && /ترجمهٔ همین صفحه/.test(pdoc.getElementById('translatePageBtn').textContent));
   check('file name input present', !!pdoc.getElementById('pdfName'));
   check('page limit input present', pdoc.getElementById('pageLimit') &&
     pdoc.getElementById('pageLimit').type === 'number');
@@ -211,6 +213,53 @@ async function runPopupOnce(executeResult, shouldReject, clickStart = true) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('PDF shortcut opens a dedicated empty preview workspace',
       openedUrl === 'chrome-extension://ext/src/viewer/viewer.html?pdfWorkspace=1', openedUrl);
+  }
+
+  // The page-translation action opens a consent/progress page with the selected web tab metadata.
+  {
+    const translateDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const translateWindow = translateDom.window;
+    let openedUrl = '';
+    translateWindow.chrome = {
+      runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
+      tabs: {
+        query: async () => [{ id: 33, url: 'https://news.example.test/story/1' }],
+        create: async (options) => { openedUrl = options.url; return { id: 77 }; }
+      }
+    };
+    vm.runInContext(popupCode, translateDom.getInternalVMContext(), { filename: 'popup.js' });
+    const translateButton = translateWindow.document.getElementById('translatePageBtn');
+    if (translateButton) translateButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('page translation opens the consent page for the active website tab',
+      openedUrl === 'chrome-extension://ext/src/page-translator/page.html?tabId=33&host=news.example.test', openedUrl);
+  }
+  {
+    const blockedDom = new JSDOM(fs.readFileSync(__dirname + '/../src/popup/popup.html', 'utf8'), {
+      url: 'chrome-extension://ext/src/popup/popup.html', runScripts: 'dangerously', pretendToBeVisual: true
+    });
+    const blockedWindow = blockedDom.window;
+    Object.defineProperty(blockedWindow.Element.prototype, 'innerText', {
+      get() { return this.textContent; }, set(value) { this.textContent = value; }, configurable: true
+    });
+    let created = 0;
+    blockedWindow.chrome = {
+      runtime: { getURL: (resource) => `chrome-extension://ext/${resource}` },
+      tabs: {
+        query: async () => [{ id: 34, url: 'chrome://settings/' }],
+        create: async () => { created++; }
+      }
+    };
+    vm.runInContext(popupCode, blockedDom.getInternalVMContext(), { filename: 'popup.js' });
+    const translateButton = blockedWindow.document.getElementById('translatePageBtn');
+    if (translateButton) translateButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('page translation refuses browser-internal pages with a clear error',
+      created === 0 && !blockedWindow.document.getElementById('statusBox').classList.contains('hidden') &&
+      /صفحه‌های داخلی/.test(blockedWindow.document.getElementById('statusText').textContent),
+      blockedWindow.document.getElementById('statusText').textContent);
   }
 
   // start scraping without awaiting: the overlay is created synchronously before the first await,

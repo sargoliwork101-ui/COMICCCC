@@ -31,6 +31,30 @@ const hideStatus = () => {
   statusBox.classList.add('hidden');
 };
 
+const translatePageBtn = document.getElementById('translatePageBtn');
+if (translatePageBtn) {
+  translatePageBtn.addEventListener('click', async () => {
+    translatePageBtn.disabled = true;
+    hideStatus();
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab || !Number.isInteger(tab.id) || !tab.url) throw new Error('صفحهٔ فعالی برای ترجمه پیدا نشد.');
+      const pageUrl = new URL(tab.url);
+      const isWebStore = pageUrl.hostname === 'chromewebstore.google.com' ||
+        (pageUrl.hostname === 'chrome.google.com' && pageUrl.pathname.startsWith('/webstore'));
+      if (!['http:', 'https:'].includes(pageUrl.protocol) || isWebStore) {
+        throw new Error('ترجمه فقط روی صفحه‌های وب معمولی انجام می‌شود؛ صفحه‌های داخلی مرورگر و فروشگاه افزونه پشتیبانی نمی‌شوند.');
+      }
+      const target = chrome.runtime.getURL('src/page-translator/page.html') +
+        `?tabId=${tab.id}&host=${encodeURIComponent(pageUrl.hostname)}`;
+      await chrome.tabs.create({ url: target, active: true });
+    } catch (error) {
+      showError(error && error.message ? error.message : String(error));
+      translatePageBtn.disabled = false;
+    }
+  });
+}
+
 // سه روش جمع‌آوری: اسکرول (کمیک تودرتو)، ورق‌زدن خودکار (کلیک روی دکمهٔ بعدی)، ورق‌زدن دستی
 let collectMode = 'scroll';
 // کادرهای هر حالت فقط در همان حالت نمایش داده می‌شوند و ربطی به سایت ندارند

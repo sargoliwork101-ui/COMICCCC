@@ -25,6 +25,25 @@ function check(name, condition, extra) {
     (txt.match(/===== PAGE 1 =====/g) || []).length === 1, txt);
 
   {
+    let request = null;
+    await AiTranslateTools.translateBatch({
+      context: 'webpage', provider: 'gemini', apiKey: 'webpage-private-key', model: 'gemini-2.5-flash',
+      entries: [{ id: 'p000001', page: 1, text: 'A short article paragraph.' }],
+      fetchFn: async (url, options) => {
+        request = { url, options };
+        return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify([
+          { id: 'p000001', translation: 'یک بند کوتاه از مقاله.' }
+        ]) }] } }] }) };
+      }
+    });
+    const body = JSON.parse(request.options.body);
+    const prompt = body.systemInstruction.parts[0].text;
+    check('webpage translation uses a general-purpose prompt rather than comic-dialogue instructions',
+      /webpage|web page/i.test(prompt) && /Persian/.test(prompt) &&
+      !/OCR comic dialogue/.test(prompt) && !/حباب/.test(prompt), prompt);
+  }
+
+  {
     const calls = [];
     const signal = { marker: 'abort-signal' };
     const fetchFn = async (url, options) => {
