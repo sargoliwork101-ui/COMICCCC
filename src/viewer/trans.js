@@ -5,6 +5,7 @@ const TR = { worker: null, lang: null, cancel: false, aiController: null };
 const AI_SETTINGS_KEY = 'gemini_translation_settings_v1';
 const AI_PROVIDER_IDS = Object.keys(AiTranslateTools.PROVIDERS);
 let aiProvider = 'gemini', aiProviderSettings = {}, aiProfiles = [], aiProfileSerial = 0;
+let webpageTranslationEngine = 'auto';
 
 function makeAiProfile(name = '', apiKey = '', id = '') {
   aiProfileSerial++;
@@ -104,6 +105,8 @@ async function loadAiSettings() {
   try {
     const stored = await chrome.storage.local.get(AI_SETTINGS_KEY);
     const settings = stored[AI_SETTINGS_KEY] || {};
+    webpageTranslationEngine = ['auto', 'google', 'mymemory', 'ai'].includes(settings.engine)
+      ? settings.engine : (settings.enabled === true ? 'ai' : 'auto');
     $('trAiEnabled').checked = settings.enabled === true;
     const providerStore = settings.providers && typeof settings.providers === 'object' ? settings.providers : null;
     AI_PROVIDER_IDS.forEach((id) => {
@@ -127,6 +130,7 @@ async function loadAiSettings() {
     showAiProvider(AI_PROVIDER_IDS.includes(settings.provider) ? settings.provider : 'gemini');
   } catch (error) {
     console.warn('خواندن تنظیمات ترجمهٔ هوش مصنوعی ناموفق بود', error);
+    webpageTranslationEngine = 'auto';
     aiProviderSettings = {};
     $('trAiSkill').value = AiTranslateTools.DEFAULT_SKILL;
     showAiProvider('gemini');
@@ -146,6 +150,7 @@ async function saveAiSettings() {
       };
     });
     await chrome.storage.local.set({ [AI_SETTINGS_KEY]: {
+      engine: webpageTranslationEngine,
       enabled: $('trAiEnabled').checked,
       provider: aiProvider,
       providers,

@@ -420,6 +420,30 @@ const prepare = async (it) => [{ data: it.data, fmt: it.fmt, w: it.w, h: it.h, a
     check('translate tried google first', calls >= 2, calls);
   }
   {
+    let calls = 0;
+    const fetchFn = async (url) => {
+      calls++;
+      return url.includes('translate.googleapis.com')
+        ? { ok: true, json: async () => [[['سلام', 'hi']], null, null] }
+        : { ok: true, json: async () => ({ responseData: { translatedText: 'سلام' } }) };
+    };
+    const google = await TranslateTools.translate('hi', 'en', fetchFn, 'google');
+    const mymemory = await TranslateTools.translate('hi', 'en', fetchFn, 'mymemory');
+    check('selected Google engine is used directly', google.ok && google.engine === 'google' && google.text === 'سلام');
+    check('selected MyMemory engine is used directly', mymemory.ok && mymemory.engine === 'mymemory' && mymemory.text === 'سلام');
+    check('direct engine choices do not contact another provider', calls === 2, calls);
+  }
+  {
+    let calls = [];
+    const fetchFn = async (url) => {
+      calls.push(url);
+      return { ok: false, status: 500, json: async () => ({}) };
+    };
+    const r = await TranslateTools.translate('hi', 'en', fetchFn, 'google');
+    check('selected Google engine does not silently fall back to MyMemory',
+      r.ok === false && r.engine === 'google' && calls.length === 2 && calls.every((url) => url.includes('translate.googleapis.com')));
+  }
+  {
     const fetchFn = async () => ({ ok: false, status: 500, json: async () => ({}) });
     const r = await TranslateTools.translate('hi', 'en', fetchFn);
     check('translate all fail -> ok false', r.ok === false && r.text === '', r);

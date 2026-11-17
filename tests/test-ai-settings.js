@@ -45,10 +45,25 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   const $ = (id) => window.document.getElementById(id);
   check('settings page loads the same local key used by the viewer and webpage translator',
     calls.gets[0] === key && $('provider').value === 'openai' && $('model').value === 'gpt-4o-mini');
-  check('existing API profile, enable switch, and translation instructions are restored',
+  check('existing API profile, OCR enable switch, and translation instructions are restored',
     $('aiEnabled').checked && $('profiles').querySelector('input[type=password]').value === 'secret-existing' && $('skill').value === 'ترجمهٔ روان');
+  check('legacy AI setting is migrated to the selected page translation engine', $('pageEngine').value === 'ai');
+  check('translation engine choices include Google, MyMemory, and the selected AI service',
+    [...$('pageEngine').options].map((option) => option.value).join(',') === 'auto,google,mymemory,ai');
   check('provider choices include all services supported by the extension',
     [...$('provider').options].map((option) => option.value).join(',') === 'gemini,openai,openrouter,avalai');
+
+  $('pageEngine').value = 'mymemory';
+  $('pageEngine').dispatchEvent(new window.Event('change', { bubbles: true }));
+  await pause();
+  check('selecting a free engine hides AI-only configuration fields and saves that choice',
+    $('aiProviderSettings').classList.contains('hidden') && calls.sets.at(-1)[key].engine === 'mymemory' &&
+    calls.sets.at(-1)[key].enabled === true);
+  $('pageEngine').value = 'ai';
+  $('pageEngine').dispatchEvent(new window.Event('change', { bubbles: true }));
+  await pause();
+  check('selecting the AI engine reveals provider, model, and key settings',
+    !$('aiProviderSettings').classList.contains('hidden') && calls.sets.at(-1)[key].engine === 'ai');
 
   $('provider').value = 'gemini';
   $('provider').dispatchEvent(new window.Event('change', { bubbles: true }));
@@ -62,7 +77,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   await pause();
   const saved = calls.sets.at(-1) && calls.sets.at(-1)[key];
   check('saving writes the shared settings key and new API data for webpage translation',
-    !!saved && saved.provider === 'gemini' && saved.enabled === true &&
+    !!saved && saved.engine === 'ai' && saved.provider === 'gemini' && saved.enabled === true &&
     saved.providers.gemini.profiles[0].apiKey === 'new-secret' && saved.skill === 'ترجمهٔ رسمی');
   check('saving preserves other provider profiles and models',
     !!saved && saved.providers.openai.profiles[0].apiKey === 'secret-existing' && saved.providers.openai.model === 'gpt-4o-mini', saved && saved.providers.openai);

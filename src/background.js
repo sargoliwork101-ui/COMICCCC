@@ -268,7 +268,9 @@ async function translateWebpageBatch(rawEntries) {
   const entries = validateWebpageEntries(rawEntries);
   const stored = await chrome.storage.local.get(WEBPAGE_TRANSLATION_SETTINGS_KEY);
   const settings = stored[WEBPAGE_TRANSLATION_SETTINGS_KEY] || {};
-  if (settings.enabled === true) {
+  const engine = ['auto', 'google', 'mymemory', 'ai'].includes(settings.engine)
+    ? settings.engine : (settings.enabled === true ? 'ai' : 'auto');
+  if (engine === 'ai') {
     if (typeof AiTranslateTools === 'undefined') throw new Error('موتور ترجمهٔ هوش مصنوعی بارگذاری نشد.');
     const config = webpageAiConfig(settings);
     const result = await AiTranslateTools.translateWithFailover({
@@ -286,11 +288,13 @@ async function translateWebpageBatch(rawEntries) {
   await Promise.all(Array.from({ length: Math.min(3, entries.length) }, async () => {
     while (next < entries.length) {
       const entry = entries[next++];
-      const result = await TranslateTools.translate(entry.text, 'auto');
+      const result = await TranslateTools.translate(entry.text, 'auto', undefined, engine);
       if (result && result.ok && result.text) translations.push({ id: entry.id, text: result.text });
     }
   }));
-  return { ok: true, provider: 'Google Translate', translations };
+  const provider = engine === 'mymemory' ? 'MyMemory'
+    : engine === 'google' ? 'Google Translate' : 'Google Translate / MyMemory';
+  return { ok: true, provider, engine, translations };
 }
 
 // دریافت لیست تصاویر از صفحه و باز کردن تب ساخت PDF

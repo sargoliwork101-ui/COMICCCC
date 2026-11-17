@@ -21,6 +21,10 @@ function setStatus(message, error = false) {
   node.classList.toggle('error', error);
 }
 
+function updateEngineFields() {
+  $('aiProviderSettings').classList.toggle('hidden', $('pageEngine').value !== 'ai');
+}
+
 function captureProvider(provider = activeProvider) {
   const data = state.providerData[provider] || {};
   data.model = $('model').value.trim() || AiTranslateTools.DEFAULT_MODELS[provider];
@@ -101,6 +105,10 @@ async function loadSettings() {
     const stored = await chrome.storage.local.get(SETTINGS_KEY);
     const settings = stored[SETTINGS_KEY] || {};
     $('aiEnabled').checked = settings.enabled === true;
+    const savedEngine = ['auto', 'google', 'mymemory', 'ai'].includes(settings.engine)
+      ? settings.engine : (settings.enabled === true ? 'ai' : 'auto');
+    $('pageEngine').value = savedEngine;
+    updateEngineFields();
     const providerStore = settings.providers && typeof settings.providers === 'object' ? settings.providers : null;
     for (const provider of providerIds) {
       const raw = providerStore && providerStore[provider] && typeof providerStore[provider] === 'object'
@@ -130,6 +138,8 @@ async function loadSettings() {
       };
     }
     $('skill').value = AiTranslateTools.DEFAULT_SKILL;
+    $('pageEngine').value = 'auto';
+    updateEngineFields();
     showProvider('gemini');
   }
 }
@@ -148,6 +158,7 @@ async function saveSettings() {
       };
     }
     await chrome.storage.local.set({ [SETTINGS_KEY]: {
+      engine: $('pageEngine').value,
       enabled: $('aiEnabled').checked,
       provider: $('provider').value,
       providers,
@@ -161,6 +172,10 @@ async function saveSettings() {
   }
 }
 
+$('pageEngine').addEventListener('change', async () => {
+  updateEngineFields();
+  await saveSettings();
+});
 $('provider').addEventListener('change', async () => {
   captureProvider(activeProvider);
   showProvider($('provider').value);

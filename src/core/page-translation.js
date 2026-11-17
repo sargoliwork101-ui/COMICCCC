@@ -8,6 +8,12 @@
   const MAX_SEGMENT_CHARS = 420;
   const MAX_BATCH_ITEMS = 20;
   const MAX_BATCH_CHARS = 5000;
+  const DIRECTION_BLOCKS = new Set([
+    'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DD', 'DIV', 'DL', 'DT', 'FIGCAPTION',
+    'FOOTER', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER', 'LI', 'MAIN', 'NAV',
+    'P', 'SECTION', 'SUMMARY', 'TD', 'TH'
+  ]);
+  const directionSnapshots = new WeakMap();
 
   function splitText(text, id, maxChars = MAX_SEGMENT_CHARS) {
     const source = String(text || '');
@@ -95,9 +101,47 @@
     return batches;
   }
 
+  function directionTarget(node) {
+    let element = node && node.parentElement;
+    let fallback = element;
+    while (element && element.tagName !== 'BODY' && element.tagName !== 'HTML') {
+      if (element.hasAttribute('dir') || DIRECTION_BLOCKS.has(element.tagName)) return element;
+      element = element.parentElement;
+    }
+    return fallback || element;
+  }
+
+  function setTranslatedDirection(records) {
+    (Array.isArray(records) ? records : []).forEach((record) => {
+      if (!record.hasTranslation || !record.node || !record.node.isConnected) return;
+      const target = record.directionTarget || directionTarget(record.node);
+      if (!target) return;
+      record.directionTarget = target;
+      if (!directionSnapshots.has(target)) {
+        directionSnapshots.set(target, {
+          hadDir: target.hasAttribute('dir'),
+          value: target.getAttribute('dir')
+        });
+      }
+      target.setAttribute('dir', 'rtl');
+    });
+  }
+
+  function restoreDirections(records) {
+    const targets = new Set((Array.isArray(records) ? records : [])
+      .map((record) => record && record.directionTarget).filter(Boolean));
+    targets.forEach((target) => {
+      const snapshot = directionSnapshots.get(target);
+      if (!snapshot) return;
+      if (snapshot.hadDir) target.setAttribute('dir', snapshot.value);
+      else target.removeAttribute('dir');
+    });
+  }
+
   function applyTranslations(records, translations) {
     const map = translations instanceof Map ? translations : new Map(Object.entries(translations || {}));
     (Array.isArray(records) ? records : []).forEach((record) => {
+      record.hasTranslation = (record.parts || []).some((part) => String(map.get(part.id) || '').trim());
       const content = (record.parts || []).map((part) => {
         const translated = String(map.get(part.id) || '').trim();
         return (translated || part.text) + (part.after || '');
@@ -105,6 +149,7 @@
       record.translated = record.leading + content + record.trailing;
       if (record.node && record.node.isConnected) record.node.nodeValue = record.translated;
     });
+    setTranslatedDirection(records);
     return records;
   }
 
@@ -112,12 +157,14 @@
     (Array.isArray(records) ? records : []).forEach((record) => {
       if (record.node && record.node.isConnected) record.node.nodeValue = record.original;
     });
+    restoreDirections(records);
   }
 
   function showTranslations(records) {
     (Array.isArray(records) ? records : []).forEach((record) => {
       if (record.node && record.node.isConnected && typeof record.translated === 'string') record.node.nodeValue = record.translated;
     });
+    setTranslatedDirection(records);
   }
 
   function restoreOriginal(records) {

@@ -10,7 +10,8 @@ function check(name, condition, extra) {
 
 const dom = new JSDOM(`<!doctype html><html><body>
   <main>
-    <p id="first">Hello <strong>world</strong> from this page.</p>
+    <p id="first" dir="ltr">Hello <strong>world</strong> from this page.</p>
+    <p id="second">Another paragraph.</p>
     <p id="empty">   </p>
     <p id="number">2026-11-01</p>
     <p hidden>Hidden message.</p>
@@ -27,9 +28,9 @@ const { document } = dom.window;
 
 const records = PageTranslationTools.collectTextNodes(document.querySelector('main'), document);
 check('extracts eligible text nodes, including inline markup, but skips controls and hidden/code/script text',
-  records.map((record) => record.original).join('|') === 'Hello |world| from this page.', records.map((record) => record.original));
+  records.map((record) => record.original).join('|') === 'Hello |world| from this page.|Another paragraph.', records.map((record) => record.original));
 check('assigns stable IDs to extracted text nodes',
-  records.length === 3 && records.every((record, index) => record.id === `p${String(index + 1).padStart(6, '0')}`),
+  records.length === 4 && records.every((record, index) => record.id === `p${String(index + 1).padStart(6, '0')}`),
   records.map((record) => record.id));
 
 {
@@ -55,18 +56,24 @@ check('assigns stable IDs to extracted text nodes',
 
 {
   const originals = records.map((record) => record.original);
-  const translations = new Map(records.map((record, index) => [record.id, ['سلام ', 'دنیا', ' از این صفحه.'][index]]));
+  const translations = new Map(records.map((record, index) => [record.id, ['سلام ', 'دنیا', ' از این صفحه.', 'یک بند دیگر.'][index]]));
   PageTranslationTools.applyTranslations(records, translations);
   check('replaces only eligible text-node contents and keeps inline HTML structure',
     document.querySelector('#first').innerHTML === 'سلام <strong>دنیا</strong> از این صفحه.' &&
     document.querySelector('#first strong') !== null);
+  check('Persian translations set RTL direction on their text blocks',
+    document.querySelector('#first').getAttribute('dir') === 'rtl' &&
+    document.querySelector('#second').getAttribute('dir') === 'rtl');
   PageTranslationTools.showOriginal(records);
   check('original-text toggle restores every captured node exactly',
-    records.map((record) => record.node.nodeValue).join('|') === originals.join('|'));
+    records.map((record) => record.node.nodeValue).join('|') === originals.join('|') &&
+    document.querySelector('#first').getAttribute('dir') === 'ltr' && !document.querySelector('#second').hasAttribute('dir'));
   PageTranslationTools.showTranslations(records);
+  check('translated-text toggle reapplies RTL direction', document.querySelector('#first').getAttribute('dir') === 'rtl');
   PageTranslationTools.restoreOriginal(records);
-  check('restore returns the page to its original DOM text',
-    document.querySelector('#first').innerHTML === 'Hello <strong>world</strong> from this page.');
+  check('restore returns text and original direction attributes',
+    document.querySelector('#first').innerHTML === 'Hello <strong>world</strong> from this page.' &&
+    document.querySelector('#first').getAttribute('dir') === 'ltr' && !document.querySelector('#second').hasAttribute('dir'));
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL PAGE TRANSLATION TESTS PASSED');

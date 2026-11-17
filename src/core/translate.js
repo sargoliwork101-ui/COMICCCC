@@ -22,15 +22,19 @@
   }
 
   // برمی‌گرداند: { text, ok }
-  async function translate(text, sl, fetchFn) {
+  async function translate(text, sl, fetchFn, engine = 'auto') {
     const f = fetchFn || ((u) => fetch(u));
-    for (const fn of [viaGoogle, viaMyMemory]) {
+    const requested = String(engine || 'auto').toLowerCase();
+    const selected = ['google', 'mymemory', 'auto'].includes(requested) ? requested : 'auto';
+    const engines = selected === 'google' ? [viaGoogle]
+      : selected === 'mymemory' ? [viaMyMemory] : [viaGoogle, viaMyMemory];
+    for (const fn of engines) {
       for (let attempt = 0; attempt < 2; attempt++) {
-        try { return { text: await fn(text, sl, f), ok: true }; }
+        try { return { text: await fn(text, sl, f), ok: true, engine: fn === viaGoogle ? 'google' : 'mymemory' }; }
         catch { await new Promise((r) => setTimeout(r, 250 * (attempt + 1))); }
       }
     }
-    return { text: '', ok: false };
+    return { text: '', ok: false, engine: selected };
   }
 
   const api = { translate, viaGoogle, viaMyMemory };

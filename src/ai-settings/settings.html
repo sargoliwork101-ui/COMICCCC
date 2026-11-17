@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>تنظیمات هوش مصنوعی — PIC TO PDF</title>
+  <title>تنظیمات ترجمه — PIC TO PDF</title>
   <link rel="stylesheet" href="../shared/style.css">
   <link rel="stylesheet" href="settings.css">
 </head>
@@ -19,11 +19,22 @@
     </header>
 
     <section class="settings-card" aria-labelledby="aiSettingsTitle">
-      <h2 id="aiSettingsTitle">ترجمهٔ هوش مصنوعی</h2>
+      <h2 id="aiSettingsTitle">موتور ترجمهٔ صفحه</h2>
+      <div class="field">
+        <label for="pageEngine">انتخاب موتور ترجمه</label>
+        <select id="pageEngine" class="sel">
+          <option value="auto">Google Translate، و در صورت خطا MyMemory</option>
+          <option value="google">فقط Google Translate</option>
+          <option value="mymemory">فقط MyMemory</option>
+          <option value="ai">هوش مصنوعی (سرویس انتخابی پایین)</option>
+        </select>
+        <p class="help">این انتخاب برای ترجمهٔ کپی صفحهٔ وب است. سرویس و مدل هوش مصنوعی را جداگانه انتخاب کنید.</p>
+      </div>
       <label class="toggle-row" for="aiEnabled">
         <input type="checkbox" id="aiEnabled">
-        <span><strong>استفاده از هوش مصنوعی برای ترجمهٔ صفحه</strong><small>اگر خاموش باشد، ترجمهٔ صفحه از سرویس ترجمهٔ معمولی استفاده می‌کند.</small></span>
+        <span><strong>استفاده از هوش مصنوعی برای ترجمهٔ متن داخل تصویرها</strong><small>این گزینه مربوط به ترجمهٔ OCR تصاویر است؛ موتور ترجمهٔ صفحه از فهرست بالا انتخاب می‌شود.</small></span>
       </label>
+      <div id="aiProviderSettings">
       <div class="field">
         <label for="provider">سرویس هوش مصنوعی</label>
         <select id="provider" class="sel">
@@ -49,8 +60,9 @@
       <p id="keyHelp" class="help"></p>
 
       <div class="field">
-        <label for="skill">راهنمای سبک ترجمه (اختیاری)</label>
+        <label for="skill">راهنمای سبک ترجمهٔ هوش مصنوعی (اختیاری)</label>
         <textarea id="skill" rows="6" placeholder="لحن و شیوهٔ ترجمهٔ دلخواهتان را بنویسید"></textarea>
+      </div>
       </div>
       <p class="privacy-note">کلیدها در فضای محلی افزونه در همین مرورگر ذخیره می‌شوند. هنگام ترجمه، متن صفحه برای سرویس انتخاب‌شده فرستاده می‌شود؛ HTML کامل، نشانی صفحه و کلید API در متن ترجمه قرار نمی‌گیرند. از فرستادن اطلاعات حساس خودداری کنید.</p>
       <p id="settingsStatus" class="status" role="status" aria-live="polite"></p>

@@ -47,6 +47,7 @@ function check(name, condition, extra) {
     window.document.querySelector('#article strong') !== null &&
     window.document.querySelector('#site-button').textContent === 'Do not translate controls' &&
     window.document.querySelector('#article').textContent.includes('FA('), window.document.querySelector('#article').innerHTML);
+  check('translated Persian text block is explicitly RTL', window.document.querySelector('#article').getAttribute('dir') === 'rtl');
   check('page receives a visible control to toggle source text and restore it',
     !!window.document.querySelector('[data-wtpdf-page-translation-ui] [data-action="original"]') &&
     !!window.document.querySelector('[data-wtpdf-page-translation-ui] [data-action="restore"]'));
@@ -54,11 +55,13 @@ function check(name, condition, extra) {
     progress.length > 0 && progress.every((item) => !Object.hasOwn(item, 'text')));
 
   window.document.querySelector('[data-action="original"]').click();
-  check('original-text toggle changes only the captured text back',
-    window.document.querySelector('#article').textContent === 'Hello world from this page.');
+  check('original-text toggle changes text back and restores the original direction',
+    window.document.querySelector('#article').textContent === 'Hello world from this page.' &&
+    !window.document.querySelector('#article').hasAttribute('dir'));
   window.document.querySelector('[data-action="translated"]').click();
-  check('translated-text toggle re-applies the saved translations',
-    window.document.querySelector('#article').textContent.includes('FA('), window.document.querySelector('#article').innerHTML);
+  check('translated-text toggle re-applies the saved translations and RTL direction',
+    window.document.querySelector('#article').textContent.includes('FA(') &&
+    window.document.querySelector('#article').getAttribute('dir') === 'rtl', window.document.querySelector('#article').innerHTML);
   window.document.querySelector('[data-action="restore"]').click();
   check('restore removes the toolbar and restores the initial page text',
     !window.document.querySelector('[data-wtpdf-page-translation-ui]') &&

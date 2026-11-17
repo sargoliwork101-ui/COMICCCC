@@ -100,8 +100,8 @@ function bootBackground(initialStorage, translationApis = {}) {
   {
     const calls = [];
     const b = bootBackground({}, {
-      TranslateTools: { translate: async (text, sourceLang) => {
-        calls.push({ text, sourceLang });
+      TranslateTools: { translate: async (text, sourceLang, _fetchFn, engine) => {
+        calls.push({ text, sourceLang, engine });
         return { ok: true, text: `FA:${text}` };
       } },
       AiTranslateTools: { translateWithFailover: async () => { throw new Error('AI should not run'); } }
@@ -112,15 +112,15 @@ function bootBackground(initialStorage, translationApis = {}) {
     }, { tab: { id: 18, url: 'https://example.test/article' } }, (result) => { response = result; });
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('page translation keeps async response open and defaults to free translation', keepOpen === true &&
-      calls.length === 1 && calls[0].text === 'Hello world.' && calls[0].sourceLang === 'auto');
+      calls.length === 1 && calls[0].text === 'Hello world.' && calls[0].sourceLang === 'auto' && calls[0].engine === 'auto');
     check('free page translation returns only the translated text keyed by its source ID',
       response && response.ok === true && response.translations[0].id === 'p000001' &&
-      response.translations[0].text === 'FA:Hello world.' && response.provider === 'Google Translate', response);
+      response.translations[0].text === 'FA:Hello world.' && response.provider === 'Google Translate / MyMemory', response);
   }
   {
     const calls = [];
     const settings = {
-      enabled: true, provider: 'openai', skill: 'web style',
+      engine: 'ai', enabled: false, provider: 'openai', skill: 'web style',
       providers: { openai: { model: 'gpt-web', profiles: [{ name: 'Saved', apiKey: 'private-key' }] } }
     };
     const b = bootBackground({ gemini_translation_settings_v1: settings }, {
@@ -138,9 +138,44 @@ function bootBackground(initialStorage, translationApis = {}) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     check('configured AI is used for webpage text with a general webpage context',
       calls.length === 1 && calls[0].provider === 'openai' && calls[0].context === 'webpage' &&
-      calls[0].entries[0].text === 'Good morning.' && calls[0].profiles[0].apiKey === 'private-key');
+      calls[0].entries[0].text === 'Good morning.' && calls[0].profiles[0].apiKey === 'private-key' &&
+      response && response.provider === 'هوش مصنوعی');
     check('AI response does not return or expose saved API keys',
       response && response.translations[0].text === 'سلام' && !JSON.stringify(response).includes('private-key'), response);
+  }
+  {
+    const calls = [];
+    const b = bootBackground({ gemini_translation_settings_v1: { engine: 'google', enabled: false } }, {
+      TranslateTools: { translate: async (text, sourceLang, _fetchFn, engine) => {
+        calls.push({ text, sourceLang, engine });
+        return { ok: true, text: 'ترجمهٔ Google' };
+      } },
+      AiTranslateTools: { translateWithFailover: async () => { throw new Error('selected Google, not AI'); } }
+    });
+    let response = null;
+    b.listeners.message({ type: 'WTPDF_TRANSLATE_PAGE_BATCH', entries: [{ id: 'p000003', text: 'Sample.' }] },
+      { tab: { id: 20, url: 'https://example.test/' } }, (result) => { response = result; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('page translation honors the explicit Google Translate choice',
+      calls.length === 1 && calls[0].engine === 'google' && response &&
+      response.provider === 'Google Translate' && response.translations[0].text === 'ترجمهٔ Google');
+  }
+  {
+    const calls = [];
+    const b = bootBackground({ gemini_translation_settings_v1: { engine: 'mymemory', enabled: false } }, {
+      TranslateTools: { translate: async (text, sourceLang, _fetchFn, engine) => {
+        calls.push({ text, sourceLang, engine });
+        return { ok: true, text: 'ترجمهٔ MyMemory' };
+      } },
+      AiTranslateTools: { translateWithFailover: async () => { throw new Error('selected MyMemory, not AI'); } }
+    });
+    let response = null;
+    b.listeners.message({ type: 'WTPDF_TRANSLATE_PAGE_BATCH', entries: [{ id: 'p000003', text: 'Sample.' }] },
+      { tab: { id: 21, url: 'https://example.test/' } }, (result) => { response = result; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    check('page translation honors the explicitly selected MyMemory engine',
+      calls.length === 1 && calls[0].engine === 'mymemory' && response &&
+      response.provider === 'MyMemory' && response.translations[0].text === 'ترجمهٔ MyMemory');
   }
   {
     let translateCalls = 0;
