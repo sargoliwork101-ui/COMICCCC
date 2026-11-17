@@ -14,6 +14,7 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
   const dom = new JSDOM(`<!doctype html><html><body dir="ltr"><main>
     <p id="article">Hello <strong>world</strong> from this page.</p>
     <p id="second">This paragraph can remain unchanged.</p>
+    <p id="history">This paragraph will collect several saved translations.</p>
     <button id="site-button">Do not translate controls</button>
   </main></body></html>`, { url: 'https://example.test/article', runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
@@ -98,8 +99,9 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     window.document.querySelector('#second').textContent === 'This paragraph can remain unchanged.' &&
     !window.document.querySelector('#second').hasAttribute('dir'));
 
-  check('toolbar can move the selected paragraph between original and translated versions',
-    group('group-1').versions.length === 2 && toolbar.querySelector('[data-action="version-prev"]').disabled === false);
+  check('toolbar can move the selected paragraph between original and translated versions and reports its saved count',
+    group('group-1').versions.length === 2 && toolbar.querySelector('[data-action="version-prev"]').disabled === false &&
+    toolbar.querySelector('[data-role="version-count"]').textContent.includes('۱ ترجمه'));
   toolbar.querySelector('[data-action="version-prev"]').click();
   check('previous-version control restores original text for the selected paragraph',
     window.document.querySelector('#article').textContent === 'Hello world from this page.' &&
@@ -152,6 +154,25 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     window.document.querySelector('#article').textContent.includes('V2('));
   toolbar.querySelector('[data-action="version-next"]').click();
   toolbar.querySelector('[data-action="version-next"]').click();
+
+  pickToggle.click();
+  clickBlock(window.document.getElementById('article'));
+  clickBlock(window.document.getElementById('history'));
+  pickToggle.click();
+  for (let index = 0; index < 8; index++) {
+    toolbar.querySelector('[data-action="translate-selected"]').click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  check('keeps the latest six translations for a paragraph, including five prior versions',
+    group('group-3').versions.length === 7 && group('group-3').activeVersion === 6 &&
+    window.document.querySelector('#history').textContent.includes('V13(') &&
+    toolbar.querySelector('[data-role="version-count"]').textContent.includes('۶ ترجمه'));
+  for (let index = 0; index < 5; index++) toolbar.querySelector('[data-action="version-prev"]').click();
+  check('the five earlier saved translations remain reachable after the history limit is reached',
+    window.document.querySelector('#history').textContent.includes('V8('));
+  for (let index = 0; index < 5; index++) toolbar.querySelector('[data-action="version-next"]').click();
+  check('version counter explains the restore button affects only the translated copy',
+    toolbar.querySelector('[data-action="restore"]').title.includes('صفحهٔ اصلی تغییر نمی‌کند'));
 
   toolbar.querySelector('[data-action="original"]').click();
   check('global original control restores all paragraphs and original directions',

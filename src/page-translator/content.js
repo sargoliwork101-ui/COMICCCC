@@ -5,6 +5,8 @@
   if (!tools) return;
 
   const JOB_PREFIX = 'WTPDF_PAGE_TRANSLATE_';
+  const MAX_TRANSLATION_VERSIONS = 6; // آخرین ترجمه + پنج ترجمهٔ قبلی برای هر پاراگراف
+  const toPersianNumber = (value) => String(value).replace(/\d/gu, (digit) => '۰۱۲۳۴۵۶۷۸۹'[Number(digit)]);
   const sendProgress = (jobId, state, details = {}) => {
     if (!jobId) return;
     try {
@@ -34,6 +36,7 @@
           records: [],
           versions: [],
           activeVersion: 0,
+          nextVersionNumber: 0,
           status: 'pending',
           lastAttempt: new Map(),
           failedPartIds: new Set()
@@ -59,6 +62,7 @@
         border-radius:12px;background:#18212f;color:#fff;border:1px solid #64748b;box-shadow:0 8px 32px #0007;
         font:600 13px/1.5 system-ui,sans-serif;direction:rtl;}
       [data-wtpdf-page-translation-ui="toolbar"] [data-role="status"]{max-width:min(30vw,360px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      [data-wtpdf-page-translation-ui="toolbar"] [data-role="version-count"]{white-space:nowrap;color:#a7f3d0;font-size:12px;}
       [data-wtpdf-page-translation-ui="toolbar"] button,[data-wtpdf-page-translation-ui="toolbar"] select{font:600 12px/1.4 system-ui,sans-serif;
         border:1px solid #94a3b8;border-radius:8px;background:#273449;color:#fff;padding:7px 9px;cursor:pointer;}
       [data-wtpdf-page-translation-ui="toolbar"] select{max-width:210px;}
@@ -82,6 +86,9 @@
     const status = document.createElement('span');
     status.dataset.role = 'status'; status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
     status.textContent = `برای شروع روی پاراگراف‌های دلخواه کلیک کنید · ${state.groups.length} پاراگراف شناسایی شد.`;
+    const versionCount = document.createElement('span');
+    versionCount.dataset.role = 'version-count';
+    versionCount.setAttribute('aria-live', 'polite');
     const engineSelect = document.createElement('select');
     engineSelect.dataset.role = 'translation-engine';
     engineSelect.setAttribute('aria-label', 'انتخاب موتور ترجمه');
@@ -108,9 +115,10 @@
     translated.type = 'button'; translated.dataset.action = 'translated'; translated.textContent = 'آخرین ترجمه';
     const restore = document.createElement('button');
     restore.type = 'button'; restore.dataset.action = 'restore'; restore.textContent = 'بازگردانی';
-    toolbar.append(status, engineSelect, pickToggle, translate, retry, versionPrev, versionNext, original, translated, restore);
+    restore.title = 'فقط کپی را به متن و جهت اولیه برمی‌گرداند و نوار ترجمه را می‌بندد؛ صفحهٔ اصلی تغییر نمی‌کند. برای دیدن متن اصلی بدون بستن نوار، «متن اصلی» را بزنید.';
+    toolbar.append(status, versionCount, engineSelect, pickToggle, translate, retry, versionPrev, versionNext, original, translated, restore);
     document.documentElement.append(style, toolbar);
-    return { style, toolbar, status, engineSelect, pickToggle, translate, retry, versionPrev, versionNext, original, translated, restore };
+    return { style, toolbar, status, versionCount, engineSelect, pickToggle, translate, retry, versionPrev, versionNext, original, translated, restore };
   }
 
   function versionTextMap(records, values, translatedIds) {
@@ -133,6 +141,17 @@
   function refreshToolbarControls(state) {
     if (!state.ui) return;
     const selected = state.groups.filter((group) => state.selectedGroups.has(group.id));
+    const countGroups = selected.length ? selected : state.groups;
+    const savedVersions = countGroups.reduce((total, group) => total + Math.max(0, group.versions.length - 1), 0);
+    const countLabel = selected.length === 1
+      ? `برای این پاراگراف: ${toPersianNumber(savedVersions)} ترجمه`
+      : selected.length > 1
+        ? `مجموع ${toPersianNumber(savedVersions)} ترجمه در ${toPersianNumber(selected.length)} پاراگراف انتخاب‌شده`
+        : `در کل صفحه: ${toPersianNumber(savedVersions)} ترجمهٔ نگه‌داشته‌شده`;
+    state.ui.versionCount.textContent = countLabel;
+    state.ui.versionCount.title = countGroups.length
+      ? `${countGroups.map((group) => `${group.label}: ${toPersianNumber(Math.max(0, group.versions.length - 1))}`).join(' · ')}؛ برای هر پاراگراف حداکثر ${toPersianNumber(MAX_TRANSLATION_VERSIONS)} ترجمه نگه‌داری می‌شود.`
+      : `برای هر پاراگراف حداکثر ${toPersianNumber(MAX_TRANSLATION_VERSIONS)} ترجمه نگه‌داری می‌شود.`;
     const canRetry = selected.some((group) => group.failedPartIds && group.failedPartIds.size);
     const canStepBack = selected.some((group) => group.activeVersion > 0);
     const canStepForward = selected.some((group) => group.activeVersion < group.versions.length - 1);
@@ -308,11 +327,14 @@
         tools.applyTranslations(group.records, group.lastAttempt);
         const translatedIds = new Set(group.records.filter((record) => record.hasTranslation).map((record) => record.id));
         const values = new Map(group.records.map((record) => [record.id, record.translated]));
+        group.nextVersionNumber++;
         const version = {
-          label: group.status === 'partial' ? `ترجمهٔ ${group.versions.length} (ناقص)` : `ترجمهٔ ${group.versions.length}`,
+          label: group.status === 'partial' ? `ترجمهٔ ${group.nextVersionNumber} (ناقص)` : `ترجمهٔ ${group.nextVersionNumber}`,
           values, translatedIds
         };
         group.versions.push(version);
+        const excessVersions = group.versions.length - 1 - MAX_TRANSLATION_VERSIONS;
+        if (excessVersions > 0) group.versions.splice(1, excessVersions);
         group.activeVersion = group.versions.length - 1;
         versionTextMap(group.records, values, translatedIds);
         updatedParagraphs++;
