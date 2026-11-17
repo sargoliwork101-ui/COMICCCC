@@ -52,6 +52,11 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 0));
     [...$('pageEngine').options].map((option) => option.value).join(',') === 'auto,google,mymemory,ai');
   check('provider choices include all services supported by the extension',
     [...$('provider').options].map((option) => option.value).join(',') === 'gemini,openai,openrouter,avalai');
+  $('provider').value = 'gemini';
+  $('provider').dispatchEvent(new window.Event('change', { bubbles: true }));
+  await pause();
+  check('Gemini key help uses the current Google AI Studio API keys page',
+    $('keyHelp').querySelector('a').href === 'https://aistudio.google.com/api-keys');
 
   $('pageEngine').value = 'mymemory';
   $('pageEngine').dispatchEvent(new window.Event('change', { bubbles: true }));

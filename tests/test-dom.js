@@ -125,7 +125,7 @@ const $ = (id) => window.document.getElementById(id);
     manifest.action.default_title === 'PIC TO PDF');
   check('extension remains Manifest V3', manifest.manifest_version === 3);
   check('manifest and viewer version badge are synchronized at 2.79', manifest.version === '2.79' &&
-    window.document.querySelector('.version-pill').textContent.includes('2.79'));
+    window.document.querySelector('.version-pill').textContent.includes('۲.۷۹'));
   const viewerCss = fs.readFileSync(path.join(ROOT, 'src/viewer/viewer.css'), 'utf8');
   check('topbar keeps the hamburger visible while the page scrolls',
     /\.topbar\s*\{[^}]*position:\s*sticky;[^}]*top:\s*0;/s.test(viewerCss));
